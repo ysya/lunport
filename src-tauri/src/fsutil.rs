@@ -71,9 +71,10 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>, AppError> {
 /// 檔案指紋：用於偵測 SSH config 被外部工具（ssh CLI、其他編輯器）改動。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export, export_to = "../src/bindings/"))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct Fingerprint {
     /// 修改時間（unix 毫秒；取不到時為 0）
+    #[cfg_attr(test, ts(type = "number"))]
     pub mtime_ms: u64,
     /// 檔案內容的小寫 hex SHA-256
     pub sha256: String,
