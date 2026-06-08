@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::error::AppError;
 
 /// 確保目錄存在，且（unix）權限為 0700。不存在才建立。
+/// 僅在「建立時」設定權限；既有目錄的權限刻意不改動（避免動到使用者既有的 ~/.ssh）。
 pub fn ensure_dir_secure(dir: &Path) -> Result<(), AppError> {
     if !dir.exists() {
         fs::create_dir_all(dir)?;
@@ -23,6 +24,7 @@ pub fn ensure_dir_secure(dir: &Path) -> Result<(), AppError> {
 
 /// 原子寫入：在目標同目錄建 temp 檔，設好權限後寫入、fsync，再 rename 蓋回。
 /// `mode` 為 unix 權限（如 config 用 0o600、known_hosts 用 0o644）。
+/// 注意：rename 會取代 `path` 這個路徑項本身；若 `path` 是 symlink，連結會被實體檔取代（而非寫入其指向的目標）。
 pub fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), AppError> {
     let parent = path
         .parent()
@@ -43,6 +45,16 @@ pub fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), AppEr
     tmp.write_all(contents)?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| AppError::Io(e.error))?;
+
+    // Best-effort durability: fsync the parent directory so the rename entry
+    // survives a crash. `sync_all` above only persisted the file's contents,
+    // not the directory entry created by the rename.
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
     Ok(())
 }
 
