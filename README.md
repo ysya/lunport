@@ -14,12 +14,18 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 
 ## Status
 
-🚧 Early development. **Phase 0 (foundation & boundary)** is complete: app scaffold, least-privilege capability, unified `AppError`, safe file-IO utilities (`fsutil`: atomic write, secure perms, timestamped backup, drift detection), an `app_platform` IPC smoke command, the TanStack Query + Zustand wiring, and a ts-rs Rust→TS type bridge.
+🚧 Early development. **Phase 1 (a working lossless config editor)** is complete:
+
+- **Phase 0 — foundation:** app scaffold, least-privilege capability (WebView gets zero fs/shell), unified `AppError`, safe file-IO (`fsutil`: atomic write, secure perms, timestamped backup, hash drift detection), TanStack Query + Zustand wiring, ts-rs type bridge.
+- **Phase 1a — config core (Rust):** a custom **lossless CST** parser/serializer (byte-identical round-trip, golden-file tested), edit operations (single-line minimal change), multi-file `Include` loading, host DTOs, and the `config_*` Tauri command surface with a safe write path that **refuses to overwrite externally-changed files** (drift conflict guard) and backs up before writing.
+- **Phase 1b — editor UI (React):** master-detail host list (search + grouping), a tabbed host editor (Connection / Authentication / Forwarding / Reliability + Advanced raw options), add/remove host, group/tags, and a drift banner. Edits send only changed fields, so untouched lines stay byte-identical.
+
+75 automated tests pass (61 Rust + 14 frontend). Not yet implemented: launching connections, key management, ssh-agent, known_hosts UI, and signed/notarized distribution (Phases 2–6).
 
 See the design and plans:
 
 - Design spec: [`docs/superpowers/specs/2026-06-08-ssh-config-manager-design.md`](docs/superpowers/specs/2026-06-08-ssh-config-manager-design.md)
-- Phase 0 plan: [`docs/superpowers/plans/2026-06-08-sshelter-phase0-foundation.md`](docs/superpowers/plans/2026-06-08-sshelter-phase0-foundation.md)
+- Plans: [`docs/superpowers/plans/`](docs/superpowers/plans/) (Phase 0 foundation, Phase 1a config core, Phase 1b editor UI)
 
 ## Development
 
