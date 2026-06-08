@@ -56,9 +56,9 @@ pub fn classify_line(line: &str) -> LineKind {
     // valuepart = everything after the separator
     let valuepart = &after_kw[sep_end..];
 
-    // Split valuepart into value + inline_comment, quote-aware.
+    // Split valuepart into value + trailing_ws + inline_comment, quote-aware.
     // Scan for the first '#' that is NOT inside a "..." span.
-    let (value, inline_comment) = split_value_comment(valuepart);
+    let (value, trailing_ws, inline_comment) = split_value_comment(valuepart);
 
     LineKind::Directive(Directive {
         keyword: keyword.to_string(),
@@ -66,6 +66,7 @@ pub fn classify_line(line: &str) -> LineKind {
         value,
         separator,
         indent: indent.to_string(),
+        trailing_ws,
         inline_comment,
         enabled: true,
         raw: line.to_string(),
@@ -75,17 +76,21 @@ pub fn classify_line(line: &str) -> LineKind {
 
 /// Split `valuepart` (everything after the separator) into:
 /// - `value`: the actual value, trimmed of trailing whitespace
+/// - `trailing_ws`: whitespace after the value when there is NO comment (else "" — for the
+///   comment case the inter-token whitespace is folded into `inline_comment` instead)
 /// - `inline_comment`: the trailing whitespace + `#...` if any, else None
 ///
-/// Only `"..."` double-quote spans suppress `#` detection (SSH config has no single-quote semantics).
-fn split_value_comment(valuepart: &str) -> (String, Option<String>) {
+/// The decomposition is byte-faithful: `value + trailing_ws + inline_comment` reconstructs
+/// `valuepart` exactly. Only `"..."` double-quote spans suppress `#` detection (SSH config has
+/// no single-quote semantics for comments).
+fn split_value_comment(valuepart: &str) -> (String, String, Option<String>) {
     let mut in_dquote = false;
     let mut comment_byte_idx: Option<usize> = None;
 
     let bytes = valuepart.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let ch = bytes[i] as char;
+        let ch = bytes[i] as char; // ASCII-safe: only compared against '"'/'#', never mid-char
         if ch == '"' {
             in_dquote = !in_dquote;
         } else if ch == '#' && !in_dquote {
@@ -97,17 +102,19 @@ fn split_value_comment(valuepart: &str) -> (String, Option<String>) {
 
     match comment_byte_idx {
         None => {
-            // No comment: value is valuepart with trailing whitespace stripped.
-            (valuepart.trim_end().to_string(), None)
+            // No comment: value + its trailing whitespace (preserved so the split is faithful).
+            let value = valuepart.trim_end();
+            let trailing_ws = &valuepart[value.len()..];
+            (value.to_string(), trailing_ws.to_string(), None)
         }
         Some(idx) => {
             let before = &valuepart[..idx];
             let value = before.trim_end().to_string();
-            // The whitespace between value and '#'
+            // The whitespace between value and '#' is carried inside the comment string.
             let ws = &before[value.len()..];
             let comment_part = &valuepart[idx..];
             let inline_comment = format!("{}{}", ws, comment_part);
-            (value, Some(inline_comment))
+            (value, String::new(), Some(inline_comment))
         }
     }
 }
@@ -123,11 +130,12 @@ mod tests {
             Separator::Equals(s) => s.clone(),
         };
         format!(
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}",
             d.indent,
             d.keyword,
             sep_str,
             d.value,
+            d.trailing_ws,
             d.inline_comment.as_deref().unwrap_or("")
         )
     }
@@ -234,6 +242,25 @@ mod tests {
                 assert!(!d.dirty);
                 assert_eq!(d.raw, input);
                 // Round-trip
+                assert_eq!(reassemble(&d), input);
+            }
+            _ => panic!("Expected Directive"),
+        }
+    }
+
+    // Test 5b: trailing whitespace after value with NO comment must be preserved (byte-faithful split)
+    #[test]
+    fn test_trailing_whitespace_no_comment_preserved() {
+        let input = "User bob   ";
+        let kind = classify_line(input);
+        match kind {
+            LineKind::Directive(d) => {
+                assert_eq!(d.keyword, "User");
+                assert_eq!(d.value, "bob");
+                assert_eq!(d.trailing_ws, "   ");
+                assert_eq!(d.inline_comment, None);
+                assert_eq!(d.raw, input);
+                // Round-trip: the trailing whitespace is not lost
                 assert_eq!(reassemble(&d), input);
             }
             _ => panic!("Expected Directive"),

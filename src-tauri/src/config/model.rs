@@ -17,6 +17,7 @@ pub struct Directive {
     pub value: String,                  // value (without inline comment; quotes preserved)
     pub separator: Separator,
     pub indent: String,                 // leading whitespace
+    pub trailing_ws: String,            // whitespace after value when there is NO inline comment (else "")
     pub inline_comment: Option<String>, // trailing comment incl its leading ws and '#'
     pub enabled: bool,                  // false => serialized commented-out
     pub raw: String,                    // original full line (no newline); emitted verbatim when !dirty
@@ -70,6 +71,7 @@ impl Directive {
             value: value.to_string(),
             separator: Separator::Space(" ".to_string()),
             indent: indent.to_string(),
+            trailing_ws: String::new(),
             inline_comment: None,
             enabled: true,
             raw: String::new(),
