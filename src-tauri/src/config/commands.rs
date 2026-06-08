@@ -80,6 +80,19 @@ pub fn persist_file(
     backed_up: &mut HashSet<PathBuf>,
 ) -> Result<(), AppError> {
     let path = doc.files[idx].path.clone();
+
+    // Conflict guard: never overwrite a file that changed on disk since we loaded/last wrote it
+    // (an external editor, `ssh-keygen -R`, etc.). A vanished file is also a conflict. On Conflict
+    // the caller must reload (config_load), which re-syncs in-memory state from disk — so this also
+    // bounds the in-memory/disk divergence window. The first write of a session is compared against
+    // the load-time fingerprint; subsequent writes against the fingerprint refreshed below.
+    match fsutil::has_changed(&path, &doc.files[idx].fingerprint) {
+        Ok(false) => {}
+        Ok(true) | Err(_) => {
+            return Err(AppError::Conflict(path.to_string_lossy().to_string()));
+        }
+    }
+
     let trailing_newline = doc.files[idx].trailing_newline;
     let text = serialize_items(&doc.files[idx].items, trailing_newline);
 
@@ -380,6 +393,55 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".bak"))
             .count();
         assert_eq!(bak_count, 1, "exactly one .bak file should be created");
+    }
+
+    // ── Test 1b: persist refuses to clobber an externally-modified file ───────
+    #[test]
+    fn persist_refuses_on_external_change_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+
+        // Someone (another editor / ssh-keygen -R) rewrites the file AFTER we loaded it.
+        std::fs::write(&config_path, "Host web\n    User externally_changed\n").unwrap();
+
+        // A persist must now REFUSE (Conflict), not clobber the external edit.
+        let res = persist_file(&mut doc, 0, &mut backed_up);
+        assert!(
+            matches!(res, Err(AppError::Conflict(_))),
+            "expected Conflict, got {res:?}"
+        );
+        // The external edit survives untouched on disk.
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        assert!(on_disk.contains("externally_changed"), "external edit must be preserved");
+    }
+
+    // ── Test 1c: a normal second save (no external change) still succeeds ─────
+    #[test]
+    fn persist_succeeds_twice_without_external_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+
+        apply_changes(
+            &mut doc,
+            "web",
+            &[HostFieldChange { keyword: "User".into(), value: "u1".into(), remove: false }],
+        )
+        .unwrap();
+        persist_file(&mut doc, 0, &mut backed_up).expect("first persist ok");
+
+        // Second save against the fingerprint refreshed by the first write — no false conflict.
+        apply_changes(
+            &mut doc,
+            "web",
+            &[HostFieldChange { keyword: "User".into(), value: "u2".into(), remove: false }],
+        )
+        .unwrap();
+        persist_file(&mut doc, 0, &mut backed_up).expect("second persist must succeed");
+        assert!(std::fs::read_to_string(&config_path).unwrap().contains("User u2"));
     }
 
     // ── Test 2: apply_changes add new field and remove field ─────────────────

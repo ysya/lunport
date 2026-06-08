@@ -18,6 +18,11 @@ pub enum AppError {
 
     #[error("parse error at line {line}: {msg}")]
     Parse { msg: String, line: usize },
+
+    /// The on-disk file changed (or vanished) since it was loaded; refuse to overwrite so the
+    /// front end can prompt the user to reload rather than clobber concurrent external edits.
+    #[error("file changed on disk since it was loaded: {0}")]
+    Conflict(String),
 }
 
 impl Serialize for AppError {
