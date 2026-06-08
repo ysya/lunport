@@ -1,18 +1,27 @@
 import { useMemo } from "react";
+import { Search, ServerOff } from "lucide-react";
+
 import type { HostSummary } from "@/bindings/HostSummary";
 import { useUiStore } from "@/stores/ui";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { cn } from "@/lib/utils";
+import { Skeleton } from "@/components/ui/skeleton";
+import { AddHostDialog } from "@/components/AddHostDialog";
+import { cn, basename } from "@/lib/utils";
 
 const UNGROUPED = "Ungrouped";
 
-/** Last path segment of a (possibly `/`- or `\`-separated) file path. */
-function basename(p: string): string {
-  const norm = p.replace(/\\/g, "/");
-  const parts = norm.split("/");
-  return parts[parts.length - 1] || p;
+/**
+ * Derive a short secondary line for a host row. Patterns beyond the alias make a
+ * good hint; otherwise we fall back to the alias itself so the row never looks
+ * empty. (HostSummary has no resolved HostName/User, so patterns are the best
+ * available signal without changing the data layer.)
+ */
+function secondaryLine(host: HostSummary): string {
+  const extra = host.patterns.filter((p) => p !== host.alias);
+  if (extra.length > 0) return extra.join(", ");
+  return host.alias;
 }
 
 /** True if the host matches the (lowercased) search term across its searchable fields. */
@@ -65,66 +74,106 @@ export function HostList({ hosts, isLoading }: HostListProps) {
 
   const totalShown = grouped.reduce((n, g) => n + g.hosts.length, 0);
 
+  // A running index across all rows so the staggered enter animation reads as a
+  // single cascade rather than restarting per group.
+  let rowIndex = -1;
+
   return (
     <div className="flex h-full flex-col">
       <div className="border-b p-3">
-        <Input
-          type="search"
-          placeholder="Search hosts…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          aria-label="Search hosts"
-        />
+        <div className="relative">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="search"
+            placeholder="Search hosts…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search hosts"
+            className="pl-8 font-mono text-sm placeholder:font-sans"
+          />
+        </div>
       </div>
 
       <ScrollArea className="flex-1">
         <div className="p-2">
           {isLoading ? (
-            <p className="px-2 py-8 text-center text-sm text-muted-foreground">
-              Loading hosts…
-            </p>
+            <HostListSkeleton />
           ) : totalShown === 0 ? (
-            <p className="px-2 py-8 text-center text-sm text-muted-foreground">
-              {hosts.length === 0 ? "No hosts found." : "No hosts match your search."}
-            </p>
+            hosts.length === 0 ? (
+              <EmptyHosts />
+            ) : (
+              <p className="px-2 py-10 text-center text-sm text-muted-foreground">
+                No hosts match{" "}
+                <span className="font-mono text-foreground">“{search.trim()}”</span>.
+              </p>
+            )
           ) : (
             grouped.map((group) => (
-              <div key={group.name} className="mb-3">
-                <div className="px-2 py-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                  {group.name}
+              <div key={group.name} className="mb-4">
+                <div className="flex items-center justify-between px-2 py-1.5">
+                  <span className="text-[0.68rem] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+                    {group.name}
+                  </span>
+                  <span className="font-mono text-[0.68rem] text-muted-foreground/70 tabular-nums">
+                    {group.hosts.length}
+                  </span>
                 </div>
                 <ul className="space-y-0.5">
                   {group.hosts.map((host) => {
                     const active = host.alias === selectedAlias;
+                    rowIndex += 1;
+                    const delay = `${Math.min(rowIndex, 16) * 22}ms`;
+                    const secondary = secondaryLine(host);
                     return (
-                      <li key={`${host.source_file}::${host.alias}`}>
+                      <li
+                        key={`${host.source_file}::${host.alias}`}
+                        className="animate-row-enter"
+                        style={{ animationDelay: delay }}
+                      >
                         <button
                           type="button"
                           onClick={() => setSelectedAlias(host.alias)}
                           aria-current={active ? "true" : undefined}
                           className={cn(
-                            "flex w-full flex-col gap-1 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
-                            "hover:bg-muted focus-visible:bg-muted focus-visible:outline-none",
-                            active && "bg-muted",
+                            "group relative flex w-full flex-col gap-1 rounded-md border border-transparent py-2 pr-2.5 pl-3 text-left transition-colors",
+                            "hover:bg-muted/70 focus-visible:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:outline-none",
+                            active && "border-primary/20 bg-primary/10 hover:bg-primary/15",
                           )}
                         >
+                          <span
+                            aria-hidden
+                            className={cn(
+                              "absolute top-1.5 bottom-1.5 left-0 w-0.5 rounded-full bg-primary transition-opacity",
+                              active ? "opacity-100" : "opacity-0",
+                            )}
+                          />
                           <div className="flex items-center justify-between gap-2">
-                            <span className="truncate font-medium">{host.alias}</span>
+                            <span
+                              className={cn(
+                                "truncate font-mono text-sm font-medium",
+                                active && "text-primary",
+                              )}
+                            >
+                              {host.alias}
+                            </span>
                             <Badge
                               variant="secondary"
-                              className="shrink-0 font-normal"
+                              className="shrink-0 font-mono text-[0.65rem] font-normal text-muted-foreground"
                               title={host.source_file}
                             >
                               {basename(host.source_file)}
                             </Badge>
                           </div>
+                          <span className="truncate font-mono text-xs text-muted-foreground">
+                            {secondary}
+                          </span>
                           {host.tags.length > 0 && (
-                            <div className="flex flex-wrap gap-1">
+                            <div className="flex flex-wrap gap-1 pt-0.5">
                               {host.tags.map((tag) => (
                                 <Badge
                                   key={tag}
                                   variant="outline"
-                                  className="font-normal text-muted-foreground"
+                                  className="border-border/70 font-mono text-[0.65rem] font-normal text-muted-foreground"
                                 >
                                   {tag}
                                 </Badge>
@@ -141,6 +190,45 @@ export function HostList({ hosts, isLoading }: HostListProps) {
           )}
         </div>
       </ScrollArea>
+    </div>
+  );
+}
+
+/** Skeleton placeholder rows while the host list loads. */
+function HostListSkeleton() {
+  return (
+    <div className="space-y-4" aria-hidden>
+      {[0, 1].map((g) => (
+        <div key={g}>
+          <Skeleton className="mx-2 mb-2 h-3 w-20" />
+          <div className="space-y-1.5">
+            {[0, 1, 2].map((r) => (
+              <div key={r} className="space-y-1.5 px-3 py-2">
+                <Skeleton className="h-3.5 w-2/3" />
+                <Skeleton className="h-3 w-1/2" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Friendly empty state when no hosts exist at all. */
+function EmptyHosts() {
+  return (
+    <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
+      <div className="flex size-10 items-center justify-center rounded-lg bg-muted/60 text-muted-foreground ring-1 ring-border">
+        <ServerOff className="size-5" />
+      </div>
+      <div className="space-y-0.5">
+        <p className="text-sm font-medium">No hosts yet</p>
+        <p className="text-xs text-muted-foreground">
+          Add your first SSH host to get started.
+        </p>
+      </div>
+      <AddHostDialog />
     </div>
   );
 }

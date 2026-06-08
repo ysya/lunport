@@ -3,7 +3,7 @@ import { useForm, useFieldArray, Controller, type Resolver } from "react-hook-fo
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Trash2, Plus } from "lucide-react";
+import { Trash2, Plus, MoreVertical, RotateCcw, Save } from "lucide-react";
 
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostOption } from "@/bindings/HostOption";
@@ -23,12 +23,15 @@ import {
   useRemoveHost,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
+import { cn, basename } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
@@ -48,6 +51,12 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 const GROUPS = ["Connection", "Authentication", "Forwarding", "Reliability"] as const;
 
@@ -107,7 +116,7 @@ export function HostEditor({ alias }: HostEditorProps) {
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
 
   if (isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading host…</p>;
+    return <HostEditorSkeleton />;
   }
   if (isError || !detail) {
     return (
@@ -123,16 +132,44 @@ export function HostEditor({ alias }: HostEditorProps) {
       detail={detail}
       isMac={isMac}
       saving={saveHost.isPending}
-      onSave={(changes) => saveHost.mutate({ alias: detail.alias, changes })}
-      onSetGroup={(group) => setGroup.mutate({ alias: detail.alias, group })}
-      onSetTags={(tags) => setTags.mutate({ alias: detail.alias, tags })}
+      onSave={(changes) =>
+        saveHost.mutate(
+          { alias: detail.alias, changes },
+          { onSuccess: () => toast.success(`Saved ${detail.alias}`) },
+        )
+      }
+      onSetGroup={(group) =>
+        setGroup.mutate(
+          { alias: detail.alias, group },
+          {
+            onSuccess: () =>
+              toast.success(
+                group ? `Moved ${detail.alias} to ${group}` : `Ungrouped ${detail.alias}`,
+              ),
+          },
+        )
+      }
+      onSetTags={(tags) =>
+        setTags.mutate(
+          { alias: detail.alias, tags },
+          { onSuccess: () => toast.success(`Updated tags for ${detail.alias}`) },
+        )
+      }
       onEnableOption={(keyword) =>
-        setOptionEnabled.mutate({ alias: detail.alias, keyword, enabled: true })
+        setOptionEnabled.mutate(
+          { alias: detail.alias, keyword, enabled: true },
+          { onSuccess: () => toast.success(`Enabled ${keyword}`) },
+        )
       }
       onRemove={() =>
         removeHost.mutate(
           { alias: detail.alias },
-          { onSuccess: () => setSelectedAlias(null) },
+          {
+            onSuccess: () => {
+              setSelectedAlias(null);
+              toast.success(`Removed ${detail.alias}`);
+            },
+          },
         )
       }
       removing={removeHost.isPending}
@@ -227,12 +264,69 @@ function HostEditorForm({
 
   return (
     <div className="space-y-6">
-      <div className="space-y-1">
-        <h2 className="text-lg font-semibold">{detail.alias}</h2>
-        <p className="text-xs text-muted-foreground">
-          {detail.patterns.join(", ")} ·{" "}
-          <span className="font-mono">{detail.source_file}</span>
-        </p>
+      {/* Editor header: alias large in mono + patterns + source + remove menu. */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-2">
+          <h2 className="truncate font-mono text-2xl font-semibold tracking-tight">
+            {detail.alias}
+          </h2>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            <span className="font-mono">{detail.patterns.join(", ")}</span>
+            <span className="text-muted-foreground/40">·</span>
+            <Badge
+              variant="secondary"
+              className="font-mono text-[0.65rem] font-normal text-muted-foreground"
+              title={detail.source_file}
+            >
+              {basename(detail.source_file)}
+            </Badge>
+          </div>
+        </div>
+
+        <AlertDialog>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Host actions"
+                disabled={removing}
+              >
+                <MoreVertical className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-40">
+              <AlertDialogTrigger asChild>
+                <DropdownMenuItem variant="destructive">
+                  <Trash2 className="size-4" /> Remove host
+                </DropdownMenuItem>
+              </AlertDialogTrigger>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                Remove “<span className="font-mono">{detail.alias}</span>”?
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                This deletes the host block from{" "}
+                <span className="font-mono">{basename(detail.source_file)}</span>.
+                This cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={onRemove}
+                className="bg-destructive text-white hover:bg-destructive/90"
+              >
+                Remove
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
 
       {/* Group / tags */}
@@ -245,6 +339,7 @@ function HostEditorForm({
               value={group}
               onChange={(e) => setGroupValue(e.target.value)}
               placeholder="Ungrouped"
+              className="font-mono"
             />
             <Button
               type="button"
@@ -263,6 +358,7 @@ function HostEditorForm({
               value={tags}
               onChange={(e) => setTagsValue(e.target.value)}
               placeholder="comma, separated"
+              className="font-mono"
             />
             <Button
               type="button"
@@ -284,9 +380,9 @@ function HostEditorForm({
 
       <Separator />
 
-      <form onSubmit={onSubmit} className="space-y-4">
-        <Tabs defaultValue="Connection">
-          <TabsList>
+      <form onSubmit={onSubmit} id="host-editor-form" className="space-y-4">
+        <Tabs defaultValue="Connection" className="w-full">
+          <TabsList variant="line" className="w-full justify-start">
             {GROUPS.map((g) => (
               <TabsTrigger key={g} value={g}>
                 {g}
@@ -296,7 +392,7 @@ function HostEditorForm({
           </TabsList>
 
           {GROUPS.map((g) => (
-            <TabsContent key={g} value={g} className="space-y-4 pt-2">
+            <TabsContent key={g} value={g} className="space-y-5 pt-4">
               {FIELD_DEFS.filter((d) => d.group === g)
                 .filter((d) => !d.macOnly || isMac)
                 .map((def) => (
@@ -305,20 +401,22 @@ function HostEditorForm({
             </TabsContent>
           ))}
 
-          <TabsContent value="Advanced" className="space-y-3 pt-2">
+          <TabsContent value="Advanced" className="space-y-3 pt-4">
             {fields.length === 0 && (
-              <p className="text-sm text-muted-foreground">No advanced options.</p>
+              <p className="text-sm text-muted-foreground">
+                No advanced options. Add raw keyword/value pairs below.
+              </p>
             )}
             {fields.map((field, index) => (
               <div key={field.id} className="flex items-center gap-2">
                 <Input
-                  className="flex-1"
+                  className="flex-1 font-mono text-sm"
                   placeholder="Keyword"
                   aria-label="Keyword"
                   {...register(`advanced.${index}.keyword` as const)}
                 />
                 <Input
-                  className="flex-[2]"
+                  className="flex-[2] font-mono text-sm"
                   placeholder="Value"
                   aria-label="Value"
                   {...register(`advanced.${index}.value` as const)}
@@ -344,19 +442,13 @@ function HostEditorForm({
             </Button>
           </TabsContent>
         </Tabs>
-
-        <div className="flex items-center gap-2">
-          <Button type="submit" disabled={!isDirty || saving}>
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </div>
       </form>
 
       {disabledOpts.length > 0 && (
         <>
           <Separator />
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium">Disabled options</h3>
+          <div className="space-y-2 opacity-80">
+            <h3 className="text-sm font-medium text-muted-foreground">Disabled options</h3>
             <p className="text-xs text-muted-foreground">
               Commented-out lines. Toggle on to re-enable, then edit above.
             </p>
@@ -373,34 +465,55 @@ function HostEditorForm({
         </>
       )}
 
-      <Separator />
+      {/* Sticky save bar: appears only when the option form is dirty. */}
+      {isDirty && (
+        <div className="animate-save-bar fixed inset-x-0 bottom-0 z-20 border-t bg-background/80 backdrop-blur-md">
+          <div className="mx-auto flex max-w-2xl items-center justify-between gap-3 px-6 py-3">
+            <span className="flex items-center gap-2 text-sm text-muted-foreground">
+              <span className="size-1.5 rounded-full bg-primary" aria-hidden />
+              Unsaved changes
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => reset(defaults)}
+                disabled={saving}
+              >
+                <RotateCcw className="size-4" /> Discard
+              </Button>
+              <Button type="submit" form="host-editor-form" disabled={!isDirty || saving}>
+                <Save className="size-4" /> {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
-      <AlertDialog>
-        <AlertDialogTrigger asChild>
-          <Button type="button" variant="destructive" disabled={removing}>
-            <Trash2 className="size-4" /> Remove host
-          </Button>
-        </AlertDialogTrigger>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove “{detail.alias}”?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This deletes the host block from{" "}
-              <span className="font-mono">{detail.source_file}</span>. This cannot
-              be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={onRemove}
-              className="bg-destructive text-white hover:bg-destructive/90"
-            >
-              Remove
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+/** Skeleton placeholder shown while a host's detail loads. */
+function HostEditorSkeleton() {
+  return (
+    <div className="space-y-6" aria-hidden>
+      <div className="space-y-2">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-3 w-64" />
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Skeleton className="h-9 w-full" />
+        <Skeleton className="h-9 w-full" />
+      </div>
+      <Skeleton className="h-8 w-72" />
+      <div className="space-y-5">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="space-y-1.5">
+            <Skeleton className="h-3 w-24" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -422,7 +535,9 @@ function FieldControl({ def, control, register }: FieldControlProps) {
   if (def.kind === "toggle") {
     return (
       <div className="flex items-center justify-between gap-4">
-        <Label htmlFor={id}>{def.label}</Label>
+        <Label htmlFor={id} className="font-mono text-sm">
+          {def.label}
+        </Label>
         <Controller
           control={control}
           name={name}
@@ -441,7 +556,9 @@ function FieldControl({ def, control, register }: FieldControlProps) {
   if (def.kind === "select") {
     return (
       <div className="space-y-1.5">
-        <Label htmlFor={id}>{def.label}</Label>
+        <Label htmlFor={id} className="font-mono text-sm">
+          {def.label}
+        </Label>
         <Controller
           control={control}
           name={name}
@@ -450,13 +567,15 @@ function FieldControl({ def, control, register }: FieldControlProps) {
               value={field.value ? field.value : UNSET}
               onValueChange={(v) => field.onChange(v === UNSET ? "" : v)}
             >
-              <SelectTrigger id={id} className="w-full">
+              <SelectTrigger id={id} className="w-full font-mono">
                 <SelectValue placeholder="—" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={UNSET}>(unset)</SelectItem>
+                <SelectItem value={UNSET} className="font-sans text-muted-foreground">
+                  (unset)
+                </SelectItem>
                 {(def.options ?? []).map((opt) => (
-                  <SelectItem key={opt} value={opt}>
+                  <SelectItem key={opt} value={opt} className="font-mono">
                     {opt}
                   </SelectItem>
                 ))}
@@ -471,10 +590,13 @@ function FieldControl({ def, control, register }: FieldControlProps) {
   // text | number
   return (
     <div className="space-y-1.5">
-      <Label htmlFor={id}>{def.label}</Label>
+      <Label htmlFor={id} className="font-mono text-sm">
+        {def.label}
+      </Label>
       <Input
         id={id}
         type={def.kind === "number" ? "number" : "text"}
+        className="font-mono"
         {...register(name)}
       />
     </div>
@@ -488,7 +610,9 @@ interface DisabledOptionRowProps {
 
 function DisabledOptionRow({ option, onEnable }: DisabledOptionRowProps) {
   return (
-    <li className="flex items-center justify-between gap-3 rounded-md border px-3 py-1.5">
+    <li className={cn(
+      "flex items-center justify-between gap-3 rounded-md border border-dashed bg-muted/30 px-3 py-1.5",
+    )}>
       <span className="truncate font-mono text-sm text-muted-foreground">
         {option.keyword} {option.value}
       </span>

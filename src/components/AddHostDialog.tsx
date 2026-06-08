@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Plus } from "lucide-react";
+import { toast } from "sonner";
 
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
 import { useHostsQuery, useAddHost } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
+import { basename } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,13 +27,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
-/** Last path segment of a (possibly `/`- or `\`-separated) file path. */
-function basename(p: string): string {
-  const norm = p.replace(/\\/g, "/");
-  const parts = norm.split("/");
-  return parts[parts.length - 1] || p;
-}
 
 export function AddHostDialog() {
   const { data } = useHostsQuery();
@@ -77,6 +72,7 @@ export function AddHostDialog() {
           setOpen(false);
           resetForm();
           setSelectedAlias(newAlias);
+          toast.success(`Added ${newAlias}`);
         },
       },
     );
@@ -92,13 +88,13 @@ export function AddHostDialog() {
     >
       <DialogTrigger asChild>
         <Button size="sm" variant="default">
-          <Plus className="size-4" /> Add host
+          <Plus className="size-4" /> New host
         </Button>
       </DialogTrigger>
       <DialogContent>
         <form onSubmit={handleSubmit}>
           <DialogHeader>
-            <DialogTitle>Add host</DialogTitle>
+            <DialogTitle>New host</DialogTitle>
             <DialogDescription>
               Create a new SSH host block in the chosen config file.
             </DialogDescription>
@@ -113,7 +109,7 @@ export function AddHostDialog() {
                 </SelectTrigger>
                 <SelectContent>
                   {files.map((f) => (
-                    <SelectItem key={f} value={f}>
+                    <SelectItem key={f} value={f} className="font-mono">
                       {basename(f)}
                     </SelectItem>
                   ))}
@@ -128,6 +124,7 @@ export function AddHostDialog() {
                 value={alias}
                 onChange={(e) => setAlias(e.target.value)}
                 placeholder="my-server"
+                className="font-mono"
                 autoFocus
               />
             </div>
@@ -139,6 +136,7 @@ export function AddHostDialog() {
                 value={hostName}
                 onChange={(e) => setHostName(e.target.value)}
                 placeholder="example.com"
+                className="font-mono"
               />
             </div>
 
@@ -150,6 +148,7 @@ export function AddHostDialog() {
                   value={user}
                   onChange={(e) => setUser(e.target.value)}
                   placeholder="root"
+                  className="font-mono"
                 />
               </div>
               <div className="space-y-1.5">
@@ -160,6 +159,7 @@ export function AddHostDialog() {
                   value={port}
                   onChange={(e) => setPort(e.target.value)}
                   placeholder="22"
+                  className="font-mono"
                 />
               </div>
             </div>
@@ -172,7 +172,7 @@ export function AddHostDialog() {
               </Button>
             </DialogClose>
             <Button type="submit" disabled={!canSubmit}>
-              {addHost.isPending ? "Adding…" : "Add host"}
+              {addHost.isPending ? "Adding…" : "Create host"}
             </Button>
           </DialogFooter>
         </form>

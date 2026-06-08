@@ -1,17 +1,11 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, TriangleAlert } from "lucide-react";
 
 import { useDrift, useLoadConfig, queryKeys } from "@/lib/queries";
 import { Button } from "@/components/ui/button";
-
-/** Last path segment of a (possibly `/`- or `\`-separated) file path. */
-function basename(p: string): string {
-  const norm = p.replace(/\\/g, "/");
-  const parts = norm.split("/");
-  return parts[parts.length - 1] || p;
-}
+import { basename } from "@/lib/utils";
 
 /**
  * Detects on-disk drift (files changed since load) and offers a one-click
@@ -38,14 +32,19 @@ export function DriftBanner() {
   const names = changed.map((d) => basename(d.path)).join(", ");
 
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm">
-      <span className="text-amber-700 dark:text-amber-400">
-        Changed on disk: <span className="font-medium">{names}</span>
-      </span>
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3.5 py-2.5 text-sm">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <TriangleAlert className="size-4 shrink-0 text-primary" />
+        <span className="min-w-0 text-foreground">
+          Changed on disk:{" "}
+          <span className="font-mono font-medium break-all">{names}</span>
+        </span>
+      </div>
       <Button
         type="button"
         size="sm"
         variant="outline"
+        className="shrink-0"
         disabled={loadConfig.isPending}
         onClick={() =>
           loadConfig.mutate(undefined, {
@@ -56,7 +55,7 @@ export function DriftBanner() {
           })
         }
       >
-        <RefreshCw className="size-4" /> Reload
+        <RefreshCw className={loadConfig.isPending ? "size-4 animate-spin" : "size-4"} /> Reload
       </Button>
     </div>
   );
