@@ -1,0 +1,9 @@
+# Global SSH configuration
+# Managed by SSHelter
+
+
+Host gateway
+    HostName gw.example.com
+    User jump  # default jump user
+    # inner note about proxy below
+    ProxyCommand sh -c "echo # nope; nc %h %p"

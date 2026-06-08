@@ -1,0 +1,6 @@
+Host mixed
+	HostName=mixed.example.com
+    hostname mixed-alias.example.com
+    User = operator
+    Port=2200
+    Compression yes

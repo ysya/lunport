@@ -1,0 +1,9 @@
+# Host oldserver
+#     HostName old.example.com
+#     User legacy
+#     Port 22
+
+Host newserver
+    HostName new.example.com
+    User current
+    Port 22

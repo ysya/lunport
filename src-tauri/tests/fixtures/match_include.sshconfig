@@ -1,0 +1,13 @@
+Include config.d/*.conf
+
+Match host bastion.example.com user deploy
+    ForwardAgent yes
+    IdentityFile ~/.ssh/id_bastion
+
+Host prod-* !prod-old
+    User produser
+    Port 22
+
+Host *
+    ServerAliveInterval 60
+    ServerAliveCountMax 3

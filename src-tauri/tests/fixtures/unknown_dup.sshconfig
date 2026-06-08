@@ -1,0 +1,7 @@
+Host appserver
+    HostName app1.example.com
+    HostName app2.example.com
+    User svc
+    SetEnv LANG=en_US.UTF-8
+    Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com
+    FutureUnknownOption some-experimental-value

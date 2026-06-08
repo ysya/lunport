@@ -1,0 +1,11 @@
+Host web
+    HostName web.example.com
+    User deploy
+    Port 22
+    IdentityFile ~/.ssh/id_web
+
+Host db
+    HostName db.example.com
+    User admin
+    Port 2222
+    IdentityFile ~/.ssh/id_db
