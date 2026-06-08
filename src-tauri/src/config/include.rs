@@ -11,7 +11,7 @@ use crate::fsutil;
 pub fn load_doc(main_path: &Path) -> Result<SshConfigDoc, AppError> {
     let mut files: Vec<ConfigFile> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
-    load_recursive(main_path, &mut files, &mut visited)?;
+    load_recursive(main_path, &mut files, &mut visited, true)?;
     Ok(SshConfigDoc { files })
 }
 
@@ -19,6 +19,7 @@ fn load_recursive(
     path: &Path,
     files: &mut Vec<ConfigFile>,
     visited: &mut HashSet<PathBuf>,
+    is_root: bool,
 ) -> Result<(), AppError> {
     // Canonicalize for cycle detection; fall back to absolute if canonicalize fails (file doesn't
     // exist yet in some edge cases, but we still guard with the raw path).
@@ -29,9 +30,28 @@ fn load_recursive(
     }
     visited.insert(canonical);
 
-    let text = std::fs::read_to_string(path)?;
+    // The main config must exist (fatal). An INCLUDED file that can't be read (removed mid-scan,
+    // permission denied, broken symlink that passed is_file()) is skipped so one bad include never
+    // aborts loading the whole config.
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            if is_root {
+                return Err(AppError::Io(e));
+            }
+            return Ok(());
+        }
+    };
     let (items, trailing_newline) = parse_file(&text);
-    let fingerprint = fsutil::file_fingerprint(path)?;
+    let fingerprint = match fsutil::file_fingerprint(path) {
+        Ok(f) => f,
+        Err(e) => {
+            if is_root {
+                return Err(e);
+            }
+            return Ok(());
+        }
+    };
 
     let parent = path
         .parent()
@@ -90,7 +110,8 @@ fn load_recursive(
             matched_paths.sort();
 
             for matched in matched_paths {
-                load_recursive(&matched, files, visited)?;
+                // Included files are non-root: a failure inside skips that file, not the whole load.
+                load_recursive(&matched, files, visited, false)?;
             }
         }
     }
@@ -213,5 +234,52 @@ mod tests {
             doc.files[0].path.canonicalize().unwrap(),
             config_path.canonicalize().unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_include_is_skipped_not_fatal() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config");
+        {
+            let mut f = std::fs::File::create(&config_path).unwrap();
+            // Include FIRST so it's a top-level directive (parser folds post-Host lines into the body).
+            writeln!(f, "Include secret.conf").unwrap();
+            writeln!(f, "Host main-h").unwrap();
+            writeln!(f, "    HostName main.example.com").unwrap();
+        }
+        // An included file that exists (is_file() passes) but is unreadable.
+        let secret = dir.path().join("secret.conf");
+        std::fs::write(&secret, "Host secret-h\n").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let doc = load_doc(&config_path).expect("unreadable include must NOT fail the whole load");
+        assert_eq!(
+            doc.files.len(),
+            1,
+            "unreadable include is skipped; main still loads"
+        );
+        assert!(find_host_file_index(&doc, "main-h").is_some());
+        assert!(find_host_file_index(&doc, "secret-h").is_none());
+
+        // Restore perms so tempdir cleanup succeeds.
+        let _ = std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_root_is_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config");
+        std::fs::write(&config_path, "Host h\n").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let res = load_doc(&config_path);
+        assert!(res.is_err(), "an unreadable MAIN config must be a fatal error");
+
+        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
     }
 }
