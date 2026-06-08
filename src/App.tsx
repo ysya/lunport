@@ -3,11 +3,14 @@ import { toast } from "sonner";
 import { useHostsQuery } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { HostList } from "@/components/HostList";
+import { HostEditor } from "@/components/HostEditor";
+import { AddHostDialog } from "@/components/AddHostDialog";
+import { DriftBanner } from "@/components/DriftBanner";
 import { Toaster } from "@/components/ui/sonner";
 
 /**
  * App shell: master-detail layout. The left pane is the host list; the right
- * pane is a placeholder that Task UI-2 will replace with the host editor.
+ * pane is the host editor for the selected alias.
  *
  * Config is loaded on mount via `useHostsQuery` (a single `config_load` that
  * yields files + hosts). Errors are surfaced as a toast.
@@ -33,6 +36,9 @@ function App() {
         <span className="text-xs text-muted-foreground">
           {isLoading ? "loading…" : `${hosts.length} hosts`}
         </span>
+        <div className="ml-auto">
+          <AddHostDialog />
+        </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -42,12 +48,9 @@ function App() {
 
         <main className="min-w-0 flex-1 overflow-auto p-6">
           {selectedAlias ? (
-            <div className="space-y-2">
-              <h2 className="text-lg font-semibold">{selectedAlias}</h2>
-              <p className="text-sm text-muted-foreground">
-                Editor coming in the next task. Selected host:{" "}
-                <code className="font-mono">{selectedAlias}</code>
-              </p>
+            <div className="mx-auto max-w-2xl space-y-4">
+              <DriftBanner />
+              <HostEditor alias={selectedAlias} />
             </div>
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">

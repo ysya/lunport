@@ -69,6 +69,19 @@ export function useLoadConfig() {
   });
 }
 
+/**
+ * Host platform (`"macos" | "linux" | "windows"`). Cached indefinitely — it
+ * never changes during a session. Used to gate macOS-only fields in the editor.
+ */
+export function usePlatform() {
+  return useQuery<string>({
+    queryKey: ["app", "platform"],
+    queryFn: () => tauriInvoke<string>("app_platform"),
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+}
+
 /** Detail for a single host. Disabled until an alias is provided. */
 export function useHostDetail(alias: string | null | undefined) {
   return useQuery<HostDetail | null>({
