@@ -405,6 +405,10 @@ function HostEditorForm({
   );
 }
 
+// Radix Select cannot use "" as an item value, so the "unset" choice uses a sentinel that
+// maps back to "" (which clears the field → the directive line is removed on save).
+const UNSET = "__unset__";
+
 interface FieldControlProps {
   def: FieldDef;
   control: ReturnType<typeof useForm<FormValues>>["control"];
@@ -443,13 +447,14 @@ function FieldControl({ def, control, register }: FieldControlProps) {
           name={name}
           render={({ field }) => (
             <Select
-              value={field.value || undefined}
-              onValueChange={field.onChange}
+              value={field.value ? field.value : UNSET}
+              onValueChange={(v) => field.onChange(v === UNSET ? "" : v)}
             >
               <SelectTrigger id={id} className="w-full">
                 <SelectValue placeholder="—" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value={UNSET}>(unset)</SelectItem>
                 {(def.options ?? []).map((opt) => (
                   <SelectItem key={opt} value={opt}>
                     {opt}

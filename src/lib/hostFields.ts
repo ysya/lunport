@@ -25,7 +25,7 @@ export const FIELD_DEFS: FieldDef[] = [
 
   // --- Authentication ---
   { keyword: "IdentityFile", label: "IdentityFile", group: "Authentication", kind: "text" },
-  { keyword: "IdentitiesOnly", label: "IdentitiesOnly", group: "Authentication", kind: "toggle" },
+  { keyword: "IdentitiesOnly", label: "IdentitiesOnly", group: "Authentication", kind: "select", options: ["yes", "no"] },
   {
     keyword: "AddKeysToAgent",
     label: "AddKeysToAgent",
@@ -33,8 +33,8 @@ export const FIELD_DEFS: FieldDef[] = [
     kind: "select",
     options: ["yes", "no", "ask", "confirm"],
   },
-  { keyword: "UseKeychain", label: "UseKeychain", group: "Authentication", kind: "toggle", macOnly: true },
-  { keyword: "ForwardAgent", label: "ForwardAgent", group: "Authentication", kind: "toggle" },
+  { keyword: "UseKeychain", label: "UseKeychain", group: "Authentication", kind: "select", options: ["yes", "no"], macOnly: true },
+  { keyword: "ForwardAgent", label: "ForwardAgent", group: "Authentication", kind: "select", options: ["yes", "no"] },
 
   // --- Forwarding ---
   { keyword: "ProxyJump", label: "ProxyJump", group: "Forwarding", kind: "text" },
@@ -46,7 +46,7 @@ export const FIELD_DEFS: FieldDef[] = [
   { keyword: "ServerAliveInterval", label: "ServerAliveInterval", group: "Reliability", kind: "number" },
   { keyword: "ServerAliveCountMax", label: "ServerAliveCountMax", group: "Reliability", kind: "number" },
   { keyword: "ConnectTimeout", label: "ConnectTimeout", group: "Reliability", kind: "number" },
-  { keyword: "Compression", label: "Compression", group: "Reliability", kind: "toggle" },
+  { keyword: "Compression", label: "Compression", group: "Reliability", kind: "select", options: ["yes", "no"] },
   {
     keyword: "RequestTTY",
     label: "RequestTTY",
