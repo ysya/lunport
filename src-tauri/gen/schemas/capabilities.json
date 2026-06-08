@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Least-privilege capability for SSHelter's main window. The WebView gets NO filesystem and NO shell-exec permission; all privileged IO/exec happens in Rust commands. This is the security boundary.","local":true,"windows":["main"],"permissions":["core:default","opener:default","os:default"]}}
