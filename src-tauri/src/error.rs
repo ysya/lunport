@@ -15,6 +15,9 @@ pub enum AppError {
 
     #[error("{0}")]
     Other(String),
+
+    #[error("parse error at line {line}: {msg}")]
+    Parse { msg: String, line: usize },
 }
 
 impl Serialize for AppError {
@@ -43,5 +46,15 @@ mod tests {
         let e: AppError = io.into();
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(json, "\"io error: missing\"");
+    }
+
+    #[test]
+    fn parse_error_serializes_to_its_message() {
+        let e = AppError::Parse {
+            msg: "bad".into(),
+            line: 3,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert_eq!(json, "\"parse error at line 3: bad\"");
     }
 }
