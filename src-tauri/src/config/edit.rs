@@ -21,6 +21,9 @@ pub fn find_host_mut<'a>(items: &'a mut [Item], alias: &str) -> Option<&'a mut H
 /// to the body using the block's inferred indent. Returns true if anything changed.
 pub fn set_host_field(host: &mut HostBlock, keyword: &str, value: &str) -> bool {
     let key_lower = keyword.to_lowercase();
+    // A value can never legally contain a newline; strip CR/LF so a malicious/garbled value
+    // cannot inject a fabricated directive line into the user's live config on serialize.
+    let value = sanitize_value(value);
 
     // Try to find and update existing directive.
     for item in host.body.iter_mut() {
@@ -29,18 +32,30 @@ pub fn set_host_field(host: &mut HostBlock, keyword: &str, value: &str) -> bool 
                 if d.value == value {
                     return false; // no change
                 }
-                d.value = value.to_string();
+                d.value = value;
                 d.dirty = true;
                 return true;
             }
         }
     }
 
-    // Not found — infer indent and append.
+    // Not found — infer indent and insert AFTER the last directive (before any trailing
+    // blank/comment run) so the new line stays visually inside the block.
     let indent = infer_indent(&host.body);
+    let insert_at = host
+        .body
+        .iter()
+        .rposition(|it| matches!(it, Item::Directive(_)))
+        .map(|i| i + 1)
+        .unwrap_or(host.body.len());
     host.body
-        .push(Item::Directive(Directive::new(keyword, value, &indent)));
+        .insert(insert_at, Item::Directive(Directive::new(keyword, &value, &indent)));
     true
+}
+
+/// Strip CR/LF from a value so it can never inject extra physical lines on serialize.
+fn sanitize_value(value: &str) -> String {
+    value.replace(['\r', '\n'], "")
 }
 
 /// Infer the indent from the first Directive in a body; fall back to 4 spaces.
@@ -79,6 +94,11 @@ pub fn set_directive_enabled(d: &mut Directive, enabled: bool) {
 
 /// Enable/disable an entire host: applies to the header AND every directive in the body
 /// (each gets enabled set + dirty=true). Blank/Comment items are untouched.
+///
+/// NOTE — one-way across reload: disabling serializes the block as `#`-commented lines. On a
+/// subsequent parse those lines classify as Comments (not a disabled Host block), so the host
+/// can no longer be re-enabled through this API after save+reload. The UI must not assume the
+/// toggle is reversible across a reload.
 pub fn set_host_enabled(host: &mut HostBlock, enabled: bool) {
     set_directive_enabled(&mut host.header, enabled);
     for item in host.body.iter_mut() {
@@ -617,6 +637,60 @@ mod tests {
         assert!(
             find_sentinel(&host.body, "#tags:").is_none(),
             "tags sentinel must be removed after set_tags(&[])"
+        );
+    }
+
+    // ── Test 9: value newlines are stripped (no line injection) ──────────────
+    #[test]
+    fn test_set_field_strips_newlines_no_injection() {
+        let original = "Host web\n    User deploy\n\nHost db\n    User admin\n";
+        let (mut items, nl) = parse_file(original);
+        let lines_before = serialize_items(&items, nl).lines().count();
+
+        let host = find_host_mut(&mut items, "web").unwrap();
+        // A malicious value carrying a newline + a fake directive must NOT inject a line.
+        set_host_field(host, "User", "evil\n    ForwardAgent yes");
+        let edited = serialize_items(&items, nl);
+
+        assert_eq!(
+            edited.lines().count(),
+            lines_before,
+            "a value newline must not inject a physical line:\n{edited}"
+        );
+
+        let host = find_host_mut(&mut items, "web").unwrap();
+        let user = host.body.iter().find_map(|it| match it {
+            Item::Directive(d) if d.key == "user" => Some(d),
+            _ => None,
+        });
+        assert!(
+            !user.unwrap().value.contains('\n'),
+            "stored value must not contain a newline"
+        );
+    }
+
+    // ── Test 10: appended field lands before a trailing blank, not orphaned ──
+    #[test]
+    fn test_append_field_goes_before_trailing_blank() {
+        // The parser folds the inter-host blank into the FIRST block's body, so web's body
+        // ends with Blank(""). An appended field must go before it (inside the block).
+        let original = "Host web\n    User deploy\n\nHost db\n    User admin\n";
+        let (mut items, nl) = parse_file(original);
+
+        let host = find_host_mut(&mut items, "web").unwrap();
+        set_host_field(host, "ForwardAgent", "yes"); // new field
+
+        let edited = serialize_items(&items, nl);
+        let lines: Vec<&str> = edited.lines().collect();
+        let fa = lines
+            .iter()
+            .position(|l| l.contains("ForwardAgent yes"))
+            .expect("ForwardAgent line present");
+        assert_eq!(lines[fa], "    ForwardAgent yes");
+        assert_eq!(
+            lines[fa + 1],
+            "",
+            "appended field must sit before the trailing blank, got:\n{edited}"
         );
     }
 }

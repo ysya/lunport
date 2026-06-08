@@ -68,7 +68,8 @@ impl Directive {
         Directive {
             keyword: keyword.to_string(),
             key: keyword.to_lowercase(),
-            value: value.to_string(),
+            // Strip CR/LF: a value must never inject extra physical lines on serialize.
+            value: value.replace(['\r', '\n'], ""),
             separator: Separator::Space(" ".to_string()),
             indent: indent.to_string(),
             trailing_ws: String::new(),
