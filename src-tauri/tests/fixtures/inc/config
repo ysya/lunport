@@ -1,0 +1,7 @@
+ServerAliveInterval 60
+Include config.d/*.conf
+
+Host main-a
+    HostName main-a.example.com
+    User deployer
+    Port 22
