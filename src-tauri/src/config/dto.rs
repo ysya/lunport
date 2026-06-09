@@ -24,6 +24,10 @@ pub struct HostSummary {
     pub source_file: String,
     /// Parsed from a `#tags:` sentinel comment in the host body.
     pub tags: Vec<String>,
+    /// First enabled `HostName` value, if any — for a meaningful, distinct list subtitle.
+    pub hostname: Option<String>,
+    /// First enabled `User` value, if any.
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +83,24 @@ fn build_summary(h: &HostBlock, source_file: &str) -> HostSummary {
         patterns: h.patterns.clone(),
         source_file: source_file.to_string(),
         tags,
+        hostname: first_enabled_value(&h.body, "hostname"),
+        user: first_enabled_value(&h.body, "user"),
     }
+}
+
+/// First enabled directive value for `key_lower` in a block body (trimmed, non-empty), else None.
+fn first_enabled_value(body: &[Item], key_lower: &str) -> Option<String> {
+    for item in body {
+        if let Item::Directive(d) = item {
+            if d.enabled && d.key == key_lower {
+                let v = d.value.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn build_detail(h: &HostBlock, source_file: &str) -> HostDetail {
@@ -166,6 +187,10 @@ mod tests {
 
         // Tags parsed correctly.
         assert_eq!(work.tags, vec!["prod", "db"], "work-1 tags");
+
+        // Resolved HostName/User surfaced for the list subtitle.
+        assert_eq!(work.hostname.as_deref(), Some("work-1.example.com"), "work-1 hostname");
+        assert!(work.user.is_some(), "work-1 should expose a User");
     }
 
     // ── Test 4: host_detail options in order + group/tags ────────────────────
@@ -230,6 +255,8 @@ mod tests {
             patterns: vec!["test".to_string()],
             source_file: "/tmp/config".to_string(),
             tags: vec![],
+            hostname: Some("example.com".to_string()),
+            user: None,
         };
         let _det = HostDetail {
             alias: "test".to_string(),

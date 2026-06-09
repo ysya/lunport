@@ -11,15 +11,20 @@ import { AddHostDialog } from "@/components/AddHostDialog";
 import { cn, basename } from "@/lib/utils";
 
 /**
- * Derive a short secondary line for a host row. Patterns beyond the alias make a
- * good hint; otherwise we fall back to the alias itself so the row never looks
- * empty. (HostSummary has no resolved HostName/User, so patterns are the best
- * available signal without changing the data layer.)
+ * Derive a short, DISTINCT secondary line for a host row from its resolved
+ * connection target — `user@hostname`, or whichever is present. Falls back to
+ * extra (wildcard) patterns, and finally to `null` so we render NO second line
+ * rather than duplicating the alias.
  */
-function secondaryLine(host: HostSummary): string {
+function secondaryLine(host: HostSummary): string | null {
+  const hostname = host.hostname?.trim() ?? "";
+  const user = host.user?.trim() ?? "";
+  if (user && hostname) return `${user}@${hostname}`;
+  if (hostname) return hostname;
+  if (user) return user;
   const extra = host.patterns.filter((p) => p !== host.alias);
   if (extra.length > 0) return extra.join(", ");
-  return host.alias;
+  return null;
 }
 
 /** True if the host matches the (lowercased) search term across its searchable fields. */
@@ -154,9 +159,11 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               {host.alias}
                             </span>
                           </div>
-                          <span className="truncate font-mono text-xs text-muted-foreground">
-                            {secondary}
-                          </span>
+                          {secondary && (
+                            <span className="truncate font-mono text-xs text-muted-foreground">
+                              {secondary}
+                            </span>
+                          )}
                           {host.tags.length > 0 && (
                             <div className="flex flex-wrap gap-1 pt-0.5">
                               {host.tags.map((tag) => (

@@ -12,4 +12,12 @@ source_file: string,
 /**
  * Parsed from a `#tags:` sentinel comment in the host body.
  */
-tags: Array<string>, };
+tags: Array<string>, 
+/**
+ * First enabled `HostName` value, if any — for a meaningful, distinct list subtitle.
+ */
+hostname: string | null, 
+/**
+ * First enabled `User` value, if any.
+ */
+user: string | null, };
