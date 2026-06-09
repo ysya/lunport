@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Search, ServerOff } from "lucide-react";
+import { Search, ServerOff, Server, Globe } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
 import { useUiStore } from "@/stores/ui";
@@ -25,6 +25,29 @@ function secondaryLine(host: HostSummary): string | null {
   const extra = host.patterns.filter((p) => p !== host.alias);
   if (extra.length > 0) return extra.join(", ");
   return null;
+}
+
+/** Dotted-quad IPv4 (e.g. 10.0.0.5) — these are servers, not "web" hosts. */
+const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+/** A hostname that ends in a DNS-style label, e.g. example.com / corp.internal. */
+const DOMAIN_RE = /\.[a-z]{2,}$/i;
+
+/**
+ * Pick a leading anchor glyph for a row: a globe for hosts that resolve to a
+ * DNS domain (alias or hostname like `github.com` / `corp.internal`), a server
+ * for IPs and bare names. Monochrome + muted — a left anchor so the list isn't
+ * a wall of text.
+ */
+function HostGlyph({ host }: { host: HostSummary }) {
+  const target = (host.hostname?.trim() || host.alias).trim();
+  const isDomain = !IPV4_RE.test(target) && DOMAIN_RE.test(target);
+  const Icon = isDomain ? Globe : Server;
+  return (
+    <Icon
+      className="size-3.5 shrink-0 text-muted-foreground/70 group-aria-[current=true]:text-primary/80"
+      aria-hidden
+    />
+  );
 }
 
 /** True if the host matches the (lowercased) search term across its searchable fields. */
@@ -88,7 +111,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search hosts"
-            className="h-7 pl-8 font-mono text-sm placeholder:font-sans"
+            className="h-7 pl-8 text-sm"
           />
         </div>
       </div>
@@ -109,18 +132,18 @@ export function HostList({ hosts, isLoading }: HostListProps) {
           ) : (
             grouped.map((group) => (
               <div key={group.file} className="mb-3">
-                <div className="flex items-center justify-between px-2 py-1">
+                <div className="flex items-center justify-between px-2 py-1 select-none">
                   <span
-                    className="text-[0.65rem] font-semibold tracking-[0.12em] text-muted-foreground uppercase"
+                    className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase"
                     title={group.file}
                   >
                     {group.name}
                   </span>
-                  <span className="font-mono text-[0.65rem] text-muted-foreground/70 tabular-nums">
+                  <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
                     {group.hosts.length}
                   </span>
                 </div>
-                <ul className="space-y-0.5">
+                <ul className="space-y-px">
                   {group.hosts.map((host) => {
                     const active = host.alias === selectedAlias;
                     rowIndex += 1;
@@ -132,51 +155,53 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                         className="animate-row-enter"
                         style={{ animationDelay: delay }}
                       >
+                        {/*
+                         * Source-list row: leading monochrome glyph anchor +
+                         * dense content. Selection is ONE quiet cue — an inset
+                         * accent-tinted pill (radius 6) with slightly stronger
+                         * text. No left bar, no border, no colored alias.
+                         */}
                         <button
                           type="button"
                           onClick={() => setSelectedAlias(host.alias)}
                           aria-current={active ? "true" : undefined}
                           className={cn(
-                            "group relative flex w-full flex-col gap-0.5 rounded-md border border-transparent py-1.5 pr-2 pl-2.5 text-left transition-colors",
-                            "hover:bg-muted/70 focus-visible:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:outline-none",
-                            active && "border-primary/20 bg-primary/10 hover:bg-primary/15",
+                            "group flex w-full items-start gap-2 rounded-[6px] px-2 py-1.5 text-left transition-colors duration-100 select-none",
+                            "hover:bg-muted/70 focus-visible:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+                            active && "bg-primary/12 hover:bg-primary/15",
                           )}
                         >
-                          <span
-                            aria-hidden
-                            className={cn(
-                              "absolute top-1.5 bottom-1.5 left-0 w-0.5 rounded-full bg-primary transition-opacity",
-                              active ? "opacity-100" : "opacity-0",
-                            )}
-                          />
-                          <div className="flex items-center justify-between gap-2">
+                          <span className="flex h-[18px] items-center">
+                            <HostGlyph host={host} />
+                          </span>
+                          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                             <span
                               className={cn(
-                                "truncate font-mono text-sm font-medium",
-                                active && "text-primary",
+                                "truncate text-[0.8125rem] leading-[18px] font-medium",
+                                active ? "text-foreground" : "text-foreground/90",
                               )}
                             >
                               {host.alias}
                             </span>
-                          </div>
-                          {secondary && (
-                            <span className="truncate font-mono text-xs text-muted-foreground">
-                              {secondary}
-                            </span>
-                          )}
-                          {host.tags.length > 0 && (
-                            <div className="flex flex-wrap gap-1 pt-0.5">
-                              {host.tags.map((tag) => (
-                                <Badge
-                                  key={tag}
-                                  variant="outline"
-                                  className="border-border/70 font-mono text-[0.65rem] font-normal text-muted-foreground"
-                                >
-                                  {tag}
-                                </Badge>
-                              ))}
-                            </div>
-                          )}
+                            {secondary && (
+                              <span className="truncate font-mono text-xs leading-tight text-muted-foreground">
+                                {secondary}
+                              </span>
+                            )}
+                            {host.tags.length > 0 && (
+                              <span className="flex flex-wrap gap-1 pt-0.5">
+                                {host.tags.map((tag) => (
+                                  <Badge
+                                    key={tag}
+                                    variant="outline"
+                                    className="border-border/70 font-mono text-[0.65rem] font-normal text-muted-foreground"
+                                  >
+                                    {tag}
+                                  </Badge>
+                                ))}
+                              </span>
+                            )}
+                          </span>
                         </button>
                       </li>
                     );
@@ -198,11 +223,14 @@ function HostListSkeleton() {
       {[0, 1].map((g) => (
         <div key={g}>
           <Skeleton className="mx-2 mb-2 h-3 w-20" />
-          <div className="space-y-1.5">
+          <div className="space-y-px">
             {[0, 1, 2].map((r) => (
-              <div key={r} className="space-y-1.5 px-3 py-2">
-                <Skeleton className="h-3.5 w-2/3" />
-                <Skeleton className="h-3 w-1/2" />
+              <div key={r} className="flex items-start gap-2 px-2 py-1.5">
+                <Skeleton className="mt-0.5 size-3.5 shrink-0 rounded" />
+                <div className="flex-1 space-y-1.5">
+                  <Skeleton className="h-3 w-2/3" />
+                  <Skeleton className="h-2.5 w-1/2" />
+                </div>
               </div>
             ))}
           </div>
@@ -215,8 +243,8 @@ function HostListSkeleton() {
 /** Friendly empty state when no hosts exist at all. */
 function EmptyHosts() {
   return (
-    <div className="flex flex-col items-center gap-3 px-4 py-12 text-center">
-      <div className="flex size-10 items-center justify-center rounded-lg bg-muted/60 text-muted-foreground ring-1 ring-border">
+    <div className="flex flex-col items-center gap-3 px-4 py-12 text-center select-none">
+      <div className="flex size-10 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border">
         <ServerOff className="size-5" />
       </div>
       <div className="space-y-0.5">
@@ -225,7 +253,7 @@ function EmptyHosts() {
           Add your first SSH host to get started.
         </p>
       </div>
-      <AddHostDialog />
+      <AddHostDialog variant="labeled" />
     </div>
   );
 }

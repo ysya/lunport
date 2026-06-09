@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useForm, useFieldArray, Controller, type Resolver } from "react-hook-form";
+import {
+  useForm,
+  useFieldArray,
+  useWatch,
+  Controller,
+  type Control,
+  type Resolver,
+} from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Trash2, Plus, MoreVertical, RotateCcw, Save } from "lucide-react";
+import { Trash2, Plus, MoreVertical, RotateCcw, Save, ChevronRight } from "lucide-react";
 
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostOption } from "@/bindings/HostOption";
@@ -22,7 +29,7 @@ import {
   useRemoveHost,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
-import { basename } from "@/lib/utils";
+import { basename, cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,7 +37,6 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -245,19 +251,23 @@ function HostEditorForm({
   });
 
   return (
-    <div className="space-y-5">
-      {/* Editor header: alias in mono + patterns + source + remove menu. */}
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 space-y-1.5">
-          <h2 className="truncate font-mono text-xl font-semibold tracking-tight">
+    <div className="space-y-6">
+      {/*
+       * Editor header. The alias is the host's IDENTITY — rendered in the
+       * system sans (title), with the resolved patterns/source shown as a mono
+       * value caption beneath it.
+       */}
+      <div className="flex items-start justify-between gap-3 select-none">
+        <div className="min-w-0 space-y-1">
+          <h2 className="truncate text-[0.9375rem] font-semibold tracking-tight">
             {detail.alias}
           </h2>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-            <span className="font-mono">{detail.patterns.join(", ")}</span>
+            <span className="font-mono select-text">{detail.patterns.join(", ")}</span>
             <span className="text-muted-foreground/40">·</span>
             <Badge
-              variant="secondary"
-              className="font-mono text-[0.65rem] font-normal text-muted-foreground"
+              variant="outline"
+              className="border-border font-mono text-[0.65rem] font-normal text-muted-foreground"
               title={detail.source_file}
             >
               {basename(detail.source_file)}
@@ -312,119 +322,123 @@ function HostEditorForm({
         </AlertDialog>
       </div>
 
-      {/* Tags — settings-style inset row: label left, control right. */}
-      <SettingsGroup>
-        <div className="flex items-center justify-between gap-4 px-3 py-2">
-          <Label htmlFor="host-tags" className="shrink-0 text-sm font-normal">
-            Tags
-          </Label>
-          <div className="flex max-w-[60%] flex-1 items-center gap-1.5">
-            <Input
-              id="host-tags"
-              value={tags}
-              onChange={(e) => setTagsValue(e.target.value)}
-              placeholder="comma, separated"
-              className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/50 focus-visible:ring-0 dark:bg-transparent"
-            />
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="h-7 shrink-0"
-              onClick={() =>
-                onSetTags(
-                  tags
-                    .split(",")
-                    .map((t) => t.trim())
-                    .filter(Boolean),
-                )
-              }
-            >
-              Apply
-            </Button>
-          </div>
-        </div>
-      </SettingsGroup>
-
-      <form onSubmit={onSubmit} id="host-editor-form" className="space-y-3">
-        <Tabs defaultValue="Connection" className="w-full">
-          <TabsList variant="line" className="w-full justify-start">
-            {GROUPS.map((g) => (
-              <TabsTrigger key={g} value={g}>
-                {g}
-              </TabsTrigger>
-            ))}
-            <TabsTrigger value="Advanced">Advanced</TabsTrigger>
-          </TabsList>
-
-          {GROUPS.map((g) => (
-            <TabsContent key={g} value={g} className="pt-3">
+      {/*
+       * Stacked, scrollable System-Settings-style sections — NO tabs. Every
+       * field group is rendered as its own labelled inset so all fields are
+       * visible by scrolling (no hidden tabs, no empty canvas).
+       */}
+      <form onSubmit={onSubmit} id="host-editor-form" className="space-y-6">
+        {GROUPS.map((g) => {
+          const defs = FIELD_DEFS.filter((d) => d.group === g).filter(
+            (d) => !d.macOnly || isMac,
+          );
+          if (defs.length === 0) return null;
+          return (
+            <Section key={g} title={g}>
               <SettingsGroup>
-                {FIELD_DEFS.filter((d) => d.group === g)
-                  .filter((d) => !d.macOnly || isMac)
-                  .map((def) => (
-                    <FieldControl key={def.keyword} def={def} control={control} register={register} />
-                  ))}
-              </SettingsGroup>
-            </TabsContent>
-          ))}
-
-          <TabsContent value="Advanced" className="space-y-2 pt-3">
-            {fields.length === 0 ? (
-              <p className="px-1 text-sm text-muted-foreground">
-                No advanced options. Add raw keyword/value pairs below.
-              </p>
-            ) : (
-              <SettingsGroup>
-                {fields.map((field, index) => (
-                  <div key={field.id} className="flex items-center gap-2 px-3 py-1.5">
-                    <Input
-                      className="h-7 flex-1 border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/50 focus-visible:ring-0 dark:bg-transparent"
-                      placeholder="Keyword"
-                      aria-label="Keyword"
-                      {...register(`advanced.${index}.keyword` as const)}
-                    />
-                    <Input
-                      className="h-7 flex-[2] border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/50 focus-visible:ring-0 dark:bg-transparent"
-                      placeholder="Value"
-                      aria-label="Value"
-                      {...register(`advanced.${index}.value` as const)}
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="size-7 shrink-0"
-                      aria-label="Remove option"
-                      onClick={() => remove(index)}
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </div>
+                {defs.map((def) => (
+                  <FieldControl key={def.keyword} def={def} control={control} register={register} />
                 ))}
               </SettingsGroup>
-            )}
+            </Section>
+          );
+        })}
+
+        {/* Advanced — raw keyword/value pairs. */}
+        <Section
+          title="Advanced"
+          action={
             <Button
               type="button"
-              variant="outline"
-              size="sm"
-              className="h-7"
+              variant="ghost"
+              size="xs"
+              className="h-6 -mr-1 text-muted-foreground"
               onClick={() => append({ keyword: "", value: "" })}
             >
-              <Plus className="size-4" /> Add option
+              <Plus className="size-3.5" /> Add option
             </Button>
-          </TabsContent>
-        </Tabs>
+          }
+        >
+          {fields.length === 0 ? (
+            <SettingsGroup>
+              <p className="px-3 py-2.5 text-sm text-muted-foreground">
+                No advanced options. Add raw keyword/value pairs.
+              </p>
+            </SettingsGroup>
+          ) : (
+            <SettingsGroup>
+              {fields.map((field, index) => (
+                <div key={field.id} className="flex items-center gap-2 px-3 py-1.5">
+                  <Input
+                    className="h-7 flex-1 border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
+                    placeholder="Keyword"
+                    aria-label="Keyword"
+                    {...register(`advanced.${index}.keyword` as const)}
+                  />
+                  <Input
+                    className="h-7 flex-[2] border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
+                    placeholder="Value"
+                    aria-label="Value"
+                    {...register(`advanced.${index}.value` as const)}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 shrink-0 text-muted-foreground"
+                    aria-label="Remove option"
+                    onClick={() => remove(index)}
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              ))}
+            </SettingsGroup>
+          )}
+        </Section>
       </form>
 
-      {disabledOpts.length > 0 && (
-        <div className="space-y-2">
-          <div className="space-y-0.5 px-1">
-            <h3 className="text-sm font-medium text-muted-foreground">Disabled options</h3>
-            <p className="text-xs text-muted-foreground">
-              Commented-out lines. Toggle on to re-enable, then edit above.
-            </p>
+      {/* Tags — settings-style inset row: label left, value (mono) right. */}
+      <Section title="Tags">
+        <SettingsGroup>
+          <div className="flex items-center justify-between gap-4 px-3 py-2">
+            <Label htmlFor="host-tags" className="shrink-0 text-sm font-normal text-muted-foreground">
+              Tags
+            </Label>
+            <div className="flex max-w-[62%] flex-1 items-center gap-1.5">
+              <Input
+                id="host-tags"
+                value={tags}
+                onChange={(e) => setTagsValue(e.target.value)}
+                placeholder="comma, separated"
+                className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="h-7 shrink-0"
+                onClick={() =>
+                  onSetTags(
+                    tags
+                      .split(",")
+                      .map((t) => t.trim())
+                      .filter(Boolean),
+                  )
+                }
+              >
+                Apply
+              </Button>
+            </div>
           </div>
+        </SettingsGroup>
+      </Section>
+
+      {disabledOpts.length > 0 && (
+        <Section
+          title="Disabled options"
+          description="Commented-out lines. Toggle on to re-enable, then edit above."
+        >
           <SettingsGroup>
             {disabledOpts.map((o, i) => (
               <DisabledOptionRow
@@ -434,13 +448,16 @@ function HostEditorForm({
               />
             ))}
           </SettingsGroup>
-        </div>
+        </Section>
       )}
+
+      {/* Signature: the SSH Host block these form values represent. */}
+      <ConfigPreview alias={detail.alias} control={control} />
 
       {/* Sticky save bar: appears only when the option form is dirty. */}
       {isDirty && (
-        <div className="animate-save-bar fixed inset-x-0 bottom-0 z-30 border-t bg-background/85 backdrop-blur-md">
-          <div className="mx-auto flex max-w-2xl items-center justify-between gap-3 px-5 py-2.5">
+        <div className="animate-save-bar fixed inset-x-0 bottom-0 left-64 z-30 border-t bg-background/85 backdrop-blur-md">
+          <div className="flex items-center justify-between gap-3 px-6 py-2.5 select-none">
             <span className="flex items-center gap-2 text-sm text-muted-foreground">
               <span className="size-1.5 rounded-full bg-primary" aria-hidden />
               Unsaved changes
@@ -496,6 +513,36 @@ function HostEditorSkeleton() {
 const UNSET = "__unset__";
 
 /**
+ * A stacked editor section: a small uppercase system-font header (with an
+ * optional right-aligned action and an optional description) above a grouped
+ * inset. Replaces the old tabs — every group is always visible by scrolling.
+ */
+function Section({
+  title,
+  description,
+  action,
+  children,
+}: {
+  title: string;
+  description?: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section>
+      <div className="flex items-end justify-between gap-2">
+        <span className="section-label">{title}</span>
+        {action}
+      </div>
+      {children}
+      {description && (
+        <p className="px-2.5 pt-1.5 text-xs text-muted-foreground select-none">{description}</p>
+      )}
+    </section>
+  );
+}
+
+/**
  * macOS System-Settings-style grouped inset container: a rounded card whose
  * direct children are separated by hairline dividers (see `.settings-group` in
  * index.css). Each child is expected to be a single row.
@@ -505,8 +552,9 @@ function SettingsGroup({ children }: { children: ReactNode }) {
 }
 
 /**
- * A single settings row: label on the LEFT, control area on the RIGHT
- * (right-aligned), compact fixed height. Used for every editor field.
+ * A single settings row: label on the LEFT (system font, muted), control area
+ * on the RIGHT (right-aligned, value in mono), compact fixed height. Used for
+ * every editor field.
  */
 function SettingsRow({
   id,
@@ -519,7 +567,7 @@ function SettingsRow({
 }) {
   return (
     <div className="flex min-h-9 items-center justify-between gap-4 px-3 py-1.5">
-      <Label htmlFor={id} className="shrink-0 font-mono text-sm font-normal">
+      <Label htmlFor={id} className="shrink-0 text-sm font-normal text-muted-foreground">
         {label}
       </Label>
       <div className="flex min-w-0 max-w-[62%] flex-1 items-center justify-end">
@@ -594,7 +642,7 @@ function FieldControl({ def, control, register }: FieldControlProps) {
       <Input
         id={id}
         type={def.kind === "number" ? "number" : "text"}
-        className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/50 focus-visible:ring-0 dark:bg-transparent"
+        className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
         {...register(name)}
       />
     </SettingsRow>
@@ -618,6 +666,66 @@ function DisabledOptionRow({ option, onEnable }: DisabledOptionRowProps) {
         aria-label={`Enable ${option.keyword}`}
       />
     </div>
+  );
+}
+
+/**
+ * Build the `ssh_config` Host block these form values represent: first-class
+ * fields (with values, in FIELD_DEFS order) followed by advanced entries — the
+ * same rendering ssh would see. Used only for the read-only preview signature.
+ */
+function buildConfigText(alias: string, values: FormValues): string {
+  const lines: string[] = [`Host ${alias}`];
+  for (const def of FIELD_DEFS) {
+    const raw = values.firstClass?.[def.keyword.toLowerCase()] ?? "";
+    const v = raw.trim();
+    if (v !== "") lines.push(`    ${def.keyword} ${v}`);
+  }
+  for (const entry of values.advanced ?? []) {
+    const keyword = entry.keyword.trim();
+    if (keyword !== "") lines.push(`    ${keyword} ${entry.value.trim()}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Collapsible "Config preview" — the terminal-DNA signature. Renders the live
+ * Host block client-side from the current form values. Read-only, mono, quiet.
+ */
+function ConfigPreview({
+  alias,
+  control,
+}: {
+  alias: string;
+  control: Control<FormValues>;
+}) {
+  const [open, setOpen] = useState(false);
+  const values = useWatch({ control }) as FormValues;
+  const text = useMemo(() => buildConfigText(alias, values), [alias, values]);
+
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1 text-left select-none focus-visible:outline-none"
+      >
+        <ChevronRight
+          className={cn(
+            "size-3 text-muted-foreground transition-transform duration-150",
+            open && "rotate-90",
+          )}
+          aria-hidden
+        />
+        <span className="section-label !pb-0">Config preview</span>
+      </button>
+      {open && (
+        <div className="pt-2">
+          <pre className="config-preview">{text}</pre>
+        </div>
+      )}
+    </section>
   );
 }
 

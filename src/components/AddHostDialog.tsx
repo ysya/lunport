@@ -28,7 +28,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export function AddHostDialog() {
+export interface AddHostDialogProps {
+  /**
+   * `"icon"` (default) renders the compact `+` toolbar button; `"labeled"`
+   * renders a full "New host" button for the empty-state CTA.
+   */
+  variant?: "icon" | "labeled";
+}
+
+export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
   const { data } = useHostsQuery();
   const files = data?.files ?? [];
   const addHost = useAddHost();
@@ -87,9 +95,22 @@ export function AddHostDialog() {
       }}
     >
       <DialogTrigger asChild>
-        <Button size="sm" variant="default">
-          <Plus className="size-4" /> New host
-        </Button>
+        {variant === "labeled" ? (
+          <Button type="button" size="sm" variant="outline">
+            <Plus className="size-4" /> New host
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="size-7"
+            aria-label="New host"
+            title="New host"
+          >
+            <Plus className="size-4" />
+          </Button>
+        )}
       </DialogTrigger>
       <DialogContent>
         <form onSubmit={handleSubmit}>

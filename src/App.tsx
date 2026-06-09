@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { toast } from "sonner";
-import { Moon, Sun, TerminalSquare, ServerCog } from "lucide-react";
+import { Moon, Sun, Terminal, ServerCog } from "lucide-react";
 
 import { useHostsQuery, usePlatform } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
@@ -64,12 +64,10 @@ function App() {
           )}
         >
           <div className="pointer-events-none flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-md bg-primary/15 text-primary ring-1 ring-primary/25">
-              <TerminalSquare className="size-3.5" />
-            </span>
+            <Terminal className="size-4 text-muted-foreground" />
             <div className="flex items-baseline gap-1.5">
-              <h1 className="text-[0.8rem] font-semibold tracking-tight">SSHelter</h1>
-              <span className="font-mono text-[0.7rem] text-muted-foreground tabular-nums">
+              <h1 className="text-[0.8125rem] font-semibold tracking-tight">SSHelter</h1>
+              <span className="font-mono text-[0.6875rem] text-muted-foreground/80 tabular-nums">
                 {isLoading ? "loading…" : `${hosts.length} ${hosts.length === 1 ? "host" : "hosts"}`}
               </span>
             </div>
@@ -107,10 +105,15 @@ function App() {
             <HostList hosts={hosts} isLoading={isLoading} />
           </aside>
 
-          {/* Editor pane: its OWN bounded scroll region, independent of sidebar. */}
+          {/*
+           * Editor pane: its OWN bounded scroll region, independent of sidebar.
+           * The pane fills the full width (no centered narrow column); the form
+           * content is LEFT-ALIGNED with an inner cap (~560px) so values track
+           * cleanly per macOS form guidance — the background fills edge-to-edge.
+           */}
           <main className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto">
             {selectedAlias ? (
-              <div className="mx-auto max-w-2xl space-y-4 p-5 pb-24">
+              <div className="max-w-[560px] space-y-5 px-6 py-5 pb-24">
                 <DriftBanner />
                 <HostEditor alias={selectedAlias} />
               </div>
@@ -129,18 +132,14 @@ function App() {
 /** Centered, characterful empty state shown when no host is selected. */
 function EmptySelection() {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-      <div className="flex size-14 items-center justify-center rounded-xl bg-muted/60 text-muted-foreground ring-1 ring-border">
-        <ServerCog className="size-7" />
+    <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center select-none">
+      <div className="flex size-12 items-center justify-center rounded-xl bg-muted text-muted-foreground ring-1 ring-border">
+        <ServerCog className="size-6" />
       </div>
       <div className="space-y-1">
         <p className="text-sm font-medium">No host selected</p>
         <p className="text-sm text-muted-foreground">
-          Select a host to edit, or{" "}
-          <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-[0.7rem] text-foreground">
-            New host
-          </kbd>{" "}
-          to create one.
+          Select a host from the sidebar to edit, or add a new one.
         </p>
       </div>
     </div>

@@ -32,12 +32,12 @@ export function DriftBanner() {
   const names = changed.map((d) => basename(d.path)).join(", ");
 
   return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3.5 py-2.5 text-sm">
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3.5 py-2.5 text-sm">
       <div className="flex min-w-0 items-center gap-2.5">
-        <TriangleAlert className="size-4 shrink-0 text-primary" />
-        <span className="min-w-0 text-foreground">
+        <TriangleAlert className="size-4 shrink-0 text-warning" />
+        <span className="min-w-0 text-foreground select-none">
           Changed on disk:{" "}
-          <span className="font-mono font-medium break-all">{names}</span>
+          <span className="font-mono font-medium break-all select-text">{names}</span>
         </span>
       </div>
       <Button

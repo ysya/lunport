@@ -1,15 +1,21 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+    /*
+     * Native macOS chrome uses the SYSTEM sans for all UI (labels, titles,
+     * buttons, section headers). Monospace is reserved for VALUES only
+     * (hostnames, user@host, ports, paths, the config preview, tags).
+     */
     --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', sans-serif;
-    --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, monospace;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Geist Mono Variable", monospace;
+    --color-warning: var(--warning);
+    --color-warning-foreground: var(--warning-foreground);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -50,73 +56,83 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/*
+ * Color system: near-neutral GRAPHITE surface ladder + hairline borders +
+ * minimal shadows. The ONE accent is macOS system blue (#0A84FF), used only for
+ * the selection pill, the primary button, and the focus ring. Amber is demoted
+ * to a semantic --warning used only by the drift / "needs attention" banner.
+ */
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.72 0.15 65);
-    --primary-foreground: oklch(0.21 0.03 65);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.72 0.15 65);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
+    --background: #ffffff;
+    --foreground: #16181b;
+    --card: #ffffff;
+    --card-foreground: #16181b;
+    --popover: #ffffff;
+    --popover-foreground: #16181b;
+    --primary: #0a84ff;
+    --primary-foreground: #ffffff;
+    --secondary: #f0f1f3;
+    --secondary-foreground: #16181b;
+    --muted: #f5f6f7;
+    --muted-foreground: #6b7178;
+    --accent: #eef0f2;
+    --accent-foreground: #16181b;
+    --destructive: #e5484d;
+    --warning: #d9a200;
+    --warning-foreground: #3d2c00;
+    --border: #e4e6e9;
+    --input: #dcdfe3;
+    --ring: #0a84ff;
+    --chart-1: #0a84ff;
+    --chart-2: #6b7178;
+    --chart-3: #8a8f98;
+    --chart-4: #b5b9bf;
+    --chart-5: #d6d9dd;
     --radius: 0.5rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    --sidebar: #f5f6f7;
+    --sidebar-foreground: #16181b;
+    --sidebar-primary: #0a84ff;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #eef0f2;
+    --sidebar-accent-foreground: #16181b;
+    --sidebar-border: #e4e6e9;
+    --sidebar-ring: #0a84ff;
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.79 0.15 78);
-    --primary-foreground: oklch(0.20 0.03 78);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.70 0.13 78);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --background: #0f1011;
+    --foreground: #f7f8f8;
+    --card: #161718;
+    --card-foreground: #f7f8f8;
+    --popover: #18191a;
+    --popover-foreground: #f7f8f8;
+    --primary: #0a84ff;
+    --primary-foreground: #ffffff;
+    --secondary: #1f2123;
+    --secondary-foreground: #f7f8f8;
+    --muted: #1a1b1d;
+    --muted-foreground: #8a8f98;
+    --accent: #222426;
+    --accent-foreground: #f7f8f8;
+    --destructive: #ff6161;
+    --warning: #ffc533;
+    --warning-foreground: #2a2000;
+    --border: #26282b;
+    --input: #2a2c2f;
+    --ring: #0a84ff;
+    --chart-1: #0a84ff;
+    --chart-2: #8a8f98;
+    --chart-3: #6b7178;
+    --chart-4: #4a4d52;
+    --chart-5: #2a2c2f;
+    --sidebar: #0c0d0e;
+    --sidebar-foreground: #f7f8f8;
+    --sidebar-primary: #0a84ff;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #222426;
+    --sidebar-accent-foreground: #f7f8f8;
+    --sidebar-border: #26282b;
+    --sidebar-ring: #0a84ff;
 }
 
 @layer base {
@@ -143,7 +159,33 @@
     @apply bg-background text-foreground;
     /* Antialiasing closer to native AppKit text rendering. */
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+    }
+
+  /*
+   * Native apps never show the link/hand cursor on buttons or controls — only
+   * a text caret inside editable fields. Mirror that: default arrow on all
+   * interactive chrome, text caret only inside text inputs/textareas.
+   */
+  button,
+  [role="button"],
+  [role="tab"],
+  [role="menuitem"],
+  [role="option"],
+  label,
+  select,
+  summary,
+  [data-slot="select-trigger"],
+  [data-slot="switch"] {
+    cursor: default;
+    }
+  input[type="text"],
+  input[type="search"],
+  input[type="number"],
+  input:not([type]),
+  textarea {
+    cursor: text;
     }
 }
 
@@ -158,14 +200,17 @@
   }
 
   /*
-   * Native toolbar surface: a thin, subtly frosted bar with a hairline bottom
-   * border. Stays effectively opaque (high alpha) so traffic-light overlap and
-   * controls remain legible regardless of any window vibrancy behind it.
+   * Native unified toolbar surface: a thin, subtly frosted bar with a hairline
+   * bottom border. Stays effectively opaque (high alpha) so traffic-light
+   * overlap and controls remain legible regardless of any window vibrancy.
+   * Chrome is non-selectable.
    */
   .app-toolbar {
-    background-color: color-mix(in oklch, var(--background) 82%, transparent);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    backdrop-filter: saturate(180%) blur(20px);
+    background-color: color-mix(in srgb, var(--background) 80%, transparent);
+    -webkit-backdrop-filter: saturate(160%) blur(20px);
+    backdrop-filter: saturate(160%) blur(20px);
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   /*
@@ -173,12 +218,14 @@
    * active behind a transparent webview region it shows through; otherwise the
    * CSS backdrop-blur produces a frosted look on its own. The MAIN editor pane
    * is deliberately NOT translucent (see .app-main) so content is never
-   * unreadable if vibrancy fails to render.
+   * unreadable if vibrancy fails to render. Chrome is non-selectable.
    */
   .app-sidebar {
-    background-color: color-mix(in oklch, var(--sidebar) 60%, transparent);
-    -webkit-backdrop-filter: saturate(180%) blur(24px);
-    backdrop-filter: saturate(180%) blur(24px);
+    background-color: color-mix(in srgb, var(--sidebar) 72%, transparent);
+    -webkit-backdrop-filter: saturate(160%) blur(24px);
+    backdrop-filter: saturate(160%) blur(24px);
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   /* Solid editor pane — the readability guarantee. */
@@ -186,7 +233,10 @@
     background-color: var(--background);
   }
 
-  /* macOS System-Settings-style grouped inset list. */
+  /*
+   * macOS System-Settings-style grouped inset list: a rounded card (radius 8)
+   * with a 1px hairline border whose direct children are hairline-divided.
+   */
   .settings-group {
     background-color: var(--card);
     border: 1px solid var(--border);
@@ -195,6 +245,42 @@
   }
   .settings-group > * + * {
     border-top: 1px solid var(--border);
+  }
+
+  /*
+   * Small uppercase section header that sits above each grouped inset, like the
+   * group titles in macOS System Settings. System font, muted, tracked.
+   */
+  .section-label {
+    padding-inline: 0.625rem;
+    padding-bottom: 0.25rem;
+    font-size: 0.6875rem; /* ~11px */
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /*
+   * Config preview: the "terminal DNA" signature block — a quiet inset surface
+   * rendering the SSH Host block for the current form values. Mono, muted,
+   * selectable (it's a value).
+   */
+  .config-preview {
+    background-color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 0.75rem 0.875rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem; /* ~12px */
+    line-height: 1.6;
+    color: var(--muted-foreground);
+    white-space: pre;
+    overflow-x: auto;
+    user-select: text;
+    -webkit-user-select: text;
   }
 }
 
