@@ -10,10 +10,6 @@ alias: string, patterns: Array<string>,
  */
 source_file: string, 
 /**
- * Parsed from a `#group:` sentinel comment in the host body.
- */
-group: string | null, 
-/**
  * Parsed from a `#tags:` sentinel comment in the host body.
  */
 tags: Array<string>, };

@@ -17,7 +17,6 @@ import {
   useHostDetail,
   usePlatform,
   useSaveHost,
-  useSetGroup,
   useSetTags,
   useSetOptionEnabled,
   useRemoveHost,
@@ -109,7 +108,6 @@ export function HostEditor({ alias }: HostEditorProps) {
   const isMac = platform.data === "macos";
 
   const saveHost = useSaveHost();
-  const setGroup = useSetGroup();
   const setTags = useSetTags();
   const setOptionEnabled = useSetOptionEnabled();
   const removeHost = useRemoveHost();
@@ -136,17 +134,6 @@ export function HostEditor({ alias }: HostEditorProps) {
         saveHost.mutate(
           { alias: detail.alias, changes },
           { onSuccess: () => toast.success(`Saved ${detail.alias}`) },
-        )
-      }
-      onSetGroup={(group) =>
-        setGroup.mutate(
-          { alias: detail.alias, group },
-          {
-            onSuccess: () =>
-              toast.success(
-                group ? `Moved ${detail.alias} to ${group}` : `Ungrouped ${detail.alias}`,
-              ),
-          },
         )
       }
       onSetTags={(tags) =>
@@ -183,7 +170,6 @@ interface HostEditorFormProps {
   saving: boolean;
   removing: boolean;
   onSave: (changes: ReturnType<typeof computeChanges>) => void;
-  onSetGroup: (group: string | null) => void;
   onSetTags: (tags: string[]) => void;
   onEnableOption: (keyword: string) => void;
   onRemove: () => void;
@@ -195,7 +181,6 @@ function HostEditorForm({
   saving,
   removing,
   onSave,
-  onSetGroup,
   onSetTags,
   onEnableOption,
   onRemove,
@@ -233,11 +218,9 @@ function HostEditorForm({
     reset(defaults);
   }, [defaults, reset]);
 
-  // Group / tags side-form state (independent of the option form).
-  const [group, setGroupValue] = useState(detail.group ?? "");
+  // Tags side-form state (independent of the option form).
   const [tags, setTagsValue] = useState(detail.tags.join(", "));
   useEffect(() => {
-    setGroupValue(detail.group ?? "");
     setTagsValue(detail.tags.join(", "));
   }, [detail]);
 
@@ -329,52 +312,31 @@ function HostEditorForm({
         </AlertDialog>
       </div>
 
-      {/* Group / tags */}
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label htmlFor="host-group">Group</Label>
-          <div className="flex gap-2">
-            <Input
-              id="host-group"
-              value={group}
-              onChange={(e) => setGroupValue(e.target.value)}
-              placeholder="Ungrouped"
-              className="font-mono"
-            />
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => onSetGroup(group.trim() || null)}
-            >
-              Apply
-            </Button>
-          </div>
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="host-tags">Tags</Label>
-          <div className="flex gap-2">
-            <Input
-              id="host-tags"
-              value={tags}
-              onChange={(e) => setTagsValue(e.target.value)}
-              placeholder="comma, separated"
-              className="font-mono"
-            />
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() =>
-                onSetTags(
-                  tags
-                    .split(",")
-                    .map((t) => t.trim())
-                    .filter(Boolean),
-                )
-              }
-            >
-              Apply
-            </Button>
-          </div>
+      {/* Tags */}
+      <div className="space-y-1.5">
+        <Label htmlFor="host-tags">Tags</Label>
+        <div className="flex gap-2">
+          <Input
+            id="host-tags"
+            value={tags}
+            onChange={(e) => setTagsValue(e.target.value)}
+            placeholder="comma, separated"
+            className="font-mono"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() =>
+              onSetTags(
+                tags
+                  .split(",")
+                  .map((t) => t.trim())
+                  .filter(Boolean),
+              )
+            }
+          >
+            Apply
+          </Button>
         </div>
       </div>
 
@@ -501,8 +463,7 @@ function HostEditorSkeleton() {
         <Skeleton className="h-8 w-48" />
         <Skeleton className="h-3 w-64" />
       </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Skeleton className="h-9 w-full" />
+      <div>
         <Skeleton className="h-9 w-full" />
       </div>
       <Skeleton className="h-8 w-72" />

@@ -268,30 +268,6 @@ pub fn config_set_option_enabled(
 }
 
 #[tauri::command]
-pub fn config_set_group(
-    state: State<AppState>,
-    alias: String,
-    group: Option<String>,
-) -> Result<(), AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let idx = find_host_file_index(doc, &alias)
-                .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
-
-            let host = edit::find_host_mut(&mut doc.files[idx].items, &alias)
-                .ok_or_else(|| AppError::NotFound(format!("host '{}' not found in file", alias)))?;
-
-            edit::set_group(host, group.as_deref());
-            persist_file(doc, idx, &mut backed_up_lock)
-        }
-    }
-}
-
-#[tauri::command]
 pub fn config_set_tags(
     state: State<AppState>,
     alias: String,

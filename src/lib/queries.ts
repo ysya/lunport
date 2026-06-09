@@ -139,20 +139,6 @@ export function useRemoveHost() {
   });
 }
 
-/** Set (or clear, with null) a host's group. */
-export function useSetGroup() {
-  const queryClient = useQueryClient();
-  return useMutation<void, unknown, { alias: string; group: string | null }>({
-    mutationFn: ({ alias, group }) =>
-      tauriInvoke<void>("config_set_group", { alias, group }),
-    onSuccess: (_data, { alias }) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.host(alias) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
-    },
-    onError: (e) => toast.error("Failed to set group", { description: errMessage(e) }),
-  });
-}
-
 /** Replace a host's tags. */
 export function useSetTags() {
   const queryClient = useQueryClient();

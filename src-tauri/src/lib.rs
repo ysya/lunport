@@ -26,7 +26,6 @@ pub fn run() {
             config_add_host,
             config_remove_host,
             config_set_option_enabled,
-            config_set_group,
             config_set_tags,
             config_reorder_hosts,
             config_check_drift,

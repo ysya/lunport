@@ -22,8 +22,6 @@ pub struct HostSummary {
     pub patterns: Vec<String>,
     /// The ConfigFile path as a string (lossy UTF-8).
     pub source_file: String,
-    /// Parsed from a `#group:` sentinel comment in the host body.
-    pub group: Option<String>,
     /// Parsed from a `#tags:` sentinel comment in the host body.
     pub tags: Vec<String>,
 }
@@ -35,7 +33,6 @@ pub struct HostDetail {
     pub alias: String,
     pub patterns: Vec<String>,
     pub source_file: String,
-    pub group: Option<String>,
     pub tags: Vec<String>,
     /// Every body Directive in order (comments and blanks are skipped).
     pub options: Vec<HostOption>,
@@ -76,19 +73,18 @@ pub fn host_detail(doc: &SshConfigDoc, alias: &str) -> Option<HostDetail> {
 
 fn build_summary(h: &HostBlock, source_file: &str) -> HostSummary {
     let alias = h.patterns.first().cloned().unwrap_or_default();
-    let (group, tags) = parse_sentinels(&h.body);
+    let tags = parse_tags(&h.body);
     HostSummary {
         alias,
         patterns: h.patterns.clone(),
         source_file: source_file.to_string(),
-        group,
         tags,
     }
 }
 
 fn build_detail(h: &HostBlock, source_file: &str) -> HostDetail {
     let alias = h.patterns.first().cloned().unwrap_or_default();
-    let (group, tags) = parse_sentinels(&h.body);
+    let tags = parse_tags(&h.body);
 
     let options = h
         .body
@@ -110,24 +106,18 @@ fn build_detail(h: &HostBlock, source_file: &str) -> HostDetail {
         alias,
         patterns: h.patterns.clone(),
         source_file: source_file.to_string(),
-        group,
         tags,
         options,
     }
 }
 
-/// Parse `#group:` and `#tags:` sentinels from a block body.
-fn parse_sentinels(body: &[Item]) -> (Option<String>, Vec<String>) {
-    let mut group: Option<String> = None;
-    let mut tags: Vec<String> = Vec::new();
-
+/// Parse `#tags:` sentinel from a block body.
+fn parse_tags(body: &[Item]) -> Vec<String> {
     for item in body {
         if let Item::Comment(s) = item {
             let trimmed = s.trim_start();
-            if let Some(rest) = trimmed.strip_prefix("#group:") {
-                group = Some(rest.trim().to_string());
-            } else if let Some(rest) = trimmed.strip_prefix("#tags:") {
-                tags = rest
+            if let Some(rest) = trimmed.strip_prefix("#tags:") {
+                return rest
                     .split(',')
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty())
@@ -135,8 +125,7 @@ fn parse_sentinels(body: &[Item]) -> (Option<String>, Vec<String>) {
             }
         }
     }
-
-    (group, tags)
+    Vec::new()
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -175,8 +164,7 @@ mod tests {
             work.source_file
         );
 
-        // Sentinels parsed correctly.
-        assert_eq!(work.group, Some("Work".to_string()), "work-1 group");
+        // Tags parsed correctly.
         assert_eq!(work.tags, vec!["prod", "db"], "work-1 tags");
     }
 
@@ -188,7 +176,6 @@ mod tests {
         let detail = host_detail(&doc, "work-1").expect("work-1 must be found");
 
         assert_eq!(detail.alias, "work-1");
-        assert_eq!(detail.group, Some("Work".to_string()));
         assert_eq!(detail.tags, vec!["prod", "db"]);
 
         // Options must contain the known directives in order.
@@ -242,14 +229,12 @@ mod tests {
             alias: "test".to_string(),
             patterns: vec!["test".to_string()],
             source_file: "/tmp/config".to_string(),
-            group: None,
             tags: vec![],
         };
         let _det = HostDetail {
             alias: "test".to_string(),
             patterns: vec!["test".to_string()],
             source_file: "/tmp/config".to_string(),
-            group: None,
             tags: vec![],
             options: vec![],
         };

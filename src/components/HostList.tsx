@@ -10,8 +10,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { AddHostDialog } from "@/components/AddHostDialog";
 import { cn, basename } from "@/lib/utils";
 
-const UNGROUPED = "Ungrouped";
-
 /**
  * Derive a short secondary line for a host row. Patterns beyond the alias make a
  * good hint; otherwise we fall back to the alias itself so the row never looks
@@ -30,7 +28,6 @@ function matches(host: HostSummary, q: string): boolean {
   const hay = [
     host.alias,
     ...host.patterns,
-    host.group ?? "",
     ...host.tags,
     host.source_file,
   ]
@@ -54,22 +51,19 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     const q = search.trim().toLowerCase();
     const filtered = hosts.filter((h) => matches(h, q));
 
-    const byGroup = new Map<string, HostSummary[]>();
+    // Group by source_file, preserving first-appearance order.
+    const byFile = new Map<string, HostSummary[]>();
     for (const h of filtered) {
-      const g = h.group && h.group.trim() !== "" ? h.group : UNGROUPED;
-      const bucket = byGroup.get(g);
+      const bucket = byFile.get(h.source_file);
       if (bucket) bucket.push(h);
-      else byGroup.set(g, [h]);
+      else byFile.set(h.source_file, [h]);
     }
 
-    // Stable, alphabetical group order with "Ungrouped" last.
-    const names = [...byGroup.keys()].sort((a, b) => {
-      if (a === UNGROUPED) return 1;
-      if (b === UNGROUPED) return -1;
-      return a.localeCompare(b);
-    });
-
-    return names.map((name) => ({ name, hosts: byGroup.get(name)! }));
+    return [...byFile.entries()].map(([file, fileHosts]) => ({
+      file,
+      name: basename(file),
+      hosts: fileHosts,
+    }));
   }, [hosts, search]);
 
   const totalShown = grouped.reduce((n, g) => n + g.hosts.length, 0);
@@ -109,9 +103,12 @@ export function HostList({ hosts, isLoading }: HostListProps) {
             )
           ) : (
             grouped.map((group) => (
-              <div key={group.name} className="mb-4">
+              <div key={group.file} className="mb-4">
                 <div className="flex items-center justify-between px-2 py-1.5">
-                  <span className="text-[0.68rem] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+                  <span
+                    className="text-[0.68rem] font-semibold tracking-[0.12em] text-muted-foreground uppercase"
+                    title={group.file}
+                  >
                     {group.name}
                   </span>
                   <span className="font-mono text-[0.68rem] text-muted-foreground/70 tabular-nums">
@@ -156,13 +153,6 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                             >
                               {host.alias}
                             </span>
-                            <Badge
-                              variant="secondary"
-                              className="shrink-0 font-mono text-[0.65rem] font-normal text-muted-foreground"
-                              title={host.source_file}
-                            >
-                              {basename(host.source_file)}
-                            </Badge>
                           </div>
                           <span className="truncate font-mono text-xs text-muted-foreground">
                             {secondary}

@@ -215,9 +215,8 @@ pub fn reorder_hosts(items: &mut Vec<Item>, alias_order: &[String]) {
     }
 }
 
-// ─── Group / Tags sentinels ───────────────────────────────────────────────────
+// ─── Tags sentinel ────────────────────────────────────────────────────────────
 
-const GROUP_PREFIX: &str = "#group:";
 const TAGS_PREFIX: &str = "#tags:";
 
 /// Return the position of a body Comment sentinel matching `prefix`.
@@ -231,28 +230,8 @@ fn find_sentinel(body: &[Item], prefix: &str) -> Option<usize> {
     })
 }
 
-/// Set or clear the group sentinel for a host. The sentinel is a body Comment line `#group:<path>`
-/// kept as the FIRST item of the body. `Some(path)` inserts/updates it; `None` removes it.
-pub fn set_group(host: &mut HostBlock, group: Option<&str>) {
-    match group {
-        Some(path) => {
-            let sentinel = format!("{}{}", GROUP_PREFIX, path);
-            if let Some(pos) = find_sentinel(&host.body, GROUP_PREFIX) {
-                host.body[pos] = Item::Comment(sentinel);
-            } else {
-                host.body.insert(0, Item::Comment(sentinel));
-            }
-        }
-        None => {
-            if let Some(pos) = find_sentinel(&host.body, GROUP_PREFIX) {
-                host.body.remove(pos);
-            }
-        }
-    }
-}
-
-/// Set or clear the tags sentinel: a body Comment `#tags:<comma-joined>` as the first body item
-/// (after a group sentinel if present is acceptable; keep deterministic). Empty slice clears it.
+/// Set or clear the tags sentinel: a body Comment `#tags:<comma-joined>` as the first body item.
+/// Empty slice clears it.
 pub fn set_tags(host: &mut HostBlock, tags: &[String]) {
     if tags.is_empty() {
         // Clear the sentinel.
@@ -267,13 +246,7 @@ pub fn set_tags(host: &mut HostBlock, tags: &[String]) {
     if let Some(pos) = find_sentinel(&host.body, TAGS_PREFIX) {
         host.body[pos] = Item::Comment(sentinel);
     } else {
-        // Insert after group sentinel if present, otherwise at position 0.
-        let insert_pos = if let Some(g) = find_sentinel(&host.body, GROUP_PREFIX) {
-            g + 1
-        } else {
-            0
-        };
-        host.body.insert(insert_pos, Item::Comment(sentinel));
+        host.body.insert(0, Item::Comment(sentinel));
     }
 }
 
@@ -573,38 +546,16 @@ mod tests {
         assert_eq!(reparsed_order, vec!["db", "web"]);
     }
 
-    // ── Test 8: group / tags sentinels ────────────────────────────────────────
+    // ── Test 8: tags sentinel ─────────────────────────────────────────────────
 
     #[test]
-    fn test_group_and_tags_sentinels() {
+    fn test_tags_sentinel() {
         let original = read_fixture("simple.sshconfig");
         let (mut items, _nl) = parse_file(&original);
 
         let host = find_host_mut(&mut items, "web").expect("host 'web' not found");
 
-        // Insert group sentinel.
-        set_group(host, Some("Work/Prod"));
-        {
-            let first = host.body.first().expect("body must be non-empty");
-            assert!(
-                matches!(first, Item::Comment(s) if s == "#group:Work/Prod"),
-                "first body item must be the group sentinel, got {:?}", first
-            );
-        }
-
-        // Update group sentinel in-place.
-        set_group(host, Some("Work/Staging"));
-        {
-            let group_item = find_sentinel(&host.body, "#group:");
-            assert!(group_item.is_some(), "group sentinel must still be present");
-            let pos = group_item.unwrap();
-            assert!(
-                matches!(&host.body[pos], Item::Comment(s) if s == "#group:Work/Staging"),
-                "group sentinel must be updated"
-            );
-        }
-
-        // Insert tags sentinel (after group).
+        // Insert tags sentinel at position 0.
         set_tags(host, &["a".to_string(), "b".to_string()]);
         {
             let tags_pos = find_sentinel(&host.body, "#tags:");
@@ -614,23 +565,17 @@ mod tests {
                 matches!(&host.body[pos], Item::Comment(s) if s == "#tags:a,b"),
                 "tags sentinel must equal '#tags:a,b'"
             );
-            // Group must still come first.
-            let group_pos = find_sentinel(&host.body, "#group:").unwrap();
-            assert!(group_pos < pos, "group sentinel must precede tags sentinel");
         }
 
-        // Remove group sentinel — body must not contain #group: anymore.
-        set_group(host, None);
-        assert!(
-            find_sentinel(&host.body, "#group:").is_none(),
-            "group sentinel must be removed after set_group(None)"
-        );
-
-        // Tags sentinel still present.
-        assert!(
-            find_sentinel(&host.body, "#tags:").is_some(),
-            "tags sentinel must survive group removal"
-        );
+        // Update tags sentinel in-place.
+        set_tags(host, &["x".to_string()]);
+        {
+            let tags_pos = find_sentinel(&host.body, "#tags:").unwrap();
+            assert!(
+                matches!(&host.body[tags_pos], Item::Comment(s) if s == "#tags:x"),
+                "tags sentinel must be updated to '#tags:x'"
+            );
+        }
 
         // Empty tags clears sentinel.
         set_tags(host, &[]);
