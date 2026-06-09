@@ -1,31 +1,52 @@
 name: release
 
-# Push a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`) to build
-# installers on every platform and create a DRAFT GitHub Release with the assets.
-# (`workflow_dispatch` lets you trigger a build manually for testing.)
+# How releasing works:
+#  1. Every push to `main` runs release-please, which opens/updates a "release" PR that bumps
+#     the version across package.json + src-tauri/Cargo.toml + src-tauri/tauri.conf.json and
+#     regenerates CHANGELOG.md from Conventional Commits. (Reviewing/merging that PR is the gate.)
+#  2. Merging the release PR makes release-please create the GitHub Release + git tag.
+#  3. That gates the `build` job (same workflow — so it isn't blocked by the GITHUB_TOKEN
+#     "don't trigger other workflows" rule), which compiles installers on each platform and
+#     uploads them to the release created in step 2.
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
-  release:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: "macos-latest" # Apple Silicon (M-series)
-            args: "--target aarch64-apple-darwin"
-          - platform: "macos-latest" # Intel
-            args: "--target x86_64-apple-darwin"
-          - platform: "ubuntu-22.04" # Linux x86_64
+          - platform: macos-latest # Apple Silicon (M-series)
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest # Intel
+            args: --target x86_64-apple-darwin
+          - platform: ubuntu-22.04 # Linux x86_64
             args: ""
-          - platform: "ubuntu-22.04-arm" # Linux arm64 (free on public repos)
+          - platform: ubuntu-22.04-arm # Linux arm64 (free on public repos)
             args: ""
-
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -45,12 +66,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
-          cache: "pnpm"
+          cache: pnpm
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          # macOS runners build both arches; skipped elsewhere to speed up the build.
           targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust cache
@@ -61,18 +81,11 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      - name: Build and release
+      - name: Build and upload installers to the release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # tauri-action replaces __VERSION__ with the app version from tauri.conf.json.
-          tagName: v__VERSION__
-          releaseName: "SSHelter v__VERSION__"
-          releaseBody: |
-            Download the installer for your platform from the assets below.
-
-            > macOS builds are **unsigned** for now — on first launch, right-click the app and choose **Open** (or System Settings → Privacy & Security → Open Anyway). Notarized/signed builds will come later.
-          releaseDraft: true
-          prerelease: false
+          # The release already exists (created by release-please); attach assets to it by tag.
+          tagName: ${{ needs.release-please.outputs.tag_name }}
           args: ${{ matrix.args }}
