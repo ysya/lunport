@@ -2,7 +2,8 @@
 name = "sshelter"
 version = "0.1.0"
 description = "SSHelter — a cross-platform desktop manager for your local OpenSSH config, keys, agent, and known_hosts."
-authors = ["SSHelter contributors"]
+authors = ["Frank Sung"]
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

@@ -12,6 +12,8 @@ build/
 src-tauri/target/
 target/
 **/*.rs.bk
+# Tauri build-generated capability/ACL schemas (regenerated on build)
+src-tauri/gen/
 
 # Tauri / signing keys — NEVER commit
 *.local
