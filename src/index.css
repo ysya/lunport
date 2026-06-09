@@ -123,42 +123,78 @@
   * {
     @apply border-border outline-ring/50;
     }
-  body {
-    @apply bg-background text-foreground;
-    }
+  /*
+   * Native-app density: shrink the root rem so the entire rem-based shadcn
+   * scale tightens uniformly. Also lock the document to the window — only the
+   * inner scroll regions (sidebar list, editor pane) ever scroll; the page
+   * itself NEVER does. This is what fixes the "whole page scrolls" feel.
+   */
   html {
     @apply font-sans;
+    font-size: 13px;
+    }
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+    }
+  body {
+    @apply bg-background text-foreground;
+    /* Antialiasing closer to native AppKit text rendering. */
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     }
 }
 
 @layer components {
   /*
-   * Subtle background atmosphere: a faint amber-tinted radial glow anchored to
-   * the top, layered over a low-opacity grain. Restrained, reads well in both
-   * themes. Applied via the `.app-atmosphere` utility on the app shell.
+   * App shell root. Kept SOLID/opaque so the app is always readable even when
+   * the native macOS window material (windowEffects: "sidebar") renders behind
+   * the window. Only the `.app-sidebar` is intentionally translucent.
    */
-  .app-atmosphere {
-    position: relative;
+  .app-shell {
     background-color: var(--background);
-    background-image:
-      radial-gradient(
-        120% 80% at 50% -20%,
-        color-mix(in oklch, var(--primary) 9%, transparent),
-        transparent 60%
-      );
-    background-attachment: fixed;
   }
-  .app-atmosphere::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-    opacity: 0.025;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+
+  /*
+   * Native toolbar surface: a thin, subtly frosted bar with a hairline bottom
+   * border. Stays effectively opaque (high alpha) so traffic-light overlap and
+   * controls remain legible regardless of any window vibrancy behind it.
+   */
+  .app-toolbar {
+    background-color: color-mix(in oklch, var(--background) 82%, transparent);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
   }
-  .dark .app-atmosphere::before {
-    opacity: 0.04;
+
+  /*
+   * Translucent sidebar. When the native macOS "sidebar" window material is
+   * active behind a transparent webview region it shows through; otherwise the
+   * CSS backdrop-blur produces a frosted look on its own. The MAIN editor pane
+   * is deliberately NOT translucent (see .app-main) so content is never
+   * unreadable if vibrancy fails to render.
+   */
+  .app-sidebar {
+    background-color: color-mix(in oklch, var(--sidebar) 60%, transparent);
+    -webkit-backdrop-filter: saturate(180%) blur(24px);
+    backdrop-filter: saturate(180%) blur(24px);
+  }
+
+  /* Solid editor pane — the readability guarantee. */
+  .app-main {
+    background-color: var(--background);
+  }
+
+  /* macOS System-Settings-style grouped inset list. */
+  .settings-group {
+    background-color: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .settings-group > * + * {
+    border-top: 1px solid var(--border);
   }
 }
 

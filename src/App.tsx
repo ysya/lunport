@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import { Moon, Sun, TerminalSquare, ServerCog } from "lucide-react";
 
-import { useHostsQuery } from "@/lib/queries";
+import { useHostsQuery, usePlatform } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useApplyTheme } from "@/lib/theme";
 import { HostList } from "@/components/HostList";
@@ -11,6 +11,7 @@ import { AddHostDialog } from "@/components/AddHostDialog";
 import { DriftBanner } from "@/components/DriftBanner";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   Tooltip,
   TooltipContent,
@@ -29,6 +30,8 @@ function App() {
   useApplyTheme();
 
   const { data, isLoading, isError, error } = useHostsQuery();
+  const platform = usePlatform();
+  const isMac = platform.data === "macos";
   const selectedAlias = useUiStore((s) => s.selectedAlias);
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
@@ -45,27 +48,41 @@ function App() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="app-atmosphere flex h-screen flex-col overflow-hidden">
-        <header className="relative z-10 flex shrink-0 items-center gap-3 border-b bg-background/70 px-4 py-2.5 backdrop-blur-sm">
-          <div className="flex items-center gap-2">
-            <span className="flex size-7 items-center justify-center rounded-md bg-primary/15 text-primary ring-1 ring-primary/25">
-              <TerminalSquare className="size-4" />
+      {/* Root: the ONLY fixed-height container; never scrolls. */}
+      <div className="app-shell flex h-screen flex-col overflow-hidden">
+        {/*
+         * Native toolbar = window drag region. On macOS the content sits under
+         * the Overlay title bar, so pad the left so the wordmark clears the
+         * traffic lights. Interactive children opt OUT of dragging so clicks
+         * still register.
+         */}
+        <header
+          data-tauri-drag-region
+          className={cn(
+            "app-toolbar relative z-20 flex h-11 shrink-0 items-center gap-3 border-b pr-2.5",
+            isMac ? "pl-[78px]" : "pl-3",
+          )}
+        >
+          <div className="pointer-events-none flex items-center gap-2">
+            <span className="flex size-6 items-center justify-center rounded-md bg-primary/15 text-primary ring-1 ring-primary/25">
+              <TerminalSquare className="size-3.5" />
             </span>
-            <div className="flex items-baseline gap-2">
-              <h1 className="text-sm font-semibold tracking-tight">SSHelter</h1>
-              <span className="font-mono text-xs text-muted-foreground tabular-nums">
+            <div className="flex items-baseline gap-1.5">
+              <h1 className="text-[0.8rem] font-semibold tracking-tight">SSHelter</h1>
+              <span className="font-mono text-[0.7rem] text-muted-foreground tabular-nums">
                 {isLoading ? "loading…" : `${hosts.length} ${hosts.length === 1 ? "host" : "hosts"}`}
               </span>
             </div>
           </div>
 
-          <div className="ml-auto flex items-center gap-1.5">
+          <div className="ml-auto flex items-center gap-1">
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
+                  className="size-7"
                   aria-label="Toggle theme"
                   onClick={toggleTheme}
                 >
@@ -84,14 +101,16 @@ function App() {
           </div>
         </header>
 
-        <div className="relative z-10 flex min-h-0 flex-1">
-          <aside className="w-72 shrink-0 border-r bg-sidebar/40">
+        {/* Content row: flex-1 + min-h-0 so children get a bounded height. */}
+        <div className="flex min-h-0 flex-1">
+          <aside className="app-sidebar flex w-64 min-h-0 shrink-0 flex-col overflow-hidden border-r">
             <HostList hosts={hosts} isLoading={isLoading} />
           </aside>
 
-          <main className="min-w-0 flex-1 overflow-auto">
+          {/* Editor pane: its OWN bounded scroll region, independent of sidebar. */}
+          <main className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto">
             {selectedAlias ? (
-              <div className="mx-auto max-w-2xl space-y-4 p-6 pb-28">
+              <div className="mx-auto max-w-2xl space-y-4 p-5 pb-24">
                 <DriftBanner />
                 <HostEditor alias={selectedAlias} />
               </div>

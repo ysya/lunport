@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useForm, useFieldArray, Controller, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -22,13 +22,12 @@ import {
   useRemoveHost,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
-import { cn, basename } from "@/lib/utils";
+import { basename } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -246,11 +245,11 @@ function HostEditorForm({
   });
 
   return (
-    <div className="space-y-6">
-      {/* Editor header: alias large in mono + patterns + source + remove menu. */}
+    <div className="space-y-5">
+      {/* Editor header: alias in mono + patterns + source + remove menu. */}
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 space-y-2">
-          <h2 className="truncate font-mono text-2xl font-semibold tracking-tight">
+        <div className="min-w-0 space-y-1.5">
+          <h2 className="truncate font-mono text-xl font-semibold tracking-tight">
             {detail.alias}
           </h2>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -273,6 +272,7 @@ function HostEditorForm({
                 type="button"
                 variant="ghost"
                 size="icon"
+                className="size-7"
                 aria-label="Host actions"
                 disabled={removing}
               >
@@ -312,37 +312,41 @@ function HostEditorForm({
         </AlertDialog>
       </div>
 
-      {/* Tags */}
-      <div className="space-y-1.5">
-        <Label htmlFor="host-tags">Tags</Label>
-        <div className="flex gap-2">
-          <Input
-            id="host-tags"
-            value={tags}
-            onChange={(e) => setTagsValue(e.target.value)}
-            placeholder="comma, separated"
-            className="font-mono"
-          />
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() =>
-              onSetTags(
-                tags
-                  .split(",")
-                  .map((t) => t.trim())
-                  .filter(Boolean),
-              )
-            }
-          >
-            Apply
-          </Button>
+      {/* Tags — settings-style inset row: label left, control right. */}
+      <SettingsGroup>
+        <div className="flex items-center justify-between gap-4 px-3 py-2">
+          <Label htmlFor="host-tags" className="shrink-0 text-sm font-normal">
+            Tags
+          </Label>
+          <div className="flex max-w-[60%] flex-1 items-center gap-1.5">
+            <Input
+              id="host-tags"
+              value={tags}
+              onChange={(e) => setTagsValue(e.target.value)}
+              placeholder="comma, separated"
+              className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/50 focus-visible:ring-0 dark:bg-transparent"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7 shrink-0"
+              onClick={() =>
+                onSetTags(
+                  tags
+                    .split(",")
+                    .map((t) => t.trim())
+                    .filter(Boolean),
+                )
+              }
+            >
+              Apply
+            </Button>
+          </div>
         </div>
-      </div>
+      </SettingsGroup>
 
-      <Separator />
-
-      <form onSubmit={onSubmit} id="host-editor-form" className="space-y-4">
+      <form onSubmit={onSubmit} id="host-editor-form" className="space-y-3">
         <Tabs defaultValue="Connection" className="w-full">
           <TabsList variant="line" className="w-full justify-start">
             {GROUPS.map((g) => (
@@ -354,50 +358,57 @@ function HostEditorForm({
           </TabsList>
 
           {GROUPS.map((g) => (
-            <TabsContent key={g} value={g} className="space-y-5 pt-4">
-              {FIELD_DEFS.filter((d) => d.group === g)
-                .filter((d) => !d.macOnly || isMac)
-                .map((def) => (
-                  <FieldControl key={def.keyword} def={def} control={control} register={register} />
-                ))}
+            <TabsContent key={g} value={g} className="pt-3">
+              <SettingsGroup>
+                {FIELD_DEFS.filter((d) => d.group === g)
+                  .filter((d) => !d.macOnly || isMac)
+                  .map((def) => (
+                    <FieldControl key={def.keyword} def={def} control={control} register={register} />
+                  ))}
+              </SettingsGroup>
             </TabsContent>
           ))}
 
-          <TabsContent value="Advanced" className="space-y-3 pt-4">
-            {fields.length === 0 && (
-              <p className="text-sm text-muted-foreground">
+          <TabsContent value="Advanced" className="space-y-2 pt-3">
+            {fields.length === 0 ? (
+              <p className="px-1 text-sm text-muted-foreground">
                 No advanced options. Add raw keyword/value pairs below.
               </p>
+            ) : (
+              <SettingsGroup>
+                {fields.map((field, index) => (
+                  <div key={field.id} className="flex items-center gap-2 px-3 py-1.5">
+                    <Input
+                      className="h-7 flex-1 border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/50 focus-visible:ring-0 dark:bg-transparent"
+                      placeholder="Keyword"
+                      aria-label="Keyword"
+                      {...register(`advanced.${index}.keyword` as const)}
+                    />
+                    <Input
+                      className="h-7 flex-[2] border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/50 focus-visible:ring-0 dark:bg-transparent"
+                      placeholder="Value"
+                      aria-label="Value"
+                      {...register(`advanced.${index}.value` as const)}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 shrink-0"
+                      aria-label="Remove option"
+                      onClick={() => remove(index)}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                ))}
+              </SettingsGroup>
             )}
-            {fields.map((field, index) => (
-              <div key={field.id} className="flex items-center gap-2">
-                <Input
-                  className="flex-1 font-mono text-sm"
-                  placeholder="Keyword"
-                  aria-label="Keyword"
-                  {...register(`advanced.${index}.keyword` as const)}
-                />
-                <Input
-                  className="flex-[2] font-mono text-sm"
-                  placeholder="Value"
-                  aria-label="Value"
-                  {...register(`advanced.${index}.value` as const)}
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label="Remove option"
-                  onClick={() => remove(index)}
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            ))}
             <Button
               type="button"
               variant="outline"
               size="sm"
+              className="h-7"
               onClick={() => append({ keyword: "", value: "" })}
             >
               <Plus className="size-4" /> Add option
@@ -407,30 +418,29 @@ function HostEditorForm({
       </form>
 
       {disabledOpts.length > 0 && (
-        <>
-          <Separator />
-          <div className="space-y-2 opacity-80">
+        <div className="space-y-2">
+          <div className="space-y-0.5 px-1">
             <h3 className="text-sm font-medium text-muted-foreground">Disabled options</h3>
             <p className="text-xs text-muted-foreground">
               Commented-out lines. Toggle on to re-enable, then edit above.
             </p>
-            <ul className="space-y-1.5">
-              {disabledOpts.map((o, i) => (
-                <DisabledOptionRow
-                  key={`${o.keyword}-${i}`}
-                  option={o}
-                  onEnable={() => onEnableOption(o.keyword)}
-                />
-              ))}
-            </ul>
           </div>
-        </>
+          <SettingsGroup>
+            {disabledOpts.map((o, i) => (
+              <DisabledOptionRow
+                key={`${o.keyword}-${i}`}
+                option={o}
+                onEnable={() => onEnableOption(o.keyword)}
+              />
+            ))}
+          </SettingsGroup>
+        </div>
       )}
 
       {/* Sticky save bar: appears only when the option form is dirty. */}
       {isDirty && (
-        <div className="animate-save-bar fixed inset-x-0 bottom-0 z-20 border-t bg-background/80 backdrop-blur-md">
-          <div className="mx-auto flex max-w-2xl items-center justify-between gap-3 px-6 py-3">
+        <div className="animate-save-bar fixed inset-x-0 bottom-0 z-30 border-t bg-background/85 backdrop-blur-md">
+          <div className="mx-auto flex max-w-2xl items-center justify-between gap-3 px-5 py-2.5">
             <span className="flex items-center gap-2 text-sm text-muted-foreground">
               <span className="size-1.5 rounded-full bg-primary" aria-hidden />
               Unsaved changes
@@ -439,12 +449,14 @@ function HostEditorForm({
               <Button
                 type="button"
                 variant="ghost"
+                size="sm"
+                className="h-7"
                 onClick={() => reset(defaults)}
                 disabled={saving}
               >
                 <RotateCcw className="size-4" /> Discard
               </Button>
-              <Button type="submit" form="host-editor-form" disabled={!isDirty || saving}>
+              <Button type="submit" size="sm" className="h-7" form="host-editor-form" disabled={!isDirty || saving}>
                 <Save className="size-4" /> {saving ? "Saving…" : "Save"}
               </Button>
             </div>
@@ -483,6 +495,40 @@ function HostEditorSkeleton() {
 // maps back to "" (which clears the field → the directive line is removed on save).
 const UNSET = "__unset__";
 
+/**
+ * macOS System-Settings-style grouped inset container: a rounded card whose
+ * direct children are separated by hairline dividers (see `.settings-group` in
+ * index.css). Each child is expected to be a single row.
+ */
+function SettingsGroup({ children }: { children: ReactNode }) {
+  return <div className="settings-group">{children}</div>;
+}
+
+/**
+ * A single settings row: label on the LEFT, control area on the RIGHT
+ * (right-aligned), compact fixed height. Used for every editor field.
+ */
+function SettingsRow({
+  id,
+  label,
+  children,
+}: {
+  id?: string;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-9 items-center justify-between gap-4 px-3 py-1.5">
+      <Label htmlFor={id} className="shrink-0 font-mono text-sm font-normal">
+        {label}
+      </Label>
+      <div className="flex min-w-0 max-w-[62%] flex-1 items-center justify-end">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 interface FieldControlProps {
   def: FieldDef;
   control: ReturnType<typeof useForm<FormValues>>["control"];
@@ -495,10 +541,7 @@ function FieldControl({ def, control, register }: FieldControlProps) {
 
   if (def.kind === "toggle") {
     return (
-      <div className="flex items-center justify-between gap-4">
-        <Label htmlFor={id} className="font-mono text-sm">
-          {def.label}
-        </Label>
+      <SettingsRow id={id} label={def.label}>
         <Controller
           control={control}
           name={name}
@@ -510,16 +553,13 @@ function FieldControl({ def, control, register }: FieldControlProps) {
             />
           )}
         />
-      </div>
+      </SettingsRow>
     );
   }
 
   if (def.kind === "select") {
     return (
-      <div className="space-y-1.5">
-        <Label htmlFor={id} className="font-mono text-sm">
-          {def.label}
-        </Label>
+      <SettingsRow id={id} label={def.label}>
         <Controller
           control={control}
           name={name}
@@ -528,7 +568,7 @@ function FieldControl({ def, control, register }: FieldControlProps) {
               value={field.value ? field.value : UNSET}
               onValueChange={(v) => field.onChange(v === UNSET ? "" : v)}
             >
-              <SelectTrigger id={id} className="w-full font-mono">
+              <SelectTrigger id={id} size="sm" className="h-7 w-auto min-w-28 gap-1.5 border-0 bg-transparent font-mono shadow-none focus-visible:ring-0 dark:bg-transparent">
                 <SelectValue placeholder="—" />
               </SelectTrigger>
               <SelectContent>
@@ -544,23 +584,20 @@ function FieldControl({ def, control, register }: FieldControlProps) {
             </Select>
           )}
         />
-      </div>
+      </SettingsRow>
     );
   }
 
   // text | number
   return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id} className="font-mono text-sm">
-        {def.label}
-      </Label>
+    <SettingsRow id={id} label={def.label}>
       <Input
         id={id}
         type={def.kind === "number" ? "number" : "text"}
-        className="font-mono"
+        className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/50 focus-visible:ring-0 dark:bg-transparent"
         {...register(name)}
       />
-    </div>
+    </SettingsRow>
   );
 }
 
@@ -571,9 +608,7 @@ interface DisabledOptionRowProps {
 
 function DisabledOptionRow({ option, onEnable }: DisabledOptionRowProps) {
   return (
-    <li className={cn(
-      "flex items-center justify-between gap-3 rounded-md border border-dashed bg-muted/30 px-3 py-1.5",
-    )}>
+    <div className="flex min-h-9 items-center justify-between gap-3 px-3 py-1.5">
       <span className="truncate font-mono text-sm text-muted-foreground">
         {option.keyword} {option.value}
       </span>
@@ -582,7 +617,7 @@ function DisabledOptionRow({ option, onEnable }: DisabledOptionRowProps) {
         onCheckedChange={() => onEnable()}
         aria-label={`Enable ${option.keyword}`}
       />
-    </li>
+    </div>
   );
 }
 

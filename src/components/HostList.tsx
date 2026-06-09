@@ -78,23 +78,23 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   let rowIndex = -1;
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="border-b p-3">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0 border-b p-2">
         <div className="relative">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             type="search"
             placeholder="Search hosts…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search hosts"
-            className="pl-8 font-mono text-sm placeholder:font-sans"
+            className="h-7 pl-8 font-mono text-sm placeholder:font-sans"
           />
         </div>
       </div>
 
-      <ScrollArea className="flex-1">
-        <div className="p-2">
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="p-1.5">
           {isLoading ? (
             <HostListSkeleton />
           ) : totalShown === 0 ? (
@@ -108,15 +108,15 @@ export function HostList({ hosts, isLoading }: HostListProps) {
             )
           ) : (
             grouped.map((group) => (
-              <div key={group.file} className="mb-4">
-                <div className="flex items-center justify-between px-2 py-1.5">
+              <div key={group.file} className="mb-3">
+                <div className="flex items-center justify-between px-2 py-1">
                   <span
-                    className="text-[0.68rem] font-semibold tracking-[0.12em] text-muted-foreground uppercase"
+                    className="text-[0.65rem] font-semibold tracking-[0.12em] text-muted-foreground uppercase"
                     title={group.file}
                   >
                     {group.name}
                   </span>
-                  <span className="font-mono text-[0.68rem] text-muted-foreground/70 tabular-nums">
+                  <span className="font-mono text-[0.65rem] text-muted-foreground/70 tabular-nums">
                     {group.hosts.length}
                   </span>
                 </div>
@@ -137,7 +137,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                           onClick={() => setSelectedAlias(host.alias)}
                           aria-current={active ? "true" : undefined}
                           className={cn(
-                            "group relative flex w-full flex-col gap-1 rounded-md border border-transparent py-2 pr-2.5 pl-3 text-left transition-colors",
+                            "group relative flex w-full flex-col gap-0.5 rounded-md border border-transparent py-1.5 pr-2 pl-2.5 text-left transition-colors",
                             "hover:bg-muted/70 focus-visible:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:outline-none",
                             active && "border-primary/20 bg-primary/10 hover:bg-primary/15",
                           )}
