@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { HostSummary } from "@/bindings/HostSummary";
-import { secondaryLine, shortLabels } from "@/lib/host-display";
+import { isWildcardOnly, secondaryLine, shortLabels } from "@/lib/host-display";
 
 /** Build a HostSummary with sensible defaults; override what each test needs. */
 function host(over: Partial<HostSummary> = {}): HostSummary {
@@ -63,5 +63,29 @@ describe("shortLabels", () => {
     const m = shortLabels(["/a/CONFIG", "/b/config"]);
     expect(m.get("/a/CONFIG")).toBe("CONFIG");
     expect(m.get("/b/config")).toBe("b/config");
+  });
+});
+
+describe("isWildcardOnly", () => {
+  it("treats a bare * block as wildcard-only", () => {
+    expect(isWildcardOnly(host({ alias: "*", patterns: ["*"] }))).toBe(true);
+  });
+
+  it("treats *.web as wildcard-only", () => {
+    expect(isWildcardOnly(host({ alias: "*.web", patterns: ["*.web"] }))).toBe(true);
+  });
+
+  it("is false when ANY pattern is a concrete host", () => {
+    expect(isWildcardOnly(host({ alias: "web", patterns: ["web", "*.web"] }))).toBe(
+      false,
+    );
+  });
+
+  it("counts ? as a wildcard", () => {
+    expect(isWildcardOnly(host({ alias: "web?", patterns: ["web?"] }))).toBe(true);
+  });
+
+  it("is false for a plain alias", () => {
+    expect(isWildcardOnly(host({ alias: "web", patterns: ["web"] }))).toBe(false);
   });
 });

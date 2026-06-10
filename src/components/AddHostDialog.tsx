@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
 
@@ -56,6 +56,16 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
   const [hostName, setHostName] = useState("");
   const [user, setUser] = useState("");
   const [port, setPort] = useState("");
+
+  // Sidebar file scope: when the user has scoped the list to ONE file, that
+  // file is the natural default target for a new host. Only seed the choice
+  // while the picker is still untouched — never fight an explicit selection.
+  const fileScope = useUiStore((s) => s.fileScope);
+  useEffect(() => {
+    if (open && targetFile === "" && fileScope && files.includes(fileScope)) {
+      setTargetFile(fileScope);
+    }
+  }, [open, targetFile, fileScope, files]);
 
   function resetForm() {
     setTargetFile("");

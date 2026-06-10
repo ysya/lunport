@@ -19,6 +19,7 @@ import { DriftBanner } from "@/components/DriftBanner";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { isWildcardOnly } from "@/lib/host-display";
 import {
   Tooltip,
   TooltipContent,
@@ -64,6 +65,9 @@ function App() {
   }, [isError, error]);
 
   const hosts = data?.hosts ?? [];
+  // Wildcard-only blocks (`Host *`) are config defaults, not hosts — keep them
+  // out of every user-facing count.
+  const hostCount = hosts.filter((h) => !isWildcardOnly(h)).length;
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -87,7 +91,7 @@ function App() {
             <div className="flex items-baseline gap-1.5">
               <h1 className="text-[0.8125rem] font-semibold tracking-tight">SSHelter</h1>
               <span className="font-mono text-[0.6875rem] text-muted-foreground/80 tabular-nums">
-                {isLoading ? "loading…" : `${hosts.length} ${hosts.length === 1 ? "host" : "hosts"}`}
+                {isLoading ? "loading…" : `${hostCount} ${hostCount === 1 ? "host" : "hosts"}`}
               </span>
             </div>
           </div>

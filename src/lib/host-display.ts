@@ -38,3 +38,15 @@ export function shortLabels(files: string[]): Map<string, string> {
   }
   return map;
 }
+
+/**
+ * True when EVERY pattern of the host block is a wildcard (contains `*` or
+ * `?`), e.g. `Host *` or `Host *.web`. These blocks supply config DEFAULTS —
+ * they are not connectable hosts, so the sidebar demotes them to a "Defaults"
+ * footer and excludes them from host counts.
+ */
+export function isWildcardOnly(host: HostSummary): boolean {
+  return (
+    host.patterns.length > 0 && host.patterns.every((p) => p.includes("*") || p.includes("?"))
+  );
+}

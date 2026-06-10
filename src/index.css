@@ -241,6 +241,17 @@
     -webkit-user-select: none;
   }
 
+  /*
+   * Sticky group headers inside the sidebar list. The sidebar itself is
+   * translucent, so each stuck header re-applies the same frosted recipe —
+   * rows scrolling beneath blur away instead of bleeding through.
+   */
+  .sidebar-sticky-header {
+    background-color: color-mix(in srgb, var(--sidebar) 92%, transparent);
+    -webkit-backdrop-filter: saturate(160%) blur(16px);
+    backdrop-filter: saturate(160%) blur(16px);
+  }
+
   /* Solid editor pane — the readability guarantee. */
   .app-main {
     background-color: var(--background);
