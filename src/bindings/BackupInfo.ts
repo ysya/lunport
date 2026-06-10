@@ -2,7 +2,7 @@
 
 export type BackupInfo = { 
 /**
- * Full path to the `.bak` file.
+ * Full path to the `.bak` file (in the managed file's mirror dir under the backups root).
  */
 path: string, 
 /**

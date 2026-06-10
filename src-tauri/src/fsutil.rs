@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -58,8 +58,71 @@ pub fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), AppEr
     Ok(())
 }
 
-/// 若 `path` 存在，複製成 `<path>.<unix_millis>.bak` 並回傳備份路徑；不存在則回 None。
-/// 在每個 session 第一次寫入 live 檔案前呼叫。
+/// 所有 config 備份的根目錄，位於任何 ssh 可見目錄之外：
+/// `dirs::data_dir()/org.homelab.sshelter/backups`
+/// （macOS: `~/Library/Application Support/org.homelab.sshelter/backups`；
+/// Linux: `~/.local/share/org.homelab.sshelter/backups`）。
+///
+/// 備份絕不能放在目標檔旁邊：使用者的 `Include config.d/*` 之類 glob 會把 `.bak`
+/// 檔當成 live config，讓本 app 的 loader 和真正的 `ssh` 都讀進過期副本。
+pub fn backups_root() -> Result<PathBuf, AppError> {
+    #[cfg(test)]
+    let root = test_backups_root().to_path_buf();
+    #[cfg(not(test))]
+    let root = dirs::data_dir()
+        .ok_or_else(|| {
+            AppError::Other("cannot determine user data directory for backups".to_string())
+        })?
+        .join("org.homelab.sshelter")
+        .join("backups");
+    Ok(root)
+}
+
+/// Tests must never touch the real user data dir: one shared per-process temp root. Every test
+/// target lives in its own tempdir, so mirror dirs never collide between tests.
+#[cfg(test)]
+pub(crate) fn test_backups_root() -> &'static Path {
+    use std::sync::OnceLock;
+    static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    ROOT.get_or_init(|| tempfile::tempdir().expect("create test backups root"))
+        .path()
+}
+
+/// `target` 的備份所在「鏡像目錄」：backups_root + target 的絕對父目錄路徑（去掉開頭的
+/// root / prefix），例如 `/Users/frank/.ssh/config.d/leg.config` 的備份放在
+/// `<root>/Users/frank/.ssh/config.d/`。
+///
+/// 此映射可逆：備份檔的隱含目標 = `/` + 備份父目錄相對 root 的路徑 + 檔名解析出的 `<name>`
+/// （見 `commands::resolve_restore_target`）。`.`/`..` 成分做字典式正規化，且 `..` 只會
+/// pop 已 push 的相對成分 —— 永遠不可能逃逸出 backups_root。
+pub fn backup_dir_for(target: &Path) -> Result<PathBuf, AppError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| AppError::Other(format!("no parent dir for {}", target.display())))?;
+    let abs_parent = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(parent)
+    };
+
+    let mut rel = PathBuf::new();
+    for comp in abs_parent.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
+            // `pop` on an empty path is a no-op: `..` can never climb above the backups root.
+            Component::ParentDir => {
+                rel.pop();
+            }
+            Component::Normal(c) => rel.push(c),
+        }
+    }
+    Ok(backups_root()?.join(rel))
+}
+
+/// 若 `path` 存在，複製成 `<mirror dir>/<filename>.<unix_millis>.bak` 並回傳備份路徑；
+/// 不存在則回 None。在每個 session 第一次寫入 live 檔案前呼叫。
+/// 備份一律寫進 `backups_root()` 下的鏡像目錄（見 `backup_dir_for`），絕不寫在目標旁邊
+/// —— 否則 glob `Include` 會把備份當成 live config 讀進去。
 pub fn backup(path: &Path) -> Result<Option<PathBuf>, AppError> {
     if !path.exists() {
         return Ok(None);
@@ -74,7 +137,10 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>, AppError> {
         .ok_or_else(|| AppError::Other(format!("no file name for {}", path.display())))?
         .to_os_string();
     name.push(format!(".{millis}.bak"));
-    let backup_path = path.with_file_name(name);
+
+    let dir = backup_dir_for(path)?;
+    fs::create_dir_all(&dir)?;
+    let backup_path = dir.join(name);
 
     fs::copy(path, &backup_path)?;
     Ok(Some(backup_path))
@@ -83,7 +149,7 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>, AppError> {
 /// SECURITY-CRITICAL strict parse: if `name` is exactly `<target_filename>.<digits>.bak` (digits
 /// non-empty, all ASCII, parseable as u64), return the millis. Anything else → None. Mirrors the
 /// parsing discipline of `commands::parse_backup_name` / `resolve_restore_target`.
-fn backup_millis_for(name: &str, target_filename: &str) -> Option<u64> {
+pub(crate) fn backup_millis_for(name: &str, target_filename: &str) -> Option<u64> {
     let rest = name.strip_prefix(target_filename)?;
     let rest = rest.strip_prefix('.')?;
     let digits = rest.strip_suffix(".bak")?;
@@ -93,26 +159,31 @@ fn backup_millis_for(name: &str, target_filename: &str) -> Option<u64> {
     digits.parse::<u64>().ok()
 }
 
-/// SECURITY-CRITICAL deletion: prune old backups of `target`, keeping the newest `keep`.
-/// Returns the number of files deleted.
+/// SECURITY-CRITICAL deletion: prune old backups of `target` in its mirror dir under
+/// `backups_root()`, keeping the newest `keep`. Returns the number of files deleted.
 ///
 /// Conservative constraints (non-negotiable):
-/// - only considers files in the SAME directory as `target` (never recurses);
+/// - only considers files in `target`'s MIRROR backup dir (never recurses, never the live dir);
 /// - only names that strictly parse as `<target filename>.<digits>.bak` (see `backup_millis_for`);
 /// - only regular files per `symlink_metadata` — symlinks are skipped, never deleted through;
 /// - ordering comes from the millis in the NAME (not mtime), newest kept;
-/// - a single failed deletion is skipped, never failing the overall operation.
+/// - a single failed deletion is skipped, never failing the overall operation;
+/// - a missing mirror dir simply means zero backups (`Ok(0)`).
 pub fn prune_backups(target: &Path, keep: usize) -> Result<usize, AppError> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| AppError::Other(format!("no parent dir for {}", target.display())))?;
     let filename = target
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| AppError::Other(format!("no file name for {}", target.display())))?;
+    let dir = backup_dir_for(target)?;
+
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(AppError::Io(e)),
+    };
 
     let mut backups: Vec<(u64, PathBuf)> = Vec::new();
-    for entry in fs::read_dir(parent)?.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(|e| e.ok()) {
         let entry_name = entry.file_name();
         let Some(entry_name) = entry_name.to_str() else {
             continue;
@@ -187,6 +258,23 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The mirror dir for `target`, created so tests can seed backups into it.
+    fn mirror_dir(target: &Path) -> PathBuf {
+        let dir = backup_dir_for(target).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn bak_count_in(dir: &Path) -> usize {
+        match fs::read_dir(dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".bak"))
+                .count(),
+            Err(_) => 0,
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn ensure_dir_secure_creates_0700() {
@@ -218,13 +306,38 @@ mod tests {
     }
 
     #[test]
-    fn backup_copies_existing_file() {
+    fn backup_dir_for_mirrors_absolute_target_path() {
+        let root = backups_root().unwrap();
+        let dir = backup_dir_for(Path::new("/Users/frank/.ssh/config.d/leg.config")).unwrap();
+        assert_eq!(dir, root.join("Users/frank/.ssh/config.d"));
+    }
+
+    #[test]
+    fn backup_dir_for_normalizes_dots_and_never_escapes_root() {
+        let root = backups_root().unwrap();
+        let dir = backup_dir_for(Path::new("/a/b/../c/config")).unwrap();
+        assert_eq!(dir, root.join("a/c"));
+        // `..` at the top can never climb above the backups root.
+        let dir2 = backup_dir_for(Path::new("/../../etc/config")).unwrap();
+        assert_eq!(dir2, root.join("etc"));
+    }
+
+    #[test]
+    fn backup_copies_into_mirror_dir_not_next_to_file() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config");
         fs::write(&p, b"original").unwrap();
+
         let b = backup(&p).unwrap().expect("backup should be created");
         assert_eq!(fs::read(&b).unwrap(), b"original");
         assert!(b.to_string_lossy().ends_with(".bak"));
+
+        // The backup lives in the mirror dir under backups_root…
+        let mirror = backup_dir_for(&p).unwrap();
+        assert_eq!(b.parent().unwrap(), mirror);
+        assert!(mirror.starts_with(backups_root().unwrap()));
+        // …and NEVER next to the live file (glob Includes would read it as config).
+        assert_eq!(bak_count_in(dir.path()), 0, "no .bak may sit next to the live file");
     }
 
     #[test]
@@ -239,17 +352,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("config");
         fs::write(&target, b"live").unwrap();
+        let mirror = mirror_dir(&target);
         for ts in [100u64, 300, 200, 400] {
-            fs::write(dir.path().join(format!("config.{ts}.bak")), b"x").unwrap();
+            fs::write(mirror.join(format!("config.{ts}.bak")), b"x").unwrap();
         }
 
         let deleted = prune_backups(&target, 2).unwrap();
         assert_eq!(deleted, 2);
         // Newest two (400, 300) survive; 200 and 100 are gone; live file untouched.
-        assert!(dir.path().join("config.400.bak").exists());
-        assert!(dir.path().join("config.300.bak").exists());
-        assert!(!dir.path().join("config.200.bak").exists());
-        assert!(!dir.path().join("config.100.bak").exists());
+        assert!(mirror.join("config.400.bak").exists());
+        assert!(mirror.join("config.300.bak").exists());
+        assert!(!mirror.join("config.200.bak").exists());
+        assert!(!mirror.join("config.100.bak").exists());
         assert!(target.exists());
     }
 
@@ -258,13 +372,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("config");
         fs::write(&target, b"live").unwrap();
-        fs::write(dir.path().join("config.100.bak"), b"x").unwrap();
-        fs::write(dir.path().join("config.200.bak"), b"x").unwrap();
+        let mirror = mirror_dir(&target);
+        fs::write(mirror.join("config.100.bak"), b"x").unwrap();
+        fs::write(mirror.join("config.200.bak"), b"x").unwrap();
 
         let deleted = prune_backups(&target, 5).unwrap();
         assert_eq!(deleted, 0);
-        assert!(dir.path().join("config.100.bak").exists());
-        assert!(dir.path().join("config.200.bak").exists());
+        assert!(mirror.join("config.100.bak").exists());
+        assert!(mirror.join("config.200.bak").exists());
+    }
+
+    #[test]
+    fn prune_backups_with_no_mirror_dir_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config");
+        fs::write(&target, b"live").unwrap();
+        // No mirror dir was ever created for this target.
+        assert_eq!(prune_backups(&target, 0).unwrap(), 0);
     }
 
     #[test]
@@ -272,23 +396,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("config");
         fs::write(&target, b"live").unwrap();
+        let mirror = mirror_dir(&target);
         // Decoys that must NEVER be touched.
-        fs::write(dir.path().join("other.123.bak"), b"x").unwrap(); // different target
-        fs::write(dir.path().join("config.abc.bak"), b"x").unwrap(); // non-digit millis
-        fs::write(dir.path().join("config.123.bak.txt"), b"x").unwrap(); // wrong suffix
-        fs::write(dir.path().join("config.bak"), b"x").unwrap(); // no millis segment
+        fs::write(mirror.join("other.123.bak"), b"x").unwrap(); // different target
+        fs::write(mirror.join("config.abc.bak"), b"x").unwrap(); // non-digit millis
+        fs::write(mirror.join("config.123.bak.txt"), b"x").unwrap(); // wrong suffix
+        fs::write(mirror.join("config.bak"), b"x").unwrap(); // no millis segment
         // Real backups: keep=0 → all real ones deleted, decoys intact.
-        fs::write(dir.path().join("config.100.bak"), b"x").unwrap();
-        fs::write(dir.path().join("config.200.bak"), b"x").unwrap();
+        fs::write(mirror.join("config.100.bak"), b"x").unwrap();
+        fs::write(mirror.join("config.200.bak"), b"x").unwrap();
 
         let deleted = prune_backups(&target, 0).unwrap();
         assert_eq!(deleted, 2);
-        assert!(dir.path().join("other.123.bak").exists());
-        assert!(dir.path().join("config.abc.bak").exists());
-        assert!(dir.path().join("config.123.bak.txt").exists());
-        assert!(dir.path().join("config.bak").exists());
-        assert!(!dir.path().join("config.100.bak").exists());
-        assert!(!dir.path().join("config.200.bak").exists());
+        assert!(mirror.join("other.123.bak").exists());
+        assert!(mirror.join("config.abc.bak").exists());
+        assert!(mirror.join("config.123.bak.txt").exists());
+        assert!(mirror.join("config.bak").exists());
+        assert!(!mirror.join("config.100.bak").exists());
+        assert!(!mirror.join("config.200.bak").exists());
     }
 
     #[cfg(unix)]
@@ -297,22 +422,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("config");
         fs::write(&target, b"live").unwrap();
+        let mirror = mirror_dir(&target);
 
         // A precious file outside the prune set, symlinked under a matching backup name.
         let precious = dir.path().join("precious");
         fs::write(&precious, b"do not delete").unwrap();
-        let link = dir.path().join("config.100.bak");
+        let link = mirror.join("config.100.bak");
         std::os::unix::fs::symlink(&precious, &link).unwrap();
 
         // One real (newer) backup; keep=0 would otherwise delete everything.
-        fs::write(dir.path().join("config.200.bak"), b"x").unwrap();
+        fs::write(mirror.join("config.200.bak"), b"x").unwrap();
 
         let deleted = prune_backups(&target, 0).unwrap();
         assert_eq!(deleted, 1, "only the regular file is deleted");
         assert!(link.exists(), "symlink must be skipped");
         assert!(precious.exists(), "symlink target must survive");
         assert_eq!(fs::read(&precious).unwrap(), b"do not delete");
-        assert!(!dir.path().join("config.200.bak").exists());
+        assert!(!mirror.join("config.200.bak").exists());
     }
 
     #[test]

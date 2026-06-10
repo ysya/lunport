@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -43,7 +43,7 @@ pub struct DriftInfo {
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct BackupInfo {
-    /// Full path to the `.bak` file.
+    /// Full path to the `.bak` file (in the managed file's mirror dir under the backups root).
     pub path: String,
     /// The managed config file this backup snapshots.
     pub file: String,
@@ -86,9 +86,10 @@ pub fn apply_changes(
 }
 
 /// Serialize file `idx`, back it up once (tracked in `backed_up`), atomic-write at 0o600, and
-/// refresh its in-memory fingerprint. `retention` = how many `.bak` snapshots to keep next to the
-/// file (None = unlimited); old ones are pruned right after a successful backup, and a prune
-/// failure never fails the save.
+/// refresh its in-memory fingerprint. Backups go to the file's MIRROR dir under
+/// `fsutil::backups_root()` — never next to the file, where a glob `Include` would read them as
+/// live config. `retention` = how many `.bak` snapshots to keep per file (None = unlimited); old
+/// ones are pruned right after a successful backup, and a prune failure never fails the save.
 pub fn persist_file(
     doc: &mut crate::config::model::SshConfigDoc,
     idx: usize,
@@ -161,7 +162,8 @@ fn parse_backup_name(name: &str) -> Option<(String, u64)> {
     Some((target.to_string(), millis))
 }
 
-/// List `<name>.<millis>.bak` files sitting next to each managed ConfigFile, newest first.
+/// List `<name>.<millis>.bak` files in each managed ConfigFile's mirror dir under
+/// `fsutil::backups_root()`, newest first.
 pub fn list_backups(
     doc: &crate::config::model::SshConfigDoc,
 ) -> Result<Vec<BackupInfo>, AppError> {
@@ -172,13 +174,13 @@ pub fn list_backups(
             Some(n) => n.to_string(),
             None => continue,
         };
-        let parent = match cf.path.parent() {
-            Some(p) => p,
-            None => continue,
+        let mirror = match fsutil::backup_dir_for(&cf.path) {
+            Ok(d) => d,
+            Err(_) => continue,
         };
-        let entries = match std::fs::read_dir(parent) {
+        let entries = match std::fs::read_dir(&mirror) {
             Ok(e) => e,
-            Err(_) => continue, // parent unreadable/missing → no backups for this file
+            Err(_) => continue, // mirror dir missing/unreadable → no backups for this file
         };
 
         let managed = cf.path.to_string_lossy().into_owned();
@@ -205,42 +207,54 @@ pub fn list_backups(
 /// SECURITY-CRITICAL validation for backup restore. Given the loaded doc and a candidate
 /// `backup_path`, return the managed target file path to overwrite, or `ForbiddenPath`.
 ///
-/// Rules: the backup must canonicalize to an existing file whose name is `<X>.<digits>.bak`, and
-/// whose stripped target `<X>` lives in the SAME directory as — and EXACTLY equals — one of the
-/// loaded `ConfigFile.path`s (compared via canonicalized parent + filename). This prevents
-/// restoring/overwriting an arbitrary path.
+/// The mirror layout (`fsutil::backup_dir_for`) is reversible, and every rule below is enforced on
+/// canonicalized paths:
+/// 1. the backup's parent dir must canonicalize to somewhere STRICTLY INSIDE the canonicalized
+///    backups root (created first so canonicalization can succeed);
+/// 2. the filename must strictly parse as `<name>.<digits u64>.bak`;
+/// 3. the implied target — `/` + (parent relative to the root) + `/<name>` — must canonicalize to
+///    EXACTLY one of the loaded managed `ConfigFile.path`s;
+/// 4. the backup itself must be a regular file per `symlink_metadata` (never a symlink).
+///
+/// This prevents restoring from arbitrary paths and overwriting arbitrary targets. The legacy
+/// next-to-file backup scheme is NOT accepted (those files are auto-migrated on load).
 pub fn resolve_restore_target(
     doc: &crate::config::model::SshConfigDoc,
     backup_path: &str,
 ) -> Result<PathBuf, AppError> {
-    let backup = PathBuf::from(backup_path);
-    let canonical = backup
-        .canonicalize()
-        .map_err(|_| AppError::ForbiddenPath(backup_path.to_string()))?;
+    let forbidden = || AppError::ForbiddenPath(backup_path.to_string());
 
-    if !canonical.is_file() {
-        return Err(AppError::ForbiddenPath(backup_path.to_string()));
+    let root = fsutil::backups_root()?;
+    std::fs::create_dir_all(&root)?;
+    let root = root.canonicalize().map_err(|_| forbidden())?;
+
+    let backup = PathBuf::from(backup_path);
+
+    // Rule 4: regular file only — never restore through a symlink (or from anything missing/odd).
+    match std::fs::symlink_metadata(&backup) {
+        Ok(md) if md.file_type().is_file() => {}
+        _ => return Err(forbidden()),
     }
 
-    let backup_name = canonical
+    // Rule 1: canonical parent strictly inside the canonical backups root.
+    let parent = backup.parent().ok_or_else(forbidden)?;
+    let parent = parent.canonicalize().map_err(|_| forbidden())?;
+    let rel = parent.strip_prefix(&root).map_err(|_| forbidden())?;
+    if rel.as_os_str().is_empty() {
+        // Directly in the root would imply a target of `/<name>`; strict prefix required.
+        return Err(forbidden());
+    }
+
+    // Rule 2: strict `<name>.<digits>.bak` filename.
+    let backup_name = backup
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| AppError::ForbiddenPath(backup_path.to_string()))?;
+        .ok_or_else(forbidden)?;
+    let (target_name, _millis) = parse_backup_name(backup_name).ok_or_else(forbidden)?;
 
-    let (target_name, _millis) = parse_backup_name(backup_name)
-        .ok_or_else(|| AppError::ForbiddenPath(backup_path.to_string()))?;
-
-    let backup_parent = canonical
-        .parent()
-        .ok_or_else(|| AppError::ForbiddenPath(backup_path.to_string()))?;
-
-    // The implied target file: same dir as the backup, named `<X>`.
-    let implied_target = backup_parent.join(&target_name);
-    let implied_canonical = implied_target
-        .canonicalize()
-        .map_err(|_| AppError::ForbiddenPath(backup_path.to_string()))?;
-
-    // It must EXACTLY equal one of the managed files (compared canonically).
+    // Rule 3: the implied target must exist and canonically EXACTLY equal a managed file.
+    let implied = PathBuf::from("/").join(rel).join(&target_name);
+    let implied_canonical = implied.canonicalize().map_err(|_| forbidden())?;
     for cf in &doc.files {
         if let Ok(managed_canonical) = cf.path.canonicalize() {
             if managed_canonical == implied_canonical {
@@ -249,7 +263,122 @@ pub fn resolve_restore_target(
         }
     }
 
-    Err(AppError::ForbiddenPath(backup_path.to_string()))
+    Err(forbidden())
+}
+
+/// Legacy-layout cleanup: older SSHelter versions wrote `<file>.<millis>.bak` NEXT TO each config
+/// file, which glob `Include` lines (e.g. `Include config.d/*`) then fed back to both our loader
+/// and the real `ssh` binary as live config. Move every such stray into the file's mirror dir
+/// under `fsutil::backups_root()`.
+///
+/// Returns `true` if any file that was loaded AS config (a glob-Included stray) got moved — the
+/// caller must reload the doc once so it no longer contains those files.
+///
+/// Edge-case handling:
+/// - only strict `<loaded filename>.<digits>.bak` names in the file's own parent dir are touched;
+/// - backup-named loaded files are migration targets, never scan anchors;
+/// - symlinks (and anything not a regular file) are never migrated;
+/// - the loaded ROOT config itself is never moved, even if backup-named;
+/// - `fs::rename` falls back to copy+remove (cross-device); any single failure is logged via
+///   eprintln and skipped without failing the load.
+pub fn migrate_legacy_backups(doc: &crate::config::model::SshConfigDoc) -> bool {
+    // Canonical identities of everything loaded AS config, captured BEFORE any file moves
+    // (canonicalize fails once the file has been moved away).
+    let loaded_canonical: Vec<Option<PathBuf>> =
+        doc.files.iter().map(|cf| cf.path.canonicalize().ok()).collect();
+    let root_canonical: Option<&PathBuf> = loaded_canonical.first().and_then(|c| c.as_ref());
+
+    let mut moved: HashSet<PathBuf> = HashSet::new();
+
+    for cf in &doc.files {
+        let Some(filename) = cf.path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Backup-named loaded files (glob-Included strays) are what we migrate, not where we scan.
+        if parse_backup_name(filename).is_some() {
+            continue;
+        }
+        let Some(parent) = cf.path.parent() else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            continue;
+        };
+        let mirror = match fsutil::backup_dir_for(&cf.path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[migrate] no backups root for {}: {e}", cf.path.display());
+                continue;
+            }
+        };
+
+        // Collect first: we rename entries out of the directory we're iterating.
+        let candidates: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(|n| fsutil::backup_millis_for(n, filename))
+                    .is_some()
+            })
+            .map(|e| e.path())
+            .collect();
+
+        for src in candidates {
+            // Regular files only — never migrate through a symlink.
+            match std::fs::symlink_metadata(&src) {
+                Ok(md) if md.file_type().is_file() => {}
+                _ => continue,
+            }
+            let src_canonical = src.canonicalize().ok();
+            // Paranoia: never move the loaded ROOT config out from under ourselves.
+            if src_canonical.is_some() && src_canonical.as_ref() == root_canonical {
+                continue;
+            }
+
+            if let Err(e) = std::fs::create_dir_all(&mirror) {
+                eprintln!("[migrate] cannot create {}: {e}", mirror.display());
+                continue;
+            }
+            let dest = mirror.join(src.file_name().expect("candidate has a file name"));
+            let result = std::fs::rename(&src, &dest).or_else(|_| {
+                // Cross-device fallback: copy then remove the original.
+                std::fs::copy(&src, &dest).and_then(|_| std::fs::remove_file(&src))
+            });
+            match result {
+                Ok(()) => {
+                    if let Some(c) = src_canonical {
+                        moved.insert(c);
+                    }
+                    moved.insert(src);
+                }
+                Err(e) => eprintln!(
+                    "[migrate] failed to move {} -> {}: {e}",
+                    src.display(),
+                    dest.display()
+                ),
+            }
+        }
+    }
+
+    if moved.is_empty() {
+        return false;
+    }
+    // Did we move any file that had been loaded AS config? Then the doc is stale.
+    doc.files.iter().zip(&loaded_canonical).any(|(cf, canonical)| {
+        moved.contains(&cf.path) || canonical.as_ref().is_some_and(|c| moved.contains(c))
+    })
+}
+
+/// `load_doc` + legacy backup migration. If migration moved files that had been loaded AS config
+/// (glob-Included strays), reload once so the returned doc no longer contains them. The reload is
+/// unconditional-once (migration is not re-run on its result), so this can never loop.
+pub fn load_doc_migrated(path: &Path) -> Result<crate::config::model::SshConfigDoc, AppError> {
+    let doc = load_doc(path)?;
+    if migrate_legacy_backups(&doc) {
+        return load_doc(path);
+    }
+    Ok(doc)
 }
 
 // ─── Tauri command wrappers ───────────────────────────────────────────────────
@@ -265,7 +394,7 @@ pub fn config_load(
         None => default_config_path()?,
     };
 
-    let doc = load_doc(&config_path)?;
+    let doc = load_doc_migrated(&config_path)?;
     let files = doc.files.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
     let hosts = host_summaries(&doc);
 
@@ -530,7 +659,7 @@ pub fn config_restore_backup(
     fsutil::atomic_write(&target, &bytes, 0o600)?;
 
     // 4. Reload the doc from the main file, refresh state + tray, return a fresh LoadResult.
-    let doc = load_doc(&main_path)?;
+    let doc = load_doc_migrated(&main_path)?;
     let files = doc.files.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
     let hosts = host_summaries(&doc);
 
@@ -559,6 +688,23 @@ mod tests {
         path
     }
 
+    /// The mirror backup dir for `target`, created so tests can seed/inspect backups.
+    fn mirror_dir(target: &Path) -> PathBuf {
+        let dir = fsutil::backup_dir_for(target).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn bak_count_in(dir: &Path) -> usize {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".bak"))
+                .count(),
+            Err(_) => 0,
+        }
+    }
+
     // ── Test 1: apply_changes + persist round-trip minimal change ─────────────
     #[test]
     fn apply_changes_and_persist_round_trip() {
@@ -584,13 +730,10 @@ mod tests {
         assert!(on_disk.contains("    User newuser"), "new value on disk:\n{}", on_disk);
         assert!(!on_disk.contains("    User deploy"), "old value must be gone:\n{}", on_disk);
 
-        // Backup file was created.
-        let bak_count = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".bak"))
-            .count();
-        assert_eq!(bak_count, 1, "exactly one .bak file should be created");
+        // Backup file was created in the MIRROR dir — never next to the live file,
+        // where a glob `Include` would feed it back to ssh as live config.
+        assert_eq!(bak_count_in(dir.path()), 0, "no .bak next to the live file");
+        assert_eq!(bak_count_in(&mirror_dir(&config_path)), 1, "exactly one .bak in the mirror dir");
     }
 
     // ── Test 1b: persist refuses to clobber an externally-modified file ───────
@@ -708,21 +851,13 @@ mod tests {
         persist_file(&mut doc, 0, &mut backed_up, None).expect("first persist ok");
         assert!(backed_up.contains(&config_path), "path must be in backed_up after first persist");
 
-        let bak_count_after_first = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".bak"))
-            .count();
-        assert_eq!(bak_count_after_first, 1, "one .bak after first persist");
+        let mirror = mirror_dir(&config_path);
+        assert_eq!(bak_count_in(&mirror), 1, "one .bak in the mirror dir after first persist");
 
         // Second persist — backed_up already contains the path, so no new backup.
         persist_file(&mut doc, 0, &mut backed_up, None).expect("second persist ok");
-        let bak_count_after_second = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".bak"))
-            .count();
-        assert_eq!(bak_count_after_second, 1, "still one .bak after second persist");
+        assert_eq!(bak_count_in(&mirror), 1, "still one .bak after second persist");
+        assert_eq!(bak_count_in(dir.path()), 0, "never a .bak next to the live file");
     }
 
     // ── Test 4b: persist_file prunes old backups when retention is set ────────
@@ -730,24 +865,19 @@ mod tests {
     fn persist_file_prunes_with_retention() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
-        // Two stale backups from earlier sessions (name-millis far in the past).
-        std::fs::write(dir.path().join("config.100.bak"), b"old1").unwrap();
-        std::fs::write(dir.path().join("config.200.bak"), b"old2").unwrap();
+        // Two stale backups from earlier sessions, in the mirror dir (name-millis far in the past).
+        let mirror = mirror_dir(&config_path);
+        std::fs::write(mirror.join("config.100.bak"), b"old1").unwrap();
+        std::fs::write(mirror.join("config.200.bak"), b"old2").unwrap();
 
         let mut doc = load_doc(&config_path).expect("load_doc ok");
         let mut backed_up: HashSet<PathBuf> = HashSet::new();
         persist_file(&mut doc, 0, &mut backed_up, Some(1)).expect("persist ok");
 
         // Only the newest backup (the one just created) survives.
-        let baks: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".bak"))
-            .collect();
-        assert_eq!(baks.len(), 1, "retention 1 keeps only the newest: {baks:?}");
-        assert!(!dir.path().join("config.100.bak").exists());
-        assert!(!dir.path().join("config.200.bak").exists());
+        assert_eq!(bak_count_in(&mirror), 1, "retention 1 keeps only the newest");
+        assert!(!mirror.join("config.100.bak").exists());
+        assert!(!mirror.join("config.200.bak").exists());
     }
 
     // ── Test 5: drift detection ───────────────────────────────────────────────
@@ -806,79 +936,256 @@ mod tests {
         };
     }
 
-    // ── Test 8: list_backups finds sibling .bak files, newest first ───────────
+    // ── Test 8: list_backups scans the mirror dir, newest first ───────────────
     #[test]
-    fn list_backups_finds_siblings_newest_first() {
+    fn list_backups_scans_mirror_dir_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
         let doc = load_doc(&config_path).expect("load_doc ok");
 
-        // Create three backups + one decoy that is NOT a backup of this file.
-        std::fs::write(dir.path().join("config.100.bak"), b"v1").unwrap();
-        std::fs::write(dir.path().join("config.300.bak"), b"v3").unwrap();
-        std::fs::write(dir.path().join("config.200.bak"), b"v2").unwrap();
-        std::fs::write(dir.path().join("other.500.bak"), b"x").unwrap(); // different target
-        std::fs::write(dir.path().join("config.bak"), b"x").unwrap(); // no millis → ignored
-        std::fs::write(dir.path().join("config.notdigits.bak"), b"x").unwrap(); // non-digit
+        // Create three backups + decoys in the mirror dir.
+        let mirror = mirror_dir(&config_path);
+        std::fs::write(mirror.join("config.100.bak"), b"v1").unwrap();
+        std::fs::write(mirror.join("config.300.bak"), b"v3").unwrap();
+        std::fs::write(mirror.join("config.200.bak"), b"v2").unwrap();
+        std::fs::write(mirror.join("other.500.bak"), b"x").unwrap(); // different target
+        std::fs::write(mirror.join("config.bak"), b"x").unwrap(); // no millis → ignored
+        std::fs::write(mirror.join("config.notdigits.bak"), b"x").unwrap(); // non-digit
+        // A LEGACY-location backup next to the live file must NOT be listed anymore.
+        std::fs::write(dir.path().join("config.999.bak"), b"legacy").unwrap();
 
         let backups = list_backups(&doc).expect("list_backups ok");
         let ts: Vec<u64> = backups.iter().map(|b| b.timestamp_ms).collect();
-        assert_eq!(ts, vec![300, 200, 100], "newest first, only this file's backups");
+        assert_eq!(ts, vec![300, 200, 100], "newest first, only this file's mirror backups");
 
         for b in &backups {
             assert_eq!(b.file, config_path.to_string_lossy());
             assert!(b.path.ends_with(".bak"));
+            assert!(
+                PathBuf::from(&b.path).starts_with(fsutil::backups_root().unwrap()),
+                "every listed backup lives under the backups root: {}",
+                b.path
+            );
         }
     }
 
-    // ── Test 9: resolve_restore_target returns managed path for a valid sibling ─
+    // ── Test 9: resolve_restore_target accepts a valid mirror-dir backup ──────
     #[test]
-    fn resolve_restore_target_accepts_managed_sibling_bak() {
+    fn resolve_restore_target_accepts_mirror_dir_bak() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
         let doc = load_doc(&config_path).expect("load_doc ok");
 
-        let bak = dir.path().join("config.123.bak");
-        std::fs::write(&bak, b"Host web\n    User restored\n").unwrap();
-
+        // A real backup created through fsutil::backup …
+        let bak = fsutil::backup(&config_path).unwrap().expect("backup created");
         let target = resolve_restore_target(&doc, &bak.to_string_lossy())
-            .expect("a valid sibling .bak must resolve");
+            .expect("a valid mirror-dir .bak must resolve");
         assert_eq!(
             target.canonicalize().unwrap(),
             config_path.canonicalize().unwrap()
         );
+
+        // … and a manually placed one with a fixed timestamp.
+        let manual = mirror_dir(&config_path).join("config.123.bak");
+        std::fs::write(&manual, b"Host web\n    User restored\n").unwrap();
+        let target2 = resolve_restore_target(&doc, &manual.to_string_lossy())
+            .expect("manual mirror-dir .bak must resolve");
+        assert_eq!(
+            target2.canonicalize().unwrap(),
+            config_path.canonicalize().unwrap()
+        );
     }
 
-    // ── Test 10: resolve_restore_target REJECTS paths outside any managed dir ──
+    // ── Test 10: resolve_restore_target rejects everything outside backups_root ─
     #[test]
-    fn resolve_restore_target_rejects_unsafe_paths() {
+    fn resolve_restore_target_rejects_paths_outside_backups_root() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
         let doc = load_doc(&config_path).expect("load_doc ok");
 
-        // (a) A .bak in an UNRELATED directory whose target is not a managed file.
+        // (a) A LEGACY next-to-file backup is no longer restorable (outside backups_root).
+        let legacy = dir.path().join("config.123.bak");
+        std::fs::write(&legacy, b"legacy").unwrap();
+        let r = resolve_restore_target(&doc, &legacy.to_string_lossy());
+        assert!(matches!(r, Err(AppError::ForbiddenPath(_))), "legacy sibling .bak rejected: {r:?}");
+
+        // (b) A .bak in an unrelated directory.
         let other_dir = tempfile::tempdir().unwrap();
-        let stray_bak = other_dir.path().join("config.123.bak");
-        std::fs::write(&stray_bak, b"malicious").unwrap();
-        // The implied target `other_dir/config` doesn't even exist → ForbiddenPath.
-        let r = resolve_restore_target(&doc, &stray_bak.to_string_lossy());
-        assert!(matches!(r, Err(AppError::ForbiddenPath(_))), "stray .bak must be rejected: {r:?}");
+        let stray = other_dir.path().join("config.123.bak");
+        std::fs::write(&stray, b"malicious").unwrap();
+        let r2 = resolve_restore_target(&doc, &stray.to_string_lossy());
+        assert!(matches!(r2, Err(AppError::ForbiddenPath(_))), "stray .bak rejected: {r2:?}");
 
-        // (a2) Even if the implied target file EXISTS in the unrelated dir, it isn't managed.
-        std::fs::write(other_dir.path().join("config"), b"unmanaged").unwrap();
-        let r2 = resolve_restore_target(&doc, &stray_bak.to_string_lossy());
-        assert!(
-            matches!(r2, Err(AppError::ForbiddenPath(_))),
-            "a .bak of an unmanaged file must be rejected: {r2:?}"
-        );
-
-        // (b) A non-.bak path (e.g. /etc/passwd) must be rejected.
+        // (c) A non-.bak path (e.g. /etc/passwd) must be rejected.
         let r3 = resolve_restore_target(&doc, "/etc/passwd");
-        assert!(matches!(r3, Err(AppError::ForbiddenPath(_))), "non-.bak path must be rejected: {r3:?}");
+        assert!(matches!(r3, Err(AppError::ForbiddenPath(_))), "non-.bak path rejected: {r3:?}");
 
-        // (c) A nonexistent .bak path must be rejected (cannot canonicalize).
-        let missing = dir.path().join("config.999.bak");
+        // (d) A nonexistent path must be rejected.
+        let missing = fsutil::backup_dir_for(&config_path).unwrap().join("config.999.bak");
         let r4 = resolve_restore_target(&doc, &missing.to_string_lossy());
-        assert!(matches!(r4, Err(AppError::ForbiddenPath(_))), "missing .bak must be rejected: {r4:?}");
+        assert!(matches!(r4, Err(AppError::ForbiddenPath(_))), "missing .bak rejected: {r4:?}");
+
+        // (e) A file DIRECTLY in backups_root (parent must be STRICTLY inside the root).
+        let root = fsutil::backups_root().unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let in_root = root.join("config.777.bak");
+        std::fs::write(&in_root, b"x").unwrap();
+        let r5 = resolve_restore_target(&doc, &in_root.to_string_lossy());
+        assert!(matches!(r5, Err(AppError::ForbiddenPath(_))), "root-level .bak rejected: {r5:?}");
+    }
+
+    // ── Test 10b: bad filenames and unmanaged implied targets are rejected ────
+    #[test]
+    fn resolve_restore_target_rejects_bad_names_and_unmanaged_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let doc = load_doc(&config_path).expect("load_doc ok");
+        let mirror = mirror_dir(&config_path);
+
+        // Bad filenames INSIDE the correct mirror dir.
+        for bad in ["config.abc.bak", "other.123.bak.txt", "config.bak"] {
+            let p = mirror.join(bad);
+            std::fs::write(&p, b"x").unwrap();
+            let r = resolve_restore_target(&doc, &p.to_string_lossy());
+            assert!(
+                matches!(r, Err(AppError::ForbiddenPath(_))),
+                "bad filename '{bad}' must be rejected: {r:?}"
+            );
+        }
+
+        // Implied target exists on disk but is NOT a managed file.
+        std::fs::write(dir.path().join("other"), b"unmanaged").unwrap();
+        let p = mirror.join("other.123.bak"); // same mirror dir: `other` sits next to `config`
+        std::fs::write(&p, b"x").unwrap();
+        let r = resolve_restore_target(&doc, &p.to_string_lossy());
+        assert!(
+            matches!(r, Err(AppError::ForbiddenPath(_))),
+            "backup of an unmanaged file must be rejected: {r:?}"
+        );
+    }
+
+    // ── Test 10c: symlinked backups are never restored ────────────────────────
+    #[cfg(unix)]
+    #[test]
+    fn resolve_restore_target_rejects_symlinked_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let doc = load_doc(&config_path).expect("load_doc ok");
+        let mirror = mirror_dir(&config_path);
+
+        let real = dir.path().join("realfile");
+        std::fs::write(&real, b"sneaky").unwrap();
+        let link = mirror.join("config.456.bak");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let r = resolve_restore_target(&doc, &link.to_string_lossy());
+        assert!(
+            matches!(r, Err(AppError::ForbiddenPath(_))),
+            "a symlinked .bak must be rejected: {r:?}"
+        );
+    }
+
+    // ── Test 11: legacy migration moves stray sibling .bak files into the mirror ─
+    #[test]
+    fn migration_moves_stray_sibling_baks_into_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        // Legacy strays next to the live file.
+        std::fs::write(dir.path().join("config.100.bak"), b"old1").unwrap();
+        std::fs::write(dir.path().join("config.200.bak"), b"old2").unwrap();
+        // Decoys that must stay put (strict name parse).
+        std::fs::write(dir.path().join("config.abc.bak"), b"decoy").unwrap();
+        std::fs::write(dir.path().join("other.999.bak"), b"decoy").unwrap(); // `other` not loaded
+
+        let doc = load_doc(&config_path).expect("load_doc ok");
+        let needs_reload = migrate_legacy_backups(&doc);
+        assert!(!needs_reload, "strays were not loaded as config → no reload needed");
+
+        // Strays moved into the mirror dir, contents intact.
+        let mirror = fsutil::backup_dir_for(&config_path).unwrap();
+        assert_eq!(std::fs::read(mirror.join("config.100.bak")).unwrap(), b"old1");
+        assert_eq!(std::fs::read(mirror.join("config.200.bak")).unwrap(), b"old2");
+        assert!(!dir.path().join("config.100.bak").exists());
+        assert!(!dir.path().join("config.200.bak").exists());
+        // Decoys untouched.
+        assert!(dir.path().join("config.abc.bak").exists());
+        assert!(dir.path().join("other.999.bak").exists());
+    }
+
+    // ── Test 11b: glob-Included strays trigger the one-shot reload ────────────
+    #[test]
+    fn migration_of_glob_included_strays_triggers_one_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config.d")).unwrap();
+        let config_path = write_config(
+            &dir,
+            "config",
+            "Include config.d/*\nHost main-h\n    HostName main.example.com\n",
+        );
+        std::fs::write(
+            dir.path().join("config.d/leg.config"),
+            "Host leg\n    HostName leg.example.com\n",
+        )
+        .unwrap();
+        // THE BUG: a legacy backup matched by `Include config.d/*` and loaded as live config.
+        std::fs::write(
+            dir.path().join("config.d/leg.config.123.bak"),
+            "Host stale\n    HostName stale.example.com\n",
+        )
+        .unwrap();
+
+        // Plain load_doc DOES pick up the stray (that's the bug being fixed).
+        let polluted = load_doc(&config_path).expect("load_doc ok");
+        assert_eq!(polluted.files.len(), 3, "stray .bak is glob-Included");
+        assert!(find_host_file_index(&polluted, "stale").is_some());
+
+        // load_doc_migrated migrates and reloads once: clean doc, stray gone from disk + doc.
+        let doc = load_doc_migrated(&config_path).expect("load_doc_migrated ok");
+        assert_eq!(doc.files.len(), 2, "the .bak must be gone after migration: {:?}",
+            doc.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>());
+        assert!(
+            doc.files.iter().all(|f| !f.path.to_string_lossy().ends_with(".bak")),
+            "no loaded file may be backup-named"
+        );
+        assert!(find_host_file_index(&doc, "stale").is_none(), "stale host gone");
+        assert!(find_host_file_index(&doc, "leg").is_some(), "real host still loaded");
+        assert!(find_host_file_index(&doc, "main-h").is_some());
+
+        // The stray now lives in the mirror dir of leg.config, content intact.
+        let leg = dir.path().join("config.d/leg.config");
+        let mirror = fsutil::backup_dir_for(&leg).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mirror.join("leg.config.123.bak")).unwrap(),
+            "Host stale\n    HostName stale.example.com\n"
+        );
+        assert_eq!(bak_count_in(&dir.path().join("config.d")), 0, "ssh-visible dir is clean");
+    }
+
+    // ── Test 11c: migration never moves symlinks ──────────────────────────────
+    #[cfg(unix)]
+    #[test]
+    fn migration_skips_symlinked_strays() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let precious = dir.path().join("precious");
+        std::fs::write(&precious, b"keep me").unwrap();
+        let link = dir.path().join("config.100.bak");
+        std::os::unix::fs::symlink(&precious, &link).unwrap();
+
+        let doc = load_doc(&config_path).expect("load_doc ok");
+        let needs_reload = migrate_legacy_backups(&doc);
+        assert!(!needs_reload);
+        assert!(link.exists(), "symlink must not be migrated");
+        assert!(precious.exists());
+    }
+
+    // ── Test 11d: a clean config loads identically through load_doc_migrated ──
+    #[test]
+    fn load_doc_migrated_is_noop_on_clean_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let doc = load_doc_migrated(&config_path).expect("load ok");
+        assert_eq!(doc.files.len(), 1);
+        assert!(find_host_file_index(&doc, "web").is_some());
     }
 }
