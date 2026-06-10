@@ -1,8 +1,9 @@
 import { useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Moon, Sun, Terminal, ServerCog } from "lucide-react";
+import { Moon, RotateCw, Sun, Terminal, ServerCog } from "lucide-react";
 
-import { useHostsQuery, usePlatform } from "@/lib/queries";
+import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useApplyTheme } from "@/lib/theme";
 import { HostList } from "@/components/HostList";
@@ -33,6 +34,17 @@ function App() {
   const platform = usePlatform();
   const isMac = platform.data === "macos";
   const selectedAlias = useUiStore((s) => s.selectedAlias);
+  const reload = useLoadConfig();
+  const queryClient = useQueryClient();
+
+  const handleReload = () =>
+    reload.mutate(undefined, {
+      onSuccess: () => {
+        // Re-read everything from disk (in case the file was edited outside SSHelter).
+        queryClient.invalidateQueries({ queryKey: ["config"] });
+        toast.success("Reloaded from disk");
+      },
+    });
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
 
@@ -74,6 +86,22 @@ function App() {
           </div>
 
           <div className="ml-auto flex items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  aria-label="Reload from disk"
+                  onClick={handleReload}
+                  disabled={reload.isPending}
+                >
+                  <RotateCw className={cn("size-4", reload.isPending && "animate-spin")} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Reload from disk</TooltipContent>
+            </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
