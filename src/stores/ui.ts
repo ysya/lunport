@@ -5,6 +5,23 @@ export type Theme = "light" | "dark";
 /** localStorage key for the persisted theme preference. */
 export const THEME_STORAGE_KEY = "sshelter-theme";
 
+/** localStorage key for the persisted preferred-terminal id. */
+export const TERMINAL_STORAGE_KEY = "sshelter-terminal";
+
+/**
+ * Resolve the initial terminal preference from localStorage. `null` means
+ * "system default / first detected" — also the stored sentinel for default.
+ */
+function initialTerminalId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const stored = window.localStorage.getItem(TERMINAL_STORAGE_KEY);
+    return stored && stored.length > 0 ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Resolve the initial theme without importing theme.ts (avoids an import cycle):
  * persisted preference first, then the OS preference, defaulting to dark.
@@ -34,6 +51,15 @@ interface UiState {
   /** Full source_file paths of collapsed sidebar groups (in-memory only). */
   collapsedGroups: string[];
   toggleGroup: (file: string) => void;
+  /**
+   * Preferred terminal id to launch connections into (null = system default /
+   * first detected). Persisted to localStorage. Passed as `terminalOverride`.
+   */
+  terminalId: string | null;
+  setTerminalId: (id: string | null) => void;
+  /** Whether the "New host" dialog is open (driven by the command palette + toolbar). */
+  addHostOpen: boolean;
+  setAddHostOpen: (open: boolean) => void;
 }
 
 /** 只放 UI 狀態，永不鏡像後端資料（後端資料由 TanStack Query 持有）。 */
@@ -52,4 +78,16 @@ export const useUiStore = create<UiState>((set) => ({
         ? s.collapsedGroups.filter((f) => f !== file)
         : [...s.collapsedGroups, file],
     })),
+  terminalId: initialTerminalId(),
+  setTerminalId: (terminalId) => {
+    try {
+      if (terminalId) window.localStorage.setItem(TERMINAL_STORAGE_KEY, terminalId);
+      else window.localStorage.removeItem(TERMINAL_STORAGE_KEY);
+    } catch {
+      // localStorage may be unavailable (private mode etc.) — preference stays in-memory.
+    }
+    set({ terminalId });
+  },
+  addHostOpen: false,
+  setAddHostOpen: (addHostOpen) => set({ addHostOpen }),
 }));

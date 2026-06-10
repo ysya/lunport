@@ -1,14 +1,15 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Moon, RotateCw, Sun, Terminal, ServerCog } from "lucide-react";
+import { Moon, RotateCw, Sun, Terminal, TerminalSquare, ServerCog } from "lucide-react";
 
-import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
+import { useHostsQuery, usePlatform, useLoadConfig, useTerminals } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useApplyTheme } from "@/lib/theme";
 import { HostList } from "@/components/HostList";
 import { HostEditor } from "@/components/HostEditor";
 import { AddHostDialog } from "@/components/AddHostDialog";
+import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,15 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 /**
  * App shell: master-detail layout. The left pane is the host list; the right
@@ -47,6 +57,12 @@ function App() {
     });
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
+  const terminals = useTerminals();
+  const terminalId = useUiStore((s) => s.terminalId);
+  const setTerminalId = useUiStore((s) => s.setTerminalId);
+  // Radix radio values must be non-empty strings; map the "system default"
+  // choice to a sentinel that round-trips back to `null`.
+  const TERMINAL_DEFAULT = "__default__";
 
   useEffect(() => {
     if (isError) {
@@ -123,6 +139,45 @@ function App() {
                 {theme === "dark" ? "Light mode" : "Dark mode"}
               </TooltipContent>
             </Tooltip>
+
+            <DropdownMenu>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      aria-label="Terminal"
+                    >
+                      <TerminalSquare className="size-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent>Terminal</TooltipContent>
+              </Tooltip>
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuLabel>Launch in</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuRadioGroup
+                  value={terminalId ?? TERMINAL_DEFAULT}
+                  onValueChange={(v) =>
+                    setTerminalId(v === TERMINAL_DEFAULT ? null : v)
+                  }
+                >
+                  <DropdownMenuRadioItem value={TERMINAL_DEFAULT}>
+                    System default
+                  </DropdownMenuRadioItem>
+                  {(terminals.data ?? []).map((t) => (
+                    <DropdownMenuRadioItem key={t.id} value={t.id}>
+                      {t.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <AddHostDialog />
           </div>
         </header>
@@ -152,6 +207,7 @@ function App() {
           </main>
         </div>
 
+        <CommandPalette />
         <Toaster />
       </div>
     </TooltipProvider>

@@ -42,7 +42,15 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
   const addHost = useAddHost();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
 
-  const [open, setOpen] = useState(false);
+  // The toolbar (icon) instance — always mounted — owns the store-driven open
+  // flag so the command palette's "New host" action can open it. The labeled
+  // empty-state instance keeps purely-local state to avoid two dialogs sharing
+  // one flag (both are mounted when there are zero hosts).
+  const storeOpen = useUiStore((s) => s.addHostOpen);
+  const setStoreOpen = useUiStore((s) => s.setAddHostOpen);
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = variant === "icon" ? storeOpen : localOpen;
+  const setOpen = variant === "icon" ? setStoreOpen : setLocalOpen;
   const [targetFile, setTargetFile] = useState<string>("");
   const [alias, setAlias] = useState("");
   const [hostName, setHostName] = useState("");

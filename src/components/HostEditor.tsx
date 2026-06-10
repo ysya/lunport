@@ -10,7 +10,7 @@ import {
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Trash2, Plus, MoreVertical, RotateCcw, Save, Copy, Check } from "lucide-react";
+import { Trash2, Plus, MoreVertical, RotateCcw, Save, Copy, Check, TerminalSquare } from "lucide-react";
 
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostOption } from "@/bindings/HostOption";
@@ -27,6 +27,7 @@ import {
   useSetTags,
   useSetOptionEnabled,
   useRemoveHost,
+  useConnect,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { basename, cn } from "@/lib/utils";
@@ -116,7 +117,9 @@ export function HostEditor({ alias }: HostEditorProps) {
   const setTags = useSetTags();
   const setOptionEnabled = useSetOptionEnabled();
   const removeHost = useRemoveHost();
+  const connect = useConnect();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
+  const terminalId = useUiStore((s) => s.terminalId);
 
   if (isLoading) {
     return <HostEditorSkeleton />;
@@ -165,6 +168,10 @@ export function HostEditor({ alias }: HostEditorProps) {
         )
       }
       removing={removeHost.isPending}
+      onConnect={() =>
+        connect.mutate({ alias: detail.alias, terminalOverride: terminalId })
+      }
+      connecting={connect.isPending}
     />
   );
 }
@@ -174,10 +181,12 @@ interface HostEditorFormProps {
   isMac: boolean;
   saving: boolean;
   removing: boolean;
+  connecting: boolean;
   onSave: (changes: ReturnType<typeof computeChanges>) => void;
   onSetTags: (tags: string[]) => void;
   onEnableOption: (keyword: string) => void;
   onRemove: () => void;
+  onConnect: () => void;
 }
 
 function HostEditorForm({
@@ -185,10 +194,12 @@ function HostEditorForm({
   isMac,
   saving,
   removing,
+  connecting,
   onSave,
   onSetTags,
   onEnableOption,
   onRemove,
+  onConnect,
 }: HostEditorFormProps) {
   const enabledOpts = useMemo(
     () => detail.options.filter((o) => o.enabled),
@@ -273,7 +284,18 @@ function HostEditorForm({
           </div>
         </div>
 
-        <AlertDialog>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button
+            type="button"
+            size="sm"
+            className="h-7"
+            onClick={onConnect}
+            disabled={connecting}
+          >
+            <TerminalSquare className="size-4" /> Connect
+          </Button>
+
+          <AlertDialog>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -317,7 +339,8 @@ function HostEditorForm({
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
-        </AlertDialog>
+          </AlertDialog>
+        </div>
       </div>
 
       {/*

@@ -10,6 +10,7 @@ import type { LoadResult } from "@/bindings/LoadResult";
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
 import type { DriftInfo } from "@/bindings/DriftInfo";
+import type { TerminalInfo } from "@/bindings/TerminalInfo";
 
 /**
  * Centralized query keys. The hosts list is the canonical cache: both
@@ -182,6 +183,41 @@ export function useReorderHosts() {
       queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
     },
     onError: (e) => toast.error("Failed to reorder hosts", { description: errMessage(e) }),
+  });
+}
+
+/**
+ * The terminal emulators we can launch a connection into. Detected once per
+ * session (the installed set doesn't change while the app runs) → cached
+ * indefinitely. The toolbar picker reads this; an empty list means "system
+ * default only".
+ */
+export function useTerminals() {
+  return useQuery<TerminalInfo[]>({
+    queryKey: ["terminals"],
+    queryFn: () => tauriInvoke<TerminalInfo[]>("connect_list_terminals"),
+    staleTime: Infinity,
+  });
+}
+
+/**
+ * Launch an SSH connection to a host in a terminal. `terminalOverride` is the
+ * preferred terminal id (or `null` for the system default / first detected).
+ * Backend rejects unknown aliases — surfaced as an error toast.
+ */
+export function useConnect() {
+  return useMutation<
+    void,
+    unknown,
+    { alias: string; terminalOverride?: string | null }
+  >({
+    mutationFn: ({ alias, terminalOverride }) =>
+      tauriInvoke<void>("connect_launch", {
+        alias,
+        terminalOverride: terminalOverride ?? null,
+      }),
+    onSuccess: (_data, { alias }) => toast.success(`Launching ${alias}…`),
+    onError: (e) => toast.error("Could not connect", { description: errMessage(e) }),
   });
 }
 

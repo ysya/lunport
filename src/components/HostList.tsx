@@ -1,10 +1,12 @@
 import { useMemo } from "react";
-import { Search, ServerOff, Server, Globe, ChevronRight } from "lucide-react";
+import { Search, ServerOff, Server, Globe, ChevronRight, Play } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
 import { useUiStore } from "@/stores/ui";
+import { useConnect } from "@/lib/queries";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AddHostDialog } from "@/components/AddHostDialog";
@@ -98,6 +100,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
   const collapsedGroups = useUiStore((s) => s.collapsedGroups);
   const toggleGroup = useUiStore((s) => s.toggleGroup);
+  const terminalId = useUiStore((s) => s.terminalId);
+  const connect = useConnect();
 
   const grouped = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -201,7 +205,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                     return (
                       <li
                         key={`${host.source_file}::${host.alias}`}
-                        className="animate-row-enter"
+                        className="animate-row-enter group/row relative"
                         style={{ animationDelay: delay }}
                       >
                         {/*
@@ -215,7 +219,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                           onClick={() => setSelectedAlias(host.alias)}
                           aria-current={active ? "true" : undefined}
                           className={cn(
-                            "group flex w-full items-start gap-2 rounded-[6px] px-2 py-1.5 text-left transition-colors duration-100 select-none",
+                            "group flex w-full items-start gap-2 rounded-[6px] py-1.5 pr-9 pl-2 text-left transition-colors duration-100 select-none",
                             "hover:bg-muted/70 focus-visible:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
                             active && "bg-primary/12 hover:bg-primary/15",
                           )}
@@ -252,6 +256,26 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                             )}
                           </span>
                         </button>
+                        {/*
+                         * Connect affordance — overlays the row's right edge,
+                         * hidden until the row is hovered/focused (or the button
+                         * itself is focused for keyboard users). Stops propagation
+                         * so it never also selects the row.
+                         */}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Connect to ${host.alias}`}
+                          title={`Connect to ${host.alias}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            connect.mutate({ alias: host.alias, terminalOverride: terminalId });
+                          }}
+                          className="absolute top-1/2 right-1.5 size-6 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+                        >
+                          <Play className="size-3.5" />
+                        </Button>
                       </li>
                     );
                   })}
