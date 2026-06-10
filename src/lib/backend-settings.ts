@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { tauriInvoke } from "@/lib/ipc";
+import { checkForUpdates } from "@/lib/updater";
 import { useSettingsStore } from "@/stores/settings";
 
 /**
@@ -17,7 +18,8 @@ export function useSyncBackendSettings(): void {
     if (fired.current) return; // StrictMode double-mount guard
     fired.current = true;
 
-    const { trayVisible, closeToTray, backupRetention } = useSettingsStore.getState();
+    const { trayVisible, closeToTray, backupRetention, autoCheckUpdates } =
+      useSettingsStore.getState();
     const warn = (cmd: string) => (e: unknown) =>
       console.warn(`[settings] startup sync: ${cmd} failed:`, e);
 
@@ -30,5 +32,11 @@ export function useSyncBackendSettings(): void {
     tauriInvoke<void>("config_set_backup_retention", { limit: backupRetention }).catch(
       warn("config_set_backup_retention"),
     );
+
+    // Update check waits a few seconds so launch stays snappy; silent = no
+    // nagging in dev builds or offline.
+    if (autoCheckUpdates) {
+      window.setTimeout(() => void checkForUpdates({ silent: true }), 5_000);
+    }
   }, []);
 }

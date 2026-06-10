@@ -2,12 +2,16 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Least-privilege capability for SSHelter's main window. The WebView gets NO filesystem and NO shell-exec permission; all privileged IO/exec happens in Rust commands. This is the security boundary.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "opener:default",
     "os:default",
     "core:window:allow-start-dragging",
-    "core:window:allow-internal-toggle-maximize"
+    "core:window:allow-internal-toggle-maximize",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

@@ -21,6 +21,7 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **Host discovery** — surface candidate hosts from `known_hosts` and your Tailscale network.
 - **Backup history & restore** — every write is snapshotted; browse and restore prior versions (restore is itself backed up first and validated against managed paths).
 - **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), menu bar icon & close-to-tray, default terminal + new-tab launch (iTerm2), custom config path, backup retention, discovery sources, drift auto-check, and per-rule lint toggles.
+- **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings.
 
 ## Status
 

@@ -55,6 +55,9 @@ interface SettingsState {
    */
   terminalId: string | null;
   setTerminalId: (id: string | null) => void;
+  /** Check GitHub Releases for a newer build shortly after launch. */
+  autoCheckUpdates: boolean;
+  setAutoCheckUpdates: (enabled: boolean) => void;
   /** Show the menu-bar (tray) icon. Mirrored to the backend via `tray_set_visible`. */
   trayVisible: boolean;
   setTrayVisible: (visible: boolean) => void;
@@ -101,6 +104,8 @@ export const useSettingsStore = create<SettingsState>()(
         })),
       terminalId: legacyTerminalId(),
       setTerminalId: (terminalId) => set({ terminalId }),
+      autoCheckUpdates: true,
+      setAutoCheckUpdates: (autoCheckUpdates) => set({ autoCheckUpdates }),
       trayVisible: true,
       setTrayVisible: (trayVisible) => set({ trayVisible }),
       closeToTray: false,

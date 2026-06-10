@@ -13,10 +13,13 @@ import {
   TerminalSquare,
 } from "lucide-react";
 
+import { getVersion } from "@tauri-apps/api/app";
+
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { useLoadConfig, useTerminals } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
+import { checkForUpdates } from "@/lib/updater";
 import {
   LINT_RULES,
   terminalSupportsNewTab,
@@ -143,6 +146,23 @@ function GeneralPane() {
   const setTrayVisible = useSettingsStore((s) => s.setTrayVisible);
   const closeToTray = useSettingsStore((s) => s.closeToTray);
   const setCloseToTray = useSettingsStore((s) => s.setCloseToTray);
+  const autoCheckUpdates = useSettingsStore((s) => s.autoCheckUpdates);
+  const setAutoCheckUpdates = useSettingsStore((s) => s.setAutoCheckUpdates);
+  const [checking, setChecking] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion(null));
+  }, []);
+
+  const onCheckNow = async () => {
+    setChecking(true);
+    try {
+      await checkForUpdates({ silent: false });
+    } finally {
+      setChecking(false);
+    }
+  };
 
   const onTray = (visible: boolean) => {
     setTrayVisible(visible);
@@ -173,6 +193,37 @@ function GeneralPane() {
               checked={closeToTray}
               onCheckedChange={onCloseToTray}
             />
+          </SettingsRow>
+        </SettingsGroup>
+      </Section>
+
+      <Section title="Updates">
+        <SettingsGroup>
+          <SettingsRow
+            id="set-auto-update"
+            label="Check for updates automatically"
+            description="Checks GitHub Releases shortly after launch."
+          >
+            <Switch
+              id="set-auto-update"
+              checked={autoCheckUpdates}
+              onCheckedChange={setAutoCheckUpdates}
+            />
+          </SettingsRow>
+          <SettingsRow
+            label="Version"
+            description={appVersion ? `SSHelter ${appVersion}` : undefined}
+          >
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7"
+              onClick={onCheckNow}
+              disabled={checking}
+            >
+              {checking ? "Checking…" : "Check now"}
+            </Button>
           </SettingsRow>
         </SettingsGroup>
       </Section>

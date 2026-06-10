@@ -32,9 +32,16 @@ fn app_set_close_to_tray(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_process::init());
+    // The updater plugin is desktop-only (the crate is a desktop-target dependency).
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder
         .manage(state::AppState::default())
         .setup(|app| {
             tray::rebuild_tray(app.handle(), &[])?;
