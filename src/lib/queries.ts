@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { tauriInvoke } from "@/lib/ipc";
+import { useSettingsStore } from "@/stores/settings";
 import type { LoadResult } from "@/bindings/LoadResult";
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
@@ -59,7 +60,14 @@ export function useHostsQuery(
 ) {
   return useQuery<LoadResult>({
     queryKey: queryKeys.hosts,
-    queryFn: () => tauriInvoke<LoadResult>("config_load"),
+    // Read the persisted config path at FETCH time (not render time) so a
+    // plain invalidation of ["config"] always reloads from the current
+    // preference. The key stays stable because this cache entry is also primed
+    // imperatively by `useLoadConfig`.
+    queryFn: () => {
+      const path = useSettingsStore.getState().configPath;
+      return tauriInvoke<LoadResult>("config_load", path ? { path } : undefined);
+    },
     ...options,
   });
 }
@@ -70,9 +78,18 @@ export function useHostsQuery(
  */
 export function useLoadConfig() {
   const queryClient = useQueryClient();
-  return useMutation<LoadResult, unknown, string | undefined>({
-    mutationFn: (path) =>
-      tauriInvoke<LoadResult>("config_load", path ? { path } : undefined),
+  return useMutation<LoadResult, unknown, string | null | undefined>({
+    // `undefined` = "use the persisted configPath preference" (toolbar reload),
+    // `null` = "explicitly the default ~/.ssh/config" (Settings clearing the
+    // path), a string = that exact path (Settings applying a new one).
+    mutationFn: (path) => {
+      const effective =
+        path === undefined ? useSettingsStore.getState().configPath : path;
+      return tauriInvoke<LoadResult>(
+        "config_load",
+        effective ? { path: effective } : undefined,
+      );
+    },
     onSuccess: (data) => {
       queryClient.setQueryData<LoadResult>(queryKeys.hosts, data);
       queryClient.setQueryData<string[]>(queryKeys.files, data.files);
@@ -220,12 +237,15 @@ export function useConnect() {
   return useMutation<
     void,
     unknown,
-    { alias: string; terminalOverride?: string | null }
+    { alias: string; terminalOverride?: string | null; newTab?: boolean | null }
   >({
-    mutationFn: ({ alias, terminalOverride }) =>
+    mutationFn: ({ alias, terminalOverride, newTab }) =>
       tauriInvoke<void>("connect_launch", {
         alias,
         terminalOverride: terminalOverride ?? null,
+        // Only honored by terminals with `supports_new_tab` — callers gate via
+        // `effectiveNewTab()` so this is false for unsupported terminals.
+        newTab: newTab ?? null,
       }),
     onSuccess: (_data, { alias }) => toast.success(`Launching ${alias}…`),
     onError: (e) => toast.error("Could not connect", { description: errMessage(e) }),

@@ -10,6 +10,8 @@ import {
 import type { LintIssue } from "@/bindings/LintIssue";
 import { useLint } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
+import { useSettingsStore } from "@/stores/settings";
+import { filterLintIssues } from "@/lib/settings-logic";
 import { basename, cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -45,7 +47,12 @@ function severityIcon(sev: string) {
 export function LintDialog() {
   const [open, setOpen] = useState(false);
   const { data } = useLint();
-  const issues = data ?? [];
+  const lintRules = useSettingsStore((s) => s.lintRules);
+  // Both the dialog AND the toolbar badge count only enabled rules.
+  const issues = useMemo(
+    () => filterLintIssues(data ?? [], lintRules),
+    [data, lintRules],
+  );
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
 
   const errorCount = issues.filter((i) => i.severity === "error").length;

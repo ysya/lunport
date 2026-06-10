@@ -16,8 +16,11 @@ import {
   useHostsQuery,
   useConnect,
   useLoadConfig,
+  useTerminals,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
+import { useSettingsStore } from "@/stores/settings";
+import { effectiveNewTab } from "@/lib/settings-logic";
 
 import {
   Command,
@@ -56,11 +59,13 @@ export function CommandPalette() {
   const reload = useLoadConfig();
   const queryClient = useQueryClient();
 
-  const terminalId = useUiStore((s) => s.terminalId);
+  const terminalId = useSettingsStore((s) => s.terminalId);
+  const newTabConnect = useSettingsStore((s) => s.newTabConnect);
+  const toggleTheme = useSettingsStore((s) => s.toggleTheme);
+  const terminals = useTerminals();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
   const setAddHostOpen = useUiStore((s) => s.setAddHostOpen);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
-  const toggleTheme = useUiStore((s) => s.toggleTheme);
 
   // Global ⌘K / Ctrl+K toggle.
   useEffect(() => {
@@ -76,10 +81,14 @@ export function CommandPalette() {
 
   const doConnect = useCallback(
     (alias: string) => {
-      connect.mutate({ alias, terminalOverride: terminalId });
+      connect.mutate({
+        alias,
+        terminalOverride: terminalId,
+        newTab: effectiveNewTab(newTabConnect, terminalId, terminals.data ?? []),
+      });
       setOpen(false);
     },
-    [connect, terminalId],
+    [connect, terminalId, newTabConnect, terminals.data],
   );
 
   const doEdit = useCallback(

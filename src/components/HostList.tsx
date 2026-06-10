@@ -3,7 +3,9 @@ import { Search, ServerOff, Server, Globe, ChevronRight, Play } from "lucide-rea
 
 import type { HostSummary } from "@/bindings/HostSummary";
 import { useUiStore } from "@/stores/ui";
-import { useConnect } from "@/lib/queries";
+import { useConnect, useTerminals } from "@/lib/queries";
+import { useSettingsStore } from "@/stores/settings";
+import { effectiveNewTab } from "@/lib/settings-logic";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -62,7 +64,9 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
   const collapsedGroups = useUiStore((s) => s.collapsedGroups);
   const toggleGroup = useUiStore((s) => s.toggleGroup);
-  const terminalId = useUiStore((s) => s.terminalId);
+  const terminalId = useSettingsStore((s) => s.terminalId);
+  const newTabConnect = useSettingsStore((s) => s.newTabConnect);
+  const terminals = useTerminals();
   const connect = useConnect();
 
   const grouped = useMemo(() => {
@@ -232,7 +236,11 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                           title={`Connect to ${host.alias}`}
                           onClick={(e) => {
                             e.stopPropagation();
-                            connect.mutate({ alias: host.alias, terminalOverride: terminalId });
+                            connect.mutate({
+                              alias: host.alias,
+                              terminalOverride: terminalId,
+                              newTab: effectiveNewTab(newTabConnect, terminalId, terminals.data ?? []),
+                            });
                           }}
                           className="absolute top-1/2 right-1.5 size-6 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
                         >

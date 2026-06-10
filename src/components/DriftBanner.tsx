@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { RefreshCw, TriangleAlert } from "lucide-react";
 
 import { useDrift, useLoadConfig, queryKeys } from "@/lib/queries";
+import { useSettingsStore } from "@/stores/settings";
 import { Button } from "@/components/ui/button";
 import { basename } from "@/lib/utils";
 
@@ -14,7 +15,13 @@ import { basename } from "@/lib/utils";
  */
 export function DriftBanner() {
   const queryClient = useQueryClient();
-  const { data } = useDrift({ enabled: true });
+  const driftAutoCheck = useSettingsStore((s) => s.driftAutoCheck);
+  const driftIntervalSec = useSettingsStore((s) => s.driftIntervalSec);
+  const { data } = useDrift({
+    enabled: true,
+    // Opt-in polling on top of the always-on focus re-check below.
+    refetchInterval: driftAutoCheck ? driftIntervalSec * 1000 : undefined,
+  });
   const loadConfig = useLoadConfig();
 
   // Re-check drift when the window regains focus.

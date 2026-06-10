@@ -28,8 +28,11 @@ import {
   useSetOptionEnabled,
   useRemoveHost,
   useConnect,
+  useTerminals,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
+import { useSettingsStore } from "@/stores/settings";
+import { effectiveNewTab } from "@/lib/settings-logic";
 import { basename, cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -121,7 +124,9 @@ export function HostEditor({ alias }: HostEditorProps) {
   const removeHost = useRemoveHost();
   const connect = useConnect();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
-  const terminalId = useUiStore((s) => s.terminalId);
+  const terminalId = useSettingsStore((s) => s.terminalId);
+  const newTabConnect = useSettingsStore((s) => s.newTabConnect);
+  const terminals = useTerminals();
 
   if (isLoading) {
     return <HostEditorSkeleton />;
@@ -171,7 +176,11 @@ export function HostEditor({ alias }: HostEditorProps) {
       }
       removing={removeHost.isPending}
       onConnect={() =>
-        connect.mutate({ alias: detail.alias, terminalOverride: terminalId })
+        connect.mutate({
+          alias: detail.alias,
+          terminalOverride: terminalId,
+          newTab: effectiveNewTab(newTabConnect, terminalId, terminals.data ?? []),
+        })
       }
       connecting={connect.isPending}
     />

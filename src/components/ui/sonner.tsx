@@ -1,10 +1,11 @@
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon } from "lucide-react"
-import { useUiStore } from "@/stores/ui"
+import { useSettingsStore } from "@/stores/settings"
 
 const Toaster = ({ ...props }: ToasterProps) => {
-  // Theme is owned by the app's Zustand store (not next-themes).
-  const theme = useUiStore((s) => s.theme)
+  // Theme preference is owned by the settings store (not next-themes).
+  // Sonner natively understands "system" | "light" | "dark".
+  const theme = useSettingsStore((s) => s.theme)
 
   return (
     <Sonner

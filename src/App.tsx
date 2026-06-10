@@ -6,6 +6,7 @@ import { RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
 import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useApplyTheme } from "@/lib/theme";
+import { useSyncBackendSettings } from "@/lib/backend-settings";
 import { HostList } from "@/components/HostList";
 import { HostEditor } from "@/components/HostEditor";
 import { AddHostDialog } from "@/components/AddHostDialog";
@@ -34,6 +35,8 @@ import {
  */
 function App() {
   useApplyTheme();
+  // Re-send persisted tray/close-to-tray/retention prefs (backend resets each launch).
+  useSyncBackendSettings();
 
   const { data, isLoading, isError, error } = useHostsQuery();
   const platform = usePlatform();

@@ -3,6 +3,7 @@ import { Telescope, FileKey, Network } from "lucide-react";
 
 import type { Suggestion } from "@/bindings/Suggestion";
 import { useDiscoverHosts } from "@/lib/queries";
+import { useSettingsStore } from "@/stores/settings";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -30,7 +31,17 @@ export function DiscoverDialog() {
   const [open, setOpen] = useState(false);
   // Lazy: only shell out to discover when the dialog is open.
   const { data, isLoading, isFetching } = useDiscoverHosts({ enabled: open });
-  const suggestions = data ?? [];
+  const discoverKnownHosts = useSettingsStore((s) => s.discoverKnownHosts);
+  const discoverTailscale = useSettingsStore((s) => s.discoverTailscale);
+  const allSourcesOff = !discoverKnownHosts && !discoverTailscale;
+  // Hide suggestions from disabled sources; unknown sources stay visible.
+  const suggestions = (data ?? []).filter((s) =>
+    s.source === "known_hosts"
+      ? discoverKnownHosts
+      : s.source === "tailscale"
+        ? discoverTailscale
+        : true,
+  );
 
   const grouped = useMemo(() => {
     const map = new Map<string, Suggestion[]>();
@@ -70,7 +81,11 @@ export function DiscoverDialog() {
           </DialogDescription>
         </DialogHeader>
 
-        {isLoading || isFetching ? (
+        {allSourcesOff ? (
+          <p className="py-6 text-center text-sm text-muted-foreground select-none">
+            All discovery sources are disabled. Enable them in Settings → Advanced.
+          </p>
+        ) : isLoading || isFetching ? (
           <p className="py-6 text-center text-sm text-muted-foreground select-none">
             Scanning…
           </p>
