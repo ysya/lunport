@@ -79,6 +79,33 @@ pub fn rebuild_tray(app: &tauri::AppHandle, aliases: &[String]) -> tauri::Result
         tray_builder.build(app)?;
     }
 
+    // Re-apply the desired visibility so a rebuild never resurrects a hidden tray.
+    let visible = app
+        .state::<crate::state::AppState>()
+        .tray_visible
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_visible(visible)?;
+    }
+
+    Ok(())
+}
+
+/// Show or hide the menubar tray icon. The desired state is stored in AppState so
+/// `rebuild_tray` (e.g. on config reload) keeps honoring it.
+#[tauri::command]
+pub fn tray_set_visible(
+    app: tauri::AppHandle,
+    state: tauri::State<crate::state::AppState>,
+    visible: bool,
+) -> Result<(), crate::error::AppError> {
+    state
+        .tray_visible
+        .store(visible, std::sync::atomic::Ordering::Relaxed);
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_visible(visible)
+            .map_err(|e| crate::error::AppError::Other(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -120,7 +147,7 @@ fn quick_connect(app: &tauri::AppHandle, alias: &str) -> Result<(), crate::error
         .next()
         .ok_or_else(|| AppError::Other("no terminal found".to_string()))?;
 
-    let spec = crate::connect::build_launch(&terminal.id, alias)?;
+    let spec = crate::connect::build_launch(&terminal.id, alias, false)?;
     crate::connect::launch(&spec)
 }
 

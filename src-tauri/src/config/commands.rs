@@ -86,11 +86,14 @@ pub fn apply_changes(
 }
 
 /// Serialize file `idx`, back it up once (tracked in `backed_up`), atomic-write at 0o600, and
-/// refresh its in-memory fingerprint.
+/// refresh its in-memory fingerprint. `retention` = how many `.bak` snapshots to keep next to the
+/// file (None = unlimited); old ones are pruned right after a successful backup, and a prune
+/// failure never fails the save.
 pub fn persist_file(
     doc: &mut crate::config::model::SshConfigDoc,
     idx: usize,
     backed_up: &mut HashSet<PathBuf>,
+    retention: Option<usize>,
 ) -> Result<(), AppError> {
     let path = doc.files[idx].path.clone();
 
@@ -112,6 +115,11 @@ pub fn persist_file(
     if !backed_up.contains(&path) {
         fsutil::backup(&path)?;
         backed_up.insert(path.clone());
+        if let Some(keep) = retention {
+            if let Err(e) = fsutil::prune_backups(&path, keep) {
+                eprintln!("[backup] prune failed for {}: {e}", path.display());
+            }
+        }
     }
 
     fsutil::atomic_write(&path, text.as_bytes(), 0o600)?;
@@ -300,12 +308,13 @@ pub fn config_save_host(
 ) -> Result<Option<HostDetail>, AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
     let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
 
     match doc_lock.as_mut() {
         None => Err(AppError::Other("no config loaded".to_string())),
         Some(doc) => {
             let idx = apply_changes(doc, &alias, &changes)?;
-            persist_file(doc, idx, &mut backed_up_lock)?;
+            persist_file(doc, idx, &mut backed_up_lock, retention)?;
             Ok(host_detail(doc, &alias))
         }
     }
@@ -320,6 +329,7 @@ pub fn config_add_host(
 ) -> Result<(), AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
     let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
 
     match doc_lock.as_mut() {
         None => Err(AppError::Other("no config loaded".to_string())),
@@ -335,7 +345,7 @@ pub fn config_add_host(
                 .map(|c| (c.keyword.clone(), c.value.clone()))
                 .collect();
             edit::add_host(&mut doc.files[idx].items, &alias, &kv);
-            persist_file(doc, idx, &mut backed_up_lock)
+            persist_file(doc, idx, &mut backed_up_lock, retention)
         }
     }
 }
@@ -347,6 +357,7 @@ pub fn config_remove_host(
 ) -> Result<bool, AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
     let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
 
     match doc_lock.as_mut() {
         None => Err(AppError::Other("no config loaded".to_string())),
@@ -354,7 +365,7 @@ pub fn config_remove_host(
             let idx = find_host_file_index(doc, &alias)
                 .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
             let removed = edit::remove_host(&mut doc.files[idx].items, &alias);
-            persist_file(doc, idx, &mut backed_up_lock)?;
+            persist_file(doc, idx, &mut backed_up_lock, retention)?;
             Ok(removed)
         }
     }
@@ -369,6 +380,7 @@ pub fn config_set_option_enabled(
 ) -> Result<(), AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
     let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
 
     match doc_lock.as_mut() {
         None => Err(AppError::Other("no config loaded".to_string())),
@@ -390,7 +402,7 @@ pub fn config_set_option_enabled(
             }).ok_or_else(|| AppError::NotFound(format!("keyword '{}' not found in host '{}'", keyword, alias)))?;
 
             edit::set_directive_enabled(directive, enabled);
-            persist_file(doc, idx, &mut backed_up_lock)
+            persist_file(doc, idx, &mut backed_up_lock, retention)
         }
     }
 }
@@ -403,6 +415,7 @@ pub fn config_set_tags(
 ) -> Result<(), AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
     let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
 
     match doc_lock.as_mut() {
         None => Err(AppError::Other("no config loaded".to_string())),
@@ -414,7 +427,7 @@ pub fn config_set_tags(
                 .ok_or_else(|| AppError::NotFound(format!("host '{}' not found in file", alias)))?;
 
             edit::set_tags(host, &tags);
-            persist_file(doc, idx, &mut backed_up_lock)
+            persist_file(doc, idx, &mut backed_up_lock, retention)
         }
     }
 }
@@ -427,6 +440,7 @@ pub fn config_reorder_hosts(
 ) -> Result<(), AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
     let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
 
     match doc_lock.as_mut() {
         None => Err(AppError::Other("no config loaded".to_string())),
@@ -438,9 +452,18 @@ pub fn config_reorder_hosts(
                 .ok_or_else(|| AppError::NotFound(format!("file '{}' not found", file)))?;
 
             edit::reorder_hosts(&mut doc.files[idx].items, &order);
-            persist_file(doc, idx, &mut backed_up_lock)
+            persist_file(doc, idx, &mut backed_up_lock, retention)
         }
     }
+}
+
+#[tauri::command]
+pub fn config_set_backup_retention(
+    state: State<AppState>,
+    limit: Option<u32>,
+) -> Result<(), AppError> {
+    *state.backup_retention.lock().unwrap() = limit.map(|v| v as usize);
+    Ok(())
 }
 
 #[tauri::command]
@@ -495,6 +518,12 @@ pub fn config_restore_backup(
     // 3. Snapshot the CURRENT state first (so the restore is itself undoable), then overwrite the
     //    managed target with the backup bytes.
     fsutil::backup(&target)?;
+    let retention = *state.backup_retention.lock().unwrap();
+    if let Some(keep) = retention {
+        if let Err(e) = fsutil::prune_backups(&target, keep) {
+            eprintln!("[backup] prune failed for {}: {e}", target.display());
+        }
+    }
     let bytes = std::fs::read(&backup_path)?;
     fsutil::atomic_write(&target, &bytes, 0o600)?;
 
@@ -546,7 +575,7 @@ mod tests {
         assert_eq!(idx, 0);
 
         let mut backed_up: HashSet<PathBuf> = HashSet::new();
-        persist_file(&mut doc, idx, &mut backed_up).expect("persist_file ok");
+        persist_file(&mut doc, idx, &mut backed_up, None).expect("persist_file ok");
 
         // Re-read from disk.
         let on_disk = std::fs::read_to_string(&config_path).unwrap();
@@ -574,7 +603,7 @@ mod tests {
         std::fs::write(&config_path, "Host web\n    User externally_changed\n").unwrap();
 
         // A persist must now REFUSE (Conflict), not clobber the external edit.
-        let res = persist_file(&mut doc, 0, &mut backed_up);
+        let res = persist_file(&mut doc, 0, &mut backed_up, None);
         assert!(
             matches!(res, Err(AppError::Conflict(_))),
             "expected Conflict, got {res:?}"
@@ -598,7 +627,7 @@ mod tests {
             &[HostFieldChange { keyword: "User".into(), value: "u1".into(), remove: false }],
         )
         .unwrap();
-        persist_file(&mut doc, 0, &mut backed_up).expect("first persist ok");
+        persist_file(&mut doc, 0, &mut backed_up, None).expect("first persist ok");
 
         // Second save against the fingerprint refreshed by the first write — no false conflict.
         apply_changes(
@@ -607,7 +636,7 @@ mod tests {
             &[HostFieldChange { keyword: "User".into(), value: "u2".into(), remove: false }],
         )
         .unwrap();
-        persist_file(&mut doc, 0, &mut backed_up).expect("second persist must succeed");
+        persist_file(&mut doc, 0, &mut backed_up, None).expect("second persist must succeed");
         assert!(std::fs::read_to_string(&config_path).unwrap().contains("User u2"));
     }
 
@@ -674,7 +703,7 @@ mod tests {
         let mut backed_up: HashSet<PathBuf> = HashSet::new();
 
         // First persist.
-        persist_file(&mut doc, 0, &mut backed_up).expect("first persist ok");
+        persist_file(&mut doc, 0, &mut backed_up, None).expect("first persist ok");
         assert!(backed_up.contains(&config_path), "path must be in backed_up after first persist");
 
         let bak_count_after_first = std::fs::read_dir(dir.path())
@@ -685,13 +714,38 @@ mod tests {
         assert_eq!(bak_count_after_first, 1, "one .bak after first persist");
 
         // Second persist — backed_up already contains the path, so no new backup.
-        persist_file(&mut doc, 0, &mut backed_up).expect("second persist ok");
+        persist_file(&mut doc, 0, &mut backed_up, None).expect("second persist ok");
         let bak_count_after_second = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".bak"))
             .count();
         assert_eq!(bak_count_after_second, 1, "still one .bak after second persist");
+    }
+
+    // ── Test 4b: persist_file prunes old backups when retention is set ────────
+    #[test]
+    fn persist_file_prunes_with_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        // Two stale backups from earlier sessions (name-millis far in the past).
+        std::fs::write(dir.path().join("config.100.bak"), b"old1").unwrap();
+        std::fs::write(dir.path().join("config.200.bak"), b"old2").unwrap();
+
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        persist_file(&mut doc, 0, &mut backed_up, Some(1)).expect("persist ok");
+
+        // Only the newest backup (the one just created) survives.
+        let baks: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".bak"))
+            .collect();
+        assert_eq!(baks.len(), 1, "retention 1 keeps only the newest: {baks:?}");
+        assert!(!dir.path().join("config.100.bak").exists());
+        assert!(!dir.path().join("config.200.bak").exists());
     }
 
     // ── Test 5: drift detection ───────────────────────────────────────────────

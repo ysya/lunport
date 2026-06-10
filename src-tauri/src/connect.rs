@@ -16,6 +16,11 @@ use crate::error::AppError;
 pub struct TerminalInfo {
     pub id: String,
     pub label: String,
+    /// Whether this terminal supports opening the connection in a NEW TAB of an existing window.
+    /// Only iTerm2 qualifies: Terminal.app's only new-tab path is System Events GUI scripting,
+    /// which requires the user to grant Accessibility permission — explicitly NOT doing that.
+    /// All Linux emulators are launched as new windows, so they are `false` as well.
+    pub supports_new_tab: bool,
 }
 
 /// A resolved process invocation: program + argv (no shell).
@@ -75,11 +80,14 @@ pub fn detect_terminals() -> Vec<TerminalInfo> {
     let mut out = vec![TerminalInfo {
         id: "terminal".to_string(),
         label: "Terminal".to_string(),
+        // Terminal.app new-tab needs System Events GUI scripting + accessibility permission.
+        supports_new_tab: false,
     }];
     if std::path::Path::new("/Applications/iTerm.app").exists() {
         out.push(TerminalInfo {
             id: "iterm2".to_string(),
             label: "iTerm2".to_string(),
+            supports_new_tab: true,
         });
     }
     out
@@ -99,6 +107,7 @@ pub fn detect_terminals() -> Vec<TerminalInfo> {
             out.push(TerminalInfo {
                 id: "env".to_string(),
                 label: base,
+                supports_new_tab: false,
             });
         }
     }
@@ -120,6 +129,7 @@ pub fn detect_terminals() -> Vec<TerminalInfo> {
             out.push(TerminalInfo {
                 id: bin.to_string(),
                 label: label.to_string(),
+                supports_new_tab: false,
             });
         }
     }
@@ -159,9 +169,11 @@ fn linux_args(id: &str, alias: &str) -> Option<Vec<String>> {
     })
 }
 
-/// Build the platform/terminal-specific argv to open `ssh <alias>` in a NEW terminal window.
+/// Build the platform/terminal-specific argv to open `ssh <alias>` in a NEW terminal window —
+/// or, when `new_tab` is true and the terminal supports it (only iTerm2), a new TAB of the
+/// current window (falling back to a new window when none exists).
 /// PURE function. The alias is assumed pre-validated, but AppleScript strings are still escaped.
-pub fn build_launch(terminal_id: &str, alias: &str) -> Result<LaunchSpec, AppError> {
+pub fn build_launch(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
     match terminal_id {
         "terminal" => {
             let esc = applescript_escape(alias);
@@ -177,17 +189,45 @@ pub fn build_launch(terminal_id: &str, alias: &str) -> Result<LaunchSpec, AppErr
         }
         "iterm2" => {
             let esc = applescript_escape(alias);
-            Ok(LaunchSpec {
-                program: "osascript".into(),
-                args: vec![
-                    "-e".into(),
-                    "tell application \"iTerm2\" to activate".into(),
-                    "-e".into(),
-                    format!(
-                        "tell application \"iTerm2\" to create window with default profile command \"ssh {esc}\""
-                    ),
-                ],
-            })
+            if new_tab {
+                // Multi-statement script as separate `-e` lines (osascript joins them into one
+                // script): tab in the current window, or a new window when none exists.
+                Ok(LaunchSpec {
+                    program: "osascript".into(),
+                    args: vec![
+                        "-e".into(),
+                        "tell application \"iTerm2\"".into(),
+                        "-e".into(),
+                        "activate".into(),
+                        "-e".into(),
+                        "if (count of windows) > 0 then".into(),
+                        "-e".into(),
+                        format!(
+                            "tell current window to create tab with default profile command \"ssh {esc}\""
+                        ),
+                        "-e".into(),
+                        "else".into(),
+                        "-e".into(),
+                        format!("create window with default profile command \"ssh {esc}\""),
+                        "-e".into(),
+                        "end if".into(),
+                        "-e".into(),
+                        "end tell".into(),
+                    ],
+                })
+            } else {
+                Ok(LaunchSpec {
+                    program: "osascript".into(),
+                    args: vec![
+                        "-e".into(),
+                        "tell application \"iTerm2\" to activate".into(),
+                        "-e".into(),
+                        format!(
+                            "tell application \"iTerm2\" to create window with default profile command \"ssh {esc}\""
+                        ),
+                    ],
+                })
+            }
         }
         "env" => {
             // Resolve $TERMINAL basename, then look it up in the Linux table.
@@ -235,6 +275,7 @@ pub fn connect_launch(
     state: tauri::State<crate::state::AppState>,
     alias: String,
     terminal_override: Option<String>,
+    new_tab: Option<bool>,
 ) -> Result<(), AppError> {
     let doc_lock = state.doc.lock().unwrap();
     let doc = doc_lock
@@ -254,7 +295,7 @@ pub fn connect_launch(
         }
     };
 
-    let spec = build_launch(&terminal_id, &alias)?;
+    let spec = build_launch(&terminal_id, &alias, new_tab.unwrap_or(false))?;
     launch(&spec)
 }
 
@@ -322,7 +363,7 @@ mod tests {
 
     #[test]
     fn build_launch_macos_terminal() {
-        let spec = build_launch("terminal", "web").unwrap();
+        let spec = build_launch("terminal", "web", false).unwrap();
         assert_eq!(spec.program, "osascript");
         assert_eq!(
             spec.args,
@@ -338,7 +379,7 @@ mod tests {
     #[test]
     fn build_launch_macos_terminal_escapes_quotes() {
         // Hypothetical quote/backslash in alias must be escaped in the AppleScript literal.
-        let spec = build_launch("terminal", "a\"b\\c").unwrap();
+        let spec = build_launch("terminal", "a\"b\\c", false).unwrap();
         let last = spec.args.last().unwrap();
         assert_eq!(
             last,
@@ -348,7 +389,7 @@ mod tests {
 
     #[test]
     fn build_launch_macos_iterm2() {
-        let spec = build_launch("iterm2", "web").unwrap();
+        let spec = build_launch("iterm2", "web", false).unwrap();
         assert_eq!(spec.program, "osascript");
         assert_eq!(
             spec.args,
@@ -364,49 +405,103 @@ mod tests {
 
     #[test]
     fn build_launch_linux_gnome_terminal() {
-        let spec = build_launch("gnome-terminal", "web").unwrap();
+        let spec = build_launch("gnome-terminal", "web", false).unwrap();
         assert_eq!(spec.program, "gnome-terminal");
         assert_eq!(spec.args, vec!["--", "ssh", "web"]);
     }
 
     #[test]
     fn build_launch_linux_konsole() {
-        let spec = build_launch("konsole", "web").unwrap();
+        let spec = build_launch("konsole", "web", false).unwrap();
         assert_eq!(spec.program, "konsole");
         assert_eq!(spec.args, vec!["-e", "ssh", "web"]);
     }
 
     #[test]
     fn build_launch_linux_kitty() {
-        let spec = build_launch("kitty", "web").unwrap();
+        let spec = build_launch("kitty", "web", false).unwrap();
         assert_eq!(spec.program, "kitty");
         assert_eq!(spec.args, vec!["ssh", "web"]);
     }
 
     #[test]
     fn build_launch_linux_wezterm() {
-        let spec = build_launch("wezterm", "web").unwrap();
+        let spec = build_launch("wezterm", "web", false).unwrap();
         assert_eq!(spec.program, "wezterm");
         assert_eq!(spec.args, vec!["start", "--", "ssh", "web"]);
     }
 
     #[test]
     fn build_launch_linux_xfce4() {
-        let spec = build_launch("xfce4-terminal", "web").unwrap();
+        let spec = build_launch("xfce4-terminal", "web", false).unwrap();
         assert_eq!(spec.program, "xfce4-terminal");
         assert_eq!(spec.args, vec!["-e".to_string(), "ssh web".to_string()]);
     }
 
     #[test]
     fn build_launch_linux_xterm() {
-        let spec = build_launch("xterm", "web").unwrap();
+        let spec = build_launch("xterm", "web", false).unwrap();
         assert_eq!(spec.program, "xterm");
         assert_eq!(spec.args, vec!["-e", "ssh", "web"]);
     }
 
     #[test]
+    fn build_launch_macos_iterm2_new_tab() {
+        let spec = build_launch("iterm2", "web", true).unwrap();
+        assert_eq!(spec.program, "osascript");
+        assert_eq!(
+            spec.args,
+            vec![
+                "-e".to_string(),
+                "tell application \"iTerm2\"".to_string(),
+                "-e".to_string(),
+                "activate".to_string(),
+                "-e".to_string(),
+                "if (count of windows) > 0 then".to_string(),
+                "-e".to_string(),
+                "tell current window to create tab with default profile command \"ssh web\""
+                    .to_string(),
+                "-e".to_string(),
+                "else".to_string(),
+                "-e".to_string(),
+                "create window with default profile command \"ssh web\"".to_string(),
+                "-e".to_string(),
+                "end if".to_string(),
+                "-e".to_string(),
+                "end tell".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_launch_new_tab_is_noop_for_other_terminals() {
+        // Only iTerm2 honors new_tab; everything else launches a new window either way.
+        assert_eq!(
+            build_launch("terminal", "web", true).unwrap(),
+            build_launch("terminal", "web", false).unwrap()
+        );
+        assert_eq!(
+            build_launch("gnome-terminal", "web", true).unwrap(),
+            build_launch("gnome-terminal", "web", false).unwrap()
+        );
+    }
+
+    #[test]
+    fn detect_terminals_supports_new_tab_flags() {
+        let terminals = detect_terminals();
+        for t in &terminals {
+            if t.id == "iterm2" {
+                assert!(t.supports_new_tab, "iTerm2 must support new tabs");
+            } else {
+                // Terminal.app (no GUI-scripting), $TERMINAL, and all Linux emulators: false.
+                assert!(!t.supports_new_tab, "{} must not claim new-tab support", t.id);
+            }
+        }
+    }
+
+    #[test]
     fn build_launch_unknown_id_errors() {
-        let err = build_launch("nope-term", "web").unwrap_err();
+        let err = build_launch("nope-term", "web", false).unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
     }
 }

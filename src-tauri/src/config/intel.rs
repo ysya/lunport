@@ -66,6 +66,8 @@ pub fn effective_config(
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct LintIssue {
+    /// Stable kebab-case rule id (e.g. "duplicate-directive") so the frontend can toggle rules.
+    pub rule: String,
     pub severity: String, // "error" | "warning" | "info"
     pub file: String,
     pub alias: Option<String>,
@@ -128,6 +130,7 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
             if let Some(a) = &alias {
                 if !seen_aliases.insert(a.clone()) {
                     issues.push(LintIssue {
+                        rule: "shadowed-host".to_string(),
                         severity: "warning".to_string(),
                         file: file.clone(),
                         alias: alias.clone(),
@@ -156,6 +159,7 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                 *count += 1;
                 if *count == 2 && !MULTI_VALUE_KEYS.contains(&d.key.as_str()) {
                     issues.push(LintIssue {
+                        rule: "duplicate-directive".to_string(),
                         severity: "warning".to_string(),
                         file: file.clone(),
                         alias: alias.clone(),
@@ -174,6 +178,7 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                         if let Ok(expanded) = shellexpand::full(&d.value) {
                             if !Path::new(expanded.as_ref()).exists() {
                                 issues.push(LintIssue {
+                                    rule: "missing-identity-file".to_string(),
                                     severity: "error".to_string(),
                                     file: file.clone(),
                                     alias: alias.clone(),
@@ -188,6 +193,7 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                 // ── Rule 4: insecure StrictHostKeyChecking ──
                 if d.key == "stricthostkeychecking" && d.value.trim().eq_ignore_ascii_case("no") {
                     issues.push(LintIssue {
+                        rule: "insecure-strict-host-key-checking".to_string(),
                         severity: "warning".to_string(),
                         file: file.clone(),
                         alias: alias.clone(),
@@ -210,6 +216,7 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                             && !doc_defines_alias(doc, host_part)
                         {
                             issues.push(LintIssue {
+                                rule: "undefined-proxy-jump".to_string(),
                                 severity: "warning".to_string(),
                                 file: file.clone(),
                                 alias: alias.clone(),
@@ -646,10 +653,43 @@ mod tests {
         assert!(hy.identity_files.is_empty());
     }
 
+    // ── (b) lint: stable rule ids ─────────────────────────────────────────────
+    #[test]
+    fn lint_issues_carry_stable_rule_ids() {
+        let keydir = tempfile::tempdir().unwrap();
+        let missing = keydir.path().join("nope_key");
+        let content = format!(
+            "Host dup\n User a\n User b\n\
+             Host shadowme\n HostName 1.1.1.1\n\
+             Host shadowme\n HostName 2.2.2.2\n\
+             Host badkey\n IdentityFile {}\n\
+             Host insecure\n StrictHostKeyChecking no\n\
+             Host jumper\n ProxyJump undefined-bastion\n",
+            missing.display()
+        );
+        let (doc, _dir) = doc_with(&content);
+        let issues = lint(&doc);
+
+        let rule_of = |alias: &str| -> String {
+            issues
+                .iter()
+                .find(|i| i.alias.as_deref() == Some(alias))
+                .unwrap_or_else(|| panic!("no issue for {alias}: {issues:?}"))
+                .rule
+                .clone()
+        };
+        assert_eq!(rule_of("dup"), "duplicate-directive");
+        assert_eq!(rule_of("shadowme"), "shadowed-host");
+        assert_eq!(rule_of("badkey"), "missing-identity-file");
+        assert_eq!(rule_of("insecure"), "insecure-strict-host-key-checking");
+        assert_eq!(rule_of("jumper"), "undefined-proxy-jump");
+    }
+
     // ── ts-rs export smoke ────────────────────────────────────────────────────
     #[test]
     fn ts_export_types_compile() {
         let _ = LintIssue {
+            rule: "duplicate-directive".into(),
             severity: "warning".into(),
             file: "/tmp/config".into(),
             alias: Some("web".into()),
