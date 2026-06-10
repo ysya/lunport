@@ -1,9 +1,12 @@
 mod config;
+mod connect;
 mod error;
 mod fsutil;
 mod state;
+mod tray;
 
 use config::commands::*;
+use connect::{connect_launch, connect_list_terminals};
 
 /// 端到端 smoke command：回傳目前作業系統（"macos" / "linux" / "windows"）。
 #[tauri::command]
@@ -17,6 +20,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
         .manage(state::AppState::default())
+        .setup(|app| {
+            tray::rebuild_tray(app.handle(), &[])?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_platform,
             config_load,
@@ -29,6 +36,8 @@ pub fn run() {
             config_set_tags,
             config_reorder_hosts,
             config_check_drift,
+            connect_list_terminals,
+            connect_launch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
