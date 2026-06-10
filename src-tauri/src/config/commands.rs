@@ -127,7 +127,11 @@ pub fn drift(doc: &crate::config::model::SshConfigDoc) -> Result<Vec<DriftInfo>,
 // ─── Tauri command wrappers ───────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn config_load(state: State<AppState>, path: Option<String>) -> Result<LoadResult, AppError> {
+pub fn config_load(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    path: Option<String>,
+) -> Result<LoadResult, AppError> {
     let config_path = match path {
         Some(p) => PathBuf::from(p),
         None => default_config_path()?,
@@ -136,6 +140,10 @@ pub fn config_load(state: State<AppState>, path: Option<String>) -> Result<LoadR
     let doc = load_doc(&config_path)?;
     let files = doc.files.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
     let hosts = host_summaries(&doc);
+
+    // Refresh the menubar quick-connect menu from the freshly loaded doc.
+    let aliases = crate::tray::tray_aliases(&doc);
+    let _ = crate::tray::rebuild_tray(&app, &aliases);
 
     let mut doc_lock = state.doc.lock().unwrap();
     *doc_lock = Some(doc);
