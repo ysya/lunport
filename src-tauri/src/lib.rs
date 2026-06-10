@@ -1,5 +1,6 @@
 mod config;
 mod connect;
+mod discover;
 mod error;
 mod fsutil;
 mod state;
@@ -37,6 +38,9 @@ pub fn run() {
             config_set_tags,
             config_reorder_hosts,
             config_check_drift,
+            discover_hosts,
+            config_list_backups,
+            config_restore_backup,
             connect_list_terminals,
             connect_launch,
             config_effective,
