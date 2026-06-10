@@ -147,7 +147,9 @@
    */
   html {
     @apply font-sans;
-    font-size: 13px;
+    /* Root size: the whole UI scales off this (rem-based). 15px lands body text
+     * (text-sm) at ~13px (native target) and captions at ~11px. */
+    font-size: 15px;
     }
   html,
   body,
