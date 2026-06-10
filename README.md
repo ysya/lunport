@@ -1,6 +1,6 @@
 # SSHelter
 
-A cross-platform desktop app for managing your **local OpenSSH** setup — `~/.ssh/config`, keys, `ssh-agent`, and `known_hosts` — with lossless, format-preserving editing. macOS + Linux first (Windows later). Inspired by [hejki SSH Editor](https://www.hejki.org/ssheditor/).
+A cross-platform desktop app for managing your **local OpenSSH** setup — `~/.ssh/config`, keys, `ssh-agent`, and `known_hosts` — with lossless, format-preserving editing. macOS + Linux first (Windows later).
 
 ## Why
 
@@ -22,22 +22,6 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **Backup history & restore** — every write is snapshotted; browse and restore prior versions (restore is itself backed up first and validated against managed paths).
 - **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), menu bar icon & close-to-tray, default terminal + new-tab launch (iTerm2), custom config path, backup retention, discovery sources, drift auto-check, and per-rule lint toggles.
 - **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings.
-
-## Status
-
-🚧 Early development, but well past a usable editor. The security boundary is strict: the WebView has **zero** filesystem/shell permission — all privileged IO and SSH-tool invocation happen in audited Rust commands (argv vectors only, never `sh -c`; alias inputs are charset-validated and reject option-injection).
-
-- **Phase 0 — foundation:** app scaffold, least-privilege capability, unified `AppError`, safe file-IO (`fsutil`: atomic write, secure perms, timestamped backup, hash drift detection), TanStack Query + Zustand wiring, ts-rs type bridge.
-- **Phase 1a — config core (Rust):** a custom **lossless CST** parser/serializer (byte-identical round-trip, golden-file tested), edit operations (single-line minimal change), multi-file `Include` loading, host DTOs, and the `config_*` Tauri command surface with a safe write path that **refuses to overwrite externally-changed files** (drift conflict guard) and backs up before writing.
-- **Phase 1b — editor UI (React):** master-detail host list (search + collapsible source-file grouping), a System-Settings-style grouped host editor (Connection / Authentication / Forwarding / Reliability + Advanced raw options), add/remove host, tags, a live `ssh_config` inspector, and a drift banner. Edits send only changed fields, so untouched lines stay byte-identical.
-- **v0.2 — connect, intelligence & discovery:** terminal launcher + menubar tray, ⌘K command palette, per-host config intelligence (key hygiene / ProxyJump chain / effective config), global lint, `known_hosts`+Tailscale discovery, and backup history/restore.
-
-130 automated tests pass (116 Rust + 14 frontend). Not yet implemented: in-app key management, ssh-agent control, a full `known_hosts` editor, and signed/notarized distribution.
-
-See the design and plans:
-
-- Design spec: [`docs/superpowers/specs/2026-06-08-ssh-config-manager-design.md`](docs/superpowers/specs/2026-06-08-ssh-config-manager-design.md)
-- Plans: [`docs/superpowers/plans/`](docs/superpowers/plans/)
 
 ## Development
 
