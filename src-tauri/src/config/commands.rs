@@ -462,7 +462,9 @@ pub fn config_set_backup_retention(
     state: State<AppState>,
     limit: Option<u32>,
 ) -> Result<(), AppError> {
-    *state.backup_retention.lock().unwrap() = limit.map(|v| v as usize);
+    // keep >= 1: a limit of 0 would prune the backup we just created, silently
+    // disabling the safety net. Unlimited is expressed as None, not 0.
+    *state.backup_retention.lock().unwrap() = limit.map(|v| (v as usize).max(1));
     Ok(())
 }
 
