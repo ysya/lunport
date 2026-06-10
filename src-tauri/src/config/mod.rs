@@ -6,3 +6,4 @@ pub mod edit;
 pub mod include;
 pub mod dto;
 pub mod commands;
+pub mod intel;

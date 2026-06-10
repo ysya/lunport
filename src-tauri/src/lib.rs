@@ -6,6 +6,7 @@ mod state;
 mod tray;
 
 use config::commands::*;
+use config::intel::{config_effective, config_jump_chain, config_key_hygiene, config_lint};
 use connect::{connect_launch, connect_list_terminals};
 
 /// 端到端 smoke command：回傳目前作業系統（"macos" / "linux" / "windows"）。
@@ -38,6 +39,10 @@ pub fn run() {
             config_check_drift,
             connect_list_terminals,
             connect_launch,
+            config_effective,
+            config_lint,
+            config_jump_chain,
+            config_key_hygiene,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
