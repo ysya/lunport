@@ -107,13 +107,14 @@ function App() {
 
           {/*
            * Editor pane: its OWN bounded scroll region, independent of sidebar.
-           * The pane fills the full width (no centered narrow column); the form
-           * content is LEFT-ALIGNED with an inner cap (~560px) so values track
-           * cleanly per macOS form guidance — the background fills edge-to-edge.
+           * The editor lays itself out as a responsive two-pane block (form +
+           * sticky ssh_config inspector) that fills wide panes and stacks when
+           * narrow. We give it a generous cap (~1100px) and keep it LEFT-aligned
+           * so it reads full at ~1600px without stretching absurdly ultra-wide.
            */}
           <main className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto">
             {selectedAlias ? (
-              <div className="max-w-[560px] space-y-5 px-6 py-5 pb-24">
+              <div className="max-w-[1100px] space-y-5 px-6 py-5 pb-24">
                 <DriftBanner />
                 <HostEditor alias={selectedAlias} />
               </div>

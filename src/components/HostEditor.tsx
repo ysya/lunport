@@ -10,7 +10,7 @@ import {
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Trash2, Plus, MoreVertical, RotateCcw, Save, ChevronRight } from "lucide-react";
+import { Trash2, Plus, MoreVertical, RotateCcw, Save, Copy, Check } from "lucide-react";
 
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostOption } from "@/bindings/HostOption";
@@ -251,11 +251,15 @@ function HostEditorForm({
   });
 
   return (
-    <div className="space-y-6">
+    // `@container`: the editor root is a container-query context so the layout
+    // below switches on the EDITOR PANE width (window − sidebar), not the
+    // viewport. Wide panes get a two-column form + sticky inspector; narrow
+    // panes collapse to a single stacked column.
+    <div className="@container space-y-6">
       {/*
-       * Editor header. The alias is the host's IDENTITY — rendered in the
-       * system sans (title), with the resolved patterns/source shown as a mono
-       * value caption beneath it.
+       * Editor header — spans the full width above both columns. The alias is
+       * the host's IDENTITY — rendered in the system sans (title), with the
+       * resolved patterns/source shown as a mono value caption beneath it.
        */}
       <div className="flex items-start justify-between gap-3 select-none">
         <div className="min-w-0 space-y-1">
@@ -323,11 +327,23 @@ function HostEditorForm({
       </div>
 
       {/*
-       * Stacked, scrollable System-Settings-style sections — NO tabs. Every
-       * field group is rendered as its own labelled inset so all fields are
-       * visible by scrolling (no hidden tabs, no empty canvas).
+       * Two-pane body. Single column by default (narrow panes); at ≥960px of
+       * CONTAINER width it becomes a row: a width-capped form on the left and a
+       * sticky ssh_config inspector on the right that fills the remaining width.
+       * In the single-column case the inspector simply stacks beneath the form.
        */}
-      <form onSubmit={onSubmit} id="host-editor-form" className="space-y-6">
+      <div className="flex flex-col gap-6 @[960px]:flex-row @[960px]:items-start">
+        {/*
+         * LEFT — the form column. Full width when stacked; capped at ~560px in
+         * the two-pane layout so values track cleanly per macOS form guidance.
+         */}
+        <div className="min-w-0 flex-1 space-y-6 @[960px]:max-w-[560px]">
+          {/*
+           * Stacked, scrollable System-Settings-style sections — NO tabs. Every
+           * field group is rendered as its own labelled inset so all fields are
+           * visible by scrolling (no hidden tabs, no empty canvas).
+           */}
+          <form onSubmit={onSubmit} id="host-editor-form" className="space-y-6">
         {GROUPS.map((g) => {
           const defs = FIELD_DEFS.filter((d) => d.group === g).filter(
             (d) => !d.macOnly || isMac,
@@ -396,63 +412,70 @@ function HostEditorForm({
             </SettingsGroup>
           )}
         </Section>
-      </form>
+          </form>
 
-      {/* Tags — settings-style inset row: label left, value (mono) right. */}
-      <Section title="Tags">
-        <SettingsGroup>
-          <div className="flex items-center justify-between gap-4 px-3 py-2">
-            <Label htmlFor="host-tags" className="shrink-0 text-sm font-normal text-muted-foreground">
-              Tags
-            </Label>
-            <div className="flex max-w-[62%] flex-1 items-center gap-1.5">
-              <Input
-                id="host-tags"
-                value={tags}
-                onChange={(e) => setTagsValue(e.target.value)}
-                placeholder="comma, separated"
-                className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="h-7 shrink-0"
-                onClick={() =>
-                  onSetTags(
-                    tags
-                      .split(",")
-                      .map((t) => t.trim())
-                      .filter(Boolean),
-                  )
-                }
-              >
-                Apply
-              </Button>
-            </div>
-          </div>
-        </SettingsGroup>
-      </Section>
+          {/* Tags — settings-style inset row: label left, value (mono) right. */}
+          <Section title="Tags">
+            <SettingsGroup>
+              <div className="flex items-center justify-between gap-4 px-3 py-2">
+                <Label htmlFor="host-tags" className="shrink-0 text-sm font-normal text-muted-foreground">
+                  Tags
+                </Label>
+                <div className="flex max-w-[62%] flex-1 items-center gap-1.5">
+                  <Input
+                    id="host-tags"
+                    value={tags}
+                    onChange={(e) => setTagsValue(e.target.value)}
+                    placeholder="comma, separated"
+                    className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="h-7 shrink-0"
+                    onClick={() =>
+                      onSetTags(
+                        tags
+                          .split(",")
+                          .map((t) => t.trim())
+                          .filter(Boolean),
+                      )
+                    }
+                  >
+                    Apply
+                  </Button>
+                </div>
+              </div>
+            </SettingsGroup>
+          </Section>
 
-      {disabledOpts.length > 0 && (
-        <Section
-          title="Disabled options"
-          description="Commented-out lines. Toggle on to re-enable, then edit above."
-        >
-          <SettingsGroup>
-            {disabledOpts.map((o, i) => (
-              <DisabledOptionRow
-                key={`${o.keyword}-${i}`}
-                option={o}
-                onEnable={() => onEnableOption(o.keyword)}
-              />
-            ))}
-          </SettingsGroup>
-        </Section>
-      )}
+          {disabledOpts.length > 0 && (
+            <Section
+              title="Disabled options"
+              description="Commented-out lines. Toggle on to re-enable, then edit above."
+            >
+              <SettingsGroup>
+                {disabledOpts.map((o, i) => (
+                  <DisabledOptionRow
+                    key={`${o.keyword}-${i}`}
+                    option={o}
+                    onEnable={() => onEnableOption(o.keyword)}
+                  />
+                ))}
+              </SettingsGroup>
+            </Section>
+          )}
+        </div>
 
-      {/* Signature: the SSH Host block these form values represent. */}
-      <ConfigPreview alias={detail.alias} control={control} />
+        {/*
+         * RIGHT — the ssh_config inspector. The live Host block these form
+         * values represent, updating as the user edits. Fills the remaining
+         * width and sticks to the top of the scroll region in the two-pane
+         * layout; stacks beneath the form as a full-width section when narrow.
+         */}
+        <ConfigInspector alias={detail.alias} control={control} />
+      </div>
 
       {/* Sticky save bar: appears only when the option form is dirty. */}
       {isDirty && (
@@ -689,43 +712,66 @@ function buildConfigText(alias: string, values: FormValues): string {
 }
 
 /**
- * Collapsible "Config preview" — the terminal-DNA signature. Renders the live
- * Host block client-side from the current form values. Read-only, mono, quiet.
+ * The ssh_config inspector — the terminal-DNA signature, promoted into a live,
+ * always-visible panel. Renders the Host block client-side from the current
+ * form values (read-only, mono) and exposes a Copy action.
+ *
+ * Layout: a flex child of the two-pane body. When the editor pane is wide
+ * (≥960px container) it fills the remaining width and STICKS to the top of the
+ * scroll region while the form scrolls; when narrow it stacks beneath the form
+ * as a full-width section (today's behavior).
  */
-function ConfigPreview({
+function ConfigInspector({
   alias,
   control,
 }: {
   alias: string;
   control: Control<FormValues>;
 }) {
-  const [open, setOpen] = useState(false);
   const values = useWatch({ control }) as FormValues;
   const text = useMemo(() => buildConfigText(alias, values), [alias, values]);
+  const [copied, setCopied] = useState(false);
+
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      toast("Copied");
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      toast.error("Couldn't copy to clipboard");
+    }
+  };
 
   return (
-    <section>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-1 text-left select-none focus-visible:outline-none"
-      >
-        <ChevronRight
-          className={cn(
-            "size-3 text-muted-foreground transition-transform duration-150",
-            open && "rotate-90",
-          )}
-          aria-hidden
-        />
-        <span className="section-label !pb-0">Config preview</span>
-      </button>
-      {open && (
-        <div className="pt-2">
-          <pre className="config-preview">{text}</pre>
+    <aside className="min-w-0 flex-1 @[960px]:min-w-[340px] @[960px]:self-start @[960px]:sticky @[960px]:top-0">
+      <div className="settings-group">
+        {/* Header — a quiet "filename" label + Copy action, like an editor tab. */}
+        <div className="flex items-center justify-between gap-2 bg-muted/40 px-3 py-1.5 select-none">
+          <span className="font-mono text-xs text-muted-foreground">ssh_config</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="h-6 gap-1.5 text-muted-foreground"
+            onClick={onCopy}
+            aria-label="Copy ssh_config block"
+          >
+            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            {copied ? "Copied" : "Copy"}
+          </Button>
         </div>
-      )}
-    </section>
+        {/* Body — the live Host block. Mono, muted, selectable (it's a value). */}
+        <pre
+          className={cn(
+            "overflow-x-auto px-3.5 py-3 font-mono text-xs leading-relaxed text-muted-foreground",
+            "whitespace-pre select-text",
+          )}
+        >
+          {text}
+        </pre>
+      </div>
+    </aside>
   );
 }
 
