@@ -39,6 +39,19 @@ pub struct DriftInfo {
     pub changed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct BackupInfo {
+    /// Full path to the `.bak` file.
+    pub path: String,
+    /// The managed config file this backup snapshots.
+    pub file: String,
+    /// Backup timestamp (unix millis, parsed from the `<name>.<millis>.bak` filename).
+    #[cfg_attr(test, ts(type = "number"))]
+    pub timestamp_ms: u64,
+}
+
 // ─── Testable helper functions ────────────────────────────────────────────────
 
 /// Default ~/.ssh/config path (uses dirs::home_dir). Errors if home dir is unknown.
@@ -122,6 +135,113 @@ pub fn drift(doc: &crate::config::model::SshConfigDoc) -> Result<Vec<DriftInfo>,
         });
     }
     Ok(result)
+}
+
+/// If `name` matches `<X>.<digits>.bak`, return `(X, millis)`. The `<X>` part is everything before
+/// the final `.<digits>.bak` segment.
+fn parse_backup_name(name: &str) -> Option<(String, u64)> {
+    let stem = name.strip_suffix(".bak")?;
+    // Split off the trailing `.<digits>` segment.
+    let (target, millis_str) = stem.rsplit_once('.')?;
+    if target.is_empty() || millis_str.is_empty() {
+        return None;
+    }
+    if !millis_str.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let millis = millis_str.parse::<u64>().ok()?;
+    Some((target.to_string(), millis))
+}
+
+/// List `<name>.<millis>.bak` files sitting next to each managed ConfigFile, newest first.
+pub fn list_backups(
+    doc: &crate::config::model::SshConfigDoc,
+) -> Result<Vec<BackupInfo>, AppError> {
+    let mut out: Vec<BackupInfo> = Vec::new();
+
+    for cf in &doc.files {
+        let filename = match cf.path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let parent = match cf.path.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+        let entries = match std::fs::read_dir(parent) {
+            Ok(e) => e,
+            Err(_) => continue, // parent unreadable/missing → no backups for this file
+        };
+
+        let managed = cf.path.to_string_lossy().into_owned();
+        for entry in entries.filter_map(|e| e.ok()) {
+            let entry_name = entry.file_name().to_string_lossy().into_owned();
+            if let Some((target, millis)) = parse_backup_name(&entry_name) {
+                // Only backups OF this managed file (target == its filename).
+                if target == filename {
+                    out.push(BackupInfo {
+                        path: entry.path().to_string_lossy().into_owned(),
+                        file: managed.clone(),
+                        timestamp_ms: millis,
+                    });
+                }
+            }
+        }
+    }
+
+    // Newest first.
+    out.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+    Ok(out)
+}
+
+/// SECURITY-CRITICAL validation for backup restore. Given the loaded doc and a candidate
+/// `backup_path`, return the managed target file path to overwrite, or `ForbiddenPath`.
+///
+/// Rules: the backup must canonicalize to an existing file whose name is `<X>.<digits>.bak`, and
+/// whose stripped target `<X>` lives in the SAME directory as — and EXACTLY equals — one of the
+/// loaded `ConfigFile.path`s (compared via canonicalized parent + filename). This prevents
+/// restoring/overwriting an arbitrary path.
+pub fn resolve_restore_target(
+    doc: &crate::config::model::SshConfigDoc,
+    backup_path: &str,
+) -> Result<PathBuf, AppError> {
+    let backup = PathBuf::from(backup_path);
+    let canonical = backup
+        .canonicalize()
+        .map_err(|_| AppError::ForbiddenPath(backup_path.to_string()))?;
+
+    if !canonical.is_file() {
+        return Err(AppError::ForbiddenPath(backup_path.to_string()));
+    }
+
+    let backup_name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| AppError::ForbiddenPath(backup_path.to_string()))?;
+
+    let (target_name, _millis) = parse_backup_name(backup_name)
+        .ok_or_else(|| AppError::ForbiddenPath(backup_path.to_string()))?;
+
+    let backup_parent = canonical
+        .parent()
+        .ok_or_else(|| AppError::ForbiddenPath(backup_path.to_string()))?;
+
+    // The implied target file: same dir as the backup, named `<X>`.
+    let implied_target = backup_parent.join(&target_name);
+    let implied_canonical = implied_target
+        .canonicalize()
+        .map_err(|_| AppError::ForbiddenPath(backup_path.to_string()))?;
+
+    // It must EXACTLY equal one of the managed files (compared canonically).
+    for cf in &doc.files {
+        if let Ok(managed_canonical) = cf.path.canonicalize() {
+            if managed_canonical == implied_canonical {
+                return Ok(cf.path.clone());
+            }
+        }
+    }
+
+    Err(AppError::ForbiddenPath(backup_path.to_string()))
 }
 
 // ─── Tauri command wrappers ───────────────────────────────────────────────────
@@ -330,6 +450,69 @@ pub fn config_check_drift(state: State<AppState>) -> Result<Vec<DriftInfo>, AppE
         None => Err(AppError::Other("no config loaded".to_string())),
         Some(doc) => drift(doc),
     }
+}
+
+#[tauri::command]
+pub fn discover_hosts(state: State<AppState>) -> Result<Vec<crate::discover::Suggestion>, AppError> {
+    let doc_lock = state.doc.lock().unwrap();
+    match doc_lock.as_ref() {
+        None => Ok(Vec::new()),
+        Some(doc) => Ok(crate::discover::discover_all(doc)),
+    }
+}
+
+#[tauri::command]
+pub fn config_list_backups(state: State<AppState>) -> Result<Vec<BackupInfo>, AppError> {
+    let doc_lock = state.doc.lock().unwrap();
+    match doc_lock.as_ref() {
+        None => Ok(Vec::new()),
+        Some(doc) => list_backups(doc),
+    }
+}
+
+#[tauri::command]
+pub fn config_restore_backup(
+    state: State<AppState>,
+    app: tauri::AppHandle,
+    backup_path: String,
+) -> Result<LoadResult, AppError> {
+    // 1. Lock doc; none loaded → error. Validate BEFORE touching the filesystem.
+    let target = {
+        let doc_lock = state.doc.lock().unwrap();
+        let doc = doc_lock
+            .as_ref()
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+
+        // 2. SECURITY-CRITICAL path validation.
+        let target = resolve_restore_target(doc, &backup_path)?;
+
+        // Remember the doc's main file path to reload from after restore.
+        let main_path = doc.files[0].path.clone();
+        (target, main_path)
+    };
+    let (target, main_path) = target;
+
+    // 3. Snapshot the CURRENT state first (so the restore is itself undoable), then overwrite the
+    //    managed target with the backup bytes.
+    fsutil::backup(&target)?;
+    let bytes = std::fs::read(&backup_path)?;
+    fsutil::atomic_write(&target, &bytes, 0o600)?;
+
+    // 4. Reload the doc from the main file, refresh state + tray, return a fresh LoadResult.
+    let doc = load_doc(&main_path)?;
+    let files = doc.files.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
+    let hosts = host_summaries(&doc);
+
+    let aliases = crate::tray::tray_aliases(&doc);
+    let _ = crate::tray::rebuild_tray(&app, &aliases);
+
+    let mut doc_lock = state.doc.lock().unwrap();
+    *doc_lock = Some(doc);
+
+    let mut backed_up_lock = state.backed_up.lock().unwrap();
+    backed_up_lock.clear();
+
+    Ok(LoadResult { files, hosts })
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -560,5 +743,86 @@ mod tests {
             path: "/tmp/config".to_string(),
             changed: false,
         };
+        let _backup = BackupInfo {
+            path: "/tmp/config.123.bak".to_string(),
+            file: "/tmp/config".to_string(),
+            timestamp_ms: 123,
+        };
+    }
+
+    // ── Test 8: list_backups finds sibling .bak files, newest first ───────────
+    #[test]
+    fn list_backups_finds_siblings_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let doc = load_doc(&config_path).expect("load_doc ok");
+
+        // Create three backups + one decoy that is NOT a backup of this file.
+        std::fs::write(dir.path().join("config.100.bak"), b"v1").unwrap();
+        std::fs::write(dir.path().join("config.300.bak"), b"v3").unwrap();
+        std::fs::write(dir.path().join("config.200.bak"), b"v2").unwrap();
+        std::fs::write(dir.path().join("other.500.bak"), b"x").unwrap(); // different target
+        std::fs::write(dir.path().join("config.bak"), b"x").unwrap(); // no millis → ignored
+        std::fs::write(dir.path().join("config.notdigits.bak"), b"x").unwrap(); // non-digit
+
+        let backups = list_backups(&doc).expect("list_backups ok");
+        let ts: Vec<u64> = backups.iter().map(|b| b.timestamp_ms).collect();
+        assert_eq!(ts, vec![300, 200, 100], "newest first, only this file's backups");
+
+        for b in &backups {
+            assert_eq!(b.file, config_path.to_string_lossy());
+            assert!(b.path.ends_with(".bak"));
+        }
+    }
+
+    // ── Test 9: resolve_restore_target returns managed path for a valid sibling ─
+    #[test]
+    fn resolve_restore_target_accepts_managed_sibling_bak() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let doc = load_doc(&config_path).expect("load_doc ok");
+
+        let bak = dir.path().join("config.123.bak");
+        std::fs::write(&bak, b"Host web\n    User restored\n").unwrap();
+
+        let target = resolve_restore_target(&doc, &bak.to_string_lossy())
+            .expect("a valid sibling .bak must resolve");
+        assert_eq!(
+            target.canonicalize().unwrap(),
+            config_path.canonicalize().unwrap()
+        );
+    }
+
+    // ── Test 10: resolve_restore_target REJECTS paths outside any managed dir ──
+    #[test]
+    fn resolve_restore_target_rejects_unsafe_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let doc = load_doc(&config_path).expect("load_doc ok");
+
+        // (a) A .bak in an UNRELATED directory whose target is not a managed file.
+        let other_dir = tempfile::tempdir().unwrap();
+        let stray_bak = other_dir.path().join("config.123.bak");
+        std::fs::write(&stray_bak, b"malicious").unwrap();
+        // The implied target `other_dir/config` doesn't even exist → ForbiddenPath.
+        let r = resolve_restore_target(&doc, &stray_bak.to_string_lossy());
+        assert!(matches!(r, Err(AppError::ForbiddenPath(_))), "stray .bak must be rejected: {r:?}");
+
+        // (a2) Even if the implied target file EXISTS in the unrelated dir, it isn't managed.
+        std::fs::write(other_dir.path().join("config"), b"unmanaged").unwrap();
+        let r2 = resolve_restore_target(&doc, &stray_bak.to_string_lossy());
+        assert!(
+            matches!(r2, Err(AppError::ForbiddenPath(_))),
+            "a .bak of an unmanaged file must be rejected: {r2:?}"
+        );
+
+        // (b) A non-.bak path (e.g. /etc/passwd) must be rejected.
+        let r3 = resolve_restore_target(&doc, "/etc/passwd");
+        assert!(matches!(r3, Err(AppError::ForbiddenPath(_))), "non-.bak path must be rejected: {r3:?}");
+
+        // (c) A nonexistent .bak path must be rejected (cannot canonicalize).
+        let missing = dir.path().join("config.999.bak");
+        let r4 = resolve_restore_target(&doc, &missing.to_string_lossy());
+        assert!(matches!(r4, Err(AppError::ForbiddenPath(_))), "missing .bak must be rejected: {r4:?}");
     }
 }
