@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Search, ServerOff, Server, Globe } from "lucide-react";
+import { Search, ServerOff, Server, Globe, ChevronRight } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
 import { useUiStore } from "@/stores/ui";
@@ -50,6 +50,28 @@ function HostGlyph({ host }: { host: HostSummary }) {
   );
 }
 
+/**
+ * Map each source-file path to the shortest trailing path-segment label unique
+ * among `files`. The first file to claim a basename keeps it; later collisions
+ * extend by prepending one more path segment.
+ */
+function shortLabels(files: string[]): Map<string, string> {
+  const used = new Set<string>();
+  const map = new Map<string, string>();
+  for (const f of files) {
+    const segs = f.split("/").filter(Boolean);
+    let n = 1;
+    let label = segs[segs.length - 1] ?? f;
+    while (used.has(label.toLowerCase()) && n < segs.length) {
+      n += 1;
+      label = segs.slice(segs.length - n).join("/");
+    }
+    used.add(label.toLowerCase());
+    map.set(f, label);
+  }
+  return map;
+}
+
 /** True if the host matches the (lowercased) search term across its searchable fields. */
 function matches(host: HostSummary, q: string): boolean {
   if (!q) return true;
@@ -74,6 +96,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const setSearch = useUiStore((s) => s.setSearch);
   const selectedAlias = useUiStore((s) => s.selectedAlias);
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
+  const collapsedGroups = useUiStore((s) => s.collapsedGroups);
+  const toggleGroup = useUiStore((s) => s.toggleGroup);
 
   const grouped = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -87,14 +111,22 @@ export function HostList({ hosts, isLoading }: HostListProps) {
       else byFile.set(h.source_file, [h]);
     }
 
+    // Compute distinct shortest-unique labels across all loaded source files
+    // (first-appearance order, de-duplicated). NOTE: we label over the full
+    // unfiltered set so labels stay stable while searching.
+    const allFiles = [...new Map(hosts.map((h) => [h.source_file, true])).keys()];
+    const labels = shortLabels(allFiles);
+
     return [...byFile.entries()].map(([file, fileHosts]) => ({
       file,
-      name: basename(file),
+      name: labels.get(file) ?? basename(file),
       hosts: fileHosts,
     }));
   }, [hosts, search]);
 
   const totalShown = grouped.reduce((n, g) => n + g.hosts.length, 0);
+  // When a search is active, force-expand all groups so results are never hidden.
+  const searchActive = search.trim().length > 0;
 
   // A running index across all rows so the staggered enter animation reads as a
   // single cascade rather than restarting per group.
@@ -130,19 +162,36 @@ export function HostList({ hosts, isLoading }: HostListProps) {
               </p>
             )
           ) : (
-            grouped.map((group) => (
+            grouped.map((group) => {
+              const isCollapsed = !searchActive && collapsedGroups.includes(group.file);
+              return (
               <div key={group.file} className="mb-3">
-                <div className="flex items-center justify-between px-2 py-1 select-none">
-                  <span
-                    className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase"
-                    title={group.file}
-                  >
-                    {group.name}
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(group.file)}
+                  className="flex w-full items-center justify-between px-2 py-1 select-none rounded-sm hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 cursor-default"
+                  title={group.file}
+                  aria-expanded={!isCollapsed}
+                >
+                  <span className="flex min-w-0 items-center gap-1">
+                    <ChevronRight
+                      className={cn(
+                        "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
+                        !isCollapsed && "rotate-90",
+                      )}
+                      aria-hidden
+                    />
+                    <span
+                      className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase"
+                    >
+                      {group.name}
+                    </span>
                   </span>
                   <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
                     {group.hosts.length}
                   </span>
-                </div>
+                </button>
+                {!isCollapsed && (
                 <ul className="space-y-px">
                   {group.hosts.map((host) => {
                     const active = host.alias === selectedAlias;
@@ -207,8 +256,10 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                     );
                   })}
                 </ul>
+                )}
               </div>
-            ))
+              );
+            })
           )}
         </div>
       </ScrollArea>

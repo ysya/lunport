@@ -31,6 +31,9 @@ interface UiState {
   /** Free-text host-list filter. */
   search: string;
   setSearch: (search: string) => void;
+  /** Full source_file paths of collapsed sidebar groups (in-memory only). */
+  collapsedGroups: string[];
+  toggleGroup: (file: string) => void;
 }
 
 /** 只放 UI 狀態，永不鏡像後端資料（後端資料由 TanStack Query 持有）。 */
@@ -42,4 +45,11 @@ export const useUiStore = create<UiState>((set) => ({
   setSelectedAlias: (selectedAlias) => set({ selectedAlias }),
   search: "",
   setSearch: (search) => set({ search }),
+  collapsedGroups: [],
+  toggleGroup: (file) =>
+    set((s) => ({
+      collapsedGroups: s.collapsedGroups.includes(file)
+        ? s.collapsedGroups.filter((f) => f !== file)
+        : [...s.collapsedGroups, file],
+    })),
 }));
