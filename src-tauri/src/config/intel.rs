@@ -103,11 +103,11 @@ fn hop_host(hop: &str) -> &str {
     }
 }
 
-/// True if `host` exactly matches any HostBlock's first pattern in the doc.
+/// True if `host` exactly matches ANY pattern of any HostBlock in the doc (incl. secondary aliases).
 fn doc_defines_alias(doc: &SshConfigDoc, host: &str) -> bool {
     doc.files.iter().any(|f| {
         f.items.iter().any(|item| {
-            matches!(item, Item::Host(h) if h.patterns.first().map(|p| p == host).unwrap_or(false))
+            matches!(item, Item::Host(h) if h.patterns.iter().any(|p| p == host))
         })
     })
 }
@@ -145,6 +145,11 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                 let Item::Directive(d) = body_item else {
                     continue;
                 };
+                // Disabled (commented-out) directives don't take effect — skip for ALL rules,
+                // so commenting out a duplicate never flags the remaining active line.
+                if !d.enabled {
+                    continue;
+                }
 
                 // ── Rule 1: duplicate directive within a block ──
                 let count = seen_keys.entry(d.key.clone()).or_insert(0);
@@ -160,10 +165,6 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                             d.keyword
                         ),
                     });
-                }
-
-                if !d.enabled {
-                    continue;
                 }
 
                 // ── Rule 3: missing IdentityFile path ──
@@ -200,7 +201,8 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                 if d.key == "proxyjump" {
                     for hop in d.value.split(',') {
                         let host_part = hop_host(hop);
-                        if host_part.is_empty() {
+                        // `none` is a reserved ProxyJump value (disables proxying), not a host.
+                        if host_part.is_empty() || host_part.eq_ignore_ascii_case("none") {
                             continue;
                         }
                         // Only flag alias-looking hops (no '.'/':') that aren't defined in the doc.
@@ -236,12 +238,12 @@ pub struct ChainNode {
     pub defined: bool,
 }
 
-/// Find a HostBlock by alias (exact first-pattern match) anywhere in the doc.
+/// Find a HostBlock matching `alias` against ANY of its patterns (incl. secondary aliases).
 fn find_host_block<'a>(doc: &'a SshConfigDoc, alias: &str) -> Option<&'a HostBlock> {
     for f in &doc.files {
         for item in &f.items {
             if let Item::Host(h) = item {
-                if h.patterns.first().map(|p| p == alias).unwrap_or(false) {
+                if h.patterns.iter().any(|p| p == alias) {
                     return Some(h);
                 }
             }
@@ -583,6 +585,37 @@ mod tests {
         // Must terminate (cycle guard): x appears exactly once.
         assert_eq!(chain.len(), 1, "self-cycle must terminate: {chain:?}");
         assert_eq!(chain[0].name, "x");
+    }
+
+    #[test]
+    fn jump_chain_terminates_on_cross_host_cycle() {
+        let (doc, _dir) = doc_with("Host a\n ProxyJump b\nHost b\n ProxyJump a\n");
+        let chain = jump_chain(&doc, "a");
+        // a→b→(a already visited) — must terminate without looping.
+        let names: Vec<&str> = chain.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"], "cross-host cycle must terminate: {chain:?}");
+    }
+
+    #[test]
+    fn lint_secondary_alias_proxyjump_not_flagged() {
+        // `jump-host` is a SECONDARY pattern of the bastion block — must not be "undefined".
+        let (doc, _dir) =
+            doc_with("Host bastion jump-host\n HostName 10.0.0.1\nHost web\n ProxyJump jump-host\n");
+        let undefined: Vec<_> = lint(&doc)
+            .into_iter()
+            .filter(|i| i.message.contains("ProxyJump references undefined host"))
+            .collect();
+        assert!(undefined.is_empty(), "secondary alias must not be flagged: {undefined:?}");
+    }
+
+    #[test]
+    fn lint_proxyjump_none_not_flagged() {
+        let (doc, _dir) = doc_with("Host direct\n ProxyJump none\n");
+        let undefined: Vec<_> = lint(&doc)
+            .into_iter()
+            .filter(|i| i.message.contains("ProxyJump references undefined host"))
+            .collect();
+        assert!(undefined.is_empty(), "`none` is reserved, not a host: {undefined:?}");
     }
 
     // ── (d) key_hygiene ───────────────────────────────────────────────────────
