@@ -55,7 +55,8 @@ jobs:
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          # xdg-utils: the AppImage bundler needs xdg-open; the arm64 runner image lacks it.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

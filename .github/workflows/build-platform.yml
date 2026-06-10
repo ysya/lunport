@@ -1,0 +1,75 @@
+name: build-platform
+
+# Manual fallback: rebuild ONE platform's installers and attach them to an
+# EXISTING release (by tag). Used when a single matrix leg of the release
+# workflow fails (e.g. a runner-image quirk) — re-running the original job
+# would reuse the old workflow definition, so this builds with current main.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach installers to (e.g. v0.2.0)"
+        required: true
+      platform:
+        description: "Runner platform to build on"
+        required: true
+        type: choice
+        options:
+          - ubuntu-22.04
+          - ubuntu-22.04-arm
+          - macos-latest
+      args:
+        description: "Extra tauri build args (e.g. --target aarch64-apple-darwin)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ inputs.platform }}
+    steps:
+      # Build from the release tag so the artifacts match the released version.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Linux dependencies
+        if: startsWith(inputs.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          # xdg-utils: the AppImage bundler needs xdg-open; the arm64 runner image lacks it.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(inputs.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build and upload installers to the release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ inputs.tag }}
+          args: ${{ inputs.args }}
