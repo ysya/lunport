@@ -7,6 +7,7 @@ import {
   Plus,
   RotateCw,
   Server,
+  Settings,
   Sun,
   TerminalSquare,
 } from "lucide-react";
@@ -58,6 +59,7 @@ export function CommandPalette() {
   const terminalId = useUiStore((s) => s.terminalId);
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
   const setAddHostOpen = useUiStore((s) => s.setAddHostOpen);
+  const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
 
   // Global ⌘K / Ctrl+K toggle.
@@ -107,6 +109,11 @@ export function CommandPalette() {
     toggleTheme();
     setOpen(false);
   }, [toggleTheme]);
+
+  const doOpenSettings = useCallback(() => {
+    setOpen(false);
+    setSettingsOpen(true);
+  }, [setSettingsOpen]);
 
   // ⌘/Ctrl+Enter on the highlighted host → edit instead of connect.
   const onKeyDownCapture = useCallback(
@@ -176,6 +183,10 @@ export function CommandPalette() {
             <CommandItem value="reload refresh disk" onSelect={doReload}>
               <RotateCw className="text-muted-foreground" />
               Reload from disk
+            </CommandItem>
+            <CommandItem value="settings preferences" onSelect={doOpenSettings}>
+              <Settings className="text-muted-foreground" />
+              Settings
             </CommandItem>
           </CommandGroup>
         </CommandList>

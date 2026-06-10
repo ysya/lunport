@@ -1,9 +1,9 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Moon, RotateCw, Sun, Terminal, TerminalSquare, ServerCog } from "lucide-react";
+import { RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
 
-import { useHostsQuery, usePlatform, useLoadConfig, useTerminals } from "@/lib/queries";
+import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useApplyTheme } from "@/lib/theme";
 import { HostList } from "@/components/HostList";
@@ -12,6 +12,7 @@ import { AddHostDialog } from "@/components/AddHostDialog";
 import { LintDialog } from "@/components/LintDialog";
 import { DiscoverDialog } from "@/components/DiscoverDialog";
 import { BackupHistoryDialog } from "@/components/BackupHistoryDialog";
+import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
 import { Toaster } from "@/components/ui/sonner";
@@ -23,15 +24,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 
 /**
  * App shell: master-detail layout. The left pane is the host list; the right
@@ -58,14 +50,7 @@ function App() {
         toast.success("Reloaded from disk");
       },
     });
-  const theme = useUiStore((s) => s.theme);
-  const toggleTheme = useUiStore((s) => s.toggleTheme);
-  const terminals = useTerminals();
-  const terminalId = useUiStore((s) => s.terminalId);
-  const setTerminalId = useUiStore((s) => s.setTerminalId);
-  // Radix radio values must be non-empty strings; map the "system default"
-  // choice to a sentinel that round-trips back to `null`.
-  const TERMINAL_DEFAULT = "__default__";
+  const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
 
   useEffect(() => {
     if (isError) {
@@ -121,6 +106,11 @@ function App() {
               </TooltipTrigger>
               <TooltipContent>Reload from disk</TooltipContent>
             </Tooltip>
+
+            <LintDialog />
+            <DiscoverDialog />
+            <BackupHistoryDialog />
+
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -128,62 +118,14 @@ function App() {
                   variant="ghost"
                   size="icon"
                   className="size-7"
-                  aria-label="Toggle theme"
-                  onClick={toggleTheme}
+                  aria-label="Settings"
+                  onClick={() => setSettingsOpen(true)}
                 >
-                  {theme === "dark" ? (
-                    <Sun className="size-4" />
-                  ) : (
-                    <Moon className="size-4" />
-                  )}
+                  <Settings className="size-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>
-                {theme === "dark" ? "Light mode" : "Dark mode"}
-              </TooltipContent>
+              <TooltipContent>Settings (⌘,)</TooltipContent>
             </Tooltip>
-
-            <DropdownMenu>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="size-7"
-                      aria-label="Terminal"
-                    >
-                      <TerminalSquare className="size-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </TooltipTrigger>
-                <TooltipContent>Terminal</TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent align="end" className="w-44">
-                <DropdownMenuLabel>Launch in</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuRadioGroup
-                  value={terminalId ?? TERMINAL_DEFAULT}
-                  onValueChange={(v) =>
-                    setTerminalId(v === TERMINAL_DEFAULT ? null : v)
-                  }
-                >
-                  <DropdownMenuRadioItem value={TERMINAL_DEFAULT}>
-                    System default
-                  </DropdownMenuRadioItem>
-                  {(terminals.data ?? []).map((t) => (
-                    <DropdownMenuRadioItem key={t.id} value={t.id}>
-                      {t.label}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            <LintDialog />
-            <DiscoverDialog />
-            <BackupHistoryDialog />
 
             <AddHostDialog />
           </div>
@@ -215,6 +157,7 @@ function App() {
         </div>
 
         <CommandPalette />
+        <SettingsDialog />
         <Toaster />
       </div>
     </TooltipProvider>

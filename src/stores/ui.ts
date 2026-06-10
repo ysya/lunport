@@ -60,6 +60,9 @@ interface UiState {
   /** Whether the "New host" dialog is open (driven by the command palette + toolbar). */
   addHostOpen: boolean;
   setAddHostOpen: (open: boolean) => void;
+  /** Whether the Settings sheet is open (driven by ⌘, , the toolbar gear, and the palette). */
+  settingsOpen: boolean;
+  setSettingsOpen: (open: boolean) => void;
 }
 
 /** 只放 UI 狀態，永不鏡像後端資料（後端資料由 TanStack Query 持有）。 */
@@ -90,4 +93,6 @@ export const useUiStore = create<UiState>((set) => ({
   },
   addHostOpen: false,
   setAddHostOpen: (addHostOpen) => set({ addHostOpen }),
+  settingsOpen: false,
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 }));
