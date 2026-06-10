@@ -28,6 +28,10 @@ pub struct LaunchSpec {
 /// Allowed alias charset: non-empty and every char in [A-Za-z0-9._@%-].
 fn alias_charset_ok(alias: &str) -> bool {
     !alias.is_empty()
+        // Reject a leading '-': otherwise an alias like `-Fevil`/`-D8080` is read by `ssh` as an
+        // OPTION, not a hostname (argument injection — `-F` loads an arbitrary config → ProxyCommand
+        // RCE). OpenSSH has no `--` end-of-options marker, so rejecting the dash is the mitigation.
+        && !alias.starts_with('-')
         && alias
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '%' | '-'))
@@ -293,6 +297,21 @@ mod tests {
         let doc = doc_with("Host web\n    User x\n");
         let err = validate_alias(&doc, "db").unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn validate_alias_rejects_leading_dash_argument_injection() {
+        // A malicious/synced config can contain `Host -Fevil`; that pattern passes presence-in-doc,
+        // so the charset gate MUST reject the leading dash to prevent `ssh -Fevil` (config-file →
+        // ProxyCommand RCE). Also -D8080 / -E forms.
+        let doc = doc_with("Host -Fevil\nHost -D8080\n");
+        for bad in ["-Fevil", "-D8080", "-G", "-v"] {
+            let err = validate_alias(&doc, bad).unwrap_err();
+            assert!(
+                matches!(err, AppError::ForbiddenPath(_)),
+                "leading-dash alias {bad:?} must be rejected on charset, got {err:?}"
+            );
+        }
     }
 
     #[test]
