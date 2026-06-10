@@ -251,15 +251,9 @@ function HostEditorForm({
   });
 
   return (
-    // `@container`: the editor root is a container-query context so the layout
-    // below switches on the EDITOR PANE width (window − sidebar), not the
-    // viewport. Wide panes get a two-column form + sticky inspector; narrow
-    // panes collapse to a single stacked column.
-    <div className="@container space-y-6">
+    <div className="space-y-6">
       {/*
-       * Editor header — spans the full width above both columns. The alias is
-       * the host's IDENTITY — rendered in the system sans (title), with the
-       * resolved patterns/source shown as a mono value caption beneath it.
+       * Editor header — alias as the host identity with patterns/source below.
        */}
       <div className="flex items-start justify-between gap-3 select-none">
         <div className="min-w-0 space-y-1">
@@ -327,22 +321,9 @@ function HostEditorForm({
       </div>
 
       {/*
-       * Two-pane body. Single column by default (narrow panes); at ≥960px of
-       * CONTAINER width it becomes a row: a width-capped form on the left and a
-       * sticky ssh_config inspector on the right that fills the remaining width.
-       * In the single-column case the inspector simply stacks beneath the form.
+       * Single stacked column: grouped sections followed by the config preview.
        */}
-      <div className="flex flex-col gap-6 @[960px]:flex-row @[960px]:items-start">
-        {/*
-         * LEFT — the form column. Full width when stacked; capped at ~560px in
-         * the two-pane layout so values track cleanly per macOS form guidance.
-         */}
-        <div className="min-w-0 flex-1 space-y-6 @[960px]:max-w-[560px]">
-          {/*
-           * Stacked, scrollable System-Settings-style sections — NO tabs. Every
-           * field group is rendered as its own labelled inset so all fields are
-           * visible by scrolling (no hidden tabs, no empty canvas).
-           */}
+      <div className="space-y-6">
           <form onSubmit={onSubmit} id="host-editor-form" className="space-y-6">
         {GROUPS.map((g) => {
           const defs = FIELD_DEFS.filter((d) => d.group === g).filter(
@@ -466,16 +447,10 @@ function HostEditorForm({
               </SettingsGroup>
             </Section>
           )}
-        </div>
 
-        {/*
-         * RIGHT — the ssh_config inspector. The live Host block these form
-         * values represent, updating as the user edits. Fills the remaining
-         * width and sticks to the top of the scroll region in the two-pane
-         * layout; stacks beneath the form as a full-width section when narrow.
-         */}
-        <ConfigInspector alias={detail.alias} control={control} />
-      </div>
+          {/* Config preview — always-visible at the bottom of the column. */}
+          <ConfigInspector alias={detail.alias} control={control} />
+        </div>
 
       {/* Sticky save bar: appears only when the option form is dirty. */}
       {isDirty && (
@@ -712,14 +687,9 @@ function buildConfigText(alias: string, values: FormValues): string {
 }
 
 /**
- * The ssh_config inspector — the terminal-DNA signature, promoted into a live,
- * always-visible panel. Renders the Host block client-side from the current
- * form values (read-only, mono) and exposes a Copy action.
- *
- * Layout: a flex child of the two-pane body. When the editor pane is wide
- * (≥960px container) it fills the remaining width and STICKS to the top of the
- * scroll region while the form scrolls; when narrow it stacks beneath the form
- * as a full-width section (today's behavior).
+ * The ssh_config inspector — the terminal-DNA signature, always-visible at the
+ * bottom of the single-column editor. Renders the Host block client-side from
+ * the current form values (read-only, mono) and exposes a Copy action.
  */
 function ConfigInspector({
   alias,
@@ -744,23 +714,23 @@ function ConfigInspector({
   };
 
   return (
-    <aside className="min-w-0 flex-1 @[960px]:min-w-[340px] @[960px]:self-start @[960px]:sticky @[960px]:top-0">
+    <Section
+      title="ssh_config"
+      action={
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          className="h-6 -mr-1 gap-1.5 text-muted-foreground"
+          onClick={onCopy}
+          aria-label="Copy ssh_config block"
+        >
+          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      }
+    >
       <div className="settings-group">
-        {/* Header — a quiet "filename" label + Copy action, like an editor tab. */}
-        <div className="flex items-center justify-between gap-2 bg-muted/40 px-3 py-1.5 select-none">
-          <span className="font-mono text-xs text-muted-foreground">ssh_config</span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="h-6 gap-1.5 text-muted-foreground"
-            onClick={onCopy}
-            aria-label="Copy ssh_config block"
-          >
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-            {copied ? "Copied" : "Copy"}
-          </Button>
-        </div>
         {/* Body — the live Host block. Mono, muted, selectable (it's a value). */}
         <pre
           className={cn(
@@ -771,7 +741,7 @@ function ConfigInspector({
           {text}
         </pre>
       </div>
-    </aside>
+    </Section>
   );
 }
 

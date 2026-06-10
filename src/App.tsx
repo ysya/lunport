@@ -114,7 +114,7 @@ function App() {
            */}
           <main className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto">
             {selectedAlias ? (
-              <div className="max-w-[1100px] space-y-5 px-6 py-5 pb-24">
+              <div className="mx-auto max-w-[720px] space-y-5 px-6 py-5 pb-24">
                 <DriftBanner />
                 <HostEditor alias={selectedAlias} />
               </div>
