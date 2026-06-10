@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { BackupInfo } from "@/bindings/BackupInfo";
 import { useBackups, useRestoreBackup } from "@/lib/queries";
 import { basename } from "@/lib/utils";
+import { relativeTime, sortBackupsByNewest } from "@/lib/format";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -32,23 +33,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-/** Format a unix-millis timestamp as a coarse relative string ("2h ago"). */
-function relativeTime(ms: number): string {
-  const diff = Date.now() - ms;
-  if (diff < 0) return "just now";
-  const sec = Math.floor(diff / 1000);
-  if (sec < 60) return "just now";
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const day = Math.floor(hr / 24);
-  if (day < 30) return `${day}d ago`;
-  const month = Math.floor(day / 30);
-  if (month < 12) return `${month}mo ago`;
-  return `${Math.floor(month / 12)}y ago`;
-}
-
 /** Toolbar button + a dialog listing config backups, newest-first, with restore. */
 export function BackupHistoryDialog() {
   const [open, setOpen] = useState(false);
@@ -56,10 +40,7 @@ export function BackupHistoryDialog() {
   const { data, isLoading, isFetching } = useBackups({ enabled: open });
   const restore = useRestoreBackup();
 
-  const backups = useMemo(
-    () => [...(data ?? [])].sort((a, b) => b.timestamp_ms - a.timestamp_ms),
-    [data],
-  );
+  const backups = useMemo(() => sortBackupsByNewest(data ?? []), [data]);
 
   function handleRestore(b: BackupInfo) {
     restore.mutate(
