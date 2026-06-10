@@ -23,6 +23,18 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), menu bar icon & close-to-tray, default terminal + new-tab launch (iTerm2), custom config path, backup retention, discovery sources, drift auto-check, and per-rule lint toggles.
 - **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings.
 
+## Install
+
+Download the installer for your platform from [Releases](https://github.com/ysya/sshelter/releases/latest) (`.dmg` for macOS, `.AppImage`/`.deb`/`.rpm` for Linux — ignore the `.sig` files; they're update signatures).
+
+**macOS:** builds are not yet notarized with Apple, so Gatekeeper blocks the downloaded app (often as "damaged"). After dragging SSHelter to Applications, clear the quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/SSHelter.app
+```
+
+Subsequent auto-updates install in-app and don't need this again.
+
 ## Development
 
 Prerequisites: Rust (rustup), Node + pnpm, and platform build deps (macOS: Xcode Command Line Tools; Linux: `libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev`).
