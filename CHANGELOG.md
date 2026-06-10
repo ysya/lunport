@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/ysya/sshelter/compare/v0.2.0...v0.3.0) (2026-06-10)
+
+
+### Features
+
+* **app:** auto-update via tauri-plugin-updater ([10f096b](https://github.com/ysya/sshelter/commit/10f096ba5f193d2ade835cb6ab8dbb51fa9851a9))
+
 ## 0.2.0 (2026-06-10)
 
 
