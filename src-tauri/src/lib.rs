@@ -70,6 +70,7 @@ pub fn run() {
             config_save_host,
             config_add_host,
             config_remove_host,
+            config_rename_host,
             config_set_option_enabled,
             config_set_tags,
             config_reorder_hosts,

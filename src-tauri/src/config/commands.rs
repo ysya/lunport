@@ -85,6 +85,74 @@ pub fn apply_changes(
     Ok(idx)
 }
 
+/// Validate rename pattern tokens: the list must be non-empty and every token must be
+/// non-empty with no whitespace, no `#`, and no newline (newlines are whitespace).
+pub fn validate_host_patterns(patterns: &[String]) -> Result<(), AppError> {
+    if patterns.is_empty() {
+        return Err(AppError::Other("at least one host pattern is required".to_string()));
+    }
+    for p in patterns {
+        if p.is_empty() {
+            return Err(AppError::Other("host patterns must not be empty".to_string()));
+        }
+        if p.chars().any(|c| c.is_whitespace()) {
+            return Err(AppError::Other(format!(
+                "host pattern '{}' must not contain whitespace",
+                p
+            )));
+        }
+        if p.contains('#') {
+            return Err(AppError::Other(format!(
+                "host pattern '{}' must not contain '#'",
+                p
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Rename a host: replace the pattern tokens of the block currently matching `alias` with
+/// `patterns` (losslessly — only the Host header line changes). Rejects when the new FIRST
+/// pattern exactly equals the alias (first pattern) of a DIFFERENT existing host block; a
+/// same-block rename (incl. no-op) is fine. Returns the index of the modified ConfigFile.
+pub fn rename_host(
+    doc: &mut crate::config::model::SshConfigDoc,
+    alias: &str,
+    patterns: &[String],
+) -> Result<usize, AppError> {
+    use crate::config::model::Item;
+
+    validate_host_patterns(patterns)?;
+
+    let idx = find_host_file_index(doc, alias)
+        .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
+    let target_pos = doc.files[idx]
+        .items
+        .iter()
+        .position(|it| matches!(it, Item::Host(h) if h.patterns.iter().any(|p| p == alias)))
+        .ok_or_else(|| AppError::NotFound(format!("host '{}' not found in file", alias)))?;
+
+    // Collision guard: the new first pattern must not be the primary alias of ANOTHER block.
+    let new_first = patterns[0].as_str();
+    for (fi, cf) in doc.files.iter().enumerate() {
+        for (ii, item) in cf.items.iter().enumerate() {
+            if fi == idx && ii == target_pos {
+                continue; // the block being renamed may keep (or reorder to) its own alias
+            }
+            if let Item::Host(h) = item {
+                if h.patterns.first().map(String::as_str) == Some(new_first) {
+                    return Err(AppError::Other(format!("host '{}' already exists", new_first)));
+                }
+            }
+        }
+    }
+
+    if let Item::Host(h) = &mut doc.files[idx].items[target_pos] {
+        edit::set_host_patterns(h, patterns);
+    }
+    Ok(idx)
+}
+
 /// Serialize file `idx`, back it up once (tracked in `backed_up`), atomic-write at 0o600, and
 /// refresh its in-memory fingerprint. Backups go to the file's MIRROR dir under
 /// `fsutil::backups_root()` — never next to the file, where a glob `Include` would read them as
@@ -501,6 +569,27 @@ pub fn config_remove_host(
 }
 
 #[tauri::command]
+pub fn config_rename_host(
+    state: State<AppState>,
+    alias: String,
+    patterns: Vec<String>,
+) -> Result<Option<HostDetail>, AppError> {
+    let mut doc_lock = state.doc.lock().unwrap();
+    let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
+
+    match doc_lock.as_mut() {
+        None => Err(AppError::Other("no config loaded".to_string())),
+        Some(doc) => {
+            let idx = rename_host(doc, &alias, &patterns)?;
+            persist_file(doc, idx, &mut backed_up_lock, retention)?;
+            // The host's identity may have changed: look it up by the NEW first pattern.
+            Ok(host_detail(doc, &patterns[0]))
+        }
+    }
+}
+
+#[tauri::command]
 pub fn config_set_option_enabled(
     state: State<AppState>,
     alias: String,
@@ -813,6 +902,99 @@ mod tests {
         apply_changes(&mut doc, "web", &remove_changes).expect("apply_changes remove ok");
         let text2 = serialize_items(&doc.files[idx].items, doc.files[idx].trailing_newline);
         assert!(!text2.contains("Port 22"), "removed field must be gone:\n{}", text2);
+    }
+
+    // ── Tests: rename_host ────────────────────────────────────────────────────
+
+    #[test]
+    fn rename_host_persists_and_findable_under_new_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "Host web\n    HostName web.example.com\n    User deploy\n\nHost db\n    User admin\n";
+        let config_path = write_config(&dir, "config", content);
+
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+        let idx = rename_host(
+            &mut doc,
+            "web",
+            &["web-prod".to_string(), "web".to_string()],
+        )
+        .expect("rename_host ok");
+        assert_eq!(idx, 0);
+
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        persist_file(&mut doc, idx, &mut backed_up, None).expect("persist_file ok");
+
+        // Reload from disk: the host is findable under the NEW first pattern, the body is
+        // untouched, and every non-header line is byte-identical.
+        let reloaded = load_doc(&config_path).expect("reload ok");
+        assert!(find_host_file_index(&reloaded, "web-prod").is_some(), "new alias findable");
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(
+            on_disk,
+            "Host web-prod web\n    HostName web.example.com\n    User deploy\n\nHost db\n    User admin\n",
+            "only the Host header line may change"
+        );
+    }
+
+    #[test]
+    fn rename_host_collision_rejected_same_block_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "Host web\n    User deploy\n\nHost db\n    User admin\n";
+        let config_path = write_config(&dir, "config", content);
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+
+        // Renaming 'web' to another block's alias is rejected.
+        let r = rename_host(&mut doc, "web", &["db".to_string()]);
+        match r {
+            Err(AppError::Other(msg)) => assert!(
+                msg.contains("already exists"),
+                "collision message should say already exists, got: {msg}"
+            ),
+            other => panic!("expected Other(already exists), got {other:?}"),
+        }
+
+        // A same-block no-op rename is fine.
+        rename_host(&mut doc, "web", &["web".to_string()]).expect("same-block rename ok");
+        // …and so is keeping the alias while adding a pattern.
+        rename_host(&mut doc, "web", &["web".to_string(), "web.example.com".to_string()])
+            .expect("same-block pattern addition ok");
+    }
+
+    #[test]
+    fn rename_host_rejects_invalid_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+
+        let bad: &[&[&str]] = &[
+            &[],                  // empty list
+            &[""],                // empty token
+            &["a b"],             // whitespace
+            &["a\tb"],            // tab
+            &["a\nb"],            // newline
+            &["web#prod"],        // hash
+        ];
+        for tokens in bad {
+            let patterns: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
+            let r = rename_host(&mut doc, "web", &patterns);
+            assert!(
+                matches!(r, Err(AppError::Other(_))),
+                "tokens {tokens:?} must be rejected, got {r:?}"
+            );
+        }
+
+        // Nothing was changed by the rejected attempts.
+        let text = serialize_items(&doc.files[0].items, doc.files[0].trailing_newline);
+        assert_eq!(text, "Host web\n    User deploy\n");
+    }
+
+    #[test]
+    fn rename_host_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+        let r = rename_host(&mut doc, "nope", &["x".to_string()]);
+        assert!(matches!(r, Err(AppError::NotFound(_))), "unknown alias → NotFound, got {r:?}");
     }
 
     // ── Test 3: apply_changes NotFound for unknown alias ─────────────────────

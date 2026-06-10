@@ -68,6 +68,30 @@ fn infer_indent(body: &[Item]) -> String {
     "    ".to_string()
 }
 
+/// Rewrite ONLY the pattern tokens of the `Host` header line. The header is a parsed
+/// `Directive`, so setting its `value` (+ `dirty=true`) re-renders just that one line while
+/// preserving the leading indentation, the `Host` keyword's original casing, the original
+/// keyword/value separator (spacing or `=`), and any trailing inline comment byte-for-byte.
+/// Whitespace BETWEEN pattern tokens is normalized to single spaces. Returns true if changed.
+pub fn set_host_patterns(host: &mut HostBlock, patterns: &[String]) -> bool {
+    // Last line of defense against line injection through the header: a pattern token can
+    // never legally contain CR/LF (the command layer rejects whitespace tokens up front).
+    let tokens: Vec<String> = patterns
+        .iter()
+        .map(|p| p.replace(['\r', '\n'], ""))
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    let value = tokens.join(" ");
+    if host.header.value == value {
+        return false; // no change — keep the raw line byte-identical
+    }
+    host.header.value = value;
+    host.header.dirty = true;
+    host.patterns = tokens;
+    true
+}
+
 /// Remove the first body directive whose `key == key_lower`. Returns true if one was removed.
 pub fn remove_host_field(host: &mut HostBlock, key_lower: &str) -> bool {
     let key_lower = key_lower.to_lowercase();
@@ -583,6 +607,67 @@ mod tests {
             find_sentinel(&host.body, "#tags:").is_none(),
             "tags sentinel must be removed after set_tags(&[])"
         );
+    }
+
+    // ── Tests: set_host_patterns — lossless single-line Host header rewrite ──
+
+    #[test]
+    fn test_set_host_patterns_changes_only_host_line_keeps_comment_and_indent() {
+        // An indented Host line with odd keyword spacing AND a trailing comment: everything
+        // around the pattern tokens must survive byte-for-byte.
+        let original = "# global note\n  Host  web db.old  # primary cluster\n    User deploy\n\nHost other\n    User x\n";
+        let (mut items, nl) = parse_file(original);
+
+        let host = find_host_mut(&mut items, "web").expect("host 'web' not found");
+        let changed = set_host_patterns(
+            host,
+            &["web-prod".to_string(), "db.old".to_string()],
+        );
+        assert!(changed, "set_host_patterns should return true");
+        assert_eq!(host.patterns, vec!["web-prod", "db.old"]);
+
+        let edited = serialize_items(&items, nl);
+        let orig_lines: Vec<&str> = original.lines().collect();
+        let edit_lines: Vec<&str> = edited.lines().collect();
+        assert_eq!(orig_lines.len(), edit_lines.len(), "line count must not change");
+
+        let diffs: Vec<usize> = orig_lines
+            .iter()
+            .zip(edit_lines.iter())
+            .enumerate()
+            .filter_map(|(i, (a, b))| if a != b { Some(i) } else { None })
+            .collect();
+        assert_eq!(diffs.len(), 1, "exactly one line should differ, got {:?}:\n{}", diffs, edited);
+        // Indent ("  "), keyword spacing ("Host  ") and the trailing comment all preserved;
+        // only the tokens changed (inter-token whitespace normalized to single spaces).
+        assert_eq!(edit_lines[diffs[0]], "  Host  web-prod db.old  # primary cluster");
+    }
+
+    #[test]
+    fn test_set_host_patterns_noop_keeps_file_byte_identical() {
+        let original = "Host web db\n    User deploy\n";
+        let (mut items, nl) = parse_file(original);
+
+        let host = find_host_mut(&mut items, "web").unwrap();
+        let changed = set_host_patterns(host, &["web".to_string(), "db".to_string()]);
+        assert!(!changed, "same tokens must be a no-op");
+        assert_eq!(serialize_items(&items, nl), original, "no-op must round-trip byte-identically");
+    }
+
+    #[test]
+    fn test_set_host_patterns_strips_crlf_no_injection() {
+        let original = "Host web\n    User deploy\n";
+        let (mut items, nl) = parse_file(original);
+
+        let host = find_host_mut(&mut items, "web").unwrap();
+        set_host_patterns(host, &["evil\nHost injected".to_string()]);
+        let edited = serialize_items(&items, nl);
+        assert_eq!(
+            edited.lines().count(),
+            original.lines().count(),
+            "a pattern newline must not inject a physical line:\n{edited}"
+        );
+        assert_eq!(edited.lines().next().unwrap(), "Host evilHost injected");
     }
 
     // ── Test 9: value newlines are stripped (no line injection) ──────────────

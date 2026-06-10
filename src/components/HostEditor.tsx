@@ -10,7 +10,7 @@ import {
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Trash2, Plus, MoreVertical, RotateCcw, Save, Copy, Check, TerminalSquare } from "lucide-react";
+import { Trash2, Plus, MoreVertical, RotateCcw, Save, Copy, Check, TerminalSquare, Pencil, X } from "lucide-react";
 
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostOption } from "@/bindings/HostOption";
@@ -27,6 +27,7 @@ import {
   useSetTags,
   useSetOptionEnabled,
   useRemoveHost,
+  useRenameHost,
   useConnect,
   useTerminals,
 } from "@/lib/queries";
@@ -277,23 +278,8 @@ function HostEditorForm({
       {/*
        * Editor header — alias as the host identity with patterns/source below.
        */}
-      <div className="flex items-start justify-between gap-3 select-none">
-        <div className="min-w-0 space-y-1">
-          <h2 className="truncate text-[0.9375rem] font-semibold tracking-tight">
-            {detail.alias}
-          </h2>
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-            <span className="font-mono select-text">{detail.patterns.join(", ")}</span>
-            <span className="text-muted-foreground/40">·</span>
-            <Badge
-              variant="outline"
-              className="border-border font-mono text-[0.65rem] font-normal text-muted-foreground"
-              title={detail.source_file}
-            >
-              {basename(detail.source_file)}
-            </Badge>
-          </div>
-        </div>
+      <div className="group flex items-start justify-between gap-3 select-none">
+        <HostHeaderTitle detail={detail} />
 
         <div className="flex shrink-0 items-center gap-1.5">
           <Button
@@ -515,6 +501,125 @@ function HostEditorForm({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Editor header identity block: alias title + patterns/source line, with a
+ * quiet inline-rename mode. The pencil (revealed on header hover, always
+ * keyboard-reachable) swaps the title for a single mono input holding the FULL
+ * `Host` pattern list space-separated. Enter = commit, Esc = cancel; ✓/✕ for
+ * the mouse. On success the selection follows the new first pattern.
+ */
+function HostHeaderTitle({ detail }: { detail: HostDetail }) {
+  const renameHost = useRenameHost();
+  const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const pending = renameHost.isPending;
+
+  const startEdit = () => {
+    setValue(detail.patterns.join(" "));
+    setEditing(true);
+  };
+
+  const commit = () => {
+    const patterns = value.split(/\s+/).filter(Boolean);
+    // Empty or unchanged input is a silent cancel — nothing to write.
+    if (patterns.length === 0 || patterns.join(" ") === detail.patterns.join(" ")) {
+      setEditing(false);
+      return;
+    }
+    renameHost.mutate(
+      { alias: detail.alias, patterns },
+      {
+        onSuccess: () => {
+          setEditing(false);
+          setSelectedAlias(patterns[0]);
+          toast.success(`Renamed to ${patterns[0]}`);
+        },
+        // Validation/collision errors surface via the mutation's error toast;
+        // stay in edit mode so the input can be corrected.
+      },
+    );
+  };
+
+  if (editing) {
+    return (
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <Input
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              setEditing(false);
+            }
+          }}
+          disabled={pending}
+          aria-label="Host patterns"
+          placeholder="alias [more patterns…]"
+          className="h-7 max-w-md flex-1 px-2 font-mono text-sm"
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0 text-muted-foreground"
+          aria-label="Apply rename"
+          onClick={commit}
+          disabled={pending}
+        >
+          <Check className="size-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0 text-muted-foreground"
+          aria-label="Cancel rename"
+          onClick={() => setEditing(false)}
+          disabled={pending}
+        >
+          <X className="size-4" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-w-0 space-y-1">
+      <div className="flex items-center gap-0.5">
+        <h2 className="truncate text-[0.9375rem] font-semibold tracking-tight">
+          {detail.alias}
+        </h2>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+          aria-label="Rename host"
+          onClick={startEdit}
+        >
+          <Pencil className="size-3.5" />
+        </Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        <span className="font-mono select-text">{detail.patterns.join(", ")}</span>
+        <span className="text-muted-foreground/40">·</span>
+        <Badge
+          variant="outline"
+          className="border-border font-mono text-[0.65rem] font-normal text-muted-foreground"
+          title={detail.source_file}
+        >
+          {basename(detail.source_file)}
+        </Badge>
+      </div>
     </div>
   );
 }

@@ -168,6 +168,31 @@ export function useRemoveHost() {
   });
 }
 
+/**
+ * Rename a host: replace the `Host` line's pattern tokens losslessly. The first
+ * pattern is the host's identity, so on success BOTH the old and new detail
+ * keys are invalidated (plus the hosts list, which refreshes the sidebar).
+ */
+export function useRenameHost() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    HostDetail | null,
+    unknown,
+    { alias: string; patterns: string[] }
+  >({
+    mutationFn: ({ alias, patterns }) =>
+      tauriInvoke<HostDetail | null>("config_rename_host", { alias, patterns }),
+    onSuccess: (_data, { alias, patterns }) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.host(alias) });
+      if (patterns[0] && patterns[0] !== alias) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.host(patterns[0]) });
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
+    },
+    onError: (e) => toast.error("Failed to rename host", { description: errMessage(e) }),
+  });
+}
+
 /** Replace a host's tags. */
 export function useSetTags() {
   const queryClient = useQueryClient();
