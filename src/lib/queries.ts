@@ -11,6 +11,11 @@ import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
 import type { DriftInfo } from "@/bindings/DriftInfo";
 import type { TerminalInfo } from "@/bindings/TerminalInfo";
+import type { KeyHygiene } from "@/bindings/KeyHygiene";
+import type { ChainNode } from "@/bindings/ChainNode";
+import type { LintIssue } from "@/bindings/LintIssue";
+import type { Suggestion } from "@/bindings/Suggestion";
+import type { BackupInfo } from "@/bindings/BackupInfo";
 
 /**
  * Centralized query keys. The hosts list is the canonical cache: both
@@ -22,6 +27,12 @@ export const queryKeys = {
   host: (alias: string) => ["config", "host", alias] as const,
   files: ["config", "files"] as const,
   drift: ["config", "drift"] as const,
+  lint: ["config", "lint"] as const,
+  keyHygiene: (alias: string) => ["config", "keyHygiene", alias] as const,
+  effective: (alias: string) => ["config", "effective", alias] as const,
+  jumpChain: (alias: string) => ["config", "jumpChain", alias] as const,
+  discover: ["discover", "hosts"] as const,
+  backups: ["config", "backups"] as const,
 };
 
 /** Normalize a rejected-promise error (Tauri rejects with a string) to a message. */
@@ -233,5 +244,116 @@ export function useDrift(
     queryFn: () => tauriInvoke<DriftInfo[]>("config_check_drift"),
     enabled: false,
     ...options,
+  });
+}
+
+/**
+ * Key hygiene for a host: its resolved IdentityFile set (with existence checks)
+ * plus the `IdentitiesOnly` / explicit-IdentityFile flags. Keyed per-alias and
+ * disabled until an alias is provided. Read-only insight panel.
+ */
+export function useKeyHygiene(alias: string | null | undefined) {
+  return useQuery<KeyHygiene>({
+    queryKey: queryKeys.keyHygiene(alias ?? ""),
+    queryFn: () => tauriInvoke<KeyHygiene>("config_key_hygiene", { alias }),
+    enabled: !!alias,
+  });
+}
+
+/**
+ * The resolved (`ssh -G`) effective config for a host as ordered
+ * keyword/value tuples. This can be large and shells out, so callers should
+ * gate it behind an `enabled` flag (e.g. only when the section is expanded).
+ */
+export function useEffectiveConfig(
+  alias: string | null | undefined,
+  options?: Omit<UseQueryOptions<Array<[string, string]>>, "queryKey" | "queryFn">,
+) {
+  return useQuery<Array<[string, string]>>({
+    queryKey: queryKeys.effective(alias ?? ""),
+    queryFn: () =>
+      tauriInvoke<Array<[string, string]>>("config_effective", { alias }),
+    enabled: !!alias,
+    ...options,
+  });
+}
+
+/**
+ * The ProxyJump chain for a host: ordered hops from the entry host through each
+ * jump. Empty array = no ProxyJump. A node with `defined: false` is referenced
+ * but not present in the user's config. Keyed per-alias, disabled until alias.
+ */
+export function useJumpChain(alias: string | null | undefined) {
+  return useQuery<ChainNode[]>({
+    queryKey: queryKeys.jumpChain(alias ?? ""),
+    queryFn: () => tauriInvoke<ChainNode[]>("config_jump_chain", { alias }),
+    enabled: !!alias,
+  });
+}
+
+/**
+ * Global config lint: issues across the whole config (not per-host). Naturally
+ * refetched on a config reload because its key lives under `["config"]`, which
+ * the reload path invalidates.
+ */
+export function useLint(
+  options?: Omit<UseQueryOptions<LintIssue[]>, "queryKey" | "queryFn">,
+) {
+  return useQuery<LintIssue[]>({
+    queryKey: queryKeys.lint,
+    queryFn: () => tauriInvoke<LintIssue[]>("config_lint"),
+    staleTime: 30_000,
+    ...options,
+  });
+}
+
+/**
+ * Discover candidate hosts from `known_hosts` + Tailscale. Shells out, so it is
+ * lazy: callers gate it behind an `enabled` flag (e.g. dialog-open state).
+ */
+export function useDiscoverHosts(
+  options?: Omit<UseQueryOptions<Suggestion[]>, "queryKey" | "queryFn">,
+) {
+  return useQuery<Suggestion[]>({
+    queryKey: queryKeys.discover,
+    queryFn: () => tauriInvoke<Suggestion[]>("discover_hosts"),
+    enabled: false,
+    staleTime: 30_000,
+    ...options,
+  });
+}
+
+/**
+ * List config backups. Newest-first is NOT guaranteed by the backend — sort by
+ * `timestamp_ms` descending in the UI. Lazy: callers gate behind dialog-open.
+ */
+export function useBackups(
+  options?: Omit<UseQueryOptions<BackupInfo[]>, "queryKey" | "queryFn">,
+) {
+  return useQuery<BackupInfo[]>({
+    queryKey: queryKeys.backups,
+    queryFn: () => tauriInvoke<BackupInfo[]>("config_list_backups"),
+    enabled: false,
+    ...options,
+  });
+}
+
+/**
+ * Restore a backup over its live config file. On success it primes the
+ * hosts/files caches from the returned `LoadResult` (mirroring `useLoadConfig`)
+ * then invalidates everything under `["config"]` so all derived views refetch.
+ */
+export function useRestoreBackup() {
+  const queryClient = useQueryClient();
+  return useMutation<LoadResult, unknown, { backupPath: string }>({
+    mutationFn: ({ backupPath }) =>
+      tauriInvoke<LoadResult>("config_restore_backup", { backupPath }),
+    onSuccess: (data) => {
+      queryClient.setQueryData<LoadResult>(queryKeys.hosts, data);
+      queryClient.setQueryData<string[]>(queryKeys.files, data.files);
+      queryClient.invalidateQueries({ queryKey: ["config"] });
+    },
+    onError: (e) =>
+      toast.error("Failed to restore backup", { description: errMessage(e) }),
   });
 }

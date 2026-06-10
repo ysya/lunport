@@ -9,6 +9,9 @@ import { useApplyTheme } from "@/lib/theme";
 import { HostList } from "@/components/HostList";
 import { HostEditor } from "@/components/HostEditor";
 import { AddHostDialog } from "@/components/AddHostDialog";
+import { LintDialog } from "@/components/LintDialog";
+import { DiscoverDialog } from "@/components/DiscoverDialog";
+import { BackupHistoryDialog } from "@/components/BackupHistoryDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
 import { Toaster } from "@/components/ui/sonner";
@@ -177,6 +180,10 @@ function App() {
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>
+
+            <LintDialog />
+            <DiscoverDialog />
+            <BackupHistoryDialog />
 
             <AddHostDialog />
           </div>

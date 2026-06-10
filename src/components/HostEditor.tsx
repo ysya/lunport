@@ -62,6 +62,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Section, SettingsGroup } from "@/components/settings-primitives";
+import { HostIntelligence } from "@/components/HostIntelligence";
 
 const GROUPS = ["Connection", "Authentication", "Forwarding", "Reliability"] as const;
 
@@ -471,6 +473,9 @@ function HostEditorForm({
             </Section>
           )}
 
+          {/* Read-only per-host intelligence: key hygiene, ProxyJump chain, ssh -G. */}
+          <HostIntelligence alias={detail.alias} />
+
           {/* Config preview — always-visible at the bottom of the column. */}
           <ConfigInspector alias={detail.alias} control={control} />
         </div>
@@ -532,45 +537,6 @@ function HostEditorSkeleton() {
 // Radix Select cannot use "" as an item value, so the "unset" choice uses a sentinel that
 // maps back to "" (which clears the field → the directive line is removed on save).
 const UNSET = "__unset__";
-
-/**
- * A stacked editor section: a small uppercase system-font header (with an
- * optional right-aligned action and an optional description) above a grouped
- * inset. Replaces the old tabs — every group is always visible by scrolling.
- */
-function Section({
-  title,
-  description,
-  action,
-  children,
-}: {
-  title: string;
-  description?: string;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section>
-      <div className="flex items-end justify-between gap-2">
-        <span className="section-label">{title}</span>
-        {action}
-      </div>
-      {children}
-      {description && (
-        <p className="px-2.5 pt-1.5 text-xs text-muted-foreground select-none">{description}</p>
-      )}
-    </section>
-  );
-}
-
-/**
- * macOS System-Settings-style grouped inset container: a rounded card whose
- * direct children are separated by hairline dividers (see `.settings-group` in
- * index.css). Each child is expected to be a single row.
- */
-function SettingsGroup({ children }: { children: ReactNode }) {
-  return <div className="settings-group">{children}</div>;
-}
 
 /**
  * A single settings row: label on the LEFT (system font, muted), control area
