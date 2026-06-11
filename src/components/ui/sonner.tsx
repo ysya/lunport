@@ -34,6 +34,12 @@ const Toaster = ({ ...props }: ToasterProps) => {
           "--normal-text": "var(--popover-foreground)",
           "--normal-border": "var(--border)",
           "--border-radius": "var(--radius)",
+          // Radix modal dialogs set `pointer-events: none` on <body>, which
+          // makes toasts visible-but-unclickable while a dialog is open (a
+          // click would fall through to the overlay and dismiss the dialog).
+          // Re-enable pointer events for the toaster subtree so notifications
+          // stay actionable above modals.
+          pointerEvents: "auto",
         } as React.CSSProperties
       }
       toastOptions={{
