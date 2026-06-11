@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import {
+  clampFontSize,
+  DEFAULT_FONT_SIZE,
   defaultLintRules,
   resolveTheme,
   systemPrefersDark,
@@ -55,6 +57,9 @@ interface SettingsState {
    */
   terminalId: string | null;
   setTerminalId: (id: string | null) => void;
+  /** Root font-size in px (the whole UI is rem-based and scales with it). */
+  fontSize: number;
+  setFontSize: (px: number) => void;
   /** Check GitHub Releases for a newer build shortly after launch. */
   autoCheckUpdates: boolean;
   setAutoCheckUpdates: (enabled: boolean) => void;
@@ -115,6 +120,8 @@ export const useSettingsStore = create<SettingsState>()(
         })),
       terminalId: legacyTerminalId(),
       setTerminalId: (terminalId) => set({ terminalId }),
+      fontSize: DEFAULT_FONT_SIZE,
+      setFontSize: (fontSize) => set({ fontSize: clampFontSize(fontSize) }),
       autoCheckUpdates: true,
       setAutoCheckUpdates: (autoCheckUpdates) => set({ autoCheckUpdates }),
       trayVisible: true,

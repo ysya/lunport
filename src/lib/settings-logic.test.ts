@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TerminalInfo } from "@/bindings/TerminalInfo";
 import {
+  clampFontSize,
+  DEFAULT_FONT_SIZE,
   defaultLintRules,
   effectiveNewTab,
   filterLintIssues,
@@ -111,5 +113,19 @@ describe("new-tab connect gating", () => {
     expect(effectiveNewTab(false, "iterm2", TERMINALS)).toBe(false);
     expect(effectiveNewTab(true, "terminal", TERMINALS)).toBe(false);
     expect(effectiveNewTab(true, null, TERMINALS)).toBe(false);
+  });
+});
+
+describe("clampFontSize", () => {
+  it("passes valid options through", () => {
+    expect(clampFontSize(13)).toBe(13);
+    expect(clampFontSize(17)).toBe(17);
+  });
+
+  it("falls back to the default for invalid/legacy values", () => {
+    expect(clampFontSize(9)).toBe(DEFAULT_FONT_SIZE);
+    expect(clampFontSize(40)).toBe(DEFAULT_FONT_SIZE);
+    expect(clampFontSize("15")).toBe(DEFAULT_FONT_SIZE);
+    expect(clampFontSize(undefined)).toBe(DEFAULT_FONT_SIZE);
   });
 });

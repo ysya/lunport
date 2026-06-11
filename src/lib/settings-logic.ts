@@ -24,6 +24,27 @@ export function systemPrefersDark(): boolean {
 }
 
 /**
+ * UI text-size choices (the root `font-size`; the whole UI is rem-based so it
+ * scales proportionally). 15 is the shipped default.
+ */
+export const FONT_SIZE_OPTIONS = [
+  { value: 13, label: "Small" },
+  { value: 14, label: "Compact" },
+  { value: 15, label: "Default" },
+  { value: 16, label: "Large" },
+  { value: 17, label: "Larger" },
+] as const;
+
+export const DEFAULT_FONT_SIZE = 15;
+
+/** Clamp a persisted font size to a valid option (bad/legacy values → default). */
+export function clampFontSize(value: unknown): number {
+  return FONT_SIZE_OPTIONS.some((o) => o.value === value)
+    ? (value as number)
+    : DEFAULT_FONT_SIZE;
+}
+
+/**
  * The lint rules the backend emits, with stable kebab-case ids (mirrors
  * `LintIssue.rule`) and human-readable labels for the Settings switches.
  */

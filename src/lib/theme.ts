@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 
 import { useSettingsStore } from "@/stores/settings";
-import { resolveTheme, systemPrefersDark } from "@/lib/settings-logic";
+import { clampFontSize, resolveTheme, systemPrefersDark } from "@/lib/settings-logic";
 
 /**
  * Applies the current `useSettingsStore.theme` preference to the document:
@@ -28,4 +28,11 @@ export function useApplyTheme(): void {
     mql.addEventListener("change", apply);
     return () => mql.removeEventListener("change", apply);
   }, [theme]);
+
+  // Root font-size preference: the entire UI is rem-based, so this scales it
+  // proportionally. Overrides the stylesheet's `html { font-size: 15px }`.
+  const fontSize = useSettingsStore((s) => s.fontSize);
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${clampFontSize(fontSize)}px`;
+  }, [fontSize]);
 }

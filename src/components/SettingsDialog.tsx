@@ -21,6 +21,7 @@ import { useLoadConfig, useTerminals } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
 import { checkForUpdates } from "@/lib/updater";
 import {
+  FONT_SIZE_OPTIONS,
   LINT_RULES,
   terminalSupportsNewTab,
   type ThemePref,
@@ -252,14 +253,36 @@ function GeneralPane() {
 function AppearancePane() {
   const theme = useSettingsStore((s) => s.theme);
   const setTheme = useSettingsStore((s) => s.setTheme);
+  const fontSize = useSettingsStore((s) => s.fontSize);
+  const setFontSize = useSettingsStore((s) => s.setFontSize);
   return (
     <Section
       title="Appearance"
-      description="“System” follows your OS light/dark preference."
+      description="“System” follows your OS light/dark preference. Text size scales the whole interface."
     >
       <SettingsGroup>
         <SettingsRow label="Theme">
           <ThemeSegmented value={theme} onChange={setTheme} />
+        </SettingsRow>
+        <SettingsRow id="set-font-size" label="Text size">
+          <Select
+            value={String(fontSize)}
+            onValueChange={(v) => setFontSize(Number(v))}
+          >
+            <SelectTrigger id="set-font-size" className="h-7 w-[10rem] text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {FONT_SIZE_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={String(o.value)}>
+                  {o.label}
+                  <span className="ml-1 font-mono text-xs text-muted-foreground">
+                    {o.value}px
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </SettingsRow>
       </SettingsGroup>
     </Section>
