@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/ysya/sshelter/compare/v0.4.0...v0.5.0) (2026-06-11)
+
+
+### Features
+
+* **app:** launch-at-login, global hotkey, settings export/import, ⌘F/⌘N ([636144b](https://github.com/ysya/sshelter/commit/636144b7dfec191bc515ff7b7db0776235ce86b0))
+* **hosts:** move/duplicate host across files, per-host terminal override, raw file viewer ([4eb8e52](https://github.com/ysya/sshelter/commit/4eb8e52751db1dc8a29733f1497b4cd4b162801c))
+* **keys:** SSH key management — list/fingerprints/agent status, generate ed25519, copy pubkey, ssh-copy-id deploy via terminal ([c54f1ab](https://github.com/ysya/sshelter/commit/c54f1ab1038a8154dca0ab2c3cc3f869d09b32b7))
+* **known-hosts:** known_hosts viewer — search + safe entry removal (lossless, backed up) ([0130f51](https://github.com/ysya/sshelter/commit/0130f510fbddd2f9bd375a914cef7191fbc63a7d))
+* **ui:** drag-to-reorder hosts within a config file ([2226433](https://github.com/ysya/sshelter/commit/2226433cf3cba13036fe7df03a76c23f5799820e))
+* **ui:** user-adjustable text size (Settings &gt; Appearance, scales the rem-based UI) ([09b9d2a](https://github.com/ysya/sshelter/commit/09b9d2ab0e316399af4826c18f0f4a5d307b3d86))
+
+
+### Bug Fixes
+
+* **config:** address option toggles by occurrence index (same-keyword pairs hit the wrong line) ([bbbf10f](https://github.com/ysya/sshelter/commit/bbbf10f96c5506418c59881504ffd274976cf41d))
+* **ui:** overlay buttons centered with translate (-translate-y-1/2) lost ([4eb8e52](https://github.com/ysya/sshelter/commit/4eb8e52751db1dc8a29733f1497b4cd4b162801c))
+
 ## [0.4.0](https://github.com/ysya/sshelter/compare/v0.3.0...v0.4.0) (2026-06-11)
 
 
