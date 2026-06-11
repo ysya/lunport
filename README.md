@@ -20,7 +20,10 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **Config intelligence** — per-host **key hygiene** (which IdentityFiles exist, IdentitiesOnly/explicit state), **ProxyJump chain** visualization (flags hops not defined in your config), and the resolved **effective config** (`ssh -G`); plus a global **linter** (invalid ports, unresolvable hosts, missing keys, shadowed aliases, duplicate directives).
 - **Host discovery** — surface candidate hosts from `known_hosts` and your Tailscale network.
 - **Backup history & restore** — every write is snapshotted; browse and restore prior versions (restore is itself backed up first and validated against managed paths).
-- **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), menu bar icon & close-to-tray, default terminal + new-tab launch (iTerm2), custom config path, backup retention, discovery sources, drift auto-check, and per-rule lint toggles.
+- **Key management** — list `~/.ssh` keypairs with fingerprints and agent status, generate ed25519 keys (passphrase flow via your terminal), copy public keys, and deploy with `ssh-copy-id`.
+- **known_hosts editor** — view, search, and safely remove host-key entries (lossless line removal, backed up first) — the "host key changed after a reinstall" cleanup without the terminal.
+- **Host organization** — drag-to-reorder within a file, move hosts between config files (byte-identical block moves), duplicate as a template, rename the `Host` line itself, and give source files custom display names.
+- **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), text size, menu bar icon & close-to-tray, launch at login, global quick-connect hotkey, default + per-host terminal, new-tab launch (iTerm2), custom config path, backup retention, discovery sources, drift auto-check, per-rule lint toggles, and settings export/import.
 - **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings.
 
 ## Install
