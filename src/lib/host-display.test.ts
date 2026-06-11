@@ -52,9 +52,19 @@ describe("shortLabels", () => {
     expect(m.get("/Users/me/.ssh/work")).toBe("work");
   });
 
-  it("disambiguates duplicate basenames by prepending a parent segment", () => {
+  it("labels a colliding file by its nearest distinctive ancestor", () => {
+    // The OrbStack case: `ssh/config` is meaningless to a human; `orbstack` is the identity.
+    const m = shortLabels([
+      "/Users/me/.ssh/config",
+      "/Users/me/.orbstack/ssh/config",
+    ]);
+    expect(m.get("/Users/me/.ssh/config")).toBe("config");
+    expect(m.get("/Users/me/.orbstack/ssh/config")).toBe("orbstack");
+  });
+
+  it("falls back to a trailing path when every ancestor is generic", () => {
     const m = shortLabels(["/Users/me/.ssh/config", "/etc/ssh/config"]);
-    // First claim keeps the bare basename; the collision extends.
+    // /etc/ssh are both generic segments — no distinctive anchor exists.
     expect(m.get("/Users/me/.ssh/config")).toBe("config");
     expect(m.get("/etc/ssh/config")).toBe("ssh/config");
   });
@@ -62,7 +72,19 @@ describe("shortLabels", () => {
   it("is case-insensitive when detecting collisions", () => {
     const m = shortLabels(["/a/CONFIG", "/b/config"]);
     expect(m.get("/a/CONFIG")).toBe("CONFIG");
-    expect(m.get("/b/config")).toBe("b/config");
+    expect(m.get("/b/config")).toBe("b");
+  });
+
+  it("falls back to trailing paths when anchors also collide", () => {
+    const m = shortLabels([
+      "/base/config",
+      "/x/work/ssh/config",
+      "/y/work/ssh/config",
+    ]);
+    expect(m.get("/base/config")).toBe("config");
+    expect(m.get("/x/work/ssh/config")).toBe("work");
+    // `work` is taken too — extend with the trailing path until unique.
+    expect(m.get("/y/work/ssh/config")).toBe("ssh/config");
   });
 });
 

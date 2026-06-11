@@ -18,17 +18,59 @@ export function secondaryLine(host: HostSummary): string | null {
 }
 
 /**
- * Map each source-file path to the shortest trailing path-segment label unique
- * among `files`. The first file to claim a basename keeps it; later collisions
- * extend by prepending one more path segment. Comparison is case-insensitive.
+ * Path segments that carry no identity on their own — extending a colliding
+ * label with one of these (e.g. `ssh/config` for OrbStack's
+ * `~/.orbstack/ssh/config`) reads as noise, so the disambiguator skips past
+ * them to the first DISTINCTIVE ancestor instead.
+ */
+const GENERIC_SEGMENTS = new Set(["ssh", ".ssh", "etc", "config.d", "conf.d", "ssh_config.d"]);
+
+/** A segment rendered as a label: leading dots stripped (`.orbstack` → `orbstack`). */
+function displaySegment(seg: string): string {
+  const stripped = seg.replace(/^\.+/, "");
+  return stripped.length > 0 ? stripped : seg;
+}
+
+/**
+ * Map each source-file path to a short label unique among `files`. The first
+ * file to claim a basename keeps it; later collisions are labeled by their
+ * nearest DISTINCTIVE ancestor directory (skipping generic segments like
+ * `ssh`/`config.d`), so `~/.orbstack/ssh/config` shows as `orbstack` rather
+ * than `ssh/config`. Falls back to progressively longer trailing paths when no
+ * distinctive ancestor exists. Comparison is case-insensitive.
  */
 export function shortLabels(files: string[]): Map<string, string> {
   const used = new Set<string>();
   const map = new Map<string, string>();
+  const claim = (label: string): boolean => {
+    if (used.has(label.toLowerCase())) return false;
+    used.add(label.toLowerCase());
+    return true;
+  };
+
   for (const f of files) {
     const segs = f.split("/").filter(Boolean);
+    const basename = segs[segs.length - 1] ?? f;
+    if (claim(basename)) {
+      map.set(f, basename);
+      continue;
+    }
+
+    // Collision: prefer the nearest non-generic ancestor as the identity.
+    const anchor = [...segs.slice(0, -1)]
+      .reverse()
+      .find((s) => !GENERIC_SEGMENTS.has(s.toLowerCase()));
+    if (anchor) {
+      const label = displaySegment(anchor);
+      if (claim(label)) {
+        map.set(f, label);
+        continue;
+      }
+    }
+
+    // Fall back: extend with progressively longer trailing paths.
     let n = 1;
-    let label = segs[segs.length - 1] ?? f;
+    let label = basename;
     while (used.has(label.toLowerCase()) && n < segs.length) {
       n += 1;
       label = segs.slice(segs.length - n).join("/");
