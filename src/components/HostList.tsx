@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   Search,
   ServerOff,
@@ -11,7 +11,7 @@ import {
 
 import type { HostSummary } from "@/bindings/HostSummary";
 import { useUiStore } from "@/stores/ui";
-import { useConnect, useHostsQuery, useTerminals } from "@/lib/queries";
+import { useConnect, useHostsQuery, useReorderHosts, useTerminals } from "@/lib/queries";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab } from "@/lib/settings-logic";
 import { Input } from "@/components/ui/input";
@@ -27,6 +27,7 @@ import {
 import { AddHostDialog } from "@/components/AddHostDialog";
 import { cn, basename } from "@/lib/utils";
 import { isWildcardOnly, labelsFor, secondaryLine, shortLabels } from "@/lib/host-display";
+import { buildNewOrder } from "@/lib/reorder";
 
 /** Sentinel Select value for the "All files" scope (Radix items can't be empty). */
 const ALL_FILES = "__all__";
@@ -84,6 +85,16 @@ interface HostRowProps {
   onSelect: () => void;
   /** Omitted for defaults rows — connecting to `Host *` is meaningless. */
   onConnect?: () => void;
+  /** Row can be drag-reordered (within its source file). Off while searching. */
+  draggable?: boolean;
+  /** True while THIS row is the drag source — rendered semi-transparent. */
+  dragging?: boolean;
+  /** Insertion indicator: a 2px accent line above/below this row. */
+  indicator?: "before" | "after" | null;
+  onDragStart?: (e: DragEvent<HTMLElement>) => void;
+  onDragOver?: (e: DragEvent<HTMLElement>) => void;
+  onDrop?: (e: DragEvent<HTMLElement>) => void;
+  onDragEnd?: () => void;
 }
 
 /**
@@ -92,17 +103,41 @@ interface HostRowProps {
  * accent-tinted pill. Tags are no longer shown per-row (still searchable and
  * visible in the editor).
  */
-function HostRow({ host, active, delay, variant, onSelect, onConnect }: HostRowProps) {
+function HostRow({
+  host,
+  active,
+  delay,
+  variant,
+  onSelect,
+  onConnect,
+  draggable,
+  dragging,
+  indicator,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+}: HostRowProps) {
   const secondary = secondaryLine(host);
   const isDefaults = variant === "defaults";
   return (
     <li
       className="animate-row-enter group/row relative"
       style={{ animationDelay: delay }}
+      // Drop targeting lives on the <li> so the whole row (incl. the Play
+      // overlay's footprint) maps to an insertion gap.
+      onDragOver={onDragOver}
+      onDrop={onDrop}
     >
       <button
         type="button"
         onClick={onSelect}
+        // Dragging starts ONLY from the row body — the Play overlay is a
+        // sibling, so grabbing it never moves the row. Native HTML5 DnD has
+        // its own movement threshold, so plain clicks still just select.
+        draggable={draggable || undefined}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
         aria-current={active ? "true" : undefined}
         className={cn(
           "group flex h-7 w-full items-center gap-2 rounded-[6px] pr-2 pl-2 text-left select-none",
@@ -111,6 +146,8 @@ function HostRow({ host, active, delay, variant, onSelect, onConnect }: HostRowP
           // Reserve room for the overlay Play button while it's visible so the
           // right-aligned secondary slides clear instead of colliding with it.
           onConnect && "group-hover/row:pr-8 [&:has(+button:focus-visible)]:pr-8",
+          draggable && "active:cursor-grabbing",
+          dragging && "opacity-40",
           active && "bg-primary/12 hover:bg-primary/15",
         )}
       >
@@ -164,6 +201,16 @@ function HostRow({ host, active, delay, variant, onSelect, onConnect }: HostRowP
           <Play className="size-3.5" />
         </Button>
       )}
+      {/* 2px accent insertion line in the gap above/below this row. */}
+      {indicator && (
+        <div
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-x-1 z-10 h-0.5 rounded-full bg-primary",
+            indicator === "before" ? "-top-px" : "-bottom-px",
+          )}
+        />
+      )}
     </li>
   );
 }
@@ -197,6 +244,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const setFileAlias = useSettingsStore((s) => s.setFileAlias);
   const terminals = useTerminals();
   const connect = useConnect();
+  const reorderHosts = useReorderHosts();
 
   // ALL loaded source files (same cache entry App reads) — drives the scope
   // Select even for files that currently have zero hosts.
@@ -293,6 +341,64 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const visibleRows = sections.reduce((n, s) => n + s.hosts.length + s.defaults.length, 0);
   // When a search is active, force-expand all groups so results are never hidden.
   const searchActive = search.trim().length > 0;
+
+  // ── Drag-to-reorder (within ONE source file) ──────────────────────────────
+  // `drag` is the source row; `dropGap` the insertion gap, both as indices into
+  // that file's CONCRETE host list (`section.hosts` — wildcard DEFAULTS rows
+  // are pinned and excluded). A filtered list's order is meaningless to
+  // persist, so dragging is disabled entirely while searching.
+  const canReorder = !searchActive;
+  const [drag, setDrag] = useState<{ file: string; index: number } | null>(null);
+  const [dropGap, setDropGap] = useState<{ file: string; index: number } | null>(null);
+
+  const clearDrag = () => {
+    setDrag(null);
+    setDropGap(null);
+  };
+
+  /** The insertion gap (0..n) a pointer position maps to: above or below row `index`. */
+  const gapFor = (e: DragEvent<HTMLElement>, index: number) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return e.clientY < rect.top + rect.height / 2 ? index : index + 1;
+  };
+
+  const rowDragStart = (file: string, index: number) => (e: DragEvent<HTMLElement>) => {
+    e.dataTransfer.effectAllowed = "move";
+    // Some WebViews won't start a drag without data; the source row itself is
+    // tracked in React state, not in the dataTransfer payload.
+    e.dataTransfer.setData("text/plain", "");
+    setDrag({ file, index });
+  };
+
+  const rowDragOver = (file: string, index: number) => (e: DragEvent<HTMLElement>) => {
+    if (!drag) return;
+    if (drag.file !== file) {
+      // Cross-group target: NOT preventDefault'ed → native no-drop cursor.
+      setDropGap(null);
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const gap = gapFor(e, index);
+    // The gaps hugging the source row are no-ops — show no indicator there.
+    const next =
+      gap === drag.index || gap === drag.index + 1 ? null : { file, index: gap };
+    setDropGap((prev) =>
+      prev?.file === next?.file && prev?.index === next?.index ? prev : next,
+    );
+  };
+
+  const rowDrop = (file: string, index: number) => (e: DragEvent<HTMLElement>) => {
+    if (!drag || drag.file !== file) return;
+    e.preventDefault();
+    const gap = gapFor(e, index);
+    clearDrag();
+    if (gap === drag.index || gap === drag.index + 1) return; // dropped in place
+    // Full document-order host list of the file (incl. wildcard DEFAULTS) —
+    // the backend order must be exhaustive or unnamed blocks sink to the end.
+    const fileHosts = hosts.filter((h) => h.source_file === file);
+    reorderHosts.mutate({ file, order: buildNewOrder(fileHosts, drag.index, gap) });
+  };
 
   const connectTo = (alias: string) =>
     connect.mutate({
@@ -471,7 +577,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                     <>
                       {section.hosts.length > 0 && (
                         <ul className="space-y-px">
-                          {section.hosts.map((host) => (
+                          {section.hosts.map((host, i) => (
                             <HostRow
                               key={`${host.source_file}::${host.alias}`}
                               host={host}
@@ -480,6 +586,22 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               variant="host"
                               onSelect={() => setSelectedAlias(host.alias)}
                               onConnect={() => connectTo(host.alias)}
+                              draggable={canReorder && section.hosts.length > 1}
+                              dragging={drag?.file === section.file && drag.index === i}
+                              indicator={
+                                dropGap?.file === section.file
+                                  ? dropGap.index === i
+                                    ? "before"
+                                    : dropGap.index === i + 1 &&
+                                        i === section.hosts.length - 1
+                                      ? "after"
+                                      : null
+                                  : null
+                              }
+                              onDragStart={rowDragStart(section.file, i)}
+                              onDragOver={rowDragOver(section.file, i)}
+                              onDrop={rowDrop(section.file, i)}
+                              onDragEnd={clearDrag}
                             />
                           ))}
                         </ul>
@@ -496,6 +618,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                                 delay={nextDelay()}
                                 variant="defaults"
                                 onSelect={() => setSelectedAlias(host.alias)}
+                                onDragOver={() => setDropGap(null)}
                               />
                             ))}
                           </ul>

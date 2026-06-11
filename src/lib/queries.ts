@@ -7,6 +7,7 @@ import {
 import { toast } from "sonner";
 import { tauriInvoke } from "@/lib/ipc";
 import { useSettingsStore } from "@/stores/settings";
+import { applyOrderToHosts } from "@/lib/reorder";
 import type { LoadResult } from "@/bindings/LoadResult";
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
@@ -237,16 +238,47 @@ export function useSetOptionEnabled() {
   });
 }
 
-/** Reorder hosts within a file. */
+/**
+ * Reorder hosts within a file. `order` must be the COMPLETE alias list of every
+ * host block in `file` (including wildcard-only blocks) in the desired order —
+ * the backend pushes any unnamed block AFTER all named ones. Build it with
+ * `buildNewOrder()` from `@/lib/reorder`.
+ *
+ * Optimistic: the hosts cache is reordered immediately (`onMutate`), restored
+ * from a snapshot on error, and re-validated against the backend either way.
+ */
 export function useReorderHosts() {
   const queryClient = useQueryClient();
-  return useMutation<void, unknown, { file: string; order: string[] }>({
+  return useMutation<
+    void,
+    unknown,
+    { file: string; order: string[] },
+    { previous: LoadResult | undefined }
+  >({
     mutationFn: ({ file, order }) =>
       tauriInvoke<void>("config_reorder_hosts", { file, order }),
+    onMutate: async ({ file, order }) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.hosts });
+      const previous = queryClient.getQueryData<LoadResult>(queryKeys.hosts);
+      if (previous) {
+        queryClient.setQueryData<LoadResult>(queryKeys.hosts, {
+          ...previous,
+          hosts: applyOrderToHosts(previous.hosts, file, order),
+        });
+      }
+      return { previous };
+    },
+    onError: (e, _vars, context) => {
+      // Roll back the optimistic reorder, then refetch the truth from disk.
+      if (context?.previous) {
+        queryClient.setQueryData<LoadResult>(queryKeys.hosts, context.previous);
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
+      toast.error("Failed to reorder hosts", { description: errMessage(e) });
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
     },
-    onError: (e) => toast.error("Failed to reorder hosts", { description: errMessage(e) }),
   });
 }
 

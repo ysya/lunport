@@ -108,7 +108,7 @@ export function labelsFor(
  * they are not connectable hosts, so the sidebar demotes them to a "Defaults"
  * footer and excludes them from host counts.
  */
-export function isWildcardOnly(host: HostSummary): boolean {
+export function isWildcardOnly(host: Pick<HostSummary, "patterns">): boolean {
   return (
     host.patterns.length > 0 && host.patterns.every((p) => p.includes("*") || p.includes("?"))
   );
