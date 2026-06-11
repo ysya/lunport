@@ -4,6 +4,7 @@ mod discover;
 mod error;
 mod fsutil;
 mod keys;
+mod known_hosts;
 mod state;
 mod tray;
 
@@ -14,6 +15,7 @@ use keys::{
     keys_agent_status, keys_deploy, keys_generate, keys_generate_in_terminal, keys_list,
     keys_read_public,
 };
+use known_hosts::{known_hosts_list, known_hosts_remove};
 use tauri::Manager;
 use tray::tray_set_visible;
 
@@ -92,6 +94,8 @@ pub fn run() {
             keys_generate,
             keys_generate_in_terminal,
             keys_deploy,
+            known_hosts_list,
+            known_hosts_remove,
             config_effective,
             config_lint,
             config_jump_chain,

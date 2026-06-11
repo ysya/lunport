@@ -20,6 +20,7 @@ import type { Suggestion } from "@/bindings/Suggestion";
 import type { BackupInfo } from "@/bindings/BackupInfo";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { AgentStatus } from "@/bindings/AgentStatus";
+import type { KnownHostEntry } from "@/bindings/KnownHostEntry";
 
 /**
  * Centralized query keys. The hosts list is the canonical cache: both
@@ -40,6 +41,7 @@ export const queryKeys = {
   // Both live under ["keys"] so one invalidation refreshes the list AND agent.
   keys: ["keys", "list"] as const,
   agent: ["keys", "agent"] as const,
+  knownHosts: ["known_hosts"] as const,
 };
 
 /** Normalize a rejected-promise error (Tauri rejects with a string) to a message. */
@@ -443,6 +445,45 @@ export function useKeys(
     queryFn: () => tauriInvoke<KeyInfo[]>("keys_list"),
     enabled: false,
     ...options,
+  });
+}
+
+/**
+ * Entries in ~/.ssh/known_hosts (line index + first field + key type/fingerprint).
+ * Lazy: callers gate behind dialog-open state.
+ */
+export function useKnownHosts(
+  options?: Omit<UseQueryOptions<KnownHostEntry[]>, "queryKey" | "queryFn">,
+) {
+  return useQuery<KnownHostEntry[]>({
+    queryKey: queryKeys.knownHosts,
+    queryFn: () => tauriInvoke<KnownHostEntry[]>("known_hosts_list"),
+    enabled: false,
+    ...options,
+  });
+}
+
+/**
+ * Remove known_hosts lines by index, guarded by the expected first fields (the backend rejects a
+ * stale view with a Conflict). Invalidates the list on success AND on error — a Conflict means
+ * the file changed under us, so the dialog must re-show the truth either way.
+ */
+export function useRemoveKnownHosts() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    number,
+    unknown,
+    { lineIndices: number[]; expectedHosts: string[] }
+  >({
+    mutationFn: ({ lineIndices, expectedHosts }) =>
+      tauriInvoke<number>("known_hosts_remove", { lineIndices, expectedHosts }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.knownHosts });
+    },
+    onError: (e) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.knownHosts });
+      toast.error("Failed to remove host key", { description: errMessage(e) });
+    },
   });
 }
 

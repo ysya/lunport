@@ -19,39 +19,21 @@ pub struct KnownHostEntry {
 
 /// Parse ~/.ssh/known_hosts text → plaintext host entries.
 ///
-/// Skips: hashed entries (`|1|...`), comment/blank lines, and the marker token of
-/// `@cert-authority` / `@revoked` lines (the host part after the marker is still parsed).
-/// Handles `[host]:port` bracket form and comma-separated host lists (each taken). Deduped.
+/// Line splitting/marker handling is shared with the known_hosts editor
+/// (`crate::known_hosts::parse_lines`). On top of that, discovery skips hashed entries
+/// (`|1|...`, unrecoverable) and expands `[host]:port` bracket form and comma-separated
+/// host lists (each taken). Deduped.
 pub fn parse_known_hosts(text: &str) -> Vec<KnownHostEntry> {
     let mut out: Vec<KnownHostEntry> = Vec::new();
 
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let mut fields = line.split_whitespace();
-        let mut first = match fields.next() {
-            Some(f) => f,
-            None => continue,
-        };
-
-        // A marker line begins with `@cert-authority` or `@revoked`; the hostlist is the next field.
-        if first.starts_with('@') {
-            first = match fields.next() {
-                Some(f) => f,
-                None => continue,
-            };
-        }
-
+    for raw in crate::known_hosts::parse_lines(text) {
         // Hashed entries are unrecoverable → skip.
-        if first.starts_with("|1|") || first.starts_with('|') {
+        if raw.hosts.starts_with('|') {
             continue;
         }
 
         // The first field can be a comma-separated host list.
-        for token in first.split(',') {
+        for token in raw.hosts.split(',') {
             let token = token.trim();
             if token.is_empty() {
                 continue;
