@@ -3,12 +3,17 @@ mod connect;
 mod discover;
 mod error;
 mod fsutil;
+mod keys;
 mod state;
 mod tray;
 
 use config::commands::*;
 use config::intel::{config_effective, config_jump_chain, config_key_hygiene, config_lint};
 use connect::{connect_launch, connect_list_terminals};
+use keys::{
+    keys_agent_status, keys_deploy, keys_generate, keys_generate_in_terminal, keys_list,
+    keys_read_public,
+};
 use tauri::Manager;
 use tray::tray_set_visible;
 
@@ -81,6 +86,12 @@ pub fn run() {
             config_restore_backup,
             connect_list_terminals,
             connect_launch,
+            keys_list,
+            keys_agent_status,
+            keys_read_public,
+            keys_generate,
+            keys_generate_in_terminal,
+            keys_deploy,
             config_effective,
             config_lint,
             config_jump_chain,

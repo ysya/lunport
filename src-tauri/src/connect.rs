@@ -75,6 +75,28 @@ fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Quote ONE argv element for a POSIX shell command line (the string a terminal
+/// emulator hands to the user's shell, e.g. via AppleScript `do script`).
+///
+/// Args made of an unambiguous safe charset are left bare (so `ssh web` stays
+/// `ssh web`); anything else is single-quoted with embedded `'` escaped as
+/// `'\''`. NOTE `~` is NOT in the safe set — a bare `~` would be tilde-expanded.
+pub fn shell_quote(arg: &str) -> String {
+    let safe = |c: char| {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '%' | '+' | '=' | ',')
+    };
+    if !arg.is_empty() && arg.chars().all(safe) {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}
+
+/// Join an argv vector into one shell-safe command string (each element passed
+/// through `shell_quote`).
+pub fn shell_join(argv: &[String]) -> String {
+    argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(target_os = "macos")]
 pub fn detect_terminals() -> Vec<TerminalInfo> {
     let mut out = vec![TerminalInfo {
@@ -150,21 +172,29 @@ fn which_in_path(bin: &str) -> bool {
     false
 }
 
-/// Map a known Linux terminal id to its argv tail for `ssh <alias>` in a new window.
-/// `None` => unknown id.
-fn linux_args(id: &str, alias: &str) -> Option<Vec<String>> {
-    let a = alias.to_string();
+/// Map a known Linux terminal id to its argv tail for running `argv` in a new window.
+/// `None` => unknown id. Where the emulator execs a program directly, the argv is passed
+/// through untouched (no shell, no quoting); only `xfce4-terminal -e` takes a single
+/// shell-parsed string, which is built with `shell_join`.
+fn linux_args(id: &str, argv: &[String]) -> Option<Vec<String>> {
+    let tail = |prefix: &[&str]| -> Vec<String> {
+        prefix
+            .iter()
+            .map(|s| s.to_string())
+            .chain(argv.iter().cloned())
+            .collect()
+    };
     Some(match id {
-        "ptyxis" => vec!["--".into(), "ssh".into(), a],
-        "gnome-terminal" => vec!["--".into(), "ssh".into(), a],
-        "konsole" => vec!["-e".into(), "ssh".into(), a],
-        "kitty" => vec!["ssh".into(), a],
-        "alacritty" => vec!["-e".into(), "ssh".into(), a],
-        "wezterm" => vec!["start".into(), "--".into(), "ssh".into(), a],
-        "foot" => vec!["ssh".into(), a],
-        // single-string exec; alias is charset-validated so this is safe.
-        "xfce4-terminal" => vec!["-e".into(), format!("ssh {a}")],
-        "xterm" => vec!["-e".into(), "ssh".into(), a],
+        "ptyxis" => tail(&["--"]),
+        "gnome-terminal" => tail(&["--"]),
+        "konsole" => tail(&["-e"]),
+        "kitty" => tail(&[]),
+        "alacritty" => tail(&["-e"]),
+        "wezterm" => tail(&["start", "--"]),
+        "foot" => tail(&[]),
+        // single-string exec parsed by a shell → shell-safe quoting required.
+        "xfce4-terminal" => vec!["-e".into(), shell_join(argv)],
+        "xterm" => tail(&["-e"]),
         _ => return None,
     })
 }
@@ -172,23 +202,41 @@ fn linux_args(id: &str, alias: &str) -> Option<Vec<String>> {
 /// Build the platform/terminal-specific argv to open `ssh <alias>` in a NEW terminal window —
 /// or, when `new_tab` is true and the terminal supports it (only iTerm2), a new TAB of the
 /// current window (falling back to a new window when none exists).
-/// PURE function. The alias is assumed pre-validated, but AppleScript strings are still escaped.
+/// PURE function. The alias is assumed pre-validated; thin wrapper over `build_launch_command`.
 pub fn build_launch(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
+    build_launch_command(terminal_id, &["ssh".to_string(), alias.to_string()], new_tab)
+}
+
+/// Generalized launcher: run an arbitrary `argv` (program + args) in a new terminal
+/// window/tab. PURE function.
+///
+/// macOS paths embed the command into an AppleScript literal that the terminal hands to a
+/// shell, so each argv element is shell-quoted (`shell_join`) FIRST and the resulting command
+/// string AppleScript-escaped SECOND. Linux emulators receive the argv directly where they
+/// exec the program (no shell), except `xfce4-terminal` (see `linux_args`).
+pub fn build_launch_command(
+    terminal_id: &str,
+    argv: &[String],
+    new_tab: bool,
+) -> Result<LaunchSpec, AppError> {
+    if argv.is_empty() {
+        return Err(AppError::Other("empty command".to_string()));
+    }
     match terminal_id {
         "terminal" => {
-            let esc = applescript_escape(alias);
+            let esc = applescript_escape(&shell_join(argv));
             Ok(LaunchSpec {
                 program: "osascript".into(),
                 args: vec![
                     "-e".into(),
                     "tell application \"Terminal\" to activate".into(),
                     "-e".into(),
-                    format!("tell application \"Terminal\" to do script \"ssh {esc}\""),
+                    format!("tell application \"Terminal\" to do script \"{esc}\""),
                 ],
             })
         }
         "iterm2" => {
-            let esc = applescript_escape(alias);
+            let esc = applescript_escape(&shell_join(argv));
             if new_tab {
                 // Multi-statement script as separate `-e` lines (osascript joins them into one
                 // script): tab in the current window, or a new window when none exists.
@@ -203,12 +251,12 @@ pub fn build_launch(terminal_id: &str, alias: &str, new_tab: bool) -> Result<Lau
                         "if (count of windows) > 0 then".into(),
                         "-e".into(),
                         format!(
-                            "tell current window to create tab with default profile command \"ssh {esc}\""
+                            "tell current window to create tab with default profile command \"{esc}\""
                         ),
                         "-e".into(),
                         "else".into(),
                         "-e".into(),
-                        format!("create window with default profile command \"ssh {esc}\""),
+                        format!("create window with default profile command \"{esc}\""),
                         "-e".into(),
                         "end if".into(),
                         "-e".into(),
@@ -223,7 +271,7 @@ pub fn build_launch(terminal_id: &str, alias: &str, new_tab: bool) -> Result<Lau
                         "tell application \"iTerm2\" to activate".into(),
                         "-e".into(),
                         format!(
-                            "tell application \"iTerm2\" to create window with default profile command \"ssh {esc}\""
+                            "tell application \"iTerm2\" to create window with default profile command \"{esc}\""
                         ),
                     ],
                 })
@@ -236,15 +284,19 @@ pub fn build_launch(terminal_id: &str, alias: &str, new_tab: bool) -> Result<Lau
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let args = linux_args(&base, alias)
-                // unknown basename → best-effort -e ssh alias
-                .unwrap_or_else(|| vec!["-e".into(), "ssh".into(), alias.to_string()]);
+            let args = linux_args(&base, argv)
+                // unknown basename → best-effort `-e <argv…>`
+                .unwrap_or_else(|| {
+                    std::iter::once("-e".to_string())
+                        .chain(argv.iter().cloned())
+                        .collect()
+                });
             Ok(LaunchSpec {
                 program: if base.is_empty() { term } else { base },
                 args,
             })
         }
-        other => match linux_args(other, alias) {
+        other => match linux_args(other, argv) {
             Some(args) => Ok(LaunchSpec {
                 program: other.to_string(),
                 args,
@@ -378,13 +430,98 @@ mod tests {
 
     #[test]
     fn build_launch_macos_terminal_escapes_quotes() {
-        // Hypothetical quote/backslash in alias must be escaped in the AppleScript literal.
+        // Hypothetical quote/backslash in alias (charset-impossible post-validation, defense in
+        // depth): the arg is single-quoted for the SHELL first, then the resulting command string
+        // is escaped for the AppleScript literal. Inner shell: `ssh 'a"b\c'`.
         let spec = build_launch("terminal", "a\"b\\c", false).unwrap();
         let last = spec.args.last().unwrap();
         assert_eq!(
             last,
-            "tell application \"Terminal\" to do script \"ssh a\\\"b\\\\c\""
+            "tell application \"Terminal\" to do script \"ssh 'a\\\"b\\\\c'\""
         );
+    }
+
+    // ── shell quoting helper ──────────────────────────────────────────────────
+
+    #[test]
+    fn shell_quote_leaves_safe_args_bare() {
+        for s in ["web", "ssh", "/Users/frank/.ssh/id_ed25519.pub", "user@host", "a.b-c_d"] {
+            assert_eq!(shell_quote(s), s, "{s:?} must stay bare");
+        }
+    }
+
+    #[test]
+    fn shell_quote_quotes_space_quote_and_dollar() {
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("a\"b"), "'a\"b'");
+        assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+        assert_eq!(shell_quote("`id`"), "'`id`'");
+        assert_eq!(shell_quote(";rm -rf x"), "';rm -rf x'");
+        assert_eq!(shell_quote(""), "''");
+        // `~` is unsafe bare (tilde expansion).
+        assert_eq!(shell_quote("~"), "'~'");
+    }
+
+    #[test]
+    fn shell_join_quotes_each_arg() {
+        let argv: Vec<String> = vec!["ssh-keygen".into(), "-C".into(), "work laptop".into()];
+        assert_eq!(shell_join(&argv), "ssh-keygen -C 'work laptop'");
+    }
+
+    // ── generalized launcher ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_launch_command_macos_terminal_arbitrary_argv() {
+        let argv: Vec<String> = vec![
+            "ssh-copy-id".into(),
+            "-i".into(),
+            "/Users/frank/.ssh/id_ed25519.pub".into(),
+            "web".into(),
+        ];
+        let spec = build_launch_command("terminal", &argv, false).unwrap();
+        assert_eq!(spec.program, "osascript");
+        assert_eq!(
+            spec.args.last().unwrap(),
+            "tell application \"Terminal\" to do script \"ssh-copy-id -i /Users/frank/.ssh/id_ed25519.pub web\""
+        );
+    }
+
+    #[test]
+    fn build_launch_command_macos_quotes_args_with_spaces() {
+        let argv: Vec<String> = vec![
+            "ssh-keygen".into(),
+            "-f".into(),
+            "/Users/My Name/.ssh/key".into(),
+            "-C".into(),
+            "a \"quoted\" comment".into(),
+        ];
+        let spec = build_launch_command("iterm2", &argv, false).unwrap();
+        // Shell-quoted first, AppleScript-escaped second.
+        assert_eq!(
+            spec.args.last().unwrap(),
+            "tell application \"iTerm2\" to create window with default profile command \"ssh-keygen -f '/Users/My Name/.ssh/key' -C 'a \\\"quoted\\\" comment'\""
+        );
+    }
+
+    #[test]
+    fn build_launch_command_linux_passes_argv_directly() {
+        let argv: Vec<String> = vec!["ssh-copy-id".into(), "-i".into(), "/h/.ssh/k.pub".into(), "web".into()];
+        let spec = build_launch_command("gnome-terminal", &argv, false).unwrap();
+        assert_eq!(spec.args, vec!["--", "ssh-copy-id", "-i", "/h/.ssh/k.pub", "web"]);
+        // Args with spaces stay single argv elements — NO shell parses them.
+        let argv2: Vec<String> = vec!["ssh-keygen".into(), "-C".into(), "two words".into()];
+        let spec2 = build_launch_command("konsole", &argv2, false).unwrap();
+        assert_eq!(spec2.args, vec!["-e", "ssh-keygen", "-C", "two words"]);
+        // xfce4-terminal's single-string -e gets shell quoting.
+        let spec3 = build_launch_command("xfce4-terminal", &argv2, false).unwrap();
+        assert_eq!(spec3.args, vec!["-e".to_string(), "ssh-keygen -C 'two words'".to_string()]);
+    }
+
+    #[test]
+    fn build_launch_command_rejects_empty_argv() {
+        let err = build_launch_command("terminal", &[], false).unwrap_err();
+        assert!(matches!(err, AppError::Other(_)), "got {err:?}");
     }
 
     #[test]

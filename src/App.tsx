@@ -13,6 +13,7 @@ import { AddHostDialog } from "@/components/AddHostDialog";
 import { LintDialog } from "@/components/LintDialog";
 import { DiscoverDialog } from "@/components/DiscoverDialog";
 import { BackupHistoryDialog } from "@/components/BackupHistoryDialog";
+import { KeysDialog } from "@/components/KeysDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
@@ -116,6 +117,7 @@ function App() {
 
             <LintDialog />
             <DiscoverDialog />
+            <KeysDialog />
             <BackupHistoryDialog />
 
             <Tooltip>

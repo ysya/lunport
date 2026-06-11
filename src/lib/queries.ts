@@ -18,6 +18,8 @@ import type { ChainNode } from "@/bindings/ChainNode";
 import type { LintIssue } from "@/bindings/LintIssue";
 import type { Suggestion } from "@/bindings/Suggestion";
 import type { BackupInfo } from "@/bindings/BackupInfo";
+import type { KeyInfo } from "@/bindings/KeyInfo";
+import type { AgentStatus } from "@/bindings/AgentStatus";
 
 /**
  * Centralized query keys. The hosts list is the canonical cache: both
@@ -35,6 +37,9 @@ export const queryKeys = {
   jumpChain: (alias: string) => ["config", "jumpChain", alias] as const,
   discover: ["discover", "hosts"] as const,
   backups: ["config", "backups"] as const,
+  // Both live under ["keys"] so one invalidation refreshes the list AND agent.
+  keys: ["keys", "list"] as const,
+  agent: ["keys", "agent"] as const,
 };
 
 /** Normalize a rejected-promise error (Tauri rejects with a string) to a message. */
@@ -423,6 +428,106 @@ export function useBackups(
     queryFn: () => tauriInvoke<BackupInfo[]>("config_list_backups"),
     enabled: false,
     ...options,
+  });
+}
+
+/**
+ * Keypairs found in ~/.ssh (with fingerprints + agent membership). Shells out
+ * to ssh-keygen/ssh-add, so it is lazy: callers gate behind dialog-open state.
+ */
+export function useKeys(
+  options?: Omit<UseQueryOptions<KeyInfo[]>, "queryKey" | "queryFn">,
+) {
+  return useQuery<KeyInfo[]>({
+    queryKey: queryKeys.keys,
+    queryFn: () => tauriInvoke<KeyInfo[]>("keys_list"),
+    enabled: false,
+    ...options,
+  });
+}
+
+/** ssh-agent status (running + loaded key count). Lazy, like {@link useKeys}. */
+export function useAgentStatus(
+  options?: Omit<UseQueryOptions<AgentStatus>, "queryKey" | "queryFn">,
+) {
+  return useQuery<AgentStatus>({
+    queryKey: queryKeys.agent,
+    queryFn: () => tauriInvoke<AgentStatus>("keys_agent_status"),
+    enabled: false,
+    ...options,
+  });
+}
+
+/**
+ * Generate a new passphrase-LESS ed25519 keypair `~/.ssh/<name>` (the UI carries
+ * the warning). Invalidates ["keys"] so the list refreshes with the new pair.
+ */
+export function useGenerateKey() {
+  const queryClient = useQueryClient();
+  return useMutation<KeyInfo, unknown, { name: string; comment: string | null }>({
+    mutationFn: ({ name, comment }) =>
+      tauriInvoke<KeyInfo>("keys_generate", { name, comment }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["keys"] });
+    },
+    onError: (e) =>
+      toast.error("Failed to generate key", { description: errMessage(e) }),
+  });
+}
+
+/**
+ * Launch INTERACTIVE `ssh-keygen` in the user's terminal (passphrase-protected
+ * flow). The list is invalidated optimistically — the key appears once the user
+ * finishes the prompts and reopens/refetches.
+ */
+export function useGenerateKeyInTerminal() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    void,
+    unknown,
+    { name: string; comment: string | null; terminalOverride?: string | null }
+  >({
+    mutationFn: ({ name, comment, terminalOverride }) =>
+      tauriInvoke<void>("keys_generate_in_terminal", {
+        name,
+        comment,
+        terminalOverride: terminalOverride ?? null,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["keys"] });
+    },
+    onError: (e) =>
+      toast.error("Failed to open terminal", { description: errMessage(e) }),
+  });
+}
+
+/** Launch `ssh-copy-id -i <pub> <alias>` in the user's terminal (interactive password). */
+export function useDeployKey() {
+  return useMutation<
+    void,
+    unknown,
+    { alias: string; publicPath: string; terminalOverride?: string | null }
+  >({
+    mutationFn: ({ alias, publicPath, terminalOverride }) =>
+      tauriInvoke<void>("keys_deploy", {
+        alias,
+        publicPath,
+        terminalOverride: terminalOverride ?? null,
+      }),
+    onError: (e) =>
+      toast.error("Failed to deploy key", { description: errMessage(e) }),
+  });
+}
+
+/**
+ * Read a `.pub` file's contents (public material only — the backend enforces
+ * the `.pub`-inside-~/.ssh rule). Imperative (mutation) for copy-to-clipboard.
+ */
+export function useReadPublicKey() {
+  return useMutation<string, unknown, { path: string }>({
+    mutationFn: ({ path }) => tauriInvoke<string>("keys_read_public", { path }),
+    onError: (e) =>
+      toast.error("Failed to read public key", { description: errMessage(e) }),
   });
 }
 
