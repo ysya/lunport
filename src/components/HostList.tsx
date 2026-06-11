@@ -30,6 +30,7 @@ import { FileViewDialog } from "@/components/FileViewDialog";
 import { cn, basename } from "@/lib/utils";
 import { isWildcardOnly, labelsFor, secondaryLine, shortLabels } from "@/lib/host-display";
 import { buildNewOrder } from "@/lib/reorder";
+import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 
 /** Sentinel Select value for the "All files" scope (Radix items can't be empty). */
 const ALL_FILES = "__all__";
@@ -433,6 +434,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
         <div className="relative">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
+            id={SEARCH_INPUT_ID}
             type="search"
             placeholder="Search hosts…"
             value={search}

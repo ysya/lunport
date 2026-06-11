@@ -73,6 +73,21 @@ export function filterLintIssues<T extends Pick<LintIssue, "rule">>(
 }
 
 /**
+ * The global quick-connect accelerator for a platform, in the global-shortcut
+ * plugin's hotkey syntax. NOTE: the underlying parser (`global-hotkey` crate)
+ * does NOT accept "Meta" — the macOS command key is spelled "Super" (or
+ * "Command"). Pure — testable.
+ */
+export function quickConnectShortcut(platform: string | undefined): string {
+  return platform === "macos" ? "Alt+Super+K" : "Ctrl+Alt+K";
+}
+
+/** Human-readable label for {@link quickConnectShortcut} (shown in Settings). */
+export function quickConnectLabel(platform: string | undefined): string {
+  return platform === "macos" ? "⌥⌘K" : "Ctrl+Alt+K";
+}
+
+/**
  * The terminal id to launch a connection to `alias` into: the host's override
  * (from the settings store's `hostTerminals`) wins; otherwise the global
  * preference; otherwise `null` = system default / first detected. Pass the

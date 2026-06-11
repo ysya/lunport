@@ -26,6 +26,9 @@ interface UiState {
   /** Whether the Settings window is open (driven by ⌘, , the toolbar gear, and the palette). */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+  /** Whether the ⌘K command palette is open (also driven by the global quick-connect hotkey). */
+  paletteOpen: boolean;
+  setPaletteOpen: (open: boolean) => void;
 }
 
 /**
@@ -56,6 +59,8 @@ export const useUiStore = create<UiState>()(
       setAddHostOpen: (addHostOpen) => set({ addHostOpen }),
       settingsOpen: false,
       setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+      paletteOpen: false,
+      setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
     }),
     {
       name: UI_STORAGE_KEY,

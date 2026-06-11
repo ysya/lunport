@@ -14,21 +14,43 @@ import {
 } from "lucide-react";
 
 import { getVersion } from "@tauri-apps/api/app";
+import {
+  disable as autostartDisable,
+  enable as autostartEnable,
+  isEnabled as autostartIsEnabled,
+} from "@tauri-apps/plugin-autostart";
 
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
-import { useLoadConfig, useTerminals } from "@/lib/queries";
+import { useLoadConfig, usePlatform, useTerminals } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
 import { checkForUpdates } from "@/lib/updater";
 import {
+  exportSettings,
+  pickSettingsImport,
+  applySettingsImport,
+  type SettingsEnvelope,
+} from "@/lib/settings-io";
+import {
   FONT_SIZE_OPTIONS,
   LINT_RULES,
+  quickConnectLabel,
   terminalSupportsNewTab,
   type ThemePref,
 } from "@/lib/settings-logic";
 import { cn } from "@/lib/utils";
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -147,13 +169,27 @@ function GeneralPane() {
   const setTrayVisible = useSettingsStore((s) => s.setTrayVisible);
   const closeToTray = useSettingsStore((s) => s.closeToTray);
   const setCloseToTray = useSettingsStore((s) => s.setCloseToTray);
+  const globalHotkey = useSettingsStore((s) => s.globalHotkey);
+  const setGlobalHotkey = useSettingsStore((s) => s.setGlobalHotkey);
   const autoCheckUpdates = useSettingsStore((s) => s.autoCheckUpdates);
   const setAutoCheckUpdates = useSettingsStore((s) => s.setAutoCheckUpdates);
+  const platform = usePlatform();
   const [checking, setChecking] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
+  // Launch-at-login reflects the OS state (NOT a persisted flag): queried
+  // fresh every time this pane mounts; null = still loading → switch disabled.
+  const [launchAtLogin, setLaunchAtLogin] = useState<boolean | null>(null);
+  // A validated-but-unconfirmed settings import (drives the overwrite AlertDialog).
+  const [pendingImport, setPendingImport] = useState<SettingsEnvelope | null>(null);
 
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => setAppVersion(null));
+    autostartIsEnabled()
+      .then(setLaunchAtLogin)
+      .catch((e) => {
+        setLaunchAtLogin(null);
+        console.warn("[settings] autostart state query failed:", e);
+      });
   }, []);
 
   const onCheckNow = async () => {
@@ -178,6 +214,54 @@ function GeneralPane() {
     );
   };
 
+  // Optimistic toggle, then re-read the ACTUAL state — the OS is the source
+  // of truth (the user can also flip this in System Settings → Login Items).
+  const onLaunchAtLogin = async (enabled: boolean) => {
+    const prev = launchAtLogin;
+    setLaunchAtLogin(enabled);
+    try {
+      if (enabled) await autostartEnable();
+      else await autostartDisable();
+      setLaunchAtLogin(await autostartIsEnabled());
+    } catch (e) {
+      setLaunchAtLogin(prev);
+      toast.error("Could not update launch at login", { description: String(e) });
+    }
+  };
+
+  const onExport = async () => {
+    try {
+      const path = await exportSettings();
+      if (path) toast.success("Settings exported", { description: path });
+    } catch (e) {
+      toast.error("Could not export settings", { description: String(e) });
+    }
+  };
+
+  // Pick + validate first; the destructive overwrite waits for the AlertDialog.
+  const onImport = async () => {
+    try {
+      const envelope = await pickSettingsImport();
+      if (envelope) setPendingImport(envelope);
+    } catch (e) {
+      toast.error("Could not import settings", {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
+  const confirmImport = async () => {
+    const envelope = pendingImport;
+    setPendingImport(null);
+    if (!envelope) return;
+    try {
+      await applySettingsImport(envelope);
+      toast.success("Settings imported");
+    } catch (e) {
+      toast.error("Could not apply imported settings", { description: String(e) });
+    }
+  };
+
   return (
     <>
       <Section title="Menu bar">
@@ -194,6 +278,38 @@ function GeneralPane() {
               checked={closeToTray}
               onCheckedChange={onCloseToTray}
             />
+          </SettingsRow>
+          <SettingsRow
+            id="set-launch-login"
+            label="Launch at login"
+            description="Reflects the system Login Items state."
+          >
+            <Switch
+              id="set-launch-login"
+              checked={launchAtLogin === true}
+              disabled={launchAtLogin === null}
+              onCheckedChange={onLaunchAtLogin}
+            />
+          </SettingsRow>
+        </SettingsGroup>
+      </Section>
+
+      <Section
+        title="Quick connect"
+        description="Brings SSHelter to the front with the command palette open, from any app."
+      >
+        <SettingsGroup>
+          <SettingsRow id="set-global-hotkey" label="Global quick-connect hotkey">
+            <div className="flex items-center gap-2.5">
+              <kbd className="rounded-sm border bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                {quickConnectLabel(platform.data)}
+              </kbd>
+              <Switch
+                id="set-global-hotkey"
+                checked={globalHotkey}
+                onCheckedChange={setGlobalHotkey}
+              />
+            </div>
           </SettingsRow>
         </SettingsGroup>
       </Section>
@@ -246,6 +362,64 @@ function GeneralPane() {
           </SettingsRow>
         </SettingsGroup>
       </Section>
+
+      <Section
+        title="Data"
+        description="Preferences only — your SSH config, keys, and hosts are never included."
+      >
+        <SettingsGroup>
+          <SettingsRow
+            label="Export settings"
+            description="Save all preferences to a JSON file."
+          >
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7"
+              onClick={onExport}
+            >
+              Export…
+            </Button>
+          </SettingsRow>
+          <SettingsRow
+            label="Import settings"
+            description="Replace all preferences from a JSON file."
+          >
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7"
+              onClick={onImport}
+            >
+              Import…
+            </Button>
+          </SettingsRow>
+        </SettingsGroup>
+      </Section>
+
+      {/* Confirm-before-overwrite: the picked file is already validated. */}
+      <AlertDialog
+        open={pendingImport !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingImport(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace all settings?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Importing replaces every SSHelter preference with the contents of
+              the selected file. Your SSH config files are not affected.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmImport}>Import</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

@@ -8,6 +8,8 @@ import {
   effectiveNewTab,
   filterLintIssues,
   LINT_RULES,
+  quickConnectLabel,
+  quickConnectShortcut,
   resolveTerminal,
   resolveTheme,
   systemPrefersDark,
@@ -152,5 +154,19 @@ describe("clampFontSize", () => {
     expect(clampFontSize(40)).toBe(DEFAULT_FONT_SIZE);
     expect(clampFontSize("15")).toBe(DEFAULT_FONT_SIZE);
     expect(clampFontSize(undefined)).toBe(DEFAULT_FONT_SIZE);
+  });
+});
+
+describe("global quick-connect hotkey", () => {
+  it("uses ⌥⌘K on macOS (spelled Super — the parser rejects 'Meta')", () => {
+    expect(quickConnectShortcut("macos")).toBe("Alt+Super+K");
+    expect(quickConnectLabel("macos")).toBe("⌥⌘K");
+  });
+
+  it("uses Ctrl+Alt+K elsewhere (and before the platform is known)", () => {
+    expect(quickConnectShortcut("linux")).toBe("Ctrl+Alt+K");
+    expect(quickConnectShortcut("windows")).toBe("Ctrl+Alt+K");
+    expect(quickConnectShortcut(undefined)).toBe("Ctrl+Alt+K");
+    expect(quickConnectLabel("linux")).toBe("Ctrl+Alt+K");
   });
 });

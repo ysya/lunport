@@ -77,6 +77,13 @@ interface SettingsState {
   /** Keep running in the menu bar when the window closes (`app_set_close_to_tray`). */
   closeToTray: boolean;
   setCloseToTray: (enabled: boolean) => void;
+  /**
+   * Global quick-connect hotkey (⌥⌘K / Ctrl+Alt+K): show + focus the window
+   * and open the ⌘K palette from anywhere. Registration is synced by
+   * `useGlobalHotkey`; this flag is only the persisted preference.
+   */
+  globalHotkey: boolean;
+  setGlobalHotkey: (enabled: boolean) => void;
   /** Prefer opening connections in a new TAB (only honored by capable terminals). */
   newTabConnect: boolean;
   setNewTabConnect: (enabled: boolean) => void;
@@ -147,6 +154,8 @@ export const useSettingsStore = create<SettingsState>()(
       setTrayVisible: (trayVisible) => set({ trayVisible }),
       closeToTray: false,
       setCloseToTray: (closeToTray) => set({ closeToTray }),
+      globalHotkey: false,
+      setGlobalHotkey: (globalHotkey) => set({ globalHotkey }),
       newTabConnect: false,
       setNewTabConnect: (newTabConnect) => set({ newTabConnect }),
       configPath: null,

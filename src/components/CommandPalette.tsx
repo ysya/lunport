@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -49,7 +49,10 @@ import {
  * Enter is left untouched and falls through to `onSelect` (= connect).
  */
 export function CommandPalette() {
-  const [open, setOpen] = useState(false);
+  // Open state lives in the UI store so the global quick-connect hotkey
+  // (`useGlobalHotkey`) can open the palette from outside this component.
+  const open = useUiStore((s) => s.paletteOpen);
+  const setOpen = useUiStore((s) => s.setPaletteOpen);
   const listRef = useRef<HTMLDivElement>(null);
 
   const { data } = useHostsQuery();
@@ -68,12 +71,14 @@ export function CommandPalette() {
   const setAddHostOpen = useUiStore((s) => s.setAddHostOpen);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
 
-  // Global ⌘K / Ctrl+K toggle.
+  // Global ⌘K / Ctrl+K toggle. Reads the CURRENT open state from the store so
+  // the listener stays stable (identical to the previous setState-updater form).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        setOpen((o) => !o);
+        const ui = useUiStore.getState();
+        ui.setPaletteOpen(!ui.paletteOpen);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -213,6 +218,15 @@ export function CommandPalette() {
           <span className="flex items-center gap-1">
             <Pencil className="size-3" />
             <kbd className="font-mono">⌘↵</kbd> edit
+          </span>
+          <span className="ml-auto flex items-center gap-3">
+            <span className="flex items-center gap-1">
+              <kbd className="font-mono">⌘N</kbd> new host
+            </span>
+            <span className="text-muted-foreground/40">·</span>
+            <span className="flex items-center gap-1">
+              <kbd className="font-mono">⌘F</kbd> search
+            </span>
           </span>
         </div>
       </Command>

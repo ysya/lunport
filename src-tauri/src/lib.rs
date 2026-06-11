@@ -5,6 +5,7 @@ mod error;
 mod fsutil;
 mod keys;
 mod known_hosts;
+mod settings_io;
 mod state;
 mod tray;
 
@@ -16,6 +17,7 @@ use keys::{
     keys_read_public,
 };
 use known_hosts::{known_hosts_list, known_hosts_remove};
+use settings_io::{settings_export, settings_import};
 use tauri::Manager;
 use tray::tray_set_visible;
 
@@ -42,11 +44,22 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_process::init());
-    // The updater plugin is desktop-only (the crate is a desktop-target dependency).
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init());
+    // Desktop-only plugins (the crates are desktop-target dependencies).
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            // Launch-at-login. macOS uses a LaunchAgent (no AppleScript); no
+            // extra args are passed to the binary on autostart.
+            .plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ))
+            // Global quick-connect hotkey; registration is driven from the
+            // frontend (`useGlobalHotkey`) via the JS plugin API.
+            .plugin(tauri_plugin_global_shortcut::Builder::new().build());
     }
     builder
         .manage(state::AppState::default())
@@ -104,6 +117,8 @@ pub fn run() {
             config_jump_chain,
             config_key_hygiene,
             tray_set_visible,
+            settings_export,
+            settings_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
