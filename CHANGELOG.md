@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.0](https://github.com/ysya/sshelter/compare/v0.3.0...v0.4.0) (2026-06-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **config:** existing next-to-file .bak snapshots are moved into the new backups root on first load; restore only accepts backups inside the new location.
+
+### Features
+
+* **config:** rename host — lossless Host-line pattern editing from the editor header ([6ea2e1a](https://github.com/ysya/sshelter/commit/6ea2e1a979cb0e482cbde85ea99b635fff0ad4da))
+* **ui:** sidebar v2 — file scope filter, compact rows, sticky headers, wildcard defaults footer, persisted nav state ([0e7cb97](https://github.com/ysya/sshelter/commit/0e7cb97b00d0430dae6a19ea1ba68812d0f05414))
+* **ui:** user-defined display aliases for config file groups (double-click to rename) ([b450afc](https://github.com/ysya/sshelter/commit/b450afce1a5c1651781a3a438ee20ce56e807995))
+
+
+### Bug Fixes
+
+* **config:** relocate backups out of ssh-visible dirs (glob Includes were loading .bak files) ([c7c4707](https://github.com/ysya/sshelter/commit/c7c47078a24c427bfb12bfe5f54b70c4bb63e706))
+* **ui:** label colliding config files by their distinctive ancestor (orbstack, not ssh/config) ([0c236ac](https://github.com/ysya/sshelter/commit/0c236ac891a94332044ad5f3ef4a97d551c76ff9))
+
 ## [0.3.0](https://github.com/ysya/sshelter/compare/v0.2.0...v0.3.0) (2026-06-10)
 
 
