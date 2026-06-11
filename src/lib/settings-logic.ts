@@ -73,6 +73,23 @@ export function filterLintIssues<T extends Pick<LintIssue, "rule">>(
 }
 
 /**
+ * The terminal id to launch a connection to `alias` into: the host's override
+ * (from the settings store's `hostTerminals`) wins; otherwise the global
+ * preference; otherwise `null` = system default / first detected. Pass the
+ * result BOTH as `terminalOverride` and into `effectiveNewTab` — new-tab
+ * gating must follow the terminal that will actually launch.
+ */
+export function resolveTerminal(
+  alias: string,
+  hostTerminals: Record<string, string>,
+  globalTerminalId: string | null,
+): string | null {
+  const override = hostTerminals[alias];
+  if (override !== undefined && override !== "") return override;
+  return globalTerminalId ?? null;
+}
+
+/**
  * Whether the selected terminal can open the connection in a new TAB.
  * `null` (= system default / first detected) counts as unsupported because we
  * cannot know which terminal the backend will pick.

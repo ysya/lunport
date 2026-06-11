@@ -86,7 +86,8 @@ pub fn apply_changes(
 }
 
 /// Validate rename pattern tokens: the list must be non-empty and every token must be
-/// non-empty with no whitespace, no `#`, and no newline (newlines are whitespace).
+/// non-empty with no whitespace, no `#`, no newline (newlines are whitespace), and no
+/// leading `-` (which reads as an option, never a hostname).
 pub fn validate_host_patterns(patterns: &[String]) -> Result<(), AppError> {
     if patterns.is_empty() {
         return Err(AppError::Other("at least one host pattern is required".to_string()));
@@ -104,6 +105,12 @@ pub fn validate_host_patterns(patterns: &[String]) -> Result<(), AppError> {
         if p.contains('#') {
             return Err(AppError::Other(format!(
                 "host pattern '{}' must not contain '#'",
+                p
+            )));
+        }
+        if p.starts_with('-') {
+            return Err(AppError::Other(format!(
+                "host pattern '{}' must not start with '-'",
                 p
             )));
         }
@@ -151,6 +158,143 @@ pub fn rename_host(
         edit::set_host_patterns(h, patterns);
     }
     Ok(idx)
+}
+
+/// True when the LAST physical line of `items` is blank (or the file has no lines at all).
+/// Recurses into the trailing Host/Match block body — the parser folds inter-block blank
+/// lines into the PRECEDING block's body, so the last top-level item alone can't tell.
+fn ends_with_blank_line(items: &[crate::config::model::Item]) -> bool {
+    use crate::config::model::Item;
+    match items.last() {
+        None => true, // empty file: an appended block needs no separator
+        Some(Item::Blank(_)) => true,
+        Some(Item::Comment(_)) | Some(Item::Directive(_)) => false,
+        // A block header is itself a line, so an empty body means "ends in the header line".
+        Some(Item::Host(h)) => !h.body.is_empty() && ends_with_blank_line(&h.body),
+        Some(Item::Match(m)) => !m.body.is_empty() && ends_with_blank_line(&m.body),
+    }
+}
+
+/// Move the WHOLE Host block matching `alias` (its `Item::Host` with every raw line and
+/// comment inside the block, emitted verbatim) from its source file to the END of
+/// `target_file`, separated by one blank line when the target doesn't already end with one
+/// (matching how `config_add_host` appends). `target_file` must EXACTLY equal a loaded
+/// managed file's path (else ForbiddenPath); moving within the same file is refused.
+/// Returns `(source_idx, target_idx)` — the caller persists BOTH files.
+pub fn move_host(
+    doc: &mut crate::config::model::SshConfigDoc,
+    alias: &str,
+    target_file: &str,
+) -> Result<(usize, usize), AppError> {
+    use crate::config::model::Item;
+
+    let tgt = doc
+        .files
+        .iter()
+        .position(|f| f.path.to_string_lossy() == target_file)
+        .ok_or_else(|| AppError::ForbiddenPath(target_file.to_string()))?;
+    let src = find_host_file_index(doc, alias)
+        .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
+    if src == tgt {
+        return Err(AppError::Other(format!(
+            "host '{}' is already in '{}'",
+            alias, target_file
+        )));
+    }
+    let pos = doc.files[src]
+        .items
+        .iter()
+        .position(|it| matches!(it, Item::Host(h) if h.patterns.iter().any(|p| p == alias)))
+        .ok_or_else(|| AppError::NotFound(format!("host '{}' not found in file", alias)))?;
+
+    // Drift pre-check on BOTH files BEFORE mutating: a two-file write can only be half
+    // rolled back, so refuse up front when either file changed on disk. (persist_file
+    // re-checks at write time — this just closes most of the partial-failure window.)
+    for &i in &[src, tgt] {
+        match fsutil::has_changed(&doc.files[i].path, &doc.files[i].fingerprint) {
+            Ok(false) => {}
+            Ok(true) | Err(_) => {
+                return Err(AppError::Conflict(
+                    doc.files[i].path.to_string_lossy().to_string(),
+                ));
+            }
+        }
+    }
+
+    let block = doc.files[src].items.remove(pos);
+    if !ends_with_blank_line(&doc.files[tgt].items) {
+        doc.files[tgt].items.push(Item::Blank(String::new()));
+    }
+    doc.files[tgt].items.push(block);
+    Ok((src, tgt))
+}
+
+/// Duplicate the Host block matching `alias` within the SAME file: a verbatim copy appended
+/// at the end (blank-line separated, like `move_host`) with ONLY the `Host` header line's
+/// patterns replaced by `new_alias`. `new_alias` follows the rename token rules and must not
+/// collide with ANY existing host's first pattern. Returns the modified ConfigFile index.
+pub fn duplicate_host(
+    doc: &mut crate::config::model::SshConfigDoc,
+    alias: &str,
+    new_alias: &str,
+) -> Result<usize, AppError> {
+    use crate::config::model::Item;
+
+    validate_host_patterns(&[new_alias.to_string()])?;
+
+    for cf in &doc.files {
+        for item in &cf.items {
+            if let Item::Host(h) = item {
+                if h.patterns.first().map(String::as_str) == Some(new_alias) {
+                    return Err(AppError::Other(format!("host '{}' already exists", new_alias)));
+                }
+            }
+        }
+    }
+
+    let idx = find_host_file_index(doc, alias)
+        .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
+    let pos = doc.files[idx]
+        .items
+        .iter()
+        .position(|it| matches!(it, Item::Host(h) if h.patterns.iter().any(|p| p == alias)))
+        .ok_or_else(|| AppError::NotFound(format!("host '{}' not found in file", alias)))?;
+
+    let mut copy = match &doc.files[idx].items[pos] {
+        Item::Host(h) => h.clone(),
+        _ => unreachable!("position() matched Item::Host"),
+    };
+    // Lossless header rewrite (Wave-rename op): only the Host line re-renders on the copy;
+    // every body line keeps its raw bytes.
+    edit::set_host_patterns(&mut copy, &[new_alias.to_string()]);
+
+    if !ends_with_blank_line(&doc.files[idx].items) {
+        doc.files[idx].items.push(Item::Blank(String::new()));
+    }
+    doc.files[idx].items.push(Item::Host(copy));
+    Ok(idx)
+}
+
+/// Resolve `path` to a LOADED managed file's index: exact string match first, then
+/// canonical-path equality (consistent with how restore validates targets). Anything
+/// else — unmanaged files, traversal attempts — is ForbiddenPath.
+pub fn find_managed_file(
+    doc: &crate::config::model::SshConfigDoc,
+    path: &str,
+) -> Result<usize, AppError> {
+    if let Some(i) = doc.files.iter().position(|f| f.path.to_string_lossy() == path) {
+        return Ok(i);
+    }
+    let forbidden = || AppError::ForbiddenPath(path.to_string());
+    let requested = PathBuf::from(path).canonicalize().map_err(|_| forbidden())?;
+    for (i, cf) in doc.files.iter().enumerate() {
+        if let Ok(managed) = cf.path.canonicalize() {
+            if managed == requested {
+                return Ok(i);
+            }
+        }
+    }
+    Err(forbidden())
 }
 
 /// Enable/disable ONE option line of a host, addressed by its position in the host's directive
@@ -638,6 +782,62 @@ pub fn config_rename_host(
 }
 
 #[tauri::command]
+pub fn config_move_host(
+    state: State<AppState>,
+    alias: String,
+    target_file: String,
+) -> Result<(), AppError> {
+    let mut doc_lock = state.doc.lock().unwrap();
+    let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
+
+    match doc_lock.as_mut() {
+        None => Err(AppError::Other("no config loaded".to_string())),
+        Some(doc) => {
+            let (src, tgt) = move_host(doc, &alias, &target_file)?;
+            // Persist the TARGET first: if the source write then fails, the block exists in
+            // both files (a recoverable duplicate) rather than in neither.
+            persist_file(doc, tgt, &mut backed_up_lock, retention)?;
+            persist_file(doc, src, &mut backed_up_lock, retention)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn config_duplicate_host(
+    state: State<AppState>,
+    alias: String,
+    new_alias: String,
+) -> Result<(), AppError> {
+    let mut doc_lock = state.doc.lock().unwrap();
+    let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
+
+    match doc_lock.as_mut() {
+        None => Err(AppError::Other("no config loaded".to_string())),
+        Some(doc) => {
+            let idx = duplicate_host(doc, &alias, &new_alias)?;
+            persist_file(doc, idx, &mut backed_up_lock, retention)
+        }
+    }
+}
+
+/// Raw text of ONE loaded managed config file (read-only viewer). The path must resolve to
+/// a loaded file (exact string or canonical match) — anything else is ForbiddenPath. The
+/// content is config the app already holds in memory, so returning it is safe.
+#[tauri::command]
+pub fn config_read_file(state: State<AppState>, path: String) -> Result<String, AppError> {
+    let doc_lock = state.doc.lock().unwrap();
+    match doc_lock.as_ref() {
+        None => Err(AppError::Other("no config loaded".to_string())),
+        Some(doc) => {
+            let idx = find_managed_file(doc, &path)?;
+            Ok(std::fs::read_to_string(&doc.files[idx].path)?)
+        }
+    }
+}
+
+#[tauri::command]
 pub fn config_set_option_enabled(
     state: State<AppState>,
     alias: String,
@@ -1114,6 +1314,7 @@ mod tests {
             &["a\tb"],            // tab
             &["a\nb"],            // newline
             &["web#prod"],        // hash
+            &["-web"],            // leading dash
         ];
         for tokens in bad {
             let patterns: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
@@ -1136,6 +1337,216 @@ mod tests {
         let mut doc = load_doc(&config_path).expect("load_doc ok");
         let r = rename_host(&mut doc, "nope", &["x".to_string()]);
         assert!(matches!(r, Err(AppError::NotFound(_))), "unknown alias → NotFound, got {r:?}");
+    }
+
+    // ── Tests: move_host — verbatim cross-file block move ─────────────────────
+
+    /// Main config (`Include sub` + two hosts) and an included `sub` file. Returns
+    /// (doc, main_path, sub_path).
+    fn two_file_doc(
+        dir: &tempfile::TempDir,
+        sub_content: &str,
+    ) -> (crate::config::model::SshConfigDoc, PathBuf, PathBuf) {
+        let main_content =
+            "Include sub\n\nHost web\n    User deploy\n\nHost db\n    User admin\n";
+        let sub_path = write_config(dir, "sub", sub_content);
+        let main_path = write_config(dir, "config", main_content);
+        let doc = load_doc(&main_path).expect("load_doc ok");
+        assert_eq!(doc.files.len(), 2, "main + included sub");
+        (doc, main_path, sub_path)
+    }
+
+    #[test]
+    fn move_host_moves_block_verbatim_golden() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut doc, main_path, sub_path) = two_file_doc(&dir, "Host s1\n    User a\n");
+
+        let (src, tgt) =
+            move_host(&mut doc, "db", &sub_path.to_string_lossy()).expect("move_host ok");
+        assert_eq!((src, tgt), (0, 1));
+
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        persist_file(&mut doc, tgt, &mut backed_up, None).expect("persist target ok");
+        persist_file(&mut doc, src, &mut backed_up, None).expect("persist source ok");
+
+        // Source: byte-identical except the removed block lines.
+        let main_on_disk = std::fs::read_to_string(&main_path).unwrap();
+        assert_eq!(main_on_disk, "Include sub\n\nHost web\n    User deploy\n\n");
+
+        // Target: original bytes + one separating blank + the block's bytes VERBATIM.
+        let sub_on_disk = std::fs::read_to_string(&sub_path).unwrap();
+        assert_eq!(sub_on_disk, "Host s1\n    User a\n\nHost db\n    User admin\n");
+
+        // Reload from disk: the host now lives in sub.
+        let reloaded = load_doc(&main_path).expect("reload ok");
+        let idx = find_host_file_index(&reloaded, "db").expect("db still findable");
+        assert_eq!(reloaded.files[idx].path, sub_path);
+    }
+
+    #[test]
+    fn move_host_keeps_comments_and_no_double_blank_when_target_ends_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        // The block carries an inline header comment, a body comment, and odd spacing —
+        // all of it must move byte-for-byte. The target already ENDS with a blank line,
+        // so no extra separator is inserted.
+        let sub_path = write_config(&dir, "sub", "Host s1\n    User a\n\n");
+        let main_path = write_config(
+            &dir,
+            "config",
+            "Include sub\nHost web  extra # prod box\n    User deploy\n    # pinned note\n\tPort  2222\n",
+        );
+        let mut doc = load_doc(&main_path).expect("load_doc ok");
+
+        move_host(&mut doc, "web", &sub_path.to_string_lossy()).expect("move_host ok");
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        persist_file(&mut doc, 1, &mut backed_up, None).unwrap();
+        persist_file(&mut doc, 0, &mut backed_up, None).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&main_path).unwrap(), "Include sub\n");
+        assert_eq!(
+            std::fs::read_to_string(&sub_path).unwrap(),
+            "Host s1\n    User a\n\nHost web  extra # prod box\n    User deploy\n    # pinned note\n\tPort  2222\n"
+        );
+    }
+
+    #[test]
+    fn move_host_rejects_unloaded_target_same_file_and_unknown_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut doc, main_path, sub_path) = two_file_doc(&dir, "Host s1\n    User a\n");
+        let before_main = doc_text(&doc);
+
+        // Target not a loaded managed file → ForbiddenPath.
+        let stray = dir.path().join("not-loaded");
+        std::fs::write(&stray, "Host x\n").unwrap();
+        let r = move_host(&mut doc, "db", &stray.to_string_lossy());
+        assert!(matches!(r, Err(AppError::ForbiddenPath(_))), "unloaded target: {r:?}");
+
+        // target == source → no-op error.
+        let r2 = move_host(&mut doc, "db", &main_path.to_string_lossy());
+        assert!(matches!(r2, Err(AppError::Other(_))), "same-file move: {r2:?}");
+
+        // Unknown alias → NotFound.
+        let r3 = move_host(&mut doc, "nope", &sub_path.to_string_lossy());
+        assert!(matches!(r3, Err(AppError::NotFound(_))), "unknown alias: {r3:?}");
+
+        // Rejected attempts change nothing in memory.
+        assert_eq!(doc_text(&doc), before_main);
+    }
+
+    #[test]
+    fn move_host_refuses_on_drifted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut doc, _main_path, sub_path) = two_file_doc(&dir, "Host s1\n    User a\n");
+
+        // The TARGET changes on disk after load — the move must refuse before mutating.
+        std::fs::write(&sub_path, "Host s1\n    User changed\n").unwrap();
+        let r = move_host(&mut doc, "db", &sub_path.to_string_lossy());
+        assert!(matches!(r, Err(AppError::Conflict(_))), "drifted target: {r:?}");
+        // The source doc was not mutated.
+        assert!(doc_text(&doc).contains("Host db"));
+    }
+
+    // ── Tests: duplicate_host — same-file copy, only the header line differs ──
+
+    #[test]
+    fn duplicate_host_appends_copy_with_only_header_changed_golden() {
+        let dir = tempfile::tempdir().unwrap();
+        let original =
+            "Host web extra  # prod\n    HostName w.example.com\n    # pinned\n    User deploy\n";
+        let config_path = write_config(&dir, "config", original);
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+
+        let idx = duplicate_host(&mut doc, "web", "web-copy").expect("duplicate ok");
+        assert_eq!(idx, 0);
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        persist_file(&mut doc, idx, &mut backed_up, None).expect("persist ok");
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        // Prefix byte-identical; the copy keeps the header's spacing + inline comment and
+        // every body line verbatim — only the pattern tokens became `web-copy`.
+        assert!(on_disk.starts_with(original), "prefix must be untouched:\n{on_disk}");
+        assert_eq!(
+            on_disk,
+            format!(
+                "{original}\nHost web-copy  # prod\n    HostName w.example.com\n    # pinned\n    User deploy\n"
+            )
+        );
+
+        // Reload: both hosts findable; the copy's patterns are exactly [new_alias].
+        let reloaded = load_doc(&config_path).expect("reload ok");
+        assert!(find_host_file_index(&reloaded, "web").is_some());
+        let copy = reloaded.files[0]
+            .items
+            .iter()
+            .find_map(|it| match it {
+                crate::config::model::Item::Host(h)
+                    if h.patterns.first().map(String::as_str) == Some("web-copy") =>
+                {
+                    Some(h)
+                }
+                _ => None,
+            })
+            .expect("copy present");
+        assert_eq!(copy.patterns, vec!["web-copy".to_string()]);
+    }
+
+    #[test]
+    fn duplicate_host_rejects_collisions_and_invalid_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "Host web\n    User deploy\n\nHost db\n    User admin\n";
+        let config_path = write_config(&dir, "config", original);
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+
+        // Collision with ANY existing host's first pattern (incl. its own).
+        for taken in ["db", "web"] {
+            match duplicate_host(&mut doc, "web", taken) {
+                Err(AppError::Other(msg)) => {
+                    assert!(msg.contains("already exists"), "got: {msg}")
+                }
+                other => panic!("expected Other(already exists), got {other:?}"),
+            }
+        }
+
+        // Invalid tokens — same rules as rename.
+        for bad in ["", "a b", "a#b", "-web", "a\nb"] {
+            let r = duplicate_host(&mut doc, "web", bad);
+            assert!(matches!(r, Err(AppError::Other(_))), "alias {bad:?} must be rejected: {r:?}");
+        }
+
+        // Unknown source alias → NotFound.
+        let r = duplicate_host(&mut doc, "nope", "fresh");
+        assert!(matches!(r, Err(AppError::NotFound(_))), "unknown alias: {r:?}");
+
+        // Nothing changed in memory after all the rejections.
+        assert_eq!(doc_text(&doc), original);
+    }
+
+    // ── Tests: find_managed_file (config_read_file path validation) ───────────
+
+    #[test]
+    fn find_managed_file_accepts_loaded_paths_and_rejects_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let (doc, main_path, sub_path) = two_file_doc(&dir, "Host s1\n    User a\n");
+
+        // Exact string matches.
+        assert_eq!(find_managed_file(&doc, &main_path.to_string_lossy()).unwrap(), 0);
+        assert_eq!(find_managed_file(&doc, &sub_path.to_string_lossy()).unwrap(), 1);
+
+        // Canonical equivalence (a `./` hop) also resolves.
+        let dotted = format!(
+            "{}/./{}",
+            dir.path().to_string_lossy(),
+            main_path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(find_managed_file(&doc, &dotted).unwrap(), 0);
+
+        // Unmanaged sibling, system file, and nonsense are all forbidden.
+        let stray = dir.path().join("unmanaged");
+        std::fs::write(&stray, "Host x\n").unwrap();
+        for bad in [stray.to_string_lossy().to_string(), "/etc/passwd".into(), "nope".into()] {
+            let r = find_managed_file(&doc, &bad);
+            assert!(matches!(r, Err(AppError::ForbiddenPath(_))), "path {bad:?}: {r:?}");
+        }
     }
 
     // ── Test 3: apply_changes NotFound for unknown alias ─────────────────────

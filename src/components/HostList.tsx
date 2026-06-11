@@ -5,6 +5,7 @@ import {
   Server,
   Globe,
   ChevronRight,
+  FileText,
   Play,
   SlidersHorizontal,
 } from "lucide-react";
@@ -13,7 +14,7 @@ import type { HostSummary } from "@/bindings/HostSummary";
 import { useUiStore } from "@/stores/ui";
 import { useConnect, useHostsQuery, useReorderHosts, useTerminals } from "@/lib/queries";
 import { useSettingsStore } from "@/stores/settings";
-import { effectiveNewTab } from "@/lib/settings-logic";
+import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -25,6 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AddHostDialog } from "@/components/AddHostDialog";
+import { FileViewDialog } from "@/components/FileViewDialog";
 import { cn, basename } from "@/lib/utils";
 import { isWildcardOnly, labelsFor, secondaryLine, shortLabels } from "@/lib/host-display";
 import { buildNewOrder } from "@/lib/reorder";
@@ -196,7 +198,11 @@ function HostRow({
             e.stopPropagation();
             onConnect();
           }}
-          className="absolute top-1/2 right-1 size-6 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+          // Centered via auto margins, NOT translate: the Button's global
+          // `active:translate-y-px` would override a translate-based centering
+          // on mousedown, teleporting the button out from under the cursor so
+          // the click never lands (mouseup retargets to the row).
+          className="absolute inset-y-0 right-1 my-auto size-6 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
         >
           <Play className="size-3.5" />
         </Button>
@@ -239,6 +245,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const fileScope = useUiStore((s) => s.fileScope);
   const setFileScope = useUiStore((s) => s.setFileScope);
   const terminalId = useSettingsStore((s) => s.terminalId);
+  const hostTerminals = useSettingsStore((s) => s.hostTerminals);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
   const fileAliases = useSettingsStore((s) => s.fileAliases);
   const setFileAlias = useSettingsStore((s) => s.setFileAlias);
@@ -258,6 +265,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   // Inline group-label rename (double-click a header) — transient local state.
   const [editingFile, setEditingFile] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // Raw-file viewer dialog: the loaded file currently shown (null = closed).
+  const [viewFile, setViewFile] = useState<string | null>(null);
   // Pending single-click collapse toggle, deferred past the double-click
   // window so a rename double-click never toggles the group.
   const collapseTimer = useRef<number | null>(null);
@@ -400,12 +409,15 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     reorderHosts.mutate({ file, order: buildNewOrder(fileHosts, drag.index, gap) });
   };
 
-  const connectTo = (alias: string) =>
+  const connectTo = (alias: string) => {
+    // Per-host terminal override wins; new-tab gating follows the RESOLVED terminal.
+    const resolved = resolveTerminal(alias, hostTerminals, terminalId);
     connect.mutate({
       alias,
-      terminalOverride: terminalId,
-      newTab: effectiveNewTab(newTabConnect, terminalId, terminals.data ?? []),
+      terminalOverride: resolved,
+      newTab: effectiveNewTab(newTabConnect, resolved, terminals.data ?? []),
     });
+  };
 
   // A running index across all rows so the staggered enter animation reads as a
   // single cascade rather than restarting per group.
@@ -454,6 +466,19 @@ export function HostList({ hosts, isLoading }: HostListProps) {
               ))}
             </SelectContent>
           </Select>
+          {scope && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-6 shrink-0 text-muted-foreground"
+              aria-label={`View file ${scope}`}
+              title={`View file — ${scope}`}
+              onClick={() => setViewFile(scope)}
+            >
+              <FileText className="size-3.5" />
+            </Button>
+          )}
           <span className="shrink-0 pr-1 font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
             {isLoading ? "…" : `${hostCount} ${hostCount === 1 ? "host" : "hosts"}`}
           </span>
@@ -540,38 +565,61 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                         </span>
                       </div>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={(e) => headerClick(section.file, e.detail)}
-                        onDoubleClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          beginEdit(section.file);
-                        }}
-                        className="sidebar-sticky-header sticky top-0 z-10 flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
-                        title={
-                          alias
-                            ? `${alias} — ${section.file} (double-click to rename)`
-                            : `${section.file} (double-click to rename)`
-                        }
-                        aria-expanded={!isCollapsed}
-                      >
-                        <span className="flex min-w-0 items-center gap-1">
-                          <ChevronRight
-                            className={cn(
-                              "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
-                              !isCollapsed && "rotate-90",
-                            )}
-                            aria-hidden
-                          />
-                          <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
-                            {section.name}
+                      /*
+                       * The sticky/relative wrapper lets the View-file button sit
+                       * as a SIBLING overlay (never nested in the header button),
+                       * so collapse single-click and rename double-click are
+                       * completely untouched by it.
+                       */
+                      <div className="group/header sidebar-sticky-header sticky top-0 z-10 rounded-sm">
+                        <button
+                          type="button"
+                          onClick={(e) => headerClick(section.file, e.detail)}
+                          onDoubleClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            beginEdit(section.file);
+                          }}
+                          className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
+                          title={
+                            alias
+                              ? `${alias} — ${section.file} (double-click to rename)`
+                              : `${section.file} (double-click to rename)`
+                          }
+                          aria-expanded={!isCollapsed}
+                        >
+                          <span className="flex min-w-0 items-center gap-1">
+                            <ChevronRight
+                              className={cn(
+                                "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
+                                !isCollapsed && "rotate-90",
+                              )}
+                              aria-hidden
+                            />
+                            <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+                              {section.name}
+                            </span>
                           </span>
-                        </span>
-                        <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
-                          {section.hosts.length}
-                        </span>
-                      </button>
+                          <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
+                            {section.hosts.length}
+                          </span>
+                        </button>
+                        {/* Raw-file viewer — revealed on header hover, next to the count. */}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`View file ${section.file}`}
+                          title={`View file — ${section.file}`}
+                          onClick={() => setViewFile(section.file)}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          // inset-y centering (no translate) — see the row Play
+                          // button for why translate-based centering breaks clicks.
+                          className="absolute inset-y-0 right-6 my-auto size-5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/header:opacity-100"
+                        >
+                          <FileText className="size-3" />
+                        </Button>
+                      </div>
                     ))}
                   {!isCollapsed && (
                     <>
@@ -632,6 +680,15 @@ export function HostList({ hosts, isLoading }: HostListProps) {
           )}
         </div>
       </div>
+
+      {/* Raw config-file viewer (read-only, lazy fetch while open). */}
+      <FileViewDialog
+        path={viewFile}
+        label={viewFile ? (labels.get(viewFile) ?? basename(viewFile)) : undefined}
+        onOpenChange={(open) => {
+          if (!open) setViewFile(null);
+        }}
+      />
     </div>
   );
 }

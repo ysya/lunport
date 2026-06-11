@@ -8,6 +8,7 @@ import {
   effectiveNewTab,
   filterLintIssues,
   LINT_RULES,
+  resolveTerminal,
   resolveTheme,
   systemPrefersDark,
   terminalSupportsNewTab,
@@ -113,6 +114,30 @@ describe("new-tab connect gating", () => {
     expect(effectiveNewTab(false, "iterm2", TERMINALS)).toBe(false);
     expect(effectiveNewTab(true, "terminal", TERMINALS)).toBe(false);
     expect(effectiveNewTab(true, null, TERMINALS)).toBe(false);
+  });
+});
+
+describe("resolveTerminal", () => {
+  const OVERRIDES = { web: "iterm2", db: "kitty" };
+
+  it("prefers the host override over the global preference", () => {
+    expect(resolveTerminal("web", OVERRIDES, "terminal")).toBe("iterm2");
+    expect(resolveTerminal("db", OVERRIDES, null)).toBe("kitty");
+  });
+
+  it("falls back to the global preference when the host has no override", () => {
+    expect(resolveTerminal("bastion", OVERRIDES, "terminal")).toBe("terminal");
+    expect(resolveTerminal("bastion", {}, "iterm2")).toBe("iterm2");
+  });
+
+  it("returns null (system default) when neither override nor global is set", () => {
+    expect(resolveTerminal("bastion", {}, null)).toBeNull();
+    expect(resolveTerminal("web", {}, null)).toBeNull();
+  });
+
+  it("ignores a blank override entry (defensive against bad persisted state)", () => {
+    expect(resolveTerminal("web", { web: "" }, "terminal")).toBe("terminal");
+    expect(resolveTerminal("web", { web: "" }, null)).toBeNull();
   });
 });
 

@@ -20,7 +20,7 @@ import {
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
-import { effectiveNewTab } from "@/lib/settings-logic";
+import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
 
 import {
   Command,
@@ -60,6 +60,7 @@ export function CommandPalette() {
   const queryClient = useQueryClient();
 
   const terminalId = useSettingsStore((s) => s.terminalId);
+  const hostTerminals = useSettingsStore((s) => s.hostTerminals);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
   const toggleTheme = useSettingsStore((s) => s.toggleTheme);
   const terminals = useTerminals();
@@ -81,14 +82,16 @@ export function CommandPalette() {
 
   const doConnect = useCallback(
     (alias: string) => {
+      // Per-host terminal override wins; new-tab gating follows the RESOLVED terminal.
+      const resolved = resolveTerminal(alias, hostTerminals, terminalId);
       connect.mutate({
         alias,
-        terminalOverride: terminalId,
-        newTab: effectiveNewTab(newTabConnect, terminalId, terminals.data ?? []),
+        terminalOverride: resolved,
+        newTab: effectiveNewTab(newTabConnect, resolved, terminals.data ?? []),
       });
       setOpen(false);
     },
-    [connect, terminalId, newTabConnect, terminals.data],
+    [connect, hostTerminals, terminalId, newTabConnect, terminals.data],
   );
 
   const doEdit = useCallback(

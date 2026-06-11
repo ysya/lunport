@@ -57,6 +57,14 @@ interface SettingsState {
    */
   terminalId: string | null;
   setTerminalId: (id: string | null) => void;
+  /**
+   * Per-host terminal overrides (host alias → terminal id). A host's override
+   * wins over the global `terminalId`; no entry = use the global preference.
+   * Resolve with `resolveTerminal` from `@/lib/settings-logic`.
+   */
+  hostTerminals: Record<string, string>;
+  /** Set or clear (null deletes the entry) the terminal override for a host. */
+  setHostTerminal: (alias: string, id: string | null) => void;
   /** Root font-size in px (the whole UI is rem-based and scales with it). */
   fontSize: number;
   setFontSize: (px: number) => void;
@@ -120,6 +128,17 @@ export const useSettingsStore = create<SettingsState>()(
         })),
       terminalId: legacyTerminalId(),
       setTerminalId: (terminalId) => set({ terminalId }),
+      hostTerminals: {},
+      setHostTerminal: (alias, id) =>
+        set((s) => {
+          if (id === null) {
+            if (!(alias in s.hostTerminals)) return {};
+            const next = { ...s.hostTerminals };
+            delete next[alias];
+            return { hostTerminals: next };
+          }
+          return { hostTerminals: { ...s.hostTerminals, [alias]: id } };
+        }),
       fontSize: DEFAULT_FONT_SIZE,
       setFontSize: (fontSize) => set({ fontSize: clampFontSize(fontSize) }),
       autoCheckUpdates: true,

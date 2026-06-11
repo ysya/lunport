@@ -10,7 +10,21 @@ import {
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Trash2, Plus, MoreVertical, RotateCcw, Save, Copy, Check, TerminalSquare, Pencil, X } from "lucide-react";
+import {
+  Trash2,
+  Plus,
+  MoreVertical,
+  RotateCcw,
+  Save,
+  Copy,
+  CopyPlus,
+  Check,
+  ChevronDown,
+  FolderInput,
+  TerminalSquare,
+  Pencil,
+  X,
+} from "lucide-react";
 
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostOption } from "@/bindings/HostOption";
@@ -22,18 +36,22 @@ import {
 } from "@/lib/hostFields";
 import {
   useHostDetail,
+  useHostsQuery,
   usePlatform,
   useSaveHost,
   useSetTags,
   useSetOptionEnabled,
   useRemoveHost,
   useRenameHost,
+  useMoveHost,
+  useDuplicateHost,
   useConnect,
   useTerminals,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
-import { effectiveNewTab } from "@/lib/settings-logic";
+import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
+import { labelsFor } from "@/lib/host-display";
 import { basename, cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -61,9 +79,25 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Section, SettingsGroup } from "@/components/settings-primitives";
@@ -123,11 +157,7 @@ export function HostEditor({ alias }: HostEditorProps) {
   const setTags = useSetTags();
   const setOptionEnabled = useSetOptionEnabled();
   const removeHost = useRemoveHost();
-  const connect = useConnect();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
-  const terminalId = useSettingsStore((s) => s.terminalId);
-  const newTabConnect = useSettingsStore((s) => s.newTabConnect);
-  const terminals = useTerminals();
 
   if (isLoading) {
     return <HostEditorSkeleton />;
@@ -176,14 +206,6 @@ export function HostEditor({ alias }: HostEditorProps) {
         )
       }
       removing={removeHost.isPending}
-      onConnect={() =>
-        connect.mutate({
-          alias: detail.alias,
-          terminalOverride: terminalId,
-          newTab: effectiveNewTab(newTabConnect, terminalId, terminals.data ?? []),
-        })
-      }
-      connecting={connect.isPending}
     />
   );
 }
@@ -193,13 +215,11 @@ interface HostEditorFormProps {
   isMac: boolean;
   saving: boolean;
   removing: boolean;
-  connecting: boolean;
   onSave: (changes: ReturnType<typeof computeChanges>) => void;
   onSetTags: (tags: string[]) => void;
   /** `index` is the option's position in `HostDetail.options` (document order). */
   onEnableOption: (keyword: string, index: number) => void;
   onRemove: () => void;
-  onConnect: () => void;
 }
 
 function HostEditorForm({
@@ -207,12 +227,10 @@ function HostEditorForm({
   isMac,
   saving,
   removing,
-  connecting,
   onSave,
   onSetTags,
   onEnableOption,
   onRemove,
-  onConnect,
 }: HostEditorFormProps) {
   const enabledOpts = useMemo(
     () => detail.options.filter((o) => o.enabled),
@@ -286,64 +304,7 @@ function HostEditorForm({
        */}
       <div className="group flex items-start justify-between gap-3 select-none">
         <HostHeaderTitle detail={detail} />
-
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button
-            type="button"
-            size="sm"
-            className="h-7"
-            onClick={onConnect}
-            disabled={connecting}
-          >
-            <TerminalSquare className="size-4" /> Connect
-          </Button>
-
-          <AlertDialog>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="size-7"
-                aria-label="Host actions"
-                disabled={removing}
-              >
-                <MoreVertical className="size-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-40">
-              <AlertDialogTrigger asChild>
-                <DropdownMenuItem variant="destructive">
-                  <Trash2 className="size-4" /> Remove host
-                </DropdownMenuItem>
-              </AlertDialogTrigger>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>
-                Remove “<span className="font-mono">{detail.alias}</span>”?
-              </AlertDialogTitle>
-              <AlertDialogDescription>
-                This deletes the host block from{" "}
-                <span className="font-mono">{basename(detail.source_file)}</span>.
-                This cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={onRemove}
-                className="bg-destructive text-white hover:bg-destructive/90"
-              >
-                Remove
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-          </AlertDialog>
-        </div>
+        <HostActions detail={detail} removing={removing} onRemove={onRemove} />
       </div>
 
       {/*
@@ -507,6 +468,246 @@ function HostEditorForm({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Radix items can't carry an empty value — sentinel for "no per-host override". */
+const APP_DEFAULT_TERMINAL = "__app_default__";
+
+/**
+ * Editor header actions: a split Connect control (main button launches with the
+ * RESOLVED terminal — per-host override, else the global preference; the
+ * chevron edits the override) plus the ⋯ menu (Duplicate / Move to file /
+ * Remove). Owns its own mutations so the form component stays presentational.
+ */
+function HostActions({
+  detail,
+  removing,
+  onRemove,
+}: {
+  detail: HostDetail;
+  removing: boolean;
+  onRemove: () => void;
+}) {
+  const connect = useConnect();
+  const moveHost = useMoveHost();
+  const duplicateHost = useDuplicateHost();
+  const terminals = useTerminals();
+  const { data } = useHostsQuery();
+  const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
+  const terminalId = useSettingsStore((s) => s.terminalId);
+  const newTabConnect = useSettingsStore((s) => s.newTabConnect);
+  const hostTerminals = useSettingsStore((s) => s.hostTerminals);
+  const setHostTerminal = useSettingsStore((s) => s.setHostTerminal);
+  const fileAliases = useSettingsStore((s) => s.fileAliases);
+
+  // Move targets: every OTHER loaded file, shown under its sidebar display label.
+  const files = useMemo(() => data?.files ?? [], [data]);
+  const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
+  const otherFiles = files.filter((f) => f !== detail.source_file);
+  const labelOf = (f: string) => labels.get(f) ?? basename(f);
+
+  // New-tab gating must follow the terminal that will ACTUALLY launch.
+  const resolved = resolveTerminal(detail.alias, hostTerminals, terminalId);
+  const onConnect = () =>
+    connect.mutate({
+      alias: detail.alias,
+      terminalOverride: resolved,
+      newTab: effectiveNewTab(newTabConnect, resolved, terminals.data ?? []),
+    });
+
+  // The duplicate prompt lives OUTSIDE the dropdown (the menu unmounts on select).
+  const [dupOpen, setDupOpen] = useState(false);
+  const [dupAlias, setDupAlias] = useState("");
+
+  const submitDuplicate = (e: React.FormEvent) => {
+    e.preventDefault();
+    const newAlias = dupAlias.trim();
+    if (newAlias === "" || duplicateHost.isPending) return;
+    duplicateHost.mutate(
+      { alias: detail.alias, newAlias },
+      {
+        onSuccess: () => {
+          setDupOpen(false);
+          setSelectedAlias(newAlias);
+          toast.success(`Duplicated as ${newAlias}`);
+        },
+        // Validation/collision errors surface via the mutation's error toast;
+        // the dialog stays open so the alias can be corrected.
+      },
+    );
+  };
+
+  return (
+    <div className="flex shrink-0 items-center gap-1.5">
+      {/* Split Connect: main action + per-host terminal picker. */}
+      <div className="flex items-center">
+        <Button
+          type="button"
+          size="sm"
+          className="h-7 rounded-r-none"
+          onClick={onConnect}
+          disabled={connect.isPending}
+        >
+          <TerminalSquare className="size-4" /> Connect
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              size="icon"
+              className="h-7 w-5 rounded-l-none border-l border-primary-foreground/25 px-0"
+              aria-label="Choose terminal for this host"
+            >
+              <ChevronDown className="size-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+              Open connection in
+            </DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={hostTerminals[detail.alias] ?? APP_DEFAULT_TERMINAL}
+              onValueChange={(v) =>
+                setHostTerminal(detail.alias, v === APP_DEFAULT_TERMINAL ? null : v)
+              }
+            >
+              <DropdownMenuRadioItem value={APP_DEFAULT_TERMINAL}>
+                App default
+              </DropdownMenuRadioItem>
+              {(terminals.data ?? []).map((t) => (
+                <DropdownMenuRadioItem key={t.id} value={t.id}>
+                  {t.label}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      <AlertDialog>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              aria-label="Host actions"
+              disabled={removing}
+            >
+              <MoreVertical className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuItem
+              onSelect={() => {
+                setDupAlias(`${detail.alias}-copy`);
+                setDupOpen(true);
+              }}
+            >
+              <CopyPlus className="size-4" /> Duplicate host…
+            </DropdownMenuItem>
+            {otherFiles.length > 0 && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <FolderInput className="size-4 text-muted-foreground" /> Move to file
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="max-w-64">
+                  {otherFiles.map((f) => (
+                    <DropdownMenuItem
+                      key={f}
+                      title={f}
+                      disabled={moveHost.isPending}
+                      onSelect={() =>
+                        moveHost.mutate(
+                          { alias: detail.alias, targetFile: f },
+                          {
+                            onSuccess: () =>
+                              toast.success(`Moved ${detail.alias} to ${labelOf(f)}`),
+                          },
+                        )
+                      }
+                    >
+                      <span className="truncate font-mono text-xs">{labelOf(f)}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
+            <DropdownMenuSeparator />
+            <AlertDialogTrigger asChild>
+              <DropdownMenuItem variant="destructive">
+                <Trash2 className="size-4" /> Remove host
+              </DropdownMenuItem>
+            </AlertDialogTrigger>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Remove “<span className="font-mono">{detail.alias}</span>”?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This deletes the host block from{" "}
+              <span className="font-mono">{basename(detail.source_file)}</span>.
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={onRemove}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Duplicate prompt — minimal: one alias field, prefilled `<alias>-copy`. */}
+      <Dialog open={dupOpen} onOpenChange={setDupOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <form onSubmit={submitDuplicate}>
+            <DialogHeader>
+              <DialogTitle>
+                Duplicate “<span className="font-mono">{detail.alias}</span>”
+              </DialogTitle>
+              <DialogDescription>
+                Copies the whole block within{" "}
+                <span className="font-mono">{basename(detail.source_file)}</span> — only
+                the alias changes.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-1.5 py-4">
+              <Label htmlFor="duplicate-alias">New alias</Label>
+              <Input
+                id="duplicate-alias"
+                autoFocus
+                value={dupAlias}
+                onChange={(e) => setDupAlias(e.target.value)}
+                className="font-mono"
+              />
+            </div>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button type="button" variant="outline">
+                  Cancel
+                </Button>
+              </DialogClose>
+              <Button
+                type="submit"
+                disabled={dupAlias.trim() === "" || duplicateHost.isPending}
+              >
+                {duplicateHost.isPending ? "Duplicating…" : "Duplicate"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

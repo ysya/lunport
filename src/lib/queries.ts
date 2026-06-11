@@ -31,6 +31,7 @@ export const queryKeys = {
   hosts: ["config", "hosts"] as const,
   host: (alias: string) => ["config", "host", alias] as const,
   files: ["config", "files"] as const,
+  fileText: (path: string) => ["config", "fileText", path] as const,
   drift: ["config", "drift"] as const,
   lint: ["config", "lint"] as const,
   keyHygiene: (alias: string) => ["config", "keyHygiene", alias] as const,
@@ -198,6 +199,59 @@ export function useRenameHost() {
       queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
     },
     onError: (e) => toast.error("Failed to rename host", { description: errMessage(e) }),
+  });
+}
+
+/**
+ * Move a host block to another LOADED config file (verbatim, appended at the
+ * end). The host's alias is unchanged, so callers keep the selection as-is;
+ * both the list and the host's detail (its `source_file`) are invalidated.
+ */
+export function useMoveHost() {
+  const queryClient = useQueryClient();
+  return useMutation<void, unknown, { alias: string; targetFile: string }>({
+    mutationFn: ({ alias, targetFile }) =>
+      tauriInvoke<void>("config_move_host", { alias, targetFile }),
+    onSuccess: (_data, { alias }) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.host(alias) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
+      // Raw-file viewers of either file are stale now.
+      queryClient.invalidateQueries({ queryKey: ["config", "fileText"] });
+    },
+    onError: (e) => toast.error("Failed to move host", { description: errMessage(e) }),
+  });
+}
+
+/**
+ * Duplicate a host within its file: a verbatim copy appended at the end with
+ * only the `Host` line's patterns replaced by `newAlias`. Callers select the
+ * new alias on success.
+ */
+export function useDuplicateHost() {
+  const queryClient = useQueryClient();
+  return useMutation<void, unknown, { alias: string; newAlias: string }>({
+    mutationFn: ({ alias, newAlias }) =>
+      tauriInvoke<void>("config_duplicate_host", { alias, newAlias }),
+    onSuccess: (_data, { newAlias }) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.host(newAlias) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
+      queryClient.invalidateQueries({ queryKey: ["config", "fileText"] });
+    },
+    onError: (e) =>
+      toast.error("Failed to duplicate host", { description: errMessage(e) }),
+  });
+}
+
+/**
+ * Raw text of ONE loaded managed config file (read-only viewer). Disabled until
+ * a path is provided — mount the consumer only while its dialog is open so each
+ * open refetches the current on-disk text.
+ */
+export function useFileText(path: string | null) {
+  return useQuery<string>({
+    queryKey: queryKeys.fileText(path ?? ""),
+    queryFn: () => tauriInvoke<string>("config_read_file", { path }),
+    enabled: !!path,
   });
 }
 
