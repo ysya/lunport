@@ -207,16 +207,27 @@ export function useSetTags() {
   });
 }
 
-/** Toggle whether a single option line is enabled (commented out vs. active). */
+/**
+ * Toggle whether a single option line is enabled (commented out vs. active).
+ * The line is addressed by `index` — its position in `HostDetail.options`
+ * (document order), which uniquely identifies it even when the block holds an
+ * enabled and a disabled line with the same keyword. `keyword` is a backend
+ * sanity check: a mismatch (stale view) errors instead of hitting a wrong line.
+ */
 export function useSetOptionEnabled() {
   const queryClient = useQueryClient();
   return useMutation<
     void,
     unknown,
-    { alias: string; keyword: string; enabled: boolean }
+    { alias: string; keyword: string; index: number; enabled: boolean }
   >({
-    mutationFn: ({ alias, keyword, enabled }) =>
-      tauriInvoke<void>("config_set_option_enabled", { alias, keyword, enabled }),
+    mutationFn: ({ alias, keyword, index, enabled }) =>
+      tauriInvoke<void>("config_set_option_enabled", {
+        alias,
+        keyword,
+        index,
+        enabled,
+      }),
     onSuccess: (_data, { alias }) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.host(alias) });
       queryClient.invalidateQueries({ queryKey: queryKeys.hosts });

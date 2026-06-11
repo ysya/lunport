@@ -158,9 +158,9 @@ export function HostEditor({ alias }: HostEditorProps) {
           { onSuccess: () => toast.success(`Updated tags for ${detail.alias}`) },
         )
       }
-      onEnableOption={(keyword) =>
+      onEnableOption={(keyword, index) =>
         setOptionEnabled.mutate(
-          { alias: detail.alias, keyword, enabled: true },
+          { alias: detail.alias, keyword, index, enabled: true },
           { onSuccess: () => toast.success(`Enabled ${keyword}`) },
         )
       }
@@ -196,7 +196,8 @@ interface HostEditorFormProps {
   connecting: boolean;
   onSave: (changes: ReturnType<typeof computeChanges>) => void;
   onSetTags: (tags: string[]) => void;
-  onEnableOption: (keyword: string) => void;
+  /** `index` is the option's position in `HostDetail.options` (document order). */
+  onEnableOption: (keyword: string, index: number) => void;
   onRemove: () => void;
   onConnect: () => void;
 }
@@ -217,8 +218,13 @@ function HostEditorForm({
     () => detail.options.filter((o) => o.enabled),
     [detail],
   );
+  // Disabled rows keep their ORIGINAL index into detail.options: the backend
+  // addresses the line by that index (a filtered-array index would be wrong).
   const disabledOpts = useMemo(
-    () => detail.options.filter((o) => !o.enabled),
+    () =>
+      detail.options
+        .map((option, index) => ({ option, index }))
+        .filter(({ option }) => !option.enabled),
     [detail],
   );
 
@@ -457,11 +463,11 @@ function HostEditorForm({
               description="Commented-out lines. Toggle on to re-enable, then edit above."
             >
               <SettingsGroup>
-                {disabledOpts.map((o, i) => (
+                {disabledOpts.map(({ option, index }) => (
                   <DisabledOptionRow
-                    key={`${o.keyword}-${i}`}
-                    option={o}
-                    onEnable={() => onEnableOption(o.keyword)}
+                    key={`${option.keyword}-${index}`}
+                    option={option}
+                    onEnable={() => onEnableOption(option.keyword, index)}
                   />
                 ))}
               </SettingsGroup>

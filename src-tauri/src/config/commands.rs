@@ -153,6 +153,54 @@ pub fn rename_host(
     Ok(idx)
 }
 
+/// Enable/disable ONE option line of a host, addressed by its position in the host's directive
+/// list — the exact order `HostDetail.options` is emitted in (every body `Item::Directive`, in
+/// document order, comments/blanks skipped). Addressing by keyword alone is ambiguous the moment
+/// a block holds an enabled and a disabled line with the same keyword (e.g. an active
+/// `IdentityFile a` next to a commented `# IdentityFile b`), so `index` picks the line and
+/// `keyword` is only a sanity check: a mismatch means the caller's view of the host is stale and
+/// the toggle is refused instead of risking the wrong line. Returns the modified ConfigFile index.
+pub fn set_option_enabled(
+    doc: &mut crate::config::model::SshConfigDoc,
+    alias: &str,
+    keyword: &str,
+    index: usize,
+    enabled: bool,
+) -> Result<usize, AppError> {
+    use crate::config::model::Item;
+
+    let idx = find_host_file_index(doc, alias)
+        .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
+
+    let host = edit::find_host_mut(&mut doc.files[idx].items, alias)
+        .ok_or_else(|| AppError::NotFound(format!("host '{}' not found in file", alias)))?;
+
+    let directive = host
+        .body
+        .iter_mut()
+        .filter_map(|item| match item {
+            Item::Directive(d) => Some(d),
+            _ => None,
+        })
+        .nth(index)
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "option index {} out of range for host '{}'",
+                index, alias
+            ))
+        })?;
+
+    if directive.key != keyword.to_lowercase() {
+        return Err(AppError::Other(format!(
+            "option at index {} of host '{}' is '{}', not '{}' — the view is stale, reload and retry",
+            index, alias, directive.keyword, keyword
+        )));
+    }
+
+    edit::set_directive_enabled(directive, enabled);
+    Ok(idx)
+}
+
 /// Serialize file `idx`, back it up once (tracked in `backed_up`), atomic-write at 0o600, and
 /// refresh its in-memory fingerprint. Backups go to the file's MIRROR dir under
 /// `fsutil::backups_root()` — never next to the file, where a glob `Include` would read them as
@@ -594,6 +642,7 @@ pub fn config_set_option_enabled(
     state: State<AppState>,
     alias: String,
     keyword: String,
+    index: usize,
     enabled: bool,
 ) -> Result<(), AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
@@ -603,23 +652,7 @@ pub fn config_set_option_enabled(
     match doc_lock.as_mut() {
         None => Err(AppError::Other("no config loaded".to_string())),
         Some(doc) => {
-            let idx = find_host_file_index(doc, &alias)
-                .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
-
-            let key_lower = keyword.to_lowercase();
-            let host = edit::find_host_mut(&mut doc.files[idx].items, &alias)
-                .ok_or_else(|| AppError::NotFound(format!("host '{}' not found in file", alias)))?;
-
-            let directive = host.body.iter_mut().find_map(|item| {
-                if let crate::config::model::Item::Directive(d) = item {
-                    if d.key == key_lower {
-                        return Some(d);
-                    }
-                }
-                None
-            }).ok_or_else(|| AppError::NotFound(format!("keyword '{}' not found in host '{}'", keyword, alias)))?;
-
-            edit::set_directive_enabled(directive, enabled);
+            let idx = set_option_enabled(doc, &alias, &keyword, index, enabled)?;
             persist_file(doc, idx, &mut backed_up_lock, retention)
         }
     }
@@ -902,6 +935,114 @@ mod tests {
         apply_changes(&mut doc, "web", &remove_changes).expect("apply_changes remove ok");
         let text2 = serialize_items(&doc.files[idx].items, doc.files[idx].trailing_newline);
         assert!(!text2.contains("Port 22"), "removed field must be gone:\n{}", text2);
+    }
+
+    // ── Tests: set_option_enabled — addressed by options index, not keyword ──
+
+    /// Serialized text of file 0.
+    fn doc_text(doc: &crate::config::model::SshConfigDoc) -> String {
+        serialize_items(&doc.files[0].items, doc.files[0].trailing_newline)
+    }
+
+    /// Indices of the lines that differ between two equal-length texts.
+    fn diff_lines(a: &str, b: &str) -> Vec<usize> {
+        let al: Vec<&str> = a.lines().collect();
+        let bl: Vec<&str> = b.lines().collect();
+        assert_eq!(al.len(), bl.len(), "line count must not change:\n{a}\n--- vs ---\n{b}");
+        al.iter()
+            .zip(bl.iter())
+            .enumerate()
+            .filter_map(|(i, (x, y))| if x != y { Some(i) } else { None })
+            .collect()
+    }
+
+    /// A doc whose 'web' host holds `IdentityFile a` (enabled) plus `IdentityFile b` and
+    /// `IdentityFile c` disabled in-memory (serialized as `# IdentityFile …`) — the
+    /// same-keyword mix that keyword-only addressing gets wrong. Options indices:
+    /// 0 = HostName, 1 = IdentityFile a, 2 = IdentityFile b, 3 = IdentityFile c, 4 = User.
+    fn doc_with_same_keyword_mix(dir: &tempfile::TempDir) -> crate::config::model::SshConfigDoc {
+        let content = "Host web\n    HostName web.example.com\n    IdentityFile a\n    IdentityFile b\n    IdentityFile c\n    User deploy\n";
+        let config_path = write_config(dir, "config", content);
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+        // Disabled state only exists in-memory (a reload re-classifies `# …` as comments),
+        // so build it through the op under test.
+        set_option_enabled(&mut doc, "web", "IdentityFile", 2, false).expect("disable b");
+        set_option_enabled(&mut doc, "web", "IdentityFile", 3, false).expect("disable c");
+        let text = doc_text(&doc);
+        assert!(text.contains("    # IdentityFile b"), "b disabled:\n{text}");
+        assert!(text.contains("    # IdentityFile c"), "c disabled:\n{text}");
+        assert!(text.contains("    IdentityFile a"), "a still enabled:\n{text}");
+        doc
+    }
+
+    #[test]
+    fn set_option_enabled_enables_the_second_disabled_same_keyword_line_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = doc_with_same_keyword_mix(&dir);
+        let before = doc_text(&doc);
+
+        // Enable the SECOND disabled IdentityFile (c, options index 3). Keyword-only
+        // addressing would have hit the enabled `IdentityFile a` instead.
+        set_option_enabled(&mut doc, "web", "IdentityFile", 3, true).expect("enable c");
+        let after = doc_text(&doc);
+
+        let diffs = diff_lines(&before, &after);
+        assert_eq!(diffs.len(), 1, "exactly one line may change, got {diffs:?}:\n{after}");
+        assert_eq!(before.lines().nth(diffs[0]).unwrap(), "    # IdentityFile c");
+        assert_eq!(after.lines().nth(diffs[0]).unwrap(), "    IdentityFile c");
+        // The other same-keyword lines are untouched.
+        assert!(after.contains("    IdentityFile a"));
+        assert!(after.contains("    # IdentityFile b"));
+    }
+
+    #[test]
+    fn set_option_enabled_disables_the_enabled_same_keyword_line_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = doc_with_same_keyword_mix(&dir);
+        let before = doc_text(&doc);
+
+        // Disable the still-enabled `IdentityFile a` (options index 1).
+        set_option_enabled(&mut doc, "web", "IdentityFile", 1, false).expect("disable a");
+        let after = doc_text(&doc);
+
+        let diffs = diff_lines(&before, &after);
+        assert_eq!(diffs.len(), 1, "exactly one line may change, got {diffs:?}:\n{after}");
+        assert_eq!(before.lines().nth(diffs[0]).unwrap(), "    IdentityFile a");
+        assert_eq!(after.lines().nth(diffs[0]).unwrap(), "    # IdentityFile a");
+        assert!(after.contains("    # IdentityFile b"));
+        assert!(after.contains("    # IdentityFile c"));
+    }
+
+    #[test]
+    fn set_option_enabled_rejects_keyword_index_mismatch_and_bad_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = doc_with_same_keyword_mix(&dir);
+        let before = doc_text(&doc);
+
+        // Index 0 is HostName, not IdentityFile → keyword mismatch is refused.
+        let r = set_option_enabled(&mut doc, "web", "IdentityFile", 0, true);
+        assert!(matches!(r, Err(AppError::Other(_))), "mismatch must error, got {r:?}");
+
+        // Index past the directive list → NotFound.
+        let r2 = set_option_enabled(&mut doc, "web", "IdentityFile", 99, true);
+        assert!(matches!(r2, Err(AppError::NotFound(_))), "out of range must error, got {r2:?}");
+
+        // Unknown alias → NotFound.
+        let r3 = set_option_enabled(&mut doc, "nope", "IdentityFile", 1, true);
+        assert!(matches!(r3, Err(AppError::NotFound(_))), "unknown alias must error, got {r3:?}");
+
+        // Rejected attempts change nothing.
+        assert_eq!(doc_text(&doc), before, "failed toggles must not modify the doc");
+    }
+
+    #[test]
+    fn set_option_enabled_keyword_check_is_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    IdentityFile a\n");
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+        set_option_enabled(&mut doc, "web", "identityfile", 0, false)
+            .expect("case-insensitive keyword match");
+        assert!(doc_text(&doc).contains("    # IdentityFile a"));
     }
 
     // ── Tests: rename_host ────────────────────────────────────────────────────
