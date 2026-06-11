@@ -39,10 +39,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest # Apple Silicon (M-series)
-            args: --target aarch64-apple-darwin
-          - platform: macos-latest # Intel
-            args: --target x86_64-apple-darwin
+          # ONE universal mac leg (Intel + Apple Silicon in a single binary). Two separate mac
+          # legs finished near-simultaneously and raced each other updating latest.json on the
+          # release (delete-asset 404) — one leg can't race itself. The updater falls back to
+          # the `darwin-universal` key when `darwin-{arch}` is absent.
+          - platform: macos-latest
+            args: --target universal-apple-darwin
           - platform: ubuntu-22.04 # Linux x86_64
             args: ""
           - platform: ubuntu-22.04-arm # Linux arm64 (free on public repos)
