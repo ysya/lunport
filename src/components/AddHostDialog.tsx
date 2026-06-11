@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
 import { useHostsQuery, useAddHost } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
+import { useSettingsStore } from "@/stores/settings";
+import { labelsFor } from "@/lib/host-display";
 import { basename } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -38,7 +40,10 @@ export interface AddHostDialogProps {
 
 export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
   const { data } = useHostsQuery();
-  const files = data?.files ?? [];
+  const files = useMemo(() => data?.files ?? [], [data]);
+  // Same display names as the sidebar: auto short labels + user file aliases.
+  const fileAliases = useSettingsStore((s) => s.fileAliases);
+  const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
   const addHost = useAddHost();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
 
@@ -148,8 +153,8 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
                 </SelectTrigger>
                 <SelectContent>
                   {files.map((f) => (
-                    <SelectItem key={f} value={f} className="font-mono">
-                      {basename(f)}
+                    <SelectItem key={f} value={f} title={f} className="font-mono">
+                      {labels.get(f) ?? basename(f)}
                     </SelectItem>
                   ))}
                 </SelectContent>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Search,
   ServerOff,
@@ -26,10 +26,16 @@ import {
 } from "@/components/ui/select";
 import { AddHostDialog } from "@/components/AddHostDialog";
 import { cn, basename } from "@/lib/utils";
-import { isWildcardOnly, secondaryLine, shortLabels } from "@/lib/host-display";
+import { isWildcardOnly, labelsFor, secondaryLine, shortLabels } from "@/lib/host-display";
 
 /** Sentinel Select value for the "All files" scope (Radix items can't be empty). */
 const ALL_FILES = "__all__";
+
+/**
+ * How long a single click on a group header waits before toggling collapse —
+ * just past the double-click window, so a rename double-click never toggles.
+ */
+const COLLAPSE_CLICK_DELAY_MS = 250;
 
 /** Dotted-quad IPv4 (e.g. 10.0.0.5) — these are servers, not "web" hosts. */
 const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
@@ -187,6 +193,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const setFileScope = useUiStore((s) => s.setFileScope);
   const terminalId = useSettingsStore((s) => s.terminalId);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
+  const fileAliases = useSettingsStore((s) => s.fileAliases);
+  const setFileAlias = useSettingsStore((s) => s.setFileAlias);
   const terminals = useTerminals();
   const connect = useConnect();
 
@@ -194,7 +202,59 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   // Select even for files that currently have zero hosts.
   const { data } = useHostsQuery();
   const files = useMemo(() => data?.files ?? [], [data]);
-  const labels = useMemo(() => shortLabels(files), [files]);
+  // Auto heuristic over the FULL file set (the "clear back to this" baseline)…
+  const autoLabels = useMemo(() => shortLabels(files), [files]);
+  // …overlaid with the user's per-file display aliases (an override wins).
+  const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
+
+  // Inline group-label rename (double-click a header) — transient local state.
+  const [editingFile, setEditingFile] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  // Pending single-click collapse toggle, deferred past the double-click
+  // window so a rename double-click never toggles the group.
+  const collapseTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (collapseTimer.current !== null) window.clearTimeout(collapseTimer.current);
+    },
+    [],
+  );
+
+  const cancelPendingCollapse = () => {
+    if (collapseTimer.current !== null) {
+      window.clearTimeout(collapseTimer.current);
+      collapseTimer.current = null;
+    }
+  };
+
+  /** Header click: keyboard activation toggles at once; mouse clicks wait out a possible double-click. */
+  const headerClick = (file: string, detail: number) => {
+    if (detail > 1) return; // second click of a double-click — rename handles it
+    if (detail === 0) {
+      // Keyboard (Enter/Space) — can't become a double-click, toggle now.
+      toggleGroup(file);
+      return;
+    }
+    cancelPendingCollapse();
+    collapseTimer.current = window.setTimeout(() => {
+      collapseTimer.current = null;
+      toggleGroup(file);
+    }, COLLAPSE_CLICK_DELAY_MS);
+  };
+
+  const beginEdit = (file: string) => {
+    cancelPendingCollapse();
+    setDraft(labels.get(file) ?? basename(file));
+    setEditingFile(file);
+  };
+
+  /** Enter: trimmed value saves; empty — or identical to the AUTO label — clears the override. */
+  const commitEdit = (file: string) => {
+    const trimmed = draft.trim();
+    const auto = autoLabels.get(file) ?? basename(file);
+    setFileAlias(file, trimmed === "" || trimmed === auto ? null : trimmed);
+    setEditingFile(null);
+  };
 
   // If the scoped file vanished after a reload, fall back to All gracefully.
   useEffect(() => {
@@ -327,33 +387,86 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                 section.name !== null &&
                 !searchActive &&
                 collapsedGroups.includes(section.file);
+              const alias = fileAliases[section.file];
+              const isEditing = editingFile === section.file;
               return (
                 <div key={section.file} className="mb-3 last:mb-0">
-                  {section.name !== null && (
-                    <button
-                      type="button"
-                      onClick={() => toggleGroup(section.file)}
-                      className="sidebar-sticky-header sticky top-0 z-10 flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
-                      title={section.file}
-                      aria-expanded={!isCollapsed}
-                    >
-                      <span className="flex min-w-0 items-center gap-1">
-                        <ChevronRight
-                          className={cn(
-                            "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
-                            !isCollapsed && "rotate-90",
-                          )}
-                          aria-hidden
-                        />
-                        <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
-                          {section.name}
+                  {section.name !== null &&
+                    (isEditing ? (
+                      /*
+                       * Inline rename: the header's label swaps for a tiny mono
+                       * input pre-filled with the CURRENT display label. Enter
+                       * saves (empty or auto-identical clears the override),
+                       * Esc/blur cancels. A div, not the collapse button —
+                       * collapse is suspended while editing.
+                       */
+                      <div className="sidebar-sticky-header sticky top-0 z-10 flex w-full items-center justify-between rounded-sm px-2 py-1 select-none">
+                        <span className="flex min-w-0 flex-1 items-center gap-1">
+                          <ChevronRight
+                            className={cn(
+                              "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
+                              !isCollapsed && "rotate-90",
+                            )}
+                            aria-hidden
+                          />
+                          <Input
+                            autoFocus
+                            value={draft}
+                            onChange={(e) => setDraft(e.target.value)}
+                            onFocus={(e) => e.currentTarget.select()}
+                            onBlur={() => setEditingFile(null)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                commitEdit(section.file);
+                              } else if (e.key === "Escape") {
+                                e.stopPropagation();
+                                setEditingFile(null);
+                              }
+                            }}
+                            aria-label={`Display name for ${section.file} — press Enter to save, or clear the field to restore the automatic label`}
+                            title="Enter saves · Esc cancels · empty restores the automatic label"
+                            className="h-5 min-w-0 flex-1 rounded-sm px-1 text-[0.6875rem] font-mono md:text-[0.6875rem]"
+                          />
                         </span>
-                      </span>
-                      <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
-                        {section.hosts.length}
-                      </span>
-                    </button>
-                  )}
+                        <span className="pl-2 font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
+                          {section.hosts.length}
+                        </span>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={(e) => headerClick(section.file, e.detail)}
+                        onDoubleClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          beginEdit(section.file);
+                        }}
+                        className="sidebar-sticky-header sticky top-0 z-10 flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
+                        title={
+                          alias
+                            ? `${alias} — ${section.file} (double-click to rename)`
+                            : `${section.file} (double-click to rename)`
+                        }
+                        aria-expanded={!isCollapsed}
+                      >
+                        <span className="flex min-w-0 items-center gap-1">
+                          <ChevronRight
+                            className={cn(
+                              "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
+                              !isCollapsed && "rotate-90",
+                            )}
+                            aria-hidden
+                          />
+                          <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+                            {section.name}
+                          </span>
+                        </span>
+                        <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
+                          {section.hosts.length}
+                        </span>
+                      </button>
+                    ))}
                   {!isCollapsed && (
                     <>
                       {section.hosts.length > 0 && (

@@ -86,6 +86,17 @@ interface SettingsState {
   /** Per-rule lint toggles, keyed by the backend's stable rule ids. */
   lintRules: Record<string, boolean>;
   setLintRule: (rule: string, enabled: boolean) => void;
+  /**
+   * User display aliases for source config files (full path → label), shown
+   * by sidebar group headers, the file-scope picker, and the Add-host target
+   * picker via `labelsFor`. No entry = the automatic `shortLabels` heuristic.
+   */
+  fileAliases: Record<string, string>;
+  /**
+   * Set or clear the display alias for a file. The label is trimmed; null or
+   * a blank string DELETES the entry, restoring the automatic label.
+   */
+  setFileAlias: (path: string, label: string | null) => void;
 }
 
 /**
@@ -127,6 +138,18 @@ export const useSettingsStore = create<SettingsState>()(
       lintRules: defaultLintRules(),
       setLintRule: (rule, enabled) =>
         set((s) => ({ lintRules: { ...s.lintRules, [rule]: enabled } })),
+      fileAliases: {},
+      setFileAlias: (path, label) =>
+        set((s) => {
+          const trimmed = label?.trim() ?? "";
+          if (trimmed === "") {
+            if (!(path in s.fileAliases)) return {};
+            const next = { ...s.fileAliases };
+            delete next[path];
+            return { fileAliases: next };
+          }
+          return { fileAliases: { ...s.fileAliases, [path]: trimmed } };
+        }),
     }),
     { name: SETTINGS_STORAGE_KEY },
   ),

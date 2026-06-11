@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { HostSummary } from "@/bindings/HostSummary";
-import { isWildcardOnly, secondaryLine, shortLabels } from "@/lib/host-display";
+import { isWildcardOnly, labelsFor, secondaryLine, shortLabels } from "@/lib/host-display";
 
 /** Build a HostSummary with sensible defaults; override what each test needs. */
 function host(over: Partial<HostSummary> = {}): HostSummary {
@@ -109,5 +109,49 @@ describe("isWildcardOnly", () => {
 
   it("is false for a plain alias", () => {
     expect(isWildcardOnly(host({ alias: "web", patterns: ["web"] }))).toBe(false);
+  });
+});
+
+describe("labelsFor", () => {
+  const MAIN = "/Users/me/.ssh/config";
+  const ORB = "/Users/me/.orbstack/ssh/config";
+
+  it("returns the auto labels when there are no overrides", () => {
+    const m = labelsFor([MAIN, ORB], {});
+    expect(m.get(MAIN)).toBe("config");
+    expect(m.get(ORB)).toBe("orbstack");
+  });
+
+  it("an override wins over the auto label", () => {
+    const m = labelsFor([MAIN, ORB], { [ORB]: "OrbStack" });
+    expect(m.get(ORB)).toBe("OrbStack");
+    expect(m.get(MAIN)).toBe("config");
+  });
+
+  it("a cleared (absent) override falls back to the auto label", () => {
+    // The store deletes the key on clear — absent key means auto again.
+    const m = labelsFor([MAIN, ORB], {});
+    expect(m.get(ORB)).toBe("orbstack");
+  });
+
+  it("ignores blank override values (treated as no override)", () => {
+    const m = labelsFor([MAIN, ORB], { [ORB]: "   " });
+    expect(m.get(ORB)).toBe("orbstack");
+  });
+
+  it("does not reshuffle OTHER files' auto-disambiguation", () => {
+    // Renaming the main config away from "config" must NOT let the OrbStack
+    // file reclaim the now-free "config" basename — auto labels are computed
+    // over the FULL file set first, then overlaid.
+    const m = labelsFor([MAIN, ORB], { [MAIN]: "Personal" });
+    expect(m.get(MAIN)).toBe("Personal");
+    expect(m.get(ORB)).toBe("orbstack");
+  });
+
+  it("applies overrides verbatim without uniquifying duplicates", () => {
+    // Naming two files the same is the user's call.
+    const m = labelsFor([MAIN, ORB], { [MAIN]: "same", [ORB]: "same" });
+    expect(m.get(MAIN)).toBe("same");
+    expect(m.get(ORB)).toBe("same");
   });
 });

@@ -82,6 +82,27 @@ export function shortLabels(files: string[]): Map<string, string> {
 }
 
 /**
+ * Display labels for source files: the {@link shortLabels} auto-heuristic
+ * overlaid with user overrides (full path → custom alias, from the settings
+ * store's `fileAliases`). An override always wins and is applied VERBATIM —
+ * user choices are never re-uniquified (naming two files the same is the
+ * user's call). The auto labels are computed over the FULL file set FIRST, so
+ * overriding one file never reshuffles another file's auto-disambiguation.
+ * Blank overrides are ignored (treated as "no override").
+ */
+export function labelsFor(
+  files: string[],
+  overrides: Record<string, string>,
+): Map<string, string> {
+  const map = shortLabels(files);
+  for (const f of files) {
+    const override = overrides[f];
+    if (override !== undefined && override.trim() !== "") map.set(f, override);
+  }
+  return map;
+}
+
+/**
  * True when EVERY pattern of the host block is a wildcard (contains `*` or
  * `?`), e.g. `Host *` or `Host *.web`. These blocks supply config DEFAULTS —
  * they are not connectable hosts, so the sidebar demotes them to a "Defaults"
