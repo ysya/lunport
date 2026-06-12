@@ -40,11 +40,37 @@ export function useSyncBackendSettings(): void {
     fired.current = true;
 
     pushBackendSettings();
-
-    // Update check waits a few seconds so launch stays snappy; silent = no
-    // nagging in dev builds or offline.
-    if (useSettingsStore.getState().autoCheckUpdates) {
-      window.setTimeout(() => void checkForUpdates({ silent: true }), 5_000);
-    }
   }, []);
+
+  // Auto update checks. A long-running app (especially with close-to-tray)
+  // would otherwise only ever check once at launch, so while the preference is
+  // on we ALSO re-check periodically and on window focus (throttled). The
+  // updater module itself dedupes prompts per version.
+  const autoCheckUpdates = useSettingsStore((s) => s.autoCheckUpdates);
+  useEffect(() => {
+    if (!autoCheckUpdates) return;
+
+    const RECHECK_MS = 4 * 3_600_000; // every 4 hours while running
+    const FOCUS_THROTTLE_MS = 3_600_000; // at most one focus-triggered check per hour
+    let lastCheck = 0;
+
+    const checkNow = () => {
+      lastCheck = Date.now();
+      void checkForUpdates({ silent: true });
+    };
+
+    // Initial check waits a few seconds so launch stays snappy.
+    const initial = window.setTimeout(checkNow, 5_000);
+    const interval = window.setInterval(checkNow, RECHECK_MS);
+    const onFocus = () => {
+      if (Date.now() - lastCheck >= FOCUS_THROTTLE_MS) checkNow();
+    };
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [autoCheckUpdates]);
 }

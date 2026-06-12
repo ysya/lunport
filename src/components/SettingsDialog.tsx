@@ -319,7 +319,7 @@ function GeneralPane() {
           <SettingsRow
             id="set-auto-update"
             label="Check for updates automatically"
-            description="Checks GitHub Releases shortly after launch."
+            description="Checks GitHub Releases at launch, every few hours, and when the window regains focus."
           >
             <Switch
               id="set-auto-update"

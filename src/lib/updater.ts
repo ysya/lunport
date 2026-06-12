@@ -4,13 +4,18 @@ import { toast } from "sonner";
 
 /** True while a check or install is already running (avoid double prompts). */
 let busy = false;
+/** Last version a silent check already prompted for — never re-toast the same one. */
+let lastPromptedVersion: string | null = null;
+/** A stable toast id so repeated prompts replace rather than stack. */
+const UPDATE_TOAST_ID = "sshelter-update";
 
 /**
  * Check GitHub Releases (`latest.json`) for a newer signed build. When one is
  * found, prompt via a persistent toast; on confirm, download + install + relaunch.
  *
- * `silent` is for the automatic startup check: no "up to date" confirmation and
- * no error toasts (dev builds and offline machines would nag otherwise).
+ * `silent` is for the automatic checks: no "up to date" confirmation, no error
+ * toasts (dev builds and offline machines would nag otherwise), and the same
+ * version is only prompted ONCE per app run — a manual check always prompts.
  */
 export async function checkForUpdates({ silent }: { silent: boolean }): Promise<void> {
   if (busy) return;
@@ -22,7 +27,11 @@ export async function checkForUpdates({ silent }: { silent: boolean }): Promise<
       return;
     }
 
+    if (silent && update.version === lastPromptedVersion) return;
+    lastPromptedVersion = update.version;
+
     toast.info(`Update available: v${update.version}`, {
+      id: UPDATE_TOAST_ID,
       description: update.body?.split("\n")[0],
       duration: Infinity,
       action: {
