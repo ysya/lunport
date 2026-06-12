@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/ysya/sshelter/compare/v0.5.0...v0.5.1) (2026-06-12)
+
+
+### Bug Fixes
+
+* **ui:** keep toasts clickable above modal dialogs ([cf668fd](https://github.com/ysya/sshelter/commit/cf668fddba13bbb787b61384c8fb98a2fe29ff88))
+* **updater:** keep checking for updates while the app runs ([2b0a1ab](https://github.com/ysya/sshelter/commit/2b0a1aba5990e1d7a8ba7fdc1ea8ea598e8b1fa9))
+
 ## [0.5.0](https://github.com/ysya/sshelter/compare/v0.4.0...v0.5.0) (2026-06-11)
 
 
