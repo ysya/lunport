@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/ysya/sshelter/compare/v0.5.1...v0.6.0) (2026-06-19)
+
+
+### Features
+
+* **host-list:** add target-file resolver for right-click add-host ([3934ab1](https://github.com/ysya/sshelter/commit/3934ab1d50f41658c75bcedc37aa41269bb45dbd))
+* **host-list:** right-click file headers to add a host, view, or rename ([b809e95](https://github.com/ysya/sshelter/commit/b809e95ddf5bcc81eee4d984ee46ea920777e036))
+* **host-list:** seed AddHostDialog target from right-click file ([c71a7a7](https://github.com/ysya/sshelter/commit/c71a7a75c2fa41bf2841fd73a6e479577af2e2c1))
+* **host-list:** track right-click add-host target file in ui store ([33288f2](https://github.com/ysya/sshelter/commit/33288f2aa0821a2d8311a2cab5a960a33cbe6788))
+* **ui:** add context-menu primitive ([80155e0](https://github.com/ysya/sshelter/commit/80155e03ac7d3061c285b4fe6144c6d4ae8684fc))
+
 ## [0.5.1](https://github.com/ysya/sshelter/compare/v0.5.0...v0.5.1) (2026-06-12)
 
 
