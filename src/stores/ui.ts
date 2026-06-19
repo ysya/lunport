@@ -23,6 +23,12 @@ interface UiState {
   /** Whether the "New host" dialog is open (driven by the command palette + toolbar). */
   addHostOpen: boolean;
   setAddHostOpen: (open: boolean) => void;
+  /**
+   * The file the right-click "New host in this file" wants the Add-host dialog
+   * to preselect (null = none; the dialog falls back to fileScope). Session-only.
+   */
+  addHostTargetFile: string | null;
+  setAddHostTargetFile: (file: string | null) => void;
   /** Whether the Settings window is open (driven by ⌘, , the toolbar gear, and the palette). */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
@@ -57,6 +63,8 @@ export const useUiStore = create<UiState>()(
       setFileScope: (fileScope) => set({ fileScope }),
       addHostOpen: false,
       setAddHostOpen: (addHostOpen) => set({ addHostOpen }),
+      addHostTargetFile: null,
+      setAddHostTargetFile: (addHostTargetFile) => set({ addHostTargetFile }),
       settingsOpen: false,
       setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
       paletteOpen: false,
