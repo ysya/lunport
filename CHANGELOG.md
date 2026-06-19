@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/ysya/sshelter/compare/v0.6.0...v0.6.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* **host-list:** show the Defaults group at the top of each file section ([022087a](https://github.com/ysya/sshelter/commit/022087a90dd58c55e1c72338e5229e472d08f9c6))
+
 ## [0.6.0](https://github.com/ysya/sshelter/compare/v0.5.1...v0.6.0) (2026-06-19)
 
 
