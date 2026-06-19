@@ -8,6 +8,7 @@ import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { labelsFor } from "@/lib/host-display";
 import { basename } from "@/lib/utils";
+import { initialAddHostTarget } from "@/lib/add-host-target";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -66,11 +67,14 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
   // file is the natural default target for a new host. Only seed the choice
   // while the picker is still untouched — never fight an explicit selection.
   const fileScope = useUiStore((s) => s.fileScope);
+  const addHostTargetFile = useUiStore((s) => s.addHostTargetFile);
+  const setAddHostTargetFile = useUiStore((s) => s.setAddHostTargetFile);
   useEffect(() => {
-    if (open && targetFile === "" && fileScope && files.includes(fileScope)) {
-      setTargetFile(fileScope);
+    if (open && targetFile === "") {
+      const seeded = initialAddHostTarget(addHostTargetFile, fileScope, files);
+      if (seeded) setTargetFile(seeded);
     }
-  }, [open, targetFile, fileScope, files]);
+  }, [open, targetFile, addHostTargetFile, fileScope, files]);
 
   function resetForm() {
     setTargetFile("");
@@ -78,6 +82,7 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
     setHostName("");
     setUser("");
     setPort("");
+    setAddHostTargetFile(null);
   }
 
   const canSubmit = targetFile !== "" && alias.trim() !== "" && !addHost.isPending;
