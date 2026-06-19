@@ -8,6 +8,8 @@ import {
   FileText,
   Play,
   SlidersHorizontal,
+  Pencil,
+  Plus,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
@@ -27,6 +29,13 @@ import {
 } from "@/components/ui/select";
 import { AddHostDialog } from "@/components/AddHostDialog";
 import { FileViewDialog } from "@/components/FileViewDialog";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { cn, basename } from "@/lib/utils";
 import { isWildcardOnly, labelsFor, secondaryLine, shortLabels } from "@/lib/host-display";
 import { buildNewOrder } from "@/lib/reorder";
@@ -245,6 +254,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const toggleGroup = useUiStore((s) => s.toggleGroup);
   const fileScope = useUiStore((s) => s.fileScope);
   const setFileScope = useUiStore((s) => s.setFileScope);
+  const setAddHostOpen = useUiStore((s) => s.setAddHostOpen);
+  const setAddHostTargetFile = useUiStore((s) => s.setAddHostTargetFile);
   const terminalId = useSettingsStore((s) => s.terminalId);
   const hostTerminals = useSettingsStore((s) => s.hostTerminals);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
@@ -573,55 +584,79 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                        * so collapse single-click and rename double-click are
                        * completely untouched by it.
                        */
-                      <div className="group/header sidebar-sticky-header sticky top-0 z-10 rounded-sm">
-                        <button
-                          type="button"
-                          onClick={(e) => headerClick(section.file, e.detail)}
-                          onDoubleClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            beginEdit(section.file);
-                          }}
-                          className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
-                          title={
-                            alias
-                              ? `${alias} — ${section.file} (double-click to rename)`
-                              : `${section.file} (double-click to rename)`
-                          }
-                          aria-expanded={!isCollapsed}
-                        >
-                          <span className="flex min-w-0 items-center gap-1">
-                            <ChevronRight
-                              className={cn(
-                                "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
-                                !isCollapsed && "rotate-90",
-                              )}
-                              aria-hidden
-                            />
-                            <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
-                              {section.name}
-                            </span>
-                          </span>
-                          <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
-                            {section.hosts.length}
-                          </span>
-                        </button>
-                        {/* Raw-file viewer — revealed on header hover, next to the count. */}
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`View file ${section.file}`}
-                          title={`View file — ${section.file}`}
-                          onClick={() => setViewFile(section.file)}
-                          onDoubleClick={(e) => e.stopPropagation()}
-                          // inset-y centering (no translate) — see the row Play
-                          // button for why translate-based centering breaks clicks.
-                          className="absolute inset-y-0 right-6 my-auto size-5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/header:opacity-100"
-                        >
-                          <FileText className="size-3" />
-                        </Button>
-                      </div>
+                      <ContextMenu>
+                        <ContextMenuTrigger asChild>
+                          <div className="group/header sidebar-sticky-header sticky top-0 z-10 rounded-sm">
+                            <button
+                              type="button"
+                              onClick={(e) => headerClick(section.file, e.detail)}
+                              onDoubleClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                beginEdit(section.file);
+                              }}
+                              className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
+                              title={
+                                alias
+                                  ? `${alias} — ${section.file} (double-click to rename)`
+                                  : `${section.file} (double-click to rename)`
+                              }
+                              aria-expanded={!isCollapsed}
+                            >
+                              <span className="flex min-w-0 items-center gap-1">
+                                <ChevronRight
+                                  className={cn(
+                                    "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
+                                    !isCollapsed && "rotate-90",
+                                  )}
+                                  aria-hidden
+                                />
+                                <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+                                  {section.name}
+                                </span>
+                              </span>
+                              <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
+                                {section.hosts.length}
+                              </span>
+                            </button>
+                            {/* Raw-file viewer — revealed on header hover, next to the count. */}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`View file ${section.file}`}
+                              title={`View file — ${section.file}`}
+                              onClick={() => setViewFile(section.file)}
+                              onDoubleClick={(e) => e.stopPropagation()}
+                              // inset-y centering (no translate) — see the row Play
+                              // button for why translate-based centering breaks clicks.
+                              className="absolute inset-y-0 right-6 my-auto size-5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/header:opacity-100"
+                            >
+                              <FileText className="size-3" />
+                            </Button>
+                          </div>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent>
+                          <ContextMenuItem
+                            onSelect={() => {
+                              setAddHostTargetFile(section.file);
+                              setAddHostOpen(true);
+                            }}
+                          >
+                            <Plus />
+                            New host in this file
+                          </ContextMenuItem>
+                          <ContextMenuSeparator />
+                          <ContextMenuItem onSelect={() => setViewFile(section.file)}>
+                            <FileText />
+                            View file
+                          </ContextMenuItem>
+                          <ContextMenuItem onSelect={() => beginEdit(section.file)}>
+                            <Pencil />
+                            Rename label
+                          </ContextMenuItem>
+                        </ContextMenuContent>
+                      </ContextMenu>
                     ))}
                   {!isCollapsed && (
                     <>
