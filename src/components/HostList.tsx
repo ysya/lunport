@@ -231,10 +231,10 @@ function HostRow({
   );
 }
 
-/** Tiny muted subheader for the wildcard-defaults footer (smaller than group headers). */
+/** Tiny muted subheader marking the wildcard-defaults group atop each file section. */
 function DefaultsLabel() {
   return (
-    <div className="px-2 pt-2 pb-0.5 text-[0.625rem] font-medium tracking-[0.1em] text-muted-foreground/60 uppercase select-none">
+    <div className="px-2 pt-1 pb-0.5 text-[0.625rem] font-medium tracking-[0.1em] text-muted-foreground/60 uppercase select-none">
       Defaults
     </div>
   );
@@ -660,8 +660,31 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                     ))}
                   {!isCollapsed && (
                     <>
+                      {section.defaults.length > 0 && (
+                        <>
+                          <DefaultsLabel />
+                          <ul className="space-y-px">
+                            {section.defaults.map((host) => (
+                              <HostRow
+                                key={`${host.source_file}::${host.alias}`}
+                                host={host}
+                                active={host.alias === selectedAlias}
+                                delay={nextDelay()}
+                                variant="defaults"
+                                onSelect={() => setSelectedAlias(host.alias)}
+                                onDragOver={() => setDropGap(null)}
+                              />
+                            ))}
+                          </ul>
+                        </>
+                      )}
                       {section.hosts.length > 0 && (
-                        <ul className="space-y-px">
+                        <ul
+                          className={cn(
+                            "space-y-px",
+                            section.defaults.length > 0 && "mt-1.5",
+                          )}
+                        >
                           {section.hosts.map((host, i) => (
                             <HostRow
                               key={`${host.source_file}::${host.alias}`}
@@ -690,24 +713,6 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                             />
                           ))}
                         </ul>
-                      )}
-                      {section.defaults.length > 0 && (
-                        <>
-                          <DefaultsLabel />
-                          <ul className="space-y-px">
-                            {section.defaults.map((host) => (
-                              <HostRow
-                                key={`${host.source_file}::${host.alias}`}
-                                host={host}
-                                active={host.alias === selectedAlias}
-                                delay={nextDelay()}
-                                variant="defaults"
-                                onSelect={() => setSelectedAlias(host.alias)}
-                                onDragOver={() => setDropGap(null)}
-                              />
-                            ))}
-                          </ul>
-                        </>
                       )}
                     </>
                   )}
