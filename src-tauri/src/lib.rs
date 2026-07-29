@@ -1,6 +1,7 @@
 pub mod askpass;
 mod config;
 mod connect;
+mod deploy;
 mod discover;
 mod error;
 mod fsutil;
