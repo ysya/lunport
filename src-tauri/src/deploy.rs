@@ -264,17 +264,27 @@ pub fn known_hosts_host_field(ep: &Endpoint) -> String {
     }
 }
 
-/// 從一行 `<host> <type> <base64>` 取出 (type, base64)。註解行與空行回 None。
-fn split_key_line(line: &str) -> Option<(&str, &str)> {
+/// 從一行 known_hosts 項目取出 `(marker, type, base64)`。註解行與空行回 `None`。
+///
+/// **marker（`@cert-authority` / `@revoked`）是獨立欄位，會把後面每一欄往後推一格。**
+/// 不處理的話，host 會被當成 key type、key type 被當成 base64，解出一個「非 None 但
+/// 完全錯亂」的結果 —— 那個結果不可能等於任何真實金鑰，於是一台合法透過 CA 信任的
+/// 主機會被誤判成 `Mismatch`（可能是中間人，硬中止）。本 repo 的
+/// `known_hosts::parse_fields` 早就正確處理了同一件事，這裡的規則與它一致。
+fn split_key_line(line: &str) -> Option<(Option<&str>, &str, &str)> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
     let mut parts = line.split_whitespace();
-    let _host = parts.next()?;
+    let first = parts.next()?;
+    let marker = if first.starts_with('@') { Some(first) } else { None };
+    if marker.is_some() {
+        parts.next()?; // marker 之後才是真正的 hosts 欄位
+    }
     let key_type = parts.next()?;
     let material = parts.next()?;
-    Some((key_type, material))
+    Some((marker, key_type, material))
 }
 
 /// 查詢這台 host 既有的 known_hosts 項目所需的 argv（不含程式名）。
@@ -302,20 +312,44 @@ pub fn compare_host_keys(
 ) -> HostKeyStatus {
     let host_field = known_hosts_host_field(ep);
 
-    let scanned_keys: Vec<(&str, &str)> = scanned.lines().filter_map(split_key_line).collect();
+    // ssh-keyscan 的輸出不含 marker，取後兩欄即可。
+    let scanned_keys: Vec<(&str, &str)> = scanned
+        .lines()
+        .filter_map(split_key_line)
+        .map(|(_, t, k)| (t, k))
+        .collect();
     if scanned_keys.is_empty() {
         return HostKeyStatus::Unavailable {
             message: format!("ssh-keyscan returned no host key for {host_field}"),
         };
     }
 
-    let known_keys: Vec<(&str, &str)> =
+    let known: Vec<(Option<&str>, &str, &str)> =
         known_for_host.lines().filter_map(split_key_line).collect();
 
-    // 指紋一律取掃到的第一把，作為要顯示給使用者的代表。
     let (first_type, first_material) = scanned_keys[0];
     let fingerprint = crate::known_hosts::fingerprint_sha256(first_material)
         .unwrap_or_else(|| "SHA256:<unreadable>".to_string());
+
+    // `@revoked` 明確標記這把金鑰已作廢 —— 比「不符」更嚴重，一律中止。
+    if known.iter().any(|(m, t, k)| {
+        *m == Some("@revoked") && scanned_keys.iter().any(|(st, sk)| st == t && sk == k)
+    }) {
+        return HostKeyStatus::Mismatch { fingerprint };
+    }
+
+    // `@cert-authority`：這台主機透過 CA 信任。ssh 自己會驗證主機憑證，
+    // `StrictHostKeyChecking=yes` 不會跳提示，所以部署可以直接進行、也不該去動
+    // known_hosts。把它當成新主機要求使用者確認指紋，是對已信任狀態的誤報。
+    if known.iter().any(|(m, _, _)| *m == Some("@cert-authority")) {
+        return HostKeyStatus::Trusted;
+    }
+
+    let known_keys: Vec<(&str, &str)> = known
+        .iter()
+        .filter(|(m, _, _)| m.is_none())
+        .map(|(_, t, k)| (*t, *k))
+        .collect();
 
     if known_keys.is_empty() {
         return HostKeyStatus::New {
@@ -768,6 +802,48 @@ mod tests {
         let scanned = "10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
         let hashed = "# Host 10.0.0.9 found: line 7\n                      |1|F1E2D3C4B5A6=|Zm9vYmFyYmF6cXV4= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
         assert_eq!(compare_host_keys(scanned, hashed, &ep), HostKeyStatus::Trusted);
+    }
+
+    #[test]
+    fn ca_trusted_host_is_not_reported_as_a_man_in_the_middle() {
+        // `@cert-authority` 是獨立欄位，會把後面每一欄往後推一格。不處理的話
+        // host 會被當成 key type，解出一個錯亂但非 None 的結果 —— 於是一台合法
+        // 透過 CA 信任、用 ssh 連線完全正常的主機，會被指控成中間人攻擊。
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let scanned = "10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
+        let ca = "# Host 10.0.0.9 found: line 3 CA\n                  @cert-authority 10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
+        assert_eq!(compare_host_keys(scanned, ca, &ep), HostKeyStatus::Trusted);
+    }
+
+    #[test]
+    fn revoked_key_aborts_rather_than_being_trusted() {
+        // `@revoked` 明確標記金鑰已作廢，比「不符」更嚴重，絕不可放行。
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+        let scanned = format!("10.0.0.9 ssh-ed25519 {blob}\n");
+        let revoked = format!("@revoked 10.0.0.9 ssh-ed25519 {blob}\n");
+        assert!(matches!(
+            compare_host_keys(&scanned, &revoked, &ep),
+            HostKeyStatus::Mismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn split_key_line_skips_markers_without_shifting_fields() {
+        assert_eq!(split_key_line("h ssh-ed25519 AAAA"), Some((None, "ssh-ed25519", "AAAA")));
+        assert_eq!(
+            split_key_line("@cert-authority h ssh-ed25519 AAAA"),
+            Some((Some("@cert-authority"), "ssh-ed25519", "AAAA"))
+        );
+        assert_eq!(
+            split_key_line("@revoked h ssh-rsa BBBB"),
+            Some((Some("@revoked"), "ssh-rsa", "BBBB"))
+        );
+        // 註解、空行、欄位不足一律 None。
+        assert_eq!(split_key_line("# Host h found: line 3"), None);
+        assert_eq!(split_key_line("   "), None);
+        assert_eq!(split_key_line("h ssh-ed25519"), None);
+        assert_eq!(split_key_line("@cert-authority h ssh-ed25519"), None);
     }
 
     #[test]
