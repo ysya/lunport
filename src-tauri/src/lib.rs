@@ -5,6 +5,7 @@ mod error;
 mod fsutil;
 mod keys;
 mod known_hosts;
+mod secrets;
 mod settings_io;
 mod state;
 mod tray;
