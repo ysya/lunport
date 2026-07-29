@@ -368,8 +368,12 @@ pub fn compare_host_keys(
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// 這個 alias 是否經過跳板。`ssh -G` 對 ProxyJump 會輸出 `proxyjump`，
-/// ProxyJump 也會被展開成 `proxycommand`；兩者都要擋。`none` 是明確停用的寫法。
+/// 這個 alias 是否經過跳板。
+///
+/// 實測（OpenSSH 10.2p1）：設了 `ProxyJump bastion` 時 `ssh -G` 只印 `proxyjump bastion`，
+/// **不會**另外印 `proxycommand`；而 `ProxyJump none` 則是**整行都不印**。所以 `none` 的
+/// 字串比對其實碰不到 —— 保留它是縱深防禦（不同 OpenSSH 版本輸出可能不同），不是它讓
+/// `none` 判對的。直接設 `ProxyCommand` 的情形則會印 `proxycommand`，因此兩個 key 都要檢查。
 pub fn has_proxy(pairs: &[(String, String)]) -> bool {
     pairs.iter().any(|(k, v)| {
         (k.eq_ignore_ascii_case("proxyjump") || k.eq_ignore_ascii_case("proxycommand"))
@@ -379,19 +383,52 @@ pub fn has_proxy(pairs: &[(String, String)]) -> bool {
 }
 
 /// 取得 alias 的 `ssh -G` key/value 對（驗證 alias 後）。
+///
+/// **刻意傳 `None` 而不是已載入的 config 路徑。** 部署真正跑的是 `ssh <alias>`，沒有 `-F`；
+/// 而 ssh(1) 明載「If a configuration file is given on the command line, the system-wide
+/// configuration file (/etc/ssh/ssh_config) will be ignored」。若這裡帶 `-F`，探測看到的
+/// 設定就和實際執行的不同 —— 一個寫在 `/etc/ssh/ssh_config`（或 RHEL/Fedora 預設 Include
+/// 進來的 `ssh_config.d/*.conf`）裡的 `ProxyJump`，會對 `has_proxy` 完全隱形，跳板拒絕
+/// 因此在它唯一存在意義的情境下失效。安全閘門必須建模「實際會跑的那條指令」。
 fn effective_pairs(
     state: &tauri::State<crate::state::AppState>,
     alias: &str,
 ) -> Result<Vec<(String, String)>, AppError> {
-    let main_path = {
+    {
         let doc_lock = state.doc.lock().unwrap();
         let doc = doc_lock
             .as_ref()
             .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
         crate::connect::validate_alias(doc, alias)?;
-        doc.files.first().map(|f| f.path.clone())
+    }
+    crate::config::intel::effective_config(alias, None)
+}
+
+/// in-app 部署要求「載入的設定檔就是 ssh 預設會讀的那一份」。
+///
+/// 使用者可以把 SSHelter 指向任意 config 路徑，但部署跑的 `ssh <alias>` 永遠讀
+/// `~/.ssh/config`。兩者不同時，我們對這個 alias 的一切推理（跳板、endpoint、認證方式）
+/// 都可能來自一份 ssh 根本不會讀的檔案 —— 與拒絕跳板同一個理由：無法保證我們推理的設定
+/// 就是 ssh 會用的設定，就不該把使用者的密碼送出去。
+fn require_default_config_root(state: &tauri::State<crate::state::AppState>) -> Result<(), AppError> {
+    let loaded = {
+        let doc_lock = state.doc.lock().unwrap();
+        doc_lock
+            .as_ref()
+            .and_then(|d| d.files.first().map(|f| f.path.clone()))
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?
     };
-    crate::config::intel::effective_config(alias, main_path.as_deref())
+    let default = crate::config::commands::default_config_path()?;
+    let same = loaded.canonicalize().ok() == default.canonicalize().ok()
+        || loaded == default;
+    if !same {
+        return Err(AppError::Other(format!(
+            "in-app deploy needs the default config ({}); SSHelter is currently viewing {}",
+            default.display(),
+            loaded.display()
+        )));
+    }
+    Ok(())
 }
 
 /// 解析 alias 的實際連線目標（走既有的 `ssh -G` 整合）。
@@ -449,7 +486,31 @@ fn run_ssh_deploy(
             .stdin
             .take()
             .ok_or_else(|| AppError::Other("failed to open ssh stdin".to_string()))?;
-        stdin.write_all(pub_material.as_bytes()).map_err(AppError::Io)?;
+        // 失敗時要主動收掉子程序：Rust 的 `Child::drop` 既不 kill 也不 reap，
+        // 而那個程序身上帶著 SSHELTER_ASKPASS_ACCOUNT，隨後那筆 keychain 項目就會被刪。
+        if let Err(e) = stdin.write_all(pub_material.as_bytes()) {
+            drop(stdin);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AppError::Io(e));
+        }
+    }
+
+    // 整體逾時。`ConnectTimeout=10` 只涵蓋 TCP 連線，**不涵蓋認證之後的 hang** ——
+    // 沒有這一段，遠端掛住時 `wait_with_output()` 會無限期阻塞、使用者沒有任何取消路徑，
+    // 而 `classify_outcome(None, ..)` 那條分支也永遠不會被觸發。
+    const DEPLOY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + DEPLOY_TIMEOUT;
+    loop {
+        match child.try_wait().map_err(AppError::Io)? {
+            Some(_) => break,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(classify_outcome(None, "", ""));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
     }
 
     let output = child.wait_with_output().map_err(AppError::Io)?;
@@ -462,11 +523,14 @@ fn run_ssh_deploy(
 
 // ─── Tauri commands ──────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn deploy_precheck_host_key(
     state: tauri::State<crate::state::AppState>,
     alias: String,
 ) -> Result<HostKeyStatus, AppError> {
+    // Same reasoning as `deploy_key`: the actual deploy always reads `~/.ssh/config` (no
+    // `-F`), so a precheck against a non-default loaded config could scan/trust the wrong host.
+    require_default_config_root(&state)?;
     let ep = resolve_endpoint(&state, &alias)?;
 
     let scanned = match Command::new("ssh-keyscan").args(keyscan_target(&ep)).output() {
@@ -490,30 +554,37 @@ pub fn deploy_precheck_host_key(
     Ok(compare_host_keys(&scanned, &known, &ep))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn deploy_trust_host_key(
     state: tauri::State<crate::state::AppState>,
     alias: String,
-    key_line: String,
+    fingerprint: String,
 ) -> Result<(), AppError> {
-    // key_line 只接受 precheck 回傳的形狀，重新驗一次避免前端傳入任意內容。
-    let ep = resolve_endpoint(&state, &alias)?;
-    let expected_host = known_hosts_host_field(&ep);
-    let ok = key_line
-        .split_whitespace()
-        .next()
-        .is_some_and(|h| h == expected_host)
-        && split_key_line(&key_line).is_some()
-        && !key_line.contains('\n');
-    if !ok {
-        return Err(AppError::ForbiddenPath(format!(
-            "refusing to append malformed known_hosts line for '{alias}'"
-        )));
+    // **前端不提供要寫入的那一行。** 這個 command 會寫進使用者真實的
+    // `~/.ssh/known_hosts`，而那個檔案的效力遠超出本 app —— 一旦寫進去，使用者從終端機
+    // 直接 `ssh` 也會接受那把金鑰。若接受前端傳來的 key_line，一個被入侵或有 bug 的前端
+    // 就能替一台真實主機永久釘上攻擊者的 host key（形狀檢查完全擋不住這件事，因為那一行
+    // 的形狀是合法的），甚至在 precheck 已回報 Mismatch 的情況下把「硬中止」洗白成「信任」。
+    //
+    // 因此：重跑一次 precheck，只有結果是 `New` 時才寫入，而且寫入的是**後端自己算出來的**
+    // key_line。前端只傳使用者按下確認時看到的 fingerprint，用來確認「使用者確認的那把」
+    // 就是「現在掃到的那把」—— 保留使用者的確認語意，卻把前端移出信任路徑。
+    require_default_config_root(&state)?;
+    match deploy_precheck_host_key(state, alias.clone())? {
+        HostKeyStatus::New {
+            fingerprint: actual,
+            key_line,
+        } if actual == fingerprint => crate::known_hosts::append_known_hosts_line(&key_line),
+        HostKeyStatus::New { .. } => Err(AppError::Other(format!(
+            "the host key for '{alias}' changed since you confirmed it; nothing was written"
+        ))),
+        other => Err(AppError::Other(format!(
+            "refusing to trust '{alias}': precheck now reports {other:?}"
+        ))),
     }
-    crate::known_hosts::append_known_hosts_line(&key_line)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn deploy_key(
     state: tauri::State<crate::state::AppState>,
     alias: String,
@@ -528,6 +599,7 @@ pub fn deploy_key(
             .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
         crate::connect::validate_alias(doc, &alias)?;
     }
+    require_default_config_root(&state)?;
     // ProxyJump／ProxyCommand 必須「主動拒絕」，不能只是「不支援」。
     // `SSH_ASKPASS` 與 `SSHELTER_ASKPASS_*` 會被 ProxyCommand 子進程繼承，於是跳板
     // 主機的 `user@jump's password: ` 提示會被 helper 用「目標主機的密碼」回答 ——
@@ -551,41 +623,59 @@ pub fn deploy_key(
     let pub_material = validate_public_material(&std::fs::read_to_string(&pub_path)?)?;
 
     let use_keychain = crate::secrets::available();
-    let account = if remember {
-        crate::secrets::host_account(&alias)
-    } else {
-        crate::secrets::tmp_account(&alias)
-    };
+    // **嘗試期間一律用暫存項目，即使使用者勾了「記住密碼」。** 先寫永久項目的話，
+    // 密碼打錯時那個錯的密碼會永久留著（清理條件是 !remember），之後的自動填入會反覆
+    // 把錯密碼送給主機 —— 有 fail2ban／帳號鎖定政策的主機會把使用者鎖在門外。
+    // 不變式：永久項目永遠只含「已經成功用過」的密碼。
+    let account = crate::secrets::tmp_account(&alias);
     if use_keychain {
+        // 上一次崩潰／強制結束可能留下殘留，先回收。
+        let _ = crate::secrets::delete(&account);
         crate::secrets::set(&account, &password)?;
     }
+
+    // unwind 也要清掉：panic 或使用者在部署中途強制結束時，`?` 之後的清理不會執行，
+    // 明文密碼就會永久留在作業系統鑰匙圈裡而且沒有任何地方會再掃它。
+    // 寫法沿用 `secrets.rs` 既有的 CleanupGuard。
+    struct TmpSecretGuard<'a>(&'a str, bool);
+    impl Drop for TmpSecretGuard<'_> {
+        fn drop(&mut self) {
+            if self.1 {
+                let _ = crate::secrets::delete(self.0);
+            }
+        }
+    }
+    let _guard = TmpSecretGuard(&account, use_keychain);
 
     let env_secret = if use_keychain { None } else { Some(password.as_str()) };
     let result = run_ssh_deploy(&alias, &pub_material, &account, env_secret);
 
-    // 清理：暫存項目一律刪除，無論部署成敗。
-    if use_keychain && !remember {
-        let _ = crate::secrets::delete(&account);
+    // 只有真的成功過的密碼才升級成永久項目。
+    if use_keychain
+        && remember
+        && matches!(result, Ok(DeployOutcome::Added) | Ok(DeployOutcome::AlreadyPresent))
+    {
+        crate::secrets::set(&crate::secrets::host_account(&alias), &password)?;
     }
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn secrets_has(alias: String) -> Result<bool, AppError> {
     Ok(crate::secrets::get(&crate::secrets::host_account(&alias))?.is_some())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn secrets_get(alias: String) -> Result<Option<String>, AppError> {
     crate::secrets::get(&crate::secrets::host_account(&alias))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn secrets_set(alias: String, password: String) -> Result<(), AppError> {
     crate::secrets::set(&crate::secrets::host_account(&alias), &password)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn secrets_delete(alias: String) -> Result<(), AppError> {
     crate::secrets::delete(&crate::secrets::host_account(&alias))
 }

@@ -220,7 +220,8 @@ fn known_hosts_path() -> Result<PathBuf, AppError> {
         .ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))
 }
 
-/// 讀取 known_hosts 全文；檔案不存在時回空字串（首次使用的正常狀態）。
+/// Read the full known_hosts text; a missing file reads back as empty (the normal first-run
+/// state).
 pub fn read_known_hosts_text() -> Result<String, AppError> {
     let path = known_hosts_path()?;
     match std::fs::read_to_string(&path) {
@@ -230,11 +231,14 @@ pub fn read_known_hosts_text() -> Result<String, AppError> {
     }
 }
 
-/// 追加一行到 known_hosts。呼叫端必須先驗證 `line` 的形狀（見 `deploy_trust_host_key`）。
-/// 檔案不存在時以 0600 建立，並確保與前一行之間有換行。
+/// Append one line to known_hosts. The caller MUST have already validated `line`'s shape (see
+/// `deploy_trust_host_key`). Backs up the existing file first (same mirror-dir convention as
+/// `remove_from_file`), then creates the file at 0600 if absent and ensures a newline separates
+/// it from the previous line.
 pub fn append_known_hosts_line(line: &str) -> Result<(), AppError> {
     let path = known_hosts_path()?;
     let mut text = read_known_hosts_text()?;
+    fsutil::backup(&path)?;
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
