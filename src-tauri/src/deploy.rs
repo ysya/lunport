@@ -128,8 +128,11 @@ const UNREACHABLE_MARKERS: &[&str] = &[
 
 /// 把 ssh 的退出碼與輸出翻譯成使用者看得懂的結果。
 ///
-/// 順序很重要：部署成功時退出碼是 0，所以先看 stdout 的標記；255 是 ssh 自己的
-/// 錯誤（連線／認證），其餘退出碼來自遠端 script。
+/// 順序很重要：部署成功時退出碼是 0，所以先看 stdout 的標記。
+///
+/// ssh(1) 明載退出碼是「**遠端指令的退出碼，或發生錯誤時的 255**」—— 兩者無法從退出碼
+/// 本身區分。我們靠自訂的 90/91/92/94 避開碰撞，並接受一個已知取捨：遠端指令若剛好
+/// 回 255，會被歸類成 ssh 層級錯誤。
 pub fn classify_outcome(code: Option<i32>, stdout: &str, stderr: &str) -> DeployOutcome {
     if stdout.contains("SSHELTER_ADDED") {
         return DeployOutcome::Added;
