@@ -205,6 +205,130 @@ fn first_line_or(stderr: &str, fallback: &str) -> String {
         .to_string()
 }
 
+/// `ssh -G` 解析出的實際連線目標。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Endpoint {
+    pub hostname: String,
+    pub port: String,
+}
+
+/// 從 `ssh -G` 的 key/value 對取出 hostname 與 port。沒有 hostname 就回 None。
+pub fn endpoint_from_effective(pairs: &[(String, String)]) -> Option<Endpoint> {
+    let find = |key: &str| {
+        pairs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.clone())
+    };
+    let hostname = find("hostname").filter(|h| !h.is_empty())?;
+    Some(Endpoint {
+        hostname,
+        port: find("port").filter(|p| !p.is_empty()).unwrap_or_else(|| "22".to_string()),
+    })
+}
+
+/// `ssh-keyscan` 的 argv（不含程式名）。純函式，方便測試。
+pub fn keyscan_target(ep: &Endpoint) -> Vec<String> {
+    vec![
+        "-T".to_string(),
+        "5".to_string(),
+        "-p".to_string(),
+        ep.port.clone(),
+        ep.hostname.clone(),
+    ]
+}
+
+/// host key 的三種狀態（外加「掃不到」）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub enum HostKeyStatus {
+    /// known_hosts 已有且相符，可直接部署。
+    Trusted,
+    /// known_hosts 沒有這台；前端顯示指紋讓使用者確認後寫入。
+    New { fingerprint: String, key_line: String },
+    /// known_hosts 有但金鑰不同 —— 可能是中間人，一律中止。
+    Mismatch { fingerprint: String },
+    /// `ssh-keyscan` 掃不到（非標準網路路徑、ProxyJump 後方等）。
+    Unavailable { message: String },
+}
+
+/// known_hosts 的 host 欄位寫法：22 埠是裸主機名，其他埠是 `[host]:port`。
+/// 這也是 `ssh-keygen -F` 期望的查詢字串形式。
+pub fn known_hosts_host_field(ep: &Endpoint) -> String {
+    if ep.port == "22" {
+        ep.hostname.clone()
+    } else {
+        format!("[{}]:{}", ep.hostname, ep.port)
+    }
+}
+
+/// 從一行 `<host> <type> <base64>` 取出 (type, base64)。註解行與空行回 None。
+fn split_key_line(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    let _host = parts.next()?;
+    let key_type = parts.next()?;
+    let material = parts.next()?;
+    Some((key_type, material))
+}
+
+/// 查詢這台 host 既有的 known_hosts 項目所需的 argv（不含程式名）。
+///
+/// **刻意用 `ssh-keygen -F` 而不是自己讀 known_hosts 檔案。** 原因：known_hosts 可以是
+/// 雜湊過的（`|1|salt|hash` 開頭），而 Debian／Ubuntu 的 `HashKnownHosts` 預設就是 `yes`。
+/// 自己用字面 host 欄位比對，在那些系統上永遠比不中 —— 後果不只是每次都要重新確認指紋，
+/// 而是**已信任主機的金鑰被換掉時會被判成 `New` 而不是 `Mismatch`**，中間人攻擊會顯示成
+/// 「新主機，要信任嗎？」而不是硬中止。`ssh-keygen -F` 原生處理雜湊項目，這正是它存在的理由。
+pub fn keygen_find_args(ep: &Endpoint) -> Vec<String> {
+    vec!["-F".to_string(), known_hosts_host_field(ep)]
+}
+
+/// 比對 `ssh-keyscan` 的輸出與 `ssh-keygen -F` 回報的既有項目。
+///
+/// `known_for_host` 是 `ssh-keygen -F` 的 stdout —— 它已經只包含這台 host 的項目，
+/// 所以這裡**不再、也不可以**用字面 host 欄位過濾（雜湊項目的第一欄是 `|1|…`，
+/// 過濾會把它們全部濾掉，等於回到上面說的那個安全性缺口）。
+///
+/// 掃到多把金鑰（ed25519 + rsa）時，只要有任何一把相符即視為已信任 —— 與 ssh 一致。
+pub fn compare_host_keys(
+    scanned: &str,
+    known_for_host: &str,
+    ep: &Endpoint,
+) -> HostKeyStatus {
+    let host_field = known_hosts_host_field(ep);
+
+    let scanned_keys: Vec<(&str, &str)> = scanned.lines().filter_map(split_key_line).collect();
+    if scanned_keys.is_empty() {
+        return HostKeyStatus::Unavailable {
+            message: format!("ssh-keyscan returned no host key for {host_field}"),
+        };
+    }
+
+    let known_keys: Vec<(&str, &str)> =
+        known_for_host.lines().filter_map(split_key_line).collect();
+
+    // 指紋一律取掃到的第一把，作為要顯示給使用者的代表。
+    let (first_type, first_material) = scanned_keys[0];
+    let fingerprint = crate::known_hosts::fingerprint_sha256(first_material)
+        .unwrap_or_else(|| "SHA256:<unreadable>".to_string());
+
+    if known_keys.is_empty() {
+        return HostKeyStatus::New {
+            fingerprint,
+            key_line: format!("{host_field} {first_type} {first_material}"),
+        };
+    }
+    if scanned_keys.iter().any(|s| known_keys.contains(s)) {
+        return HostKeyStatus::Trusted;
+    }
+    HostKeyStatus::Mismatch { fingerprint }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +659,126 @@ mod tests {
     fn classify_signal_killed_process_has_no_exit_code() {
         let out = classify_outcome(None, "", "");
         assert!(matches!(out, DeployOutcome::Other { .. }), "got {out:?}");
+    }
+
+    // ── endpoint 解析 ─────────────────────────────────────────────────────────
+
+    fn pairs(kv: &[(&str, &str)]) -> Vec<(String, String)> {
+        kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn endpoint_reads_hostname_and_port_from_ssh_dash_g() {
+        let p = pairs(&[("user", "frank"), ("hostname", "10.0.0.9"), ("port", "2222")]);
+        let ep = endpoint_from_effective(&p).expect("endpoint");
+        assert_eq!(ep.hostname, "10.0.0.9");
+        assert_eq!(ep.port, "2222");
+    }
+
+    #[test]
+    fn endpoint_defaults_port_to_22_when_absent() {
+        let p = pairs(&[("hostname", "example.com")]);
+        let ep = endpoint_from_effective(&p).expect("endpoint");
+        assert_eq!(ep.port, "22");
+    }
+
+    #[test]
+    fn endpoint_is_none_without_hostname() {
+        assert!(endpoint_from_effective(&pairs(&[("user", "frank")])).is_none());
+    }
+
+    #[test]
+    fn keyscan_target_passes_port_and_host_as_separate_argv() {
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "2222".into() };
+        assert_eq!(
+            keyscan_target(&ep),
+            vec!["-T", "5", "-p", "2222", "10.0.0.9"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── host key 比對 ─────────────────────────────────────────────────────────
+
+    // 真實 ed25519 host key blob（`ssh-keyscan github.com` 取得，已用 `ssh-keygen -lf`
+    // 交叉驗證得到 SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU）。用真實 blob
+    // 而非隨手編的假 base64，這樣「New 狀態的指紋確實算得出來」才是這條測試真正驗到的事，
+    // 不是靠 `compare_host_keys` 內部 `unwrap_or_else` 的 fallback 字串矇混過去。
+    const SCANNED: &str =
+        "# 10.0.0.9:22 SSH-2.0-OpenSSH_9.6\n10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
+
+    #[test]
+    fn host_key_trusted_when_known_hosts_matches() {
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let known = "10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
+        assert_eq!(compare_host_keys(SCANNED, known, &ep), HostKeyStatus::Trusted);
+    }
+
+    #[test]
+    fn host_key_new_when_absent_from_known_hosts() {
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        match compare_host_keys(SCANNED, "", &ep) {
+            HostKeyStatus::New { fingerprint, key_line } => {
+                assert!(fingerprint.starts_with("SHA256:"), "got {fingerprint}");
+                assert_eq!(
+                    fingerprint, "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
+                    "must be the real computed fingerprint, not the <unreadable> fallback"
+                );
+                assert!(key_line.contains("ssh-ed25519"));
+            }
+            other => panic!("expected New, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_key_mismatch_is_reported_not_silently_trusted() {
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let known = "10.0.0.9 ssh-ed25519 AAAADIFFERENTKEYMATERIALZZZ\n";
+        assert!(
+            matches!(compare_host_keys(SCANNED, known, &ep), HostKeyStatus::Mismatch { .. }),
+            "a changed host key must never be auto-trusted"
+        );
+    }
+
+    #[test]
+    fn host_key_unavailable_when_keyscan_returned_nothing() {
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        assert!(matches!(
+            compare_host_keys("", "", &ep),
+            HostKeyStatus::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn keygen_find_args_use_bracket_form_for_nonstandard_ports() {
+        let std_port = Endpoint { hostname: "h".into(), port: "22".into() };
+        assert_eq!(keygen_find_args(&std_port), vec!["-F".to_string(), "h".to_string()]);
+        let odd_port = Endpoint { hostname: "h".into(), port: "2222".into() };
+        assert_eq!(keygen_find_args(&odd_port), vec!["-F".to_string(), "[h]:2222".to_string()]);
+    }
+
+    #[test]
+    fn host_key_trusted_when_the_known_entry_is_hashed() {
+        // Debian／Ubuntu 的 HashKnownHosts 預設為 yes，項目長這樣。`ssh-keygen -F`
+        // 會替我們解析出來，所以第一欄是 `|1|…` 也必須照樣比對成功。
+        // 若這裡退回用字面 host 欄位過濾，這個測試會紅 —— 而真實後果是中間人攻擊
+        // 會被判成 New（可信任）而不是 Mismatch（硬中止）。
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let scanned = "10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
+        let hashed = "# Host 10.0.0.9 found: line 7\n                      |1|F1E2D3C4B5A6=|Zm9vYmFyYmF6cXV4= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
+        assert_eq!(compare_host_keys(scanned, hashed, &ep), HostKeyStatus::Trusted);
+    }
+
+    #[test]
+    fn host_key_mismatch_is_detected_even_for_hashed_entries() {
+        // 這是上面那個缺口最要命的一半：已信任但金鑰被換掉，必須是 Mismatch。
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let scanned = "10.0.0.9 ssh-ed25519 AAAAATTACKERKEYZZZ\n";
+        let hashed = "|1|F1E2D3C4B5A6=|Zm9vYmFyYmF6cXV4= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
+        assert!(matches!(
+            compare_host_keys(scanned, hashed, &ep),
+            HostKeyStatus::Mismatch { .. }
+        ));
     }
 }

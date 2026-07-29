@@ -51,7 +51,7 @@ pub struct AgentStatus {
 // ─── Path / name validation (security-critical) ───────────────────────────────
 
 /// The user's ~/.ssh directory. Errors if the home dir is unknown.
-fn ssh_dir() -> Result<PathBuf, AppError> {
+pub fn ssh_dir() -> Result<PathBuf, AppError> {
     let home = dirs::home_dir()
         .ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))?;
     Ok(home.join(".ssh"))
