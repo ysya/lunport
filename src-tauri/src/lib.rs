@@ -1,3 +1,4 @@
+pub mod askpass;
 mod config;
 mod connect;
 mod discover;
