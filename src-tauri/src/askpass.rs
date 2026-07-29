@@ -4,9 +4,19 @@
 //! 就呼叫 `run()`，完全不初始化 GUI。ssh 把提示文字當作 argv[1] 傳進來。
 //!
 //! 安全性：`SSH_ASKPASS_REQUIRE=force` 會讓「所有」提示都走這裡，包含 host key 驗證。
-//! 若無條件印出密碼，就會拿密碼去回答 host key 提示、ssh 再問一次 → 無窮迴圈；而且
-//! keyboard-interactive 的提示文字由伺服器控制，惡意主機可藉此騙走密碼。因此這裡採
-//! 白名單：只回應真正的密碼／passphrase 提示，其餘一律 exit 1 交回 ssh 正常處理。
+//! 若無條件印出密碼，就會拿密碼去回答 host key 提示、ssh 再問一次 → 無窮迴圈（已實測，
+//! 見 spike 記錄）；而且 keyboard-interactive 的提示文字由伺服器控制，惡意主機可藉此
+//! 騙走密碼。因此這裡採白名單：只回應真正的密碼／passphrase 提示。
+//!
+//! **但「拒絕」不是免費的，也不是安全的預設。** `readpass.c` 的 `read_passphrase` 在
+//! askpass 失敗時，若呼叫端沒帶 `RP_ALLOW_EOF` 就 `return xstrdup("")`，而 `sshconnect2.c`
+//! 的兩個認證呼叫點都沒帶。所以 exit 1 會讓 ssh **送出一個空密碼**，在遠端留下一筆真實
+//! 的失敗認證；只有 host key 的 `confirm()` 會把空字串當成 "no" 而安全失敗。
+//!
+//! 真正的結構性防線因此不在這個白名單，而在部署 argv 的 `-o KbdInteractiveAuthentication=no`
+//! （見 `deploy::build_deploy_argv`）：關掉之後，helper 收到的提示全部由 client 產生，
+//! 伺服器可控的文字根本進不來。**移除那個選項會讓這個白名單重新暴露在伺服器可控的輸入
+//! 之下 —— 它不是效能調校。**
 
 /// 只回應真正的密碼／passphrase 提示。
 ///
@@ -91,7 +101,14 @@ pub fn resolve_secret(account: &str, env_secret: Option<String>) -> Option<Strin
 pub fn run() -> ! {
     use std::io::Write;
 
-    let prompt = std::env::args().nth(1).unwrap_or_default();
+    // 用 args_os，不用 args()：伺服器可以在 keyboard-interactive 提示塞任意 bytes，
+    // ssh 原樣轉交給 argv[1]。args() 遇到非法 UTF-8 會 panic；lossy 轉換則讓非法
+    // UTF-8 的提示直接在白名單比對時被拒絕，而不是讓整個 process 帶著一段沒有
+    // `[sshelter-askpass]` 前綴的 panic 訊息死在 stderr 上。
+    let prompt = std::env::args_os()
+        .nth(1)
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if !prompt_is_answerable(&prompt) {
         log_decision(&prompt, "refused");
         std::process::exit(1);
@@ -140,6 +157,9 @@ mod tests {
         // 的情境：舊規則只認得無前綴的字面值，遇到前綴整句比對就失敗，等於拒絕了
         // 所有真正的 kbdint 密碼提示。
         assert!(prompt_is_answerable("(frank@10.0.0.9) Password: "));
+        // 反過來的規格：裸的 `Password: `（沒有 client 前綴）沒有任何 ssh 路徑會
+        // 產生，刻意不接受——接受它等於接受一段完全沒有 client 附加上下文的文字。
+        assert!(!prompt_is_answerable("Password: "));
     }
 
     #[test]
@@ -268,5 +288,22 @@ mod tests {
         }
         let got = resolve_secret("host:definitely-not-a-real-account-xyz", None);
         assert_eq!(got, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_prompt_is_rejected_not_panicking() {
+        // 鏡射 run() 讀 argv[1] 的路徑：std::env::args_os().to_string_lossy()。伺服器
+        // 能在 keyboard-interactive 提示塞任意 bytes，ssh 原樣轉交給 argv[1]；若這裡
+        // 用的是 std::env::args()，非法 UTF-8 會直接 panic，而 panic 訊息沒有
+        // `[sshelter-askpass]` 前綴，會被 Task 4 的 first_line_or 誤當成真正的錯誤
+        // 訊息秀給使用者。無法從 unit test 設定真的 argv，所以直接構造非法 UTF-8
+        // bytes、模擬 run() 裡的 lossy 轉換，確認轉換後的結果會被白名單安全拒絕。
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid = OsString::from_vec(vec![b'(', b'x', 0xff, 0xfe, b')', b' ', b'P']);
+        let prompt = invalid.to_string_lossy().into_owned();
+        assert!(!prompt_is_answerable(&prompt));
     }
 }
