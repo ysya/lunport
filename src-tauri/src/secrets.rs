@@ -55,11 +55,13 @@ pub fn delete(account: &str) -> Result<(), AppError> {
 }
 
 /// 本機是否有可用的密鑰環。false 時呼叫端要改走環境變數 fallback 並告知使用者。
+///
+/// 刻意把「任何錯誤」都視為不可用，而不是只認 `NoDefaultStore`：在沒有 Secret Service
+/// 的 Linux 上，第一次呼叫拿到的是 D-Bus 連線錯誤，第二次以後才是 `NoDefaultStore`
+/// （`Entry::new` 會先把初始化旗標設成 true 才嘗試建 store）。只認單一變體會在這個
+/// 機制唯一存在意義的平台上、第一次呼叫時錯答「可用」。
 pub fn available() -> bool {
-    !matches!(
-        keyring::Entry::new(SERVICE, "availability-probe"),
-        Err(keyring::Error::NoDefaultStore)
-    )
+    keyring::Entry::new(SERVICE, "availability-probe").is_ok()
 }
 
 #[cfg(test)]
@@ -79,6 +81,15 @@ mod tests {
         assert_ne!(host_account("deploy-tmp:web"), tmp_account("web"));
     }
 
+    /// 保底清理：就算 `set` 之後、下面明確呼叫 `delete` 之前的斷言或 `unwrap` panic，
+    /// unwind 過程也會呼叫 `drop`，確保不會在真實使用者的 keychain 裡留下明文密碼。
+    struct CleanupGuard<'a>(&'a str);
+    impl Drop for CleanupGuard<'_> {
+        fn drop(&mut self) {
+            let _ = delete(self.0);
+        }
+    }
+
     /// 真的碰作業系統 keychain。CI 上沒有可用的密鑰環時自動跳過。
     #[test]
     fn round_trip_set_get_delete() {
@@ -87,6 +98,7 @@ mod tests {
             return;
         }
         let account = "test:round-trip";
+        let _cleanup = CleanupGuard(account);
         set(account, "hunter2").expect("set ok");
         assert_eq!(get(account).unwrap().as_deref(), Some("hunter2"));
         delete(account).expect("delete ok");
