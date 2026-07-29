@@ -363,6 +363,233 @@ pub fn compare_host_keys(
     HostKeyStatus::Mismatch { fingerprint }
 }
 
+// ─── 執行層（有副作用，不做單元測試；以 Task 12 的手動驗證涵蓋） ─────────────
+
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+/// 這個 alias 是否經過跳板。`ssh -G` 對 ProxyJump 會輸出 `proxyjump`，
+/// ProxyJump 也會被展開成 `proxycommand`；兩者都要擋。`none` 是明確停用的寫法。
+pub fn has_proxy(pairs: &[(String, String)]) -> bool {
+    pairs.iter().any(|(k, v)| {
+        (k.eq_ignore_ascii_case("proxyjump") || k.eq_ignore_ascii_case("proxycommand"))
+            && !v.trim().is_empty()
+            && !v.trim().eq_ignore_ascii_case("none")
+    })
+}
+
+/// 取得 alias 的 `ssh -G` key/value 對（驗證 alias 後）。
+fn effective_pairs(
+    state: &tauri::State<crate::state::AppState>,
+    alias: &str,
+) -> Result<Vec<(String, String)>, AppError> {
+    let main_path = {
+        let doc_lock = state.doc.lock().unwrap();
+        let doc = doc_lock
+            .as_ref()
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        crate::connect::validate_alias(doc, alias)?;
+        doc.files.first().map(|f| f.path.clone())
+    };
+    crate::config::intel::effective_config(alias, main_path.as_deref())
+}
+
+/// 解析 alias 的實際連線目標（走既有的 `ssh -G` 整合）。
+fn resolve_endpoint(
+    state: &tauri::State<crate::state::AppState>,
+    alias: &str,
+) -> Result<Endpoint, AppError> {
+    let main_path = {
+        let doc_lock = state.doc.lock().unwrap();
+        let doc = doc_lock
+            .as_ref()
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        crate::connect::validate_alias(doc, alias)?;
+        doc.files.first().map(|f| f.path.clone())
+    };
+    let pairs = crate::config::intel::effective_config(alias, main_path.as_deref())?;
+    endpoint_from_effective(&pairs)
+        .ok_or_else(|| AppError::NotFound(format!("ssh -G returned no hostname for '{alias}'")))
+}
+
+/// 執行部署本體。回傳 (outcome)。密碼已事先放進 `account` 指向的 keychain 項目。
+fn run_ssh_deploy(
+    alias: &str,
+    pub_material: &str,
+    account: &str,
+    env_secret: Option<&str>,
+) -> Result<DeployOutcome, AppError> {
+    let exe = std::env::current_exe().map_err(AppError::Io)?;
+
+    let mut cmd = Command::new("ssh");
+    cmd.args(build_deploy_argv(alias))
+        .env("SSH_ASKPASS", &exe)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("SSHELTER_ASKPASS", "1")
+        .env("SSHELTER_ASKPASS_ACCOUNT", account)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(secret) = env_secret {
+        // 本機無密鑰環時的 fallback；UI 已告知使用者密碼不會被儲存。
+        cmd.env("SSHELTER_ASKPASS_SECRET", secret);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotFound("ssh not found".to_string())
+        } else {
+            AppError::Io(e)
+        }
+    })?;
+
+    {
+        // 公鑰走 stdin。handle 必須在這個 scope 結束時 drop，遠端的 `cat` 才會看到 EOF。
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| AppError::Other("failed to open ssh stdin".to_string()))?;
+        stdin.write_all(pub_material.as_bytes()).map_err(AppError::Io)?;
+    }
+
+    let output = child.wait_with_output().map_err(AppError::Io)?;
+    Ok(classify_outcome(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    ))
+}
+
+// ─── Tauri commands ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn deploy_precheck_host_key(
+    state: tauri::State<crate::state::AppState>,
+    alias: String,
+) -> Result<HostKeyStatus, AppError> {
+    let ep = resolve_endpoint(&state, &alias)?;
+
+    let scanned = match Command::new("ssh-keyscan").args(keyscan_target(&ep)).output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HostKeyStatus::Unavailable {
+                message: "ssh-keyscan not found".to_string(),
+            });
+        }
+        Err(e) => return Err(AppError::Io(e)),
+    };
+
+    // 用 `ssh-keygen -F` 查既有項目，而不是自己讀 known_hosts —— 它原生處理雜湊項目
+    // （HashKnownHosts 在 Debian／Ubuntu 預設為 yes）。找不到時 exit 1、stdout 為空，
+    // 那正是我們要的「這台是新主機」。
+    let known = Command::new("ssh-keygen")
+        .args(keygen_find_args(&ep))
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    Ok(compare_host_keys(&scanned, &known, &ep))
+}
+
+#[tauri::command]
+pub fn deploy_trust_host_key(
+    state: tauri::State<crate::state::AppState>,
+    alias: String,
+    key_line: String,
+) -> Result<(), AppError> {
+    // key_line 只接受 precheck 回傳的形狀，重新驗一次避免前端傳入任意內容。
+    let ep = resolve_endpoint(&state, &alias)?;
+    let expected_host = known_hosts_host_field(&ep);
+    let ok = key_line
+        .split_whitespace()
+        .next()
+        .is_some_and(|h| h == expected_host)
+        && split_key_line(&key_line).is_some()
+        && !key_line.contains('\n');
+    if !ok {
+        return Err(AppError::ForbiddenPath(format!(
+            "refusing to append malformed known_hosts line for '{alias}'"
+        )));
+    }
+    crate::known_hosts::append_known_hosts_line(&key_line)
+}
+
+#[tauri::command]
+pub fn deploy_key(
+    state: tauri::State<crate::state::AppState>,
+    alias: String,
+    public_path: String,
+    password: String,
+    remember: bool,
+) -> Result<DeployOutcome, AppError> {
+    {
+        let doc_lock = state.doc.lock().unwrap();
+        let doc = doc_lock
+            .as_ref()
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        crate::connect::validate_alias(doc, &alias)?;
+    }
+    // ProxyJump／ProxyCommand 必須「主動拒絕」，不能只是「不支援」。
+    // `SSH_ASKPASS` 與 `SSHELTER_ASKPASS_*` 會被 ProxyCommand 子進程繼承，於是跳板
+    // 主機的 `user@jump's password: ` 提示會被 helper 用「目標主機的密碼」回答 ——
+    // 那是把密碼洩漏給另一台機器。白名單擋不住這個，因為那是一個完全合法的提示。
+    {
+        let ep_pairs = effective_pairs(&state, &alias)?;
+        if has_proxy(&ep_pairs) {
+            return Err(AppError::Other(format!(
+                "'{alias}' goes through a jump host; in-app deploy is refused because the \
+                 password would be offered to the jump host as well"
+            )));
+        }
+    }
+
+    let dir = crate::keys::ssh_dir()?;
+    let pub_path = crate::keys::validate_public_path(&public_path, &dir)?;
+    // 內容驗證不可省略：`validate_public_path` 只驗路徑，不看檔案內容。多行的 `.pub`
+    // （例如有人把 authorized_keys 複製成 backup.pub）會讓遠端的 `grep -F` 把換行當成
+    // pattern 分隔，只要任一行已存在就回報「已存在」，實際一把金鑰都沒部署。
+    // 送出去的必須是驗證後的「單行」，不是原始檔案內容。
+    let pub_material = validate_public_material(&std::fs::read_to_string(&pub_path)?)?;
+
+    let use_keychain = crate::secrets::available();
+    let account = if remember {
+        crate::secrets::host_account(&alias)
+    } else {
+        crate::secrets::tmp_account(&alias)
+    };
+    if use_keychain {
+        crate::secrets::set(&account, &password)?;
+    }
+
+    let env_secret = if use_keychain { None } else { Some(password.as_str()) };
+    let result = run_ssh_deploy(&alias, &pub_material, &account, env_secret);
+
+    // 清理：暫存項目一律刪除，無論部署成敗。
+    if use_keychain && !remember {
+        let _ = crate::secrets::delete(&account);
+    }
+    result
+}
+
+#[tauri::command]
+pub fn secrets_has(alias: String) -> Result<bool, AppError> {
+    Ok(crate::secrets::get(&crate::secrets::host_account(&alias))?.is_some())
+}
+
+#[tauri::command]
+pub fn secrets_get(alias: String) -> Result<Option<String>, AppError> {
+    crate::secrets::get(&crate::secrets::host_account(&alias))
+}
+
+#[tauri::command]
+pub fn secrets_set(alias: String, password: String) -> Result<(), AppError> {
+    crate::secrets::set(&crate::secrets::host_account(&alias), &password)
+}
+
+#[tauri::command]
+pub fn secrets_delete(alias: String) -> Result<(), AppError> {
+    crate::secrets::delete(&crate::secrets::host_account(&alias))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,6 +1053,25 @@ mod tests {
             compare_host_keys(&scanned, &revoked, &ep),
             HostKeyStatus::Mismatch { .. }
         ));
+    }
+
+    #[test]
+    fn revoked_outranks_cert_authority_when_both_are_present() {
+        // 同一台 host 的 known_hosts 項目可以同時有 `@cert-authority`（信任這台的 CA）
+        // 與 `@revoked`（這把「特定」金鑰已作廢）。順序不能顛倒：revoked 必須先擋下來，
+        // 否則 CA 分支只看 marker 是否存在、完全不比對金鑰內容，會把一把明確被撤銷、
+        // 且剛好被 ssh-keyscan 掃到的金鑰洗白成 Trusted。
+        let ep = Endpoint { hostname: "10.0.0.9".into(), port: "22".into() };
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+        let scanned = format!("10.0.0.9 ssh-ed25519 {blob}\n");
+        let known = format!(
+            "@cert-authority 10.0.0.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\
+             @revoked 10.0.0.9 ssh-ed25519 {blob}\n"
+        );
+        assert!(
+            matches!(compare_host_keys(&scanned, &known, &ep), HostKeyStatus::Mismatch { .. }),
+            "a revoked key must abort even when the same host also carries a cert-authority line"
+        );
     }
 
     #[test]

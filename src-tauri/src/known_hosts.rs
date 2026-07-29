@@ -220,6 +220,29 @@ fn known_hosts_path() -> Result<PathBuf, AppError> {
         .ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))
 }
 
+/// 讀取 known_hosts 全文；檔案不存在時回空字串（首次使用的正常狀態）。
+pub fn read_known_hosts_text() -> Result<String, AppError> {
+    let path = known_hosts_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// 追加一行到 known_hosts。呼叫端必須先驗證 `line` 的形狀（見 `deploy_trust_host_key`）。
+/// 檔案不存在時以 0600 建立，並確保與前一行之間有換行。
+pub fn append_known_hosts_line(line: &str) -> Result<(), AppError> {
+    let path = known_hosts_path()?;
+    let mut text = read_known_hosts_text()?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(line.trim_end());
+    text.push('\n');
+    crate::fsutil::atomic_write(&path, text.as_bytes(), 0o600)
+}
+
 #[tauri::command]
 pub fn known_hosts_list() -> Result<Vec<KnownHostEntry>, AppError> {
     let path = known_hosts_path()?;
