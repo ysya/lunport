@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::AppError;
 
 /// 在遠端執行的固定 script。不含任何使用者輸入；公鑰從 stdin 讀入。
-/// 退出碼 90/91/92 用來區分遠端失敗的階段。
+/// 退出碼 90/91/92/94 用來區分遠端失敗的階段（90=mkdir、91=空輸入、92=寫入、94=chmod）。
 ///
 /// 三個防守點，每一個都對應一種「回報成功但實際沒成功」的失敗：
 /// 1. **補結尾換行**：遠端 `authorized_keys` 若最後一個 byte 不是 `\n`（手動編輯、
@@ -208,6 +208,8 @@ fn first_line_or(stderr: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::path::Path;
 
     #[test]
     fn argv_pins_host_key_and_limits_password_attempts() {
@@ -378,6 +380,123 @@ mod tests {
         assert!(validate_public_material("").is_err());
         assert!(validate_public_material("   \n  ").is_err());
         assert!(validate_public_material("hello world").is_err());
+    }
+
+    /// 真的把 REMOTE_SCRIPT 交給 `/bin/sh` 執行，`HOME` 指向暫存目錄完全沙箱化
+    /// （script 只碰 `~/.ssh`，而 sh 的 `~` 展開讀 `$HOME`）。
+    ///
+    /// 為什麼非要這個測試不可：上面那三條 `REMOTE_SCRIPT.contains(...)` 只證明「某段文字
+    /// 還在常數裡」，不證明那段 shell 邏輯是對的。把 `-z` 改成 `-n`、把 `[ ! -s ]` 改成
+    /// `[ -s ]`、或把補換行那行搬到 printf 之後 —— 三種突變都會讓 C1 完全復發，而字串
+    /// 比對測試全部照樣是綠的。這一條會抓到。
+    #[cfg(unix)]
+    fn run_remote_script(home: &Path, stdin: &str) -> (i32, String) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(REMOTE_SCRIPT)
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn /bin/sh");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_appends_without_corrupting_a_file_that_lacks_a_trailing_newline() {
+        // 這是 C1 的行為測試：舊金鑰結尾沒有換行時，新金鑰必須「另起一行」，
+        // 而且舊那一行必須原封不動。
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        let ak = ssh.join("authorized_keys");
+        std::fs::write(&ak, "ssh-rsa AAAAOLD").unwrap(); // 刻意無結尾換行
+
+        let (code, stdout) = run_remote_script(dir.path(), "ssh-ed25519 AAAANEW frank@laptop\n");
+        assert_eq!(code, 0, "stdout={stdout}");
+        assert!(stdout.contains("SSHELTER_ADDED"), "stdout={stdout}");
+
+        let text = std::fs::read_to_string(&ak).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "expected two separate lines, got {text:?}");
+        assert_eq!(lines[0], "ssh-rsa AAAAOLD", "the existing key must survive intact");
+        assert_eq!(lines[1], "ssh-ed25519 AAAANEW frank@laptop");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_handles_absent_empty_and_newline_terminated_files() {
+        let key = "ssh-ed25519 AAAANEW frank@laptop\n";
+
+        // 檔案不存在 → 直接建立，只有一行。
+        let d1 = tempfile::tempdir().unwrap();
+        let (c1, _) = run_remote_script(d1.path(), key);
+        assert_eq!(c1, 0);
+        let t1 = std::fs::read_to_string(d1.path().join(".ssh/authorized_keys")).unwrap();
+        assert_eq!(t1, key, "no leading blank line for a fresh file");
+
+        // 空檔 → 不可補出開頭空行。
+        let d2 = tempfile::tempdir().unwrap();
+        let ssh2 = d2.path().join(".ssh");
+        std::fs::create_dir_all(&ssh2).unwrap();
+        std::fs::write(ssh2.join("authorized_keys"), "").unwrap();
+        let (c2, _) = run_remote_script(d2.path(), key);
+        assert_eq!(c2, 0);
+        let t2 = std::fs::read_to_string(ssh2.join("authorized_keys")).unwrap();
+        assert_eq!(t2, key, "empty file must not gain a leading blank line");
+
+        // 結尾已有換行 → 不可重複補。
+        let d3 = tempfile::tempdir().unwrap();
+        let ssh3 = d3.path().join(".ssh");
+        std::fs::create_dir_all(&ssh3).unwrap();
+        std::fs::write(ssh3.join("authorized_keys"), "ssh-rsa AAAAOLD\n").unwrap();
+        let (c3, _) = run_remote_script(d3.path(), key);
+        assert_eq!(c3, 0);
+        let t3 = std::fs::read_to_string(ssh3.join("authorized_keys")).unwrap();
+        assert_eq!(t3, format!("ssh-rsa AAAAOLD\n{key}"), "no extra blank line");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_reports_existing_key_without_touching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        let ak = ssh.join("authorized_keys");
+        let existing = "ssh-ed25519 AAAANEW frank@laptop\n";
+        std::fs::write(&ak, existing).unwrap();
+
+        let (code, stdout) = run_remote_script(dir.path(), existing);
+        assert_eq!(code, 0);
+        assert!(stdout.contains("SSHELTER_EXISTS"), "stdout={stdout}");
+        assert_eq!(
+            std::fs::read_to_string(&ak).unwrap(),
+            existing,
+            "an already-present key must leave the file byte-identical"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_rejects_empty_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let (code, _) = run_remote_script(dir.path(), "");
+        assert_eq!(code, 91, "empty key material must exit 91");
     }
 
     #[test]
