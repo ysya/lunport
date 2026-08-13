@@ -23,6 +23,7 @@ import {
   FolderInput,
   Trash2,
   X,
+  FilePlus2,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
@@ -46,6 +47,7 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -90,6 +92,8 @@ import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 
 /** Sentinel Select value for the "All files" scope (Radix items can't be empty). */
 const ALL_FILES = "__all__";
+/** Sentinel Select value: opens the New-config-file dialog instead of scoping. */
+const NEW_FILE = "__new-file__";
 
 /**
  * How long a single click on a group header waits before toggling collapse —
@@ -138,9 +142,11 @@ interface HostRowProps {
   onDeployKey?: () => void;
   /** Render tag chips after the alias (file grouping only — tag groups ARE the tag). */
   showTags?: boolean;
-  /** Other loaded files as "Move to file" targets (empty = hide the submenu). */
+  /** Other loaded files as "Move to file" targets. */
   moveTargets?: { file: string; label: string }[];
   onMoveTo?: (file: string) => void;
+  /** "Move to file → New file…" — opens the create dialog with a move intent. */
+  onMoveToNew?: () => void;
   /** Opens the shared remove-confirmation dialog (owned by HostList). */
   onRemove?: () => void;
   /** Row can be drag-reordered (within its source file). Off while searching. */
@@ -173,6 +179,7 @@ function HostRow({
   showTags,
   moveTargets = [],
   onMoveTo,
+  onMoveToNew,
   onRemove,
   draggable,
   dragging,
@@ -302,7 +309,7 @@ function HostRow({
               <Upload className="size-3.5" />
               Deploy key…
             </DropdownMenuItem>
-            {onMoveTo && moveTargets.length > 0 && (
+            {onMoveTo && (moveTargets.length > 0 || onMoveToNew) && (
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger>
                   <FolderInput className="size-3.5" />
@@ -314,6 +321,15 @@ function HostRow({
                       {t.label}
                     </DropdownMenuItem>
                   ))}
+                  {onMoveToNew && (
+                    <>
+                      {moveTargets.length > 0 && <DropdownMenuSeparator />}
+                      <DropdownMenuItem onSelect={onMoveToNew}>
+                        <FilePlus2 className="size-3.5" />
+                        New file…
+                      </DropdownMenuItem>
+                    </>
+                  )}
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             )}
@@ -379,7 +395,7 @@ function HostRow({
           <Upload className="size-3.5" />
           Deploy key…
         </ContextMenuItem>
-        {onMoveTo && moveTargets.length > 0 && (
+        {onMoveTo && (moveTargets.length > 0 || onMoveToNew) && (
           <ContextMenuSub>
             <ContextMenuSubTrigger>
               <FolderInput className="size-3.5" />
@@ -391,6 +407,15 @@ function HostRow({
                   {t.label}
                 </ContextMenuItem>
               ))}
+              {onMoveToNew && (
+                <>
+                  {moveTargets.length > 0 && <ContextMenuSeparator />}
+                  <ContextMenuItem onSelect={onMoveToNew}>
+                    <FilePlus2 className="size-3.5" />
+                    New file…
+                  </ContextMenuItem>
+                </>
+              )}
             </ContextMenuSubContent>
           </ContextMenuSub>
         )}
@@ -436,6 +461,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const setAddHostOpen = useUiStore((s) => s.setAddHostOpen);
   const setAddHostTargetFile = useUiStore((s) => s.setAddHostTargetFile);
   const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
+  const setNewFileIntent = useUiStore((s) => s.setNewFileIntent);
   const terminalId = useSettingsStore((s) => s.terminalId);
   const hostTerminals = useSettingsStore((s) => s.hostTerminals);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
@@ -847,7 +873,13 @@ export function HostList({ hosts, isLoading }: HostListProps) {
         <div className="flex items-center gap-1.5">
           <Select
             value={scope ?? ALL_FILES}
-            onValueChange={(v) => setFileScope(v === ALL_FILES ? null : v)}
+            onValueChange={(v) => {
+              if (v === NEW_FILE) {
+                setNewFileIntent({ kind: "scope" });
+                return; // controlled value stays put — this is an action, not a scope
+              }
+              setFileScope(v === ALL_FILES ? null : v);
+            }}
           >
             <SelectTrigger
               size="sm"
@@ -866,6 +898,10 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                   {labels.get(f) ?? basename(f)}
                 </SelectItem>
               ))}
+              <SelectSeparator />
+              <SelectItem value={NEW_FILE} className="text-xs">
+                <FilePlus2 className="size-3.5" /> New config file…
+              </SelectItem>
             </SelectContent>
           </Select>
           {scope && (
@@ -1156,6 +1192,9 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               onDeployKey={() => setDeployKeyAlias(host.alias)}
                               moveTargets={moveTargetsByFile.get(host.source_file) ?? []}
                               onMoveTo={(f) => moveTo(host.alias, f)}
+                              onMoveToNew={() =>
+                                setNewFileIntent({ kind: "move", aliases: [host.alias] })
+                              }
                               onRemove={() => setRemoveTarget(host.alias)}
                               showTags={showHostTags && groupMode === "file"}
                               // Draggable when reordering OR a cross-file move
@@ -1249,7 +1288,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                     variant="outline"
                     size="sm"
                     className="h-7 flex-1"
-                    disabled={files.length < 2 || moveHost.isPending}
+                    disabled={moveHost.isPending}
                   >
                     <FolderInput className="size-3.5" /> Move to
                   </Button>
@@ -1260,6 +1299,17 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                       {labels.get(f) ?? basename(f)}
                     </DropdownMenuItem>
                   ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() => {
+                      const aliases = [...checkedAliases];
+                      clearChecked();
+                      setNewFileIntent({ kind: "move", aliases });
+                    }}
+                  >
+                    <FilePlus2 className="size-3.5" />
+                    New file…
+                  </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
               <Button

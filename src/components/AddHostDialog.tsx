@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus } from "lucide-react";
+import { FilePlus2, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
@@ -27,9 +27,13 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+/** Sentinel Select value: opens the New-config-file dialog instead of picking. */
+const NEW_FILE = "__new-file__";
 
 export interface AddHostDialogProps {
   /**
@@ -47,6 +51,7 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
   const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
   const addHost = useAddHost();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
+  const setNewFileIntent = useUiStore((s) => s.setNewFileIntent);
 
   // The toolbar (icon) instance — always mounted — owns the store-driven open
   // flag so the command palette's "New host" action can open it. The labeled
@@ -152,7 +157,20 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
           <div className="space-y-4 py-4">
             <div className="space-y-1.5">
               <Label htmlFor="add-target-file">Target file</Label>
-              <Select value={targetFile || undefined} onValueChange={setTargetFile}>
+              <Select
+                value={targetFile || undefined}
+                onValueChange={(v) => {
+                  if (v === NEW_FILE) {
+                    // Hand off to the create dialog; it reopens Add host with
+                    // the fresh file preselected (via addHostTargetFile).
+                    setOpen(false);
+                    resetForm();
+                    setNewFileIntent({ kind: "addHost" });
+                    return;
+                  }
+                  setTargetFile(v);
+                }}
+              >
                 <SelectTrigger id="add-target-file" className="w-full">
                   <SelectValue placeholder="Select a config file" />
                 </SelectTrigger>
@@ -162,6 +180,10 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
                       {labels.get(f) ?? basename(f)}
                     </SelectItem>
                   ))}
+                  <SelectSeparator />
+                  <SelectItem value={NEW_FILE}>
+                    <FilePlus2 className="size-3.5" /> New config file…
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
