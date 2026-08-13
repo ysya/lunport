@@ -20,6 +20,9 @@ interface UiState {
    */
   fileScope: string | null;
   setFileScope: (file: string | null) => void;
+  /** Sidebar grouping dimension: by source file or by tag (persisted). */
+  groupMode: "file" | "tag";
+  setGroupMode: (mode: "file" | "tag") => void;
   /** Whether the "New host" dialog is open (driven by the command palette + toolbar). */
   addHostOpen: boolean;
   setAddHostOpen: (open: boolean) => void;
@@ -70,6 +73,8 @@ export const useUiStore = create<UiState>()(
         })),
       fileScope: null,
       setFileScope: (fileScope) => set({ fileScope }),
+      groupMode: "file",
+      setGroupMode: (groupMode) => set({ groupMode }),
       addHostOpen: false,
       setAddHostOpen: (addHostOpen) => set({ addHostOpen }),
       addHostTargetFile: null,
@@ -86,7 +91,11 @@ export const useUiStore = create<UiState>()(
     {
       name: UI_STORAGE_KEY,
       // ONLY navigation state survives restarts; everything else is session-only.
-      partialize: (s) => ({ collapsedGroups: s.collapsedGroups, fileScope: s.fileScope }),
+      partialize: (s) => ({
+        collapsedGroups: s.collapsedGroups,
+        fileScope: s.fileScope,
+        groupMode: s.groupMode,
+      }),
     },
   ),
 );

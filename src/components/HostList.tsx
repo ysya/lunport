@@ -11,6 +11,7 @@ import {
   Pencil,
   Plus,
   Upload,
+  Tags,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
@@ -266,6 +267,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const toggleGroup = useUiStore((s) => s.toggleGroup);
   const fileScope = useUiStore((s) => s.fileScope);
   const setFileScope = useUiStore((s) => s.setFileScope);
+  const groupMode = useUiStore((s) => s.groupMode);
+  const setGroupMode = useUiStore((s) => s.setGroupMode);
   const setAddHostOpen = useUiStore((s) => s.setAddHostOpen);
   const setAddHostTargetFile = useUiStore((s) => s.setAddHostTargetFile);
   const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
@@ -349,6 +352,46 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     const scoped = scope ? hosts.filter((h) => h.source_file === scope) : hosts;
     const filtered = scoped.filter((h) => hostMatches(h, q));
 
+    if (groupMode === "tag") {
+      // Gmail-label model: a host appears under EVERY tag it carries; untagged
+      // hosts pool at the bottom. Wildcard defaults are config structure, not
+      // hosts — they only exist in the file view.
+      const byTag = new Map<string, HostSummary[]>();
+      const untagged: HostSummary[] = [];
+      for (const h of filtered) {
+        if (isWildcardOnly(h)) continue;
+        if (h.tags.length === 0) {
+          untagged.push(h);
+          continue;
+        }
+        for (const t of h.tags) {
+          const bucket = byTag.get(t);
+          if (bucket) bucket.push(h);
+          else byTag.set(t, [h]);
+        }
+      }
+      const tagSections = [...byTag.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([tag, tagHosts]) => ({
+          kind: "tag" as const,
+          // Prefixed collapse/React key — never collides with a file path.
+          file: `tag:${tag}`,
+          name: tag,
+          hosts: tagHosts,
+          defaults: [] as HostSummary[],
+        }));
+      if (untagged.length > 0) {
+        tagSections.push({
+          kind: "tag" as const,
+          file: "tag:",
+          name: "Untagged",
+          hosts: untagged,
+          defaults: [],
+        });
+      }
+      return tagSections;
+    }
+
     // Group by source_file, preserving first-appearance order. A single-file
     // scope yields ONE headerless section (flat list).
     const byFile = new Map<string, HostSummary[]>();
@@ -360,6 +403,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     if (scope && !byFile.has(scope)) byFile.set(scope, []);
 
     return [...byFile.entries()].map(([file, fileHosts]) => ({
+      kind: "file" as const,
       file,
       // null name = flat list without a group header (single-file scope).
       name: scope ? null : (labels.get(file) ?? basename(file)),
@@ -368,7 +412,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
       // demoted to a footer and excluded from every user-facing count.
       defaults: fileHosts.filter((h) => isWildcardOnly(h)),
     }));
-  }, [hosts, search, scope, labels]);
+  }, [hosts, search, scope, labels, groupMode]);
 
   // "N hosts" reflects the scoped + filtered CONNECTABLE count (no wildcards).
   const hostCount = sections.reduce((n, s) => n + s.hosts.length, 0);
@@ -380,8 +424,9 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   // `drag` is the source row; `dropGap` the insertion gap, both as indices into
   // that file's CONCRETE host list (`section.hosts` — wildcard DEFAULTS rows
   // are pinned and excluded). A filtered list's order is meaningless to
-  // persist, so dragging is disabled entirely while searching.
-  const canReorder = !searchActive;
+  // persist, so dragging is disabled entirely while searching — and in tag
+  // view, where list position has no file position to map back to.
+  const canReorder = !searchActive && groupMode === "file";
   const [drag, setDrag] = useState<{ file: string; index: number } | null>(null);
   const [dropGap, setDropGap] = useState<{ file: string; index: number } | null>(null);
 
@@ -505,6 +550,41 @@ export function HostList({ hosts, isLoading }: HostListProps) {
               <FileText className="size-3.5" />
             </Button>
           )}
+          {/* Grouping dimension: by source file (default) or by tag. */}
+          <div
+            role="group"
+            aria-label="Group hosts by"
+            className="flex shrink-0 items-center gap-0.5"
+          >
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-pressed={groupMode === "file"}
+              title="Group by file"
+              onClick={() => setGroupMode("file")}
+              className={cn(
+                "size-6 text-muted-foreground",
+                groupMode === "file" && "bg-muted/70 text-foreground",
+              )}
+            >
+              <FileText className="size-3.5" />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-pressed={groupMode === "tag"}
+              title="Group by tag"
+              onClick={() => setGroupMode("tag")}
+              className={cn(
+                "size-6 text-muted-foreground",
+                groupMode === "tag" && "bg-muted/70 text-foreground",
+              )}
+            >
+              <Tags className="size-3.5" />
+            </Button>
+          </div>
           <span className="shrink-0 pr-1 font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
             {isLoading ? "…" : `${hostCount} ${hostCount === 1 ? "host" : "hosts"}`}
           </span>
@@ -548,7 +628,33 @@ export function HostList({ hosts, isLoading }: HostListProps) {
               const isEditing = editingFile === section.file;
               return (
                 <div key={section.file} className="mb-3 last:mb-0">
+                  {section.name !== null && section.kind === "tag" && (
+                    /* Tag headers only collapse — no rename, no file menu. */
+                    <button
+                      type="button"
+                      onClick={() => toggleGroup(section.file)}
+                      className="sidebar-sticky-header sticky top-0 z-10 flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
+                      aria-expanded={!isCollapsed}
+                    >
+                      <span className="flex min-w-0 items-center gap-1">
+                        <ChevronRight
+                          className={cn(
+                            "size-3 shrink-0 text-muted-foreground/60 transition-transform duration-150",
+                            !isCollapsed && "rotate-90",
+                          )}
+                          aria-hidden
+                        />
+                        <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+                          {section.name}
+                        </span>
+                      </span>
+                      <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
+                        {section.hosts.length}
+                      </span>
+                    </button>
+                  )}
                   {section.name !== null &&
+                    section.kind === "file" &&
                     (isEditing ? (
                       /*
                        * Inline rename: the header's label swaps for a tiny mono
