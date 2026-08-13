@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.0](https://github.com/ysya/sshelter/compare/v0.9.0...v0.10.0) (2026-08-13)
+
+
+### Features
+
+* **host-list:** drag a host onto another file group to move it ([453593f](https://github.com/ysya/sshelter/commit/453593f268643e1de4219e58fc1f2082defa4676))
+* **host-list:** hover actions menu with move and remove ([efb67e4](https://github.com/ysya/sshelter/commit/efb67e48fd620d864669d66be3513274ad0968ee))
+* **host-list:** multi-select with batch move, tag and remove ([c8e375a](https://github.com/ysya/sshelter/commit/c8e375a7cddb8153bda3d9c33e67d22c0109d01f))
+
 ## [0.9.0](https://github.com/ysya/sshelter/compare/v0.8.0...v0.9.0) (2026-08-13)
 
 
