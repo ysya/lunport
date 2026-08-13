@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.0](https://github.com/ysya/sshelter/compare/v0.7.0...v0.8.0) (2026-08-13)
+
+
+### Features
+
+* **deploy:** add editor, palette, hygiene and keys-dialog entry points ([b73501e](https://github.com/ysya/sshelter/commit/b73501e0b218cb5bccd870ae8f392f965b7c4677))
+* **deploy:** add identity-file write-back decision helpers ([c690d74](https://github.com/ysya/sshelter/commit/c690d7450e452535e2443e5dad2e3792d9471e2a))
+* **deploy:** write IdentityFile back after a successful deploy ([7c3169f](https://github.com/ysya/sshelter/commit/7c3169fb7c3248e605ceb9b922771c88f50fdca1))
+* **host-editor:** pick IdentityFile from detected keys or a file dialog ([e939e1a](https://github.com/ysya/sshelter/commit/e939e1a24b86126678d5edff69ae141abd291d14))
+
+
+### Bug Fixes
+
+* **ui:** disable autocorrect and autocapitalize on all text inputs ([d806a66](https://github.com/ysya/sshelter/commit/d806a66ba7afcd59a1705df1f995ad493ec8f502))
+
 ## [0.7.0](https://github.com/ysya/sshelter/compare/v0.6.1...v0.7.0) (2026-08-13)
 
 
