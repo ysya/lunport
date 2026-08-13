@@ -10,6 +10,7 @@ import {
   SlidersHorizontal,
   Pencil,
   Plus,
+  Upload,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
@@ -97,6 +98,8 @@ interface HostRowProps {
   onSelect: () => void;
   /** Omitted for defaults rows — connecting to `Host *` is meaningless. */
   onConnect?: () => void;
+  /** Right-click "Deploy key…". Omitted = no context menu (defaults rows). */
+  onDeployKey?: () => void;
   /** Row can be drag-reordered (within its source file). Off while searching. */
   draggable?: boolean;
   /** True while THIS row is the drag source — rendered semi-transparent. */
@@ -122,6 +125,7 @@ function HostRow({
   variant,
   onSelect,
   onConnect,
+  onDeployKey,
   draggable,
   dragging,
   indicator,
@@ -132,7 +136,7 @@ function HostRow({
 }: HostRowProps) {
   const secondary = secondaryLine(host);
   const isDefaults = variant === "defaults";
-  return (
+  const row = (
     <li
       className="animate-row-enter group/row relative"
       style={{ animationDelay: delay }}
@@ -229,6 +233,26 @@ function HostRow({
       )}
     </li>
   );
+
+  if (!onDeployKey) return row;
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+      <ContextMenuContent>
+        {onConnect && (
+          <ContextMenuItem onSelect={onConnect}>
+            <Play className="size-3.5" />
+            Connect
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem onSelect={onDeployKey}>
+          <Upload className="size-3.5" />
+          Deploy key…
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
 }
 
 /** Tiny muted subheader marking the wildcard-defaults group atop each file section. */
@@ -256,6 +280,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const setFileScope = useUiStore((s) => s.setFileScope);
   const setAddHostOpen = useUiStore((s) => s.setAddHostOpen);
   const setAddHostTargetFile = useUiStore((s) => s.setAddHostTargetFile);
+  const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
   const terminalId = useSettingsStore((s) => s.terminalId);
   const hostTerminals = useSettingsStore((s) => s.hostTerminals);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
@@ -694,6 +719,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               variant="host"
                               onSelect={() => setSelectedAlias(host.alias)}
                               onConnect={() => connectTo(host.alias)}
+                              onDeployKey={() => setDeployKeyAlias(host.alias)}
                               draggable={canReorder && section.hosts.length > 1}
                               dragging={drag?.file === section.file && drag.index === i}
                               indicator={
