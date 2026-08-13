@@ -26,7 +26,10 @@ import {
   X,
   Eye,
   Upload,
+  KeyRound,
+  FolderOpen,
 } from "lucide-react";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostOption } from "@/bindings/HostOption";
@@ -53,7 +56,9 @@ import {
   useRevealHostPassword,
   useSetHostPassword,
   useDeleteHostPassword,
+  useKeys,
 } from "@/lib/queries";
+import { toTildeSshPath } from "@/lib/identity-file";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
@@ -259,6 +264,7 @@ function HostEditorForm({
     register,
     handleSubmit,
     reset,
+    setValue,
     formState: { isDirty },
   } = useForm<FormValues>({
     resolver: formResolver,
@@ -327,7 +333,13 @@ function HostEditorForm({
             <Section key={g} title={g}>
               <SettingsGroup>
                 {defs.map((def) => (
-                  <FieldControl key={def.keyword} def={def} control={control} register={register} />
+                  <FieldControl
+                    key={def.keyword}
+                    def={def}
+                    control={control}
+                    register={register}
+                    setValue={setValue}
+                  />
                 ))}
               </SettingsGroup>
             </Section>
@@ -912,9 +924,10 @@ interface FieldControlProps {
   def: FieldDef;
   control: ReturnType<typeof useForm<FormValues>>["control"];
   register: ReturnType<typeof useForm<FormValues>>["register"];
+  setValue: ReturnType<typeof useForm<FormValues>>["setValue"];
 }
 
-function FieldControl({ def, control, register }: FieldControlProps) {
+function FieldControl({ def, control, register, setValue }: FieldControlProps) {
   const name = `firstClass.${def.keyword.toLowerCase()}` as const;
   const id = `field-${def.keyword.toLowerCase()}`;
 
@@ -967,6 +980,15 @@ function FieldControl({ def, control, register }: FieldControlProps) {
     );
   }
 
+  // IdentityFile gets picker affordances: detected ~/.ssh keys + a file dialog.
+  if (def.keyword === "IdentityFile") {
+    return (
+      <SettingsRow id={id} label={def.label}>
+        <IdentityFileControl id={id} name={name} register={register} setValue={setValue} />
+      </SettingsRow>
+    );
+  }
+
   // text | number
   return (
     <SettingsRow id={id} label={def.label}>
@@ -977,6 +999,95 @@ function FieldControl({ def, control, register }: FieldControlProps) {
         {...register(name)}
       />
     </SettingsRow>
+  );
+}
+
+/**
+ * IdentityFile input with two pick affordances: a dropdown of the private keys
+ * detected in ~/.ssh (fetched lazily when the menu opens) and a native file
+ * dialog for anything else. Both write through setValue so the form dirties
+ * and saves exactly like hand-typed text; paths under ~/.ssh are written in
+ * their `~` form, matching ssh_config convention.
+ */
+function IdentityFileControl({
+  id,
+  name,
+  register,
+  setValue,
+}: {
+  id: string;
+  name: `firstClass.${string}`;
+  register: ReturnType<typeof useForm<FormValues>>["register"];
+  setValue: ReturnType<typeof useForm<FormValues>>["setValue"];
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const keysQ = useKeys({ enabled: menuOpen });
+  const pick = (value: string) =>
+    setValue(name, value, { shouldDirty: true, shouldTouch: true });
+
+  const browse = async () => {
+    const picked = await openFileDialog({
+      multiple: false,
+      directory: false,
+      title: "Choose an identity file",
+    });
+    if (typeof picked === "string") pick(toTildeSshPath(picked));
+  };
+
+  return (
+    <div className="flex min-w-0 flex-1 items-center justify-end gap-0.5">
+      <Input
+        id={id}
+        type="text"
+        className="h-7 border-0 bg-transparent px-2 text-right font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
+        {...register(name)}
+      />
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
+            aria-label="Pick a detected key"
+            title="Pick a key from ~/.ssh"
+          >
+            <KeyRound className="size-3.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-56">
+          <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+            Keys in ~/.ssh
+          </DropdownMenuLabel>
+          {keysQ.isLoading ? (
+            <DropdownMenuItem disabled>Scanning…</DropdownMenuItem>
+          ) : (keysQ.data ?? []).length === 0 ? (
+            <DropdownMenuItem disabled>No keys found</DropdownMenuItem>
+          ) : (
+            (keysQ.data ?? []).map((k) => (
+              <DropdownMenuItem
+                key={k.private_path}
+                className="font-mono"
+                onSelect={() => pick(toTildeSshPath(k.private_path))}
+              >
+                {k.name}
+              </DropdownMenuItem>
+            ))
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
+        aria-label="Browse for an identity file"
+        title="Browse…"
+        onClick={browse}
+      >
+        <FolderOpen className="size-3.5" />
+      </Button>
+    </div>
   );
 }
 
