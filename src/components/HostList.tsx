@@ -12,11 +12,21 @@ import {
   Plus,
   Upload,
   Tags,
+  MoreHorizontal,
+  FolderInput,
+  Trash2,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
 import { useUiStore } from "@/stores/ui";
-import { useConnect, useHostsQuery, useReorderHosts, useTerminals } from "@/lib/queries";
+import {
+  useConnect,
+  useHostsQuery,
+  useMoveHost,
+  useRemoveHost,
+  useReorderHosts,
+  useTerminals,
+} from "@/lib/queries";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
 import { Input } from "@/components/ui/input";
@@ -36,11 +46,35 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { cn, basename } from "@/lib/utils";
 import { isWildcardOnly, labelsFor, secondaryLine, shortLabels } from "@/lib/host-display";
 import { hostMatches, parseQuery } from "@/lib/host-filter";
+import { toast } from "sonner";
 import { buildNewOrder } from "@/lib/reorder";
 import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 
@@ -91,6 +125,11 @@ interface HostRowProps {
   onDeployKey?: () => void;
   /** Render tag chips after the alias (file grouping only — tag groups ARE the tag). */
   showTags?: boolean;
+  /** Other loaded files as "Move to file" targets (empty = hide the submenu). */
+  moveTargets?: { file: string; label: string }[];
+  onMoveTo?: (file: string) => void;
+  /** Opens the shared remove-confirmation dialog (owned by HostList). */
+  onRemove?: () => void;
   /** Row can be drag-reordered (within its source file). Off while searching. */
   draggable?: boolean;
   /** True while THIS row is the drag source — rendered semi-transparent. */
@@ -118,6 +157,9 @@ function HostRow({
   onConnect,
   onDeployKey,
   showTags,
+  moveTargets = [],
+  onMoveTo,
+  onRemove,
   draggable,
   dragging,
   indicator,
@@ -151,9 +193,12 @@ function HostRow({
           "group flex h-7 w-full items-center gap-2 rounded-[6px] pr-2 pl-2 text-left select-none",
           "transition-[background-color,padding] duration-100",
           "hover:bg-muted/70 focus-visible:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
-          // Reserve room for the overlay Play button while it's visible so the
-          // right-aligned secondary slides clear instead of colliding with it.
-          onConnect && "group-hover/row:pr-8 [&:has(+button:focus-visible)]:pr-8",
+          // Reserve room for the overlay buttons (⋯ + Play) while visible so the
+          // right-aligned secondary slides clear instead of colliding with them.
+          onConnect &&
+            (onDeployKey
+              ? "group-hover/row:pr-14 [&:has(~button:focus-visible)]:pr-14 [&:has(~[data-state=open])]:pr-14"
+              : "group-hover/row:pr-8 [&:has(~button:focus-visible)]:pr-8"),
           draggable && "active:cursor-grabbing",
           dragging && "opacity-40",
           active && "bg-primary/12 hover:bg-primary/15",
@@ -215,6 +260,60 @@ function HostRow({
        * row is hovered/focused (or the button itself is focused for keyboard
        * users). Stops propagation so it never also selects the row.
        */}
+      {onDeployKey && (
+        /* Hover ⋯ — the same actions as the right-click menu, but visible. */
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label={`Actions for ${host.alias}`}
+              title="Actions"
+              onClick={(e) => e.stopPropagation()}
+              className="absolute inset-y-0 right-7 my-auto size-6 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100"
+            >
+              <MoreHorizontal className="size-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {onConnect && (
+              <DropdownMenuItem onSelect={onConnect}>
+                <Play className="size-3.5" />
+                Connect
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem onSelect={onDeployKey}>
+              <Upload className="size-3.5" />
+              Deploy key…
+            </DropdownMenuItem>
+            {onMoveTo && moveTargets.length > 0 && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <FolderInput className="size-3.5" />
+                  Move to file
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {moveTargets.map((t) => (
+                    <DropdownMenuItem key={t.file} onSelect={() => onMoveTo(t.file)}>
+                      {t.label}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
+            {onRemove && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onSelect={onRemove}>
+                  <Trash2 className="size-3.5" />
+                  Remove…
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
       {onConnect && (
         <Button
           type="button"
@@ -250,6 +349,7 @@ function HostRow({
 
   if (!onDeployKey) return row;
 
+  // Mirrors the ⋯ dropdown above — keep both item lists in the same order.
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
@@ -264,6 +364,30 @@ function HostRow({
           <Upload className="size-3.5" />
           Deploy key…
         </ContextMenuItem>
+        {onMoveTo && moveTargets.length > 0 && (
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>
+              <FolderInput className="size-3.5" />
+              Move to file
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent>
+              {moveTargets.map((t) => (
+                <ContextMenuItem key={t.file} onSelect={() => onMoveTo(t.file)}>
+                  {t.label}
+                </ContextMenuItem>
+              ))}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+        )}
+        {onRemove && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem variant="destructive" onSelect={onRemove}>
+              <Trash2 className="size-3.5" />
+              Remove…
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -306,6 +430,10 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const terminals = useTerminals();
   const connect = useConnect();
   const reorderHosts = useReorderHosts();
+  const moveHost = useMoveHost();
+  const removeHost = useRemoveHost();
+  // Row-menu remove confirmation — one dialog shared by every row.
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
   // ALL loaded source files (same cache entry App reads) — drives the scope
   // Select even for files that currently have zero hosts.
@@ -315,6 +443,31 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const autoLabels = useMemo(() => shortLabels(files), [files]);
   // …overlaid with the user's per-file display aliases (an override wins).
   const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
+  // "Move to file" targets per SOURCE file (a host's own file never appears).
+  // Keyed by source_file, not section — tag-mode sections aren't files.
+  const moveTargetsByFile = useMemo(
+    () =>
+      new Map(
+        files.map((src) => [
+          src,
+          files
+            .filter((f) => f !== src)
+            .map((f) => ({ file: f, label: labels.get(f) ?? basename(f) })),
+        ]),
+      ),
+    [files, labels],
+  );
+
+  const moveTo = (alias: string, targetFile: string) =>
+    moveHost.mutate(
+      { alias, targetFile },
+      {
+        onSuccess: () =>
+          toast.success(
+            `Moved ${alias} → ${labels.get(targetFile) ?? basename(targetFile)}`,
+          ),
+      },
+    );
 
   // Inline group-label rename (double-click a header) — transient local state.
   const [editingFile, setEditingFile] = useState<string | null>(null);
@@ -840,6 +993,9 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               onSelect={() => setSelectedAlias(host.alias)}
                               onConnect={() => connectTo(host.alias)}
                               onDeployKey={() => setDeployKeyAlias(host.alias)}
+                              moveTargets={moveTargetsByFile.get(host.source_file) ?? []}
+                              onMoveTo={(f) => moveTo(host.alias, f)}
+                              onRemove={() => setRemoveTarget(host.alias)}
                               showTags={showHostTags && groupMode === "file"}
                               draggable={canReorder && section.hosts.length > 1}
                               dragging={drag?.file === section.file && drag.index === i}
@@ -878,6 +1034,47 @@ export function HostList({ hosts, isLoading }: HostListProps) {
           if (!open) setViewFile(null);
         }}
       />
+
+      {/* Row-menu Remove… confirmation. Backend writes a backup before the edit. */}
+      <AlertDialog
+        open={removeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Remove <span className="font-mono">{removeTarget}</span>?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Deletes this Host block from its config file. A backup is written
+              first, so it can be restored from Backup history.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const alias = removeTarget;
+                if (alias === null) return;
+                setRemoveTarget(null);
+                removeHost.mutate(
+                  { alias },
+                  {
+                    onSuccess: () => {
+                      toast.success(`Removed ${alias}`);
+                      if (selectedAlias === alias) setSelectedAlias(null);
+                    },
+                  },
+                );
+              }}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
