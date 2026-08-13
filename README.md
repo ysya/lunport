@@ -14,7 +14,7 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 
 ## Features
 
-- **Lossless config editing** — a clean GUI host editor over `~/.ssh/config` and every `Include`d file; only the lines you change are touched, so comments, ordering, and unknown directives survive byte-for-byte.
+- **Lossless config editing** — a clean GUI host editor over `~/.ssh/config` and every `Include`d file; only the lines you change are touched, so comments, ordering, and unknown directives survive byte-for-byte. Create new config files from any file picker: SSHelter detects an existing `Include` glob (like `config.d/*`) and drops the file where it's already loaded, or adds the `Include` line for you.
 - **Connect** — launch `ssh <host>` into your terminal of choice (macOS Terminal/iTerm2, common Linux emulators), from a per-row button, the editor header, or the menubar tray's quick-connect list.
 - **Command palette (⌘K)** — fuzzy-jump to any host with your recent connections surfaced first; <kbd>Enter</kbd> connects, <kbd>⌘Enter</kbd> edits, plus quick actions (new host, deploy key, toggle theme, reload).
 - **Config intelligence** — per-host **key hygiene** (which IdentityFiles exist, IdentitiesOnly/explicit state), **ProxyJump chain** visualization (flags hops not defined in your config), and the resolved **effective config** (`ssh -G`); plus a global **linter** (invalid ports, unresolvable hosts, missing keys, shadowed aliases, duplicate directives).
