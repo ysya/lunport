@@ -29,6 +29,9 @@ interface UiState {
    */
   addHostTargetFile: string | null;
   setAddHostTargetFile: (file: string | null) => void;
+  /** Host targeted by the "Deploy key" dialog (null = closed). Session-only. */
+  deployKeyAlias: string | null;
+  setDeployKeyAlias: (alias: string | null) => void;
   /** Whether the Settings window is open (driven by ⌘, , the toolbar gear, and the palette). */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
@@ -65,6 +68,8 @@ export const useUiStore = create<UiState>()(
       setAddHostOpen: (addHostOpen) => set({ addHostOpen }),
       addHostTargetFile: null,
       setAddHostTargetFile: (addHostTargetFile) => set({ addHostTargetFile }),
+      deployKeyAlias: null,
+      setDeployKeyAlias: (deployKeyAlias) => set({ deployKeyAlias }),
       settingsOpen: false,
       setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
       paletteOpen: false,
