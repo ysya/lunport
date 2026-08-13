@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  History,
   Moon,
   Pencil,
   Plus,
@@ -12,6 +13,8 @@ import {
   TerminalSquare,
   Upload,
 } from "lucide-react";
+
+import type { HostSummary } from "@/bindings/HostSummary";
 
 import {
   useHostsQuery,
@@ -56,6 +59,9 @@ export function CommandPalette() {
   const open = useUiStore((s) => s.paletteOpen);
   const setOpen = useUiStore((s) => s.setPaletteOpen);
   const listRef = useRef<HTMLDivElement>(null);
+  // Controlled so the Recent group can hide as soon as the user types —
+  // otherwise its entries would double up with the Hosts group's hits.
+  const [query, setQuery] = useState("");
 
   const { data } = useHostsQuery();
   const hosts = data?.hosts ?? [];
@@ -81,6 +87,18 @@ export function CommandPalette() {
     hosts.some((h) => h.alias === selectedAlias && !isWildcardOnly(h))
       ? selectedAlias
       : null;
+
+  // Industry convention (Termius New Tab, Tabby selector): recents live in the
+  // launcher. Stale aliases (renamed/removed hosts) simply drop out here.
+  const recentConnections = useSettingsStore((s) => s.recentConnections);
+  const recentHosts = useMemo(() => {
+    const byAlias = new Map(hosts.map((h) => [h.alias, h]));
+    return Object.entries(recentConnections)
+      .sort(([, a], [, b]) => b - a)
+      .map(([alias]) => byAlias.get(alias))
+      .filter((h): h is HostSummary => h !== undefined && !isWildcardOnly(h))
+      .slice(0, 5);
+  }, [recentConnections, hosts]);
 
   // Global ⌘K / Ctrl+K toggle. Reads the CURRENT open state from the store so
   // the listener stays stable (identical to the previous setState-updater form).
@@ -161,11 +179,43 @@ export function CommandPalette() {
   );
 
   return (
-    <CommandDialog open={open} onOpenChange={setOpen}>
+    <CommandDialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setQuery("");
+      }}
+    >
       <Command onKeyDownCapture={onKeyDownCapture}>
-        <CommandInput placeholder="Search hosts or run a command…" />
+        <CommandInput
+          placeholder="Search hosts or run a command…"
+          value={query}
+          onValueChange={setQuery}
+        />
         <CommandList ref={listRef}>
           <CommandEmpty>No results.</CommandEmpty>
+
+          {query.trim() === "" && recentHosts.length > 0 && (
+            <CommandGroup heading="Recent">
+              {recentHosts.map((host) => (
+                <CommandItem
+                  key={`recent:${host.alias}`}
+                  value={`recent:${host.alias}`}
+                  data-alias={host.alias}
+                  onSelect={() => doConnect(host.alias)}
+                >
+                  <History className="text-muted-foreground" />
+                  <span className="font-mono">{host.alias}</span>
+                  {host.hostname && (
+                    <span className="ml-auto truncate pl-3 text-xs text-muted-foreground">
+                      {host.user ? `${host.user}@` : ""}
+                      {host.hostname}
+                    </span>
+                  )}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          )}
 
           {hosts.length > 0 && (
             <CommandGroup heading="Hosts">

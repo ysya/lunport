@@ -71,6 +71,9 @@ interface SettingsState {
   /** Show tag chips on sidebar host rows (file grouping only). */
   showHostTags: boolean;
   setShowHostTags: (enabled: boolean) => void;
+  /** alias → last successful connect (epoch ms); drives the ⌘K Recent group. */
+  recentConnections: Record<string, number>;
+  recordConnection: (alias: string) => void;
   /** Check GitHub Releases for a newer build shortly after launch. */
   autoCheckUpdates: boolean;
   setAutoCheckUpdates: (enabled: boolean) => void;
@@ -153,6 +156,16 @@ export const useSettingsStore = create<SettingsState>()(
       setFontSize: (fontSize) => set({ fontSize: clampFontSize(fontSize) }),
       showHostTags: true,
       setShowHostTags: (showHostTags) => set({ showHostTags }),
+      recentConnections: {},
+      recordConnection: (alias) =>
+        set((s) => {
+          const next = { ...s.recentConnections, [alias]: Date.now() };
+          // Keep the map bounded: only the 20 most recent survive.
+          const keep = Object.entries(next)
+            .sort(([, a], [, b]) => b - a)
+            .slice(0, 20);
+          return { recentConnections: Object.fromEntries(keep) };
+        }),
       autoCheckUpdates: true,
       setAutoCheckUpdates: (autoCheckUpdates) => set({ autoCheckUpdates }),
       trayVisible: true,

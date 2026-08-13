@@ -380,7 +380,11 @@ export function useConnect() {
         // `effectiveNewTab()` so this is false for unsupported terminals.
         newTab: newTab ?? null,
       }),
-    onSuccess: (_data, { alias }) => toast.success(`Launching ${alias}…`),
+    onSuccess: (_data, { alias }) => {
+      // Feeds the ⌘K "Recent" group; read via getState so this stays a plain fn.
+      useSettingsStore.getState().recordConnection(alias);
+      toast.success(`Launching ${alias}…`);
+    },
     onError: (e) => toast.error("Could not connect", { description: errMessage(e) }),
   });
 }
