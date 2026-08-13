@@ -24,6 +24,7 @@ import {
   TerminalSquare,
   Pencil,
   X,
+  Eye,
 } from "lucide-react";
 
 import type { HostDetail } from "@/bindings/HostDetail";
@@ -47,11 +48,15 @@ import {
   useDuplicateHost,
   useConnect,
   useTerminals,
+  useHasHostPassword,
+  useRevealHostPassword,
+  useSetHostPassword,
+  useDeleteHostPassword,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
-import { labelsFor } from "@/lib/host-display";
+import { isWildcardOnly, labelsFor } from "@/lib/host-display";
 import { basename, cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -434,6 +439,9 @@ function HostEditorForm({
               </SettingsGroup>
             </Section>
           )}
+
+          {/* Keychain-backed password — not an ssh_config field, saved on its own. */}
+          {!isWildcardOnly(detail) && <HostPasswordSection alias={detail.alias} />}
 
           {/* Read-only per-host intelligence: key hygiene, ProxyJump chain, ssh -G. */}
           <HostIntelligence alias={detail.alias} />
@@ -974,6 +982,150 @@ function DisabledOptionRow({ option, onEnable }: DisabledOptionRowProps) {
         aria-label={`Enable ${option.keyword}`}
       />
     </div>
+  );
+}
+
+/**
+ * This host's password, stored in the operating-system keychain.
+ *
+ * Deliberately NOT an ssh config field — it never touches any config file and
+ * takes no part in the form's save flow. ssh_config has no password directive;
+ * one written there would make ssh reject the file for every host.
+ */
+function HostPasswordSection({ alias }: { alias: string }) {
+  const [draft, setDraft] = useState("");
+  const [revealed, setRevealed] = useState(false);
+  const has = useHasHostPassword(alias);
+  const reveal = useRevealHostPassword();
+  const save = useSetHostPassword();
+  const remove = useDeleteHostPassword();
+
+  // Clear the draft when switching hosts so A's password can't land on B.
+  useEffect(() => {
+    setDraft("");
+    setRevealed(false);
+  }, [alias]);
+
+  const saved = has.data === true;
+
+  const copySaved = () =>
+    reveal.mutate(
+      { alias },
+      {
+        onSuccess: async (pw) => {
+          if (pw === null) return;
+          try {
+            await navigator.clipboard.writeText(pw);
+            toast.success("Password copied");
+          } catch {
+            toast.error("Clipboard unavailable");
+          }
+        },
+      },
+    );
+
+  return (
+    <Section
+      title="Password"
+      description="Stored in your operating system's keychain — never written to ~/.ssh/config."
+    >
+      <SettingsGroup>
+        <div className="flex items-center gap-1.5 px-3 py-2">
+          <Input
+            type={revealed ? "text" : "password"}
+            autoComplete="off"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={saved ? "Saved — press Show to view" : "Set a password"}
+            aria-label={`Password for ${alias}`}
+            className="h-7 flex-1 border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
+          />
+          {saved && (
+            <>
+              <Badge variant="secondary" className="shrink-0 select-none">
+                Saved
+              </Badge>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                className="h-7 shrink-0 text-muted-foreground"
+                disabled={reveal.isPending}
+                onClick={() =>
+                  reveal.mutate(
+                    { alias },
+                    {
+                      onSuccess: (pw) => {
+                        if (pw !== null) {
+                          setDraft(pw);
+                          setRevealed(true);
+                        }
+                      },
+                    },
+                  )
+                }
+              >
+                <Eye className="size-3.5" /> Show
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0 text-muted-foreground"
+                aria-label="Copy password"
+                disabled={reveal.isPending}
+                onClick={copySaved}
+              >
+                <Copy className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0 text-muted-foreground"
+                aria-label="Delete password"
+                disabled={remove.isPending}
+                onClick={() =>
+                  remove.mutate(
+                    { alias },
+                    {
+                      onSuccess: () => {
+                        toast.success("Password deleted");
+                        setDraft("");
+                        setRevealed(false);
+                      },
+                    },
+                  )
+                }
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </>
+          )}
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="h-7 shrink-0"
+            disabled={draft.trim() === "" || save.isPending}
+            onClick={() =>
+              save.mutate(
+                { alias, password: draft },
+                {
+                  onSuccess: () => {
+                    toast.success("Password saved");
+                    setDraft("");
+                    setRevealed(false);
+                  },
+                },
+              )
+            }
+          >
+            Save
+          </Button>
+        </div>
+      </SettingsGroup>
+    </Section>
   );
 }
 
