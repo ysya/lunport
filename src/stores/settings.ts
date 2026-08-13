@@ -68,6 +68,9 @@ interface SettingsState {
   /** Root font-size in px (the whole UI is rem-based and scales with it). */
   fontSize: number;
   setFontSize: (px: number) => void;
+  /** Show tag chips on sidebar host rows (file grouping only). */
+  showHostTags: boolean;
+  setShowHostTags: (enabled: boolean) => void;
   /** Check GitHub Releases for a newer build shortly after launch. */
   autoCheckUpdates: boolean;
   setAutoCheckUpdates: (enabled: boolean) => void;
@@ -148,6 +151,8 @@ export const useSettingsStore = create<SettingsState>()(
         }),
       fontSize: DEFAULT_FONT_SIZE,
       setFontSize: (fontSize) => set({ fontSize: clampFontSize(fontSize) }),
+      showHostTags: true,
+      setShowHostTags: (showHostTags) => set({ showHostTags }),
       autoCheckUpdates: true,
       setAutoCheckUpdates: (autoCheckUpdates) => set({ autoCheckUpdates }),
       trayVisible: true,

@@ -89,6 +89,8 @@ interface HostRowProps {
   onConnect?: () => void;
   /** Right-click "Deploy key…". Omitted = no context menu (defaults rows). */
   onDeployKey?: () => void;
+  /** Render tag chips after the alias (file grouping only — tag groups ARE the tag). */
+  showTags?: boolean;
   /** Row can be drag-reordered (within its source file). Off while searching. */
   draggable?: boolean;
   /** True while THIS row is the drag source — rendered semi-transparent. */
@@ -115,6 +117,7 @@ function HostRow({
   onSelect,
   onConnect,
   onDeployKey,
+  showTags,
   draggable,
   dragging,
   indicator,
@@ -171,9 +174,31 @@ function HostRow({
               ? "font-normal text-muted-foreground"
               : cn("font-medium", active ? "text-foreground" : "text-foreground/90"),
           )}
+          title={
+            showTags && host.tags.length > 0
+              ? `${host.alias} — tags: ${host.tags.join(", ")}`
+              : undefined
+          }
         >
           {host.alias}
         </span>
+        {showTags && host.tags.length > 0 && (
+          <span className="flex shrink-0 items-center gap-1" aria-hidden>
+            {host.tags.slice(0, 2).map((t) => (
+              <span
+                key={t}
+                className="max-w-16 truncate rounded bg-muted px-1 font-mono text-[0.625rem] leading-4 text-muted-foreground"
+              >
+                {t}
+              </span>
+            ))}
+            {host.tags.length > 2 && (
+              <span className="font-mono text-[0.625rem] text-muted-foreground/70">
+                +{host.tags.length - 2}
+              </span>
+            )}
+          </span>
+        )}
         {secondary && (
           <span
             className={cn(
@@ -276,6 +301,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const hostTerminals = useSettingsStore((s) => s.hostTerminals);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
   const fileAliases = useSettingsStore((s) => s.fileAliases);
+  const showHostTags = useSettingsStore((s) => s.showHostTags);
   const setFileAlias = useSettingsStore((s) => s.setFileAlias);
   const terminals = useTerminals();
   const connect = useConnect();
@@ -814,6 +840,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               onSelect={() => setSelectedAlias(host.alias)}
                               onConnect={() => connectTo(host.alias)}
                               onDeployKey={() => setDeployKeyAlias(host.alias)}
+                              showTags={showHostTags && groupMode === "file"}
                               draggable={canReorder && section.hosts.length > 1}
                               dragging={drag?.file === section.file && drag.index === i}
                               indicator={

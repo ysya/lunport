@@ -429,6 +429,8 @@ function AppearancePane() {
   const setTheme = useSettingsStore((s) => s.setTheme);
   const fontSize = useSettingsStore((s) => s.fontSize);
   const setFontSize = useSettingsStore((s) => s.setFontSize);
+  const showHostTags = useSettingsStore((s) => s.showHostTags);
+  const setShowHostTags = useSettingsStore((s) => s.setShowHostTags);
   return (
     <Section
       title="Appearance"
@@ -457,6 +459,17 @@ function AppearancePane() {
               ))}
             </SelectContent>
           </Select>
+        </SettingsRow>
+        <SettingsRow
+          id="set-show-host-tags"
+          label="Show tags in host list"
+          description="Tag chips on sidebar rows when grouping by file."
+        >
+          <Switch
+            id="set-show-host-tags"
+            checked={showHostTags}
+            onCheckedChange={setShowHostTags}
+          />
         </SettingsRow>
       </SettingsGroup>
     </Section>
