@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.0](https://github.com/ysya/sshelter/compare/v0.8.0...v0.9.0) (2026-08-13)
+
+
+### Features
+
+* **host-list:** add #tag [@user](https://github.com/user) search prefixes ([9e26e08](https://github.com/ysya/sshelter/commit/9e26e083f09243a83e539a116d22acfd10dfbfa2))
+* **host-list:** group hosts by file or by tag ([4bc643b](https://github.com/ysya/sshelter/commit/4bc643b3ba6f9344e6e509826fc88688e574632c))
+* **host-list:** show tag chips on host rows ([9c7b905](https://github.com/ysya/sshelter/commit/9c7b905a3fba7867087fc77e8fae0f1262d76e36))
+* **palette:** surface recent connections first ([daae0d2](https://github.com/ysya/sshelter/commit/daae0d297a3dd5f8a068ff16c51ab860e80fb87b))
+
+
+### Bug Fixes
+
+* **host-editor:** demote deploy button to the menu once a key is configured ([29df22f](https://github.com/ysya/sshelter/commit/29df22f7e95b7fad509538bd08144e94cafff8d6))
+
 ## [0.8.0](https://github.com/ysya/sshelter/compare/v0.7.0...v0.8.0) (2026-08-13)
 
 
