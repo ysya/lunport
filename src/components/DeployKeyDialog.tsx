@@ -9,9 +9,13 @@ import {
   XCircle,
 } from "lucide-react";
 
+import { useQueryClient } from "@tanstack/react-query";
+
 import type { DeployOutcome } from "@/bindings/DeployOutcome";
 import { pickDefaultPublicKey } from "@/lib/deploy-key-select";
+import { identityFileAction, toTildeSshPath } from "@/lib/identity-file";
 import {
+  queryKeys,
   useDeployKeyDirect,
   useDeployPreflight,
   useHasHostPassword,
@@ -19,6 +23,7 @@ import {
   useKeys,
   usePrecheckHostKey,
   useRevealHostPassword,
+  useSaveHost,
   useTrustHostKey,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
@@ -116,6 +121,10 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
   const [password, setPassword] = useState("");
   const [revealed, setRevealed] = useState(false);
   const [remember, setRemember] = useState(false);
+  /** Result-screen note about the host's IdentityFile (written / already set). */
+  const [identityNote, setIdentityNote] = useState<string | null>(null);
+  /** Pending "use this key instead" offer — the ~/.ssh value it would write. */
+  const [identityOffer, setIdentityOffer] = useState<string | null>(null);
 
   // Only rendered while the dialog is open, so the lazy keys query can run.
   const keysQ = useKeys({ enabled: true });
@@ -126,6 +135,8 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
   const precheck = usePrecheckHostKey();
   const trust = useTrustHostKey();
   const deploy = useDeployKeyDirect();
+  const saveHost = useSaveHost();
+  const queryClient = useQueryClient();
 
   // One advisory probe per dialog (the flow remounts per alias).
   const probe = preflight.mutate;
@@ -150,6 +161,21 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
 
   const busy = precheck.isPending || trust.isPending || deploy.isPending;
 
+  /** Write `IdentityFile <value>` to this host and reflect it on the result screen. */
+  function writeIdentityFile(value: string) {
+    saveHost.mutate(
+      { alias, changes: [{ keyword: "IdentityFile", value, remove: false }] },
+      {
+        onSuccess: () => {
+          setIdentityOffer(null);
+          setIdentityNote(`IdentityFile ${value} written to the host config.`);
+          queryClient.invalidateQueries({ queryKey: queryKeys.keyHygiene(alias) });
+        },
+        // Errors already toast via useSaveHost; the offer button stays usable.
+      },
+    );
+  }
+
   async function runDeploy() {
     const outcome = await deploy.mutateAsync({
       alias,
@@ -157,6 +183,23 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
       password,
       remember: remember && !keychainMissing,
     });
+    if (outcome.kind === "added" || outcome.kind === "alreadyPresent") {
+      // The key is on the remote now — make sure ssh will actually offer it.
+      const privateAbs = publicPath.replace(/\.pub$/, "");
+      const value = toTildeSshPath(privateAbs);
+      const existing = (hygiene.data?.identity_files ?? []).map((f) => f.path);
+      switch (identityFileAction(existing, privateAbs)) {
+        case "write":
+          writeIdentityFile(value);
+          break;
+        case "already":
+          setIdentityNote("The host config already points at this key.");
+          break;
+        case "offer":
+          setIdentityOffer(value);
+          break;
+      }
+    }
     setStage({ kind: "result", view: { kind: "outcome", outcome } });
   }
 
@@ -238,6 +281,10 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
     return (
       <ResultStage
         view={stage.view}
+        identityNote={identityNote}
+        identityOffer={identityOffer}
+        identityWriting={saveHost.isPending}
+        onWriteIdentity={writeIdentityFile}
         onRetry={() => setStage({ kind: "form" })}
         onClose={onClose}
       />
@@ -397,10 +444,18 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
 
 function ResultStage({
   view,
+  identityNote,
+  identityOffer,
+  identityWriting,
+  onWriteIdentity,
   onRetry,
   onClose,
 }: {
   view: ResultView;
+  identityNote: string | null;
+  identityOffer: string | null;
+  identityWriting: boolean;
+  onWriteIdentity: (value: string) => void;
   onRetry: () => void;
   onClose: () => void;
 }) {
@@ -473,6 +528,28 @@ function ResultStage({
         </DialogTitle>
         {detail && <DialogDescription>{detail}</DialogDescription>}
       </DialogHeader>
+      {identityNote && (
+        <p className="text-xs text-muted-foreground">{identityNote}</p>
+      )}
+      {identityOffer && (
+        <div className="space-y-1.5 rounded-md border bg-muted/40 p-3">
+          <p className="text-xs text-muted-foreground">
+            This host&rsquo;s config points at a different IdentityFile. Switch
+            it to the key you just deployed?
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={identityWriting}
+            onClick={() => onWriteIdentity(identityOffer)}
+          >
+            {identityWriting && <Loader2 className="size-3.5 animate-spin" />}
+            Use this key — IdentityFile{" "}
+            <span className="font-mono">{identityOffer}</span>
+          </Button>
+        </div>
+      )}
       <DialogFooter>
         {text.tone === "err" && (
           <Button type="button" variant="outline" onClick={onRetry}>
