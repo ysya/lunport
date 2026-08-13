@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/context-menu";
 import { cn, basename } from "@/lib/utils";
 import { isWildcardOnly, labelsFor, secondaryLine, shortLabels } from "@/lib/host-display";
+import { hostMatches, parseQuery } from "@/lib/host-filter";
 import { buildNewOrder } from "@/lib/reorder";
 import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 
@@ -74,19 +75,6 @@ function HostGlyph({ host }: { host: HostSummary }) {
   );
 }
 
-/** True if the host matches the (lowercased) search term across its searchable fields. */
-function matches(host: HostSummary, q: string): boolean {
-  if (!q) return true;
-  const hay = [
-    host.alias,
-    ...host.patterns,
-    ...host.tags,
-    host.source_file,
-  ]
-    .join(" ")
-    .toLowerCase();
-  return hay.includes(q);
-}
 
 interface HostRowProps {
   host: HostSummary;
@@ -357,9 +345,9 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const scope = fileScope && files.includes(fileScope) ? fileScope : null;
 
   const sections = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = parseQuery(search);
     const scoped = scope ? hosts.filter((h) => h.source_file === scope) : hosts;
-    const filtered = scoped.filter((h) => matches(h, q));
+    const filtered = scoped.filter((h) => hostMatches(h, q));
 
     // Group by source_file, preserving first-appearance order. A single-file
     // scope yields ONE headerless section (flat list).
@@ -472,7 +460,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
           <Input
             id={SEARCH_INPUT_ID}
             type="search"
-            placeholder="Search hosts…"
+            placeholder="Search…  #tag @user"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search hosts"
