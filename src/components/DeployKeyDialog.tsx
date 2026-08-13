@@ -44,7 +44,7 @@ import {
 
 type Stage =
   | { kind: "form" }
-  | { kind: "hostkey"; fingerprint: string; keyLine: string }
+  | { kind: "hostkey"; fingerprint: string }
   | { kind: "result"; view: ResultView };
 
 type ResultView =
@@ -157,11 +157,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
           await runDeploy();
           break;
         case "new":
-          setStage({
-            kind: "hostkey",
-            fingerprint: status.fingerprint,
-            keyLine: status.key_line,
-          });
+          setStage({ kind: "hostkey", fingerprint: status.fingerprint });
           break;
         case "mismatch":
           setStage({
@@ -181,9 +177,11 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
     }
   }
 
-  async function handleTrustAndContinue(keyLine: string) {
+  // The backend re-scans and writes its own key line; we only pass along the
+  // fingerprint the user actually confirmed, so a changed key aborts the trust.
+  async function handleTrustAndContinue(fingerprint: string) {
     try {
-      await trust.mutateAsync({ alias, keyLine });
+      await trust.mutateAsync({ alias, fingerprint });
       await runDeploy();
     } catch {
       // Toasted by the hooks; keep the fingerprint on screen.
@@ -214,7 +212,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
           </Button>
           <Button
             type="button"
-            onClick={() => handleTrustAndContinue(stage.keyLine)}
+            onClick={() => handleTrustAndContinue(stage.fingerprint)}
             disabled={busy}
           >
             {busy && <Loader2 className="size-4 animate-spin" />}

@@ -675,11 +675,15 @@ export function usePrecheckHostKey() {
   });
 }
 
-/** After the user confirms the fingerprint, append the host key to known_hosts. */
+/**
+ * After the user confirms the fingerprint, append the host key to known_hosts.
+ * Only the fingerprint crosses the IPC boundary — the backend re-scans and
+ * writes its own key line, so the frontend stays out of the trust path.
+ */
 export function useTrustHostKey() {
-  return useMutation<void, unknown, { alias: string; keyLine: string }>({
-    mutationFn: ({ alias, keyLine }) =>
-      tauriInvoke<void>("deploy_trust_host_key", { alias, keyLine }),
+  return useMutation<void, unknown, { alias: string; fingerprint: string }>({
+    mutationFn: ({ alias, fingerprint }) =>
+      tauriInvoke<void>("deploy_trust_host_key", { alias, fingerprint }),
     onError: (e) =>
       toast.error("Failed to trust host key", { description: errMessage(e) }),
   });
