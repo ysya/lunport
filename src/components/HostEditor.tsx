@@ -57,6 +57,7 @@ import {
   useSetHostPassword,
   useDeleteHostPassword,
   useKeys,
+  useKeyHygiene,
 } from "@/lib/queries";
 import { toTildeSshPath } from "@/lib/identity-file";
 import { useUiStore } from "@/stores/ui";
@@ -518,6 +519,11 @@ function HostActions({
   const { data } = useHostsQuery();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
   const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
+  // With an IdentityFile already configured the host is presumably keyed —
+  // deploy demotes from a headline button to a ⋯ menu item ("deploy another").
+  const hygiene = useKeyHygiene(detail.alias);
+  const deployable = !isWildcardOnly(detail);
+  const hasExplicitKey = hygiene.data?.explicit === true;
   const terminalId = useSettingsStore((s) => s.terminalId);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
   const hostTerminals = useSettingsStore((s) => s.hostTerminals);
@@ -608,8 +614,10 @@ function HostActions({
         </DropdownMenu>
       </div>
 
-      {/* Visible per-host deploy entry — the context menu alone was too hidden. */}
-      {!isWildcardOnly(detail) && (
+      {/* Visible per-host deploy entry — but only while the host has no
+          IdentityFile yet. Once keyed, deploying again is a rare action and
+          lives in the ⋯ menu instead of shouting from the header. */}
+      {deployable && hygiene.isSuccess && !hasExplicitKey && (
         <Button
           type="button"
           variant="outline"
@@ -636,6 +644,11 @@ function HostActions({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-44">
+            {deployable && hasExplicitKey && (
+              <DropdownMenuItem onSelect={() => setDeployKeyAlias(detail.alias)}>
+                <Upload className="size-4" /> Deploy another key…
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
               onSelect={() => {
                 setDupAlias(`${detail.alias}-copy`);
