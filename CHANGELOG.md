@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.7.0](https://github.com/ysya/sshelter/compare/v0.6.1...v0.7.0) (2026-08-13)
+
+
+### Features
+
+* **askpass:** add SSH_ASKPASS helper mode with prompt whitelist ([e413437](https://github.com/ysya/sshelter/commit/e413437095fcb199c2d5517e229fc242d0cfd2e0))
+* **askpass:** dispatch to helper mode before Tauri init ([be79556](https://github.com/ysya/sshelter/commit/be79556b1ff7c295766123fa477fdcd8c7c90d54))
+* **deploy:** add deploy/precheck/secrets Tauri commands ([1b1b449](https://github.com/ysya/sshelter/commit/1b1b4491f09c6f26de1491b92bc817bf8d72052e))
+* **deploy:** add host key precheck against known_hosts ([dbd93c0](https://github.com/ysya/sshelter/commit/dbd93c0b4bf7633281678dad90d1b3e4e6a21cb6))
+* **deploy:** add in-app key deployment dialog ([b3c3780](https://github.com/ysya/sshelter/commit/b3c3780a63944832f5a00e69fb2ffad32b70520d))
+* **deploy:** add pure argv builder, remote script and outcome classifier ([a343133](https://github.com/ysya/sshelter/commit/a343133f5e57d6b416d123c681744a44db4de36e))
+* **deploy:** warn about old OpenSSH and password-blocking config ([94c8b19](https://github.com/ysya/sshelter/commit/94c8b1981de7d575fa2c7550b4a0214d71203744))
+* **host-editor:** manage the host password stored in the OS keychain ([79f70fd](https://github.com/ysya/sshelter/commit/79f70fdd0c74817179c92b84506ce70594892542))
+* **host-list:** right-click a host to deploy a key ([777fe89](https://github.com/ysya/sshelter/commit/777fe89d99b2968278b6bc6e232eb86f6683ea53))
+* **queries:** add deploy and host-password hooks ([d6a89a9](https://github.com/ysya/sshelter/commit/d6a89a9ba8ffab921ef7715d51c84814134e1eed))
+* **secrets:** add OS keychain wrapper for per-host passwords ([be59a76](https://github.com/ysya/sshelter/commit/be59a76211a2c456fed964edde808c784f8ef3a5))
+
+
+### Bug Fixes
+
+* **askpass:** anchor prompt whitelist to real OpenSSH client behavior ([325b34c](https://github.com/ysya/sshelter/commit/325b34ce49810ad6cf3ba54e4dd4f749c141fd6e))
+* **askpass:** correct module doc and use lossy argv decoding ([e1a3c68](https://github.com/ysya/sshelter/commit/e1a3c683729249182c093aed44bacf75a22dd4cf))
+* **deploy-ui:** trust the host key by confirmed fingerprint, not key line ([d0ee77d](https://github.com/ysya/sshelter/commit/d0ee77d28aac33e279a2268652378752c03b430b))
+* **deploy:** close config/timeout/keychain gaps in the deploy commands ([a075bbd](https://github.com/ysya/sshelter/commit/a075bbdb81d51166d3d2ea41f2159d9fce45aeae))
+* **deploy:** guard authorized_keys corruption and misclassified auth failures ([aac2fc9](https://github.com/ysya/sshelter/commit/aac2fc9e228c37a6a3b893a401ecad192c146c33))
+* **deploy:** parse known_hosts markers so CA-trusted and revoked hosts are handled correctly ([646ac75](https://github.com/ysya/sshelter/commit/646ac75f278335787b78a620de8e4a11d9dbe1e1))
+* **secrets:** trust any keyring error as unavailable, guard test cleanup ([5f1e44a](https://github.com/ysya/sshelter/commit/5f1e44a4f264614ed4725c3b0f267871d678e66a))
+
 ## [0.6.1](https://github.com/ysya/sshelter/compare/v0.6.0...v0.6.1) (2026-06-19)
 
 
