@@ -730,12 +730,18 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   // persist, so dragging is disabled entirely while searching — and in tag
   // view, where list position has no file position to map back to.
   const canReorder = !searchActive && groupMode === "file";
-  const [drag, setDrag] = useState<{ file: string; index: number } | null>(null);
+  const [drag, setDrag] = useState<{ file: string; index: number; alias: string } | null>(
+    null,
+  );
   const [dropGap, setDropGap] = useState<{ file: string; index: number } | null>(null);
+  // Cross-file drag target: the whole group highlights (the move appends at the
+  // file's end — there is no meaningful insertion position to point at).
+  const [dropFile, setDropFile] = useState<string | null>(null);
 
   const clearDrag = () => {
     setDrag(null);
     setDropGap(null);
+    setDropFile(null);
   };
 
   /** The insertion gap (0..n) a pointer position maps to: above or below row `index`. */
@@ -744,12 +750,34 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     return e.clientY < rect.top + rect.height / 2 ? index : index + 1;
   };
 
-  const rowDragStart = (file: string, index: number) => (e: DragEvent<HTMLElement>) => {
-    e.dataTransfer.effectAllowed = "move";
-    // Some WebViews won't start a drag without data; the source row itself is
-    // tracked in React state, not in the dataTransfer payload.
-    e.dataTransfer.setData("text/plain", "");
-    setDrag({ file, index });
+  const rowDragStart =
+    (file: string, index: number, alias: string) => (e: DragEvent<HTMLElement>) => {
+      e.dataTransfer.effectAllowed = "move";
+      // Some WebViews won't start a drag without data; the source row itself is
+      // tracked in React state, not in the dataTransfer payload.
+      e.dataTransfer.setData("text/plain", "");
+      setDrag({ file, index, alias });
+    };
+
+  /** Container-level cross-file drop: dragging onto ANOTHER file group moves the host there. */
+  const groupDragOver = (section: { kind: string; file: string }) => (e: DragEvent<HTMLElement>) => {
+    if (!drag || section.kind !== "file") return;
+    if (drag.file === section.file) {
+      if (dropFile !== null) setDropFile(null);
+      return; // row handlers own same-file insertion gaps
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dropFile !== section.file) setDropFile(section.file);
+  };
+
+  const groupDrop = (section: { kind: string; file: string }) => (e: DragEvent<HTMLElement>) => {
+    if (!drag || section.kind !== "file" || drag.file === section.file) return;
+    e.preventDefault();
+    const alias = drag.alias;
+    const target = section.file;
+    clearDrag();
+    moveTo(alias, target);
   };
 
   const rowDragOver = (file: string, index: number) => (e: DragEvent<HTMLElement>) => {
@@ -930,7 +958,15 @@ export function HostList({ hosts, isLoading }: HostListProps) {
               const alias = fileAliases[section.file];
               const isEditing = editingFile === section.file;
               return (
-                <div key={section.file} className="mb-3 last:mb-0">
+                <div
+                  key={section.file}
+                  className={cn(
+                    "mb-3 rounded-md transition-shadow last:mb-0",
+                    dropFile === section.file && "bg-primary/5 ring-1 ring-primary/40",
+                  )}
+                  onDragOver={groupDragOver(section)}
+                  onDrop={groupDrop(section)}
+                >
                   {section.name !== null && section.kind === "tag" && (
                     /* Tag headers only collapse — no rename, no file menu. */
                     <button
@@ -1122,7 +1158,11 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               onMoveTo={(f) => moveTo(host.alias, f)}
                               onRemove={() => setRemoveTarget(host.alias)}
                               showTags={showHostTags && groupMode === "file"}
-                              draggable={canReorder && section.hosts.length > 1}
+                              // Draggable when reordering OR a cross-file move
+                              // is possible (single-host files can drag out).
+                              draggable={
+                                canReorder && (section.hosts.length > 1 || files.length > 1)
+                              }
                               dragging={drag?.file === section.file && drag.index === i}
                               indicator={
                                 dropGap?.file === section.file
@@ -1134,7 +1174,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                                       : null
                                   : null
                               }
-                              onDragStart={rowDragStart(section.file, i)}
+                              onDragStart={rowDragStart(section.file, i, host.alias)}
                               onDragOver={rowDragOver(section.file, i)}
                               onDrop={rowDrop(section.file, i)}
                               onDragEnd={clearDrag}
