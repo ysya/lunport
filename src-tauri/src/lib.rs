@@ -16,8 +16,8 @@ use config::commands::*;
 use config::intel::{config_effective, config_jump_chain, config_key_hygiene, config_lint};
 use connect::{connect_launch, connect_list_terminals};
 use deploy::{
-    deploy_key, deploy_precheck_host_key, deploy_trust_host_key, secrets_delete, secrets_get,
-    secrets_has, secrets_set,
+    deploy_key, deploy_precheck_host_key, deploy_preflight, deploy_trust_host_key, secrets_delete,
+    secrets_get, secrets_has, secrets_set,
 };
 use keys::{
     keys_agent_status, keys_deploy, keys_generate, keys_generate_in_terminal, keys_list,
@@ -120,6 +120,7 @@ pub fn run() {
             deploy_precheck_host_key,
             deploy_trust_host_key,
             deploy_key,
+            deploy_preflight,
             secrets_has,
             secrets_get,
             secrets_set,

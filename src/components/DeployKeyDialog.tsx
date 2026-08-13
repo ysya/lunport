@@ -13,6 +13,7 @@ import type { DeployOutcome } from "@/bindings/DeployOutcome";
 import { pickDefaultPublicKey } from "@/lib/deploy-key-select";
 import {
   useDeployKeyDirect,
+  useDeployPreflight,
   useHasHostPassword,
   useKeyHygiene,
   useKeys,
@@ -121,9 +122,19 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
   const hygiene = useKeyHygiene(alias);
   const hasPassword = useHasHostPassword(alias);
   const reveal = useRevealHostPassword();
+  const preflight = useDeployPreflight();
   const precheck = usePrecheckHostKey();
   const trust = useTrustHostKey();
   const deploy = useDeployKeyDirect();
+
+  // One advisory probe per dialog (the flow remounts per alias).
+  const probe = preflight.mutate;
+  useEffect(() => {
+    probe({ alias });
+  }, [probe, alias]);
+
+  const askpassBlocked = preflight.data ? !preflight.data.askpassSupported : false;
+  const keychainMissing = preflight.data ? !preflight.data.keychainAvailable : false;
 
   const deployable = (keysQ.data ?? []).filter((k) => k.public_path !== null);
 
@@ -144,7 +155,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
       alias,
       publicPath,
       password,
-      remember,
+      remember: remember && !keychainMissing,
     });
     setStage({ kind: "result", view: { kind: "outcome", outcome } });
   }
@@ -247,6 +258,21 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
       </DialogHeader>
 
       <div className="space-y-4">
+        {askpassBlocked && (
+          <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            This machine&rsquo;s OpenSSH is older than 8.5 and cannot auto-fill
+            the password. Use the terminal-based deploy from the Keys dialog
+            instead.
+          </p>
+        )}
+        {preflight.data?.passwordAuthBlocked && (
+          <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+            This host&rsquo;s config sets{" "}
+            <span className="font-mono">PreferredAuthentications</span> without
+            password, so the password will never be used. Deploy will fail with
+            &ldquo;Permission denied&rdquo;.
+          </p>
+        )}
         <div className="space-y-1.5">
           <Label htmlFor="deploy-key">Public key</Label>
           <Select value={publicPath} onValueChange={setPublicPath}>
@@ -324,15 +350,26 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
           )}
         </div>
 
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="deploy-remember"
-            checked={remember}
-            onCheckedChange={(v) => setRemember(v === true)}
-          />
-          <Label htmlFor="deploy-remember" className="font-normal">
-            Remember this host&rsquo;s password (stored in your keychain)
-          </Label>
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            {/* Without a credential store nothing could actually be saved —
+                a checkable box here would simply be lying to the user. */}
+            <Checkbox
+              id="deploy-remember"
+              checked={keychainMissing ? false : remember}
+              disabled={keychainMissing}
+              onCheckedChange={(v) => setRemember(v === true)}
+            />
+            <Label htmlFor="deploy-remember" className="font-normal">
+              Remember this host&rsquo;s password (stored in your keychain)
+            </Label>
+          </div>
+          {keychainMissing && (
+            <p className="text-xs text-muted-foreground">
+              No credential store on this machine — the password will be used
+              once and not saved.
+            </p>
+          )}
         </div>
       </div>
 
@@ -347,7 +384,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
           <Button
             type="button"
             onClick={handleDeploy}
-            disabled={busy || publicPath === "" || password === ""}
+            disabled={busy || publicPath === "" || password === "" || askpassBlocked}
           >
             {busy && <Loader2 className="size-4 animate-spin" />}
             Deploy

@@ -521,7 +521,85 @@ fn run_ssh_deploy(
     ))
 }
 
+// ─── 部署前的環境檢查（純函式） ──────────────────────────────────────────────
+
+/// 閘門是 OpenSSH **8.5**：`SSH_ASKPASS_REQUIRE` 雖然 8.4 就有，但 kbdint 提示的
+/// `(user@host) ` 前綴要到 8.5 才加入，而白名單已不接受裸的 `Password: `。
+/// 認不出版本時回 true（保守放行，讓真正的部署去回報實際錯誤）。
+pub fn openssh_supports_askpass_require(version_line: &str) -> bool {
+    let Some(rest) = version_line.split("OpenSSH_").nth(1) else {
+        return true;
+    };
+    let digits: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = digits.split('.');
+    let (Some(major), Some(minor)) = (parts.next(), parts.next()) else {
+        return true;
+    };
+    match (major.parse::<u32>(), minor.parse::<u32>()) {
+        (Ok(major), Ok(minor)) => major > 8 || (major == 8 && minor >= 5),
+        _ => true,
+    }
+}
+
+/// 使用者的設定是否讓密碼認證根本用不上。
+pub fn password_auth_is_blocked(pairs: &[(String, String)]) -> bool {
+    let Some((_, value)) = pairs
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("preferredauthentications"))
+    else {
+        return false; // 未設定 → ssh 預設含 password
+    };
+    !value
+        .split(',')
+        .any(|m| matches!(m.trim(), "password" | "keyboard-interactive"))
+}
+
+/// 部署前的環境檢查結果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct DeployPreflight {
+    /// 本機 ssh 是否夠新（>= 8.5）可自動填密碼。
+    pub askpass_supported: bool,
+    /// 這台 host 的設定是否封鎖了密碼認證。
+    pub password_auth_blocked: bool,
+    /// 本機是否有可用的密鑰環。false 時密碼只能經環境變數傳給 helper，且無法「記住」。
+    pub keychain_available: bool,
+}
+
 // ─── Tauri commands ──────────────────────────────────────────────────────────
+
+/// 諮詢性質的環境檢查 —— 只產生警告，不擋部署（硬閘門住在 `deploy_key` 裡）。
+/// probe 刻意與 `effective_pairs` 同一條路（無 `-F`，建模實際會跑的 `ssh <alias>`）；
+/// 探測失敗時回退為「沒有警告」，讓真正的部署去回報實際錯誤。
+#[tauri::command(async)]
+pub fn deploy_preflight(
+    state: tauri::State<crate::state::AppState>,
+    alias: String,
+) -> Result<DeployPreflight, AppError> {
+    let version = Command::new("ssh")
+        .arg("-V")
+        .output()
+        .map(|o| {
+            // ssh -V 寫到 stderr。
+            let mut s = String::from_utf8_lossy(&o.stderr).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stdout));
+            s
+        })
+        .unwrap_or_default();
+
+    let pairs = effective_pairs(&state, &alias).unwrap_or_default();
+
+    Ok(DeployPreflight {
+        askpass_supported: openssh_supports_askpass_require(&version),
+        password_auth_blocked: password_auth_is_blocked(&pairs),
+        keychain_available: crate::secrets::available(),
+    })
+}
 
 #[tauri::command(async)]
 pub fn deploy_precheck_host_key(
@@ -1192,5 +1270,52 @@ mod tests {
             compare_host_keys(scanned, hashed, &ep),
             HostKeyStatus::Mismatch { .. }
         ));
+    }
+
+    // ── 部署前的環境檢查 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn openssh_version_gate_requires_8_5() {
+        // SSH_ASKPASS_REQUIRE 是 OpenSSH 8.4 引入的，但 kbdint 的 `(user@host) ` 前綴要到
+        // 8.5 才有。白名單已不接受裸的 `Password: `，所以閘門必須是 8.5 而非 8.4。
+        assert!(openssh_supports_askpass_require("OpenSSH_10.2p1, LibreSSL 3.3.6"));
+        assert!(openssh_supports_askpass_require("OpenSSH_9.6p1, LibreSSL 3.3.6"));
+        assert!(openssh_supports_askpass_require("OpenSSH_8.5p1, OpenSSL 1.1.1"));
+        assert!(!openssh_supports_askpass_require("OpenSSH_8.4p1, OpenSSL 1.1.1"));
+        assert!(!openssh_supports_askpass_require("OpenSSH_8.3p1, OpenSSL 1.1.1"));
+        assert!(!openssh_supports_askpass_require("OpenSSH_7.9p1, LibreSSL 2.7.3"));
+        // 認不出來時保守放行，讓實際部署去回報真正的錯誤。
+        assert!(openssh_supports_askpass_require("something unparseable"));
+    }
+
+    #[test]
+    fn detects_jump_hosts_so_deploy_can_refuse_them() {
+        // 這不是「不支援」而是「必須拒絕」：askpass 的環境變數會被 ProxyCommand 子進程
+        // 繼承，跳板的密碼提示是完全合法的形狀，白名單擋不住 —— 結果是把目標主機的密碼
+        // 送給跳板主機。
+        assert!(has_proxy(&pairs(&[("proxyjump", "bastion")])));
+        assert!(has_proxy(&pairs(&[("proxycommand", "ssh -W %h:%p bastion")])));
+        // `none` 是明確停用，不算跳板。
+        assert!(!has_proxy(&pairs(&[("proxyjump", "none")])));
+        assert!(!has_proxy(&pairs(&[("proxycommand", "none")])));
+        assert!(!has_proxy(&pairs(&[("proxyjump", "")])));
+        assert!(!has_proxy(&pairs(&[("hostname", "10.0.0.9")])));
+    }
+
+    #[test]
+    fn detects_config_that_blocks_password_auth() {
+        // 使用者若全域設了 PreferredAuthentications publickey，密碼永遠用不到，
+        // 部署會以 "Permission denied" 失敗 —— 那個訊息會被誤讀成「密碼錯」。
+        let blocked = pairs(&[("preferredauthentications", "publickey")]);
+        assert!(password_auth_is_blocked(&blocked));
+
+        let ok = pairs(&[("preferredauthentications", "publickey,password")]);
+        assert!(!password_auth_is_blocked(&ok));
+
+        let ki = pairs(&[("preferredauthentications", "keyboard-interactive")]);
+        assert!(!password_auth_is_blocked(&ki));
+
+        // 沒設就是 ssh 的預設值，包含 password。
+        assert!(!password_auth_is_blocked(&pairs(&[("user", "frank")])));
     }
 }

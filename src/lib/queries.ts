@@ -22,6 +22,7 @@ import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { AgentStatus } from "@/bindings/AgentStatus";
 import type { KnownHostEntry } from "@/bindings/KnownHostEntry";
 import type { DeployOutcome } from "@/bindings/DeployOutcome";
+import type { DeployPreflight } from "@/bindings/DeployPreflight";
 import type { HostKeyStatus } from "@/bindings/HostKeyStatus";
 
 /**
@@ -705,6 +706,22 @@ export function useDeployKeyDirect() {
       }),
     onError: (e) =>
       toast.error("Deploy failed", { description: errMessage(e) }),
+  });
+}
+
+/**
+ * Advisory environment probe for the deploy dialog: old OpenSSH, config that
+ * blocks password auth, missing credential store. Warnings only — the hard
+ * gates live in the deploy_key command itself.
+ */
+export function useDeployPreflight() {
+  return useMutation<DeployPreflight, unknown, { alias: string }>({
+    mutationFn: ({ alias }) =>
+      tauriInvoke<DeployPreflight>("deploy_preflight", { alias }),
+    onError: (e) =>
+      toast.error("Failed to check deploy prerequisites", {
+        description: errMessage(e),
+      }),
   });
 }
 
