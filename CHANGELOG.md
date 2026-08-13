@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.0](https://github.com/ysya/sshelter/compare/v0.10.0...v0.11.0) (2026-08-13)
+
+
+### Features
+
+* **config:** new-config-file dialog with live include preview ([9c3ac32](https://github.com/ysya/sshelter/commit/9c3ac32b1b58e87f70f2b3ce9dffae42004d25c0))
+* **config:** plan and create included config files ([f1fe215](https://github.com/ysya/sshelter/commit/f1fe215a8d16d4b49e8fcef3a3b55cbad4a17561))
+* **host-list:** create a new config file from every file picker ([b3668d0](https://github.com/ysya/sshelter/commit/b3668d0df7a17fd8e2ad62014ae1d64a927dba4d))
+
 ## [0.10.0](https://github.com/ysya/sshelter/compare/v0.9.0...v0.10.0) (2026-08-13)
 
 

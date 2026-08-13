@@ -1,6 +1,6 @@
 [package]
 name = "sshelter"
-version = "0.10.0"
+version = "0.11.0"
 description = "SSHelter — a cross-platform desktop manager for your local OpenSSH config, keys, agent, and known_hosts."
 authors = ["Frank Sung"]
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
