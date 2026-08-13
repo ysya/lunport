@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+/** What the New-config-file dialog should do after the file exists. */
+export type NewFileIntent =
+  | { kind: "scope" }
+  | { kind: "addHost" }
+  | { kind: "move"; aliases: string[] };
+
 /** localStorage key for persisted sidebar NAVIGATION state (scope + collapsed groups). */
 export const UI_STORAGE_KEY = "sshelter-ui";
 
@@ -41,6 +47,9 @@ interface UiState {
    */
   deployKeyInitialPub: string | null;
   setDeployKeyInitialPub: (path: string | null) => void;
+  /** New-config-file dialog: open while non-null; says how to continue after. */
+  newFileIntent: NewFileIntent | null;
+  setNewFileIntent: (intent: NewFileIntent | null) => void;
   /** Whether the Settings window is open (driven by ⌘, , the toolbar gear, and the palette). */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
@@ -83,6 +92,8 @@ export const useUiStore = create<UiState>()(
       setDeployKeyAlias: (deployKeyAlias) => set({ deployKeyAlias }),
       deployKeyInitialPub: null,
       setDeployKeyInitialPub: (deployKeyInitialPub) => set({ deployKeyInitialPub }),
+      newFileIntent: null,
+      setNewFileIntent: (newFileIntent) => set({ newFileIntent }),
       settingsOpen: false,
       setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
       paletteOpen: false,

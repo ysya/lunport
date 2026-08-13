@@ -18,6 +18,7 @@ import { BackupHistoryDialog } from "@/components/BackupHistoryDialog";
 import { KeysDialog } from "@/components/KeysDialog";
 import { KnownHostsDialog } from "@/components/KnownHostsDialog";
 import { DeployKeyDialog } from "@/components/DeployKeyDialog";
+import { NewConfigFileDialog } from "@/components/NewConfigFileDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
@@ -177,6 +178,7 @@ function App() {
         <CommandPalette />
         <SettingsDialog />
         <DeployKeyDialog />
+        <NewConfigFileDialog />
         <Toaster />
       </div>
     </TooltipProvider>

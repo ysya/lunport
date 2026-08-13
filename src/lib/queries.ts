@@ -22,6 +22,7 @@ import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { AgentStatus } from "@/bindings/AgentStatus";
 import type { KnownHostEntry } from "@/bindings/KnownHostEntry";
 import type { DeployOutcome } from "@/bindings/DeployOutcome";
+import type { NewFilePlan } from "@/bindings/NewFilePlan";
 import type { DeployPreflight } from "@/bindings/DeployPreflight";
 import type { HostKeyStatus } from "@/bindings/HostKeyStatus";
 
@@ -251,6 +252,31 @@ export function useDuplicateHost() {
  * a path is provided — mount the consumer only while its dialog is open so each
  * open refetches the current on-disk text.
  */
+/**
+ * Dry-run for the New-config-file dialog: where the file would land and
+ * whether the main config gains an Include line. Errors (bad names) surface
+ * inline in the dialog, so deliberately no toast here.
+ */
+export function usePlanNewFile() {
+  return useMutation<NewFilePlan, unknown, { name: string }>({
+    mutationFn: ({ name }) =>
+      tauriInvoke<NewFilePlan>("config_plan_new_file", { name }),
+  });
+}
+
+/** Create the planned config file (and Include line when needed), then reload. */
+export function useCreateConfigFile() {
+  const queryClient = useQueryClient();
+  return useMutation<string, unknown, { name: string }>({
+    mutationFn: ({ name }) => tauriInvoke<string>("config_create_file", { name }),
+    // Return the invalidation so per-call onSuccess runs AFTER the refreshed
+    // files list lands — continuations (scope/add-host/move) depend on it.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["config"] }),
+    onError: (e) =>
+      toast.error("Failed to create config file", { description: errMessage(e) }),
+  });
+}
+
 export function useFileText(path: string | null) {
   return useQuery<string>({
     queryKey: queryKeys.fileText(path ?? ""),
