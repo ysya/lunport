@@ -93,6 +93,8 @@ pub fn run() {
             app_set_close_to_tray,
             config_load,
             config_list_files,
+            config_plan_new_file,
+            config_create_file,
             config_get_host,
             config_save_host,
             config_add_host,

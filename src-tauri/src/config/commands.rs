@@ -7,6 +7,8 @@ use tauri::State;
 use crate::config::dto::{host_detail, host_summaries, HostDetail, HostSummary};
 use crate::config::edit;
 use crate::config::include::{find_host_file_index, load_doc};
+use crate::config::model::{Directive, Item};
+use crate::config::newfile::{self, NewFilePlan};
 use crate::config::serialize::serialize_items;
 use crate::error::AppError;
 use crate::fsutil;
@@ -669,6 +671,106 @@ pub fn config_load(
     backed_up_lock.clear();
 
     Ok(LoadResult { files, hosts })
+}
+
+/// main config top-level 的 enabled Include 值(文件順序)。
+fn main_include_values(doc: &crate::config::model::SshConfigDoc) -> Vec<String> {
+    doc.files
+        .first()
+        .map(|main| {
+            main.items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Directive(d) if d.key == "include" && d.enabled => {
+                        Some(d.value.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 無副作用的建檔預覽:給對話框即時顯示「會建在哪、動不動 main config」。
+#[tauri::command]
+pub fn config_plan_new_file(
+    state: State<AppState>,
+    name: String,
+) -> Result<NewFilePlan, AppError> {
+    let doc_lock = state.doc.lock().unwrap();
+    let doc = doc_lock
+        .as_ref()
+        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    let main_dir = doc
+        .files
+        .first()
+        .and_then(|f| f.path.parent().map(|p| p.to_path_buf()))
+        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    let patterns = main_include_values(doc);
+    let mut plan =
+        newfile::plan_new_file(&name, &main_dir, &patterns, dirs::home_dir().as_deref())?;
+    plan.already_exists = Path::new(&plan.path).exists();
+    Ok(plan)
+}
+
+/// 建立空的 config 檔;未被既有 Include glob 涵蓋時,同時把 `Include` 行
+/// 插入 main config(既有 lossless/backup 機制),最後重載整份文件。
+#[tauri::command]
+pub fn config_create_file(state: State<AppState>, name: String) -> Result<String, AppError> {
+    let mut doc_lock = state.doc.lock().unwrap();
+    let mut backed_up_lock = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
+
+    let doc = doc_lock
+        .as_mut()
+        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    let main_path = doc
+        .files
+        .first()
+        .map(|f| f.path.clone())
+        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    let main_dir = main_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| AppError::Other("main config has no parent directory".to_string()))?;
+
+    let patterns = main_include_values(doc);
+    let plan = newfile::plan_new_file(&name, &main_dir, &patterns, dirs::home_dir().as_deref())?;
+
+    let target = PathBuf::from(&plan.path);
+    if target.exists() {
+        return Err(AppError::Other(format!(
+            "{} already exists",
+            target.display()
+        )));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+    }
+
+    // create_new:絕不覆蓋既有檔案;Unix 上以 0600 建立(ssh 慣例權限)。
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&target).map_err(AppError::Io)?;
+    }
+
+    if let Some(value) = &plan.include_value {
+        let idx = newfile::include_insert_index(&doc.files[0].items);
+        doc.files[0]
+            .items
+            .insert(idx, Item::Directive(Directive::new("Include", value, "")));
+        persist_file(doc, 0, &mut backed_up_lock, retention)?;
+    }
+
+    // 重載讓新(空)檔案進入 files 清單;失敗時檔案已建立,前端可手動 reload。
+    *doc_lock = Some(load_doc_migrated(&main_path)?);
+    Ok(plan.path)
 }
 
 #[tauri::command]

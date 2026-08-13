@@ -4,6 +4,7 @@ pub mod parser;
 pub mod serialize;
 pub mod edit;
 pub mod include;
+pub mod newfile;
 pub mod dto;
 pub mod commands;
 pub mod intel;
