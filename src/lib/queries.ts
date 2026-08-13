@@ -21,6 +21,8 @@ import type { BackupInfo } from "@/bindings/BackupInfo";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { AgentStatus } from "@/bindings/AgentStatus";
 import type { KnownHostEntry } from "@/bindings/KnownHostEntry";
+import type { DeployOutcome } from "@/bindings/DeployOutcome";
+import type { HostKeyStatus } from "@/bindings/HostKeyStatus";
 
 /**
  * Centralized query keys. The hosts list is the canonical cache: both
@@ -43,6 +45,7 @@ export const queryKeys = {
   keys: ["keys", "list"] as const,
   agent: ["keys", "agent"] as const,
   knownHosts: ["known_hosts"] as const,
+  hostPassword: (alias: string) => ["hostPassword", alias] as const,
 };
 
 /** Normalize a rejected-promise error (Tauri rejects with a string) to a message. */
@@ -611,6 +614,93 @@ export function useDeployKey() {
       }),
     onError: (e) =>
       toast.error("Failed to deploy key", { description: errMessage(e) }),
+  });
+}
+
+/** Whether the keychain holds a password for this host (does not fetch it). */
+export function useHasHostPassword(alias: string | null) {
+  return useQuery<boolean>({
+    queryKey: alias ? queryKeys.hostPassword(alias) : ["hostPassword", "none"],
+    queryFn: () => tauriInvoke<boolean>("secrets_has", { alias }),
+    enabled: !!alias,
+  });
+}
+
+/**
+ * Fetch this host's password from the keychain. Deliberately a mutation, not a
+ * query — the password is read only when the user explicitly asks to see it,
+ * never cached as part of rendering.
+ */
+export function useRevealHostPassword() {
+  return useMutation<string | null, unknown, { alias: string }>({
+    mutationFn: ({ alias }) =>
+      tauriInvoke<string | null>("secrets_get", { alias }),
+    onError: (e) =>
+      toast.error("Failed to read password", { description: errMessage(e) }),
+  });
+}
+
+export function useSetHostPassword() {
+  const queryClient = useQueryClient();
+  return useMutation<void, unknown, { alias: string; password: string }>({
+    mutationFn: ({ alias, password }) =>
+      tauriInvoke<void>("secrets_set", { alias, password }),
+    onSuccess: (_d, { alias }) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.hostPassword(alias) });
+    },
+    onError: (e) =>
+      toast.error("Failed to save password", { description: errMessage(e) }),
+  });
+}
+
+export function useDeleteHostPassword() {
+  const queryClient = useQueryClient();
+  return useMutation<void, unknown, { alias: string }>({
+    mutationFn: ({ alias }) => tauriInvoke<void>("secrets_delete", { alias }),
+    onSuccess: (_d, { alias }) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.hostPassword(alias) });
+    },
+    onError: (e) =>
+      toast.error("Failed to delete password", { description: errMessage(e) }),
+  });
+}
+
+/** Verify the host key before deploying so ssh can run with StrictHostKeyChecking=yes. */
+export function usePrecheckHostKey() {
+  return useMutation<HostKeyStatus, unknown, { alias: string }>({
+    mutationFn: ({ alias }) =>
+      tauriInvoke<HostKeyStatus>("deploy_precheck_host_key", { alias }),
+    onError: (e) =>
+      toast.error("Failed to check host key", { description: errMessage(e) }),
+  });
+}
+
+/** After the user confirms the fingerprint, append the host key to known_hosts. */
+export function useTrustHostKey() {
+  return useMutation<void, unknown, { alias: string; keyLine: string }>({
+    mutationFn: ({ alias, keyLine }) =>
+      tauriInvoke<void>("deploy_trust_host_key", { alias, keyLine }),
+    onError: (e) =>
+      toast.error("Failed to trust host key", { description: errMessage(e) }),
+  });
+}
+
+/** Deploy the public key directly from the app (no terminal involved). */
+export function useDeployKeyDirect() {
+  return useMutation<
+    DeployOutcome,
+    unknown,
+    { alias: string; publicPath: string; password: string; remember: boolean }
+  >({
+    mutationFn: ({ alias, publicPath, password, remember }) =>
+      tauriInvoke<DeployOutcome>("deploy_key", {
+        alias,
+        publicPath,
+        password,
+        remember,
+      }),
+    onError: (e) =>
+      toast.error("Deploy failed", { description: errMessage(e) }),
   });
 }
 
