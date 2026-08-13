@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   KeyRound,
   ChevronDown,
+  Upload,
 } from "lucide-react";
 
 import {
@@ -13,8 +14,10 @@ import {
   useEffectiveConfig,
 } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/ui";
 import { Section, SettingsGroup } from "@/components/settings-primitives";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
@@ -37,6 +40,7 @@ export function HostIntelligence({ alias }: { alias: string }) {
 
 function KeyHygieneSection({ alias }: { alias: string }) {
   const { data, isLoading } = useKeyHygiene(alias);
+  const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
 
   return (
     <Section
@@ -44,6 +48,15 @@ function KeyHygieneSection({ alias }: { alias: string }) {
       action={
         data ? (
           <div className="flex items-center gap-1.5 pb-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              className="h-6 text-muted-foreground"
+              onClick={() => setDeployKeyAlias(alias)}
+            >
+              <Upload className="size-3.5" /> Deploy key…
+            </Button>
             {data.identities_only ? (
               <Badge
                 variant="outline"

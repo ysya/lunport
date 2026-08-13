@@ -32,6 +32,12 @@ interface UiState {
   /** Host targeted by the "Deploy key" dialog (null = closed). Session-only. */
   deployKeyAlias: string | null;
   setDeployKeyAlias: (alias: string | null) => void;
+  /**
+   * Public key the deploy dialog should preselect (used by the Keys dialog's
+   * per-key entry; null = derive from the host's IdentityFile). Session-only.
+   */
+  deployKeyInitialPub: string | null;
+  setDeployKeyInitialPub: (path: string | null) => void;
   /** Whether the Settings window is open (driven by ⌘, , the toolbar gear, and the palette). */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
@@ -70,6 +76,8 @@ export const useUiStore = create<UiState>()(
       setAddHostTargetFile: (addHostTargetFile) => set({ addHostTargetFile }),
       deployKeyAlias: null,
       setDeployKeyAlias: (deployKeyAlias) => set({ deployKeyAlias }),
+      deployKeyInitialPub: null,
+      setDeployKeyInitialPub: (deployKeyInitialPub) => set({ deployKeyInitialPub }),
       settingsOpen: false,
       setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
       paletteOpen: false,

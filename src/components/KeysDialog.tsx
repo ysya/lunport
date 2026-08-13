@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ArrowLeft, Copy, KeyRound, Send } from "lucide-react";
+import { ArrowLeft, Copy, KeyRound, Send, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 import type { KeyInfo } from "@/bindings/KeyInfo";
@@ -13,6 +13,7 @@ import {
   useReadPublicKey,
 } from "@/lib/queries";
 import { useSettingsStore } from "@/stores/settings";
+import { useUiStore } from "@/stores/ui";
 import { isWildcardOnly } from "@/lib/host-display";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +49,10 @@ export function KeysDialog() {
   const [open, setOpen] = useState(false);
   // When set, the dialog shows the host picker to deploy THIS key's .pub.
   const [deployFor, setDeployFor] = useState<KeyInfo | null>(null);
+  // "app" hands off to the in-app deploy dialog; "terminal" runs ssh-copy-id.
+  const [deployMode, setDeployMode] = useState<"app" | "terminal">("app");
+  const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
+  const setDeployKeyInitialPub = useUiStore((s) => s.setDeployKeyInitialPub);
 
   // Lazy: shell out to ssh-keygen / ssh-add only while the dialog is open.
   const keysQ = useKeys({ enabled: open });
@@ -87,6 +92,14 @@ export function KeysDialog() {
 
   const deployTo = (alias: string) => {
     if (!deployFor?.public_path) return;
+    if (deployMode === "app") {
+      // Hand off to the in-app deploy dialog with THIS key preselected.
+      setOpen(false);
+      setDeployFor(null);
+      setDeployKeyInitialPub(deployFor.public_path);
+      setDeployKeyAlias(alias);
+      return;
+    }
     deploy.mutate(
       { alias, publicPath: deployFor.public_path, terminalOverride: terminalId },
       {
@@ -129,8 +142,14 @@ export function KeysDialog() {
                 Deploy <span className="font-mono">{deployFor.name}.pub</span>
               </DialogTitle>
               <DialogDescription>
-                Pick a host — <span className="font-mono">ssh-copy-id</span> runs in your
-                terminal and will ask for the password.
+                {deployMode === "app" ? (
+                  <>Pick a host — the deploy runs right here in the app.</>
+                ) : (
+                  <>
+                    Pick a host — <span className="font-mono">ssh-copy-id</span> runs in
+                    your terminal and will ask for the password.
+                  </>
+                )}
               </DialogDescription>
             </DialogHeader>
 
@@ -202,7 +221,14 @@ export function KeysDialog() {
                       info={k}
                       copying={readPublic.isPending}
                       onCopy={() => copyPublicKey(k)}
-                      onDeploy={() => setDeployFor(k)}
+                      onDeploy={() => {
+                        setDeployMode("terminal");
+                        setDeployFor(k);
+                      }}
+                      onDeployApp={() => {
+                        setDeployMode("app");
+                        setDeployFor(k);
+                      }}
                     />
                   ))}
                 </div>
@@ -254,11 +280,13 @@ function KeyRow({
   copying,
   onCopy,
   onDeploy,
+  onDeployApp,
 }: {
   info: KeyInfo;
   copying: boolean;
   onCopy: () => void;
   onDeploy: () => void;
+  onDeployApp: () => void;
 }) {
   const hasPub = info.public_path !== null;
   return (
@@ -321,14 +349,30 @@ function KeyRow({
               variant="ghost"
               size="icon"
               className="size-6 text-muted-foreground hover:text-foreground"
-              aria-label={`Deploy ${info.name} to a host`}
+              aria-label={`Deploy ${info.name} from the app`}
+              disabled={!hasPub}
+              onClick={onDeployApp}
+            >
+              <Upload className="size-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Deploy from app…</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-6 text-muted-foreground hover:text-foreground"
+              aria-label={`Deploy ${info.name} via the terminal`}
               disabled={!hasPub}
               onClick={onDeploy}
             >
               <Send className="size-3.5" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Deploy to host…</TooltipContent>
+          <TooltipContent>Deploy via terminal (ssh-copy-id)…</TooltipContent>
         </Tooltip>
       </div>
     </div>

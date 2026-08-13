@@ -94,12 +94,16 @@ function outcomeDetail(outcome: DeployOutcome): string | null {
 export function DeployKeyDialog() {
   const alias = useUiStore((s) => s.deployKeyAlias);
   const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
+  const setDeployKeyInitialPub = useUiStore((s) => s.setDeployKeyInitialPub);
 
   return (
     <Dialog
       open={alias !== null}
       onOpenChange={(next) => {
-        if (!next) setDeployKeyAlias(null);
+        if (!next) {
+          setDeployKeyAlias(null);
+          setDeployKeyInitialPub(null);
+        }
       }}
     >
       <DialogContent className="sm:max-w-md">
@@ -149,15 +153,22 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
 
   const deployable = (keysQ.data ?? []).filter((k) => k.public_path !== null);
 
+  // An explicit key handed over by the Keys dialog wins over any inference.
+  const initialPub = useUiStore((s) => s.deployKeyInitialPub);
+
   // Preselect once both sources have settled — seeding from keys alone would
   // lock in the single-key fallback before the host's IdentityFile arrives.
   useEffect(() => {
     if (publicPath !== "" || !keysQ.data) return;
+    if (initialPub) {
+      setPublicPath(initialPub);
+      return;
+    }
     if (hygiene.isPending) return;
     const identityFiles = (hygiene.data?.identity_files ?? []).map((f) => f.path);
     const preset = pickDefaultPublicKey(identityFiles, keysQ.data);
     if (preset) setPublicPath(preset);
-  }, [publicPath, keysQ.data, hygiene.isPending, hygiene.data]);
+  }, [publicPath, keysQ.data, hygiene.isPending, hygiene.data, initialPub]);
 
   const busy = precheck.isPending || trust.isPending || deploy.isPending;
 

@@ -10,6 +10,7 @@ import {
   Settings,
   Sun,
   TerminalSquare,
+  Upload,
 } from "lucide-react";
 
 import {
@@ -21,6 +22,7 @@ import {
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
+import { isWildcardOnly } from "@/lib/host-display";
 
 import {
   Command,
@@ -68,8 +70,17 @@ export function CommandPalette() {
   const toggleTheme = useSettingsStore((s) => s.toggleTheme);
   const terminals = useTerminals();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
+  const selectedAlias = useUiStore((s) => s.selectedAlias);
   const setAddHostOpen = useUiStore((s) => s.setAddHostOpen);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
+  const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
+
+  // Deploy targets real hosts only — wildcard blocks are defaults, not machines.
+  const deployTarget =
+    selectedAlias !== null &&
+    hosts.some((h) => h.alias === selectedAlias && !isWildcardOnly(h))
+      ? selectedAlias
+      : null;
 
   // Global ⌘K / Ctrl+K toggle. Reads the CURRENT open state from the store so
   // the listener stays stable (identical to the previous setState-updater form).
@@ -186,6 +197,18 @@ export function CommandPalette() {
           <CommandSeparator />
 
           <CommandGroup heading="Actions">
+            {deployTarget !== null && (
+              <CommandItem
+                value={`deploy key ssh ${deployTarget}`}
+                onSelect={() => {
+                  setOpen(false);
+                  setDeployKeyAlias(deployTarget);
+                }}
+              >
+                <Upload className="text-muted-foreground" />
+                Deploy key to <span className="font-mono">{deployTarget}</span>
+              </CommandItem>
+            )}
             <CommandItem value="new host create add" onSelect={doNewHost}>
               <Plus className="text-muted-foreground" />
               New host

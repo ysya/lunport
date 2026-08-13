@@ -25,6 +25,7 @@ import {
   Pencil,
   X,
   Eye,
+  Upload,
 } from "lucide-react";
 
 import type { HostDetail } from "@/bindings/HostDetail";
@@ -504,6 +505,7 @@ function HostActions({
   const terminals = useTerminals();
   const { data } = useHostsQuery();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
+  const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
   const terminalId = useSettingsStore((s) => s.terminalId);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
   const hostTerminals = useSettingsStore((s) => s.hostTerminals);
@@ -593,6 +595,19 @@ function HostActions({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+
+      {/* Visible per-host deploy entry — the context menu alone was too hidden. */}
+      {!isWildcardOnly(detail) && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7"
+          onClick={() => setDeployKeyAlias(detail.alias)}
+        >
+          <Upload className="size-4" /> Deploy key
+        </Button>
+      )}
 
       <AlertDialog>
         <DropdownMenu>
