@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import {
   Search,
   ServerOff,
@@ -15,6 +22,7 @@ import {
   MoreHorizontal,
   FolderInput,
   Trash2,
+  X,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
@@ -25,8 +33,10 @@ import {
   useMoveHost,
   useRemoveHost,
   useReorderHosts,
+  useSetTags,
   useTerminals,
 } from "@/lib/queries";
+import { rangeBetween } from "@/lib/selection-range";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
 import { Input } from "@/components/ui/input";
@@ -118,7 +128,10 @@ interface HostRowProps {
   delay: string;
   /** Wildcard-defaults rows are de-emphasized and not connectable. */
   variant: "host" | "defaults";
-  onSelect: () => void;
+  /** Receives the click event so the list can route ⌘/Shift to multi-select. */
+  onSelect: (e: ReactMouseEvent<HTMLButtonElement>) => void;
+  /** Multi-select membership — adds the checked-row tint. */
+  checked?: boolean;
   /** Omitted for defaults rows — connecting to `Host *` is meaningless. */
   onConnect?: () => void;
   /** Right-click "Deploy key…". Omitted = no context menu (defaults rows). */
@@ -154,6 +167,7 @@ function HostRow({
   delay,
   variant,
   onSelect,
+  checked,
   onConnect,
   onDeployKey,
   showTags,
@@ -202,6 +216,7 @@ function HostRow({
           draggable && "active:cursor-grabbing",
           dragging && "opacity-40",
           active && "bg-primary/12 hover:bg-primary/15",
+          checked && "bg-primary/8 ring-1 ring-inset ring-primary/30",
         )}
       >
         {isDefaults ? (
@@ -432,8 +447,33 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const reorderHosts = useReorderHosts();
   const moveHost = useMoveHost();
   const removeHost = useRemoveHost();
+  const setTags = useSetTags();
   // Row-menu remove confirmation — one dialog shared by every row.
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
+
+  // ── Multi-select ──────────────────────────────────────────────────────────
+  // Checked aliases are independent of the editor's single selection: ⌘-click
+  // toggles, Shift-click ranges from the last plain/⌘ click, plain click and
+  // Esc clear. Batch actions live in the sticky footer below the list.
+  const [checkedAliases, setCheckedAliases] = useState<Set<string>>(new Set());
+  const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null);
+  const [batchRemoveOpen, setBatchRemoveOpen] = useState(false);
+  const [tagDraft, setTagDraft] = useState<string | null>(null); // null = input closed
+
+  const clearChecked = () => {
+    setCheckedAliases(new Set());
+    setBatchRemoveOpen(false);
+    setTagDraft(null);
+  };
+
+  useEffect(() => {
+    if (checkedAliases.size === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") clearChecked();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [checkedAliases.size]);
 
   // ALL loaded source files (same cache entry App reads) — drives the scope
   // Select even for files that currently have zero hosts.
@@ -592,6 +632,90 @@ export function HostList({ hosts, isLoading }: HostListProps) {
       defaults: fileHosts.filter((h) => isWildcardOnly(h)),
     }));
   }, [hosts, search, scope, labels, groupMode]);
+
+  // Render-order aliases — the coordinate system for Shift-click ranges.
+  const visibleAliases = useMemo(
+    () => sections.flatMap((s) => s.hosts.map((h) => h.alias)),
+    [sections],
+  );
+
+  const rowClick =
+    (alias: string) => (e: ReactMouseEvent<HTMLButtonElement>) => {
+      if (e.metaKey || e.ctrlKey) {
+        setCheckedAliases((prev) => {
+          const next = new Set(prev);
+          if (next.has(alias)) next.delete(alias);
+          else next.add(alias);
+          return next;
+        });
+        setSelectionAnchor(alias);
+        return;
+      }
+      if (e.shiftKey) {
+        setCheckedAliases(
+          new Set(rangeBetween(visibleAliases, selectionAnchor, alias)),
+        );
+        return;
+      }
+      clearChecked();
+      setSelectionAnchor(alias);
+      setSelectedAlias(alias);
+    };
+
+  const batchMove = async (targetFile: string) => {
+    const targets = [...checkedAliases];
+    let moved = 0;
+    for (const alias of targets) {
+      const h = hosts.find((x) => x.alias === alias);
+      if (!h || h.source_file === targetFile) continue;
+      try {
+        await moveHost.mutateAsync({ alias, targetFile });
+        moved += 1;
+      } catch {
+        // Per-host failures already toast via the mutation; keep going.
+      }
+    }
+    toast.success(
+      `Moved ${moved}/${targets.length} → ${labels.get(targetFile) ?? basename(targetFile)}`,
+    );
+    clearChecked();
+  };
+
+  const batchTag = async (tag: string) => {
+    const t = tag.trim();
+    if (t === "") return;
+    const targets = [...checkedAliases];
+    let tagged = 0;
+    for (const alias of targets) {
+      const h = hosts.find((x) => x.alias === alias);
+      if (!h || h.tags.includes(t)) continue;
+      try {
+        await setTags.mutateAsync({ alias, tags: [...h.tags, t] });
+        tagged += 1;
+      } catch {
+        // Toasted by the mutation.
+      }
+    }
+    toast.success(`Tagged ${tagged}/${targets.length} with #${t}`);
+    clearChecked();
+  };
+
+  const batchRemove = async () => {
+    const targets = [...checkedAliases];
+    setBatchRemoveOpen(false);
+    let removed = 0;
+    for (const alias of targets) {
+      try {
+        await removeHost.mutateAsync({ alias });
+        removed += 1;
+        if (selectedAlias === alias) setSelectedAlias(null);
+      } catch {
+        // Toasted by the mutation.
+      }
+    }
+    toast.success(`Removed ${removed}/${targets.length} hosts`);
+    clearChecked();
+  };
 
   // "N hosts" reflects the scoped + filtered CONNECTABLE count (no wildcards).
   const hostCount = sections.reduce((n, s) => n + s.hosts.length, 0);
@@ -990,7 +1114,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               active={host.alias === selectedAlias}
                               delay={nextDelay()}
                               variant="host"
-                              onSelect={() => setSelectedAlias(host.alias)}
+                              onSelect={rowClick(host.alias)}
+                              checked={checkedAliases.has(host.alias)}
                               onConnect={() => connectTo(host.alias)}
                               onDeployKey={() => setDeployKeyAlias(host.alias)}
                               moveTargets={moveTargetsByFile.get(host.source_file) ?? []}
@@ -1027,6 +1152,100 @@ export function HostList({ hosts, isLoading }: HostListProps) {
       </div>
 
       {/* Raw config-file viewer (read-only, lazy fetch while open). */}
+      {/* Batch action bar — appears while any rows are checked (⌘/Shift-click). */}
+      {checkedAliases.size > 0 && (
+        <div className="shrink-0 space-y-1.5 border-t bg-background p-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground select-none">
+              {checkedAliases.size} selected
+            </span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-5 text-muted-foreground"
+              aria-label="Clear selection"
+              title="Clear selection (Esc)"
+              onClick={clearChecked}
+            >
+              <X className="size-3.5" />
+            </Button>
+          </div>
+          {tagDraft !== null ? (
+            <div className="flex items-center gap-1.5">
+              <Input
+                autoFocus
+                value={tagDraft}
+                onChange={(e) => setTagDraft(e.target.value)}
+                placeholder="tag name"
+                aria-label="Tag to add to the selected hosts"
+                className="h-7 flex-1 font-mono text-sm"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void batchTag(tagDraft);
+                  } else if (e.key === "Escape") {
+                    e.stopPropagation();
+                    setTagDraft(null);
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                size="sm"
+                className="h-7"
+                disabled={tagDraft.trim() === "" || setTags.isPending}
+                onClick={() => void batchTag(tagDraft)}
+              >
+                Apply
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 flex-1"
+                    disabled={files.length < 2 || moveHost.isPending}
+                  >
+                    <FolderInput className="size-3.5" /> Move to
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  {files.map((f) => (
+                    <DropdownMenuItem key={f} onSelect={() => void batchMove(f)}>
+                      {labels.get(f) ?? basename(f)}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 flex-1"
+                onClick={() => setTagDraft("")}
+              >
+                <Tags className="size-3.5" /> Add tag
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 flex-1 text-destructive hover:text-destructive"
+                disabled={removeHost.isPending}
+                onClick={() => setBatchRemoveOpen(true)}
+              >
+                <Trash2 className="size-3.5" /> Remove…
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
       <FileViewDialog
         path={viewFile}
         label={viewFile ? (labels.get(viewFile) ?? basename(viewFile)) : undefined}
@@ -1034,6 +1253,32 @@ export function HostList({ hosts, isLoading }: HostListProps) {
           if (!open) setViewFile(null);
         }}
       />
+
+      {/* Batch Remove… confirmation. */}
+      <AlertDialog open={batchRemoveOpen} onOpenChange={setBatchRemoveOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Remove {checkedAliases.size}{" "}
+              {checkedAliases.size === 1 ? "host" : "hosts"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              <span className="font-mono">
+                {[...checkedAliases].slice(0, 5).join(", ")}
+                {checkedAliases.size > 5 ? ", …" : ""}
+              </span>{" "}
+              — deletes each Host block from its config file. Backups are
+              written first.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void batchRemove()}>
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Row-menu Remove… confirmation. Backend writes a backup before the edit. */}
       <AlertDialog
