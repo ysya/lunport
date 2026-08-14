@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
+import { Bot, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
 
 import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
@@ -22,10 +22,12 @@ import { NewConfigFileDialog } from "@/components/NewConfigFileDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
+import { McpApprovalDialog } from "@/components/McpApprovalDialog";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { isWildcardOnly } from "@/lib/host-display";
+import { useMcpStatus } from "@/lib/mcp";
 import {
   Tooltip,
   TooltipContent,
@@ -65,6 +67,9 @@ function App() {
       },
     });
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
+  const setSettingsCategory = useUiStore((s) => s.setSettingsCategory);
+  const mcpStatus = useMcpStatus(2_000);
+  const pendingMcp = mcpStatus.data?.pending.length ?? 0;
 
   useEffect(() => {
     if (isError) {
@@ -136,9 +141,41 @@ function App() {
                   type="button"
                   variant="ghost"
                   size="icon"
+                  className="relative size-7"
+                  aria-label="AI access"
+                  onClick={() => {
+                    setSettingsCategory("ai");
+                    setSettingsOpen(true);
+                  }}
+                >
+                  <Bot
+                    className={cn(
+                      "size-4",
+                      mcpStatus.data?.enabled && "text-emerald-600 dark:text-emerald-400",
+                    )}
+                  />
+                  {pendingMcp > 0 && (
+                    <span className="absolute right-0 top-0 size-2 rounded-full bg-amber-500 ring-2 ring-background" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {pendingMcp > 0 ? `${pendingMcp} AI request pending` : "AI access"}
+              </TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
                   className="size-7"
                   aria-label="Settings"
-                  onClick={() => setSettingsOpen(true)}
+                  onClick={() => {
+                    setSettingsCategory("general");
+                    setSettingsOpen(true);
+                  }}
                 >
                   <Settings className="size-4" />
                 </Button>
@@ -179,6 +216,7 @@ function App() {
         <SettingsDialog />
         <DeployKeyDialog />
         <NewConfigFileDialog />
+        <McpApprovalDialog />
         <Toaster />
       </div>
     </TooltipProvider>

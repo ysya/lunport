@@ -7,6 +7,7 @@ mod error;
 mod fsutil;
 mod keys;
 mod known_hosts;
+pub mod mcp;
 mod secrets;
 mod settings_io;
 mod state;
@@ -24,6 +25,7 @@ use keys::{
     keys_read_public,
 };
 use known_hosts::{known_hosts_list, known_hosts_remove};
+use mcp::{mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
 use settings_io::{settings_export, settings_import};
 use tauri::Manager;
 use tray::tray_set_visible;
@@ -48,6 +50,16 @@ fn app_set_close_to_tray(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    run_app(false);
+}
+
+/// Start the desktop approval center on behalf of a stdio MCP adapter.
+/// Closing the window hides it instead of terminating active MCP access.
+pub fn run_mcp_host() {
+    run_app(true);
+}
+
+fn run_app(mcp_keep_alive: bool) {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
@@ -70,7 +82,8 @@ pub fn run() {
     }
     builder
         .manage(state::AppState::default())
-        .setup(|app| {
+        .setup(move |app| {
+            mcp::initialize(app.handle(), mcp_keep_alive)?;
             tray::rebuild_tray(app.handle(), &[])?;
             Ok(())
         })
@@ -80,6 +93,10 @@ pub fn run() {
                 if state
                     .close_to_tray
                     .load(std::sync::atomic::Ordering::Relaxed)
+                    || state
+                        .mcp
+                        .keep_alive
+                        .load(std::sync::atomic::Ordering::Relaxed)
                 {
                     // Hide to tray instead of quitting; the tray "Open SSHelter" item
                     // (show + set_focus) brings it back.
@@ -136,6 +153,10 @@ pub fn run() {
             tray_set_visible,
             settings_export,
             settings_import,
+            mcp_status,
+            mcp_set_enabled,
+            mcp_set_host_allowed,
+            mcp_resolve_request,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

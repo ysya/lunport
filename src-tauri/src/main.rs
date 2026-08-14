@@ -7,5 +7,10 @@ fn main() {
     if std::env::var_os("SSHELTER_ASKPASS").is_some() {
         sshelter_lib::askpass::run();
     }
-    sshelter_lib::run()
+
+    match std::env::args().nth(1).as_deref() {
+        Some("--mcp") => sshelter_lib::mcp::run_stdio(),
+        Some("--mcp-host") => sshelter_lib::run_mcp_host(),
+        _ => sshelter_lib::run(),
+    }
 }

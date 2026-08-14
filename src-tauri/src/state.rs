@@ -16,6 +16,8 @@ pub struct AppState {
     pub tray_visible: AtomicBool,
     /// When true, closing the main window hides it to the tray instead of quitting.
     pub close_to_tray: AtomicBool,
+    /// Local MCP bridge policy, pending approvals, and recent audit events.
+    pub mcp: crate::mcp::McpRuntime,
 }
 
 impl Default for AppState {
@@ -26,6 +28,7 @@ impl Default for AppState {
             backup_retention: Mutex::new(None),
             tray_visible: AtomicBool::new(true),
             close_to_tray: AtomicBool::new(false),
+            mcp: crate::mcp::McpRuntime::default(),
         }
     }
 }

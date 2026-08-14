@@ -3,6 +3,8 @@ import type { ComponentType, ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  Bot,
+  Copy,
   FolderCog,
   Monitor,
   Moon,
@@ -20,9 +22,9 @@ import {
   isEnabled as autostartIsEnabled,
 } from "@tauri-apps/plugin-autostart";
 
-import { useUiStore } from "@/stores/ui";
+import { useUiStore, type SettingsCategory } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
-import { useLoadConfig, usePlatform, useTerminals } from "@/lib/queries";
+import { useHostsQuery, useLoadConfig, usePlatform, useTerminals } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
 import { checkForUpdates } from "@/lib/updater";
 import {
@@ -39,6 +41,12 @@ import {
   type ThemePref,
 } from "@/lib/settings-logic";
 import { cn } from "@/lib/utils";
+import { isWildcardOnly } from "@/lib/host-display";
+import {
+  useMcpStatus,
+  useSetMcpEnabled,
+  useSetMcpHostAllowed,
+} from "@/lib/mcp";
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -52,6 +60,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -69,13 +78,16 @@ const TERMINAL_DEFAULT = "__default__";
 /** Sentinel for "keep all backups" (backupRetention = null). */
 const RETENTION_ALL = "__all__";
 
-type CategoryId = "general" | "appearance" | "connection" | "files" | "advanced";
-
-const CATEGORIES: { id: CategoryId; label: string; icon: ComponentType<{ className?: string }> }[] = [
+const CATEGORIES: {
+  id: SettingsCategory;
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+}[] = [
   { id: "general", label: "General", icon: Settings2 },
   { id: "appearance", label: "Appearance", icon: SunMoon },
   { id: "connection", label: "Connection", icon: TerminalSquare },
   { id: "files", label: "Files & Backups", icon: FolderCog },
+  { id: "ai", label: "AI Access", icon: Bot },
   { id: "advanced", label: "Advanced", icon: SlidersHorizontal },
 ];
 
@@ -90,7 +102,8 @@ const CATEGORIES: { id: CategoryId; label: string; icon: ComponentType<{ classNa
 export function SettingsDialog() {
   const open = useUiStore((s) => s.settingsOpen);
   const setOpen = useUiStore((s) => s.setSettingsOpen);
-  const [category, setCategory] = useState<CategoryId>("general");
+  const category = useUiStore((s) => s.settingsCategory);
+  const setCategory = useUiStore((s) => s.setSettingsCategory);
 
   // Global ⌘, / Ctrl+, shortcut — the macOS-standard Preferences accelerator.
   useEffect(() => {
@@ -151,6 +164,7 @@ export function SettingsDialog() {
               {category === "appearance" && <AppearancePane />}
               {category === "connection" && <ConnectionPane />}
               {category === "files" && <FilesPane />}
+              {category === "ai" && <McpPane />}
               {category === "advanced" && <AdvancedPane />}
             </div>
           </div>
@@ -622,6 +636,165 @@ function FilesPane() {
           </SettingsRow>
         </SettingsGroup>
       </Section>
+    </>
+  );
+}
+
+function shellQuoted(value: string, platform: string | undefined): string {
+  if (platform === "windows") {
+    return `"${value.replace(/"/g, '`"')}"`;
+  }
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function McpPane() {
+  const status = useMcpStatus(2_000);
+  const hostsQuery = useHostsQuery();
+  const platform = usePlatform();
+  const setEnabled = useSetMcpEnabled();
+  const setHostAllowed = useSetMcpHostAllowed();
+  const allowed = new Set(status.data?.allowed_hosts ?? []);
+  const hosts = (hostsQuery.data?.hosts ?? []).filter((host) => !isWildcardOnly(host));
+  const setupCommand = status.data
+    ? `codex mcp add sshelter -- ${shellQuoted(status.data.executable, platform.data)} --mcp`
+    : "";
+
+  const copySetup = async () => {
+    try {
+      await navigator.clipboard.writeText(setupCommand);
+      toast.success("Codex setup command copied");
+    } catch (error) {
+      toast.error("Could not copy setup command", { description: String(error) });
+    }
+  };
+
+  return (
+    <>
+      <Section
+        title="MCP access"
+        description="Let local AI clients request SSH actions through SSHelter. Remote commands always require an Allow once decision here."
+      >
+        <SettingsGroup>
+          <SettingsRow
+            id="set-mcp-enabled"
+            label="Enable AI access"
+            description="Disabling immediately denies every pending request."
+          >
+            <Switch
+              id="set-mcp-enabled"
+              checked={status.data?.enabled === true}
+              disabled={status.isLoading || setEnabled.isPending}
+              onCheckedChange={(enabled) => setEnabled.mutate(enabled)}
+            />
+          </SettingsRow>
+          <SettingsRow
+            label="Local approval bridge"
+            description={
+              status.data?.last_client_at_ms
+                ? `Last MCP activity ${new Date(status.data.last_client_at_ms).toLocaleString()}`
+                : "Waiting for a local MCP client."
+            }
+          >
+            <Badge variant={status.data?.bridge_active ? "secondary" : "outline"}>
+              {status.data?.bridge_active ? "Ready" : "Unavailable"}
+            </Badge>
+          </SettingsRow>
+        </SettingsGroup>
+      </Section>
+
+      <Section
+        title="Connect Codex"
+        description="Run this once in a terminal. Codex will launch or reconnect to the SSHelter approval center when needed."
+      >
+        <div className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2">
+          <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap px-1 font-mono text-xs">
+            {setupCommand || "Loading…"}
+          </code>
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon"
+            className="size-7 shrink-0"
+            aria-label="Copy Codex setup command"
+            disabled={!setupCommand}
+            onClick={copySetup}
+          >
+            <Copy className="size-3.5" />
+          </Button>
+        </div>
+      </Section>
+
+      <Section
+        title="Allowed hosts"
+        description="Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."
+      >
+        <SettingsGroup>
+          {hosts.length === 0 ? (
+            <p className="px-3 py-3 text-sm text-muted-foreground">No SSH hosts loaded.</p>
+          ) : (
+            hosts.map((host) => (
+              <SettingsRow
+                key={host.alias}
+                id={`mcp-host-${host.alias}`}
+                label={host.alias}
+                description={
+                  host.hostname
+                    ? `${host.user ? `${host.user}@` : ""}${host.hostname}`
+                    : "Uses the alias as its destination."
+                }
+                mono
+              >
+                <Switch
+                  id={`mcp-host-${host.alias}`}
+                  checked={allowed.has(host.alias)}
+                  disabled={setHostAllowed.isPending}
+                  onCheckedChange={(value) =>
+                    setHostAllowed.mutate({ alias: host.alias, allowed: value })
+                  }
+                />
+              </SettingsRow>
+            ))
+          )}
+        </SettingsGroup>
+      </Section>
+
+      <Section
+        title="Recent decisions"
+        description="This session-only log records the decision and exit status, not SSH credentials."
+      >
+        <SettingsGroup>
+          {(status.data?.recent.length ?? 0) === 0 ? (
+            <p className="px-3 py-3 text-sm text-muted-foreground">No AI commands yet.</p>
+          ) : (
+            status.data?.recent.slice(0, 10).map((entry) => (
+              <div key={entry.id} className="space-y-1 px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono text-xs">{entry.alias}</span>
+                  <Badge
+                    variant={entry.outcome === "allowed" ? "secondary" : "outline"}
+                    className={cn(
+                      entry.outcome === "allowed" &&
+                        "text-emerald-700 dark:text-emerald-300",
+                      entry.outcome !== "allowed" && "text-amber-700 dark:text-amber-300",
+                    )}
+                  >
+                    {entry.outcome.split("_").join(" ")}
+                    {entry.exit_code !== null ? ` · ${entry.exit_code}` : ""}
+                  </Badge>
+                </div>
+                <p className="truncate font-mono text-xs text-muted-foreground" title={entry.command}>
+                  {entry.command}
+                </p>
+              </div>
+            ))
+          )}
+        </SettingsGroup>
+      </Section>
+
+      <p className="text-xs text-muted-foreground">
+        This controls requests made through SSHelter MCP. It cannot prevent software running as
+        your OS account from invoking another SSH client directly.
+      </p>
     </>
   );
 }

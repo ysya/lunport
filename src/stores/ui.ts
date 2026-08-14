@@ -10,6 +10,14 @@ export type NewFileIntent =
 /** localStorage key for persisted sidebar NAVIGATION state (scope + collapsed groups). */
 export const UI_STORAGE_KEY = "sshelter-ui";
 
+export type SettingsCategory =
+  | "general"
+  | "appearance"
+  | "connection"
+  | "files"
+  | "ai"
+  | "advanced";
+
 interface UiState {
   /** Currently selected host alias in the master-detail layout (null = nothing selected). */
   selectedAlias: string | null;
@@ -53,6 +61,9 @@ interface UiState {
   /** Whether the Settings window is open (driven by ⌘, , the toolbar gear, and the palette). */
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+  /** Settings category selected by toolbar shortcuts; session-only. */
+  settingsCategory: SettingsCategory;
+  setSettingsCategory: (category: SettingsCategory) => void;
   /** Whether the ⌘K command palette is open (also driven by the global quick-connect hotkey). */
   paletteOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
@@ -96,6 +107,8 @@ export const useUiStore = create<UiState>()(
       setNewFileIntent: (newFileIntent) => set({ newFileIntent }),
       settingsOpen: false,
       setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+      settingsCategory: "general",
+      setSettingsCategory: (settingsCategory) => set({ settingsCategory }),
       paletteOpen: false,
       setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
     }),

@@ -25,6 +25,7 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **known_hosts editor** — view, search, and safely remove host-key entries (lossless line removal, backed up first) — the "host key changed after a reinstall" cleanup without the terminal.
 - **Host organization** — group the sidebar by source file or by tag (tag chips on rows, toggleable), search with `#tag` / `@user` prefixes, drag-to-reorder within a file or drop onto another file group to move, ⌘-click/Shift-click to multi-select with batch move / tag / remove, per-row hover actions (connect, deploy, move, remove), duplicate as a template, rename the `Host` line itself, and give source files custom display names.
 - **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), text size, menu bar icon & close-to-tray, launch at login, global quick-connect hotkey, default + per-host terminal, new-tab launch (iTerm2), custom config path, backup retention, discovery sources, drift auto-check, per-rule lint toggles, and settings export/import.
+- **AI Access (MCP)** — expose an explicit host allowlist to local MCP clients such as Codex. Read-only host/config tools stay scoped to that list; every remote command opens SSHelter, shows the resolved destination and exact command, and waits for an in-app **Allow once** or **Deny** decision. Recent decisions and exit codes remain visible in the interface.
 - **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings.
 
 ## Install
@@ -40,6 +41,14 @@ xattr -dr com.apple.quarantine /Applications/SSHelter.app
 ```
 
 Subsequent auto-updates install in-app and don't need this again.
+
+## AI Access (MCP)
+
+Open **Settings → AI Access**, enable access, and explicitly select each host an AI client may see. The same pane provides a ready-to-copy `codex mcp add` command that registers the installed SSHelter executable as a local stdio MCP server.
+
+The MCP adapter launches or reconnects to the SSHelter desktop approval center over an authenticated `127.0.0.1` bridge. It exposes three tools: `list_hosts`, `get_effective_config`, and `run`. `run` never executes until the desktop interface approves that exact request, and SSH output is bounded before it is returned to the client.
+
+MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so the host must already work with a key, agent, or other non-prompting authentication method. SSHelter does not forward passwords or key passphrases to the AI process. This gate controls requests made through SSHelter MCP; it is not an operating-system sandbox and cannot prevent another process running as your user from invoking `ssh` directly.
 
 ## Development
 
