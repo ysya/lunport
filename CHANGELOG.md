@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0](https://github.com/ysya/sshelter/compare/v0.12.0...v0.13.0) (2026-08-14)
+
+
+### Features
+
+* **keys:** hint how to enable the Windows ssh-agent service ([122b0a3](https://github.com/ysya/sshelter/commit/122b0a3c1f5d762a4844abd5fb48120ac37220a1))
+* **mcp:** add UI-controlled SSH access ([963467e](https://github.com/ysya/sshelter/commit/963467e5b5d26b8d9d78ea6e56a27e1ca14f7836))
+
 ## [0.12.0](https://github.com/ysya/sshelter/compare/v0.11.0...v0.12.0) (2026-08-14)
 
 
