@@ -18,6 +18,7 @@ on:
           - ubuntu-22.04
           - ubuntu-22.04-arm
           - macos-latest
+          - windows-latest
       args:
         description: "Extra tauri build args (e.g. --target aarch64-apple-darwin)"
         required: false

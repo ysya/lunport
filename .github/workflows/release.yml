@@ -49,6 +49,8 @@ jobs:
             args: ""
           - platform: ubuntu-22.04-arm # Linux arm64 (free on public repos)
             args: ""
+          - platform: windows-latest # Windows x86_64 (NSIS installer)
+            args: ""
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4

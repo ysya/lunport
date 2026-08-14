@@ -115,7 +115,27 @@ pub fn detect_terminals() -> Vec<TerminalInfo> {
     out
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn detect_terminals() -> Vec<TerminalInfo> {
+    let mut out = Vec::new();
+    // Windows Terminal when installed (per-user App Execution Alias on PATH)…
+    if which_in_path("wt.exe") {
+        out.push(TerminalInfo {
+            id: "wt".to_string(),
+            label: "Windows Terminal".to_string(),
+            supports_new_tab: true,
+        });
+    }
+    // …and cmd as the always-present fallback.
+    out.push(TerminalInfo {
+        id: "cmd".to_string(),
+        label: "Command Prompt".to_string(),
+        supports_new_tab: false,
+    });
+    out
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn detect_terminals() -> Vec<TerminalInfo> {
     let mut out = Vec::new();
 
@@ -296,6 +316,33 @@ pub fn build_launch_command(
                 args,
             })
         }
+        "wt" => {
+            // Windows Terminal execs the argv directly (no shell). `-w 0 nt`
+            // targets a tab in the most-recent window when asked; wt falls back
+            // to a new window when none exists.
+            let mut args: Vec<String> = if new_tab {
+                vec!["-w".into(), "0".into(), "nt".into()]
+            } else {
+                Vec::new()
+            };
+            args.extend(argv.iter().cloned());
+            Ok(LaunchSpec {
+                program: "wt.exe".into(),
+                args,
+            })
+        }
+        "cmd" => {
+            // `start` opens a fresh console; the inner `cmd /k` keeps it open
+            // after ssh exits, matching the mac/linux terminal behavior. The
+            // empty "" is start's window-title slot.
+            let mut args: Vec<String> =
+                vec!["/c".into(), "start".into(), String::new(), "cmd".into(), "/k".into()];
+            args.extend(argv.iter().cloned());
+            Ok(LaunchSpec {
+                program: "cmd".into(),
+                args,
+            })
+        }
         other => match linux_args(other, argv) {
             Some(args) => Ok(LaunchSpec {
                 program: other.to_string(),
@@ -357,6 +404,22 @@ pub fn connect_launch(
 mod tests {
     use super::*;
     use crate::config::include::load_doc;
+
+    #[test]
+    fn windows_terminal_spec_execs_argv_directly() {
+        let spec = build_launch("wt", "web", false).unwrap();
+        assert_eq!(spec.program, "wt.exe");
+        assert_eq!(spec.args, vec!["ssh", "web"]);
+        let tab = build_launch("wt", "web", true).unwrap();
+        assert_eq!(tab.args, vec!["-w", "0", "nt", "ssh", "web"]);
+    }
+
+    #[test]
+    fn cmd_spec_keeps_the_console_open_after_ssh_exits() {
+        let spec = build_launch("cmd", "web", false).unwrap();
+        assert_eq!(spec.program, "cmd");
+        assert_eq!(spec.args, vec!["/c", "start", "", "cmd", "/k", "ssh", "web"]);
+    }
 
     fn doc_with(content: &str) -> SshConfigDoc {
         let dir = tempfile::tempdir().unwrap();
