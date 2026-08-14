@@ -29,7 +29,9 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 
 ## Install
 
-Download the installer for your platform from [Releases](https://github.com/ysya/sshelter/releases/latest) (`.dmg` for macOS, `.AppImage`/`.deb`/`.rpm` for Linux — ignore the `.sig` files; they're update signatures).
+Download the installer for your platform from [Releases](https://github.com/ysya/sshelter/releases/latest) (`.dmg` for macOS, `.AppImage`/`.deb`/`.rpm` for Linux, `.exe` NSIS installer for Windows — ignore the `.sig` files; they're update signatures).
+
+**Windows:** the installer is not code-signed, so SmartScreen may warn — choose "More info → Run anyway". SSHelter drives the built-in OpenSSH client (`ssh` on PATH); connections open in Windows Terminal when installed, otherwise Command Prompt. Windows 10's bundled OpenSSH (8.1) is too old for the in-app key deploy's password automation — the dialog will say so and point you to the terminal-based deploy; Windows 11 (OpenSSH 8.6+) is fine.
 
 **macOS:** builds are not yet notarized with Apple, so Gatekeeper blocks the downloaded app (often as "damaged"). After dragging SSHelter to Applications, clear the quarantine flag once:
 
