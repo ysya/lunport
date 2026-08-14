@@ -98,3 +98,20 @@ jobs:
           # The release already exists (created by release-please); attach assets to it by tag.
           tagName: ${{ needs.release-please.outputs.tag_name }}
           args: ${{ matrix.args }}
+
+  # Submit the new version to winget-pkgs once every installer is uploaded.
+  # Needs the WINGET_TOKEN secret (classic PAT, public_repo scope) and the
+  # package to already exist in winget-pkgs (first version was submitted
+  # manually). continue-on-error: a missing token or moderation hiccup must
+  # never redden an otherwise-good release.
+  winget:
+    needs: [release-please, build]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: ysya.SSHelter
+          installers-regex: '_x64-setup\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
