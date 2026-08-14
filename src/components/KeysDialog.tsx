@@ -10,6 +10,7 @@ import {
   useGenerateKeyInTerminal,
   useHostsQuery,
   useKeys,
+  usePlatform,
   useReadPublicKey,
 } from "@/lib/queries";
 import { useSettingsStore } from "@/stores/settings";
@@ -253,23 +254,38 @@ function AgentStatusLine({
   keyCount: number;
   loading: boolean;
 }) {
+  const platform = usePlatform();
   return (
-    <div className="flex items-center gap-2 select-none">
-      <span
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          running ? "bg-emerald-500" : "bg-muted-foreground/40",
+    <div className="space-y-1 select-none">
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            running ? "bg-emerald-500" : "bg-muted-foreground/40",
+          )}
+          aria-hidden
+        />
+        {loading ? (
+          <span className="text-xs text-muted-foreground">checking agent…</span>
+        ) : running ? (
+          <span className="font-mono text-xs text-muted-foreground">
+            agent: {keyCount} {keyCount === 1 ? "key" : "keys"}
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">agent not running</span>
         )}
-        aria-hidden
-      />
-      {loading ? (
-        <span className="text-xs text-muted-foreground">checking agent…</span>
-      ) : running ? (
-        <span className="font-mono text-xs text-muted-foreground">
-          agent: {keyCount} {keyCount === 1 ? "key" : "keys"}
-        </span>
-      ) : (
-        <span className="text-xs text-muted-foreground">agent not running</span>
+      </div>
+      {/* Windows ships ssh-agent as a SERVICE that is disabled by default —
+          without this hint "agent not running" is a dead end. */}
+      {!loading && !running && platform.data === "windows" && (
+        <p className="pl-3.5 text-xs text-muted-foreground">
+          Enable the <span className="font-mono">OpenSSH Authentication Agent</span>{" "}
+          Windows service to keep passphrase-protected keys loaded — in
+          PowerShell (admin):{" "}
+          <span className="font-mono">
+            Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent
+          </span>
+        </p>
       )}
     </div>
   );
