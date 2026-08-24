@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/ysya/sshelter/compare/v0.13.0...v0.14.0) (2026-08-24)
+
+
+### Features
+
+* **hosts:** add SSH name copy and fix Windows commands ([65f65c9](https://github.com/ysya/sshelter/commit/65f65c92eae3b807b8f8a5d23c619ca674ecbb5f))
+
 ## [0.13.0](https://github.com/ysya/sshelter/compare/v0.12.0...v0.13.0) (2026-08-14)
 
 
