@@ -8,6 +8,7 @@ mod fsutil;
 mod keys;
 mod known_hosts;
 pub mod mcp;
+mod process;
 mod secrets;
 mod settings_io;
 mod state;

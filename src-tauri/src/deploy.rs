@@ -366,7 +366,7 @@ pub fn compare_host_keys(
 // ─── 執行層（有副作用，不做單元測試；以 Task 12 的手動驗證涵蓋） ─────────────
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// 這個 alias 是否經過跳板。
 ///
@@ -458,7 +458,7 @@ fn run_ssh_deploy(
 ) -> Result<DeployOutcome, AppError> {
     let exe = std::env::current_exe().map_err(AppError::Io)?;
 
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::process::background_command("ssh");
     cmd.args(build_deploy_argv(alias))
         .env("SSH_ASKPASS", &exe)
         .env("SSH_ASKPASS_REQUIRE", "force")
@@ -581,7 +581,7 @@ pub fn deploy_preflight(
     state: tauri::State<crate::state::AppState>,
     alias: String,
 ) -> Result<DeployPreflight, AppError> {
-    let version = Command::new("ssh")
+    let version = crate::process::background_command("ssh")
         .arg("-V")
         .output()
         .map(|o| {
@@ -611,7 +611,10 @@ pub fn deploy_precheck_host_key(
     require_default_config_root(&state)?;
     let ep = resolve_endpoint(&state, &alias)?;
 
-    let scanned = match Command::new("ssh-keyscan").args(keyscan_target(&ep)).output() {
+    let scanned = match crate::process::background_command("ssh-keyscan")
+        .args(keyscan_target(&ep))
+        .output()
+    {
         Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(HostKeyStatus::Unavailable {
@@ -624,7 +627,7 @@ pub fn deploy_precheck_host_key(
     // 用 `ssh-keygen -F` 查既有項目，而不是自己讀 known_hosts —— 它原生處理雜湊項目
     // （HashKnownHosts 在 Debian／Ubuntu 預設為 yes）。找不到時 exit 1、stdout 為空，
     // 那正是我們要的「這台是新主機」。
-    let known = Command::new("ssh-keygen")
+    let known = crate::process::background_command("ssh-keygen")
         .args(keygen_find_args(&ep))
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

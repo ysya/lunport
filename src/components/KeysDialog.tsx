@@ -54,6 +54,11 @@ export function KeysDialog() {
   const [deployMode, setDeployMode] = useState<"app" | "terminal">("app");
   const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
   const setDeployKeyInitialPub = useUiStore((s) => s.setDeployKeyInitialPub);
+  const platform = usePlatform();
+  // Windows OpenSSH has no ssh-copy-id. Its supported path is the app-native
+  // deploy flow, which uses ssh directly and never opens a terminal.
+  const terminalDeploySupported =
+    platform.data !== undefined && platform.data !== "windows";
 
   // Lazy: shell out to ssh-keygen / ssh-add only while the dialog is open.
   const keysQ = useKeys({ enabled: open });
@@ -222,10 +227,14 @@ export function KeysDialog() {
                       info={k}
                       copying={readPublic.isPending}
                       onCopy={() => copyPublicKey(k)}
-                      onDeploy={() => {
-                        setDeployMode("terminal");
-                        setDeployFor(k);
-                      }}
+                      onDeploy={
+                        terminalDeploySupported
+                          ? () => {
+                              setDeployMode("terminal");
+                              setDeployFor(k);
+                            }
+                          : undefined
+                      }
                       onDeployApp={() => {
                         setDeployMode("app");
                         setDeployFor(k);
@@ -301,7 +310,7 @@ function KeyRow({
   info: KeyInfo;
   copying: boolean;
   onCopy: () => void;
-  onDeploy: () => void;
+  onDeploy?: () => void;
   onDeployApp: () => void;
 }) {
   const hasPub = info.public_path !== null;
@@ -374,22 +383,24 @@ function KeyRow({
           </TooltipTrigger>
           <TooltipContent>Deploy from app…</TooltipContent>
         </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-6 text-muted-foreground hover:text-foreground"
-              aria-label={`Deploy ${info.name} via the terminal`}
-              disabled={!hasPub}
-              onClick={onDeploy}
-            >
-              <Send className="size-3.5" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Deploy via terminal (ssh-copy-id)…</TooltipContent>
-        </Tooltip>
+        {onDeploy && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-6 text-muted-foreground hover:text-foreground"
+                aria-label={`Deploy ${info.name} via the terminal`}
+                disabled={!hasPub}
+                onClick={onDeploy}
+              >
+                <Send className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Deploy via terminal (ssh-copy-id)…</TooltipContent>
+          </Tooltip>
+        )}
       </div>
     </div>
   );

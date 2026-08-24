@@ -3,8 +3,6 @@
 //! the IO/exec entry point (`discover_all`) is a thin, untested wrapper.
 
 use std::path::Path;
-use std::process::Command;
-
 use serde::{Deserialize, Serialize};
 
 use crate::config::model::{Item, SshConfigDoc};
@@ -268,7 +266,9 @@ fn read_known_hosts() -> Vec<KnownHostEntry> {
 }
 
 fn read_tailscale_status() -> Vec<TailscalePeer> {
-    let output = Command::new("tailscale").args(["status", "--json"]).output();
+    let output = crate::process::background_command("tailscale")
+        .args(["status", "--json"])
+        .output();
     match output {
         Ok(out) if out.status.success() => {
             let json = String::from_utf8_lossy(&out.stdout);

@@ -24,6 +24,7 @@ import {
   Trash2,
   X,
   FilePlus2,
+  Copy,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
@@ -191,6 +192,14 @@ function HostRow({
 }: HostRowProps) {
   const secondary = secondaryLine(host);
   const isDefaults = variant === "defaults";
+  const copySshName = async () => {
+    try {
+      await navigator.clipboard.writeText(host.alias);
+      toast.success(`Copied ${host.alias}`);
+    } catch {
+      toast.error("Clipboard unavailable");
+    }
+  };
   const row = (
     <li
       className="animate-row-enter group/row relative"
@@ -305,6 +314,10 @@ function HostRow({
                 Connect
               </DropdownMenuItem>
             )}
+            <DropdownMenuItem onSelect={() => void copySshName()}>
+              <Copy className="size-3.5" />
+              Copy SSH name
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={onDeployKey}>
               <Upload className="size-3.5" />
               Deploy key…
@@ -391,6 +404,10 @@ function HostRow({
             Connect
           </ContextMenuItem>
         )}
+        <ContextMenuItem onSelect={() => void copySshName()}>
+          <Copy className="size-3.5" />
+          Copy SSH name
+        </ContextMenuItem>
         <ContextMenuItem onSelect={onDeployKey}>
           <Upload className="size-3.5" />
           Deploy key…

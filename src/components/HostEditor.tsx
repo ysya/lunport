@@ -774,6 +774,15 @@ function HostHeaderTitle({ detail }: { detail: HostDetail }) {
   const [value, setValue] = useState("");
   const pending = renameHost.isPending;
 
+  const copySshName = async () => {
+    try {
+      await navigator.clipboard.writeText(detail.alias);
+      toast.success(`Copied ${detail.alias}`);
+    } catch {
+      toast.error("Clipboard unavailable");
+    }
+  };
+
   const startEdit = () => {
     setValue(detail.patterns.join(" "));
     setEditing(true);
@@ -853,6 +862,17 @@ function HostHeaderTitle({ detail }: { detail: HostDetail }) {
         <h2 className="truncate text-[0.9375rem] font-semibold tracking-tight">
           {detail.alias}
         </h2>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+          aria-label={`Copy SSH name ${detail.alias}`}
+          title="Copy SSH name"
+          onClick={() => void copySshName()}
+        >
+          <Copy className="size-3.5" />
+        </Button>
         <Button
           type="button"
           variant="ghost"

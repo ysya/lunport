@@ -23,7 +23,7 @@ pub fn effective_config(
     alias: &str,
     config_path: Option<&Path>,
 ) -> Result<Vec<(String, String)>, AppError> {
-    let mut cmd = std::process::Command::new("ssh");
+    let mut cmd = crate::process::background_command("ssh");
     if let Some(path) = config_path {
         cmd.arg("-F").arg(path);
     }

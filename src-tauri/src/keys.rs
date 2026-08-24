@@ -12,8 +12,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
 use serde::{Deserialize, Serialize};
 
 use crate::connect::{build_launch_command, detect_terminals, launch, validate_alias};
@@ -187,7 +185,12 @@ pub fn parse_keygen_l(line: &str) -> Option<KeygenFields> {
 
 /// Run `ssh-keygen -l -f <path>` (argv, no shell) and parse its output. Any failure → None.
 fn keygen_fields(path: &Path) -> Option<KeygenFields> {
-    let out = Command::new("ssh-keygen").arg("-l").arg("-f").arg(path).output().ok()?;
+    let out = crate::process::background_command("ssh-keygen")
+        .arg("-l")
+        .arg("-f")
+        .arg(path)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -216,7 +219,7 @@ pub fn parse_agent_list(exit_code: Option<i32>, stdout: &str) -> (AgentStatus, H
 
 /// Run `ssh-add -l` ONCE and interpret it (see `parse_agent_list`).
 fn agent_snapshot() -> (AgentStatus, HashSet<String>) {
-    match Command::new("ssh-add").arg("-l").output() {
+    match crate::process::background_command("ssh-add").arg("-l").output() {
         Ok(out) => parse_agent_list(out.status.code(), &String::from_utf8_lossy(&out.stdout)),
         Err(_) => parse_agent_list(None, ""),
     }
@@ -332,7 +335,7 @@ pub fn keys_generate(name: String, comment: Option<String>) -> Result<KeyInfo, A
     // Argv only, no shell. `-N ""` = empty passphrase (the UI carries the warning); `-q`
     // silences the banner. The comment is the dedicated argument after `-C` — never parsed
     // as an option.
-    let mut cmd = Command::new("ssh-keygen");
+    let mut cmd = crate::process::background_command("ssh-keygen");
     cmd.arg("-q").arg("-t").arg("ed25519").arg("-f").arg(&target).arg("-N").arg("");
     if let Some(c) = comment.as_deref() {
         cmd.arg("-C").arg(c);
@@ -382,6 +385,16 @@ pub fn keys_deploy(
     public_path: String,
     terminal_override: Option<String>,
 ) -> Result<(), AppError> {
+    // The built-in Windows OpenSSH distribution does not ship ssh-copy-id.
+    // Keep this backend guard even though the Windows UI hides the terminal
+    // action: direct IPC callers must get a useful error instead of a terminal
+    // that opens successfully only to report "command not found".
+    if cfg!(target_os = "windows") {
+        return Err(AppError::Other(
+            "ssh-copy-id is not available on Windows; use Deploy from app instead".to_string(),
+        ));
+    }
+
     // Alias must be a real host in the loaded doc AND pass the charset gate (no leading `-`).
     {
         let doc_lock = state.doc.lock().unwrap();

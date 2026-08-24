@@ -766,7 +766,7 @@ fn execute_ssh(
     timeout_seconds: u64,
     canceled: &AtomicBool,
 ) -> Result<RunOutput, String> {
-    let mut command = Command::new("ssh");
+    let mut command = crate::process::background_command("ssh");
     if let Some(path) = config_path {
         command.arg("-F").arg(path);
     }
