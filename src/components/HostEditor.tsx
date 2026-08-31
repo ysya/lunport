@@ -1186,7 +1186,7 @@ function HostPasswordSection({ alias }: { alias: string }) {
   return (
     <Section
       title="Password"
-      description="Stored in your operating system's keychain — never written to ~/.ssh/config."
+      description="Stored in your operating system's keychain — never written to ~/.ssh/config. Connect auto-fills it once the host key is trusted (not for ProxyJump or 2FA hosts)."
     >
       <SettingsGroup>
         <div className="flex items-center gap-1.5 px-3 py-2">

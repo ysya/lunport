@@ -353,6 +353,166 @@ pub fn build_launch_command(
     }
 }
 
+// ─── Password auto-fill (saved keychain password → askpass injection) ────────
+
+/// ssh argv (no program) for a password auto-fill connect. Mirrors the deploy
+/// argv's safety options but stays interactive: no `-T` (the session needs a
+/// pty), no pinned StrictHostKeyChecking (the caller pre-checks known_hosts),
+/// and no PreferredAuthentications so an existing working key still wins.
+pub fn autofill_ssh_argv(alias: &str) -> Vec<String> {
+    vec![
+        // A global `BatchMode yes` would silently disable password prompts.
+        "-o".to_string(), "BatchMode=no".to_string(),
+        // One wrong saved password must not burn three attempts against
+        // fail2ban-style lockouts.
+        "-o".to_string(), "NumberOfPasswordPrompts=1".to_string(),
+        // Same anti-phishing model as deploy (see `deploy::build_deploy_argv`):
+        // with kbdint off, every prompt the helper sees is client-generated;
+        // server-controlled text never reaches it. Cost: kbdint-only hosts
+        // (PAM 2FA) are not eligible for auto-fill — don't save a password there.
+        "-o".to_string(), "KbdInteractiveAuthentication=no".to_string(),
+        alias.to_string(),
+    ]
+}
+
+/// Wrap `argv` with env(1) assignments: `env K=V … <argv…>`. env scopes the
+/// variables to the ssh process only — nothing lingers in the shell session —
+/// and unlike `VAR=x cmd` prefixes it also works when the user's shell is fish.
+pub fn env_wrapped_argv(env_pairs: &[(String, String)], argv: &[String]) -> Vec<String> {
+    std::iter::once("env".to_string())
+        .chain(env_pairs.iter().map(|(k, v)| format!("{k}={v}")))
+        .chain(argv.iter().cloned())
+        .collect()
+}
+
+/// One `cmd /k` command string: set the variables, run the command, then CLEAR
+/// the variables. The clearing tail is load-bearing: `/k` keeps the console
+/// session alive after ssh exits, and a leftover SSH_ASKPASS +
+/// SSHELTER_ASKPASS_ACCOUNT would make a later manual `ssh otherhost` in that
+/// window consult our helper — which would answer with THIS host's password
+/// (cross-host disclosure). `&` (not `&&`) so the clears run even when ssh
+/// fails. `set "K=V"` keeps spaces in values (the install path) intact.
+fn windows_autofill_cmd_string(env_pairs: &[(String, String)], command_argv: &[String]) -> String {
+    let sets: Vec<String> = env_pairs
+        .iter()
+        .map(|(k, v)| format!("set \"{k}={v}\""))
+        .collect();
+    let clears: Vec<String> = env_pairs
+        .iter()
+        .map(|(k, _)| format!("& set \"{k}=\""))
+        .collect();
+    format!(
+        "{} && {} {}",
+        sets.join(" && "),
+        command_argv.join(" "),
+        clears.join(" ")
+    )
+}
+
+/// Build the terminal launch for a password auto-fill connect.
+///
+/// POSIX terminals run `env K=V … ssh …` (per-process scope; every argv element
+/// still goes through the existing quoting paths). Windows terminals cannot
+/// take env assignments as argv, so both wt and cmd run one `cmd /k` string
+/// that sets the variables, runs ssh, and clears them again — deterministic
+/// even when Windows Terminal gloms the tab onto an existing window process
+/// that never inherited our environment.
+pub fn build_autofill_launch(
+    terminal_id: &str,
+    alias: &str,
+    new_tab: bool,
+    env_pairs: &[(String, String)],
+) -> Result<LaunchSpec, AppError> {
+    let ssh_argv: Vec<String> = std::iter::once("ssh".to_string())
+        .chain(autofill_ssh_argv(alias))
+        .collect();
+    match terminal_id {
+        "wt" => {
+            let mut args: Vec<String> = if new_tab {
+                vec!["-w".into(), "0".into(), "nt".into()]
+            } else {
+                Vec::new()
+            };
+            args.extend([
+                "cmd".to_string(),
+                "/k".to_string(),
+                windows_autofill_cmd_string(env_pairs, &ssh_argv),
+            ]);
+            Ok(LaunchSpec { program: "wt.exe".into(), args })
+        }
+        "cmd" => Ok(LaunchSpec {
+            program: "cmd".into(),
+            args: vec![
+                "/c".into(),
+                "start".into(),
+                String::new(),
+                "cmd".into(),
+                "/k".into(),
+                windows_autofill_cmd_string(env_pairs, &ssh_argv),
+            ],
+        }),
+        other => build_launch_command(other, &env_wrapped_argv(env_pairs, &ssh_argv), new_tab),
+    }
+}
+
+/// Decide whether THIS connect can auto-fill the saved password, and build the
+/// askpass environment if so. Every gate falls back to a plain launch (`None`)
+/// — auto-fill is a convenience and must never make Connect stop working. The
+/// password itself NEVER appears in the launch command; the helper reads it
+/// from the keychain via SSHELTER_ASKPASS_ACCOUNT.
+///
+/// Gates, in order (all mirror in-app deploy's reasoning):
+/// 1. a non-empty saved password exists in the OS keychain,
+/// 2. the loaded config root is the default `~/.ssh/config` — the terminal runs
+///    plain `ssh <alias>`, so reasoning based on any other file would be about
+///    a config ssh will not read,
+/// 3. the local ssh can force askpass while holding a tty
+///    (`deploy::openssh_supports_forced_askpass_in_terminal`),
+/// 4. the alias is not behind ProxyJump/ProxyCommand — the jump host's password
+///    prompt is a perfectly legal shape and would be answered with the TARGET
+///    host's password,
+/// 5. the host key is already in known_hosts: SSH_ASKPASS_REQUIRE=force routes
+///    the host-key confirmation to the helper too, which refuses it (multiline
+///    whitelist rule), so a first-time host would abort instead of asking — let
+///    a plain launch handle that first connection interactively.
+fn password_autofill_env(
+    state: &tauri::State<crate::state::AppState>,
+    alias: &str,
+) -> Option<Vec<(String, String)>> {
+    let account = crate::secrets::host_account(alias);
+    match crate::secrets::get(&account) {
+        Ok(Some(secret)) if !secret.is_empty() => {}
+        _ => return None,
+    }
+    if !crate::deploy::is_default_config_root(state) {
+        return None;
+    }
+    if !crate::deploy::openssh_supports_forced_askpass_in_terminal(
+        &crate::deploy::local_ssh_version(),
+    ) {
+        return None;
+    }
+    let pairs = crate::config::intel::effective_config(alias, None).ok()?;
+    if crate::deploy::has_proxy(&pairs) {
+        return None;
+    }
+    let ep = crate::deploy::endpoint_from_effective(&pairs)?;
+    let known = crate::process::background_command("ssh-keygen")
+        .args(crate::deploy::keygen_find_args(&ep))
+        .output()
+        .ok()?;
+    if String::from_utf8_lossy(&known.stdout).trim().is_empty() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    Some(vec![
+        ("SSHELTER_ASKPASS".to_string(), "1".to_string()),
+        ("SSHELTER_ASKPASS_ACCOUNT".to_string(), account),
+        ("SSH_ASKPASS".to_string(), exe.to_string_lossy().into_owned()),
+        ("SSH_ASKPASS_REQUIRE".to_string(), "force".to_string()),
+    ])
+}
+
 /// Spawn the launch spec detached, inheriting the environment. Not unit-tested (side effect).
 pub fn launch(spec: &LaunchSpec) -> Result<(), AppError> {
     std::process::Command::new(&spec.program)
@@ -369,19 +529,24 @@ pub fn connect_list_terminals() -> Vec<TerminalInfo> {
     detect_terminals()
 }
 
-#[tauri::command]
+// (async): the auto-fill prechecks spawn `ssh -V`, `ssh -G`, and
+// `ssh-keygen -F` — that must not run on the main thread.
+#[tauri::command(async)]
 pub fn connect_launch(
     state: tauri::State<crate::state::AppState>,
     alias: String,
     terminal_override: Option<String>,
     new_tab: Option<bool>,
 ) -> Result<(), AppError> {
-    let doc_lock = state.doc.lock().unwrap();
-    let doc = doc_lock
-        .as_ref()
-        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-
-    validate_alias(doc, &alias)?;
+    // Scoped: `password_autofill_env` takes the same lock again (via
+    // `is_default_config_root`); holding it across that call would deadlock.
+    {
+        let doc_lock = state.doc.lock().unwrap();
+        let doc = doc_lock
+            .as_ref()
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        validate_alias(doc, &alias)?;
+    }
 
     let terminal_id = match terminal_override {
         Some(id) => id,
@@ -394,7 +559,11 @@ pub fn connect_launch(
         }
     };
 
-    let spec = build_launch(&terminal_id, &alias, new_tab.unwrap_or(false))?;
+    let new_tab = new_tab.unwrap_or(false);
+    let spec = match password_autofill_env(&state, &alias) {
+        Some(env_pairs) => build_autofill_launch(&terminal_id, &alias, new_tab, &env_pairs)?,
+        None => build_launch(&terminal_id, &alias, new_tab)?,
+    };
     launch(&spec)
 }
 
@@ -703,5 +872,151 @@ mod tests {
     fn build_launch_unknown_id_errors() {
         let err = build_launch("nope-term", "web", false).unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
+    }
+
+    // ── password auto-fill launch ─────────────────────────────────────────────
+
+    fn pairs(kv: &[(&str, &str)]) -> Vec<(String, String)> {
+        kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn autofill_ssh_argv_limits_password_attempts_and_disables_kbdint() {
+        let argv = autofill_ssh_argv("web");
+        // One wrong saved password must not burn three attempts against
+        // fail2ban-style lockouts.
+        assert!(argv.windows(2).any(|w| w == ["-o", "NumberOfPasswordPrompts=1"]));
+        // Same anti-phishing model as deploy: with kbdint off, every prompt the
+        // helper sees is client-generated; server-controlled text never reaches it.
+        assert!(argv.windows(2).any(|w| w == ["-o", "KbdInteractiveAuthentication=no"]));
+        // A global `BatchMode yes` would silently disable password auth.
+        assert!(argv.windows(2).any(|w| w == ["-o", "BatchMode=no"]));
+        assert_eq!(argv.last().unwrap(), "web", "alias must come last");
+    }
+
+    #[test]
+    fn autofill_ssh_argv_keeps_the_session_interactive() {
+        // This launches a real terminal session: -T (no pty) would break the
+        // interactive shell, and pinning StrictHostKeyChecking/PreferredAuthentications
+        // is the precheck's job — an existing working key must still win.
+        let argv = autofill_ssh_argv("web");
+        assert!(!argv.iter().any(|a| a == "-T"));
+        assert!(!argv.iter().any(|a| a.starts_with("StrictHostKeyChecking")));
+        assert!(!argv.iter().any(|a| a.starts_with("PreferredAuthentications")));
+    }
+
+    #[test]
+    fn env_wrapped_argv_prefixes_env_program() {
+        // env(1) scopes the variables to the ssh process only — unlike shell
+        // `VAR=x` prefixes it also works when the user's shell is fish.
+        let env = pairs(&[("SSHELTER_ASKPASS", "1"), ("SSH_ASKPASS", "/a/b")]);
+        let argv: Vec<String> = vec!["ssh".into(), "web".into()];
+        assert_eq!(
+            env_wrapped_argv(&env, &argv),
+            vec!["env", "SSHELTER_ASKPASS=1", "SSH_ASKPASS=/a/b", "ssh", "web"]
+        );
+    }
+
+    #[test]
+    fn build_autofill_launch_macos_terminal_wraps_with_env() {
+        let env = pairs(&[
+            ("SSHELTER_ASKPASS", "1"),
+            ("SSH_ASKPASS", "/Applications/My SSHelter.app/sshelter"),
+        ]);
+        let spec = build_autofill_launch("terminal", "web", false, &env).unwrap();
+        assert_eq!(spec.program, "osascript");
+        // Shell-quoted first (space in the app path), AppleScript-escaped second.
+        assert_eq!(
+            spec.args.last().unwrap(),
+            "tell application \"Terminal\" to do script \"env SSHELTER_ASKPASS=1 \
+             'SSH_ASKPASS=/Applications/My SSHelter.app/sshelter' ssh -o BatchMode=no \
+             -o NumberOfPasswordPrompts=1 -o KbdInteractiveAuthentication=no web\""
+        );
+    }
+
+    #[test]
+    fn build_autofill_launch_linux_passes_env_argv_directly() {
+        let env = pairs(&[("SSH_ASKPASS", "/usr/bin/sshelter")]);
+        let spec = build_autofill_launch("gnome-terminal", "web", false, &env).unwrap();
+        assert_eq!(spec.program, "gnome-terminal");
+        assert_eq!(
+            spec.args,
+            vec![
+                "--",
+                "env",
+                "SSH_ASKPASS=/usr/bin/sshelter",
+                "ssh",
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "NumberOfPasswordPrompts=1",
+                "-o",
+                "KbdInteractiveAuthentication=no",
+                "web"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_autofill_launch_windows_wt_sets_runs_then_clears() {
+        let env = pairs(&[
+            ("SSHELTER_ASKPASS", "1"),
+            ("SSH_ASKPASS", r"C:\Program Files\SSHelter\sshelter.exe"),
+        ]);
+        let spec = build_autofill_launch("wt", "web", false, &env).unwrap();
+        assert_eq!(spec.program, "wt.exe");
+        assert_eq!(spec.args[..2], ["cmd".to_string(), "/k".to_string()]);
+        // `set "K=V"` quotes the value (the install path contains a space); the
+        // trailing `& set "K="` clears the variables from the surviving /k session
+        // so a later manual `ssh otherhost` in that window cannot reach our helper
+        // and be answered with THIS host's password.
+        assert_eq!(
+            spec.args[2],
+            "set \"SSHELTER_ASKPASS=1\" && \
+             set \"SSH_ASKPASS=C:\\Program Files\\SSHelter\\sshelter.exe\" && \
+             ssh -o BatchMode=no -o NumberOfPasswordPrompts=1 \
+             -o KbdInteractiveAuthentication=no web \
+             & set \"SSHELTER_ASKPASS=\" & set \"SSH_ASKPASS=\""
+        );
+
+        // new_tab keeps the existing `-w 0 nt` targeting.
+        let tab = build_autofill_launch("wt", "web", true, &env).unwrap();
+        assert_eq!(tab.args[..5], ["-w", "0", "nt", "cmd", "/k"].map(String::from));
+    }
+
+    #[test]
+    fn build_autofill_launch_windows_cmd_sets_runs_then_clears() {
+        let env = pairs(&[("SSHELTER_ASKPASS", "1")]);
+        let spec = build_autofill_launch("cmd", "web", false, &env).unwrap();
+        assert_eq!(spec.program, "cmd");
+        assert_eq!(
+            spec.args,
+            vec![
+                "/c".to_string(),
+                "start".to_string(),
+                String::new(),
+                "cmd".to_string(),
+                "/k".to_string(),
+                "set \"SSHELTER_ASKPASS=1\" && ssh -o BatchMode=no \
+                 -o NumberOfPasswordPrompts=1 -o KbdInteractiveAuthentication=no web \
+                 & set \"SSHELTER_ASKPASS=\""
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_autofill_launch_xfce4_uses_single_shell_string() {
+        let env = pairs(&[("SSH_ASKPASS", "/opt/s h/sshelter")]);
+        let spec = build_autofill_launch("xfce4-terminal", "web", false, &env).unwrap();
+        assert_eq!(
+            spec.args,
+            vec![
+                "-e".to_string(),
+                "env 'SSH_ASKPASS=/opt/s h/sshelter' ssh -o BatchMode=no \
+                 -o NumberOfPasswordPrompts=1 -o KbdInteractiveAuthentication=no web"
+                    .to_string(),
+            ]
+        );
     }
 }
