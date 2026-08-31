@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/ysya/sshelter/compare/v0.14.0...v0.15.0) (2026-08-31)
+
+
+### Features
+
+* **connect:** auto-fill saved passwords when connecting ([8cc2542](https://github.com/ysya/sshelter/commit/8cc25426b248e8a2408808894ad0508e276835bc))
+
+
+### Bug Fixes
+
+* **deploy:** make in-app key deploy work on Windows ([2b1319e](https://github.com/ysya/sshelter/commit/2b1319e16c94354be69bf3b3ea9837ac77762df5))
+
 ## [0.14.0](https://github.com/ysya/sshelter/compare/v0.13.0...v0.14.0) (2026-08-24)
 
 
