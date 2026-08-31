@@ -158,7 +158,7 @@ pub fn classify_outcome(code: Option<i32>, stdout: &str, stderr: &str) -> Deploy
                             ),
                         }
                     }
-                    _ => DeployOutcome::WrongPassword,
+                    _ => classify_denied_password(stderr),
                 }
             } else if UNREACHABLE_MARKERS.iter().any(|m| stderr.contains(m)) {
                 DeployOutcome::Unreachable
@@ -178,8 +178,42 @@ pub fn classify_outcome(code: Option<i32>, stdout: &str, stderr: &str) -> Deploy
     }
 }
 
+/// `Permission denied` 且伺服器有提供 password 方法時，靠 helper 留在 stderr 的標記
+/// 分辨四種完全不同的失敗（見 `askpass::log_decision`）。
+///
+/// 沒有 `answered` 標記時**不能**回報「密碼錯誤」：那代表 ssh 根本沒把密碼要走
+/// （本機 OpenSSH 不支援 askpass、helper 啟動失敗、或 helper 拒答），實際送出的是
+/// 空密碼 —— Windows 8.1 沒有 DISPLAY 時正是這樣。此時回報「密碼錯誤」會讓使用者
+/// 重打幾次正確密碼都得到同樣結果。
+///
+/// 標記理論上可被惡意伺服器的 pre-auth banner 偽造（banner 走同一條 stderr），但偽造
+/// 的效果只是把診斷訊息換成「密碼錯誤」—— 與沒有這個分類器時的行為相同，不構成新風險。
+fn classify_denied_password(stderr: &str) -> DeployOutcome {
+    if stderr.contains("[sshelter-askpass] answered:") {
+        return DeployOutcome::WrongPassword;
+    }
+    if stderr.contains("[sshelter-askpass] no-secret:") {
+        return DeployOutcome::Other {
+            message: "the askpass helper had no password to send (keychain read failed?)"
+                .to_string(),
+        };
+    }
+    if stderr.contains("[sshelter-askpass] refused:") {
+        return DeployOutcome::Other {
+            message: "ssh asked for something other than this host's password; \
+                      SSHelter refused to auto-answer it"
+                .to_string(),
+        };
+    }
+    DeployOutcome::Other {
+        message: "ssh never asked SSHelter for the password — the local OpenSSH \
+                  likely cannot run askpass automation"
+            .to_string(),
+    }
+}
+
 /// 從 `Permission denied (publickey,password).` 取出括號內伺服器實際提供的方法清單。
-/// 沒有括號（訊息形式不同）時回 `None`，呼叫端保守地當成密碼錯誤處理。
+/// 沒有括號（訊息形式不同）時回 `None`，呼叫端交由標記分類處理。
 fn permission_denied_methods(stderr: &str) -> Option<Vec<String>> {
     let line = stderr.lines().find(|l| l.contains("Permission denied"))?;
     let start = line.find('(')?;
@@ -431,6 +465,37 @@ fn require_default_config_root(state: &tauri::State<crate::state::AppState>) -> 
     Ok(())
 }
 
+/// `require_default_config_root` 的布林版，給「不該報錯、只該安靜退回」的呼叫端
+/// （connect 的密碼自動填入）。理由同上：終端機跑的是 `ssh <alias>`（無 `-F`），
+/// 對非預設 config 的推理可能與 ssh 實際讀到的設定無關。
+pub(crate) fn is_default_config_root(state: &tauri::State<crate::state::AppState>) -> bool {
+    let Some(loaded) = ({
+        let doc_lock = state.doc.lock().unwrap();
+        doc_lock
+            .as_ref()
+            .and_then(|d| d.files.first().map(|f| f.path.clone()))
+    }) else {
+        return false;
+    };
+    let Ok(default) = crate::config::commands::default_config_path() else {
+        return false;
+    };
+    loaded.canonicalize().ok() == default.canonicalize().ok() || loaded == default
+}
+
+/// `ssh -V` 的輸出（版本寫在 stderr；順手併上 stdout 以防未來變動）。
+pub(crate) fn local_ssh_version() -> String {
+    crate::process::background_command("ssh")
+        .arg("-V")
+        .output()
+        .map(|o| {
+            let mut s = String::from_utf8_lossy(&o.stderr).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stdout));
+            s
+        })
+        .unwrap_or_default()
+}
+
 /// 解析 alias 的實際連線目標（走既有的 `ssh -G` 整合）。
 fn resolve_endpoint(
     state: &tauri::State<crate::state::AppState>,
@@ -470,6 +535,14 @@ fn run_ssh_deploy(
     if let Some(secret) = env_secret {
         // 本機無密鑰環時的 fallback；UI 已告知使用者密碼不會被儲存。
         cmd.env("SSHELTER_ASKPASS_SECRET", secret);
+    }
+    // Win10 內建的 OpenSSH 8.1 不認識 `SSH_ASKPASS_REQUIRE`：它走 askpass 的唯一
+    // 條件是「DISPLAY 非空」且「開不到 console」（readpass.c v8.1.0.0）。這個子程序
+    // 以 CREATE_NO_WINDOW 啟動、本來就沒有 console，補上 DISPLAY 就補齊了另一半；
+    // 缺了它，8.1 會直接送出空密碼。8.6+ 靠 REQUIRE=force 已強制 askpass，多一個
+    // DISPLAY 無作用。非 Windows 不動 —— 那裡 DISPLAY 是真實桌面環境的語意。
+    if cfg!(target_os = "windows") && std::env::var_os("DISPLAY").is_none() {
+        cmd.env("DISPLAY", "sshelter");
     }
 
     let mut child = cmd.spawn().map_err(|e| {
@@ -523,25 +596,66 @@ fn run_ssh_deploy(
 
 // ─── 部署前的環境檢查（純函式） ──────────────────────────────────────────────
 
-/// 閘門是 OpenSSH **8.5**：`SSH_ASKPASS_REQUIRE` 雖然 8.4 就有，但 kbdint 提示的
-/// `(user@host) ` 前綴要到 8.5 才加入，而白名單已不接受裸的 `Password: `。
+/// 非 Windows 的閘門是 OpenSSH **8.5**：`SSH_ASKPASS_REQUIRE` 雖然 8.4 就有，但 kbdint
+/// 提示的 `(user@host) ` 前綴要到 8.5 才加入，而白名單已不接受裸的 `Password: `。
+///
+/// **Microsoft 的 Windows port 自報 `OpenSSH_for_Windows_X.Y`，必須另外解析。**
+/// 舊版解析在 `for_Windows_` 上取不出數字，於是走「認不出版本 → 保守放行」——
+/// Win10 內建的 8.1 因此從未被擋下，部署一路走到 ssh 拿不到密碼、送出空密碼，
+/// 被分類成「密碼錯誤」，使用者重打幾次正確密碼都一樣。
+///
+/// Windows 的門檻是 **8.1** 而非 8.5：
+/// - 8.1 不認識 `SSH_ASKPASS_REQUIRE`（忽略、無害），但只要 `DISPLAY` 非空且開不到
+///   console，它就走 askpass（readpass.c v8.1.0.0）；`run_ssh_deploy` 因此在 Windows
+///   注入 DISPLAY。把提示文字傳給 askpass 的修改 8.1 已包含，白名單收得到完整的
+///   `user@host's password: `；7.x 沒有那個修改，helper 只收得到空提示 → 擋下。
+/// - 8.6+（Win11 內建）直接支援 `SSH_ASKPASS_REQUIRE=force`
+///   （PowerShell/Win32-OpenSSH#2115 的結論，兩位使用者實測證實）。
+/// - 8.5 的 kbdint 前綴顧慮在部署路徑不適用：argv 帶 `KbdInteractiveAuthentication=no`，
+///   kbdint 提示根本不會出現。
+///
 /// 認不出版本時回 true（保守放行，讓真正的部署去回報實際錯誤）。
 pub fn openssh_supports_askpass_require(version_line: &str) -> bool {
-    let Some(rest) = version_line.split("OpenSSH_").nth(1) else {
-        return true;
+    match parse_openssh_version(version_line) {
+        Some((major, minor, true)) => (major, minor) >= (8, 1),
+        Some((major, minor, false)) => (major, minor) >= (8, 5),
+        None => true,
+    }
+}
+
+/// Connect 自動填入用的閘門：在「有 tty 的終端機裡」強制 askpass。
+///
+/// 與 `openssh_supports_askpass_require`（部署用，子程序無 console）只差 Windows
+/// 門檻：8.1 走 askpass 的前提是「開不到 console」，終端機裡必然有 console，所以
+/// 8.1 在這個情境等於不支援；8.6（Win11 內建）起 `SSH_ASKPASS_REQUIRE=force` 直接
+/// 蓋過 tty（v8.6.0.0 readpass.c，並經 Win32-OpenSSH#2115 實測證實）。
+///
+/// 認不出版本 → 放行：多注入的環境變數在不支援的 ssh 上是無害的 no-op（終端機照樣
+/// 出現一般密碼提示），少注入則是功能無聲失效。
+pub fn openssh_supports_forced_askpass_in_terminal(version_line: &str) -> bool {
+    match parse_openssh_version(version_line) {
+        Some((major, minor, true)) => (major, minor) >= (8, 6),
+        Some((major, minor, false)) => (major, minor) >= (8, 5),
+        None => true,
+    }
+}
+
+/// 解析 `ssh -V` 的版本行，回 `(major, minor, 是否為 Microsoft Windows port)`。
+/// Windows port 自報 `OpenSSH_for_Windows_X.Y`，上游則是 `OpenSSH_X.Y`。
+fn parse_openssh_version(version_line: &str) -> Option<(u32, u32, bool)> {
+    let rest = version_line.split("OpenSSH_").nth(1)?;
+    let (rest, windows) = match rest.strip_prefix("for_Windows_") {
+        Some(rest) => (rest, true),
+        None => (rest, false),
     };
     let digits: String = rest
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.')
         .collect();
     let mut parts = digits.split('.');
-    let (Some(major), Some(minor)) = (parts.next(), parts.next()) else {
-        return true;
-    };
-    match (major.parse::<u32>(), minor.parse::<u32>()) {
-        (Ok(major), Ok(minor)) => major > 8 || (major == 8 && minor >= 5),
-        _ => true,
-    }
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    Some((major, minor, windows))
 }
 
 /// 使用者的設定是否讓密碼認證根本用不上。
@@ -581,16 +695,7 @@ pub fn deploy_preflight(
     state: tauri::State<crate::state::AppState>,
     alias: String,
 ) -> Result<DeployPreflight, AppError> {
-    let version = crate::process::background_command("ssh")
-        .arg("-V")
-        .output()
-        .map(|o| {
-            // ssh -V 寫到 stderr。
-            let mut s = String::from_utf8_lossy(&o.stderr).into_owned();
-            s.push_str(&String::from_utf8_lossy(&o.stdout));
-            s
-        })
-        .unwrap_or_default();
+    let version = local_ssh_version();
 
     let pairs = effective_pairs(&state, &alias).unwrap_or_default();
 
@@ -830,7 +935,11 @@ mod tests {
 
     #[test]
     fn classify_wrong_password() {
-        let stderr = "spike@localhost: Permission denied (publickey,password).";
+        // 「密碼錯誤」需要兩個條件：伺服器提供 password 方法，且 helper 留下 answered
+        // 標記（密碼真的送出過）。沒有標記的 Permission denied 走診斷分類，見
+        // `denied_password_without_helper_consultation_is_not_wrong_password`。
+        let stderr = "[sshelter-askpass] answered: \"spike@localhost's password: \"\n\
+                      spike@localhost: Permission denied (publickey,password).";
         assert_eq!(classify_outcome(Some(255), "", stderr), DeployOutcome::WrongPassword);
     }
 
@@ -874,14 +983,23 @@ mod tests {
             classify_outcome(Some(255), "", "Permission denied (publickey)."),
             DeployOutcome::Other { .. }
         ));
-        // 括號裡有 password 才是真的密碼錯誤。
+        // 括號裡有 password、且 helper 真的送出過密碼，才是密碼錯誤。
         assert_eq!(
-            classify_outcome(Some(255), "", "Permission denied (publickey,password)."),
+            classify_outcome(
+                Some(255),
+                "",
+                "[sshelter-askpass] answered: \"f@h's password: \"\n\
+                 Permission denied (publickey,password)."
+            ),
             DeployOutcome::WrongPassword
         );
-        // 沒有括號時保守處理成密碼錯誤。
+        // 沒有括號時同樣交給標記分類：有 answered 標記照樣是密碼錯誤。
         assert_eq!(
-            classify_outcome(Some(255), "", "Permission denied"),
+            classify_outcome(
+                Some(255),
+                "",
+                "[sshelter-askpass] answered: \"f@h's password: \"\nPermission denied"
+            ),
             DeployOutcome::WrongPassword
         );
     }
@@ -1289,6 +1407,100 @@ mod tests {
         assert!(!openssh_supports_askpass_require("OpenSSH_7.9p1, LibreSSL 2.7.3"));
         // 認不出來時保守放行，讓實際部署去回報真正的錯誤。
         assert!(openssh_supports_askpass_require("something unparseable"));
+    }
+
+    #[test]
+    fn openssh_version_gate_parses_the_windows_port_string() {
+        // Microsoft 的 port 自報 `OpenSSH_for_Windows_X.Y`。舊解析在 `for_Windows_`
+        // 取不出數字 → 一律走「認不出 → 保守放行」，Win10 內建的 8.1 因此從未被擋，
+        // 一路走到空密碼被送出、被回報成「密碼錯誤」。
+        // Windows 的門檻是 8.1（配合 run_ssh_deploy 注入 DISPLAY）：
+        // 把提示傳給 askpass 的 commit 8.1 才有，7.x 的 helper 只收得到空提示。
+        assert!(openssh_supports_askpass_require(
+            "OpenSSH_for_Windows_8.1p1, LibreSSL 3.0.2"
+        ));
+        assert!(openssh_supports_askpass_require(
+            "OpenSSH_for_Windows_8.6p1, LibreSSL 3.4.3"
+        ));
+        assert!(openssh_supports_askpass_require(
+            "OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2"
+        ));
+        assert!(!openssh_supports_askpass_require(
+            "OpenSSH_for_Windows_7.7p1, LibreSSL 2.6.5"
+        ));
+    }
+
+    #[test]
+    fn terminal_askpass_gate_needs_8_5_or_windows_8_6() {
+        // Connect 的自動填入是在「有 tty 的終端機裡」跑 ssh：
+        // - 非 Windows 沿用 8.5 門檻（force 蓋過 tty）。
+        // - Windows 8.1 只有在「開不到 console」時才走 askpass，終端機裡必然有
+        //   console，所以 Windows 門檻是 8.6（第一個支援 REQUIRE=force 的內建版）。
+        assert!(openssh_supports_forced_askpass_in_terminal("OpenSSH_9.6p1, LibreSSL 3.3.6"));
+        assert!(openssh_supports_forced_askpass_in_terminal("OpenSSH_8.5p1, OpenSSL 1.1.1"));
+        assert!(!openssh_supports_forced_askpass_in_terminal("OpenSSH_8.4p1, OpenSSL 1.1.1"));
+        assert!(openssh_supports_forced_askpass_in_terminal(
+            "OpenSSH_for_Windows_8.6p1, LibreSSL 3.4.3"
+        ));
+        assert!(openssh_supports_forced_askpass_in_terminal(
+            "OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2"
+        ));
+        assert!(!openssh_supports_forced_askpass_in_terminal(
+            "OpenSSH_for_Windows_8.1p1, LibreSSL 3.0.2"
+        ));
+        // 認不出版本 → 放行：多注入的環境變數在不支援的 ssh 上是無害的 no-op
+        //（終端機照樣出現一般密碼提示），少注入則是功能無聲失效。
+        assert!(openssh_supports_forced_askpass_in_terminal("something unparseable"));
+    }
+
+    #[test]
+    fn denied_password_with_answered_marker_is_wrong_password() {
+        // helper 真的送出過密碼、伺服器仍拒絕 → 才是「密碼錯誤」。
+        let stderr = "[sshelter-askpass] answered: \"spike@localhost's password: \"\n\
+                      spike@localhost: Permission denied (publickey,password).";
+        assert_eq!(classify_outcome(Some(255), "", stderr), DeployOutcome::WrongPassword);
+    }
+
+    #[test]
+    fn denied_password_without_helper_consultation_is_not_wrong_password() {
+        // Windows 8.1 沒有 DISPLAY 時 ssh 根本不會啟動 helper，直接送出空密碼。
+        // 這裡若回報「密碼錯誤」，使用者重打幾次正確密碼都會得到同樣結果。
+        let stderr = "frank@h: Permission denied (publickey,password).";
+        match classify_outcome(Some(255), "", stderr) {
+            DeployOutcome::Other { message } => {
+                assert!(message.contains("never asked"), "{message}");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+        // 沒有括號的 `Permission denied` 同理：沒有 answered 標記就不是密碼錯誤。
+        assert!(matches!(
+            classify_outcome(Some(255), "", "Permission denied"),
+            DeployOutcome::Other { .. }
+        ));
+    }
+
+    #[test]
+    fn denied_password_with_no_secret_marker_reports_keychain_problem() {
+        let stderr = "[sshelter-askpass] no-secret: \"frank@h's password: \"\n\
+                      frank@h: Permission denied (publickey,password).";
+        match classify_outcome(Some(255), "", stderr) {
+            DeployOutcome::Other { message } => {
+                assert!(message.contains("no password"), "{message}");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn denied_password_with_refused_marker_reports_unexpected_prompt() {
+        let stderr = "[sshelter-askpass] refused: \"(x@y) Verification code: \"\n\
+                      frank@h: Permission denied (publickey,password).";
+        match classify_outcome(Some(255), "", stderr) {
+            DeployOutcome::Other { message } => {
+                assert!(message.contains("refused"), "{message}");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
     }
 
     #[test]

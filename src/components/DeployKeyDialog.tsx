@@ -21,6 +21,7 @@ import {
   useHasHostPassword,
   useKeyHygiene,
   useKeys,
+  usePlatform,
   usePrecheckHostKey,
   useRevealHostPassword,
   useSaveHost,
@@ -132,6 +133,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
 
   // Only rendered while the dialog is open, so the lazy keys query can run.
   const keysQ = useKeys({ enabled: true });
+  const platform = usePlatform();
   const hygiene = useKeyHygiene(alias);
   const hasPassword = useHasHostPassword(alias);
   const reveal = useRevealHostPassword();
@@ -318,9 +320,24 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
       <div className="space-y-4">
         {askpassBlocked && (
           <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-            This machine&rsquo;s OpenSSH is older than 8.5 and cannot auto-fill
-            the password. Use the terminal-based deploy from the Keys dialog
-            instead.
+            {platform.data === "windows" ? (
+              // No ssh-copy-id on Windows, so pointing at the terminal-based
+              // deploy would be a dead end — updating OpenSSH is the way out.
+              <>
+                This machine&rsquo;s OpenSSH is too old to auto-fill the
+                password. Update the Windows OpenSSH client (
+                <span className="font-mono">
+                  winget install Microsoft.OpenSSH.Preview
+                </span>
+                ) and reopen this dialog.
+              </>
+            ) : (
+              <>
+                This machine&rsquo;s OpenSSH is older than 8.5 and cannot
+                auto-fill the password. Use the terminal-based deploy from the
+                Keys dialog instead.
+              </>
+            )}
           </p>
         )}
         {preflight.data?.passwordAuthBlocked && (

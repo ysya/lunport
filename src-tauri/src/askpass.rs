@@ -127,6 +127,10 @@ pub fn run() -> ! {
                 log_decision(&prompt, "write-failed");
                 std::process::exit(1);
             }
+            // `answered` 讓 `deploy::classify_denied_password` 能把「密碼真的送出過
+            // 但被拒」與「ssh 根本沒問 helper」分開 —— 後者（如 Windows 8.1 缺
+            // DISPLAY）過去也被回報成「密碼錯誤」，使用者重打正確密碼毫無作用。
+            log_decision(&prompt, "answered");
             std::process::exit(0);
         }
         None => {
