@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/ysya/sshelter/compare/v0.15.0...v0.15.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **clipboard:** use native clipboard on Windows ([1052b21](https://github.com/ysya/sshelter/commit/1052b21f4e559366c68dfc5a6e1076f72f282155))
+
 ## [0.15.0](https://github.com/ysya/sshelter/compare/v0.14.0...v0.15.0) (2026-08-31)
 
 
