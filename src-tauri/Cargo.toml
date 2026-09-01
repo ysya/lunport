@@ -35,6 +35,7 @@ keyring = "4.1.5"
 getrandom = "0.3"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-dialog = "2.7.1"
+tauri-plugin-clipboard-manager = "2"
 
 [dev-dependencies]
 ts-rs = "10"

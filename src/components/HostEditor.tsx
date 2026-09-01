@@ -60,6 +60,7 @@ import {
   useKeyHygiene,
 } from "@/lib/queries";
 import { toTildeSshPath } from "@/lib/identity-file";
+import { copyText } from "@/lib/clipboard";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
@@ -776,7 +777,7 @@ function HostHeaderTitle({ detail }: { detail: HostDetail }) {
 
   const copySshName = async () => {
     try {
-      await navigator.clipboard.writeText(detail.alias);
+      await copyText(detail.alias);
       toast.success(`Copied ${detail.alias}`);
     } catch {
       toast.error("Clipboard unavailable");
@@ -1174,7 +1175,7 @@ function HostPasswordSection({ alias }: { alias: string }) {
         onSuccess: async (pw) => {
           if (pw === null) return;
           try {
-            await navigator.clipboard.writeText(pw);
+            await copyText(pw);
             toast.success("Password copied");
           } catch {
             toast.error("Clipboard unavailable");
@@ -1325,7 +1326,7 @@ function ConfigInspector({
 
   const onCopy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       setCopied(true);
       toast("Copied");
       window.setTimeout(() => setCopied(false), 1400);

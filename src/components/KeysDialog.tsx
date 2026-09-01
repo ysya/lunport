@@ -16,6 +16,7 @@ import {
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import { isWildcardOnly } from "@/lib/host-display";
+import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 
 import { Badge } from "@/components/ui/badge";
@@ -86,7 +87,7 @@ export function KeysDialog() {
       {
         onSuccess: async (text) => {
           try {
-            await navigator.clipboard.writeText(text);
+            await copyText(text);
             toast.success(`Copied ${key.name}.pub`);
           } catch {
             toast.error("Clipboard unavailable");

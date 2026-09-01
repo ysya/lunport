@@ -27,6 +27,7 @@ import { useSettingsStore } from "@/stores/settings";
 import { useHostsQuery, useLoadConfig, usePlatform, useTerminals } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
 import { checkForUpdates } from "@/lib/updater";
+import { copyText } from "@/lib/clipboard";
 import {
   exportSettings,
   pickSettingsImport,
@@ -661,7 +662,7 @@ function McpPane() {
 
   const copySetup = async () => {
     try {
-      await navigator.clipboard.writeText(setupCommand);
+      await copyText(setupCommand);
       toast.success("Codex setup command copied");
     } catch (error) {
       toast.error("Could not copy setup command", { description: String(error) });

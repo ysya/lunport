@@ -3,6 +3,7 @@ import { Check, Copy } from "lucide-react";
 import { toast } from "sonner";
 
 import { useFileText } from "@/lib/queries";
+import { copyText } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -34,7 +35,7 @@ export function FileViewDialog({ path, label, onOpenChange }: FileViewDialogProp
   const onCopy = async () => {
     if (data === undefined) return;
     try {
-      await navigator.clipboard.writeText(data);
+      await copyText(data);
       setCopied(true);
       toast("Copied");
       window.setTimeout(() => setCopied(false), 1400);

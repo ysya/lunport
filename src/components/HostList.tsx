@@ -39,6 +39,7 @@ import {
   useTerminals,
 } from "@/lib/queries";
 import { rangeBetween } from "@/lib/selection-range";
+import { copyText } from "@/lib/clipboard";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
 import { Input } from "@/components/ui/input";
@@ -194,7 +195,7 @@ function HostRow({
   const isDefaults = variant === "defaults";
   const copySshName = async () => {
     try {
-      await navigator.clipboard.writeText(host.alias);
+      await copyText(host.alias);
       toast.success(`Copied ${host.alias}`);
     } catch {
       toast.error("Clipboard unavailable");

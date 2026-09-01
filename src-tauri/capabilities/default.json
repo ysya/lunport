@@ -20,6 +20,7 @@
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
-    "dialog:default"
+    "dialog:default",
+    "clipboard-manager:allow-write-text"
   ]
 }

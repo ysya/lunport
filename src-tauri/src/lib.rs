@@ -62,6 +62,7 @@ pub fn run_mcp_host() {
 
 fn run_app(mcp_keep_alive: bool) {
     let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
