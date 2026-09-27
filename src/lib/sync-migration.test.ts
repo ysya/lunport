@@ -13,6 +13,7 @@ describe("isSyncableHost", () => {
     expect(isSyncableHost(host("*", "/f", ["*"]))).toBe(false);
     expect(isSyncableHost(host("web", "/f", ["web", "*.internal"]))).toBe(false);
     expect(isSyncableHost(host("web", "/f", ["web", "!prod"]))).toBe(false);
+    expect(isSyncableHost(host("web?", "/f", ["web?"]))).toBe(false);
     expect(isSyncableHost(host("w", "/f", []))).toBe(false);
   });
 });
