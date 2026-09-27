@@ -906,16 +906,50 @@ pub fn config_move_host(
     let mut backed_up_lock = state.backed_up.lock().unwrap();
     let retention = *state.backup_retention.lock().unwrap();
 
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let (src, tgt) = move_host(doc, &alias, &target_file)?;
-            // Persist the TARGET first: if the source write then fails, the block exists in
-            // both files (a recoverable duplicate) rather than in neither.
-            persist_file(doc, tgt, &mut backed_up_lock, retention)?;
-            persist_file(doc, src, &mut backed_up_lock, retention)
-        }
+    let doc = doc_lock
+        .as_ref()
+        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    // 拖進 sidebar 的 Synced 群組(目標是已載入的同步檔):與遷移精靈同一套規則 —— 剛 Join、第一輪同步還沒
+    // 完成就拒絕;同步檔已經定義了這個名字也拒絕(重複的 alias 會讓整條同步停下)。鎖順序 doc → backed_up → core。
+    let managed = crate::keys::ssh_dir()
+        .ok()
+        .map(|dir| crate::sync::hosts_file::managed_path(&dir));
+    if let Some(managed) = managed.filter(|managed| {
+        doc.files
+            .iter()
+            .any(|f| &f.path == managed && f.path.to_string_lossy() == target_file.as_str())
+    }) {
+        crate::sync::migrate::refuse_before_first_sync(&state.sync)?;
+        crate::sync::migrate::refuse_already_synced(doc, &managed, &alias)?;
     }
+    move_host_and_persist(&mut doc_lock, &alias, &target_file, |doc, idx| {
+        persist_file(doc, idx, &mut backed_up_lock, retention)
+    })
+}
+
+/// `config_move_host` 的搬移與寫檔(`persist` 由呼叫端注入,測試可模擬寫入失敗)。
+/// 任一寫入失敗:區塊已經在 in-memory doc 裡搬過去,磁碟上卻沒有(或只寫了一半)—— doc 比磁碟新,任何人
+/// (含同步引擎)都不能再拿它行動。從磁碟重載主 config(改動前記下的路徑)讓兩邊一致;重載也失敗就整份作廢
+/// (`None`):前端下次取主機清單時重新載入,引擎在 doc 是 None 時安靜跳過(同 `sync_migrate_hosts`)。
+pub(crate) fn move_host_and_persist(
+    slot: &mut Option<crate::config::model::SshConfigDoc>,
+    alias: &str,
+    target_file: &str,
+    mut persist: impl FnMut(&mut crate::config::model::SshConfigDoc, usize) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let doc = slot
+        .as_mut()
+        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    let main_path = doc.files[0].path.clone();
+    let (src, tgt) = move_host(doc, alias, target_file)?;
+    // Persist the TARGET first: if the source write then fails, the block exists in
+    // both files (a recoverable duplicate) rather than in neither.
+    let persisted = persist(doc, tgt).and_then(|()| persist(doc, src));
+    if let Err(e) = persisted {
+        *slot = load_doc_migrated(&main_path).ok();
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1559,6 +1593,77 @@ mod tests {
         assert!(matches!(r, Err(AppError::Conflict(_))), "drifted target: {r:?}");
         // The source doc was not mutated.
         assert!(doc_text(&doc).contains("Host db"));
+    }
+
+    /// Every loaded file's in-memory items serialize to exactly its on-disk bytes.
+    fn assert_doc_matches_disk(doc: &crate::config::model::SshConfigDoc) {
+        for f in &doc.files {
+            assert_eq!(
+                serialize_items(&f.items, f.trailing_newline),
+                std::fs::read_to_string(&f.path).unwrap(),
+                "{} in memory differs from disk",
+                f.path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_source_write_reloads_the_doc_so_it_is_never_ahead_of_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (doc, _main_path, sub_path) = two_file_doc(&dir, "Host s1\n    User a\n");
+        let mut slot = Some(doc);
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        let mut calls = 0;
+        // Target written, then the SOURCE write fails: on disk the block is now in both files.
+        let r = move_host_and_persist(&mut slot, "db", &sub_path.to_string_lossy(), |doc, idx| {
+            calls += 1;
+            if calls == 2 {
+                Err(AppError::Other("disk is full".to_string()))
+            } else {
+                persist_file(doc, idx, &mut backed_up, None)
+            }
+        });
+        assert_eq!(r.unwrap_err().to_string(), "disk is full");
+        let doc = slot.expect("reloaded from disk");
+        assert!(doc_text(&doc).contains("Host db"), "the source still has the block on disk, so in memory too");
+        assert_doc_matches_disk(&doc);
+    }
+
+    #[test]
+    fn a_failed_target_write_reloads_the_untouched_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let (doc, main_path, sub_path) = two_file_doc(&dir, "Host s1\n    User a\n");
+        let before = std::fs::read_to_string(&main_path).unwrap();
+        let mut slot = Some(doc);
+        let r = move_host_and_persist(&mut slot, "db", &sub_path.to_string_lossy(), |_, _| {
+            Err(AppError::Other("disk is full".to_string()))
+        });
+        assert!(r.is_err());
+        let doc = slot.as_ref().expect("reloaded from disk");
+        assert_eq!(doc_text(doc), before, "the moved-in-memory block is back where the disk has it");
+        assert_doc_matches_disk(doc);
+        // A successful move needs no reload and persists both files.
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        move_host_and_persist(&mut slot, "db", &sub_path.to_string_lossy(), |doc, idx| {
+            persist_file(doc, idx, &mut backed_up, None)
+        })
+        .unwrap();
+        assert!(std::fs::read_to_string(&sub_path).unwrap().contains("Host db"));
+        assert_doc_matches_disk(slot.as_ref().unwrap());
+    }
+
+    #[test]
+    fn a_failed_move_write_drops_the_doc_when_the_reload_fails_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let (doc, main_path, sub_path) = two_file_doc(&dir, "Host s1\n    User a\n");
+        let mut slot = Some(doc);
+        let r = move_host_and_persist(&mut slot, "db", &sub_path.to_string_lossy(), |_, _| {
+            // The main config vanishes as the write fails: the reload cannot succeed either.
+            std::fs::remove_file(&main_path).unwrap();
+            Err(AppError::Other("disk is full".to_string()))
+        });
+        assert!(r.is_err());
+        assert!(slot.is_none(), "a doc that may differ from disk is dropped, never kept");
     }
 
     // ── Tests: duplicate_host — same-file copy, only the header line differs ──

@@ -14,7 +14,11 @@ use crate::config::include::find_host_file_index;
 use crate::config::model::{Item, SshConfigDoc};
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::sync::engine::SyncRuntime;
 use crate::sync::hosts_file::{first_alias, is_syncable_block};
+
+/// 剛 Join、基線輪還沒跑完時搬進同步檔的拒絕訊息(遷移精靈整批拒絕、sidebar 拖曳只在目標是同步檔時拒絕)。
+pub const WAIT_FOR_FIRST_SYNC: &str = "wait for the first sync to finish before moving hosts into sync";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -87,6 +91,46 @@ pub fn refuse_wildcard(doc: &SshConfigDoc, alias: &str) -> Result<(), AppError> 
         ))),
         _ => Ok(()),
     }
+}
+
+/// 同步檔裡已有 Host 區塊定義了 `name`(該區塊任一 pattern 等於它)。
+pub fn managed_defines(doc: &SshConfigDoc, managed: &Path, name: &str) -> bool {
+    doc.files
+        .iter()
+        .filter(|f| f.path == managed)
+        .flat_map(|f| f.items.iter())
+        .any(|i| matches!(i, Item::Host(h) if h.patterns.iter().any(|p| p == name)))
+}
+
+/// 搬進同步檔之前的重複檢查(遷移精靈與 sidebar 拖進 Synced 群組共用)。同步檔已經定義了這個 alias —— 例如
+/// 加入 chain 時本地就有同名主機 —— 再搬一份進去,同步檔就違反「alias 不重複」的不變式
+/// (`check_managed_items`),整條同步停在讀檔階段;基線輪之前搬進去,還會被基線輪直接蓋掉。本地那份要用
+/// 遮蔽面板改名或移除。同一條規則也套在 `move_host` 實際會搬的那個區塊的 alias(第一個 pattern)上:用次要
+/// pattern 指名時,搬進去的是別的 alias,不變式看的是它。
+pub fn refuse_already_synced(doc: &SshConfigDoc, managed: &Path, alias: &str) -> Result<(), AppError> {
+    // 與 `move_host` 相同的定位規則:`find_host_file_index` → 該檔案裡「任一 pattern 相符」的第一個區塊。
+    let moving = find_host_file_index(doc, alias).and_then(|idx| {
+        doc.files[idx].items.iter().find_map(|i| match i {
+            Item::Host(h) if h.patterns.iter().any(|p| p == alias) => h.patterns.first().map(String::as_str),
+            _ => None,
+        })
+    });
+    for name in std::iter::once(alias).chain(moving) {
+        if managed_defines(doc, managed, name) {
+            return Err(AppError::Other(format!("'{name}' is already in the synced file — resolve the duplicate instead")));
+        }
+    }
+    Ok(())
+}
+
+/// 加入中、基線輪還沒跑完(剛 Join)就拒絕搬進同步檔:這時搬進去的主機會被基線輪以 chain 為準直接覆蓋(不算
+/// 衝突、不通知)。呼叫端持有 doc(與 backed_up)鎖,這裡只短暫拿 core 鎖(鎖順序 doc → backed_up → core)。
+pub fn refuse_before_first_sync(sync: &SyncRuntime) -> Result<(), AppError> {
+    let pending = sync.core.lock().unwrap().state.as_ref().is_some_and(|s| s.joined() && !s.baseline_established);
+    if pending {
+        return Err(AppError::Other(WAIT_FOR_FIRST_SYNC.to_string()));
+    }
+    Ok(())
 }
 
 /// 同步檔與其他任何檔案都定義了的 alias(Include 置頂 → 同步檔那份的選項優先,本地那份仍會補上其餘選項)。
@@ -194,7 +238,8 @@ pub async fn sync_resolve_shadowed(app: AppHandle, alias: String, file: String, 
 /// `persist_file`,測試版能在第 N 次呼叫時模擬失敗)。`move_host` 先改 doc、才寫檔:target、source、
 /// tag 三個寫入之中任一失敗,in-memory doc 就可能已經比磁碟新(半套用的搬移)—— 一律停止整批,不再
 /// 嘗試後面的 alias,回傳的旗標請呼叫端從磁碟重載讓兩邊回到一致。target 與 source 都已落盤的那台
-/// 算 `moved`,即使接下來的 tag 寫入才失敗。
+/// 算 `moved`,即使接下來的 tag 寫入才失敗。搬移前就拒絕的(wildcard、同步檔已有同名)doc 沒動過,不停批次。
+/// `tag_by_file` 只替 Include 進來的檔案上 tag:主 config(`doc.files[0]`)的 tag 永遠是 "config",只是雜訊。
 fn migrate_hosts(
     doc: &mut SshConfigDoc,
     aliases: Vec<String>,
@@ -216,7 +261,13 @@ fn migrate_hosts(
             report.failed.push(MigrationFailure { alias, error: e.to_string() });
             continue;
         }
-        let source_tag = find_host_file_index(doc, &alias).map(|i| tag_for_file(&doc.files[i].path));
+        if let Err(e) = refuse_already_synced(doc, Path::new(managed_str), &alias) {
+            report.failed.push(MigrationFailure { alias, error: e.to_string() });
+            continue;
+        }
+        let source_tag = find_host_file_index(doc, &alias)
+            .filter(|&i| i != 0)
+            .map(|i| tag_for_file(&doc.files[i].path));
         match move_host(doc, &alias, managed_str) {
             Ok((src, tgt)) => {
                 if let Err(e) = persist(doc, tgt).and_then(|_| persist(doc, src)) {
@@ -252,7 +303,8 @@ fn migrate_hosts(
 }
 
 /// 逐台搬進同步檔;每台獨立成功/失敗,任一寫入失敗就停止整批並從磁碟重載(見 `migrate_hosts`)。
-/// `tag_by_file` 時把原檔名加成 tag(已有同名 tag 不重複)。
+/// `tag_by_file` 時把 Include 檔的檔名加成 tag(已有同名 tag 不重複;主 config 的主機不上 tag)。
+/// 剛 Join、第一輪同步還沒完成時整批拒絕(`refuse_before_first_sync`)。
 #[tauri::command]
 pub async fn sync_migrate_hosts(app: AppHandle, aliases: Vec<String>, tag_by_file: bool) -> Result<MigrationReport, AppError> {
     let handle = app.clone();
@@ -264,6 +316,7 @@ pub async fn sync_migrate_hosts(app: AppHandle, aliases: Vec<String>, tag_by_fil
         let mut backed_up = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
         let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        refuse_before_first_sync(&state.sync)?;
         if !doc.files.iter().any(|f| f.path == managed) {
             return Err(AppError::Other("synced hosts file is not loaded; create or join a chain first".to_string()));
         }
@@ -363,6 +416,106 @@ mod tests {
         // 不存在的檔案 / alias。
         assert!(resolve_shadowed(&mut doc2, "web", "/nope/config", ShadowedAction::Remove, &managed).is_err());
         assert!(resolve_shadowed(&mut doc2, "ghost", &main_str, ShadowedAction::Remove, &managed).is_err());
+    }
+
+    #[test]
+    fn already_synced_names_are_refused_by_alias_and_by_the_block_that_would_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("hosts.config");
+        std::fs::write(&managed, "Host web-1 web\nHost bastion\n").unwrap();
+        let main = dir.path().join("config");
+        std::fs::write(&main, format!("Include {}\nHost web\nHost bastion jump\nHost db\n", managed.display())).unwrap();
+        let doc = load_doc(&main).unwrap();
+        assert!(managed_defines(&doc, &managed, "web"), "any pattern of a synced block counts");
+        assert!(managed_defines(&doc, &managed, "web-1"));
+        assert!(!managed_defines(&doc, &managed, "db"));
+        assert!(!managed_defines(&doc, &main, "web-1"), "only the synced file is looked at");
+        assert_eq!(
+            refuse_already_synced(&doc, &managed, "web").unwrap_err().to_string(),
+            "'web' is already in the synced file — resolve the duplicate instead"
+        );
+        // 以次要 pattern 指名:`move_host` 會搬 `Host bastion jump`,同步檔裡已經有 `bastion`。
+        assert_eq!(
+            refuse_already_synced(&doc, &managed, "jump").unwrap_err().to_string(),
+            "'bastion' is already in the synced file — resolve the duplicate instead"
+        );
+        assert!(refuse_already_synced(&doc, &managed, "db").is_ok());
+        assert!(refuse_already_synced(&doc, &managed, "ghost").is_ok(), "move_host reports unknown aliases itself");
+    }
+
+    #[test]
+    fn moves_into_sync_wait_for_the_first_sync_after_join() {
+        let runtime = SyncRuntime::default();
+        assert!(refuse_before_first_sync(&runtime).is_ok(), "no state yet: nothing to wait for");
+        let mut s = crate::sync::state::SyncState::fresh("Box").unwrap();
+        runtime.core.lock().unwrap().state = Some(s.clone());
+        assert!(refuse_before_first_sync(&runtime).is_ok(), "not joined");
+        // 剛 Join:基線輪還沒跑完。
+        s.chain_id = Some("ab".repeat(32));
+        s.baseline_established = false;
+        runtime.core.lock().unwrap().state = Some(s.clone());
+        assert_eq!(
+            refuse_before_first_sync(&runtime).unwrap_err().to_string(),
+            "wait for the first sync to finish before moving hosts into sync"
+        );
+        s.baseline_established = true;
+        runtime.core.lock().unwrap().state = Some(s);
+        assert!(refuse_before_first_sync(&runtime).is_ok());
+    }
+
+    #[test]
+    fn migration_refuses_aliases_the_synced_file_already_defines_without_halting_the_batch() {
+        let (_dir, main, managed) = fixture();
+        let managed_str = managed.to_string_lossy().into_owned();
+        let mut doc = load_doc(&main).unwrap();
+        let mut backed_up = std::collections::HashSet::new();
+        let (report, needs_reload) = migrate_hosts(
+            &mut doc,
+            vec!["web".to_string(), "local-only".to_string()],
+            false,
+            &managed_str,
+            |doc, idx| persist_file(doc, idx, &mut backed_up, None),
+        );
+        assert!(!needs_reload, "a refusal before any change is not a failed write");
+        assert_eq!(report.moved, vec!["local-only".to_string()], "the batch goes on after the refusal");
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].alias, "web");
+        assert_eq!(report.failed[0].error, "'web' is already in the synced file — resolve the duplicate instead");
+        let synced = std::fs::read_to_string(&managed).unwrap();
+        assert_eq!(synced.matches("Host web\n").count(), 1, "no second 'Host web' in the synced file: {synced}");
+        assert!(synced.contains("Host local-only"));
+        let local = std::fs::read_to_string(&main).unwrap();
+        assert!(local.contains("Host web\n  HostName 2\n"), "the local copy stays for the shadow panel: {local}");
+    }
+
+    #[test]
+    fn tag_by_file_tags_hosts_from_included_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("hosts.config");
+        std::fs::write(&managed, "").unwrap();
+        let homelab = dir.path().join("homelab.config");
+        std::fs::write(&homelab, "Host b\n  HostName 2\n").unwrap();
+        let main = dir.path().join("config");
+        std::fs::write(&main, format!("Include {}\nInclude {}\nHost a\n  HostName 1\n", managed.display(), homelab.display())).unwrap();
+        let mut doc = load_doc(&main).unwrap();
+        let managed_str = managed.to_string_lossy().into_owned();
+        let mut backed_up = std::collections::HashSet::new();
+        let (report, needs_reload) = migrate_hosts(
+            &mut doc,
+            vec!["a".to_string(), "b".to_string()],
+            true,
+            &managed_str,
+            |doc, idx| persist_file(doc, idx, &mut backed_up, None),
+        );
+        assert!(!needs_reload);
+        assert_eq!(report.moved, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(report.tagged, 1, "only the host from an included file is tagged");
+        // 從磁碟重新讀:主 config 的主機沒有 "config" tag,Include 檔的主機帶檔名 tag。
+        let hosts = crate::config::dto::host_summaries(&load_doc(&main).unwrap());
+        let tags_of = |alias: &str| hosts.iter().find(|h| h.alias == alias).map(|h| h.tags.clone()).unwrap();
+        assert!(tags_of("a").is_empty(), "the main config's hosts get no 'config' tag");
+        assert_eq!(tags_of("b"), vec!["homelab".to_string()]);
+        assert!(hosts.iter().all(|h| h.source_file == managed.to_string_lossy()), "both moved into the synced file");
     }
 
     #[test]
