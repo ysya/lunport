@@ -1,4 +1,7 @@
-import { defineConfig } from "vite";
+// `defineConfig`/`configDefaults` from "vitest/config" (not "vite"): same
+// identity-function `defineConfig` at runtime, but its .d.ts augments Vite's
+// `UserConfig` with the `test` field so the block below type-checks.
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
@@ -36,5 +39,14 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+
+  test: {
+    // relay/ is a separate Cloudflare Workers sub-project: its own
+    // vitest.config.ts (the @cloudflare/vitest-plugin pool), its own `npm
+    // test`, and its own CI job (.github/workflows/relay.yml). Without this,
+    // the root `vitest run` also picks up relay/test/*.test.ts and fails them
+    // (they need that pool to resolve the `cloudflare:workers` module).
+    exclude: [...configDefaults.exclude, "relay/**"],
   },
 }));
