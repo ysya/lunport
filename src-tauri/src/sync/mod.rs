@@ -8,4 +8,5 @@
 pub mod crypto;
 pub mod hosts_file;
 pub mod record;
+pub mod relay;
 pub mod state;
