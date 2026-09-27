@@ -102,12 +102,25 @@ pub fn managed_defines(doc: &SshConfigDoc, managed: &Path, name: &str) -> bool {
         .any(|i| matches!(i, Item::Host(h) if h.patterns.iter().any(|p| p == name)))
 }
 
+/// 同步檔裡有第一個 alias 等於 `name` 的 Host 區塊 —— 遮蔽面板(`duplicate_aliases`)比對的正是這個。
+fn managed_first_alias(doc: &SshConfigDoc, managed: &Path, name: &str) -> bool {
+    doc.files
+        .iter()
+        .filter(|f| f.path == managed)
+        .flat_map(|f| f.items.iter())
+        .any(|i| first_alias(i) == Some(name))
+}
+
 /// 搬進同步檔之前的重複檢查(遷移精靈與 sidebar 拖進 Synced 群組共用)。同步檔已經定義了這個 alias —— 例如
 /// 加入 chain 時本地就有同名主機 —— 再搬一份進去,同步檔就違反「alias 不重複」的不變式
-/// (`check_managed_items`),整條同步停在讀檔階段;基線輪之前搬進去,還會被基線輪直接蓋掉。本地那份要用
-/// 遮蔽面板改名或移除。`move_host` 搬的是整個區塊,所以檢查的是那個區塊的**每一個** pattern:任一個已經是
-/// 同步檔裡某個 Host 區塊的 pattern 就拒絕(同步檔有 `Host a shared` 時,搬進 `Host b shared` 會留下兩個都
-/// 符合 `shared` 的同步區塊)。訊息點名撞到的那個 pattern(請求的名字本身撞到時優先點名它)。
+/// (`check_managed_items`),整條同步停在讀檔階段;基線輪之前搬進去,還會被基線輪直接蓋掉。`move_host` 搬的是
+/// 整個區塊,所以檢查的是那個區塊的**每一個** pattern:任一個已經是同步檔裡某個 Host 區塊的 pattern 就拒絕
+/// (同步檔有 `Host a shared` 時,搬進 `Host b shared` 會留下兩個都符合 `shared` 的同步區塊)。訊息點名撞到的
+/// 那個 pattern(請求的名字本身撞到時優先點名它),並指向真的能處理它的地方:
+/// - 要搬的區塊的第一個 alias 也是某個同步區塊的第一個 alias:遮蔽面板會列出這一對,叫使用者去那裡改名或移除;
+/// - 其他撞名(次要名稱,或本地的第一個 alias 撞到同步區塊的次要名稱):面板裡沒有它,要使用者先在本地那個
+///   主機(以它的第一個 alias 指名)移除或改名撞到的名字。
+///
 /// 不變式本身(`check_managed_items`)刻意只看第一個 alias(記錄的 key):別台裝置同步過來的區塊可以合法地
 /// 共用次要名稱,收緊它會讓那些 chain 整條停下 —— 這裡只擋「從本機搬進去」這個動作。
 pub fn refuse_already_synced(doc: &SshConfigDoc, managed: &Path, alias: &str) -> Result<(), AppError> {
@@ -121,12 +134,20 @@ pub fn refuse_already_synced(doc: &SshConfigDoc, managed: &Path, alias: &str) ->
             })
         })
         .unwrap_or_default();
-    for name in std::iter::once(alias).chain(moving.iter().map(String::as_str)) {
-        if managed_defines(doc, managed, name) {
-            return Err(AppError::Other(format!("'{name}' is already in the synced file — resolve the duplicate instead")));
-        }
+    let Some(name) = std::iter::once(alias)
+        .chain(moving.iter().map(String::as_str))
+        .find(|name| managed_defines(doc, managed, name))
+    else {
+        return Ok(());
+    };
+    let first = moving.first().map_or(alias, String::as_str);
+    if name == first && managed_first_alias(doc, managed, name) {
+        Err(AppError::Other(format!("'{name}' is already in the synced file — resolve the duplicate instead")))
+    } else {
+        Err(AppError::Other(format!(
+            "'{name}' is already used by a synced host — remove or rename it in the local host '{first}' first"
+        )))
     }
-    Ok(())
 }
 
 /// 這個行程沒有跑同步引擎(拿不到同步鎖,`engine::engine_active()` 為 false)時,拒絕任何「搬進同步檔」的動作。
@@ -475,15 +496,24 @@ mod tests {
         assert!(managed_defines(&doc, &managed, "web-1"));
         assert!(!managed_defines(&doc, &managed, "db"));
         assert!(!managed_defines(&doc, &main, "web-1"), "only the synced file is looked at");
+        // 本地的 `Host web` 撞到同步區塊 `Host web-1 web` 的次要名稱:遮蔽面板不會列出它(只比第一個 alias),
+        // 所以要使用者在本地那個主機改名或移除。
         assert_eq!(
             refuse_already_synced(&doc, &managed, "web").unwrap_err().to_string(),
-            "'web' is already in the synced file — resolve the duplicate instead"
+            "'web' is already used by a synced host — remove or rename it in the local host 'web' first"
         );
-        // 以次要 pattern 指名:`move_host` 會搬 `Host bastion jump`,同步檔裡已經有 `bastion`。
+        // 以次要 pattern 指名:`move_host` 會搬 `Host bastion jump`,它的第一個 alias `bastion` 也是同步區塊的
+        // 第一個 alias —— 遮蔽面板會列出這一對。
         assert_eq!(
             refuse_already_synced(&doc, &managed, "jump").unwrap_err().to_string(),
             "'bastion' is already in the synced file — resolve the duplicate instead"
         );
+        assert_eq!(
+            refuse_already_synced(&doc, &managed, "bastion").unwrap_err().to_string(),
+            "'bastion' is already in the synced file — resolve the duplicate instead"
+        );
+        let panel: Vec<String> = duplicate_aliases(&doc, &managed).into_iter().map(|d| d.alias).collect();
+        assert_eq!(panel, vec!["bastion".to_string()], "only the refusal that names the panel has an entry there");
         assert!(refuse_already_synced(&doc, &managed, "db").is_ok());
         assert!(refuse_already_synced(&doc, &managed, "ghost").is_ok(), "move_host reports unknown aliases itself");
     }
@@ -502,16 +532,18 @@ mod tests {
     fn a_block_sharing_any_name_with_the_synced_file_is_refused() {
         let (_dir, main, managed) = secondary_overlap_fixture();
         let doc = load_doc(&main).unwrap();
-        // `move_host` 搬整個 `Host b shared`:它的次要名稱 `shared` 已經是同步區塊 `Host a shared` 的名字。
+        // `move_host` 搬整個 `Host b shared`:它的次要名稱 `shared` 已經是同步區塊 `Host a shared` 的名字。遮蔽
+        // 面板只比第一個 alias(`b` 對 `a`),沒有這一筆 —— 訊息要使用者在本地主機 `b` 裡處理 `shared`。
         assert_eq!(
             refuse_already_synced(&doc, &managed, "b").unwrap_err().to_string(),
-            "'shared' is already in the synced file — resolve the duplicate instead"
+            "'shared' is already used by a synced host — remove or rename it in the local host 'b' first"
         );
-        // 以撞到的名字本身指名:點名它。
+        // 以撞到的名字本身指名:點名它,主機仍以區塊的第一個 alias 指名。
         assert_eq!(
             refuse_already_synced(&doc, &managed, "shared").unwrap_err().to_string(),
-            "'shared' is already in the synced file — resolve the duplicate instead"
+            "'shared' is already used by a synced host — remove or rename it in the local host 'b' first"
         );
+        assert!(duplicate_aliases(&doc, &managed).is_empty(), "the shadow panel has nothing to offer here");
         // 沒有任何名字重疊的區塊照常可以搬,不論用哪個名字指名。
         assert!(refuse_already_synced(&doc, &managed, "c").is_ok());
         assert!(refuse_already_synced(&doc, &managed, "d").is_ok());
@@ -534,7 +566,10 @@ mod tests {
         assert_eq!(report.moved, vec!["c".to_string()], "the batch goes on after the refusal");
         assert_eq!(report.failed.len(), 1);
         assert_eq!(report.failed[0].alias, "b");
-        assert_eq!(report.failed[0].error, "'shared' is already in the synced file — resolve the duplicate instead");
+        assert_eq!(
+            report.failed[0].error,
+            "'shared' is already used by a synced host — remove or rename it in the local host 'b' first"
+        );
         let synced = std::fs::read_to_string(&managed).unwrap();
         assert_eq!(synced.matches("shared").count(), 1, "only one synced block matches 'shared': {synced}");
         assert!(synced.contains("Host c d\n"));

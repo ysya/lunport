@@ -718,6 +718,30 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_offline_edit_that_loses_during_a_restore_is_reported_as_a_conflict() {
+        let relay = FakeRelay::default();
+        let k = keys();
+        let (mut a, mut b) = (device("a"), device("b"));
+        let (mut file_a, mut file_b) = (vec![block("web", "Host web\n"), block("db", "Host db\n")], Vec::new());
+        sync(&mut a, &relay, &mut file_a, 100);
+        sync(&mut b, &relay, &mut file_b, 200);
+        // A 離線改了 web(沒推出去);之後 B 也改了 web 並推上去 —— B 的比較新。
+        file_a[0].text = "Host web\n  User a\n".to_string();
+        plan_local(&mut a, &file_a, |_| 300, 300, "test");
+        file_b.iter_mut().find(|blk| blk.alias == "web").unwrap().text = "Host web\n  User b\n".to_string();
+        sync(&mut b, &relay, &mut file_b, 400);
+        // A 的 hosts.config 不見了:重設保留 A 的修改,基線輪合併時它輸給 B 的版本 —— 引擎要把這筆當成衝突通知
+        // (`merged.conflicts` 就是基線輪發出 `sync://conflict` 的內容),檔案寫的是 B 的版本,不會再寫回 A 的。
+        crate::sync::engine::reset_hosts_for_rematerialize(&mut a);
+        let merged = pull_merge(&a, &k, &relay).unwrap();
+        assert_eq!(merged.conflicts, vec!["web".to_string()]);
+        assert!(unpushed_host_effects(&merged.state, &[]).is_empty(), "the losing edit is not written back");
+        let mut restored = Vec::new();
+        apply_to(&mut restored, &merged.host_effects);
+        assert_eq!(sorted(&restored), vec![pair("db", "Host db\n"), pair("web", "Host web\n  User b\n")]);
+    }
+
+    #[test]
     fn undecryptable_envelopes_are_skipped_not_fatal() {
         let relay = FakeRelay::default();
         relay.rows.borrow_mut().insert(

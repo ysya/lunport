@@ -668,20 +668,50 @@ pub fn config_load(
     let aliases = crate::tray::tray_aliases(&doc);
     let _ = crate::tray::rebuild_tray(&app, &aliases);
 
-    {
+    // 同步引擎用的受管檔路徑(與 `sync::engine` 相同);拿不到家目錄時只在第一次載入喚醒。
+    let managed = crate::keys::ssh_dir()
+        .ok()
+        .map(|dir| crate::sync::hosts_file::managed_path(&dir));
+    let wake = {
         let mut doc_lock = state.doc.lock().unwrap();
+        let wake = load_wakes_sync(doc_lock.as_ref(), &doc, managed.as_deref());
         *doc_lock = Some(doc);
 
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         backed_up_lock.clear();
+        wake
+    };
+    // 在放掉 doc 鎖之後才喚醒(見 `load_wakes_sync`)。
+    if wake {
+        crate::sync::engine::wake();
     }
-    // 每次成功載入都喚醒同步引擎(在放掉 doc 鎖之後)。第一次載入之前,引擎的輪次都在 doc 是 None 時安靜跳過;
-    // 之後的重新載入可能帶進了 app 以外對 hosts.config 的修改(例如被外部工具清空)—— 存檔當下的規劃
-    // (`note_file_written`)是拿 app 的編輯去比快取,要讓同步輪次先看到這次載入(例如先從 chain 重新長出被清空
-    // 的檔案),下一次 app 存檔才不會對著過期的快取把每一台主機都規劃成刪除。排隊的喚醒會合併成一輪。
-    crate::sync::engine::wake();
 
     Ok(LoadResult { files, hosts })
+}
+
+/// `config_load` 換上新的 doc 之後要不要喚醒同步引擎(純函式):
+/// - 之前沒有 doc(第一次載入,或寫入失敗後被作廢):要 —— 引擎的輪次在 doc 是 None 時都安靜跳過。
+/// - 受管檔(`managed`,與引擎同一個路徑)在新舊 doc 裡的有無或指紋不同:要 —— 這次載入帶進了 app 以外的
+///   修改(例如被外部工具清空)。存檔當下的規劃(`note_file_written`)拿整個檔案去比快取,要讓同步輪次先看到
+///   這次載入(例如先從 chain 重新長出被清空的檔案),下一次 app 存檔才不會對著過期的快取把每一台主機都規劃成
+///   刪除。
+/// - 其他情況不喚醒。前端在每次 `sync://applied` 之後都會重新載入,而引擎每次整份重載 doc(即使什麼都沒套用)
+///   都會發 `sync://applied`:例如 hosts.config 存在卻載入不了(非 UTF-8、讀不到、不是一般檔案)時,
+///   `load_doc` 會略過它,每一輪都重載、失敗、再發一次 —— 每次載入都喚醒的話,就成了沒有間隔的迴圈。
+///   引擎自己寫檔之後的重新載入也一樣:指紋相同,不必多跑一輪。
+///
+/// 拿不到受管檔路徑(`managed` 為 None)時只有第一次載入會喚醒。
+fn load_wakes_sync(
+    previous: Option<&crate::config::model::SshConfigDoc>,
+    next: &crate::config::model::SshConfigDoc,
+    managed: Option<&Path>,
+) -> bool {
+    let Some(previous) = previous else { return true };
+    let Some(managed) = managed else { return false };
+    let fingerprint = |doc: &crate::config::model::SshConfigDoc| {
+        doc.files.iter().find(|f| f.path == managed).map(|f| f.fingerprint.clone())
+    };
+    fingerprint(previous) != fingerprint(next)
 }
 
 /// main config top-level 的 enabled Include 值(文件順序)。
@@ -2141,5 +2171,51 @@ mod tests {
         let doc = load_doc_migrated(&config_path).expect("load ok");
         assert_eq!(doc.files.len(), 1);
         assert!(find_host_file_index(&doc, "web").is_some());
+    }
+
+    // ── config_load 只在受管同步檔變了時喚醒同步引擎 ─────────────────────────────
+    // 只用暫存目錄:受管檔路徑由測試傳入(正式環境是 ~/.ssh/sshelter/hosts.config)。
+
+    #[test]
+    fn a_config_load_wakes_sync_on_the_first_load_and_when_the_synced_file_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = write_config(&dir, "hosts.config", "Host web\n");
+        let main = write_config(&dir, "config", &format!("Include {}\nHost local\n", managed.display()));
+        let first = load_doc(&main).unwrap();
+        assert!(load_wakes_sync(None, &first, Some(&managed)), "the first load wakes the engine");
+        // 什麼都沒變(例如引擎寫檔之後、前端因 sync://applied 重新載入):不喚醒。
+        let same = load_doc(&main).unwrap();
+        assert!(!load_wakes_sync(Some(&first), &same, Some(&managed)), "an identical reload does not");
+        // 只有別的檔案變了:不喚醒。
+        std::fs::write(&main, format!("Include {}\nHost local\n  User me\n", managed.display())).unwrap();
+        let main_edited = load_doc(&main).unwrap();
+        assert!(!load_wakes_sync(Some(&same), &main_edited, Some(&managed)), "other files do not matter");
+        // 受管檔在 app 以外被改了(例如被清空):喚醒。
+        std::fs::write(&managed, "").unwrap();
+        let emptied = load_doc(&main).unwrap();
+        assert!(load_wakes_sync(Some(&main_edited), &emptied, Some(&managed)), "a changed fingerprint wakes it");
+        // 拿不到受管檔路徑:只有第一次載入喚醒。
+        assert!(load_wakes_sync(None, &emptied, None));
+        assert!(!load_wakes_sync(Some(&first), &emptied, None));
+    }
+
+    #[test]
+    fn a_config_load_wakes_sync_when_the_synced_file_appears_or_disappears_but_not_while_it_stays_unloadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("hosts.config");
+        let main = write_config(&dir, "config", &format!("Include {}\nHost local\n", managed.display()));
+        let without = load_doc(&main).unwrap();
+        assert!(without.files.iter().all(|f| f.path != managed));
+        std::fs::write(&managed, "Host web\n").unwrap();
+        let with = load_doc(&main).unwrap();
+        assert!(load_wakes_sync(Some(&without), &with, Some(&managed)), "appeared");
+        assert!(load_wakes_sync(Some(&with), &without, Some(&managed)), "disappeared");
+        // 存在卻載入不了(例如另存成 UTF-16):`load_doc` 略過它,引擎每一輪都重載 doc 並發 sync://applied。
+        // 前端因此重新載入時不能再喚醒 —— 否則就是沒有間隔的迴圈。
+        std::fs::write(&managed, [0xff, 0xfe, b'H', 0x00]).unwrap();
+        let unloadable = load_doc(&main).unwrap();
+        assert!(unloadable.files.iter().all(|f| f.path != managed), "load_doc skips a non-UTF-8 include");
+        let reloaded = load_doc(&main).unwrap();
+        assert!(!load_wakes_sync(Some(&unloadable), &reloaded, Some(&managed)));
     }
 }

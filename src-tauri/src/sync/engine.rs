@@ -708,7 +708,7 @@ fn log_skipped(merged: &reconcile::Merged) {
 /// 回 `SUPERSEDED` 表示被 lifecycle / 狀態命令 / 存檔當下的規劃搶先,不是錯誤。
 fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys) -> Result<(), AppError> {
     // doc 還沒載入(app 剛啟動、前端還沒 config_load):安靜跳過 —— 不寫 last_error、不存狀態;
-    // 每次成功的 config_load 都會喚醒下一輪。
+    // config_load 載入 doc 時會喚醒下一輪(見 `config::commands::load_wakes_sync`)。
     let Some(Prepared { path: managed, reloaded, rematerialize }) = ensure_managed_loaded(app)? else {
         return Ok(());
     };
@@ -744,7 +744,9 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
     //    tombstone、本機同步檔卻還留著的區塊會被移除(先備份)。否則 Leave 後保留的舊區塊會以「現在」的時間戳
     //    復活遠端的刪除。重新長出受管檔時保留下來的未上傳修改(`reset_hosts_for_rematerialize`),合併後仍贏
     //    LWW、檔案裡卻沒有的,和 chain 的主機一起寫回(`unpushed_host_effects`);剛 Join 時快取沒有 host 記錄,
-    //    沒有這種效果。成功後立刻再跑一輪,本機獨有的區塊才當外部編輯上傳、保留的修改照常推送。
+    //    沒有這種效果。保留的修改若輸給較新的遠端版,就被遠端版取代 —— 和一般輪次一樣以 `sync://conflict`
+    //    通知(在 apply_and_commit 回來、不持有任何鎖之後),不會默默消失。成功後立刻再跑一輪,本機獨有的區塊
+    //    才當外部編輯上傳、保留的修改照常推送。
     if !s.baseline_established {
         let merged = reconcile::pull_merge(&s, &keys, &relay).map_err(relay_round_error)?;
         log_skipped(&merged);
@@ -759,6 +761,9 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
         {
             if wrote {
                 let _ = app.emit("sync://applied", &effects.len());
+            }
+            if !merged.conflicts.is_empty() {
+                let _ = app.emit("sync://conflict", &merged.conflicts);
             }
             if let Some(e) = save_error {
                 return Err(e); // 狀態沒落盤:停下,下一輪先補存
@@ -1923,19 +1928,21 @@ mod tests {
 
     #[test]
     fn a_sync_lock_released_while_retrying_is_taken() {
-        // app 內更新重新啟動:舊行程在新行程重試的期間結束。只用暫存目錄;「結束」在注入的 pause 裡發生,不靠計時。
+        // app 內更新重新啟動:舊行程在新行程重試的期間放掉鎖。只用暫存目錄;放掉鎖在注入的 pause 裡發生,不靠計時。
+        // 用明確的 `unlock()`(LOCK_UN)而不是 drop:別的測試同時在 spawn 子行程,子行程在 exec 之前會短暫握著這個
+        // open file description 的複本 —— 只 close 的話,鎖要等最後一個複本關掉才放,不等待的重試會剛好全部錯過;
+        // LOCK_UN 則立刻放掉,不論還有誰握著複本。(正式的重試真的會等 200 ms,不受這個影響。)
         let dir = tempfile::tempdir().unwrap();
-        let mut old_process = Some(acquire_engine_lock(dir.path()).unwrap());
+        let old_process = acquire_engine_lock(dir.path()).unwrap();
         let mut pauses = 0;
         let taken = acquire_engine_lock_with(dir.path(), ENGINE_LOCK_ATTEMPTS, || {
             pauses += 1;
             if pauses == 3 {
-                old_process.take();
+                old_process.unlock().unwrap();
             }
         });
         assert!(taken.is_ok(), "the lock is taken on the attempt after the old process let go");
         assert_eq!(pauses, 3);
-        assert!(old_process.is_none());
     }
 
     #[test]
