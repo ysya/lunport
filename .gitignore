@@ -44,3 +44,6 @@ pnpm-debug.log*
 
 # Design audit / screenshot harness (local-only; not part of the app)
 .design/
+
+relay/node_modules
+relay/.wrangler
