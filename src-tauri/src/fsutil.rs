@@ -8,6 +8,13 @@ use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 
+/// 應用程式本機資料根目錄(MCP policy、sync state 等皆放這裡)。
+pub fn app_data_root() -> Result<PathBuf, AppError> {
+    dirs::data_local_dir()
+        .ok_or_else(|| AppError::Other("cannot determine local data directory".to_string()))
+        .map(|p| p.join("org.homelab.sshelter"))
+}
+
 /// 確保目錄存在，且（unix）權限為 0700。不存在才建立。
 /// 僅在「建立時」設定權限；既有目錄的權限刻意不改動（避免動到使用者既有的 ~/.ssh）。
 pub fn ensure_dir_secure(dir: &Path) -> Result<(), AppError> {

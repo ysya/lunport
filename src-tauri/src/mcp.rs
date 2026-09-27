@@ -243,18 +243,12 @@ fn unix_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn app_data_root() -> Result<PathBuf, AppError> {
-    dirs::data_local_dir()
-        .ok_or_else(|| AppError::Other("cannot determine local data directory".to_string()))
-        .map(|p| p.join("org.homelab.sshelter"))
-}
-
 fn policy_path() -> Result<PathBuf, AppError> {
-    Ok(app_data_root()?.join("mcp-policy.json"))
+    Ok(crate::fsutil::app_data_root()?.join("mcp-policy.json"))
 }
 
 fn runtime_path() -> Result<PathBuf, AppError> {
-    Ok(app_data_root()?.join("mcp-runtime.json"))
+    Ok(crate::fsutil::app_data_root()?.join("mcp-runtime.json"))
 }
 
 fn load_policy() -> Result<McpPolicy, AppError> {
