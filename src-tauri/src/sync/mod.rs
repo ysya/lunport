@@ -6,3 +6,4 @@
 //! - `relay`: 中繼 HTTP client(Task 5)
 
 pub mod crypto;
+pub mod record;
