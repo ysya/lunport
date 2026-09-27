@@ -53,9 +53,9 @@ MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so 
 
 ## Sync
 
-Open **Settings → Sync**. *Create* shows a 24-word recovery phrase — store it in a password manager; it is the only secret and anyone holding it can read your synced hosts. On another computer choose *Join* and paste the words.
+Open **Settings → Sync**. *Create* shows a 24-word recovery phrase — store it in a password manager; it is the only secret and anyone holding it can read your synced hosts. On another computer choose *Join* and paste the words. SSHelter needs an existing SSH config: on a new machine create an empty `~/.ssh/config` first.
 
-Synced hosts live in `~/.ssh/sshelter/hosts.config`, which SSHelter `Include`s at the top of your main config, so plain `ssh` keeps working and the file survives uninstalling SSHelter. Use *Choose hosts…* to move existing hosts in (optionally tagged with their old file name). Hosts in other files stay local to that computer.
+Synced hosts live in `~/.ssh/sshelter/hosts.config`, which SSHelter `Include`s at the top of your main config, so plain `ssh` keeps working and the file survives uninstalling SSHelter. Use *Choose hosts…* to move existing hosts in (optionally tagged with their old file name). Hosts in other files stay local to that computer. Edits to `hosts.config` made outside SSHelter sync like any other edit, including deletions; if the file disappears or is emptied, SSHelter restores it from the chain.
 
 *Forget* (in the Devices list) only removes a device from that list; a device that still has the phrase keeps syncing. If a device is lost, leave the chain, start a new one on the devices you keep, and rotate the keys it could see.
 
