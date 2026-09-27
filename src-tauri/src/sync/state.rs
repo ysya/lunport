@@ -13,11 +13,18 @@ use crate::sync::record::{Envelope, LocalRecord, SCHEMA_VERSION};
 
 pub const STATE_VERSION: u32 = 1;
 
-/// 建置時由 CI 以 `SSHELTER_RELAY_URL` 注入正式中繼;本機開發預設指向 `wrangler dev`。
-pub const DEFAULT_RELAY_URL: &str = match option_env!("SSHELTER_RELAY_URL") {
-    Some(url) => url,
-    None => "http://127.0.0.1:8787",
-};
+/// 建置時由 CI 以 `SSHELTER_RELAY_URL` 注入正式中繼;沒設定、或設成空字串(GitHub Actions 對未設定的
+/// repository variable 會給空字串)都退回本機 `wrangler dev`。
+pub const DEFAULT_RELAY_URL: &str = relay_url_or_default(option_env!("SSHELTER_RELAY_URL"));
+
+const LOCAL_RELAY_URL: &str = "http://127.0.0.1:8787";
+
+const fn relay_url_or_default(injected: Option<&'static str>) -> &'static str {
+    match injected {
+        Some(url) if !url.is_empty() => url,
+        _ => LOCAL_RELAY_URL,
+    }
+}
 
 pub const MNEMONIC_ACCOUNT: &str = "sync:mnemonic";
 
@@ -215,5 +222,12 @@ mod tests {
         save(&path, &SyncState::fresh("A").unwrap()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn empty_or_missing_injected_relay_url_falls_back_to_local() {
+        assert_eq!(relay_url_or_default(None), "http://127.0.0.1:8787");
+        assert_eq!(relay_url_or_default(Some("")), "http://127.0.0.1:8787");
+        assert_eq!(relay_url_or_default(Some("https://relay.example.com")), "https://relay.example.com");
     }
 }
