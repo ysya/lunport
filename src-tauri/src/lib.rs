@@ -1,4 +1,5 @@
 pub mod askpass;
+mod sync;
 mod config;
 mod connect;
 mod deploy;
