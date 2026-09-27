@@ -280,8 +280,9 @@ pub fn note_file_written(path: &Path, items: &[Item]) {
     wake();
 }
 
-/// 確保受管檔存在、主 config 有 Include(置頂)、且 doc 已載入受管檔。回傳受管檔路徑。
-fn ensure_managed_loaded(app: &AppHandle) -> Result<PathBuf, AppError> {
+/// 確保受管檔存在、主 config 有 Include(置頂)、且 doc 已載入受管檔。回傳(受管檔路徑, 是否整份重載了
+/// in-memory doc)—— 重載是最後一步,之後不會再失敗;重載過的話,呼叫端在放掉所有鎖之後 `refresh_views`。
+fn ensure_managed_loaded(app: &AppHandle) -> Result<(PathBuf, bool), AppError> {
     let ssh_dir = crate::keys::ssh_dir()?;
     let managed = hosts_file::ensure_managed_file(&ssh_dir)?;
     let state = app.state::<AppState>();
@@ -293,20 +294,26 @@ fn ensure_managed_loaded(app: &AppHandle) -> Result<PathBuf, AppError> {
     if hosts_file::ensure_include(&mut doc.files[0].items) {
         persist_file(doc, 0, &mut backed_up, retention)?;
     }
+    let mut reloaded = false;
     if !doc.files.iter().any(|f| f.path == managed) {
         *doc_lock = Some(load_doc_migrated(&main_path)?);
+        reloaded = true;
     }
-    Ok(managed)
+    Ok((managed, reloaded))
 }
 
-/// gather 的結果:區塊 + 當時的檔案指紋(套用前要再比一次)+ 檔案 mtime(外部編輯的時間戳)。
+/// gather 的結果:區塊 + 當時的檔案指紋(套用前要再比一次)+ 檔案 mtime(外部編輯的時間戳)+ 這次是否因為
+/// 磁碟被手改而整份重載了 in-memory doc(呼叫端放掉鎖之後 `refresh_views`)。
 struct Gathered {
     blocks: Vec<HostBlockText>,
     fingerprint: Fingerprint,
     modified_ms: u64,
+    reloaded: bool,
 }
 
 /// 取出受管檔目前的區塊並檢查不變式。磁碟若已被手改(指紋不同)先重載,避免用過期的 in-memory 內容。
+/// 只在同步執行緒的 `run_round` 裡呼叫(呼叫端不持有任何鎖):重載之後才失敗(例如手改出違反不變式的區塊)
+/// 時,doc 已經換過、之後的輪次也不會再重載 —— 所以在這裡放掉鎖、通知 tray 與前端之後才回錯誤。
 fn gather_blocks(app: &AppHandle, managed: &Path) -> Result<Gathered, AppError> {
     let state = app.state::<AppState>();
     let mut doc_lock = state.doc.lock().unwrap();
@@ -316,14 +323,30 @@ fn gather_blocks(app: &AppHandle, managed: &Path) -> Result<Gathered, AppError> 
         .iter()
         .position(|f| f.path == managed)
         .ok_or_else(|| AppError::Other("synced hosts file is not loaded".to_string()))?;
+    let mut reloaded = false;
     if crate::fsutil::has_changed(managed, &doc.files[idx].fingerprint).unwrap_or(true) {
         let main_path = doc.files[0].path.clone();
         *doc_lock = Some(load_doc_migrated(&main_path)?);
+        reloaded = true;
     }
     let doc = doc_lock.as_ref().expect("just loaded");
-    let idx = doc.files.iter().position(|f| f.path == managed).ok_or_else(|| AppError::Other("synced hosts file vanished".to_string()))?;
+    let checked = doc
+        .files
+        .iter()
+        .position(|f| f.path == managed)
+        .ok_or_else(|| AppError::Other("synced hosts file vanished".to_string()))
+        .and_then(|idx| check_managed_items(&doc.files[idx].items).map(|()| idx));
+    let idx = match checked {
+        Ok(idx) => idx,
+        Err(e) => {
+            drop(doc_lock);
+            if reloaded {
+                refresh_views(app);
+            }
+            return Err(e);
+        }
+    };
     let items = &doc.files[idx].items;
-    check_managed_items(items)?;
     // 外部編輯的時間戳 = 檔案 mtime(整檔的近似值,spec §6 明示);拿不到就退回現在。
     let modified_ms = std::fs::metadata(managed)
         .and_then(|m| m.modified())
@@ -331,7 +354,22 @@ fn gather_blocks(app: &AppHandle, managed: &Path) -> Result<Gathered, AppError> 
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or_else(now_ms);
-    Ok(Gathered { blocks: hosts_file::blocks_of(items), fingerprint: doc.files[idx].fingerprint.clone(), modified_ms })
+    Ok(Gathered { blocks: hosts_file::blocks_of(items), fingerprint: doc.files[idx].fingerprint.clone(), modified_ms, reloaded })
+}
+
+/// 引擎整份換掉 in-memory doc(重載)之後:重建 tray、發 `sync://applied`(0)讓前端的 config 查詢失效。
+/// 只在算 alias 時短暫持有 doc 鎖(同 `apply_and_commit` 的 tray 重建);tray 與事件都在放掉鎖之後 ——
+/// **呼叫端不得持有任何鎖**:建立 tray menu 會同步等待主執行緒。
+fn refresh_views(app: &AppHandle) {
+    let aliases = {
+        let state = app.state::<AppState>();
+        let doc_lock = state.doc.lock().unwrap();
+        doc_lock.as_ref().map(crate::tray::tray_aliases)
+    };
+    if let Some(aliases) = aliases {
+        let _ = crate::tray::rebuild_tray(app, &aliases);
+    }
+    let _ = app.emit("sync://applied", &0usize);
 }
 
 enum Applied {
@@ -412,6 +450,9 @@ fn apply_and_commit(
                 // 發布合併狀態 —— 否則下一輪會把已套用的遠端內容誤判成本機修改;否 → 沒寫進去,本輪作廢。
                 let committed = std::fs::read_to_string(managed).map(|t| t == expected).unwrap_or(false);
                 if !committed {
+                    // doc 已從磁碟重載(可能含外部編輯):放掉鎖之後通知 tray 與前端,本輪不發布。
+                    drop(doc_lock);
+                    refresh_views(app);
                     return match e {
                         AppError::Conflict(_) => Ok(Applied::FileChanged),
                         other => Err(other),
@@ -473,8 +514,21 @@ fn commit_state(app: &AppHandle, generation: u64, s: &SyncState) -> Result<(), A
 /// 狀態已確定落盤:`sync_once` 會先補存 `unsaved`,補不成就不跑)。
 /// 回 `SUPERSEDED` 表示被 lifecycle / 狀態命令 / 存檔當下的規劃搶先,不是錯誤。
 fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys) -> Result<(), AppError> {
-    let managed = ensure_managed_loaded(app)?;
-    let gathered = gather_blocks(app, &managed)?; // 含受管檔不變式檢查
+    let (managed, reloaded) = ensure_managed_loaded(app)?;
+    // 含受管檔不變式檢查。ensure 已重載 doc、gather 卻失敗時,照樣先通知 tray 與前端(這裡沒有持有任何鎖)。
+    let gathered = match gather_blocks(app, &managed) {
+        Ok(gathered) => gathered,
+        Err(e) => {
+            if reloaded {
+                refresh_views(app);
+            }
+            return Err(e);
+        }
+    };
+    // 引擎整份重載了 in-memory doc(受管檔還沒載入、或磁碟被手改):這裡沒有持有任何鎖,通知 tray 與前端。
+    if reloaded || gathered.reloaded {
+        refresh_views(app);
+    }
     let now = now_ms();
     let platform = std::env::consts::OS;
     let relay = RelayClient::new(&s.relay_url, &keys.auth_token)?;
@@ -484,6 +538,9 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
     //    成功後立刻再跑一輪,本機獨有的區塊才當外部編輯上傳。
     if !s.baseline_established {
         let merged = reconcile::pull_merge(&s, &keys, &relay)?;
+        if merged.skipped > 0 {
+            eprintln!("[sync] {} remote record(s) could not be read and were skipped", merged.skipped);
+        }
         let mut next = merged.state;
         next.baseline_established = true;
         next.last_sync_ms = Some(now);
@@ -510,6 +567,9 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
 
     // 2. 網路:不持有任何鎖。
     let merged = reconcile::pull_merge(&s, &keys, &relay)?;
+    if merged.skipped > 0 {
+        eprintln!("[sync] {} remote record(s) could not be read and were skipped", merged.skipped);
+    }
 
     // 3. 套用 + 發布(同一交易)。受管檔在網路期間變過 → 整輪丟棄(cursor 不前進),立刻重跑。
     let next = merged.state;
@@ -600,11 +660,26 @@ fn worker_loop(app: AppHandle, rx: Receiver<()>) {
     }
 }
 
-/// 啟動:載入狀態與助記詞,派生金鑰,開背景執行緒。狀態損毀不阻擋 app 啟動。
+/// 狀態檔讀不懂(損毀,或更新版 SSHelter 寫的)時,把它搬到同一目錄的 `sync-state.unreadable-<ms>.json`:
+/// 之後的任何存檔(改裝置名、Create/Join、Leave 重試)都會把新狀態寫到原路徑,不搬就會蓋掉它。回傳要放進
+/// `last_error` 的說明(含原錯誤);搬不動就保留原錯誤並附上原因。
+fn set_aside_unreadable_state(path: &Path, timestamp_ms: u64, error: &AppError) -> String {
+    let name = format!("sync-state.unreadable-{timestamp_ms}.json");
+    match std::fs::rename(path, path.with_file_name(&name)) {
+        Ok(()) => format!("{error}; the old file was kept as {name}"),
+        Err(e) => format!("{error}; could not set the old file aside: {e}"),
+    }
+}
+
+/// 啟動:載入狀態與助記詞,派生金鑰,開背景執行緒。狀態損毀不阻擋 app 啟動 —— 讀不懂的狀態檔先搬到旁邊
+/// 保留(`set_aside_unreadable_state`),之後存下的新狀態才不會蓋掉它。
 pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
-    let mut loaded = match sync_state::state_path().and_then(|p| sync_state::load(&p)) {
+    let read = sync_state::state_path().and_then(|path| {
+        sync_state::load(&path).map_err(|e| AppError::Other(set_aside_unreadable_state(&path, now_ms(), &e)))
+    });
+    let mut loaded = match read {
         Ok(Some(s)) => s,
         Ok(None) => SyncState::fresh(&default_device_name())?,
         Err(e) => {
@@ -652,16 +727,17 @@ fn with_state<T>(app: &AppHandle, f: impl FnOnce(&mut SyncState) -> Result<T, Ap
 }
 
 /// 只動狀態的命令:先拿 doc 鎖(與 apply_and_commit 的交易互斥,順序 doc → core),在同一個 core 臨界區
-/// 「換 generation + 改狀態 + 持久化」。在途輪次的整份狀態副本會因 generation 不同而被丟棄。
+/// 「改狀態 + 換 generation + 持久化」。在途輪次的整份狀態副本會因 generation 不同而被丟棄。`f` 回錯誤
+/// (命令被拒絕)時不換 generation,在途輪次照常完成 —— 所以 `f` 必須在任何修改之前就決定要不要回錯誤。
 fn mutate_state<T>(app: &AppHandle, f: impl FnOnce(&mut SyncState) -> Result<T, AppError>) -> Result<T, AppError> {
     let state = app.state::<AppState>();
     let _doc = state.doc.lock().unwrap();
     let mut core = state.sync.core.lock().unwrap();
-    core.generation += 1;
     let out = {
         let s = core.state.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
         f(s)?
     };
+    core.generation += 1;
     save_core(&mut core)?;
     Ok(out)
 }
@@ -684,7 +760,9 @@ enum ChainEntry {
 
 /// 建立或加入 chain 的共同流程。**呼叫端已持有 lifecycle 鎖**(全程,含網路與 keychain)。
 /// 驗證/建立 → 存助記詞 → 在 doc 鎖內、同一個 core 臨界區換 generation/狀態/金鑰 → 準備受管檔 → 喚醒。
-fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry) -> Result<SyncStatus, AppError> {
+/// 回傳(狀態, 準備受管檔時是否重載了 doc):這裡還在 lifecycle 鎖內,不能重建 tray / 發事件 —— 由呼叫端在
+/// 放掉 lifecycle 鎖之後 `refresh_views`。
+fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry) -> Result<(SyncStatus, bool), AppError> {
     let keys = crypto::derive_keys(words)?;
     let relay_url = with_state(app, |s| Ok(s.relay_url.clone()))?;
     let relay = RelayClient::new(&relay_url, &keys.auth_token)?;
@@ -743,9 +821,9 @@ fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry
         core.keys = Some(keys);
         save_core(&mut core)?;
     }
-    ensure_managed_loaded(app)?;
+    let (_, reloaded) = ensure_managed_loaded(app)?;
     wake();
-    current_status(app)
+    Ok((current_status(app)?, reloaded))
 }
 
 /// 離開 chain。**呼叫端已持有 lifecycle 鎖**。先作廢在途輪次並清掉 chain 狀態(確保停止同步),再刪
@@ -794,7 +872,6 @@ fn leave_chain(app: &AppHandle, delete_remote: bool) -> Result<SyncStatus, AppEr
         Ok(())
     })?;
     let saved = save_state(app);
-    emit_status(app);
     if let Err(e) = cleared {
         return Err(AppError::Other(format!(
             "left the sync chain, but the recovery phrase could not be removed from the keychain ({e}); use \"Remove phrase\" to retry"
@@ -814,17 +891,24 @@ pub fn sync_status(app: AppHandle) -> Result<SyncStatus, AppError> {
 }
 
 /// 網路在 spawn_blocking 裡(`reqwest::blocking` 不能在 tokio runtime 內呼叫);lifecycle 鎖涵蓋前置檢查。
+/// tray 重建與事件在 lifecycle 鎖放掉之後(`refresh_views`)。
 #[tauri::command]
 pub async fn sync_create_chain(app: AppHandle, device_name: String) -> Result<String, AppError> {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
-        let _lifecycle = state.sync.lifecycle.lock().unwrap();
-        if with_state(&handle, |s| Ok(s.joined()))? {
-            return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
+        let (words, reloaded) = {
+            let _lifecycle = state.sync.lifecycle.lock().unwrap();
+            if with_state(&handle, |s| Ok(s.joined()))? {
+                return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
+            }
+            let words = crypto::generate_mnemonic()?;
+            let (_, reloaded) = enter_chain(&handle, &words, &device_name, ChainEntry::Create)?;
+            (words, reloaded)
+        };
+        if reloaded {
+            refresh_views(&handle);
         }
-        let words = crypto::generate_mnemonic()?;
-        enter_chain(&handle, &words, &device_name, ChainEntry::Create)?;
         Ok(words)
     })
     .await
@@ -837,11 +921,17 @@ pub async fn sync_join_chain(app: AppHandle, words: String, device_name: String)
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
-        let _lifecycle = state.sync.lifecycle.lock().unwrap();
-        if with_state(&handle, |s| Ok(s.joined()))? {
-            return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
+        let (status, reloaded) = {
+            let _lifecycle = state.sync.lifecycle.lock().unwrap();
+            if with_state(&handle, |s| Ok(s.joined()))? {
+                return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
+            }
+            enter_chain(&handle, &normalized, &device_name, ChainEntry::Join)?
+        };
+        if reloaded {
+            refresh_views(&handle);
         }
-        enter_chain(&handle, &normalized, &device_name, ChainEntry::Join)
+        Ok(status)
     })
     .await
     .map_err(join_error)?
@@ -861,13 +951,18 @@ pub async fn sync_show_words(app: AppHandle) -> Result<String, AppError> {
     .map_err(join_error)?
 }
 
+/// `sync://status` 在 lifecycle 鎖放掉之後才發(每條路徑,含錯誤):不在持鎖時呼叫任何 Tauri API。
 #[tauri::command]
 pub async fn sync_leave_chain(app: AppHandle, delete_remote: bool) -> Result<SyncStatus, AppError> {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = handle.state::<AppState>();
-        let _lifecycle = state.sync.lifecycle.lock().unwrap();
-        leave_chain(&handle, delete_remote)
+        let result = {
+            let _lifecycle = state.sync.lifecycle.lock().unwrap();
+            leave_chain(&handle, delete_remote)
+        };
+        emit_status(&handle);
+        result
     })
     .await
     .map_err(join_error)?
@@ -1061,5 +1156,23 @@ mod tests {
         assert!(status.devices[0].is_this);
         assert!(status.read_only);
         assert!(!status.phrase_cleanup_pending);
+    }
+
+    #[test]
+    fn an_unreadable_state_file_is_set_aside_instead_of_overwritten() {
+        // 只用暫存目錄,絕不碰真正的 app data。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync-state.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let error = AppError::Other("sync state is unreadable: boom".to_string());
+        assert_eq!(
+            set_aside_unreadable_state(&path, 1234, &error),
+            "sync state is unreadable: boom; the old file was kept as sync-state.unreadable-1234.json"
+        );
+        assert!(!path.exists(), "a fresh state saved later can no longer overwrite it");
+        assert_eq!(std::fs::read(dir.path().join("sync-state.unreadable-1234.json")).unwrap(), b"{ not json");
+        // 搬不動(這裡:原檔已不在)→ 保留原錯誤並附上原因。
+        let failed = set_aside_unreadable_state(&path, 1235, &error);
+        assert!(failed.starts_with("sync state is unreadable: boom; could not set the old file aside: "), "got: {failed}");
     }
 }
