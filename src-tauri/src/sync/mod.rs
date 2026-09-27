@@ -2,11 +2,13 @@
 //! - `crypto`: 助記詞、金鑰派生、記錄加密
 //! - `record`: 記錄模型與 LWW 合併(Task 2)
 //! - `hosts_file`: 受管同步檔的區塊操作(Task 3)
+//! - `planner`: 本機變更偵測(Task 1)
 //! - `state`: 本機同步狀態持久化(Task 4)
 //! - `relay`: 中繼 HTTP client(Task 5)
 
 pub mod crypto;
 pub mod hosts_file;
+pub mod planner;
 pub mod record;
 pub mod relay;
 pub mod state;
