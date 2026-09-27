@@ -17,11 +17,13 @@ pub fn managed_path(ssh_dir: &Path) -> PathBuf {
 }
 
 /// 建立 `~/.ssh/sshelter/`(0700)與空的 `hosts.config`(0600);已存在則不動內容。
+/// 存在與否用 `try_exists`:查不到 metadata(權限、I/O 錯誤)是錯誤,不是「不存在」—— 否則一次暫時的
+/// stat 失敗就會用空檔蓋掉既有的同步檔(這條路徑不做備份)。
 pub fn ensure_managed_file(ssh_dir: &Path) -> Result<PathBuf, AppError> {
     let path = managed_path(ssh_dir);
     let dir = path.parent().expect("managed path always has a parent");
     fsutil::ensure_dir_secure(dir)?;
-    if !path.exists() {
+    if !path.try_exists()? {
         fsutil::atomic_write(&path, b"", 0o600)?;
     }
     Ok(path)

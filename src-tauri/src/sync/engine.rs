@@ -327,7 +327,9 @@ fn ensure_managed_loaded(app: &AppHandle) -> Result<Option<Prepared>, AppError> 
     let Some(doc) = doc_lock.as_mut() else { return Ok(None) };
     let mut backed_up = state.backed_up.lock().unwrap();
     let retention = *state.backup_retention.lock().unwrap();
-    let recreated = !hosts_file::managed_path(&ssh_dir).exists();
+    // 只有「確定不存在」(`Ok(false)`)才算不見了。查不到 metadata(EACCES、EIO…)就讓這一輪失敗、什麼都不
+    // 重設 —— 否則一次暫時的 stat 錯誤就會丟掉所有 host 記錄(含還沒上傳的修改),存取恢復後再被 chain 蓋過。
+    let recreated = !hosts_file::managed_path(&ssh_dir).try_exists()?;
     let mut rematerialize = false;
     if recreated {
         let mut core = state.sync.core.lock().unwrap();
@@ -730,27 +732,33 @@ fn worker_loop(app: AppHandle, rx: Receiver<()>) {
 }
 
 /// 狀態檔讀不懂(損毀,或更新版 SSHelter 寫的)時,把它搬到同一目錄的 `sync-state.unreadable-<ms>.json`:
-/// 之後的任何存檔(改裝置名、Create/Join、Leave 重試)都會把新狀態寫到原路徑,不搬就會蓋掉它。回傳要放進
-/// `last_error` 的說明(含原錯誤);搬不動就保留原錯誤並附上原因。
-fn set_aside_unreadable_state(path: &Path, timestamp_ms: u64, error: &AppError) -> String {
+/// 之後的任何存檔(改裝置名、Create/Join、Leave 重試)都會把新狀態寫到原路徑,不搬就會蓋掉它。回傳新檔名;
+/// 搬不動回傳 I/O 錯誤(由 `unreadable_state_outcome` 決定怎麼辦)。
+fn set_aside_unreadable_state(path: &Path, timestamp_ms: u64) -> std::io::Result<String> {
     let name = format!("sync-state.unreadable-{timestamp_ms}.json");
-    match std::fs::rename(path, path.with_file_name(&name)) {
-        Ok(()) => format!("{error}; the old file was kept as {name}"),
-        Err(e) => format!("{error}; could not set the old file aside: {e}"),
-    }
+    std::fs::rename(path, path.with_file_name(&name))?;
+    Ok(name)
 }
 
-/// 啟動時 `sync_state::load` 失敗:回傳(要放進 `last_error` 的說明, `save_blocked`)。只有內容錯誤
-/// (`AppError::Other`:讀不懂的 JSON、更新版的格式)才搬到旁邊保留,之後照常存新狀態。其他(I/O 錯誤:
-/// EIO、Windows 的共用衝突…)可能只是暫時的 → 檔案留在原地,這個 session 不寫狀態 —— 否則一次讀取失敗
-/// 就會把完好的狀態搬走,讓裝置默默退出 chain。
+/// 狀態檔還留在原路徑時附在說明後面的提示;同一段完整說明也放進 `save_blocked`。
+const STATE_LEFT_IN_PLACE: &str = "; the sync state file was left in place — restart SSHelter to retry";
+
+/// 啟動時 `sync_state::load` 失敗:回傳(要放進 `last_error` 的說明, `save_blocked`)。
+/// - 內容錯誤(`AppError::Other`:讀不懂的 JSON、更新版的格式)→ 搬到旁邊保留,之後照常存新狀態。搬不動 →
+///   檔案還在原路徑,之後的存檔會蓋掉它(例如 Windows 上別的程式放掉 handle 之後)→ 這個 session 不寫狀態。
+/// - 其他(I/O 錯誤:EIO、Windows 的共用衝突…)可能只是暫時的 → 檔案留在原地,這個 session 不寫狀態 ——
+///   否則一次讀取失敗就會把完好的狀態搬走,讓裝置默默退出 chain。
 fn unreadable_state_outcome(path: &Path, timestamp_ms: u64, error: &AppError) -> (String, Option<String>) {
+    let left_in_place = |message: String| {
+        let message = format!("{message}{STATE_LEFT_IN_PLACE}");
+        (message.clone(), Some(message))
+    };
     match error {
-        AppError::Other(_) => (set_aside_unreadable_state(path, timestamp_ms, error), None),
-        _ => {
-            let message = format!("{error}; the sync state file was left in place — restart SSHelter to retry");
-            (message.clone(), Some(message))
-        }
+        AppError::Other(_) => match set_aside_unreadable_state(path, timestamp_ms) {
+            Ok(name) => (format!("{error}; the old file was kept as {name}"), None),
+            Err(e) => left_in_place(format!("{error}; could not set the old file aside: {e}")),
+        },
+        _ => left_in_place(error.to_string()),
     }
 }
 
@@ -1299,15 +1307,17 @@ mod tests {
         let path = dir.path().join("sync-state.json");
         std::fs::write(&path, b"{ not json").unwrap();
         let error = AppError::Other("sync state is unreadable: boom".to_string());
-        assert_eq!(
-            set_aside_unreadable_state(&path, 1234, &error),
-            "sync state is unreadable: boom; the old file was kept as sync-state.unreadable-1234.json"
-        );
+        let (message, blocked) = unreadable_state_outcome(&path, 1234, &error);
+        assert_eq!(message, "sync state is unreadable: boom; the old file was kept as sync-state.unreadable-1234.json");
+        assert!(blocked.is_none(), "once it is set aside, saving a fresh state is safe");
         assert!(!path.exists(), "a fresh state saved later can no longer overwrite it");
         assert_eq!(std::fs::read(dir.path().join("sync-state.unreadable-1234.json")).unwrap(), b"{ not json");
-        // 搬不動(這裡:原檔已不在)→ 保留原錯誤並附上原因。
-        let failed = set_aside_unreadable_state(&path, 1235, &error);
+        // 搬不動(這裡用「原檔已不在」讓 rename 失敗)→ 保留原錯誤並附上原因;檔案若其實還在原路徑,之後的
+        // 存檔就會蓋掉它 —— 所以同樣擋下這個 session 的存檔。
+        let (failed, blocked) = unreadable_state_outcome(&path, 1235, &error);
         assert!(failed.starts_with("sync state is unreadable: boom; could not set the old file aside: "), "got: {failed}");
+        assert!(failed.ends_with("; the sync state file was left in place — restart SSHelter to retry"), "got: {failed}");
+        assert_eq!(blocked.as_deref(), Some(failed.as_str()));
     }
 
     #[test]
@@ -1331,10 +1341,11 @@ mod tests {
 
     #[test]
     fn blocked_saves_fail_without_writing_or_marking_unsaved() {
-        // 被擋下時在碰任何路徑之前就回錯誤(這個測試因此不會碰到真正的 app data)。
+        // fail-safe:core 裡沒有狀態可寫。`app_data_root()` 在測試裡沒有替身 —— 就算擋存檔的防線退化,
+        // `save_core` 也只會回 Ok 讓斷言失敗,絕不會把東西寫進開發者真正的 sync-state.json。
         let mut core = SyncCore {
             generation: 0,
-            state: Some(SyncState::fresh("Box").unwrap()),
+            state: None,
             keys: None,
             unsaved: false,
             save_blocked: Some("left in place — restart SSHelter to retry".to_string()),
