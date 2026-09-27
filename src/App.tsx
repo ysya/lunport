@@ -1,14 +1,18 @@
 import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Bot, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
 
+import type { SyncStatus } from "@/bindings/SyncStatus";
 import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useApplyTheme } from "@/lib/theme";
 import { useSyncBackendSettings } from "@/lib/backend-settings";
 import { useGlobalHotkey } from "@/lib/global-hotkey";
 import { useAppShortcuts } from "@/lib/app-shortcuts";
+import { tauriInvoke } from "@/lib/ipc";
+import { syncStatusKey } from "@/lib/sync";
 import { HostList } from "@/components/HostList";
 import { HostEditor } from "@/components/HostEditor";
 import { AddHostDialog } from "@/components/AddHostDialog";
@@ -78,6 +82,34 @@ function App() {
       });
     }
   }, [isError, error]);
+
+  // Sync engine → UI: status pushes refresh the Settings pane without polling;
+  // applied remote changes refresh the host list; conflicts surface as a toast;
+  // regaining focus nudges a sync round.
+  useEffect(() => {
+    let disposed = false;
+    const unlisten: Array<() => void> = [];
+    void listen<SyncStatus>("sync://status", (e) => queryClient.setQueryData(syncStatusKey, e.payload)).then(
+      (fn) => (disposed ? fn() : unlisten.push(fn)),
+    );
+    void listen<number>("sync://applied", () => {
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
+    }).then((fn) => (disposed ? fn() : unlisten.push(fn)));
+    void listen<string[]>("sync://conflict", (e) => {
+      const aliases = e.payload.join(", ");
+      toast.warning("Sync overwrote a local change", {
+        description: `${aliases} was edited on another device more recently.`,
+      });
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
+    }).then((fn) => (disposed ? fn() : unlisten.push(fn)));
+    const onFocus = () => void tauriInvoke("sync_now");
+    window.addEventListener("focus", onFocus);
+    return () => {
+      disposed = true;
+      unlisten.forEach((u) => u());
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [queryClient]);
 
   const hosts = data?.hosts ?? [];
   // Wildcard-only blocks (`Host *`) are config defaults, not hosts — keep them

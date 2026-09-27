@@ -16,6 +16,7 @@ export type SettingsCategory =
   | "connection"
   | "files"
   | "ai"
+  | "sync"
   | "advanced";
 
 interface UiState {
@@ -67,6 +68,9 @@ interface UiState {
   /** Whether the ⌘K command palette is open (also driven by the global quick-connect hotkey). */
   paletteOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
+  /** Whether the "Move hosts into sync" wizard is open. Session-only. */
+  syncMigrationOpen: boolean;
+  setSyncMigrationOpen: (open: boolean) => void;
 }
 
 /**
@@ -111,6 +115,8 @@ export const useUiStore = create<UiState>()(
       setSettingsCategory: (settingsCategory) => set({ settingsCategory }),
       paletteOpen: false,
       setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+      syncMigrationOpen: false,
+      setSyncMigrationOpen: (syncMigrationOpen) => set({ syncMigrationOpen }),
     }),
     {
       name: UI_STORAGE_KEY,
