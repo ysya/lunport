@@ -91,7 +91,7 @@ pub fn is_syncable_block(patterns: &[String]) -> bool {
     !patterns.is_empty() && patterns.iter().all(|p| is_syncable_alias(p))
 }
 
-fn first_alias(item: &Item) -> Option<&str> {
+pub(crate) fn first_alias(item: &Item) -> Option<&str> {
     match item {
         Item::Host(h) => h.patterns.first().map(String::as_str),
         _ => None,

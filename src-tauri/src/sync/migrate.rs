@@ -7,14 +7,14 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::config::commands::{move_host, persist_file, validate_host_patterns};
+use crate::config::commands::{load_doc_migrated, move_host, persist_file, validate_host_patterns};
 use crate::config::dto::parse_tags;
 use crate::config::edit::{find_host_mut, set_host_patterns, set_tags};
 use crate::config::include::find_host_file_index;
 use crate::config::model::{Item, SshConfigDoc};
 use crate::error::AppError;
 use crate::state::AppState;
-use crate::sync::hosts_file::is_syncable_block;
+use crate::sync::hosts_file::{first_alias, is_syncable_block};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -71,13 +71,6 @@ pub fn tag_for_file(path: &Path) -> String {
         }
     }
     out.trim_matches('-').to_string()
-}
-
-fn first_alias(item: &Item) -> Option<&str> {
-    match item {
-        Item::Host(h) => h.patterns.first().map(String::as_str),
-        _ => None,
-    }
 }
 
 /// 遷入前的資格檢查,用**與 `move_host` 相同的定位規則**(`find_host_file_index` → 該檔案裡「任一 pattern
@@ -197,7 +190,69 @@ pub async fn sync_resolve_shadowed(app: AppHandle, alias: String, file: String, 
     .map_err(crate::sync::engine::join_error)?
 }
 
-/// 逐台搬進同步檔;每台獨立成功/失敗。`tag_by_file` 時把原檔名加成 tag(已有同名 tag 不重複)。
+/// 批次遷入的核心迴圈:不依賴 AppHandle,可直接單元測試。`persist` 由呼叫端注入(command 版是真的
+/// `persist_file`,測試版能在第 N 次呼叫時模擬失敗)。`move_host` 先改 doc、才寫檔:target、source、
+/// tag 三個寫入之中任一失敗,in-memory doc 就可能已經比磁碟新(半套用的搬移)—— 一律停止整批,不再
+/// 嘗試後面的 alias,回傳的旗標請呼叫端從磁碟重載讓兩邊回到一致。target 與 source 都已落盤的那台
+/// 算 `moved`,即使接下來的 tag 寫入才失敗。
+fn migrate_hosts(
+    doc: &mut SshConfigDoc,
+    aliases: Vec<String>,
+    tag_by_file: bool,
+    managed_str: &str,
+    mut persist: impl FnMut(&mut SshConfigDoc, usize) -> Result<(), AppError>,
+) -> (MigrationReport, bool) {
+    let mut report = MigrationReport { moved: Vec::new(), failed: Vec::new(), tagged: 0 };
+    let mut halted = false;
+    for alias in aliases {
+        if halted {
+            report.failed.push(MigrationFailure {
+                alias,
+                error: "not attempted: an earlier move failed".to_string(),
+            });
+            continue;
+        }
+        if let Err(e) = refuse_wildcard(doc, &alias) {
+            report.failed.push(MigrationFailure { alias, error: e.to_string() });
+            continue;
+        }
+        let source_tag = find_host_file_index(doc, &alias).map(|i| tag_for_file(&doc.files[i].path));
+        match move_host(doc, &alias, managed_str) {
+            Ok((src, tgt)) => {
+                if let Err(e) = persist(doc, tgt).and_then(|_| persist(doc, src)) {
+                    report.failed.push(MigrationFailure { alias, error: e.to_string() });
+                    halted = true;
+                    continue;
+                }
+                if let (true, Some(tag)) = (tag_by_file, source_tag) {
+                    // 先讀搬進去那個區塊自己的 tags(可變借用在這行結束),再取可變借用寫回:
+                    // 兩段借用不重疊,才不會 E0502;也不用 host_summaries(它取第一個命中,遮蔽時會錯)。
+                    let mut tags = find_host_mut(&mut doc.files[tgt].items, &alias)
+                        .map(|h| parse_tags(&h.body))
+                        .unwrap_or_default();
+                    if !tags.contains(&tag) {
+                        tags.push(tag);
+                        if let Some(host) = find_host_mut(&mut doc.files[tgt].items, &alias) {
+                            set_tags(host, &tags);
+                        }
+                        // target/source 都已落盤,這台已經算搬移成功;tag 只是第三次(錦上添花的)寫入 ——
+                        // 失敗一樣要停批次交給呼叫端重載,但不能反悔剛剛判定的 `moved`。
+                        match persist(doc, tgt) {
+                            Ok(()) => report.tagged += 1,
+                            Err(_) => halted = true,
+                        }
+                    }
+                }
+                report.moved.push(alias);
+            }
+            Err(e) => report.failed.push(MigrationFailure { alias, error: e.to_string() }),
+        }
+    }
+    (report, halted)
+}
+
+/// 逐台搬進同步檔;每台獨立成功/失敗,任一寫入失敗就停止整批並從磁碟重載(見 `migrate_hosts`)。
+/// `tag_by_file` 時把原檔名加成 tag(已有同名 tag 不重複)。
 #[tauri::command]
 pub async fn sync_migrate_hosts(app: AppHandle, aliases: Vec<String>, tag_by_file: bool) -> Result<MigrationReport, AppError> {
     let handle = app.clone();
@@ -212,42 +267,18 @@ pub async fn sync_migrate_hosts(app: AppHandle, aliases: Vec<String>, tag_by_fil
         if !doc.files.iter().any(|f| f.path == managed) {
             return Err(AppError::Other("synced hosts file is not loaded; create or join a chain first".to_string()));
         }
+        let main_path = doc.files[0].path.clone();
 
-        let mut report = MigrationReport { moved: Vec::new(), failed: Vec::new(), tagged: 0 };
-        for alias in aliases {
-            if let Err(e) = refuse_wildcard(doc, &alias) {
-                report.failed.push(MigrationFailure { alias, error: e.to_string() });
-                continue;
-            }
-            let source_tag = find_host_file_index(doc, &alias).map(|i| tag_for_file(&doc.files[i].path));
-            match move_host(doc, &alias, &managed_str) {
-                Ok((src, tgt)) => {
-                    if let Err(e) = persist_file(doc, tgt, &mut backed_up, retention)
-                        .and_then(|_| persist_file(doc, src, &mut backed_up, retention))
-                    {
-                        report.failed.push(MigrationFailure { alias, error: e.to_string() });
-                        continue;
-                    }
-                    if let (true, Some(tag)) = (tag_by_file, source_tag) {
-                        // 先讀搬進去那個區塊自己的 tags(可變借用在這行結束),再取可變借用寫回:
-                        // 兩段借用不重疊,才不會 E0502;也不用 host_summaries(它取第一個命中,遮蔽時會錯)。
-                        let mut tags = find_host_mut(&mut doc.files[tgt].items, &alias)
-                            .map(|h| parse_tags(&h.body))
-                            .unwrap_or_default();
-                        if !tags.contains(&tag) {
-                            tags.push(tag);
-                            if let Some(host) = find_host_mut(&mut doc.files[tgt].items, &alias) {
-                                set_tags(host, &tags);
-                            }
-                            if persist_file(doc, tgt, &mut backed_up, retention).is_ok() {
-                                report.tagged += 1;
-                            }
-                        }
-                    }
-                    report.moved.push(alias);
-                }
-                Err(e) => report.failed.push(MigrationFailure { alias, error: e.to_string() }),
-            }
+        let (report, needs_reload) = migrate_hosts(doc, aliases, tag_by_file, &managed_str, |doc, idx| {
+            persist_file(doc, idx, &mut backed_up, retention)
+        });
+        if needs_reload {
+            // 有寫入失敗:in-memory doc 可能已經比磁碟新。重載讓兩邊一致;重載也失敗就整份作廢 —— 前端會在
+            // 拿到這次報告後重新取一次設定,引擎在 doc 是 None 時安靜跳過(不寫 last_error、不存狀態)。
+            *doc_lock = match load_doc_migrated(&main_path) {
+                Ok(fresh) => Some(fresh),
+                Err(_) => None,
+            };
         }
         drop(doc_lock);
         crate::sync::engine::wake();
@@ -332,5 +363,43 @@ mod tests {
         // 不存在的檔案 / alias。
         assert!(resolve_shadowed(&mut doc2, "web", "/nope/config", ShadowedAction::Remove, &managed).is_err());
         assert!(resolve_shadowed(&mut doc2, "ghost", &main_str, ShadowedAction::Remove, &managed).is_err());
+    }
+
+    #[test]
+    fn migrate_hosts_halts_the_batch_at_the_first_persist_failure_and_flags_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("hosts.config");
+        std::fs::write(&managed, "").unwrap();
+        let main = dir.path().join("config");
+        std::fs::write(&main, format!("Include {}\nHost a\nHost b\nHost c\n", managed.display())).unwrap();
+        let mut doc = load_doc(&main).unwrap();
+        let managed_str = managed.to_string_lossy().into_owned();
+
+        // 第 3 次 persist 呼叫(alias "b" 的 target 寫入)模擬失敗:"a" 已經整台落盤,"b" 半套用,
+        // "c" 完全沒碰過。
+        let mut backed_up = std::collections::HashSet::new();
+        let mut calls = 0u32;
+        let (report, needs_reload) = migrate_hosts(
+            &mut doc,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            false,
+            &managed_str,
+            |doc, idx| {
+                calls += 1;
+                if calls == 3 {
+                    Err(AppError::Other("disk is full".to_string()))
+                } else {
+                    persist_file(doc, idx, &mut backed_up, None)
+                }
+            },
+        );
+
+        assert!(needs_reload, "a persist failure must ask the caller to reload from disk");
+        assert_eq!(report.moved, vec!["a".to_string()], "only the fully-persisted move counts");
+        assert_eq!(report.failed.len(), 2);
+        assert_eq!(report.failed[0].alias, "b");
+        assert!(report.failed[0].error.contains("disk is full"), "{}", report.failed[0].error);
+        assert_eq!(report.failed[1].alias, "c");
+        assert_eq!(report.failed[1].error, "not attempted: an earlier move failed");
     }
 }
