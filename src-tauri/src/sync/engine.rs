@@ -864,8 +864,9 @@ fn current_status(app: &AppHandle) -> Result<SyncStatus, AppError> {
     with_state(app, |s| Ok(status_from(s, &managed)))
 }
 
-/// spawn_blocking 的 JoinHandle 錯誤(執行緒被取消等)→ AppError。
-fn join_error(e: tauri::Error) -> AppError {
+/// spawn_blocking 的 JoinHandle 錯誤(執行緒被取消等)→ AppError。給 `sync::migrate` 的 command 共用,
+/// 不重複定義。
+pub(crate) fn join_error(e: tauri::Error) -> AppError {
     AppError::Other(format!("sync task failed: {e}"))
 }
 

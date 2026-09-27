@@ -133,7 +133,7 @@ fn build_detail(h: &HostBlock, source_file: &str) -> HostDetail {
 }
 
 /// Parse `#tags:` sentinel from a block body.
-fn parse_tags(body: &[Item]) -> Vec<String> {
+pub(crate) fn parse_tags(body: &[Item]) -> Vec<String> {
     for item in body {
         if let Item::Comment(s) = item {
             let trimmed = s.trim_start();

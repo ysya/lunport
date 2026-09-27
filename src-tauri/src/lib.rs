@@ -33,6 +33,7 @@ use sync::engine::{
     sync_create_chain, sync_forget_device, sync_join_chain, sync_leave_chain, sync_now,
     sync_set_device_name, sync_set_relay_url, sync_show_words, sync_status,
 };
+use sync::migrate::{sync_duplicate_aliases, sync_migrate_hosts, sync_resolve_shadowed};
 use tauri::Manager;
 use tray::tray_set_visible;
 
@@ -174,6 +175,9 @@ fn run_app(mcp_keep_alive: bool) {
             sync_set_relay_url,
             sync_set_device_name,
             sync_forget_device,
+            sync_migrate_hosts,
+            sync_duplicate_aliases,
+            sync_resolve_shadowed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

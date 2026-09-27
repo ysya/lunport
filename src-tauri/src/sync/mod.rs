@@ -11,6 +11,7 @@
 pub mod crypto;
 pub mod engine;
 pub mod hosts_file;
+pub mod migrate;
 pub mod planner;
 pub mod reconcile;
 pub mod record;
