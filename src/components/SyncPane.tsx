@@ -71,7 +71,7 @@ export function SyncPane() {
       )}
 
       <Dialog open={freshWords !== null} onOpenChange={(open) => { if (!open && saved) finishOnboarding(); }}>
-        <DialogContent className="sm:max-w-lg" onEscapeKeyDown={(e) => { if (!saved) e.preventDefault(); }} onPointerDownOutside={(e) => { if (!saved) e.preventDefault(); }}>
+        <DialogContent className="sm:max-w-lg" showCloseButton={false} onEscapeKeyDown={(e) => { if (!saved) e.preventDefault(); }} onPointerDownOutside={(e) => { if (!saved) e.preventDefault(); }}>
           <DialogHeader>
             <DialogTitle>Your recovery phrase</DialogTitle>
             <DialogDescription>
@@ -166,7 +166,8 @@ function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (
     }
   };
 
-  const wordCount = cleanWordsInput(words) === "" ? 0 : cleanWordsInput(words).split(" ").length;
+  const cleaned = cleanWordsInput(words);
+  const wordCount = cleaned === "" ? 0 : cleaned.split(" ").length;
 
   return (
     <>
@@ -345,7 +346,7 @@ function JoinedPane({ status: s, onShowWords }: { status: SyncStatus; onShowWord
         </SettingsGroup>
       </Section>
 
-      <AlertDialog open={leaveOpen} onOpenChange={setLeaveOpen}>
+      <AlertDialog open={leaveOpen} onOpenChange={(open) => { if (!leave.isPending) setLeaveOpen(open); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Leave the sync chain?</AlertDialogTitle>
@@ -358,9 +359,18 @@ function JoinedPane({ status: s, onShowWords }: { status: SyncStatus; onShowWord
             Also delete the chain from the relay (other devices will stop syncing)
           </label>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => leave.mutate({ deleteRemote }, { onSuccess: () => { setLeaveOpen(false); toast.success("Left the sync chain"); } })}>
-              Leave
+            <AlertDialogCancel disabled={leave.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={leave.isPending}
+              onClick={(e) => {
+                // Keep the dialog open until the request settles: Radix's Close
+                // (which Action composes) skips its auto-close when the click
+                // handler calls preventDefault first.
+                e.preventDefault();
+                leave.mutate({ deleteRemote }, { onSuccess: () => { setLeaveOpen(false); toast.success("Left the sync chain"); } });
+              }}
+            >
+              {leave.isPending && <Loader2 className="size-3.5 animate-spin" />} Leave
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
