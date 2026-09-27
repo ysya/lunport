@@ -94,6 +94,8 @@ jobs:
           # empty PASSWORD var keeps the CLI from prompting interactively.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # 正式中繼 URL(repository variable,必須是 https://);未設定時 app 預設指向本機 wrangler dev。
+          SSHELTER_RELAY_URL: ${{ vars.SSHELTER_RELAY_URL }}
         with:
           # The release already exists (created by release-please); attach assets to it by tag.
           tagName: ${{ needs.release-please.outputs.tag_name }}
