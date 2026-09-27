@@ -5,6 +5,7 @@
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -15,10 +16,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::config::commands::{load_doc_migrated, persist_file};
-use crate::config::model::Item;
+use crate::config::model::{ConfigFile, Item};
 use crate::config::serialize::serialize_items;
 use crate::error::AppError;
-use crate::fsutil::Fingerprint;
+use crate::fsutil::{self, Fingerprint};
 use crate::state::AppState;
 use crate::sync::crypto::{self, ChainKeys};
 use crate::sync::hosts_file::{self, HostBlockText};
@@ -30,6 +31,19 @@ use crate::sync::state::{self as sync_state, SyncState};
 const SYNC_INTERVAL: Duration = Duration::from_secs(45);
 const SUPERSEDED: &str = "sync round superseded by a newer chain state";
 const READ_ONLY_MESSAGE: &str = "this sync chain uses a newer format; update SSHelter to keep syncing";
+/// 連續這麼多輪以推送衝突收尾之後,不再立刻重跑(改等 45 秒的 tick)並顯示 `STUCK_CONFLICTS_MESSAGE`。
+const CONFLICT_RETRY_LIMIT: u32 = 3;
+const STUCK_CONFLICTS_MESSAGE: &str =
+    "Some changes could not be uploaded because the relay holds a newer version this SSHelter cannot read — update SSHelter";
+/// 加入中的 chain 在中繼上 404:被別台裝置刪掉,或閒置過期。
+const CHAIN_GONE_MESSAGE: &str =
+    "This sync chain no longer exists on the relay (deleted from another device or expired) — leave it on this device";
+const NO_CONFIG_MESSAGE: &str =
+    "SSHelter could not load your SSH config — create it (an empty ~/.ssh/config is fine) and reload, then try again";
+const OTHER_CHAIN_MESSAGE: &str = "the recovery phrase in the keychain belongs to a different sync chain; leave and rejoin";
+/// app data 目錄裡的行程間同步鎖:一個 OS 使用者同時只有一個行程跑同步引擎。
+const ENGINE_LOCK_FILE: &str = "sync.lock";
+const ANOTHER_ENGINE_MESSAGE: &str = "Sync is running in another SSHelter process — quit it to use sync here";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -75,12 +89,15 @@ pub struct SyncStatus {
 /// 網路操作前先重存,失敗就停下(dirty 記錄必須先落盤,spec §6)。
 /// `save_blocked`:啟動時 `sync-state.json` 讀不到(I/O 錯誤,不是內容錯誤)—— 檔案原封不動,這個 session
 /// 一律不寫狀態:記憶體裡只是一份新的空狀態,寫下去會蓋掉可能完好的舊狀態、讓裝置默默退出 chain。內容是原因。
+/// 別的行程持有同步鎖時(`initialize`)也用它擋下所有會寫狀態的命令。
+/// `conflict_streak`:連續幾輪以推送衝突收尾(不持久化;見 `after_push`)。
 pub struct SyncCore {
     pub generation: u64,
     pub state: Option<SyncState>,
     pub keys: Option<ChainKeys>,
     pub unsaved: bool,
     pub save_blocked: Option<String>,
+    pub conflict_streak: u32,
 }
 
 /// Tauri 管理的同步執行期狀態。
@@ -96,7 +113,14 @@ pub struct SyncRuntime {
 impl Default for SyncRuntime {
     fn default() -> Self {
         Self {
-            core: Mutex::new(SyncCore { generation: 0, state: None, keys: None, unsaved: false, save_blocked: None }),
+            core: Mutex::new(SyncCore {
+                generation: 0,
+                state: None,
+                keys: None,
+                unsaved: false,
+                save_blocked: None,
+                conflict_streak: 0,
+            }),
             lifecycle: Mutex::new(()),
             syncing: AtomicBool::new(false),
         }
@@ -130,6 +154,12 @@ fn engine_writing() -> bool {
 
 /// 喚醒背景執行緒的通道;由 `persist_file` 與 commands 共用,故放全域。
 static WAKER: OnceLock<Mutex<Option<Sender<()>>>> = OnceLock::new();
+
+/// 行程間同步鎖的 handle:鎖跟著這個 File,所以要活到行程結束(`initialize` 取得後放在這裡)。
+static ENGINE_LOCK: OnceLock<File> = OnceLock::new();
+
+/// 這個行程取得了同步鎖、跑著同步引擎。false(別的行程持有鎖、或單元測試)時存檔 hook 什麼都不做。
+static ENGINE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn wake() {
     if let Some(slot) = WAKER.get() {
@@ -249,6 +279,10 @@ fn save_core(core: &mut SyncCore) -> Result<(), AppError> {
 /// 輪次的舊快照作廢(spec §6)。引擎自己套用遠端效果的寫入(`EngineWrite`)不算本機編輯。未加入、
 /// 基線輪還沒跑、或受管檔違反不變式時不規劃(交給同步輪次處理/顯示),但加入中一律換 generation。
 pub fn note_file_written(path: &Path, items: &[Item]) {
+    // 同步引擎在別的行程:這裡的寫入對那個引擎而言就是外部編輯,由它的同步輪次發現。
+    if !ENGINE_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(app) = APP.get() else { return };
     let Ok(ssh_dir) = crate::keys::ssh_dir() else { return };
     if path != hosts_file::managed_path(&ssh_dir) || engine_writing() {
@@ -300,6 +334,16 @@ fn reset_hosts_for_rematerialize(s: &mut SyncState) {
     s.records.retain(|_, l| l.record.kind != RecordKind::Host);
     s.cursor_seq = 0;
     s.baseline_established = false;
+}
+
+/// 受管檔還在、卻一個 Host 區塊都沒有(被清空),而快取裡還有未刪除的主機:和檔案消失一樣視為意外,從 chain
+/// 重新長出 —— 照做本機 diff 的話,每一台快取的主機都會變成 tombstone 推給所有裝置。快取裡只剩 tombstone
+/// (主機已經在 app 裡刪光,存檔當下就規劃過)時照常 diff。
+fn managed_file_emptied(blocks: &[HostBlockText], s: &SyncState) -> bool {
+    blocks.is_empty()
+        && s.joined()
+        && s.baseline_established
+        && s.records.values().any(|l| l.record.kind == RecordKind::Host && !l.record.deleted)
 }
 
 /// `ensure_managed_loaded` 的結果。
@@ -364,7 +408,20 @@ struct Gathered {
     reloaded: bool,
 }
 
-/// 取出受管檔目前的區塊並檢查不變式。磁碟若已被手改(指紋不同)先重載,避免用過期的 in-memory 內容。
+/// in-memory 的受管檔內容是否正是磁碟上的 bytes:用 `persist_file` 的同一個 serializer 與 `trailing_newline`
+/// 序列化後逐 byte 比對(parser 是 lossless 的,從磁碟載入或剛寫入的內容一定相等)。
+fn items_match_disk(items: &[Item], trailing_newline: bool, disk: &[u8]) -> bool {
+    serialize_items(items, trailing_newline).as_bytes() == disk
+}
+
+/// 只比指紋不夠:app 的某次寫入「先改 doc、寫檔才失敗」時,磁碟沒變、指紋照樣相符,in-memory 的 doc 卻已經比
+/// 磁碟新 —— 拿它做 diff 會把沒寫進去的內容當成本機修改上傳。讀不到檔一律當成不相符。
+fn memory_matches_disk(file: &ConfigFile) -> bool {
+    std::fs::read(&file.path).is_ok_and(|disk| items_match_disk(&file.items, file.trailing_newline, &disk))
+}
+
+/// 取出受管檔目前的區塊並檢查不變式。磁碟若已被手改(指紋不同)、或 in-memory 內容不是磁碟上的內容
+/// (`memory_matches_disk`),先重載,避免用過期或沒寫進去的 in-memory 內容。
 /// 只在同步執行緒的 `run_round` 裡呼叫(呼叫端不持有任何鎖):重載之後才失敗(例如手改出違反不變式的區塊)
 /// 時,doc 已經換過、之後的輪次也不會再重載 —— 所以在這裡放掉鎖、通知 tray 與前端之後才回錯誤。
 fn gather_blocks(app: &AppHandle, managed: &Path) -> Result<Gathered, AppError> {
@@ -377,7 +434,7 @@ fn gather_blocks(app: &AppHandle, managed: &Path) -> Result<Gathered, AppError> 
         .position(|f| f.path == managed)
         .ok_or_else(|| AppError::Other("synced hosts file is not loaded".to_string()))?;
     let mut reloaded = false;
-    if crate::fsutil::has_changed(managed, &doc.files[idx].fingerprint).unwrap_or(true) {
+    if fsutil::has_changed(managed, &doc.files[idx].fingerprint).unwrap_or(true) || !memory_matches_disk(&doc.files[idx]) {
         let main_path = doc.files[0].path.clone();
         *doc_lock = Some(load_doc_migrated(&main_path)?);
         reloaded = true;
@@ -456,10 +513,12 @@ fn apply_and_commit(
         .iter()
         .position(|f| f.path == managed)
         .ok_or_else(|| AppError::Other("synced hosts file is not loaded".to_string()))?;
-    // in-memory 指紋不同 = app 自己在網路期間存過檔;磁碟指紋不同 = 外部編輯。兩者都丟棄本輪 ——
-    // 沒有效果要寫時也一樣(spec §6:發布前一律比對)。
+    // in-memory 指紋不同 = app 自己在網路期間存過檔;磁碟指紋不同 = 外部編輯;in-memory 內容不是磁碟上的
+    // 內容 = 網路期間 app 的某次寫入失敗、doc 比磁碟新(不能把它連同遠端效果一起寫下去)。三者都丟棄本輪,
+    // 下一輪 gather 會重載 —— 沒有效果要寫時也一樣(spec §6:發布前一律比對)。
     if doc.files[idx].fingerprint != *gathered
-        || crate::fsutil::has_changed(managed, &doc.files[idx].fingerprint).unwrap_or(true)
+        || fsutil::has_changed(managed, &doc.files[idx].fingerprint).unwrap_or(true)
+        || !memory_matches_disk(&doc.files[idx])
     {
         return Ok(Applied::FileChanged);
     }
@@ -563,6 +622,59 @@ fn commit_state(app: &AppHandle, generation: u64, s: &SyncState) -> Result<(), A
     save_core(&mut core)
 }
 
+/// 一輪推送結束後怎麼辦(`after_push`)。
+#[derive(Debug, PartialEq)]
+struct AfterPush {
+    /// 更新後的連續衝突輪數(本輪沒有衝突就歸零)。
+    streak: u32,
+    /// 立刻再跑一輪(下一輪 pull 會拿到中繼上的版本再合併)。
+    retry_now: bool,
+    /// 衝突一直解不開:改等 45 秒的 tick,狀態列顯示 `STUCK_CONFLICTS_MESSAGE`。
+    stuck: bool,
+}
+
+/// 推送衝突後的決策(純函式)。一般的衝突下一輪 pull 就解開;連續 `CONFLICT_RETRY_LIMIT` 輪都還有衝突,通常是
+/// 中繼上有這版讀不懂(被略過)的新版記錄:cursor 已經越過它,本機那筆的 seq 永遠是舊的,每次推送都衝突 ——
+/// 再立刻重跑只是對中繼的熱迴圈。`streak` 是本輪之前的連續衝突輪數。
+fn after_push(streak: u32, conflicts: usize) -> AfterPush {
+    if conflicts == 0 {
+        return AfterPush { streak: 0, retry_now: false, stuck: false };
+    }
+    let streak = streak.saturating_add(1);
+    let retry_now = streak < CONFLICT_RETRY_LIMIT;
+    AfterPush { streak, retry_now, stuck: !retry_now }
+}
+
+/// 推送成功後的回寫:同 `commit_state`(generation 變了就丟棄),並在同一個 core 臨界區裡更新連續衝突輪數、
+/// 決定狀態列訊息。回傳是否要立刻再跑一輪。
+fn commit_pushed(app: &AppHandle, generation: u64, s: &mut SyncState, conflicts: usize) -> Result<bool, AppError> {
+    let state = app.state::<AppState>();
+    let mut core = state.sync.core.lock().unwrap();
+    if core.generation != generation {
+        return Err(superseded());
+    }
+    let next = after_push(core.conflict_streak, conflicts);
+    core.conflict_streak = next.streak;
+    s.last_error = if next.stuck {
+        Some(STUCK_CONFLICTS_MESSAGE.to_string())
+    } else {
+        s.read_only().then(|| READ_ONLY_MESSAGE.to_string())
+    };
+    core.state = Some(s.clone());
+    save_core(&mut core)?;
+    Ok(next.retry_now)
+}
+
+/// 同步輪次裡 pull/push 的錯誤:中繼對加入中的 chain 回 404(`AppError::NotFound`)= chain 已不在中繼上
+/// (被別台裝置刪掉或閒置過期)。金鑰由 keychain 裡同一條 chain 的助記詞派生(`keys_from_keychain` 比對過
+/// chain id),所以不會是 token 不符。換成要使用者 Leave 的說明;其他錯誤原樣。
+fn relay_round_error(e: AppError) -> AppError {
+    match e {
+        AppError::NotFound(_) => AppError::Other(CHAIN_GONE_MESSAGE.to_string()),
+        other => other,
+    }
+}
+
 /// 解不開 / 格式不支援而略過的遠端記錄:只記數量到 stderr,絕不記內容。
 fn log_skipped(merged: &reconcile::Merged) {
     if merged.skipped > 0 {
@@ -611,7 +723,7 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
     //    留著的區塊會被移除(先備份)。否則 Leave 後保留的舊區塊會以「現在」的時間戳復活遠端的刪除。
     //    成功後立刻再跑一輪,本機獨有的區塊才當外部編輯上傳。
     if !s.baseline_established {
-        let merged = reconcile::pull_merge(&s, &keys, &relay)?;
+        let merged = reconcile::pull_merge(&s, &keys, &relay).map_err(relay_round_error)?;
         log_skipped(&merged);
         let mut next = merged.state;
         next.baseline_established = true;
@@ -631,6 +743,16 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
         return Ok(());
     }
 
+    // 受管檔被清空(一個 Host 區塊都沒有,快取裡卻還有未刪除的主機):和檔案消失一樣,不做本機 diff —— 改成
+    // 從 chain 重新長出,下一輪是基線輪。檔案一直是空的,所以被搶先(generation 變了)時下一輪會再偵測一次。
+    if managed_file_emptied(&gathered.blocks, &s) {
+        reset_hosts_for_rematerialize(&mut s);
+        commit_state(app, generation, &s)?;
+        eprintln!("[sync] the synced hosts file was emptied; restoring its hosts from the sync chain");
+        wake();
+        return Ok(());
+    }
+
     // 1. 外部編輯(app 的存檔已在存檔當下規劃過)→ dirty,時間戳 = 檔案 mtime(近似,spec §6)。
     let external_at = gathered.modified_ms.min(now);
     if reconcile::plan_local(&mut s, &gathered.blocks, |_| external_at, now, platform) > 0 {
@@ -638,7 +760,7 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
     }
 
     // 2. 網路:不持有任何鎖。
-    let merged = reconcile::pull_merge(&s, &keys, &relay)?;
+    let merged = reconcile::pull_merge(&s, &keys, &relay).map_err(relay_round_error)?;
     log_skipped(&merged);
 
     // 3. 套用 + 發布(同一交易)。受管檔在網路期間變過 → 整輪丟棄(cursor 不前進),立刻重跑。
@@ -664,14 +786,19 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
 
     // 4. 推送(唯讀模式內部略過)。部分成功也要持久化,所以先 commit 再看結果。被換代搶先時 push 結果
     //    會遺失 —— 下一輪自己的記錄以 KeepLocal 合併、更新 seq 後重送一次,結果一致(只是多傳一次)。
-    let pushed = reconcile::push_dirty(&mut s, &keys, &relay);
+    //    有衝突時立刻再跑一輪(下一輪 pull 會拿到中繼版本再合併),但連續幾輪都解不開就改等 tick(`after_push`)。
+    let pushed = reconcile::push_dirty(&mut s, &keys, &relay).map_err(relay_round_error);
     s.last_sync_ms = Some(now);
-    if pushed.is_ok() {
-        s.last_error = s.read_only().then(|| READ_ONLY_MESSAGE.to_string());
-    }
-    commit_state(app, generation, &s)?;
-    if pushed?.conflicts > 0 {
-        wake(); // 下一輪 pull 會拿到中繼版本再合併。
+    let retry_now = match &pushed {
+        Ok(p) => commit_pushed(app, generation, &mut s, p.conflicts)?,
+        Err(_) => {
+            commit_state(app, generation, &s)?;
+            false
+        }
+    };
+    pushed?;
+    if retry_now {
+        wake();
     }
     Ok(())
 }
@@ -720,10 +847,14 @@ pub fn sync_once(app: &AppHandle) -> Result<(), AppError> {
     outcome
 }
 
+/// 一輪之前先把已經排隊的喚醒全部收掉:`wake()` 每呼叫一次就送一則訊息,批次遷移 60 台主機(每台兩三次寫檔)
+/// 會排上百則 —— 一則一輪的話,整條 chain 會被中繼限流(429)。一輪本來就處理當下的全部狀態,合併成一輪即可;
+/// 本輪進行中才到的喚醒會留到下一圈,再跑一輪。
 fn worker_loop(app: AppHandle, rx: Receiver<()>) {
     loop {
         match rx.recv_timeout(SYNC_INTERVAL) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {
+                while rx.try_recv().is_ok() {}
                 let _ = sync_once(&app);
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -764,11 +895,18 @@ fn unreadable_state_outcome(path: &Path, timestamp_ms: u64, error: &AppError) ->
 
 /// 啟動時從 keychain 讀助記詞 → 金鑰;失敗時回傳要放進 `last_error` 的說明,每種情況給不同的建議。
 /// keychain 讀取出錯(上鎖、被拒)不能建議 Leave:照做會把助記詞刪掉。派生失敗一律用固定訊息 ——
-/// 那段錯誤文字來自助記詞本身,可能帶到其中的字,絕不內插。
-fn keys_from_keychain(read: Result<Option<String>, AppError>) -> Result<ChainKeys, String> {
+/// 那段錯誤文字來自助記詞本身,可能帶到其中的字,絕不內插。派生出的 chain id 必須就是狀態裡的 `chain_id`:
+/// 不是的話金鑰屬於別條 chain,拿它同步只會在錯的 chain 上 pull/push(或一直 404),所以金鑰留空。
+fn keys_from_keychain(read: Result<Option<String>, AppError>, chain_id: &str) -> Result<ChainKeys, String> {
     match read {
-        Ok(Some(words)) => crypto::derive_keys(&words)
-            .map_err(|_| "the stored recovery phrase could not be used; leave and rejoin the chain".to_string()),
+        Ok(Some(words)) => {
+            let keys = crypto::derive_keys(&words)
+                .map_err(|_| "the stored recovery phrase could not be used; leave and rejoin the chain".to_string())?;
+            if keys.chain_id != chain_id {
+                return Err(OTHER_CHAIN_MESSAGE.to_string());
+            }
+            Ok(keys)
+        }
         Ok(None) => Err("recovery phrase is missing from the keychain; leave and rejoin the chain".to_string()),
         Err(e) => Err(format!(
             "could not read the recovery phrase from the keychain ({e}); unlock the keychain and restart SSHelter"
@@ -776,11 +914,61 @@ fn keys_from_keychain(read: Result<Option<String>, AppError>) -> Result<ChainKey
     }
 }
 
-/// 啟動:載入狀態與助記詞,派生金鑰,開背景執行緒。狀態壞掉不阻擋 app 啟動:內容讀不懂的狀態檔搬到旁邊
-/// 保留;暫時讀不到的留在原地、這個 session 不寫狀態(`unreadable_state_outcome`)。
+/// 取不到同步鎖時要顯示的說明(帶錯誤文字;別的行程持有鎖另有固定訊息)。
+fn engine_lock_error(e: &dyn std::fmt::Display) -> String {
+    format!("sync is off in this SSHelter process: the sync lock could not be taken ({e}); restart SSHelter to retry")
+}
+
+/// 取得 `<dir>/sync.lock` 的獨占鎖(`File::try_lock`,不等待)。回傳的 File 要一直活著:鎖跟著這個 handle,
+/// 放掉或行程結束才釋放。拿不到 → Err(要顯示給使用者的說明):別的行程持有 → `ANOTHER_ENGINE_MESSAGE`;
+/// 其他錯誤(建目錄、開檔、上鎖失敗)→ 帶錯誤文字。
+fn acquire_engine_lock(dir: &Path) -> Result<File, String> {
+    fsutil::ensure_dir_secure(dir).map_err(|e| engine_lock_error(&e))?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(ENGINE_LOCK_FILE))
+        .map_err(|e| engine_lock_error(&e))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(ANOTHER_ENGINE_MESSAGE.to_string()),
+        Err(TryLockError::Error(e)) => Err(engine_lock_error(&e)),
+    }
+}
+
+/// 啟動:取得同步鎖,載入狀態與助記詞,派生金鑰,開背景執行緒。狀態壞掉不阻擋 app 啟動:內容讀不懂的狀態檔
+/// 搬到旁邊保留;暫時讀不到的留在原地、這個 session 不寫狀態(`unreadable_state_outcome`)。
+///
+/// 一個 OS 使用者只能有一個同步引擎:generation 與各把鎖都只在單一行程內成立,兩個行程(Windows/Linux 上開
+/// 第二次、兩個 MCP adapter 同時啟動 `--mcp-host`)會在同一份 `sync-state.json` 與 hosts.config 上各跑一套 ——
+/// 第二個會撤掉第一個的受管檔消失保護、在第一個 Leave 之後照樣同步。拿不到鎖的行程只讀一份狀態給 UI 看:
+/// 不搬狀態檔、不讀 keychain、不開背景執行緒、存檔 hook 不動作,`save_blocked` 讓所有會寫狀態的命令一律拒絕。
 pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
+    let lock = fsutil::app_data_root().map_err(|e| engine_lock_error(&e)).and_then(|root| acquire_engine_lock(&root));
+    match lock {
+        Ok(file) => {
+            let _ = ENGINE_LOCK.set(file);
+            ENGINE_ACTIVE.store(true, Ordering::SeqCst);
+        }
+        Err(reason) => {
+            // 讀不到或讀不懂都退回全新狀態:檔案屬於持有鎖的那個行程,這裡絕不搬動或改寫它。
+            let loaded = sync_state::state_path().and_then(|path| sync_state::load(&path)).ok().flatten();
+            let mut shown = match loaded {
+                Some(s) => s,
+                None => SyncState::fresh(&default_device_name())?,
+            };
+            shown.last_error = Some(reason.clone());
+            let mut core = state.sync.core.lock().unwrap();
+            core.state = Some(shown);
+            core.keys = None;
+            core.save_blocked = Some(reason);
+            return Ok(());
+        }
+    }
     let (read, save_blocked) = match sync_state::state_path() {
         Ok(path) => match sync_state::load(&path) {
             Ok(loaded) => (Ok(loaded), None),
@@ -801,8 +989,8 @@ pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
         }
     };
     let mut keys = None;
-    if loaded.joined() {
-        match keys_from_keychain(sync_state::load_mnemonic()) {
+    if let Some(chain_id) = loaded.chain_id.clone() {
+        match keys_from_keychain(sync_state::load_mnemonic(), &chain_id) {
             Ok(k) => keys = Some(k),
             Err(message) => loaded.last_error = Some(message),
         }
@@ -890,6 +1078,19 @@ fn clean_device_name(name: &str) -> Result<String, AppError> {
     Ok(name.to_string())
 }
 
+/// Create/Join 之前 doc 必須已載入:沒有 `~/.ssh/config` 時 `config_load` 失敗、doc 一直是 None,引擎每輪都
+/// 安靜跳過 —— 加入看起來成功卻永遠不會同步。不替使用者在猜的路徑建檔:config 路徑由前端決定。
+/// 呼叫端持有 lifecycle 鎖(順序 lifecycle → doc)。
+fn config_loaded(app: &AppHandle) -> Result<(), AppError> {
+    let state = app.state::<AppState>();
+    let loaded = state.doc.lock().unwrap().is_some();
+    if loaded {
+        Ok(())
+    } else {
+        Err(AppError::Other(NO_CONFIG_MESSAGE.to_string()))
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ChainEntry {
     Create,
@@ -898,12 +1099,14 @@ enum ChainEntry {
 
 /// 建立或加入 chain 的共同流程。**呼叫端已持有 lifecycle 鎖**(全程,含網路與 keychain)。
 /// 驗證/建立 → 存助記詞 → 在 doc 鎖內、同一個 core 臨界區換 generation/狀態/金鑰 → 準備受管檔 → 喚醒。
-/// 回傳(狀態, 準備受管檔時是否重載了 doc):這裡還在 lifecycle 鎖內,不能重建 tray / 發事件 —— 由呼叫端在
-/// 放掉 lifecycle 鎖之後 `refresh_views`。doc 還沒載入時照樣加入:受管檔與 Include 由 doc 載入後的那一輪準備。
-fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry) -> Result<(SyncStatus, bool), AppError> {
-    // 任何中繼或 keychain 動作之前:名稱不得為空、這個 session 必須能寫狀態。
+/// 回傳準備受管檔時是否重載了 doc:這裡還在 lifecycle 鎖內,不能重建 tray / 發事件 —— 由呼叫端在放掉
+/// lifecycle 鎖之後 `refresh_views`。加入狀態與助記詞存下之後就不再失敗:準備受管檔失敗只記到 stderr,
+/// 下一輪同步會再做一次(Create 一定要把助記詞交回給使用者)。
+fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry) -> Result<bool, AppError> {
+    // 任何金鑰派生、中繼或 keychain 動作之前:名稱不得為空、這個 session 必須能寫狀態、SSH config 已載入。
     let device_name = clean_device_name(device_name)?;
     saves_allowed(app)?;
+    config_loaded(app)?;
     let keys = crypto::derive_keys(words)?;
     let relay_url = with_state(app, |s| Ok(s.relay_url.clone()))?;
     let relay = RelayClient::new(&relay_url, &keys.auth_token)?;
@@ -929,6 +1132,7 @@ fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry
         let _doc = state.doc.lock().unwrap();
         let mut core = state.sync.core.lock().unwrap();
         core.generation += 1;
+        core.conflict_streak = 0;
         let s = core.state.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
         s.chain_id = Some(keys.chain_id.clone());
         s.device_name = device_name;
@@ -962,9 +1166,15 @@ fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry
         core.keys = Some(keys);
         save_core(&mut core)?;
     }
-    let reloaded = ensure_managed_loaded(app)?.is_some_and(|prepared| prepared.reloaded);
+    let reloaded = match ensure_managed_loaded(app) {
+        Ok(prepared) => prepared.is_some_and(|prepared| prepared.reloaded),
+        Err(e) => {
+            eprintln!("[sync] could not prepare the synced hosts file after joining the chain ({e}); the next sync round retries");
+            false
+        }
+    };
     wake();
-    Ok((current_status(app)?, reloaded))
+    Ok(reloaded)
 }
 
 /// 離開 chain。**呼叫端已持有 lifecycle 鎖**。先作廢在途輪次並清掉 chain 狀態(確保停止同步),再刪
@@ -997,6 +1207,7 @@ fn leave_chain(app: &AppHandle, delete_remote: bool) -> Result<SyncStatus, AppEr
         let mut core = state.sync.core.lock().unwrap();
         core.generation += 1;
         core.keys = None;
+        core.conflict_streak = 0;
         if let Some(s) = core.state.as_mut() {
             s.chain_id = None;
             s.cursor_seq = 0;
@@ -1049,7 +1260,7 @@ pub async fn sync_create_chain(app: AppHandle, device_name: String) -> Result<St
                 return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
             }
             let words = crypto::generate_mnemonic()?;
-            let (_, reloaded) = enter_chain(&handle, &words, &device_name, ChainEntry::Create)?;
+            let reloaded = enter_chain(&handle, &words, &device_name, ChainEntry::Create)?;
             (words, reloaded)
         };
         if reloaded {
@@ -1072,7 +1283,8 @@ pub async fn sync_join_chain(app: AppHandle, words: String, device_name: String)
             if with_state(&handle, |s| Ok(s.joined()))? {
                 return Err(AppError::Other("already in a sync chain; leave it first".to_string()));
             }
-            enter_chain(&handle, &normalized, &device_name, ChainEntry::Join)?
+            let reloaded = enter_chain(&handle, &normalized, &device_name, ChainEntry::Join)?;
+            (current_status(&handle)?, reloaded)
         };
         if reloaded {
             refresh_views(&handle);
@@ -1350,6 +1562,7 @@ mod tests {
             keys: None,
             unsaved: false,
             save_blocked: Some("left in place — restart SSHelter to retry".to_string()),
+            conflict_streak: 0,
         };
         assert_eq!(save_core(&mut core).unwrap_err().to_string(), "left in place — restart SSHelter to retry");
         assert!(!core.unsaved, "retrying cannot help; only a restart can");
@@ -1358,21 +1571,32 @@ mod tests {
     #[test]
     fn keychain_problems_at_startup_get_distinct_messages_and_never_echo_the_phrase() {
         let words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
-        assert!(keys_from_keychain(Ok(Some(words.to_string()))).is_ok());
+        let chain = crypto::derive_keys(words).unwrap().chain_id;
+        assert!(keys_from_keychain(Ok(Some(words.to_string())), &chain).is_ok());
         assert_eq!(
-            keys_from_keychain(Ok(None)).unwrap_err(),
+            keys_from_keychain(Ok(None), &chain).unwrap_err(),
             "recovery phrase is missing from the keychain; leave and rejoin the chain"
         );
         // 上鎖 / 被拒:不能建議 Leave(照做會刪掉助記詞)。
-        let locked = keys_from_keychain(Err(AppError::Other("keychain error: locked".to_string()))).unwrap_err();
+        let locked = keys_from_keychain(Err(AppError::Other("keychain error: locked".to_string())), &chain).unwrap_err();
         assert_eq!(
             locked,
             "could not read the recovery phrase from the keychain (keychain error: locked); unlock the keychain and restart SSHelter"
         );
         // 派生失敗:固定訊息,絕不帶出助記詞裡的字。
-        let broken = keys_from_keychain(Ok(Some("zebra sunshine".to_string()))).unwrap_err();
+        let broken = keys_from_keychain(Ok(Some("zebra sunshine".to_string())), &chain).unwrap_err();
         assert_eq!(broken, "the stored recovery phrase could not be used; leave and rejoin the chain");
         assert!(!broken.contains("zebra") && !broken.contains("sunshine"));
+    }
+
+    #[test]
+    fn a_keychain_phrase_for_another_chain_yields_no_keys() {
+        let words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+        // 狀態記的是另一條 chain:金鑰留空(不在錯的 chain 上同步),固定訊息不帶助記詞裡的字。
+        let other_chain = "cd".repeat(32);
+        let message = keys_from_keychain(Ok(Some(words.to_string())), &other_chain).unwrap_err();
+        assert_eq!(message, "the recovery phrase in the keychain belongs to a different sync chain; leave and rejoin");
+        assert!(!message.contains("abandon"));
     }
 
     #[test]
@@ -1457,5 +1681,119 @@ mod tests {
         let mut lone = joined_with_synced_hosts();
         lone.chain_id = None;
         assert!(!managed_file_vanished(true, &lone));
+    }
+
+    #[test]
+    fn an_emptied_synced_file_with_live_hosts_is_restored_from_the_chain() {
+        // 快取裡有未刪除的 `web`(另有 tombstone `old`),檔案卻一個區塊都沒有 → 從 chain 重新長出。
+        let s = joined_with_synced_hosts();
+        assert!(managed_file_emptied(&[], &s));
+        let blocks = vec![HostBlockText { alias: "web".into(), text: "Host web\n".into() }];
+        assert!(!managed_file_emptied(&blocks, &s), "a file that still has blocks is diffed as usual");
+        // 剛 Join(基線輪本來就以 chain 為準)或沒加入時不算。
+        let mut fresh = joined_with_synced_hosts();
+        fresh.baseline_established = false;
+        assert!(!managed_file_emptied(&[], &fresh));
+        let mut lone = joined_with_synced_hosts();
+        lone.chain_id = None;
+        assert!(!managed_file_emptied(&[], &lone));
+    }
+
+    #[test]
+    fn an_empty_synced_file_with_only_tombstones_is_diffed_as_usual() {
+        // 主機都已經在 app 裡刪掉(存檔當下就規劃成 tombstone):空檔是真的,照常 diff。
+        let mut s = joined_with_synced_hosts();
+        for local in s.records.values_mut().filter(|l| l.record.kind == RecordKind::Host) {
+            local.record.deleted = true;
+        }
+        assert!(!managed_file_emptied(&[], &s));
+        // 快取裡根本沒有主機也一樣。
+        s.records.retain(|_, l| l.record.kind != RecordKind::Host);
+        assert!(!managed_file_emptied(&[], &s));
+    }
+
+    #[test]
+    fn in_memory_items_must_match_the_disk_bytes_exactly() {
+        let text = "Host web\n  HostName 10.0.0.1\n\nHost db\n";
+        let (mut items, trailing_newline) = parse_file(text);
+        assert!(items_match_disk(&items, trailing_newline, text.as_bytes()));
+        // 少了結尾換行 = 不同的 bytes。
+        assert!(!items_match_disk(&items, false, text.as_bytes()));
+        // doc 被改了、寫檔卻沒成功:in-memory 比磁碟新。
+        hosts_file::apply_host_text(&mut items, "app", "Host app\n").unwrap();
+        assert!(!items_match_disk(&items, trailing_newline, text.as_bytes()));
+        // 空檔。
+        let (empty, trailing) = parse_file("");
+        assert!(items_match_disk(&empty, trailing, b""));
+    }
+
+    #[test]
+    fn a_disk_file_matches_its_freshly_loaded_items_and_not_an_unsaved_edit() {
+        // 只用暫存目錄。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.config");
+        std::fs::write(&path, "Host web\n  User x\n").unwrap();
+        let (items, trailing_newline) = parse_file(&std::fs::read_to_string(&path).unwrap());
+        let mut file = ConfigFile {
+            path: path.clone(),
+            items,
+            trailing_newline,
+            fingerprint: fsutil::file_fingerprint(&path).unwrap(),
+        };
+        assert!(memory_matches_disk(&file));
+        hosts_file::remove_host_block(&mut file.items, "web");
+        assert!(!memory_matches_disk(&file), "an edit that never reached the disk");
+        std::fs::remove_file(&path).unwrap();
+        assert!(!memory_matches_disk(&file), "an unreadable file never counts as matching");
+    }
+
+    #[test]
+    fn push_conflicts_retry_at_once_only_a_few_rounds_in_a_row() {
+        assert_eq!(after_push(0, 0), AfterPush { streak: 0, retry_now: false, stuck: false });
+        assert_eq!(after_push(0, 2), AfterPush { streak: 1, retry_now: true, stuck: false });
+        assert_eq!(after_push(1, 1), AfterPush { streak: 2, retry_now: true, stuck: false });
+        // 第 3 輪起改等 45 秒的 tick,並顯示需要更新的訊息。
+        assert_eq!(after_push(2, 1), AfterPush { streak: 3, retry_now: false, stuck: true });
+        assert_eq!(after_push(9, 4), AfterPush { streak: 10, retry_now: false, stuck: true });
+        // 一輪沒有衝突就歸零。
+        assert_eq!(after_push(9, 0), AfterPush { streak: 0, retry_now: false, stuck: false });
+        assert_eq!(after_push(u32::MAX, 1).streak, u32::MAX, "never overflows");
+    }
+
+    #[test]
+    fn a_relay_404_during_a_round_means_the_chain_is_gone() {
+        let gone = relay_round_error(AppError::NotFound("sync chain not found on the relay (or wrong recovery phrase)".into()));
+        assert_eq!(
+            gone.to_string(),
+            "This sync chain no longer exists on the relay (deleted from another device or expired) — leave it on this device"
+        );
+        let other = relay_round_error(AppError::Other("relay is rate-limiting this chain; try again later".into()));
+        assert_eq!(other.to_string(), "relay is rate-limiting this chain; try again later");
+    }
+
+    #[test]
+    fn only_one_handle_can_hold_the_sync_lock() {
+        // 只用暫存目錄,絕不碰真正的 app data。
+        let dir = tempfile::tempdir().unwrap();
+        let first = acquire_engine_lock(dir.path()).expect("the first process takes the lock");
+        assert!(dir.path().join("sync.lock").is_file());
+        assert_eq!(
+            acquire_engine_lock(dir.path()).unwrap_err(),
+            "Sync is running in another SSHelter process — quit it to use sync here",
+            "a second holder is refused while the first one lives"
+        );
+        drop(first);
+        assert!(acquire_engine_lock(dir.path()).is_ok(), "released once the holder goes away");
+    }
+
+    #[test]
+    fn a_sync_lock_that_cannot_be_opened_reports_the_error() {
+        // 只用暫存目錄:把「目錄」做成一般檔案,開鎖檔一定失敗。
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let message = acquire_engine_lock(&not_a_dir).unwrap_err();
+        assert!(message.starts_with("sync is off in this SSHelter process: the sync lock could not be taken ("), "got: {message}");
+        assert!(message.ends_with("); restart SSHelter to retry"), "got: {message}");
     }
 }

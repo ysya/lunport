@@ -233,8 +233,10 @@ pub fn pull_merge(state: &SyncState, keys: &ChainKeys, relay: &dyn Relay) -> Res
             }
         }
     }
-    // cursor 只跟 pull 的 watermark 走。
-    next.cursor_seq = next.cursor_seq.max(pulled.latest_seq);
+    // cursor 只跟 pull 的 watermark 走。watermark 比 cursor 還小 = 中繼被還原或重置(自架的中繼):cursor 歸零,
+    // 下一輪從頭重拉 —— 合併是冪等的。不取 max:cursor 會停在中繼要很久才到得了的序號,這段期間別台裝置寫入
+    // 的記錄全部被跳過。
+    next.cursor_seq = if pulled.latest_seq < state.cursor_seq { 0 } else { pulled.latest_seq };
     Ok(Merged { state: next, host_effects: acc.host_effects, conflicts: acc.conflicts, skipped: acc.skipped })
 }
 
@@ -476,6 +478,32 @@ mod tests {
         let mut aliases: Vec<&str> = m.host_effects.iter().map(|e| e.alias()).collect();
         aliases.sort();
         assert_eq!(aliases, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn a_relay_watermark_that_went_backwards_resets_the_cursor() {
+        let relay = FakeRelay::default();
+        let k = keys();
+        let mut a = device("a");
+        let mut b = device("b");
+        round(&mut a, &relay, &[block("web", "Host web\n")], 100);
+        round(&mut b, &relay, &[], 200);
+        round(&mut b, &relay, &[], 300);
+        assert_eq!(b.cursor_seq, 3);
+        // 自架中繼從舊備份還原:只剩 seq 1,watermark 退回 1。
+        relay.rows.borrow_mut().retain(|_, e| e.seq <= 1);
+        *relay.latest.borrow_mut() = 1;
+        let m = pull_merge(&b, &k, &relay).unwrap();
+        assert_eq!(m.state.cursor_seq, 0, "a cursor past the relay's watermark is reset, never kept");
+        assert!(m.host_effects.is_empty());
+        b = m.state;
+        // 還原之後 A 再寫一台,拿到的 seq(2)比 B 原本的 cursor 小:只有從頭重拉才收得到。已經套用過的記錄
+        // 再合併一次不產生任何效果(冪等)。
+        plan_local(&mut a, &[block("web", "Host web\n"), block("db", "Host db\n")], |_| 400, 400, "test");
+        push_dirty(&mut a, &k, &relay).unwrap();
+        let m = pull_merge(&b, &k, &relay).unwrap();
+        assert_eq!(m.host_effects, vec![upsert("db", "Host db\n")]);
+        assert_eq!(m.state.cursor_seq, 2);
     }
 
     #[test]

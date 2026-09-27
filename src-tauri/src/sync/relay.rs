@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn unreachable_relay_fails_fast() {
-        // 127.0.0.1:9 幾乎不會有人聽;connect timeout 2s 內必須回錯。
+        // 127.0.0.1:9 幾乎不會有人聽;connect timeout(5s)內必須回錯。
         let client = RelayClient::new("http://127.0.0.1:9", "tok").unwrap();
         let started = std::time::Instant::now();
         assert!(client.pull("abc", 0).is_err());
