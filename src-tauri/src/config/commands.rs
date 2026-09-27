@@ -668,11 +668,20 @@ pub fn config_load(
     let aliases = crate::tray::tray_aliases(&doc);
     let _ = crate::tray::rebuild_tray(&app, &aliases);
 
-    let mut doc_lock = state.doc.lock().unwrap();
-    *doc_lock = Some(doc);
+    let was_empty = {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let was_empty = doc_lock.is_none();
+        *doc_lock = Some(doc);
 
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    backed_up_lock.clear();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        backed_up_lock.clear();
+        was_empty
+    };
+    // 第一次載入(None → Some):同步引擎在 doc 載入前的輪次都安靜跳過,現在喚醒它跑一輪。之後的重新載入
+    // (前端重新取主機清單)不喚醒,免得每次都多跑一輪。在放掉 doc 鎖之後呼叫。
+    if was_empty {
+        crate::sync::engine::wake();
+    }
 
     Ok(LoadResult { files, hosts })
 }
