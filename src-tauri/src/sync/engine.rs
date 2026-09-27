@@ -43,7 +43,7 @@ const NO_CONFIG_MESSAGE: &str =
 const OTHER_CHAIN_MESSAGE: &str = "the recovery phrase in the keychain belongs to a different sync chain; leave and rejoin";
 /// app data 目錄裡的行程間同步鎖:一個 OS 使用者同時只有一個行程跑同步引擎。
 const ENGINE_LOCK_FILE: &str = "sync.lock";
-const ANOTHER_ENGINE_MESSAGE: &str = "Sync is running in another SSHelter process — quit it to use sync here";
+pub(crate) const ANOTHER_ENGINE_MESSAGE: &str = "Sync is running in another SSHelter process — quit it to use sync here";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -160,6 +160,12 @@ static ENGINE_LOCK: OnceLock<File> = OnceLock::new();
 
 /// 這個行程取得了同步鎖、跑著同步引擎。false(別的行程持有鎖、或單元測試)時存檔 hook 什麼都不做。
 static ENGINE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 這個行程是否跑著同步引擎(`initialize` 取得了同步鎖)。搬進同步檔的命令用它拒絕沒有引擎的行程
+/// (`migrate::refuse_while_sync_inactive`)。
+pub fn engine_active() -> bool {
+    ENGINE_ACTIVE.load(Ordering::SeqCst)
+}
 
 pub fn wake() {
     if let Some(slot) = WAKER.get() {

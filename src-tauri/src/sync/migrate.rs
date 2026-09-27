@@ -14,7 +14,7 @@ use crate::config::include::find_host_file_index;
 use crate::config::model::{Item, SshConfigDoc};
 use crate::error::AppError;
 use crate::state::AppState;
-use crate::sync::engine::SyncRuntime;
+use crate::sync::engine::{SyncRuntime, ANOTHER_ENGINE_MESSAGE};
 use crate::sync::hosts_file::{first_alias, is_syncable_block};
 
 /// 剛 Join、基線輪還沒跑完時搬進同步檔的拒絕訊息(遷移精靈整批拒絕、sidebar 拖曳只在目標是同步檔時拒絕)。
@@ -105,22 +105,42 @@ pub fn managed_defines(doc: &SshConfigDoc, managed: &Path, name: &str) -> bool {
 /// 搬進同步檔之前的重複檢查(遷移精靈與 sidebar 拖進 Synced 群組共用)。同步檔已經定義了這個 alias —— 例如
 /// 加入 chain 時本地就有同名主機 —— 再搬一份進去,同步檔就違反「alias 不重複」的不變式
 /// (`check_managed_items`),整條同步停在讀檔階段;基線輪之前搬進去,還會被基線輪直接蓋掉。本地那份要用
-/// 遮蔽面板改名或移除。同一條規則也套在 `move_host` 實際會搬的那個區塊的 alias(第一個 pattern)上:用次要
-/// pattern 指名時,搬進去的是別的 alias,不變式看的是它。
+/// 遮蔽面板改名或移除。`move_host` 搬的是整個區塊,所以檢查的是那個區塊的**每一個** pattern:任一個已經是
+/// 同步檔裡某個 Host 區塊的 pattern 就拒絕(同步檔有 `Host a shared` 時,搬進 `Host b shared` 會留下兩個都
+/// 符合 `shared` 的同步區塊)。訊息點名撞到的那個 pattern(請求的名字本身撞到時優先點名它)。
+/// 不變式本身(`check_managed_items`)刻意只看第一個 alias(記錄的 key):別台裝置同步過來的區塊可以合法地
+/// 共用次要名稱,收緊它會讓那些 chain 整條停下 —— 這裡只擋「從本機搬進去」這個動作。
 pub fn refuse_already_synced(doc: &SshConfigDoc, managed: &Path, alias: &str) -> Result<(), AppError> {
     // 與 `move_host` 相同的定位規則:`find_host_file_index` → 該檔案裡「任一 pattern 相符」的第一個區塊。
-    let moving = find_host_file_index(doc, alias).and_then(|idx| {
-        doc.files[idx].items.iter().find_map(|i| match i {
-            Item::Host(h) if h.patterns.iter().any(|p| p == alias) => h.patterns.first().map(String::as_str),
-            _ => None,
+    // 找不到就只剩請求的名字可查(`move_host` 自己會回報找不到)。
+    let moving: &[String] = find_host_file_index(doc, alias)
+        .and_then(|idx| {
+            doc.files[idx].items.iter().find_map(|i| match i {
+                Item::Host(h) if h.patterns.iter().any(|p| p == alias) => Some(h.patterns.as_slice()),
+                _ => None,
+            })
         })
-    });
-    for name in std::iter::once(alias).chain(moving) {
+        .unwrap_or_default();
+    for name in std::iter::once(alias).chain(moving.iter().map(String::as_str)) {
         if managed_defines(doc, managed, name) {
             return Err(AppError::Other(format!("'{name}' is already in the synced file — resolve the duplicate instead")));
         }
     }
     Ok(())
+}
+
+/// 這個行程沒有跑同步引擎(拿不到同步鎖,`engine::engine_active()` 為 false)時,拒絕任何「搬進同步檔」的動作。
+/// 這種行程的同步狀態是啟動時讀到的快照:`refuse_before_first_sync` 看的是過期資料(例如另一個行程剛重新
+/// Join、基線輪還沒跑完)。訊息沿用這個行程的 `save_blocked`:別的行程持有鎖時正是 `ANOTHER_ENGINE_MESSAGE`;
+/// 鎖因其他錯誤取不到時是那段說明,與 Sync 面板顯示的一致。沒有記下原因(單元測試)時退回
+/// `ANOTHER_ENGINE_MESSAGE`。同步檔的其他編輯照常允許:對跑著引擎的那個行程而言就是外部編輯。
+/// 呼叫端可能持有 doc(與 backed_up)鎖,這裡只短暫拿 core 鎖(鎖順序 doc → backed_up → core)。
+pub fn refuse_while_sync_inactive(active: bool, sync: &SyncRuntime) -> Result<(), AppError> {
+    if active {
+        return Ok(());
+    }
+    let reason = sync.core.lock().unwrap().save_blocked.clone();
+    Err(AppError::Other(reason.unwrap_or_else(|| ANOTHER_ENGINE_MESSAGE.to_string())))
 }
 
 /// 加入中、基線輪還沒跑完(剛 Join)就拒絕搬進同步檔:這時搬進去的主機會被基線輪以 chain 為準直接覆蓋(不算
@@ -225,13 +245,35 @@ pub async fn sync_resolve_shadowed(app: AppHandle, alias: String, file: String, 
         let mut doc_lock = state.doc.lock().unwrap();
         let mut backed_up = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
-        let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-        let idx = resolve_shadowed(doc, &alias, &file, action, &managed)?;
-        persist_file(doc, idx, &mut backed_up, retention)?;
-        Ok(duplicate_aliases(doc, &managed))
+        resolve_shadowed_and_persist(&mut doc_lock, &alias, &file, action, &managed, |doc, idx| {
+            persist_file(doc, idx, &mut backed_up, retention)
+        })
     })
     .await
     .map_err(crate::sync::engine::join_error)?
+}
+
+/// `sync_resolve_shadowed` 的改動與寫檔(`persist` 由呼叫端注入,測試可模擬寫入失敗)。`resolve_shadowed`
+/// 拒絕時什麼都沒改;寫入失敗時區塊已經在 in-memory doc 裡改名/移除、磁碟上卻沒有 —— doc 比磁碟新,之後任何
+/// 一次成功的寫入(含同步引擎)都會把這個「失敗」的改動寫下去。所以從磁碟重載主 config(改動前記下的路徑)讓
+/// 兩邊一致,重載也失敗就整份作廢(`None`),再回傳原本的錯誤 —— 同 `config_move_host` 的
+/// `move_host_and_persist`。
+fn resolve_shadowed_and_persist(
+    slot: &mut Option<SshConfigDoc>,
+    alias: &str,
+    file: &str,
+    action: ShadowedAction,
+    managed: &Path,
+    mut persist: impl FnMut(&mut SshConfigDoc, usize) -> Result<(), AppError>,
+) -> Result<Vec<DuplicateAlias>, AppError> {
+    let doc = slot.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    let main_path = doc.files[0].path.clone();
+    let idx = resolve_shadowed(doc, alias, file, action, managed)?;
+    if let Err(e) = persist(doc, idx) {
+        *slot = load_doc_migrated(&main_path).ok();
+        return Err(e);
+    }
+    Ok(duplicate_aliases(doc, managed))
 }
 
 /// 批次遷入的核心迴圈:不依賴 AppHandle,可直接單元測試。`persist` 由呼叫端注入(command 版是真的
@@ -304,7 +346,8 @@ fn migrate_hosts(
 
 /// 逐台搬進同步檔;每台獨立成功/失敗,任一寫入失敗就停止整批並從磁碟重載(見 `migrate_hosts`)。
 /// `tag_by_file` 時把 Include 檔的檔名加成 tag(已有同名 tag 不重複;主 config 的主機不上 tag)。
-/// 剛 Join、第一輪同步還沒完成時整批拒絕(`refuse_before_first_sync`)。
+/// 這個行程沒有同步引擎(`refuse_while_sync_inactive`)、或剛 Join、第一輪同步還沒完成
+/// (`refuse_before_first_sync`)時,在任何改動之前整批拒絕。
 #[tauri::command]
 pub async fn sync_migrate_hosts(app: AppHandle, aliases: Vec<String>, tag_by_file: bool) -> Result<MigrationReport, AppError> {
     let handle = app.clone();
@@ -316,6 +359,8 @@ pub async fn sync_migrate_hosts(app: AppHandle, aliases: Vec<String>, tag_by_fil
         let mut backed_up = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
         let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        // 先看這個行程有沒有引擎:沒有的話,下一行看的狀態是啟動時的快照。
+        refuse_while_sync_inactive(crate::sync::engine::engine_active(), &state.sync)?;
         refuse_before_first_sync(&state.sync)?;
         if !doc.files.iter().any(|f| f.path == managed) {
             return Err(AppError::Other("synced hosts file is not loaded; create or join a chain first".to_string()));
@@ -441,6 +486,135 @@ mod tests {
         );
         assert!(refuse_already_synced(&doc, &managed, "db").is_ok());
         assert!(refuse_already_synced(&doc, &managed, "ghost").is_ok(), "move_host reports unknown aliases itself");
+    }
+
+    /// 同步檔有 `Host a shared`;主 config 有共用次要名稱的 `Host b shared`,和沒有任何重疊的 `Host c d`。
+    fn secondary_overlap_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("hosts.config");
+        std::fs::write(&managed, "Host a shared\n  HostName 1\n").unwrap();
+        let main = dir.path().join("config");
+        std::fs::write(&main, format!("Include {}\nHost b shared\n  HostName 2\nHost c d\n  HostName 3\n", managed.display())).unwrap();
+        (dir, main, managed)
+    }
+
+    #[test]
+    fn a_block_sharing_any_name_with_the_synced_file_is_refused() {
+        let (_dir, main, managed) = secondary_overlap_fixture();
+        let doc = load_doc(&main).unwrap();
+        // `move_host` 搬整個 `Host b shared`:它的次要名稱 `shared` 已經是同步區塊 `Host a shared` 的名字。
+        assert_eq!(
+            refuse_already_synced(&doc, &managed, "b").unwrap_err().to_string(),
+            "'shared' is already in the synced file — resolve the duplicate instead"
+        );
+        // 以撞到的名字本身指名:點名它。
+        assert_eq!(
+            refuse_already_synced(&doc, &managed, "shared").unwrap_err().to_string(),
+            "'shared' is already in the synced file — resolve the duplicate instead"
+        );
+        // 沒有任何名字重疊的區塊照常可以搬,不論用哪個名字指名。
+        assert!(refuse_already_synced(&doc, &managed, "c").is_ok());
+        assert!(refuse_already_synced(&doc, &managed, "d").is_ok());
+    }
+
+    #[test]
+    fn migration_refuses_a_secondary_name_collision_without_halting_the_batch() {
+        let (_dir, main, managed) = secondary_overlap_fixture();
+        let managed_str = managed.to_string_lossy().into_owned();
+        let mut doc = load_doc(&main).unwrap();
+        let mut backed_up = std::collections::HashSet::new();
+        let (report, needs_reload) = migrate_hosts(
+            &mut doc,
+            vec!["b".to_string(), "c".to_string()],
+            false,
+            &managed_str,
+            |doc, idx| persist_file(doc, idx, &mut backed_up, None),
+        );
+        assert!(!needs_reload, "a refusal before any change is not a failed write");
+        assert_eq!(report.moved, vec!["c".to_string()], "the batch goes on after the refusal");
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].alias, "b");
+        assert_eq!(report.failed[0].error, "'shared' is already in the synced file — resolve the duplicate instead");
+        let synced = std::fs::read_to_string(&managed).unwrap();
+        assert_eq!(synced.matches("shared").count(), 1, "only one synced block matches 'shared': {synced}");
+        assert!(synced.contains("Host c d\n"));
+        assert!(std::fs::read_to_string(&main).unwrap().contains("Host b shared\n"), "the refused block stays local");
+    }
+
+    #[test]
+    fn moves_into_sync_are_refused_in_a_process_without_the_sync_engine() {
+        let runtime = SyncRuntime::default();
+        assert!(refuse_while_sync_inactive(true, &runtime).is_ok());
+        // 沒有記下原因時(單元測試)退回固定訊息。
+        assert_eq!(
+            refuse_while_sync_inactive(false, &runtime).unwrap_err().to_string(),
+            "Sync is running in another SSHelter process — quit it to use sync here"
+        );
+        // 別的行程持有同步鎖:`initialize` 把這段訊息放進 `save_blocked`。
+        runtime.core.lock().unwrap().save_blocked = Some(ANOTHER_ENGINE_MESSAGE.to_string());
+        assert_eq!(
+            refuse_while_sync_inactive(false, &runtime).unwrap_err().to_string(),
+            "Sync is running in another SSHelter process — quit it to use sync here"
+        );
+        // 鎖因其他錯誤取不到:說的是那個原因(與 Sync 面板一致),不是「別的行程」。
+        let lock_error = "sync is off in this SSHelter process: the sync lock could not be taken (boom); restart SSHelter to retry";
+        runtime.core.lock().unwrap().save_blocked = Some(lock_error.to_string());
+        assert_eq!(refuse_while_sync_inactive(false, &runtime).unwrap_err().to_string(), lock_error);
+        // 跑著引擎的行程不在這裡被擋(狀態檔暫時讀不到時 `save_blocked` 也有值,但那是另一回事)。
+        assert!(refuse_while_sync_inactive(true, &runtime).is_ok());
+    }
+
+    #[test]
+    fn a_failed_shadow_resolution_reloads_the_doc_so_it_is_never_ahead_of_disk() {
+        let (_dir, main, managed) = fixture();
+        let main_str = main.to_string_lossy().into_owned();
+        let mut slot = Some(load_doc(&main).unwrap());
+        for action in [ShadowedAction::Rename, ShadowedAction::Remove] {
+            let err = resolve_shadowed_and_persist(&mut slot, "web", &main_str, action, &managed, |_, _| {
+                Err(AppError::Other("disk is full".to_string()))
+            })
+            .unwrap_err();
+            assert_eq!(err.to_string(), "disk is full", "the original error is returned");
+            let doc = slot.as_ref().expect("reloaded from disk");
+            let main_text = serialize_items(&doc.files[0].items, true);
+            assert!(main_text.contains("Host web\n  HostName 2\n"), "the failed change is gone from memory: {main_text}");
+            assert!(!main_text.contains("web-local"));
+            assert_eq!(duplicate_aliases(doc, &managed).len(), 1, "the local copy is still reported as shadowed");
+        }
+    }
+
+    #[test]
+    fn a_failed_shadow_resolution_drops_the_doc_when_the_reload_fails_too() {
+        let (_dir, main, managed) = fixture();
+        let main_str = main.to_string_lossy().into_owned();
+        let mut slot = Some(load_doc(&main).unwrap());
+        std::fs::remove_file(&main).unwrap(); // 重載讀不到主 config
+        let err = resolve_shadowed_and_persist(&mut slot, "web", &main_str, ShadowedAction::Remove, &managed, |_, _| {
+            Err(AppError::Other("disk is full".to_string()))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "disk is full");
+        assert!(slot.is_none(), "an in-memory doc that is ahead of disk is dropped");
+    }
+
+    #[test]
+    fn a_refused_or_successful_shadow_resolution_keeps_the_doc_in_step_with_disk() {
+        let (_dir, main, managed) = fixture();
+        let main_str = main.to_string_lossy().into_owned();
+        let mut slot = Some(load_doc(&main).unwrap());
+        let mut backed_up = std::collections::HashSet::new();
+        // 拒絕(碰同步檔那份):什麼都沒改,也不重載。
+        let refused = resolve_shadowed_and_persist(&mut slot, "web", &managed.to_string_lossy(), ShadowedAction::Remove, &managed, |_, _| {
+            panic!("nothing to persist after a refusal")
+        });
+        assert!(refused.is_err());
+        assert!(slot.is_some());
+        let left = resolve_shadowed_and_persist(&mut slot, "web", &main_str, ShadowedAction::Rename, &managed, |doc, idx| {
+            persist_file(doc, idx, &mut backed_up, None)
+        })
+        .unwrap();
+        assert!(left.is_empty(), "no shadowed alias is left");
+        assert!(std::fs::read_to_string(&main).unwrap().contains("Host web-local\n  HostName 2\n"));
     }
 
     #[test]

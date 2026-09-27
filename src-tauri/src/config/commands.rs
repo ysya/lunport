@@ -909,8 +909,9 @@ pub fn config_move_host(
     let doc = doc_lock
         .as_ref()
         .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-    // 拖進 sidebar 的 Synced 群組(目標是已載入的同步檔):與遷移精靈同一套規則 —— 剛 Join、第一輪同步還沒
-    // 完成就拒絕;同步檔已經定義了這個名字也拒絕(重複的 alias 會讓整條同步停下)。鎖順序 doc → backed_up → core。
+    // 拖進 sidebar 的 Synced 群組(目標是已載入的同步檔):與遷移精靈同一套規則,都在任何改動之前 —— 這個行程
+    // 沒有同步引擎(別的 SSHelter 行程持有同步鎖,這裡的狀態只是啟動時的快照)就拒絕;剛 Join、第一輪同步還沒
+    // 完成就拒絕;要搬的區塊有任何名字已經在同步檔裡也拒絕(重複會讓整條同步停下)。鎖順序 doc → backed_up → core。
     let managed = crate::keys::ssh_dir()
         .ok()
         .map(|dir| crate::sync::hosts_file::managed_path(&dir));
@@ -919,6 +920,7 @@ pub fn config_move_host(
             .iter()
             .any(|f| &f.path == managed && f.path.to_string_lossy() == target_file.as_str())
     }) {
+        crate::sync::migrate::refuse_while_sync_inactive(crate::sync::engine::engine_active(), &state.sync)?;
         crate::sync::migrate::refuse_before_first_sync(&state.sync)?;
         crate::sync::migrate::refuse_already_synced(doc, &managed, &alias)?;
     }
