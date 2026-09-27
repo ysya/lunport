@@ -26,7 +26,7 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **Host organization** — group the sidebar by source file or by tag (tag chips on rows, toggleable), search with `#tag` / `@user` prefixes, drag-to-reorder within a file or drop onto another file group to move, ⌘-click/Shift-click to multi-select with batch move / tag / remove, per-row hover actions (connect, deploy, move, remove), duplicate as a template, rename the `Host` line itself, and give source files custom display names.
 - **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), text size, menu bar icon & close-to-tray, launch at login, global quick-connect hotkey, default + per-host terminal, new-tab launch (iTerm2), custom config path, backup retention, discovery sources, drift auto-check, per-rule lint toggles, and settings export/import.
 - **AI Access (MCP)** — expose an explicit host allowlist to local MCP clients such as Codex. Read-only host/config tools stay scoped to that list; every remote command opens SSHelter, shows the resolved destination and exact command, and waits for an in-app **Allow once** or **Deny** decision. Recent decisions and exit codes remain visible in the interface.
-- **Sync (no account)** — create a sync chain on one computer, enter its 24-word recovery phrase on the others, and your synced hosts follow you. Records are end-to-end encrypted before they reach the relay (which is open source and self-hostable); private keys and passwords are opt-in and never leave a device unencrypted.
+- **Sync (no account)** — create a sync chain on one computer, enter its 24-word recovery phrase on the others, and your synced hosts follow you. Records are end-to-end encrypted before they reach the relay (which is open source and self-hostable). Only hosts sync today; private keys and passwords stay on each device.
 - **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings.
 
 ## Install
@@ -57,7 +57,7 @@ Open **Settings → Sync**. *Create* shows a 24-word recovery phrase — store i
 
 Synced hosts live in `~/.ssh/sshelter/hosts.config`, which SSHelter `Include`s at the top of your main config, so plain `ssh` keeps working and the file survives uninstalling SSHelter. Use *Choose hosts…* to move existing hosts in (optionally tagged with their old file name). Hosts in other files stay local to that computer.
 
-*Forget device* only removes a device from the list; a device that still has the phrase keeps syncing. If a device is lost, leave the chain, start a new one on the devices you keep, and rotate the keys it could see.
+*Forget* (in the Devices list) only removes a device from that list; a device that still has the phrase keeps syncing. If a device is lost, leave the chain, start a new one on the devices you keep, and rotate the keys it could see.
 
 The relay stores only ciphertext and can be self-hosted from `relay/` (`npx wrangler deploy`); point *Settings → Sync → Relay URL* at yours (`https://` required, except `localhost` for development).
 
