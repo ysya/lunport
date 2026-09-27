@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ComponentType, ReactNode } from "react";
+import type { ComponentType } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -8,6 +8,7 @@ import {
   FolderCog,
   Monitor,
   Moon,
+  RefreshCw,
   Settings2,
   SlidersHorizontal,
   Sun,
@@ -63,7 +64,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -72,7 +72,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Section, SettingsGroup } from "@/components/settings-primitives";
+import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
+import { SyncPane } from "@/components/SyncPane";
 
 /** Radix Select values must be non-empty; this sentinel round-trips to `null`. */
 const TERMINAL_DEFAULT = "__default__";
@@ -89,6 +90,7 @@ const CATEGORIES: {
   { id: "connection", label: "Connection", icon: TerminalSquare },
   { id: "files", label: "Files & Backups", icon: FolderCog },
   { id: "ai", label: "AI Access", icon: Bot },
+  { id: "sync", label: "Sync", icon: RefreshCw },
   { id: "advanced", label: "Advanced", icon: SlidersHorizontal },
 ];
 
@@ -166,6 +168,7 @@ export function SettingsDialog() {
               {category === "connection" && <ConnectionPane />}
               {category === "files" && <FilesPane />}
               {category === "ai" && <McpPane />}
+              {category === "sync" && <SyncPane />}
               {category === "advanced" && <AdvancedPane />}
             </div>
           </div>
@@ -894,42 +897,6 @@ function AdvancedPane() {
 /* ------------------------------------------------------------------------- */
 /* Shared bits                                                               */
 /* ------------------------------------------------------------------------- */
-
-/**
- * A single settings row: label (plus optional muted description) on the left,
- * control on the right. `mono` renders the label in the mono face — for labels
- * that ARE technical values (e.g. `known_hosts`).
- */
-function SettingsRow({
-  id,
-  label,
-  description,
-  mono,
-  children,
-}: {
-  id?: string;
-  label: string;
-  description?: string;
-  mono?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex min-h-9 items-center justify-between gap-4 px-3 py-2">
-      <div className="min-w-0 space-y-0.5 select-none">
-        <Label
-          htmlFor={id}
-          className={cn("text-sm font-normal", mono && "font-mono")}
-        >
-          {label}
-        </Label>
-        {description && (
-          <p className="text-xs text-muted-foreground">{description}</p>
-        )}
-      </div>
-      <div className="flex shrink-0 items-center">{children}</div>
-    </div>
-  );
-}
 
 const THEME_OPTIONS: { value: ThemePref; label: string; icon: typeof Sun }[] = [
   { value: "system", label: "System", icon: Monitor },
