@@ -704,7 +704,7 @@ fn log_skipped(merged: &reconcile::Merged) {
 /// 回 `SUPERSEDED` 表示被 lifecycle / 狀態命令 / 存檔當下的規劃搶先,不是錯誤。
 fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys) -> Result<(), AppError> {
     // doc 還沒載入(app 剛啟動、前端還沒 config_load):安靜跳過 —— 不寫 last_error、不存狀態;
-    // config_load 第一次載入 doc 時會喚醒下一輪。
+    // 每次成功的 config_load 都會喚醒下一輪。
     let Some(Prepared { path: managed, reloaded, rematerialize }) = ensure_managed_loaded(app)? else {
         return Ok(());
     };
@@ -940,10 +940,21 @@ fn engine_lock_error(e: &dyn std::fmt::Display) -> String {
     format!("sync is off in this SSHelter process: the sync lock could not be taken ({e}); restart SSHelter to retry")
 }
 
-/// 取得 `<dir>/sync.lock` 的獨占鎖(`File::try_lock`,不等待)。回傳的 File 要一直活著:鎖跟著這個 handle,
-/// 放掉或行程結束才釋放。拿不到 → Err(要顯示給使用者的說明):別的行程持有 → `ANOTHER_ENGINE_MESSAGE`;
-/// 其他錯誤(建目錄、開檔、上鎖失敗)→ 帶錯誤文字。
+/// 同步鎖被別的行程拿著(`WouldBlock`)時最多試幾次、每次之間等多久(合計約 2 秒):app 內更新重新啟動時,
+/// 新行程會在舊行程結束之前就啟動 —— 只試一次的話,新行程會一直是 sync-inactive,直到使用者手動重開。
+const ENGINE_LOCK_ATTEMPTS: u32 = 10;
+const ENGINE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+/// 取得 `<dir>/sync.lock` 的獨占鎖(`File::try_lock`)。回傳的 File 要一直活著:鎖跟著這個 handle,放掉或
+/// 行程結束才釋放。別的行程持有鎖時每 `ENGINE_LOCK_RETRY_DELAY` 再試一次,共 `ENGINE_LOCK_ATTEMPTS` 次;
+/// 拿不到 → Err(要顯示給使用者的說明):別的行程一直持有 → `ANOTHER_ENGINE_MESSAGE`;其他錯誤(建目錄、
+/// 開檔、上鎖失敗)→ 立刻回報,帶錯誤文字。只在 `initialize` 呼叫(啟動時最多多等約 2 秒)。
 fn acquire_engine_lock(dir: &Path) -> Result<File, String> {
+    acquire_engine_lock_with(dir, ENGINE_LOCK_ATTEMPTS, || std::thread::sleep(ENGINE_LOCK_RETRY_DELAY))
+}
+
+/// `acquire_engine_lock` 的本體:最多試 `attempts` 次,兩次之間呼叫 `pause`(測試注入,不必真的等)。
+fn acquire_engine_lock_with(dir: &Path, attempts: u32, mut pause: impl FnMut()) -> Result<File, String> {
     fsutil::ensure_dir_secure(dir).map_err(|e| engine_lock_error(&e))?;
     let file = OpenOptions::new()
         .read(true)
@@ -952,10 +963,17 @@ fn acquire_engine_lock(dir: &Path) -> Result<File, String> {
         .truncate(false)
         .open(dir.join(ENGINE_LOCK_FILE))
         .map_err(|e| engine_lock_error(&e))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => Err(ANOTHER_ENGINE_MESSAGE.to_string()),
-        Err(TryLockError::Error(e)) => Err(engine_lock_error(&e)),
+    let mut attempt = 1;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if attempt < attempts => {
+                attempt += 1;
+                pause();
+            }
+            Err(TryLockError::WouldBlock) => return Err(ANOTHER_ENGINE_MESSAGE.to_string()),
+            Err(TryLockError::Error(e)) => return Err(engine_lock_error(&e)),
+        }
     }
 }
 
@@ -964,8 +982,10 @@ fn acquire_engine_lock(dir: &Path) -> Result<File, String> {
 ///
 /// 一個 OS 使用者只能有一個同步引擎:generation 與各把鎖都只在單一行程內成立,兩個行程(Windows/Linux 上開
 /// 第二次、兩個 MCP adapter 同時啟動 `--mcp-host`)會在同一份 `sync-state.json` 與 hosts.config 上各跑一套 ——
-/// 第二個會撤掉第一個的受管檔消失保護、在第一個 Leave 之後照樣同步。拿不到鎖的行程只讀一份狀態給 UI 看:
-/// 不搬狀態檔、不讀 keychain、不開背景執行緒、存檔 hook 不動作,`save_blocked` 讓所有會寫狀態的命令一律拒絕。
+/// 第二個會撤掉第一個的受管檔消失保護、在第一個 Leave 之後照樣同步。鎖被別的行程拿著時先重試約 2 秒
+/// (`acquire_engine_lock`:app 內更新時舊行程還沒結束)。還是拿不到鎖的行程只讀一份狀態給 UI 看:不搬
+/// 狀態檔、不讀 keychain、不開背景執行緒、存檔 hook 不動作,`save_blocked` 讓所有會寫狀態的命令一律拒絕,
+/// 搬進同步檔的命令也拒絕(`migrate::refuse_while_sync_inactive`)。
 pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
@@ -1863,27 +1883,48 @@ mod tests {
 
     #[test]
     fn only_one_handle_can_hold_the_sync_lock() {
-        // 只用暫存目錄,絕不碰真正的 app data。
+        // 只用暫存目錄,絕不碰真正的 app data。第二個持有者的重試不真的等(注入的 pause 只計數)。
         let dir = tempfile::tempdir().unwrap();
         let first = acquire_engine_lock(dir.path()).expect("the first process takes the lock");
         assert!(dir.path().join("sync.lock").is_file());
+        let mut pauses = 0;
         assert_eq!(
-            acquire_engine_lock(dir.path()).unwrap_err(),
+            acquire_engine_lock_with(dir.path(), ENGINE_LOCK_ATTEMPTS, || pauses += 1).unwrap_err(),
             "Sync is running in another SSHelter process — quit it to use sync here",
             "a second holder is refused while the first one lives"
         );
+        assert_eq!(pauses, ENGINE_LOCK_ATTEMPTS - 1, "it retried before giving up");
         drop(first);
         assert!(acquire_engine_lock(dir.path()).is_ok(), "released once the holder goes away");
     }
 
     #[test]
+    fn a_sync_lock_released_while_retrying_is_taken() {
+        // app 內更新重新啟動:舊行程在新行程重試的期間結束。只用暫存目錄;「結束」在注入的 pause 裡發生,不靠計時。
+        let dir = tempfile::tempdir().unwrap();
+        let mut old_process = Some(acquire_engine_lock(dir.path()).unwrap());
+        let mut pauses = 0;
+        let taken = acquire_engine_lock_with(dir.path(), ENGINE_LOCK_ATTEMPTS, || {
+            pauses += 1;
+            if pauses == 3 {
+                old_process.take();
+            }
+        });
+        assert!(taken.is_ok(), "the lock is taken on the attempt after the old process let go");
+        assert_eq!(pauses, 3);
+        assert!(old_process.is_none());
+    }
+
+    #[test]
     fn a_sync_lock_that_cannot_be_opened_reports_the_error() {
-        // 只用暫存目錄:把「目錄」做成一般檔案,開鎖檔一定失敗。
+        // 只用暫存目錄:把「目錄」做成一般檔案,開鎖檔一定失敗。WouldBlock 以外的錯誤不重試。
         let dir = tempfile::tempdir().unwrap();
         let not_a_dir = dir.path().join("not-a-dir");
         std::fs::write(&not_a_dir, b"").unwrap();
-        let message = acquire_engine_lock(&not_a_dir).unwrap_err();
+        let message =
+            acquire_engine_lock_with(&not_a_dir, ENGINE_LOCK_ATTEMPTS, || panic!("only a held lock is retried")).unwrap_err();
         assert!(message.starts_with("sync is off in this SSHelter process: the sync lock could not be taken ("), "got: {message}");
         assert!(message.ends_with("); restart SSHelter to retry"), "got: {message}");
+        assert_eq!(acquire_engine_lock(&not_a_dir).unwrap_err(), message);
     }
 }

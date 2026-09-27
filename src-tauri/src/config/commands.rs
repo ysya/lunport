@@ -668,20 +668,18 @@ pub fn config_load(
     let aliases = crate::tray::tray_aliases(&doc);
     let _ = crate::tray::rebuild_tray(&app, &aliases);
 
-    let was_empty = {
+    {
         let mut doc_lock = state.doc.lock().unwrap();
-        let was_empty = doc_lock.is_none();
         *doc_lock = Some(doc);
 
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         backed_up_lock.clear();
-        was_empty
-    };
-    // 第一次載入(None → Some):同步引擎在 doc 載入前的輪次都安靜跳過,現在喚醒它跑一輪。之後的重新載入
-    // (前端重新取主機清單)不喚醒,免得每次都多跑一輪。在放掉 doc 鎖之後呼叫。
-    if was_empty {
-        crate::sync::engine::wake();
     }
+    // 每次成功載入都喚醒同步引擎(在放掉 doc 鎖之後)。第一次載入之前,引擎的輪次都在 doc 是 None 時安靜跳過;
+    // 之後的重新載入可能帶進了 app 以外對 hosts.config 的修改(例如被外部工具清空)—— 存檔當下的規劃
+    // (`note_file_written`)是拿 app 的編輯去比快取,要讓同步輪次先看到這次載入(例如先從 chain 重新長出被清空
+    // 的檔案),下一次 app 存檔才不會對著過期的快取把每一台主機都規劃成刪除。排隊的喚醒會合併成一輪。
+    crate::sync::engine::wake();
 
     Ok(LoadResult { files, hosts })
 }
