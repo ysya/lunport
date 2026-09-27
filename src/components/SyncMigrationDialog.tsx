@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
+import type { MigrationFailure } from "@/bindings/MigrationFailure";
 import { useHostsQuery } from "@/lib/queries";
 import { labelsFor } from "@/lib/host-display";
 import { groupHostsForMigration } from "@/lib/sync-migration";
@@ -38,12 +39,16 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
   const resolve = useResolveShadowed();
   const [tagByFile, setTagByFile] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // The previous Move's failures (if any), kept on screen until the next Move
+  // replaces them or the dialog closes (this component unmounts then).
+  const [failedMoves, setFailedMoves] = useState<MigrationFailure[]>([]);
   // Guards the default-selection effect below so it only ever fires once per
   // dialog opening (this component unmounts when the dialog closes, so the ref
   // is fresh again next time it opens).
   const didDefaultSelect = useRef(false);
 
   const managed = status.data?.managed_file ?? "";
+  const loaded = Boolean(status.data && hostsQuery.data);
   const files = useMemo(() => hostsQuery.data?.files ?? [], [hostsQuery.data]);
   const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
   // Only group once BOTH queries are loaded. Before `status` loads, `managed`
@@ -81,6 +86,9 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
           const failed = report.failed.length;
           toast.success(`Moved ${report.moved.length} host${report.moved.length === 1 ? "" : "s"} into sync${failed ? `, ${failed} failed` : ""}`);
           setSelected(new Set());
+          // The backend stops at the first failed write, so entries after the
+          // first are "not attempted" — surfaced below, not just as a count.
+          setFailedMoves(report.failed);
         },
       },
     );
@@ -96,7 +104,9 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
         </DialogDescription>
       </DialogHeader>
 
-      {groups.length === 0 ? (
+      {!loaded ? (
+        <p className="text-sm text-muted-foreground">Loading hosts…</p>
+      ) : groups.length === 0 ? (
         <p className="text-sm text-muted-foreground">Every host is already in the synced file.</p>
       ) : (
         <div className="max-h-[40vh] space-y-3 overflow-y-auto pr-1">
@@ -120,6 +130,20 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
           <Checkbox checked={tagByFile} onCheckedChange={(v) => setTagByFile(v === true)} />
           Tag each host with its current file name (keeps your grouping in tag view)
         </label>
+      )}
+
+      {failedMoves.length > 0 && (
+        <div className="space-y-1.5 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs">
+          <p className="font-medium text-destructive">
+            {failedMoves.length} host{failedMoves.length === 1 ? "" : "s"} not moved
+          </p>
+          {failedMoves.map((f) => (
+            <div key={f.alias} className="space-y-0.5">
+              <span className="font-mono">{f.alias}</span>
+              <p className="text-muted-foreground">{f.error}</p>
+            </div>
+          ))}
+        </div>
       )}
 
       {dups.length > 0 && (
