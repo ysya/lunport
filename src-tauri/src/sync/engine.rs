@@ -71,6 +71,9 @@ pub struct SyncStatus {
     pub relay_url: String,
     #[cfg_attr(test, ts(type = "number | null"))]
     pub last_sync_ms: Option<u64>,
+    /// 加入中、第一輪(基線輪)同步還沒完成:剛 Join,或受管檔不見了/被清空、正從 chain 重新長出
+    /// (這時 `last_sync_ms` 仍是上一次的時間)。這段期間搬進同步檔會被拒絕(`refuse_before_first_sync`)。
+    pub first_sync_pending: bool,
     pub last_error: Option<String>,
     /// 尚未上傳的記錄數。
     #[cfg_attr(test, ts(type = "number"))]
@@ -248,6 +251,7 @@ pub fn status_from(state: &SyncState, managed_file: &str) -> SyncStatus {
         device_name: state.device_name.clone(),
         relay_url: state.relay_url.clone(),
         last_sync_ms: state.last_sync_ms,
+        first_sync_pending: state.joined() && !state.baseline_established,
         last_error: state.last_error.clone(),
         pending: state.records.values().filter(|l| l.dirty).count() as u64,
         read_only: state.read_only(),
@@ -1524,6 +1528,25 @@ mod tests {
         assert!(status.devices.is_empty());
         assert!(status.phrase_cleanup_pending);
         assert!(!status.read_only);
+        assert!(!status.first_sync_pending, "not joined: there is no first sync to wait for");
+    }
+
+    #[test]
+    fn status_reports_a_pending_first_sync_while_joined_without_a_baseline() {
+        // 剛 Join:還沒同步過。
+        let mut s = SyncState::fresh("Box").unwrap();
+        s.chain_id = Some("ab".repeat(32));
+        assert!(status_from(&s, "/tmp/hosts.config").first_sync_pending);
+        s.baseline_established = true;
+        s.last_sync_ms = Some(5);
+        assert!(!status_from(&s, "/tmp/hosts.config").first_sync_pending);
+        // 受管檔不見了、正從 chain 重新長出:`last_sync_ms` 還是上一次的時間,但第一輪還沒跑完。
+        let mut rematerializing = joined_with_synced_hosts();
+        rematerializing.last_sync_ms = Some(5);
+        reset_hosts_for_rematerialize(&mut rematerializing);
+        let status = status_from(&rematerializing, "/tmp/hosts.config");
+        assert!(status.first_sync_pending);
+        assert_eq!(status.last_sync_ms, Some(5));
     }
 
     #[test]

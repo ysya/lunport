@@ -5,7 +5,12 @@ export type SyncStatus = { joined: boolean,
 /**
  * chain id 前 8 個 hex,只作辨識用。
  */
-chain_short: string | null, device_id: string, device_name: string, relay_url: string, last_sync_ms: number | null, last_error: string | null, 
+chain_short: string | null, device_id: string, device_name: string, relay_url: string, last_sync_ms: number | null, 
+/**
+ * 加入中、第一輪(基線輪)同步還沒完成:剛 Join,或受管檔不見了/被清空、正從 chain 重新長出
+ * (這時 `last_sync_ms` 仍是上一次的時間)。這段期間搬進同步檔會被拒絕(`refuse_before_first_sync`)。
+ */
+first_sync_pending: boolean, last_error: string | null, 
 /**
  * 尚未上傳的記錄數。
  */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HostSummary } from "@/bindings/HostSummary";
-import { cleanWordsInput, groupHostsForMigration, isSyncableHost } from "./sync-migration";
+import { cleanWordsInput, groupHostsForMigration, isSyncableHost, keepVisible } from "./sync-migration";
 
 function host(alias: string, file: string, patterns: string[] = [alias]): HostSummary {
   return { alias, patterns, source_file: file, tags: [], hostname: null, user: null };
@@ -69,5 +69,33 @@ describe("groupHostsForMigration", () => {
   it("drops a file group whose every host is already synced", () => {
     const hosts = [host("web", managed), host("web", "/home/f/.ssh/config"), host("db", "/home/f/.ssh/config.d/x.config")];
     expect(groupHostsForMigration(hosts, managed).map((g) => g.file)).toEqual(["/home/f/.ssh/config.d/x.config"]);
+  });
+});
+
+describe("keepVisible", () => {
+  const managed = "/home/f/.ssh/sshelter/hosts.config";
+
+  it("drops selected hosts the wizard no longer lists", () => {
+    const before = groupHostsForMigration([host("web", "/home/f/.ssh/config"), host("db", "/home/f/.ssh/config")], managed);
+    const selected = new Set(["web", "db"]);
+    expect(keepVisible(selected, before)).toBe(selected);
+    // The first sync brings a synced `web`: the local `web` leaves the list and the selection.
+    const after = groupHostsForMigration(
+      [host("web", managed), host("web", "/home/f/.ssh/config"), host("db", "/home/f/.ssh/config")],
+      managed,
+    );
+    expect([...keepVisible(selected, after)]).toEqual(["db"]);
+  });
+
+  it("keeps the same set when every selected host is still listed", () => {
+    const groups = groupHostsForMigration([host("a", "/f"), host("b", "/f"), host("c", "/g")], managed);
+    const selected = new Set(["a", "c"]);
+    expect(keepVisible(selected, groups)).toBe(selected);
+    const none = new Set<string>();
+    expect(keepVisible(none, groups)).toBe(none);
+  });
+
+  it("drops everything when nothing is listed", () => {
+    expect(keepVisible(new Set(["a"]), []).size).toBe(0);
   });
 });

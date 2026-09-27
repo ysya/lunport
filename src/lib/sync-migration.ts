@@ -47,3 +47,16 @@ export function groupHostsForMigration(
   }
   return [...byFile.entries()].map(([file, hosts]) => ({ file, hosts }));
 }
+
+/**
+ * The selection limited to hosts the wizard still lists. A selected host can
+ * drop out of the list — e.g. a same-name local host once the first sync brings
+ * in its synced twin — and must then neither count toward "Move N hosts" nor be
+ * submitted. Returns `selected` itself when nothing was dropped, so a state
+ * update with the result is a no-op.
+ */
+export function keepVisible(selected: Set<string>, groups: { hosts: { alias: string }[] }[]): Set<string> {
+  const visible = new Set(groups.flatMap((g) => g.hosts.map((h) => h.alias)));
+  const kept = new Set([...selected].filter((alias) => visible.has(alias)));
+  return kept.size === selected.size ? selected : kept;
+}

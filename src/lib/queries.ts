@@ -223,7 +223,12 @@ export function useMoveHost() {
       // Raw-file viewers of either file are stale now.
       queryClient.invalidateQueries({ queryKey: ["config", "fileText"] });
     },
-    onError: (e) => toast.error("Failed to move host", { description: errMessage(e) }),
+    onError: (e) => {
+      // A failed write makes the backend reload the config from disk (or drop
+      // it) so a half-applied move never lingers: refetch everything config.
+      queryClient.invalidateQueries({ queryKey: ["config"] });
+      toast.error("Failed to move host", { description: errMessage(e) });
+    },
   });
 }
 

@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import type { MigrationFailure } from "@/bindings/MigrationFailure";
 import { useHostsQuery } from "@/lib/queries";
 import { labelsFor } from "@/lib/host-display";
-import { groupHostsForMigration } from "@/lib/sync-migration";
+import { groupHostsForMigration, keepVisible } from "@/lib/sync-migration";
 import { useDuplicateAliases, useMigrateHosts, useResolveShadowed, useSyncStatus } from "@/lib/sync";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
@@ -50,10 +50,11 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
 
   const managed = status.data?.managed_file ?? "";
   const loaded = Boolean(status.data && hostsQuery.data);
-  // Joined, but the first sync has not finished yet — right after Join the
-  // chain has not even been pulled, so hosts moved now would race the baseline
-  // round (the backend refuses them anyway).
-  const waitingForFirstSync = status.data?.last_sync_ms === null;
+  // Joined, but the first (baseline) sync has not finished yet — right after
+  // Join, or while a vanished or emptied synced file is rebuilt from the chain
+  // (`last_sync_ms` still holds the previous sync then). Hosts moved now would
+  // race the baseline round, and the backend refuses them anyway.
+  const waitingForFirstSync = status.data?.first_sync_pending === true;
   const files = useMemo(() => hostsQuery.data?.files ?? [], [hostsQuery.data]);
   const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
   // Only group once BOTH queries are loaded. Before `status` loads, `managed`
@@ -73,12 +74,21 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
   // hosts the user had deselected — for example right after a successful
   // partial move clears it.
   useEffect(() => {
-    if (didDefaultSelect.current || !status.data || status.data.last_sync_ms === null || groups.length === 0) return;
+    if (didDefaultSelect.current || !status.data || status.data.first_sync_pending || groups.length === 0) return;
     didDefaultSelect.current = true;
     if (status.data.hosts_in_sync === 0) {
       setSelected(new Set(groups.flatMap((g) => g.hosts.map((h) => h.alias))));
     }
   }, [groups, status.data]);
+
+  // Whenever the list changes, drop selected hosts it no longer shows — e.g. a
+  // same-name local host once the first sync brings in its synced twin. The
+  // effect runs after render, so the count and the submitted aliases also go
+  // through `keepVisible` for the render in between.
+  useEffect(() => {
+    setSelected((prev) => keepVisible(prev, groups));
+  }, [groups]);
+  const visibleSelected = useMemo(() => keepVisible(selected, groups), [selected, groups]);
 
   const toggle = (alias: string, on: boolean) => {
     didDefaultSelect.current = true;
@@ -92,7 +102,7 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
 
   const run = () =>
     migrate.mutate(
-      { aliases: [...selected], tagByFile },
+      { aliases: [...visibleSelected], tagByFile },
       {
         onSuccess: (report) => {
           const failed = report.failed.length;
@@ -185,8 +195,8 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onClose}>Close</Button>
         {groups.length > 0 && (
-          <Button type="button" disabled={selected.size === 0 || migrate.isPending || waitingForFirstSync} onClick={run}>
-            {migrate.isPending && <Loader2 className="size-4 animate-spin" />} Move {selected.size} host{selected.size === 1 ? "" : "s"}
+          <Button type="button" disabled={visibleSelected.size === 0 || migrate.isPending || waitingForFirstSync} onClick={run}>
+            {migrate.isPending && <Loader2 className="size-4 animate-spin" />} Move {visibleSelected.size} host{visibleSelected.size === 1 ? "" : "s"}
           </Button>
         )}
       </DialogFooter>

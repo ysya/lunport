@@ -91,7 +91,14 @@ export function useResolveShadowed() {
       queryClient.setQueryData(syncDuplicatesKey, remaining);
       void queryClient.invalidateQueries({ queryKey: ["config"] });
     },
-    onError: (error) => toast.error("Could not update the local host", { description: errorMessage(error) }),
+    onError: (error) => {
+      // After a failed write the backend reloads the config from disk (or drops
+      // it), and a write conflict may have brought in outside edits: refetch the
+      // host views and the shadow list instead of trusting the cache.
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
+      void queryClient.invalidateQueries({ queryKey: syncDuplicatesKey });
+      toast.error("Could not update the local host", { description: errorMessage(error) });
+    },
   });
 }
 
