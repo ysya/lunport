@@ -5,10 +5,12 @@
 //! - `planner`: 本機變更偵測(Task 1)
 //! - `state`: 本機同步狀態持久化(Task 4)
 //! - `relay`: 中繼 HTTP client(Task 5)
+//! - `reconcile`: 一輪同步的三段純函式(plan_local → pull_merge → push_dirty)
 
 pub mod crypto;
 pub mod hosts_file;
 pub mod planner;
+pub mod reconcile;
 pub mod record;
 pub mod relay;
 pub mod state;
