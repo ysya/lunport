@@ -23,6 +23,7 @@ import { KeysDialog } from "@/components/KeysDialog";
 import { KnownHostsDialog } from "@/components/KnownHostsDialog";
 import { DeployKeyDialog } from "@/components/DeployKeyDialog";
 import { NewConfigFileDialog } from "@/components/NewConfigFileDialog";
+import { SyncMigrationDialog } from "@/components/SyncMigrationDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
@@ -248,6 +249,7 @@ function App() {
         <SettingsDialog />
         <DeployKeyDialog />
         <NewConfigFileDialog />
+        <SyncMigrationDialog />
         <McpApprovalDialog />
         <Toaster />
       </div>
