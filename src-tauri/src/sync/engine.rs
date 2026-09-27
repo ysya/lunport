@@ -327,29 +327,40 @@ pub fn note_file_written(path: &Path, items: &[Item]) {
     wake();
 }
 
-/// 加入中、基線已建立、快取裡有主機記錄,受管檔卻不在了(被刪、或整個 ~/.ssh 換過)。這時不能做本機 diff:
-/// 重建出來的空檔會讓每一台快取的主機都變成本機刪除,tombstone 推給所有裝置 —— 要改成從 chain 重新長出來。
-/// 剛 Join、基線輪還沒跑(本來就以 chain 為準),或根本沒有同步中的主機時,重建空檔沒有風險。
-fn managed_file_vanished(recreated: bool, s: &SyncState) -> bool {
-    recreated && s.joined() && s.baseline_established && s.records.values().any(|l| l.record.kind == RecordKind::Host)
+/// 快取裡有未刪除的 host 記錄 —— 已上傳的,或還沒上傳的離線修改都算。受管檔不見了或被清空時,本機 diff
+/// 只會把這些記錄變成 tombstone(已刪除的不會再刪一次),所以「要不要改成從 chain 重新長出」只看它們。
+fn holds_live_hosts(s: &SyncState) -> bool {
+    s.records.values().any(|l| l.record.kind == RecordKind::Host && !l.record.deleted)
 }
 
-/// 從 chain 重新長出受管檔:只丟掉快取的 host 記錄(device/meta 記錄與它們的 dirty、`sealed` 都保留),
-/// cursor 歸零、回到基線輪 —— 下一輪從 0 拉取,以 chain 為準把主機寫回檔案。chain、裝置身分、relay 不動。
-fn reset_hosts_for_rematerialize(s: &mut SyncState) {
-    s.records.retain(|_, l| l.record.kind != RecordKind::Host);
+/// 加入中、基線已建立、快取裡有未刪除的主機(`holds_live_hosts`),受管檔卻不在了(被刪、或整個 ~/.ssh 換過)。
+/// 這時不能做本機 diff:重建出來的空檔會讓每一台快取的主機都變成本機刪除,tombstone 推給所有裝置 —— 要改成
+/// 從 chain 重新長出來。剛 Join、基線輪還沒跑(本來就以 chain 為準),或快取裡沒有未刪除的主機(只剩
+/// tombstone、或根本沒有)時,重建空檔沒有風險。
+/// 不會重複觸發:重設(`reset_hosts_for_rematerialize`)會留下還沒上傳的 host 記錄,所以「快取裡有主機」
+/// 在重設之後可能仍成立 —— 擋住它的是 `baseline_established`:重設把它設成 false,基線輪完成(檔案已經
+/// 從 chain 與保留的修改寫回)之前,這個檢查與 `managed_file_emptied` 都不會再成立。
+fn managed_file_vanished(recreated: bool, s: &SyncState) -> bool {
+    recreated && s.joined() && s.baseline_established && holds_live_hosts(s)
+}
+
+/// 從 chain 重新長出受管檔:丟掉已上傳(乾淨)的 host 記錄 —— 基線輪會從 chain 把它們拉回來;還沒上傳的
+/// (dirty:離線時的修改與刪除)保留 —— 中繼上沒有它們(或只有較舊的版本),丟掉就永遠失去了。基線輪合併
+/// 之後仍贏 LWW、檔案裡卻沒有的修改,會和 chain 的主機一起寫回檔案(`reconcile::unpushed_host_effects`);
+/// dirty 的 tombstone 不寫回,照常推送。device/meta 記錄(含 dirty)與 `sealed` 都保留;cursor 歸零、回到
+/// 基線輪 —— 下一輪從 0 拉取。chain、裝置身分、relay 不動。
+pub(crate) fn reset_hosts_for_rematerialize(s: &mut SyncState) {
+    s.records.retain(|_, l| l.record.kind != RecordKind::Host || l.dirty);
     s.cursor_seq = 0;
     s.baseline_established = false;
 }
 
-/// 受管檔還在、卻一個 Host 區塊都沒有(被清空),而快取裡還有未刪除的主機:和檔案消失一樣視為意外,從 chain
-/// 重新長出 —— 照做本機 diff 的話,每一台快取的主機都會變成 tombstone 推給所有裝置。快取裡只剩 tombstone
-/// (主機已經在 app 裡刪光,存檔當下就規劃過)時照常 diff。
+/// 受管檔還在、卻一個 Host 區塊都沒有(被清空),而快取裡還有未刪除的主機(`holds_live_hosts`):和檔案消失
+/// 一樣視為意外,從 chain 重新長出 —— 照做本機 diff 的話,每一台快取的主機都會變成 tombstone 推給所有裝置。
+/// 快取裡只剩 tombstone(主機已經在 app 裡刪光,存檔當下就規劃過)時照常 diff。不會重複觸發的理由同
+/// `managed_file_vanished`(重設之後 `baseline_established` 為 false)。
 fn managed_file_emptied(blocks: &[HostBlockText], s: &SyncState) -> bool {
-    blocks.is_empty()
-        && s.joined()
-        && s.baseline_established
-        && s.records.values().any(|l| l.record.kind == RecordKind::Host && !l.record.deleted)
+    blocks.is_empty() && s.joined() && s.baseline_established && holds_live_hosts(s)
 }
 
 /// `ensure_managed_loaded` 的結果。
@@ -378,7 +389,7 @@ fn ensure_managed_loaded(app: &AppHandle) -> Result<Option<Prepared>, AppError> 
     let mut backed_up = state.backed_up.lock().unwrap();
     let retention = *state.backup_retention.lock().unwrap();
     // 只有「確定不存在」(`Ok(false)`)才算不見了。查不到 metadata(EACCES、EIO…)就讓這一輪失敗、什麼都不
-    // 重設 —— 否則一次暫時的 stat 錯誤就會丟掉所有 host 記錄(含還沒上傳的修改),存取恢復後再被 chain 蓋過。
+    // 重設 —— 否則一次暫時的 stat 錯誤就會丟掉快取的主機記錄、回到基線輪從 chain 整份重拉。
     let recreated = !hosts_file::managed_path(&ssh_dir).try_exists()?;
     let mut rematerialize = false;
     if recreated {
@@ -725,21 +736,25 @@ fn run_round(app: &AppHandle, generation: u64, mut s: SyncState, keys: ChainKeys
     let platform = std::env::consts::OS;
     let relay = RelayClient::new(&s.relay_url, &keys.auth_token)?;
 
-    // 0. 基線輪(剛 Join):不做本機 diff,以 chain 為準套用 —— chain 上已 tombstone、本機同步檔卻還
-    //    留著的區塊會被移除(先備份)。否則 Leave 後保留的舊區塊會以「現在」的時間戳復活遠端的刪除。
-    //    成功後立刻再跑一輪,本機獨有的區塊才當外部編輯上傳。
+    // 0. 基線輪(剛 Join,或受管檔不見了/被清空之後):不做本機 diff,以 chain 為準套用 —— chain 上已
+    //    tombstone、本機同步檔卻還留著的區塊會被移除(先備份)。否則 Leave 後保留的舊區塊會以「現在」的時間戳
+    //    復活遠端的刪除。重新長出受管檔時保留下來的未上傳修改(`reset_hosts_for_rematerialize`),合併後仍贏
+    //    LWW、檔案裡卻沒有的,和 chain 的主機一起寫回(`unpushed_host_effects`);剛 Join 時快取沒有 host 記錄,
+    //    沒有這種效果。成功後立刻再跑一輪,本機獨有的區塊才當外部編輯上傳、保留的修改照常推送。
     if !s.baseline_established {
         let merged = reconcile::pull_merge(&s, &keys, &relay).map_err(relay_round_error)?;
         log_skipped(&merged);
+        let mut effects = merged.host_effects;
+        effects.extend(reconcile::unpushed_host_effects(&merged.state, &gathered.blocks));
         let mut next = merged.state;
         next.baseline_established = true;
         next.last_sync_ms = Some(now);
         next.last_error = next.read_only().then(|| READ_ONLY_MESSAGE.to_string());
         if let Applied::Committed { wrote, save_error } =
-            apply_and_commit(app, &managed, generation, &gathered.fingerprint, &merged.host_effects, &next)?
+            apply_and_commit(app, &managed, generation, &gathered.fingerprint, &effects, &next)?
         {
             if wrote {
-                let _ = app.emit("sync://applied", &merged.host_effects.len());
+                let _ = app.emit("sync://applied", &effects.len());
             }
             if let Some(e) = save_error {
                 return Err(e); // 狀態沒落盤:停下,下一輪先補存
@@ -1657,7 +1672,10 @@ mod tests {
         reset_hosts_for_rematerialize(&mut s);
         assert_eq!(s.cursor_seq, 0);
         assert!(!s.baseline_established, "the next round is a baseline round from the chain");
-        assert!(s.records.values().all(|l| l.record.kind != RecordKind::Host), "no host record is left to tombstone");
+        assert!(
+            s.records.values().all(|l| l.record.kind != RecordKind::Host),
+            "every host record here was already uploaded, so the baseline round pulls them all from the chain again"
+        );
         // chain、裝置身分、relay 與非 host 記錄(含 dirty 旗標)、sealed 都保留。
         assert_eq!(s.chain_id, before.chain_id);
         assert_eq!(s.device_id, before.device_id);
@@ -1669,6 +1687,72 @@ mod tests {
             assert_eq!(s.records.get(key), Some(local));
         }
         assert_eq!(s.sealed, before.sealed);
+    }
+
+    /// `joined_with_synced_hosts` 再加上兩筆還沒上傳的 host 記錄:離線修改的 `edited`、離線刪除的 `dropped`。
+    fn with_unpushed_hosts(mut s: SyncState) -> SyncState {
+        for (alias, deleted) in [("edited", false), ("dropped", true)] {
+            let host = Record {
+                kind: RecordKind::Host,
+                id: alias.into(),
+                version: 3,
+                updated_at_ms: 20,
+                device_id: s.device_id.clone(),
+                deleted,
+                payload: if deleted {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!({ "schema": 1, "text": format!("Host {alias}\n  User me\n") })
+                },
+            };
+            s.records.insert(record_key(RecordKind::Host, alias), LocalRecord { record: host, seq: 7, dirty: true });
+        }
+        s
+    }
+
+    #[test]
+    fn a_reset_keeps_unpushed_host_records_and_drops_the_clean_ones() {
+        let mut s = with_unpushed_hosts(joined_with_synced_hosts());
+        let before = s.clone();
+        reset_hosts_for_rematerialize(&mut s);
+        assert_eq!(s.cursor_seq, 0);
+        assert!(!s.baseline_established);
+        // 已上傳的(`web` 與 tombstone `old`)丟掉:基線輪會從 chain 拉回來。
+        assert!(!s.records.contains_key("host:web"));
+        assert!(!s.records.contains_key("host:old"));
+        // 還沒上傳的修改與刪除原封不動(含 dirty 與 seq);device/meta 記錄與 sealed 也是。
+        for key in ["host:edited", "host:dropped", "meta:chain"] {
+            assert_eq!(s.records.get(key), before.records.get(key), "{key}");
+        }
+        let device = record_key(RecordKind::Device, &s.device_id);
+        assert_eq!(s.records.get(&device), before.records.get(&device));
+        assert_eq!(s.records.len(), 4);
+        assert_eq!(s.sealed, before.sealed);
+        // 不會重複觸發:快取裡仍有未刪除的主機,但基線輪完成之前兩個檢查都不成立。
+        assert!(holds_live_hosts(&s), "the unpushed edit is still a live host record");
+        assert!(!managed_file_vanished(true, &s));
+        assert!(!managed_file_emptied(&[], &s));
+        // 基線輪完成之後(檔案已從 chain 與保留的修改寫回),檔案若再不見或被清空,照樣偵測得到。
+        s.baseline_established = true;
+        assert!(managed_file_vanished(true, &s));
+        assert!(managed_file_emptied(&[], &s));
+    }
+
+    #[test]
+    fn unpushed_edits_alone_are_worth_restoring_but_tombstones_alone_are_not() {
+        // 只剩還沒上傳的主機(例如離線新增、從沒推出去過):對空檔做本機 diff 會把它們變成刪除 → 要重新長出。
+        let mut unpushed = with_unpushed_hosts(joined_with_synced_hosts());
+        unpushed.records.retain(|_, l| l.record.kind != RecordKind::Host || l.dirty);
+        assert!(managed_file_vanished(true, &unpushed));
+        assert!(managed_file_emptied(&[], &unpushed));
+        // 只剩 tombstone(乾淨的或還沒上傳的):空檔的本機 diff 什麼都不會刪 —— 照常 diff、照常推送。
+        let mut tombstones = with_unpushed_hosts(joined_with_synced_hosts());
+        for local in tombstones.records.values_mut().filter(|l| l.record.kind == RecordKind::Host) {
+            local.record.deleted = true;
+        }
+        assert!(!holds_live_hosts(&tombstones));
+        assert!(!managed_file_vanished(true, &tombstones));
+        assert!(!managed_file_emptied(&[], &tombstones));
     }
 
     #[test]

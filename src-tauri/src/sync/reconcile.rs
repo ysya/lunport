@@ -233,11 +233,45 @@ pub fn pull_merge(state: &SyncState, keys: &ChainKeys, relay: &dyn Relay) -> Res
             }
         }
     }
-    // cursor 只跟 pull 的 watermark 走。watermark 比 cursor 還小 = 中繼被還原或重置(自架的中繼):cursor 歸零,
-    // 下一輪從頭重拉 —— 合併是冪等的。不取 max:cursor 會停在中繼要很久才到得了的序號,這段期間別台裝置寫入
+    // cursor 只跟 pull 的 watermark 走。不取 max:cursor 會停在中繼要很久才到得了的序號,這段期間別台裝置寫入
     // 的記錄全部被跳過。
-    next.cursor_seq = if pulled.latest_seq < state.cursor_seq { 0 } else { pulled.latest_seq };
+    if pulled.latest_seq < state.cursor_seq {
+        // watermark 比 cursor 還小 = 中繼的歷史倒退了(自架的中繼從舊備份還原、或被重置):中繼上可能少了我們
+        // 早就看過、甚至是我們自己推上去的記錄。只把 cursor 歸零重拉補不回來 —— 本機勝出的乾淨記錄會保留、卻
+        // 永遠不再上傳,中繼(與之後加入的裝置)就一直缺著。所以 cursor 歸零,並把每一筆快取的記錄
+        // (host/device/meta)標成 `seq = 0`、dirty:接下來的輪次從 0 重拉(KeepLocal 把 seq 更新成中繼現況、
+        // 遠端較新的照常取代本機),再把中繼缺的推回去(中繼沒有那一列 → 新建)。`seq = 0` 讓中繼上還有的
+        // 記錄先回 conflict、經過一次合併才覆寫,不會蓋掉還原之後別台裝置寫的新版。代價:一次整份重傳;遠端
+        // 較新的主機會以「覆寫了本機修改」通知(本機的 dirty 是這裡標的)。`sealed` 裡的密文不重推(Phase B
+        // 種類的已知限制)。偵測不到的情況:中繼還原之後、我們 pull 之前,中繼的序號已經追到 ≥ 我們的 cursor
+        // (別台裝置推了夠多)—— watermark 看起來正常,中間那段記錄照樣被跳過;要分辨得出來,中繼得有 epoch
+        // (協定變更)。
+        next.cursor_seq = 0;
+        for local in next.records.values_mut() {
+            local.seq = 0;
+            local.dirty = true;
+        }
+    } else {
+        next.cursor_seq = pulled.latest_seq;
+    }
     Ok(Merged { state: next, host_effects: acc.host_effects, conflicts: acc.conflicts, skipped: acc.skipped })
+}
+
+/// 基線輪要寫回受管檔的本機修改(純函式)。受管檔不見了或被清空、從 chain 重新長出時
+/// (`engine::reset_hosts_for_rematerialize`),還沒上傳的 host 記錄會留在快取裡;合併之後仍是 dirty 的就是
+/// 還贏 LWW 的本機修改(輸的已經被遠端版取代、不再 dirty)—— 中繼上只有較舊的版本(KeepLocal,不產生效果)
+/// 或根本沒有,不寫回的話檔案裡就少了它們。所以:dirty、未刪除、而受管檔目前的區塊(`blocks`)裡沒有這個
+/// alias 的 host 記錄 → 以記錄自己的 alias 與文字 Upsert。dirty 的 tombstone 不產生效果(照常推送);乾淨的
+/// 記錄交給 chain;檔案裡已經有的區塊不動。文字經過與遠端記錄相同的檢查(`host_effect`),所以套用不會失敗。
+/// 剛 Join 的快取裡沒有 host 記錄,結果一定是空的。
+pub fn unpushed_host_effects(state: &SyncState, blocks: &[HostBlockText]) -> Vec<HostEffect> {
+    state
+        .records
+        .values()
+        .filter(|l| l.dirty && l.record.kind == RecordKind::Host && !l.record.deleted)
+        .filter(|l| !blocks.iter().any(|b| b.alias == l.record.id))
+        .filter_map(|l| host_effect(&l.record))
+        .collect()
 }
 
 fn send_batch(
@@ -378,6 +412,37 @@ mod tests {
         (merged, pushed)
     }
 
+    /// 模擬的受管檔:效果寫進區塊列表(Upsert 取代或附加、Delete 移除),同引擎的 apply_and_commit。
+    fn apply_to(file: &mut Vec<HostBlockText>, effects: &[HostEffect]) {
+        for effect in effects {
+            match effect {
+                HostEffect::Upsert { alias, text } => match file.iter_mut().find(|b| &b.alias == alias) {
+                    Some(existing) => existing.text = text.clone(),
+                    None => file.push(block(alias, text)),
+                },
+                HostEffect::Delete { alias } => file.retain(|b| &b.alias != alias),
+            }
+        }
+    }
+
+    /// `round` 加上把效果寫回模擬的受管檔:下一輪的本機 diff 看到的就是寫回之後的檔案。
+    fn sync(state: &mut SyncState, relay: &FakeRelay, file: &mut Vec<HostBlockText>, now: u64) -> (Merged, Pushed) {
+        let (merged, pushed) = round(state, relay, file.as_slice(), now);
+        apply_to(file, &merged.host_effects);
+        (merged, pushed)
+    }
+
+    /// 依 alias 排序後的 (alias, text),比對檔案內容用。
+    fn sorted(file: &[HostBlockText]) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = file.iter().map(|b| (b.alias.clone(), b.text.clone())).collect();
+        out.sort();
+        out
+    }
+
+    fn pair(alias: &str, text: &str) -> (String, String) {
+        (alias.to_string(), text.to_string())
+    }
+
     fn host_record(id: &str, payload: serde_json::Value, deleted: bool) -> Record {
         Record { kind: RecordKind::Host, id: id.into(), version: 1, updated_at_ms: 1, device_id: "z".into(), deleted, payload }
     }
@@ -496,6 +561,9 @@ mod tests {
         let m = pull_merge(&b, &k, &relay).unwrap();
         assert_eq!(m.state.cursor_seq, 0, "a cursor past the relay's watermark is reset, never kept");
         assert!(m.host_effects.is_empty());
+        // 每一筆快取的記錄都要重新上傳(中繼可能少了它們),而且以 seq 0 為基準:中繼上還有的先衝突、合併後才覆寫。
+        assert!(!m.state.records.is_empty());
+        assert!(m.state.records.values().all(|l| l.seq == 0 && l.dirty), "every cached record is re-uploaded");
         b = m.state;
         // 還原之後 A 再寫一台,拿到的 seq(2)比 B 原本的 cursor 小:只有從頭重拉才收得到。已經套用過的記錄
         // 再合併一次不產生任何效果(冪等)。
@@ -504,6 +572,149 @@ mod tests {
         let m = pull_merge(&b, &k, &relay).unwrap();
         assert_eq!(m.host_effects, vec![upsert("db", "Host db\n")]);
         assert_eq!(m.state.cursor_seq, 2);
+    }
+
+    #[test]
+    fn a_relay_restored_from_an_older_backup_is_repaired_from_this_device() {
+        let relay = FakeRelay::default();
+        let k = keys();
+        let (mut a, mut b) = (device("a"), device("b"));
+        let (mut file_a, mut file_b) = (vec![block("web", "Host web\n"), block("db", "Host db\n")], Vec::new());
+        // 1. 兩台裝置同步幾台主機;記下中繼這時的樣子(之後的「備份」)。
+        sync(&mut a, &relay, &mut file_a, 100);
+        sync(&mut b, &relay, &mut file_b, 200);
+        let backup = (relay.rows.borrow().clone(), *relay.latest.borrow());
+        // A 改了 web、加了 app;兩台都同步到最新。
+        file_a[0].text = "Host web\n  User deploy\n".to_string();
+        file_a.push(block("app", "Host app\n"));
+        sync(&mut a, &relay, &mut file_a, 300);
+        sync(&mut b, &relay, &mut file_b, 400);
+        sync(&mut a, &relay, &mut file_a, 500);
+        assert_eq!(sorted(&file_b), sorted(&file_a), "B has everything before the restore");
+        assert!(a.cursor_seq > backup.1, "A has seen records the backup does not hold");
+
+        // 2. 自架中繼從舊備份還原:較新的記錄(A 的新版 web、app)不見了,watermark 退回 A 的 cursor 之下。
+        *relay.rows.borrow_mut() = backup.0;
+        *relay.latest.borrow_mut() = backup.1;
+
+        // 3. A 的下一次 pull 偵測到倒退:cursor 歸零、每一筆記錄都要重新上傳。
+        let detected = pull_merge(&a, &k, &relay).unwrap();
+        assert_eq!(detected.state.cursor_seq, 0);
+        assert!(detected.state.records.values().all(|l| l.seq == 0 && l.dirty));
+        assert!(detected.host_effects.is_empty(), "nothing in A's file changes");
+        // A 照常跑幾輪,直到沒有東西要上傳:中繼缺的推回去,中繼還有的先衝突、重拉合併後再推。
+        for now in [600, 700, 800] {
+            let (m, _) = sync(&mut a, &relay, &mut file_a, now);
+            assert!(m.host_effects.is_empty(), "the repair never changes A's own file");
+        }
+        assert!(a.records.values().all(|l| !l.dirty), "everything the relay lost was uploaded again");
+
+        // 4. 新加入的 C 拉到完整的主機集合,含 A 在備份之後才寫的新版 web 與 app。
+        let (mut c, mut file_c) = (device("c"), Vec::new());
+        sync(&mut c, &relay, &mut file_c, 900);
+        assert_eq!(
+            sorted(&file_c),
+            vec![pair("app", "Host app\n"), pair("db", "Host db\n"), pair("web", "Host web\n  User deploy\n")]
+        );
+    }
+
+    #[test]
+    fn the_rollback_repair_never_overwrites_a_newer_write_made_after_the_restore() {
+        let relay = FakeRelay::default();
+        let (mut a, mut b) = (device("a"), device("b"));
+        let (mut file_a, mut file_b) = (vec![block("web", "Host web\n"), block("db", "Host db\n")], Vec::new());
+        sync(&mut a, &relay, &mut file_a, 100);
+        sync(&mut b, &relay, &mut file_b, 200);
+        let backup = (relay.rows.borrow().clone(), *relay.latest.borrow());
+        // 備份之後 A 改了 web、加了 app,兩台都同步到最新:A 快取裡 web 的 seq 比備份裡的任何序號都大。
+        file_a[0].text = "Host web\n  User a\n".to_string();
+        file_a.push(block("app", "Host app\n"));
+        sync(&mut a, &relay, &mut file_a, 300);
+        sync(&mut b, &relay, &mut file_b, 400);
+        sync(&mut a, &relay, &mut file_a, 450);
+        *relay.rows.borrow_mut() = backup.0;
+        *relay.latest.borrow_mut() = backup.1;
+        // 還原之後、A 發現之前,B 又改了 web 並推上去:它在中繼上拿到的 seq 比 A 快取裡那筆的 seq 還小,
+        // watermark 仍在 A 的 cursor 之下。
+        file_b.iter_mut().find(|blk| blk.alias == "web").unwrap().text = "Host web\n  User b\n".to_string();
+        plan_local(&mut b, &file_b, |_| 480, 480, "test");
+        assert_eq!(push_dirty(&mut b, &keys(), &relay).unwrap().accepted, 1);
+        assert!(*relay.latest.borrow() < a.cursor_seq);
+        assert!(*relay.latest.borrow() < a.records["host:web"].seq, "a push based on A's old seq would be accepted");
+        // A 偵測到倒退、重新上傳:以 seq 0 為基準,中繼上 B 的新版先回衝突、合併後寫回 A 的檔案 —— 不會被 A 的
+        // 舊版蓋掉。(這一筆會以「覆寫了本機修改」通知:A 的 dirty 是偵測倒退時標的。)
+        for now in [500, 600, 700] {
+            sync(&mut a, &relay, &mut file_a, now);
+        }
+        assert!(a.records.values().all(|l| !l.dirty));
+        assert!(file_a.contains(&block("web", "Host web\n  User b\n")), "A takes B's newer web: {file_a:?}");
+        let (mut c, mut file_c) = (device("c"), Vec::new());
+        sync(&mut c, &relay, &mut file_c, 900);
+        assert_eq!(
+            sorted(&file_c),
+            vec![pair("app", "Host app\n"), pair("db", "Host db\n"), pair("web", "Host web\n  User b\n")]
+        );
+    }
+
+    fn cached_host(alias: &str, text: Option<&str>, dirty: bool) -> (String, LocalRecord) {
+        let record = Record {
+            kind: RecordKind::Host,
+            id: alias.into(),
+            version: 2,
+            updated_at_ms: 50,
+            device_id: "z".into(),
+            deleted: text.is_none(),
+            payload: text.map_or(serde_json::Value::Null, |t| serde_json::json!({ "schema": 1, "text": t })),
+        };
+        (record_key(RecordKind::Host, alias), LocalRecord { record, seq: 3, dirty })
+    }
+
+    #[test]
+    fn only_unpushed_edits_missing_from_the_file_are_written_back() {
+        let mut s = device("a");
+        s.records.extend([
+            cached_host("edited", Some("Host edited\n  User me\n"), true), // 離線修改、檔案裡沒有 → 寫回
+            cached_host("dropped", None, true),                            // 離線刪除 → 不寫回(照常推送)
+            cached_host("clean", Some("Host clean\n"), false),             // 已上傳 → 交給 chain
+            cached_host("present", Some("Host present\n  User me\n"), true), // 檔案裡已有 → 不動
+            cached_host("broken", Some("# not a host\n"), true),           // 文字套不上 → 不寫回
+        ]);
+        let me = own_device_record(&s, 5, "test");
+        s.records.insert(record_key(RecordKind::Device, &s.device_id), LocalRecord { record: me, seq: 0, dirty: true });
+        let file = [block("present", "Host present\n")];
+        assert_eq!(unpushed_host_effects(&s, &file), vec![upsert("edited", "Host edited\n  User me\n")]);
+        // 剛 Join:快取沒有 host 記錄,沒有任何效果。
+        assert!(unpushed_host_effects(&device("b"), &[]).is_empty());
+    }
+
+    #[test]
+    fn an_offline_edit_survives_restoring_a_vanished_synced_file_from_the_chain() {
+        let relay = FakeRelay::default();
+        let k = keys();
+        let (mut a, mut b) = (device("a"), device("b"));
+        let (mut file_a, mut file_b) = (vec![block("web", "Host web\n"), block("db", "Host db\n")], Vec::new());
+        sync(&mut a, &relay, &mut file_a, 100);
+        sync(&mut b, &relay, &mut file_b, 200);
+        // 中繼連不上時 A 改了 web:存檔當下規劃成 dirty,但沒推出去。
+        file_a[0].text = "Host web\n  User offline\n".to_string();
+        plan_local(&mut a, &file_a, |_| 300, 300, "test");
+        assert!(a.records["host:web"].dirty);
+        // hosts.config 不見了:引擎改成從 chain 重新長出(檔案重建成空的),下一輪是基線輪。
+        crate::sync::engine::reset_hosts_for_rematerialize(&mut a);
+        let mut file_a: Vec<HostBlockText> = Vec::new();
+        let merged = pull_merge(&a, &k, &relay).unwrap();
+        let mut effects = merged.host_effects.clone();
+        effects.extend(unpushed_host_effects(&merged.state, &file_a));
+        apply_to(&mut file_a, &effects);
+        a = merged.state;
+        // 檔案裡有 chain 上的每一台主機,web 是 A 的離線版本(不是 chain 上較舊的那份)。
+        assert_eq!(sorted(&file_a), vec![pair("db", "Host db\n"), pair("web", "Host web\n  User offline\n")]);
+        // 下一輪照常把修改推出去,B 收到它(不是衝突)。
+        sync(&mut a, &relay, &mut file_a, 400);
+        assert!(a.records.values().all(|l| !l.dirty));
+        let (m, _) = sync(&mut b, &relay, &mut file_b, 500);
+        assert_eq!(m.host_effects, vec![upsert("web", "Host web\n  User offline\n")]);
+        assert!(m.conflicts.is_empty());
     }
 
     #[test]
