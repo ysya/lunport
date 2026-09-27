@@ -29,6 +29,10 @@ use keys::{
 use known_hosts::{known_hosts_list, known_hosts_remove};
 use mcp::{mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
 use settings_io::{settings_export, settings_import};
+use sync::engine::{
+    sync_create_chain, sync_forget_device, sync_join_chain, sync_leave_chain, sync_now,
+    sync_set_device_name, sync_set_relay_url, sync_show_words, sync_status,
+};
 use tauri::Manager;
 use tray::tray_set_visible;
 
@@ -87,6 +91,7 @@ fn run_app(mcp_keep_alive: bool) {
         .manage(state::AppState::default())
         .setup(move |app| {
             mcp::initialize(app.handle(), mcp_keep_alive)?;
+            sync::engine::initialize(app.handle())?;
             tray::rebuild_tray(app.handle(), &[])?;
             Ok(())
         })
@@ -160,6 +165,15 @@ fn run_app(mcp_keep_alive: bool) {
             mcp_set_enabled,
             mcp_set_host_allowed,
             mcp_resolve_request,
+            sync_status,
+            sync_now,
+            sync_create_chain,
+            sync_join_chain,
+            sync_show_words,
+            sync_leave_chain,
+            sync_set_relay_url,
+            sync_set_device_name,
+            sync_forget_device,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -18,6 +18,8 @@ pub struct AppState {
     pub close_to_tray: AtomicBool,
     /// Local MCP bridge policy, pending approvals, and recent audit events.
     pub mcp: crate::mcp::McpRuntime,
+    /// 同步執行期狀態:generation/狀態/金鑰同一把鎖(`SyncCore`)、lifecycle 互斥鎖、同步中旗標。
+    pub sync: crate::sync::engine::SyncRuntime,
 }
 
 impl Default for AppState {
@@ -29,6 +31,7 @@ impl Default for AppState {
             tray_visible: AtomicBool::new(true),
             close_to_tray: AtomicBool::new(false),
             mcp: crate::mcp::McpRuntime::default(),
+            sync: crate::sync::engine::SyncRuntime::default(),
         }
     }
 }

@@ -388,6 +388,10 @@ pub fn persist_file(
     fsutil::atomic_write(&path, text.as_bytes(), 0o600)?;
     doc.files[idx].fingerprint = fsutil::file_fingerprint(&path)?;
 
+    // 同步 hook:app 對受管同步檔的編輯在存檔當下規劃(呼叫端持有 doc 鎖,鎖順序維持 doc → sync core)。
+    // 其他檔案、以及單元測試(沒有經過 `sync::engine::initialize`)都是 no-op。
+    crate::sync::engine::note_file_written(&path, &doc.files[idx].items);
+
     Ok(())
 }
 
