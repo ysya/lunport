@@ -16,7 +16,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 
 /**
  * "Move hosts into sync": pick existing hosts (grouped by file) to move into the
- * synced file, optionally tagging them with their old file's name; then resolve
+ * synced file, optionally tagging those from included files with their old
+ * file's name (never the main config's "config"); then resolve
  * aliases that the synced file now shadows — addressed by file, never by
  * first-match, so the synced copy is never touched.
  */
@@ -42,13 +43,17 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
   // The previous Move's failures (if any), kept on screen until the next Move
   // replaces them or the dialog closes (this component unmounts then).
   const [failedMoves, setFailedMoves] = useState<MigrationFailure[]>([]);
-  // Guards the default-selection effect below so it only ever fires once per
+  // Guards the default-selection effect below so it only ever settles once per
   // dialog opening (this component unmounts when the dialog closes, so the ref
   // is fresh again next time it opens).
   const didDefaultSelect = useRef(false);
 
   const managed = status.data?.managed_file ?? "";
   const loaded = Boolean(status.data && hostsQuery.data);
+  // Joined, but the first sync has not finished yet — right after Join the
+  // chain has not even been pulled, so hosts moved now would race the baseline
+  // round (the backend refuses them anyway).
+  const waitingForFirstSync = status.data?.last_sync_ms === null;
   const files = useMemo(() => hostsQuery.data?.files ?? [], [hostsQuery.data]);
   const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
   // Only group once BOTH queries are loaded. Before `status` loads, `managed`
@@ -59,24 +64,31 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
     [status.data, hostsQuery.data],
   );
 
-  // Default to everything selected, but only the FIRST time the list is known
-  // for this dialog opening. Re-running this whenever `groups` changes while
-  // the selection is empty would silently re-select hosts the user had
-  // deselected — for example right after a successful partial move clears it.
+  // The default selection is decided once per dialog opening, and only after
+  // the first sync has finished: right after Join `hosts_in_sync` is still 0
+  // because the chain has not been pulled yet. Everything is preselected only
+  // for a fresh chain (nothing synced yet, e.g. right after Create); otherwise
+  // the user picks. A manual toggle settles it too. Re-running this whenever
+  // `groups` changes while the selection is empty would silently re-select
+  // hosts the user had deselected — for example right after a successful
+  // partial move clears it.
   useEffect(() => {
-    if (!didDefaultSelect.current && groups.length > 0) {
-      didDefaultSelect.current = true;
+    if (didDefaultSelect.current || !status.data || status.data.last_sync_ms === null || groups.length === 0) return;
+    didDefaultSelect.current = true;
+    if (status.data.hosts_in_sync === 0) {
       setSelected(new Set(groups.flatMap((g) => g.hosts.map((h) => h.alias))));
     }
-  }, [groups]);
+  }, [groups, status.data]);
 
-  const toggle = (alias: string, on: boolean) =>
+  const toggle = (alias: string, on: boolean) => {
+    didDefaultSelect.current = true;
     setSelected((prev) => {
       const next = new Set(prev);
       if (on) next.add(alias);
       else next.delete(alias);
       return next;
     });
+  };
 
   const run = () =>
     migrate.mutate(
@@ -100,7 +112,7 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
       <DialogHeader>
         <DialogTitle>Move hosts into sync</DialogTitle>
         <DialogDescription>
-          Selected hosts move into <span className="font-mono">{basename(managed)}</span> (a backup is written first) and appear on every device in the chain. Wildcard blocks stay where they are.
+          Selected hosts move into <span className="font-mono">{basename(managed)}</span> (a backup is written first) and appear on every device in the chain. Wildcard blocks stay where they are. Moved hosts are read before your main config, so their own options now take precedence over wildcard blocks (like <span className="font-mono">Host *</span>) earlier in that file.
         </DialogDescription>
       </DialogHeader>
 
@@ -128,8 +140,12 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
       {groups.length > 0 && (
         <label className="flex items-center gap-2 text-sm">
           <Checkbox checked={tagByFile} onCheckedChange={(v) => setTagByFile(v === true)} />
-          Tag each host with its current file name (keeps your grouping in tag view)
+          Tag hosts from included files with their file name (keeps your grouping in tag view)
         </label>
+      )}
+
+      {groups.length > 0 && waitingForFirstSync && (
+        <p className="text-sm text-muted-foreground">Waiting for the first sync to finish…</p>
       )}
 
       {failedMoves.length > 0 && (
@@ -169,7 +185,7 @@ function MigrationFlow({ onClose }: { onClose: () => void }) {
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onClose}>Close</Button>
         {groups.length > 0 && (
-          <Button type="button" disabled={selected.size === 0 || migrate.isPending} onClick={run}>
+          <Button type="button" disabled={selected.size === 0 || migrate.isPending || waitingForFirstSync} onClick={run}>
             {migrate.isPending && <Loader2 className="size-4 animate-spin" />} Move {selected.size} host{selected.size === 1 ? "" : "s"}
           </Button>
         )}

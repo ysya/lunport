@@ -12,7 +12,7 @@ import { useSyncBackendSettings } from "@/lib/backend-settings";
 import { useGlobalHotkey } from "@/lib/global-hotkey";
 import { useAppShortcuts } from "@/lib/app-shortcuts";
 import { tauriInvoke } from "@/lib/ipc";
-import { syncStatusKey } from "@/lib/sync";
+import { syncDuplicatesKey, syncStatusKey } from "@/lib/sync";
 import { HostList } from "@/components/HostList";
 import { HostEditor } from "@/components/HostEditor";
 import { AddHostDialog } from "@/components/AddHostDialog";
@@ -85,7 +85,8 @@ function App() {
   }, [isError, error]);
 
   // Sync engine → UI: status pushes refresh the Settings pane without polling;
-  // applied remote changes refresh the host list; conflicts surface as a toast;
+  // applied remote changes refresh the host list and the shadowed-alias list
+  // (a newly synced host can shadow a local one); conflicts surface as a toast;
   // regaining focus nudges a sync round.
   useEffect(() => {
     let disposed = false;
@@ -95,6 +96,7 @@ function App() {
     );
     void listen<number>("sync://applied", () => {
       void queryClient.invalidateQueries({ queryKey: ["config"] });
+      void queryClient.invalidateQueries({ queryKey: syncDuplicatesKey });
     }).then((fn) => (disposed ? fn() : unlisten.push(fn)));
     void listen<string[]>("sync://conflict", (e) => {
       const aliases = e.payload.join(", ");

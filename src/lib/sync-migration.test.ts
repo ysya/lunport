@@ -49,4 +49,25 @@ describe("groupHostsForMigration", () => {
   it("returns no groups when nothing is left to migrate", () => {
     expect(groupHostsForMigration([host("synced", managed)], managed)).toEqual([]);
   });
+
+  it("leaves out local hosts that share any name with a synced host", () => {
+    const hosts = [
+      host("web", managed),
+      host("app-1", managed, ["app-1", "app"]),
+      host("web", "/home/f/.ssh/config"), // same alias as a synced host
+      host("web-prod", "/home/f/.ssh/config", ["web-prod", "web"]), // a later pattern is synced
+      host("app", "/home/f/.ssh/config.d/homelab.config"), // matches a synced host's later pattern
+      host("db", "/home/f/.ssh/config"),
+      host("app-2", "/home/f/.ssh/config.d/homelab.config"), // similar, but no shared name
+    ];
+    const groups = groupHostsForMigration(hosts, managed);
+    expect(groups.map((g) => g.file)).toEqual(["/home/f/.ssh/config", "/home/f/.ssh/config.d/homelab.config"]);
+    expect(groups[0].hosts.map((h) => h.alias)).toEqual(["db"]);
+    expect(groups[1].hosts.map((h) => h.alias)).toEqual(["app-2"]);
+  });
+
+  it("drops a file group whose every host is already synced", () => {
+    const hosts = [host("web", managed), host("web", "/home/f/.ssh/config"), host("db", "/home/f/.ssh/config.d/x.config")];
+    expect(groupHostsForMigration(hosts, managed).map((g) => g.file)).toEqual(["/home/f/.ssh/config.d/x.config"]);
+  });
 });

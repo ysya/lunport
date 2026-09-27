@@ -52,8 +52,13 @@ export function SyncPane() {
   const [shownWords, setShownWords] = useState<string | null>(null); // re-shown on request
   const [saved, setSaved] = useState(false);
 
-  if (status.isLoading || !status.data) {
-    return <p className="px-3 py-3 text-sm text-muted-foreground">Loading sync status…</p>;
+  if (!status.data) {
+    // A failed status query never turns into data: show why instead of loading forever.
+    return status.isError ? (
+      <p className="px-3 py-3 text-sm text-destructive">Could not load sync status: {errorMessage(status.error)}</p>
+    ) : (
+      <p className="px-3 py-3 text-sm text-muted-foreground">Loading sync status…</p>
+    );
   }
 
   const finishOnboarding = () => {
@@ -171,6 +176,19 @@ function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (
 
   return (
     <>
+      {/* Errors that happen while not joined — a state file set aside at startup,
+          an I/O error that needs a restart, sync running in another SSHelter
+          process — have nowhere else to show. */}
+      {status.last_error && (
+        <Section title="Sync error">
+          <SettingsGroup>
+            <SettingsRow label="Status" description={status.last_error}>
+              <Badge variant="destructive">Error</Badge>
+            </SettingsRow>
+          </SettingsGroup>
+        </Section>
+      )}
+
       {status.phrase_cleanup_pending && (
         <Section title="Cleanup needed" description="You left the chain, but the recovery phrase is still in the keychain.">
           <SettingsGroup>

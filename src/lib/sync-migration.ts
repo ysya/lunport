@@ -25,14 +25,22 @@ export function cleanWordsInput(raw: string): string {
     .trim();
 }
 
-/** Hosts that can still be moved into the synced file, grouped by their current file. */
+/**
+ * Hosts that can still be moved into the synced file, grouped by their current file.
+ * A local host that shares any name with a synced host is left out: a second block
+ * for a synced name would make the synced file define it twice (the backend refuses
+ * such moves), and right after Join these are exactly the local copies of hosts the
+ * chain already has.
+ */
 export function groupHostsForMigration(
   hosts: HostSummary[],
   managedFile: string,
 ): { file: string; hosts: HostSummary[] }[] {
+  const syncedNames = new Set(hosts.filter((h) => h.source_file === managedFile).flatMap((h) => h.patterns));
   const byFile = new Map<string, HostSummary[]>();
   for (const h of hosts) {
     if (h.source_file === managedFile || !isSyncableHost(h)) continue;
+    if (h.patterns.some((p) => syncedNames.has(p))) continue;
     const bucket = byFile.get(h.source_file);
     if (bucket) bucket.push(h);
     else byFile.set(h.source_file, [h]);
