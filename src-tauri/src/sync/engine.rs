@@ -41,6 +41,7 @@ const CHAIN_GONE_MESSAGE: &str =
 const NO_CONFIG_MESSAGE: &str =
     "SSHelter could not load your SSH config — create it (an empty ~/.ssh/config is fine) and reload, then try again";
 const OTHER_CHAIN_MESSAGE: &str = "the recovery phrase in the keychain belongs to a different sync chain; leave and rejoin";
+const NO_RELAY_MESSAGE: &str = "enter a relay URL first (Settings → Sync → Relay URL) — this build has no built-in relay";
 /// app data 目錄裡的行程間同步鎖:一個 OS 使用者同時只有一個行程跑同步引擎。
 const ENGINE_LOCK_FILE: &str = "sync.lock";
 pub(crate) const ANOTHER_ENGINE_MESSAGE: &str = "Sync is running in another SSHelter process — quit it to use sync here";
@@ -1128,6 +1129,16 @@ fn clean_device_name(name: &str) -> Result<String, AppError> {
     Ok(name.to_string())
 }
 
+/// Create/Join 需要中繼網址。沒有內建中繼的 release 建置(`DEFAULT_RELAY_URL` 為空字串)在使用者於
+/// Settings → Sync 填入網址之前一律拒絕,不做任何金鑰派生、網路或 keychain 動作。
+fn relay_configured(url: &str) -> Result<(), AppError> {
+    if url.trim().is_empty() {
+        Err(AppError::Other(NO_RELAY_MESSAGE.to_string()))
+    } else {
+        Ok(())
+    }
+}
+
 /// Create/Join 之前 doc 必須已載入:沒有 `~/.ssh/config` 時 `config_load` 失敗、doc 一直是 None,引擎每輪都
 /// 安靜跳過 —— 加入看起來成功卻永遠不會同步。不替使用者在猜的路徑建檔:config 路徑由前端決定。
 /// 呼叫端持有 lifecycle 鎖(順序 lifecycle → doc)。
@@ -1153,12 +1164,14 @@ enum ChainEntry {
 /// lifecycle 鎖之後 `refresh_views`。加入狀態與助記詞存下之後就不再失敗:準備受管檔失敗只記到 stderr,
 /// 下一輪同步會再做一次(Create 一定要把助記詞交回給使用者)。
 fn enter_chain(app: &AppHandle, words: &str, device_name: &str, mode: ChainEntry) -> Result<bool, AppError> {
-    // 任何金鑰派生、中繼或 keychain 動作之前:名稱不得為空、這個 session 必須能寫狀態、SSH config 已載入。
+    // 任何金鑰派生、中繼或 keychain 動作之前:名稱不得為空、這個 session 必須能寫狀態、SSH config 已載入、
+    // 已經有中繼網址。
     let device_name = clean_device_name(device_name)?;
     saves_allowed(app)?;
     config_loaded(app)?;
-    let keys = crypto::derive_keys(words)?;
     let relay_url = with_state(app, |s| Ok(s.relay_url.clone()))?;
+    relay_configured(&relay_url)?;
+    let keys = crypto::derive_keys(words)?;
     let relay = RelayClient::new(&relay_url, &keys.auth_token)?;
     match mode {
         // 只有 Create 用 PUT(冪等建立)。
@@ -1672,6 +1685,13 @@ mod tests {
     fn device_names_are_trimmed_and_must_not_be_blank() {
         assert_eq!(clean_device_name("  Box \n").unwrap(), "Box");
         assert_eq!(clean_device_name(" \t ").unwrap_err().to_string(), "device name cannot be empty");
+    }
+
+    #[test]
+    fn create_and_join_need_a_relay_url_when_the_build_has_none() {
+        assert_eq!(relay_configured("").unwrap_err().to_string(), NO_RELAY_MESSAGE);
+        assert_eq!(relay_configured("  ").unwrap_err().to_string(), NO_RELAY_MESSAGE);
+        assert!(relay_configured("https://relay.example.com").is_ok());
     }
 
     /// 加入中、基線已建立、有同步中的主機,外加 device / meta 記錄與一筆 sealed envelope。

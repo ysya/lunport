@@ -116,7 +116,7 @@ function RelayUrlRow({ current }: { current: string }) {
   return (
     <SettingsRow id="sync-relay" label="Relay URL" description="https:// only (plain http is allowed for localhost). Self-host from the repository's relay/ folder.">
       <div className="flex items-center gap-1.5">
-        <Input id="sync-relay" value={draft} onChange={(e) => setDraft(e.target.value)} className="h-7 w-64 font-mono text-xs" />
+        <Input id="sync-relay" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="https://relay.example.com" className="h-7 w-64 font-mono text-xs" />
         <Button type="button" variant="secondary" size="sm" className="h-7" disabled={draft.trim() === current || setRelayUrl.isPending} onClick={() => setRelayUrl.mutate({ url: draft })}>
           Save
         </Button>
@@ -173,6 +173,9 @@ function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (
 
   const cleaned = cleanWordsInput(words);
   const wordCount = cleaned === "" ? 0 : cleaned.split(" ").length;
+  // Release builds made without a built-in relay start with an empty relay URL:
+  // the user must enter one before creating or joining (the backend refuses too).
+  const relayMissing = status.relay_url.trim() === "";
 
   return (
     <>
@@ -201,6 +204,17 @@ function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (
         </Section>
       )}
 
+      {relayMissing && (
+        <Section
+          title="Relay"
+          description="This build has no built-in relay. Enter the URL of the relay to sync through (self-host one from the repository's relay/ folder), then create or join a chain."
+        >
+          <SettingsGroup>
+            <RelayUrlRow current={status.relay_url} />
+          </SettingsGroup>
+        </Section>
+      )}
+
       <Section
         title="Sync chain"
         description="Keep hosts in sync across your computers without an account. A 24-word recovery phrase is the only secret; the relay only ever stores encrypted records."
@@ -209,8 +223,11 @@ function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (
           <SettingsRow id="sync-device-name" label="This device" description="Shown to your other devices.">
             <Input id="sync-device-name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} className="h-7 w-48 text-sm" />
           </SettingsRow>
-          <SettingsRow label="Start a new chain" description="Creates the recovery phrase you will enter on other devices.">
-            <Button type="button" size="sm" className="h-7" disabled={busy !== null || deviceName.trim() === ""} onClick={() => void onCreate()}>
+          <SettingsRow
+            label="Start a new chain"
+            description={relayMissing ? "Enter a relay URL above first." : "Creates the recovery phrase you will enter on other devices."}
+          >
+            <Button type="button" size="sm" className="h-7" disabled={busy !== null || deviceName.trim() === "" || relayMissing} onClick={() => void onCreate()}>
               {busy === "create" && <Loader2 className="size-3.5 animate-spin" />} Create
             </Button>
           </SettingsRow>
@@ -230,17 +247,19 @@ function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (
             autoCapitalize="off"
             spellCheck={false}
           />
-          <Button type="button" size="sm" className="h-7" disabled={busy !== null || wordCount !== 24 || deviceName.trim() === ""} onClick={() => void onJoin()}>
+          <Button type="button" size="sm" className="h-7" disabled={busy !== null || wordCount !== 24 || deviceName.trim() === "" || relayMissing} onClick={() => void onJoin()}>
             {busy === "join" && <Loader2 className="size-3.5 animate-spin" />} Join
           </Button>
         </div>
       </Section>
 
-      <Section title="Advanced" description="Change this before creating or joining if you self-host the relay or the default one is unreachable.">
-        <SettingsGroup>
-          <RelayUrlRow current={status.relay_url} />
-        </SettingsGroup>
-      </Section>
+      {!relayMissing && (
+        <Section title="Advanced" description="Change this before creating or joining if you self-host the relay or the default one is unreachable.">
+          <SettingsGroup>
+            <RelayUrlRow current={status.relay_url} />
+          </SettingsGroup>
+        </Section>
+      )}
     </>
   );
 }

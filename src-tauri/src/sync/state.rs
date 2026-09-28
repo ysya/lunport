@@ -13,16 +13,18 @@ use crate::sync::record::{Envelope, LocalRecord, SCHEMA_VERSION};
 
 pub const STATE_VERSION: u32 = 1;
 
-/// 建置時由 CI 以 `SSHELTER_RELAY_URL` 注入正式中繼;沒設定、或設成空字串(GitHub Actions 對未設定的
-/// repository variable 會給空字串)都退回本機 `wrangler dev`。
-pub const DEFAULT_RELAY_URL: &str = relay_url_or_default(option_env!("SSHELTER_RELAY_URL"));
+/// 內建中繼:建置時由 CI 以 `SSHELTER_RELAY_URL` 注入。沒設定、或設成空字串(GitHub Actions 對未設定的
+/// repository variable 會給空字串)時分兩種模式:debug 建置退回本機 `wrangler dev`(開發用);release 建置
+/// **沒有內建中繼**(空字串)—— 需要同步的使用者在 Settings → Sync 自行填入中繼網址,填好之前不能 Create/Join。
+pub const DEFAULT_RELAY_URL: &str = default_relay_url(option_env!("SSHELTER_RELAY_URL"), cfg!(debug_assertions));
 
 const LOCAL_RELAY_URL: &str = "http://127.0.0.1:8787";
 
-const fn relay_url_or_default(injected: Option<&'static str>) -> &'static str {
+const fn default_relay_url(injected: Option<&'static str>, debug: bool) -> &'static str {
     match injected {
         Some(url) if !url.is_empty() => url,
-        _ => LOCAL_RELAY_URL,
+        _ if debug => LOCAL_RELAY_URL,
+        _ => "",
     }
 }
 
@@ -225,9 +227,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_missing_injected_relay_url_falls_back_to_local() {
-        assert_eq!(relay_url_or_default(None), "http://127.0.0.1:8787");
-        assert_eq!(relay_url_or_default(Some("")), "http://127.0.0.1:8787");
-        assert_eq!(relay_url_or_default(Some("https://relay.example.com")), "https://relay.example.com");
+    fn an_injected_relay_url_is_the_default_in_every_build() {
+        assert_eq!(default_relay_url(Some("https://relay.example.com"), false), "https://relay.example.com");
+        assert_eq!(default_relay_url(Some("https://relay.example.com"), true), "https://relay.example.com");
+    }
+
+    #[test]
+    fn without_an_injected_relay_debug_builds_use_the_local_relay_and_release_builds_have_none() {
+        // 沒設定與空字串(GitHub Actions 對未設定的 repository variable 給的值)一樣處理。
+        for injected in [None, Some("")] {
+            assert_eq!(default_relay_url(injected, true), "http://127.0.0.1:8787");
+            assert_eq!(default_relay_url(injected, false), "", "release builds ask the user for a relay");
+        }
     }
 }

@@ -59,7 +59,7 @@ Synced hosts live in `~/.ssh/sshelter/hosts.config`, which SSHelter `Include`s a
 
 *Forget* (in the Devices list) only removes a device from that list; a device that still has the phrase keeps syncing. If a device is lost, leave the chain, start a new one on the devices you keep, and rotate the keys it could see.
 
-The relay stores only ciphertext and can be self-hosted from `relay/` (`npx wrangler deploy`); point *Settings → Sync → Relay URL* at yours (`https://` required, except `localhost` for development).
+The relay stores only ciphertext and can be self-hosted from `relay/` (`npx wrangler deploy`); point *Settings → Sync → Relay URL* at yours (`https://` required, except `localhost` for development). Builds made without a built-in relay ask for one first: enter your relay's URL in *Settings → Sync* before creating or joining a chain.
 
 ## Development
 
