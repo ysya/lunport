@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.16.0](https://github.com/ysya/sshelter/compare/v0.15.1...v0.16.0) (2026-10-01)
+
+
+### Features
+
+* **ci:** beta channel script that validates beta versions and maintains the updater-beta manifest ([88a9f48](https://github.com/ysya/sshelter/commit/88a9f480f6c617d45900971a81af6ed84b8ce021))
+* **relay:** zero-knowledge sync relay on Cloudflare Durable Objects ([c346f83](https://github.com/ysya/sshelter/commit/c346f83fe11a9efdd5b90b5af8d2079b26cd54b4))
+* **sync:** background engine with transactional apply, save-time planning and lifecycle mutex ([44a17ff](https://github.com/ysya/sshelter/commit/44a17ff6254e70ceb705a053143f471e46ce95b0))
+* **sync:** detect local host block changes with per-block change times ([26390a4](https://github.com/ysya/sshelter/commit/26390a43bfae3a241d670b97fa7c5ac86f2b9315))
+* **sync:** expose first_sync_pending; the wizard moves only visible hosts and refetches after failed writes ([c6cf129](https://github.com/ysya/sshelter/commit/c6cf1299d7aba1b277121ea955b9f05fe91f64fd))
+* **sync:** frontend hooks, event wiring and migration helpers ([e631b7b](https://github.com/ysya/sshelter/commit/e631b7b638c9748ca0382070987833cd4a4316d7))
+* **sync:** let release builds ship without a built-in relay and ask for one in Settings → Sync ([29cd804](https://github.com/ysya/sshelter/commit/29cd804bcfec3befd64dcf7e2b52e683c5f3a54c))
+* **sync:** managed hosts file block operations ([b97870f](https://github.com/ysya/sshelter/commit/b97870f2a1e02ea5cc1e58cafbf38fdcde1cf37c))
+* **sync:** migrate hosts into the synced file, detect and resolve shadowed aliases by file ([432fe05](https://github.com/ysya/sshelter/commit/432fe055c191b54afb7a25b754d3422798bbd2c0))
+* **sync:** migration wizard with file-addressed shadowed alias handling ([f3f3da8](https://github.com/ysya/sshelter/commit/f3f3da8ceea13802bfe9052ebd6570f3e5d206c0))
+* **sync:** mnemonic, key derivation and record encryption ([97aa368](https://github.com/ysya/sshelter/commit/97aa368984435d82c11e8351f3b01727ef585b7f))
+* **sync:** persist local sync state and keep the mnemonic in the keychain ([e002dc0](https://github.com/ysya/sshelter/commit/e002dc0af9b23ba869ce9241285f7579c82a13c7))
+* **sync:** plan/pull-merge/push round with sealed retention and batched uploads ([5f6354b](https://github.com/ysya/sshelter/commit/5f6354b345e9a98fb9e360ad28f30e1291f960a8))
+* **sync:** record model, wire envelope and last-writer-wins merge ([6e51d67](https://github.com/ysya/sshelter/commit/6e51d672b3e2fc9e748c000209e9a6000e926d4b))
+* **sync:** relay HTTP client with conflict-aware push ([2783365](https://github.com/ysya/sshelter/commit/27833659b9c5856b33c365615ee1a6242d811e79))
+* **sync:** settings pane to create, join, inspect and leave a sync chain ([df511a4](https://github.com/ysya/sshelter/commit/df511a48d72fad6a11e3770703fe1ca90a19e7f0))
+* **updater:** backend commands to check and install from the Beta update channel ([a653bf7](https://github.com/ysya/sshelter/commit/a653bf777fb2743efff119aeaec355a5cd221624))
+* **updater:** Stable/Beta update channel setting and mark sync as beta ([906dff0](https://github.com/ysya/sshelter/commit/906dff0aa821405b2c10ce19b45bb6e34c652fc6))
+
+
+### Bug Fixes
+
+* **ci:** enforce the exact beta version format and harden the beta channel script ([6a82bea](https://github.com/ysya/sshelter/commit/6a82bea316f07e33c68f23408db04cbbe7d54022))
+* **ci:** enforce Windows MSI version limits on betas and clarify republishing ([62fbb16](https://github.com/ysya/sshelter/commit/62fbb16636353a09aad57daf87eedebe63704390))
+* **ci:** make build-platform refuse beta tags before building anything ([a6de115](https://github.com/ysya/sshelter/commit/a6de1150a094f63e331256f2c2c7500460c6d2cc))
+* **ci:** refresh the Beta manifest when a version is rebuilt and validate it before promoting ([e6f622e](https://github.com/ysya/sshelter/commit/e6f622e806fe50d52c85feaf4e024588b4aa92fa))
+* **ci:** refuse existing beta tags, keep betas prerelease and reject leading zeros ([ff9f82b](https://github.com/ysya/sshelter/commit/ff9f82b291cd2d4e80950dc54eb11cf89cd2ee94))
+* **ci:** refuse to publish a beta when the tag check cannot reach origin ([e9e1aca](https://github.com/ysya/sshelter/commit/e9e1acad85b50b807e467a01236503a7fdc35a63))
+* **sync:** drop a stale ts-expect-error and cover lone ? wildcards ([4c4eeee](https://github.com/ysya/sshelter/commit/4c4eeeebd3a3cb317f2fd8165e4e64969ad0d46e))
+* **sync:** fall back to the local relay when the injected relay URL is empty ([5d3911e](https://github.com/ysya/sshelter/commit/5d3911ec2ff43438814986ff629ce59bb02bb927))
+* **sync:** keep synced names out of the wizard, wait for the first sync and show sync errors ([35de116](https://github.com/ysya/sshelter/commit/35de11607bcf096977252c22983e17bc3e80a626))
+* **sync:** keep the leave dialog open until the request settles ([ed67453](https://github.com/ysya/sshelter/commit/ed67453590e16c62a5b133d241905c1743f733b1))
+* **sync:** keep unpushed edits when restoring the synced file and repair a rolled-back relay ([e6a1945](https://github.com/ysya/sshelter/commit/e6a1945c1d7983ae0709d824a7ad5586ff7b3b17))
+* **sync:** list failed host moves and distinguish loading from empty in the migration wizard ([f95f451](https://github.com/ysya/sshelter/commit/f95f4518c94b7b5e44a57eb863f60e4f976ad8c5))
+* **sync:** one engine per OS user, bounded conflict retries and safer sync rounds ([1baf929](https://github.com/ysya/sshelter/commit/1baf9297e4c80aa88a4b7add5b10bfeb1fd7e1fe))
+* **sync:** quiet startup before the config loads, restore a vanished synced file from the chain and harden state and keychain errors ([94e788d](https://github.com/ysya/sshelter/commit/94e788ddb7606fbd0fbb4385ee5f3bf240b5b6a2))
+* **sync:** refuse moves that share any synced name or run without the engine, reload after a failed shadow fix ([cdbf943](https://github.com/ysya/sshelter/commit/cdbf943589ace707229aa997ab0f0282adebb83c))
+* **sync:** refuse moves that would duplicate a synced alias and reload after a failed move ([657e161](https://github.com/ysya/sshelter/commit/657e1615b0a5e6bb31772a820ba123160960cf0b))
+* **sync:** retry a held engine lock briefly and wake the engine after every config load ([3e4783f](https://github.com/ysya/sshelter/commit/3e4783f26407d1fc48e395ec665ee53ad8d49039))
+* **sync:** stop a host migration batch at the first failed write and reload from disk ([c263572](https://github.com/ysya/sshelter/commit/c2635728314cdc9cc1009f99f50cbe84aab25270))
+* **sync:** surface engine doc reloads, keep unreadable state files and emit outside the lifecycle lock ([0daa74a](https://github.com/ysya/sshelter/commit/0daa74a6ac97932349d0b1d50f52996e01bad9bb))
+* **sync:** treat unreadable metadata as an error, never as a missing synced file or state ([305f0a9](https://github.com/ysya/sshelter/commit/305f0a917e153fa33416df2b1fb9fcdb65b02e65))
+* **sync:** wake the engine only when a config load changes the synced file, report baseline conflicts, clarify secondary-name refusals ([2661b13](https://github.com/ysya/sshelter/commit/2661b13b26121f5ef0fe983726929f1a5d448db0))
+* **updater:** ignore stale channel results and retire the update prompt on any channel change ([ca66e3a](https://github.com/ysya/sshelter/commit/ca66e3ad48291be2b694c10fd5fbc5444cbfe71f))
+
 ## [0.15.1](https://github.com/ysya/sshelter/compare/v0.15.0...v0.15.1) (2026-09-01)
 
 
