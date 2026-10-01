@@ -241,6 +241,14 @@
     -webkit-user-select: none;
   }
 
+  /* While the sidebar edge is dragged: keep the resize cursor everywhere and select nothing. */
+  .sidebar-resizing,
+  .sidebar-resizing * {
+    cursor: col-resize !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+  }
+
   /*
    * Sticky group headers inside the sidebar list. The sidebar itself is
    * translucent, so each stuck header re-applies the same frosted recipe —

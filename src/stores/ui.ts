@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import { DEFAULT_SIDEBAR_WIDTH, clampSidebarWidth } from "@/lib/sidebar-width";
+
 /** What the New-config-file dialog should do after the file exists. */
 export type NewFileIntent =
   | { kind: "scope" }
@@ -38,6 +40,9 @@ interface UiState {
   /** Sidebar grouping dimension: by source file or by tag (persisted). */
   groupMode: "file" | "tag";
   setGroupMode: (mode: "file" | "tag") => void;
+  /** Sidebar width in rem, set by dragging its edge (persisted; see lib/sidebar-width). */
+  sidebarWidth: number;
+  setSidebarWidth: (width: number) => void;
   /** Whether the "New host" dialog is open (driven by the command palette + toolbar). */
   addHostOpen: boolean;
   setAddHostOpen: (open: boolean) => void;
@@ -78,8 +83,8 @@ interface UiState {
  * 持久化偏好（theme、terminal、connection/lint/discovery 等)一律住在
  * `useSettingsStore`（zustand persist）。
  *
- * 例外：`collapsedGroups` 與 `fileScope` 是「導覽狀態」（不是偏好設定），透過
- * `partialize` 單獨持久化到 `sshelter-ui`，其餘欄位維持 session-only。
+ * 例外：`collapsedGroups`、`fileScope`、`groupMode` 與 `sidebarWidth` 是側邊欄的「導覽／版面狀態」
+ * （不是偏好設定），透過 `partialize` 單獨持久化到 `sshelter-ui`，其餘欄位維持 session-only。
  */
 export const useUiStore = create<UiState>()(
   persist(
@@ -99,6 +104,8 @@ export const useUiStore = create<UiState>()(
       setFileScope: (fileScope) => set({ fileScope }),
       groupMode: "file",
       setGroupMode: (groupMode) => set({ groupMode }),
+      sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+      setSidebarWidth: (width) => set({ sidebarWidth: clampSidebarWidth(width) }),
       addHostOpen: false,
       setAddHostOpen: (addHostOpen) => set({ addHostOpen }),
       addHostTargetFile: null,
@@ -120,11 +127,12 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: UI_STORAGE_KEY,
-      // ONLY navigation state survives restarts; everything else is session-only.
+      // ONLY sidebar navigation/layout state survives restarts; everything else is session-only.
       partialize: (s) => ({
         collapsedGroups: s.collapsedGroups,
         fileScope: s.fileScope,
         groupMode: s.groupMode,
+        sidebarWidth: s.sidebarWidth,
       }),
     },
   ),

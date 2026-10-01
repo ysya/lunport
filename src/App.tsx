@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -13,6 +13,7 @@ import { useGlobalHotkey } from "@/lib/global-hotkey";
 import { useAppShortcuts } from "@/lib/app-shortcuts";
 import { tauriInvoke } from "@/lib/ipc";
 import { syncDuplicatesKey, syncStatusKey } from "@/lib/sync";
+import { clampSidebarWidth } from "@/lib/sidebar-width";
 import { HostList } from "@/components/HostList";
 import { HostEditor } from "@/components/HostEditor";
 import { AddHostDialog } from "@/components/AddHostDialog";
@@ -28,6 +29,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
 import { McpApprovalDialog } from "@/components/McpApprovalDialog";
+import { SidebarResizeHandle } from "@/components/SidebarResizeHandle";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -60,6 +62,8 @@ function App() {
   const platform = usePlatform();
   const isMac = platform.data === "macos";
   const selectedAlias = useUiStore((s) => s.selectedAlias);
+  const sidebarWidth = clampSidebarWidth(useUiStore((s) => s.sidebarWidth));
+  const sidebarRef = useRef<HTMLElement>(null);
   const reload = useLoadConfig();
   const queryClient = useQueryClient();
 
@@ -224,9 +228,15 @@ function App() {
 
         {/* Content row: flex-1 + min-h-0 so children get a bounded height. */}
         <div className="flex min-h-0 flex-1">
-          <aside className="app-sidebar flex w-64 min-h-0 shrink-0 flex-col overflow-hidden border-r">
+          {/* Resizable by its edge (SidebarResizeHandle); half the window at most, so the editor keeps room. */}
+          <aside
+            ref={sidebarRef}
+            className="app-sidebar flex min-h-0 shrink-0 flex-col overflow-hidden border-r"
+            style={{ width: `${sidebarWidth}rem`, maxWidth: "50vw" }}
+          >
             <HostList hosts={hosts} isLoading={isLoading} />
           </aside>
+          <SidebarResizeHandle sidebarRef={sidebarRef} />
 
           {/*
            * Editor pane: its OWN bounded scroll region, independent of sidebar.
