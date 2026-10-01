@@ -11,12 +11,16 @@ import { useSettingsStore } from "@/stores/settings";
 let busy = false;
 /** Last version a silent check already prompted for — never re-toast the same one. */
 let lastPromptedVersion: string | null = null;
-/**
- * A stable toast id so repeated prompts replace rather than stack. Exported so
- * Settings can dismiss the prompt when the channel changes: the prompt's button
- * installs from the channel it was found on.
- */
-export const UPDATE_TOAST_ID = "sshelter-update";
+/** A stable toast id so repeated prompts replace rather than stack. */
+const UPDATE_TOAST_ID = "sshelter-update";
+
+// Any channel change — the Settings switch or a settings import — retires the current prompt:
+// its button would otherwise install from the channel the user just left.
+useSettingsStore.subscribe((state, previous) => {
+  if (normalizeUpdateChannel(state.updateChannel) !== normalizeUpdateChannel(previous.updateChannel)) {
+    toast.dismiss(UPDATE_TOAST_ID);
+  }
+});
 
 /** What the prompt needs from either channel. */
 interface FoundUpdate {
@@ -54,6 +58,9 @@ export async function checkForUpdates({ silent }: { silent: boolean }): Promise<
   try {
     const channel = normalizeUpdateChannel(useSettingsStore.getState().updateChannel);
     const update = channel === "beta" ? await checkBeta() : await checkStable();
+    // The user switched channels while this check was in flight: its result belongs to the
+    // old channel, so drop it rather than prompt (and later install) from the wrong one.
+    if (normalizeUpdateChannel(useSettingsStore.getState().updateChannel) !== channel) return;
     if (!update) {
       if (!silent) toast.success("SSHelter is up to date");
       return;

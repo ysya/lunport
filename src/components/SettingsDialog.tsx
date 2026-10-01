@@ -27,7 +27,7 @@ import { useUiStore, type SettingsCategory } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { useHostsQuery, useLoadConfig, usePlatform, useTerminals } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
-import { checkForUpdates, UPDATE_TOAST_ID } from "@/lib/updater";
+import { checkForUpdates } from "@/lib/updater";
 import { copyText } from "@/lib/clipboard";
 import {
   exportSettings,
@@ -230,10 +230,6 @@ function GeneralPane() {
   };
 
   const onChannelChange = (channel: UpdateChannel) => {
-    // The pending prompt is persistent and installs from the channel it was
-    // found on — drop it first, or a user who switches back to Stable could
-    // still install a beta from the old toast.
-    toast.dismiss(UPDATE_TOAST_ID);
     setUpdateChannel(channel);
     // Switching to Beta checks right away so the user learns whether a beta is available.
     if (channel === "beta") void onCheckNow();
