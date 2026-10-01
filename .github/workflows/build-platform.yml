@@ -4,8 +4,8 @@ name: build-platform
 # EXISTING release (by tag). Used when a single matrix leg of the release
 # workflow fails (e.g. a runner-image quirk) — re-running the original job
 # would reuse the old workflow definition, so this builds with current main.
-# Stable tags only. Afterwards run "update beta channel" for the same tag: this workflow does not
-# touch the Beta update manifest, and the rebuild replaces the installer's signature in it.
+# Stable tags only. Afterwards run "update beta channel" for the same tag: the rebuilt installers
+# have new signatures, and this workflow does not refresh the Beta update manifest's copy.
 on:
   workflow_dispatch:
     inputs:
