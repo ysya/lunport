@@ -77,6 +77,18 @@ describe("validateBetaVersion", () => {
     expect(() => validateBetaVersion("0.16.1-01", "0.16.0")).toThrow(/unsupported beta version/);
     expect(() => validateBetaVersion("0.16.01-1", "0.16.0")).toThrow(/unsupported beta version/);
   });
+
+  it("rejects versions the Windows MSI bundle cannot represent, before anything is published", () => {
+    expect(() => validateBetaVersion("0.16.1-65536", "0.16.0")).toThrow(/Windows MSI limits/);
+    expect(() => validateBetaVersion("256.0.0-1", "0.16.0")).toThrow(/Windows MSI limits/);
+    expect(() => validateBetaVersion("0.256.0-1", "0.16.0")).toThrow(/Windows MSI limits/);
+    expect(() => validateBetaVersion("0.16.65536-1", "0.16.0")).toThrow(/Windows MSI limits/);
+  });
+
+  it("accepts versions right at the Windows MSI limits", () => {
+    expect(() => validateBetaVersion("0.16.1-65535", "0.16.0")).not.toThrow();
+    expect(() => validateBetaVersion("255.255.65535-65535", "0.16.0")).not.toThrow();
+  });
 });
 
 describe("workflowCommandMessage", () => {

@@ -82,7 +82,7 @@ cd src-tauri && cargo test   # backend tests
 
 Betas reach machines whose **Settings → General → Update channel** is **Beta**. In GitHub Actions run **publish beta** with a version `X.Y.Z-N` (numeric suffix only, e.g. `0.16.1-1`) newer than the current release. The workflow creates the prerelease `vX.Y.Z-N`, builds every platform, then points the `updater-beta` release's `latest.json` at it. Stable releases keep going through release-please and are offered on the Beta channel too.
 
-If a build leg fails, use **Re-run failed jobs** on that run: it keeps the same inputs and commit, and the manifest job then runs. Never use `build-platform.yml` for a beta: it builds the tag's commit without the beta version stamp and does not update the Beta manifest. To publish the same version again, delete both the prerelease and its tag first, or simply use the next `-N`.
+If a build leg fails, use **Re-run failed jobs** on that run: it keeps the same inputs and commit, and the manifest job then runs. Never use `build-platform.yml` for a beta: it builds the tag's commit without the beta version stamp and does not update the Beta manifest. To publish the same version again, delete both the prerelease and its tag first, but only if the failed run never reached the **beta-manifest** job (its "Update the Beta channel manifest" step): the manifest is not rewritten for an equal version, so a republished one would keep the old signatures. Otherwise publish the next `-N`.
 
 ## Recommended IDE Setup
 

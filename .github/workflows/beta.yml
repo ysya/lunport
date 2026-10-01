@@ -59,8 +59,9 @@ jobs:
           # existing tag: the release would then point at an older commit than this build uses.
           # actions/checkout fetches no tags, so ask the remote. With --exit-code git exits 2 only
           # when no ref matches; any other failure means the check itself failed, so refuse then too.
+          # stderr stays visible: git prints nothing on exit 0 or 2 and says why on any other failure.
           status=0
-          git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1 || status=$?
+          git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null || status=$?
           if [ "$status" -eq 0 ]; then
             echo "::error::Tag v$VERSION already exists. Delete it (git push --delete origin v$VERSION) or use the next -N."
             exit 1

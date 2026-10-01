@@ -2,7 +2,7 @@
 // Beta update channel helpers for CI (spec: docs/superpowers/specs/2026-10-01-update-channels-design.md).
 //
 //   node scripts/beta-channel.mjs check-version <version>
-//     Fails unless <version> is X.Y.Z-N (numeric pre-release: the Windows MSI rule) and newer
+//     Fails unless <version> is X.Y.Z-N (numeric, within the Windows MSI field limits) and newer
 //     than the current release in .release-please-manifest.json.
 //
 //   node scripts/beta-channel.mjs update-manifest <source-tag>
@@ -64,6 +64,12 @@ export function validateBetaVersion(version, stableVersion) {
   }
   if (!BETA_VERSION_RE.test(version)) {
     throw new Error(`unsupported beta version "${version}" (expected X.Y.Z-N: digits only, no leading zeros, no "v" prefix, no whitespace)`);
+  }
+  // The MSI bundler turns X.Y.Z-N into the four-field version X.Y.Z.N, with a field limit each: a
+  // version beyond them would only fail on the Windows leg, after the prerelease and tag exist.
+  const { major, minor, patch, pre } = parseVersion(version);
+  if (major > 255 || minor > 255 || patch > 65535 || pre > 65535) {
+    throw new Error(`beta version ${version} exceeds the Windows MSI limits (major and minor ≤ 255, patch and the -N suffix ≤ 65535)`);
   }
   if (compareVersions(version, stableVersion) <= 0) {
     throw new Error(`beta version ${version} must be newer than the current release ${stableVersion}`);
