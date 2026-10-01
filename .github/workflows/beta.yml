@@ -55,6 +55,13 @@ jobs:
             echo "::error::Release v$VERSION already exists."
             exit 1
           fi
+          # Deleting a release keeps its tag, and `gh release create --target` is ignored for an
+          # existing tag: the release would then point at an older commit than this build uses.
+          # (actions/checkout fetches no tags, so ask the remote.)
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag v$VERSION already exists. Delete it (git push --delete origin v$VERSION) or use the next -N."
+            exit 1
+          fi
           gh release create "v$VERSION" --prerelease --target "$GITHUB_SHA" \
             --title "v$VERSION (beta)" \
             --notes "${NOTES:-Beta build for the Beta update channel (Settings → General → Update channel).}"
@@ -149,6 +156,9 @@ jobs:
         with:
           # The prerelease already exists (created by `prepare`); attach assets to it by tag.
           tagName: ${{ needs.prepare.outputs.tag_name }}
+          # The action only sets this when it creates a release. If it ever updated the flag, this
+          # keeps the beta a prerelease, so it can never become "latest" for the Stable channel.
+          prerelease: true
           args: ${{ matrix.args }}
 
   beta-manifest:

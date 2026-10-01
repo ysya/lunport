@@ -23,6 +23,9 @@ const CHANNEL_NOTES =
 
 const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$/;
 
+/** A beta version, exactly X.Y.Z-N. No leading zeros: cargo (semver) rejects them, but only after the prerelease and tag exist. */
+export const BETA_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-(0|[1-9]\d*)$/;
+
 /** Parse `X.Y.Z` or `X.Y.Z-N` (an optional leading `v` is ignored). */
 export function parseVersion(text) {
   const match = VERSION_RE.exec(String(text).trim());
@@ -59,8 +62,8 @@ export function validateBetaVersion(version, stableVersion) {
   if (parseVersion(version).pre === null) {
     throw new Error(`beta version "${version}" needs a numeric pre-release suffix (X.Y.Z-N, e.g. 0.16.1-1)`);
   }
-  if (!/^\d+\.\d+\.\d+-\d+$/.test(version)) {
-    throw new Error(`unsupported beta version "${version}" (expected X.Y.Z-N: digits only, no "v" prefix, no whitespace)`);
+  if (!BETA_VERSION_RE.test(version)) {
+    throw new Error(`unsupported beta version "${version}" (expected X.Y.Z-N: digits only, no leading zeros, no "v" prefix, no whitespace)`);
   }
   if (compareVersions(version, stableVersion) <= 0) {
     throw new Error(`beta version ${version} must be newer than the current release ${stableVersion}`);

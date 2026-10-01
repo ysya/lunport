@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { compareVersions, parseVersion, shouldReplace, validateBetaVersion, workflowCommandMessage } from "./beta-channel.mjs";
+import { BETA_VERSION_RE, compareVersions, parseVersion, shouldReplace, validateBetaVersion, workflowCommandMessage } from "./beta-channel.mjs";
 
 describe("compareVersions", () => {
   it("orders numeric pre-releases below their release and by number", () => {
@@ -38,6 +38,15 @@ describe("shouldReplace", () => {
   });
 });
 
+describe("BETA_VERSION_RE", () => {
+  it("matches exactly X.Y.Z-N: digits only, no leading zeros", () => {
+    for (const ok of ["0.16.1-1", "0.0.0-0", "10.20.30-40"]) expect(BETA_VERSION_RE.test(ok)).toBe(true);
+    for (const bad of ["0.16.1-01", "0.16.01-1", "00.16.1-1", "v0.16.1-1", " 0.16.1-1", "0.16.1-1\n", "0.16.1", "0.16.1-1-2", "0.16.1-beta.1"]) {
+      expect(BETA_VERSION_RE.test(bad)).toBe(false);
+    }
+  });
+});
+
 describe("validateBetaVersion", () => {
   it("accepts X.Y.Z-N newer than the current release", () => {
     expect(() => validateBetaVersion("0.16.1-1", "0.16.0")).not.toThrow();
@@ -62,6 +71,11 @@ describe("validateBetaVersion", () => {
 
   it("rejects a version with whitespace", () => {
     expect(() => validateBetaVersion(" 0.16.1-1", "0.16.0")).toThrow(/unsupported beta version/);
+  });
+
+  it("rejects leading zeros, which cargo refuses only after the prerelease and tag exist", () => {
+    expect(() => validateBetaVersion("0.16.1-01", "0.16.0")).toThrow(/unsupported beta version/);
+    expect(() => validateBetaVersion("0.16.01-1", "0.16.0")).toThrow(/unsupported beta version/);
   });
 });
 
