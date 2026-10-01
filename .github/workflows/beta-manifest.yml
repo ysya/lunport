@@ -1,0 +1,44 @@
+name: update beta channel
+
+# Manual recovery: points the Beta update channel (the `latest.json` on the `updater-beta`
+# prerelease) at an EXISTING release by tag. The `beta-manifest` jobs of release.yml and beta.yml
+# normally do this by themselves; run this one when they did not or could not:
+#  - a platform leg of a stable release was rebuilt with build-platform.yml. That workflow does not
+#    touch the Beta manifest, and the rebuild replaces the installer's signature, so the channel's
+#    copy of the manifest has to be refreshed;
+#  - a `beta-manifest` job was cancelled or skipped (for example, a build leg failed and was fixed
+#    some other way).
+# The rules are those of scripts/beta-channel.mjs: the release's latest.json must be complete (the
+# tag's version, an entry for every platform), the channel only moves forward, and the same version
+# is refreshed when its content changed. An up-to-date channel is left alone, so re-running is safe.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to offer on the Beta channel (e.g. v0.16.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  beta-manifest:
+    runs-on: ubuntu-latest
+    # Shared with release.yml and beta.yml: manifest updates queue instead of racing.
+    concurrency:
+      group: updater-beta-manifest
+      cancel-in-progress: false
+    steps:
+      # The branch this workflow runs on, not the tag: older releases do not have the script.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Update the Beta channel manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: node scripts/beta-channel.mjs update-manifest "$TAG"
