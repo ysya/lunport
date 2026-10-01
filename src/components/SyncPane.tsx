@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Copy, Eye, Loader2, RefreshCw, UserMinus } from "lucide-react";
+import { Copy, ExternalLink, Eye, Loader2, RefreshCw, UserMinus } from "lucide-react";
 import { toast } from "sonner";
 
 import type { SyncStatus } from "@/bindings/SyncStatus";
@@ -9,6 +9,7 @@ import {
   createChain,
   errorMessage,
   joinChain,
+  openRelayDeploy,
   refreshSyncViews,
   showWords,
   useForgetDevice,
@@ -207,9 +208,17 @@ function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (
       {relayMissing && (
         <Section
           title="Relay"
-          description="This build has no built-in relay. Enter the URL of the relay to sync through (self-host one from the repository's relay/ folder), then create or join a chain."
+          description="This build has no built-in relay. Deploy your own, enter its URL, then create or join a chain. Use the same relay URL on every computer in the chain."
         >
           <SettingsGroup>
+            <SettingsRow
+              label="Deploy a relay"
+              description="Opens Cloudflare in your browser: it copies the relay into a new repository on your GitHub or GitLab account and deploys it (the free plan is enough). Paste the workers.dev URL it gives you below."
+            >
+              <Button type="button" variant="outline" size="sm" className="h-7" onClick={() => void openRelayDeploy()}>
+                <ExternalLink className="size-3.5" /> Deploy to Cloudflare
+              </Button>
+            </SettingsRow>
             <RelayUrlRow current={status.relay_url} />
           </SettingsGroup>
         </Section>

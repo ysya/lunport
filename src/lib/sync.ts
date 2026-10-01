@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
 import type { DuplicateAlias } from "@/bindings/DuplicateAlias";
@@ -11,6 +12,18 @@ export const syncDuplicatesKey = ["sync", "duplicates"] as const;
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Cloudflare's one-click deploy of this repository's relay/ folder — the README buttons' link. */
+export const RELAY_DEPLOY_URL = "https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/sshelter/tree/main/relay";
+
+/** Open the relay deploy flow in the default browser. */
+export async function openRelayDeploy(): Promise<void> {
+  try {
+    await openUrl(RELAY_DEPLOY_URL);
+  } catch (e) {
+    toast.error("Could not open your browser", { description: errorMessage(e) });
+  }
 }
 
 /** After anything that changes chain membership: refetch status, hosts and duplicates. */
