@@ -8,6 +8,7 @@ import {
   effectiveNewTab,
   filterLintIssues,
   LINT_RULES,
+  normalizeUpdateChannel,
   quickConnectLabel,
   quickConnectShortcut,
   resolveTerminal,
@@ -168,5 +169,19 @@ describe("global quick-connect hotkey", () => {
     expect(quickConnectShortcut("windows")).toBe("Ctrl+Alt+K");
     expect(quickConnectShortcut(undefined)).toBe("Ctrl+Alt+K");
     expect(quickConnectLabel("linux")).toBe("Ctrl+Alt+K");
+  });
+});
+
+describe("normalizeUpdateChannel", () => {
+  it("keeps the two known channels", () => {
+    expect(normalizeUpdateChannel("stable")).toBe("stable");
+    expect(normalizeUpdateChannel("beta")).toBe("beta");
+  });
+
+  it("treats anything else — missing, misspelled, from a newer build — as Stable", () => {
+    expect(normalizeUpdateChannel(undefined)).toBe("stable");
+    expect(normalizeUpdateChannel("nightly")).toBe("stable");
+    expect(normalizeUpdateChannel("Beta")).toBe("stable");
+    expect(normalizeUpdateChannel(1)).toBe("stable");
   });
 });

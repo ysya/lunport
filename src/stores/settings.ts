@@ -8,6 +8,7 @@ import {
   resolveTheme,
   systemPrefersDark,
   type ThemePref,
+  type UpdateChannel,
 } from "@/lib/settings-logic";
 
 /** localStorage key for ALL persisted preferences (zustand persist envelope). */
@@ -77,6 +78,9 @@ interface SettingsState {
   /** Check GitHub Releases for a newer build shortly after launch. */
   autoCheckUpdates: boolean;
   setAutoCheckUpdates: (enabled: boolean) => void;
+  /** Update channel: Stable (default) or Beta (prereleases). Read it through `normalizeUpdateChannel`. */
+  updateChannel: UpdateChannel;
+  setUpdateChannel: (channel: UpdateChannel) => void;
   /** Show the menu-bar (tray) icon. Mirrored to the backend via `tray_set_visible`. */
   trayVisible: boolean;
   setTrayVisible: (visible: boolean) => void;
@@ -168,6 +172,8 @@ export const useSettingsStore = create<SettingsState>()(
         }),
       autoCheckUpdates: true,
       setAutoCheckUpdates: (autoCheckUpdates) => set({ autoCheckUpdates }),
+      updateChannel: "stable",
+      setUpdateChannel: (updateChannel) => set({ updateChannel }),
       trayVisible: true,
       setTrayVisible: (trayVisible) => set({ trayVisible }),
       closeToTray: false,

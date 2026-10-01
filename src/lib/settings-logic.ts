@@ -128,3 +128,15 @@ export function effectiveNewTab(
 ): boolean {
   return newTabConnect && terminalSupportsNewTab(terminalId, terminals);
 }
+
+/** Update channels (Settings → General → Updates). */
+export type UpdateChannel = "stable" | "beta";
+
+/**
+ * The channel to check, from a persisted or imported value. Anything other
+ * than "beta" — missing, misspelled, written by a newer build — means Stable,
+ * the code path every install used before channels existed.
+ */
+export function normalizeUpdateChannel(value: unknown): UpdateChannel {
+  return value === "beta" ? "beta" : "stable";
+}

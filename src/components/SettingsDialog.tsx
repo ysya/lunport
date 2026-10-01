@@ -27,7 +27,7 @@ import { useUiStore, type SettingsCategory } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { useHostsQuery, useLoadConfig, usePlatform, useTerminals } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
-import { checkForUpdates } from "@/lib/updater";
+import { checkForUpdates, UPDATE_TOAST_ID } from "@/lib/updater";
 import { copyText } from "@/lib/clipboard";
 import {
   exportSettings,
@@ -38,9 +38,11 @@ import {
 import {
   FONT_SIZE_OPTIONS,
   LINT_RULES,
+  normalizeUpdateChannel,
   quickConnectLabel,
   terminalSupportsNewTab,
   type ThemePref,
+  type UpdateChannel,
 } from "@/lib/settings-logic";
 import { cn } from "@/lib/utils";
 import { isWildcardOnly } from "@/lib/host-display";
@@ -84,13 +86,14 @@ const CATEGORIES: {
   id: SettingsCategory;
   label: string;
   icon: ComponentType<{ className?: string }>;
+  badge?: string;
 }[] = [
   { id: "general", label: "General", icon: Settings2 },
   { id: "appearance", label: "Appearance", icon: SunMoon },
   { id: "connection", label: "Connection", icon: TerminalSquare },
   { id: "files", label: "Files & Backups", icon: FolderCog },
   { id: "ai", label: "AI Access", icon: Bot },
-  { id: "sync", label: "Sync", icon: RefreshCw },
+  { id: "sync", label: "Sync", icon: RefreshCw, badge: "Beta" },
   { id: "advanced", label: "Advanced", icon: SlidersHorizontal },
 ];
 
@@ -151,6 +154,11 @@ export function SettingsDialog() {
                   >
                     <Icon className="size-4 shrink-0" />
                     {c.label}
+                    {c.badge && (
+                      <Badge variant="outline" className="ml-auto h-4 px-1 text-[10px] font-normal">
+                        {c.badge}
+                      </Badge>
+                    )}
                   </button>
                 );
               })}
@@ -191,6 +199,8 @@ function GeneralPane() {
   const setGlobalHotkey = useSettingsStore((s) => s.setGlobalHotkey);
   const autoCheckUpdates = useSettingsStore((s) => s.autoCheckUpdates);
   const setAutoCheckUpdates = useSettingsStore((s) => s.setAutoCheckUpdates);
+  const updateChannel = normalizeUpdateChannel(useSettingsStore((s) => s.updateChannel));
+  const setUpdateChannel = useSettingsStore((s) => s.setUpdateChannel);
   const platform = usePlatform();
   const [checking, setChecking] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -217,6 +227,16 @@ function GeneralPane() {
     } finally {
       setChecking(false);
     }
+  };
+
+  const onChannelChange = (channel: UpdateChannel) => {
+    // The pending prompt is persistent and installs from the channel it was
+    // found on — drop it first, or a user who switches back to Stable could
+    // still install a beta from the old toast.
+    toast.dismiss(UPDATE_TOAST_ID);
+    setUpdateChannel(channel);
+    // Switching to Beta checks right away so the user learns whether a beta is available.
+    if (channel === "beta") void onCheckNow();
   };
 
   const onTray = (visible: boolean) => {
@@ -344,6 +364,21 @@ function GeneralPane() {
               checked={autoCheckUpdates}
               onCheckedChange={setAutoCheckUpdates}
             />
+          </SettingsRow>
+          <SettingsRow
+            id="set-update-channel"
+            label="Update channel"
+            description="Beta gets preview builds earlier and may be less stable. Switching back to Stable keeps your current version until a newer stable release is out."
+          >
+            <Select value={updateChannel} onValueChange={(value) => onChannelChange(normalizeUpdateChannel(value))}>
+              <SelectTrigger id="set-update-channel" className="h-7 w-[10rem] text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="stable">Stable</SelectItem>
+                <SelectItem value="beta">Beta</SelectItem>
+              </SelectContent>
+            </Select>
           </SettingsRow>
           <SettingsRow
             label="Version"

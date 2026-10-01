@@ -217,7 +217,7 @@ function NotJoinedPane({ status, onCreated }: { status: SyncStatus; onCreated: (
 
       <Section
         title="Sync chain"
-        description="Keep hosts in sync across your computers without an account. A 24-word recovery phrase is the only secret; the relay only ever stores encrypted records."
+        description="Sync is in beta. Keep hosts in sync across your computers without an account. A 24-word recovery phrase is the only secret; the relay only ever stores encrypted records."
       >
         <SettingsGroup>
           <SettingsRow id="sync-device-name" label="This device" description="Shown to your other devices.">
@@ -317,7 +317,7 @@ function JoinedPane({ status: s, onShowWords }: { status: SyncStatus; onShowWord
 
   return (
     <>
-      <Section title="Sync chain" description={`Chain ${s.chain_short ?? ""} · ${s.hosts_in_sync} hosts in sync · last sync ${lastSync}`}>
+      <Section title="Sync chain" description={`Sync is in beta · Chain ${s.chain_short ?? ""} · ${s.hosts_in_sync} hosts in sync · last sync ${lastSync}`}>
         <SettingsGroup>
           <SettingsRow label="Status" description={s.last_error ?? (s.pending > 0 ? `${s.pending} change${s.pending === 1 ? "" : "s"} waiting to upload` : "Up to date")}>
             <div className="flex items-center gap-1.5">

@@ -2,15 +2,46 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { toast } from "sonner";
 
+import type { UpdateInfo } from "@/bindings/UpdateInfo";
+import { tauriInvoke } from "@/lib/ipc";
+import { normalizeUpdateChannel } from "@/lib/settings-logic";
+import { useSettingsStore } from "@/stores/settings";
+
 /** True while a check or install is already running (avoid double prompts). */
 let busy = false;
 /** Last version a silent check already prompted for — never re-toast the same one. */
 let lastPromptedVersion: string | null = null;
-/** A stable toast id so repeated prompts replace rather than stack. */
-const UPDATE_TOAST_ID = "sshelter-update";
+/**
+ * A stable toast id so repeated prompts replace rather than stack. Exported so
+ * Settings can dismiss the prompt when the channel changes: the prompt's button
+ * installs from the channel it was found on.
+ */
+export const UPDATE_TOAST_ID = "sshelter-update";
+
+/** What the prompt needs from either channel. */
+interface FoundUpdate {
+  version: string;
+  body?: string | null;
+  install: () => Promise<void>;
+}
+
+/** Stable: the plugin's own check against tauri.conf.json's endpoint — the pre-channel path. */
+async function checkStable(): Promise<FoundUpdate | null> {
+  const update = await check();
+  if (!update) return null;
+  return { version: update.version, body: update.body, install: () => update.downloadAndInstall() };
+}
+
+/** Beta: the backend checks the `updater-beta` manifest and installs what it found. */
+async function checkBeta(): Promise<FoundUpdate | null> {
+  const info = await tauriInvoke<UpdateInfo | null>("updater_check_beta");
+  if (!info) return null;
+  return { version: info.version, body: info.body, install: () => tauriInvoke<void>("updater_install_beta") };
+}
 
 /**
- * Check GitHub Releases (`latest.json`) for a newer signed build. When one is
+ * Check the selected channel for a newer signed build: Stable reads GitHub
+ * Releases' `latest.json`, Beta reads the `updater-beta` release's. When one is
  * found, prompt via a persistent toast; on confirm, download + install + relaunch.
  *
  * `silent` is for the automatic checks: no "up to date" confirmation, no error
@@ -21,7 +52,8 @@ export async function checkForUpdates({ silent }: { silent: boolean }): Promise<
   if (busy) return;
   busy = true;
   try {
-    const update = await check();
+    const channel = normalizeUpdateChannel(useSettingsStore.getState().updateChannel);
+    const update = channel === "beta" ? await checkBeta() : await checkStable();
     if (!update) {
       if (!silent) toast.success("SSHelter is up to date");
       return;
@@ -52,10 +84,10 @@ export async function checkForUpdates({ silent }: { silent: boolean }): Promise<
   }
 }
 
-async function installUpdate(update: NonNullable<Awaited<ReturnType<typeof check>>>) {
+async function installUpdate(update: FoundUpdate) {
   const id = toast.loading(`Downloading v${update.version}…`);
   try {
-    await update.downloadAndInstall();
+    await update.install();
     toast.success("Update installed — restarting…", { id });
     await relaunch();
   } catch (e) {

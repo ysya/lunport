@@ -27,7 +27,7 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), text size, menu bar icon & close-to-tray, launch at login, global quick-connect hotkey, default + per-host terminal, new-tab launch (iTerm2), custom config path, backup retention, discovery sources, drift auto-check, per-rule lint toggles, and settings export/import.
 - **AI Access (MCP)** — expose an explicit host allowlist to local MCP clients such as Codex. Read-only host/config tools stay scoped to that list; every remote command opens SSHelter, shows the resolved destination and exact command, and waits for an in-app **Allow once** or **Deny** decision. Recent decisions and exit codes remain visible in the interface.
 - **Sync (no account)** — create a sync chain on one computer, enter its 24-word recovery phrase on the others, and your synced hosts follow you. Records are end-to-end encrypted before they reach the relay (which is open source and self-hostable). Only hosts sync today; private keys and passwords stay on each device.
-- **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings.
+- **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings. Pick the Stable or Beta update channel in Settings → General.
 
 ## Install
 
@@ -53,7 +53,7 @@ MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so 
 
 ## Sync
 
-Open **Settings → Sync**. *Create* shows a 24-word recovery phrase — store it in a password manager; it is the only secret and anyone holding it can read your synced hosts. On another computer choose *Join* and paste the words. SSHelter needs an existing SSH config: on a new machine create an empty `~/.ssh/config` first.
+Sync is in beta. This release has no built-in relay: deploy your own from `relay/` and enter its URL in *Settings → Sync* first. Open **Settings → Sync**. *Create* shows a 24-word recovery phrase — store it in a password manager; it is the only secret and anyone holding it can read your synced hosts. On another computer choose *Join* and paste the words. SSHelter needs an existing SSH config: on a new machine create an empty `~/.ssh/config` first.
 
 Synced hosts live in `~/.ssh/sshelter/hosts.config`, which SSHelter `Include`s at the top of your main config, so plain `ssh` keeps working and the file survives uninstalling SSHelter. Use *Choose hosts…* to move existing hosts in (hosts from included files can be tagged with their file name). Hosts in other files stay local to that computer. Edits to `hosts.config` made outside SSHelter sync like any other edit, including deletions; if the file disappears or is emptied, SSHelter restores it from the chain.
 
