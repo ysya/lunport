@@ -4,6 +4,8 @@ name: build-platform
 # EXISTING release (by tag). Used when a single matrix leg of the release
 # workflow fails (e.g. a runner-image quirk) — re-running the original job
 # would reuse the old workflow definition, so this builds with current main.
+# Stable tags only. Afterwards run "update beta channel" for the same tag: this workflow does not
+# touch the Beta update manifest, and the rebuild replaces the installer's signature in it.
 on:
   workflow_dispatch:
     inputs:
@@ -31,6 +33,19 @@ jobs:
   build:
     runs-on: ${{ inputs.platform }}
     steps:
+      # Betas have a dash in their tag (vX.Y.Z-N). This workflow builds the tag's commit without
+      # the beta version stamp (scripts/set-app-version.mjs, applied by beta.yml only), so its
+      # installers would carry the stable version. Fail before anything is built.
+      - name: Refuse beta tags
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$TAG" == *-* ]]; then
+            echo '::error::build-platform.yml is for stable tags; re-run the failed job of the "publish beta" run instead.'
+            exit 1
+          fi
+
       # Build from the release tag so the artifacts match the released version.
       - uses: actions/checkout@v4
         with:
