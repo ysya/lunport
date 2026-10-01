@@ -14,6 +14,7 @@ mod secrets;
 mod settings_io;
 mod state;
 mod tray;
+mod updater_channel;
 
 use config::commands::*;
 use config::intel::{config_effective, config_jump_chain, config_key_hygiene, config_lint};
@@ -36,6 +37,7 @@ use sync::engine::{
 use sync::migrate::{sync_duplicate_aliases, sync_migrate_hosts, sync_resolve_shadowed};
 use tauri::Manager;
 use tray::tray_set_visible;
+use updater_channel::{updater_check_beta, updater_install_beta};
 
 /// 端到端 smoke command：回傳目前作業系統（"macos" / "linux" / "windows"）。
 #[tauri::command]
@@ -78,6 +80,8 @@ fn run_app(mcp_keep_alive: bool) {
     {
         builder = builder
             .plugin(tauri_plugin_updater::Builder::new().build())
+            // Beta 頻道暫存的更新(`PendingBetaUpdate` 只在桌面平台存在,所以在這裡才 manage)。
+            .manage(updater_channel::PendingBetaUpdate::default())
             // Launch-at-login. macOS uses a LaunchAgent (no AppleScript); no
             // extra args are passed to the binary on autostart.
             .plugin(tauri_plugin_autostart::init(
@@ -117,6 +121,8 @@ fn run_app(mcp_keep_alive: bool) {
         .invoke_handler(tauri::generate_handler![
             app_platform,
             app_set_close_to_tray,
+            updater_check_beta,
+            updater_install_beta,
             config_load,
             config_list_files,
             config_plan_new_file,
