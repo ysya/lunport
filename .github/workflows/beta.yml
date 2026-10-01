@@ -57,9 +57,16 @@ jobs:
           fi
           # Deleting a release keeps its tag, and `gh release create --target` is ignored for an
           # existing tag: the release would then point at an older commit than this build uses.
-          # (actions/checkout fetches no tags, so ask the remote.)
-          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+          # actions/checkout fetches no tags, so ask the remote. With --exit-code git exits 2 only
+          # when no ref matches; any other failure means the check itself failed, so refuse then too.
+          status=0
+          git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1 || status=$?
+          if [ "$status" -eq 0 ]; then
             echo "::error::Tag v$VERSION already exists. Delete it (git push --delete origin v$VERSION) or use the next -N."
+            exit 1
+          fi
+          if [ "$status" -ne 2 ]; then
+            echo "::error::Could not check whether tag v$VERSION exists (git ls-remote exited with $status)."
             exit 1
           fi
           gh release create "v$VERSION" --prerelease --target "$GITHUB_SHA" \
