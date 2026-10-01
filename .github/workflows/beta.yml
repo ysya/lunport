@@ -1,0 +1,175 @@
+name: publish beta
+
+# Publishes a beta for the Beta update channel (Settings → General → Update channel):
+#  1. `prepare` checks the version (X.Y.Z-N, newer than the current release) and creates the
+#     GitHub prerelease v<version> on this commit. Prereleases never become "latest", so the
+#     Stable channel (releases/latest/download/latest.json) never offers them.
+#  2. `build` stamps the version into the CI workspace only (scripts/set-app-version.mjs; nothing
+#     is committed), then builds and uploads the installers on every platform. Keep its steps in
+#     sync with the `build` job in release.yml.
+#  3. `beta-manifest` points the `updater-beta` release's latest.json at this beta.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Beta version X.Y.Z-N, newer than the current release (e.g. 0.16.1-1)"
+        required: true
+      notes:
+        description: "Release notes (optional)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-beta
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node scripts/beta-channel.mjs check-version "$VERSION"
+
+      - name: Create the prerelease
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Release v$VERSION already exists."
+            exit 1
+          fi
+          gh release create "v$VERSION" --prerelease --target "$GITHUB_SHA" \
+            --title "v$VERSION (beta)" \
+            --notes "${NOTES:-Beta build for the Beta update channel (Settings → General → Update channel).}"
+          echo "tag_name=v$VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ONE universal mac leg (Intel + Apple Silicon in a single binary). Two separate mac
+          # legs finished near-simultaneously and raced each other updating latest.json on the
+          # release (delete-asset 404) — one leg can't race itself. The updater falls back to
+          # the `darwin-universal` key when `darwin-{arch}` is absent.
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+          - platform: ubuntu-22.04 # Linux x86_64
+            args: ""
+          - platform: ubuntu-22.04-arm # Linux arm64 (free on public repos)
+            args: ""
+          - platform: windows-latest # Windows x86_64 (NSIS installer)
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          # xdg-utils: the AppImage bundler needs xdg-open; the arm64 runner image lacks it.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Stamp the beta version (workspace only)
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node scripts/set-app-version.mjs "$VERSION"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # Two supported modes: with the repository variable set, releases ship a built-in sync relay;
+      # without it, users who want sync enter their own relay URL in Settings → Sync. A value that is
+      # set but not https:// would ship a default the app itself rejects, so that fails the build.
+      - name: Check the sync relay URL
+        shell: bash
+        env:
+          SSHELTER_RELAY_URL: ${{ vars.SSHELTER_RELAY_URL }}
+        run: |
+          if [ -z "$SSHELTER_RELAY_URL" ]; then
+            echo "::notice::SSHELTER_RELAY_URL is not set: this beta has no built-in sync relay (users enter one in Settings → Sync)."
+          elif [[ "$SSHELTER_RELAY_URL" != https://* ]]; then
+            echo "::error::SSHELTER_RELAY_URL must start with https:// (got '$SSHELTER_RELAY_URL')."
+            exit 1
+          fi
+
+      - name: Build and upload installers to the prerelease
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater artifact signing (minisign). The key has no password; the
+          # empty PASSWORD var keeps the CLI from prompting interactively.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # Built-in sync relay URL (repository variable; https:// only, checked above). When unset, the release has no built-in relay.
+          SSHELTER_RELAY_URL: ${{ vars.SSHELTER_RELAY_URL }}
+        with:
+          # The prerelease already exists (created by `prepare`); attach assets to it by tag.
+          tagName: ${{ needs.prepare.outputs.tag_name }}
+          args: ${{ matrix.args }}
+
+  beta-manifest:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Shared with release.yml: manifest updates queue instead of racing.
+    concurrency:
+      group: updater-beta-manifest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Update the Beta channel manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+        run: node scripts/beta-channel.mjs update-manifest "$TAG_NAME"

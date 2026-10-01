@@ -78,6 +78,10 @@ pnpm test               # frontend unit tests (vitest)
 cd src-tauri && cargo test   # backend tests
 ```
 
+### Publishing a beta
+
+Betas reach machines whose **Settings → General → Update channel** is **Beta**. In GitHub Actions run **publish beta** with a version `X.Y.Z-N` (numeric suffix only, e.g. `0.16.1-1`) newer than the current release. The workflow creates the prerelease `vX.Y.Z-N`, builds every platform, then points the `updater-beta` release's `latest.json` at it. Stable releases keep going through release-please and are offered on the Beta channel too.
+
 ## Recommended IDE Setup
 
 [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).

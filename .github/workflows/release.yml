@@ -115,3 +115,30 @@ jobs:
           # The release already exists (created by release-please); attach assets to it by tag.
           tagName: ${{ needs.release-please.outputs.tag_name }}
           args: ${{ matrix.args }}
+
+  beta-manifest:
+    # Offer this release on the Beta update channel too, unless the channel already points at a
+    # newer beta (scripts/beta-channel.mjs). Runs after every platform uploaded its artifacts, so
+    # the release's latest.json is complete; skipped when any build leg failed.
+    needs: [release-please, build]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Shared with beta.yml: manifest updates queue instead of racing.
+    concurrency:
+      group: updater-beta-manifest
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Update the Beta channel manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: node scripts/beta-channel.mjs update-manifest "$TAG_NAME"
