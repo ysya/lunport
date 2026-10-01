@@ -63,7 +63,7 @@ The relay stores only ciphertext and is open source (`relay/`). Builds made with
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/sshelter/tree/main/relay)
 
-The button copies `relay/` into a new repository on your GitHub or GitLab account and deploys it to your Cloudflare account. When it finishes, enter the Worker's `https://…workers.dev` URL in *Settings → Sync → Relay URL* on every computer in the chain, then create or join. To deploy from a checkout instead: `cd relay && npm install && npx wrangler login && npx wrangler deploy`. Relay URLs must use `https://`, except `localhost` for development.
+The button copies `relay/` into a new repository on your GitHub or GitLab account and deploys it to your Cloudflare account. When it finishes, enter the Worker's `https://…workers.dev` URL in *Settings → Sync → Relay URL* on every computer in the chain, then create or join. To deploy from a checkout instead: `cd relay && npm install && npx wrangler login && npx wrangler deploy`. To run it on your own server, use Docker Compose ([relay/README.md](relay/README.md#self-host-with-docker-compose)). Relay URLs must use `https://`, except `localhost` for development.
 
 ## Development
 

@@ -1,0 +1,9 @@
+# HTTPS in front of the relay. Caddy gets a certificate for RELAY_DOMAIN by itself: the domain's
+# DNS must point at this host, and ports 80 and 443 must reach it.
+{$RELAY_DOMAIN} {
+	reverse_proxy relay:8080 {
+		# The relay rate-limits per client IP from this header (on Cloudflare, the edge sets it).
+		# Overwrite it with the real peer address so a client cannot pick its own bucket.
+		header_up CF-Connecting-IP {remote_host}
+	}
+}

@@ -21,3 +21,44 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  # The Docker Compose self-host (relay/selfhost): the image runs the real protocol, keeps data
+  # across a restart, and behind Caddy ignores a client-supplied CF-Connecting-IP.
+  selfhost:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay/selfhost
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Build the image
+        run: docker build -f Dockerfile -t sshelter-relay ..
+      - name: Create, push and conflict; restart; read back and delete
+        run: |
+          wait_for() { for _ in $(seq 1 60); do curl -s -o /dev/null "$1" && return 0; sleep 1; done; return 1; }
+          docker run -d --name relay -p 127.0.0.1:8787:8080 -v relay-data:/data sshelter-relay
+          wait_for http://127.0.0.1:8787/
+          node smoke-test.mjs http://127.0.0.1:8787 "$RUNNER_TEMP/state.json" write
+          docker restart relay
+          wait_for http://127.0.0.1:8787/
+          node smoke-test.mjs http://127.0.0.1:8787 "$RUNNER_TEMP/state.json" read
+      - name: Behind Caddy over HTTPS, forged client IPs are ignored
+        env:
+          RELAY_DOMAIN: localhost
+          # Caddy serves localhost with its own internal CA.
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+        run: |
+          docker compose up -d --build
+          for _ in $(seq 1 60); do
+            [ "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/v1/chains/not-hex/records)" = 400 ] && break
+            sleep 1
+          done
+          node smoke-test.mjs https://localhost spoof
+      - name: Logs
+        if: failure()
+        run: |
+          docker logs relay || true
+          docker compose logs || true

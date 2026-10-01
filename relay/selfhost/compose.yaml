@@ -1,0 +1,32 @@
+# Self-hosted SSHelter relay behind Caddy (automatic HTTPS). See ../README.md,
+# "Self-host with Docker Compose". Set RELAY_DOMAIN, e.g. in a .env file next to this one.
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: selfhost/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - relay-data:/data
+    # No published port: only Caddy reaches the relay, so nobody can forge the client IP header.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - relay
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?set RELAY_DOMAIN to the relay's domain name, e.g. in a .env file next to compose.yaml}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:
