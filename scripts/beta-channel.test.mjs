@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { compareVersions, parseVersion, shouldReplace, validateBetaVersion } from "./beta-channel.mjs";
+import { compareVersions, parseVersion, shouldReplace, validateBetaVersion, workflowCommandMessage } from "./beta-channel.mjs";
 
 describe("compareVersions", () => {
   it("orders numeric pre-releases below their release and by number", () => {
@@ -54,5 +54,19 @@ describe("validateBetaVersion", () => {
   it("rejects a beta that is not newer than the current release", () => {
     expect(() => validateBetaVersion("0.16.0-1", "0.16.0")).toThrow(/must be newer/);
     expect(() => validateBetaVersion("0.15.1-1", "0.16.0")).toThrow(/must be newer/);
+  });
+
+  it("rejects a version with a v prefix", () => {
+    expect(() => validateBetaVersion("v0.16.1-1", "0.16.0")).toThrow(/unsupported beta version/);
+  });
+
+  it("rejects a version with whitespace", () => {
+    expect(() => validateBetaVersion(" 0.16.1-1", "0.16.0")).toThrow(/unsupported beta version/);
+  });
+});
+
+describe("workflowCommandMessage", () => {
+  it("escapes special characters for GitHub Actions workflow commands", () => {
+    expect(workflowCommandMessage("a%b\r\n::warning::x")).toBe("a%25b%0D%0A::warning::x");
   });
 });

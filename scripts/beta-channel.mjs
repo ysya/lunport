@@ -11,7 +11,7 @@
 //     so an older stable patch never moves beta users backwards. Creates `updater-beta` on first
 //     use. Needs GH_TOKEN (and GH_REPO outside a checkout).
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -29,6 +29,11 @@ export function parseVersion(text) {
   if (!match) throw new Error(`unsupported version "${text}" (expected X.Y.Z or X.Y.Z-N)`);
   const [, major, minor, patch, pre] = match;
   return { major: Number(major), minor: Number(minor), patch: Number(patch), pre: pre === undefined ? null : Number(pre) };
+}
+
+/** Escape a message for a GitHub Actions workflow command such as `::error::`. */
+export function workflowCommandMessage(message) {
+  return String(message).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
 }
 
 /** Sort-style comparison; a release outranks every pre-release of the same X.Y.Z. */
@@ -54,6 +59,9 @@ export function validateBetaVersion(version, stableVersion) {
   if (parseVersion(version).pre === null) {
     throw new Error(`beta version "${version}" needs a numeric pre-release suffix (X.Y.Z-N, e.g. 0.16.1-1)`);
   }
+  if (!/^\d+\.\d+\.\d+-\d+$/.test(version)) {
+    throw new Error(`unsupported beta version "${version}" (expected X.Y.Z-N: digits only, no "v" prefix, no whitespace)`);
+  }
   if (compareVersions(version, stableVersion) <= 0) {
     throw new Error(`beta version ${version} must be newer than the current release ${stableVersion}`);
   }
@@ -76,8 +84,10 @@ function checkVersion(version) {
 }
 
 function updateManifest(sourceTag) {
+  parseVersion(sourceTag);
   const work = mkdtempSync(join(tmpdir(), "beta-channel-"));
   const sourceDir = join(work, "source");
+  const currentDir = join(work, "current");
   gh(["release", "download", sourceTag, "--pattern", MANIFEST, "--dir", sourceDir]);
   const next = manifestVersion(join(sourceDir, MANIFEST));
 
@@ -89,7 +99,6 @@ function updateManifest(sourceTag) {
   } else {
     const assets = JSON.parse(gh(["release", "view", CHANNEL_TAG, "--json", "assets"])).assets.map((a) => a.name);
     if (assets.includes(MANIFEST)) {
-      const currentDir = join(work, "current");
       gh(["release", "download", CHANNEL_TAG, "--pattern", MANIFEST, "--dir", currentDir]);
       current = manifestVersion(join(currentDir, MANIFEST));
     }
@@ -99,7 +108,20 @@ function updateManifest(sourceTag) {
     console.log(`${CHANNEL_TAG} stays on ${current} (${sourceTag} carries ${next}, which is not newer)`);
     return;
   }
-  gh(["release", "upload", CHANNEL_TAG, join(sourceDir, MANIFEST), "--clobber"]);
+  try {
+    gh(["release", "upload", CHANNEL_TAG, join(sourceDir, MANIFEST), "--clobber"]);
+  } catch (error) {
+    // `--clobber` deletes the old asset before uploading: put the previous manifest back (best
+    // effort) so a failed run leaves the channel where it was, then fail the job.
+    if (current !== null) {
+      try {
+        gh(["release", "upload", CHANNEL_TAG, join(currentDir, MANIFEST), "--clobber"]);
+      } catch {
+        console.error(`could not restore the previous ${MANIFEST} on ${CHANNEL_TAG}; re-run this job`);
+      }
+    }
+    throw error;
+  }
   console.log(`${CHANNEL_TAG} now offers ${next}${current ? ` (was ${current})` : ""}`);
 }
 
@@ -109,11 +131,11 @@ function main([command, arg]) {
   throw new Error("usage: beta-channel.mjs check-version <version> | update-manifest <source-tag>");
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
     main(process.argv.slice(2));
   } catch (error) {
-    console.error(`::error::${error.message}`);
+    console.error(`::error::${workflowCommandMessage(error.message)}`);
     process.exit(1);
   }
 }
