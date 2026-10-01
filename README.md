@@ -53,7 +53,7 @@ MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so 
 
 ## Sync
 
-Sync is in beta. This release has no built-in relay: deploy your own from `relay/` and enter its URL in *Settings → Sync* first. Open **Settings → Sync**. *Create* shows a 24-word recovery phrase — store it in a password manager; it is the only secret and anyone holding it can read your synced hosts. On another computer choose *Join* and paste the words. SSHelter needs an existing SSH config: on a new machine create an empty `~/.ssh/config` first.
+Sync is in beta. Open **Settings → Sync**. *Create* shows a 24-word recovery phrase — store it in a password manager; it is the only secret and anyone holding it can read your synced hosts. On another computer choose *Join* and paste the words. SSHelter needs an existing SSH config: on a new machine create an empty `~/.ssh/config` first.
 
 Synced hosts live in `~/.ssh/sshelter/hosts.config`, which SSHelter `Include`s at the top of your main config, so plain `ssh` keeps working and the file survives uninstalling SSHelter. Use *Choose hosts…* to move existing hosts in (hosts from included files can be tagged with their file name). Hosts in other files stay local to that computer. Edits to `hosts.config` made outside SSHelter sync like any other edit, including deletions; if the file disappears or is emptied, SSHelter restores it from the chain.
 
@@ -82,7 +82,9 @@ cd src-tauri && cargo test   # backend tests
 
 Betas reach machines whose **Settings → General → Update channel** is **Beta**. In GitHub Actions run **publish beta** with a version `X.Y.Z-N` (numeric suffix only, e.g. `0.16.1-1`) newer than the current release. The workflow creates the prerelease `vX.Y.Z-N`, builds every platform, then points the `updater-beta` release's `latest.json` at it. Stable releases keep going through release-please and are offered on the Beta channel too.
 
-If a build leg fails, use **Re-run failed jobs** on that run: it keeps the same inputs and commit, and the manifest job then runs. Never use `build-platform.yml` for a beta: it builds the tag's commit without the beta version stamp and does not update the Beta manifest. To publish the same version again, delete both the prerelease and its tag first, but only if the failed run never reached the **beta-manifest** job (its "Update the Beta channel manifest" step): the manifest is not rewritten for an equal version, so a republished one would keep the old signatures. Otherwise publish the next `-N`.
+If a build leg fails, use **Re-run failed jobs** on that run: it keeps the same inputs and commit, and the manifest job then runs. Never use `build-platform.yml` for a beta: it builds the tag's commit without the beta version stamp and does not update the Beta manifest, so it refuses beta tags. To publish the same version again, delete both the prerelease and its tag first. When the manifest job runs for a republished or rebuilt version, it replaces the channel's copy, so the old signatures do not linger. Machines that already installed that version are not offered it again; publish the next `-N` for them.
+
+To point the Beta channel at a release by hand, run **update beta channel** with its tag (for example `v0.16.0`). It is the recovery path after `build-platform.yml` rebuilt a platform of a stable release (that workflow leaves the Beta manifest alone, and the rebuilt installer has a new signature), and for a **beta-manifest** job that was cancelled or skipped. It first checks that the release's `latest.json` is complete, never moves the channel backwards, and leaves an up-to-date channel alone, so re-running it is safe.
 
 ## Recommended IDE Setup
 
