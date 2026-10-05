@@ -445,6 +445,7 @@ pub fn own_device_record(
             last_seen_ms: now_ms,
             keys: Vec::new(),
             spaces: spaces.to_vec(),
+            slots: Vec::new(),
         })
         .expect("DevicePayload serializes"),
     }
@@ -1239,7 +1240,7 @@ mod tests {
         assert!(plan_device(&mut account, "dev-a", "Box", "macos", &[], 1_000));
         assert!(plan_device(&mut account, "dev-b", "Laptop", "linux", &[], 2_000));
         // 不列出:已刪除的裝置(payload 讀得懂也一樣)、payload 讀不懂的記錄、不是 device 的記錄。
-        let old = DevicePayload { schema: 1, name: "Old".into(), platform: "macos".into(), joined_at_ms: 1, last_seen_ms: 1, keys: Vec::new(), spaces: Vec::new() };
+        let old = DevicePayload { schema: 1, name: "Old".into(), platform: "macos".into(), joined_at_ms: 1, last_seen_ms: 1, keys: Vec::new(), spaces: Vec::new(), slots: Vec::new() };
         put_account_record(&mut account, RecordKind::Device, "dev-gone", serde_json::to_value(old).unwrap(), true, "dev-a", 3);
         put_account_record(&mut account, RecordKind::Device, "dev-junk", serde_json::json!({ "unexpected": true }), false, "dev-a", 4);
         put_account_record(&mut account, RecordKind::Meta, ACCOUNT_META_ID, serde_json::to_value(MetaPayload::account("0.17.0")).unwrap(), false, "dev-a", 5);

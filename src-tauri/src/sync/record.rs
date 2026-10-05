@@ -23,6 +23,7 @@ pub const SPACE0_SLUG: &str = "synced";
 #[serde(rename_all = "lowercase")]
 pub enum RecordKind {
     Host,
+    /// 帳戶 chain:同步的私鑰(id = 插槽 id;祕密,SP3 spec §4.1)。
     Key,
     Password,
     Device,
@@ -31,6 +32,8 @@ pub enum RecordKind {
     Space,
     /// 帳戶 chain:一個 space 的權杖與金鑰(id = space id;wire 名稱 `spacekey`)。
     SpaceKey,
+    /// 帳戶 chain:一個金鑰插槽(id = 插槽 id;wire 名稱 `keyslot`;SP3 spec §4.1)。
+    KeySlot,
 }
 
 impl RecordKind {
@@ -43,6 +46,7 @@ impl RecordKind {
             RecordKind::Meta => "meta",
             RecordKind::Space => "space",
             RecordKind::SpaceKey => "spacekey",
+            RecordKind::KeySlot => "keyslot",
         }
     }
 
@@ -55,6 +59,7 @@ impl RecordKind {
             "meta" => Some(RecordKind::Meta),
             "space" => Some(RecordKind::Space),
             "spacekey" => Some(RecordKind::SpaceKey),
+            "keyslot" => Some(RecordKind::KeySlot),
             _ => None,
         }
     }
@@ -176,6 +181,10 @@ pub struct DevicePayload {
     /// 這台勾選的 space id(spec §4.1)。v1 的裝置記錄沒有這個欄位 → 空;空的時候不寫出,v1 payload 的內容不變。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spaces: Vec<String>,
+    /// 這台的插槽裡是哪把金鑰(SP3 spec §4.1)。空的時候不寫出,SP1 的 payload 內容不變;SP1 讀到會略過這個欄位。
+    /// 不能用 `keys`:SP1 把它當 `Vec<String>` 解析。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<crate::sync::slot_rules::DeviceSlot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -384,6 +393,42 @@ mod tests {
         picked.spaces = vec!["a".repeat(64)];
         let back: DevicePayload = serde_json::from_value(serde_json::to_value(&picked).unwrap()).unwrap();
         assert_eq!(back.spaces, vec!["a".repeat(64)]);
+    }
+
+    #[test]
+    fn keyslot_kind_round_trips_and_is_not_secret() {
+        assert_eq!(RecordKind::KeySlot.as_str(), "keyslot");
+        assert_eq!(RecordKind::parse("keyslot"), Some(RecordKind::KeySlot));
+        assert!(!RecordKind::KeySlot.is_secret());
+        assert!(RecordKind::Key.is_secret());
+    }
+
+    /// SP1 的 `DevicePayload` 沒有 `slots`:SP3 寫出的裝置記錄,SP1 照樣讀得懂(未知欄位略過);`slots` 空的時候不寫出。
+    #[test]
+    fn device_slots_are_invisible_to_sp1_and_omitted_when_empty() {
+        #[derive(serde::Deserialize)]
+        struct Sp1DevicePayload {
+            #[allow(dead_code)]
+            name: String,
+            #[serde(default)]
+            #[allow(dead_code)]
+            keys: Vec<String>,
+        }
+        let payload = DevicePayload {
+            schema: 1,
+            name: "MacBook".into(),
+            platform: "macos".into(),
+            joined_at_ms: 1,
+            last_seen_ms: 2,
+            keys: Vec::new(),
+            spaces: Vec::new(),
+            slots: vec![crate::sync::slot_rules::DeviceSlot { slot_id: "0".repeat(32), fingerprint: None, synced_copy: true }],
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(serde_json::from_value::<Sp1DevicePayload>(json.clone()).is_ok());
+        assert_eq!(serde_json::from_value::<DevicePayload>(json).unwrap(), payload);
+        let empty = serde_json::to_value(DevicePayload { slots: Vec::new(), ..payload }).unwrap();
+        assert!(empty.get("slots").is_none());
     }
 
     #[test]

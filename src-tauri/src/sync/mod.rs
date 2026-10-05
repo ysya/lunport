@@ -5,6 +5,7 @@
 //! - `hosts_file`: 同步檔的區塊操作、主 config 的 Include 清單、禁用的 directive
 //! - `space_files`: space 檔命名、Include 清單順序與建立 / 移除 / 改名的順序規則
 //! - `approval`: 危險設定的核准簽章
+//! - `slot_rules`: 金鑰插槽(SP3)的型別、名稱與檔名規則、OpenSSH 私鑰檢查、`IdentityFile` 值的解析
 //! - `relay`: relay HTTP client(`RelayApi`)與輪詢間隔
 //! - `reconcile`: 記錄的加解密編碼與套到檔案的效果
 //! - `merge`: 帳戶與 space 區段的本機 diff、合併、上傳(純函式)
@@ -42,6 +43,7 @@ pub mod relay;
 pub mod rotation;
 pub mod round;
 pub mod runtime;
+pub mod slot_rules;
 pub mod space_files;
 pub mod spaces;
 pub mod state;
