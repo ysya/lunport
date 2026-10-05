@@ -235,15 +235,26 @@ fn scan(doc: &SshConfigDoc, space_files: &[(String, PathBuf)], state: &SyncState
     KeyCandidates { keys, unsupported }
 }
 
-/// 這台勾選的 space 檔裡,指到本機私鑰、還沒有插槽的 `IdentityFile`(依金鑰檔分組),以及無法自動設定的值。鎖:先短暫
-/// 拿 core 取快照,再拿 doc。
+/// 這台勾選、而且第一輪同步已經跑完(`SpaceState::baseline_established`)的 space 檔(space id, 路徑;順序同 `selected_space_files`)。只有它們參與
+/// 設定(候選的掃描與主機的改寫都只看它們):第一輪還沒跑完的 space,存檔 hook 不為它規劃任何記錄(`files::note_written`),而第一輪以 chain
+/// 為準 —— 在這之前改寫的主機會被寫回 chain 的版本,改寫就白費了(插槽還在,主機卻悄悄變回原樣)。搬移精靈與側邊欄搬移對這種 space 也是拒絕
+/// (`migrate::refuse_before_first_sync`)。它們的主機在那個 space 的第一輪之後的下一次掃描才會出現。旗標在取得勾選清單之後才讀(最新的值)。
+fn ready_space_files(env: &SyncEnv) -> Vec<(String, PathBuf)> {
+    let selected = selected_space_files(env.runtime, &env.ssh_dir);
+    let core = env.runtime.core.lock().unwrap();
+    let Some(state) = core.state.as_ref() else { return Vec::new() };
+    selected.into_iter().filter(|(id, _)| state.spaces.get(id).is_some_and(|sp| sp.baseline_established)).collect()
+}
+
+/// 這台勾選、第一輪同步已經跑完(`ready_space_files`)的 space 檔裡,指到本機私鑰、還沒有插槽的 `IdentityFile`(依金鑰檔分組),以及無法自動設定的值。
+/// 第一輪還沒跑完的 space 的主機既不是候選、也不列在無法自動設定的清單裡。鎖:先短暫拿 core 取快照,再拿 doc。
 pub fn key_candidates(env: &SyncEnv) -> Result<KeyCandidates, AppError> {
     let home = home_of(env)?;
     let Some(state) = env.runtime.core.lock().unwrap().state.clone() else { return Ok(KeyCandidates::default()) };
     if state.account.is_none() {
         return Ok(KeyCandidates::default());
     }
-    let space_files = selected_space_files(env.runtime, &env.ssh_dir);
+    let space_files = ready_space_files(env);
     let doc_lock = env.doc.lock().unwrap();
     let Some(doc) = doc_lock.as_ref() else { return Ok(KeyCandidates::default()) };
     Ok(scan(doc, &space_files, &state, &home))
@@ -296,6 +307,9 @@ fn rewrite_in(
 /// 依使用者的決定建立或沿用插槽,再改寫用到那些金鑰的主機(SP3 spec §6.1;插槽一定先就位,主機才改寫)。`active` = 這個
 /// 行程跑著同步引擎(`engine::engine_active`;改寫的主機要靠它上傳)。決定裡的路徑不在目前的候選裡就略過。回傳改寫了的 alias。
 ///
+/// 只有第一輪同步已經跑完的 space 參與(`ready_space_files`):候選只來自它們的主機,改寫也只動它們的檔案 —— 其他 space 的主機照舊指到金鑰檔,
+/// 等那個 space 的第一輪之後,下一次掃描會列出它們、直接沿用已建好的插槽。
+///
 /// 任何一個決定做不成(名字不合規、金鑰不能同步、插槽路徑上有別人的東西……)就在那裡回錯誤:那個決定什麼都沒留下,後面的決定
 /// 與所有主機的改寫都不做;前面的決定已經建好的插槽留著,下一次掃描會建議沿用(和改寫撞到 `Conflict` 時一樣)。
 pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Result<Vec<String>, AppError> {
@@ -332,11 +346,13 @@ pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Resul
 /// 改寫用到 `planned` 裡那些金鑰的主機,經 `persist_file` 寫回。鎖(doc、backed_up)只在內層區塊裡持有:通知(`applied` 會重建 tray、
 /// 同步等待主執行緒)要在全部放掉之後才發,同搬移精靈(`migrate::move_hosts_into_space`)。
 fn rewrite_hosts(env: &SyncEnv, home: &Path, planned: &[(PathBuf, String)]) -> Result<Vec<String>, AppError> {
-    let space_files: Vec<PathBuf> = selected_space_files(env.runtime, &env.ssh_dir).into_iter().map(|(_, p)| p).collect();
     let result = {
         let mut doc_lock = env.doc.lock().unwrap();
         let mut backed_up = env.backed_up.lock().unwrap();
         let retention = env.retention();
+        // 只改寫第一輪同步已經跑完的 space 的主機(`ready_space_files`)。清單在持有 doc 鎖時才取、不沿用掃描時的結果:掃描之後 space 可能又退回了基線輪
+        // (`prepare_files` 在 doc 鎖裡做這件事,持有 doc 鎖時它不會發生)。
+        let space_files: Vec<PathBuf> = ready_space_files(env).into_iter().map(|(_, path)| path).collect();
         let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
         let main_path = doc.files[0].path.clone();
         let result = rewrite_in(doc, &space_files, home, planned, |doc, idx| persist_file(doc, idx, &mut backed_up, retention));
@@ -563,6 +579,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// 把一個勾選的 space 標成第一輪同步還沒跑完(`false`)或已經跑完(`true`):直接改記憶體裡的狀態(同 `files.rs` 的測試)。
+    fn set_baseline(d: &TestDevice, space_id: &str, established: bool) {
+        d.runtime.core.lock().unwrap().state.as_mut().unwrap().spaces.get_mut(space_id).unwrap().baseline_established = established;
     }
 
     /// 這台用 Keep 為 `id_mac` 設定了插槽;之後主機又指回金鑰檔本身,一輪之後沒有主機用到它 —— 連結收起來了(`parked`)。
@@ -933,5 +954,64 @@ mod tests {
             assert_eq!(*probe.all_free.lock().unwrap(), vec![true], "one applied(0), sent with no lock held (conflict: {conflict})");
             assert_eq!(probe.wakes(), 1, "conflict: {conflict}");
         }
+    }
+
+    /// 第一輪同步還沒跑完(`baseline_established == false`)的 space:存檔 hook 不為它規劃記錄(`files::note_written`),第一輪以 chain 為準 ——
+    /// 這時改寫的主機會被寫回原樣。它的主機不列為候選、也不列在無法自動設定的清單裡,設定時也不改寫(什麼都不建立);那個 space 的第一輪之後,
+    /// 下一次掃描才出現。
+    #[test]
+    fn hosts_in_a_space_that_has_not_finished_its_first_sync_are_neither_offered_nor_rewritten() {
+        let (a, personal) = device("# main\n");
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        let space = a.space_path(&personal);
+        let text = "Host web\n  IdentityFile ~/.ssh/id_mac\nHost proxy\n  IdentityFile ~/.ssh/%h\nHost agent\n  IdentityFile ~/.ssh/id_mac.pub\n";
+        a.save_in_app(&space, text);
+        set_baseline(&a, &personal, false);
+
+        let found = key_candidates(&a.env()).unwrap();
+        assert!(found.keys.is_empty() && found.unsupported.is_empty(), "{found:?}");
+        assert_eq!(setup_keys(&a.env(), true, vec![keep(&key, "id_mac")]).unwrap(), Vec::<String>::new());
+        assert!(live_slots(a.state().account.as_ref().unwrap()).is_empty(), "no slot is created for a key nothing offered");
+        assert!(a.state().key_slots.is_empty());
+        assert_eq!(a.read(&space), text, "the file is not touched");
+
+        // 第一輪跑完之後(這裡直接標成已建立):下一次掃描才出現,設定也照常做完。
+        set_baseline(&a, &personal, true);
+        let found = key_candidates(&a.env()).unwrap();
+        assert_eq!(found.keys.len(), 1, "{found:?}");
+        assert_eq!(found.keys[0].hosts.iter().map(|h| h.alias.as_str()).collect::<Vec<_>>(), vec!["web"]);
+        assert_eq!(found.unsupported.iter().map(|u| u.alias.as_str()).collect::<Vec<_>>(), vec!["proxy", "agent"]);
+        assert_eq!(setup_keys(&a.env(), true, vec![keep(&key, "id_mac")]).unwrap(), vec!["web".to_string()]);
+    }
+
+    /// 同一把金鑰被已經跑完第一輪的 space 與還沒跑完的 space 的主機用到:設定只改寫前者的主機(後者照舊指到金鑰檔,不會被它的第一輪悄悄還原),
+    /// 後者的第一輪之後,下一次掃描把它們列出來、直接沿用剛建好的插槽。
+    #[test]
+    fn the_rewrite_covers_only_spaces_that_have_finished_their_first_sync() {
+        let (a, personal) = device("# main\n");
+        let work = crate::sync::spaces::create_space(&a.env(), "Work").unwrap();
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        let (personal_file, work_file) = (a.space_path(&personal), a.space_path(&work));
+        a.save_in_app(&personal_file, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        a.save_in_app(&work_file, "Host db\n  IdentityFile ~/.ssh/id_mac\n");
+        set_baseline(&a, &work, false);
+
+        let found = key_candidates(&a.env()).unwrap();
+        assert_eq!(found.keys.len(), 1, "{found:?}");
+        assert_eq!(found.keys[0].hosts.iter().map(|h| h.alias.as_str()).collect::<Vec<_>>(), vec!["web"], "only the finished space's host is offered");
+        assert_eq!(setup_keys(&a.env(), true, vec![keep(&key, "id_mac")]).unwrap(), vec!["web".to_string()]);
+        let id = live_slots(a.state().account.as_ref().unwrap())[0].0.clone();
+        let file = slot_file_name("id_mac", &id);
+        assert_eq!(a.read(&personal_file), format!("Host web\n  IdentityFile ~/.ssh/sshelter/keys/{file}\n"));
+        assert_eq!(a.read(&work_file), "Host db\n  IdentityFile ~/.ssh/id_mac\n", "the space that has not finished its first sync is left alone");
+
+        set_baseline(&a, &work, true);
+        let found = key_candidates(&a.env()).unwrap();
+        assert_eq!(found.keys.len(), 1, "{found:?}");
+        assert_eq!(found.keys[0].existing_slot.as_deref(), Some(id.as_str()), "the slot just made is offered for reuse");
+        assert_eq!(found.keys[0].hosts.iter().map(|h| h.alias.as_str()).collect::<Vec<_>>(), vec!["db"]);
+        assert_eq!(setup_keys(&a.env(), true, vec![reuse(&key, &id)]).unwrap(), vec!["db".to_string()]);
+        assert_eq!(a.read(&work_file), format!("Host db\n  IdentityFile ~/.ssh/sshelter/keys/{file}\n"));
+        assert_eq!(live_slots(a.state().account.as_ref().unwrap()).len(), 1, "no second slot");
     }
 }
