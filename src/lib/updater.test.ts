@@ -1,9 +1,13 @@
+import type { Channel } from "@tauri-apps/api/core";
+import { isValidElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 
+import { type DownloadEvent, STALL_AFTER_MS } from "@/lib/download-progress";
 import type { UpdateChannel } from "@/lib/settings-logic";
 import { useSettingsStore } from "@/stores/settings";
-import { checkForUpdates } from "./updater";
+import { PROGRESS_REFRESH_MS, checkForUpdates } from "./updater";
 
 /**
  * The real settings store, the real sonner and the real updater/process plugins, with only the
@@ -13,7 +17,8 @@ import { checkForUpdates } from "./updater";
  * Every command, whether `tauriInvoke` sends it or a plugin does (`check()`, `downloadAndInstall()`,
  * `relaunch()`), ends in `window.__TAURI_INTERNALS__.invoke`: that one function is the backend. It
  * logs each command name, in order, and answers from `answers` laid over DEFAULT_ANSWERS (a
- * function answers lazily, so a test can hold a reply back). A command nobody listed rejects.
+ * function answers lazily, with the command's arguments, so a test can hold a reply back). A command
+ * nobody listed rejects.
  */
 const DEFAULT_ANSWERS: Record<string, unknown> = {
   "plugin:updater|check": null,
@@ -28,11 +33,11 @@ function stubBackend(answers: Record<string, unknown> = {}): string[] {
   const calls: string[] = [];
   vi.stubGlobal("window", {
     __TAURI_INTERNALS__: {
-      invoke: async (cmd: string) => {
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
         calls.push(cmd);
         if (!(cmd in replies)) throw new Error(`unexpected command: ${cmd}`);
         const reply = replies[cmd];
-        return typeof reply === "function" ? reply() : reply;
+        return typeof reply === "function" ? reply(args) : reply;
       },
       // The plugin's `downloadAndInstall()` opens a `Channel`, which registers its callback here.
       transformCallback: () => 1,
@@ -188,5 +193,184 @@ describe("update prompts follow the selected channel", () => {
     useSettingsStore.setState({ updateChannel: to as UpdateChannel });
 
     expect(promptedVersions()).toEqual(["0.16.1"]);
+  });
+});
+
+/** The install's toast (the prompt aside): its title and the text its description shows (not screen-reader-only text). */
+function installToast(): { title: string; text: string } {
+  const shown = toast
+    .getToasts()
+    .flatMap((t) => ("title" in t && typeof t.title === "string" && !t.title.startsWith(PROMPT_TITLE) ? [t] : []));
+  if (shown.length !== 1) throw new Error(`expected one install toast, found ${shown.length}`);
+  const [{ title, description }] = shown;
+  const text = isValidElement(description)
+    ? renderToStaticMarkup(description)
+        .replace(/<span class="sr-only">.*?<\/span>/g, "")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+    : typeof description === "string"
+      ? description
+      : "";
+  return { title: title as string, text };
+}
+
+/** Ends every held install (and held check), so a test that fails halfway does not leave the next ones blocked. */
+const pendingInstalls: (() => void)[] = [];
+
+/** An install command that stays open until the test ends it, and hands over the channel its progress goes through. */
+function heldInstall() {
+  const held: { channel?: Channel<DownloadEvent>; finish: () => void; fail: (error: Error) => void } = {
+    finish: () => {},
+    fail: () => {},
+  };
+  const reply = (args?: Record<string, unknown>) => {
+    held.channel = args?.onEvent as Channel<DownloadEvent>;
+    return new Promise<void>((resolve, reject) => {
+      held.finish = resolve;
+      held.fail = reject;
+      pendingInstalls.push(resolve);
+    });
+  };
+  const send = (event: DownloadEvent) => {
+    if (!held.channel) throw new Error("the install command got no progress channel");
+    held.channel.onmessage(event);
+  };
+  return { held, reply, send };
+}
+
+describe("installing shows the download's progress", () => {
+  // The toast refreshes on an interval and times the download with performance.now(): both are faked, so a test
+  // steps through time. Promises and sonner's own timers stay real.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+  });
+  afterEach(async () => {
+    for (const finish of pendingInstalls.splice(0)) finish();
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let those installs restart before the stubs go
+    vi.useRealTimers();
+  });
+
+  it.each([
+    { channel: "stable", found: { "plugin:updater|check": STABLE_FOUND }, command: "plugin:updater|download_and_install", version: "0.16.1" },
+    { channel: "beta", found: { updater_check_beta: BETA_FOUND }, command: "updater_install_beta", version: "0.16.1-1" },
+  ] as const)("$channel: from connecting, through the bytes from its channel, to installing and restarting", async ({ channel, found, command, version }) => {
+    const install = heldInstall();
+    const calls = stubBackend({ ...found, [command]: install.reply });
+    useSettingsStore.setState({ updateChannel: channel });
+    await checkForUpdates({ silent: false });
+    pressInstall();
+
+    expect(installToast()).toEqual({ title: `Downloading v${version}…`, text: "Connecting…" });
+
+    install.send({ event: "Started", data: { contentLength: 4_000_000 } });
+    // The bytes appear with the next refresh, so the first chunk does not flash "0 B of 4.0 MB" before it.
+    expect(installToast().text).toBe("Connecting…");
+    install.send({ event: "Progress", data: { chunkLength: 1_000_000 } });
+    vi.advanceTimersByTime(PROGRESS_REFRESH_MS);
+    expect(installToast()).toEqual({ title: `Downloading v${version}…`, text: "1.0 MB of 4.0 MB" });
+
+    install.send({ event: "Progress", data: { chunkLength: 3_000_000 } });
+    install.send({ event: "Finished" });
+    expect(installToast()).toEqual({ title: `Installing v${version}…`, text: "4.0 MB downloaded" });
+
+    install.held.finish();
+    await vi.waitFor(() => expect(calls).toContain("plugin:process|restart"));
+    expect(installToast()).toEqual({ title: "Update installed — restarting…", text: "" });
+
+    // Nothing after the install brings the progress back.
+    install.send({ event: "Finished" });
+    vi.advanceTimersByTime(STALL_AFTER_MS);
+    expect(installToast()).toEqual({ title: "Update installed — restarting…", text: "" });
+  });
+
+  it("says when no data has arrived for a while", async () => {
+    const install = heldInstall();
+    const calls = stubBackend({ "plugin:updater|check": STABLE_FOUND, "plugin:updater|download_and_install": install.reply });
+    await checkForUpdates({ silent: false });
+    pressInstall();
+
+    install.send({ event: "Started", data: { contentLength: 4_000_000 } });
+    install.send({ event: "Progress", data: { chunkLength: 1_000_000 } });
+    vi.advanceTimersByTime(STALL_AFTER_MS);
+
+    expect(installToast().text).toBe(
+      "1.0 MB of 4.0 MB · 0 B/s No data for 10 s — the download may have stalled. Restart SSHelter to try again.",
+    );
+    install.held.finish();
+    await vi.waitFor(() => expect(calls).toContain("plugin:process|restart"));
+  });
+
+  it("prompts for nothing while an update installs, so a second download cannot start", async () => {
+    const install = heldInstall();
+    const calls = stubBackend({ updater_check_beta: BETA_FOUND, updater_install_beta: install.reply });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    await checkForUpdates({ silent: false });
+    pressInstall();
+    toast.dismiss("sshelter-update"); // the Toaster closes a prompt when its button is pressed
+
+    await checkForUpdates({ silent: false }); // e.g. Settings → Check for updates after the stall warning
+
+    expect(calls.filter((cmd) => cmd === "updater_check_beta")).toHaveLength(1);
+    expect(promptedVersions()).toEqual([]);
+    install.held.finish();
+    await vi.waitFor(() => expect(calls).toContain("plugin:process|restart"));
+  });
+
+  it("starts one download when Install is pressed twice", async () => {
+    const install = heldInstall();
+    const calls = stubBackend({ "plugin:updater|check": STABLE_FOUND, "plugin:updater|download_and_install": install.reply });
+    await checkForUpdates({ silent: false });
+
+    pressInstall();
+    pressInstall(); // a double click can land before the Toaster removes the prompt
+
+    expect(calls.filter((cmd) => cmd === "plugin:updater|download_and_install")).toHaveLength(1);
+  });
+
+  it("drops the result of a check that comes back after Install was pressed", async () => {
+    const install = heldInstall();
+    let deliver!: (answer: unknown) => void;
+    let checks = 0;
+    stubBackend({
+      updater_check_beta: () =>
+        ++checks === 1
+          ? BETA_FOUND
+          : new Promise((resolve) => {
+              deliver = resolve;
+              pendingInstalls.push(() => resolve(null)); // a held check would keep the next tests from checking
+            }),
+      updater_install_beta: install.reply,
+    });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    await checkForUpdates({ silent: false });
+
+    const inFlight = checkForUpdates({ silent: false }); // a manual check, still running
+    pressInstall(); // meanwhile, Install on the prompt already on screen
+    toast.dismiss("sshelter-update");
+    deliver(BETA_FOUND);
+    await inFlight;
+
+    expect(promptedVersions()).toEqual([]);
+  });
+
+  it("replaces the progress with the error when the download fails", async () => {
+    const install = heldInstall();
+    stubBackend({ updater_check_beta: BETA_FOUND, updater_install_beta: install.reply });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    await checkForUpdates({ silent: false });
+    pressInstall();
+
+    install.send({ event: "Started", data: { contentLength: null } });
+    install.held.fail(new Error("connection reset"));
+    await vi.waitFor(() => expect(installToast().title).toBe("Update failed"));
+    vi.advanceTimersByTime(STALL_AFTER_MS);
+
+    expect(installToast()).toEqual({ title: "Update failed", text: "Error: connection reset" });
+
+    // The failed install no longer holds back the next check.
+    toast.dismiss("sshelter-update");
+    await checkForUpdates({ silent: false });
+    expect(promptedVersions()).toEqual(["0.16.1-1"]);
   });
 });
