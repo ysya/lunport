@@ -7,6 +7,7 @@ import {
   useMoveHost,
   usePlanNewFile,
 } from "@/lib/queries";
+import { isImeKey } from "@/lib/ime";
 import { useUiStore, type NewFileIntent } from "@/stores/ui";
 
 import { Button } from "@/components/ui/button";
@@ -153,6 +154,7 @@ function NewFileFlow({
             placeholder="work"
             className="font-mono"
             onKeyDown={(e) => {
+              if (isImeKey(e)) return;
               if (e.key === "Enter") {
                 e.preventDefault();
                 handleCreate();

@@ -40,6 +40,7 @@ import {
 } from "@/lib/queries";
 import { rangeBetween } from "@/lib/selection-range";
 import { copyText } from "@/lib/clipboard";
+import { isImeKey } from "@/lib/ime";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
 import { Input } from "@/components/ui/input";
@@ -1072,6 +1073,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                             onFocus={(e) => e.currentTarget.select()}
                             onBlur={() => setEditingFile(null)}
                             onKeyDown={(e) => {
+                              if (isImeKey(e)) return;
                               if (e.key === "Enter") {
                                 e.preventDefault();
                                 commitEdit(section.file);
@@ -1278,6 +1280,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                 aria-label="Tag to add to the selected hosts"
                 className="h-7 flex-1 font-mono text-sm"
                 onKeyDown={(e) => {
+                  if (isImeKey(e)) return;
                   if (e.key === "Enter") {
                     e.preventDefault();
                     void batchTag(tagDraft);

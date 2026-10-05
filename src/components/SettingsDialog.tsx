@@ -29,6 +29,7 @@ import { useHostsQuery, useLoadConfig, usePlatform, useTerminals } from "@/lib/q
 import { tauriInvoke } from "@/lib/ipc";
 import { checkForUpdates } from "@/lib/updater";
 import { copyText } from "@/lib/clipboard";
+import { isImeKey } from "@/lib/ime";
 import {
   exportSettings,
   pickSettingsImport,
@@ -631,6 +632,7 @@ function FilesPane() {
               spellCheck={false}
               className="h-7 flex-1 border-0 bg-transparent px-2 font-mono text-sm shadow-none focus-visible:bg-muted/60 focus-visible:ring-0 dark:bg-transparent"
               onKeyDown={(e) => {
+                if (isImeKey(e)) return;
                 if (e.key === "Enter") applyPath();
               }}
             />

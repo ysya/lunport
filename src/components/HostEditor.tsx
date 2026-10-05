@@ -61,6 +61,7 @@ import {
 } from "@/lib/queries";
 import { toTildeSshPath } from "@/lib/identity-file";
 import { copyText } from "@/lib/clipboard";
+import { isImeKey } from "@/lib/ime";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
@@ -818,6 +819,7 @@ function HostHeaderTitle({ detail }: { detail: HostDetail }) {
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
+            if (isImeKey(e)) return;
             if (e.key === "Enter") {
               e.preventDefault();
               commit();
