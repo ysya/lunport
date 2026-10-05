@@ -260,6 +260,12 @@ mod tests {
         assert_eq!(link(&source, &linked).unwrap(), LinkKind::HardLink);
         assert_eq!(content_sha256(&linked), content_sha256(&source));
 
+        // 重新整理插槽目錄的權限不能動到 hard link 共用的原檔:`ensure_keys_dir` 之後,原檔的 ACE 數量不變
+        // (暫存目錄裡的檔案在 runner 上會繼承好幾條 ACE;若目錄的 ACE 被傳播給子項,數量就會變)。
+        let before = ace_count(&source).unwrap();
+        ensure_keys_dir(&dir).unwrap();
+        assert_eq!(ace_count(&source).unwrap(), before, "securing the keys dir must not rewrite the ACL of a key a slot is linked to");
+
         // 對同一個原檔再連一次:`linked` 已經和原檔是同一個檔案,這之後插槽目錄裡不能留下 `.tmp` 的暫存名稱。
         assert_eq!(link(&source, &linked).unwrap(), LinkKind::HardLink);
         let leftovers: Vec<String> = fs::read_dir(&dir)

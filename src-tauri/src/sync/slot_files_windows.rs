@@ -6,15 +6,17 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, GENERIC_ALL, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE};
 use windows_sys::Win32::Security::Authorization::{
-    SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_FILE_OBJECT,
-    TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    SetEntriesInAclW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION,
-    SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, InitializeSecurityDescriptor, SetFileSecurityW, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, TokenUser, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, SECURITY_DESCRIPTOR,
+    SE_DACL_PROTECTED, SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TOKEN_USER,
 };
+use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 fn wide(path: &Path) -> Vec<u16> {
@@ -45,13 +47,24 @@ fn current_user_token() -> io::Result<Vec<u64>> {
 
 /// 把 `path` 的 DACL 換成只有一條「目前使用者:完全控制」,並切斷上層繼承。`inheritable` = true(目錄)時這一條會被
 /// 之後在裡面建立的檔案與目錄繼承 —— 暫存檔一建立就是 owner-only,沒有可被讀取的空窗。
+///
+/// - 用 `SetFileSecurityW`,不用 `SetNamedSecurityInfoW`:後者設在目錄上會把可繼承的 ACE 自動傳播給既有的子項,而插槽可能是
+///   使用者原檔的 hard link(和原檔共用同一份安全描述元),傳播會改到使用者自己的金鑰檔;前者只改這一個物件,設在目錄上的
+///   安全設定不會被既有的子項繼承。
+/// - 「不繼承上層」放在描述元的 `SE_DACL_PROTECTED` 控制位元,不傳 `PROTECTED_DACL_SECURITY_INFORMATION`(文件沒有說
+///   `SetFileSecurityW` 認得它)。輸入的描述元帶著這個位元時,系統忽略物件現有的 DACL,整份換成這裡給的,不會和上層繼承
+///   來的 ACE 合併(見 `SeSetSecurityDescriptorInfoEx` 的規則)。
+/// - 權限用具體的 `FILE_ALL_ACCESS`,不用 `GENERIC_ALL`:含 generic 權限的可繼承 ACE 會被存成兩條(一條 inherit-only、一條
+///   對應後的有效 ACE),DACL 就不是只有一條。
 pub fn restrict_to_owner(path: &Path, inheritable: bool) -> io::Result<()> {
     let token = current_user_token()?;
+    // 路徑先轉好:`last_os_error` 要緊接在失敗的 Win32 呼叫之後讀,中間不能再有別的配置。
+    let name = wide(path);
     unsafe {
         // `token` 是 `Vec<u64>`,起點 8 位元組對齊,夠 `TOKEN_USER` 用(內容已由 `GetTokenInformation` 填好)。
         let user = &*(token.as_ptr() as *const TOKEN_USER);
         let access = EXPLICIT_ACCESS_W {
-            grfAccessPermissions: GENERIC_ALL,
+            grfAccessPermissions: FILE_ALL_ACCESS,
             grfAccessMode: SET_ACCESS,
             grfInheritance: if inheritable { SUB_CONTAINERS_AND_OBJECTS_INHERIT } else { NO_INHERITANCE },
             Trustee: TRUSTEE_W {
@@ -67,19 +80,18 @@ pub fn restrict_to_owner(path: &Path, inheritable: bool) -> io::Result<()> {
         if status != ERROR_SUCCESS {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
-        let name = wide(path);
-        let status = SetNamedSecurityInfoW(
-            name.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            acl,
-            ptr::null(),
-        );
+        // 絕對格式的描述元,只帶這一份 DACL 並標成受保護;描述元只引用 `acl`、不複製,所以 `acl` 要活到 `SetFileSecurityW` 回來。
+        // 任何一步失敗就不再往下做,錯誤碼留在 last error。
+        let mut descriptor: SECURITY_DESCRIPTOR = std::mem::zeroed();
+        let descriptor_ptr = &mut descriptor as *mut SECURITY_DESCRIPTOR as *mut c_void;
+        let applied = InitializeSecurityDescriptor(descriptor_ptr, SECURITY_DESCRIPTOR_REVISION) != 0
+            && SetSecurityDescriptorDacl(descriptor_ptr, 1, acl, 0) != 0
+            && SetSecurityDescriptorControl(descriptor_ptr, SE_DACL_PROTECTED, SE_DACL_PROTECTED) != 0
+            && SetFileSecurityW(name.as_ptr(), DACL_SECURITY_INFORMATION, descriptor_ptr) != 0;
+        let error = io::Error::last_os_error();
         LocalFree(acl as *mut c_void);
-        if status != ERROR_SUCCESS {
-            return Err(io::Error::from_raw_os_error(status as i32));
+        if !applied {
+            return Err(error);
         }
     }
     Ok(())
@@ -88,7 +100,7 @@ pub fn restrict_to_owner(path: &Path, inheritable: bool) -> io::Result<()> {
 /// 測試用:`path` 的 DACL 有幾條 ACE。
 #[cfg(test)]
 pub fn ace_count(path: &Path) -> io::Result<u32> {
-    use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
     use windows_sys::Win32::Security::{AclSizeInformation, GetAclInformation, ACL_SIZE_INFORMATION};
     unsafe {
         let name = wide(path);

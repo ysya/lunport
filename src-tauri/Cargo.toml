@@ -53,6 +53,7 @@ tauri-plugin-autostart = "2.5.1"
 tauri-plugin-global-shortcut = "2.3.2"
 
 # SP3 金鑰插槽:Windows 上把插槽目錄與私鑰設成只有目前使用者能存取(src/sync/slot_files_windows.rs)。
-# 0.61 已在 Cargo.lock(tempfile 等的相依),不需下載。
+# 0.61 已在 Cargo.lock(tempfile 等的相依),不需下載。Win32_Storage_FileSystem 與 Win32_System_SystemServices 只為了
+# FILE_ALL_ACCESS 與 SECURITY_DESCRIPTOR_REVISION 兩個常數。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
