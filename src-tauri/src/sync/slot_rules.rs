@@ -288,8 +288,9 @@ pub fn parse_public_key(line: &str) -> Option<(String, String)> {
     Some((format!("{key_type} {b64}"), blob_fingerprint(&blob)))
 }
 
-/// `keyslot` payload 能不能進快取(spec §4.1):schema、名稱、來源裝置;`mode` 與四個金鑰欄位一致;`Synced` 的指紋要等於
-/// 公鑰的指紋。
+/// `keyslot` payload 能不能進快取(spec §4.1):schema、名稱、來源裝置;`mode` 與四個金鑰欄位一致;`Synced` 的
+/// `public_key` 必須剛好是 `<type> <base64>`(沒有 comment、沒有第二行、沒有多餘的空白:其他電腦會把它原樣寫進 `.pub`,
+/// 帳戶裡的惡意成員不得借此夾帶別的內容),而且它的指紋要等於 `fingerprint`。
 pub fn valid_slot_payload(p: &KeySlotPayload) -> bool {
     if p.schema != SLOT_SCHEMA || !valid_slot_name(&p.name) || p.origin_device_id.is_empty() {
         return false;
@@ -300,7 +301,7 @@ pub fn valid_slot_payload(p: &KeySlotPayload) -> bool {
         }
         SlotMode::Synced => match (&p.public_key, &p.fingerprint, &p.key_type, p.has_passphrase) {
             (Some(public), Some(fingerprint), Some(_), Some(_)) => {
-                parse_public_key(public).is_some_and(|(_, f)| &f == fingerprint)
+                parse_public_key(public).is_some_and(|(normalized, f)| &normalized == public && &f == fingerprint)
             }
             _ => false,
         },
@@ -565,6 +566,31 @@ mod tests {
         assert!(!valid_slot_payload(&KeySlotPayload { name: "../x".into(), ..synced_payload() }));
         assert!(!valid_slot_payload(&KeySlotPayload { schema: 2, ..synced_payload() }));
         assert!(!valid_slot_payload(&KeySlotPayload { origin_device_id: String::new(), ..synced_payload() }));
+
+        // synced 的 public_key 只能是剛好 `<type> <base64>`:其他電腦會把它原樣寫進 `.pub`,
+        // 帳戶裡的惡意成員不得夾帶 comment、第二行或多餘的空白。
+        let accepts = |public_key: &str| {
+            valid_slot_payload(&KeySlotPayload { public_key: Some(public_key.to_string()), ..synced_payload() })
+        };
+        assert!(accepts(PLAIN_PUBLIC));
+        let wrongly_accepted: Vec<String> = [
+            format!("{PLAIN_PUBLIC} me@host"),
+            format!("{PLAIN_PUBLIC}\n{ECDSA_PUBLIC}"),
+            format!("{PLAIN_PUBLIC}\n"),
+            format!(" {PLAIN_PUBLIC}"),
+            PLAIN_PUBLIC.replacen(' ', "  ", 1),
+        ]
+        .into_iter()
+        .filter(|public_key| accepts(public_key))
+        .collect();
+        assert!(wrongly_accepted.is_empty(), "{wrongly_accepted:?}");
+        // 帶 `=` 補位的 ecdsa 公鑰照常通過。
+        assert!(valid_slot_payload(&KeySlotPayload {
+            public_key: Some(ECDSA_PUBLIC.into()),
+            fingerprint: Some(ECDSA_FINGERPRINT.into()),
+            key_type: Some("ecdsa-sha2-nistp256".into()),
+            ..synced_payload()
+        }));
 
         assert!(valid_key_payload(&KeyPayload { schema: SLOT_SCHEMA, private_key: plain() }));
         assert!(!valid_key_payload(&KeyPayload { schema: SLOT_SCHEMA, private_key: String::new() }));
