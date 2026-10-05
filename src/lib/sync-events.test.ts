@@ -99,6 +99,12 @@ describe("notices", () => {
       description:
         "Use one of the new sync codes on every computer. To use the other one on this computer, leave the sync account and join with it.",
     });
+    expect(noticeMessage({ kind: "keys_needed", names: ["id_mac", "work"] })).toEqual({
+      title: "Pick keys for this computer",
+      description: "Synced hosts use id_mac and work, which stay on your other computers.",
+    });
+    // 名稱來自別台電腦:看不見的字元要顯示出來。
+    expect(noticeMessage({ kind: "keys_needed", names: [SPOOFED_NAME] }).description).toContain(SPOOFED_NAME_SHOWN);
   });
 });
 

@@ -99,6 +99,11 @@ export function noticeMessage(notice: SyncNotice): SyncMessage {
         description:
           "Use one of the new sync codes on every computer. To use the other one on this computer, leave the sync account and join with it.",
       };
+    case "keys_needed":
+      return {
+        title: "Pick keys for this computer",
+        description: `Synced hosts use ${listNames(notice.names.map(revealHidden))}, which stay on your other computers.`,
+      };
   }
 }
 

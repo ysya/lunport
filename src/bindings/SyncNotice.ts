@@ -3,4 +3,4 @@
 /**
  * 要讓使用者看到、看過才清掉的提示(`SyncStateV2::notices`;同時以 `sync://notice` 發出)。
  */
-export type SyncNotice = { "kind": "upgraded", kept_file: string | null, kept_hosts: Array<string>, moved_files: Array<string>, } | { "kind": "space_deleted", name: string, by_device: string, } | { "kind": "rename_blocked", space_id: string, name: string, file_name: string, } | { "kind": "left_account", kept_files: Array<string>, } | { "kind": "new_sync_code" } | { "kind": "other_rotation", devices: Array<string>, };
+export type SyncNotice = { "kind": "upgraded", kept_file: string | null, kept_hosts: Array<string>, moved_files: Array<string>, } | { "kind": "space_deleted", name: string, by_device: string, } | { "kind": "rename_blocked", space_id: string, name: string, file_name: string, } | { "kind": "left_account", kept_files: Array<string>, } | { "kind": "new_sync_code" } | { "kind": "other_rotation", devices: Array<string>, } | { "kind": "keys_needed", names: Array<string>, };

@@ -16,6 +16,7 @@ use crate::sync::record::{
     Record, RecordKind, RotationMarkerPayload, SpaceKeyPayload, SpacePayload, ACCOUNT_META_ID, SCHEMA_VERSION,
 };
 use crate::sync::relay::{PullResponse, PushItem, PushOutcome, PushResult, RelayApi, RelayError};
+use crate::sync::slot_rules::{is_slot_id, valid_key_payload, valid_slot_payload, DeviceSlot, KeyPayload, KeySlotPayload};
 use crate::sync::space_files::{include_order, include_tokens};
 use crate::sync::state_v2::{sealed_key, AccountState, DeclinedVersion, PendingApproval, SealedRecord, SpaceState};
 
@@ -355,8 +356,8 @@ pub fn device_name(account: &AccountState, device_id: &str) -> String {
         .unwrap_or_else(|| device_id.to_string())
 }
 
-/// 帳戶區段裡寫一筆這台產生的明文記錄(`space` / `device` / `meta`):版本號與時間戳接在前一版之後、保留 seq、
-/// 標 dirty。
+/// 帳戶區段裡寫一筆這台產生的明文記錄(`space` / `device` / `meta` / `keyslot`):版本號與時間戳接在前一版之後、
+/// 保留 seq、標 dirty。
 pub fn put_account_record(
     account: &mut AccountState,
     kind: RecordKind,
@@ -426,10 +427,10 @@ pub fn own_device_record(
 ) -> Record {
     let key = record_key(RecordKind::Device, device_id);
     let previous = account.records.get(&key).map(|l| &l.record);
-    let joined_at_ms = previous
-        .and_then(|r| serde_json::from_value::<DevicePayload>(r.payload.clone()).ok())
-        .map(|p| p.joined_at_ms)
-        .unwrap_or(now_ms);
+    let previous_payload = previous.and_then(|r| serde_json::from_value::<DevicePayload>(r.payload.clone()).ok());
+    let joined_at_ms = previous_payload.as_ref().map(|p| p.joined_at_ms).unwrap_or(now_ms);
+    // 插槽清單由 `set_device_slots` 維護;心跳與勾選變更沿用前一版(SP3 spec §4.1)。
+    let slots = previous_payload.map(|p| p.slots).unwrap_or_default();
     Record {
         kind: RecordKind::Device,
         id: device_id.to_string(),
@@ -445,7 +446,7 @@ pub fn own_device_record(
             last_seen_ms: now_ms,
             keys: Vec::new(),
             spaces: spaces.to_vec(),
-            slots: Vec::new(),
+            slots,
         })
         .expect("DevicePayload serializes"),
     }
@@ -479,6 +480,31 @@ pub fn plan_device(
     true
 }
 
+/// 這台的插槽清單(SP3 spec §4.1)和裝置記錄裡的不同時,寫一版新的(dirty;其他欄位沿用現況,`last_seen_ms` 更新)。
+/// 這台還沒有裝置記錄(`plan_device` 還沒寫)時什麼都不做。回傳是否寫了。
+pub fn set_device_slots(account: &mut AccountState, device_id: &str, slots: Vec<DeviceSlot>, now_ms: u64) -> bool {
+    let key = record_key(RecordKind::Device, device_id);
+    let Some(local) = account.records.get(&key).filter(|l| !l.record.deleted) else { return false };
+    let Ok(mut payload) = serde_json::from_value::<DevicePayload>(local.record.payload.clone()) else { return false };
+    if payload.slots == slots {
+        return false;
+    }
+    payload.slots = slots;
+    payload.last_seen_ms = now_ms;
+    let record = Record {
+        kind: RecordKind::Device,
+        id: device_id.to_string(),
+        version: local.record.version + 1,
+        updated_at_ms: next_timestamp(now_ms, Some(local.record.updated_at_ms)),
+        device_id: device_id.to_string(),
+        deleted: false,
+        payload: serde_json::to_value(payload).expect("DevicePayload serializes"),
+    };
+    let seq = local.seq;
+    account.records.insert(key, LocalRecord { record, seq, dirty: true });
+    true
+}
+
 /// `merge_account` 的結果。`markers` 非空 = 帳戶已被更換同步碼(spec §7.5):呼叫端**不採用** `section`,只記下
 /// `frozen`、停止這一輪。
 #[derive(Clone, Debug)]
@@ -488,8 +514,9 @@ pub struct AccountMerged {
     pub skipped: u32,
 }
 
-/// 帳戶 chain 上的明文記錄是否可以進快取:space / spacekey 的 id 必須是 64 字元小寫 hex(之後會組進檔名與 URL),
-/// payload 必須讀得懂(tombstone 除外)。
+/// 帳戶 chain 上的記錄是否可以進快取:space / spacekey 的 id 必須是 64 字元小寫 hex(之後會組進檔名與 URL),
+/// keyslot / key 的 id 必須是插槽 id(32 字元小寫 hex;插槽檔名由它組成),payload 必須讀得懂(tombstone 除外;
+/// keyslot 與 key 另外要通過 `slot_rules` 的規則)。
 fn valid_account_record(record: &Record) -> bool {
     let parses = |ok: bool| record.deleted || ok;
     match record.kind {
@@ -512,13 +539,29 @@ fn valid_account_record(record: &Record) -> bool {
             parses(serde_json::from_value::<RotationMarkerPayload>(record.payload.clone()).is_ok())
         }
         RecordKind::Meta => true,
+        RecordKind::KeySlot => {
+            is_slot_id(&record.id)
+                && parses(
+                    serde_json::from_value::<KeySlotPayload>(record.payload.clone())
+                        .ok()
+                        .is_some_and(|p| valid_slot_payload(&p)),
+                )
+        }
+        RecordKind::Key => {
+            is_slot_id(&record.id)
+                && parses(
+                    serde_json::from_value::<KeyPayload>(record.payload.clone())
+                        .ok()
+                        .is_some_and(|p| valid_key_payload(&p)),
+                )
+        }
         _ => false,
     }
 }
 
-/// 帳戶 chain 拉到的記錄 → 合併(spec §7.1 第 4–5 步)。`device` / `space` / `meta` 解密進 `records`;`spacekey` 只在
-/// 記憶體解開比較,保存的是密文(`sealed`);其他種類(含未知)原樣存進 `sealed`、永不解密。拉到的 `meta`
-/// `rotation:*`(未刪除)收進 `markers`。
+/// 帳戶 chain 拉到的記錄 → 合併(spec §7.1 第 4–5 步)。`device` / `space` / `meta` / `keyslot` 解密進 `records`;
+/// `spacekey` 與 `key`(SP3)只在記憶體解開比較,保存的是密文(`sealed`);其他種類(含未知)原樣存進 `sealed`、
+/// 永不解密。拉到的 `meta` `rotation:*`(未刪除)收進 `markers`。
 pub fn merge_account(section: &AccountState, keys: &ChainKeys, pulled: &PullResponse) -> AccountMerged {
     let mut next = section.clone();
     let mut markers = Vec::new();
@@ -526,7 +569,14 @@ pub fn merge_account(section: &AccountState, keys: &ChainKeys, pulled: &PullResp
     for env in &pulled.records {
         let kind = RecordKind::parse(&env.kind);
         match kind {
-            Some(RecordKind::Device | RecordKind::Meta | RecordKind::Space | RecordKind::SpaceKey) => {}
+            Some(
+                RecordKind::Device
+                | RecordKind::Meta
+                | RecordKind::Space
+                | RecordKind::SpaceKey
+                | RecordKind::KeySlot
+                | RecordKind::Key,
+            ) => {}
             _ => {
                 // 本版不處理的種類:密文原樣保存,不解密、不刪除(spec §4.1)。
                 next.sealed.insert(sealed_key(&env.kind, &env.id_hash), SealedRecord { envelope: env.clone(), dirty: false });
@@ -545,7 +595,7 @@ pub fn merge_account(section: &AccountState, keys: &ChainKeys, pulled: &PullResp
                 markers.push(marker);
             }
         }
-        if record.kind == RecordKind::SpaceKey {
+        if matches!(record.kind, RecordKind::SpaceKey | RecordKind::Key) {
             let slot = sealed_key(&env.kind, &env.id_hash);
             let local = next.sealed.get(&slot).and_then(|s| {
                 s.open(keys).ok().map(|r| LocalRecord { record: r, seq: s.envelope.seq, dirty: s.dirty })
@@ -586,7 +636,8 @@ pub fn merge_account(section: &AccountState, keys: &ChainKeys, pulled: &PullResp
             local.seq = 0;
             local.dirty = true;
         }
-        for sealed in next.sealed.values_mut().filter(|s| s.envelope.kind == RecordKind::SpaceKey.as_str()) {
+        let resent = [RecordKind::SpaceKey.as_str(), RecordKind::Key.as_str()];
+        for sealed in next.sealed.values_mut().filter(|s| resent.contains(&s.envelope.kind.as_str())) {
             sealed.envelope.seq = 0;
             sealed.dirty = true;
         }

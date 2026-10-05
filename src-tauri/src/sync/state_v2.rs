@@ -1,7 +1,7 @@
 //! Sync v2 的本機狀態(spec §4.4):`sync-state.json` 升為 `version: 2`(0600,`atomic_write`),路徑同 v1
-//! (`state::state_path`)。只保存帳戶與這台勾選的 space;space 的權杖與金鑰只以帳戶金鑰加密的 envelope 落地
-//! (`AccountState::sealed`),在記憶體解開。讀到 `version: 1` 的檔案 → `LoadedState::Legacy`(交給 v1 升級,
-//! spec §7.6),不解析成 v2。
+//! (`state::state_path`)。只保存帳戶、這台勾選的 space 與這台的金鑰插槽;space 的權杖與金鑰、同步的私鑰只以帳戶金鑰
+//! 加密的 envelope 落地(`AccountState::sealed`),在記憶體解開。讀到 `version: 1` 的檔案 → `LoadedState::Legacy`
+//! (交給 v1 升級,spec §7.6),不解析成 v2。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
@@ -16,6 +16,8 @@ use crate::sync::crypto::ChainKeys;
 use crate::sync::reconcile::{decode, encode};
 use crate::sync::record::{Envelope, LocalRecord, Record, RotationMarkerPayload, ACCOUNT_SCHEMA_VERSION};
 use crate::sync::relay::{PushItem, RelayInfo};
+use crate::sync::slot_files::LinkKind;
+use crate::sync::slot_rules::KeySlotPayload;
 use crate::sync::state::{SyncState as LegacyState, DEFAULT_RELAY_URL};
 
 pub const STATE_VERSION_V2: u32 = 2;
@@ -51,6 +53,9 @@ pub struct SyncStateV2 {
     pub phrase_cleanup_pending: bool,
     pub last_sync_ms: Option<u64>,
     pub last_error: Option<String>,
+    /// 這台的金鑰插槽(SP3 spec §4.3),key = 插槽 id。只含公開資訊與本機路徑。離開帳戶時保留(插槽檔留在原地)。
+    #[serde(default)]
+    pub key_slots: BTreeMap<String, LocalSlot>,
     /// 等使用者看過才清掉的提示(v1 升級說明、別台刪了 space、改名被擋下、新同步碼……;spec §7.2、§7.5、§8)。讀檔時略過
     /// 這版不認得的種類(`known_notices`),降版之後狀態檔照樣讀得回來。
     #[serde(default, deserialize_with = "known_notices")]
@@ -74,6 +79,7 @@ impl SyncStateV2 {
             phrase_cleanup_pending: false,
             last_sync_ms: None,
             last_error: None,
+            key_slots: BTreeMap::new(),
             notices: Vec::new(),
         })
     }
@@ -111,10 +117,10 @@ pub struct AccountState {
     /// 偵測到帳戶已被更換同步碼(spec §7.5)。
     #[serde(default)]
     pub frozen: Option<FreezeInfo>,
-    /// device / space / meta 的明文記錄,key = `record_key(kind, id)`。
+    /// device / space / meta / keyslot 的明文記錄,key = `record_key(kind, id)`。
     #[serde(default)]
     pub records: BTreeMap<String, LocalRecord>,
-    /// `spacekey` 與未知種類的密文,key = `sealed_key(kind, id_hash)`。
+    /// `spacekey`、`key`(SP3)與未知種類的密文,key = `sealed_key(kind, id_hash)`。
     #[serde(default)]
     pub sealed: BTreeMap<String, SealedRecord>,
     /// 這台刪除的 space 還沒 `DELETE` 的 chain(spec §7.2):tombstone 之前那份 `spacekey` 的密文(帳戶金鑰加密,
@@ -190,6 +196,35 @@ impl SealedRecord {
     pub fn key(&self) -> String {
         sealed_key(&self.envelope.kind, &self.envelope.id_hash)
     }
+}
+
+/// 一個插槽在這台電腦上的狀況(SP3 spec §4.3)。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LocalSlot {
+    /// 插槽檔名(`<name>-<插槽 id 前 8>`)。
+    pub file_name: String,
+    /// 插槽裡放的是什麼;None = 這台還沒有它的金鑰。
+    #[serde(default)]
+    pub source: Option<SlotSource>,
+    /// 最近一次維護這個插槽的錯誤(給使用者看;只有路徑與原因,不含金鑰內容)。
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// 已經為「這台需要金鑰」發過 `SyncNotice::KeysNeeded`(每個插槽只發一次)。
+    #[serde(default)]
+    pub asked: bool,
+    /// 最後看到的 `keyslot` payload:帳戶裡找不到這個插槽時(例如在沒有 SP3 的電腦上更換了同步碼)據此補寫(spec §6.6)。
+    #[serde(default)]
+    pub payload: Option<KeySlotPayload>,
+}
+
+/// 插槽裡放的東西(SP3 spec §4.2)。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SlotSource {
+    /// 連到這台的一把金鑰:建立插槽的那台(`origin`)連到原檔,其他電腦連到使用者挑的那把。
+    Linked { path: String, link: LinkKind, fingerprint: Option<String>, origin: bool },
+    /// 同步來的私鑰(檔案就在插槽裡)。
+    SyncedCopy { fingerprint: String },
 }
 
 /// 一個這台勾選的 space(spec §4.4)。
@@ -284,6 +319,8 @@ pub enum SyncNotice {
     NewSyncCode,
     /// 另一台電腦也更換了同步碼(spec §7.5「兩台同時更換」)。
     OtherRotation { devices: Vec<String> },
+    /// 這台同步的主機用到留在別台電腦的金鑰:請在這台挑一把(SP3 spec §6.7;每個插槽只提示一次)。
+    KeysNeeded { names: Vec<String> },
 }
 
 /// `SyncStateV2::notices` 的讀法:逐則讀,這版不認得(較新版本寫的種類)或讀不懂的提示略過。狀態檔裡其他 enum 讀不懂就是
@@ -502,6 +539,7 @@ mod tests {
     use super::*;
     use crate::sync::approval::signature;
     use crate::sync::record::{record_key, RecordKind, SpaceKeyPayload};
+    use crate::sync::slot_rules::SlotMode;
 
     fn host(alias: &str, text: &str) -> Record {
         Record {
@@ -622,6 +660,42 @@ mod tests {
             checked_at_ms: 50,
         });
         s.legacy_v1_backup = Some(LEGACY_BACKUP_FILE.to_string());
+        // 兩種插槽來源都有,`LocalSlot` 的每個欄位都不是預設值。
+        s.key_slots.insert(
+            "3fa2c1d90123456789abcdef01234567".to_string(),
+            LocalSlot {
+                file_name: "id_mac-3fa2c1d9".to_string(),
+                source: Some(SlotSource::SyncedCopy { fingerprint: "SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew".to_string() }),
+                last_error: Some("The key this slot points to is gone: /home/f/.ssh/id_mac.".to_string()),
+                asked: true,
+                payload: Some(KeySlotPayload {
+                    schema: 1,
+                    name: "id_mac".to_string(),
+                    mode: SlotMode::Own,
+                    origin_device_id: "dev-a".to_string(),
+                    created_at_ms: 5,
+                    public_key: None,
+                    fingerprint: None,
+                    key_type: None,
+                    has_passphrase: None,
+                }),
+            },
+        );
+        s.key_slots.insert(
+            "0123456789abcdef0123456789abcdef".to_string(),
+            LocalSlot {
+                file_name: "work-01234567".to_string(),
+                source: Some(SlotSource::Linked {
+                    path: "C:\\Users\\f\\.ssh\\work".to_string(),
+                    link: LinkKind::HardLink,
+                    fingerprint: Some("SHA256:vUthAmDZoxYXCTAPEZUn5qtWSMHWQCEcUfpnyM05mMs".to_string()),
+                    origin: false,
+                }),
+                last_error: None,
+                asked: false,
+                payload: None,
+            },
+        );
         s
     }
 
@@ -632,7 +706,7 @@ mod tests {
         assert_eq!(s.device_id.len(), 32);
         assert_eq!(s.relay_url, DEFAULT_RELAY_URL);
         assert!(!s.joined() && !s.read_only() && s.frozen().is_none());
-        assert!(s.spaces.is_empty() && s.rotation.is_none());
+        assert!(s.spaces.is_empty() && s.rotation.is_none() && s.key_slots.is_empty());
         assert!(s.legacy_v1_backup.is_none() && s.relay_features.is_none() && !s.phrase_cleanup_pending);
         assert!(s.last_sync_ms.is_none() && s.last_error.is_none() && s.notices.is_empty());
         // 新勾選的 space:勾選中、從頭開始、第一輪以 chain 為準(基線)。
@@ -653,6 +727,34 @@ mod tests {
             LoadedState::Current(back) => assert_eq!(*back, s),
             other => panic!("expected a v2 state, got {other:?}"),
         }
+    }
+
+    /// SP3 之前寫的狀態檔沒有 `key_slots`,讀進來是空的;有 `key_slots` 的狀態檔照樣讀得回來。
+    #[test]
+    fn key_slots_default_to_empty_and_round_trip() {
+        let mut state = SyncStateV2::fresh("MacBook").unwrap();
+        let mut json = serde_json::to_value(&state).unwrap();
+        json.as_object_mut().unwrap().remove("key_slots");
+        let old: SyncStateV2 = serde_json::from_value(json).unwrap();
+        assert!(old.key_slots.is_empty());
+
+        state.key_slots.insert(
+            "3fa2c1d90123456789abcdef01234567".into(),
+            LocalSlot {
+                file_name: "id_mac-3fa2c1d9".into(),
+                source: Some(SlotSource::Linked {
+                    path: "/home/f/.ssh/id_mac".into(),
+                    link: crate::sync::slot_files::LinkKind::Symlink,
+                    fingerprint: None,
+                    origin: true,
+                }),
+                last_error: None,
+                asked: false,
+                payload: None,
+            },
+        );
+        let back: SyncStateV2 = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(back.key_slots, state.key_slots);
     }
 
     #[test]
