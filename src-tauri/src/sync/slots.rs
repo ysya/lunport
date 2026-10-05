@@ -145,14 +145,32 @@ pub fn slot_hosts(state: &SyncStateV2) -> BTreeMap<String, Vec<String>> {
     out.into_iter().map(|(file, hosts)| (file, hosts.into_iter().collect())).collect()
 }
 
-/// 本機一把金鑰的指紋:OpenSSH 格式從私鑰讀;其他格式讀旁邊的 `.pub`;都讀不到 → None。
-pub fn local_key_fingerprint(path: &Path) -> Option<String> {
+/// 本機一把金鑰的(公鑰、指紋):OpenSSH 格式從私鑰讀(不需要 passphrase);其他格式讀旁邊 `.pub` 的第一行;都讀不到 → None。
+/// 公鑰是正規化的 `<type> <base64>`(沒有 comment)。
+fn local_key_public(path: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(path).ok()?;
     if let Ok(facts) = inspect_private_key(&text) {
-        return Some(facts.fingerprint);
+        return Some((facts.public_key, facts.fingerprint));
     }
     let public = std::fs::read_to_string(public_path(path)).ok()?;
-    parse_public_key(public.lines().next()?).map(|(_, fingerprint)| fingerprint)
+    parse_public_key(public.lines().next()?)
+}
+
+/// 本機一把金鑰的指紋:OpenSSH 格式從私鑰讀;其他格式讀旁邊的 `.pub`;都讀不到 → None。
+pub fn local_key_fingerprint(path: &Path) -> Option<String> {
+    local_key_public(path).map(|(_, fingerprint)| fingerprint)
+}
+
+/// 連結、重新連結或認回一個插槽(`Linked` 來源)的時候,重寫插槽旁的 `<slot>.pub`:內容只來自連到的那把金鑰自己 —— 從原檔的私鑰
+/// 推出公鑰;推不出來(舊式 PEM 之類)就用原檔旁邊 `<source>.pub` 的第一行(正規化);都沒有就把 `<slot>.pub` 拿掉。沒有 `.pub` 比
+/// 錯的好:OpenSSH 先從 `<金鑰檔>.pub` 讀公鑰,`ssh-copy-id -i <slot>` 也會把 `<slot>.pub` 送進伺服器的 authorized_keys,這個檔案不能
+/// 是別的插槽(或別人)放在這個位置的。插槽目錄要已經建好(`slot_files::ensure_keys_dir`)。建立插槽(Task 5)與挑選金鑰(Task 6)
+/// 也用它。
+pub fn write_linked_public(slot: &Path, source: &Path) -> Result<(), AppError> {
+    match local_key_public(source) {
+        Some((public_key, _)) => slot_files::write_public(slot, &public_key),
+        None => Ok(remove_if_present(&public_path(slot))?),
+    }
 }
 
 /// 一輪插槽維護的結果:要發的通知(呼叫端用 `add_notice` 存進狀態並發出)、狀態是否變了。
@@ -311,8 +329,8 @@ fn link_fate(link: LinkKind, source: &str, path: &Path) -> Option<LinkFate> {
     }
 }
 
-/// 只拿掉插槽路徑上的連結檔;`.pub` 留著(同一個插槽下次用到時只要重新連結)。已經不存在不算錯。
-fn remove_link_file(path: &Path) -> std::io::Result<()> {
+/// 拿掉一個檔案;已經不存在不算錯。
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         other => other,
@@ -326,12 +344,13 @@ fn keep_as_copy(local: &mut LocalSlot) {
     }
 }
 
-/// 帳戶裡還有、這台沒有主機用到的插槽:只拿掉連結檔(symlink,或原檔還在而且內容相同的 hard link;原檔不動),`LocalSlot` 的
-/// 記錄留著 —— `Linked` 來源、`origin`、使用者的挑選不能因為暫時沒有主機用到(主機的 `IdentityFile` 暫時拿掉、space 檔重新長出來)
-/// 就忘掉,用到的時候 `maintain` 重新連結,不會再問使用者。拿掉之後記錄標成 `parked`:它不再擁有插槽路徑上的東西 —— 之後那裡出現的
-/// 任何東西(別的插槽放的副本、使用者的檔案)都不是它的,這裡不看、不碰,也不把它記成這個插槽的複製檔。永遠不拿掉一把金鑰的最後
-/// 一個名字:原檔不見或內容不同的 hard link 留在原地、記成複製檔(那是這個插槽放的,沒有收起來)。複製檔與同步來的副本本來就不拿掉
-/// (私鑰不自動刪除);使用者自己換在 symlink 位置上的一般檔案也不碰,記錄同樣標成 `parked`。
+/// 帳戶裡還有、這台沒有主機用到的插槽:只拿掉連結檔(symlink,或原檔還在而且內容相同的 hard link;原檔不動)與旁邊自己的 `.pub`,
+/// `LocalSlot` 的記錄留著 —— `Linked` 來源、`origin`、使用者的挑選不能因為暫時沒有主機用到(主機的 `IdentityFile` 暫時拿掉、space 檔
+/// 重新長出來)就忘掉,用到的時候 `maintain` 重新連結(並從自己的金鑰重寫 `.pub`),不會再問使用者。拿掉之後記錄標成 `parked`:它不再
+/// 擁有插槽路徑上的東西 —— 之後那裡出現的任何東西(別的插槽放的副本與 `.pub`、使用者的檔案)都不是它的,這裡不看、不碰,也不把它記成
+/// 這個插槽的複製檔。永遠不拿掉一把金鑰的最後一個名字:原檔不見或內容不同的 hard link 留在原地、記成複製檔(那是這個插槽放的,沒有收起來)。
+/// 複製檔與同步來的副本本來就不拿掉(私鑰不自動刪除);使用者自己換在 symlink 位置上的一般檔案也不碰(連同旁邊的 `.pub`),記錄同樣標成
+/// `parked`。
 fn park_link(local: &mut LocalSlot, path: &Path) {
     if local.parked {
         // 已經收起來了:路徑上現在的東西不是這個插槽的,不看、不碰;用到它的時候才有的錯誤(擋路)現在不必再顯示。
@@ -344,9 +363,13 @@ fn park_link(local: &mut LocalSlot, path: &Path) {
         Some(LinkFate::NotOurs) => local.parked = true,
         Some(LinkFate::LastName) => keep_as_copy(local),
         Some(LinkFate::Removable) => {
-            if let Err(e) = remove_link_file(path) {
-                local.last_error = Some(e.to_string());
-                return;
+            // 真的拿掉自己的連結時,連同旁邊自己的 `.pub` 一起拿掉:空著的插槽路徑旁不留 `.pub`(別的插槽落地時自己會寫,這個插槽重新連結
+            // 時從自己的金鑰重寫)。路徑上本來就沒有東西時什麼都不動 —— 旁邊的 `.pub` 不能確定是自己的。
+            if slot_files::occupied(path) {
+                if let Err(e) = slot_files::remove_slot(path) {
+                    local.last_error = Some(e.to_string());
+                    return;
+                }
             }
             local.parked = true;
         }
@@ -397,12 +420,14 @@ fn maintain(
             let source_path = PathBuf::from(&source);
             // 收起來的連結:路徑上現在的東西不是這個插槽的(別的插槽放的副本、使用者的檔案)—— 不覆蓋、不認它是自己的,回報擋路,
             // 記錄維持收起來。例外:上一輪已經重新連結、狀態卻沒存下來(`commit` 被搶先),路徑上正好是 `link` 會做出來的 symlink。
+            let mut recognised = false;
             if local.parked && slot_files::occupied(path) {
                 let own_link = link == LinkKind::Symlink && std::fs::read_link(path).is_ok_and(|target| target == source_path);
                 if !own_link {
                     local.last_error = Some(in_the_way_message(path));
                     return;
                 }
+                recognised = true;
             }
             if !source_path.is_file() {
                 local.last_error = Some(source_gone_message(&source));
@@ -411,8 +436,16 @@ fn maintain(
             // hard link 與複製不會跟著原檔走:內容不同(原檔被換掉)就重新連結;任何一種,插槽不見了都重建。
             let stale = !slot_files::occupied(path)
                 || (link != LinkKind::Symlink && slot_files::content_sha256(path) != slot_files::content_sha256(&source_path));
+            // 連結、重新連結、認回的時候,插槽旁的 `.pub` 一律從連到的這把金鑰自己重寫:這個位置上留著的 `.pub` 可能是別的插槽(或別人)放的,
+            // 之後 OpenSSH 與 `ssh-copy-id -i <slot>` 讀的就是它。在連結之前寫:寫不進去就不連結,下一輪再試。
+            if stale || recognised {
+                if let Err(e) = slot_files::ensure_keys_dir(keys_dir).and_then(|()| write_linked_public(path, &source_path)) {
+                    local.last_error = Some(e.to_string());
+                    return;
+                }
+            }
             let link = if stale {
-                match slot_files::ensure_keys_dir(keys_dir).and_then(|()| slot_files::link(&source_path, path)) {
+                match slot_files::link(&source_path, path) {
                     Ok(kind) => kind,
                     Err(e) => {
                         local.last_error = Some(e.to_string());
@@ -1705,11 +1738,15 @@ pub(crate) mod tests {
         if hard_link {
             make_it_a_hard_link(&a, &id, &file, "id_mac");
         }
+        let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+        write_linked_public(&path, &source).unwrap(); // 建立插槽時寫的 `.pub`(Task 5 的 setup 做的事)
         use_slot(&a, &personal, &file);
         settle(&a);
+        assert!(slot_files::occupied(&public_path(&path)), "the slot has its own .pub while it is linked");
         a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
         settle(&a);
-        assert!(!slot_files::occupied(&home(&a).join(SLOT_DIR).join(&file)), "the link file is gone");
+        assert!(!slot_files::occupied(&path), "the link file is gone");
+        assert!(!slot_files::occupied(&public_path(&path)), "and so is its .pub: nothing of this slot is left at an empty path");
         assert!(a.state().key_slots[&id].parked, "and the record says so");
         (a, personal, id, file)
     }
@@ -1855,17 +1892,201 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_linked_slots_pub_file_is_never_left_over_from_another_slot() {
+        for hard_link in [false, true] {
+            let (a, personal, x, file) = a_parked_slot(hard_link);
+            let path = home(&a).join(SLOT_DIR).join(&file);
+            let pub_path = public_path(&path);
+            // 帳戶裡的成員發佈同名、同 id 前 8 字元、排在 X 前面的 Z(以他自己的金鑰同步),讓主機用到這個檔案:Z 放進空著的路徑,
+            // 連旁邊的 `.pub` 也是它的。
+            let z = format!("{}{}", &x[..8], "0".repeat(24));
+            publish(&a, &z, &ecdsa_payload("a-member"), Some(&test_keys::ecdsa()));
+            use_slot(&a, &personal, &file);
+            settle(&a);
+            assert_eq!(std::fs::read_to_string(&pub_path).unwrap(), format!("{}\n", test_keys::ECDSA_PUBLIC), "Z landed with its own .pub");
+            assert_eq!(a.state().key_slots[&x].last_error, Some(in_the_way_message(&path)));
+
+            // 成員刪掉 Z;使用者照訊息把擋路的檔案移走(Z 的 `.pub` 留在原地)。
+            unpublish(&a, &z);
+            settle(&a);
+            std::fs::remove_file(&path).unwrap();
+            settle(&a);
+
+            // X 重新連結:`.pub` 是 X 自己這把金鑰的,不是成員的 —— `ssh-copy-id -i <slot>` 送出去的就是它。
+            let local = a.state().key_slots[&x].clone();
+            assert!(!local.parked && local.last_error.is_none(), "hard_link={hard_link}: {local:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), test_keys::plain());
+            assert_eq!(std::fs::read_to_string(&pub_path).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "hard_link={hard_link}");
+        }
+    }
+
+    #[test]
+    fn parking_removes_the_pub_file_with_the_link_but_not_beside_a_users_file() {
+        // 連結和它的 `.pub` 一起拿掉(`a_parked_slot` 檢查過了,這裡把兩種連結種類的結果再寫明一次)。
+        for hard_link in [false, true] {
+            let (a, _personal, _id, file) = a_parked_slot(hard_link);
+            assert!(!slot_files::occupied(&public_path(&home(&a).join(SLOT_DIR).join(&file))), "hard_link={hard_link}");
+        }
+        // 使用者把 symlink 換成自己的檔案:那是使用者的,旁邊的 `.pub` 也不碰。
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+        write_linked_public(&path, &source).unwrap();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "mine").unwrap();
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+        settle(&a);
+        assert!(a.state().key_slots[&id].parked);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+        assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+
+        // 連結已經不在了(使用者自己刪掉的),旁邊有個 `.pub`:沒有拿掉任何連結,那個 `.pub` 不能確定是這個插槽的,不碰。
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+        write_linked_public(&path, &source).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+        settle(&a);
+        assert!(a.state().key_slots[&id].parked && !slot_files::occupied(&path));
+        assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+    }
+
+    #[test]
+    fn a_relink_after_the_original_was_replaced_rewrites_the_pub_file_from_the_new_key() {
+        for kind in [LinkKind::HardLink, LinkKind::Copy] {
+            let (_relay, _clock, a, _b, _words, personal) = pair();
+            let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+            let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+            // 這台是 Windows 的情形(在 Unix 上手動做出來):插槽是原檔的 hard link 或複製,旁邊是這把金鑰的 `.pub`。
+            std::fs::remove_file(&path).unwrap();
+            match kind {
+                LinkKind::HardLink => std::fs::hard_link(&source, &path).unwrap(),
+                _ => {
+                    std::fs::copy(&source, &path).unwrap();
+                }
+            }
+            mutate(&a.env(), |s| {
+                if let Some(SlotSource::Linked { link, .. }) = s.key_slots.get_mut(&id).and_then(|l| l.source.as_mut()) {
+                    *link = kind;
+                }
+                Ok(())
+            })
+            .unwrap();
+            write_linked_public(&path, &source).unwrap();
+            use_slot(&a, &personal, &file);
+            settle(&a);
+            assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "{kind:?}");
+
+            // 原檔被換成另一把(寫新檔再 rename):hard link 與複製不會跟著走,下一輪重新連結,`.pub` 跟著換成新的這把。
+            std::fs::write(a.ssh_dir().join("id_mac.new"), test_keys::ecdsa()).unwrap();
+            std::fs::rename(a.ssh_dir().join("id_mac.new"), &source).unwrap();
+            settle(&a);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), test_keys::ecdsa(), "{kind:?}: relinked");
+            assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::ECDSA_PUBLIC), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_linked_key_whose_public_half_cannot_be_derived_gets_no_pub_file_unless_it_has_its_own() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let pem = format!("{}\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n{}\n", concat!("-----BEGIN RSA ", "PRIVATE KEY-----"), concat!("-----END RSA ", "PRIVATE KEY-----"));
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &pem, "id_old");
+        let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_old"));
+        let stop_using = || {
+            a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+            settle(&a);
+        };
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        stop_using();
+        assert!(a.state().key_slots[&id].parked);
+
+        // 別的插槽留在這個位置的 `.pub`;重新連結時推不出這把金鑰的公鑰、原檔旁邊也沒有 `.pub`:不留 `.pub`(沒有比錯的好)。
+        slot_files::write_public(&path, test_keys::ECDSA_PUBLIC).unwrap();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        assert!(!a.state().key_slots[&id].parked && a.state().key_slots[&id].last_error.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), pem);
+        assert!(!slot_files::occupied(&public_path(&path)), "no .pub is better than another slot's");
+
+        // 原檔旁邊有自己的 `.pub`:下一次連結時用它的第一行(正規化,不帶 comment)。
+        std::fs::write(public_path(&source), format!("{} me@host\n", test_keys::PLAIN_PUBLIC)).unwrap();
+        stop_using();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+    }
+
+    #[test]
+    fn write_linked_public_takes_the_public_half_only_from_the_linked_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (slot, key) = (dir.path().join("slot-3fa2c1d9"), dir.path().join("id_mac"));
+        let pub_of = |p: &Path| std::fs::read_to_string(public_path(p)).ok();
+        let line = |public: &str| Some(format!("{public}\n"));
+        let pem = format!("{}\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n{}\n", concat!("-----BEGIN RSA ", "PRIVATE KEY-----"), concat!("-----END RSA ", "PRIVATE KEY-----"));
+
+        // OpenSSH 私鑰:公鑰從私鑰推出,蓋掉別人放的 `.pub`;原檔旁邊的 `.pub`(這裡故意放別把的)不看。
+        std::fs::write(&key, test_keys::plain()).unwrap();
+        std::fs::write(public_path(&key), format!("{} lies\n", test_keys::ECDSA_PUBLIC)).unwrap();
+        slot_files::write_public(&slot, test_keys::ECDSA_PUBLIC).unwrap();
+        write_linked_public(&slot, &key).unwrap();
+        assert_eq!(pub_of(&slot), line(test_keys::PLAIN_PUBLIC));
+        // 有 passphrase 的 OpenSSH 私鑰也推得出來(公鑰段不加密)。
+        std::fs::write(&key, test_keys::encrypted()).unwrap();
+        write_linked_public(&slot, &key).unwrap();
+        assert_eq!(pub_of(&slot), line(test_keys::ENC_PUBLIC));
+        // 舊式 PEM:用原檔旁邊 `.pub` 的第一行(正規化:不帶 comment、不帶第二行)。
+        std::fs::write(&key, &pem).unwrap();
+        std::fs::write(public_path(&key), format!("{} me@host\n{}\n", test_keys::PLAIN_PUBLIC, test_keys::ECDSA_PUBLIC)).unwrap();
+        write_linked_public(&slot, &key).unwrap();
+        assert_eq!(pub_of(&slot), line(test_keys::PLAIN_PUBLIC));
+        // 原檔旁邊的 `.pub` 讀不懂、沒有、原檔不見:拿掉 `<slot>.pub`;沒有東西可拿掉不是錯誤。
+        std::fs::write(public_path(&key), "garbage\n").unwrap();
+        write_linked_public(&slot, &key).unwrap();
+        assert_eq!(pub_of(&slot), None, "an unreadable .pub beside the key");
+        slot_files::write_public(&slot, test_keys::ECDSA_PUBLIC).unwrap();
+        std::fs::remove_file(public_path(&key)).unwrap();
+        write_linked_public(&slot, &key).unwrap();
+        assert_eq!(pub_of(&slot), None, "no .pub beside the key");
+        slot_files::write_public(&slot, test_keys::ECDSA_PUBLIC).unwrap();
+        std::fs::remove_file(&key).unwrap();
+        write_linked_public(&slot, &key).unwrap();
+        assert_eq!(pub_of(&slot), None, "no key at all");
+        write_linked_public(&slot, &key).unwrap();
+    }
+
+    #[test]
+    fn a_quiet_round_does_not_rewrite_a_linked_slots_pub_file() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (_id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let path = home(&a).join(SLOT_DIR).join(&file);
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        // 使用者自己放的 `.pub`(例如帶 comment):沒有連結、重新連結或認回的事件就不重寫它。
+        let theirs = format!("{} me@host\n", test_keys::PLAIN_PUBLIC);
+        std::fs::write(public_path(&path), &theirs).unwrap();
+        settle(&a);
+        settle(&a);
+        assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), theirs);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_parked_link_that_was_made_again_before_the_state_was_saved_is_recognised() {
         let (a, personal, id, file) = a_parked_slot(false);
         let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
         // 上一輪重新連結了、狀態卻沒存下來(`commit` 被搶先):路徑上正好是連結會做出來的 symlink,就是這個插槽自己的。
         std::os::unix::fs::symlink(&source, &path).unwrap();
+        slot_files::write_public(&path, test_keys::ECDSA_PUBLIC).unwrap(); // 別人留在這裡的 `.pub`
         use_slot(&a, &personal, &file);
         settle(&a);
         let local = a.state().key_slots[&id].clone();
         assert!(!local.parked && local.last_error.is_none(), "{local:?}");
         assert_eq!(std::fs::read_link(&path).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "recognising the link rewrites the .pub too");
         assert_eq!(device_slots_seen_by(&a, &a).len(), 1);
 
         // 指到別把金鑰的 symlink 就不是了。
@@ -1923,15 +2144,15 @@ pub(crate) mod tests {
         use_slot(&a, &personal, &file);
         settle(&a);
         let link = home(&a).join(SLOT_DIR).join(&file);
-        slot_files::write_public(&link, test_keys::PLAIN_PUBLIC).unwrap();
+        write_linked_public(&link, &a.ssh_dir().join("id_mac")).unwrap();
         let linked = a.state().key_slots[&id].clone();
         assert!(matches!(&linked.source, Some(SlotSource::Linked { origin: true, .. })));
 
         // 主機的 `IdentityFile` 暫時拿掉(例如編輯到一半存檔)。
         a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
         settle(&a);
-        assert!(!slot_files::occupied(&link), "only the link file is removed");
-        assert!(slot_files::occupied(&public_path(&link)), "the .pub stays for the next time");
+        assert!(!slot_files::occupied(&link), "the link file is removed");
+        assert!(!slot_files::occupied(&public_path(&link)), "and the .pub that went with it");
         assert_eq!(a.state().key_slots[&id], LocalSlot { parked: true, ..linked.clone() }, "the record is kept, marked as parked");
         assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
         assert_eq!(device_slots_seen_by(&a, &a), Vec::new());
@@ -1947,6 +2168,7 @@ pub(crate) mod tests {
         use_slot(&a, &personal, &file);
         settle(&a);
         assert_eq!(std::fs::read_to_string(&link).unwrap(), test_keys::plain());
+        assert_eq!(std::fs::read_to_string(public_path(&link)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "the .pub is written again, from the key itself");
         assert_eq!(a.state().key_slots[&id], linked);
         assert!(matches!(view_of(&a)[0].status, SlotStatusView::Ready { synced_copy: false, .. }), "{:?}", view_of(&a)[0].status);
         assert_eq!(device_slots_seen_by(&a, &a).len(), 1);
