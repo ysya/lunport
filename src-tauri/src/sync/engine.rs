@@ -612,6 +612,18 @@ pub async fn sync_unmovable_hosts(app: AppHandle) -> Result<Vec<crate::sync::mig
     run(app, false, crate::sync::migrate::unmovable_hosts).await
 }
 
+/// 還沒設定的金鑰(SP3 spec §7.1):讀 config,不改任何東西。
+#[tauri::command]
+pub async fn sync_key_candidates(app: AppHandle) -> Result<crate::sync::slot_setup::KeyCandidates, AppError> {
+    run(app, false, crate::sync::slot_setup::key_candidates).await
+}
+
+/// 依使用者的決定建立或沿用插槽並改寫主機(SP3 spec §6.1)。結構性變更:持有 lifecycle 鎖。
+#[tauri::command]
+pub async fn sync_setup_keys(app: AppHandle, choices: Vec<crate::sync::slot_setup::KeyChoice>) -> Result<SyncOverview, AppError> {
+    run_then_overview(app, true, move |env| crate::sync::slot_setup::setup_keys(env, engine_active(), choices).map(|_| ())).await
+}
+
 /// 更換同步碼(spec §7.5):第 1 步在這裡做完,之後由背景執行緒逐步推進;進度在 `SyncOverview::rotation`,完成時
 /// 留下 `SyncNotice::NewSyncCode`(UI 以 `sync_show_words` 顯示新同步碼)。
 #[tauri::command]

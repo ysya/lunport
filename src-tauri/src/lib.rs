@@ -33,10 +33,11 @@ use settings_io::{settings_export, settings_import};
 use sync::engine::{
     sync_approve, sync_cancel_sync_code_change, sync_change_sync_code, sync_check_relay,
     sync_create_account, sync_create_space, sync_delete_space, sync_dismiss_notice,
-    sync_forget_device, sync_join_account, sync_leave_account, sync_move_files_to_new_spaces,
-    sync_move_hosts_to_space, sync_now, sync_overview, sync_pending_approvals, sync_rebuild_space,
-    sync_reject, sync_rejoin_account, sync_rename_space, sync_select_space, sync_set_device_name,
-    sync_set_relay_url, sync_show_words, sync_unmovable_hosts, sync_unselect_space,
+    sync_forget_device, sync_join_account, sync_key_candidates, sync_leave_account,
+    sync_move_files_to_new_spaces, sync_move_hosts_to_space, sync_now, sync_overview,
+    sync_pending_approvals, sync_rebuild_space, sync_reject, sync_rejoin_account,
+    sync_rename_space, sync_select_space, sync_set_device_name, sync_set_relay_url,
+    sync_setup_keys, sync_show_words, sync_unmovable_hosts, sync_unselect_space,
 };
 use sync::migrate::{sync_duplicate_aliases, sync_resolve_shadowed};
 use tauri::Manager;
@@ -203,6 +204,8 @@ fn run_app(mcp_keep_alive: bool) {
             sync_move_hosts_to_space,
             sync_move_files_to_new_spaces,
             sync_unmovable_hosts,
+            sync_key_candidates,
+            sync_setup_keys,
             sync_change_sync_code,
             sync_cancel_sync_code_change,
             sync_rejoin_account,

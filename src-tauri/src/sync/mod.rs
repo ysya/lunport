@@ -8,7 +8,8 @@
 //! - `slot_rules`: 金鑰插槽(SP3)的型別、名稱與檔名規則、OpenSSH 私鑰檢查、`IdentityFile` 值的解析
 //! - `slot_files`: 金鑰插槽的檔案系統動作:目錄與私鑰的權限、原子寫入、連結(symlink / hard link / 複製)、內容雜湊、移除與改名保留
 //! - `slot_files_windows`(只在 Windows):owner-only、不繼承上層的 DACL
-//! - `slots`: 金鑰插槽(SP3)的引擎:帳戶裡 `keyslot` 與 `key` 記錄的讀寫
+//! - `slot_setup`: 金鑰插槽(SP3)的建立:還沒設定的金鑰(候選)、建立或沿用插槽、無損改寫主機的 `IdentityFile`
+//! - `slots`: 金鑰插槽(SP3)的引擎:帳戶裡 `keyslot` 與 `key` 記錄的讀寫、每一輪在這台維護插槽(`reconcile`)、給 UI 的插槽檢視(`views`)
 //! - `relay`: relay HTTP client(`RelayApi`)與輪詢間隔
 //! - `reconcile`: 記錄的加解密編碼與套到檔案的效果
 //! - `merge`: 帳戶與 space 區段的本機 diff、合併、上傳(純函式)
@@ -50,6 +51,7 @@ pub mod slot_files;
 #[cfg(windows)]
 pub mod slot_files_windows;
 pub mod slot_rules;
+pub mod slot_setup;
 pub mod slots;
 pub mod space_files;
 pub mod spaces;
