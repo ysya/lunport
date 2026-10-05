@@ -132,6 +132,14 @@ pub(crate) mod tests {
         }
     }
 
+    /// SP3 之前的版本拉到 `keyslot` 時的存法:不認得這個種類,密文原樣放進 `sealed`(不解密、不是 dirty、序號是 relay 給的),
+    /// cursor 照常前進。
+    fn kept_sealed_by_an_older_build(account: &mut AccountState, items: &[Outgoing]) {
+        for env in pulled(items, items.len() as u64).records {
+            account.sealed.insert(sealed_key(&env.kind, &env.id_hash), SealedRecord { envelope: env, dirty: false });
+        }
+    }
+
     #[test]
     fn a_slot_and_its_key_reach_another_device_and_the_key_stays_sealed() {
         let keys = ChainKeys::generate().unwrap();
@@ -226,6 +234,96 @@ pub(crate) mod tests {
         assert!(live_slots(&merged.section).is_empty());
         assert!(slot_record_exists(&merged.section, SLOT_ID), "the tombstone is kept");
         assert_eq!(open_key_secret(&merged.section, &keys, SLOT_ID), None);
+    }
+
+    #[test]
+    fn a_keyslot_an_older_build_kept_sealed_shows_up_at_the_next_merge() {
+        let keys = ChainKeys::generate().unwrap();
+        // 另一台建立了一個插槽(連同它的金鑰)、又刪掉了另一個(tombstone)。
+        let deleted = "0123456789abcdef0123456789abcdef";
+        let mut a = AccountState::new(&keys.chain_id);
+        put_slot(&mut a, SLOT_ID, Some(&synced_payload("a")), "a", 10);
+        put_key_secret(&mut a, &keys, SLOT_ID, Some(&test_keys::plain()), "a", 10).unwrap();
+        put_slot(&mut a, deleted, None, "a", 11);
+
+        // 這台在更新之前拉到它們:舊版不認得 `keyslot`,密文原樣存進 `sealed`,cursor 已經在它們之後 —— 之後的增量拉取不會再拉到。
+        let mut b = AccountState::new(&keys.chain_id);
+        kept_sealed_by_an_older_build(&mut b, &account_outgoing(&a, &keys).unwrap());
+        b.cursor_seq = 3;
+        assert!(live_slots(&b).is_empty(), "nothing reads a sealed keyslot");
+        let stored = sealed_key(RecordKind::KeySlot.as_str(), &id_hash(&keys, RecordKind::KeySlot.as_str(), SLOT_ID));
+        let stored_seq = b.sealed[&stored].envelope.seq;
+
+        // 更新之後的第一輪(什麼都沒拉到)就讓插槽出現,`sealed` 不再留它們。
+        let empty_pull = PullResponse { records: Vec::new(), latest_seq: 3 };
+        let merged = merge_account(&b, &keys, &empty_pull);
+        assert_eq!(merged.skipped, 0);
+        assert_eq!(live_slots(&merged.section), vec![(SLOT_ID.to_string(), synced_payload("a"))]);
+        assert!(slot_record_exists(&merged.section, deleted), "the tombstone is promoted as a tombstone");
+        let promoted = &merged.section.records[&record_key(RecordKind::KeySlot, SLOT_ID)];
+        assert_eq!((promoted.seq, promoted.dirty), (stored_seq, false), "it came from the relay: nothing to upload");
+        assert_eq!(merged.section.cursor_seq, 3);
+        // `sealed` 只剩 `key`:它在 `sealed` 裡的位置和 SP3 一樣,舊版存的就讀得到。
+        assert_eq!(merged.section.sealed.keys().collect::<Vec<_>>(), vec![&key_secret_key(&keys, SLOT_ID)]);
+        assert_eq!(open_key_secret(&merged.section, &keys, SLOT_ID).as_deref(), Some(test_keys::plain().as_str()));
+        // 再一輪什麼都不變。
+        assert_eq!(merge_account(&merged.section, &keys, &empty_pull).section, merged.section);
+    }
+
+    #[test]
+    fn a_stored_keyslot_that_cannot_be_read_is_dropped_not_promoted() {
+        let keys = ChainKeys::generate().unwrap();
+        // 讀得懂的一筆、名稱不合規的一筆(帳戶裡的惡意成員寫的)、別的帳戶金鑰加密的一筆(解不開)。
+        let mut a = AccountState::new(&keys.chain_id);
+        put_slot(&mut a, SLOT_ID, Some(&synced_payload("a")), "a", 10);
+        put_slot(&mut a, "0123456789abcdef0123456789abcdef", Some(&KeySlotPayload { name: "../escape".into(), ..synced_payload("a") }), "a", 10);
+        let mut b = AccountState::new(&keys.chain_id);
+        kept_sealed_by_an_older_build(&mut b, &account_outgoing(&a, &keys).unwrap());
+        let stranger = ChainKeys::generate().unwrap();
+        let mut c = AccountState::new(&stranger.chain_id);
+        put_slot(&mut c, "89abcdef0123456789abcdef01234567", Some(&synced_payload("c")), "c", 10);
+        kept_sealed_by_an_older_build(&mut b, &account_outgoing(&c, &stranger).unwrap());
+        assert_eq!(b.sealed.len(), 3);
+
+        let merged = merge_account(&b, &keys, &PullResponse { records: Vec::new(), latest_seq: 0 });
+        assert_eq!(merged.skipped, 2);
+        assert_eq!(live_slots(&merged.section), vec![(SLOT_ID.to_string(), synced_payload("a"))]);
+        assert_eq!(merged.section.records.len(), 1, "the unreadable ones are not promoted");
+        assert!(merged.section.sealed.is_empty(), "and not kept sealed either");
+    }
+
+    #[test]
+    fn a_stored_keyslot_is_merged_by_last_writer_wins_with_the_record_already_there() {
+        let keys = ChainKeys::generate().unwrap();
+        let named = |name: &str| KeySlotPayload { name: name.into(), ..synced_payload("a") };
+        // 舊版存下的版本:時間 20、名稱 `stored`,relay 序號 4。
+        let mut remote = AccountState::new(&keys.chain_id);
+        put_slot(&mut remote, SLOT_ID, Some(&named("stored")), "a", 20);
+        let mut base = AccountState::new(&keys.chain_id);
+        kept_sealed_by_an_older_build(&mut base, &account_outgoing(&remote, &keys).unwrap());
+        for sealed in base.sealed.values_mut() {
+            sealed.envelope.seq = 4;
+        }
+        let empty_pull = PullResponse { records: Vec::new(), latest_seq: 4 };
+
+        // 這台的現況比較舊(時間 10):存下的版本取代它,seq 是 relay 的、不用再上傳。
+        let mut older = base.clone();
+        put_slot(&mut older, SLOT_ID, Some(&named("here")), "b", 10);
+        let merged = merge_account(&older, &keys, &empty_pull).section;
+        let local = &merged.records[&record_key(RecordKind::KeySlot, SLOT_ID)];
+        assert_eq!((slot(&merged, SLOT_ID).unwrap().name.as_str(), local.seq, local.dirty), ("stored", 4, false));
+
+        // 現況比較新(時間 30):現況留著、仍要上傳,只是 seq 跟上 relay 的(下一次上傳才不會撞 conflict)。
+        let mut newer = base.clone();
+        put_slot(&mut newer, SLOT_ID, Some(&named("here")), "b", 30);
+        let merged = merge_account(&newer, &keys, &empty_pull).section;
+        let local = &merged.records[&record_key(RecordKind::KeySlot, SLOT_ID)];
+        assert_eq!((slot(&merged, SLOT_ID).unwrap().name.as_str(), local.seq, local.dirty), ("here", 4, true));
+        assert!(merged.sealed.is_empty());
+        // 現況的 seq 已經比存下的那筆還新(9):不往回退,不然上傳的 base_seq 比 relay 的舊,會一直撞 conflict。
+        newer.records.get_mut(&record_key(RecordKind::KeySlot, SLOT_ID)).unwrap().seq = 9;
+        let merged = merge_account(&newer, &keys, &empty_pull).section;
+        assert_eq!(merged.records[&record_key(RecordKind::KeySlot, SLOT_ID)].seq, 9);
     }
 
     #[test]

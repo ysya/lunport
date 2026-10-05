@@ -561,11 +561,43 @@ fn valid_account_record(record: &Record) -> bool {
 
 /// 帳戶 chain 拉到的記錄 → 合併(spec §7.1 第 4–5 步)。`device` / `space` / `meta` / `keyslot` 解密進 `records`;
 /// `spacekey` 與 `key`(SP3)只在記憶體解開比較,保存的是密文(`sealed`);其他種類(含未知)原樣存進 `sealed`、
-/// 永不解密。拉到的 `meta` `rotation:*`(未刪除)收進 `markers`。
+/// 永不解密 —— SP3 之前的版本這樣存下的 `keyslot` 除外,它們一開始就升格成 `records` 裡的明文記錄。拉到的 `meta`
+/// `rotation:*`(未刪除)收進 `markers`。
 pub fn merge_account(section: &AccountState, keys: &ChainKeys, pulled: &PullResponse) -> AccountMerged {
     let mut next = section.clone();
     let mut markers = Vec::new();
     let mut skipped = 0;
+    // SP3 之前的版本不認得 `keyslot`:當成未知種類,把密文原樣存進 `sealed`、cursor 照常前進;更新之後的增量拉取(只從
+    // cursor 起)不會再拉到它們,插槽就一直看不見。所以先把 `sealed` 裡的 `keyslot` 升格成明文記錄 —— 解密、驗證、和
+    // `records` 裡的現況 LWW 合併 —— `sealed` 不再留 `keyslot`;讀不懂的丟掉,算進 `skipped`。
+    let kept_raw: Vec<String> = next
+        .sealed
+        .iter()
+        .filter(|(_, s)| s.envelope.kind == RecordKind::KeySlot.as_str())
+        .map(|(slot, _)| slot.clone())
+        .collect();
+    for slot in kept_raw {
+        let Some(stored) = next.sealed.remove(&slot) else { continue };
+        let record = match decode(keys, &stored.envelope) {
+            Ok(r) if valid_account_record(&r) => r,
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let key = record_key(record.kind, &record.id);
+        match merge(next.records.get(&key), &record) {
+            MergeOutcome::KeepLocal => {
+                // 現況較新:留著,只讓 seq 跟上 relay 的(不往回退:上傳的 base_seq 比 relay 的舊就會一直撞 conflict)。
+                if let Some(local) = next.records.get_mut(&key) {
+                    local.seq = local.seq.max(stored.envelope.seq);
+                }
+            }
+            _ => {
+                next.records.insert(key, LocalRecord { record, seq: stored.envelope.seq, dirty: false });
+            }
+        }
+    }
     for env in &pulled.records {
         let kind = RecordKind::parse(&env.kind);
         match kind {
