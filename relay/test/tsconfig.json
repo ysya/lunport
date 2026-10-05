@@ -3,7 +3,8 @@
   "compilerOptions": {
     "moduleResolution": "bundler",
     "types": ["@cloudflare/vitest-plugin/types"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "resolveJsonModule": true
   },
   "include": ["./**/*.ts", "../worker-configuration.d.ts"]
 }

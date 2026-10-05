@@ -12,6 +12,7 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 
 import type { DeployOutcome } from "@/bindings/DeployOutcome";
+import type { HostSummary } from "@/bindings/HostSummary";
 import { pickDefaultPublicKey } from "@/lib/deploy-key-select";
 import { identityFileAction, toTildeSshPath } from "@/lib/identity-file";
 import {
@@ -19,6 +20,7 @@ import {
   useDeployKeyDirect,
   useDeployPreflight,
   useHasHostPassword,
+  useHostsQuery,
   useKeyHygiene,
   useKeys,
   usePlatform,
@@ -27,6 +29,8 @@ import {
   useSaveHost,
   useTrustHostKey,
 } from "@/lib/queries";
+import { useAmbiguousNames } from "@/lib/sync-labels";
+import { identityFileNote } from "@/lib/sync-sidebar";
 import { useUiStore } from "@/stores/ui";
 
 import { Button } from "@/components/ui/button";
@@ -48,6 +52,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+/** Stable while the config loads, so the memo over the hosts does not rerun every render. */
+const NO_HOSTS: HostSummary[] = [];
 
 type Stage =
   | { kind: "form" }
@@ -143,6 +150,9 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
   const deploy = useDeployKeyDirect();
   const saveHost = useSaveHost();
   const queryClient = useQueryClient();
+  // Writing IdentityFile finds the host by its name: with several copies, one in a synced space, that
+  // would edit the first copy in load order (and sync it, if it is a space's). Not written then.
+  const ambiguous = useAmbiguousNames(useHostsQuery().data?.hosts ?? NO_HOSTS);
 
   // One advisory probe per dialog (the flow remounts per alias).
   const probe = preflight.mutate;
@@ -201,17 +211,11 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
       const privateAbs = publicPath.replace(/\.pub$/, "");
       const value = toTildeSshPath(privateAbs);
       const existing = (hygiene.data?.identity_files ?? []).map((f) => f.path);
-      switch (identityFileAction(existing, privateAbs)) {
-        case "write":
-          writeIdentityFile(value);
-          break;
-        case "already":
-          setIdentityNote("The host config already points at this key.");
-          break;
-        case "offer":
-          setIdentityOffer(value);
-          break;
-      }
+      const action = identityFileAction(existing, privateAbs);
+      if (action === "already") setIdentityNote("The host config already points at this key.");
+      else if (ambiguous.has(alias)) setIdentityNote(identityFileNote(alias, value));
+      else if (action === "write") writeIdentityFile(value);
+      else setIdentityOffer(value);
     }
     setStage({ kind: "result", view: { kind: "outcome", outcome } });
   }

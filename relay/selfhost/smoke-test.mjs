@@ -1,5 +1,5 @@
 // End-to-end check of a running relay over HTTP. Node ≥ 18, no dependencies.
-//   node smoke-test.mjs <base-url> <state-file> write  — create a chain, push, hit a conflict; save its credentials
+//   node smoke-test.mjs <base-url> <state-file> write  — create a chain, push, hit a conflict, batch-pull; save its credentials
 //   node smoke-test.mjs <base-url> <state-file> read   — the record is still there (restart the relay first); delete the chain
 //   node smoke-test.mjs <base-url> spoof               — through the proxy, a forged CF-Connecting-IP header is ignored:
 //                                                        the 21st chain created within the hour is refused
@@ -29,6 +29,16 @@ async function call(method, path, token, { body, headers = {} } = {}) {
   return { status: res.status, json: text ? JSON.parse(text) : null };
 }
 
+async function callBatch(items) {
+  const res = await fetch(new URL("/v1/pull", base), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(items),
+    redirect: "manual",
+  });
+  return { status: res.status, json: await res.json() };
+}
+
 function check(label, actual, expected) {
   try {
     deepStrictEqual(actual, expected);
@@ -55,6 +65,25 @@ if (phase === "write") {
     status: 200,
     json: { results: [{ status: "conflict", current: { ...record, seq: 1 } }], latestSeq: 1 },
   });
+  const info = await fetch(new URL("/v1/info", base)).then(async (r) => ({ status: r.status, json: await r.json() }));
+  check("the relay reports its features", [info.status, info.json.features], [200, ["pull-batch", "freeze"]]);
+  const unknown = hex(32);
+  check("a batch pull answers each chain on its own", await callBatch([
+    { chain, token, since: 0 },
+    { chain: unknown, token: hex(32), since: 0 },
+  ]), {
+    status: 200,
+    json: { results: [{ chain, status: "ok", records: [{ ...record, seq: 1 }], latestSeq: 1 }, { chain: unknown, status: "not_found" }] },
+  });
+  const frozenChain = hex(32);
+  const frozenToken = hex(32);
+  check("create a chain to freeze", (await call("PUT", `/v1/chains/${frozenChain}`, frozenToken)).status, 201);
+  check("freeze it", (await call("POST", `/v1/chains/${frozenChain}/freeze`, frozenToken)).status, 204);
+  check("a frozen chain refuses pushes", await call("POST", `/v1/chains/${frozenChain}/records`, frozenToken, {
+    body: [{ ...record, baseSeq: 0 }],
+  }), { status: 409, json: { status: "frozen" } });
+  check("a frozen chain still reads", (await call("GET", `/v1/chains/${frozenChain}/records?since=0`, frozenToken)).status, 200);
+  check("a frozen chain can be deleted", (await call("DELETE", `/v1/chains/${frozenChain}`, frozenToken)).status, 204);
   writeFileSync(stateFile, JSON.stringify({ chain, token, record }));
 } else if (phase === "read") {
   const { chain, token, record } = JSON.parse(readFileSync(stateFile, "utf8"));

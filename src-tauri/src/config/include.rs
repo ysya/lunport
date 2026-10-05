@@ -84,10 +84,7 @@ fn load_recursive(
         // Each include value may contain multiple whitespace-separated patterns.
         for token in pattern_str.split_whitespace() {
             // Expand ~ and environment variables.
-            let expanded = match shellexpand::full(token) {
-                Ok(s) => s.into_owned(),
-                Err(_) => continue,
-            };
+            let Some(expanded) = expand_token(token) else { continue };
 
             // Resolve relative paths against the parent directory of the including file.
             let base_pattern = {
@@ -117,6 +114,36 @@ fn load_recursive(
     }
 
     Ok(())
+}
+
+/// `~` 與環境變數展開。測試建置可以用 `with_test_home` 把 `~` 指到暫存的家目錄(thread-local):同步引擎的 Include
+/// 一律寫成 `~/.ssh/sshelter/...`,測試不能因此讀到開發者真正的家目錄。
+fn expand_token(token: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.with(|h| h.borrow().clone()) {
+        if let Some(rest) = token.strip_prefix("~/") {
+            return Some(home.join(rest).to_string_lossy().into_owned());
+        }
+    }
+    shellexpand::full(token).ok().map(|s| s.into_owned())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 只給測試:在 `f` 執行期間,這個執行緒載入 config 時 `~` 指向 `home`。離開時(包括 `f` panic)一律還原成原本的值。
+#[cfg(test)]
+pub(crate) fn with_test_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_HOME.with(|h| *h.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(TEST_HOME.with(|h| h.replace(Some(home.to_path_buf()))));
+    f()
 }
 
 /// Index of the file in `doc.files` whose top-level items contain a Host block matching `alias`
@@ -281,5 +308,25 @@ mod tests {
         assert!(res.is_err(), "an unreadable MAIN config must be a fatal error");
 
         let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    #[test]
+    fn with_test_home_restores_the_previous_home_even_when_the_closure_panics() {
+        let (outer, inner) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let home_of = |dir: &tempfile::TempDir| dir.path().join("x").to_string_lossy().into_owned();
+        assert!(TEST_HOME.with(|h| h.borrow().is_none()));
+        with_test_home(outer.path(), || {
+            assert_eq!(expand_token("~/x"), Some(home_of(&outer)));
+            // 巢狀:離開內層(包括 panic)之後回到外層的家目錄。
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_test_home(inner.path(), || {
+                    assert_eq!(expand_token("~/x"), Some(home_of(&inner)));
+                    panic!("the closure panics");
+                })
+            }));
+            assert!(panicked.is_err());
+            assert_eq!(expand_token("~/x"), Some(home_of(&outer)), "the outer home is back after the panic");
+        });
+        assert!(TEST_HOME.with(|h| h.borrow().is_none()), "and nothing is left over after the outermost call");
     }
 }

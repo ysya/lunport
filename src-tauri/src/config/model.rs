@@ -19,7 +19,7 @@ pub struct Directive {
     pub indent: String,                 // leading whitespace
     pub trailing_ws: String,            // whitespace after value when there is NO inline comment (else "")
     pub inline_comment: Option<String>, // trailing comment incl its leading ws and '#'
-    pub enabled: bool,                  // false => serialized commented-out
+    pub enabled: bool,                  // false 且 dirty 才寫成註解;「這行在磁碟上會不會生效」一律問 serializes_as_comment()
     pub raw: String,                    // original full line (no newline); emitted verbatim when !dirty
     pub dirty: bool,                    // true once a structured field is edited => serialize re-renders
 }
@@ -78,5 +78,15 @@ impl Directive {
             raw: String::new(),
             dirty: true,
         }
+    }
+}
+
+impl Directive {
+    /// Whether `render_directive` writes this line out commented-out (`# ...`). That takes BOTH `!enabled`
+    /// and `dirty`: a clean directive is always emitted as its original `raw` text, i.e. as a live line,
+    /// whatever `enabled` says. Anything asking "does this line take effect on disk?" must use this predicate
+    /// instead of reading `enabled` alone, so it can never disagree with the serializer.
+    pub fn serializes_as_comment(&self) -> bool {
+        !self.enabled && self.dirty
     }
 }

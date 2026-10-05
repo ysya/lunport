@@ -31,10 +31,14 @@ use known_hosts::{known_hosts_list, known_hosts_remove};
 use mcp::{mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
 use settings_io::{settings_export, settings_import};
 use sync::engine::{
-    sync_create_chain, sync_forget_device, sync_join_chain, sync_leave_chain, sync_now,
-    sync_set_device_name, sync_set_relay_url, sync_show_words, sync_status,
+    sync_approve, sync_cancel_sync_code_change, sync_change_sync_code, sync_check_relay,
+    sync_create_account, sync_create_space, sync_delete_space, sync_dismiss_notice,
+    sync_forget_device, sync_join_account, sync_leave_account, sync_move_files_to_new_spaces,
+    sync_move_hosts_to_space, sync_now, sync_overview, sync_pending_approvals, sync_rebuild_space,
+    sync_reject, sync_rejoin_account, sync_rename_space, sync_select_space, sync_set_device_name,
+    sync_set_relay_url, sync_show_words, sync_unmovable_hosts, sync_unselect_space,
 };
-use sync::migrate::{sync_duplicate_aliases, sync_migrate_hosts, sync_resolve_shadowed};
+use sync::migrate::{sync_duplicate_aliases, sync_resolve_shadowed};
 use tauri::Manager;
 use tray::tray_set_visible;
 use updater_channel::{updater_check_beta, updater_install_beta};
@@ -101,6 +105,10 @@ fn run_app(mcp_keep_alive: bool) {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // 視窗在前景時以一般間隔輪詢、回到前景立刻同步一輪(同步退避期間要等退避結束,spec §6.4);不在前景時省 relay 的配額(Sync v2)。
+            if let tauri::WindowEvent::Focused(focused) = event {
+                sync::engine::window_focused(window.app_handle(), *focused);
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.app_handle().state::<state::AppState>();
                 if state
@@ -172,16 +180,32 @@ fn run_app(mcp_keep_alive: bool) {
             mcp_set_enabled,
             mcp_set_host_allowed,
             mcp_resolve_request,
-            sync_status,
+            sync_overview,
             sync_now,
-            sync_create_chain,
-            sync_join_chain,
+            sync_create_account,
+            sync_join_account,
+            sync_leave_account,
             sync_show_words,
-            sync_leave_chain,
             sync_set_relay_url,
+            sync_check_relay,
             sync_set_device_name,
             sync_forget_device,
-            sync_migrate_hosts,
+            sync_create_space,
+            sync_rename_space,
+            sync_delete_space,
+            sync_select_space,
+            sync_unselect_space,
+            sync_rebuild_space,
+            sync_pending_approvals,
+            sync_approve,
+            sync_reject,
+            sync_dismiss_notice,
+            sync_move_hosts_to_space,
+            sync_move_files_to_new_spaces,
+            sync_unmovable_hosts,
+            sync_change_sync_code,
+            sync_cancel_sync_code_change,
+            sync_rejoin_account,
             sync_duplicate_aliases,
             sync_resolve_shadowed,
         ])

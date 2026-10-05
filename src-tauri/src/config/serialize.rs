@@ -24,11 +24,13 @@ pub fn render_directive(d: &Directive) -> String {
         d.inline_comment.as_deref().unwrap_or("")
     );
 
-    if d.enabled {
-        format!("{}{}", d.indent, body)
-    } else {
+    // Past the `!dirty` early return this is exactly `!d.enabled`; going through the shared predicate keeps
+    // the serializer and every "is this line live?" check (e.g. the sync ban) in agreement.
+    if d.serializes_as_comment() {
         // Disabled directives are serialized commented-out.
         format!("{}# {}", d.indent, body)
+    } else {
+        format!("{}{}", d.indent, body)
     }
 }
 

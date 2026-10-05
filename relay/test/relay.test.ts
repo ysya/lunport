@@ -1,4 +1,5 @@
 import { env, exports } from "cloudflare:workers";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
 const TOKEN = "b".repeat(64);
@@ -6,6 +7,8 @@ const OTHER_TOKEN = "c".repeat(64);
 const base = "https://relay.test";
 const SMALL = "YQ=="; // base64("a"),4 字元
 const NONCE = "bm9uY2U="; // base64("nonce"),8 字元
+const HOUR = 60 * 60 * 1000;
+const IDLE_TTL = 180 * 24 * HOUR; // 與 src/index.ts 的 IDLE_TTL_MS 相同(Worker 主模組不能 export 常數)
 
 /** 64-hex chain id,每個測試一條新 chain。 */
 function newChainId(): string {
@@ -18,8 +21,15 @@ function hid(n: number): string {
   return n.toString(16).padStart(64, "0");
 }
 
+/**
+ * 每個測試各用一個來源 IP。IpLimiter 的 Durable Object 儲存不會在測試之間重置,
+ * 共用同一個 IP 會讓「每 IP 每小時 20 次建鏈」被整個檔案的測試耗盡,之後的 PUT 就一律 429。
+ */
+let ip = "";
+let ipSeq = 0;
+
 function auth(token = TOKEN): HeadersInit {
-  return { authorization: `Bearer ${token}`, "content-type": "application/json", "cf-connecting-ip": "203.0.113.7" };
+  return { authorization: `Bearer ${token}`, "content-type": "application/json", "cf-connecting-ip": ip };
 }
 
 function relay(path: string, init?: RequestInit) {
@@ -33,6 +43,8 @@ function item(idHash: string, baseSeq = 0, ciphertext = "Y2lwaGVy", deleted = fa
 let chain = "";
 beforeEach(() => {
   chain = newChainId();
+  ipSeq += 1;
+  ip = `203.0.113.${ipSeq}`;
 });
 
 const create = (token = TOKEN, id = chain) => relay(`/v1/chains/${id}`, { method: "PUT", headers: auth(token), body: "{}" });
@@ -40,6 +52,7 @@ const push = (items: unknown, token = TOKEN, id = chain) =>
   relay(`/v1/chains/${id}/records`, { method: "POST", headers: auth(token), body: JSON.stringify(items) });
 const pull = (since: string | number, token = TOKEN, id = chain) => relay(`/v1/chains/${id}/records?since=${since}`, { headers: auth(token) });
 const destroy = (token = TOKEN, id = chain) => relay(`/v1/chains/${id}`, { method: "DELETE", headers: auth(token) });
+const freeze = (token = TOKEN, id = chain) => relay(`/v1/chains/${id}/freeze`, { method: "POST", headers: auth(token) });
 
 type PushBody = { results: { status: string; seq?: number; current?: { seq: number; ciphertext: string; deleted: boolean } }[]; latestSeq: number };
 type PullBody = { records: { idHash: string; seq: number; ciphertext: string; deleted: boolean }[]; latestSeq: number };
@@ -232,5 +245,105 @@ describe("records", () => {
     // 同一個 instance、同一分鐘:DELETE 不把計數歸零,重建是第 121 次 → 429,且沒有建出 schema。
     expect((await create()).status).toBe(429);
     expect(await env.CHAIN.getByName(chain).exists()).toBe(false);
+  });
+});
+
+describe("freeze", () => {
+  it("refuses every push after a freeze and writes nothing", async () => {
+    await create();
+    await push([item(hid(1))]);
+    expect((await freeze()).status).toBe(204);
+    const refused = await push([item(hid(2))]);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ status: "frozen" });
+    // 已存在的記錄被「更新」也一樣被擋。
+    expect((await push([item(hid(1), 1, "bmV3")])).status).toBe(409);
+    const all = (await (await pull(0)).json()) as PullBody;
+    expect(all.records.map((r) => r.idHash)).toEqual([hid(1)]);
+    expect(all.latestSeq).toBe(1);
+  });
+
+  it("keeps a frozen chain readable; deleting it removes the records but cannot reopen it", async () => {
+    await create();
+    await push([item(hid(1))]);
+    await freeze();
+    expect((await pull(0)).status).toBe(200);
+    expect((await create()).status).toBe(200);
+    expect((await push([item(hid(2))])).status).toBe(409);
+    expect((await destroy()).status).toBe(204);
+    // 同一個權杖 DELETE 再 PUT:chain 還在(200 不是 201)、仍然凍結,記錄清空但 latestSeq 保留。
+    expect((await create()).status).toBe(200);
+    expect((await push([item(hid(3))])).status).toBe(409);
+    const after = await pull(0);
+    expect(after.status).toBe(200);
+    expect(await after.json()).toEqual({ records: [], latestSeq: 1 });
+    // token hash 也保留:別的權杖不能接手這個 chain id。
+    expect((await create(OTHER_TOKEN)).status).toBe(404);
+    expect(await env.CHAIN.getByName(chain).exists()).toBe(true);
+  });
+
+  it("still deletes a chain that was never frozen completely", async () => {
+    await create();
+    await push([item(hid(1))]);
+    expect((await destroy()).status).toBe(204);
+    expect(await env.CHAIN.getByName(chain).exists()).toBe(false);
+    expect((await create()).status).toBe(201);
+    const r = (await (await push([item(hid(2))])).json()) as PushBody;
+    expect(r.results[0]).toEqual({ status: "ok", seq: 1 });
+  });
+
+  it("is idempotent and needs the chain's own token", async () => {
+    await create();
+    expect((await freeze(OTHER_TOKEN)).status).toBe(404);
+    expect((await push([item(hid(1))])).status).toBe(200);
+    expect((await freeze()).status).toBe(204);
+    expect((await freeze()).status).toBe(204);
+    const id = newChainId();
+    expect((await freeze(TOKEN, id)).status).toBe(404);
+    expect(await env.CHAIN.getByName(id).exists()).toBe(false);
+  });
+
+  it("stays frozen after the chain's Durable Object is evicted", async () => {
+    await create();
+    await freeze();
+    // 驅逐會丟掉 instance 的記憶體、保留儲存:凍結旗標必須在 meta 表裡,不能只是記憶體裡的欄位。
+    await evictDurableObject(env.CHAIN.getByName(chain));
+    expect((await push([item(hid(1))])).status).toBe(409);
+  });
+});
+
+describe("idle deadline", () => {
+  const alarmOf = (id = chain) => runInDurableObject(env.CHAIN.getByName(id), (_instance, state) => state.storage.getAlarm());
+  const setAlarm = (at: number) => runInDurableObject(env.CHAIN.getByName(chain), (_instance, state) => state.storage.setAlarm(at));
+
+  it("leaves the alarm alone on pulls within six hours of the last refresh, even after the object was evicted", async () => {
+    await create();
+    // 一小時前刷新過。驅逐(與休眠一樣)會丟掉 instance 的記憶體:節流必須看儲存裡的 alarm,否則每次輪詢都多寫一列。
+    const armed = Date.now() + IDLE_TTL - HOUR;
+    await setAlarm(armed);
+    await evictDurableObject(env.CHAIN.getByName(chain));
+    expect((await pull(0)).status).toBe(200);
+    expect((await pull(0)).status).toBe(200);
+    expect(await alarmOf()).toBe(armed);
+  });
+
+  it("refreshes the alarm on a pull once the last refresh is more than six hours old, or when there is none", async () => {
+    await create();
+    const stale = Date.now() + IDLE_TTL - 7 * HOUR;
+    await setAlarm(stale);
+    const before = Date.now();
+    expect((await pull(0)).status).toBe(200);
+    expect(await alarmOf()).toBeGreaterThan(before + IDLE_TTL - HOUR);
+    await runInDurableObject(env.CHAIN.getByName(chain), (_instance, state) => state.storage.deleteAlarm());
+    expect((await pull(0)).status).toBe(200);
+    expect(await alarmOf()).toBeGreaterThan(before + IDLE_TTL - HOUR);
+  });
+
+  it("refreshes the alarm on every write", async () => {
+    await create();
+    const armed = Date.now() + IDLE_TTL - HOUR;
+    await setAlarm(armed);
+    expect((await push([item(hid(1))])).status).toBe(200);
+    expect(await alarmOf()).toBeGreaterThan(armed);
   });
 });

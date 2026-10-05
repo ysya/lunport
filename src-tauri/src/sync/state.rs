@@ -1,16 +1,21 @@
-//! 本機同步狀態(`sync-state.json`,0600)與助記詞的 keychain 保管。
-//! 助記詞永不落成純文字檔;派生值只在記憶體。
+//! v1 的本機同步狀態(`sync-state.json` 的 `version: 1` 格式):只用來讀取並升級(Sync v2 spec §7.6;讀檔在
+//! `state_v2::load`)。另有兩版共用的狀態檔路徑、內建 relay 與同步碼的 keychain account。
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(test)]
+use serde::Serialize;
 
 use crate::error::AppError;
 use crate::fsutil;
-use crate::secrets;
-use crate::sync::record::{Envelope, LocalRecord, SCHEMA_VERSION};
+use crate::sync::record::{Envelope, LocalRecord};
+#[cfg(test)]
+use crate::sync::record::SCHEMA_VERSION;
 
+/// 只有測試用(`SyncState::fresh`):升級讀 v1 狀態檔,版本號由 `state_v2::load` 判斷。
+#[cfg(test)]
 pub const STATE_VERSION: u32 = 1;
 
 /// 內建中繼:建置時由 CI 以 `SSHELTER_RELAY_URL` 注入。沒設定、或設成空字串(GitHub Actions 對未設定的
@@ -30,7 +35,10 @@ const fn default_relay_url(injected: Option<&'static str>, debug: bool) -> &'sta
 
 pub const MNEMONIC_ACCOUNT: &str = "sync:mnemonic";
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// v1 狀態檔的內容,**只讀**:升級(`upgrade::upgrade_v1`)與啟動(`engine::startup`,`joined`)讀它。建構(`fresh`)、`read_only` 與序列化只有測試用 ——
+/// v2 不寫 v1 格式,v1 的狀態檔升級時原樣複製成備份(`state_v2::back_up_legacy`)。
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 pub struct SyncState {
     pub version: u32,
     /// None = 尚未建立/加入 chain。
@@ -62,6 +70,7 @@ pub struct SyncState {
 }
 
 impl SyncState {
+    #[cfg(test)]
     pub fn fresh(device_name: &str) -> Result<Self, AppError> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes)
@@ -88,7 +97,8 @@ impl SyncState {
         self.chain_id.is_some()
     }
 
-    /// chain 用了比本 app 新的格式:只套用可理解的記錄、不上傳(spec §10)。
+    /// chain 用了比本 app 新的格式:只套用可理解的記錄、不上傳(spec §10)。只有測試用:升級讀的是狀態檔裡的欄位,v2 的唯讀判斷在 `SyncStateV2::read_only`。
+    #[cfg(test)]
     pub fn read_only(&self) -> bool {
         self.remote_schema_version.is_some_and(|v| v > SCHEMA_VERSION)
     }
@@ -96,51 +106,6 @@ impl SyncState {
 
 pub fn state_path() -> Result<PathBuf, AppError> {
     Ok(fsutil::app_data_root()?.join("sync-state.json"))
-}
-
-pub fn load(path: &Path) -> Result<Option<SyncState>, AppError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(AppError::Io(e)),
-    };
-    // 先只看版本,避免新版欄位讓整個反序列化失敗時給出誤導訊息。
-    #[derive(Deserialize)]
-    struct Probe {
-        version: u32,
-    }
-    let probe: Probe = serde_json::from_slice(&bytes)
-        .map_err(|e| AppError::Other(format!("sync state is unreadable: {e}")))?;
-    if probe.version > STATE_VERSION {
-        return Err(AppError::Other(format!(
-            "sync state was written by a newer SSHelter (version {}); update the app",
-            probe.version
-        )));
-    }
-    let state: SyncState = serde_json::from_slice(&bytes)
-        .map_err(|e| AppError::Other(format!("sync state is unreadable: {e}")))?;
-    Ok(Some(state))
-}
-
-pub fn save(path: &Path, state: &SyncState) -> Result<(), AppError> {
-    if let Some(dir) = path.parent() {
-        fsutil::ensure_dir_secure(dir)?;
-    }
-    let bytes = serde_json::to_vec_pretty(state)
-        .map_err(|e| AppError::Other(format!("cannot serialize sync state: {e}")))?;
-    fsutil::atomic_write(path, &bytes, 0o600)
-}
-
-pub fn store_mnemonic(words: &str) -> Result<(), AppError> {
-    secrets::set(MNEMONIC_ACCOUNT, words)
-}
-
-pub fn load_mnemonic() -> Result<Option<String>, AppError> {
-    secrets::get(MNEMONIC_ACCOUNT)
-}
-
-pub fn clear_mnemonic() -> Result<(), AppError> {
-    secrets::delete(MNEMONIC_ACCOUNT)
 }
 
 #[cfg(test)]
@@ -168,62 +133,6 @@ mod tests {
         assert!(!s.read_only());
         s.remote_schema_version = Some(SCHEMA_VERSION + 1);
         assert!(s.read_only());
-    }
-
-    #[test]
-    fn sealed_envelopes_survive_save_and_load_without_being_decoded() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
-        let mut s = SyncState::fresh("A").unwrap();
-        s.sealed.insert(
-            "password:ff".to_string(),
-            Envelope { id_hash: "ff".into(), kind: "password".into(), seq: 4, nonce: "n".into(), ciphertext: "c".into(), deleted: false },
-        );
-        save(&path, &s).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"ciphertext\": \"c\""), "envelope is stored verbatim: {text}");
-        assert_eq!(load(&path).unwrap().unwrap().sealed, s.sealed);
-    }
-
-    #[test]
-    fn save_then_load_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
-        let mut s = SyncState::fresh("A").unwrap();
-        s.chain_id = Some("ab".repeat(32));
-        s.cursor_seq = 7;
-        save(&path, &s).unwrap();
-        let back = load(&path).unwrap().expect("state exists");
-        assert_eq!(back, s);
-        assert!(back.joined());
-    }
-
-    #[test]
-    fn missing_file_means_not_joined() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(load(&dir.path().join("nope.json")).unwrap().is_none());
-    }
-
-    #[test]
-    fn corrupt_or_newer_state_is_an_error_not_a_panic() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
-        std::fs::write(&path, b"{ not json").unwrap();
-        assert!(load(&path).is_err());
-        std::fs::write(&path, format!("{{\"version\": {} }}", STATE_VERSION + 1)).unwrap();
-        let err = load(&path).unwrap_err();
-        assert!(err.to_string().contains("newer"), "got: {err}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn state_file_is_private() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync-state.json");
-        save(&path, &SyncState::fresh("A").unwrap()).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
     }
 
     #[test]

@@ -27,3 +27,18 @@ export function relativeTime(ms: number, now: number = Date.now()): string {
 export function sortBackupsByNewest(backups: readonly BackupInfo[]): BackupInfo[] {
   return [...backups].sort((a, b) => b.timestamp_ms - a.timestamp_ms);
 }
+
+/**
+ * A count with its noun: `1 host`, `2 hosts`. Lives here, below the sync modules, so
+ * `sync-approvals.ts` can use it without an import cycle through `sync-overview.ts`
+ * (which re-exports it for the sync UI).
+ */
+export function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** Names joined for a sentence: "a", "a and b", "a, b and c". */
+export function listNames(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}

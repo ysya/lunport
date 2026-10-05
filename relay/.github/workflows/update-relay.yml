@@ -1,0 +1,207 @@
+name: Update relay
+
+# Brings this relay up to date with an SSHelter release through a pull request; merging it deploys through
+# Cloudflare Workers Builds with the same Worker name, URL and stored data. Weekly runs only happen when the
+# repository variable AUTO_UPDATE is "true".
+#
+# Trust boundary: upstream code (npm install scripts, tests) runs only in the `test` job, which has no write
+# access. The `open-pr` job holds the write token, starts from a fresh checkout and runs nothing from the
+# upstream tarball: it re-applies the update with this repository's own script and opens the pull request.
+# GitHub does not let this workflow change files under .github/workflows/, so when the upstream version of this
+# file changes, the run warns and the pull request asks you to copy it by hand.
+#
+# Contract: future versions of .github/scripts/update-relay.mjs must keep accepting
+#   apply <upstream-relay-dir> <repo-dir> [--allow-downgrade]   (prints the summary JSON)
+#   pr-body <summary.json> <upstream> <ref> <sha>               (prints the pull request body)
+# and the summary keys `skipped`, `message`, `workflowOutdated`, `direction`, `fromVersion`, `toVersion`:
+# updates replace the script but never this file. Relay versions in relay/package.json keep an X.Y.Z core.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream tag, branch or commit (empty: the latest release)"
+        required: false
+        default: ""
+      upstream:
+        description: "Upstream repository"
+        required: false
+        default: "ysya/sshelter"
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions: {}
+
+concurrency:
+  group: update-relay
+  cancel-in-progress: false
+
+jobs:
+  test:
+    if: github.event_name == 'workflow_dispatch' || vars.AUTO_UPDATE == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Resolve the upstream commit
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ inputs.upstream || 'ysya/sshelter' }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "$REF" ]; then REF=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name); fi
+          SHA=$(gh api "repos/$UPSTREAM/commits/$REF" --jq .sha)
+          {
+            echo "upstream=$UPSTREAM"
+            echo "ref=$REF"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+      - name: Download the upstream relay
+        env:
+          UPSTREAM: ${{ steps.source.outputs.upstream }}
+          SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/upstream"
+          curl -fsSL "https://codeload.github.com/$UPSTREAM/tar.gz/$SHA" | tar -xz -C "$RUNNER_TEMP/upstream" --strip-components=1
+          if [ ! -f "$RUNNER_TEMP/upstream/relay/wrangler.jsonc" ]; then
+            echo "::error::$UPSTREAM at $SHA has no relay/wrangler.jsonc."
+            exit 1
+          fi
+      - name: Apply it
+        id: apply
+        env:
+          EXPLICIT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          cp .github/scripts/update-relay.mjs "$RUNNER_TEMP/update-relay.mjs"
+          ARGS=()
+          if [ -n "$EXPLICIT_REF" ]; then ARGS+=(--allow-downgrade); fi
+          node "$RUNNER_TEMP/update-relay.mjs" apply "$RUNNER_TEMP/upstream/relay" . "${ARGS[@]}" > "$RUNNER_TEMP/summary.json"
+          if [ "$(jq -r '.skipped // ""' "$RUNNER_TEMP/summary.json")" != "" ]; then
+            jq -r .message "$RUNNER_TEMP/summary.json"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Test it
+        if: steps.apply.outputs.skip != 'true'
+        # Upstream code runs here; this job cannot write to the repository.
+        run: |
+          npm ci
+          npm test
+
+  open-pr:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Resolve the upstream commit again
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ inputs.upstream || 'ysya/sshelter' }}
+          REF: ${{ inputs.ref }}
+          TESTED_SHA: ${{ needs.test.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$REF" ]; then REF=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name); fi
+          SHA=$(gh api "repos/$UPSTREAM/commits/$REF" --jq .sha)
+          if [ "$SHA" != "$TESTED_SHA" ]; then
+            echo "::error::$REF moved from $TESTED_SHA to $SHA while the tests ran; run the workflow again."
+            exit 1
+          fi
+          {
+            echo "upstream=$UPSTREAM"
+            echo "ref=$REF"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+      - name: Download the upstream relay
+        env:
+          UPSTREAM: ${{ steps.source.outputs.upstream }}
+          SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/upstream"
+          curl -fsSL "https://codeload.github.com/$UPSTREAM/tar.gz/$SHA" | tar -xz -C "$RUNNER_TEMP/upstream" --strip-components=1
+          if [ ! -f "$RUNNER_TEMP/upstream/relay/wrangler.jsonc" ]; then
+            echo "::error::$UPSTREAM at $SHA has no relay/wrangler.jsonc."
+            exit 1
+          fi
+      - name: Apply it with this repository's own script
+        id: apply
+        # Nothing from the upstream tarball runs in this job: only files are copied.
+        env:
+          UPSTREAM: ${{ steps.source.outputs.upstream }}
+          REF: ${{ steps.source.outputs.ref }}
+          SHA: ${{ steps.source.outputs.sha }}
+          EXPLICIT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          cp .github/scripts/update-relay.mjs "$RUNNER_TEMP/update-relay.mjs"
+          ARGS=()
+          if [ -n "$EXPLICIT_REF" ]; then ARGS+=(--allow-downgrade); fi
+          node "$RUNNER_TEMP/update-relay.mjs" apply "$RUNNER_TEMP/upstream/relay" . "${ARGS[@]}" > "$RUNNER_TEMP/summary.json"
+          if [ "$(jq -r '.skipped // ""' "$RUNNER_TEMP/summary.json")" != "" ]; then
+            jq -r .message "$RUNNER_TEMP/summary.json"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node "$RUNNER_TEMP/update-relay.mjs" pr-body "$RUNNER_TEMP/summary.json" "$UPSTREAM" "$REF" "$SHA" > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$(jq -r .workflowOutdated "$RUNNER_TEMP/summary.json")" = "true" ]; then
+            echo "::warning::The update workflow changed upstream. Copy relay/.github/workflows/update-relay.yml from $UPSTREAM at $SHA into .github/workflows/ by hand: GitHub does not let this workflow edit workflow files."
+          fi
+      - name: Open a pull request
+        if: steps.apply.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ steps.source.outputs.ref }}
+          SHA: ${{ steps.source.outputs.sha }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "This relay already matches $REF."
+            exit 0
+          fi
+          BRANCH="update-relay/${SHA:0:12}"
+          # Open, closed or merged: the owner already decided about this exact upstream commit.
+          EXISTING=$(gh pr list --head "$BRANCH" --state all --json url,state --jq 'if length == 0 then "" else "\(.[0].state) \(.[0].url)" end')
+          if [ -n "$EXISTING" ]; then
+            echo "An update pull request for this upstream commit already exists ($EXISTING)."
+            exit 0
+          fi
+          TITLE=$(jq -r '"\(if .direction == "downgrade" then "Downgrade" else "Update" end) relay \(.fromVersion) → \(.toVersion)"' "$RUNNER_TEMP/summary.json")
+          git switch -c "$BRANCH"
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "chore: update relay to $REF"
+          gh auth setup-git
+          git push --force origin "$BRANCH"
+          if ! OUTPUT=$(gh pr create --head "$BRANCH" --title "$TITLE ($REF)" --body-file "$RUNNER_TEMP/body.md" 2>&1); then
+            echo "$OUTPUT"
+            if grep -q "not permitted to create or approve pull requests" <<<"$OUTPUT"; then
+              echo "::error::GitHub Actions may not open pull requests in this repository. Open one by hand: $SERVER/$REPO/compare/$BRANCH?expand=1 (or allow it under Settings → Actions → General). The open-pr job's summary has the description to paste."
+            else
+              echo "::error::Could not open the pull request. Branch $BRANCH is pushed: $SERVER/$REPO/compare/$BRANCH?expand=1"
+            fi
+            exit 1
+          fi
+          echo "$OUTPUT"

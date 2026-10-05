@@ -347,6 +347,12 @@ pub fn set_option_enabled(
     Ok(idx)
 }
 
+// 測試的插入點(只在測試建置,而且只對目前這個執行緒):`persist_file` 寫完之後,下一次重讀指紋失敗(例如檔案剛好被別的程式鎖住、暫時讀不到)。
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_FINGERPRINT_REREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Serialize file `idx`, back it up once (tracked in `backed_up`), atomic-write at 0o600, and
 /// refresh its in-memory fingerprint. Backups go to the file's MIRROR dir under
 /// `fsutil::backups_root()` — never next to the file, where a glob `Include` would read them as
@@ -386,13 +392,26 @@ pub fn persist_file(
     }
 
     fsutil::atomic_write(&path, text.as_bytes(), 0o600)?;
-    doc.files[idx].fingerprint = fsutil::file_fingerprint(&path)?;
+    // 寫入已經落地(磁碟上就是 `text`):重讀指紋失敗(檔案剛好被別的程式鎖住、暫時讀不到)不能讓這次存檔被當成失敗 —— 呼叫端會照「沒寫成」回復別的東西
+    // (例如離開帳戶時移除新路徑),磁碟上的主 config 卻已經列著它們。退回以剛寫的位元組算指紋(`fsutil::fingerprint_of`,`mtime_ms` = 0):`has_changed` 只比內容雜湊,
+    // 所以之後磁碟上的內容若不是這份,下一次存檔照樣發現衝突。整個指紋一起比的地方(`load_wakes_sync`、`files::prepare_files`、`files::apply_and_commit_space`)最多多
+    // 一次重掃或喚醒(重載之後 doc 裡就是真的指紋),見 `fsutil::fingerprint_of`。
+    doc.files[idx].fingerprint = fingerprint_after_write(&path, text.as_bytes());
 
     // 同步 hook:app 對受管同步檔的編輯在存檔當下規劃(呼叫端持有 doc 鎖,鎖順序維持 doc → sync core)。
     // 其他檔案、以及單元測試(沒有經過 `sync::engine::initialize`)都是 no-op。
     crate::sync::engine::note_file_written(&path, &doc.files[idx].items);
 
     Ok(())
+}
+
+/// 寫入落地之後的指紋:重讀磁碟上的檔案;讀不到就用剛寫的 `written` 算(`persist_file`)。
+fn fingerprint_after_write(path: &Path, written: &[u8]) -> fsutil::Fingerprint {
+    #[cfg(test)]
+    if FAIL_FINGERPRINT_REREAD.with(|f| f.replace(false)) {
+        return fsutil::fingerprint_of(written);
+    }
+    fsutil::file_fingerprint(path).unwrap_or_else(|_| fsutil::fingerprint_of(written))
 }
 
 /// Drift status for every loaded file (compares on-disk hash vs stored fingerprint).
@@ -668,10 +687,10 @@ pub fn config_load(
     let aliases = crate::tray::tray_aliases(&doc);
     let _ = crate::tray::rebuild_tray(&app, &aliases);
 
-    // 同步引擎用的受管檔路徑(與 `sync::engine` 相同);拿不到家目錄時只在第一次載入喚醒。
-    let managed = crate::keys::ssh_dir()
-        .ok()
-        .map(|dir| crate::sync::hosts_file::managed_path(&dir));
+    // 這台勾選的 space 檔(與同步引擎相同);拿不到家目錄時只在第一次載入喚醒。
+    let managed: Option<Vec<PathBuf>> = crate::keys::ssh_dir().ok().map(|dir| {
+        crate::sync::migrate::selected_space_files(&state.sync, &dir).into_iter().map(|(_, path)| path).collect()
+    });
     let wake = {
         let mut doc_lock = state.doc.lock().unwrap();
         let wake = load_wakes_sync(doc_lock.as_ref(), &doc, managed.as_deref());
@@ -681,7 +700,8 @@ pub fn config_load(
         backed_up_lock.clear();
         wake
     };
-    // 在放掉 doc 鎖之後才喚醒(見 `load_wakes_sync`)。
+    // 在放掉 doc 鎖之後才喚醒(見 `load_wakes_sync`)。刻意用一般的 `wake`、不是順便的 `wake_implicit`:這次載入帶進了 app 以外的修改(或第一次載入),要讓同步輪次
+    // 馬上先看到它(下一次 app 存檔才不會對著過期的快取行動)—— 退避期間也一樣,不能等到退避結束。
     if wake {
         crate::sync::engine::wake();
     }
@@ -691,12 +711,12 @@ pub fn config_load(
 
 /// `config_load` 換上新的 doc 之後要不要喚醒同步引擎(純函式):
 /// - 之前沒有 doc(第一次載入,或寫入失敗後被作廢):要 —— 引擎的輪次在 doc 是 None 時都安靜跳過。
-/// - 受管檔(`managed`,與引擎同一個路徑)在新舊 doc 裡的有無或指紋不同:要 —— 這次載入帶進了 app 以外的
-///   修改(例如被外部工具清空)。存檔當下的規劃(`note_file_written`)拿整個檔案去比快取,要讓同步輪次先看到
-///   這次載入(例如先從 chain 重新長出被清空的檔案),下一次 app 存檔才不會對著過期的快取把每一台主機都規劃成
-///   刪除。
+/// - 任何一個勾選的 space 檔(`managed`,與引擎同一組路徑)在新舊 doc 裡的有無或指紋不同:要 —— 這次載入帶進了
+///   app 以外的修改(例如被外部工具清空)。存檔當下的規劃(`note_file_written`)拿整個檔案去比快取,要讓同步輪次
+///   先看到這次載入(例如先從 chain 重新長出被清空的檔案),下一次 app 存檔才不會對著過期的快取把每一台主機都
+///   規劃成刪除。
 /// - 其他情況不喚醒。前端在每次 `sync://applied` 之後都會重新載入,而引擎每次整份重載 doc(即使什麼都沒套用)
-///   都會發 `sync://applied`:例如 hosts.config 存在卻載入不了(非 UTF-8、讀不到、不是一般檔案)時,
+///   都會發 `sync://applied`:例如勾選的 space 檔存在卻載入不了(非 UTF-8、讀不到、不是一般檔案)時,
 ///   `load_doc` 會略過它,每一輪都重載、失敗、再發一次 —— 每次載入都喚醒的話,就成了沒有間隔的迴圈。
 ///   引擎自己寫檔之後的重新載入也一樣:指紋相同,不必多跑一輪。
 ///
@@ -704,14 +724,17 @@ pub fn config_load(
 fn load_wakes_sync(
     previous: Option<&crate::config::model::SshConfigDoc>,
     next: &crate::config::model::SshConfigDoc,
-    managed: Option<&Path>,
+    managed: Option<&[PathBuf]>,
 ) -> bool {
     let Some(previous) = previous else { return true };
     let Some(managed) = managed else { return false };
-    let fingerprint = |doc: &crate::config::model::SshConfigDoc| {
-        doc.files.iter().find(|f| f.path == managed).map(|f| f.fingerprint.clone())
+    let fingerprints = |doc: &crate::config::model::SshConfigDoc| {
+        managed
+            .iter()
+            .map(|path| doc.files.iter().find(|f| &f.path == path).map(|f| f.fingerprint.clone()))
+            .collect::<Vec<_>>()
     };
-    fingerprint(previous) != fingerprint(next)
+    fingerprints(previous) != fingerprints(next)
 }
 
 /// main config top-level 的 enabled Include 值(文件順序)。
@@ -937,20 +960,17 @@ pub fn config_move_host(
     let doc = doc_lock
         .as_ref()
         .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-    // 拖進 sidebar 的 Synced 群組(目標是已載入的同步檔):與遷移精靈同一套規則,都在任何改動之前 —— 這個行程
-    // 沒有同步引擎(別的 SSHelter 行程持有同步鎖,這裡的狀態只是啟動時的快照)就拒絕;剛 Join、第一輪同步還沒
-    // 完成就拒絕;要搬的區塊有任何名字已經在同步檔裡也拒絕(重複會讓整條同步停下)。鎖順序 doc → backed_up → core。
-    let managed = crate::keys::ssh_dir()
-        .ok()
-        .map(|dir| crate::sync::hosts_file::managed_path(&dir));
-    if let Some(managed) = managed.filter(|managed| {
-        doc.files
-            .iter()
-            .any(|f| &f.path == managed && f.path.to_string_lossy() == target_file.as_str())
-    }) {
-        crate::sync::migrate::refuse_while_sync_inactive(crate::sync::engine::engine_active(), &state.sync)?;
-        crate::sync::migrate::refuse_before_first_sync(&state.sync)?;
-        crate::sync::migrate::refuse_already_synced(doc, &managed, &alias)?;
+    // 拖進 sidebar 的某個 space 群組(目標是已載入的、這台勾選的 space 檔;spec §7.2 跨 space 搬移也走這裡):與搬移
+    // 精靈同一套規則(`migrate::refuse_move_into_space`,兩邊共用同一組檢查),都在任何改動之前 —— 這個行程沒有同步引擎就拒絕;目標 space 第一輪同步還沒完成就拒絕;
+    // 區塊含 wildcard、`Include` 或帶引號的 keyword 就拒絕;要搬的區塊有任何名字已經在目標檔裡也拒絕(重複會讓那個 space
+    // 停下)。`move_host_and_persist` 先寫目標檔、再從來源移除。鎖順序 doc → backed_up → core。
+    let target = crate::keys::ssh_dir().ok().and_then(|dir| {
+        crate::sync::migrate::selected_space_files(&state.sync, &dir)
+            .into_iter()
+            .find(|(_, path)| path.to_string_lossy() == target_file.as_str() && doc.files.iter().any(|f| &f.path == path))
+    });
+    if let Some((space_id, path)) = target {
+        crate::sync::migrate::refuse_move_into_space(doc, &state.sync, crate::sync::engine::engine_active(), &space_id, &path, &alias)?;
     }
     move_host_and_persist(&mut doc_lock, &alias, &target_file, |doc, idx| {
         persist_file(doc, idx, &mut backed_up_lock, retention)
@@ -960,7 +980,7 @@ pub fn config_move_host(
 /// `config_move_host` 的搬移與寫檔(`persist` 由呼叫端注入,測試可模擬寫入失敗)。
 /// 任一寫入失敗:區塊已經在 in-memory doc 裡搬過去,磁碟上卻沒有(或只寫了一半)—— doc 比磁碟新,任何人
 /// (含同步引擎)都不能再拿它行動。從磁碟重載主 config(改動前記下的路徑)讓兩邊一致;重載也失敗就整份作廢
-/// (`None`):前端下次取主機清單時重新載入,引擎在 doc 是 None 時安靜跳過(同 `sync_migrate_hosts`)。
+/// (`None`):前端下次取主機清單時重新載入,引擎在 doc 是 None 時安靜跳過(搬移精靈的 `migrate::move_hosts_into_space` 一樣)。
 pub(crate) fn move_host_and_persist(
     slot: &mut Option<crate::config::model::SshConfigDoc>,
     alias: &str,
@@ -1284,6 +1304,31 @@ mod tests {
         .unwrap();
         persist_file(&mut doc, 0, &mut backed_up, None).expect("second persist must succeed");
         assert!(std::fs::read_to_string(&config_path).unwrap().contains("User u2"));
+    }
+
+    // ── Test 1d: a write that landed is never reported as failed ──────────────
+    #[test]
+    fn a_landed_write_is_not_reported_as_failed_when_the_fingerprint_cannot_be_re_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_config(&dir, "config", "Host web\n    User deploy\n");
+        let mut doc = load_doc(&config_path).expect("load_doc ok");
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        let change = |value: &str| vec![HostFieldChange { keyword: "User".into(), value: value.into(), remove: false }];
+        apply_changes(&mut doc, "web", &change("u1")).unwrap();
+        // 寫入落地了,之後重讀指紋卻失敗(檔案剛好被別的程式鎖住):這次存檔仍然成功 —— 回 Err 會讓呼叫端照「沒寫成」回復別的東西(例如離開帳戶時移除
+        // 新路徑),磁碟上的主 config 卻已經列著它們。
+        FAIL_FINGERPRINT_REREAD.with(|f| f.set(true));
+        persist_file(&mut doc, 0, &mut backed_up, None).expect("the write landed, so the save succeeded");
+        assert!(!FAIL_FINGERPRINT_REREAD.with(|f| f.get()), "the injected failure was used");
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        assert!(on_disk.contains("User u1"));
+        // 指紋是剛寫的位元組算的:同一個 doc 的下一次存檔不會誤報衝突;之後外部改了檔案,照樣擋下。
+        assert_eq!(doc.files[0].fingerprint, fsutil::fingerprint_of(on_disk.as_bytes()));
+        apply_changes(&mut doc, "web", &change("u2")).unwrap();
+        persist_file(&mut doc, 0, &mut backed_up, None).expect("no false conflict after the fallback fingerprint");
+        std::fs::write(&config_path, "Host web\n    User external\n").unwrap();
+        apply_changes(&mut doc, "web", &change("u3")).unwrap();
+        assert!(matches!(persist_file(&mut doc, 0, &mut backed_up, None), Err(AppError::Conflict(_))));
     }
 
     // ── Test 2: apply_changes add new field and remove field ─────────────────
@@ -2174,7 +2219,7 @@ mod tests {
     }
 
     // ── config_load 只在受管同步檔變了時喚醒同步引擎 ─────────────────────────────
-    // 只用暫存目錄:受管檔路徑由測試傳入(正式環境是 ~/.ssh/sshelter/hosts.config)。
+    // 只用暫存目錄:受管檔路徑由測試傳入(正式環境是這台勾選的 space 檔,~/.ssh/sshelter/<slug>-<id8>.config)。
 
     #[test]
     fn a_config_load_wakes_sync_on_the_first_load_and_when_the_synced_file_changed() {
@@ -2182,21 +2227,44 @@ mod tests {
         let managed = write_config(&dir, "hosts.config", "Host web\n");
         let main = write_config(&dir, "config", &format!("Include {}\nHost local\n", managed.display()));
         let first = load_doc(&main).unwrap();
-        assert!(load_wakes_sync(None, &first, Some(&managed)), "the first load wakes the engine");
+        assert!(load_wakes_sync(None, &first, Some(std::slice::from_ref(&managed))), "the first load wakes the engine");
         // 什麼都沒變(例如引擎寫檔之後、前端因 sync://applied 重新載入):不喚醒。
         let same = load_doc(&main).unwrap();
-        assert!(!load_wakes_sync(Some(&first), &same, Some(&managed)), "an identical reload does not");
+        assert!(!load_wakes_sync(Some(&first), &same, Some(std::slice::from_ref(&managed))), "an identical reload does not");
         // 只有別的檔案變了:不喚醒。
         std::fs::write(&main, format!("Include {}\nHost local\n  User me\n", managed.display())).unwrap();
         let main_edited = load_doc(&main).unwrap();
-        assert!(!load_wakes_sync(Some(&same), &main_edited, Some(&managed)), "other files do not matter");
+        assert!(!load_wakes_sync(Some(&same), &main_edited, Some(std::slice::from_ref(&managed))), "other files do not matter");
         // 受管檔在 app 以外被改了(例如被清空):喚醒。
         std::fs::write(&managed, "").unwrap();
         let emptied = load_doc(&main).unwrap();
-        assert!(load_wakes_sync(Some(&main_edited), &emptied, Some(&managed)), "a changed fingerprint wakes it");
+        assert!(load_wakes_sync(Some(&main_edited), &emptied, Some(std::slice::from_ref(&managed))), "a changed fingerprint wakes it");
         // 拿不到受管檔路徑:只有第一次載入喚醒。
         assert!(load_wakes_sync(None, &emptied, None));
         assert!(!load_wakes_sync(Some(&first), &emptied, None));
+    }
+
+    #[test]
+    fn a_fallback_fingerprint_after_a_landed_write_costs_at_most_one_extra_wake() {
+        // `persist_file` 寫入落地後重讀指紋失敗:doc 裡放的是以寫入的位元組算的指紋(`fsutil::fingerprint_of`,`mtime_ms` = 0)。`load_wakes_sync` 把整個指紋一起比,
+        // 所以下一次重載(算出真的指紋,`mtime_ms` 不是 0)會被當成「受管檔變了」多喚醒一次引擎;重載之後 doc 裡就是真的指紋,再重載不會再喚醒。
+        let dir = tempfile::tempdir().unwrap();
+        let managed = write_config(&dir, "hosts.config", "Host web\n  User deploy\n");
+        let main = write_config(&dir, "config", &format!("Include {}\nHost local\n", managed.display()));
+        let mut doc = load_doc(&main).unwrap();
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+        let idx = apply_changes(&mut doc, "web", &[HostFieldChange { keyword: "User".into(), value: "u1".into(), remove: false }]).unwrap();
+        assert_eq!(doc.files[idx].path, managed);
+        FAIL_FINGERPRINT_REREAD.with(|f| f.set(true));
+        persist_file(&mut doc, idx, &mut backed_up, None).unwrap();
+        assert_eq!(doc.files[idx].fingerprint.mtime_ms, 0, "the stand-in fingerprint does not know the modification time");
+        let managed_files = std::slice::from_ref(&managed);
+        let reloaded = load_doc(&main).unwrap();
+        assert_eq!(reloaded.files[idx].fingerprint.sha256, doc.files[idx].fingerprint.sha256, "the same bytes");
+        assert_ne!(reloaded.files[idx].fingerprint.mtime_ms, 0);
+        assert!(load_wakes_sync(Some(&doc), &reloaded, Some(managed_files)), "one extra wake: the whole fingerprint differs by mtime_ms");
+        let again = load_doc(&main).unwrap();
+        assert!(!load_wakes_sync(Some(&reloaded), &again, Some(managed_files)), "and then the real fingerprint is back: no more");
     }
 
     #[test]
@@ -2208,14 +2276,14 @@ mod tests {
         assert!(without.files.iter().all(|f| f.path != managed));
         std::fs::write(&managed, "Host web\n").unwrap();
         let with = load_doc(&main).unwrap();
-        assert!(load_wakes_sync(Some(&without), &with, Some(&managed)), "appeared");
-        assert!(load_wakes_sync(Some(&with), &without, Some(&managed)), "disappeared");
+        assert!(load_wakes_sync(Some(&without), &with, Some(std::slice::from_ref(&managed))), "appeared");
+        assert!(load_wakes_sync(Some(&with), &without, Some(std::slice::from_ref(&managed))), "disappeared");
         // 存在卻載入不了(例如另存成 UTF-16):`load_doc` 略過它,引擎每一輪都重載 doc 並發 sync://applied。
         // 前端因此重新載入時不能再喚醒 —— 否則就是沒有間隔的迴圈。
         std::fs::write(&managed, [0xff, 0xfe, b'H', 0x00]).unwrap();
         let unloadable = load_doc(&main).unwrap();
         assert!(unloadable.files.iter().all(|f| f.path != managed), "load_doc skips a non-UTF-8 include");
         let reloaded = load_doc(&main).unwrap();
-        assert!(!load_wakes_sync(Some(&unloadable), &reloaded, Some(&managed)));
+        assert!(!load_wakes_sync(Some(&unloadable), &reloaded, Some(std::slice::from_ref(&managed))));
     }
 }

@@ -65,7 +65,9 @@ import { isImeKey } from "@/lib/ime";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
-import { isWildcardOnly, labelsFor } from "@/lib/host-display";
+import { isWildcardOnly } from "@/lib/host-display";
+import { useFileLabels, useSpaceFileLabels } from "@/lib/sync-labels";
+import { removalSyncNote } from "@/lib/sync-sidebar";
 import { basename, cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -530,11 +532,13 @@ function HostActions({
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
   const hostTerminals = useSettingsStore((s) => s.hostTerminals);
   const setHostTerminal = useSettingsStore((s) => s.setHostTerminal);
-  const fileAliases = useSettingsStore((s) => s.fileAliases);
 
-  // Move targets: every OTHER loaded file, shown under its sidebar display label.
+  // Move targets: every OTHER loaded file, shown under its sidebar display label (a synced space's file under the space's name).
   const files = useMemo(() => data?.files ?? [], [data]);
-  const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
+  const labels = useFileLabels(files);
+  // A host in a synced space is removed on every computer that syncs it: the confirm says so.
+  const spaceLabels = useSpaceFileLabels();
+  const removeNote = removalSyncNote([detail.source_file], spaceLabels);
   const otherFiles = files.filter((f) => f !== detail.source_file);
   const labelOf = (f: string) => labels.get(f) ?? basename(f);
 
@@ -704,6 +708,7 @@ function HostActions({
               This deletes the host block from{" "}
               <span className="font-mono">{basename(detail.source_file)}</span>.
               This cannot be undone.
+              {removeNote && ` ${removeNote}`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

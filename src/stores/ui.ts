@@ -24,7 +24,16 @@ export type SettingsCategory =
 interface UiState {
   /** Currently selected host alias in the master-detail layout (null = nothing selected). */
   selectedAlias: string | null;
+  /**
+   * The file of the row that was clicked. It matters only for an alias with several copies,
+   * where the rows are told apart by alias AND file; null when the selection did not come from
+   * a row (the command palette, a lint issue, a host just added or renamed).
+   */
+  selectedFile: string | null;
+  /** Selects by alias alone: forgets the file. */
   setSelectedAlias: (alias: string | null) => void;
+  /** Selects one row: its alias and the file it is in. */
+  selectHost: (alias: string, file: string) => void;
   /** Free-text host-list filter. */
   search: string;
   setSearch: (search: string) => void;
@@ -73,9 +82,15 @@ interface UiState {
   /** Whether the ⌘K command palette is open (also driven by the global quick-connect hotkey). */
   paletteOpen: boolean;
   setPaletteOpen: (open: boolean) => void;
-  /** Whether the "Move hosts into sync" wizard is open. Session-only. */
-  syncMigrationOpen: boolean;
-  setSyncMigrationOpen: (open: boolean) => void;
+  /**
+   * The "Move hosts into a space" wizard: open while non-null; `spaceId` is the
+   * space it should move hosts into (null = let the wizard pick). Session-only.
+   */
+  syncMigration: { spaceId: string | null } | null;
+  setSyncMigration: (value: { spaceId: string | null } | null) => void;
+  /** Whether the review of synced hosts waiting for approval is open (approval toast, Settings → Sync). Session-only. */
+  syncApprovalsOpen: boolean;
+  setSyncApprovalsOpen: (open: boolean) => void;
 }
 
 /**
@@ -90,7 +105,9 @@ export const useUiStore = create<UiState>()(
   persist(
     (set) => ({
       selectedAlias: null,
-      setSelectedAlias: (selectedAlias) => set({ selectedAlias }),
+      selectedFile: null,
+      setSelectedAlias: (selectedAlias) => set({ selectedAlias, selectedFile: null }),
+      selectHost: (selectedAlias, selectedFile) => set({ selectedAlias, selectedFile }),
       search: "",
       setSearch: (search) => set({ search }),
       collapsedGroups: [],
@@ -122,8 +139,10 @@ export const useUiStore = create<UiState>()(
       setSettingsCategory: (settingsCategory) => set({ settingsCategory }),
       paletteOpen: false,
       setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
-      syncMigrationOpen: false,
-      setSyncMigrationOpen: (syncMigrationOpen) => set({ syncMigrationOpen }),
+      syncMigration: null,
+      setSyncMigration: (syncMigration) => set({ syncMigration }),
+      syncApprovalsOpen: false,
+      setSyncApprovalsOpen: (syncApprovalsOpen) => set({ syncApprovalsOpen }),
     }),
     {
       name: UI_STORAGE_KEY,

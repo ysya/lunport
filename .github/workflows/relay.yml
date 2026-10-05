@@ -22,6 +22,19 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
+  # The "Update relay" helper that ships inside relay/.github for deployed copies.
+  update-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - run: node --test relay/.github/scripts/update-relay.test.mjs
+      # The shipped workflow only runs in deployed copies, so lint it here; the image bundles shellcheck.
+      - name: Lint the workflows
+        run: docker run --rm -v "$GITHUB_WORKSPACE:/repo" -w /repo rhysd/actionlint:1.7.12 -color .github/workflows/relay.yml relay/.github/workflows/update-relay.yml
+
   # The Docker Compose self-host (relay/selfhost): the image runs the real protocol, keeps data
   # across a restart, and behind Caddy ignores a client-supplied CF-Connecting-IP.
   selfhost:

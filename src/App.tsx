@@ -1,21 +1,20 @@
 import { useEffect, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Bot, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
 
-import type { SyncStatus } from "@/bindings/SyncStatus";
 import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
 import { useApplyTheme } from "@/lib/theme";
 import { useSyncBackendSettings } from "@/lib/backend-settings";
 import { useGlobalHotkey } from "@/lib/global-hotkey";
 import { useAppShortcuts } from "@/lib/app-shortcuts";
-import { tauriInvoke } from "@/lib/ipc";
-import { syncDuplicatesKey, syncStatusKey } from "@/lib/sync";
+import { useSyncEvents } from "@/lib/sync-events";
+import { useAmbiguousNames } from "@/lib/sync-labels";
 import { clampSidebarWidth } from "@/lib/sidebar-width";
 import { HostList } from "@/components/HostList";
 import { HostEditor } from "@/components/HostEditor";
+import { DuplicateCopies } from "@/components/DuplicateCopies";
 import { AddHostDialog } from "@/components/AddHostDialog";
 import { LintDialog } from "@/components/LintDialog";
 import { DiscoverDialog } from "@/components/DiscoverDialog";
@@ -25,6 +24,8 @@ import { KnownHostsDialog } from "@/components/KnownHostsDialog";
 import { DeployKeyDialog } from "@/components/DeployKeyDialog";
 import { NewConfigFileDialog } from "@/components/NewConfigFileDialog";
 import { SyncMigrationDialog } from "@/components/SyncMigrationDialog";
+import { SyncUpgradeDialog } from "@/components/SyncUpgradeDialog";
+import { SyncApprovalDialog } from "@/components/SyncApprovalDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
@@ -57,6 +58,10 @@ function App() {
   useGlobalHotkey();
   // In-app ⌘F (focus host search) and ⌘N (new host).
   useAppShortcuts();
+  // Sync engine → UI (status, applied changes, conflicts, approvals, notices). The backend
+  // syncs on window focus by itself and holds that while the relay asks it to back off; a
+  // `sync_now` here would skip the backoff, so only the "Sync now" button calls it.
+  useSyncEvents();
 
   const { data, isLoading, isError, error } = useHostsQuery();
   const platform = usePlatform();
@@ -88,40 +93,15 @@ function App() {
     }
   }, [isError, error]);
 
-  // Sync engine → UI: status pushes refresh the Settings pane without polling;
-  // applied remote changes refresh the host list and the shadowed-alias list
-  // (a newly synced host can shadow a local one); conflicts surface as a toast;
-  // regaining focus nudges a sync round.
-  useEffect(() => {
-    let disposed = false;
-    const unlisten: Array<() => void> = [];
-    void listen<SyncStatus>("sync://status", (e) => queryClient.setQueryData(syncStatusKey, e.payload)).then(
-      (fn) => (disposed ? fn() : unlisten.push(fn)),
-    );
-    void listen<number>("sync://applied", () => {
-      void queryClient.invalidateQueries({ queryKey: ["config"] });
-      void queryClient.invalidateQueries({ queryKey: syncDuplicatesKey });
-    }).then((fn) => (disposed ? fn() : unlisten.push(fn)));
-    void listen<string[]>("sync://conflict", (e) => {
-      const aliases = e.payload.join(", ");
-      toast.warning("Sync overwrote a local change", {
-        description: `${aliases} was edited on another device more recently.`,
-      });
-      void queryClient.invalidateQueries({ queryKey: ["config"] });
-    }).then((fn) => (disposed ? fn() : unlisten.push(fn)));
-    const onFocus = () => void tauriInvoke("sync_now");
-    window.addEventListener("focus", onFocus);
-    return () => {
-      disposed = true;
-      unlisten.forEach((u) => u());
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [queryClient]);
-
   const hosts = data?.hosts ?? [];
   // Wildcard-only blocks (`Host *`) are config defaults, not hosts — keep them
   // out of every user-facing count.
   const hostCount = hosts.filter((h) => !isWildcardOnly(h)).length;
+  // A name with several copies, one in a synced space (any name with several copies until the sync
+  // overview is known): the editor would act on the first copy by name, not on the one the user
+  // clicked, so the pane explains the copies instead (read-only).
+  const ambiguous = useAmbiguousNames(hosts);
+  const copies = selectedAlias ? ambiguous.get(selectedAlias) : undefined;
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -249,7 +229,7 @@ function App() {
             {selectedAlias ? (
               <div className="mx-auto max-w-[720px] space-y-5 px-6 py-5 pb-24">
                 <DriftBanner />
-                <HostEditor alias={selectedAlias} />
+                {copies ? <DuplicateCopies alias={selectedAlias} copies={copies} /> : <HostEditor alias={selectedAlias} />}
               </div>
             ) : (
               <EmptySelection />
@@ -262,6 +242,8 @@ function App() {
         <DeployKeyDialog />
         <NewConfigFileDialog />
         <SyncMigrationDialog />
+        <SyncUpgradeDialog />
+        <SyncApprovalDialog />
         <McpApprovalDialog />
         <Toaster />
       </div>

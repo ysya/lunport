@@ -1,9 +1,23 @@
 //! 記錄模型與合併規則(spec §3.2、§6)。純資料,不碰 I/O。
+//! Sync v2(spaces spec §4.1、§4.2)加上帳戶 chain 的 `space` / `spacekey` 種類與它們的 payload。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::error::AppError;
+use crate::sync::crypto::ChainKeys;
+
+/// payload 的 `schema`(host/device/space/spacekey 皆為 1)與 v1 chain `meta` 的 `schema_version`。
 pub const SCHEMA_VERSION: u32 = 1;
+/// 帳戶 chain 的格式版本:`meta` `"account"` 的 `schema_version`(spec §4.1)。chain 上的值比它新 → 這台只讀。
+pub const ACCOUNT_SCHEMA_VERSION: u32 = 2;
+/// 帳戶 chain 上帳戶 `meta` 記錄的 id。
+pub const ACCOUNT_META_ID: &str = "account";
+/// 更換同步碼標記的 `meta` id 前綴,後接發起裝置的 device_id(spec §4.1、§7.5)。
+pub const ROTATION_META_PREFIX: &str = "rotation:";
+/// space0(v1 升級建立的第一個 space)的名稱與 slug(spec §5.2)。
+pub const SPACE0_NAME: &str = "Synced";
+pub const SPACE0_SLUG: &str = "synced";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -13,6 +27,10 @@ pub enum RecordKind {
     Password,
     Device,
     Meta,
+    /// 帳戶 chain:一個 space 的名稱與 slug(id = space id)。
+    Space,
+    /// 帳戶 chain:一個 space 的權杖與金鑰(id = space id;wire 名稱 `spacekey`)。
+    SpaceKey,
 }
 
 impl RecordKind {
@@ -23,6 +41,8 @@ impl RecordKind {
             RecordKind::Password => "password",
             RecordKind::Device => "device",
             RecordKind::Meta => "meta",
+            RecordKind::Space => "space",
+            RecordKind::SpaceKey => "spacekey",
         }
     }
 
@@ -33,13 +53,21 @@ impl RecordKind {
             "password" => Some(RecordKind::Password),
             "device" => Some(RecordKind::Device),
             "meta" => Some(RecordKind::Meta),
+            "space" => Some(RecordKind::Space),
+            "spacekey" => Some(RecordKind::SpaceKey),
             _ => None,
         }
+    }
+
+    /// 明文含祕密的種類(`spacekey` 的權杖與金鑰;v1 預留的 key/password):狀態檔只能保存它們的密文 envelope,
+    /// 解密只在記憶體(spec §3、§4.4)。
+    pub fn is_secret(self) -> bool {
+        matches!(self, RecordKind::Key | RecordKind::Password | RecordKind::SpaceKey)
     }
 }
 
 /// 一筆解密後的記錄。`payload` 依 kind 對應 `HostPayload` 等結構。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
     pub kind: RecordKind,
     pub id: String,
@@ -48,6 +76,27 @@ pub struct Record {
     pub device_id: String,
     pub deleted: bool,
     pub payload: Value,
+}
+
+/// 手寫 `Debug`:`kind.is_secret()` 的記錄(`spacekey` 等)payload 是明文祕密,只印佔位字樣。
+/// 內含 `Record` 的 `LocalRecord`、`SyncState`、`Merged` 等 derive 出來的 `Debug` 也因此不會洩漏。
+impl std::fmt::Debug for Record {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut shown = f.debug_struct("Record");
+        shown
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .field("version", &self.version)
+            .field("updated_at_ms", &self.updated_at_ms)
+            .field("device_id", &self.device_id)
+            .field("deleted", &self.deleted);
+        if self.kind.is_secret() {
+            shown.field("payload", &format_args!("<redacted>"));
+        } else {
+            shown.field("payload", &self.payload);
+        }
+        shown.finish()
+    }
 }
 
 /// 本機快取的記錄:附上最後看到的中繼序號與是否尚未上傳。
@@ -124,12 +173,93 @@ pub struct DevicePayload {
     /// 這台裝置持有的同步金鑰 id(Phase B 才會填)。
     #[serde(default)]
     pub keys: Vec<String>,
+    /// 這台勾選的 space id(spec §4.1)。v1 的裝置記錄沒有這個欄位 → 空;空的時候不寫出,v1 payload 的內容不變。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MetaPayload {
     pub schema_version: u32,
     pub created_by_app_version: String,
+}
+
+impl MetaPayload {
+    /// 帳戶 chain 的 `meta` `"account"`(spec §4.1):`{ schema_version: 2, created_by_app_version }`。
+    pub fn account(app_version: &str) -> Self {
+        Self { schema_version: ACCOUNT_SCHEMA_VERSION, created_by_app_version: app_version.to_string() }
+    }
+}
+
+/// `space` 記錄的 payload(帳戶 chain;id = space id = 該 space 的 chain id,spec §4.1)。刪除 = tombstone。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpacePayload {
+    pub schema: u32,
+    /// 顯示名稱;UI 盡量避免重名,但不作為一致性保證。
+    pub name: String,
+    /// 只用來組檔名(spec §4.3),不要求唯一。
+    pub slug: String,
+    pub created_at_ms: u64,
+    /// 更換同步碼後指向舊的 space id(spec §7.5)。
+    #[serde(default)]
+    pub previous_id: Option<String>,
+}
+
+impl SpacePayload {
+    /// space0 的確定值(spec §5.2):兩台同時從 v1 升級的電腦寫出相同的 payload。
+    pub fn space0() -> Self {
+        Self {
+            schema: SCHEMA_VERSION,
+            name: SPACE0_NAME.to_string(),
+            slug: SPACE0_SLUG.to_string(),
+            created_at_ms: 0,
+            previous_id: None,
+        }
+    }
+}
+
+/// `spacekey` 記錄的 payload(帳戶 chain;id = space id):該 space 的權杖與金鑰,`enc_key` 為標準 base64
+/// (spec §4.1)。明文是祕密:只在記憶體解開,狀態檔只存帳戶金鑰加密的 envelope;`Debug` 不印出權杖與金鑰。
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceKeyPayload {
+    pub schema: u32,
+    pub auth_token: String,
+    pub enc_key: String,
+}
+
+impl std::fmt::Debug for SpaceKeyPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpaceKeyPayload").field("schema", &self.schema).finish_non_exhaustive()
+    }
+}
+
+impl SpaceKeyPayload {
+    pub fn from_keys(keys: &ChainKeys) -> Self {
+        Self { schema: SCHEMA_VERSION, auth_token: keys.auth_token.clone(), enc_key: keys.enc_key_b64() }
+    }
+
+    /// 還原成這個 space 的 chain 金鑰;`space_id` = 記錄 id = chain id。格式不對 → Err(`ChainKeys::from_parts`)。
+    pub fn to_keys(&self, space_id: &str) -> Result<ChainKeys, AppError> {
+        ChainKeys::from_parts(space_id, &self.auth_token, &self.enc_key)
+    }
+}
+
+/// 更換同步碼的標記(`meta`,id = `rotation:<device_id>`):只出現在被淘汰的舊帳戶 chain(spec §4.1、§7.5)。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RotationMarkerPayload {
+    pub rotated_at_ms: u64,
+    pub by_device_id: String,
+    pub by_device_name: String,
+}
+
+/// 這台裝置的更換標記 id:`rotation:<device_id>`。
+pub fn rotation_meta_id(device_id: &str) -> String {
+    format!("{ROTATION_META_PREFIX}{device_id}")
+}
+
+/// `rotation:<device_id>` → `Some(device_id)`;帳戶 meta 或其他 id → None。
+pub fn rotation_marker_device(meta_id: &str) -> Option<&str> {
+    meta_id.strip_prefix(ROTATION_META_PREFIX).filter(|device| !device.is_empty())
 }
 
 #[cfg(test)]
@@ -216,5 +346,131 @@ mod tests {
         assert!(json.contains("\"idHash\":\"h\""), "got {json}");
         assert!(!json.contains("id_hash"));
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), env);
+    }
+
+    #[test]
+    fn space_kinds_use_their_wire_names_and_unknown_kinds_stay_unknown() {
+        assert_eq!(serde_json::to_string(&RecordKind::Space).unwrap(), "\"space\"");
+        assert_eq!(serde_json::to_string(&RecordKind::SpaceKey).unwrap(), "\"spacekey\"");
+        for kind in [RecordKind::Host, RecordKind::Device, RecordKind::Meta, RecordKind::Space, RecordKind::SpaceKey] {
+            assert_eq!(RecordKind::parse(kind.as_str()), Some(kind));
+            assert_eq!(serde_json::from_str::<RecordKind>(&format!("\"{}\"", kind.as_str())).unwrap(), kind);
+        }
+        // 未知種類照 v1 規則:不解析(呼叫端以原始密文保存在 sealed)。
+        assert_eq!(RecordKind::parse("future"), None);
+        assert!(serde_json::from_str::<RecordKind>("\"future\"").is_err());
+        assert_eq!(record_key(RecordKind::SpaceKey, "ab"), "spacekey:ab");
+    }
+
+    #[test]
+    fn only_secret_kinds_must_stay_sealed() {
+        assert!(RecordKind::SpaceKey.is_secret());
+        assert!(RecordKind::Key.is_secret());
+        assert!(RecordKind::Password.is_secret());
+        for kind in [RecordKind::Host, RecordKind::Device, RecordKind::Meta, RecordKind::Space] {
+            assert!(!kind.is_secret(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn device_payload_spaces_default_to_empty_and_keep_v1_payloads_unchanged() {
+        // v1 的裝置記錄沒有 spaces。
+        let v1 = serde_json::json!({ "schema": 1, "name": "A", "platform": "macos", "joined_at_ms": 1, "last_seen_ms": 2, "keys": [] });
+        let device: DevicePayload = serde_json::from_value(v1.clone()).unwrap();
+        assert!(device.spaces.is_empty());
+        // 沒勾選任何 space 時不寫出欄位:v1 的裝置記錄序列化後完全不變。
+        assert_eq!(serde_json::to_value(&device).unwrap(), v1);
+        let mut picked = device;
+        picked.spaces = vec!["a".repeat(64)];
+        let back: DevicePayload = serde_json::from_value(serde_json::to_value(&picked).unwrap()).unwrap();
+        assert_eq!(back.spaces, vec!["a".repeat(64)]);
+    }
+
+    #[test]
+    fn space0_payload_is_the_fixed_value_from_the_spec() {
+        assert_eq!(
+            serde_json::to_value(SpacePayload::space0()).unwrap(),
+            serde_json::json!({ "schema": 1, "name": "Synced", "slug": "synced", "created_at_ms": 0, "previous_id": null })
+        );
+        // previous_id 缺席 = None(serde default)。
+        let p: SpacePayload =
+            serde_json::from_value(serde_json::json!({ "schema": 1, "name": "Work", "slug": "work", "created_at_ms": 5 })).unwrap();
+        assert_eq!(p.previous_id, None);
+    }
+
+    #[test]
+    fn account_meta_and_rotation_markers() {
+        let meta = MetaPayload::account("0.17.0");
+        assert_eq!(meta.schema_version, 2);
+        assert_eq!(meta.created_by_app_version, "0.17.0");
+        assert_eq!(rotation_meta_id("dev-a"), "rotation:dev-a");
+        assert_eq!(rotation_marker_device("rotation:dev-a"), Some("dev-a"));
+        assert_eq!(rotation_marker_device(ACCOUNT_META_ID), None);
+        assert_eq!(rotation_marker_device("rotation:"), None);
+        let marker = RotationMarkerPayload { rotated_at_ms: 9, by_device_id: "dev-a".into(), by_device_name: "MacBook-A".into() };
+        assert_eq!(
+            serde_json::to_value(&marker).unwrap(),
+            serde_json::json!({ "rotated_at_ms": 9, "by_device_id": "dev-a", "by_device_name": "MacBook-A" })
+        );
+    }
+
+    #[test]
+    fn space_key_payload_round_trips_and_never_debug_prints_its_secrets() {
+        let keys = ChainKeys::generate().unwrap();
+        let payload = SpaceKeyPayload::from_keys(&keys);
+        assert_eq!(payload.schema, 1);
+        let back = payload.to_keys(&keys.chain_id).unwrap();
+        assert_eq!(back.auth_token, keys.auth_token);
+        assert_eq!(back.enc_key_b64(), keys.enc_key_b64());
+        // space id 就是 chain id:被竄改成路徑就拒絕。
+        assert!(payload.to_keys("../escape").is_err());
+        let shown = format!("{payload:?}");
+        assert!(!shown.contains(&keys.auth_token) && !shown.contains(&payload.enc_key), "{shown}");
+    }
+
+    #[test]
+    fn space_records_go_through_the_v1_record_codec() {
+        // 記錄加密與 v1 相同(spec §5.3):`reconcile::encode`/`decode` 直接處理新種類。
+        use crate::sync::reconcile::{decode, encode};
+        let account = ChainKeys::generate().unwrap();
+        let space = ChainKeys::generate().unwrap();
+        let record = Record {
+            kind: RecordKind::SpaceKey,
+            id: space.chain_id.clone(),
+            version: 1,
+            updated_at_ms: 10,
+            device_id: "dev-a".into(),
+            deleted: false,
+            payload: serde_json::to_value(SpaceKeyPayload::from_keys(&space)).unwrap(),
+        };
+        let item = encode(&account, &record, 0).unwrap();
+        assert_eq!(item.kind, "spacekey");
+        assert!(!item.ciphertext.contains(&space.auth_token));
+        let env = Envelope { id_hash: item.id_hash, kind: item.kind, seq: 1, nonce: item.nonce, ciphertext: item.ciphertext, deleted: false };
+        assert_eq!(decode(&account, &env).unwrap(), record);
+        assert!(decode(&space, &env).is_err(), "only the account key opens spacekey records");
+    }
+
+    #[test]
+    fn record_debug_never_prints_the_payload_of_secret_kinds() {
+        let keys = ChainKeys::generate().unwrap();
+        let record = Record {
+            kind: RecordKind::SpaceKey,
+            id: keys.chain_id.clone(),
+            version: 1,
+            updated_at_ms: 10,
+            device_id: "dev-a".into(),
+            deleted: false,
+            payload: serde_json::to_value(SpaceKeyPayload::from_keys(&keys)).unwrap(),
+        };
+        let local = LocalRecord { record: record.clone(), seq: 1, dirty: false };
+        // `Record` 自己,以及內含它的 `LocalRecord`(含 pretty 格式),都不能印出權杖與金鑰。
+        for shown in [format!("{record:?}"), format!("{local:#?}")] {
+            assert!(!shown.contains(&keys.auth_token), "{shown}");
+            assert!(!shown.contains(&keys.enc_key_b64()), "{shown}");
+        }
+        // 非祕密種類照常印出 payload,除錯才看得到內容。
+        let host = Record { kind: RecordKind::Host, payload: serde_json::json!({ "schema": 1, "text": "Host web" }), ..record };
+        assert!(format!("{host:?}").contains("Host web"));
     }
 }

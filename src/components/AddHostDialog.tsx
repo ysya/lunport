@@ -5,8 +5,7 @@ import { toast } from "sonner";
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
 import { useHostsQuery, useAddHost } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
-import { useSettingsStore } from "@/stores/settings";
-import { labelsFor } from "@/lib/host-display";
+import { useFileLabels } from "@/lib/sync-labels";
 import { basename } from "@/lib/utils";
 import { initialAddHostTarget } from "@/lib/add-host-target";
 
@@ -46,9 +45,8 @@ export interface AddHostDialogProps {
 export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
   const { data } = useHostsQuery();
   const files = useMemo(() => data?.files ?? [], [data]);
-  // Same display names as the sidebar: auto short labels + user file aliases.
-  const fileAliases = useSettingsStore((s) => s.fileAliases);
-  const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
+  // Same display names as the sidebar: auto short labels, user file aliases, and the names of synced spaces.
+  const labels = useFileLabels(files);
   const addHost = useAddHost();
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
   const setNewFileIntent = useUiStore((s) => s.setNewFileIntent);

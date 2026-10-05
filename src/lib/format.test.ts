@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { BackupInfo } from "@/bindings/BackupInfo";
-import { relativeTime, sortBackupsByNewest } from "@/lib/format";
+import { listNames, relativeTime, sortBackupsByNewest } from "@/lib/format";
 
 const NOW = 1_700_000_000_000; // fixed reference for deterministic tests
 
@@ -38,5 +38,14 @@ describe("sortBackupsByNewest", () => {
     const input = [mk(100), mk(300)];
     sortBackupsByNewest(input);
     expect(input.map((b) => b.timestamp_ms)).toEqual([100, 300]);
+  });
+});
+
+describe("listNames", () => {
+  it("reads like a sentence", () => {
+    expect(listNames([])).toBe("");
+    expect(listNames(["web"])).toBe("web");
+    expect(listNames(["web", "db"])).toBe("web and db");
+    expect(listNames(["web", "db", "cache"])).toBe("web, db and cache");
   });
 });

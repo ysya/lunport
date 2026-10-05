@@ -25,6 +25,9 @@ import {
   X,
   FilePlus2,
   Copy,
+  Cloud,
+  TriangleAlert,
+  Settings2,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
@@ -38,7 +41,7 @@ import {
   useSetTags,
   useTerminals,
 } from "@/lib/queries";
-import { rangeBetween } from "@/lib/selection-range";
+import { rangeBetween, rowClickKind } from "@/lib/selection-range";
 import { copyText } from "@/lib/clipboard";
 import { isImeKey } from "@/lib/ime";
 import { useSettingsStore } from "@/stores/settings";
@@ -56,10 +59,12 @@ import {
 } from "@/components/ui/select";
 import { AddHostDialog } from "@/components/AddHostDialog";
 import { FileViewDialog } from "@/components/FileViewDialog";
+import { ShadowFixDialog } from "@/components/ShadowFixDialog";
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuSub,
   ContextMenuSubContent,
@@ -70,6 +75,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -92,6 +98,20 @@ import { hostMatches, parseQuery } from "@/lib/host-filter";
 import { toast } from "sonner";
 import { buildNewOrder } from "@/lib/reorder";
 import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
+import { useSyncOverview } from "@/lib/sync";
+import { openSyncSettings } from "@/lib/sync-events";
+import { useAmbiguousNames, useShadowedCopies, useSpaceFileLabels } from "@/lib/sync-labels";
+import { useLastNonNull } from "@/lib/use-last-non-null";
+import {
+  ambiguityReason,
+  isSelectedRow,
+  removalSyncNote,
+  removeCopyLabel,
+  shadowKey,
+  shadowTooltip,
+  spaceFileProblems,
+  type ShadowFix,
+} from "@/lib/sync-sidebar";
 
 /** Sentinel Select value for the "All files" scope (Radix items can't be empty). */
 const ALL_FILES = "__all__";
@@ -152,6 +172,18 @@ interface HostRowProps {
   onMoveToNew?: () => void;
   /** Opens the shared remove-confirmation dialog (owned by HostList). */
   onRemove?: () => void;
+  /**
+   * Set when the alias has several copies, one in a synced space: the actions that find
+   * a host by its name (Move to file, Remove…) cannot tell which copy is meant, so the
+   * menus show them off, with this reason. The file-addressed `shadow` fixes stay.
+   */
+  lockedReason?: string;
+  /**
+   * ssh reads another copy of this alias first, the one in the space file labeled
+   * `winner` (spec §4.3); `inSpace`: this copy is in another space's file. Marked at
+   * the row's end, with file-addressed fixes.
+   */
+  shadow?: { winner: string; inSpace: boolean; onKeepAsLocal: () => void; onRemoveCopy: () => void };
   /** Row can be drag-reordered (within its source file). Off while searching. */
   draggable?: boolean;
   /** True while THIS row is the drag source — rendered semi-transparent. */
@@ -184,6 +216,8 @@ function HostRow({
   onMoveTo,
   onMoveToNew,
   onRemove,
+  lockedReason,
+  shadow,
   draggable,
   dragging,
   indicator,
@@ -287,6 +321,14 @@ function HostRow({
             {secondary}
           </span>
         )}
+        {shadow && (
+          <span
+            className="shrink-0 text-amber-600 dark:text-amber-400"
+            title={shadowTooltip(host.alias, shadow.winner, shadow.inSpace)}
+          >
+            <TriangleAlert className="size-3" aria-label={`Also in ${shadow.winner}, which ssh reads first`} />
+          </span>
+        )}
       </button>
       {/*
        * Connect affordance — overlays the row's right edge, hidden until the
@@ -324,7 +366,17 @@ function HostRow({
               <Upload className="size-3.5" />
               Deploy key…
             </DropdownMenuItem>
-            {onMoveTo && (moveTargets.length > 0 || onMoveToNew) && (
+            {lockedReason && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="max-w-64 leading-snug font-normal whitespace-normal">{lockedReason}</DropdownMenuLabel>
+                <DropdownMenuItem disabled>
+                  <FolderInput className="size-3.5" />
+                  Move to file
+                </DropdownMenuItem>
+              </>
+            )}
+            {!lockedReason && onMoveTo && (moveTargets.length > 0 || onMoveToNew) && (
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger>
                   <FolderInput className="size-3.5" />
@@ -348,7 +400,29 @@ function HostRow({
                 </DropdownMenuSubContent>
               </DropdownMenuSub>
             )}
-            {onRemove && (
+            {shadow && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={shadow.onKeepAsLocal}>
+                  <TriangleAlert className="size-3.5" />
+                  Keep this copy as {host.alias}-local
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={shadow.onRemoveCopy}>
+                  <Trash2 className="size-3.5" />
+                  {removeCopyLabel(shadow.winner)}
+                </DropdownMenuItem>
+              </>
+            )}
+            {lockedReason && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" disabled>
+                  <Trash2 className="size-3.5" />
+                  Remove…
+                </DropdownMenuItem>
+              </>
+            )}
+            {!lockedReason && onRemove && (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onSelect={onRemove}>
@@ -414,7 +488,17 @@ function HostRow({
           <Upload className="size-3.5" />
           Deploy key…
         </ContextMenuItem>
-        {onMoveTo && (moveTargets.length > 0 || onMoveToNew) && (
+        {lockedReason && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuLabel className="max-w-64 leading-snug font-normal whitespace-normal">{lockedReason}</ContextMenuLabel>
+            <ContextMenuItem disabled>
+              <FolderInput className="size-3.5" />
+              Move to file
+            </ContextMenuItem>
+          </>
+        )}
+        {!lockedReason && onMoveTo && (moveTargets.length > 0 || onMoveToNew) && (
           <ContextMenuSub>
             <ContextMenuSubTrigger>
               <FolderInput className="size-3.5" />
@@ -438,7 +522,29 @@ function HostRow({
             </ContextMenuSubContent>
           </ContextMenuSub>
         )}
-        {onRemove && (
+        {shadow && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem onSelect={shadow.onKeepAsLocal}>
+              <TriangleAlert className="size-3.5" />
+              Keep this copy as {host.alias}-local
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={shadow.onRemoveCopy}>
+              <Trash2 className="size-3.5" />
+              {removeCopyLabel(shadow.winner)}
+            </ContextMenuItem>
+          </>
+        )}
+        {lockedReason && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem variant="destructive" disabled>
+              <Trash2 className="size-3.5" />
+              Remove…
+            </ContextMenuItem>
+          </>
+        )}
+        {!lockedReason && onRemove && (
           <>
             <ContextMenuSeparator />
             <ContextMenuItem variant="destructive" onSelect={onRemove}>
@@ -470,7 +576,9 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const search = useUiStore((s) => s.search);
   const setSearch = useUiStore((s) => s.setSearch);
   const selectedAlias = useUiStore((s) => s.selectedAlias);
+  const selectedFile = useUiStore((s) => s.selectedFile);
   const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
+  const selectHost = useUiStore((s) => s.selectHost);
   const collapsedGroups = useUiStore((s) => s.collapsedGroups);
   const toggleGroup = useUiStore((s) => s.toggleGroup);
   const fileScope = useUiStore((s) => s.fileScope);
@@ -493,8 +601,10 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const moveHost = useMoveHost();
   const removeHost = useRemoveHost();
   const setTags = useSetTags();
-  // Row-menu remove confirmation — one dialog shared by every row.
-  const [removeTarget, setRemoveTarget] = useState<string | null>(null);
+  // The fix of a shadowed copy that waits for its confirm (Keep this copy as …-local, Remove this copy).
+  const [shadowFix, setShadowFix] = useState<ShadowFix | null>(null);
+  // Row-menu remove confirmation — one dialog shared by every row. The file says whether the host is a space's.
+  const [removeTarget, setRemoveTarget] = useState<{ alias: string; file: string } | null>(null);
 
   // ── Multi-select ──────────────────────────────────────────────────────────
   // Checked aliases are independent of the editor's single selection: ⌘-click
@@ -524,10 +634,63 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   // Select even for files that currently have zero hosts.
   const { data } = useHostsQuery();
   const files = useMemo(() => data?.files ?? [], [data]);
+  // Synced spaces: each selected space's file is labeled with the space name
+  // (spec §8), in Include order. The name comes from the sync account, so it wins
+  // over a local display alias and is renamed in Settings → Sync, not inline.
+  const overview = useSyncOverview();
+  const spaceLabels = useSpaceFileLabels();
+  // A paused or missing space: its group header carries a warning marker with the error.
+  const spaceProblems = useMemo(() => spaceFileProblems(overview.data?.spaces ?? []), [overview.data?.spaces]);
+  // Copies of an alias that a space file shadows (ssh reads the space's copy first).
+  const shadows = useShadowedCopies(hosts);
   // Auto heuristic over the FULL file set (the "clear back to this" baseline)…
   const autoLabels = useMemo(() => shortLabels(files), [files]);
-  // …overlaid with the user's per-file display aliases (an override wins).
-  const labels = useMemo(() => labelsFor(files, fileAliases), [files, fileAliases]);
+  // …overlaid with the user's per-file display aliases (an override wins), and
+  // the space names over both.
+  const labels = useMemo(
+    () => labelsFor(files, { ...fileAliases, ...Object.fromEntries(spaceLabels) }),
+    [files, fileAliases, spaceLabels],
+  );
+
+  /** The shadow marker and fixes for one row, when ssh reads another copy of its alias. */
+  const shadowFor = (host: HostSummary) => {
+    if (shadows.size === 0) return undefined;
+    const winner = shadows.get(shadowKey(host.source_file, host.alias));
+    if (!winner) return undefined;
+    const winnerLabel = labels.get(winner) ?? basename(winner);
+    // The fixes address the copy by file; each asks first, saying whom it reaches.
+    const fix = (action: "rename" | "remove") =>
+      setShadowFix({
+        alias: host.alias,
+        action,
+        file: host.source_file,
+        fileLabel: labels.get(host.source_file) ?? basename(host.source_file),
+        space: spaceLabels.get(host.source_file) ?? null,
+        winner: winnerLabel,
+      });
+    return {
+      winner: winnerLabel,
+      inSpace: spaceLabels.has(host.source_file),
+      onKeepAsLocal: () => fix("rename"),
+      onRemoveCopy: () => fix("remove"),
+    };
+  };
+  // A name with several copies, one of them in a synced space (any name with several copies until the
+  // sync overview is known): the actions that find a host by its name (Move to file, Remove…, drag, the
+  // batch actions) would change the first copy in load order, which may not be the row's own. They are
+  // off on every row of such a name.
+  const ambiguous = useAmbiguousNames(hosts);
+  const lockedReasonFor = (host: HostSummary) => {
+    const copies = ambiguous.get(host.alias);
+    return copies ? ambiguityReason(host.alias, copies, (file) => labels.get(file) ?? basename(file)) : undefined;
+  };
+  // A name that gained a copy since it was checked leaves the multi-selection.
+  useEffect(() => {
+    setCheckedAliases((prev) => {
+      const kept = new Set([...prev].filter((alias) => !ambiguous.has(alias)));
+      return kept.size === prev.size ? prev : kept;
+    });
+  }, [ambiguous]);
   // "Move to file" targets per SOURCE file (a host's own file never appears).
   // Keyed by source_file, not section — tag-mode sections aren't files.
   const moveTargetsByFile = useMemo(
@@ -685,26 +848,35 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   );
 
   const rowClick =
-    (alias: string) => (e: ReactMouseEvent<HTMLButtonElement>) => {
-      if (e.metaKey || e.ctrlKey) {
-        setCheckedAliases((prev) => {
-          const next = new Set(prev);
-          if (next.has(alias)) next.delete(alias);
-          else next.add(alias);
-          return next;
-        });
-        setSelectionAnchor(alias);
-        return;
+    (host: HostSummary) => (e: ReactMouseEvent<HTMLButtonElement>) => {
+      const alias = host.alias;
+      // The batch actions find hosts by name, so a name with several copies is never checked: a ⌘/Shift
+      // click on it just selects it (the editor pane then explains why) and leaves the rows already
+      // checked as they are — only a plain click clears them.
+      switch (rowClickKind(e, !ambiguous.has(alias))) {
+        case "toggle":
+          setCheckedAliases((prev) => {
+            const next = new Set(prev);
+            if (next.has(alias)) next.delete(alias);
+            else next.add(alias);
+            return next;
+          });
+          setSelectionAnchor(alias);
+          return;
+        case "range":
+          setCheckedAliases(
+            new Set(rangeBetween(visibleAliases, selectionAnchor, alias).filter((a) => !ambiguous.has(a))),
+          );
+          return;
+        case "keep":
+          selectHost(alias, host.source_file);
+          return;
+        case "select":
+          clearChecked();
+          setSelectionAnchor(alias);
+          selectHost(alias, host.source_file);
+          return;
       }
-      if (e.shiftKey) {
-        setCheckedAliases(
-          new Set(rangeBetween(visibleAliases, selectionAnchor, alias)),
-        );
-        return;
-      }
-      clearChecked();
-      setSelectionAnchor(alias);
-      setSelectedAlias(alias);
     };
 
   const batchMove = async (targetFile: string) => {
@@ -712,7 +884,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     let moved = 0;
     for (const alias of targets) {
       const h = hosts.find((x) => x.alias === alias);
-      if (!h || h.source_file === targetFile) continue;
+      if (!h || h.source_file === targetFile || ambiguous.has(alias)) continue;
       try {
         await moveHost.mutateAsync({ alias, targetFile });
         moved += 1;
@@ -733,7 +905,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     let tagged = 0;
     for (const alias of targets) {
       const h = hosts.find((x) => x.alias === alias);
-      if (!h || h.tags.includes(t)) continue;
+      if (!h || h.tags.includes(t) || ambiguous.has(alias)) continue;
       try {
         await setTags.mutateAsync({ alias, tags: [...h.tags, t] });
         tagged += 1;
@@ -750,6 +922,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     setBatchRemoveOpen(false);
     let removed = 0;
     for (const alias of targets) {
+      if (ambiguous.has(alias)) continue;
       try {
         await removeHost.mutateAsync({ alias });
         removed += 1;
@@ -761,6 +934,15 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     toast.success(`Removed ${removed}/${targets.length} hosts`);
     clearChecked();
   };
+
+  // What a removal says about syncing: a host in a synced space is removed on every computer that syncs it.
+  const batchRemoveNote = removalSyncNote(
+    [...checkedAliases].flatMap((alias) => hosts.find((h) => h.alias === alias)?.source_file ?? []),
+    spaceLabels,
+  );
+  // Kept while the single-host dialog animates out, so its text does not go empty.
+  const removing = useLastNonNull(removeTarget);
+  const removeNote = removing ? removalSyncNote([removing.file], spaceLabels) : null;
 
   // "N hosts" reflects the scoped + filtered CONNECTABLE count (no wildcards).
   const hostCount = sections.reduce((n, s) => n + s.hosts.length, 0);
@@ -1011,6 +1193,9 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                 !searchActive &&
                 collapsedGroups.includes(section.file);
               const alias = fileAliases[section.file];
+              // A synced space's group: named by the account, renamed in Settings → Sync.
+              const spaceName = section.kind === "file" ? spaceLabels.get(section.file) : undefined;
+              const spaceProblem = section.kind === "file" ? spaceProblems.get(section.file) : undefined;
               const isEditing = editingFile === section.file;
               return (
                 <div
@@ -1107,13 +1292,18 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               onDoubleClick={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
-                                beginEdit(section.file);
+                                // A space's header cannot be renamed here, but the double-click must not collapse it either:
+                                // the first click armed a collapse that `beginEdit` would have cancelled.
+                                if (spaceName) cancelPendingCollapse();
+                                else beginEdit(section.file);
                               }}
                               className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
                               title={
-                                alias
-                                  ? `${alias} — ${section.file} (double-click to rename)`
-                                  : `${section.file} (double-click to rename)`
+                                spaceName
+                                  ? `Synced space “${spaceName}” — ${section.file} (rename it in Settings → Sync)`
+                                  : alias
+                                    ? `${alias} — ${section.file} (double-click to rename)`
+                                    : `${section.file} (double-click to rename)`
                               }
                               aria-expanded={!isCollapsed}
                             >
@@ -1128,6 +1318,14 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                                 <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
                                   {section.name}
                                 </span>
+                                {spaceName && (
+                                  <Cloud className="size-3 shrink-0 text-muted-foreground/70" aria-label="Synced space" />
+                                )}
+                                {spaceProblem && (
+                                  <span className="shrink-0 text-amber-600 dark:text-amber-400" title={spaceProblem}>
+                                    <TriangleAlert className="size-3" aria-label={`Problem with ${spaceName}: ${spaceProblem}`} />
+                                  </span>
+                                )}
                               </span>
                               <span className="font-mono text-[0.6875rem] text-muted-foreground/70 tabular-nums">
                                 {section.hosts.length}
@@ -1158,17 +1356,24 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                             }}
                           >
                             <Plus />
-                            New host in this file
+                            {spaceName ? "New host in this space" : "New host in this file"}
                           </ContextMenuItem>
                           <ContextMenuSeparator />
                           <ContextMenuItem onSelect={() => setViewFile(section.file)}>
                             <FileText />
                             View file
                           </ContextMenuItem>
-                          <ContextMenuItem onSelect={() => beginEdit(section.file)}>
-                            <Pencil />
-                            Rename label
-                          </ContextMenuItem>
+                          {spaceName ? (
+                            <ContextMenuItem onSelect={openSyncSettings}>
+                              <Settings2 />
+                              Manage spaces…
+                            </ContextMenuItem>
+                          ) : (
+                            <ContextMenuItem onSelect={() => beginEdit(section.file)}>
+                              <Pencil />
+                              Rename label
+                            </ContextMenuItem>
+                          )}
                         </ContextMenuContent>
                       </ContextMenu>
                     ))}
@@ -1182,10 +1387,10 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               <HostRow
                                 key={`${host.source_file}::${host.alias}`}
                                 host={host}
-                                active={host.alias === selectedAlias}
+                                active={isSelectedRow(host, { alias: selectedAlias, file: selectedFile }, ambiguous.has(host.alias))}
                                 delay={nextDelay()}
                                 variant="defaults"
-                                onSelect={() => setSelectedAlias(host.alias)}
+                                onSelect={() => selectHost(host.alias, host.source_file)}
                                 onDragOver={() => setDropGap(null)}
                               />
                             ))}
@@ -1203,10 +1408,10 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                             <HostRow
                               key={`${host.source_file}::${host.alias}`}
                               host={host}
-                              active={host.alias === selectedAlias}
+                              active={isSelectedRow(host, { alias: selectedAlias, file: selectedFile }, ambiguous.has(host.alias))}
                               delay={nextDelay()}
                               variant="host"
-                              onSelect={rowClick(host.alias)}
+                              onSelect={rowClick(host)}
                               checked={checkedAliases.has(host.alias)}
                               onConnect={() => connectTo(host.alias)}
                               onDeployKey={() => setDeployKeyAlias(host.alias)}
@@ -1215,12 +1420,16 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               onMoveToNew={() =>
                                 setNewFileIntent({ kind: "move", aliases: [host.alias] })
                               }
-                              onRemove={() => setRemoveTarget(host.alias)}
+                              onRemove={() => setRemoveTarget({ alias: host.alias, file: host.source_file })}
+                              lockedReason={lockedReasonFor(host)}
+                              shadow={shadowFor(host)}
                               showTags={showHostTags && groupMode === "file"}
                               // Draggable when reordering OR a cross-file move
                               // is possible (single-host files can drag out).
                               draggable={
-                                canReorder && (section.hosts.length > 1 || files.length > 1)
+                                canReorder &&
+                                (section.hosts.length > 1 || files.length > 1) &&
+                                !ambiguous.has(host.alias)
                               }
                               dragging={drag?.file === section.file && drag.index === i}
                               indicator={
@@ -1380,6 +1589,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
               </span>{" "}
               — deletes each Host block from its config file. Backups are
               written first.
+              {batchRemoveNote && ` ${batchRemoveNote}`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1401,19 +1611,20 @@ export function HostList({ hosts, isLoading }: HostListProps) {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Remove <span className="font-mono">{removeTarget}</span>?
+              Remove <span className="font-mono">{removing?.alias}</span>?
             </AlertDialogTitle>
             <AlertDialogDescription>
               Deletes this Host block from its config file. A backup is written
               first, so it can be restored from Backup history.
+              {removeNote && ` ${removeNote}`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                const alias = removeTarget;
-                if (alias === null) return;
+                if (removeTarget === null) return;
+                const { alias } = removeTarget;
                 setRemoveTarget(null);
                 removeHost.mutate(
                   { alias },
@@ -1431,6 +1642,9 @@ export function HostList({ hosts, isLoading }: HostListProps) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Keep this copy as …-local / Remove this copy: confirmed first, saying whom it reaches. */}
+      <ShadowFixDialog fix={shadowFix} onClose={() => setShadowFix(null)} />
     </div>
   );
 }
