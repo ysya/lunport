@@ -215,6 +215,12 @@ pub struct LocalSlot {
     /// 最後看到的 `keyslot` payload:帳戶裡找不到這個插槽時(例如在沒有 SP3 的電腦上更換了同步碼)據此補寫(spec §6.6)。
     #[serde(default)]
     pub payload: Option<KeySlotPayload>,
+    /// 這台電腦自己把哪一把金鑰(指紋)上傳成這個插槽的同步金鑰:只有這台的使用者在這台選了同步它(建立插槽時選「Sync key」、
+    /// 或之後的「Sync this key」「Sync the new key」)才會設定,帳戶裡別人的變更不會動它。補寫 `key`(spec §6.6)時,連到本機金鑰的
+    /// 插槽只認它:`payload` 是帳戶裡最新的 `keyslot`,帳戶裡的任何成員都改得動(改成 `synced`、填上公開的指紋),證明不了使用者
+    /// 同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。
+    #[serde(default)]
+    pub uploaded_fingerprint: Option<String>,
 }
 
 /// 插槽裡放的東西(SP3 spec §4.2)。
@@ -679,6 +685,7 @@ mod tests {
                     key_type: None,
                     has_passphrase: None,
                 }),
+                uploaded_fingerprint: Some("SHA256:vUthAmDZoxYXCTAPEZUn5qtWSMHWQCEcUfpnyM05mMs".to_string()),
             },
         );
         s.key_slots.insert(
@@ -694,6 +701,7 @@ mod tests {
                 last_error: None,
                 asked: false,
                 payload: None,
+                uploaded_fingerprint: None,
             },
         );
         s
@@ -751,10 +759,17 @@ mod tests {
                 last_error: None,
                 asked: false,
                 payload: None,
+                uploaded_fingerprint: Some("SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew".into()),
             },
         );
         let back: SyncStateV2 = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
         assert_eq!(back.key_slots, state.key_slots);
+
+        // 沒有 `uploaded_fingerprint` 的記錄(這個欄位之前寫的狀態檔)讀進來是 None:沒有人同意過上傳,不會補寫私鑰。
+        let mut json = serde_json::to_value(&state).unwrap();
+        json["key_slots"]["3fa2c1d90123456789abcdef01234567"].as_object_mut().unwrap().remove("uploaded_fingerprint");
+        let older: SyncStateV2 = serde_json::from_value(json).unwrap();
+        assert_eq!(older.key_slots["3fa2c1d90123456789abcdef01234567"].uploaded_fingerprint, None);
     }
 
     #[test]
