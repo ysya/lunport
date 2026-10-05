@@ -624,6 +624,30 @@ pub async fn sync_setup_keys(app: AppHandle, choices: Vec<crate::sync::slot_setu
     run_then_overview(app, true, move |env| crate::sync::slot_setup::setup_keys(env, engine_active(), choices).map(|_| ())).await
 }
 
+/// 改成同步或停止同步(SP3 spec §6.3)。寫帳戶記錄:持有 lifecycle 鎖。
+#[tauri::command]
+pub async fn sync_key_set_mode(app: AppHandle, slot_id: String, mode: crate::sync::slot_rules::SlotMode) -> Result<SyncOverview, AppError> {
+    run_then_overview(app, true, move |env| crate::sync::slots::set_mode(env, &slot_id, mode)).await
+}
+
+/// 在這台為插槽挑一把金鑰(只改這台)。
+#[tauri::command]
+pub async fn sync_key_pick(app: AppHandle, slot_id: String, path: String) -> Result<SyncOverview, AppError> {
+    run_then_overview(app, false, move |env| crate::sync::slots::pick(env, &slot_id, &path)).await
+}
+
+/// 改用同步的金鑰(只改這台)。
+#[tauri::command]
+pub async fn sync_key_use_synced(app: AppHandle, slot_id: String) -> Result<SyncOverview, AppError> {
+    run_then_overview(app, false, move |env| crate::sync::slots::use_synced(env, &slot_id)).await
+}
+
+/// 刪除沒有主機用到的副本(只改這台)。
+#[tauri::command]
+pub async fn sync_key_delete_copy(app: AppHandle, slot_id: String) -> Result<SyncOverview, AppError> {
+    run_then_overview(app, false, move |env| crate::sync::slots::delete_copy(env, &slot_id)).await
+}
+
 /// 更換同步碼(spec §7.5):第 1 步在這裡做完,之後由背景執行緒逐步推進;進度在 `SyncOverview::rotation`,完成時
 /// 留下 `SyncNotice::NewSyncCode`(UI 以 `sync_show_words` 顯示新同步碼)。
 #[tauri::command]

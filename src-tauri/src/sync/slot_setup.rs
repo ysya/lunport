@@ -116,7 +116,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// 存在的私鑰檔(第一行是 `-----BEGIN … PRIVATE KEY-----`;大於 64 KiB 的不讀)。
-fn is_private_key_file(path: &Path) -> bool {
+pub(crate) fn is_private_key_file(path: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(path) else { return false };
     if !meta.is_file() || meta.len() > 64 * 1024 {
         return false;
