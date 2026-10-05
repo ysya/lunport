@@ -123,6 +123,62 @@ pub struct SyncSpaceView {
     pub synced_on: Vec<String>,
 }
 
+/// 一個金鑰插槽(SP3 spec §7.2),依名稱排序。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct SyncKeySlotView {
+    pub id: String,
+    /// 插槽名稱;來自別台電腦,UI 以 `revealHidden` 顯示。
+    pub name: String,
+    pub mode: crate::sync::slot_rules::SlotMode,
+    /// `synced` 的金鑰指紋;`own` 為 null。
+    pub fingerprint: Option<String>,
+    pub key_type: Option<String>,
+    pub has_passphrase: Option<bool>,
+    /// 建立插槽的電腦名稱。
+    pub origin_device: String,
+    pub origin_is_this: bool,
+    /// 主機 `IdentityFile` 的值(`~/.ssh/sshelter/keys/<file>`)。
+    pub value: String,
+    /// 這台用到它的主機。
+    pub hosts: Vec<String>,
+    pub status: SlotStatusView,
+    /// 其他電腦的插槽狀況(它們的 `device.slots`)。
+    pub devices: Vec<SlotDeviceView>,
+}
+
+/// 插槽在這台電腦上的狀態(SP3 spec §7.2、§7.3)。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SlotStatusView {
+    /// 插槽裡有金鑰;`file` = 這台實際用的檔案(連到的金鑰,或插槽本身的副本)。
+    Ready { file: String, synced_copy: bool, fingerprint: Option<String> },
+    /// 這台需要金鑰:`own` 要使用者挑(`waiting_for_sync` = false),`synced` 的私鑰還沒到(true)。
+    NeedsKey { waiting_for_sync: bool },
+    /// 沒有主機用到,但這台還留著同步來的副本或複製檔(可以刪除)。
+    NotInUse { file: String },
+    /// 這台沒有主機用到它。
+    NotUsedHere,
+    /// 插槽有同步的金鑰,這台用的卻是另一把(本機挑的,或舊的副本):可以改用。
+    SyncedAvailable { file: String },
+    /// 建立插槽的這台,原檔換成了另一把金鑰;其他電腦還是上一把。
+    SourceChanged { file: String },
+    Error { message: String },
+}
+
+/// 另一台電腦的插槽狀況。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct SlotDeviceView {
+    pub name: String,
+    pub fingerprint: Option<String>,
+    pub synced_copy: bool,
+}
+
 /// Settings → Sync 的全部狀態(`sync_overview` 與 `sync://status`)。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -152,6 +208,8 @@ pub struct SyncOverview {
     pub approvals_waiting: u64,
     /// `~/.ssh/sshelter/` 裡不在 Include 清單上的 `.config` 檔:OpenSSH 不讀,只提示(spec §4.3)。
     pub stray_files: Vec<String>,
+    /// 帳戶裡的金鑰插槽與這台還留著副本的舊插槽(SP3 spec §7.2)。
+    pub key_slots: Vec<SyncKeySlotView>,
     /// 等使用者看過的提示,`sync_dismiss_notice(index)` 清掉。
     pub notices: Vec<SyncNotice>,
     /// 離開帳戶時同步碼刪不掉:顯示警示與重試。
@@ -262,6 +320,10 @@ pub fn overview(env: &SyncEnv) -> Result<SyncOverview, AppError> {
     let account_dirty = account
         .map(|a| a.records.values().filter(|l| l.dirty).count() + a.sealed.values().filter(|x| x.dirty).count())
         .unwrap_or(0) as u64;
+    let key_slots = match (keys.as_ref(), env.ssh_dir.parent()) {
+        (Some(k), Some(home)) => crate::sync::slots::views(&s, k, home),
+        _ => Vec::new(),
+    };
     Ok(SyncOverview {
         joined: s.joined(),
         account_short: account.map(|a| a.chain_id.chars().take(8).collect()),
@@ -292,6 +354,7 @@ pub fn overview(env: &SyncEnv) -> Result<SyncOverview, AppError> {
         devices: device_list,
         spaces,
         stray_files,
+        key_slots,
         notices: s.notices.clone(),
         phrase_cleanup_pending: s.phrase_cleanup_pending,
     })

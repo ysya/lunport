@@ -1,15 +1,25 @@
 //! SP3 金鑰插槽的引擎(spec `docs/superpowers/specs/2026-10-05-sp3-key-slots-design.md` §4、§6):帳戶裡 `keyslot` 與
-//! `key` 記錄的讀寫(本節)、每一輪在這台維護插槽(`reconcile`,Task 4)、模式切換與挑選(Task 6)。
+//! `key` 記錄的讀寫、每一輪在這台維護插槽(`reconcile`)與給 UI 的插槽檢視(`views`)、模式切換與挑選(Task 6)。
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::config::model::Item;
+use crate::config::parser::parse_file;
 use crate::error::AppError;
 use crate::sync::crypto::{id_hash, ChainKeys};
-use crate::sync::merge::put_account_record;
+use crate::sync::dto::{SlotDeviceView, SlotStatusView, SyncKeySlotView};
+use crate::sync::merge::{device_name, devices, put_account_record, set_device_slots};
 use crate::sync::planner::next_timestamp;
-use crate::sync::record::{record_key, Record, RecordKind};
-use crate::sync::slot_rules::{valid_key_payload, valid_slot_payload, KeyPayload, KeySlotPayload, SLOT_SCHEMA};
-use crate::sync::state_v2::{sealed_key, AccountState, SealedRecord};
+use crate::sync::record::{record_key, HostPayload, Record, RecordKind};
+use crate::sync::slot_files::{self, LinkKind};
+use crate::sync::slot_rules::{
+    inspect_private_key, parse_public_key, public_path, slot_file_name, slot_file_of_value, slot_value, valid_key_payload,
+    valid_slot_payload, DeviceSlot, KeyPayload, KeySlotPayload, SlotMode, SLOT_DIR, SLOT_SCHEMA,
+};
+use crate::sync::state_v2::{sealed_key, AccountState, LocalSlot, SealedRecord, SlotSource, SyncNotice, SyncStateV2};
 
 // ── 帳戶記錄 ──────────────────────────────────────────────────────────────────────────────────
 
@@ -88,6 +98,407 @@ pub fn open_key_secret(account: &AccountState, account_keys: &ChainKeys, slot_id
     valid_key_payload(&payload).then_some(payload.private_key)
 }
 
+// ── 每一輪在這台維護插槽(SP3 spec §6.2–§6.6)──────────────────────────────────────────────────
+//
+// 一個檔案是不是 SSHelter 放的,只看這個插槽 id 自己的本機記錄(`SyncStateV2::key_slots[id]`),不看檔名:插槽檔名
+// (`<name>-<id8>`)不保證在插槽 id 之間唯一,帳戶裡的成員可以發佈同名、同 id 前 8 字元的另一個插槽。從主機的
+// `IdentityFile` 值取得的檔名(`slot_hosts`、`identity_slot_files`)只當查詢的 key,絕不拿來組出要寫入或移除的路徑。
+
+pub const MISMATCH_MESSAGE: &str = "The synced key didn't match and was not written.";
+
+pub fn in_the_way_message(path: &Path) -> String {
+    format!("A file SSHelter didn't create is in the way: {}. Move it, then sync again.", path.display())
+}
+
+pub fn source_gone_message(path: &str) -> String {
+    format!("The key this slot points to is gone: {path}.")
+}
+
+/// 一個 Host 區塊文字裡,指到插槽的 `IdentityFile`(插槽檔名)。註解掉的行不算。
+pub fn identity_slot_files(text: &str) -> Vec<String> {
+    let (items, _) = parse_file(text);
+    let mut out = Vec::new();
+    for item in &items {
+        let Item::Host(host) = item else { continue };
+        for line in &host.body {
+            if let Item::Directive(d) = line {
+                if d.key == "identityfile" && !d.serializes_as_comment() {
+                    out.extend(slot_file_of_value(&d.value));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 這台勾選的 space 裡、未刪除的主機中,用到各插槽(依插槽檔名)的 alias(排序、不重複)。等待核准的主機不算。
+pub fn slot_hosts(state: &SyncStateV2) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for space in state.spaces.values().filter(|sp| sp.selected) {
+        for local in space.records.values().filter(|l| l.record.kind == RecordKind::Host && !l.record.deleted) {
+            let Ok(payload) = serde_json::from_value::<HostPayload>(local.record.payload.clone()) else { continue };
+            for file in identity_slot_files(&payload.text) {
+                out.entry(file).or_default().insert(local.record.id.clone());
+            }
+        }
+    }
+    out.into_iter().map(|(file, hosts)| (file, hosts.into_iter().collect())).collect()
+}
+
+/// 本機一把金鑰的指紋:OpenSSH 格式從私鑰讀;其他格式讀旁邊的 `.pub`;都讀不到 → None。
+pub fn local_key_fingerprint(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if let Ok(facts) = inspect_private_key(&text) {
+        return Some(facts.fingerprint);
+    }
+    let public = std::fs::read_to_string(public_path(path)).ok()?;
+    parse_public_key(public.lines().next()?).map(|(_, fingerprint)| fingerprint)
+}
+
+/// 一輪插槽維護的結果:要發的通知(呼叫端用 `add_notice` 存進狀態並發出)、狀態是否變了。
+#[derive(Debug, Default)]
+pub struct SlotRound {
+    pub notices: Vec<SyncNotice>,
+    pub changed: bool,
+}
+
+/// 把通知加進狀態的 `notices`。「這台需要金鑰」至多一則:新名稱併進還沒關掉的那一則(前端的「Keys for this computer」
+/// 因此只開一次);其他種類一樣的不重複加。
+pub fn add_notice(notices: &mut Vec<SyncNotice>, notice: &SyncNotice) {
+    if let SyncNotice::KeysNeeded { names } = notice {
+        if let Some(SyncNotice::KeysNeeded { names: open }) = notices.iter_mut().find(|n| matches!(n, SyncNotice::KeysNeeded { .. })) {
+            for name in names {
+                if !open.contains(name) {
+                    open.push(name.clone());
+                }
+            }
+            return;
+        }
+    }
+    if !notices.contains(notice) {
+        notices.push(notice.clone());
+    }
+}
+
+/// 依合併後的帳戶與 space 記錄,維護這台的插槽(SP3 spec §6.2–§6.6)。檔案系統的動作在這裡做(呼叫端不持有任何鎖);
+/// 狀態的變更寫進 `state`(`key_slots` 與帳戶的 `device.slots`、補寫的 `keyslot`/`key`),由呼叫端提交。`home` = 家目錄。
+pub fn reconcile(state: &mut SyncStateV2, account_keys: &ChainKeys, home: &Path, now_ms: u64) -> SlotRound {
+    let mut round = SlotRound::default();
+    let needed = slot_hosts(state);
+    let device_id = state.device_id.clone();
+    let keys_dir = home.join(SLOT_DIR);
+    let Some(account) = state.account.as_mut() else { return round };
+    let live = live_slots(account);
+    let mut asked = Vec::new();
+
+    for (id, payload) in &live {
+        let file = slot_file_name(&payload.name, id);
+        let path = keys_dir.join(&file);
+        let before = state.key_slots.get(id).cloned();
+        let mut local = before.clone().unwrap_or_else(|| LocalSlot {
+            file_name: file.clone(),
+            source: None,
+            last_error: None,
+            asked: false,
+            payload: None,
+        });
+        if local.file_name != file {
+            // 插槽建立之後不改名(spec §1 非目標),帳戶裡的名稱卻變了(只有帳戶裡的惡意成員寫得出來):這個插槽記著的檔案在舊路徑,
+            // 以後不再碰它們;新路徑上的東西不屬於這個插槽(它的記錄指的是舊路徑),從頭來過 —— 不能拿新路徑去替換或移除別人的檔案。
+            local.file_name = file.clone();
+            local.source = None;
+            local.last_error = None;
+        }
+        local.payload = Some(payload.clone());
+        let is_needed = needed.contains_key(&file);
+        if is_needed {
+            maintain(&mut local, id, payload, account, account_keys, &keys_dir, &path);
+            if local.source.is_none() && local.last_error.is_none() && payload.mode == SlotMode::Own && !local.asked {
+                local.asked = true;
+                asked.push(payload.name.clone());
+            }
+        } else {
+            drop_link(&mut local, &path);
+        }
+        if !is_needed && local.source.is_none() {
+            // 這台沒用到、也沒留東西:不記。
+            round.changed |= state.key_slots.remove(id).is_some();
+        } else if before.as_ref() != Some(&local) {
+            state.key_slots.insert(id.clone(), local);
+            round.changed = true;
+        }
+    }
+
+    // 這台記著、帳戶裡卻沒有的插槽。已刪除的(tombstone):移除連結、副本留著。完全找不到記錄而主機還用著:補寫(spec §6.6,
+    // 例如在沒有 SP3 的電腦上更換了同步碼)。
+    let gone: Vec<String> = state.key_slots.keys().filter(|id| !live.iter().any(|(l, _)| l == *id)).cloned().collect();
+    for id in gone {
+        let mut local = state.key_slots[&id].clone();
+        let path = keys_dir.join(&local.file_name);
+        if !slot_record_exists(account, &id) && needed.contains_key(&local.file_name) {
+            if let Some(payload) = local.payload.clone() {
+                republish(account, account_keys, &id, &payload, &local, &path, &device_id, now_ms);
+                round.changed = true;
+                continue;
+            }
+        }
+        let before = local.clone();
+        drop_link(&mut local, &path);
+        if local.source.is_none() {
+            state.key_slots.remove(&id);
+            round.changed = true;
+        } else if local != before {
+            state.key_slots.insert(id, local);
+            round.changed = true;
+        }
+    }
+
+    let slots: Vec<DeviceSlot> = state.key_slots.iter().filter_map(|(id, l)| device_slot(id, l)).collect();
+    round.changed |= set_device_slots(account, &device_id, slots, now_ms);
+    if !asked.is_empty() {
+        round.notices.push(SyncNotice::KeysNeeded { names: asked });
+    }
+    round
+}
+
+fn device_slot(slot_id: &str, local: &LocalSlot) -> Option<DeviceSlot> {
+    match &local.source {
+        Some(SlotSource::Linked { fingerprint, .. }) => {
+            Some(DeviceSlot { slot_id: slot_id.to_string(), fingerprint: fingerprint.clone(), synced_copy: false })
+        }
+        Some(SlotSource::SyncedCopy { fingerprint }) => {
+            Some(DeviceSlot { slot_id: slot_id.to_string(), fingerprint: Some(fingerprint.clone()), synced_copy: true })
+        }
+        None => None,
+    }
+}
+
+/// 沒有主機用到的插槽:symlink / hard link 移除(原檔不動);同步來的副本與複製檔留著(私鑰不自動刪除)。
+/// 記錄說這裡是 SSHelter 建的 symlink、現在卻是一般檔案(使用者自己換上的):那不是 SSHelter 放的,留著,只忘掉這筆記錄。
+fn drop_link(local: &mut LocalSlot, path: &Path) {
+    let Some(SlotSource::Linked { link: kind @ (LinkKind::Symlink | LinkKind::HardLink), .. }) = &local.source else { return };
+    let still_ours = *kind != LinkKind::Symlink
+        || !slot_files::occupied(path)
+        || std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if still_ours {
+        if let Err(e) = slot_files::remove_slot(path) {
+            local.last_error = Some(e.to_string());
+            return;
+        }
+    }
+    local.source = None;
+    local.last_error = None;
+}
+
+/// 這台需要的插槽:連結的確認原檔還在、hard link 與複製跟上原檔;副本被刪掉就重放;空的就試著落地。
+fn maintain(
+    local: &mut LocalSlot,
+    slot_id: &str,
+    payload: &KeySlotPayload,
+    account: &AccountState,
+    account_keys: &ChainKeys,
+    keys_dir: &Path,
+    path: &Path,
+) {
+    match local.source.clone() {
+        Some(SlotSource::Linked { path: source, link, origin, .. }) => {
+            let source_path = PathBuf::from(&source);
+            if !source_path.is_file() {
+                local.last_error = Some(source_gone_message(&source));
+                return;
+            }
+            // hard link 與複製不會跟著原檔走:內容不同(原檔被換掉)就重新連結;任何一種,插槽不見了都重建。
+            let stale = !slot_files::occupied(path)
+                || (link != LinkKind::Symlink && slot_files::content_sha256(path) != slot_files::content_sha256(&source_path));
+            let link = if stale {
+                match slot_files::ensure_keys_dir(keys_dir).and_then(|()| slot_files::link(&source_path, path)) {
+                    Ok(kind) => kind,
+                    Err(e) => {
+                        local.last_error = Some(e.to_string());
+                        return;
+                    }
+                }
+            } else {
+                link
+            };
+            local.source = Some(SlotSource::Linked { path: source, link, fingerprint: local_key_fingerprint(&source_path), origin });
+            local.last_error = None;
+        }
+        Some(SlotSource::SyncedCopy { .. }) if slot_files::occupied(path) => local.last_error = None,
+        // 副本被刪掉了:同步的金鑰還在就放回去。
+        Some(SlotSource::SyncedCopy { .. }) | None => {
+            local.source = None;
+            land_into(local, slot_id, payload, account, account_keys, keys_dir, path);
+        }
+    }
+}
+
+/// 空的插槽:`synced` 而且私鑰到了就落地;`own` 等使用者挑,私鑰還沒到就等下一輪。
+fn land_into(
+    local: &mut LocalSlot,
+    slot_id: &str,
+    payload: &KeySlotPayload,
+    account: &AccountState,
+    account_keys: &ChainKeys,
+    keys_dir: &Path,
+    path: &Path,
+) {
+    local.last_error = None;
+    if payload.mode != SlotMode::Synced {
+        return;
+    }
+    let Some(secret) = open_key_secret(account, account_keys, slot_id) else { return };
+    match land(&secret, payload, keys_dir, path) {
+        Ok(fingerprint) => local.source = Some(SlotSource::SyncedCopy { fingerprint }),
+        Err(message) => local.last_error = Some(message),
+    }
+}
+
+/// 把同步的私鑰寫進空的插槽(spec §6.2):指紋要和插槽記錄一致。插槽路徑上已經有東西時,只有內容完全相同(上一輪寫了
+/// 檔案、狀態卻沒存下來)才當成自己的,其他一律不覆蓋。錯誤訊息只帶路徑與原因。
+///
+/// `.pub` 之後會被 deploy 複製進伺服器的 authorized_keys,所以只能來自通過指紋檢查的這把私鑰(`facts.public_key`),
+/// 不取自記錄上的 `public_key`(spec §3:帳戶裡的成員只能改變主機用哪把金鑰);而且一定在指紋檢查通過之後才寫。
+fn land(secret: &str, payload: &KeySlotPayload, keys_dir: &Path, path: &Path) -> Result<String, String> {
+    let facts = inspect_private_key(secret).map_err(|_| MISMATCH_MESSAGE.to_string())?;
+    if payload.fingerprint.as_deref() != Some(facts.fingerprint.as_str()) {
+        return Err(MISMATCH_MESSAGE.to_string());
+    }
+    if slot_files::occupied(path) {
+        if std::fs::read(path).ok().as_deref() != Some(secret.as_bytes()) {
+            return Err(in_the_way_message(path));
+        }
+    } else {
+        slot_files::ensure_keys_dir(keys_dir).map_err(|e| e.to_string())?;
+        slot_files::write_private(path, secret.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    slot_files::write_public(path, &facts.public_key).map_err(|e| e.to_string())?;
+    Ok(facts.fingerprint)
+}
+
+/// 補寫帳戶裡不見的插槽(spec §6.6):`keyslot` 用最後看到的 payload;原本是 `synced`、而這台讀得到同指紋的私鑰時,
+/// `key` 一起補。
+#[allow(clippy::too_many_arguments)]
+fn republish(
+    account: &mut AccountState,
+    account_keys: &ChainKeys,
+    slot_id: &str,
+    payload: &KeySlotPayload,
+    local: &LocalSlot,
+    path: &Path,
+    device_id: &str,
+    now_ms: u64,
+) {
+    put_slot(account, slot_id, Some(payload), device_id, now_ms);
+    if payload.mode != SlotMode::Synced {
+        return;
+    }
+    let readable = match &local.source {
+        Some(SlotSource::Linked { path: source, .. }) => std::fs::read_to_string(source).ok(),
+        Some(SlotSource::SyncedCopy { .. }) => std::fs::read_to_string(path).ok(),
+        None => None,
+    };
+    let matching = readable.filter(|text| {
+        inspect_private_key(text).is_ok_and(|f| payload.fingerprint.as_deref() == Some(f.fingerprint.as_str()))
+    });
+    if let Some(text) = matching {
+        if let Err(e) = put_key_secret(account, account_keys, slot_id, Some(&text), device_id, now_ms) {
+            eprintln!("[sync] could not restore a key slot's key: {e}");
+        }
+    }
+}
+
+// ── 給 UI 的插槽檢視(SP3 spec §7.2、§7.3)─────────────────────────────────────────────────────
+
+/// 帳戶裡的插槽(依名稱),加上帳戶裡已經沒有、這台還留著副本的(Not in use)。
+pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path) -> Vec<SyncKeySlotView> {
+    let Some(account) = state.account.as_ref() else { return Vec::new() };
+    let needed = slot_hosts(state);
+    let all_devices = devices(account);
+    let keys_dir = home.join(SLOT_DIR);
+    let live = live_slots(account);
+    let view = |id: &str, payload: &KeySlotPayload, status: SlotStatusView, hosts: Vec<String>| SyncKeySlotView {
+        id: id.to_string(),
+        name: payload.name.clone(),
+        mode: payload.mode,
+        fingerprint: payload.fingerprint.clone(),
+        key_type: payload.key_type.clone(),
+        has_passphrase: payload.has_passphrase,
+        origin_device: device_name(account, &payload.origin_device_id),
+        origin_is_this: payload.origin_device_id == state.device_id,
+        value: slot_value(&slot_file_name(&payload.name, id)),
+        hosts,
+        status,
+        devices: all_devices
+            .iter()
+            .filter(|(device, _)| *device != state.device_id)
+            .filter_map(|(_, p)| {
+                p.slots.iter().find(|s| s.slot_id == id).map(|s| SlotDeviceView {
+                    name: p.name.clone(),
+                    fingerprint: s.fingerprint.clone(),
+                    synced_copy: s.synced_copy,
+                })
+            })
+            .collect(),
+    };
+    let mut out = Vec::new();
+    for (id, payload) in &live {
+        let file = slot_file_name(&payload.name, id);
+        let has_secret = account.sealed.get(&key_secret_key(account_keys, id)).is_some_and(|s| !s.envelope.deleted);
+        let status = slot_status(state.key_slots.get(id), payload, needed.contains_key(&file), has_secret, &keys_dir.join(&file));
+        out.push(view(id, payload, status, needed.get(&file).cloned().unwrap_or_default()));
+    }
+    for (id, local) in &state.key_slots {
+        if live.iter().any(|(l, _)| l == id) {
+            continue;
+        }
+        let (Some(_), Some(payload)) = (&local.source, &local.payload) else { continue };
+        let file = keys_dir.join(&local.file_name).display().to_string();
+        out.push(view(id, payload, SlotStatusView::NotInUse { file }, Vec::new()));
+    }
+    out
+}
+
+/// 一個帳戶裡的插槽在這台的狀態。錯誤優先;`synced` 的插槽,這台用的若不是同步的那把,依情況是 SourceChanged(這台是
+/// 來源)或 SyncedAvailable。
+pub fn slot_status(
+    local: Option<&LocalSlot>,
+    payload: &KeySlotPayload,
+    needed: bool,
+    has_secret: bool,
+    slot_path: &Path,
+) -> SlotStatusView {
+    if let Some(message) = local.and_then(|l| l.last_error.clone()) {
+        return SlotStatusView::Error { message };
+    }
+    let here = slot_path.display().to_string();
+    let synced = payload.mode == SlotMode::Synced;
+    match local.and_then(|l| l.source.as_ref()) {
+        Some(SlotSource::Linked { path, link, fingerprint, origin }) => {
+            if synced && *origin && fingerprint != &payload.fingerprint {
+                SlotStatusView::SourceChanged { file: path.clone() }
+            } else if synced && !origin && has_secret && fingerprint != &payload.fingerprint {
+                SlotStatusView::SyncedAvailable { file: path.clone() }
+            } else if !needed {
+                SlotStatusView::NotInUse { file: if *link == LinkKind::Copy { here } else { path.clone() } }
+            } else {
+                SlotStatusView::Ready { file: path.clone(), synced_copy: false, fingerprint: fingerprint.clone() }
+            }
+        }
+        Some(SlotSource::SyncedCopy { fingerprint }) => {
+            if synced && has_secret && Some(fingerprint) != payload.fingerprint.as_ref() {
+                SlotStatusView::SyncedAvailable { file: here }
+            } else if !needed {
+                SlotStatusView::NotInUse { file: here }
+            } else {
+                SlotStatusView::Ready { file: here, synced_copy: true, fingerprint: Some(fingerprint.clone()) }
+            }
+        }
+        None if needed => SlotStatusView::NeedsKey { waiting_for_sync: synced },
+        None => SlotStatusView::NotUsedHere,
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -96,6 +507,19 @@ pub(crate) mod tests {
     use crate::sync::relay::PullResponse;
     use crate::sync::slot_rules::{test_keys, DeviceSlot, SlotMode, MAX_PRIVATE_KEY_BYTES};
     use crate::sync::state_v2::{AccountState, LoadedState, SyncStateV2};
+
+    use crate::sync::dto::{ApprovalNotice, SlotDeviceView, SlotStatusView, SyncConflict};
+    use crate::sync::env::SyncEvents;
+    use crate::sync::record::HostPayload;
+    use crate::sync::round::tests::{pair, settle};
+    use crate::sync::runtime::mutate;
+    use crate::sync::slot_files::{self, LinkKind};
+    use crate::sync::slot_rules::{default_slot_name, inspect_private_key, new_slot_id, public_path, slot_file_name, SLOT_DIR};
+    use crate::sync::state_v2::{LocalSlot, SlotSource, SpaceState, SyncNotice};
+    use crate::sync::testkit::TestDevice;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
     pub(crate) const SLOT_ID: &str = "3fa2c1d90123456789abcdef01234567";
 
@@ -461,5 +885,1099 @@ pub(crate) mod tests {
         let payload: DevicePayload = serde_json::from_value(local.record.payload.clone()).unwrap();
         assert_eq!((payload.name.as_str(), payload.platform.as_str(), payload.joined_at_ms), ("MacBook", "macos", 5_000));
         assert_eq!((payload.spaces, payload.slots), (spaces, slots));
+    }
+
+    // ── 每一輪在這台維護插槽(SP3 Task 4)──────────────────────────────────────────────────────
+
+    fn home(d: &TestDevice) -> PathBuf {
+        d.ssh_dir().parent().unwrap().to_path_buf()
+    }
+
+    fn account_keys(d: &TestDevice) -> ChainKeys {
+        let env = d.env();
+        let keys = env.runtime.core.lock().unwrap().account_keys.clone().expect("joined");
+        keys
+    }
+
+    /// 在 `d` 上建立一個插槽(Task 5 的 `setup_keys` 之前,直接寫記錄與連結):金鑰檔放在 `~/.ssh/<key_file>`,插槽連到它。
+    /// 回傳(插槽 id、插槽檔名)。
+    pub(crate) fn create_slot_on(d: &TestDevice, mode: SlotMode, key_text: &str, key_file: &str) -> (String, String) {
+        let source = d.ssh_dir().join(key_file);
+        std::fs::write(&source, key_text).unwrap();
+        let facts = inspect_private_key(key_text).ok();
+        let (id, name) = (new_slot_id().unwrap(), default_slot_name(key_file));
+        let file = slot_file_name(&name, &id);
+        let keys_dir = home(d).join(SLOT_DIR);
+        slot_files::ensure_keys_dir(&keys_dir).unwrap();
+        let link = slot_files::link(&source, &keys_dir.join(&file)).unwrap();
+        let keys = account_keys(d);
+        let env = d.env();
+        let now = env.now();
+        mutate(&env, |s| {
+            let device_id = s.device_id.clone();
+            let synced = mode == SlotMode::Synced;
+            let payload = KeySlotPayload {
+                schema: SLOT_SCHEMA,
+                name: name.clone(),
+                mode,
+                origin_device_id: device_id.clone(),
+                created_at_ms: now,
+                public_key: synced.then(|| facts.clone().unwrap().public_key),
+                fingerprint: synced.then(|| facts.clone().unwrap().fingerprint),
+                key_type: synced.then(|| facts.clone().unwrap().key_type),
+                has_passphrase: synced.then(|| facts.clone().unwrap().has_passphrase),
+            };
+            let account = s.account.as_mut().unwrap();
+            put_slot(account, &id, Some(&payload), &device_id, now);
+            if synced {
+                put_key_secret(account, &keys, &id, Some(key_text), &device_id, now)?;
+            }
+            s.key_slots.insert(
+                id.clone(),
+                LocalSlot {
+                    file_name: file.clone(),
+                    source: Some(SlotSource::Linked {
+                        path: source.to_string_lossy().into_owned(),
+                        link,
+                        fingerprint: facts.as_ref().map(|f| f.fingerprint.clone()),
+                        origin: true,
+                    }),
+                    last_error: None,
+                    asked: false,
+                    payload: Some(payload),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        (id, file)
+    }
+
+    /// 在 app 裡把 Personal 的主機 `web` 指到插槽(存檔 → 上傳)。
+    pub(crate) fn use_slot(d: &TestDevice, personal: &str, file: &str) {
+        d.save_in_app(&d.space_path(personal), &format!("Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/sshelter/keys/{file}\n"));
+    }
+
+    /// 同 `use_slot`,主機 `web` 同時用好幾個插槽(每個一行 `IdentityFile`)。
+    fn use_slots(d: &TestDevice, personal: &str, files: &[&str]) {
+        let lines: String = files.iter().map(|file| format!("  IdentityFile ~/.ssh/sshelter/keys/{file}\n")).collect();
+        d.save_in_app(&d.space_path(personal), &format!("Host web\n  HostName 10.0.0.1\n{lines}"));
+    }
+
+    /// 在 `d` 的帳戶裡直接寫一個插槽記錄與(可選的)金鑰,不建立本機插槽、不動主機:別台(或帳戶裡的任何成員)建立的插槽。
+    fn publish(d: &TestDevice, id: &str, payload: &KeySlotPayload, secret: Option<&str>) {
+        let keys = account_keys(d);
+        let env = d.env();
+        let now = env.now();
+        mutate(&env, |s| {
+            let me = s.device_id.clone();
+            let account = s.account.as_mut().unwrap();
+            put_slot(account, id, Some(payload), &me, now);
+            match secret {
+                Some(text) => put_key_secret(account, &keys, id, Some(text), &me, now),
+                None => Ok(()),
+            }
+        })
+        .unwrap();
+    }
+
+    /// 刪除一個插槽:`keyslot` 與 `key` 都寫成 tombstone。
+    fn unpublish(d: &TestDevice, id: &str) {
+        let keys = account_keys(d);
+        let env = d.env();
+        let now = env.now();
+        mutate(&env, |s| {
+            let me = s.device_id.clone();
+            let account = s.account.as_mut().unwrap();
+            put_slot(account, id, None, &me, now);
+            put_key_secret(account, &keys, id, None, &me, now)
+        })
+        .unwrap();
+    }
+
+    /// `test_keys::ecdsa()` 那把金鑰的 `synced` 記錄(名稱同 `synced_payload`,所以插槽檔名也一樣)。
+    fn ecdsa_payload(origin: &str) -> KeySlotPayload {
+        KeySlotPayload {
+            public_key: Some(test_keys::ECDSA_PUBLIC.into()),
+            fingerprint: Some(test_keys::ECDSA_FINGERPRINT.into()),
+            key_type: Some("ecdsa-sha2-nistp256".into()),
+            ..synced_payload(origin)
+        }
+    }
+
+    fn own_payload(origin: &str) -> KeySlotPayload {
+        KeySlotPayload { mode: SlotMode::Own, public_key: None, fingerprint: None, key_type: None, has_passphrase: None, ..synced_payload(origin) }
+    }
+
+    fn device_id(d: &TestDevice) -> String {
+        d.state().device_id
+    }
+
+    /// `observer` 看到的 `device` 的插槽清單(來自帳戶裡那台的 `device` 記錄)。
+    fn device_slots_seen_by(observer: &TestDevice, device: &TestDevice) -> Vec<DeviceSlot> {
+        let id = device_id(device);
+        let state = observer.state();
+        crate::sync::merge::devices(state.account.as_ref().unwrap()).into_iter().find(|(d, _)| *d == id).expect("the device is listed").1.slots
+    }
+
+    /// 兩把測試金鑰的私鑰本體,任何一行都不在 `shown` 裡。公鑰本來就會出現在狀態裡(`keyslot` 的 `public_key`);ecdsa 的公鑰段
+    /// 長到整整一行私鑰本體都落在它裡面 —— 那一行不算外洩。
+    fn assert_key_hidden(shown: &str, what: &str) {
+        for line in test_keys::PLAIN_BODY.iter().chain(test_keys::ECDSA_BODY) {
+            if test_keys::PLAIN_PUBLIC.contains(line) || test_keys::ECDSA_PUBLIC.contains(line) {
+                continue;
+            }
+            assert!(!shown.contains(line), "a line of a private key is in {what}");
+        }
+    }
+
+    fn view_of(d: &TestDevice) -> Vec<SyncKeySlotView> {
+        views(&d.state(), &account_keys(d), &home(d))
+    }
+
+    #[test]
+    fn finds_the_hosts_that_use_each_slot() {
+        assert_eq!(
+            identity_slot_files("Host web\n  identityfile = \"~/.ssh/sshelter/keys/a-11111111\"\n  # IdentityFile ~/.ssh/sshelter/keys/b-22222222\n  IdentityFile ~/.ssh/id_mac\n"),
+            vec!["a-11111111".to_string()]
+        );
+    }
+
+    #[test]
+    fn every_spelling_of_a_slot_value_counts_and_other_identity_files_do_not() {
+        let text = "Host web\n  IdentityFile %d/.ssh/sshelter/keys/a-11111111\n  IDENTITYFILE\t~/.ssh/sshelter/keys/b-22222222   # work\n  IdentityFile ~/.ssh/sshelter/keys/sub/c-33333333\n  IdentityFile /home/x/.ssh/sshelter/keys/d-44444444\n  IdentityFile ~/.ssh/sshelter/keys/\n  HostName ~/.ssh/sshelter/keys/e-55555555\n";
+        assert_eq!(identity_slot_files(text), vec!["a-11111111".to_string(), "b-22222222".to_string()]);
+        assert!(identity_slot_files("").is_empty());
+    }
+
+    fn host_record(alias: &str, text: &str, deleted: bool) -> LocalRecord {
+        LocalRecord {
+            record: Record {
+                kind: RecordKind::Host,
+                id: alias.to_string(),
+                version: 1,
+                updated_at_ms: 1,
+                device_id: "a".into(),
+                deleted,
+                payload: serde_json::to_value(HostPayload { schema: 1, text: text.to_string() }).unwrap(),
+            },
+            seq: 0,
+            dirty: false,
+        }
+    }
+
+    #[test]
+    fn hosts_count_for_a_slot_only_from_selected_spaces_and_live_hosts() {
+        let uses = |file: &str| format!("Host x\n  IdentityFile ~/.ssh/sshelter/keys/{file}\n");
+        let mut state = SyncStateV2::fresh("MacBook").unwrap();
+        let mut selected = SpaceState::new("personal-11111111.config");
+        selected.records.insert(record_key(RecordKind::Host, "web"), host_record("web", &uses("a-11111111"), false));
+        selected.records.insert(
+            record_key(RecordKind::Host, "db"),
+            host_record("db", &format!("{}  # IdentityFile ~/.ssh/sshelter/keys/b-22222222\n", uses("a-11111111")), false),
+        );
+        selected.records.insert(record_key(RecordKind::Host, "old"), host_record("old", &uses("a-11111111"), true));
+        selected.records.insert(record_key(RecordKind::Host, "plain"), host_record("plain", "Host plain\n  IdentityFile ~/.ssh/id_mac\n", false));
+        selected.records.insert(record_key(RecordKind::Host, "app"), host_record("app", &uses("c-33333333"), false));
+        let mut left = SpaceState::new("work-22222222.config");
+        left.selected = false;
+        left.records.insert(record_key(RecordKind::Host, "laptop"), host_record("laptop", &uses("d-44444444"), false));
+        state.spaces.insert("p".repeat(64), selected);
+        state.spaces.insert("w".repeat(64), left);
+        assert_eq!(
+            slot_hosts(&state),
+            BTreeMap::from([
+                ("a-11111111".to_string(), vec!["db".to_string(), "web".to_string()]),
+                ("c-33333333".to_string(), vec!["app".to_string()]),
+            ]),
+            "a deleted host, a commented line, another IdentityFile and a space this computer left do not count"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_synced_key_lands_on_the_other_computer() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+
+        let landed = home(&b).join(SLOT_DIR).join(&file);
+        assert_eq!(std::fs::read_to_string(&landed).unwrap(), test_keys::plain());
+        assert_eq!(std::fs::metadata(&landed).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(public_path(&landed)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+        assert_eq!(b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }));
+
+        let b_view = views(&b.state(), &account_keys(&b), &home(&b));
+        assert_eq!(b_view.len(), 1);
+        assert_eq!(b_view[0].hosts, vec!["web".to_string()]);
+        assert_eq!(b_view[0].origin_device, "MacBook-A");
+        assert!(!b_view[0].origin_is_this);
+        assert!(matches!(b_view[0].status, SlotStatusView::Ready { synced_copy: true, .. }), "{:?}", b_view[0].status);
+        assert_eq!(crate::sync::dto::overview(&b.env()).unwrap().key_slots, b_view);
+
+        // A 收到 B 的 `device.slots`。
+        settle(&a);
+        let a_view = views(&a.state(), &account_keys(&a), &home(&a));
+        assert!(matches!(a_view[0].status, SlotStatusView::Ready { synced_copy: false, .. }), "{:?}", a_view[0].status);
+        assert_eq!(
+            a_view[0].devices,
+            vec![SlotDeviceView { name: "MacBook-B".into(), fingerprint: Some(test_keys::PLAIN_FINGERPRINT.into()), synced_copy: true }]
+        );
+    }
+
+    #[test]
+    fn an_own_key_slot_asks_the_other_computer_once() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+
+        let local = b.state().key_slots[&id].clone();
+        assert_eq!(local.source, None);
+        assert!(local.asked);
+        assert!(!home(&b).join(SLOT_DIR).join(&file).exists());
+        let asked = SyncNotice::KeysNeeded { names: vec!["id_mac".into()] };
+        assert_eq!(b.state().notices.iter().filter(|n| **n == asked).count(), 1);
+        assert_eq!(b.events.notices.lock().unwrap().iter().filter(|n| **n == asked).count(), 1);
+
+        let _ = crate::sync::round::sync_once(&b.env());
+        assert_eq!(b.events.notices.lock().unwrap().iter().filter(|n| **n == asked).count(), 1, "asked only once");
+        let view = views(&b.state(), &account_keys(&b), &home(&b));
+        assert_eq!(view[0].status, SlotStatusView::NeedsKey { waiting_for_sync: false });
+    }
+
+    #[test]
+    fn keys_needed_notices_merge_into_one() {
+        // 還沒關掉的那一則收下新名稱:前端的「Keys for this computer」只開一次、按一次 Done 就結束。
+        let mut notices = vec![SyncNotice::NewSyncCode, SyncNotice::KeysNeeded { names: vec!["id_mac".into()] }];
+        add_notice(&mut notices, &SyncNotice::KeysNeeded { names: vec!["id_mac".into(), "work".into()] });
+        assert_eq!(
+            notices,
+            vec![SyncNotice::NewSyncCode, SyncNotice::KeysNeeded { names: vec!["id_mac".into(), "work".into()] }]
+        );
+        // 其他種類照舊:一樣的不重複加。
+        add_notice(&mut notices, &SyncNotice::NewSyncCode);
+        assert_eq!(notices.len(), 2);
+        let mut empty = Vec::new();
+        add_notice(&mut empty, &SyncNotice::KeysNeeded { names: vec!["id_mac".into()] });
+        assert_eq!(empty, vec![SyncNotice::KeysNeeded { names: vec!["id_mac".into()] }]);
+    }
+
+    #[test]
+    fn a_file_in_the_slot_path_is_never_overwritten() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        let theirs = home(&b).join(SLOT_DIR).join(&file);
+        std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+        std::fs::write(&theirs, "mine").unwrap();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "mine");
+        assert_eq!(b.state().key_slots[&id].last_error, Some(in_the_way_message(&theirs)));
+        let view = views(&b.state(), &account_keys(&b), &home(&b));
+        assert_eq!(view[0].status, SlotStatusView::Error { message: in_the_way_message(&theirs) });
+        // 錯誤訊息只帶路徑,不帶金鑰。
+        assert!(!in_the_way_message(&theirs).contains(test_keys::PLAIN_BODY[1]));
+    }
+
+    #[test]
+    fn a_key_without_its_slot_writes_nothing_until_the_slot_arrives() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let keys = account_keys(&a);
+        let id = new_slot_id().unwrap();
+        let file = slot_file_name("id_mac", &id);
+        let env = a.env();
+        let now = env.now();
+        mutate(&env, |s| {
+            let me = s.device_id.clone();
+            put_key_secret(s.account.as_mut().unwrap(), &keys, &id, Some(&test_keys::plain()), &me, now)
+        })
+        .unwrap();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        assert!(!home(&b).join(SLOT_DIR).join(&file).exists());
+        assert!(b.state().key_slots.is_empty());
+
+        mutate(&env, |s| {
+            let me = s.device_id.clone();
+            put_slot(s.account.as_mut().unwrap(), &id, Some(&synced_payload(&me)), &me, now + 1);
+            Ok(())
+        })
+        .unwrap();
+        settle(&a);
+        settle(&b);
+        assert_eq!(std::fs::read_to_string(home(&b).join(SLOT_DIR).join(&file)).unwrap(), test_keys::plain());
+    }
+
+    #[test]
+    fn a_deleted_slot_removes_links_and_keeps_copies() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+
+        let keys = account_keys(&a);
+        let env = a.env();
+        let now = env.now();
+        mutate(&env, |s| {
+            let me = s.device_id.clone();
+            let account = s.account.as_mut().unwrap();
+            put_slot(account, &id, None, &me, now);
+            put_key_secret(account, &keys, &id, None, &me, now)
+        })
+        .unwrap();
+        settle(&a);
+        settle(&b);
+
+        assert!(!slot_files::occupied(&home(&a).join(SLOT_DIR).join(&file)), "A's link is removed");
+        assert!(a.ssh_dir().join("id_mac").exists(), "the key it pointed to is untouched");
+        assert!(!a.state().key_slots.contains_key(&id));
+        let copy = home(&b).join(SLOT_DIR).join(&file);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), test_keys::plain(), "B keeps its copy");
+        let view = views(&b.state(), &account_keys(&b), &home(&b));
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].status, SlotStatusView::NotInUse { file: copy.display().to_string() });
+    }
+
+    #[test]
+    fn a_key_written_before_a_lost_commit_is_adopted() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        // 檔案寫了、狀態沒存下來:拿掉 B 對插槽的記錄,下一輪不能把自己寫的檔案當成擋路的。
+        mutate(&b.env(), |s| {
+            s.key_slots.clear();
+            Ok(())
+        })
+        .unwrap();
+        let _ = crate::sync::round::sync_once(&b.env());
+        let local = b.state().key_slots[&id].clone();
+        assert_eq!(local.last_error, None);
+        assert_eq!(local.source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }));
+        let _ = file;
+    }
+
+    #[test]
+    fn a_changed_key_on_the_origin_is_reported_and_not_uploaded() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        std::fs::write(a.ssh_dir().join("id_mac"), test_keys::ecdsa()).unwrap();
+        settle(&a);
+
+        let view = views(&a.state(), &account_keys(&a), &home(&a));
+        assert!(matches!(view[0].status, SlotStatusView::SourceChanged { .. }), "{:?}", view[0].status);
+        let account = a.state().account.unwrap();
+        assert_eq!(open_key_secret(&account, &account_keys(&a), &id).as_deref(), Some(test_keys::plain().as_str()));
+    }
+
+    // ── 落地的規則:公鑰、指紋、擋路的檔案(計畫裁定)────────────────────────────────────────────
+
+    #[test]
+    fn the_pub_file_comes_from_the_private_key_that_passed_the_fingerprint_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys_dir = dir.path().join("keys");
+        let path = keys_dir.join("id_mac-3fa2c1d9");
+        // 記錄上的 `public_key` 是別把金鑰的、`fingerprint` 卻是這把私鑰的。這種 payload 進不了快取(`valid_slot_payload`),
+        // 所以直接餵 `land`:`.pub` 之後會被 deploy 複製進伺服器的 authorized_keys,只能來自通過指紋檢查的那把私鑰。
+        let payload = KeySlotPayload { public_key: Some(test_keys::ECDSA_PUBLIC.into()), ..synced_payload("a") };
+        assert_eq!(land(&test_keys::plain(), &payload, &keys_dir, &path).unwrap(), test_keys::PLAIN_FINGERPRINT);
+        assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), test_keys::plain());
+    }
+
+    #[test]
+    fn a_key_that_fails_the_check_writes_nothing_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys_dir = dir.path().join("keys");
+        let path = keys_dir.join("id_mac-3fa2c1d9");
+        let pem = format!("{}\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n{}\n", concat!("-----BEGIN RSA ", "PRIVATE KEY-----"), concat!("-----END RSA ", "PRIVATE KEY-----"));
+        // 指紋對不上(記錄是 plain 的、金鑰是 ecdsa)、不是 OpenSSH 格式、根本不是金鑰、超過大小。
+        for secret in [test_keys::ecdsa(), pem, "garbage".to_string(), "A".repeat(MAX_PRIVATE_KEY_BYTES + 1)] {
+            assert_eq!(land(&secret, &synced_payload("a"), &keys_dir, &path), Err(MISMATCH_MESSAGE.to_string()));
+            assert!(!keys_dir.exists(), "not even the directory is created");
+        }
+        // 記錄本身沒有指紋(`own`):不是同步的金鑰,不落地。
+        assert_eq!(land(&test_keys::plain(), &own_payload("a"), &keys_dir, &path), Err(MISMATCH_MESSAGE.to_string()));
+        assert!(!keys_dir.exists());
+    }
+
+    #[test]
+    fn a_synced_key_that_does_not_match_its_record_is_refused_and_never_shown() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let id = new_slot_id().unwrap();
+        let file = slot_file_name("id_mac", &id);
+        // 記錄說這是 ecdsa 那把,`key` 裡放的卻是 plain:帳戶裡的成員寫得出這種東西。
+        publish(&a, &id, &ecdsa_payload(&device_id(&a)), Some(&test_keys::plain()));
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+
+        let slot_path = home(&b).join(SLOT_DIR).join(&file);
+        assert!(!slot_files::occupied(&slot_path) && !slot_files::occupied(&public_path(&slot_path)));
+        let local = b.state().key_slots[&id].clone();
+        assert_eq!((local.source, local.last_error.as_deref()), (None, Some(MISMATCH_MESSAGE)));
+        assert_eq!(view_of(&b)[0].status, SlotStatusView::Error { message: MISMATCH_MESSAGE.to_string() });
+        // 拒收的金鑰不會出現在任何看得到的地方。
+        assert_key_hidden(&std::fs::read_to_string(b.home.path().join("data").join("sync-state.json")).unwrap(), "the state file");
+        assert_key_hidden(&serde_json::to_string(&crate::sync::dto::overview(&b.env()).unwrap()).unwrap(), "the overview");
+        assert_key_hidden(&format!("{:?}{:?}", b.state(), b.events.notices.lock().unwrap()), "Debug output");
+    }
+
+    #[test]
+    fn a_landed_key_never_reaches_the_state_file_the_overview_or_the_events() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (_id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let landed = home(&b).join(SLOT_DIR).join(&file);
+        assert_eq!(std::fs::read_to_string(landed).unwrap(), test_keys::plain(), "the key did land");
+
+        assert_key_hidden(&std::fs::read_to_string(b.home.path().join("data").join("sync-state.json")).unwrap(), "the state file");
+        assert_key_hidden(&serde_json::to_string(&crate::sync::dto::overview(&b.env()).unwrap()).unwrap(), "the overview");
+        assert_key_hidden(&format!("{:?}{:?}", b.state(), b.events.notices.lock().unwrap()), "Debug output");
+        assert_key_hidden(&format!("{:?}", view_of(&b)), "the slot views");
+    }
+
+    // 插槽檔名(`<name>-<id8>`)不保證在插槽 id 之間唯一:帳戶裡的成員可以發佈同名、同 id 前 8 字元的另一個插槽。
+    // 一個檔案是不是 SSHelter 放的,只看這個插槽 id 自己的本機記錄,不看檔名。
+
+    #[test]
+    fn two_slots_with_the_same_file_name_never_overwrite_each_others_copy() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (first, second) = (format!("3fa2c1d9{}", "0".repeat(24)), format!("3fa2c1d9{}", "f".repeat(24)));
+        let file = slot_file_name("id_mac", &first);
+        assert_eq!(file, slot_file_name("id_mac", &second));
+        let me = device_id(&a);
+        publish(&a, &first, &synced_payload(&me), Some(&test_keys::plain()));
+        publish(&a, &second, &ecdsa_payload(&me), Some(&test_keys::ecdsa()));
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+
+        let landed = home(&b).join(SLOT_DIR).join(&file);
+        assert_eq!(std::fs::read_to_string(&landed).unwrap(), test_keys::plain(), "the one that was first on this computer keeps the path");
+        let state = b.state();
+        assert_eq!(state.key_slots[&first].source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }));
+        assert_eq!(state.key_slots[&second].source, None);
+        assert_eq!(state.key_slots[&second].last_error, Some(in_the_way_message(&landed)));
+
+        // 另一個被刪掉:第一個的檔案不動。
+        unpublish(&a, &second);
+        settle(&a);
+        settle(&b);
+        assert_eq!(std::fs::read_to_string(&landed).unwrap(), test_keys::plain());
+        assert!(b.state().key_slots.contains_key(&first) && !b.state().key_slots.contains_key(&second));
+        // 第一個被刪掉:副本留著(不是 SSHelter 放的連結),也不會被另一個覆蓋 —— 另一個重新發佈,仍然擋在外面。
+        publish(&a, &second, &ecdsa_payload(&me), Some(&test_keys::ecdsa()));
+        unpublish(&a, &first);
+        settle(&a);
+        settle(&b);
+        assert_eq!(std::fs::read_to_string(&landed).unwrap(), test_keys::plain());
+        assert_eq!(b.state().key_slots[&second].last_error, Some(in_the_way_message(&landed)));
+    }
+
+    #[test]
+    fn a_slot_with_the_same_file_name_never_replaces_or_removes_the_link_of_another_slot() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        // 同名、同 id 前 8 字元、最後一個字元不同。
+        let mut chars: Vec<char> = id.chars().collect();
+        chars[31] = if chars[31] == '0' { '1' } else { '0' };
+        let other: String = chars.into_iter().collect();
+        assert!(other != id && slot_file_name("id_mac", &other) == file);
+        publish(&a, &other, &ecdsa_payload(&device_id(&a)), Some(&test_keys::ecdsa()));
+        use_slot(&a, &personal, &file);
+        settle(&a);
+
+        let link = home(&a).join(SLOT_DIR).join(&file);
+        let source = a.ssh_dir().join("id_mac");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), test_keys::plain(), "the link still reaches the first slot's key");
+        #[cfg(unix)]
+        assert_eq!(std::fs::read_link(&link).unwrap(), source);
+        assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Linked { origin: true, .. })));
+        assert_eq!(a.state().key_slots[&other].last_error, Some(in_the_way_message(&link)));
+
+        // 第二個被刪掉:它從來沒有放過東西,第一個的連結不動。
+        unpublish(&a, &other);
+        settle(&a);
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), test_keys::plain());
+        assert!(!a.state().key_slots.contains_key(&other));
+        // 第一個被刪掉:只移除它自己的連結,它指到的金鑰不動;路徑空出來之後,另一個才放得進去。
+        publish(&a, &other, &ecdsa_payload(&device_id(&a)), Some(&test_keys::ecdsa()));
+        unpublish(&a, &id);
+        settle(&a);
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), test_keys::plain(), "the key the link pointed to is untouched");
+        settle(&a);
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), test_keys::ecdsa());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), test_keys::plain());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_slot_renamed_in_the_account_never_makes_this_computer_touch_the_new_path() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let old_link = home(&a).join(SLOT_DIR).join(&file);
+        assert!(slot_files::occupied(&old_link));
+
+        // 帳戶裡的惡意成員把這個插槽改名(spec 沒有改名):新名稱的路徑上正好有使用者自己的東西(連到另一把金鑰的 symlink)。
+        let new_file = slot_file_name("renamed", &id);
+        let theirs = home(&a).join(SLOT_DIR).join(&new_file);
+        let work_key = a.ssh_dir().join("id_work");
+        std::fs::write(&work_key, test_keys::ecdsa()).unwrap();
+        std::os::unix::fs::symlink(&work_key, &theirs).unwrap();
+        publish(&a, &id, &KeySlotPayload { name: "renamed".into(), ..own_payload(&device_id(&a)) }, None);
+        settle(&a);
+        settle(&a);
+
+        assert_eq!(std::fs::read_link(&theirs).unwrap(), work_key, "what is at the new path is not this slot's: it stays");
+        assert_eq!(std::fs::read_to_string(&work_key).unwrap(), test_keys::ecdsa());
+        assert!(slot_files::occupied(&old_link), "the files this slot recorded are left where they are, for the hosts that still name them");
+        assert_eq!(std::fs::read_to_string(&old_link).unwrap(), test_keys::plain());
+        // 主機寫的還是舊名稱:新名稱沒有主機用到,這台也不再記著這個插槽。
+        assert!(!a.state().key_slots.contains_key(&id));
+        assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_the_user_put_in_place_of_the_link_is_not_removed_when_the_slot_goes_unused() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        // 使用者自己把插槽上的 symlink 換成一份金鑰(SSHelter 沒有放它)。
+        let slot_path = home(&a).join(SLOT_DIR).join(&file);
+        std::fs::remove_file(&slot_path).unwrap();
+        std::fs::write(&slot_path, test_keys::ecdsa()).unwrap();
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+        settle(&a);
+
+        assert_eq!(std::fs::read_to_string(&slot_path).unwrap(), test_keys::ecdsa(), "not removed");
+        assert!(!a.state().key_slots.contains_key(&id), "but this computer no longer claims the slot");
+        assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_mac")).unwrap(), test_keys::plain());
+    }
+
+    // ── 維護:連結、副本、通知 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_slot_no_host_uses_loses_its_link_but_a_synced_copy_stays() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let (link, copy) = (home(&a).join(SLOT_DIR).join(&file), home(&b).join(SLOT_DIR).join(&file));
+        assert!(slot_files::occupied(&link) && slot_files::occupied(&copy));
+        assert_eq!(device_slots_seen_by(&a, &a).len(), 1);
+
+        // 主機改成不再用插槽(兩台都不再需要它)。
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+        settle(&a);
+        settle(&b);
+
+        assert!(!slot_files::occupied(&link), "the link is removed");
+        assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_mac")).unwrap(), test_keys::plain(), "the key it pointed to is untouched");
+        assert!(!a.state().key_slots.contains_key(&id), "nothing is kept for a slot that has no host and no file");
+        assert_eq!(device_slots_seen_by(&a, &a), Vec::new());
+        assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
+
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), test_keys::plain(), "a synced copy is never removed on its own");
+        assert_eq!(view_of(&b)[0].status, SlotStatusView::NotInUse { file: copy.display().to_string() });
+        assert_eq!(device_slots_seen_by(&a, &b).len(), 1, "B still has its copy");
+    }
+
+    #[test]
+    fn a_synced_copy_the_user_deleted_is_put_back_while_a_host_uses_it() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let copy = home(&b).join(SLOT_DIR).join(&file);
+        std::fs::remove_file(&copy).unwrap();
+        std::fs::remove_file(public_path(&copy)).unwrap();
+
+        settle(&b);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), test_keys::plain());
+        assert_eq!(std::fs::read_to_string(public_path(&copy)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+        assert_eq!(b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }));
+    }
+
+    #[test]
+    fn a_link_whose_key_is_gone_says_so_and_recovers_when_the_key_is_back() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let source = a.ssh_dir().join("id_mac");
+        std::fs::remove_file(&source).unwrap();
+        settle(&a);
+
+        let shown = source.to_string_lossy().into_owned();
+        assert_eq!(view_of(&a)[0].status, SlotStatusView::Error { message: source_gone_message(&shown) });
+        assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Linked { .. })), "the record of the link stays");
+
+        std::fs::write(&source, test_keys::plain()).unwrap();
+        settle(&a);
+        assert_eq!(a.state().key_slots[&id].last_error, None);
+        assert!(matches!(view_of(&a)[0].status, SlotStatusView::Ready { synced_copy: false, .. }), "{:?}", view_of(&a)[0].status);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_link_that_was_removed_is_made_again_and_a_copy_follows_its_source() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let (slot_path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+        let is_symlink = |p: &std::path::Path| std::fs::symlink_metadata(p).unwrap().file_type().is_symlink();
+
+        // 插槽被刪掉了:下一輪重新連結。
+        std::fs::remove_file(&slot_path).unwrap();
+        settle(&a);
+        assert!(is_symlink(&slot_path) && std::fs::read_to_string(&slot_path).unwrap() == test_keys::plain());
+
+        // Windows 的複製檔(這裡在 Unix 上手動做出來,狀態記著 `Copy`):內容還和原檔一樣就不動它。
+        std::fs::remove_file(&slot_path).unwrap();
+        std::fs::write(&slot_path, test_keys::plain()).unwrap();
+        mutate(&a.env(), |s| {
+            if let Some(SlotSource::Linked { link, .. }) = s.key_slots.get_mut(&id).and_then(|l| l.source.as_mut()) {
+                *link = LinkKind::Copy;
+            }
+            Ok(())
+        })
+        .unwrap();
+        settle(&a);
+        assert!(!is_symlink(&slot_path), "a copy that still matches its source is left alone");
+        // 原檔換成另一把:複製不會跟著走,下一輪重新連結,指紋跟著更新。
+        std::fs::write(&source, test_keys::ecdsa()).unwrap();
+        settle(&a);
+        assert!(is_symlink(&slot_path));
+        assert_eq!(std::fs::read_to_string(&slot_path).unwrap(), test_keys::ecdsa());
+        match &a.state().key_slots[&id].source {
+            Some(SlotSource::Linked { link: LinkKind::Symlink, fingerprint, .. }) => {
+                assert_eq!(fingerprint.as_deref(), Some(test_keys::ECDSA_FINGERPRINT));
+            }
+            other => panic!("expected a symlink to the new key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_new_synced_key_is_offered_to_a_computer_with_the_old_copy_and_never_forced_on_it() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let copy = home(&b).join(SLOT_DIR).join(&file);
+
+        // A 換了金鑰、把新的一把同步出去(`key` 與 `keyslot` 一起更新)。
+        std::fs::write(a.ssh_dir().join("id_mac"), test_keys::ecdsa()).unwrap();
+        publish(&a, &id, &ecdsa_payload(&device_id(&a)), Some(&test_keys::ecdsa()));
+        settle(&a);
+        settle(&b);
+
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), test_keys::plain(), "B's copy is not replaced");
+        assert_eq!(b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }));
+        assert_eq!(view_of(&b)[0].status, SlotStatusView::SyncedAvailable { file: copy.display().to_string() });
+        // A 連到的就是同步的那把:沒有事。
+        assert_eq!(
+            view_of(&a)[0].status,
+            SlotStatusView::Ready {
+                file: a.ssh_dir().join("id_mac").to_string_lossy().into_owned(),
+                synced_copy: false,
+                fingerprint: Some(test_keys::ECDSA_FINGERPRINT.into())
+            }
+        );
+    }
+
+    #[test]
+    fn the_device_record_lists_each_slot_and_a_quiet_round_changes_nothing() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        settle(&a);
+        let slot_of = |synced_copy| DeviceSlot { slot_id: id.clone(), fingerprint: Some(test_keys::PLAIN_FINGERPRINT.into()), synced_copy };
+        assert_eq!(device_slots_seen_by(&a, &a), vec![slot_of(false)]);
+        assert_eq!(device_slots_seen_by(&a, &b), vec![slot_of(true)]);
+        assert_eq!(device_slots_seen_by(&b, &a), vec![slot_of(false)]);
+
+        // 什麼都沒變的一輪:不寫新版本、不要求提交、不發通知。
+        for d in [&a, &b] {
+            let keys = account_keys(d);
+            let mut state = d.state();
+            let before = state.clone();
+            let round = reconcile(&mut state, &keys, &home(d), 5_000);
+            assert!(!round.changed && round.notices.is_empty());
+            assert_eq!(state, before);
+        }
+    }
+
+    #[test]
+    fn a_slot_missing_from_the_account_is_written_again_while_a_host_uses_it() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let keys = account_keys(&a);
+        // 沒有 SP3 的電腦更換了同步碼:新帳戶沒有這個插槽的兩筆記錄,這台的 `key_slots` 還記著它。
+        let mut state = a.state();
+        let payload = state.key_slots[&id].payload.clone().expect("the last payload seen is remembered");
+        let account = state.account.as_mut().unwrap();
+        account.records.remove(&record_key(RecordKind::KeySlot, &id));
+        account.sealed.remove(&key_secret_key(&keys, &id));
+        assert!(!slot_record_exists(account, &id) && live_slots(account).is_empty());
+
+        let round = reconcile(&mut state, &keys, &home(&a), 1_000);
+        assert!(round.changed);
+        let account = state.account.as_ref().unwrap();
+        assert_eq!(slot(account, &id), Some(payload));
+        assert!(account.records[&record_key(RecordKind::KeySlot, &id)].dirty, "it goes up with this round");
+        assert_eq!(open_key_secret(account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()));
+        assert!(account.sealed[&key_secret_key(&keys, &id)].dirty);
+        // 補寫之後的下一輪什麼都不再動。
+        assert!(!reconcile(&mut state, &keys, &home(&a), 2_000).changed);
+    }
+
+    #[test]
+    fn a_computer_holding_a_copy_publishes_a_slot_the_account_lost() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        // 在沒有 SP3 的電腦上更換同步碼之後,新帳戶裡沒有插槽記錄:直接從 B 的帳戶快取拿掉它們來模擬。
+        let keys = account_keys(&b);
+        mutate(&b.env(), |s| {
+            let account = s.account.as_mut().unwrap();
+            account.records.remove(&record_key(RecordKind::KeySlot, &id));
+            account.sealed.remove(&key_secret_key(&keys, &id));
+            Ok(())
+        })
+        .unwrap();
+        let _ = crate::sync::round::sync_once(&b.env());
+        let account = b.state().account.unwrap();
+        assert_eq!(slot(&account, &id).map(|p| p.mode), Some(SlotMode::Synced));
+        assert_eq!(open_key_secret(&account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()));
+        // 是從 B 手上的副本補的:副本還在、狀態不變。
+        assert_eq!(std::fs::read_to_string(home(&b).join(SLOT_DIR).join(&file)).unwrap(), test_keys::plain());
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { .. })));
+    }
+
+    #[test]
+    fn a_missing_slot_is_written_again_only_as_far_as_this_computer_can_vouch_for() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let keys = account_keys(&a);
+        let (own_id, own_file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_own");
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slots(&a, &personal, &[&own_file, &file]);
+        settle(&a);
+        // 沒有 SP3 的電腦更換了同步碼:新帳戶沒有這些插槽的記錄,這台的 `key_slots` 還記著它們。
+        let without_records = |ids: &[&str]| {
+            let mut state = a.state();
+            let account = state.account.as_mut().unwrap();
+            for id in ids {
+                account.records.remove(&record_key(RecordKind::KeySlot, id));
+                account.sealed.remove(&key_secret_key(&keys, id));
+            }
+            state
+        };
+
+        // `own`:只有 `keyslot`,沒有 `key`。
+        let mut state = without_records(&[&own_id]);
+        assert!(reconcile(&mut state, &keys, &home(&a), 1_000).changed);
+        let account = state.account.as_ref().unwrap();
+        assert!(slot(account, &own_id).is_some());
+        assert!(!account.sealed.contains_key(&key_secret_key(&keys, &own_id)));
+
+        // `synced`、可是這台連到的金鑰已經不是記錄上的那一把:`keyslot` 補回去,不把別把金鑰當成它的 `key` 上傳。
+        std::fs::write(a.ssh_dir().join("id_mac"), test_keys::ecdsa()).unwrap();
+        let mut state = without_records(&[&id]);
+        assert!(reconcile(&mut state, &keys, &home(&a), 2_000).changed);
+        let account = state.account.as_ref().unwrap();
+        assert!(slot(account, &id).is_some());
+        assert_eq!(open_key_secret(account, &keys, &id), None);
+        std::fs::write(a.ssh_dir().join("id_mac"), test_keys::plain()).unwrap();
+
+        // 已經刪除的插槽(tombstone 還在)不補寫。
+        let mut state = a.state();
+        let me = state.device_id.clone();
+        let account = state.account.as_mut().unwrap();
+        put_slot(account, &id, None, &me, 500);
+        put_key_secret(account, &keys, &id, None, &me, 500).unwrap();
+        reconcile(&mut state, &keys, &home(&a), 3_000);
+        assert_eq!(slot(state.account.as_ref().unwrap(), &id), None, "a deleted slot stays deleted");
+
+        // 沒有主機用到的也不補寫,這台也不再記著它。
+        let mut state = without_records(&[&own_id]);
+        a_host_stops_using(&mut state, &own_file);
+        reconcile(&mut state, &keys, &home(&a), 4_000);
+        assert!(!slot_record_exists(state.account.as_ref().unwrap(), &own_id), "nobody uses it: it is not written again");
+        assert!(!state.key_slots.contains_key(&own_id));
+    }
+
+    /// 直接在一份狀態副本上讓所有主機都不再用到 `file` 這個插槽。
+    fn a_host_stops_using(state: &mut SyncStateV2, file: &str) {
+        for space in state.spaces.values_mut() {
+            for local in space.records.values_mut() {
+                if let Ok(mut payload) = serde_json::from_value::<HostPayload>(local.record.payload.clone()) {
+                    payload.text = payload.text.replace(file, "elsewhere");
+                    local.record.payload = serde_json::to_value(payload).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_keyslot_deleted_before_this_computer_saw_it_writes_nothing_even_if_a_host_points_at_it() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let id = new_slot_id().unwrap();
+        let file = slot_file_name("id_mac", &id);
+        publish(&a, &id, &synced_payload(&device_id(&a)), Some(&test_keys::plain()));
+        use_slot(&a, &personal, &file);
+        unpublish(&a, &id);
+        settle(&a);
+        settle(&b);
+        for d in [&a, &b] {
+            assert!(!slot_files::occupied(&home(d).join(SLOT_DIR).join(&file)), "no half-written files");
+            assert!(d.state().key_slots.is_empty() && view_of(d).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_computer_that_joins_later_gets_the_key_in_its_first_round() {
+        let (relay, clock) = (crate::sync::fake_relay::FakeRelay::new(), crate::sync::testkit::TestClock::new());
+        let a = TestDevice::new("a", &relay, &clock);
+        let words = crate::sync::account::create_account(&a.env(), "MacBook-A").unwrap();
+        settle(&a);
+        let personal = a.state().spaces.keys().next().unwrap().clone();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+
+        // 之後才加入的電腦:勾選 space 之後的第一輪(基線輪)主機一出現,金鑰就落地。
+        let b = TestDevice::new("b", &relay, &clock);
+        crate::sync::account::join_account(&b.env(), &words, "MacBook-B").unwrap();
+        crate::sync::spaces::select_space(&b.env(), &personal).unwrap();
+        let _ = crate::sync::round::sync_once(&b.env());
+        assert!(b.read(&b.space_path(&personal)).contains(&file), "the host is there");
+        assert_eq!(std::fs::read_to_string(home(&b).join(SLOT_DIR).join(&file)).unwrap(), test_keys::plain());
+        assert_eq!(b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }));
+    }
+
+    #[test]
+    fn slots_that_need_a_key_are_asked_in_one_notice_and_later_ones_join_it() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let me = device_id(&a);
+        let names = ["work", "id_mac", "zeta"];
+        let ids = [new_slot_id().unwrap(), new_slot_id().unwrap(), new_slot_id().unwrap()];
+        let files: Vec<String> = ids.iter().zip(names).map(|(id, name)| slot_file_name(name, id)).collect();
+        for (id, name) in ids.iter().zip(names) {
+            publish(&a, id, &KeySlotPayload { name: name.into(), ..own_payload(&me) }, None);
+        }
+        use_slots(&a, &personal, &[&files[0], &files[1]]);
+        settle(&a);
+        settle(&b);
+        let asked = |names: &[&str]| SyncNotice::KeysNeeded { names: names.iter().map(|n| n.to_string()).collect() };
+        assert_eq!(b.state().notices, vec![asked(&["id_mac", "work"])], "one notice, the names in the order the slots are listed");
+
+        // 之後第三個也需要金鑰:併進還沒關掉的那一則;發出的事件只帶新的名稱。
+        use_slots(&a, &personal, &[&files[0], &files[1], &files[2]]);
+        settle(&a);
+        settle(&b);
+        assert_eq!(b.state().notices, vec![asked(&["id_mac", "work", "zeta"])]);
+        assert_eq!(*b.events.notices.lock().unwrap(), vec![asked(&["id_mac", "work"]), asked(&["zeta"])]);
+    }
+
+    #[test]
+    fn a_synced_slot_whose_key_has_not_arrived_waits_without_asking() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let id = new_slot_id().unwrap();
+        let file = slot_file_name("id_mac", &id);
+        publish(&a, &id, &synced_payload(&device_id(&a)), None);
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let slot_path = home(&b).join(SLOT_DIR).join(&file);
+        assert!(!slot_files::occupied(&slot_path));
+        assert_eq!(view_of(&b)[0].status, SlotStatusView::NeedsKey { waiting_for_sync: true });
+        assert!(!b.state().key_slots[&id].asked);
+        assert!(b.state().notices.is_empty() && b.events.notices.lock().unwrap().is_empty(), "a synced key is on its way: nobody is asked");
+
+        // 金鑰到了:落地。
+        let keys = account_keys(&a);
+        let env = a.env();
+        let now = env.now();
+        mutate(&env, |s| {
+            let me = s.device_id.clone();
+            put_key_secret(s.account.as_mut().unwrap(), &keys, &id, Some(&test_keys::plain()), &me, now)
+        })
+        .unwrap();
+        settle(&a);
+        settle(&b);
+        assert_eq!(std::fs::read_to_string(&slot_path).unwrap(), test_keys::plain());
+        assert!(matches!(view_of(&b)[0].status, SlotStatusView::Ready { synced_copy: true, .. }));
+    }
+
+    /// 發出 `notice` 的當下 doc / backed_up / core 三把鎖是不是都空著(引擎的通知一律在放掉所有鎖之後)。
+    struct LockProbe<'a> {
+        d: &'a TestDevice,
+        free: Mutex<Vec<bool>>,
+    }
+
+    impl SyncEvents for LockProbe<'_> {
+        fn status(&self) {}
+        fn applied(&self, _hosts: usize) {}
+        fn conflict(&self, _conflicts: &[SyncConflict]) {}
+        fn approval(&self, _waiting: &[ApprovalNotice]) {}
+        fn notice(&self, _notice: &SyncNotice) {
+            let free = self.d.doc.try_lock().is_ok() && self.d.backed_up.try_lock().is_ok() && self.d.runtime.core.try_lock().is_ok();
+            self.free.lock().unwrap().push(free);
+        }
+        fn wake(&self) {}
+    }
+
+    #[test]
+    fn the_keys_needed_notice_is_stored_before_it_is_sent_and_sent_with_no_lock_held() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (_id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let probe = LockProbe { d: &b, free: Mutex::new(Vec::new()) };
+        let mut env = b.env();
+        env.events = &probe;
+        crate::sync::round::sync_once(&env).unwrap();
+        assert_eq!(*probe.free.lock().unwrap(), vec![true]);
+        assert_eq!(b.state().notices, vec![SyncNotice::KeysNeeded { names: vec!["id_mac".into()] }], "already in the state when it is sent");
+    }
+
+    #[test]
+    fn local_key_fingerprints_come_from_the_key_or_else_from_the_pub_file_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let openssh = dir.path().join("id_mac");
+        std::fs::write(&openssh, test_keys::plain()).unwrap();
+        assert_eq!(local_key_fingerprint(&openssh).as_deref(), Some(test_keys::PLAIN_FINGERPRINT));
+
+        // 舊式 PEM:從私鑰讀不出公鑰,改讀旁邊的 `.pub`。
+        let pem = dir.path().join("id_rsa");
+        std::fs::write(&pem, format!("{}\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n{}\n", concat!("-----BEGIN RSA ", "PRIVATE KEY-----"), concat!("-----END RSA ", "PRIVATE KEY-----"))).unwrap();
+        assert_eq!(local_key_fingerprint(&pem), None);
+        std::fs::write(public_path(&pem), format!("{} me@host\n", test_keys::ECDSA_PUBLIC)).unwrap();
+        assert_eq!(local_key_fingerprint(&pem).as_deref(), Some(test_keys::ECDSA_FINGERPRINT));
+        std::fs::write(public_path(&pem), "this is not a public key\n").unwrap();
+        assert_eq!(local_key_fingerprint(&pem), None);
+        assert_eq!(local_key_fingerprint(&dir.path().join("missing")), None);
+    }
+
+    #[test]
+    fn slot_status_names_every_state() {
+        let slot_path = PathBuf::from("/h/.ssh/sshelter/keys/id_mac-3fa2c1d9");
+        let here = slot_path.display().to_string();
+        let source = "/h/.ssh/id_mac".to_string();
+        let (synced, own) = (synced_payload("a"), own_payload("a"));
+        let local = |source: Option<SlotSource>, error: Option<&str>| LocalSlot {
+            file_name: "id_mac-3fa2c1d9".into(),
+            source,
+            last_error: error.map(String::from),
+            asked: false,
+            payload: None,
+        };
+        let linked = |fingerprint: Option<&str>, origin: bool, link: LinkKind| SlotSource::Linked {
+            path: "/h/.ssh/id_mac".into(),
+            link,
+            fingerprint: fingerprint.map(String::from),
+            origin,
+        };
+        let copy = |fingerprint: &str| SlotSource::SyncedCopy { fingerprint: fingerprint.into() };
+        let status = |l: Option<&LocalSlot>, p: &KeySlotPayload, needed, has_secret| slot_status(l, p, needed, has_secret, &slot_path);
+        let (same, other) = (test_keys::PLAIN_FINGERPRINT, test_keys::ECDSA_FINGERPRINT);
+
+        // 錯誤優先於一切。
+        let broken = local(Some(copy(same)), Some("boom"));
+        assert_eq!(status(Some(&broken), &synced, true, true), SlotStatusView::Error { message: "boom".into() });
+        // 還沒有東西:需要 → 等金鑰(synced 是「還沒到」、own 是「請挑」);不需要 → 這台沒用到。
+        assert_eq!(status(None, &synced, true, false), SlotStatusView::NeedsKey { waiting_for_sync: true });
+        assert_eq!(status(None, &own, true, false), SlotStatusView::NeedsKey { waiting_for_sync: false });
+        assert_eq!(status(Some(&local(None, None)), &synced, true, true), SlotStatusView::NeedsKey { waiting_for_sync: true });
+        assert_eq!(status(None, &synced, false, true), SlotStatusView::NotUsedHere);
+        // 連到金鑰:來源電腦且指紋還對 → Ready;換了金鑰 → SourceChanged;其他電腦連到的和同步的不同 → 可以改用同步的。
+        let origin = local(Some(linked(Some(same), true, LinkKind::Symlink)), None);
+        assert_eq!(status(Some(&origin), &synced, true, true), SlotStatusView::Ready { file: source.clone(), synced_copy: false, fingerprint: Some(same.into()) });
+        let changed = local(Some(linked(Some(other), true, LinkKind::Symlink)), None);
+        assert_eq!(status(Some(&changed), &synced, true, true), SlotStatusView::SourceChanged { file: source.clone() });
+        let own_origin = local(Some(linked(None, true, LinkKind::Symlink)), None);
+        assert_eq!(status(Some(&own_origin), &own, true, false), SlotStatusView::Ready { file: source.clone(), synced_copy: false, fingerprint: None });
+        let picked = local(Some(linked(Some(other), false, LinkKind::Symlink)), None);
+        assert_eq!(status(Some(&picked), &synced, true, true), SlotStatusView::SyncedAvailable { file: source.clone() });
+        assert_eq!(status(Some(&picked), &synced, true, false), SlotStatusView::Ready { file: source.clone(), synced_copy: false, fingerprint: Some(other.into()) }, "no synced key to offer");
+        assert_eq!(status(Some(&picked), &own, true, false), SlotStatusView::Ready { file: source.clone(), synced_copy: false, fingerprint: Some(other.into()) });
+        // 沒有主機用到:連結顯示它連到的金鑰;複製檔就是插槽本身。
+        assert_eq!(status(Some(&origin), &synced, false, true), SlotStatusView::NotInUse { file: source.clone() });
+        let copied = local(Some(linked(Some(same), true, LinkKind::Copy)), None);
+        assert_eq!(status(Some(&copied), &synced, false, true), SlotStatusView::NotInUse { file: here.clone() });
+        // 同步來的副本:同一把 → Ready;同步的換了 → 有新的;沒有主機用到 → NotInUse;停止同步(own)之後照舊使用。
+        let held = local(Some(copy(same)), None);
+        assert_eq!(status(Some(&held), &synced, true, true), SlotStatusView::Ready { file: here.clone(), synced_copy: true, fingerprint: Some(same.into()) });
+        assert_eq!(status(Some(&held), &ecdsa_payload("a"), true, true), SlotStatusView::SyncedAvailable { file: here.clone() });
+        assert_eq!(status(Some(&held), &ecdsa_payload("a"), true, false), SlotStatusView::Ready { file: here.clone(), synced_copy: true, fingerprint: Some(same.into()) });
+        assert_eq!(status(Some(&held), &synced, false, true), SlotStatusView::NotInUse { file: here.clone() });
+        assert_eq!(status(Some(&held), &own, true, false), SlotStatusView::Ready { file: here.clone(), synced_copy: true, fingerprint: Some(same.into()) });
+    }
+
+    #[test]
+    fn views_list_slots_by_name_and_keep_the_copy_of_a_slot_that_is_gone() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let me = device_id(&a);
+        // `work` 的 id 最小:依名稱排序,不是依 id。
+        let (work, mine, gone) = ("00000000000000000000000000000001", SLOT_ID, "ffffffffffffffffffffffffffffffff");
+        publish(&a, work, &KeySlotPayload { name: "work".into(), ..own_payload(&me) }, None);
+        publish(&a, mine, &synced_payload(&me), Some(&test_keys::plain()));
+        // 帳戶裡已經沒有、這台還留著副本的插槽(別台刪除了):排在最後。
+        mutate(&a.env(), |s| {
+            s.key_slots.insert(
+                gone.to_string(),
+                LocalSlot {
+                    file_name: "old-ffffffff".into(),
+                    source: Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }),
+                    last_error: None,
+                    asked: true,
+                    payload: Some(KeySlotPayload { name: "old".into(), ..synced_payload(&me) }),
+                },
+            );
+            // 沒有 payload、或沒有放東西的記錄不顯示。
+            s.key_slots.insert("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(), LocalSlot { file_name: "x-eeeeeeee".into(), source: None, last_error: None, asked: false, payload: None });
+            Ok(())
+        })
+        .unwrap();
+
+        let view = view_of(&a);
+        assert_eq!(view.iter().map(|v| (v.name.as_str(), v.id.as_str())).collect::<Vec<_>>(), vec![("id_mac", mine), ("work", work), ("old", gone)]);
+        assert_eq!(view[0].value, format!("~/.ssh/sshelter/keys/id_mac-{}", &mine[..8]));
+        assert_eq!((view[0].mode, view[0].origin_device.as_str(), view[0].origin_is_this), (SlotMode::Synced, "MacBook-A", true));
+        assert_eq!(view[0].fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT));
+        assert_eq!((view[1].mode, view[1].fingerprint.clone(), view[1].has_passphrase), (SlotMode::Own, None, None));
+        let kept = home(&a).join(SLOT_DIR).join("old-ffffffff").display().to_string();
+        assert_eq!(view[2].status, SlotStatusView::NotInUse { file: kept });
+        assert!(view[2].hosts.is_empty());
     }
 }

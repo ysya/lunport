@@ -70,6 +70,7 @@ export function overview(overrides: Partial<SyncOverview> = {}): SyncOverview {
     pending_uploads: 0,
     approvals_waiting: 0,
     stray_files: [],
+    key_slots: [],
     notices: [],
     phrase_cleanup_pending: false,
     ...overrides,

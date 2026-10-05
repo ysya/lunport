@@ -638,6 +638,26 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
     }
     announce(env, applied_hosts, &conflicts, &held);
 
+    // 6b. 金鑰插槽(SP3 spec §6.2–§6.6):依合併後的帳戶與 space 記錄,在這台落地或維護插槽。檔案系統的動作做在 `work` 這份副本上,
+    //     不持有任何鎖;帳戶的變更(`device.slots`、補寫的 `keyslot`/`key`)跟著下面的上傳送出;通知存進狀態、放掉鎖之後發出。
+    if let Some(home) = env.ssh_dir.parent() {
+        let slot_round = crate::sync::slots::reconcile(&mut work, &keys, home, now);
+        if slot_round.changed || !slot_round.notices.is_empty() {
+            commit(env, generation, |latest| {
+                // 帳戶區段在這一輪已經整份提交過(`commit_account`),之後只有 space 的提交:用這一輪的版本整份換掉是安全的。
+                latest.account = work.account.clone();
+                latest.key_slots = work.key_slots.clone();
+                for notice in &slot_round.notices {
+                    crate::sync::slots::add_notice(&mut latest.notices, notice);
+                }
+                Ok(())
+            })?;
+            for notice in &slot_round.notices {
+                env.events.notice(notice);
+            }
+        }
+    }
+
     // 7. 上傳(唯讀模式不上傳)。帳戶與各 space 分開;撞到凍結的 chain 就停止這一輪所有上傳。被限流(任何一個 `429`)之後
     //    這一輪不再對 relay 發任何請求:不上傳、不刪 chain。
     let read_only = work.read_only();
