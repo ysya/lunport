@@ -77,6 +77,8 @@ pub fn link(source: &Path, slot: &Path) -> Result<LinkKind, AppError> {
             let _ = fs::remove_file(&tmp);
             return Err(e.into());
         }
+        // `tmp` 與 `slot` 已是同一個檔案的兩個名字時(Windows 對同一個原檔重做 hard link),POSIX 式的 rename 成功卻不會移走 `tmp`;已移走時這行不做事。
+        let _ = fs::remove_file(&tmp);
     }
     Ok(kind)
 }
@@ -256,6 +258,16 @@ mod tests {
         fs::write(&source, test_keys::ecdsa()).unwrap();
         let linked = dir.join("linked-3fa2c1d9");
         assert_eq!(link(&source, &linked).unwrap(), LinkKind::HardLink);
+        assert_eq!(content_sha256(&linked), content_sha256(&source));
+
+        // 對同一個原檔再連一次:`linked` 已經和原檔是同一個檔案,這之後插槽目錄裡不能留下 `.tmp` 的暫存名稱。
+        assert_eq!(link(&source, &linked).unwrap(), LinkKind::HardLink);
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "a re-made link leaves no temp name behind: {leftovers:?}");
         assert_eq!(content_sha256(&linked), content_sha256(&source));
     }
 }

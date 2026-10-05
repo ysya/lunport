@@ -21,8 +21,9 @@ fn wide(path: &Path) -> Vec<u16> {
     OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// 目前使用者的 `TOKEN_USER`(放在回傳的緩衝區裡;SID 指標指進緩衝區)。
-fn current_user_token() -> io::Result<Vec<u8>> {
+/// 目前使用者的 `TOKEN_USER`(放在回傳的緩衝區裡;SID 指標指進緩衝區)。緩衝區是 `Vec<u64>` 而不是 `Vec<u8>`:
+/// `TOKEN_USER` 含指標,起點必須 8 位元組對齊,`Vec<u8>` 只保證 1 位元組(得倚賴配置器的行為),`Vec<u64>` 由型別保證 8。
+fn current_user_token() -> io::Result<Vec<u64>> {
     unsafe {
         let mut token: HANDLE = ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
@@ -30,7 +31,8 @@ fn current_user_token() -> io::Result<Vec<u8>> {
         }
         let mut needed = 0u32;
         GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
-        let mut buffer = vec![0u8; needed as usize];
+        // 以 8 位元組為單位向上取整配置;傳給 Win32 的長度仍是位元組數(`needed`)。
+        let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
         let ok = GetTokenInformation(token, TokenUser, buffer.as_mut_ptr() as *mut c_void, needed, &mut needed);
         let error = io::Error::last_os_error();
         CloseHandle(token);
@@ -46,6 +48,7 @@ fn current_user_token() -> io::Result<Vec<u8>> {
 pub fn restrict_to_owner(path: &Path, inheritable: bool) -> io::Result<()> {
     let token = current_user_token()?;
     unsafe {
+        // `token` 是 `Vec<u64>`,起點 8 位元組對齊,夠 `TOKEN_USER` 用(內容已由 `GetTokenInformation` 填好)。
         let user = &*(token.as_ptr() as *const TOKEN_USER);
         let access = EXPLICIT_ACCESS_W {
             grfAccessPermissions: GENERIC_ALL,
