@@ -221,6 +221,12 @@ pub struct LocalSlot {
     /// 同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。
     #[serde(default)]
     pub uploaded_fingerprint: Option<String>,
+    /// 這個插槽的連結已經因為沒有主機用到而收起來了(`slots::park_link`:連結檔拿掉了,或路徑上被使用者換成了別的檔案):`source` 的
+    /// `Linked` 記錄還在(原檔、`origin`、使用者的挑選),但這筆記錄現在不擁有插槽路徑上的任何東西。再用到的時候,路徑空著才重新連結
+    /// (然後清掉這個旗標);路徑上有別的東西(別的插槽放的、使用者的檔案)就不碰、回報擋路,也不認它是自己的。插槽被刪除時,收起來的
+    /// 記錄只忘掉,不移除、也不收編路徑上的檔案。
+    #[serde(default)]
+    pub parked: bool,
 }
 
 /// 插槽裡放的東西(SP3 spec §4.2)。
@@ -666,7 +672,7 @@ mod tests {
             checked_at_ms: 50,
         });
         s.legacy_v1_backup = Some(LEGACY_BACKUP_FILE.to_string());
-        // 兩種插槽來源都有,`LocalSlot` 的每個欄位都不是預設值。
+        // 兩種插槽來源都有,`LocalSlot` 的每個欄位在其中一筆裡都不是預設值(`parked` 只有連結的記錄用得到)。
         s.key_slots.insert(
             "3fa2c1d90123456789abcdef01234567".to_string(),
             LocalSlot {
@@ -686,6 +692,7 @@ mod tests {
                     has_passphrase: None,
                 }),
                 uploaded_fingerprint: Some("SHA256:vUthAmDZoxYXCTAPEZUn5qtWSMHWQCEcUfpnyM05mMs".to_string()),
+                parked: false,
             },
         );
         s.key_slots.insert(
@@ -702,6 +709,7 @@ mod tests {
                 asked: false,
                 payload: None,
                 uploaded_fingerprint: None,
+                parked: true,
             },
         );
         s
@@ -760,16 +768,21 @@ mod tests {
                 asked: false,
                 payload: None,
                 uploaded_fingerprint: Some("SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew".into()),
+                parked: true,
             },
         );
         let back: SyncStateV2 = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
         assert_eq!(back.key_slots, state.key_slots);
 
-        // 沒有 `uploaded_fingerprint` 的記錄(這個欄位之前寫的狀態檔)讀進來是 None:沒有人同意過上傳,不會補寫私鑰。
+        // 沒有 `uploaded_fingerprint` 的記錄(這個欄位之前寫的狀態檔)讀進來是 None:沒有人同意過上傳,不會補寫私鑰。沒有 `parked` 的
+        // 記錄讀進來是 false:連結還在原位(收起來之前的版本不會收起連結)。
         let mut json = serde_json::to_value(&state).unwrap();
-        json["key_slots"]["3fa2c1d90123456789abcdef01234567"].as_object_mut().unwrap().remove("uploaded_fingerprint");
+        let entry = json["key_slots"]["3fa2c1d90123456789abcdef01234567"].as_object_mut().unwrap();
+        entry.remove("uploaded_fingerprint");
+        entry.remove("parked");
         let older: SyncStateV2 = serde_json::from_value(json).unwrap();
-        assert_eq!(older.key_slots["3fa2c1d90123456789abcdef01234567"].uploaded_fingerprint, None);
+        let older = &older.key_slots["3fa2c1d90123456789abcdef01234567"];
+        assert_eq!((older.uploaded_fingerprint.as_deref(), older.parked), (None, false));
     }
 
     #[test]

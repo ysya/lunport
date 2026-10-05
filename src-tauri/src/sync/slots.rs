@@ -202,12 +202,14 @@ pub fn reconcile(state: &mut SyncStateV2, account_keys: &ChainKeys, home: &Path,
             asked: false,
             payload: None,
             uploaded_fingerprint: None,
+            parked: false,
         });
         if local.file_name != file {
             // 插槽建立之後不改名(spec §1 非目標),帳戶裡的名稱卻變了(只有帳戶裡的惡意成員寫得出來):這個插槽記著的檔案在舊路徑,
             // 以後不再碰它們;新路徑上的東西不屬於這個插槽(它的記錄指的是舊路徑),從頭來過 —— 不能拿新路徑去替換或移除別人的檔案。
             local.file_name = file.clone();
             local.source = None;
+            local.parked = false;
             local.last_error = None;
         }
         local.payload = Some(payload.clone());
@@ -263,11 +265,12 @@ pub fn reconcile(state: &mut SyncStateV2, account_keys: &ChainKeys, home: &Path,
     round
 }
 
-/// 這台的 `device.slots` 裡這個插槽那一項。連結(symlink / hard link)只在有主機用到的時候才列:沒有主機用到、只是暫時收起來
-/// (`park_link`)的連結,插槽裡現在沒有東西;複製檔與同步來的副本是真的放在插槽裡的金鑰,一直列著。
+/// 這台的 `device.slots` 裡這個插槽那一項。連結(symlink / hard link)只在有主機用到、而且連結真的在插槽路徑上的時候才列:
+/// 收起來的(`LocalSlot::parked`,`park_link`)連結,插槽路徑上現在沒有這個插槽的東西;複製檔與同步來的副本是真的放在插槽裡的
+/// 金鑰,一直列著。
 fn device_slot(slot_id: &str, local: &LocalSlot, needed: bool) -> Option<DeviceSlot> {
     match &local.source {
-        Some(SlotSource::Linked { link, fingerprint, .. }) => (needed || *link == LinkKind::Copy)
+        Some(SlotSource::Linked { link, fingerprint, .. }) => ((needed && !local.parked) || *link == LinkKind::Copy)
             .then(|| DeviceSlot { slot_id: slot_id.to_string(), fingerprint: fingerprint.clone(), synced_copy: false }),
         Some(SlotSource::SyncedCopy { fingerprint }) => {
             Some(DeviceSlot { slot_id: slot_id.to_string(), fingerprint: Some(fingerprint.clone()), synced_copy: true })
@@ -325,18 +328,27 @@ fn keep_as_copy(local: &mut LocalSlot) {
 
 /// 帳戶裡還有、這台沒有主機用到的插槽:只拿掉連結檔(symlink,或原檔還在而且內容相同的 hard link;原檔不動),`LocalSlot` 的
 /// 記錄留著 —— `Linked` 來源、`origin`、使用者的挑選不能因為暫時沒有主機用到(主機的 `IdentityFile` 暫時拿掉、space 檔重新長出來)
-/// 就忘掉,用到的時候 `maintain` 重新連結,不會再問使用者。永遠不拿掉一把金鑰的最後一個名字:原檔不見或內容不同的 hard link
-/// 留在原地、記成複製檔。複製檔與同步來的副本本來就不拿掉(私鑰不自動刪除);使用者自己換在 symlink 位置上的一般檔案也不碰。
+/// 就忘掉,用到的時候 `maintain` 重新連結,不會再問使用者。拿掉之後記錄標成 `parked`:它不再擁有插槽路徑上的東西 —— 之後那裡出現的
+/// 任何東西(別的插槽放的副本、使用者的檔案)都不是它的,這裡不看、不碰,也不把它記成這個插槽的複製檔。永遠不拿掉一把金鑰的最後
+/// 一個名字:原檔不見或內容不同的 hard link 留在原地、記成複製檔(那是這個插槽放的,沒有收起來)。複製檔與同步來的副本本來就不拿掉
+/// (私鑰不自動刪除);使用者自己換在 symlink 位置上的一般檔案也不碰,記錄同樣標成 `parked`。
 fn park_link(local: &mut LocalSlot, path: &Path) {
+    if local.parked {
+        // 已經收起來了:路徑上現在的東西不是這個插槽的,不看、不碰;用到它的時候才有的錯誤(擋路)現在不必再顯示。
+        local.last_error = None;
+        return;
+    }
     let Some(SlotSource::Linked { path: source, link, .. }) = &local.source else { return };
     match link_fate(*link, source, path) {
-        None | Some(LinkFate::NotOurs) => {}
+        None => {}
+        Some(LinkFate::NotOurs) => local.parked = true,
         Some(LinkFate::LastName) => keep_as_copy(local),
         Some(LinkFate::Removable) => {
             if let Err(e) = remove_link_file(path) {
                 local.last_error = Some(e.to_string());
                 return;
             }
+            local.parked = true;
         }
     }
     local.last_error = None;
@@ -344,9 +356,16 @@ fn park_link(local: &mut LocalSlot, path: &Path) {
 
 /// 帳戶裡已經沒有的插槽(tombstone,或整筆記錄都不見):移除連結(連同 `.pub`)、忘掉這筆記錄;同步來的副本與複製檔留著
 /// (私鑰不自動刪除)。原檔不見或內容不同的 hard link 不拿掉、記成複製檔(記錄也留著,Keys 列為 Not in use);使用者自己換在
-/// symlink 位置上的一般檔案不碰,只忘掉記錄。
+/// symlink 位置上的一般檔案不碰,只忘掉記錄。收起來的記錄(`parked`)不擁有路徑上的任何東西:只忘掉記錄,不移除、也不收編
+/// 那裡現在的檔案(它可能是別的插槽放的副本,或使用者的檔案)。
 fn drop_link(local: &mut LocalSlot, path: &Path) {
     let Some(SlotSource::Linked { path: source, link, .. }) = &local.source else { return };
+    if local.parked {
+        local.source = None;
+        local.parked = false;
+        local.last_error = None;
+        return;
+    }
     match link_fate(*link, source, path) {
         None => return,
         Some(LinkFate::LastName) => keep_as_copy(local),
@@ -362,7 +381,8 @@ fn drop_link(local: &mut LocalSlot, path: &Path) {
     local.last_error = None;
 }
 
-/// 這台需要的插槽:連結的確認原檔還在、hard link 與複製跟上原檔;副本被刪掉就重放;空的就試著落地。
+/// 這台需要的插槽:連結的確認原檔還在、hard link 與複製跟上原檔;副本被刪掉就重放;空的就試著落地。收起來的連結(`parked`)只在
+/// 路徑空著的時候重新連結。
 fn maintain(
     local: &mut LocalSlot,
     slot_id: &str,
@@ -375,6 +395,15 @@ fn maintain(
     match local.source.clone() {
         Some(SlotSource::Linked { path: source, link, origin, .. }) => {
             let source_path = PathBuf::from(&source);
+            // 收起來的連結:路徑上現在的東西不是這個插槽的(別的插槽放的副本、使用者的檔案)—— 不覆蓋、不認它是自己的,回報擋路,
+            // 記錄維持收起來。例外:上一輪已經重新連結、狀態卻沒存下來(`commit` 被搶先),路徑上正好是 `link` 會做出來的 symlink。
+            if local.parked && slot_files::occupied(path) {
+                let own_link = link == LinkKind::Symlink && std::fs::read_link(path).is_ok_and(|target| target == source_path);
+                if !own_link {
+                    local.last_error = Some(in_the_way_message(path));
+                    return;
+                }
+            }
             if !source_path.is_file() {
                 local.last_error = Some(source_gone_message(&source));
                 return;
@@ -394,6 +423,7 @@ fn maintain(
                 link
             };
             local.source = Some(SlotSource::Linked { path: source, link, fingerprint: local_key_fingerprint(&source_path), origin });
+            local.parked = false;
             local.last_error = None;
         }
         Some(SlotSource::SyncedCopy { .. }) if slot_files::occupied(path) => local.last_error = None,
@@ -454,7 +484,9 @@ fn land(secret: &str, payload: &KeySlotPayload, keys_dir: &Path, path: &Path) ->
 /// 「原本是 `synced`」不能由 `payload` 判斷:那是帳戶裡最新的 `keyslot`,帳戶裡的任何成員都能把別台的 `own` 插槽改成 `synced`、
 /// 填上公開的公鑰與指紋,再讓帳戶掉了這個插槽 —— 這台若照做,就把使用者選擇留在這台的私鑰上傳給對方(spec §1、§3)。所以連到
 /// 本機金鑰的插槽,只在那把金鑰正是這台自己上傳過的(`LocalSlot::uploaded_fingerprint`,只由這台使用者的選擇設定)才補 `key`;
-/// 同步來的副本照舊(位元組來自帳戶、通過了指紋檢查,不是這台使用者的私鑰)。
+/// 同步來的副本照舊(位元組來自帳戶、通過了指紋檢查,不是這台使用者的私鑰),但路徑上現在的檔案必須還是記錄裡的那一把
+/// (`SyncedCopy::fingerprint`)—— 那個位置可能被換成了別的檔案(別的插槽放的、使用者的),不能因為它剛好符合帳戶裡最新的 payload
+/// 就上傳。
 #[allow(clippy::too_many_arguments)]
 fn republish(
     account: &mut AccountState,
@@ -474,7 +506,9 @@ fn republish(
         Some(SlotSource::Linked { path: source, .. }) => std::fs::read_to_string(source).ok().filter(|text| {
             inspect_private_key(text).is_ok_and(|f| local.uploaded_fingerprint.as_deref() == Some(f.fingerprint.as_str()))
         }),
-        Some(SlotSource::SyncedCopy { .. }) => std::fs::read_to_string(path).ok(),
+        Some(SlotSource::SyncedCopy { fingerprint }) => std::fs::read_to_string(path)
+            .ok()
+            .filter(|text| inspect_private_key(text).is_ok_and(|f| f.fingerprint == *fingerprint)),
         None => None,
     };
     let matching = readable.filter(|text| {
@@ -1031,6 +1065,7 @@ pub(crate) mod tests {
                     payload: Some(payload),
                     // 這台的使用者選了「Sync key」:這把金鑰是這台自己上傳的(`own` 沒有)。
                     uploaded_fingerprint: synced.then(|| facts.clone().unwrap().fingerprint),
+                    parked: false,
                 },
             );
             Ok(())
@@ -1557,8 +1592,15 @@ pub(crate) mod tests {
 
         assert_eq!(std::fs::read_to_string(&slot_path).unwrap(), test_keys::ecdsa(), "not removed");
         assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Linked { origin: true, .. })), "the record is kept like any parked link");
+        assert!(a.state().key_slots[&id].parked, "but it does not own the user's file");
         assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
         assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_mac")).unwrap(), test_keys::plain());
+
+        // 又用到了:那個檔案擋路,不是「連到原檔」。
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        assert_eq!(view_of(&a)[0].status, SlotStatusView::Error { message: in_the_way_message(&slot_path) });
+        assert_eq!(std::fs::read_to_string(&slot_path).unwrap(), test_keys::ecdsa());
     }
 
     /// 把 `create_slot_on` 做出來的連結換成真正的 hard link(Windows 上 `slot_files::link` 做的就是這個),狀態記成 `HardLink`。
@@ -1601,11 +1643,13 @@ pub(crate) mod tests {
         assert!(!slot_files::occupied(&slot(&kept_file)));
         assert_eq!(std::fs::read_to_string(ssh.join("id_kept")).unwrap(), test_keys::plain());
         assert!(matches!(&a.state().key_slots[&kept_id].source, Some(SlotSource::Linked { link: LinkKind::HardLink, origin: true, .. })));
-        // 原檔不見、原檔換成別把:插槽裡的 hard link 可能是那把金鑰僅存的名字 —— 留著,記成複製檔。
+        assert!(a.state().key_slots[&kept_id].parked);
+        // 原檔不見、原檔換成別把:插槽裡的 hard link 可能是那把金鑰僅存的名字 —— 留著,記成複製檔(它在路徑上,是這個插槽的,沒有收起來)。
         for (id, file) in [(&gone_id, &gone_file), (&swap_id, &swap_file)] {
             assert_eq!(std::fs::read_to_string(slot(file)).unwrap(), test_keys::plain(), "the old key bytes are still there");
             assert!(matches!(&a.state().key_slots[id].source, Some(SlotSource::Linked { link: LinkKind::Copy, .. })));
             assert_eq!(a.state().key_slots[id].last_error, None);
+            assert!(!a.state().key_slots[id].parked);
         }
         let shown = view_of(&a);
         let status_of = |id: &str| shown.iter().find(|v| v.id == id).unwrap().status.clone();
@@ -1651,6 +1695,192 @@ pub(crate) mod tests {
         assert_eq!(shown[0].status, SlotStatusView::NotInUse { file: slot(&gone_file).display().to_string() });
     }
 
+    // ── 收起來的連結(`park_link`)不擁有路徑上的東西 ───────────────────────────────────────────────
+
+    /// A 上一個已經收起來的 `own` 插槽(沒有主機用到,連結檔已經拿掉):`hard_link` 決定記錄的連結種類(hard link 在 Windows 上才會做出來,
+    /// 這裡用真的 hard link)。回傳(A、Personal 的 id、插槽 id、插槽檔名)。
+    fn a_parked_slot(hard_link: bool) -> (TestDevice, String, String, String) {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        if hard_link {
+            make_it_a_hard_link(&a, &id, &file, "id_mac");
+        }
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+        settle(&a);
+        assert!(!slot_files::occupied(&home(&a).join(SLOT_DIR).join(&file)), "the link file is gone");
+        assert!(a.state().key_slots[&id].parked, "and the record says so");
+        (a, personal, id, file)
+    }
+
+    #[test]
+    fn a_file_at_a_parked_links_path_is_never_overwritten_when_the_slot_is_used_again() {
+        for hard_link in [false, true] {
+            let (a, personal, id, file) = a_parked_slot(hard_link);
+            let path = home(&a).join(SLOT_DIR).join(&file);
+            // 收起來的連結的位置上,使用者(或別的程式)放了一個檔案。
+            std::fs::write(&path, "mine").unwrap();
+
+            // 還是沒有主機用到:不看它、不碰它,也不把它記成這個插槽的複製檔。
+            settle(&a);
+            settle(&a);
+            let local = a.state().key_slots[&id].clone();
+            assert!(local.parked, "hard_link={hard_link}: {local:?}");
+            assert!(matches!(&local.source, Some(SlotSource::Linked { link, .. }) if *link != LinkKind::Copy), "hard_link={hard_link}: {local:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+
+            // 又用到了:擋路,檔案不動,記錄還是收起來的,不列在 `device.slots`。
+            use_slot(&a, &personal, &file);
+            settle(&a);
+            let local = a.state().key_slots[&id].clone();
+            assert_eq!(local.last_error, Some(in_the_way_message(&path)), "hard_link={hard_link}");
+            assert!(local.parked);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine", "hard_link={hard_link}: not relinked over it");
+            assert_eq!(view_of(&a)[0].status, SlotStatusView::Error { message: in_the_way_message(&path) });
+            assert_eq!(device_slots_seen_by(&a, &a), Vec::new());
+
+            // 主機又不用了:不再回報擋路(那是用到它的時候才有的問題),檔案還是不動。
+            a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+            settle(&a);
+            assert_eq!(a.state().key_slots[&id].last_error, None);
+            assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+
+            // 用到、使用者把檔案移走:路徑空著,重新連結,錯誤與收起來的旗標都清掉。
+            use_slot(&a, &personal, &file);
+            settle(&a);
+            std::fs::remove_file(&path).unwrap();
+            settle(&a);
+            let local = a.state().key_slots[&id].clone();
+            assert!(!local.parked && local.last_error.is_none(), "hard_link={hard_link}: {local:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), test_keys::plain());
+            assert_eq!(device_slots_seen_by(&a, &a).len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_tombstoned_parked_slot_forgets_its_record_and_leaves_the_file_at_its_path_alone() {
+        for hard_link in [false, true] {
+            let (a, _personal, id, file) = a_parked_slot(hard_link);
+            let path = home(&a).join(SLOT_DIR).join(&file);
+            std::fs::write(&path, "mine").unwrap();
+            unpublish(&a, &id);
+            settle(&a);
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine", "hard_link={hard_link}: not removed");
+            assert!(!a.state().key_slots.contains_key(&id), "hard_link={hard_link}: forgotten, not adopted as this slot's copy");
+            assert!(view_of(&a).is_empty());
+            assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_mac")).unwrap(), test_keys::plain());
+        }
+    }
+
+    #[test]
+    fn a_member_cannot_make_a_parked_link_relink_over_another_slots_copy() {
+        for hard_link in [false, true] {
+            let (a, personal, x, file) = a_parked_slot(hard_link);
+            let path = home(&a).join(SLOT_DIR).join(&file);
+            // 帳戶裡的成員發佈同名、同 id 前 8 字元、排在 X 前面的 Z,以他自己的金鑰同步,再讓主機用到這個檔案。
+            let z = format!("{}{}", &x[..8], "0".repeat(24));
+            assert!(z < x && slot_file_name("id_mac", &z) == file);
+            publish(&a, &z, &ecdsa_payload("a-member"), Some(&test_keys::ecdsa()));
+            use_slot(&a, &personal, &file);
+            settle(&a);
+
+            // Z 放進空著的路徑;X 不能再連結蓋過去,也不能被當成放著自己的金鑰。
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), test_keys::ecdsa(), "hard_link={hard_link}: Z's copy is still there");
+            let state = a.state();
+            assert_eq!(state.key_slots[&z].source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::ECDSA_FINGERPRINT.into() }));
+            assert_eq!(state.key_slots[&x].last_error, Some(in_the_way_message(&path)), "hard_link={hard_link}");
+            assert!(state.key_slots[&x].parked);
+            let listed: Vec<String> = device_slots_seen_by(&a, &a).into_iter().map(|d| d.slot_id).collect();
+            assert_eq!(listed, vec![z.clone()], "only Z is in the slot");
+
+            // 成員把 Z 的記錄改成 plain 的公鑰與指紋,帳戶又掉了兩個插槽(沒有 SP3 的電腦更換了同步碼):X 的金鑰不會被當成 Z 的 `key` 上傳。
+            publish(&a, &z, &synced_payload("a-member"), None);
+            settle(&a);
+            let keys = account_keys(&a);
+            let mut state = a.state();
+            let account = state.account.as_mut().unwrap();
+            for id in [&x, &z] {
+                account.records.remove(&record_key(RecordKind::KeySlot, id));
+                account.sealed.remove(&key_secret_key(&keys, id));
+            }
+            reconcile(&mut state, &keys, &home(&a), 1_000);
+            let account = state.account.as_ref().unwrap();
+            for id in [&x, &z] {
+                assert_eq!(open_key_secret(account, &keys, id), None, "hard_link={hard_link}: no private key is uploaded for {id}");
+                assert!(!account.sealed.contains_key(&key_secret_key(&keys, id)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_synced_copy_whose_file_is_no_longer_the_recorded_key_is_not_uploaded_as_the_slots_key() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        // B 的副本被換成了別把金鑰(使用者的檔案,或別的插槽放的),記錄還說這是 plain 的;帳戶裡的成員同時把插槽的指紋改成那一把。
+        std::fs::write(home(&b).join(SLOT_DIR).join(&file), test_keys::ecdsa()).unwrap();
+        publish(&a, &id, &ecdsa_payload(&device_id(&a)), None);
+        settle(&a);
+        settle(&b);
+        let local = b.state().key_slots[&id].clone();
+        assert_eq!(local.source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }));
+        assert_eq!(local.payload.and_then(|p| p.fingerprint).as_deref(), Some(test_keys::ECDSA_FINGERPRINT), "this computer saw the flip");
+
+        // 帳戶掉了這個插槽:路徑上現在的檔案不是記錄裡的那一把,不能當成這個插槽的 `key` 上傳。
+        let keys = account_keys(&b);
+        let mut state = b.state();
+        let account = state.account.as_mut().unwrap();
+        account.records.remove(&record_key(RecordKind::KeySlot, &id));
+        account.sealed.remove(&key_secret_key(&keys, &id));
+        assert!(reconcile(&mut state, &keys, &home(&b), 1_000).changed);
+        let account = state.account.as_ref().unwrap();
+        assert!(slot(account, &id).is_some(), "the keyslot is written again");
+        assert!(!account.sealed.contains_key(&key_secret_key(&keys, &id)), "no key record at all");
+    }
+
+    #[test]
+    fn a_parked_slot_that_is_renamed_in_the_account_starts_over_not_parked() {
+        let (a, personal, id, _file) = a_parked_slot(false);
+        // 帳戶裡的成員把插槽改名(spec 沒有改名),主機用到新名稱的路徑:這個插槽記著的舊路徑從此不再碰,新路徑從頭來過。
+        publish(&a, &id, &KeySlotPayload { name: "renamed".into(), ..own_payload(&device_id(&a)) }, None);
+        use_slot(&a, &personal, &slot_file_name("renamed", &id));
+        settle(&a);
+        let local = a.state().key_slots[&id].clone();
+        assert_eq!((&local.source, local.parked, local.asked), (&None, false, true), "{local:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_parked_link_that_was_made_again_before_the_state_was_saved_is_recognised() {
+        let (a, personal, id, file) = a_parked_slot(false);
+        let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+        // 上一輪重新連結了、狀態卻沒存下來(`commit` 被搶先):路徑上正好是連結會做出來的 symlink,就是這個插槽自己的。
+        std::os::unix::fs::symlink(&source, &path).unwrap();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let local = a.state().key_slots[&id].clone();
+        assert!(!local.parked && local.last_error.is_none(), "{local:?}");
+        assert_eq!(std::fs::read_link(&path).unwrap(), source);
+        assert_eq!(device_slots_seen_by(&a, &a).len(), 1);
+
+        // 指到別把金鑰的 symlink 就不是了。
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+        settle(&a);
+        assert!(a.state().key_slots[&id].parked && !slot_files::occupied(&path));
+        let other = a.ssh_dir().join("id_work");
+        std::fs::write(&other, test_keys::ecdsa()).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        assert_eq!(a.state().key_slots[&id].last_error, Some(in_the_way_message(&path)));
+        assert_eq!(std::fs::read_link(&path).unwrap(), other, "not replaced");
+    }
+
     // ── 維護:連結、副本、通知 ──────────────────────────────────────────────────────────────────
 
     #[test]
@@ -1672,7 +1902,11 @@ pub(crate) mod tests {
 
         assert!(!slot_files::occupied(&link), "the link is removed");
         assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_mac")).unwrap(), test_keys::plain(), "the key it pointed to is untouched");
-        assert_eq!(a.state().key_slots[&id], linked, "the record stays: the link, its origin and the key synced from here are not forgotten");
+        assert_eq!(
+            a.state().key_slots[&id],
+            LocalSlot { parked: true, ..linked },
+            "the record stays: the link, its origin and the key synced from here are not forgotten"
+        );
         assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
         assert_eq!(device_slots_seen_by(&a, &a), Vec::new(), "a parked link is not listed: nothing is in the slot");
 
@@ -1698,7 +1932,7 @@ pub(crate) mod tests {
         settle(&a);
         assert!(!slot_files::occupied(&link), "only the link file is removed");
         assert!(slot_files::occupied(&public_path(&link)), "the .pub stays for the next time");
-        assert_eq!(a.state().key_slots[&id], linked, "the record is kept as it was");
+        assert_eq!(a.state().key_slots[&id], LocalSlot { parked: true, ..linked.clone() }, "the record is kept, marked as parked");
         assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
         assert_eq!(device_slots_seen_by(&a, &a), Vec::new());
         // 收起來之後什麼都沒變的一輪:不寫新版本、不要求提交。
@@ -2206,6 +2440,7 @@ pub(crate) mod tests {
             asked: false,
             payload: None,
             uploaded_fingerprint: None,
+            parked: false,
         };
         let linked = |fingerprint: Option<&str>, origin: bool, link: LinkKind| SlotSource::Linked {
             path: "/h/.ssh/id_mac".into(),
@@ -2272,10 +2507,11 @@ pub(crate) mod tests {
                     asked: true,
                     payload: Some(KeySlotPayload { name: "old".into(), ..synced_payload(&me) }),
                     uploaded_fingerprint: None,
+                    parked: false,
                 },
             );
             // 沒有 payload、或沒有放東西的記錄不顯示。
-            s.key_slots.insert("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(), LocalSlot { file_name: "x-eeeeeeee".into(), source: None, last_error: None, asked: false, payload: None, uploaded_fingerprint: None });
+            s.key_slots.insert("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(), LocalSlot { file_name: "x-eeeeeeee".into(), source: None, last_error: None, asked: false, payload: None, uploaded_fingerprint: None, parked: false });
             Ok(())
         })
         .unwrap();
