@@ -1243,7 +1243,7 @@ pub(crate) mod tests {
     use crate::sync::slot_rules::{test_keys, DeviceSlot, SlotMode, MAX_PRIVATE_KEY_BYTES};
     use crate::sync::state_v2::{AccountState, LoadedState, SyncStateV2};
 
-    use crate::sync::dto::{ApprovalNotice, SlotDeviceView, SlotStatusView, SyncConflict};
+    use crate::sync::dto::{ApprovalNotice, SlotStatusView, SyncConflict};
     use crate::sync::env::SyncEvents;
     use crate::sync::record::HostPayload;
     use crate::sync::round::tests::{pair, settle};
