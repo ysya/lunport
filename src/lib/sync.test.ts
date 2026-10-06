@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 
@@ -13,15 +15,23 @@ import {
   fetchKeyCandidates,
   joinAccount,
   keyArgs,
+  keyCandidatesKey,
   leaveFailureTitle,
   openRelayDeploy,
   openRelayUpdateGuide,
   rejectVersions,
   rejoinAccount,
   showWords,
+  syncApprovalsKey,
   syncDuplicatesKey,
+  syncOverviewKey,
   syncUnmovableKey,
+  useKeyDeleteCopy,
+  useKeyPick,
+  useKeySetMode,
+  useKeyUseSynced,
 } from "./sync";
+import { overview, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "./sync-fixtures";
 
 /** Stub the backend: every plugin command ends in `window.__TAURI_INTERNALS__.invoke`. */
 function stubBackend(reply: (cmd: string, args: unknown) => Promise<unknown>): Array<[string, unknown]> {
@@ -154,6 +164,62 @@ describe("key slot commands", () => {
     expect(keyArgs.setMode({ slotId: "s", mode: "own" })).toEqual({ slotId: "s", mode: "own" });
     expect(keyArgs.pick({ slotId: "s", path: "/k" })).toEqual({ slotId: "s", path: "/k" });
     expect(keyArgs.slot({ slotId: "s" })).toEqual({ slotId: "s" });
+  });
+});
+
+describe("a failed key slot command", () => {
+  /** Run a hook the way a component does and hand back what it returned (a server render: no effects run, nothing subscribes). */
+  function renderHook<T>(queryClient: QueryClient, useHook: () => T): T {
+    let result!: T;
+    const Probe = () => {
+      result = useHook();
+      return null;
+    };
+    renderToStaticMarkup(createElement(QueryClientProvider, { client: queryClient }, createElement(Probe)));
+    return result;
+  }
+
+  it("shows the backend's message with hidden characters revealed: it can name another computer", async () => {
+    // `sync_key_set_mode` refuses on a computer without the key, naming the one that has it (the name comes from that computer).
+    const refusal = (device: string) => `Do this on a computer that has this key, such as ${device}.`;
+    stubBackend(async () => {
+      throw refusal(SPOOFED_NAME);
+    });
+    const { mutateAsync } = renderHook(new QueryClient(), useKeySetMode);
+    await expect(mutateAsync({ slotId: "s", mode: "synced" })).rejects.toBe(refusal(SPOOFED_NAME));
+    expect(toast.getToasts()).toEqual([
+      expect.objectContaining({ title: "Could not change how the key is shared", description: refusal(SPOOFED_NAME_SHOWN) }),
+    ]);
+  });
+
+  it("leaves an ordinary message as it is", async () => {
+    const inTheWay = "A file SSHelter didn't create is in the way: /home/f/.ssh/sshelter/keys/id_mac-3fa2c1d9. Move it, then sync again.";
+    stubBackend(async () => {
+      throw inTheWay;
+    });
+    const { mutateAsync } = renderHook(new QueryClient(), useKeyPick);
+    await expect(mutateAsync({ slotId: "s", path: "/home/f/.ssh/id_mac" })).rejects.toBe(inTheWay);
+    expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Could not use that key", description: inTheWay })]);
+  });
+
+  it("re-reads the views after a failed pick or use of the synced key, which can fail after the slot's key was moved aside", async () => {
+    stubBackend(async () => {
+      throw "boom";
+    });
+    /** Which of the overview, the approvals and a config view (the key candidates) the failed command marked for a re-read. */
+    const reread = async (run: (queryClient: QueryClient) => Promise<unknown>) => {
+      const queryClient = new QueryClient();
+      queryClient.setQueryData(syncOverviewKey, overview());
+      queryClient.setQueryData(syncApprovalsKey, []);
+      queryClient.setQueryData(keyCandidatesKey, { keys: [], unsupported: [] });
+      await expect(run(queryClient)).rejects.toBe("boom");
+      return [syncOverviewKey, syncApprovalsKey, keyCandidatesKey].map((key) => queryClient.getQueryState(key)?.isInvalidated);
+    };
+    expect(await reread((qc) => renderHook(qc, useKeyPick).mutateAsync({ slotId: "s", path: "/k" }))).toEqual([true, true, true]);
+    expect(await reread((qc) => renderHook(qc, useKeyUseSynced).mutateAsync({ slotId: "s" }))).toEqual([true, true, true]);
+    // The mode change and the copy delete keep the cached views on a failure, as they did.
+    expect(await reread((qc) => renderHook(qc, useKeySetMode).mutateAsync({ slotId: "s", mode: "own" }))).toEqual([false, false, false]);
+    expect(await reread((qc) => renderHook(qc, useKeyDeleteCopy).mutateAsync({ slotId: "s" }))).toEqual([false, false, false]);
   });
 });
 

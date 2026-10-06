@@ -161,6 +161,8 @@ describe("the once-per-computer setup prompt", () => {
     expect(keySetupAskedBefore()).toBe(false);
     rememberKeySetupAsked();
     expect(keySetupAskedBefore()).toBe(true);
+    // What is stored is on users' disks once a beta ships: renaming it would ask everyone again. Named like `sshelter-settings`.
+    expect([...store]).toEqual([["sshelter-key-setup-asked", "1"]]);
     vi.stubGlobal("localStorage", { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); } });
     expect(keySetupAskedBefore()).toBe(false);
     expect(() => rememberKeySetupAsked()).not.toThrow();

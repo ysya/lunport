@@ -16,6 +16,7 @@ import type { SlotMode } from "@/bindings/SlotMode";
 import type { SyncOverview } from "@/bindings/SyncOverview";
 import { tauriInvoke } from "@/lib/ipc";
 import { queryKeys } from "@/lib/queries";
+import { revealHidden } from "@/lib/sync-approvals";
 
 export const syncOverviewKey = ["sync", "overview"] as const;
 export const syncApprovalsKey = ["sync", "approvals"] as const;
@@ -99,7 +100,8 @@ function useOverviewMutation<TVars>(
       if (refetchOnError) refreshSyncViews(queryClient);
       if (failure === null) return;
       const message = errorMessage(error);
-      toast.error(typeof failure === "string" ? failure : failure(message), { description: message });
+      // Some messages name another computer ("Do this on a computer that has this key, such as …"): show its hidden characters.
+      toast.error(typeof failure === "string" ? failure : failure(message), { description: revealHidden(message) });
     },
   });
 }
@@ -378,12 +380,14 @@ export function useKeySetMode() {
   return useOverviewMutation("sync_key_set_mode", "Could not change how the key is shared", keyArgs.setMode);
 }
 
+/** It moves the slot's own key aside before it links the new one, so a failure can leave the slot changed: re-read everything. */
 export function useKeyPick() {
-  return useOverviewMutation("sync_key_pick", "Could not use that key", keyArgs.pick);
+  return useOverviewMutation("sync_key_pick", "Could not use that key", keyArgs.pick, true);
 }
 
+/** Same reason: the slot's old link or copy is taken out of the way before the synced key lands. */
 export function useKeyUseSynced() {
-  return useOverviewMutation("sync_key_use_synced", "Could not use the synced key", keyArgs.slot);
+  return useOverviewMutation("sync_key_use_synced", "Could not use the synced key", keyArgs.slot, true);
 }
 
 export function useKeyDeleteCopy() {

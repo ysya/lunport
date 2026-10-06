@@ -166,8 +166,11 @@ export function hostsMissingKey(o: SyncOverview | undefined): Set<string> {
   return out;
 }
 
-/** The setup dialog opens by itself once per computer after the SP3 update (spec §7.1). localStorage may be missing or throw. */
-const ASKED_KEY = "sshelter.keySetupAsked";
+/**
+ * The setup dialog opens by itself once per computer after the SP3 update (spec §7.1). localStorage may be missing or throw.
+ * Named like the other keys (`sshelter-settings`, `sshelter-ui`); once a build ships, renaming it asks everyone again.
+ */
+const ASKED_KEY = "sshelter-key-setup-asked";
 
 export function keySetupAskedBefore(): boolean {
   try {
