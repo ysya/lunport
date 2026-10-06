@@ -39,10 +39,10 @@ pub enum Verdict {
     Ask { rememberable: bool },
 }
 
-/// 這次請求要不要問(spec §5.3 的規則 1–3)。「每次都問」的金鑰、這台的「一律每次都問」、未知的主機:一律問,而且不記住。
+/// 這次請求要不要問(spec §5.3 的規則 1–3)。`context_known` = 這條連線有可信的主機(session-bind)而且認得出發出請求的程式(spec §5.3、§5.4);任一不知道就問,而且不記住。
 /// 系統驗證(`require_user_presence`)只在問的時候做,不影響這裡的結果。
-pub fn verdict(protection: KeyProtection, settings: &AgentSettings, host_known: bool, remembered: bool) -> Verdict {
-    if protection.ask_every_time || settings.always_ask || !host_known {
+pub fn verdict(protection: KeyProtection, settings: &AgentSettings, context_known: bool, remembered: bool) -> Verdict {
+    if protection.ask_every_time || settings.always_ask || !context_known {
         return Verdict::Ask { rememberable: false };
     }
     if remembered {
@@ -73,6 +73,8 @@ impl ApprovalCache {
         self.entries.clear();
     }
 
+    /// 測試用:存著的筆數(還沒清掉的過期項目也算)。
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -97,6 +99,9 @@ mod tests {
         assert_eq!(verdict(open, &settings, false, true), Verdict::Ask { rememberable: false }, "an unknown host is never remembered");
         let strict = AgentSettings { always_ask: true, ..AgentSettings::default() };
         assert_eq!(verdict(open, &strict, true, true), Verdict::Ask { rememberable: false }, "this computer can only be stricter");
+        assert_eq!(verdict(every_time, &settings, true, false), Verdict::Ask { rememberable: false }, "first use of an every-time key");
+        assert_eq!(verdict(open, &settings, false, false), Verdict::Ask { rememberable: false }, "first use without a known host or program");
+        assert_eq!(verdict(open, &strict, true, false), Verdict::Ask { rememberable: false }, "first use on an always-ask computer");
     }
 
     #[test]
@@ -111,6 +116,10 @@ mod tests {
         cache.remember(key("claude"), 1_000, 15);
         assert!(cache.is_remembered(&key("claude"), 1_000 + 15 * 60_000 - 1));
         assert!(!cache.is_remembered(&key("iterm2"), 1_000), "another program asks again");
+        let other_key = ApprovalKey { key_fingerprint: "SHA256:other".into(), ..key("claude") };
+        let other_host = ApprovalKey { host_fingerprint: "SHA256:elsewhere".into(), ..key("claude") };
+        assert!(!cache.is_remembered(&other_key, 1_000), "another key asks again");
+        assert!(!cache.is_remembered(&other_host, 1_000), "another host asks again");
         assert!(!cache.is_remembered(&key("claude"), 1_000 + 15 * 60_000), "expired at the boundary");
         assert_eq!(cache.len(), 0, "expired entries are dropped");
     }
