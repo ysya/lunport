@@ -55,3 +55,25 @@ export function approvalTitle(r: AgentApprovalRequest): string {
   const key = revealHidden(r.key_name);
   return r.preapproved ? `Unlock ${key} to connect to ${destination(r)}` : `Allow ${programName(r)} to use ${key}?`;
 }
+
+/**
+ * The answer for a button press. A denial carries nothing. An approval remembers only what the window offered (never for a
+ * Connect unlock, which is already approved) and sends the passphrase only when the request asked for one.
+ */
+export function buildAnswer(
+  r: AgentApprovalRequest,
+  allow: boolean,
+  picked: { remember: boolean; passphrase: string; rememberPassphrase: boolean },
+): AgentApprovalAnswer {
+  return {
+    allow,
+    remember: allow && r.rememberable && !r.preapproved && picked.remember,
+    passphrase: allow && r.needs_passphrase ? picked.passphrase : null,
+    remember_passphrase: allow && r.needs_passphrase && picked.rememberPassphrase,
+  };
+}
+
+/** Allow (or Unlock) stays off while an answer is on its way and while a needed passphrase is still empty. */
+export function allowDisabled(r: AgentApprovalRequest, passphrase: string, busy: boolean): boolean {
+  return busy || (r.needs_passphrase && passphrase.length === 0);
+}

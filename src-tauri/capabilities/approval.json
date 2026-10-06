@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "approval",
-  "description": "The SSH agent's approval window: it lists and answers pending requests (app commands) and listens for their updates. Nothing else.",
+  "description": "The SSH agent's approval window: it lists and answers pending requests (app commands) and listens for their updates. This file limits plugin and core permissions only; app commands are not ACL-checked without an app manifest.",
   "windows": ["approval"],
   "permissions": ["core:default"]
 }

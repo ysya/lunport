@@ -5,7 +5,17 @@ import type { AgentApprovalRequest } from "@/bindings/AgentApprovalRequest";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { approvalTitle, destination, fetchPending, onApprovals, programChainLine, rememberLabel, resolveApproval } from "@/lib/agent";
+import {
+  allowDisabled,
+  approvalTitle,
+  buildAnswer,
+  destination,
+  fetchPending,
+  onApprovals,
+  programChainLine,
+  rememberLabel,
+  resolveApproval,
+} from "@/lib/agent";
 import { isImeKey } from "@/lib/ime";
 
 /** One request: what asks, for which key and destination, and the answer. Exported for the markup tests. */
@@ -21,15 +31,9 @@ export function ApprovalCard({
   const [remember, setRemember] = useState(request.rememberable);
   const [passphrase, setPassphrase] = useState("");
   const [rememberPassphrase, setRememberPassphrase] = useState(false);
-  const allowDisabled = busy || (request.needs_passphrase && passphrase.length === 0);
+  const cannotAllow = allowDisabled(request, passphrase, busy);
   const chain = programChainLine(request);
-  const answer = (allow: boolean) =>
-    onAnswer({
-      allow,
-      remember: allow && request.rememberable && !request.preapproved && remember,
-      passphrase: allow && request.needs_passphrase ? passphrase : null,
-      remember_passphrase: allow && request.needs_passphrase && rememberPassphrase,
-    });
+  const answer = (allow: boolean) => onAnswer(buildAnswer(request, allow, { remember, passphrase, rememberPassphrase }));
   return (
     <div className="space-y-3 p-4">
       <h1 className="text-sm font-semibold break-words">{approvalTitle(request)}</h1>
@@ -47,7 +51,7 @@ export function ApprovalCard({
             onChange={(e) => setPassphrase(e.target.value)}
             onKeyDown={(e) => {
               if (isImeKey(e)) return;
-              if (e.key === "Enter" && !allowDisabled) answer(true);
+              if (e.key === "Enter" && !cannotAllow) answer(true);
             }}
           />
           {request.passphrase_error && <p className="text-xs text-destructive">{request.passphrase_error}</p>}
@@ -67,7 +71,7 @@ export function ApprovalCard({
         <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => answer(false)}>
           {request.preapproved ? "Cancel" : "Deny"}
         </Button>
-        <Button type="button" size="sm" disabled={allowDisabled} onClick={() => answer(true)}>
+        <Button type="button" size="sm" disabled={cannotAllow} onClick={() => answer(true)}>
           {request.preapproved ? "Unlock" : "Allow"}
         </Button>
       </div>

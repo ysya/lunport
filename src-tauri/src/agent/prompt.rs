@@ -83,23 +83,43 @@ pub struct PromptHub {
     next_id: AtomicU64,
 }
 
+/// `ask` 離開時(正常回傳、逾時,或 `changed` panic 讓它展開)把請求從清單拿掉,清單裡不會留下幽靈請求。
+struct Leaving<'a> {
+    hub: &'a PromptHub,
+    id: &'a str,
+}
+
+impl Drop for Leaving<'_> {
+    fn drop(&mut self) {
+        self.hub.forget(self.id);
+    }
+}
+
 impl PromptHub {
     /// 送出請求並等待回答。逾時回 None(呼叫端當成拒絕);逾時的瞬間才到的答案照樣算數(`resolve` 已經回報成功)。`request.id` 由這裡指定。
+    /// 會阻塞到逾時,而且畫面會建立視窗:Tauri 文件說在 Windows 上從同步指令或事件處理函式建立視窗會死結,所以只能從工作執行緒呼叫
+    /// (agent 的連線執行緒)。
     pub fn ask(&self, surface: &dyn PromptSurface, mut request: AgentApprovalRequest, timeout: Duration) -> Option<AgentApprovalAnswer> {
         let id = format!("approval-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         request.id = id.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         self.pending.lock().unwrap().push(Waiting { request, answer: tx, answered: false });
+        let _leave = Leaving { hub: self, id: &id };
         self.publish(surface);
         let mut answer = rx.recv_timeout(timeout).ok();
         // 不再等了:先把請求從清單拿掉(之後的 `resolve` 找不到它,不會再送答案),再看一次 channel:逾時的瞬間才到的答案
         // (`resolve` 已經回報成功)照樣算數。
-        self.pending.lock().unwrap().retain(|w| w.request.id != id);
+        self.forget(&id);
         if answer.is_none() {
             answer = rx.try_recv().ok();
         }
         self.publish(surface);
         answer
+    }
+
+    /// 把請求從清單拿掉(不在清單裡也沒關係)。panic 展開的途中也會用到,所以鎖中毒時照樣使用:在展開中再 panic 會讓整個程式中止。
+    fn forget(&self, id: &str) {
+        self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|w| w.request.id != id);
     }
 
     /// 把目前的清單告訴畫面。取清單和呼叫 `changed` 都在 `notify` 裡:同時有請求進出時,後一個通知帶的一定是較新的清單,畫面不會最後
@@ -129,9 +149,22 @@ impl PromptHub {
         }
     }
 
+    /// 還在等答案的請求(依到達順序)。已經回答、但它的 `ask` 還沒醒來移除的不列出:不然那一小段時間裡它會被當成排在最前面的請求再通知一次。
     pub fn pending(&self) -> Vec<AgentApprovalRequest> {
-        self.pending.lock().unwrap().iter().map(|w| w.request.clone()).collect()
+        self.pending.lock().unwrap().iter().filter(|w| !w.answered).map(|w| w.request.clone()).collect()
     }
+}
+
+/// 核准視窗上一次被叫到前面時,排在最前面的請求(整個程式只有一個核准視窗)。`TauriPromptSurface` 是呼叫端每次 `ask` 現做的,
+/// 自己不能記狀態,所以放在這裡。
+static SHOWN_HEAD: Mutex<Option<String>> = Mutex::new(None);
+
+/// 記住排在最前面的請求,回傳是不是有新的請求排到最前面(才需要把視窗叫到前面;別的請求逾時、被拒絕都不算)。清單空了就忘掉。
+fn note_head(shown: &mut Option<String>, pending: &[AgentApprovalRequest]) -> bool {
+    let head = pending.first().map(|r| r.id.as_str());
+    let new_head = head.is_some() && shown.as_deref() != head;
+    *shown = head.map(str::to_string);
+    new_head
 }
 
 /// production 的畫面:核准視窗是獨立的小視窗,永遠在最上層;SSHelter 縮在系統匣時也會出現(spec §7.4)。沒有請求時銷毀它
@@ -143,29 +176,39 @@ pub struct TauriPromptSurface {
 impl PromptSurface for TauriPromptSurface {
     fn changed(&self, pending: &[AgentApprovalRequest]) {
         use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+        let new_head = note_head(&mut SHOWN_HEAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner), pending);
         if pending.is_empty() {
             if let Some(window) = self.app.get_webview_window(APPROVAL_WINDOW) {
                 let _ = window.destroy();
             }
             return;
         }
-        let window = match self.app.get_webview_window(APPROVAL_WINDOW) {
-            Some(window) => Some(window),
-            None => WebviewWindowBuilder::new(&self.app, APPROVAL_WINDOW, WebviewUrl::App("index.html".into()))
+        let (window, built) = match self.app.get_webview_window(APPROVAL_WINDOW) {
+            Some(window) => (Some(window), false),
+            None => match WebviewWindowBuilder::new(&self.app, APPROVAL_WINDOW, WebviewUrl::App("index.html".into()))
                 .title("SSHelter")
                 .inner_size(460.0, 340.0)
                 .resizable(false)
                 .always_on_top(true)
                 .center()
                 .build()
-                .ok(),
+            {
+                Ok(window) => (Some(window), true),
+                Err(e) => {
+                    eprintln!("[agent] cannot open the approval window: {e}");
+                    (None, false)
+                }
+            },
         };
+        // 只有剛建好,或有新的請求排到最前面才把視窗叫到前面:別的請求逾時,不該搶走使用者正在操作的焦點。
         if let Some(window) = window {
-            let _ = window.show();
-            let _ = window.unminimize();
-            let _ = window.set_focus();
+            if built || new_head {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
         }
-        let _ = self.app.emit(APPROVALS_EVENT, pending);
+        let _ = self.app.emit_to(APPROVAL_WINDOW, APPROVALS_EVENT, pending);
     }
 }
 
@@ -223,9 +266,10 @@ mod tests {
         let surface = Arc::new(Recorder::default());
         let (h, s) = (Arc::clone(&hub), Arc::clone(&surface));
         let waiter = std::thread::spawn(move || h.ask(s.as_ref(), request("id_mac"), Duration::from_secs(5)));
+        // 視窗被告知有這個請求才回答(視窗就是這樣回答的):已回答的請求不再列在通知裡,太早回答會讓第一次通知變成空的。
         let id = loop {
-            if let Some(r) = hub.pending().first() {
-                break r.id.clone();
+            if !surface.seen.lock().unwrap().is_empty() {
+                break hub.pending()[0].id.clone();
             }
             std::thread::sleep(Duration::from_millis(5));
         };
@@ -370,9 +414,14 @@ mod tests {
         let hub = PromptHub::default();
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hub.ask(&Panics, request("a"), Duration::from_millis(20))));
         assert!(crashed.is_err());
+        assert!(hub.pending().is_empty(), "the failed call leaves no ghost request behind");
         let surface = Recorder::default();
         assert_eq!(hub.ask(&surface, request("b"), Duration::from_millis(20)), None);
-        assert!(!surface.seen.lock().unwrap().is_empty(), "a request after the failure is still shown");
+        assert_eq!(
+            *surface.seen.lock().unwrap(),
+            vec![vec!["approval-2".to_string()], vec![]],
+            "a request after the failure is shown on its own, then gone"
+        );
     }
 
     #[test]
@@ -380,13 +429,13 @@ mod tests {
         let hub = Arc::new(PromptHub::default());
         let surface = Arc::new(Recorder::default());
         let (h, s) = (Arc::clone(&hub), Arc::clone(&surface));
-        let waiter = std::thread::spawn(move || h.ask(s.as_ref(), request("a"), Duration::from_millis(200)));
+        let waiter = std::thread::spawn(move || h.ask(s.as_ref(), request("a"), Duration::from_secs(1)));
         // `ask` 已經通知過畫面(放開了 `notify`),開始等答案。
         wait_until("ask is waiting", || !surface.seen.lock().unwrap().is_empty() && hub.notify.try_lock().is_ok());
         let id = hub.pending()[0].id.clone();
         // 這把鎖在手上的時候,`ask` 等不到答案而逾時,卡在移除請求那一步。`resolve` 在鎖裡做的事(標記已回答、送出答案)排在它移除之前。
         let mut pending = hub.pending.lock().unwrap();
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(1500));
         let waiting = pending.iter_mut().find(|w| w.request.id == id).expect("the request stays listed while the lock is held");
         waiting.answered = true;
         waiting.answer.try_send(AgentApprovalAnswer { allow: true, ..Default::default() }).unwrap();
@@ -394,5 +443,37 @@ mod tests {
         let answer = waiter.join().unwrap();
         assert_eq!(answer.map(|a| a.allow), Some(true), "resolve had reported success, so the answer must count");
         assert!(hub.pending().is_empty());
+    }
+
+    #[test]
+    fn an_answered_request_is_not_listed_before_its_ask_wakes_up() {
+        let hub = PromptHub::default();
+        // 兩個等待中的請求:a 的 `ask` 還沒醒來(沒有人在讀它的 channel),b 還在等。
+        let (tx_a, _rx_a) = mpsc::sync_channel(1);
+        let (tx_b, _rx_b) = mpsc::sync_channel(1);
+        {
+            let mut pending = hub.pending.lock().unwrap();
+            pending.push(Waiting { request: AgentApprovalRequest { id: "approval-1".into(), ..request("a") }, answer: tx_a, answered: false });
+            pending.push(Waiting { request: AgentApprovalRequest { id: "approval-2".into(), ..request("b") }, answer: tx_b, answered: false });
+        }
+        hub.resolve("approval-1", AgentApprovalAnswer { allow: true, ..Default::default() }).unwrap();
+        let ids = hub.pending().into_iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["approval-2"], "the answered request is not listed");
+        let surface = Recorder::default();
+        hub.publish(&surface);
+        assert_eq!(*surface.seen.lock().unwrap(), vec![vec!["approval-2".to_string()]], "and not announced again");
+    }
+
+    #[test]
+    fn the_window_is_only_brought_forward_when_a_new_request_is_at_the_head() {
+        let list = |ids: &[&str]| ids.iter().map(|id| AgentApprovalRequest { id: (*id).into(), ..request("k") }).collect::<Vec<_>>();
+        let mut shown = None;
+        assert!(note_head(&mut shown, &list(&["approval-1"])), "a first request is brought forward");
+        assert!(!note_head(&mut shown, &list(&["approval-1", "approval-2"])), "a request queued behind it is not");
+        assert!(!note_head(&mut shown, &list(&["approval-1"])), "nor is the request behind it timing out");
+        assert!(note_head(&mut shown, &list(&["approval-2"])), "the next request becomes the head and is");
+        assert!(!note_head(&mut shown, &[]), "an empty list brings nothing forward");
+        assert_eq!(shown, None, "and it is forgotten, so the next request starts from scratch");
+        assert!(note_head(&mut shown, &list(&["approval-2"])), "even one whose id was seen before");
     }
 }

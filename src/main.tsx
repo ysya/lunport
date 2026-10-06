@@ -11,8 +11,15 @@ const queryClient = new QueryClient();
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Root element #root not found in index.html");
 
-// The agent's approval prompt (key vault spec §7.4) is a second window that loads the same page.
-const isApprovalWindow = getCurrentWindow().label === "approval";
+// The agent's approval prompt (key vault spec §7.4) is a second window that loads the same page. Outside Tauri (a
+// plain-browser `vite dev`) there is no window to ask, so the page is the app.
+const isApprovalWindow = (() => {
+  try {
+    return getCurrentWindow().label === "approval";
+  } catch {
+    return false;
+  }
+})();
 
 ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
