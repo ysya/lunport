@@ -22,8 +22,8 @@ use crate::sync::slot_rules::{
     valid_slot_name, IdentityTarget, KeySlotPayload, SlotMode, SLOT_DIR, SLOT_SCHEMA,
 };
 use crate::sync::slots::{
-    account_still_ready, contested_and_not_held, file_name_in_use, in_the_way_message, learned_now, live_slots, local_key_fingerprint,
-    put_key_secret, put_slot, slot, slot_record_exists, source_gone_message, write_linked_public, CONTESTED_MESSAGE,
+    account_still_ready, contested_and_not_held, file_name_in_use, in_the_way_message, land, landable_key, learned_now, live_slots,
+    local_key_fingerprint, put_key_secret, put_slot, slot, slot_record_exists, source_gone_message, write_linked_public, CONTESTED_MESSAGE,
 };
 use crate::sync::state_v2::{LocalSlot, SlotSource, SyncStateV2};
 
@@ -133,6 +133,9 @@ pub const KEPT_CONTESTED_REASON: &str = "Another key slot in this sync account u
 /// 之前的帳戶留下的插槽在掃描之後變了(`adopt_slot`):什麼都沒寫。
 pub const KEPT_CHANGED_MESSAGE: &str = "That key slot changed since the list was read; nothing was set up.";
 
+/// 「Sync key」或「Keep on this computer」的那把金鑰已經不在候選裡(`setup_keys`;期間被設定好了,或主機變了):什麼都沒做。
+pub const SET_UP_MEANWHILE_MESSAGE: &str = "This key was set up in the meantime; nothing changed.";
+
 fn home_of(env: &SyncEnv) -> Result<PathBuf, AppError> {
     env.ssh_dir
         .parent()
@@ -146,6 +149,13 @@ fn same_file(a: &Path, b: &Path) -> bool {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
+}
+
+/// 金鑰檔在插槽目錄(`keys_dir`)裡:同步來的副本、插槽的連結本身之類 —— 之後可能被刪掉(「Delete copy」)或換掉。路徑本身在目錄裡,或解析 symlink
+/// 之後在目錄裡,都算。沿用插槽時不連到這樣的檔案,改成落地帳戶裡的金鑰(`reuse_slot`),所以也只建議沿用落地得了的插槽(`existing_slot_for`)。
+fn in_keys_dir(path: &Path, keys_dir: &Path) -> bool {
+    path.starts_with(keys_dir)
+        || matches!((std::fs::canonicalize(path), std::fs::canonicalize(keys_dir)), (Ok(path), Ok(dir)) if path.starts_with(&dir))
 }
 
 /// 存在的私鑰檔(第一行是 `-----BEGIN … PRIVATE KEY-----`;大於 64 KiB 的不讀)。
@@ -180,8 +190,16 @@ fn locked(patterns: &[String], counts: &BTreeMap<String, usize>) -> bool {
 }
 
 /// 已經有這把金鑰的插槽:這台建立或挑過、連到同一個檔案的(帳戶裡仍在);或帳戶裡同指紋的 `synced` 插槽。和帳戶裡另一個插槽
-/// 同檔名、這台又沒有握著的插槽(`contested_and_not_held`)在這台不能用,不建議沿用。
-fn existing_slot_for(state: &SyncStateV2, key: &Path, fingerprint: Option<&str>) -> Option<String> {
+/// 同檔名、這台又沒有握著的插槽(`contested_and_not_held`)在這台不能用,不建議沿用。金鑰檔在插槽目錄裡的(`in_slot_dir`,例如之前的帳戶留下的
+/// 同步副本)沿用時要落地帳戶裡的金鑰(`reuse_slot`):同指紋的 `synced` 插槽,帳戶裡它的 `key` 要解得開、通過落地前的檢查才算(`account_keys` 是
+/// None 時解不開,不算)—— 不然沿用只會讓能連線的主機改指到沒有金鑰的插槽。
+fn existing_slot_for(
+    state: &SyncStateV2,
+    key: &Path,
+    fingerprint: Option<&str>,
+    in_slot_dir: bool,
+    account_keys: Option<&ChainKeys>,
+) -> Option<String> {
     let account = state.account.as_ref()?;
     let live = live_slots(account);
     let usable = |id: &str| !contested_and_not_held(state, id);
@@ -194,19 +212,25 @@ fn existing_slot_for(state: &SyncStateV2, key: &Path, fingerprint: Option<&str>)
         return Some(id.clone());
     }
     let fingerprint = fingerprint?;
+    let landable = |id: &str, payload: &KeySlotPayload| account_keys.is_some_and(|keys| landable_key(account, keys, id, payload).is_ok());
     live.into_iter()
-        .find(|(id, p)| p.mode == SlotMode::Synced && p.fingerprint.as_deref() == Some(fingerprint) && usable(id))
+        .find(|(id, p)| {
+            p.mode == SlotMode::Synced
+                && p.fingerprint.as_deref() == Some(fingerprint)
+                && usable(id)
+                && (!in_slot_dir || landable(id, p))
+        })
         .map(|(id, _)| id)
 }
 
-fn candidate_for(key: &Path, state: &SyncStateV2) -> KeyCandidate {
+fn candidate_for(key: &Path, state: &SyncStateV2, account_keys: Option<&ChainKeys>, keys_dir: &Path) -> KeyCandidate {
     let text = std::fs::read_to_string(key).unwrap_or_default();
     let inspected = inspect_private_key(&text);
     let fingerprint = inspected.as_ref().ok().map(|f| f.fingerprint.clone()).or_else(|| local_key_fingerprint(key));
     KeyCandidate {
         path: key.display().to_string(),
         default_name: default_slot_name(key.file_name().and_then(|n| n.to_str()).unwrap_or("key")),
-        existing_slot: existing_slot_for(state, key, fingerprint.as_deref()),
+        existing_slot: existing_slot_for(state, key, fingerprint.as_deref(), in_keys_dir(key, keys_dir), account_keys),
         fingerprint,
         has_passphrase: inspected.as_ref().ok().map(|f| f.has_passphrase),
         unsyncable: inspected.err().map(|e| e.message().to_string()),
@@ -216,11 +240,17 @@ fn candidate_for(key: &Path, state: &SyncStateV2) -> KeyCandidate {
 }
 
 /// `keys` 裡金鑰檔是 `key` 的候選(同一個檔案,`same_file`);沒有就新增一個。回傳它的位置。
-fn candidate_index(keys: &mut Vec<KeyCandidate>, key: &Path, state: &SyncStateV2) -> usize {
+fn candidate_index(
+    keys: &mut Vec<KeyCandidate>,
+    key: &Path,
+    state: &SyncStateV2,
+    account_keys: Option<&ChainKeys>,
+    keys_dir: &Path,
+) -> usize {
     match keys.iter().position(|c| same_file(Path::new(&c.path), key)) {
         Some(i) => i,
         None => {
-            keys.push(candidate_for(key, state));
+            keys.push(candidate_for(key, state, account_keys, keys_dir));
             keys.len() - 1
         }
     }
@@ -237,12 +267,17 @@ enum KeptLookup {
 }
 
 /// 之前的帳戶留下的插槽(spec §7.1):這台檔名是 `file` 的插槽記錄,目前的帳戶裡沒有它的任何記錄(還在的或 tombstone),它不是在目前的帳戶學到的
-/// (不知道的也算不是,`LocalSlot::learned_in`),而且這台讀得到它的私鑰(`kept_key`)。名稱組不回同一個檔名的記錄不算(`kept_name`)。帳戶裡另一個
-/// 還在的插槽用了同一個檔名(不分大小寫)→ `Contested`。只讀狀態與金鑰檔。
+/// (不知道的也算不是,`LocalSlot::learned_in`),連結沒有收起來(`parked`:插槽路徑上可能是使用者的檔案,直接指到金鑰檔的主機不能改指到那裡),
+/// 而且這台讀得到它的私鑰(`kept_key`)。名稱組不回同一個檔名的記錄不算(`kept_name`)。帳戶裡另一個還在的插槽用了同一個檔名(不分大小寫)→
+/// `Contested`。只讀狀態與金鑰檔。
 fn kept_lookup(state: &SyncStateV2, file: &str, keys_dir: &Path) -> KeptLookup {
     let Some(account) = state.account.as_ref() else { return KeptLookup::No };
     let found = state.key_slots.iter().find_map(|(id, local)| {
-        if local.file_name != file || slot_record_exists(account, id) || local.learned_in.as_deref() == Some(account.chain_id.as_str()) {
+        if local.file_name != file
+            || local.parked
+            || slot_record_exists(account, id)
+            || local.learned_in.as_deref() == Some(account.chain_id.as_str())
+        {
             return None;
         }
         let name = kept_name(id, local)?;
@@ -289,7 +324,13 @@ fn kept_files(candidate: &KeyCandidate) -> Vec<String> {
 /// 掃描 doc 裡這台勾選的 space 檔(只讀:不改 doc 與狀態,但會讀金鑰檔;呼叫端持有 doc 鎖)。指到本機私鑰檔的主機依金鑰檔分組;指到之前的帳戶留下的
 /// 插槽的主機(`kept_lookup`)依那個插槽的私鑰檔分組,和直接指到同一個檔案的主機是同一個候選。候選的名稱是之前的帳戶留下的插槽的名稱(先遇到的那一個,
 /// `kept_slot`)。
-fn scan(doc: &SshConfigDoc, space_files: &[(String, PathBuf)], state: &SyncStateV2, home: &Path) -> KeyCandidates {
+fn scan(
+    doc: &SshConfigDoc,
+    space_files: &[(String, PathBuf)],
+    state: &SyncStateV2,
+    account_keys: Option<&ChainKeys>,
+    home: &Path,
+) -> KeyCandidates {
     let counts = alias_counts(doc);
     let keys_dir = home.join(SLOT_DIR);
     let mut keys: Vec<KeyCandidate> = Vec::new();
@@ -322,7 +363,7 @@ fn scan(doc: &SshConfigDoc, space_files: &[(String, PathBuf)], state: &SyncState
                         }),
                         KeptLookup::Kept { slot, key, name } => {
                             let candidate = {
-                                let index = candidate_index(&mut keys, &key, state);
+                                let index = candidate_index(&mut keys, &key, state, account_keys, &keys_dir);
                                 &mut keys[index]
                             };
                             if candidate.kept_slot.is_none() {
@@ -341,7 +382,7 @@ fn scan(doc: &SshConfigDoc, space_files: &[(String, PathBuf)], state: &SyncState
                         if !is_private_key_file(&key) {
                             continue; // 不存在或不是私鑰:交給 lint
                         }
-                        let index = candidate_index(&mut keys, &key, state);
+                        let index = candidate_index(&mut keys, &key, state, account_keys, &keys_dir);
                         keys[index].hosts.push(host());
                     }
                 }
@@ -372,14 +413,18 @@ pub fn key_candidates(env: &SyncEnv) -> Result<KeyCandidates, AppError> {
 /// 快照是 None。
 fn scan_now(env: &SyncEnv) -> Result<(KeyCandidates, Option<SyncStateV2>), AppError> {
     let home = home_of(env)?;
-    let Some(state) = env.runtime.core.lock().unwrap().state.clone() else { return Ok((KeyCandidates::default(), None)) };
+    let (state, account_keys) = {
+        let core = env.runtime.core.lock().unwrap();
+        (core.state.clone(), core.account_keys.clone())
+    };
+    let Some(state) = state else { return Ok((KeyCandidates::default(), None)) };
     if state.account.is_none() {
         return Ok((KeyCandidates::default(), None));
     }
     let space_files = ready_space_files(env);
     let doc_lock = env.doc.lock().unwrap();
     let Some(doc) = doc_lock.as_ref() else { return Ok((KeyCandidates::default(), None)) };
-    let found = scan(doc, &space_files, &state, &home);
+    let found = scan(doc, &space_files, &state, account_keys.as_ref(), &home);
     Ok((found, Some(state)))
 }
 
@@ -439,7 +484,9 @@ fn rewrite_in(
 }
 
 /// 依使用者的決定建立或沿用插槽,再改寫用到那些金鑰的主機(SP3 spec §6.1;插槽一定先就位,主機才改寫)。`active` = 這個
-/// 行程跑著同步引擎(`engine::engine_active`;改寫的主機要靠它上傳)。決定裡的路徑不在目前的候選裡就略過。回傳改寫了的 alias。
+/// 行程跑著同步引擎(`engine::engine_active`;改寫的主機要靠它上傳)。回傳改寫了的 alias。決定裡的路徑不在目前的候選裡時:沿用(對話框自己送的、
+/// 畫面上的舊資料)略過;「Sync key」與「Keep on this computer」(使用者按的)整個拒絕(`SET_UP_MEANWHILE_MESSAGE`)—— 在做任何一個決定之前就檢查,
+/// 一起送來的決定一個都不做,對話框也不會顯示成功。
 ///
 /// 只有第一輪同步已經跑完的 space 參與(`ready_space_files`):候選只來自它們的主機,改寫也只動它們的檔案 —— 其他 space 的主機照舊指到金鑰檔,
 /// 等那個 space 的第一輪之後,下一次掃描會列出它們、直接沿用已建好的插槽。
@@ -463,13 +510,15 @@ pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Resul
     let home = home_of(env)?;
     let keys_dir = home.join(SLOT_DIR);
     let (current, scanned) = scan_now(env)?;
+    let listed = |path: &str| current.keys.iter().find(|c| same_file(Path::new(&c.path), Path::new(path)));
+    if choices.iter().any(|c| !matches!(c.decision, KeyDecision::Reuse { .. }) && listed(&c.path).is_none()) {
+        return Err(AppError::Other(SET_UP_MEANWHILE_MESSAGE.to_string()));
+    }
     let mut planned: Vec<Planned> = Vec::new();
     for choice in choices {
-        let Some(candidate) = current.keys.iter().find(|c| same_file(Path::new(&c.path), Path::new(&choice.path))) else {
-            continue;
-        };
+        let Some(candidate) = listed(&choice.path) else { continue };
         let file = match (choice.decision, &candidate.kept_slot) {
-            (KeyDecision::Reuse { slot_id }, _) => reuse_slot(env, &keys_dir, candidate, &slot_id)?,
+            (KeyDecision::Reuse { slot_id }, _) => reuse_slot(env, &account_keys, &keys_dir, candidate, &slot_id)?,
             // 已經有插槽的金鑰不建立第二個(spec §6.1 第 1 步:這把金鑰已經決定過了,前端對它送的是 Reuse)。畫面上的舊資料才會走到這裡(例如重新
             // 讀取失敗之後又按了一次):拒絕、什麼都不動。不靜靜地改成沿用 —— 那個插槽是同步還是留在這台,不一定是使用者這次選的,成功的 toast 會說錯。
             (KeyDecision::Sync { .. } | KeyDecision::Keep { .. }, _) if candidate.existing_slot.is_some() => {
@@ -541,9 +590,10 @@ fn link_free_slot(keys_dir: &Path, slot_path: &Path, source: &Path) -> Result<Li
 /// - 這台已經握著它(有來源、連結沒收起來):它放的金鑰還在插槽路徑上(`held_in_place`)就照舊,什麼都不動,之後每一輪維護它;不在就拒絕、主機不改寫。
 /// - 這台還沒有它的金鑰,或連結收起來了(`LocalSlot::parked`):現在就連到使用者選的這把金鑰、寫 `.pub`、記下來(清掉 `parked`)。插槽路徑上
 ///   已經有東西(收起來的連結不擁有路徑上的任何東西)就不連結,回 `in_the_way_message`,主機也不改寫。
-/// - 例外:候選的金鑰是之前的帳戶同步來、留在這台的副本(`KeptSlot::synced_copy`),沿用的又是 `synced` 插槽 —— 不連到那個舊副本:舊的記錄之後沒有主機
-///   用了,刪掉它的副本(「Delete copy」)會讓這個插槽斷掉。只確定這台有它的記錄(沒有來源;已經有的照舊),主機改指過去之後,下一輪落地帳戶裡的金鑰。
-fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id: &str) -> Result<String, AppError> {
+/// - 例外:候選的金鑰檔在插槽目錄裡(`in_keys_dir`,例如之前的帳戶同步來、留在這台的副本),沿用的又是 `synced` 插槽 —— 不連到那個檔案:它之後可能被
+///   刪掉(舊的記錄沒有主機用了,「Delete copy」)或換掉,這個插槽就斷了。改成先把帳戶裡的金鑰落地到這個插槽(同每一輪的 `land_into`:私鑰要通過指紋
+///   檢查,路徑上有別的東西就擋路,`.pub` 一起寫;私鑰還要就是候選的那一把),記成同步來的副本,主機才改寫。任何一步做不成就拒絕,主機不改寫。
+fn reuse_slot(env: &SyncEnv, account_keys: &ChainKeys, keys_dir: &Path, candidate: &KeyCandidate, slot_id: &str) -> Result<String, AppError> {
     let state = env
         .runtime
         .core
@@ -569,23 +619,8 @@ fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id:
         return Ok(file);
     }
     let chain = state.account.as_ref().map(|a| a.chain_id.clone()).unwrap_or_default();
-    if candidate.kept_slot.as_ref().is_some_and(|kept| kept.synced_copy) && payload.mode == SlotMode::Synced {
-        mutate(env, |s| {
-            // 第一次有這個插槽的記錄:同下,快照裡插槽所在的帳戶(提交時帳戶換了就不記)。
-            let learned_here = learned_now(s, &chain);
-            s.key_slots.entry(slot_id.to_string()).or_insert_with(|| LocalSlot {
-                file_name: file.clone(),
-                source: None,
-                last_error: None,
-                asked: false,
-                payload: Some(payload.clone()),
-                uploaded_fingerprint: None,
-                parked: false,
-                learned_in: learned_here,
-            });
-            Ok(())
-        })?;
-        return Ok(file);
+    if in_keys_dir(Path::new(&candidate.path), keys_dir) && payload.mode == SlotMode::Synced {
+        return land_reused_slot(env, account_keys, &state, keys_dir, candidate, slot_id, &payload, &file, &chain);
     }
     let slot_path = keys_dir.join(&file);
     // 連結用的路徑與記進 `Linked` 的路徑出自同一個字串(`candidate.path`):`slots::maintain` 每一輪(Unix)確認 symlink 正好指到記錄的路徑。
@@ -602,6 +637,7 @@ fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id:
             uploaded_fingerprint: None,
             parked: false,
             learned_in: learned_here,
+            copy_from_another_account: false,
         });
         // 收起來的記錄原本就是這台建立的(`origin`)就還是;其他電腦連到自己挑的金鑰,不是。
         let origin = matches!(&local.source, Some(SlotSource::Linked { origin: true, .. }));
@@ -617,6 +653,63 @@ fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id:
         return Err(e);
     }
     Ok(file)
+}
+
+/// `reuse_slot` 的例外(候選的金鑰檔在插槽目錄裡):把帳戶裡的金鑰落地到要沿用的插槽 `<keys_dir>/<file>`,記下來,回傳插槽檔名;主機之後才改寫。私鑰在帳戶裡
+/// 沒有、通不過指紋檢查(`landable_key`),或不是候選的那一把(主機會換成另一把金鑰)→ 拒絕;插槽路徑上有別的東西 → 擋路(`land`,同每一輪)。記錄寫不進去
+/// 就把剛落地的檔案收回。記錄是快照裡插槽所在的帳戶的(`learned_now`;提交時帳戶換了就不改記),副本是那個帳戶的(`copy_from_another_account`)。
+#[allow(clippy::too_many_arguments)]
+fn land_reused_slot(
+    env: &SyncEnv,
+    account_keys: &ChainKeys,
+    state: &SyncStateV2,
+    keys_dir: &Path,
+    candidate: &KeyCandidate,
+    slot_id: &str,
+    payload: &KeySlotPayload,
+    file: &str,
+    chain: &str,
+) -> Result<String, AppError> {
+    let account = state.account.as_ref().ok_or_else(|| AppError::Other("that key slot no longer exists".to_string()))?;
+    let (secret, facts) = landable_key(account, account_keys, slot_id, payload)
+        .map_err(|e| AppError::Other(e.unwrap_or_else(|| "this key isn't synced".to_string())))?;
+    if candidate.fingerprint.as_deref() != Some(facts.fingerprint.as_str()) {
+        return Err(AppError::Other(OTHER_SLOT_MESSAGE.to_string()));
+    }
+    let slot_path = keys_dir.join(file);
+    let was_free = !slot_files::occupied(&slot_path);
+    let fingerprint = land(&secret, payload, keys_dir, &slot_path).map_err(AppError::Other)?;
+    let result = mutate(env, |s| {
+        let learned_here = learned_now(s, chain);
+        let local = s.key_slots.entry(slot_id.to_string()).or_insert_with(|| LocalSlot {
+            file_name: file.to_string(),
+            source: None,
+            last_error: None,
+            asked: false,
+            payload: None,
+            uploaded_fingerprint: None,
+            parked: false,
+            learned_in: learned_here.clone(),
+            copy_from_another_account: false,
+        });
+        local.file_name = file.to_string();
+        local.source = Some(SlotSource::SyncedCopy { fingerprint: fingerprint.clone() });
+        local.payload = Some(payload.clone());
+        local.last_error = None;
+        local.parked = false;
+        if learned_here.is_some() {
+            local.learned_in = learned_here;
+        }
+        local.copy_from_another_account = local.learned_in.as_deref() != Some(chain);
+        Ok(())
+    });
+    if let Err(e) = result {
+        if was_free {
+            let _ = slot_files::remove_slot(&slot_path);
+        }
+        return Err(e);
+    }
+    Ok(file.to_string())
 }
 
 /// 這台握著的插槽(`reuse_slot` 的捷徑:什麼都不動、直接改寫主機)放的金鑰,現在是不是真的在插槽路徑 `<keys_dir>/<file>` 上:記錄的檔名就是 `file`
@@ -639,10 +732,11 @@ fn held_in_place(held: &LocalSlot, file: &str, keys_dir: &Path) -> Result<(), Ap
 /// 不改寫。`scanned` = 掃描時的那筆記錄。「Sync key」上傳的是現在檔案裡的這把(同 `create_slot`:先讀、先檢查;同步來的副本還要仍是記錄裡的那一把,
 /// 否則同下回 `KEPT_CHANGED_MESSAGE`);「Keep on this computer」不讀私鑰。
 ///
-/// 提交的 core 臨界區裡先確認帳戶(`account_still_ready`),再確認掃描之後那筆記錄沒變:還在、檔名與來源相同、仍不是在這個帳戶學到的、帳戶裡仍沒有這個
-/// id 的記錄(還在的或 tombstone)、檔名仍沒有別的插槽在用(不分大小寫)—— 任何一項變了就什麼都不寫,回 `KEPT_CHANGED_MESSAGE`。帳戶記錄先寫 `key`
-/// (會失敗的先做),再寫 `keyslot`(來源裝置是這台、時間是現在)。本機記錄換上新的 payload、記成在這個帳戶學到的,同意上傳的是剛上傳的那把(Keep
-/// 沒有);來源、插槽檔與連結都不動。回傳插槽檔名。
+/// 提交的 core 臨界區裡先確認帳戶(`account_still_ready`),再確認掃描之後那筆記錄沒變:還在、檔名與來源相同、連結沒有收起來、仍不是在這個帳戶學到的、
+/// 帳戶裡仍沒有這個 id 的記錄(還在的或 tombstone)、檔名仍沒有別的插槽在用(不分大小寫)—— 任何一項變了就什麼都不寫,回 `KEPT_CHANGED_MESSAGE`。
+/// 帳戶記錄先寫 `key`(會失敗的先做),再寫 `keyslot`(來源裝置是這台、時間是現在)。本機記錄換上新的 payload、記成在這個帳戶學到的,同意上傳的是
+/// 剛上傳的那把(Keep 沒有);同步來的副本標成之前的帳戶的(`copy_from_another_account`:它的位元組不是從這個帳戶收到的)。來源、插槽檔與連結都不動。
+/// 回傳插槽檔名。
 fn adopt_slot(
     env: &SyncEnv,
     account_keys: &ChainKeys,
@@ -671,6 +765,7 @@ fn adopt_slot(
         let unchanged = s.key_slots.get(&kept.id).is_some_and(|local| {
             local.file_name == scanned.file_name
                 && local.source == scanned.source
+                && !local.parked
                 && local.learned_in.as_deref() != Some(account.chain_id.as_str())
         }) && !slot_record_exists(account, &kept.id)
             && !file_name_in_use(account, &scanned.file_name);
@@ -701,6 +796,8 @@ fn adopt_slot(
         local.learned_in = Some(account_keys.chain_id.clone());
         // 只有選了「Sync key」,上傳的這把才算這台同意上傳的(補寫 `key` 時只認它,見 `LocalSlot::uploaded_fingerprint`)。
         local.uploaded_fingerprint = facts.map(|f| f.fingerprint.clone());
+        // 同步來的副本的位元組是在之前的帳戶收到的,不是這個帳戶(補寫 `key` 時只有上面那個同意算數,見 `slots::republish`)。
+        local.copy_from_another_account = matches!(local.source, Some(SlotSource::SyncedCopy { .. }));
         local.last_error = None;
         local.asked = false;
         Ok(())
@@ -778,6 +875,7 @@ fn create_slot(
                 parked: false,
                 // 在這個帳戶建立的(`account_still_ready` 確認過帳戶就是 `account_keys` 的那一個)。
                 learned_in: Some(account_keys.chain_id.clone()),
+                copy_from_another_account: false,
             },
         );
         Ok(())
@@ -1324,7 +1422,7 @@ mod tests {
 
         let found = key_candidates(&a.env()).unwrap();
         assert!(found.keys.is_empty() && found.unsupported.is_empty(), "{found:?}");
-        assert_eq!(setup_keys(&a.env(), true, vec![keep(&key, "id_mac")]).unwrap(), Vec::<String>::new());
+        refused(&a, SET_UP_MEANWHILE_MESSAGE, || setup_keys(&a.env(), true, vec![keep(&key, "id_mac")]).map(|_| ()));
         assert!(live_slots(a.state().account.as_ref().unwrap()).is_empty(), "no slot is created for a key nothing offered");
         assert!(a.state().key_slots.is_empty());
         assert_eq!(a.read(&space), text, "the file is not touched");
@@ -1599,6 +1697,7 @@ mod tests {
         assert_eq!(live_ids(k.d.state().account.as_ref().unwrap()), vec![k.id.clone()], "the setup itself writes the slot under its own id");
         let local = k.d.state().key_slots[&k.id].clone();
         assert_eq!(local.source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }), "the copy stays as it is");
+        assert!(local.copy_from_another_account, "its bytes came from the previous account");
         assert_eq!(local.learned_in.as_deref(), Some(k.keys.chain_id.as_str()));
         assert_eq!(local.uploaded_fingerprint.as_deref(), sync_it.then_some(test_keys::PLAIN_FINGERPRINT));
         settle(&k.d);
@@ -1726,8 +1825,8 @@ mod tests {
         assert_eq!(live_slots(k.d.state().account.as_ref().unwrap()).len(), 1, "no slot of the old account went up");
     }
 
-    /// 同上,這台的是之前的帳戶同步來的副本(B):新帳戶的插槽不連到那個舊副本(之後刪掉舊副本會讓它斷掉),只記下這台要它;`web` 改指過去,下一輪落地
-    /// 帳戶裡的金鑰。之後刪掉舊副本,新帳戶的插槽照常能用。
+    /// 同上,這台的是之前的帳戶同步來的副本(B):新帳戶的插槽不連到那個舊副本(之後刪掉舊副本會讓它斷掉)—— 先把帳戶裡的金鑰落地到新帳戶的插槽,
+    /// `web` 才改指過去。之後刪掉舊副本,新帳戶的插槽照常能用。
     #[test]
     fn reusing_the_new_accounts_slot_never_links_it_to_a_synced_copy_from_the_previous_account() {
         use crate::sync::slots::tests::{device_id, publish, synced_payload};
@@ -1745,13 +1844,11 @@ mod tests {
         assert_eq!(setup_keys(&k.d.env(), true, vec![reuse(&copy, &theirs)]).unwrap(), vec!["web".to_string()]);
         let file = slot_file_name("id_mac", &theirs);
         let path = home(&k.d).join(SLOT_DIR).join(&file);
-        assert!(!slot_files::occupied(&path), "nothing is linked to the old copy");
-        let local = k.d.state().key_slots[&theirs].clone();
-        assert_eq!((local.source.as_ref(), local.learned_in.as_deref()), (None, Some(k.keys.chain_id.as_str())), "{local:?}");
+        assert_landed_from_the_account(&k, &theirs, &path);
         assert_eq!(k.d.read(&k.space()), before.replace(&k.value(), &slot_value(&file)), "web now uses the new account's slot");
 
         settle(&k.d);
-        assert_eq!(k.d.state().key_slots[&theirs].source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }), "the round lands the account's key");
+        assert_eq!(k.d.state().key_slots[&theirs].source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }));
         crate::sync::slots::delete_copy(&k.d.env(), &k.id).unwrap();
         assert!(!copy.exists(), "the old copy no host uses can go");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), test_keys::plain(), "and the new account's slot keeps its key");
@@ -1868,7 +1965,7 @@ mod tests {
     }
 
     /// 掃描之後、提交之前,那個插槽變了 —— 帳戶裡出現了它的記錄(還在的或 tombstone)、記錄改成在這個帳戶學到的、來源變了、帳戶裡有別的插槽用了同一個
-    /// 檔名 ——:不放進帳戶,說明它變了,什麼都不寫。帳戶本身換了、或被擋下:照 `account_still_ready` 拒絕。
+    /// 檔名、連結收起來了 ——:不放進帳戶,說明它變了,什麼都不寫。帳戶本身換了、或被擋下:照 `account_still_ready` 拒絕。
     #[test]
     fn a_slot_from_the_previous_account_that_changes_before_the_commit_is_not_set_up() {
         use crate::sync::account::{FROZEN_MESSAGE, NOT_JOINED_MESSAGE};
@@ -1886,7 +1983,8 @@ mod tests {
             }
         };
         let contested = |s: &mut SyncStateV2| put_slot(s.account.as_mut().unwrap(), &clash, Some(&clash_payload), "c", 5);
-        let changes: [&(dyn Fn(&mut SyncStateV2) + Send + Sync); 5] = [&live, &tombstone, &learned, &source, &contested];
+        let parked = |s: &mut SyncStateV2| s.key_slots.get_mut(&id).unwrap().parked = true;
+        let changes: [&(dyn Fn(&mut SyncStateV2) + Send + Sync); 6] = [&live, &tombstone, &learned, &source, &contested, &parked];
         for change in changes {
             refused_when_changed_before_the_commit(&k, sync(&k.key(), "mac"), change, KEPT_CHANGED_MESSAGE);
         }
@@ -1897,5 +1995,283 @@ mod tests {
         let frozen = |s: &mut SyncStateV2| s.account.as_mut().unwrap().frozen = Some(crate::sync::state_v2::FreezeInfo { detected_at_ms: 1, markers: Vec::new() });
         refused_when_changed_before_the_commit(&k, keep(&k.key(), "mac"), &frozen, FROZEN_MESSAGE);
         assert_eq!(k.offered().keys[0].kept_slot.as_ref().map(|s| s.id.as_str()), Some(id.as_str()), "untouched: still offered");
+    }
+
+    // ── 修正第 1 輪:同步副本的同意、沿用前先落地、收起來的連結、不在候選裡的決定 ─────────────────────────────
+
+    /// 新帳戶的插槽 `id` 在這台落地了帳戶裡的金鑰(`reuse_slot` 的例外:不連到插槽目錄裡的檔案):`path` 是一般檔案、是那把金鑰,旁邊有它的 `.pub`;
+    /// 記錄是同步來的副本(來自這個帳戶,不是之前的帳戶的副本),在這個帳戶學到的。
+    fn assert_landed_from_the_account(k: &Kept, id: &str, path: &Path) {
+        assert!(!std::fs::symlink_metadata(path).unwrap().file_type().is_symlink(), "nothing is linked to a file in the slot directory");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), test_keys::plain(), "the account's key is in the slot");
+        assert_eq!(std::fs::read_to_string(public_path(path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+        let local = k.d.state().key_slots[id].clone();
+        assert_eq!(local.source, Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }), "{local:?}");
+        assert!(!local.copy_from_another_account && !local.parked, "{local:?}");
+        assert_eq!(local.learned_in.as_deref(), Some(k.keys.chain_id.as_str()));
+    }
+
+    /// 帳戶掉了這個插槽(沒有 SP3 的電腦更換同步碼時沒帶 `keyslot`/`key`;重新加入之後記錄照樣算這個帳戶學到的):在這台狀態的副本上拿掉兩筆記錄,
+    /// 跑一次插槽維護。回傳維護之後的帳戶。
+    fn after_the_account_loses_the_slot(k: &Kept) -> crate::sync::state_v2::AccountState {
+        use crate::sync::record::{record_key, RecordKind};
+        use crate::sync::slots::{config_slot_uses, key_secret_key, reconcile};
+        let mut state = k.d.state();
+        let account = state.account.as_mut().unwrap();
+        account.records.remove(&record_key(RecordKind::KeySlot, &k.id));
+        account.sealed.remove(&key_secret_key(&k.keys, &k.id));
+        reconcile(&mut state, &k.keys, &home(&k.d), &config_slot_uses(&k.d.env()).unwrap(), 1_000);
+        state.account.unwrap()
+    }
+
+    /// 帳戶裡的成員把插槽 `k.id` 改成 `synced`(名稱不變,同一個插槽檔名)、填上 `payload` 的公鑰與指紋 —— 指紋在 `device.slots` 看得到 ——,`secret`
+    /// 是一起寫的私鑰(可以沒有)。成員那台與這台都同步完。
+    fn a_member_makes_it_synced(k: &Kept, payload: KeySlotPayload, secret: Option<&str>) {
+        use crate::sync::slots::tests::publish;
+        publish(&k.c, &k.id, &KeySlotPayload { name: "mac".into(), ..payload }, secret);
+        settle(&k.c);
+        settle(&k.d);
+    }
+
+    /// 之前的帳戶同步來的副本(B)就地放進新帳戶之後,帳戶掉了這個插槽(帳戶裡的成員先把它改成 `synced`、填上這把金鑰的公開指紋):補寫私鑰只在這台的使用者
+    /// 在這裡選了「Sync key」的時候。選「Keep on this computer」的,副本的位元組來自之前的帳戶,不是這個帳戶 —— 不上傳。
+    fn a_copy_set_up_in_place_is_written_back_only_where_the_user_synced_it(sync_it: bool) {
+        use crate::sync::slots::tests::{device_id, synced_payload};
+        use crate::sync::slots::{key_secret_key, open_key_secret};
+        let k = kept_after_a_move(true, true);
+        let copy = k.slot_path(&k.d);
+        let choice = if sync_it { sync(&copy, "mac") } else { keep(&copy, "mac") };
+        setup_keys(&k.d.env(), true, vec![choice]).unwrap();
+        settle(&k.d);
+        assert!(k.d.state().key_slots[&k.id].copy_from_another_account, "the copy came from the previous account");
+        a_member_makes_it_synced(&k, synced_payload(&device_id(&k.c)), None);
+
+        let account = after_the_account_loses_the_slot(&k);
+        assert!(slot(&account, &k.id).is_some(), "the keyslot is written again");
+        if sync_it {
+            assert_eq!(open_key_secret(&account, &k.keys, &k.id).as_deref(), Some(test_keys::plain().as_str()), "the user synced it here");
+        } else {
+            assert!(!account.sealed.contains_key(&key_secret_key(&k.keys, &k.id)), "a copy kept on this computer is never uploaded");
+        }
+    }
+
+    #[test]
+    fn a_copy_kept_from_the_previous_account_is_not_uploaded_when_the_account_loses_its_slot() {
+        a_copy_set_up_in_place_is_written_back_only_where_the_user_synced_it(false);
+    }
+
+    #[test]
+    fn a_copy_synced_from_the_previous_account_is_written_back_when_the_account_loses_its_slot() {
+        a_copy_set_up_in_place_is_written_back_only_where_the_user_synced_it(true);
+    }
+
+    /// 副本換成帳戶裡的金鑰之後(插槽空了、下一輪落地;或「Use the synced key」),它的位元組就是這個帳戶的了:不再標成之前的帳戶的副本,帳戶掉了這個
+    /// 插槽時照常補寫私鑰(同 N1 之前,同步來的副本)。
+    #[test]
+    fn a_copy_replaced_by_the_accounts_key_is_written_back_like_any_synced_copy() {
+        use crate::sync::slots::tests::{device_id, ecdsa_payload, synced_payload};
+        use crate::sync::slots::open_key_secret;
+        for use_synced in [false, true] {
+            let k = kept_after_a_move(true, true);
+            let copy = k.slot_path(&k.d);
+            setup_keys(&k.d.env(), true, vec![keep(&copy, "mac")]).unwrap();
+            settle(&k.d);
+            assert!(k.d.state().key_slots[&k.id].copy_from_another_account, "setup: the copy came from the previous account");
+            let landed = if use_synced {
+                // 成員同步了另一把金鑰:這台按「Use the synced key」。
+                a_member_makes_it_synced(&k, ecdsa_payload(&device_id(&k.c)), Some(&test_keys::ecdsa()));
+                crate::sync::slots::use_synced(&k.d.env(), &k.id).unwrap();
+                test_keys::ecdsa()
+            } else {
+                // 成員同步了同一把金鑰;這台的副本被刪掉,下一輪落地帳戶裡的那一份。
+                a_member_makes_it_synced(&k, synced_payload(&device_id(&k.c)), Some(&test_keys::plain()));
+                std::fs::remove_file(&copy).unwrap();
+                std::fs::remove_file(public_path(&copy)).unwrap();
+                settle(&k.d);
+                test_keys::plain()
+            };
+            let local = k.d.state().key_slots[&k.id].clone();
+            assert_eq!(std::fs::read_to_string(&copy).unwrap(), landed, "use_synced: {use_synced}");
+            assert!(!local.copy_from_another_account, "the bytes are this account's now (use_synced: {use_synced}): {local:?}");
+            let account = after_the_account_loses_the_slot(&k);
+            assert_eq!(open_key_secret(&account, &k.keys, &k.id).as_deref(), Some(landed.as_str()), "use_synced: {use_synced}");
+        }
+    }
+
+    /// 新帳戶裡同一把金鑰的 `synced` 插槽沒有 `key`(私鑰還沒到,或成員只寫了 `keyslot`):之前的帳戶同步來的副本不沿用它 —— 沿用時要先落地帳戶裡的金鑰,
+    /// 沒有就只會讓能連線的 `web` 改指到空的插槽 —— 改成問要不要把副本就地放進新帳戶(新帳戶裡同一把金鑰因此有兩個插槽)。
+    #[test]
+    fn a_copy_from_the_previous_account_does_not_reuse_a_slot_whose_key_the_account_lacks() {
+        use crate::sync::slots::tests::{device_id, publish, synced_payload};
+        let k = kept_after_a_move(true, true);
+        let theirs = new_slot_id().unwrap();
+        publish(&k.c, &theirs, &synced_payload(&device_id(&k.c)), None);
+        settle(&k.c);
+        settle(&k.d);
+        let found = k.offered();
+        assert_eq!(found.keys.len(), 1, "{found:?}");
+        assert_eq!(found.keys[0].existing_slot, None, "a slot whose key isn't in the account can't be landed");
+        assert_eq!(found.keys[0].kept_slot.as_ref().map(|s| s.id.as_str()), Some(k.id.as_str()), "so the dialog asks");
+        let copy = k.slot_path(&k.d);
+        refused(&k.d, OTHER_SLOT_MESSAGE, || setup_keys(&k.d.env(), true, vec![reuse(&copy, &theirs)]).map(|_| ()));
+
+        assert_eq!(setup_keys(&k.d.env(), true, vec![sync(&copy, "mac")]).unwrap(), Vec::<String>::new());
+        let mut ids = live_ids(k.d.state().account.as_ref().unwrap());
+        ids.sort();
+        let mut expected = vec![k.id.clone(), theirs.clone()];
+        expected.sort();
+        assert_eq!(ids, expected, "two slots for the same key");
+    }
+
+    /// 沿用新帳戶的插槽時,帳戶裡的金鑰在主機改寫之前就落地了:改寫撞到 `Conflict` 時,插槽已經就位、記錄是同步來的副本;再來一次(這台已經握著它)就把
+    /// 主機改寫完。
+    #[test]
+    fn a_reused_slot_gets_the_accounts_key_before_any_host_is_rewritten() {
+        use crate::sync::slots::tests::{device_id, publish, synced_payload};
+        let k = kept_after_a_move(true, true);
+        let theirs = new_slot_id().unwrap();
+        publish(&k.c, &theirs, &synced_payload(&device_id(&k.c)), Some(&test_keys::plain()));
+        settle(&k.c);
+        settle(&k.d);
+        let copy = k.slot_path(&k.d);
+        let space = k.space();
+        let edited = format!("{}\n# edited elsewhere\n", k.d.read(&space));
+        k.d.write_externally(&space, &edited);
+        assert!(matches!(setup_keys(&k.d.env(), true, vec![reuse(&copy, &theirs)]), Err(AppError::Conflict(_))));
+        let path = home(&k.d).join(SLOT_DIR).join(slot_file_name("id_mac", &theirs));
+        assert_landed_from_the_account(&k, &theirs, &path);
+        assert_eq!(k.d.read(&space), edited, "web is not rewritten yet");
+
+        assert_eq!(k.offered().keys[0].existing_slot.as_deref(), Some(theirs.as_str()));
+        assert_eq!(setup_keys(&k.d.env(), true, vec![reuse(&copy, &theirs)]).unwrap(), vec!["web".to_string()]);
+        assert!(k.d.read(&space).contains(&slot_value(&slot_file_name("id_mac", &theirs))));
+    }
+
+    /// 沿用新帳戶的插槽、要落地帳戶裡的金鑰,插槽路徑上卻有使用者自己的檔案:不覆蓋、不改寫主機、不記錄,說明擋路的檔案。
+    #[test]
+    fn a_reused_slot_whose_path_is_taken_is_not_landed_and_no_host_is_rewritten() {
+        use crate::sync::slots::tests::{device_id, publish, synced_payload};
+        let k = kept_after_a_move(true, true);
+        let theirs = new_slot_id().unwrap();
+        publish(&k.c, &theirs, &synced_payload(&device_id(&k.c)), Some(&test_keys::plain()));
+        settle(&k.c);
+        settle(&k.d);
+        let path = home(&k.d).join(SLOT_DIR).join(slot_file_name("id_mac", &theirs));
+        std::fs::write(&path, "mine").unwrap();
+        let copy = k.slot_path(&k.d);
+        refused(&k.d, &in_the_way_message(&path), || setup_keys(&k.d.env(), true, vec![reuse(&copy, &theirs)]).map(|_| ()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+        assert!(!k.d.state().key_slots.contains_key(&theirs));
+    }
+
+    /// 要沿用的 `synced` 插槽是因為這台曾經把它連到這份副本才被建議的(使用者在 Keys 為它挑過這個檔案,後來連結收起來了),帳戶裡它同步的卻是另一把金鑰:
+    /// 落地那一把會讓 `web` 悄悄換成別的金鑰 —— 拒絕,什麼都不落地、不改寫。
+    #[test]
+    fn a_reused_slot_whose_synced_key_is_another_key_is_not_landed() {
+        use crate::sync::slots::tests::{device_id, ecdsa_payload, publish};
+        let k = kept_after_a_move(true, true);
+        let theirs = new_slot_id().unwrap();
+        publish(&k.c, &theirs, &ecdsa_payload(&device_id(&k.c)), Some(&test_keys::ecdsa()));
+        settle(&k.c);
+        settle(&k.d);
+        let copy = k.slot_path(&k.d);
+        let file = slot_file_name("id_mac", &theirs);
+        mutate(&k.d.env(), |s| {
+            let payload = s.account.as_ref().and_then(|a| slot(a, &theirs));
+            s.key_slots.insert(
+                theirs.clone(),
+                LocalSlot {
+                    file_name: file.clone(),
+                    source: Some(SlotSource::Linked { path: copy.display().to_string(), link: LinkKind::Symlink, fingerprint: None, origin: false }),
+                    last_error: None,
+                    asked: true,
+                    payload,
+                    uploaded_fingerprint: None,
+                    parked: true,
+                    learned_in: Some(k.keys.chain_id.clone()),
+                    copy_from_another_account: false,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let found = k.offered();
+        assert_eq!(found.keys[0].existing_slot.as_deref(), Some(theirs.as_str()), "setup: suggested because this computer linked it to the copy");
+        refused(&k.d, OTHER_SLOT_MESSAGE, || setup_keys(&k.d.env(), true, vec![reuse(&copy, &theirs)]).map(|_| ()));
+        assert!(!slot_files::occupied(&home(&k.d).join(SLOT_DIR).join(&file)));
+    }
+
+    /// 之前的帳戶留下的插槽連到插槽目錄裡的一個檔案(例如使用者在之前的帳戶為它挑了別的插槽的副本),不是同步來的副本:沿用新帳戶的插槽時一樣不連到它,
+    /// 落地帳戶裡的金鑰(看的是候選的金鑰檔在不在插槽目錄裡,不是之前的帳戶留下的是哪一種插槽)。
+    #[test]
+    fn a_kept_link_to_a_file_in_the_slot_directory_is_not_linked_to_by_a_reused_slot() {
+        use crate::sync::slots::tests::{device_id, publish, synced_payload};
+        let k = kept_after_a_move(false, true);
+        let theirs = new_slot_id().unwrap();
+        publish(&k.c, &theirs, &synced_payload(&device_id(&k.c)), Some(&test_keys::plain()));
+        settle(&k.c);
+        settle(&k.d);
+        let keys_dir = home(&k.d).join(SLOT_DIR);
+        let spare = keys_dir.join("spare");
+        std::fs::write(&spare, test_keys::plain()).unwrap();
+        slot_files::link(&spare, &k.slot_path(&k.d)).unwrap();
+        mutate(&k.d.env(), |s| {
+            if let Some(SlotSource::Linked { path, .. }) = s.key_slots.get_mut(&k.id).unwrap().source.as_mut() {
+                *path = spare.display().to_string();
+            }
+            Ok(())
+        })
+        .unwrap();
+        let found = k.offered();
+        assert_eq!(found.keys.len(), 1, "{found:?}");
+        assert_eq!(found.keys[0].path, spare.display().to_string());
+        assert_eq!(found.keys[0].kept_slot.as_ref().map(|s| s.synced_copy), Some(false), "a link, not a synced copy");
+        assert_eq!(found.keys[0].existing_slot.as_deref(), Some(theirs.as_str()));
+
+        assert_eq!(setup_keys(&k.d.env(), true, vec![reuse(&spare, &theirs)]).unwrap(), vec!["web".to_string()]);
+        assert_landed_from_the_account(&k, &theirs, &keys_dir.join(slot_file_name("id_mac", &theirs)));
+    }
+
+    /// 之前的帳戶留下的插槽,連結收起來了(插槽路徑上是使用者自己的檔案):不是可以就地放進帳戶的插槽。直接指到同一把金鑰的 `db` 是一般的候選 —— 設定時
+    /// 建立新的插槽,不會被改指到那個檔案。
+    #[test]
+    fn a_parked_slot_from_the_previous_account_is_not_offered() {
+        let k = kept_after_a_move(false, true);
+        let space = k.space();
+        let moved = k.d.read(&space);
+        k.d.save_in_app(&space, &format!("Host db\n  IdentityFile ~/.ssh/id_mac\n{moved}"));
+        std::fs::remove_file(k.slot_path(&k.d)).unwrap();
+        std::fs::write(k.slot_path(&k.d), "mine").unwrap();
+        settle(&k.d);
+        assert!(k.d.state().key_slots[&k.id].parked, "setup: the user's file is in the way, so the link is put away");
+
+        let found = k.offered();
+        assert_eq!(found.keys.len(), 1, "{found:?}");
+        assert_eq!((found.keys[0].kept_slot.as_ref(), found.keys[0].default_name.as_str()), (None, "id_mac"));
+        assert_eq!(aliases_and_values(&found.keys[0]), vec![("db".to_string(), "~/.ssh/id_mac".to_string())]);
+        assert_eq!(setup_keys(&k.d.env(), true, vec![sync(&k.key(), "id_mac")]).unwrap(), vec!["db".to_string()]);
+        let made = live_ids(k.d.state().account.as_ref().unwrap());
+        assert!(made.len() == 1 && made[0] != k.id, "a new slot: {made:?}");
+        assert!(k.d.read(&space).starts_with(&format!("Host db\n  IdentityFile {}\n", slot_value(&slot_file_name("id_mac", &made[0])))));
+        assert_eq!(std::fs::read_to_string(k.slot_path(&k.d)).unwrap(), "mine", "the user's file is not touched");
+    }
+
+    /// 「Sync key」或「Keep on this computer」的那把金鑰已經不在候選裡(期間被設定好了):說明,什麼都不動 —— 一起送來、還在候選裡的決定也不做。沿用照舊略過。
+    #[test]
+    fn a_sync_or_keep_choice_for_a_key_that_is_no_longer_listed_changes_nothing() {
+        let (a, personal) = device("# main\n");
+        let mac = put_key(&a, "id_mac", &test_keys::plain());
+        let work = put_key(&a, "id_work", &test_keys::ecdsa());
+        let space = a.space_path(&personal);
+        a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\nHost jump\n  IdentityFile ~/.ssh/id_work\n");
+        setup_keys(&a.env(), true, vec![keep(&mac, "id_mac")]).unwrap();
+        let id = live_ids(a.state().account.as_ref().unwrap())[0].clone();
+        assert!(key_candidates(&a.env()).unwrap().keys.iter().all(|k| k.path != mac.display().to_string()), "setup: id_mac is set up");
+
+        for choice in [sync(&mac, "id_mac"), keep(&mac, "again")] {
+            refused(&a, SET_UP_MEANWHILE_MESSAGE, || setup_keys(&a.env(), true, vec![choice]).map(|_| ()));
+        }
+        refused(&a, SET_UP_MEANWHILE_MESSAGE, || setup_keys(&a.env(), true, vec![keep(&work, "id_work"), sync(&mac, "id_mac")]).map(|_| ()));
+        assert_eq!(setup_keys(&a.env(), true, vec![reuse(&mac, &id)]).unwrap(), Vec::<String>::new(), "a stale reuse is still skipped");
     }
 }

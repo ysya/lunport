@@ -241,6 +241,13 @@ pub struct LocalSlot {
     /// 新帳戶要接續舊帳戶的 space)把舊 chain 改記成新的。None = 不知道(這個欄位之前寫的狀態檔):當成「不是現在的帳戶」,不補寫。
     #[serde(default)]
     pub learned_in: Option<String>,
+    /// 插槽裡的同步副本(`SlotSource::SyncedCopy`)不是從這筆記錄學到的帳戶(`learned_in`)收到的:之前的帳戶留下、就地放進這個帳戶的副本
+    /// (`slot_setup::adopt_slot`,「Sync key」與「Keep on this computer」都算)。補寫 `key`(`slots::republish`,spec §6.6)時,這樣的副本
+    /// 要這台的使用者在這裡選過同步它(`uploaded_fingerprint` 是它的指紋)才算握有 —— 它的位元組來自之前的帳戶,不是這個帳戶。只對同步來的副本有意義:
+    /// 每個把 `SyncedCopy` 放進記錄的地方都重新設定它 —— 從帳戶落地同步的金鑰時清掉(`slots::land_into`、`slots::use_synced`、
+    /// `slot_setup::reuse_slot`)。false = 不是。
+    #[serde(default)]
+    pub copy_from_another_account: bool,
 }
 
 /// 插槽裡放的東西(SP3 spec §4.2)。
@@ -708,6 +715,7 @@ mod tests {
                 uploaded_fingerprint: Some("SHA256:vUthAmDZoxYXCTAPEZUn5qtWSMHWQCEcUfpnyM05mMs".to_string()),
                 parked: false,
                 learned_in: Some(account_keys.chain_id.clone()),
+                copy_from_another_account: true,
             },
         );
         s.key_slots.insert(
@@ -726,6 +734,7 @@ mod tests {
                 uploaded_fingerprint: None,
                 parked: true,
                 learned_in: None,
+                copy_from_another_account: false,
             },
         );
         s
@@ -786,6 +795,7 @@ mod tests {
                 uploaded_fingerprint: Some("SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew".into()),
                 parked: true,
                 learned_in: Some("a".repeat(64)),
+                copy_from_another_account: true,
             },
         );
         let back: SyncStateV2 = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
@@ -799,9 +809,12 @@ mod tests {
         entry.remove("uploaded_fingerprint");
         entry.remove("parked");
         entry.remove("learned_in");
+        entry.remove("copy_from_another_account");
         let older: SyncStateV2 = serde_json::from_value(json).unwrap();
         let older = &older.key_slots["3fa2c1d90123456789abcdef01234567"];
         assert_eq!((older.uploaded_fingerprint.as_deref(), older.parked, older.learned_in.as_deref()), (None, false, None));
+        // 沒有 `copy_from_another_account` 的記錄讀進來是 false:這個欄位之前,同步來的副本都是從帳戶落地的。
+        assert!(!older.copy_from_another_account);
     }
 
     #[test]

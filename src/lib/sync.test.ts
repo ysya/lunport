@@ -30,6 +30,7 @@ import {
   useKeyPick,
   useKeySetMode,
   useKeyUseSynced,
+  useSetupKeys,
 } from "./sync";
 import { overview, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "./sync-fixtures";
 
@@ -200,6 +201,22 @@ describe("a failed key slot command", () => {
     const { mutateAsync } = renderHook(new QueryClient(), useKeyPick);
     await expect(mutateAsync({ slotId: "s", path: "/home/f/.ssh/id_mac" })).rejects.toBe(inTheWay);
     expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Could not use that key", description: inTheWay })]);
+  });
+
+  it("reports a key that was set up in the meantime as a failure, and reads the keys again", async () => {
+    // A Sync key / Keep choice for a key that is no longer listed: the backend changes nothing and says so. The row's own
+    // success toast runs only when the call succeeds.
+    const meantime = "This key was set up in the meantime; nothing changed.";
+    stubBackend(async () => {
+      throw meantime;
+    });
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(keyCandidatesKey, { keys: [], unsupported: [] });
+    const { mutateAsync } = renderHook(queryClient, useSetupKeys);
+    const choices = [{ path: "/home/f/.ssh/id_mac", decision: { kind: "sync" as const, name: "id_mac" } }];
+    await expect(mutateAsync({ choices })).rejects.toBe(meantime);
+    expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Could not set up the key", description: meantime })]);
+    expect(queryClient.getQueryState(keyCandidatesKey)?.isInvalidated).toBe(true);
   });
 
   it("re-reads the views after a failed pick or use of the synced key, which can fail after the slot's key was moved aside", async () => {

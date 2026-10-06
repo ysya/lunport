@@ -102,6 +102,19 @@ pub fn open_key_secret(account: &AccountState, account_keys: &ChainKeys, slot_id
     valid_key_payload(&payload).then_some(payload.private_key)
 }
 
+/// 帳戶裡這個插槽的私鑰,而且通過落地前的檢查(`check_synced_key`:讀得懂、指紋等於插槽記錄的):(私鑰、從它讀出的資訊)。私鑰在帳戶裡沒有
+/// (或解不開)→ `Err(None)`;解得開卻對不上 → `Err(Some(MISMATCH_MESSAGE))`。
+pub(crate) fn landable_key(
+    account: &AccountState,
+    account_keys: &ChainKeys,
+    slot_id: &str,
+    payload: &KeySlotPayload,
+) -> Result<(String, KeyFacts), Option<String>> {
+    let secret = open_key_secret(account, account_keys, slot_id).ok_or(None)?;
+    let facts = check_synced_key(&secret, payload).map_err(Some)?;
+    Ok((secret, facts))
+}
+
 // ── 每一輪在這台維護插槽(SP3 spec §6.2–§6.6)──────────────────────────────────────────────────
 //
 // 一個檔案是不是 SSHelter 放的,只看這個插槽 id 自己的本機記錄(`SyncStateV2::key_slots[id]`),不看檔名:插槽檔名
@@ -339,6 +352,7 @@ pub fn reconcile(
             uploaded_fingerprint: None,
             parked: false,
             learned_in: Some(account.chain_id.clone()),
+            copy_from_another_account: false,
         });
         if local.file_name != file {
             // 插槽建立之後不改名(spec §1 非目標),帳戶裡的名稱卻變了(只有帳戶裡的惡意成員寫得出來):這個插槽記著的檔案在舊路徑,
@@ -625,8 +639,9 @@ fn land_into(
     match land(&secret, payload, keys_dir, path) {
         Ok(fingerprint) => {
             local.source = Some(SlotSource::SyncedCopy { fingerprint });
-            // 插槽裡的私鑰來自這個帳戶:記錄是這個帳戶的(`LocalSlot::learned_in`)。
+            // 插槽裡的私鑰來自這個帳戶:記錄是這個帳戶的(`LocalSlot::learned_in`),副本也是(`LocalSlot::copy_from_another_account`)。
             local.learned_in = Some(account.chain_id.clone());
+            local.copy_from_another_account = false;
         }
         Err(message) => local.last_error = Some(message),
     }
@@ -637,7 +652,7 @@ fn land_into(
 ///
 /// `.pub` 之後會被 deploy 複製進伺服器的 authorized_keys,所以只能來自通過指紋檢查的這把私鑰(`facts.public_key`),
 /// 不取自記錄上的 `public_key`(spec §3:帳戶裡的成員只能改變主機用哪把金鑰);而且一定在指紋檢查通過之後才寫。
-fn land(secret: &str, payload: &KeySlotPayload, keys_dir: &Path, path: &Path) -> Result<String, String> {
+pub(crate) fn land(secret: &str, payload: &KeySlotPayload, keys_dir: &Path, path: &Path) -> Result<String, String> {
     let facts = check_synced_key(secret, payload)?;
     if slot_files::occupied(path) {
         if std::fs::read(path).ok().as_deref() != Some(secret.as_bytes()) {
@@ -652,7 +667,7 @@ fn land(secret: &str, payload: &KeySlotPayload, keys_dir: &Path, path: &Path) ->
 }
 
 /// 同步的私鑰能不能放進插槽(spec §6.2):讀得懂,而且指紋和插槽記錄一致。錯誤訊息不帶金鑰。
-fn check_synced_key(secret: &str, payload: &KeySlotPayload) -> Result<KeyFacts, String> {
+pub(crate) fn check_synced_key(secret: &str, payload: &KeySlotPayload) -> Result<KeyFacts, String> {
     let facts = inspect_private_key(secret).map_err(|_| MISMATCH_MESSAGE.to_string())?;
     if payload.fingerprint.as_deref() != Some(facts.fingerprint.as_str()) {
         return Err(MISMATCH_MESSAGE.to_string());
@@ -669,6 +684,10 @@ fn check_synced_key(secret: &str, payload: &KeySlotPayload) -> Result<KeyFacts, 
 /// 同步來的副本照舊(位元組來自帳戶、通過了指紋檢查,不是這台使用者的私鑰),但路徑上現在的檔案必須還是記錄裡的那一把
 /// (`SyncedCopy::fingerprint`)—— 那個位置可能被換成了別的檔案(別的插槽放的、使用者的),不能因為它剛好符合帳戶裡最新的 payload
 /// 就上傳。
+///
+/// 同步來的副本也要是從這個帳戶收到的:之前的帳戶留下、就地放進這個帳戶的副本(`LocalSlot::copy_from_another_account`)位元組來自之前的帳戶,
+/// 只有這台的使用者在這裡選了同步它(`uploaded_fingerprint` 是它的指紋)才補 `key` —— 選了「Keep on this computer」的,成員之後把插槽改成 `synced`、
+/// 填上 `device.slots` 看得到的指紋,再讓帳戶掉了它,也不上傳。
 ///
 /// 補寫的一定是這個帳戶自己掉了的記錄(N1):在別的帳戶學到的記錄(`LocalSlot::learned_in` 不是現在的帳戶;不知道的也算)什麼都不寫 ——
 /// 離開帳戶 A、建立或加入另一個帳戶之後,`~/.ssh/sshelter-local/` 裡用到 A 的插槽的主機被搬進新帳戶的 space,新帳戶裡當然沒有那個插槽;
@@ -695,10 +714,12 @@ fn republish(
         Some(SlotSource::Linked { path: source, .. }) => std::fs::read_to_string(source).ok().filter(|text| {
             inspect_private_key(text).is_ok_and(|f| local.uploaded_fingerprint.as_deref() == Some(f.fingerprint.as_str()))
         }),
-        Some(SlotSource::SyncedCopy { fingerprint }) => std::fs::read_to_string(path)
-            .ok()
-            .filter(|text| inspect_private_key(text).is_ok_and(|f| f.fingerprint == *fingerprint)),
-        None => None,
+        Some(SlotSource::SyncedCopy { fingerprint })
+            if !local.copy_from_another_account || local.uploaded_fingerprint.as_deref() == Some(fingerprint.as_str()) =>
+        {
+            std::fs::read_to_string(path).ok().filter(|text| inspect_private_key(text).is_ok_and(|f| f.fingerprint == *fingerprint))
+        }
+        Some(SlotSource::SyncedCopy { .. }) | None => None,
     };
     let matching = readable.filter(|text| {
         inspect_private_key(text).is_ok_and(|f| payload.fingerprint.as_deref() == Some(f.fingerprint.as_str()))
@@ -1092,6 +1113,7 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
                 uploaded_fingerprint,
                 parked: false,
                 learned_in,
+                copy_from_another_account: false,
             },
         );
         Ok(())
@@ -1107,7 +1129,8 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
 /// 改用同步的金鑰(狀態 SyncedAvailable)。同步的金鑰先通過指紋檢查,對不上就什麼都不動。這台在插槽裡放了東西的話,只換掉這個插槽
 /// 自己的(`occupant`):自己的連結拿掉(連到的金鑰本身不動),舊副本、複製檔與可能是某把金鑰僅存名字的 hard link 改名保留(計畫裁定 3);
 /// 路徑上的東西不是它的(收起來的記錄、symlink 不是指到記錄的原檔……)就擋路。這台沒有在插槽裡放東西的話,同每一輪,`land` 只寫進空著
-/// 的路徑。落地之後的記錄不是收起來的,是快照裡那個帳戶的(`learned_in`:插槽裡的私鑰來自那裡;提交時帳戶換了就不改記)。
+/// 的路徑。落地之後的記錄不是收起來的,是快照裡那個帳戶的(`learned_in`:插槽裡的私鑰來自那裡;提交時帳戶換了就不改記),副本也不再是之前的帳戶的
+/// (`copy_from_another_account`)。
 pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let (state, keys, home) = snapshot(env)?;
     let account = state.account.as_ref().ok_or_else(not_found)?;
@@ -1144,6 +1167,7 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
             uploaded_fingerprint: None,
             parked: false,
             learned_in: None,
+            copy_from_another_account: false,
         });
         local.source = Some(SlotSource::SyncedCopy { fingerprint: fingerprint.clone() });
         local.last_error = None;
@@ -1151,6 +1175,8 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
         if learned_here.is_some() {
             local.learned_in = learned_here;
         }
+        // 副本的位元組來自快照裡的帳戶:記錄學到的就是它時,這份副本是那個帳戶的(提交時帳戶換了,就當成別的帳戶的)。
+        local.copy_from_another_account = local.learned_in.as_deref() != Some(keys.chain_id.as_str());
         Ok(())
     })?;
     env.events.wake();
@@ -1659,6 +1685,7 @@ pub(crate) mod tests {
                     parked: false,
                     // 同 `slot_setup::create_slot`:在這個帳戶建立的。
                     learned_in: Some(keys.chain_id.clone()),
+                    copy_from_another_account: false,
                 },
             );
             Ok(())
@@ -1710,7 +1737,7 @@ pub(crate) mod tests {
     }
 
     /// `test_keys::ecdsa()` 那把金鑰的 `synced` 記錄(名稱同 `synced_payload`,所以插槽檔名也一樣)。
-    fn ecdsa_payload(origin: &str) -> KeySlotPayload {
+    pub(crate) fn ecdsa_payload(origin: &str) -> KeySlotPayload {
         KeySlotPayload {
             public_key: Some(test_keys::ECDSA_PUBLIC.into()),
             fingerprint: Some(test_keys::ECDSA_FINGERPRINT.into()),
@@ -3781,6 +3808,7 @@ pub(crate) mod tests {
             uploaded_fingerprint: None,
             parked: false,
             learned_in: None,
+            copy_from_another_account: false,
         };
         let linked = |fingerprint: Option<&str>, origin: bool, link: LinkKind| SlotSource::Linked {
             path: "/h/.ssh/id_mac".into(),
@@ -3927,10 +3955,11 @@ pub(crate) mod tests {
                     uploaded_fingerprint: None,
                     parked: false,
                     learned_in: None,
+                    copy_from_another_account: false,
                 },
             );
             // 沒有 payload、或沒有放東西的記錄不顯示。
-            s.key_slots.insert("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(), LocalSlot { file_name: "x-eeeeeeee".into(), source: None, last_error: None, asked: false, payload: None, uploaded_fingerprint: None, parked: false, learned_in: None });
+            s.key_slots.insert("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(), LocalSlot { file_name: "x-eeeeeeee".into(), source: None, last_error: None, asked: false, payload: None, uploaded_fingerprint: None, parked: false, learned_in: None, copy_from_another_account: false });
             Ok(())
         })
         .unwrap();
@@ -4524,6 +4553,7 @@ pub(crate) mod tests {
             uploaded_fingerprint: None,
             parked,
             learned_in: None,
+            copy_from_another_account: false,
         };
         let linked = |link| Some(SlotSource::Linked { path: key.display().to_string(), link, fingerprint: None, origin: false });
         let at = |local: &LocalSlot| occupant(Some(local), file, &path);
