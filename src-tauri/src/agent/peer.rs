@@ -7,7 +7,7 @@ pub struct ProcInfo {
     pub ppid: u32,
     /// 執行檔的實際路徑(macOS 的 `proc_pidpath`,Linux 的 `/proc/<pid>/exe`,Windows 的 `QueryFullProcessImageNameW`)。
     pub path: Option<String>,
-    /// argv(只用來找直譯器的腳本;Windows 不取)。
+    /// argv 裡規則用得到的部分(`needed_args`):`argv[0]`,直譯器再多留到腳本或內嵌程式碼的選項為止;完整的命令列不保存。Windows 不取。
     pub argv: Vec<String>,
 }
 
@@ -24,6 +24,8 @@ const SKIP: &[&str] = &[
 ];
 const SYSTEM: &[&str] = &["launchd", "init", "systemd", "explorer", "services", "wininit", "svchost", "system"];
 const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "bun", "deno"];
+/// 直譯器執行的東西內嵌程式碼的選項。`-p`(node 印出結果)與 `-E`(perl)也是;程式碼本身不保存。
+const INLINE_FLAGS: &[&str] = &["-c", "-e", "-E", "-p", "--eval", "--print"];
 
 /// 路徑的檔名(`/` 與 `\` 都當分隔),去掉 `.exe`(大小寫都算,Windows 的檔名不分大小寫)。
 fn file_name(path: &str) -> &str {
@@ -51,12 +53,42 @@ fn is_system(p: &ProcInfo) -> bool {
     p.pid <= 1 || base_lower(p).is_some_and(|b| SYSTEM.contains(&b.as_str()))
 }
 
+/// 跳過的程序:名稱在 SKIP 清單裡,或是 login shell(`argv[0]` 開頭是 `-`,例如 `-zsh`、`-xonsh`;檔名本身不會有 `-`)。
 fn is_skipped(p: &ProcInfo) -> bool {
-    base_lower(p).is_some_and(|b| SKIP.contains(&b.as_str()) || b.starts_with('-'))
+    base_lower(p).is_some_and(|b| SKIP.contains(&b.as_str())) || p.argv.first().is_some_and(|a| a.starts_with('-'))
 }
 
 fn is_interpreter(base: &str) -> bool {
     INTERPRETERS.contains(&base) || base.starts_with("python3.")
+}
+
+/// 直譯器執行的是什麼:第一個非選項引數之前先遇到內嵌程式碼的選項 → `<inline>`;否則第一個非選項引數(腳本)。
+fn interpreted(argv: &[String]) -> Option<String> {
+    for arg in argv.iter().skip(1) {
+        if INLINE_FLAGS.contains(&arg.as_str()) {
+            return Some("<inline>".to_string());
+        }
+        if !arg.starts_with('-') {
+            return Some(arg.clone());
+        }
+    }
+    None
+}
+
+/// 只留下規則用得到的引數:每個程序留 `argv[0]`(看是不是 login shell);直譯器再留到第一個內嵌程式碼的選項或第一個非選項引數(腳本)為止,
+/// 之後的不留。完整的命令列可能含祕密。
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn needed_args(path: Option<&str>, argv: Vec<String>) -> Vec<String> {
+    let interpreter = path.is_some_and(|p| is_interpreter(&file_name(p).to_ascii_lowercase()));
+    let mut kept = Vec::new();
+    for (i, arg) in argv.into_iter().enumerate() {
+        let last = (i == 0 && !interpreter) || (i > 0 && (INLINE_FLAGS.contains(&arg.as_str()) || !arg.starts_with('-')));
+        kept.push(arg);
+        if last {
+            break;
+        }
+    }
+    kept
 }
 
 fn display(p: &ProcInfo) -> String {
@@ -75,15 +107,9 @@ pub fn identify(chain: &[ProcInfo]) -> Option<Program> {
         .or_else(|| useful.last())?;
     let program_path = program.path.clone()?;
     let base = file_name(&program_path).to_ascii_lowercase();
-    let program_id = if is_interpreter(&base) {
-        let inline = program.argv.iter().skip(1).any(|a| a == "-e" || a == "-c" || a == "--eval");
-        match program.argv.iter().skip(1).find(|a| !a.starts_with('-')) {
-            _ if inline => format!("{program_path} + <inline>"),
-            Some(script) => format!("{program_path} + {script}"),
-            None => program_path.clone(),
-        }
-    } else {
-        program_path.clone()
+    let program_id = match is_interpreter(&base).then(|| interpreted(&program.argv)).flatten() {
+        Some(what) => format!("{program_path} + {what}"),
+        None => program_path.clone(),
     };
     Some(Program {
         chain: useful.iter().rev().map(|p| display(p)).collect(),
@@ -91,16 +117,21 @@ pub fn identify(chain: &[ProcInfo]) -> Option<Program> {
     })
 }
 
-/// 從 `pid` 往上找父程序(最多 64 層)。讀不到的程序(已經結束)→ 鏈到那裡為止;一開始就讀不到 → 空的。
+/// 從 `pid` 往上找父程序(最多 64 層)。讀不到的程序(已經結束,或沒有權限讀)→ 鏈到那裡為止;一開始就讀不到 → 空的。
+/// 到 PID 1、父程序是自己、或父程序已經在鏈裡(Windows 不會重新指定父程序,舊的 PID 可能繞回來)也停。
 pub fn process_chain(pid: u32) -> Vec<ProcInfo> {
-    let mut out = Vec::new();
+    walk(pid, proc_info)
+}
+
+/// `process_chain` 的走法;讀一個程序的函式由呼叫端給(測試用假的)。
+fn walk(pid: u32, mut read: impl FnMut(u32) -> Option<ProcInfo>) -> Vec<ProcInfo> {
+    let mut out: Vec<ProcInfo> = Vec::new();
     let mut current = pid;
     while out.len() < 64 {
-        let Some(info) = proc_info(current) else { break };
+        let Some(info) = read(current) else { break };
         let parent = info.ppid;
-        let stop = current <= 1 || parent == current;
         out.push(info);
-        if stop {
+        if current <= 1 || out.iter().any(|p| p.pid == parent) {
             break;
         }
         current = parent;
@@ -108,24 +139,51 @@ pub fn process_chain(pid: u32) -> Vec<ProcInfo> {
     out
 }
 
+/// `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)` 的結果(`<sys/proc_info.h>` 的 `struct proc_bsdshortinfo`;鎖定的 libc 0.2.186 還沒有它)。
+/// 不用 `PROC_PIDTBSDINFO`:它讀 root 擁有的程序(終端機分頁底下的 `/usr/bin/login`)會 EPERM,鏈就斷在那裡;短版一般使用者都讀得到。
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct ShortBsdInfo {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+    status: u32,
+    comm: [u8; 16],
+    flags: u32,
+    uid: u32,
+    gid: u32,
+    ruid: u32,
+    rgid: u32,
+    svuid: u32,
+    svgid: u32,
+    rfu: u32,
+}
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<ShortBsdInfo>() == 64);
+
+#[cfg(target_os = "macos")]
+const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+
 #[cfg(target_os = "macos")]
 fn proc_info(pid: u32) -> Option<ProcInfo> {
     let pid = i32::try_from(pid).ok()?;
-    // SAFETY: `proc_bsdinfo` is plain old data; `proc_pidinfo` fills at most `size` bytes.
+    // SAFETY: `ShortBsdInfo` is plain old data; `proc_pidinfo` fills at most `size` bytes.
     let info = unsafe {
-        let mut info = std::mem::zeroed::<libc::proc_bsdinfo>();
-        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-        let n = libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size);
+        let mut info = std::mem::zeroed::<ShortBsdInfo>();
+        let size = std::mem::size_of::<ShortBsdInfo>() as libc::c_int;
+        let n = libc::proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size);
         (n == size).then_some(info)?
     };
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: the buffer is `PROC_PIDPATHINFO_MAXSIZE` bytes long.
     let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
     let path = (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned());
-    Some(ProcInfo { pid: pid as u32, ppid: info.pbi_ppid, path, argv: macos_argv(pid).unwrap_or_default() })
+    let argv = needed_args(path.as_deref(), macos_argv(pid).unwrap_or_default());
+    Some(ProcInfo { pid: pid as u32, ppid: info.ppid, path, argv })
 }
 
-/// `KERN_PROCARGS2`:`int argc`、執行時給的路徑與 NUL 填充、`argv[0..argc]`、環境變數。
+/// `KERN_PROCARGS2` 的內容(格式見 `parse_procargs2`)。
 #[cfg(target_os = "macos")]
 fn macos_argv(pid: i32) -> Option<Vec<String>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
@@ -143,6 +201,13 @@ fn macos_argv(pid: i32) -> Option<Vec<String>> {
         }
     }
     buf.truncate(size);
+    parse_procargs2(&buf)
+}
+
+/// `KERN_PROCARGS2` 的內容:`int argc`、執行時給的路徑與 NUL 填充、`argv[0..argc]`、環境變數。`argc` 比緩衝區裡真正有的多時
+/// (資料壞了)讀到緩衝區用完就停,不會為了很大的 `argc` 配置大量空字串。
+#[cfg(any(target_os = "macos", test))]
+fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
     let argc = i32::from_ne_bytes(buf.get(0..4)?.try_into().ok()?);
     let mut rest = &buf[4..];
     let nul = rest.iter().position(|&b| b == 0)?;
@@ -152,6 +217,9 @@ fn macos_argv(pid: i32) -> Option<Vec<String>> {
     }
     let mut argv = Vec::new();
     for _ in 0..argc.max(0) {
+        if rest.is_empty() {
+            break;
+        }
         let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
         argv.push(String::from_utf8_lossy(&rest[..end]).into_owned());
         rest = &rest[(end + 1).min(rest.len())..];
@@ -170,14 +238,17 @@ fn without_deleted_suffix(path: String) -> String {
 
 #[cfg(target_os = "linux")]
 fn proc_info(pid: u32) -> Option<ProcInfo> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `comm` 最長 15 個位元組,可能剛好斷在多位元組字的中間:讀位元組再寬鬆地轉成字串(`read_to_string` 會失敗,程序就被當成不存在)。
+    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+    let stat = String::from_utf8_lossy(&stat);
     // `pid (comm) state ppid …`:comm 可能含空白與括號,從最後一個 `)` 之後讀。
     let after = &stat[stat.rfind(')')? + 1..];
     let ppid = after.split_whitespace().nth(1)?.parse().ok()?;
     let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|p| without_deleted_suffix(p.display().to_string()));
-    let argv = std::fs::read(format!("/proc/{pid}/cmdline"))
+    let args: Vec<String> = std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect())
         .unwrap_or_default();
+    let argv = needed_args(path.as_deref(), args);
     Some(ProcInfo { pid, ppid, path, argv })
 }
 
@@ -233,6 +304,16 @@ mod tests {
 
     fn p(pid: u32, ppid: u32, path: &str, argv: &[&str]) -> ProcInfo {
         ProcInfo { pid, ppid, path: Some(path.to_string()), argv: argv.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// identity 裡程式的那一段(`|` 之後):程式是 `path`、引數是 `argv`,夾在 ssh 與 iTerm2 之間。
+    fn program_part(path: &str, argv: &[&str]) -> String {
+        let chain = vec![
+            p(50, 40, "/usr/bin/ssh", &["ssh"]),
+            p(40, 10, path, argv),
+            p(10, 1, "/Applications/iTerm.app/Contents/MacOS/iTerm2", &["iTerm2"]),
+        ];
+        identify(&chain).unwrap().identity.split_once('|').unwrap().1.to_string()
     }
 
     #[test]
@@ -292,6 +373,76 @@ mod tests {
             p(10, 1, "/Applications/iTerm.app/Contents/MacOS/iTerm2", &[]),
         ];
         assert_eq!(identify(&inline).unwrap().identity, "/Applications/iTerm.app/Contents/MacOS/iTerm2|/usr/bin/python3.12 + <inline>");
+    }
+
+    #[test]
+    fn an_interpreter_is_inline_only_when_the_flag_comes_before_the_script() {
+        assert_eq!(program_part("/usr/bin/python3", &["python3", "tool.py", "-c", "cfg"]), "/usr/bin/python3 + tool.py");
+        assert_eq!(program_part("/usr/bin/python3", &["python3", "-c", "code"]), "/usr/bin/python3 + <inline>");
+        assert_eq!(program_part("/opt/node/bin/node", &["node", "-p", "process.env.X"]), "/opt/node/bin/node + <inline>");
+        assert_eq!(program_part("/usr/bin/perl", &["perl", "-E", "say 1"]), "/usr/bin/perl + <inline>");
+        assert_eq!(program_part("/opt/node/bin/node", &["node", "--no-warnings", "/x/tool.js", "--flag"]), "/opt/node/bin/node + /x/tool.js");
+        assert_eq!(program_part("/opt/node/bin/node", &["node", "tool.js", "-e", "staging"]), "/opt/node/bin/node + tool.js");
+        assert_eq!(
+            program_part("/usr/bin/python3", &["python3", "/usr/bin/ansible-playbook", "site.yml", "-e", "@vars.yml"]),
+            "/usr/bin/python3 + /usr/bin/ansible-playbook"
+        );
+        assert_eq!(program_part("/usr/bin/python3", &["python3"]), "/usr/bin/python3", "no script: the interpreter alone");
+        assert_eq!(program_part("/usr/bin/python3", &["python3", "-u", "-B"]), "/usr/bin/python3", "options only: no script");
+    }
+
+    #[test]
+    fn a_login_shell_is_marked_by_a_dash_in_argv0_not_in_its_path() {
+        let chain = vec![
+            p(60, 50, "/usr/bin/ssh", &["ssh"]),
+            p(50, 40, "/opt/homebrew/bin/xonsh", &["-xonsh"]),
+            p(40, 30, "/usr/bin/login", &["login", "-fp", "u"]),
+            p(30, 1, "/Applications/iTerm.app/Contents/MacOS/iTerm2", &["iTerm2"]),
+            p(1, 0, "/sbin/launchd", &[]),
+        ];
+        let program = identify(&chain).unwrap();
+        assert_eq!(program.chain, vec!["iTerm", "login", "xonsh", "ssh"]);
+        assert_eq!(program.identity, "/Applications/iTerm.app/Contents/MacOS/iTerm2|/Applications/iTerm.app/Contents/MacOS/iTerm2");
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn only_the_arguments_the_rules_read_are_kept() {
+        assert_eq!(needed_args(Some("/bin/zsh"), strings(&["-zsh", "-c", "secret"])), strings(&["-zsh"]));
+        assert_eq!(needed_args(Some("/usr/bin/python3"), strings(&["python3", "-c", "secret"])), strings(&["python3", "-c"]));
+        assert_eq!(
+            needed_args(Some("/opt/node/bin/node"), strings(&["node", "--no-warnings", "/x/tool.js", "--token", "t"])),
+            strings(&["node", "--no-warnings", "/x/tool.js"])
+        );
+        assert_eq!(needed_args(Some("/usr/bin/python3.12"), strings(&["python3", "tool.py", "-c", "x"])), strings(&["python3", "tool.py"]));
+        assert_eq!(needed_args(Some("/usr/bin/python3"), strings(&["python3"])), strings(&["python3"]));
+        assert_eq!(needed_args(Some("/usr/bin/python3"), strings(&["python3", "-u", "-B"])), strings(&["python3", "-u", "-B"]), "options only: nothing to cut");
+        assert_eq!(needed_args(Some(r"C:\x\Node.EXE"), strings(&["node", "app.js", "--token", "t"])), strings(&["node", "app.js"]), "an interpreter in any case");
+        assert_eq!(needed_args(None, strings(&["whatever", "--token", "t"])), strings(&["whatever"]), "no path: not known to be an interpreter");
+        assert!(needed_args(Some("/bin/zsh"), vec![]).is_empty());
+    }
+
+    #[test]
+    fn keeping_fewer_arguments_never_changes_the_identity() {
+        let cases: &[(&str, &[&str])] = &[
+            ("/usr/bin/python3", &["python3", "tool.py", "-c", "cfg"]),
+            ("/usr/bin/python3", &["python3", "-c", "code"]),
+            ("/opt/node/bin/node", &["node", "--no-warnings", "/x/tool.js", "--token", "t"]),
+            ("/opt/node/bin/node", &["node", "-p", "process.env.X"]),
+            ("/usr/bin/perl", &["perl", "-E", "say 1"]),
+            ("/usr/bin/python3", &["python3"]),
+            ("/usr/bin/python3", &["python3", "-u", "-B"]),
+            ("/opt/homebrew/bin/xonsh", &["-xonsh", "-c", "secret"]),
+            ("/usr/bin/git", &["git", "fetch", "origin"]),
+        ];
+        for (path, argv) in cases {
+            let kept = needed_args(Some(path), strings(argv));
+            let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
+            assert_eq!(program_part(path, &kept), program_part(path, argv), "{path} {argv:?}");
+        }
     }
 
     #[test]
@@ -358,9 +509,119 @@ mod tests {
         assert!(chain.len() >= 2, "it has a parent");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pid_1_is_readable_so_the_walk_can_pass_root_owned_parents() {
+        assert!(!process_chain(1).is_empty(), "launchd / init is readable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_process_keeps_only_what_the_rules_read_of_its_command_line() {
+        // `read line; : secret-token`:兩個指令,shell 不會直接換成別的程式;它停在內建的 read(等 stdin,我們不關),不會留下子程序。
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "read line; : secret-token"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let chain = process_chain(pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!chain.is_empty(), "a child of ours is readable");
+        assert_eq!(chain[0].pid, pid);
+        assert_eq!(chain[0].argv, vec!["sh"], "only argv[0] of a program that is not an interpreter");
+        assert!(chain.iter().all(|p| p.argv.iter().all(|a| !a.contains("secret-token"))));
+    }
+
     #[test]
     fn a_process_that_is_gone_gives_an_empty_chain() {
-        assert!(process_chain(u32::MAX - 7).is_empty());
+        #[cfg(unix)]
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd").args(["/C", "exit"]).spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(process_chain(pid).is_empty());
+    }
+
+    /// `KERN_PROCARGS2` 的內容:`int argc`、執行時給的路徑、`padding` 個 NUL(含結尾那個)、之後的資料。
+    fn procargs2(argc: i32, exec_path: &str, padding: usize, rest: &[u8]) -> Vec<u8> {
+        let mut buf = argc.to_ne_bytes().to_vec();
+        buf.extend_from_slice(exec_path.as_bytes());
+        buf.extend(std::iter::repeat(0u8).take(padding));
+        buf.extend_from_slice(rest);
+        buf
+    }
+
+    #[test]
+    fn procargs2_gives_argv_and_ignores_the_environment() {
+        let buf = procargs2(2, "/opt/node/bin/node", 5, b"node\0/x/tool.js\0HOME=/Users/u\0TOKEN=secret\0");
+        assert_eq!(parse_procargs2(&buf), Some(strings(&["node", "/x/tool.js"])));
+    }
+
+    #[test]
+    fn procargs2_with_a_huge_argc_stops_where_the_buffer_ends() {
+        let buf = procargs2(3_000_000, "/x", 2, b"a\0b\0c\0d\0");
+        let argv = parse_procargs2(&buf).unwrap();
+        assert!(argv.len() <= 8, "{} items out of an 8-byte tail", argv.len());
+        assert_eq!(argv, strings(&["a", "b", "c", "d"]));
+    }
+
+    #[test]
+    fn procargs2_that_does_not_parse_is_none_or_empty() {
+        assert_eq!(parse_procargs2(&procargs2(1, "/x/no-nul-after-this", 0, b"")), None, "no NUL after the exec path");
+        assert_eq!(parse_procargs2(&[1, 0]), None, "shorter than the argc field");
+        assert_eq!(parse_procargs2(&[]), None);
+        assert_eq!(parse_procargs2(&procargs2(-5, "/x", 1, b"a\0")), Some(vec![]), "a negative argc reads nothing");
+        assert_eq!(parse_procargs2(&procargs2(0, "/x", 1, b"HOME=/\0")), Some(vec![]));
+    }
+
+    fn fake(pid: u32, ppid: u32) -> Option<ProcInfo> {
+        Some(ProcInfo { pid, ppid, path: Some(format!("/x/{pid}")), argv: vec![] })
+    }
+
+    fn pids(chain: &[ProcInfo]) -> Vec<u32> {
+        chain.iter().map(|p| p.pid).collect()
+    }
+
+    #[test]
+    fn the_walk_stops_when_a_parent_is_already_in_the_chain() {
+        let chain = walk(10, |pid| match pid {
+            10 => fake(10, 20),
+            20 => fake(20, 10),
+            _ => None,
+        });
+        assert_eq!(pids(&chain), vec![10, 20]);
+    }
+
+    #[test]
+    fn an_endless_chain_is_cut_at_64() {
+        let chain = walk(100, |pid| fake(pid, pid + 1));
+        assert_eq!(chain.len(), 64);
+        assert_eq!((chain[0].pid, chain[63].pid), (100, 163));
+    }
+
+    #[test]
+    fn a_process_that_is_its_own_parent_stops() {
+        assert_eq!(pids(&walk(7, |pid| fake(pid, pid))), vec![7]);
+    }
+
+    #[test]
+    fn an_unreadable_parent_ends_the_chain() {
+        let chain = walk(10, |pid| if pid == 10 { fake(10, 20) } else { None });
+        assert_eq!(pids(&chain), vec![10]);
+        assert!(walk(10, |_| None).is_empty());
+    }
+
+    #[test]
+    fn the_walk_ends_at_pid_1_and_never_reads_pid_0() {
+        let chain = walk(5, |pid| match pid {
+            5 => fake(5, 1),
+            1 => fake(1, 0),
+            _ => unreachable!("pid {pid} must not be read"),
+        });
+        assert_eq!(pids(&chain), vec![5, 1]);
     }
 
     #[test]
