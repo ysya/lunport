@@ -17,10 +17,11 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { deviceLine, hostsLine, slotActions, slotStatusText } from "@/lib/key-slots";
+import { deviceLine, hostsLine, slotActions, slotStatusText, syncConfirmText } from "@/lib/key-slots";
 import { useKeys } from "@/lib/queries";
 import { useKeyDeleteCopy, useKeyPick, useKeySetMode, useKeyUseSynced, useSyncOverview } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
+import { useLastNonNull } from "@/lib/use-last-non-null";
 import { cn } from "@/lib/utils";
 
 export type SlotAction = "sync" | "stop" | "pick" | "useSynced" | "syncNew" | "delete";
@@ -137,6 +138,75 @@ export function PickKeyDialog({ slot, onClose }: { slot: SyncKeySlotView | null;
   );
 }
 
+/**
+ * The confirm before "Sync this key" / "Sync the new key" upload this computer's key to the account: once it syncs it
+ * can't be taken back (stopping never deletes the copies), so say which key and whether a passphrase still protects it.
+ * `slot` is what to show (it stays set while the dialog closes); `open` whether it shows. No hooks: exported for the tests.
+ */
+export function SyncKeyConfirm({
+  slot,
+  open,
+  onCancel,
+  onConfirm,
+}: {
+  slot: SyncKeySlotView | null;
+  open: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const text = slot ? syncConfirmText(slot) : null;
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      {/* Without a passphrase note nothing describes the dialog: say so, or Radix warns that the description is missing. */}
+      <AlertDialogContent {...(text?.description ? {} : { "aria-describedby": undefined })}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{text?.title}</AlertDialogTitle>
+          {text?.description && <AlertDialogDescription>{text.description}</AlertDialogDescription>}
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirm}>Sync key</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/**
+ * The confirm before this computer's copy of a key is deleted. It says nothing about the original key: for a copy whose
+ * original was replaced or removed, this copy may be the last one. No hooks: exported for the tests.
+ */
+export function DeleteCopyConfirm({
+  slot,
+  open,
+  onCancel,
+  onConfirm,
+}: {
+  slot: SyncKeySlotView | null;
+  open: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete this copy?</AlertDialogTitle>
+          <AlertDialogDescription>
+            The copy of {slot ? revealHidden(slot.name) : ""} on this computer is deleted. Other computers aren't affected.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" onClick={onConfirm}>
+            Delete copy
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 /** "Keys used by synced hosts" in the Keys dialog (SP3 spec §7.2). Nothing while there are no slots. */
 export function KeySlotsSection() {
   const overview = useSyncOverview();
@@ -144,7 +214,11 @@ export function KeySlotsSection() {
   const switchToSynced = useKeyUseSynced();
   const deleteCopy = useKeyDeleteCopy();
   const [picking, setPicking] = useState<SyncKeySlotView | null>(null);
+  const [syncing, setSyncing] = useState<SyncKeySlotView | null>(null);
   const [deleting, setDeleting] = useState<SyncKeySlotView | null>(null);
+  // What the two confirms show while they animate out (their slot state is already null by then).
+  const shownSyncing = useLastNonNull(syncing);
+  const shownDeleting = useLastNonNull(deleting);
   const slots = overview.data?.joined ? overview.data.key_slots : [];
   if (slots.length === 0) return null;
   const busy = setMode.isPending || switchToSynced.isPending || deleteCopy.isPending;
@@ -153,7 +227,8 @@ export function KeySlotsSection() {
     switch (action) {
       case "sync":
       case "syncNew":
-        setMode.mutate({ slotId: slot.id, mode: "synced" }, { onSuccess: () => toast.success(`${name} syncs to your other computers`) });
+        // Uploading a private key can't be taken back: ask first (`SyncKeyConfirm`).
+        setSyncing(slot);
         break;
       case "stop":
         setMode.mutate({ slotId: slot.id, mode: "own" }, { onSuccess: () => toast.success(`${name} no longer syncs; computers that have it keep their copy`) });
@@ -181,28 +256,27 @@ export function KeySlotsSection() {
         </div>
       </div>
       <PickKeyDialog slot={picking} onClose={() => setPicking(null)} />
-      <AlertDialog open={deleting !== null} onOpenChange={(next) => !next && setDeleting(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this copy?</AlertDialogTitle>
-            <AlertDialogDescription>
-              The copy of {deleting ? revealHidden(deleting.name) : ""} on this computer is deleted. Other computers and the original key aren't affected.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() => {
-                if (deleting) deleteCopy.mutate({ slotId: deleting.id });
-                setDeleting(null);
-              }}
-            >
-              Delete copy
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <SyncKeyConfirm
+        slot={shownSyncing}
+        open={syncing !== null}
+        onCancel={() => setSyncing(null)}
+        onConfirm={() => {
+          if (syncing) {
+            const name = revealHidden(syncing.name);
+            setMode.mutate({ slotId: syncing.id, mode: "synced" }, { onSuccess: () => toast.success(`${name} syncs to your other computers`) });
+          }
+          setSyncing(null);
+        }}
+      />
+      <DeleteCopyConfirm
+        slot={shownDeleting}
+        open={deleting !== null}
+        onCancel={() => setDeleting(null)}
+        onConfirm={() => {
+          if (deleting) deleteCopy.mutate({ slotId: deleting.id });
+          setDeleting(null);
+        }}
+      />
     </section>
   );
 }

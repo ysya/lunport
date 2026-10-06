@@ -22,6 +22,7 @@ import {
   slotActions,
   slotStatusText,
   slotsNeedingKey,
+  syncConfirmText,
   syncedKeysNote,
   usesLine,
 } from "./key-slots";
@@ -129,6 +130,32 @@ describe("a slot row", () => {
     // A slot in error always has a way forward: pick a key here (the backend says why when picking can't help).
     expect(slotActions(keySlot({ mode: "own", status: { kind: "error", message: "The key this slot points to is gone: /home/f/.ssh/id_mac." } }))).toEqual({ ...none, pick: "pick" });
     expect(slotActions(keySlot({ status: { kind: "error", message: "The synced key didn't match and was not written." } }))).toEqual({ ...none, stopSyncing: true, pick: "pick" });
+  });
+
+  it("offers nothing but deleting an unused copy for a slot the account no longer has", () => {
+    const none = { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: false };
+    // Kept for hosts outside the spaces (left the account, joined another): there is nothing to sync or pick it for.
+    expect(slotActions(keySlot({ in_account: false }))).toEqual(none);
+    expect(slotActions(keySlot({ in_account: false, mode: "own", fingerprint: null }))).toEqual(none);
+    expect(slotActions(keySlot({ in_account: false, status: { kind: "error", message: "The key this slot points to is gone: /f." } }))).toEqual(none);
+    // A deleted slot's copy nobody uses can still be deleted.
+    expect(slotActions(keySlot({ in_account: false, status: { kind: "not_in_use", file: "/f" } }))).toEqual({ ...none, deleteCopy: true });
+  });
+
+  it("asks before a key is uploaded, saying whether a passphrase still protects the key that goes", () => {
+    const own = keySlot({ mode: "own", fingerprint: null, has_passphrase: null });
+    expect(syncConfirmText({ ...own, local_has_passphrase: true })).toEqual({
+      title: "Sync id_mac to your other computers?",
+      description: "Has a passphrase — it stays on each computer.",
+    });
+    expect(syncConfirmText({ ...own, local_has_passphrase: false }).description).toBe(
+      "No passphrase — your sync code and every joined computer can use this key once it syncs.",
+    );
+    expect(syncConfirmText({ ...own, local_has_passphrase: null }).description).toBeNull();
+    // "Sync the new key": the note is about this computer's new key, not the synced one it replaces.
+    const changed = keySlot({ status: { kind: "source_changed", file: "/f" }, has_passphrase: true, local_has_passphrase: false });
+    expect(syncConfirmText(changed).description).toBe("No passphrase — your sync code and every joined computer can use this key once it syncs.");
+    expect(syncConfirmText(keySlot({ name: SPOOFED_NAME })).title).toBe(`Sync ${SPOOFED_NAME_SHOWN} to your other computers?`);
   });
 
   it("lists hosts and other computers, revealing hidden characters in their names", () => {

@@ -47,11 +47,25 @@ export function usesLine(k: KeyCandidate, name: string): string {
   return `${listNames(hosts)} ${hosts.length === 1 ? "uses" : "use"} ${name}.`;
 }
 
-export function passphraseNote(k: KeyCandidate): string | null {
-  if (k.has_passphrase === null) return null;
-  return k.has_passphrase
+/** What a key's passphrase means once the key syncs; null when it isn't known whether the key has one. */
+function passphraseText(hasPassphrase: boolean | null): string | null {
+  if (hasPassphrase === null) return null;
+  return hasPassphrase
     ? "Has a passphrase — it stays on each computer."
     : "No passphrase — your sync code and every joined computer can use this key once it syncs.";
+}
+
+export function passphraseNote(k: KeyCandidate): string | null {
+  return passphraseText(k.has_passphrase);
+}
+
+/**
+ * The confirm before "Sync this key" / "Sync the new key" uploads this computer's key (it can't be taken back: stopping
+ * never deletes the copies). The note is about the key that goes — this computer's (`local_has_passphrase`), not the
+ * synced one it replaces — and is left out when that isn't known.
+ */
+export function syncConfirmText(slot: SyncKeySlotView): { title: string; description: string | null } {
+  return { title: `Sync ${revealHidden(slot.name)} to your other computers?`, description: passphraseText(slot.local_has_passphrase) };
 }
 
 /** The lines the setup rewrites. The slot's id is only known once it exists, so its file name ends in "…". */
@@ -143,6 +157,11 @@ export interface SlotActions {
 
 export function slotActions(slot: SyncKeySlotView): SlotActions {
   const s = slot.status;
+  // A slot the account no longer has (deleted, or kept for hosts outside the spaces after joining another account):
+  // nothing to sync or pick it for; only a copy nobody uses can go.
+  if (!slot.in_account) {
+    return { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: s.kind === "not_in_use" };
+  }
   return {
     syncThis: slot.mode === "own" && s.kind === "ready",
     stopSyncing: slot.mode === "synced",

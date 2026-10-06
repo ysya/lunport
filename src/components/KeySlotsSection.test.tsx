@@ -8,7 +8,8 @@ import type { SlotStatusView } from "@/bindings/SlotStatusView";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { syncOverviewKey } from "@/lib/sync";
 import { keySlot, overview, SLOT_FINGERPRINT, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
-import { KeyChoices, KeySlotRow, KeySlotsSection, type SlotAction } from "./KeySlotsSection";
+import { AlertDialogAction, AlertDialogCancel, AlertDialogDescription, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { DeleteCopyConfirm, KeyChoices, KeySlotRow, KeySlotsSection, SyncKeyConfirm, type SlotAction } from "./KeySlotsSection";
 
 /** A slot's row in the Keys dialog, rendered on the server: its words and the actions it offers. */
 const row = (slot = keySlot(), busy = false) => renderToStaticMarkup(<KeySlotRow slot={slot} busy={busy} onAction={() => {}} />);
@@ -48,6 +49,13 @@ describe("a key slot in the Keys dialog", () => {
 
   it("reveals hidden characters in a name another computer chose", () => {
     expect(text(row(keySlot({ name: SPOOFED_NAME })))).toContain(SPOOFED_NAME_SHOWN);
+  });
+
+  it("shows a slot the account no longer has, which hosts here still use, without buttons", () => {
+    const html = row(keySlot({ in_account: false, hosts: ["web"] }));
+    expect(text(html)).toContain("Ready");
+    expect(text(html)).toContain("Used by web");
+    expect(html).not.toContain("<button");
   });
 
   it("says why a slot failed, and still offers a key to pick", () => {
@@ -187,6 +195,76 @@ describe("the keys to pick from", () => {
     const tree = KeyChoices({ keys: [key("id_mac", "SHA256:abc"), key("old_rsa", null)], loading: false, busy: false, onChoose: (path) => chosen.push(path) });
     for (const button of buttonsIn(tree)) button.props.onClick!();
     expect(chosen).toEqual(["/home/f/.ssh/id_mac", "/home/f/.ssh/old_rsa"]);
+  });
+});
+
+/** The text of an element tree, in drawing order (a component without hooks can be called to get its tree). */
+function textIn(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textIn).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return textIn(node.props.children);
+  return "";
+}
+
+/** The elements of a tree made by `type` (a component), in drawing order. */
+function elementsOf(node: ReactNode, type: unknown, found: ReactElement<{ onClick?: () => void; children?: ReactNode }>[] = []) {
+  if (Array.isArray(node)) node.forEach((child) => elementsOf(child, type, found));
+  else if (isValidElement<{ onClick?: () => void; children?: ReactNode }>(node)) {
+    if (node.type === type) found.push(node);
+    elementsOf(node.props.children, type, found);
+  }
+  return found;
+}
+
+describe("the confirm before a key is uploaded", () => {
+  const confirm = (slot: SyncKeySlotView, onConfirm = () => {}) => SyncKeyConfirm({ slot, open: true, onCancel: () => {}, onConfirm });
+  const title = (tree: ReactNode) => textIn(elementsOf(tree, AlertDialogTitle));
+  const description = (tree: ReactNode) => elementsOf(tree, AlertDialogDescription).map(textIn);
+
+  it("names the key and says a passphrase still protects it", () => {
+    const tree = confirm(keySlot({ mode: "own", fingerprint: null, has_passphrase: null, local_has_passphrase: true }));
+    expect(title(tree)).toBe("Sync id_mac to your other computers?");
+    expect(description(tree)).toEqual(["Has a passphrase — it stays on each computer."]);
+  });
+
+  it("says who can use a key without a passphrase — the new key's, for Sync the new key", () => {
+    const tree = confirm(keySlot({ status: { kind: "source_changed", file: "/f" }, has_passphrase: true, local_has_passphrase: false }));
+    expect(title(tree)).toBe("Sync id_mac to your other computers?");
+    expect(description(tree)).toEqual(["No passphrase — your sync code and every joined computer can use this key once it syncs."]);
+  });
+
+  it("leaves the passphrase out when it isn't known", () => {
+    expect(description(confirm(keySlot({ mode: "own", fingerprint: null, has_passphrase: null, local_has_passphrase: null })))).toEqual([]);
+  });
+
+  it("reveals hidden characters in a name another computer chose", () => {
+    expect(title(confirm(keySlot({ name: SPOOFED_NAME })))).toBe(`Sync ${SPOOFED_NAME_SHOWN} to your other computers?`);
+  });
+
+  it("can be cancelled, and syncs only when Sync key is pressed", () => {
+    let confirmed = 0;
+    const tree = confirm(keySlot(), () => confirmed++);
+    expect(elementsOf(tree, AlertDialogCancel).map(textIn)).toEqual(["Cancel"]);
+    const [action] = elementsOf(tree, AlertDialogAction);
+    expect(textIn(action)).toBe("Sync key");
+    expect(confirmed).toBe(0);
+    action.props.onClick!();
+    expect(confirmed).toBe(1);
+  });
+});
+
+describe("the confirm before a copy is deleted", () => {
+  it("says this computer's copy goes and other computers keep theirs, and claims nothing about the original key", () => {
+    let deleted = 0;
+    const tree = DeleteCopyConfirm({ slot: keySlot({ name: SPOOFED_NAME }), open: true, onCancel: () => {}, onConfirm: () => deleted++ });
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe("Delete this copy?");
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
+      `The copy of ${SPOOFED_NAME_SHOWN} on this computer is deleted. Other computers aren't affected.`,
+    ]);
+    const [action] = elementsOf(tree, AlertDialogAction);
+    expect(textIn(action)).toBe("Delete copy");
+    action.props.onClick!();
+    expect(deleted).toBe(1);
   });
 });
 
