@@ -11,6 +11,7 @@ import {
   isValidSlotName,
   keySetupAskedBefore,
   keysNeededNoticeIndex,
+  keptNote,
   keysToAsk,
   lockedNote,
   needsKeyLabel,
@@ -78,6 +79,41 @@ describe("which keys the dialog asks about", () => {
   it("notices an IdentityFile change in a host save, whatever its spelling", () => {
     expect(identityFileChanged([{ keyword: "identityfile", value: "~/.ssh/k", remove: false }])).toBe(true);
     expect(identityFileChanged([{ keyword: "HostName", value: "x", remove: false }])).toBe(false);
+  });
+});
+
+describe("a key slot kept from the previous sync account", () => {
+  const FILE = "mac-3fa2c1d9";
+  const host = (alias: string, value: string, locked: string | null = null) => ({ alias, space_name: "Personal", value, locked });
+  const kept = (synced_copy: boolean, hosts = [host("web", `~/.ssh/sshelter/keys/${FILE}`)]) =>
+    keyCandidate({ default_name: "mac", kept_slot: { id: `3fa2c1d9${"0".repeat(24)}`, file_name: FILE, synced_copy }, hosts });
+
+  it("says where the key came from and that its hosts keep their slot path", () => {
+    expect(keptNote(kept(false))).toBe("From your previous sync account. Its hosts keep using ~/.ssh/sshelter/keys/mac-3fa2c1d9.");
+    expect(keptNote(kept(true))).toBe(
+      "This computer's copy, synced to it in your previous sync account. Its hosts keep using ~/.ssh/sshelter/keys/mac-3fa2c1d9.",
+    );
+    expect(keptNote(keyCandidate())).toBeNull();
+  });
+
+  it("rewrites only the hosts that don't use the slot yet, to its full file name", () => {
+    const k = kept(false, [
+      host("web", `~/.ssh/sshelter/keys/${FILE}`),
+      host("quoted", ` "~/.ssh/sshelter/keys/${FILE}" `),
+      host("percent", `%d/.ssh/sshelter/keys/${FILE}`),
+      host("db", "~/.ssh/id_mac"),
+      host("api", "~/.ssh/sshelter/keys/id_mac-0123abcd"),
+      host("deeper", `~/.ssh/sshelter/keys/${FILE}/x`),
+      host("locked", "~/.ssh/id_mac", LOCK),
+    ]);
+    expect(rewrittenLines(k, "mac")).toEqual([
+      `db: IdentityFile ~/.ssh/id_mac → ~/.ssh/sshelter/keys/${FILE}`,
+      `api: IdentityFile ~/.ssh/sshelter/keys/id_mac-0123abcd → ~/.ssh/sshelter/keys/${FILE}`,
+      `deeper: IdentityFile ~/.ssh/sshelter/keys/${FILE}/x → ~/.ssh/sshelter/keys/${FILE}`,
+    ]);
+    expect(rewrittenLines(kept(true), "mac")).toEqual([]);
+    // Other keys: unchanged, the name the user gives plus "…".
+    expect(rewrittenLines(keyCandidate(), "id_mac")).toEqual(["web: IdentityFile ~/.ssh/id_mac → ~/.ssh/sshelter/keys/id_mac-…"]);
   });
 });
 

@@ -68,9 +68,46 @@ export function syncConfirmText(slot: SyncKeySlotView): { title: string; descrip
   return { title: `Sync ${revealHidden(slot.name)} to your other computers?`, description: passphraseText(slot.local_has_passphrase) };
 }
 
-/** The lines the setup rewrites. The slot's id is only known once it exists, so its file name ends in "…". */
+/**
+ * The slot file an IdentityFile value names, as the backend reads it (`slot_rules::slot_file_of_value`): `~/` or `%d/`, then
+ * `.ssh/sshelter/keys/<file>` with no further separator, maybe in double quotes; null for any other value.
+ */
+function slotFileOfValue(value: string): string | null {
+  let v = value.trim();
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+  const prefix = ["~/", "%d/"].find((p) => v.startsWith(p));
+  const dir = ".ssh/sshelter/keys/";
+  if (prefix === undefined || !v.startsWith(dir, prefix.length)) return null;
+  const file = v.slice(prefix.length + dir.length);
+  return file.length > 0 && !/[/\\]/.test(file) ? file : null;
+}
+
+/**
+ * The lines the setup rewrites. A new slot's id is only known once it exists, so its file name ends in "…". A slot kept from
+ * the previous sync account goes in as it is: its full file name, and hosts that already use it aren't rewritten.
+ */
 export function rewrittenLines(k: KeyCandidate, name: string): string[] {
-  return k.hosts.filter((h) => h.locked === null).map((h) => `${h.alias}: IdentityFile ${h.value} → ~/.ssh/sshelter/keys/${name}-…`);
+  const hosts = k.hosts.filter((h) => h.locked === null);
+  const kept = k.kept_slot;
+  if (kept !== null) {
+    return hosts
+      .filter((h) => slotFileOfValue(h.value) !== kept.file_name)
+      .map((h) => `${h.alias}: IdentityFile ${h.value} → ~/.ssh/sshelter/keys/${kept.file_name}`);
+  }
+  return hosts.map((h) => `${h.alias}: IdentityFile ${h.value} → ~/.ssh/sshelter/keys/${name}-…`);
+}
+
+/**
+ * Where a key slot kept from the previous sync account came from (SP3 spec §7.1): it goes into this account as it is, under
+ * the same file name. Null for every other key.
+ */
+export function keptNote(k: KeyCandidate): string | null {
+  const kept = k.kept_slot;
+  if (kept === null) return null;
+  const hosts = `Its hosts keep using ~/.ssh/sshelter/keys/${kept.file_name}.`;
+  return kept.synced_copy
+    ? `This computer's copy, synced to it in your previous sync account. ${hosts}`
+    : `From your previous sync account. ${hosts}`;
 }
 
 /** Hosts the setup leaves alone, and why. */

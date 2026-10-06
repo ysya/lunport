@@ -16,7 +16,7 @@ use crate::sync::env::SyncEnv;
 use crate::sync::merge::{device_name, devices, put_account_record, set_device_slots};
 use crate::sync::planner::next_timestamp;
 use crate::sync::record::{record_key, HostPayload, Record, RecordKind};
-use crate::sync::runtime::mutate;
+use crate::sync::runtime::{mutate, SyncRuntime};
 use crate::sync::slot_files::{self, LinkKind};
 use crate::sync::slot_rules::{
     inspect_private_key, parse_public_key, public_path, resolve_identity_value, slot_file_name, slot_file_of_value, slot_value,
@@ -243,6 +243,19 @@ fn file_name_uses(live: &[(String, KeySlotPayload)]) -> BTreeMap<String, usize> 
         *uses.entry(slot_file_name(&payload.name, id).to_ascii_lowercase()).or_default() += 1;
     }
     uses
+}
+
+/// 帳戶裡有沒有還在的插槽用了插槽檔名 `file`(不分大小寫,同 `file_name_uses`)。
+pub fn file_name_in_use(account: &AccountState, file: &str) -> bool {
+    file_name_uses(&live_slots(account)).contains_key(&file.to_ascii_lowercase())
+}
+
+/// 這台的同步帳戶裡還在的插槽的檔名;不在帳戶裡是空的。`config::intel::config_lint` 用它說明缺檔的插槽路徑(spec §7.3):帳戶裡有這個插槽,還是沒有。
+/// 只短暫拿 core 鎖;`config_lint` 放掉之後才拿 doc 鎖(同 `slot_setup::key_candidates`)。
+pub fn account_slot_files(runtime: &SyncRuntime) -> BTreeSet<String> {
+    let core = runtime.core.lock().unwrap();
+    let Some(account) = core.state.as_ref().and_then(|s| s.account.as_ref()) else { return BTreeSet::new() };
+    live_slots(account).iter().map(|(id, payload)| slot_file_name(&payload.name, id)).collect()
 }
 
 /// 插槽檔名 `file` 也被帳戶裡另一個還在的插槽用了(不分大小寫,見 `file_name_uses`),而這台沒有握著這個插槽:`local`(這個插槽 id
@@ -1666,7 +1679,7 @@ pub(crate) mod tests {
     }
 
     /// 在 `d` 的帳戶裡直接寫一個插槽記錄與(可選的)金鑰,不建立本機插槽、不動主機:別台(或帳戶裡的任何成員)建立的插槽。
-    fn publish(d: &TestDevice, id: &str, payload: &KeySlotPayload, secret: Option<&str>) {
+    pub(crate) fn publish(d: &TestDevice, id: &str, payload: &KeySlotPayload, secret: Option<&str>) {
         let keys = account_keys(d);
         let env = d.env();
         let now = env.now();
@@ -1706,11 +1719,11 @@ pub(crate) mod tests {
         }
     }
 
-    fn own_payload(origin: &str) -> KeySlotPayload {
+    pub(crate) fn own_payload(origin: &str) -> KeySlotPayload {
         KeySlotPayload { mode: SlotMode::Own, public_key: None, fingerprint: None, key_type: None, has_passphrase: None, ..synced_payload(origin) }
     }
 
-    fn device_id(d: &TestDevice) -> String {
+    pub(crate) fn device_id(d: &TestDevice) -> String {
         d.state().device_id
     }
 
@@ -3126,7 +3139,7 @@ pub(crate) mod tests {
 
     /// `d` 離開帳戶,和 `other` 一起換到另一個帳戶,兩台都勾選它的 Personal 並同步完:`join` = `other` 建立、`d` 加入;否則 `d` 建立、
     /// `other` 加入。回傳(新帳戶的 Personal、新帳戶的帳戶金鑰)。
-    fn move_to_another_account(d: &TestDevice, other: &TestDevice, join: bool) -> (String, ChainKeys) {
+    pub(crate) fn move_to_another_account(d: &TestDevice, other: &TestDevice, join: bool) -> (String, ChainKeys) {
         let name = d.state().device_name;
         crate::sync::account::leave_account(&d.env(), false).unwrap();
         let (creator, creator_name, joiner, joiner_name) =
@@ -3142,22 +3155,22 @@ pub(crate) mod tests {
     }
 
     /// 搬移精靈(「搬進一個 space」)把 `~/.ssh/sshelter-local/` 裡的 `web` 搬進 `space`,同步完。
-    fn move_web_into(d: &TestDevice, space: &str) {
+    pub(crate) fn move_web_into(d: &TestDevice, space: &str) {
         let report = crate::sync::migrate::move_hosts_into_space(&d.env(), true, vec!["web".to_string()], space, false).unwrap();
         assert_eq!(report.moved, vec!["web".to_string()]);
         settle(d);
     }
 
     /// relay 上一個帳戶 chain 的內容(以那個帳戶的金鑰讀)。
-    fn account_on_relay(relay: &crate::sync::fake_relay::FakeRelay, keys: &ChainKeys) -> AccountState {
+    pub(crate) fn account_on_relay(relay: &crate::sync::fake_relay::FakeRelay, keys: &ChainKeys) -> AccountState {
         use crate::sync::relay::RelayApi;
         merge_account(&AccountState::new(&keys.chain_id), keys, &relay.pull(&keys.chain_id, &keys.auth_token, 0).unwrap()).section
     }
 
     /// 插槽 `id_mac` 在帳戶 A 裡是同步的:A 連到自己的金鑰(使用者在這台選了同步它),B 有同步來的副本。其中一台(`origin` = A,否則 B)離開 A、
     /// 換到另一個帳戶(`join` = 加入別人建立的,否則自己建立),再用搬移精靈把 `~/.ssh/sshelter-local/` 裡用到這個插槽的 `web` 搬進新帳戶的 space
-    /// (插槽路徑不是金鑰的候選,不會跳出「Sync key」對話框)。新帳戶不是 A 的延續:插槽記錄與私鑰都不寫進新帳戶,新帳戶的另一台收到主機、收不到
-    /// 金鑰;這台的主機照常用這個插槽(I1),這台也不再記得在 A 裡同意過上傳。
+    /// (這個插槽路徑現在是金鑰的候選,「Sync key」對話框會問它,見 `slot_setup` 的 `KeptSlot`;但使用者沒有選擇之前什麼都不寫)。新帳戶不是 A 的
+    /// 延續:插槽記錄與私鑰都不寫進新帳戶,新帳戶的另一台收到主機、收不到金鑰;這台的主機照常用這個插槽(I1),這台也不再記得在 A 裡同意過上傳。
     fn a_slot_from_the_old_account_stays_out_of_the_next_one(origin: bool, join: bool) {
         let (relay, clock, a, b, _words, personal) = pair();
         let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");

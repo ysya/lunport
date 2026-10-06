@@ -5,8 +5,9 @@
 //! command does this) to prevent argument injection. `ssh -G` does NOT connect — it only resolves
 //! the effective configuration locally.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -114,7 +115,9 @@ fn doc_defines_alias(doc: &SshConfigDoc, host: &str) -> bool {
     })
 }
 
-pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
+/// `account_slot_files` = 這台的同步帳戶裡還在的插槽檔名(不在帳戶裡是空的,`sync::slots::account_slot_files`):缺檔的插槽路徑依帳戶裡有沒有這個插槽
+/// 說明(SP3 spec §7.3)。
+pub fn lint(doc: &SshConfigDoc, account_slot_files: &BTreeSet<String>) -> Vec<LintIssue> {
     let mut issues = Vec::new();
 
     // Rule 2 setup: track first-seen alias to flag later (shadowed) definitions.
@@ -183,11 +186,17 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                                     file: file.clone(),
                                     alias: alias.clone(),
                                     keyword: Some(d.keyword.clone()),
-                                    // 插槽路徑(同步主機的金鑰位置):缺檔時指向 Keys 對話框,而不是讓使用者去找檔案。
-                                    message: if crate::sync::slot_rules::slot_file_of_value(&d.value).is_some() {
-                                        format!("IdentityFile not found: {} (a synced key slot \u{2014} pick a key for it in Keys)", d.value)
-                                    } else {
-                                        format!("IdentityFile not found: {}", d.value)
+                                    // 插槽路徑(同步主機的金鑰位置):缺檔時不是讓使用者去找檔案。同步帳戶裡有這個插槽(檔名不分大小寫)→ 到 Keys 對話框為它挑一把
+                                    // 金鑰;沒有(或不在帳戶裡,例如之前的帳戶留下的插槽,SP3 spec §7.1)→ 這台無從為它挑金鑰,要到有這把金鑰的電腦上設定。
+                                    message: match crate::sync::slot_rules::slot_file_of_value(&d.value) {
+                                        Some(file) if account_slot_files.iter().any(|f| f.eq_ignore_ascii_case(&file)) => {
+                                            format!("IdentityFile not found: {} (a synced key slot \u{2014} pick a key for it in Keys)", d.value)
+                                        }
+                                        Some(_) => format!(
+                                            "IdentityFile not found: {} (a key slot your sync account doesn't have \u{2014} set the key up on the computer that has it)",
+                                            d.value
+                                        ),
+                                        None => format!("IdentityFile not found: {}", d.value),
                                     },
                                 });
                             }
@@ -395,11 +404,14 @@ pub fn config_effective(
 
 #[tauri::command]
 pub fn config_lint(state: tauri::State<crate::state::AppState>) -> Result<Vec<LintIssue>, AppError> {
-    let doc_lock = state.doc.lock().unwrap();
-    match doc_lock.as_ref() {
-        None => Ok(Vec::new()),
-        Some(doc) => Ok(lint(doc)),
-    }
+    Ok(lint_current(&state.sync, &state.doc))
+}
+
+/// `config_lint` 的本體:帳戶裡的插槽檔名取自同步狀態(`sync::slots::account_slot_files` 只短暫拿 core 鎖),放掉之後才拿 doc 鎖。
+pub(crate) fn lint_current(sync: &crate::sync::runtime::SyncRuntime, doc: &Mutex<Option<SshConfigDoc>>) -> Vec<LintIssue> {
+    let account_slot_files = crate::sync::slots::account_slot_files(sync);
+    let doc_lock = doc.lock().unwrap();
+    doc_lock.as_ref().map(|doc| lint(doc, &account_slot_files)).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -490,7 +502,7 @@ mod tests {
             missing.display()
         );
         let (doc, _dir) = doc_with(&content);
-        let issues = lint(&doc);
+        let issues = lint(&doc, &BTreeSet::new());
 
         // Rule 1: duplicate directive (User twice in `dup`).
         assert!(
@@ -543,7 +555,7 @@ mod tests {
             keyfile.display()
         );
         let (doc, _dir) = doc_with(&content);
-        let issues = lint(&doc);
+        let issues = lint(&doc, &BTreeSet::new());
         assert!(issues.is_empty(), "clean config should have no issues, got {issues:?}");
     }
 
@@ -561,20 +573,81 @@ mod tests {
             k2.display()
         );
         let (doc, _dir) = doc_with(&content);
-        let issues = lint(&doc);
+        let issues = lint(&doc, &BTreeSet::new());
         assert!(
             !issues.iter().any(|i| i.message.contains("first-match-wins")),
             "two IdentityFile lines must NOT trigger dup-directive: {issues:?}"
         );
     }
 
+    /// 缺檔的插槽路徑:同步帳戶裡有這個插槽(檔名不分大小寫)→ 到 Keys 為它挑一把金鑰;沒有(或不在任何帳戶裡)→ 到有這把金鑰的電腦上設定。
     #[test]
-    fn a_missing_key_slot_points_to_the_keys_dialog() {
+    fn a_missing_key_slot_says_whether_the_sync_account_has_it() {
         let (doc, _dir) = doc_with("Host web\n IdentityFile ~/.ssh/sshelter/keys/sp3-lint-missing-00000000\n");
-        let issue = lint(&doc).into_iter().find(|i| i.rule == "missing-identity-file").expect("flagged");
+        let message = |files: &[&str]| {
+            let files: BTreeSet<String> = files.iter().map(|f| f.to_string()).collect();
+            lint(&doc, &files).into_iter().find(|i| i.rule == "missing-identity-file").expect("flagged").message
+        };
+        let in_account = "IdentityFile not found: ~/.ssh/sshelter/keys/sp3-lint-missing-00000000 (a synced key slot \u{2014} pick a key for it in Keys)";
+        let not_in_account = "IdentityFile not found: ~/.ssh/sshelter/keys/sp3-lint-missing-00000000 (a key slot your sync account doesn't have \u{2014} set the key up on the computer that has it)";
+        assert_eq!(message(&["sp3-lint-missing-00000000"]), in_account);
+        assert_eq!(message(&["SP3-LINT-MISSING-00000000", "x-22222222"]), in_account, "whatever the case of the file name");
+        assert_eq!(message(&["sp3-lint-other-11111111"]), not_in_account);
+        assert_eq!(message(&[]), not_in_account, "not in an account");
+    }
+
+    /// `config_lint` 的接線(`lint_current`):帳戶裡還在的插槽,檔名取自同步狀態。
+    #[test]
+    fn config_lint_reads_the_slots_of_this_computers_sync_account() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::slot_rules::{KeySlotPayload, SlotMode, SLOT_SCHEMA};
+        use crate::sync::testkit::{TestClock, TestDevice};
+        let main = "Host web\n IdentityFile ~/.ssh/sshelter/keys/sp3-lint-live-00000000\nHost db\n IdentityFile ~/.ssh/sshelter/keys/sp3-lint-gone-11111111\n";
+        let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), main);
+        let messages = || -> Vec<(Option<String>, String)> {
+            lint_current(&d.runtime, &d.doc)
+                .into_iter()
+                .filter(|i| i.rule == "missing-identity-file")
+                .map(|i| (i.alias, i.message))
+                .collect()
+        };
+        let synced = |file: &str| format!("IdentityFile not found: ~/.ssh/sshelter/keys/{file} (a synced key slot \u{2014} pick a key for it in Keys)");
+        let elsewhere = |file: &str| {
+            format!("IdentityFile not found: ~/.ssh/sshelter/keys/{file} (a key slot your sync account doesn't have \u{2014} set the key up on the computer that has it)")
+        };
+        let web = || Some("web".to_string());
+        let db = || Some("db".to_string());
         assert_eq!(
-            issue.message,
-            "IdentityFile not found: ~/.ssh/sshelter/keys/sp3-lint-missing-00000000 (a synced key slot \u{2014} pick a key for it in Keys)"
+            messages(),
+            vec![(web(), elsewhere("sp3-lint-live-00000000")), (db(), elsewhere("sp3-lint-gone-11111111"))],
+            "not in an account"
+        );
+
+        crate::sync::account::create_account(&d.env(), "MacBook-A").unwrap();
+        crate::sync::runtime::mutate(&d.env(), |s| {
+            let device = s.device_id.clone();
+            let payload = KeySlotPayload {
+                schema: SLOT_SCHEMA,
+                name: "SP3-LINT-LIVE".into(),
+                mode: SlotMode::Own,
+                origin_device_id: device.clone(),
+                created_at_ms: 5,
+                public_key: None,
+                fingerprint: None,
+                key_type: None,
+                has_passphrase: None,
+            };
+            let account = s.account.as_mut().unwrap();
+            crate::sync::slots::put_slot(account, &"0".repeat(32), Some(&payload), &device, 5);
+            crate::sync::slots::put_slot(account, &format!("11111111{}", "0".repeat(24)), Some(&KeySlotPayload { name: "sp3-lint-gone".into(), ..payload }), &device, 5);
+            crate::sync::slots::put_slot(account, &format!("11111111{}", "0".repeat(24)), None, &device, 6);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            messages(),
+            vec![(web(), synced("sp3-lint-live-00000000")), (db(), elsewhere("sp3-lint-gone-11111111"))],
+            "the account has the first slot (whatever its case) and only a tombstone of the second"
         );
     }
 
@@ -623,7 +696,7 @@ mod tests {
         // `jump-host` is a SECONDARY pattern of the bastion block — must not be "undefined".
         let (doc, _dir) =
             doc_with("Host bastion jump-host\n HostName 10.0.0.1\nHost web\n ProxyJump jump-host\n");
-        let undefined: Vec<_> = lint(&doc)
+        let undefined: Vec<_> = lint(&doc, &BTreeSet::new())
             .into_iter()
             .filter(|i| i.message.contains("ProxyJump references undefined host"))
             .collect();
@@ -633,7 +706,7 @@ mod tests {
     #[test]
     fn lint_proxyjump_none_not_flagged() {
         let (doc, _dir) = doc_with("Host direct\n ProxyJump none\n");
-        let undefined: Vec<_> = lint(&doc)
+        let undefined: Vec<_> = lint(&doc, &BTreeSet::new())
             .into_iter()
             .filter(|i| i.message.contains("ProxyJump references undefined host"))
             .collect();
@@ -683,7 +756,7 @@ mod tests {
             missing.display()
         );
         let (doc, _dir) = doc_with(&content);
-        let issues = lint(&doc);
+        let issues = lint(&doc, &BTreeSet::new());
 
         let rule_of = |alias: &str| -> String {
             issues

@@ -112,6 +112,7 @@ export function keyCandidate(overrides: Partial<KeyCandidate> = {}): KeyCandidat
     unsyncable: null,
     existing_slot: null,
     hosts: [{ alias: "web", space_name: "Personal", value: "~/.ssh/id_mac", locked: null }],
+    kept_slot: null,
     ...overrides,
   };
 }

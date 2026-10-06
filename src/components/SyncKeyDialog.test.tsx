@@ -64,6 +64,46 @@ describe("a key's row", () => {
   });
 });
 
+describe("a key slot kept from the previous sync account", () => {
+  const FILE = "mac-3fa2c1d9";
+  const kept = (synced_copy: boolean) =>
+    keyCandidate({
+      default_name: "mac",
+      kept_slot: { id: `3fa2c1d9${"0".repeat(24)}`, file_name: FILE, synced_copy },
+      hosts: [
+        { alias: "web", space_name: "Personal", value: `~/.ssh/sshelter/keys/${FILE}`, locked: null },
+        { alias: "db", space_name: "Personal", value: "~/.ssh/id_mac", locked: null },
+      ],
+    });
+
+  it("keeps its name, says where it came from under the question and shows only the hosts that change", () => {
+    const html = row(kept(false));
+    expect(html).not.toContain(">Rename<");
+    expect(html).not.toContain('aria-label="Key name"');
+    const t = text(html);
+    expect(t).toContain("web and db use mac.");
+    const question = t.indexOf("Sync this key to your other computers?");
+    const note = t.indexOf(`From your previous sync account. Its hosts keep using ~/.ssh/sshelter/keys/${FILE}.`);
+    expect(question).toBeGreaterThanOrEqual(0);
+    expect(note).toBeGreaterThan(question);
+    expect(t).toContain(`db: IdentityFile ~/.ssh/id_mac → ~/.ssh/sshelter/keys/${FILE}`);
+    expect(t).not.toContain("web: IdentityFile");
+    for (const label of ["Sync key", "Keep on this computer"]) expect(buttonTag(html, label)).not.toContain(DISABLED);
+  });
+
+  it("calls a synced copy this computer's copy", () => {
+    const t = text(row(kept(true)));
+    expect(t).toContain(`This computer's copy, synced to it in your previous sync account. Its hosts keep using ~/.ssh/sshelter/keys/${FILE}.`);
+    expect(row(kept(true))).not.toContain(">Rename<");
+  });
+
+  it("leaves other keys as they were: Rename and no note", () => {
+    const html = row();
+    expect(html).toContain(">Rename<");
+    expect(text(html)).not.toContain("previous sync account");
+  });
+});
+
 describe("values that can't be set up", () => {
   it("lists each host with its value and the reason", () => {
     const html = renderToStaticMarkup(<UnsupportedList items={[{ alias: "proxy", value: "~/.ssh/%h", reason: "uses % tokens or environment variables" }]} />);

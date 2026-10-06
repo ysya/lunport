@@ -12,6 +12,7 @@ import { isImeKey } from "@/lib/ime";
 import {
   choiceFor,
   isValidSlotName,
+  keptNote,
   keySetupAskedBefore,
   keysToAsk,
   lockedNote,
@@ -27,7 +28,10 @@ import { useKeyCandidates, useSetupKeys, useSyncOverview } from "@/lib/sync";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 
-/** One key's row: the hosts that use it, the question, what changes, and the two answers. Exported for the markup tests. */
+/**
+ * One key's row: the hosts that use it, the question, what changes, and the two answers. A slot kept from the previous sync
+ * account goes in under its own name: no Rename, and a note says where it came from. Exported for the markup tests.
+ */
 export function KeySetupRow({
   candidate,
   busy,
@@ -37,8 +41,11 @@ export function KeySetupRow({
   busy: boolean;
   onChoose: (sync: boolean, name: string) => void;
 }) {
-  const [name, setName] = useState(candidate.default_name);
+  const [typed, setTyped] = useState(candidate.default_name);
   const [renaming, setRenaming] = useState(false);
+  const kept = candidate.kept_slot !== null;
+  const keptText = keptNote(candidate);
+  const name = kept ? candidate.default_name : typed;
   const valid = isValidSlotName(name);
   const note = passphraseNote(candidate);
   const locked = lockedNote(candidate);
@@ -49,19 +56,19 @@ export function KeySetupRow({
           <KeyRound className="size-3.5 shrink-0 text-muted-foreground" />
           {usesLine(candidate, name)}
         </p>
-        {!renaming && (
+        {!renaming && !kept && (
           <Button type="button" variant="link" size="sm" className="h-auto p-0 text-xs" disabled={busy} onClick={() => setRenaming(true)}>
             Rename
           </Button>
         )}
       </div>
-      {renaming && (
+      {renaming && !kept && (
         <Input
           autoFocus
-          value={name}
+          value={typed}
           aria-label="Key name"
           className={cn("h-7 font-mono text-xs", !valid && "border-destructive")}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => setTyped(e.target.value)}
           onKeyDown={(e) => {
             if (isImeKey(e)) return;
             if (e.key === "Enter" && valid) setRenaming(false);
@@ -70,6 +77,7 @@ export function KeySetupRow({
         />
       )}
       <p className="text-sm">Sync this key to your other computers?</p>
+      {keptText && <p className="text-xs text-muted-foreground">{keptText}</p>}
       {note && <p className="text-xs text-muted-foreground">{note}</p>}
       <ul className="space-y-0.5 font-mono text-xs text-muted-foreground">
         {rewrittenLines(candidate, name).map((line) => (
