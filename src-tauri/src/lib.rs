@@ -1,3 +1,4 @@
+mod agent;
 pub mod askpass;
 mod sync;
 mod config;
