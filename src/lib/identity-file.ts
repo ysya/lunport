@@ -4,20 +4,28 @@
  * regular config_save_host machinery.
  */
 
-/** Rewrite an absolute path under a `.ssh` directory to its `~/.ssh/…` form. */
+/** Forward slashes, so Windows paths compare and print like the ones in ssh_config. */
+function slashes(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+/** Rewrite an absolute path under a `.ssh` directory to its `~/.ssh/…` form (either separator; the result uses `/`). */
 export function toTildeSshPath(absPath: string): string {
+  const normalized = slashes(absPath);
   const marker = "/.ssh/";
-  const at = absPath.indexOf(marker);
+  const at = normalized.indexOf(marker);
   if (at === -1) return absPath;
-  return `~/.ssh/${absPath.slice(at + marker.length)}`;
+  return `~/.ssh/${normalized.slice(at + marker.length)}`;
 }
 
 /** True when a config IdentityFile entry points at the deployed private key. */
 function pointsAt(entry: string, deployedPrivateAbs: string): boolean {
-  if (entry === deployedPrivateAbs) return true;
+  const e = slashes(entry);
+  const deployed = slashes(deployedPrivateAbs);
+  if (e === deployed) return true;
   // ssh_config keeps `~` verbatim; compare the `~/`-relative tail against the
   // end of the absolute path, segment-aligned via the leading `/`.
-  return entry.startsWith("~/") && deployedPrivateAbs.endsWith(entry.slice(1));
+  return e.startsWith("~/") && deployed.endsWith(e.slice(1));
 }
 
 /**

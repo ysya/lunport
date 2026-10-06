@@ -183,7 +183,12 @@ pub fn lint(doc: &SshConfigDoc) -> Vec<LintIssue> {
                                     file: file.clone(),
                                     alias: alias.clone(),
                                     keyword: Some(d.keyword.clone()),
-                                    message: format!("IdentityFile not found: {}", d.value),
+                                    // 插槽路徑(同步主機的金鑰位置):缺檔時指向 Keys 對話框,而不是讓使用者去找檔案。
+                                    message: if crate::sync::slot_rules::slot_file_of_value(&d.value).is_some() {
+                                        format!("IdentityFile not found: {} (a synced key slot \u{2014} pick a key for it in Keys)", d.value)
+                                    } else {
+                                        format!("IdentityFile not found: {}", d.value)
+                                    },
                                 });
                             }
                         }
@@ -560,6 +565,16 @@ mod tests {
         assert!(
             !issues.iter().any(|i| i.message.contains("first-match-wins")),
             "two IdentityFile lines must NOT trigger dup-directive: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_key_slot_points_to_the_keys_dialog() {
+        let (doc, _dir) = doc_with("Host web\n IdentityFile ~/.ssh/sshelter/keys/sp3-lint-missing-00000000\n");
+        let issue = lint(&doc).into_iter().find(|i| i.rule == "missing-identity-file").expect("flagged");
+        assert_eq!(
+            issue.message,
+            "IdentityFile not found: ~/.ssh/sshelter/keys/sp3-lint-missing-00000000 (a synced key slot \u{2014} pick a key for it in Keys)"
         );
     }
 

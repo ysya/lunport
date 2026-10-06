@@ -11,6 +11,12 @@ describe("toTildeSshPath", () => {
     expect(toTildeSshPath("/opt/keys/deploy")).toBe("/opt/keys/deploy");
     expect(toTildeSshPath("relative/path")).toBe("relative/path");
   });
+
+  it("writes Windows paths under .ssh in the portable ~/.ssh/ form", () => {
+    expect(toTildeSshPath("C:\\Users\\frank\\.ssh\\id_win")).toBe("~/.ssh/id_win");
+    expect(toTildeSshPath("C:\\Users\\frank\\.ssh\\sub\\key")).toBe("~/.ssh/sub/key");
+    expect(toTildeSshPath("D:\\keys\\deploy")).toBe("D:\\keys\\deploy");
+  });
 });
 
 describe("identityFileAction", () => {
@@ -43,5 +49,9 @@ describe("identityFileAction", () => {
     expect(identityFileAction(["~/.ssh/other", "~/.ssh/work"], deployed)).toBe(
       "already",
     );
+  });
+
+  it("matches a ~/.ssh entry against a Windows path", () => {
+    expect(identityFileAction(["~/.ssh/id_win"], "C:\\Users\\frank\\.ssh\\id_win")).toBe("already");
   });
 });

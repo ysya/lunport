@@ -14,11 +14,12 @@ export function pickDefaultPublicKey(
   const deployable = keys.filter((k) => k.public_path !== null);
 
   // ssh_config stores IdentityFile verbatim, so `~/.ssh/work` never string-equals
-  // the absolute private_path reported by keys_list. Compare the `~/`-relative
-  // tail against the end of the absolute path (segment-aligned via the `/`).
-  const matches = (identity: string, privatePath: string) =>
-    privatePath === identity ||
-    (identity.startsWith("~/") && privatePath.endsWith(identity.slice(1)));
+  // the absolute private_path reported by keys_list (which uses `\` on Windows).
+  // Compare the `~/`-relative tail against the end of the absolute path.
+  const matches = (identity: string, privatePath: string) => {
+    const [id, path] = [identity.replace(/\\/g, "/"), privatePath.replace(/\\/g, "/")];
+    return path === id || (id.startsWith("~/") && path.endsWith(id.slice(1)));
+  };
 
   for (const identity of identityFiles) {
     const match = deployable.find((k) => matches(identity, k.private_path));

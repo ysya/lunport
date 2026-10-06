@@ -75,4 +75,11 @@ describe("pickDefaultPublicKey", () => {
       "/home/f/.ssh/notwork.pub",
     );
   });
+
+  it("matches ~/.ssh IdentityFiles against Windows key paths", () => {
+    const win: KeyInfo = { ...key("id_win", "C:\\Users\\frank\\.ssh\\id_win.pub"), private_path: "C:\\Users\\frank\\.ssh\\id_win" };
+    expect(pickDefaultPublicKey(["~/.ssh/id_win"], [win, key("other", "/home/f/.ssh/other.pub")])).toBe(
+      "C:\\Users\\frank\\.ssh\\id_win.pub",
+    );
+  });
 });
