@@ -617,14 +617,23 @@ fn delete_old(env: &SyncEnv, s: &SyncStateV2, keys: &ChainKeys, rotation: &Rotat
     Ok(Stepped::Advanced)
 }
 
-/// 換到新帳戶時這台的插槽記錄(SP3 spec §6.6;N1)。新帳戶接續了舊帳戶的 space(`mapping` 的 key 裡有舊帳戶的 space)才是同一個帳戶換了同步碼:
-/// 在舊帳戶學到的記錄改記成新帳戶(`LocalSlot::learned_in`:新帳戶裡沒有它們時照樣補寫,`slots::republish`),這台同意上傳的那把
-/// (`uploaded_fingerprint`)照舊。沒有接續舊帳戶任何 space 的帳戶 —— 被擋下、又沒有勾選任何 space 的電腦,`rejoin_account` 收下任何帳戶的同步碼 ——
-/// 是加入了另一個帳戶,同 `account::install_account` 加入另一個帳戶:同意清掉、學到的帳戶不改(不補寫進去)。這裡清掉每一筆的同意,和那裡只清
-/// 不是那個帳戶學到的記錄結果一樣:同意只在記錄學到的帳戶裡給(`slot_setup::create_slot`、`slots::set_mode`),加入別的帳戶時就清掉,所以帶著同意的
-/// 記錄都是在舊帳戶學到的。舊帳戶一個 space 都沒有時無從確認,也當成另一個帳戶。在更早的帳戶學到的記錄(離開之後留下的)兩種情況都不改記。
-fn carry_key_slots(slots: &mut BTreeMap<String, LocalSlot>, old: Option<&AccountState>, new_chain: &str, mapping: &BTreeMap<String, String>) {
-    let continued = old.filter(|old| space_entries(old).iter().any(|e| mapping.contains_key(&e.id))).map(|old| old.chain_id.as_str());
+/// 換到新帳戶時這台的插槽記錄(SP3 spec §6.6;N1)。同一個帳戶換了同步碼:在舊帳戶學到的記錄改記成新帳戶(`LocalSlot::learned_in`:新帳戶裡沒有
+/// 它們時照樣補寫,`slots::republish`),這台同意上傳的那把(`uploaded_fingerprint`)照舊。新帳戶是這台自己更換同步碼建立的(`created_here`,第 7 步)
+/// 一定是;其他電腦重新加入時,新帳戶要接續舊帳戶的 space(`mapping` 的 key 裡有舊帳戶的 space)才是。沒有接續舊帳戶任何 space 的帳戶 —— 被擋下、
+/// 又沒有勾選任何 space 的電腦,`rejoin_account` 收下任何帳戶的同步碼 —— 是加入了另一個帳戶,同 `account::install_account` 加入另一個帳戶:同意清掉、
+/// 學到的帳戶不改(不補寫進去)。這裡清掉每一筆的同意,和那裡只清不是那個帳戶學到的記錄結果一樣:同意只在記錄學到的帳戶裡給
+/// (`slot_setup::create_slot`、`slots::set_mode`),加入別的帳戶時就清掉,所以帶著同意的記錄都是在舊帳戶學到的。重新加入時舊帳戶一個 space 都沒有,
+/// 就無從確認,也當成另一個帳戶。在更早的帳戶學到的記錄(離開之後留下的)兩種情況都不改記。
+fn carry_key_slots(
+    slots: &mut BTreeMap<String, LocalSlot>,
+    old: Option<&AccountState>,
+    new_chain: &str,
+    mapping: &BTreeMap<String, String>,
+    created_here: bool,
+) {
+    let continued = old
+        .filter(|old| created_here || space_entries(old).iter().any(|e| mapping.contains_key(&e.id)))
+        .map(|old| old.chain_id.as_str());
     for local in slots.values_mut() {
         match continued {
             Some(old_chain) if local.learned_in.as_deref() == Some(old_chain) => local.learned_in = Some(new_chain.to_string()),
@@ -699,6 +708,8 @@ fn unmapped_selected_files(env: &SyncEnv, mapping: &BTreeMap<String, String>) ->
 ///
 /// 呼叫端先把新碼暫存在 `sync:mnemonic-next`(更換是第 1 步,重新加入是 `rejoin_account` 驗證之後):在「狀態已換、keychain 還沒換」
 /// 之間中斷、或 keychain 寫不進去時,新碼不會丟 —— 啟動流程以它補完(`engine::startup`),這個 session 也每一輪再試(`retry_pending_swap`)。
+///
+/// `created_here` = 新帳戶是這台自己更換同步碼建立的(第 7 步,`switch`);重新加入(`rejoin_account`)是 false。決定插槽記錄怎麼帶過去(`carry_key_slots`)。
 fn install_new_account(
     env: &SyncEnv,
     words: &str,
@@ -706,6 +717,7 @@ fn install_new_account(
     account: AccountState,
     mapping: &BTreeMap<String, String>,
     mut notices: Vec<SyncNotice>,
+    created_here: bool,
 ) -> Result<(), InstallError> {
     let now = env.now();
     {
@@ -730,7 +742,7 @@ fn install_new_account(
         core.failed_rounds = 0;
         core.batch_failures = 0;
         let s = core.state.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
-        carry_key_slots(&mut s.key_slots, s.account.as_ref(), &account.chain_id, mapping);
+        carry_key_slots(&mut s.key_slots, s.account.as_ref(), &account.chain_id, mapping, created_here);
         s.spaces = carry_spaces(&s.spaces, mapping);
         s.account = Some(account);
         s.rotation = None;
@@ -787,7 +799,8 @@ fn switch(env: &SyncEnv, s: &SyncStateV2, keys: &ChainKeys, rotation: &RotationP
     if !others.is_empty() {
         notices.push(SyncNotice::OtherRotation { devices: others });
     }
-    match install_new_account(env, &words, new_account, section, &mapping, notices) {
+    // 新帳戶是這台自己建立的:一定是這個帳戶的延續(舊帳戶一個 space 都沒有、`mapping` 是空的也一樣),插槽記錄與同意照樣帶過去。
+    match install_new_account(env, &words, new_account, section, &mapping, notices, true) {
         Ok(()) => {}
         // 主 config 在載入之後被外部改過:doc 已從磁碟重載、`applied(0)` 已發。同一般輪次(`run_round`):不是要顯示的錯誤、不算失敗的一輪,
         // 以磁碟上的內容馬上重做。
@@ -933,7 +946,8 @@ pub fn rejoin_account(env: &SyncEnv, words: &str) -> Result<(), AppError> {
     // 啟動時以它補完,不必離開再加入。暫存不了就什麼都還沒改。
     env.keychain.set(NEXT_MNEMONIC_ACCOUNT, &words)?;
     let new_chain = new_account.chain_id.clone();
-    if let Err(e) = install_new_account(env, &words, new_account, section, &mapping, Vec::new()) {
+    // 新帳戶是別台建立的:插槽記錄只在它接續了舊帳戶的 space 時才帶過去(`carry_key_slots`)。
+    if let Err(e) = install_new_account(env, &words, new_account, section, &mapping, Vec::new(), false) {
         // 沒有換成新帳戶(例如檔案改成本機檔案失敗):暫存的碼不留。已經換了(只是存檔或後續失敗)的話它是現在這個帳戶的碼,要留著。
         let switched = crate::sync::runtime::snapshot(env).and_then(|s| s.account).is_some_and(|a| a.chain_id == new_chain);
         if !switched {
@@ -2391,5 +2405,28 @@ mod tests {
         assert!(!on_relay.sealed.contains_key(&key_secret_key(&keys, &id)), "no key in that account");
         assert_eq!(a.state().key_slots[&id].uploaded_fingerprint, None, "an account that does not continue this one gets no consent");
         assert_eq!(std::fs::read_to_string(a.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file)).unwrap(), test_keys::plain(), "web still works here");
+    }
+
+    /// 更換同步碼的那台自己建立了新帳戶,一定是同一個帳戶的延續:舊帳戶的 space 全刪了(新帳戶也就沒有任何 space 接續舊的),這台的插槽記錄照樣改記成
+    /// 新帳戶、這台同意上傳的那把照舊。只有重新加入的電腦才要看 space 是否接續(`rejoin_account`)。
+    #[test]
+    fn the_computer_that_changes_the_code_carries_its_key_slots_even_with_no_space_left() {
+        use crate::sync::slot_rules::{test_keys, SlotMode};
+        use crate::sync::slots::tests::create_slot_on;
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, _file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        settle(&a);
+        delete_space(&a.env(), &personal).unwrap();
+        settle(&a);
+        assert!(space_entries(a.state().account.as_ref().unwrap()).iter().all(|e| e.deleted), "A has no space left");
+
+        start_rotation(&a.env()).unwrap();
+        let next = new_code(&a);
+        finish(&a);
+        let new_chain = crypto::derive_account(&next).unwrap().chain_id;
+        assert_eq!(a.state().account.unwrap().chain_id, new_chain);
+        let local = a.state().key_slots[&id].clone();
+        assert_eq!(local.learned_in.as_deref(), Some(new_chain.as_str()), "the record now belongs to the new account");
+        assert_eq!(local.uploaded_fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT), "and the consent comes along");
     }
 }

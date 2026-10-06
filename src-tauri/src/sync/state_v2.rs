@@ -237,8 +237,8 @@ pub struct LocalSlot {
     /// 也收不到那裡同步來的私鑰。
     ///
     /// 帳戶裡之後出現同 id 的 `keyslot`,不會把記錄改記成那個帳戶:這台在新帳戶的 `device.slots` 列著留下來的插槽 id,新帳戶的成員可以發佈一個
-    /// 同 id 的插槽,讓舊帳戶同步來的副本看起來像是新帳戶的。只有更換同步碼(`rotation::install_new_account`:新帳戶接續了舊帳戶的 space)把舊
-    /// chain 改記成新的。None = 不知道(這個欄位之前寫的狀態檔):當成「不是現在的帳戶」,不補寫。
+    /// 同 id 的插槽,讓舊帳戶同步來的副本看起來像是新帳戶的。只有更換同步碼(`rotation::install_new_account`:更換的那台一定改記;重新加入的電腦,
+    /// 新帳戶要接續舊帳戶的 space)把舊 chain 改記成新的。None = 不知道(這個欄位之前寫的狀態檔):當成「不是現在的帳戶」,不補寫。
     #[serde(default)]
     pub learned_in: Option<String>,
 }
