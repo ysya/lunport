@@ -84,15 +84,20 @@ pub struct PromptHub {
 }
 
 impl PromptHub {
-    /// 送出請求並等待回答。逾時回 None(呼叫端當成拒絕)。`request.id` 由這裡指定。
+    /// 送出請求並等待回答。逾時回 None(呼叫端當成拒絕);逾時的瞬間才到的答案照樣算數(`resolve` 已經回報成功)。`request.id` 由這裡指定。
     pub fn ask(&self, surface: &dyn PromptSurface, mut request: AgentApprovalRequest, timeout: Duration) -> Option<AgentApprovalAnswer> {
         let id = format!("approval-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         request.id = id.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         self.pending.lock().unwrap().push(Waiting { request, answer: tx, answered: false });
         self.publish(surface);
-        let answer = rx.recv_timeout(timeout).ok();
+        let mut answer = rx.recv_timeout(timeout).ok();
+        // 不再等了:先把請求從清單拿掉(之後的 `resolve` 找不到它,不會再送答案),再看一次 channel:逾時的瞬間才到的答案
+        // (`resolve` 已經回報成功)照樣算數。
         self.pending.lock().unwrap().retain(|w| w.request.id != id);
+        if answer.is_none() {
+            answer = rx.try_recv().ok();
+        }
         self.publish(surface);
         answer
     }
@@ -368,5 +373,26 @@ mod tests {
         let surface = Recorder::default();
         assert_eq!(hub.ask(&surface, request("b"), Duration::from_millis(20)), None);
         assert!(!surface.seen.lock().unwrap().is_empty(), "a request after the failure is still shown");
+    }
+
+    #[test]
+    fn an_answer_that_arrives_as_the_wait_times_out_is_not_lost() {
+        let hub = Arc::new(PromptHub::default());
+        let surface = Arc::new(Recorder::default());
+        let (h, s) = (Arc::clone(&hub), Arc::clone(&surface));
+        let waiter = std::thread::spawn(move || h.ask(s.as_ref(), request("a"), Duration::from_millis(200)));
+        // `ask` 已經通知過畫面(放開了 `notify`),開始等答案。
+        wait_until("ask is waiting", || !surface.seen.lock().unwrap().is_empty() && hub.notify.try_lock().is_ok());
+        let id = hub.pending()[0].id.clone();
+        // 這把鎖在手上的時候,`ask` 等不到答案而逾時,卡在移除請求那一步。`resolve` 在鎖裡做的事(標記已回答、送出答案)排在它移除之前。
+        let mut pending = hub.pending.lock().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let waiting = pending.iter_mut().find(|w| w.request.id == id).expect("the request stays listed while the lock is held");
+        waiting.answered = true;
+        waiting.answer.try_send(AgentApprovalAnswer { allow: true, ..Default::default() }).unwrap();
+        drop(pending);
+        let answer = waiter.join().unwrap();
+        assert_eq!(answer.map(|a| a.allow), Some(true), "resolve had reported success, so the answer must count");
+        assert!(hub.pending().is_empty());
     }
 }
