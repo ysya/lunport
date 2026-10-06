@@ -542,6 +542,7 @@ mod tests {
         let mut child = std::process::Command::new("cmd").args(["/C", "exit"]).spawn().unwrap();
         let pid = child.id();
         child.wait().unwrap();
+        drop(child);
         assert!(process_chain(pid).is_empty());
     }
 
