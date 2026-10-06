@@ -25,10 +25,14 @@ const SKIP: &[&str] = &[
 const SYSTEM: &[&str] = &["launchd", "init", "systemd", "explorer", "services", "wininit", "svchost", "system"];
 const INTERPRETERS: &[&str] = &["node", "python", "python3", "ruby", "perl", "bun", "deno"];
 
-/// 路徑的檔名(`/` 與 `\` 都當分隔),去掉 `.exe`。
+/// 路徑的檔名(`/` 與 `\` 都當分隔),去掉 `.exe`(大小寫都算,Windows 的檔名不分大小寫)。
 fn file_name(path: &str) -> &str {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name)
+    // 檔名可以有多位元組的字:切之前先確認那個位置是字元的邊界。
+    match name.len().checked_sub(4) {
+        Some(cut) if name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(".exe") => &name[..cut],
+        _ => name,
+    }
 }
 
 /// `…/<X>.app/Contents/MacOS/<exe>` → `X`(bundle 的主程式);其他(bundle 裡的其他執行檔)→ None。
@@ -155,13 +159,22 @@ fn macos_argv(pid: i32) -> Option<Vec<String>> {
     Some(argv)
 }
 
+/// Linux:執行中的檔案被換掉(例如套件更新)之後,`/proc/<pid>/exe` 讀到「<原路徑> (deleted)」。
+#[cfg(any(target_os = "linux", test))]
+fn without_deleted_suffix(path: String) -> String {
+    match path.strip_suffix(" (deleted)") {
+        Some(original) => original.to_string(),
+        None => path,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn proc_info(pid: u32) -> Option<ProcInfo> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // `pid (comm) state ppid …`:comm 可能含空白與括號,從最後一個 `)` 之後讀。
     let after = &stat[stat.rfind(')')? + 1..];
     let ppid = after.split_whitespace().nth(1)?.parse().ok()?;
-    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|p| p.display().to_string());
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|p| without_deleted_suffix(p.display().to_string()));
     let argv = std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|bytes| bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect())
         .unwrap_or_default();
@@ -298,6 +311,35 @@ mod tests {
     }
 
     #[test]
+    fn a_windows_exe_in_any_case_is_named_and_skipped_like_the_lowercase_one() {
+        let chain = vec![
+            p(50, 40, r"C:\Windows\System32\OpenSSH\SSH.Exe", &[]),
+            p(40, 30, r"C:\Program Files\PowerShell\7\pwsh.exe", &[]),
+            p(30, 20, r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal\WindowsTerminal.exe", &[]),
+            p(20, 4, r"C:\Windows\explorer.exe", &[]),
+        ];
+        let program = identify(&chain).unwrap();
+        assert_eq!(program.chain, vec!["WindowsTerminal", "pwsh", "SSH"], "the extension goes, the file's own case stays");
+        assert_eq!(
+            program.identity,
+            r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal\WindowsTerminal.exe|C:\Program Files\WindowsApps\Microsoft.WindowsTerminal\WindowsTerminal.exe",
+            "SSH.Exe is skipped like ssh.exe, so the program is the same one"
+        );
+    }
+
+    #[test]
+    fn file_name_drops_exe_in_any_case_and_never_cuts_inside_a_character() {
+        assert_eq!(file_name(r"C:\x\ssh.exe"), "ssh");
+        assert_eq!(file_name(r"C:\x\SSH.EXE"), "SSH");
+        assert_eq!(file_name(r"C:\x\Ssh.eXe"), "Ssh");
+        assert_eq!(file_name("/usr/bin/ssh"), "ssh", "no extension, nothing to drop");
+        assert_eq!(file_name("/usr/bin/exe"), "exe", "`exe` without the dot is a name, not an extension");
+        assert_eq!(file_name("/opt/日本.Exe"), "日本");
+        assert_eq!(file_name("/opt/日本語"), "日本語", "the fourth byte from the end is inside a character: no slicing there");
+        assert_eq!(file_name("/opt/a日本"), "a日本");
+    }
+
+    #[test]
     fn nothing_useful_is_unknown() {
         assert_eq!(identify(&[]), None);
         assert_eq!(identify(&[p(1, 0, "/sbin/launchd", &[])]), None);
@@ -319,5 +361,12 @@ mod tests {
     #[test]
     fn a_process_that_is_gone_gives_an_empty_chain() {
         assert!(process_chain(u32::MAX - 7).is_empty());
+    }
+
+    #[test]
+    fn a_replaced_linux_executable_keeps_its_original_path() {
+        assert_eq!(without_deleted_suffix("/usr/bin/bash (deleted)".to_string()), "/usr/bin/bash");
+        assert_eq!(without_deleted_suffix("/usr/bin/bash".to_string()), "/usr/bin/bash");
+        assert_eq!(without_deleted_suffix("/opt/a (deleted)/bin/x".to_string()), "/opt/a (deleted)/bin/x", "only a suffix is dropped");
     }
 }
