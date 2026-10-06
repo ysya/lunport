@@ -1,4 +1,5 @@
-# Runs the key slot tests on Windows: hard links, the copy fallback and the owner-only DACL (SP3 Task 2).
+# Runs the key slot tests on Windows: hard links and the owner-only DACL (SP3 Task 2). The copy fallback (used when
+# a hard link can't be made, for example across drives) is not exercised on CI.
 # macOS can only type-check the Windows code; the permission behavior has to be seen on Windows.
 name: windows key slots
 
@@ -16,6 +17,7 @@ permissions:
 jobs:
   slots:
     runs-on: windows-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: src-tauri
