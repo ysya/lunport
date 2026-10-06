@@ -60,6 +60,7 @@ import {
   useKeyHygiene,
 } from "@/lib/queries";
 import { toTildeSshPath } from "@/lib/identity-file";
+import { identityFileChanged } from "@/lib/key-slots";
 import { copyText } from "@/lib/clipboard";
 import { isImeKey } from "@/lib/ime";
 import { useUiStore } from "@/stores/ui";
@@ -195,7 +196,13 @@ export function HostEditor({ alias }: HostEditorProps) {
       onSave={(changes) =>
         saveHost.mutate(
           { alias: detail.alias, changes },
-          { onSuccess: () => toast.success(`Saved ${detail.alias}`) },
+          {
+            onSuccess: () => {
+              toast.success(`Saved ${detail.alias}`);
+              // A synced host's IdentityFile may now point at a key no slot holds (SP3 spec §7.1).
+              if (identityFileChanged(changes)) useUiStore.getState().setKeySetup({ aliases: [detail.alias], reason: "saved" });
+            },
+          },
         )
       }
       onSetTags={(tags) =>
@@ -566,6 +573,8 @@ function HostActions({
           setDupOpen(false);
           setSelectedAlias(newAlias);
           toast.success(`Duplicated as ${newAlias}`);
+          // A copy in a space syncs too, and may use this computer's key (SP3 spec §7.1).
+          useUiStore.getState().setKeySetup({ aliases: [newAlias], reason: "saved" });
         },
         // Validation/collision errors surface via the mutation's error toast;
         // the dialog stays open so the alias can be corrected.
@@ -678,8 +687,11 @@ function HostActions({
                         moveHost.mutate(
                           { alias: detail.alias, targetFile: f },
                           {
-                            onSuccess: () =>
-                              toast.success(`Moved ${detail.alias} to ${labelOf(f)}`),
+                            onSuccess: () => {
+                              toast.success(`Moved ${detail.alias} to ${labelOf(f)}`);
+                              // Moved into a space, it now syncs and may use this computer's key (SP3 spec §7.1).
+                              useUiStore.getState().setKeySetup({ aliases: [detail.alias], reason: "moved" });
+                            },
                           },
                         )
                       }

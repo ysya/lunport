@@ -710,10 +710,13 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     moveHost.mutate(
       { alias, targetFile },
       {
-        onSuccess: () =>
+        onSuccess: () => {
           toast.success(
             `Moved ${alias} → ${labels.get(targetFile) ?? basename(targetFile)}`,
-          ),
+          );
+          // Moved into a space, it now syncs and may use this computer's key (SP3 spec §7.1).
+          useUiStore.getState().setKeySetup({ aliases: [alias], reason: "moved" });
+        },
       },
     );
 
@@ -882,12 +885,14 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const batchMove = async (targetFile: string) => {
     const targets = [...checkedAliases];
     let moved = 0;
+    const movedAliases: string[] = [];
     for (const alias of targets) {
       const h = hosts.find((x) => x.alias === alias);
       if (!h || h.source_file === targetFile || ambiguous.has(alias)) continue;
       try {
         await moveHost.mutateAsync({ alias, targetFile });
         moved += 1;
+        movedAliases.push(alias);
       } catch {
         // Per-host failures already toast via the mutation; keep going.
       }
@@ -895,6 +900,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
     toast.success(
       `Moved ${moved}/${targets.length} → ${labels.get(targetFile) ?? basename(targetFile)}`,
     );
+    // Asked once for the whole batch: one request per host would replace the one before it (SP3 spec §7.1).
+    if (movedAliases.length > 0) useUiStore.getState().setKeySetup({ aliases: movedAliases, reason: "moved" });
     clearChecked();
   };
 

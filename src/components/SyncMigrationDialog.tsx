@@ -167,6 +167,8 @@ function MigrationFlow({ requested, setBusy, onClose }: { requested: string | nu
     // A failed write stops the batch, so entries after it are "not attempted" —
     // surfaced below, not just as a count.
     setFailedMoves(report.failed);
+    // Hosts that now sync may use this computer's keys (SP3 spec §7.1).
+    if (report.moved.length > 0) useUiStore.getState().setKeySetup({ aliases: report.moved, reason: "moved" });
   };
 
   const run = () => {

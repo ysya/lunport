@@ -193,6 +193,8 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
           setIdentityOffer(null);
           setIdentityNote(`IdentityFile ${value} written to the host config.`);
           queryClient.invalidateQueries({ queryKey: queryKeys.keyHygiene(alias) });
+          // A synced host's IdentityFile now points at this key, which no slot may hold yet (SP3 spec §7.1).
+          useUiStore.getState().setKeySetup({ aliases: [alias], reason: "saved" });
         },
         // Errors already toast via useSaveHost; the offer button stays usable.
       },
