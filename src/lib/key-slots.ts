@@ -130,10 +130,12 @@ export function slotActions(slot: SyncKeySlotView): SlotActions {
   return {
     syncThis: slot.mode === "own" && s.kind === "ready",
     stopSyncing: slot.mode === "synced",
+    // A slot in `error` (its key is gone, a synced key didn't match) always has a way forward: pick a key here. Where picking
+    // can't help (another file is in the way, the slot is contested) the backend refuses with its own message.
     // A computer that uploaded the slot's key and then picked or regenerated another one lands in `source_changed`:
     // without Change it could only upload the new key again or stop syncing.
     pick:
-      s.kind === "needs_key"
+      s.kind === "needs_key" || s.kind === "error"
         ? "pick"
         : s.kind === "ready" || s.kind === "synced_available" || s.kind === "source_changed"
           ? "change"

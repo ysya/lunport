@@ -124,6 +124,9 @@ describe("a slot row", () => {
     expect(slotActions(keySlot({ status: { kind: "synced_available", file: "/f" } }))).toEqual({ ...none, stopSyncing: true, pick: "change", useSynced: true });
     expect(slotActions(keySlot({ status: { kind: "source_changed", file: "/f" } }))).toEqual({ ...none, stopSyncing: true, syncNew: true, pick: "change" });
     expect(slotActions(keySlot({ mode: "own", status: { kind: "not_in_use", file: "/f" } }))).toEqual({ ...none, deleteCopy: true });
+    // A slot in error always has a way forward: pick a key here (the backend says why when picking can't help).
+    expect(slotActions(keySlot({ mode: "own", status: { kind: "error", message: "The key this slot points to is gone: /home/f/.ssh/id_mac." } }))).toEqual({ ...none, pick: "pick" });
+    expect(slotActions(keySlot({ status: { kind: "error", message: "The synced key didn't match and was not written." } }))).toEqual({ ...none, stopSyncing: true, pick: "pick" });
   });
 
   it("lists hosts and other computers, revealing hidden characters in their names", () => {
