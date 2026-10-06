@@ -9,8 +9,8 @@ use crate::agent::protocol::{
     SSH_AGENT_FAILURE, SSH_AGENT_SUCCESS,
 };
 
-/// 交給 `SignAuthority` 的一個簽章請求。`host_key` 只在 userauth 資料的 session id 等於這條連線最後一次 bind 的(hostbound 方法的主機金鑰也相同)
-/// 時才有;其他情況主機未知。
+/// 交給 `SignAuthority` 的一個簽章請求。`user` 與 `host_key` 只在簽的資料是這把金鑰登入 `ssh-connection` 的 userauth 資料時才有;`host_key` 還要 userauth
+/// 資料的 session id 等於這條連線最後一次 bind 的(hostbound 方法的主機金鑰也相同),其他情況主機未知。
 pub struct SignRequest {
     pub key: KeyData,
     pub data: Vec<u8>,
@@ -28,10 +28,10 @@ pub trait SignAuthority {
     fn sign(&self, request: &SignRequest) -> Option<Vec<u8>>;
 }
 
+/// 一條連線的狀態:最後一次 bind 成功的(主機金鑰, session id),以及這條連線是否 bind 過轉送。
 #[derive(Default)]
 pub struct Session {
-    bound_host: Option<KeyData>,
-    session_id: Option<Vec<u8>>,
+    bound: Option<(KeyData, Vec<u8>)>,
     forwarded: bool,
 }
 
@@ -41,9 +41,10 @@ impl Session {
         match parse_request(msg) {
             Request::Identities => identities_answer(&authority.identities()),
             Request::Sign { key, data, flags } => {
-                let userauth = parse_userauth(&data);
-                let host_key = match (&userauth, &self.bound_host, &self.session_id) {
-                    (Some(u), Some(host), Some(sid))
+                // userauth 資料裡的公鑰必須就是被要求簽章的這把,否則不算這把金鑰的登入:沒有使用者,主機也未知。
+                let userauth = parse_userauth(&data).filter(|u| u.key == key);
+                let host_key = match (&userauth, &self.bound) {
+                    (Some(u), Some((host, sid)))
                         if &u.session_id == sid && u.hostbound_host_key.as_ref().is_none_or(|h| h == host) =>
                     {
                         Some(host.clone())
@@ -61,8 +62,7 @@ impl Session {
                 if host_key.verify(&session_id, &signature).is_err() {
                     return vec![SSH_AGENT_EXTENSION_FAILURE];
                 }
-                self.bound_host = Some(host_key);
-                self.session_id = Some(session_id);
+                self.bound = Some((host_key, session_id));
                 self.forwarded |= forwarding;
                 vec![SSH_AGENT_SUCCESS]
             }
@@ -127,11 +127,15 @@ mod tests {
     }
 
     fn userauth(session_id: &[u8], user: &str, key: &KeyData, hostbound: Option<&KeyData>) -> Vec<u8> {
+        userauth_for_service(session_id, user, "ssh-connection", key, hostbound)
+    }
+
+    fn userauth_for_service(session_id: &[u8], user: &str, service: &str, key: &KeyData, hostbound: Option<&KeyData>) -> Vec<u8> {
         let mut d = Vec::new();
         session_id.encode(&mut d).unwrap();
         50u8.encode(&mut d).unwrap();
         user.encode(&mut d).unwrap();
-        "ssh-connection".encode(&mut d).unwrap();
+        service.encode(&mut d).unwrap();
         (if hostbound.is_some() { "publickey-hostbound-v00@openssh.com" } else { "publickey" }).encode(&mut d).unwrap();
         1u8.encode(&mut d).unwrap();
         "ssh-ed25519".encode(&mut d).unwrap();
@@ -167,6 +171,10 @@ mod tests {
         assert_eq!(reply[0], SSH_AGENT_IDENTITIES_ANSWER);
         let mut r = &reply[1..];
         assert_eq!(u32::decode(&mut r).unwrap(), 1);
+        let blob = Vec::<u8>::decode(&mut r).unwrap();
+        assert_eq!(KeyData::decode(&mut &blob[..]).unwrap(), public_key_data(test_keys::PLAIN_PUBLIC).unwrap());
+        assert_eq!(String::decode(&mut r).unwrap(), "id_mac");
+        assert!(r.is_empty(), "nothing after the last identity");
     }
 
     #[test]
@@ -186,7 +194,7 @@ mod tests {
     fn a_session_id_or_host_key_that_does_not_match_the_bind_leaves_the_host_unknown() {
         let authority = fake();
         let mut s = Session::default();
-        let (bind_msg, host) = bind(b"session-1", false, false);
+        let (bind_msg, _) = bind(b"session-1", false, false);
         s.handle(&authority, &bind_msg);
         let key = public_key_data(test_keys::PLAIN_PUBLIC).unwrap();
         s.handle(&authority, &sign_request(&key, &userauth(b"other-session", "root", &key, None), 0));
@@ -195,7 +203,65 @@ mod tests {
         let seen = authority.seen.lock().unwrap().clone();
         assert_eq!(seen[0].host, None);
         assert_eq!(seen[1].host, None);
-        let _ = host;
+    }
+
+    #[test]
+    fn a_plain_publickey_login_on_the_bound_session_names_the_host() {
+        let authority = fake();
+        let mut s = Session::default();
+        let (bind_msg, host) = bind(b"session-1", false, false);
+        s.handle(&authority, &bind_msg);
+        let key = public_key_data(test_keys::PLAIN_PUBLIC).unwrap();
+        s.handle(&authority, &sign_request(&key, &userauth(b"session-1", "root", &key, None), 0));
+        let seen = authority.seen.lock().unwrap()[0].clone();
+        assert_eq!(seen, SignRequestSummary { user: Some("root".into()), host: Some(host), forwarded: false, flags: 0 });
+    }
+
+    #[test]
+    fn a_userauth_blob_naming_another_key_is_not_a_login_by_the_requested_key() {
+        let authority = fake();
+        let mut s = Session::default();
+        let (bind_msg, _) = bind(b"session-1", false, false);
+        s.handle(&authority, &bind_msg);
+        let requested = public_key_data(test_keys::PLAIN_PUBLIC).unwrap();
+        let other = public_key_data(test_keys::ECDSA_PUBLIC).unwrap();
+        // The blob has the bound session id, but it is a login by `other`, not by the key the client asks to sign with.
+        s.handle(&authority, &sign_request(&requested, &userauth(b"session-1", "root", &other, None), 0));
+        let seen = authority.seen.lock().unwrap()[0].clone();
+        assert_eq!(seen, SignRequestSummary { user: None, host: None, forwarded: false, flags: 0 });
+    }
+
+    #[test]
+    fn a_userauth_blob_for_another_service_is_not_a_login() {
+        let authority = fake();
+        let mut s = Session::default();
+        let (bind_msg, _) = bind(b"session-1", false, false);
+        s.handle(&authority, &bind_msg);
+        let key = public_key_data(test_keys::PLAIN_PUBLIC).unwrap();
+        s.handle(&authority, &sign_request(&key, &userauth_for_service(b"session-1", "root", "other-service", &key, None), 0));
+        let seen = authority.seen.lock().unwrap()[0].clone();
+        assert_eq!(seen, SignRequestSummary { user: None, host: None, forwarded: false, flags: 0 });
+    }
+
+    #[test]
+    fn a_key_string_that_runs_past_the_key_in_the_userauth_data_is_not_a_login() {
+        let authority = fake();
+        let mut s = Session::default();
+        let (bind_msg, host) = bind(b"session-1", false, false);
+        s.handle(&authority, &bind_msg);
+        let key = public_key_data(test_keys::PLAIN_PUBLIC).unwrap();
+        // A hostbound login with the same bytes, except that the length prefix of the key string also covers the host key string after it.
+        let mut data = userauth(b"session-1", "root", &key, Some(&host));
+        let mut key_blob: Vec<u8> = Vec::new();
+        let mut host_blob: Vec<u8> = Vec::new();
+        key.encode(&mut key_blob).unwrap();
+        host.encode(&mut host_blob).unwrap();
+        let key_string_at = data.len() - (4 + key_blob.len() + 4 + host_blob.len());
+        let swallowing = (key_blob.len() + 4 + host_blob.len()) as u32;
+        data[key_string_at..key_string_at + 4].copy_from_slice(&swallowing.to_be_bytes());
+        s.handle(&authority, &sign_request(&key, &data, 0));
+        let seen = authority.seen.lock().unwrap()[0].clone();
+        assert_eq!(seen, SignRequestSummary { user: None, host: None, forwarded: false, flags: 0 });
     }
 
     #[test]
@@ -233,6 +299,54 @@ mod tests {
         authority.answer = None;
         let key = public_key_data(test_keys::PLAIN_PUBLIC).unwrap();
         assert_eq!(s.handle(&authority, &sign_request(&key, b"x", 0)), vec![SSH_AGENT_FAILURE], "refused");
+    }
+
+    #[test]
+    fn a_key_string_that_runs_past_the_key_makes_the_sign_request_unreadable() {
+        let authority = fake();
+        let mut s = Session::default();
+        let key = public_key_data(test_keys::PLAIN_PUBLIC).unwrap();
+        let mut blob: Vec<u8> = Vec::new();
+        key.encode(&mut blob).unwrap();
+        // [13][u32 len = blob + 12][blob][string "DATA"][u32 0]: the 12 bytes after the key are still inside the key string,
+        // so they are not the data and the flags.
+        let mut msg = vec![SSH_AGENTC_SIGN_REQUEST];
+        ((blob.len() + 12) as u32).encode(&mut msg).unwrap();
+        msg.extend_from_slice(&blob);
+        "DATA".encode(&mut msg).unwrap();
+        0u32.encode(&mut msg).unwrap();
+        assert_eq!(s.handle(&authority, &msg), vec![SSH_AGENT_FAILURE]);
+        assert!(authority.seen.lock().unwrap().is_empty(), "the authority is never asked");
+    }
+
+    #[test]
+    fn a_signature_string_that_runs_past_the_signature_makes_the_bind_unreadable() {
+        let authority = fake();
+        let mut s = Session::default();
+        let host = open(&test_keys::ecdsa(), None).unwrap();
+        // A valid signature of the session id, with one extra byte inside its string.
+        let mut padded = host.sign(b"session-1", 0).unwrap();
+        padded.push(0);
+        let bind_head = |msg: &mut Vec<u8>| {
+            msg.push(SSH_AGENTC_EXTENSION);
+            SESSION_BIND.encode(msg).unwrap();
+            host.key_data().encode_prefixed(msg).unwrap();
+            b"session-1".as_slice().encode(msg).unwrap();
+            padded.as_slice().encode(msg).unwrap();
+        };
+        // The extra byte would be read as the forwarding flag, leaving nothing after it.
+        let mut shifted = Vec::new();
+        bind_head(&mut shifted);
+        assert_eq!(s.handle(&authority, &shifted), vec![SSH_AGENT_FAILURE], "unreadable, not a failed verification");
+        // The same with the forwarding flag where it belongs.
+        let mut natural = Vec::new();
+        bind_head(&mut natural);
+        0u8.encode(&mut natural).unwrap();
+        assert_eq!(s.handle(&authority, &natural), vec![SSH_AGENT_FAILURE]);
+        // Neither bind was kept.
+        let key = public_key_data(test_keys::PLAIN_PUBLIC).unwrap();
+        s.handle(&authority, &sign_request(&key, &userauth(b"session-1", "root", &key, None), 0));
+        assert_eq!(authority.seen.lock().unwrap()[0].host, None);
     }
 
     /// An in-memory duplex for `serve`.

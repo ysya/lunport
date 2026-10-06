@@ -36,6 +36,7 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(msg))
 }
 
+/// 寫一個訊框(`uint32` 長度 + 內容)並 flush。
 pub fn write_frame(w: &mut impl Write, body: &[u8]) -> io::Result<()> {
     let mut out = Vec::with_capacity(4 + body.len());
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
@@ -44,6 +45,7 @@ pub fn write_frame(w: &mut impl Write, body: &[u8]) -> io::Result<()> {
     w.flush()
 }
 
+/// agent 收到的請求。
 #[derive(Debug)]
 pub enum Request {
     Identities,
@@ -55,6 +57,19 @@ pub enum Request {
     Unsupported,
 }
 
+/// 讀一個帶長度的欄位(`string`)並解成 `T`,內容必須剛好用完:`Reader::read_prefixed` 自己不檢查,沒讀完的位元組會被當成下一個欄位。
+fn read_prefixed_exact<T: Decode<Error = ssh_key::Error>>(r: &mut impl Reader) -> ssh_key::Result<T> {
+    r.read_prefixed(|nested| {
+        let value = T::decode(nested)?;
+        if nested.is_finished() {
+            Ok(value)
+        } else {
+            Err(ssh_encoding::Error::TrailingData { remaining: nested.remaining_len() }.into())
+        }
+    })
+}
+
+/// 解析一則 agent 訊息(不含長度);讀不懂的內容(包括多出來的資料)一律是 `Unsupported`。
 pub fn parse_request(msg: &[u8]) -> Request {
     let Some((&kind, mut body)) = msg.split_first() else { return Request::Unsupported };
     // `KeyData::decode` 與 `Signature::decode` 的錯誤是 `ssh_key::Error`(它收得下 `ssh_encoding::Error`,反過來不行),所以用 `ssh_key::Result`。
@@ -62,7 +77,7 @@ pub fn parse_request(msg: &[u8]) -> Request {
         Ok(match kind {
             SSH_AGENTC_REQUEST_IDENTITIES => body.finish(Request::Identities)?,
             SSH_AGENTC_SIGN_REQUEST => {
-                let key = body.read_prefixed(KeyData::decode)?;
+                let key = read_prefixed_exact::<KeyData>(&mut body)?;
                 let data = Vec::<u8>::decode(&mut body)?;
                 let flags = u32::decode(&mut body)?;
                 body.finish(Request::Sign { key, data, flags })?
@@ -72,9 +87,9 @@ pub fn parse_request(msg: &[u8]) -> Request {
                 if name != SESSION_BIND {
                     return Ok(Request::Extension(name));
                 }
-                let host_key = body.read_prefixed(KeyData::decode)?;
+                let host_key = read_prefixed_exact::<KeyData>(&mut body)?;
                 let session_id = Vec::<u8>::decode(&mut body)?;
-                let signature = body.read_prefixed(Signature::decode)?;
+                let signature = read_prefixed_exact::<Signature>(&mut body)?;
                 let forwarding = u8::decode(&mut body)? != 0;
                 body.finish(Request::SessionBind { host_key, session_id, signature, forwarding })?
             }
@@ -84,6 +99,7 @@ pub fn parse_request(msg: &[u8]) -> Request {
     parsed.unwrap_or(Request::Unsupported)
 }
 
+/// `SSH_AGENT_IDENTITIES_ANSWER` 的內容:金鑰數量,接著每把金鑰的公鑰與註解。
 pub fn identities_answer(keys: &[(KeyData, String)]) -> Vec<u8> {
     let mut out = vec![SSH_AGENT_IDENTITIES_ANSWER];
     // 寫進 Vec 不會失敗。
@@ -95,6 +111,7 @@ pub fn identities_answer(keys: &[(KeyData, String)]) -> Vec<u8> {
     out
 }
 
+/// `SSH_AGENT_SIGN_RESPONSE` 的內容:signature blob 包成一個 `string`。
 pub fn sign_response(signature_blob: &[u8]) -> Vec<u8> {
     let mut out = vec![SSH_AGENT_SIGN_RESPONSE];
     signature_blob.encode(&mut out).expect("writing to a Vec");
@@ -110,7 +127,8 @@ pub struct Userauth {
     pub hostbound_host_key: Option<KeyData>,
 }
 
-/// 不是 userauth(例如 `ssh-keygen -Y sign` 的 SSHSIG)或讀不懂 → None。多出來的資料一律拒絕(同 OpenSSH 的 agent)。
+/// 不是對 `ssh-connection` 服務的 userauth(例如 `ssh-keygen -Y sign` 的 SSHSIG)或讀不懂 → None。多出來的資料一律拒絕(同 OpenSSH 的 agent),
+/// 帶長度的欄位也必須剛好讀完。
 pub fn parse_userauth(data: &[u8]) -> Option<Userauth> {
     let mut r = data;
     let parsed = (|| -> ssh_key::Result<Option<Userauth>> {
@@ -119,7 +137,10 @@ pub fn parse_userauth(data: &[u8]) -> Option<Userauth> {
             return Ok(None);
         }
         let user = String::decode(&mut r)?;
-        let _service = String::decode(&mut r)?;
+        let service = String::decode(&mut r)?;
+        if service != "ssh-connection" {
+            return Ok(None);
+        }
         let method = String::decode(&mut r)?;
         let hostbound = match method.as_str() {
             "publickey" => false,
@@ -130,8 +151,8 @@ pub fn parse_userauth(data: &[u8]) -> Option<Userauth> {
             return Ok(None);
         }
         let _algorithm = String::decode(&mut r)?;
-        let key = r.read_prefixed(KeyData::decode)?;
-        let hostbound_host_key = if hostbound { Some(r.read_prefixed(KeyData::decode)?) } else { None };
+        let key = read_prefixed_exact::<KeyData>(&mut r)?;
+        let hostbound_host_key = if hostbound { Some(read_prefixed_exact::<KeyData>(&mut r)?) } else { None };
         Ok(r.finish(Some(Userauth { session_id, user, key, hostbound_host_key }))?)
     })();
     parsed.ok().flatten()
