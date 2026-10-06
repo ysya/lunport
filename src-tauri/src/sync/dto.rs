@@ -135,17 +135,24 @@ pub struct SyncKeySlotView {
     /// `synced` 的金鑰指紋;`own` 為 null。
     pub fingerprint: Option<String>,
     pub key_type: Option<String>,
+    /// 帳戶裡同步的那把金鑰有沒有 passphrase(`synced` 才有;`own` 為 null)。
     pub has_passphrase: Option<bool>,
+    /// 這台按「Sync this key」或「Sync the new key」會上傳的那把金鑰(這台插槽裡的,不是帳戶裡現在同步的那把)有沒有 passphrase;
+    /// 這台不提供那兩個動作、或讀不到那把金鑰 → null。上傳之前的確認以它說明。
+    pub local_has_passphrase: Option<bool>,
     /// 建立插槽的電腦名稱。
     pub origin_device: String,
     pub origin_is_this: bool,
     /// 主機 `IdentityFile` 的值(`~/.ssh/sshelter/keys/<file>`)。
     pub value: String,
-    /// 這台用到它的主機。
+    /// 這台用到它的主機:勾選的 space 裡的,以及整份 config 裡的其他主機(主 config、`~/.ssh/sshelter-local/`……)。
     pub hosts: Vec<String>,
     pub status: SlotStatusView,
     /// 其他電腦的插槽狀況(它們的 `device.slots`)。
     pub devices: Vec<SlotDeviceView>,
+    /// 帳戶裡還有這個插槽。false = 帳戶裡已經沒有(被刪除,或離開之後建立、加入了別的帳戶),這台還留著它的檔案:同步、挑金鑰這些動作都不適用,
+    /// 只能刪除沒有主機用到的副本。
+    pub in_account: bool,
 }
 
 /// 插槽在這台電腦上的狀態(SP3 spec §7.2、§7.3)。
@@ -263,7 +270,8 @@ pub struct ReviewOutcome {
     pub overview: SyncOverview,
 }
 
-/// 組出 `SyncOverview`(spec §8)。只短暫持有 core 鎖;讀目錄在鎖外。
+/// 組出 `SyncOverview`(spec §8)。先後短暫持有 core 鎖與 doc 鎖(不同時持有;呼叫端只可以持有 lifecycle 鎖 —— 鎖的順序 lifecycle → doc → … → core);
+/// 讀目錄與金鑰檔在鎖外。
 pub fn overview(env: &SyncEnv) -> Result<SyncOverview, AppError> {
     let (s, keys, upgrading) = {
         let core = env.runtime.core.lock().unwrap();
@@ -321,7 +329,11 @@ pub fn overview(env: &SyncEnv) -> Result<SyncOverview, AppError> {
         .map(|a| a.records.values().filter(|l| l.dirty).count() + a.sealed.values().filter(|x| x.dirty).count())
         .unwrap_or(0) as u64;
     let key_slots = match (keys.as_ref(), env.ssh_dir.parent()) {
-        (Some(k), Some(home)) => crate::sync::slots::views(&s, k, home),
+        (Some(k), Some(home)) => {
+            // 整份 config 裡用到的插槽(短暫拿 doc 鎖;這裡沒有持有 doc 鎖或它之後的鎖)。config 還沒載入時當成沒有,只影響顯示:刪除副本自己會再查。
+            let in_use = crate::sync::slots::config_slot_uses(env).unwrap_or_default();
+            crate::sync::slots::views(&s, k, home, &in_use)
+        }
         _ => Vec::new(),
     };
     Ok(SyncOverview {

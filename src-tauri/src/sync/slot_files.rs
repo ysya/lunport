@@ -263,6 +263,8 @@ mod tests {
         // 重新整理插槽目錄的權限不能動到 hard link 共用的原檔:`ensure_keys_dir` 之後,原檔的 ACE 數量不變
         // (暫存目錄裡的檔案在 runner 上會繼承好幾條 ACE;若目錄的 ACE 被傳播給子項,數量就會變)。
         let before = ace_count(&source).unwrap();
+        // 原檔一開始只有一條 ACE 的話,下面的比較什麼都證明不了(傳播過來的也是一條):前提先確認。
+        assert!(before > 1, "the source must start with more than one inherited ACE, or the check below proves nothing (it has {before})");
         ensure_keys_dir(&dir).unwrap();
         assert_eq!(ace_count(&source).unwrap(), before, "securing the keys dir must not rewrite the ACL of a key a slot is linked to");
 

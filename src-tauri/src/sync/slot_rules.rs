@@ -122,11 +122,6 @@ pub fn slot_value(file_name: &str) -> String {
     format!("~/{SLOT_DIR}/{file_name}")
 }
 
-/// 插槽在這台電腦上的完整路徑。
-pub fn slot_path(home: &Path, file_name: &str) -> PathBuf {
-    home.join(SLOT_DIR).join(file_name)
-}
-
 /// 插槽旁的公鑰檔(`<slot>.pub`)。
 pub fn public_path(slot: &Path) -> PathBuf {
     let mut name = slot.as_os_str().to_owned();
@@ -508,7 +503,6 @@ mod tests {
         let id = "3fa2c1d90123456789abcdef01234567";
         assert_eq!(slot_file_name("id_mac", id), "id_mac-3fa2c1d9");
         assert_eq!(slot_value("id_mac-3fa2c1d9"), "~/.ssh/sshelter/keys/id_mac-3fa2c1d9");
-        assert_eq!(slot_path(Path::new("/home/f"), "id_mac-3fa2c1d9"), PathBuf::from("/home/f/.ssh/sshelter/keys/id_mac-3fa2c1d9"));
         assert_eq!(public_path(Path::new("/k/id_mac-3fa2c1d9")), PathBuf::from("/k/id_mac-3fa2c1d9.pub"));
     }
 

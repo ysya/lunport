@@ -90,12 +90,14 @@ export function keySlot(overrides: Partial<SyncKeySlotView> = {}): SyncKeySlotVi
     fingerprint: SLOT_FINGERPRINT,
     key_type: "ssh-ed25519",
     has_passphrase: false,
+    local_has_passphrase: null,
     origin_device: "MacBook-A",
     origin_is_this: true,
     value: "~/.ssh/sshelter/keys/id_mac-3fa2c1d9",
     hosts: ["web"],
     status: { kind: "ready", file: "/home/f/.ssh/id_mac", synced_copy: false, fingerprint: SLOT_FINGERPRINT },
     devices: [],
+    in_account: true,
     ...overrides,
   };
 }

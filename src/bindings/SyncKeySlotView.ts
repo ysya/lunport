@@ -14,7 +14,16 @@ name: string, mode: SlotMode,
 /**
  * `synced` 的金鑰指紋;`own` 為 null。
  */
-fingerprint: string | null, key_type: string | null, has_passphrase: boolean | null, 
+fingerprint: string | null, key_type: string | null, 
+/**
+ * 帳戶裡同步的那把金鑰有沒有 passphrase(`synced` 才有;`own` 為 null)。
+ */
+has_passphrase: boolean | null, 
+/**
+ * 這台按「Sync this key」或「Sync the new key」會上傳的那把金鑰(這台插槽裡的,不是帳戶裡現在同步的那把)有沒有 passphrase;
+ * 這台不提供那兩個動作、或讀不到那把金鑰 → null。上傳之前的確認以它說明。
+ */
+local_has_passphrase: boolean | null, 
 /**
  * 建立插槽的電腦名稱。
  */
@@ -24,10 +33,15 @@ origin_device: string, origin_is_this: boolean,
  */
 value: string, 
 /**
- * 這台用到它的主機。
+ * 這台用到它的主機:勾選的 space 裡的,以及整份 config 裡的其他主機(主 config、`~/.ssh/sshelter-local/`……)。
  */
 hosts: Array<string>, status: SlotStatusView, 
 /**
  * 其他電腦的插槽狀況(它們的 `device.slots`)。
  */
-devices: Array<SlotDeviceView>, };
+devices: Array<SlotDeviceView>, 
+/**
+ * 帳戶裡還有這個插槽。false = 帳戶裡已經沒有(被刪除,或離開之後建立、加入了別的帳戶),這台還留著它的檔案:同步、挑金鑰這些動作都不適用,
+ * 只能刪除沒有主機用到的副本。
+ */
+in_account: boolean, };

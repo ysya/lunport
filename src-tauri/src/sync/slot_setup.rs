@@ -22,7 +22,7 @@ use crate::sync::slot_rules::{
 };
 use crate::sync::slots::{
     account_still_ready, contested_and_not_held, in_the_way_message, live_slots, local_key_fingerprint, put_key_secret, put_slot, slot,
-    write_linked_public, CONTESTED_MESSAGE,
+    source_gone_message, write_linked_public, CONTESTED_MESSAGE,
 };
 use crate::sync::state_v2::{LocalSlot, SlotSource, SyncStateV2};
 
@@ -100,6 +100,12 @@ pub struct KeyChoice {
 }
 
 pub const LOCKED_REASON: &str = "This host has more than one copy; SSHelter changes it once only one copy is left.";
+
+/// 已經有插槽的金鑰收到「Sync key」或「Keep on this computer」(`setup_keys`)。
+pub const ALREADY_SET_UP_MESSAGE: &str = "This key already has a key slot, so no second one was made.";
+
+/// 「沿用」指定的插槽不是這把金鑰的(`KeyCandidate.existing_slot`)。
+pub const OTHER_SLOT_MESSAGE: &str = "That key slot is for a different key.";
 
 fn home_of(env: &SyncEnv) -> Result<PathBuf, AppError> {
     env.ssh_dir
@@ -334,6 +340,11 @@ pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Resul
         };
         let file = match choice.decision {
             KeyDecision::Reuse { slot_id } => reuse_slot(env, &keys_dir, candidate, &slot_id)?,
+            // 已經有插槽的金鑰不建立第二個(spec §6.1 第 1 步:這把金鑰已經決定過了,前端對它送的是 Reuse)。畫面上的舊資料才會走到這裡(例如重新
+            // 讀取失敗之後又按了一次):拒絕、什麼都不動。不靜靜地改成沿用 —— 那個插槽是同步還是留在這台,不一定是使用者這次選的,成功的 toast 會說錯。
+            KeyDecision::Sync { .. } | KeyDecision::Keep { .. } if candidate.existing_slot.is_some() => {
+                return Err(AppError::Other(ALREADY_SET_UP_MESSAGE.to_string()));
+            }
             KeyDecision::Sync { name } => create_slot(env, &account_keys, &keys_dir, candidate, name, true)?,
             KeyDecision::Keep { name } => create_slot(env, &account_keys, &keys_dir, candidate, name, false)?,
         };
@@ -388,7 +399,9 @@ fn link_free_slot(keys_dir: &Path, slot_path: &Path, source: &Path) -> Result<Li
 
 /// 沿用既有的插槽(`KeyDecision::Reuse`)。主機改寫之前,這台的插槽檔就要在位(spec §6.1 第 4 步)。回傳插槽檔名。
 /// - 和帳戶裡另一個插槽同檔名、這台又沒有握著的(`contested_and_not_held`):拒絕,什麼都不動。
-/// - 這台已經握著它(有來源、連結沒收起來):照舊,什麼都不動,之後每一輪維護它。
+/// - 不是候選帶著的那個插槽(`KeyCandidate.existing_slot`;畫面上的舊資料,或另一把金鑰的插槽):拒絕,什麼都不動 —— 不然這把金鑰的主機會改指到
+///   另一把金鑰的插槽,或另一個插槽在這台連到這把金鑰。
+/// - 這台已經握著它(有來源、連結沒收起來):它放的金鑰還在插槽路徑上(`held_in_place`)就照舊,什麼都不動,之後每一輪維護它;不在就拒絕、主機不改寫。
 /// - 這台還沒有它的金鑰,或連結收起來了(`LocalSlot::parked`):現在就連到使用者選的這把金鑰、寫 `.pub`、記下來(清掉 `parked`)。插槽路徑上
 ///   已經有東西(收起來的連結不擁有路徑上的任何東西)就不連結,回 `in_the_way_message`,主機也不改寫。
 fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id: &str) -> Result<String, AppError> {
@@ -408,8 +421,12 @@ fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id:
     if contested_and_not_held(&state, slot_id) {
         return Err(AppError::Other(CONTESTED_MESSAGE.to_string()));
     }
+    if candidate.existing_slot.as_deref() != Some(slot_id) {
+        return Err(AppError::Other(OTHER_SLOT_MESSAGE.to_string()));
+    }
     let file = slot_file_name(&payload.name, slot_id);
-    if state.key_slots.get(slot_id).is_some_and(|l| l.source.is_some() && !l.parked) {
+    if let Some(held) = state.key_slots.get(slot_id).filter(|l| l.source.is_some() && !l.parked) {
+        held_in_place(held, &file, keys_dir)?;
         return Ok(file);
     }
     let slot_path = keys_dir.join(&file);
@@ -439,6 +456,22 @@ fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id:
         return Err(e);
     }
     Ok(file)
+}
+
+/// 這台握著的插槽(`reuse_slot` 的捷徑:什麼都不動、直接改寫主機)放的金鑰,現在是不是真的在插槽路徑 `<keys_dir>/<file>` 上:記錄的檔名就是 `file`
+/// (帳戶裡改了名的話,這筆記錄說的是舊路徑,下一輪才從頭來過),連到的原檔還在(`Linked`),同步來的副本還在(`SyncedCopy`)。不是的話回
+/// `source_gone_message`(沒有金鑰的那個路徑):改寫主機只會讓一台能連線的主機改指到沒有金鑰的插槽。
+fn held_in_place(held: &LocalSlot, file: &str, keys_dir: &Path) -> Result<(), AppError> {
+    let slot_path = keys_dir.join(file);
+    let gone = |path: &Path| Err(AppError::Other(source_gone_message(&path.display().to_string())));
+    if held.file_name != file {
+        return gone(&slot_path);
+    }
+    match &held.source {
+        Some(SlotSource::Linked { path, .. }) if !Path::new(path).is_file() => gone(Path::new(path)),
+        Some(SlotSource::SyncedCopy { .. }) if !slot_path.is_file() => gone(&slot_path),
+        _ => Ok(()),
+    }
 }
 
 /// 建立一個新插槽:本機插槽先連到原檔(與 `.pub`),再寫帳戶記錄與本機狀態;記錄寫不進去就把連結收回。回傳插槽檔名。
@@ -910,6 +943,82 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&link).unwrap(), "mine");
         assert_eq!(a.read(&space), before);
         assert!(a.state().key_slots[&id].parked, "still not this slot's path");
+    }
+
+    /// 已經有插槽的金鑰(`existing_slot`)收到「Sync key」或「Keep on this computer」(畫面上的舊資料:重新讀取失敗之後又按了一次):不建立第二個
+    /// 插槽、不上傳、不改寫主機,說明這把金鑰已經有插槽。沿用那個插槽照常可以。
+    #[test]
+    fn a_key_that_already_has_a_slot_is_never_given_a_second_one() {
+        let (a, personal) = device("# main\n");
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        let space = a.space_path(&personal);
+        a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        setup_keys(&a.env(), true, vec![keep(&key, "id_mac")]).unwrap();
+        let id = live_slots(a.state().account.as_ref().unwrap())[0].0.clone();
+        // 又一台主機指到同一把金鑰:候選帶著那個插槽。
+        a.save_in_app(&space, &format!("{}Host db\n  IdentityFile ~/.ssh/id_mac\n", a.read(&space)));
+        assert_eq!(key_candidates(&a.env()).unwrap().keys[0].existing_slot.as_deref(), Some(id.as_str()));
+
+        for choice in [sync(&key, "again"), keep(&key, "again")] {
+            refused(&a, ALREADY_SET_UP_MESSAGE, || setup_keys(&a.env(), true, vec![choice]).map(|_| ()));
+        }
+        let state = a.state();
+        assert_eq!(live_slots(state.account.as_ref().unwrap()).len(), 1, "no second slot");
+        assert!(state.account.as_ref().unwrap().sealed.keys().all(|k| !k.starts_with("key:")), "and no key was uploaded");
+        assert_eq!(setup_keys(&a.env(), true, vec![reuse(&key, &id)]).unwrap(), vec!["db".to_string()]);
+    }
+
+    /// 「沿用」只能沿用候選帶著的那個插槽(`existing_slot`):別的插槽 id(畫面上的舊資料,或另一把金鑰的插槽)拒絕,什麼都不連、不寫、不改寫 ——
+    /// 不然這把金鑰的主機會改指到另一把金鑰的插槽,或把另一個插槽連到這把金鑰。
+    #[test]
+    fn reuse_takes_only_the_slot_the_candidate_names() {
+        let (a, personal) = device("# main\n");
+        let mac = put_key(&a, "id_mac", &test_keys::plain());
+        let work = put_key(&a, "id_work", &test_keys::ecdsa());
+        let space = a.space_path(&personal);
+        a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\nHost jump\n  IdentityFile ~/.ssh/id_work\n");
+        setup_keys(&a.env(), true, vec![keep(&work, "id_work")]).unwrap();
+        let work_slot = live_slots(a.state().account.as_ref().unwrap())[0].0.clone();
+        // `id_mac` 還沒有插槽;`id_work` 又多了一台主機,候選帶著它自己的插槽。
+        a.save_in_app(&space, &format!("{}Host db\n  IdentityFile ~/.ssh/id_work\n", a.read(&space)));
+        let found = key_candidates(&a.env()).unwrap();
+        let slot_of = |key: &Path| found.keys.iter().find(|k| k.path == key.display().to_string()).map(|k| k.existing_slot.clone());
+        assert_eq!((slot_of(&mac), slot_of(&work)), (Some(None), Some(Some(work_slot.clone()))));
+        // 另一個(帳戶裡別台發佈的)插槽。
+        let published = new_slot_id().unwrap();
+        publish_synced(&a, &published, "elsewhere");
+
+        refused(&a, OTHER_SLOT_MESSAGE, || setup_keys(&a.env(), true, vec![reuse(&mac, &work_slot)]).map(|_| ()));
+        refused(&a, OTHER_SLOT_MESSAGE, || setup_keys(&a.env(), true, vec![reuse(&work, &published)]).map(|_| ()));
+        assert_eq!(setup_keys(&a.env(), true, vec![reuse(&work, &work_slot)]).unwrap(), vec!["db".to_string()]);
+    }
+
+    /// 這台握著的插槽,沿用的捷徑(什麼都不動、直接改寫主機)只在它放的金鑰真的還在插槽路徑上時才走:連到的原檔不見了,或帳戶裡把插槽改了名(記錄說的是
+    /// 舊路徑),就不改寫主機 —— 不然一台能連線的主機會改指到沒有金鑰的插槽 —— 說明哪裡沒有金鑰。
+    #[test]
+    fn reusing_a_held_slot_whose_key_is_not_in_place_leaves_the_hosts_alone() {
+        let (a, personal) = device("# main\n");
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        let space = a.space_path(&personal);
+        a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        setup_keys(&a.env(), true, vec![sync(&key, "id_mac")]).unwrap();
+        let id = live_slots(a.state().account.as_ref().unwrap())[0].0.clone();
+        let held = a.state().key_slots[&id].clone();
+        assert!(held.source.is_some() && !held.parked);
+
+        // 原檔被搬走了;另一台主機用的是同一把金鑰的另一份(能連線)。同指紋的同步插槽就是建議沿用的那一個。
+        let copy = put_key(&a, "id_mac_copy", &test_keys::plain());
+        std::fs::remove_file(&key).unwrap();
+        a.save_in_app(&space, &format!("{}Host db\n  IdentityFile ~/.ssh/id_mac_copy\n", a.read(&space)));
+        assert_eq!(key_candidates(&a.env()).unwrap().keys[0].existing_slot.as_deref(), Some(id.as_str()));
+        refused(&a, &source_gone_message(&key.display().to_string()), || setup_keys(&a.env(), true, vec![reuse(&copy, &id)]).map(|_| ()));
+
+        // 原檔回來了,但帳戶裡的插槽改了名:記錄說的是舊路徑,新路徑上什麼都沒有。
+        std::fs::write(&key, test_keys::plain()).unwrap();
+        publish_synced(&a, &id, "renamed");
+        let renamed = home(&a).join(SLOT_DIR).join(slot_file_name("renamed", &id));
+        refused(&a, &source_gone_message(&renamed.display().to_string()), || setup_keys(&a.env(), true, vec![reuse(&copy, &id)]).map(|_| ()));
+        assert!(a.read(&space).contains("Host db\n  IdentityFile ~/.ssh/id_mac_copy\n"), "db keeps its working key");
     }
 
     /// 和帳戶裡另一個插槽同檔名、這台又沒有握著的插槽:不建議沿用(`existing_slot` 是 None)、直接要求沿用也拒絕,什麼都不連、不寫、不改寫。

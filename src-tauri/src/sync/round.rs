@@ -640,8 +640,11 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
 
     // 6b. 金鑰插槽(SP3 spec §6.2–§6.6):依合併後的帳戶與 space 記錄,在這台落地或維護插槽。檔案系統的動作做在 `work` 這份副本上,
     //     不持有任何鎖;帳戶的變更(`device.slots`、補寫的 `keyslot`/`key`)跟著下面的上傳送出;通知存進狀態、放掉鎖之後發出。
-    if let Some(home) = env.ssh_dir.parent() {
-        let slot_round = crate::sync::slots::reconcile(&mut work, &keys, home, now);
+    //     用到插槽的主機不只在勾選的 space 裡:整份 config(主 config、`~/.ssh/sshelter-local/` 的檔案……)裡用到的插槽也不收起來、不移除
+    //     (spec §4.2)。那份清單先算好(`config_slot_uses`:只在算的時候短暫拿 doc 鎖,任何檔案系統的動作之前就放掉);config 這時沒有載入
+    //     (改寫失敗之後重載也失敗,極少見)就跳過這一步 —— 不知道哪些插槽有主機用到,不能收起任何連結 —— 下一輪再做。
+    if let (Some(home), Some(in_use)) = (env.ssh_dir.parent(), crate::sync::slots::config_slot_uses(env)) {
+        let slot_round = crate::sync::slots::reconcile(&mut work, &keys, home, &in_use, now);
         if slot_round.changed || !slot_round.notices.is_empty() {
             commit(env, generation, |latest| {
                 // 帳戶區段在這一輪已經整份提交過(`commit_account`),之後只有 space 的提交:用這一輪的版本整份換掉是安全的。
