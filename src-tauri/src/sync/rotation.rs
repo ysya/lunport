@@ -2217,4 +2217,66 @@ mod tests {
             assert!(!text.contains(line), "a line of the private key is in the state file");
         }
     }
+
+    /// 更換卡住的時候(這裡是建立 chain 被限流、暫停一小時)按「Stop syncing」:拒絕。否則變更會寫進即將被換掉的舊帳戶區段 —— 複製讀的是 relay 上凍結的
+    /// 舊記錄,切換又把整個區段換成新的 —— 被丟掉;使用者看到成功,新帳戶卻還有那把私鑰,之後每一台加入或重新加入的電腦都落地它。更換做完之後才做,
+    /// `key` 在新帳戶裡才會變成 tombstone。
+    #[test]
+    fn stopping_to_sync_a_key_waits_for_the_sync_code_change_and_then_leaves_no_key_in_the_new_account() {
+        use crate::sync::account::{join_account, ROTATING_MESSAGE};
+        use crate::sync::slot_rules::{test_keys, SlotMode, SLOT_DIR};
+        use crate::sync::slots::tests::{create_slot_on, refused, use_slot};
+        use crate::sync::slots::{key_secret_key, open_key_secret, set_mode, slot};
+        use crate::sync::spaces::select_space;
+        let (relay, clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+
+        // 更換卡在建立 chain 被限流(暫停一小時):使用者在這段時間按「Stop syncing」。
+        start_rotation(&a.env()).unwrap();
+        let next = new_code(&a);
+        tick(&a);
+        tick(&a);
+        assert_eq!(step(&a), Some(RotationStep::Copying));
+        relay.fail_creates_with_429(1);
+        tick(&a);
+        assert!(a.state().rotation.unwrap().paused_until_ms.is_some(), "the change is stalled");
+        refused(&a, ROTATING_MESSAGE, || set_mode(&a.env(), &id, SlotMode::Own));
+
+        // 更換做完:新帳戶帶著同步的金鑰(複製的是更換開始時的記錄)。
+        clock.advance(2 * CREATE_PAUSE_MS);
+        finish(&a);
+        let keys = a.runtime.core.lock().unwrap().account_keys.clone().unwrap();
+        let account = a.state().account.unwrap();
+        assert_eq!(slot(&account, &id).map(|p| p.mode), Some(SlotMode::Synced));
+        assert_eq!(open_key_secret(&account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()));
+
+        // 現在才停止同步:新帳戶裡(A 的快取與 relay 上)的 `key` 是 tombstone,沒有任何祕密。
+        set_mode(&a.env(), &id, SlotMode::Own).unwrap();
+        settle(&a);
+        let account = a.state().account.unwrap();
+        assert_eq!(slot(&account, &id).map(|p| p.mode), Some(SlotMode::Own));
+        assert_eq!(open_key_secret(&account, &keys, &id), None);
+        let on_relay = merge_account(&AccountState::new(&keys.chain_id), &keys, &relay.pull(&keys.chain_id, &keys.auth_token, 0).unwrap()).section;
+        let tombstone = on_relay.sealed[&key_secret_key(&keys, &id)].open(&keys).unwrap();
+        assert!(tombstone.deleted && tombstone.payload.is_null(), "the key record on the relay carries no secret");
+        assert_eq!(slot(&on_relay, &id).map(|p| p.mode), Some(SlotMode::Own));
+
+        // 有副本的 B 重新加入:照舊留著它(停止同步不刪別台的副本),不再有同步的金鑰。之後才加入的 C 沒有金鑰可以落地。
+        settle(&b);
+        rejoin_account(&b.env(), &next).unwrap();
+        settle(&b);
+        let copy = b.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), test_keys::plain(), "B keeps its copy");
+        assert_eq!(open_key_secret(b.state().account.as_ref().unwrap(), &keys, &id), None);
+        let c = TestDevice::new("c", &relay, &clock);
+        join_account(&c.env(), &next, "MacBook-C").unwrap();
+        let new_personal = entry_named(&a, "Personal").id;
+        select_space(&c.env(), &new_personal).unwrap();
+        let _ = sync_once(&c.env());
+        assert!(c.read(&c.space_path(&new_personal)).contains(&file), "the host is there");
+        assert!(!c.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file).exists(), "no key was landed on the computer that joined later");
+    }
 }

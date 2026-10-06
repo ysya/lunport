@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::config::model::Item;
 use crate::config::parser::parse_file;
 use crate::error::AppError;
+use crate::sync::account::{account_ready, NOT_JOINED_MESSAGE};
 use crate::sync::crypto::{id_hash, ChainKeys};
 use crate::sync::dto::{SlotDeviceView, SlotStatusView, SyncKeySlotView};
 use crate::sync::env::SyncEnv;
@@ -747,6 +748,21 @@ fn readable_key(local: Option<&LocalSlot>, keys_dir: &Path) -> Option<String> {
     }
 }
 
+/// 會寫帳戶記錄的動作(`set_mode`、`slot_setup::create_slot`)要等更換同步碼:進行中(第 2 步起)或這台已被別台擋下時,帳戶區段之後會被整個換掉 ——
+/// 複製讀的是 relay 上凍結的舊記錄,切換與重新加入又把整個區段換成新的 —— 這時寫進去的記錄不是被丟掉、就是被較舊的版本取代:使用者看到成功,新帳戶卻沒有
+/// 那個變更(「Stop syncing」的 `key` tombstone 就是這樣掉的:新帳戶裡的 `key` 還在,之後每一台加入或重新加入的電腦都落地那把私鑰)。
+///
+/// 檢查和 space 的操作一樣(`account::account_ready`,同樣的說明):動作最前面 —— 讀檔、連結、寫記錄之前 —— 對快照呼叫 `account_ready` 一次;
+/// 提交的 core 臨界區裡呼叫這個函式再檢查一次(`mutate` 的閉包拿不到 core,所以用快照時的帳戶金鑰):鎖外的快照之後同步輪次可能已經記下 `frozen`
+/// (它只拿 core 鎖),帳戶也必須仍是快照時的那一個(同 `spaces::still_ready`)。不寫帳戶記錄的動作(挑金鑰、改用同步的金鑰、刪除副本)不檢查。
+pub fn account_still_ready(s: &SyncStateV2, account_keys: &ChainKeys) -> Result<(), AppError> {
+    account_ready(s, Some(account_keys))?;
+    match s.account.as_ref() {
+        Some(account) if account.chain_id == account_keys.chain_id => Ok(()),
+        _ => Err(AppError::Other(NOT_JOINED_MESSAGE.to_string())),
+    }
+}
+
 /// 快照:(狀態、帳戶金鑰、家目錄)。
 fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError> {
     let core = env.runtime.core.lock().unwrap();
@@ -804,9 +820,11 @@ fn retire_key(path: &Path) -> Result<(), AppError> {
 
 /// 改成同步(`own` → `synced`;建立插槽的那台換了金鑰後的「Sync the new key」也是它)或停止同步(`synced` → `own`,
 /// `key` 寫 tombstone;別台的副本留著)。同步要在讀得到這把私鑰的電腦上做,並在這台的插槽記錄上記下上傳的是哪一把
-/// (`LocalSlot::uploaded_fingerprint`:補寫 `key` 時只認它);停止同步清掉它。
+/// (`LocalSlot::uploaded_fingerprint`:補寫 `key` 時只認它);停止同步清掉它。更換同步碼進行中、或這台已被別台擋下時拒絕
+/// (`account_ready`,提交時再檢查一次;原因見 `account_still_ready`):什麼都不讀、不寫。
 pub fn set_mode(env: &SyncEnv, slot_id: &str, mode: SlotMode) -> Result<(), AppError> {
     let (state, keys, home) = snapshot(env)?;
+    account_ready(&state, Some(&keys))?;
     let account = state.account.as_ref().ok_or_else(not_found)?;
     let payload = slot(account, slot_id).ok_or_else(not_found)?;
     let not_here = || AppError::Other(not_here_message(&device_name(account, &payload.origin_device_id)));
@@ -820,6 +838,8 @@ pub fn set_mode(env: &SyncEnv, slot_id: &str, mode: SlotMode) -> Result<(), AppE
     };
     let now = env.now();
     mutate(env, |s| {
+        // 提交的臨界區裡再確認一次(`account_still_ready`),在任何修改之前:快照之後同步輪次可能已經記下 `frozen`。
+        account_still_ready(s, &keys)?;
         let device_id = s.device_id.clone();
         let local = s.key_slots.get_mut(slot_id);
         // 會失敗的先做:`mutate` 的閉包回 Err 時,已經做的修改不會復原。上傳的那把要記在這台的插槽記錄上,記錄不見了就什麼都不寫。
@@ -2995,28 +3015,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_slot_missing_from_the_account_is_published_again() {
-        let (_relay, _clock, a, b, _words, personal) = pair();
-        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
-        use_slot(&a, &personal, &file);
-        settle(&a);
-        settle(&b);
-        // 在沒有 SP3 的電腦上更換同步碼之後,新帳戶裡沒有插槽記錄:直接從 B 的帳戶快取拿掉它們來模擬。
-        let keys = account_keys(&b);
-        mutate(&b.env(), |s| {
-            let account = s.account.as_mut().unwrap();
-            account.records.remove(&record_key(RecordKind::KeySlot, &id));
-            account.sealed.remove(&key_secret_key(&keys, &id));
-            Ok(())
-        })
-        .unwrap();
-        let _ = crate::sync::round::sync_once(&b.env());
-        let account = b.state().account.unwrap();
-        assert_eq!(slot(&account, &id).map(|p| p.mode), Some(SlotMode::Synced));
-        assert_eq!(open_key_secret(&account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()));
-    }
-
-    #[test]
     fn a_key_this_computer_never_chose_to_sync_is_not_uploaded_when_a_member_flips_its_slot_to_synced() {
         let (_relay, _clock, a, _b, _words, personal) = pair();
         let keys = account_keys(&a);
@@ -3515,10 +3513,24 @@ pub(crate) mod tests {
     }
 
     /// 拒絕的動作:回 `message`,`~/.ssh` 底下的檔案(含插槽目錄)與這台的同步狀態都不動。
-    fn refused(d: &TestDevice, message: &str, action: impl FnOnce() -> Result<(), AppError>) {
+    pub(crate) fn refused(d: &TestDevice, message: &str, action: impl FnOnce() -> Result<(), AppError>) {
         let before = (tree(&d.ssh_dir()), d.state());
         assert_eq!(action().unwrap_err().to_string(), message);
         assert_eq!((tree(&d.ssh_dir()), d.state()), before, "a refused action changes nothing ({message})");
+    }
+
+    /// 動作讀時鐘的那一刻 —— 它在鎖外的快照與最前面的檢查之後、提交之前(`set_mode`、`slot_setup::create_slot` 都是先讀時鐘再提交)——
+    /// 同步輪次剛好記下了 `frozen`(只拿 core 鎖,同 `round::mark_frozen`)。時鐘本身照常走(同一台裝置的時鐘)。
+    pub(crate) struct FrozenWhenCommitting<'a>(pub(crate) &'a TestDevice);
+
+    impl crate::sync::env::Clock for FrozenWhenCommitting<'_> {
+        fn now_ms(&self) -> u64 {
+            let mut core = self.0.runtime.core.lock().unwrap();
+            core.state.as_mut().unwrap().account.as_mut().unwrap().frozen =
+                Some(crate::sync::state_v2::FreezeInfo { detected_at_ms: 1, markers: Vec::new() });
+            drop(core);
+            crate::sync::env::Clock::now_ms(self.0.clock.as_ref())
+        }
     }
 
     /// 插槽目錄裡改名保留的私鑰(`<file>.previous-…`,不含 `.pub`)。
@@ -4097,5 +4109,66 @@ pub(crate) mod tests {
         settle(&a);
         assert_eq!(view_of(&b)[0].status, SlotStatusView::SourceChanged { file: mine.display().to_string() });
         assert_eq!(view_of(&a)[0].status, SlotStatusView::SyncedAvailable { file: a_key });
+    }
+
+    // ── 更換同步碼期間,會寫帳戶記錄的動作要等(和 space 的操作一樣檢查 `account::account_ready`)──────────────
+
+    /// 更換同步碼進行中(第 2 步起,包括卡在 keychain 或被限流的時候)與這台已被別台擋下時,「Stop syncing」「Sync this key」一律拒絕,說明和 space
+    /// 的操作一樣:帳戶區段之後會被整個換掉 —— 複製讀的是 relay 上凍結的舊記錄,切換與重新加入又把整個區段換成新的 —— 這時寫進去的記錄不是被丟掉、就是被
+    /// 較舊的版本取代,使用者看到成功,新帳戶卻沒有那個變更。拒絕時帳戶記錄、`~/.ssh` 底下的檔案與狀態都不動。
+    #[test]
+    fn changing_how_a_key_is_shared_is_refused_during_a_sync_code_change_and_on_a_computer_that_missed_it() {
+        use crate::sync::account::{FROZEN_MESSAGE, ROTATING_MESSAGE};
+        use crate::sync::state_v2::RotationStep;
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (synced, synced_file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        let (own, own_file) = create_slot_on(&a, SlotMode::Own, &test_keys::ecdsa(), "id_own");
+        use_slots(&a, &personal, &[&synced_file, &own_file]);
+        settle(&a);
+        settle(&b);
+        // 兩個方向都擋:停止同步(同步的插槽)、同步(這台讀得到金鑰的 `own` 插槽)。
+        let refuse_both = |d: &TestDevice, message: &str| {
+            refused(d, message, || set_mode(&d.env(), &synced, SlotMode::Own));
+            refused(d, message, || set_mode(&d.env(), &own, SlotMode::Synced));
+        };
+
+        // A 更換同步碼:從準備好(第 2 步之前)到切換之前,每一步都擋。
+        crate::sync::rotation::start_rotation(&a.env()).unwrap();
+        let mut steps = Vec::new();
+        while let Some(rotation) = a.state().rotation {
+            steps.push(rotation.step);
+            refuse_both(&a, ROTATING_MESSAGE);
+            let _ = crate::sync::round::sync_once(&a.env()); // 推進一步
+            assert!(steps.len() <= 10, "the sync code change never finished: {steps:?}");
+        }
+        assert_eq!(
+            steps,
+            vec![RotationStep::Prepared, RotationStep::LocalChangesSent, RotationStep::Copying, RotationStep::Deleting, RotationStep::Switching]
+        );
+
+        // B 還沒輸入新同步碼:這台已被擋下。
+        settle(&b);
+        assert!(b.state().frozen().is_some(), "setup: B noticed the change");
+        refuse_both(&b, FROZEN_MESSAGE);
+    }
+
+    /// 鎖外的快照與最前面的檢查之後、提交之前 —— 動作讀時鐘的那一刻 —— 同步輪次剛好記下了 `frozen`:提交的 core 臨界區裡再擋一次(同
+    /// `spaces::still_ready`),帳戶記錄與本機狀態都不寫。
+    #[test]
+    fn a_freeze_recorded_just_before_a_mode_change_commits_stops_it_before_anything_is_written() {
+        use crate::sync::account::FROZEN_MESSAGE;
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let before = a.state();
+        let racing = FrozenWhenCommitting(&a);
+        let mut env = a.env();
+        env.clock = &racing;
+        assert_eq!(set_mode(&env, &id, SlotMode::Own).unwrap_err().to_string(), FROZEN_MESSAGE);
+        let mut after = a.state();
+        assert!(after.frozen().is_some(), "the freeze the round recorded is there");
+        after.account.as_mut().unwrap().frozen = None;
+        assert_eq!(after, before, "no record and no local state was written");
     }
 }

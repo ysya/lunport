@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::commands::persist_file;
 use crate::config::model::{Item, SshConfigDoc};
 use crate::error::AppError;
+use crate::sync::account::account_ready;
 use crate::sync::crypto::ChainKeys;
 use crate::sync::env::SyncEnv;
 use crate::sync::merge::space_entry;
@@ -20,7 +21,7 @@ use crate::sync::slot_rules::{
     IdentityTarget, KeySlotPayload, SlotMode, SLOT_DIR, SLOT_SCHEMA,
 };
 use crate::sync::slots::{
-    contested_and_not_held, in_the_way_message, live_slots, local_key_fingerprint, put_key_secret, put_slot, slot,
+    account_still_ready, contested_and_not_held, in_the_way_message, live_slots, local_key_fingerprint, put_key_secret, put_slot, slot,
     write_linked_public, CONTESTED_MESSAGE,
 };
 use crate::sync::state_v2::{LocalSlot, SlotSource, SyncStateV2};
@@ -312,18 +313,19 @@ fn rewrite_in(
 ///
 /// 任何一個決定做不成(名字不合規、金鑰不能同步、插槽路徑上有別人的東西……)就在那裡回錯誤:那個決定什麼都沒留下,後面的決定
 /// 與所有主機的改寫都不做;前面的決定已經建好的插槽留著,下一次掃描會建議沿用(和改寫撞到 `Conflict` 時一樣)。
+///
+/// 更換同步碼進行中(第 2 步起)、或這台已被別台擋下時整個拒絕(`account_ready`,說明同 space 的操作):建立插槽要寫 `keyslot`/`key`,那些記錄之後
+/// 會隨舊帳戶區段一起被換掉(原因見 `slots::account_still_ready`)。一開始就檢查 —— 讀任何檔案、連結、改寫主機之前;`create_slot` 提交的 core 臨界區裡再檢查一次。
 pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Result<Vec<String>, AppError> {
     refuse_while_sync_inactive(active, env.runtime)?;
+    let account_keys = {
+        let core = env.runtime.core.lock().unwrap();
+        let s = core.state.as_ref().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+        account_ready(s, core.account_keys.as_ref())?;
+        core.account_keys.clone().expect("checked by account_ready")
+    };
     let home = home_of(env)?;
     let keys_dir = home.join(SLOT_DIR);
-    let account_keys = env
-        .runtime
-        .core
-        .lock()
-        .unwrap()
-        .account_keys
-        .clone()
-        .ok_or_else(|| AppError::Other("join a sync account first".to_string()))?;
     let current = key_candidates(env)?;
     let mut planned: Vec<(PathBuf, String)> = Vec::new();
     for choice in choices {
@@ -469,6 +471,9 @@ fn create_slot(
     let link = link_free_slot(keys_dir, &slot_path, Path::new(&candidate.path))?;
     let now = env.now();
     let result = mutate(env, |s| {
+        // 提交的臨界區裡再確認一次(`account_still_ready`),在任何修改之前:`setup_keys` 一開始的檢查之後同步輪次可能已經記下 `frozen`。回 Err 的話,
+        // 剛連結的插槽由下面收回。
+        account_still_ready(s, account_keys)?;
         let device_id = s.device_id.clone();
         let account = s.account.as_mut().ok_or_else(|| AppError::Other("join a sync account first".to_string()))?;
         // 會失敗的先做:`mutate` 的閉包回 Err 時,已經做的修改不會復原。
@@ -524,6 +529,7 @@ mod tests {
     use crate::sync::round::tests::{pair, settle};
     use crate::sync::slot_rules::{public_path, test_keys, REASON_PUBLIC_KEY, REASON_TOKENS};
     use crate::sync::slots::live_slots;
+    use crate::sync::slots::tests::{refused, FrozenWhenCommitting};
     use crate::sync::testkit::{AppliedProbe, TestClock, TestDevice};
 
     /// 一台已建立帳戶的裝置(Personal),主 config 是 `main`;回傳(裝置、Personal 的 id)。
@@ -1013,5 +1019,73 @@ mod tests {
         assert_eq!(setup_keys(&a.env(), true, vec![reuse(&key, &id)]).unwrap(), vec!["db".to_string()]);
         assert_eq!(a.read(&work_file), format!("Host db\n  IdentityFile ~/.ssh/sshelter/keys/{file}\n"));
         assert_eq!(live_slots(a.state().account.as_ref().unwrap()).len(), 1, "no second slot");
+    }
+
+    // ── 更換同步碼期間,建立插槽(寫 `keyslot`/`key`)要等(和 space 的操作一樣檢查 `account::account_ready`)──────────
+
+    /// 更換同步碼進行中(第 2 步起)與這台已被別台擋下時,設定金鑰 —— 建立插槽會寫 `keyslot`/`key` —— 一律拒絕,說明和 space 的操作一樣:帳戶區段之後會被整個
+    /// 換掉,寫進去的記錄不是被丟掉、就是被較舊的版本取代。拒絕時什麼都沒建立、沒連結、沒改寫主機,狀態與 `~/.ssh` 底下的檔案都不動。
+    #[test]
+    fn setup_is_refused_during_a_sync_code_change_and_on_a_computer_that_missed_it() {
+        use crate::sync::account::{FROZEN_MESSAGE, ROTATING_MESSAGE};
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        // 各有一把只在自己這台的金鑰,各有一台主機指到它(同一個 space)。
+        let mac = put_key(&a, "id_mac", &test_keys::plain());
+        let work = put_key(&b, "id_work", &test_keys::ecdsa());
+        a.save_in_app(&a.space_path(&personal), "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        settle(&a);
+        settle(&b);
+        b.save_in_app(&b.space_path(&personal), &format!("{}Host db\n  IdentityFile ~/.ssh/id_work\n", b.read(&b.space_path(&personal))));
+        settle(&b);
+        settle(&a);
+        assert_eq!(key_candidates(&a.env()).unwrap().keys.len(), 1, "setup: A is offered its own key");
+        assert_eq!(key_candidates(&b.env()).unwrap().keys.len(), 1, "setup: B is offered its own key");
+
+        // A 更換同步碼:從準備好(第 2 步之前)到切換之前,每一步都擋 —— 「Sync key」與「Keep on this computer」一樣。
+        crate::sync::rotation::start_rotation(&a.env()).unwrap();
+        let mut steps = 0;
+        while a.state().rotation.is_some() {
+            refused(&a, ROTATING_MESSAGE, || setup_keys(&a.env(), true, vec![sync(&mac, "id_mac")]).map(|_| ()));
+            refused(&a, ROTATING_MESSAGE, || setup_keys(&a.env(), true, vec![keep(&mac, "id_mac")]).map(|_| ()));
+            let _ = crate::sync::round::sync_once(&a.env()); // 推進一步
+            steps += 1;
+            assert!(steps <= 10, "the sync code change never finished");
+        }
+        assert_eq!(steps, 5, "every step of the change was checked");
+        assert!(live_slots(a.state().account.as_ref().unwrap()).is_empty() && a.state().key_slots.is_empty(), "nothing was created");
+
+        // B 還沒輸入新同步碼:這台已被擋下。
+        settle(&b);
+        assert!(b.state().frozen().is_some(), "setup: B noticed the change");
+        refused(&b, FROZEN_MESSAGE, || setup_keys(&b.env(), true, vec![sync(&work, "id_work")]).map(|_| ()));
+        refused(&b, FROZEN_MESSAGE, || setup_keys(&b.env(), true, vec![keep(&work, "id_work")]).map(|_| ()));
+        assert!(live_slots(b.state().account.as_ref().unwrap()).is_empty() && b.state().key_slots.is_empty(), "nothing was created");
+    }
+
+    /// 鎖外的檢查之後、`create_slot` 寫帳戶記錄之前 —— 它讀時鐘的那一刻 —— 同步輪次剛好記下了 `frozen`:提交的 core 臨界區裡再擋一次(同
+    /// `spaces::still_ready`),帳戶記錄與本機狀態都不寫,剛連結的插槽(與 `.pub`)收回,主機不改寫。
+    #[test]
+    fn a_freeze_recorded_just_before_a_slot_is_created_leaves_nothing_behind() {
+        use crate::sync::account::FROZEN_MESSAGE;
+        for synced in [true, false] {
+            let (a, personal) = device("# main\n");
+            let key = put_key(&a, "id_mac", &test_keys::plain());
+            let space = a.space_path(&personal);
+            a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+            let (before, hosts) = (a.state(), a.read(&space));
+
+            let racing = FrozenWhenCommitting(&a);
+            let mut env = a.env();
+            env.clock = &racing;
+            let choice = if synced { sync(&key, "id_mac") } else { keep(&key, "id_mac") };
+            assert_eq!(setup_keys(&env, true, vec![choice]).unwrap_err().to_string(), FROZEN_MESSAGE, "synced: {synced}");
+            let mut after = a.state();
+            assert!(after.frozen().is_some(), "the freeze the round recorded is there");
+            after.account.as_mut().unwrap().frozen = None;
+            assert_eq!(after, before, "no record and no local state was written (synced: {synced})");
+            assert_eq!(a.read(&space), hosts, "the host was not rewritten (synced: {synced})");
+            let keys_dir = home(&a).join(SLOT_DIR);
+            assert!(!keys_dir.exists() || std::fs::read_dir(&keys_dir).unwrap().next().is_none(), "the link and its .pub were taken back (synced: {synced})");
+        }
     }
 }
