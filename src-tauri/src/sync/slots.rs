@@ -2995,6 +2995,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_slot_missing_from_the_account_is_published_again() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        // 在沒有 SP3 的電腦上更換同步碼之後,新帳戶裡沒有插槽記錄:直接從 B 的帳戶快取拿掉它們來模擬。
+        let keys = account_keys(&b);
+        mutate(&b.env(), |s| {
+            let account = s.account.as_mut().unwrap();
+            account.records.remove(&record_key(RecordKind::KeySlot, &id));
+            account.sealed.remove(&key_secret_key(&keys, &id));
+            Ok(())
+        })
+        .unwrap();
+        let _ = crate::sync::round::sync_once(&b.env());
+        let account = b.state().account.unwrap();
+        assert_eq!(slot(&account, &id).map(|p| p.mode), Some(SlotMode::Synced));
+        assert_eq!(open_key_secret(&account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()));
+    }
+
+    #[test]
     fn a_key_this_computer_never_chose_to_sync_is_not_uploaded_when_a_member_flips_its_slot_to_synced() {
         let (_relay, _clock, a, _b, _words, personal) = pair();
         let keys = account_keys(&a);

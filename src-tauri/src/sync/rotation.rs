@@ -443,7 +443,8 @@ fn old_account_snapshot(keys: &ChainKeys, relay: &dyn RelayApi) -> Result<crate:
 /// 第 4、5 步:從凍結的 relay 取完整快照(來源是 relay,不是本機快取 —— 包含別台已上傳的修改與這台尚待核准的記錄)
 /// → `PUT` 新帳戶與每個新 space chain(`429` 就暫停到下個小時)→ 每個 space 的記錄以新金鑰重新加密上傳(保留
 /// version、updated_at_ms、device_id 與 tombstone)→ 新帳戶寫入 `space`(含 `previous_id`)、`spacekey`、這台的
-/// `device` 與帳戶 `meta`。每完成一個 space 就記下;重跑時已寫過的列回 conflict,視為已複製。
+/// `device`、帳戶 `meta`,以及舊帳戶的 `keyslot`(原樣)與 `key`(以新帳戶金鑰重新加密;SP3 spec §6.6)。每完成一個 space 就記下;
+/// 重跑時已寫過的列回 conflict,視為已複製。
 fn copy(env: &SyncEnv, s: &SyncStateV2, keys: &ChainKeys, rotation: &RotationProgress, relay: &dyn RelayApi) -> Result<Stepped, StepError> {
     let (_, new_account) = new_words(env, rotation)?;
     let old = old_account_snapshot(keys, relay)?.section;
@@ -564,6 +565,20 @@ fn copy(env: &SyncEnv, s: &SyncStateV2, keys: &ChainKeys, rotation: &RotationPro
     }
     selected_new.sort();
     plan_device(&mut section, &s.device_id, &s.device_name, env.platform, &selected_new, now);
+    // SP3 spec §6.6:金鑰插槽跟著搬 —— `keyslot` 原樣(含 tombstone,別台才不會把刪掉的插槽補寫回來),`key` 以舊帳戶金鑰
+    // 解開、新帳戶金鑰重新加密;版本、時間戳、裝置不變。私鑰只在這個迴圈裡以明文存在於記憶體,離開這裡就是新帳戶金鑰的密文。
+    // `key` 在 `merge_account` 時已經解開驗證過,讀不開的(實際上不會有)略過:一筆壞記錄不能卡住已經凍結、不能取消的更換。
+    for local in old.records.values().filter(|l| l.record.kind == RecordKind::KeySlot) {
+        section.records.insert(
+            crate::sync::record::record_key(RecordKind::KeySlot, &local.record.id),
+            crate::sync::record::LocalRecord { record: local.record.clone(), seq: 0, dirty: true },
+        );
+    }
+    for sealed in old.sealed.values().filter(|s| s.envelope.kind == RecordKind::Key.as_str()) {
+        let Ok(record) = sealed.open(keys) else { continue };
+        let moved = SealedRecord::seal(&new_account, &record, 0)?;
+        section.sealed.insert(moved.key(), moved);
+    }
     let outgoing = account_outgoing(&section, &new_account)?;
     if let Some(e) = push_outgoing(relay, &new_account.chain_id, &new_account.auth_token, &outgoing).error {
         return Err(e.into());
@@ -2093,5 +2108,113 @@ mod tests {
         assert!(done.promoted);
         assert_eq!(a.keychain.entry(MNEMONIC_ACCOUNT), Some(next));
         start_rotation(&a.env()).unwrap();
+    }
+
+    #[test]
+    fn changing_the_sync_code_carries_the_key_slots() {
+        use crate::sync::slot_rules::{test_keys, SlotMode, SLOT_DIR};
+        use crate::sync::slots::tests::{create_slot_on, use_slot};
+        use crate::sync::slots::{live_slots, open_key_secret};
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+
+        start_rotation(&a.env()).unwrap();
+        let next = new_code(&a);
+        finish(&a);
+        let account = a.state().account.unwrap();
+        assert_eq!(live_slots(&account).iter().map(|(i, _)| i.clone()).collect::<Vec<_>>(), vec![id.clone()]);
+        let keys = a.env().runtime.core.lock().unwrap().account_keys.clone().unwrap();
+        assert_eq!(open_key_secret(&account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()));
+
+        // B 以新同步碼重新加入:插槽還在,副本照常。
+        settle(&b);
+        rejoin_account(&b.env(), &next).unwrap();
+        settle(&b);
+        assert_eq!(live_slots(b.state().account.as_ref().unwrap())[0].0, id);
+        let copy = b.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file);
+        assert_eq!(std::fs::read_to_string(copy).unwrap(), test_keys::plain());
+    }
+
+    /// `changing_the_sync_code_carries_the_key_slots` 證明不了複製步驟:更換之後這台自己的下一輪會把還有主機在用的插槽補寫回新帳戶
+    /// (`slots::reconcile`),複製漏掉了也看不出來。所以這個測試在剛複製完、還沒有任何一輪跑過的時候,直接讀 relay 上的新帳戶
+    /// (SP3 spec §6.6):每一筆 `keyslot` 原樣(含 tombstone)、每一筆 `key` 改以新帳戶金鑰加密,version、時間戳、裝置都不變 ——
+    /// 沒有主機用到的插槽也一樣(補寫幫不了它們)。
+    #[test]
+    fn the_copy_carries_every_key_slot_record_and_seals_the_keys_for_the_new_account() {
+        use crate::sync::record::record_key;
+        use crate::sync::slot_rules::{test_keys, SlotMode};
+        use crate::sync::slots::tests::create_slot_on;
+        use crate::sync::slots::{key_secret_key, live_slots, open_key_secret, put_key_secret, put_slot, slot, slot_record_exists};
+        let (relay, clock, a, b, _words, _personal) = pair();
+        // B 建的三個插槽,沒有任何主機用到:同步的(後來又寫過一版)、每台電腦用自己的金鑰的、同步過又刪掉的。
+        let (synced, _) = create_slot_on(&b, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        let (own, _) = create_slot_on(&b, SlotMode::Own, &test_keys::ecdsa(), "id_own");
+        let (gone, _) = create_slot_on(&b, SlotMode::Synced, &test_keys::ecdsa(), "id_old");
+        let b_keys = b.runtime.core.lock().unwrap().account_keys.clone().unwrap();
+        let b_env = b.env();
+        let now = b_env.now();
+        mutate(&b_env, |s| {
+            let me = s.device_id.clone();
+            let account = s.account.as_mut().unwrap();
+            let payload = slot(account, &synced).expect("the slot is there");
+            put_slot(account, &synced, Some(&payload), &me, now);
+            put_key_secret(account, &b_keys, &synced, Some(&test_keys::plain()), &me, now)?;
+            put_slot(account, &gone, None, &me, now);
+            put_key_secret(account, &b_keys, &gone, None, &me, now)
+        })
+        .unwrap();
+        settle(&b);
+        settle(&a);
+        // 更換發生在這些記錄寫下很久以後:重新寫一筆的話,時間戳一定對不上。
+        clock.advance(60_000);
+
+        let old_keys = a.runtime.core.lock().unwrap().account_keys.clone().unwrap();
+        start_rotation(&a.env()).unwrap();
+        let next = new_code(&a);
+        for _ in 0..3 {
+            tick(&a); // 第 2 步、第 3 步、第 4 至 5 步
+        }
+        assert_eq!(step(&a), Some(RotationStep::Deleting), "the copy is done and no round has run since");
+
+        let new_keys = crypto::derive_account(&next).unwrap();
+        let new = merge_account(&AccountState::new(&new_keys.chain_id), &new_keys, &relay.pull(&new_keys.chain_id, &new_keys.auth_token, 0).unwrap()).section;
+        let old = old_account_snapshot(&old_keys, relay.as_ref()).unwrap().section;
+        let old_slots: Vec<_> = old.records.values().filter(|l| l.record.kind == RecordKind::KeySlot).collect();
+        assert_eq!(old_slots.len(), 3, "the three slots, one of them a tombstone");
+        for local in old_slots {
+            let carried = new.records.get(&record_key(RecordKind::KeySlot, &local.record.id)).expect("every keyslot is carried");
+            assert_eq!(carried.record, local.record, "a keyslot arrives as it was: payload, version, timestamp, device, tombstone");
+        }
+        let old_secrets: Vec<Record> =
+            old.sealed.values().filter(|s| s.envelope.kind == RecordKind::Key.as_str()).map(|s| s.open(&old_keys).unwrap()).collect();
+        assert_eq!(old_secrets.len(), 2, "the synced slot's key and the deleted slot's tombstone; a slot every computer fills itself has none");
+        for record in old_secrets {
+            let carried = new.sealed.get(&key_secret_key(&new_keys, &record.id)).expect("every key is carried").open(&new_keys);
+            assert_eq!(carried.ok().as_ref(), Some(&record), "a key is sealed again for the new account, nothing else changes");
+        }
+
+        // 不是因為什麼都沒有才相等:同步的那把以新帳戶金鑰讀得出來,是 B 寫的第 2 版;刪掉的插槽留著 tombstone,沒有人會把它補寫回來。
+        let mut live: Vec<String> = live_slots(&new).into_iter().map(|(id, _)| id).collect();
+        live.sort();
+        let mut expected = vec![synced.clone(), own.clone()];
+        expected.sort();
+        assert_eq!(live, expected);
+        assert_eq!(open_key_secret(&new, &new_keys, &synced).as_deref(), Some(test_keys::plain().as_str()));
+        let carried_key = new.sealed[&key_secret_key(&new_keys, &synced)].open(&new_keys).unwrap();
+        assert_eq!((carried_key.version, carried_key.device_id), (2, b.state().device_id));
+        assert!(!new.sealed.contains_key(&key_secret_key(&new_keys, &own)), "no key record is made up for a slot that has none");
+        assert!(slot_record_exists(&new, &gone) && open_key_secret(&new, &new_keys, &gone).is_none());
+        assert!(new.records.keys().all(|k| !k.starts_with("key:")), "a key is never a plaintext record");
+
+        // 做完之後狀態檔裡的金鑰仍是密文。
+        finish(&a);
+        let text = std::fs::read_to_string(a.env().state_path).unwrap();
+        assert!(text.contains(&key_secret_key(&new_keys, &synced)), "the sealed key is in the state file");
+        for line in test_keys::PLAIN_BODY {
+            assert!(!text.contains(line), "a line of the private key is in the state file");
+        }
     }
 }
