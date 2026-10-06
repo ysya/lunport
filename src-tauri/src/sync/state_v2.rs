@@ -218,8 +218,9 @@ pub struct LocalSlot {
     /// 這台電腦自己把哪一把金鑰(指紋)上傳成這個插槽的同步金鑰:只有這台的使用者在這台選了同步它(建立插槽時選「Sync key」、
     /// 或之後的「Sync this key」「Sync the new key」)才會設定,帳戶裡別人的變更不會動它。補寫 `key`(spec §6.6)時,連到本機金鑰的
     /// 插槽只認它:`payload` 是帳戶裡最新的 `keyslot`,帳戶裡的任何成員都改得動(改成 `synced`、填上公開的指紋),證明不了使用者
-    /// 同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。建立或加入帳戶時一律清掉(`account::install_account`,同一個同步碼
-    /// 重新加入也一樣):在之前的帳戶裡同意的,不算同意上傳到這個帳戶。更換同步碼是同一個帳戶的延續,照舊(`rotation::install_new_account`)。
+    /// 同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。建立或加入另一個帳戶時清掉(`account::install_account`:記錄學到的帳戶
+    /// `learned_in` 不是加入的那一個):在別的帳戶裡同意的,不算同意上傳到這個帳戶;用同一個同步碼重新加入同一個帳戶照舊。更換同步碼是同一個
+    /// 帳戶的延續,也照舊(`rotation::install_new_account`)。
     #[serde(default)]
     pub uploaded_fingerprint: Option<String>,
     /// 這個插槽的連結收起來了:沒有主機用到而拿掉了連結檔,或路徑上被換成了別的檔案(`slots::park_link`);有主機用到的 symlink 插槽,

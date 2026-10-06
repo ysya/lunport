@@ -3232,8 +3232,8 @@ pub(crate) mod tests {
         assert!(!account.sealed.contains_key(&key_secret_key(&keys, &id)), "the copy from the old account is never uploaded");
     }
 
-    /// 離開帳戶 A、再以同一個同步碼加入 A、勾選 Personal:插槽在 A 裡照常(連結在、Ready、在帳戶裡、這台的 `device.slots` 列著它),之後帳戶掉了它
-    /// (沒有 SP3 的電腦更換了同步碼)也照常補寫 `keyslot`。加入帳戶一律清掉這台同意上傳的那把(同一個帳戶也一樣):`key` 要等這台再同意一次才補。
+    /// 離開帳戶 A、再以同一個同步碼加入 A、勾選 Personal:插槽在 A 裡照常(連結在、Ready、在帳戶裡、這台的 `device.slots` 列著它)。同一個帳戶的
+    /// 成員還是同一批:這台在 A 裡同意上傳的那把照舊,之後帳戶掉了這個插槽(沒有 SP3 的電腦更換了同步碼)也照常補寫 `keyslot` 與 `key`。
     #[test]
     fn leaving_and_joining_the_same_account_again_keeps_the_slot_working() {
         let (_relay, _clock, a, _b, words, personal) = pair();
@@ -3250,7 +3250,11 @@ pub(crate) mod tests {
         assert!(matches!(row.status, SlotStatusView::Ready { synced_copy: false, .. }), "{:?}", row.status);
         assert!(row.in_account);
         assert_eq!(device_slots_seen_by(&a, &a).iter().map(|s| s.slot_id.as_str()).collect::<Vec<_>>(), vec![id.as_str()]);
-        assert_eq!(a.state().key_slots[&id].uploaded_fingerprint, None, "joining clears the consent, even to the same account");
+        assert_eq!(
+            a.state().key_slots[&id].uploaded_fingerprint.as_deref(),
+            Some(test_keys::PLAIN_FINGERPRINT),
+            "rejoining the same account keeps the consent"
+        );
 
         let keys = account_keys(&a);
         let mut state = a.state();
@@ -3260,7 +3264,28 @@ pub(crate) mod tests {
         assert!(reconcile(&mut state, &keys, &home(&a), &NO_OTHER_HOSTS, 1_000).changed);
         let account = state.account.as_ref().unwrap();
         assert_eq!(slot(account, &id).map(|p| p.mode), Some(SlotMode::Synced), "the keyslot is written again into the same account");
-        assert_eq!(open_key_secret(account, &keys, &id), None, "the key waits until this computer chooses to sync it again");
+        assert_eq!(open_key_secret(account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()), "and so is the key");
+    }
+
+    /// 加入帳戶時,只有學到的帳戶就是加入的那一個的記錄留著同意;不知道是在哪個帳戶學到的(這個欄位之前寫的狀態檔)當成別的帳戶的,同意清掉。
+    #[test]
+    fn rejoining_keeps_the_consent_only_of_records_learned_in_that_account() {
+        let (_relay, _clock, a, _b, words, personal) = pair();
+        let (known, known_file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        let (unknown, unknown_file) = create_slot_on(&a, SlotMode::Synced, &test_keys::ecdsa(), "id_old");
+        use_slots(&a, &personal, &[&known_file, &unknown_file]);
+        settle(&a);
+        mutate(&a.env(), |s| {
+            s.key_slots.get_mut(&unknown).unwrap().learned_in = None;
+            Ok(())
+        })
+        .unwrap();
+        crate::sync::account::leave_account(&a.env(), false).unwrap();
+        crate::sync::account::join_account(&a.env(), &words, "MacBook-A").unwrap();
+
+        let state = a.state();
+        assert_eq!(state.key_slots[&known].uploaded_fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT), "learned in this account");
+        assert_eq!(state.key_slots[&unknown].uploaded_fingerprint, None, "learned who knows where");
     }
 
     /// 補寫只做在這個帳戶學到的記錄(`LocalSlot::learned_in`):同樣一筆帳戶掉了、勾選的 space 還用著的記錄,學到的是別的帳戶、或不知道(這個欄位

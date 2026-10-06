@@ -620,8 +620,9 @@ fn delete_old(env: &SyncEnv, s: &SyncStateV2, keys: &ChainKeys, rotation: &Rotat
 /// 換到新帳戶時這台的插槽記錄(SP3 spec §6.6;N1)。新帳戶接續了舊帳戶的 space(`mapping` 的 key 裡有舊帳戶的 space)才是同一個帳戶換了同步碼:
 /// 在舊帳戶學到的記錄改記成新帳戶(`LocalSlot::learned_in`:新帳戶裡沒有它們時照樣補寫,`slots::republish`),這台同意上傳的那把
 /// (`uploaded_fingerprint`)照舊。沒有接續舊帳戶任何 space 的帳戶 —— 被擋下、又沒有勾選任何 space 的電腦,`rejoin_account` 收下任何帳戶的同步碼 ——
-/// 是加入了另一個帳戶:同 `account::install_account`,同意一律清掉、學到的帳戶不改(不補寫進去)。舊帳戶一個 space 都沒有時無從確認,也當成另一個帳戶。
-/// 在更早的帳戶學到的記錄(離開之後留下的)兩種情況都不改記。
+/// 是加入了另一個帳戶,同 `account::install_account` 加入另一個帳戶:同意清掉、學到的帳戶不改(不補寫進去)。這裡清掉每一筆的同意,和那裡只清
+/// 不是那個帳戶學到的記錄結果一樣:同意只在記錄學到的帳戶裡給(`slot_setup::create_slot`、`slots::set_mode`),加入別的帳戶時就清掉,所以帶著同意的
+/// 記錄都是在舊帳戶學到的。舊帳戶一個 space 都沒有時無從確認,也當成另一個帳戶。在更早的帳戶學到的記錄(離開之後留下的)兩種情況都不改記。
 fn carry_key_slots(slots: &mut BTreeMap<String, LocalSlot>, old: Option<&AccountState>, new_chain: &str, mapping: &BTreeMap<String, String>) {
     let continued = old.filter(|old| space_entries(old).iter().any(|e| mapping.contains_key(&e.id))).map(|old| old.chain_id.as_str());
     for local in slots.values_mut() {
