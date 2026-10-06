@@ -22,6 +22,7 @@ import {
   usesLine,
   type KeySetupRequest,
 } from "@/lib/key-slots";
+import { useHostsQuery } from "@/lib/queries";
 import { useKeyCandidates, useSetupKeys, useSyncOverview } from "@/lib/sync";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
@@ -183,12 +184,35 @@ export function SyncKeyDialog() {
 }
 
 /**
- * After the SP3 update, synced hosts may already use this computer's keys: ask once per computer (spec §7.1). "Later"
- * leaves them in the Settings → Sync row.
+ * Whether the question after the update may be decided now: this computer syncs, its config has loaded and it was not
+ * asked before. The backend scans the config it holds and, while it holds none, answers an empty list rather than an
+ * error. At start-up the config load and the sync overview run side by side, so deciding on that empty answer would
+ * mark the question as asked and it would never appear. Exported for the tests: effects don't run under a server render.
+ */
+export function shouldAskOnUpgrade({
+  joined,
+  configLoaded,
+  askedBefore,
+}: {
+  joined: boolean;
+  configLoaded: boolean;
+  askedBefore: boolean;
+}): boolean {
+  return joined && configLoaded && !askedBefore;
+}
+
+/**
+ * After the SP3 update, synced hosts may already use this computer's keys: ask once per computer (spec §7.1), once the
+ * config has loaded (`shouldAskOnUpgrade`). "Later" leaves them in the Settings → Sync row.
  */
 export function useKeySetupOnUpgrade() {
   const overview = useSyncOverview();
-  const enabled = overview.data?.joined === true && !keySetupAskedBefore();
+  const config = useHostsQuery();
+  const enabled = shouldAskOnUpgrade({
+    joined: overview.data?.joined === true,
+    configLoaded: config.isSuccess,
+    askedBefore: keySetupAskedBefore(),
+  });
   const candidates = useKeyCandidates(enabled);
   const setRequest = useUiStore((s) => s.setKeySetup);
   useEffect(() => {

@@ -1,8 +1,14 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { keyCandidate } from "@/lib/sync-fixtures";
-import { KeySetupRow, UnsupportedList } from "./SyncKeyDialog";
+import { rememberKeySetupAsked } from "@/lib/key-slots";
+import { queryKeys } from "@/lib/queries";
+import { keyCandidatesKey, syncOverviewKey } from "@/lib/sync";
+import { keyCandidate, overview } from "@/lib/sync-fixtures";
+import { KeySetupRow, UnsupportedList, shouldAskOnUpgrade, useKeySetupOnUpgrade } from "./SyncKeyDialog";
+
+afterEach(() => vi.unstubAllGlobals());
 
 /**
  * The dialog's rows rendered on the server (no DOM): what each key's row says and which buttons it offers.
@@ -64,5 +70,48 @@ describe("values that can't be set up", () => {
     expect(text(html)).toContain("Can't set up automatically");
     expect(text(html)).toContain("proxy: ~/.ssh/%h — uses % tokens or environment variables");
     expect(renderToStaticMarkup(<UnsupportedList items={[]} />)).toBe("");
+  });
+});
+
+describe("the question after an update", () => {
+  it("is decided only for a computer that syncs, once its config has loaded, and only once", () => {
+    // Until the backend has the config it answers an empty list, not an error: deciding on that answer would use the question up.
+    expect(shouldAskOnUpgrade({ joined: false, configLoaded: true, askedBefore: false })).toBe(false);
+    expect(shouldAskOnUpgrade({ joined: true, configLoaded: false, askedBefore: false })).toBe(false);
+    expect(shouldAskOnUpgrade({ joined: true, configLoaded: true, askedBefore: true })).toBe(false);
+    expect(shouldAskOnUpgrade({ joined: true, configLoaded: true, askedBefore: false })).toBe(true);
+  });
+
+  /**
+   * What `useKeySetupOnUpgrade` hands the candidates query as `enabled` on its first render, from a query cache that holds the
+   * answers a start-up has so far. A server render runs no effects, so nothing is fetched or decided here: this is the render-time
+   * decision that gates the hook's effect, which neither asks nor remembers while it is off.
+   */
+  function enabledFor({ joined, configLoaded }: { joined: boolean; configLoaded: boolean }) {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(syncOverviewKey, overview({ joined }));
+    if (configLoaded) queryClient.setQueryData(queryKeys.hosts, { files: [], hosts: [] });
+    const Probe = () => {
+      useKeySetupOnUpgrade();
+      return null;
+    };
+    renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <Probe />
+      </QueryClientProvider>,
+    );
+    // The hook's observer built that query with the options it was given.
+    const query = queryClient.getQueryCache().find({ queryKey: keyCandidatesKey });
+    return (query?.options as unknown as { enabled?: boolean } | undefined)?.enabled;
+  }
+
+  it("is what the hook gives the candidates query: it stays off until the account and the config are both there", () => {
+    expect(enabledFor({ joined: true, configLoaded: false })).toBe(false);
+    expect(enabledFor({ joined: false, configLoaded: true })).toBe(false);
+    expect(enabledFor({ joined: true, configLoaded: true })).toBe(true);
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => store.set(k, v) });
+    rememberKeySetupAsked();
+    expect(enabledFor({ joined: true, configLoaded: true })).toBe(false);
   });
 });
