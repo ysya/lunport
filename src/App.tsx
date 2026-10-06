@@ -26,7 +26,7 @@ import { NewConfigFileDialog } from "@/components/NewConfigFileDialog";
 import { SyncMigrationDialog } from "@/components/SyncMigrationDialog";
 import { SyncUpgradeDialog } from "@/components/SyncUpgradeDialog";
 import { SyncApprovalDialog } from "@/components/SyncApprovalDialog";
-import { SyncKeyDialog, useKeySetupOnUpgrade } from "@/components/SyncKeyDialog";
+import { SyncKeyDialog } from "@/components/SyncKeyDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
@@ -63,8 +63,6 @@ function App() {
   // syncs on window focus by itself and holds that while the relay asks it to back off; a
   // `sync_now` here would skip the backoff, so only the "Sync now" button calls it.
   useSyncEvents();
-  // Once per computer after the SP3 update: keys that synced hosts already use may need a decision.
-  useKeySetupOnUpgrade();
 
   const { data, isLoading, isError, error } = useHostsQuery();
   const platform = usePlatform();

@@ -6,7 +6,7 @@ import { rememberKeySetupAsked } from "@/lib/key-slots";
 import { queryKeys } from "@/lib/queries";
 import { keyCandidatesKey, syncOverviewKey } from "@/lib/sync";
 import { keyCandidate, overview } from "@/lib/sync-fixtures";
-import { KeySetupRow, UnsupportedList, shouldAskOnUpgrade, useKeySetupOnUpgrade } from "./SyncKeyDialog";
+import { KeySetupRow, UnsupportedList, dialogBusy, shouldAskOnUpgrade, useKeySetupOnUpgrade } from "./SyncKeyDialog";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -70,6 +70,28 @@ describe("values that can't be set up", () => {
     expect(text(html)).toContain("Can't set up automatically");
     expect(text(html)).toContain("proxy: ~/.ssh/%h — uses % tokens or environment variables");
     expect(renderToStaticMarkup(<UnsupportedList items={[]} />)).toBe("");
+  });
+});
+
+describe("while the keys are read again", () => {
+  const LABELS = ["Sync key", "Keep on this computer", "Rename"];
+
+  it("is busy while a choice is being applied and while the keys are read again", () => {
+    expect(dialogBusy({ applying: false, rereading: false })).toBe(false);
+    expect(dialogBusy({ applying: true, rereading: false })).toBe(true);
+    expect(dialogBusy({ applying: false, rereading: true })).toBe(true);
+  });
+
+  // A successful answer starts reading the keys again before it is reported, so for a moment the rows on screen are the old
+  // ones, the key just answered among them. The dialog's content can't be rendered here (Radix portals render nothing on the
+  // server, and the rows only show once the first read is back), so the rule is pinned together with the row it turns off.
+  it("turns the rows off while the keys are read again, as while a choice is applied", () => {
+    for (const state of [{ applying: false, rereading: true }, { applying: true, rereading: false }]) {
+      const html = row(keyCandidate(), dialogBusy(state));
+      for (const label of LABELS) expect(buttonTag(html, label)).toContain(DISABLED);
+    }
+    const idle = row(keyCandidate(), dialogBusy({ applying: false, rereading: false }));
+    for (const label of LABELS) expect(buttonTag(idle, label)).not.toContain(DISABLED);
   });
 });
 

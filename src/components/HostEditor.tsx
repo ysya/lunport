@@ -214,7 +214,13 @@ export function HostEditor({ alias }: HostEditorProps) {
       onEnableOption={(keyword, index) =>
         setOptionEnabled.mutate(
           { alias: detail.alias, keyword, index, enabled: true },
-          { onSuccess: () => toast.success(`Enabled ${keyword}`) },
+          {
+            onSuccess: () => {
+              toast.success(`Enabled ${keyword}`);
+              // A commented-out IdentityFile is back in effect: a synced host may now point at a key no slot holds (SP3 spec §7.1).
+              if (keyword.toLowerCase() === "identityfile") useUiStore.getState().setKeySetup({ aliases: [detail.alias], reason: "saved" });
+            },
+          },
         )
       }
       onRemove={() =>

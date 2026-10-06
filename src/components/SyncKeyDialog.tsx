@@ -110,11 +110,24 @@ export function UnsupportedList({ items }: { items: UnsupportedIdentity[] }) {
 }
 
 /**
+ * Whether the dialog may be answered or closed: not while a choice is being applied, and not while the keys are read
+ * again. A successful answer starts that read before the answer is reported, so for a moment the rows on screen are
+ * still the old ones, the key just answered among them: a second click would act on a key that is already set up.
+ * Exported for the tests.
+ */
+export function dialogBusy({ applying, rereading }: { applying: boolean; rereading: boolean }): boolean {
+  return applying || rereading;
+}
+
+/**
  * "Keys used by synced hosts" (SP3 spec §7.1). Opens from the UI store (`keySetup`): after hosts move into a space,
  * after a save or a deploy that wrote IdentityFile, once after the update, or from Settings → Sync. Keys that already
- * have a slot are set up without asking; with nothing left to ask, it closes by itself without showing.
+ * have a slot are set up without asking; with nothing left to ask, it closes by itself without showing. It also runs the
+ * question after the update (`useKeySetupOnUpgrade`): this component is mounted once and is a leaf, so the overview
+ * updates that hook follows through the session don't re-render the app shell.
  */
 export function SyncKeyDialog() {
+  useKeySetupOnUpgrade();
   const request = useUiStore((s) => s.keySetup);
   const setRequest = useUiStore((s) => s.setKeySetup);
   const candidates = useKeyCandidates(request !== null);
@@ -150,9 +163,10 @@ export function SyncKeyDialog() {
 
   const close = () => setRequest(null);
   const later = request?.reason === "upgrade" || request?.reason === "settings";
+  const busy = dialogBusy({ applying: setup.isPending, rereading: candidates.isFetching });
   return (
-    <Dialog open={ready && ask.length > 0} onOpenChange={(next) => !next && !setup.isPending && close()}>
-      <DialogContent className="sm:max-w-lg" showCloseButton={!setup.isPending}>
+    <Dialog open={ready && ask.length > 0} onOpenChange={(next) => !next && !busy && close()}>
+      <DialogContent className="sm:max-w-lg" showCloseButton={!busy}>
         <DialogHeader>
           <DialogTitle>Keys used by synced hosts</DialogTitle>
           <DialogDescription>Choose for each key whether it goes to your other computers. Your servers aren't changed.</DialogDescription>
@@ -162,7 +176,7 @@ export function SyncKeyDialog() {
             <KeySetupRow
               key={candidate.path}
               candidate={candidate}
-              busy={setup.isPending}
+              busy={busy}
               onChoose={(sync, name) =>
                 setup.mutate(
                   { choices: [choiceFor(candidate, sync, name)] },
@@ -174,7 +188,7 @@ export function SyncKeyDialog() {
         </div>
         <UnsupportedList items={candidates.data?.unsupported ?? []} />
         <DialogFooter>
-          <Button type="button" variant="outline" disabled={setup.isPending} onClick={close}>
+          <Button type="button" variant="outline" disabled={busy} onClick={close}>
             {later ? "Later" : "Close"}
           </Button>
         </DialogFooter>
