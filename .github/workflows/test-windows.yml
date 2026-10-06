@@ -1,0 +1,38 @@
+# Runs the key slot tests on Windows: hard links, the copy fallback and the owner-only DACL (SP3 Task 2).
+# macOS can only type-check the Windows code; the permission behavior has to be seen on Windows.
+name: windows key slots
+
+on:
+  push:
+    branches: [main]
+    paths: ["src-tauri/**", ".github/workflows/test-windows.yml"]
+  pull_request:
+    paths: ["src-tauri/**", ".github/workflows/test-windows.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  slots:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+      # tauri::generate_context! reads frontendDist (../dist) at compile time and fails when it is missing.
+      # This job only runs Rust tests, so a placeholder page is enough.
+      - name: Placeholder frontend
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ../dist | Out-Null
+          Set-Content -Path ../dist/index.html -Value "<!doctype html>"
+      # Only the platform-dependent slot tests: identity path parsing (slot_rules) and the files, links and DACL
+      # (slot_files, slot_files_windows). The rest of the suite runs on macOS; parts of it use the system keychain.
+      - name: Key slot tests
+        run: cargo test --lib -- sync::slot_rules sync::slot_files
