@@ -25,7 +25,7 @@ tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 base64 = "0.22"
 tempfile = "3"
 glob = "0.3"
@@ -42,6 +42,14 @@ hmac = "0.12"
 chacha20poly1305 = "0.10"
 zeroize = "1"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
+# 金鑰保管庫(src/vault/material.rs):解析、解密 OpenSSH 私鑰並簽章。ssh-key 0.6.7 的 RSA 簽章有錯,RSA 改用 rsa 套件;
+# rsa::pkcs1v15::SigningKey 需要摘要演算法的 OID,所以 sha2、sha1 都開 oid。ssh-encoding 必須是 0.2(0.3 屬於 ssh-key 0.7 預覽版,與 0.6.7 不相容)。
+ssh-key = { version = "0.6.7", features = ["crypto", "encryption"] }
+ssh-encoding = "0.2"
+rsa = { version = "0.9", features = ["sha2"] }
+sha1 = { version = "0.10", features = ["oid"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+signature = "2"
 
 [dev-dependencies]
 ts-rs = "10"

@@ -386,6 +386,37 @@ pub(crate) mod test_keys {
     pub const ECDSA_PUBLIC: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEjFNKVD5g/ngM+x8oESowshddffHjvh+l4MYyyXDZMfnXpzylT6xjkTiMop0/8K1KN1+LyseBdXlLj6j5m8mvU=";
     pub const ECDSA_FINGERPRINT: &str = "SHA256:vUthAmDZoxYXCTAPEZUn5qtWSMHWQCEcUfpnyM05mMs";
 
+    /// rsa 2048,沒有 passphrase,comment `sp3-rsa`(金鑰保管庫計畫 Task 2 產生,沒有在任何地方使用)。指紋由 `ssh-keygen -l` 核對過。
+    pub const RSA_BODY: &[&str] = &[
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn",
+        "NhAAAAAwEAAQAAAQEA2LN0JUt3ulLhhwkHP9LqkMwtBGyB5tBCHH89TW85tUNw4yKFEO18",
+        "DeQL4LOpCUcq7nF/yMv8YA3jZMr4EsKKu9mwem3Sd41hDLO/HwuntOXkS2vsYrotq4+Sz2",
+        "0u+G8QnQekpzkQW7UxPLvZOKqU0xH67DkWhG+5rRxS2wFVrZ9eG4CzDpLbBqTLXSAyk8hv",
+        "7/AcXQyXs7SgCxf5jdlUKh9kP4Zudv/OQytkpmlYuaOIKmTY6ljWbYLccVD8njaAigTc+j",
+        "IXAZoVmLK0xN4myXNVmyB5VGC/zdJvIpIVR+xoMeZuk7MBKzDNGPpbGav4sRlzszujvek9",
+        "nq7K5P2vqwAAA8A4lbvqOJW76gAAAAdzc2gtcnNhAAABAQDYs3QlS3e6UuGHCQc/0uqQzC",
+        "0EbIHm0EIcfz1Nbzm1Q3DjIoUQ7XwN5Avgs6kJRyrucX/Iy/xgDeNkyvgSwoq72bB6bdJ3",
+        "jWEMs78fC6e05eRLa+xiui2rj5LPbS74bxCdB6SnORBbtTE8u9k4qpTTEfrsORaEb7mtHF",
+        "LbAVWtn14bgLMOktsGpMtdIDKTyG/v8BxdDJeztKALF/mN2VQqH2Q/hm52/85DK2SmaVi5",
+        "o4gqZNjqWNZtgtxxUPyeNoCKBNz6MhcBmhWYsrTE3ibJc1WbIHlUYL/N0m8ikhVH7Ggx5m",
+        "6TswErMM0Y+lsZq/ixGXOzO6O96T2ersrk/a+rAAAAAwEAAQAAAQAGLTdGSNxkxy/+dVdr",
+        "jkt5TRiLY7xgI9d+kHHi3yS58e4pyzYXwW0jyDg+c2CCDzE+EqYdxxKuejbdDJv9jOX/bL",
+        "kHBFJXbgQyJH1yGRbypQrYy361YbEjjrgUiXwpQKEsmKcszQeWVZfNr10FrHcJfR211fq6",
+        "U6TrNj92Vpdml3LZJW1V4w9B29oHvFWrlGgulker1FqTVHdv+m4epQsg1jBelC/BxwezFe",
+        "JhRtsu12T/K/cMgAZJEkXV1X/DN6bEFOtNr1WlP4PpTCozCWgVQzTtmOTHT9wTWRpxCSxB",
+        "AbX5Oq2o5UgDK+B7V0Xa8QS6IaIKKLk4Rwg2tOCEIQYhAAAAgCmXIM/YGNVQOsYU/ds9mz",
+        "+IcZbeSoOLgho/JxdwU775k2Kd312C/02vMGsUMRhVmmu6hi7LIpL3prb+mYmKWRll0U4I",
+        "W9HZ8Y9gW5+jBbaNOGc9PHQLHrTkRX74If3GVoOVxS/ln5eTm42SRNCj84g1HmJQsI228s",
+        "WjOIzsmR/nAAAAgQD4TsMKXXcufC93uQNZPCLArxzKQvZ/M6v1VGd6oZxc6Wpb2c9dRf8j",
+        "RAPeuT0r+GrBzxOgTActA2/qcHSoLM1PgfNqXA4YlsgJmyoyfXNIzIzQlQ7qHDeZOlWkEt",
+        "K+qFuI0mhw3T7f3ipYLiCjlFVRkuICMY4DQhJyfYtBuV8eVQAAAIEA32oH3w4+mcbhVVeX",
+        "ctgvT3WpWXzBWK42Va9OodvoTZuGRbAw/bxoElARZSaP4Wvmke2Mqx/RAYVoECN8uk5oXx",
+        "19hf7Okcw8yHPt/bqW15eVoxA7/exsqSbJSwrd3BSbbX8yfpfmk0Kf/p4jjqbui0cBssS5",
+        "xZ9vqxjEQlE7lf8AAAAHc3AzLXJzYQECAwQ=",
+    ];
+    pub const RSA_PUBLIC: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDYs3QlS3e6UuGHCQc/0uqQzC0EbIHm0EIcfz1Nbzm1Q3DjIoUQ7XwN5Avgs6kJRyrucX/Iy/xgDeNkyvgSwoq72bB6bdJ3jWEMs78fC6e05eRLa+xiui2rj5LPbS74bxCdB6SnORBbtTE8u9k4qpTTEfrsORaEb7mtHFLbAVWtn14bgLMOktsGpMtdIDKTyG/v8BxdDJeztKALF/mN2VQqH2Q/hm52/85DK2SmaVi5o4gqZNjqWNZtgtxxUPyeNoCKBNz6MhcBmhWYsrTE3ibJc1WbIHlUYL/N0m8ikhVH7Ggx5m6TswErMM0Y+lsZq/ixGXOzO6O96T2ersrk/a+r";
+    pub const RSA_FINGERPRINT: &str = "SHA256:uPzZ3UuFWT885udlYuahqchYLpT+ZyjhQqBnoICqfcU";
+
     pub fn plain() -> String {
         armor(PLAIN_BODY)
     }
@@ -394,6 +425,9 @@ pub(crate) mod test_keys {
     }
     pub fn ecdsa() -> String {
         armor(ECDSA_BODY)
+    }
+    pub fn rsa() -> String {
+        armor(RSA_BODY)
     }
 }
 
