@@ -10,7 +10,9 @@ import {
   applyResolved,
   approveVersions,
   createAccount,
+  fetchKeyCandidates,
   joinAccount,
+  keyArgs,
   leaveFailureTitle,
   openRelayDeploy,
   openRelayUpdateGuide,
@@ -139,6 +141,19 @@ describe("review commands", () => {
       ["sync_approve", { spaceId: SPACE, approvals: shown }],
       ["sync_reject", { spaceId: SPACE, approvals: [{ alias: "web", digest: "d1" }] }],
     ]);
+  });
+});
+
+describe("key slot commands", () => {
+  it("call the backend with its camelCase arguments", async () => {
+    const calls = stubBackend(async () => ({ keys: [], unsupported: [] }));
+    expect(await fetchKeyCandidates()).toEqual({ keys: [], unsupported: [] });
+    expect(calls).toEqual([["sync_key_candidates", {}]]);
+    const choices = [{ path: "/home/f/.ssh/id_mac", decision: { kind: "keep" as const, name: "id_mac" } }];
+    expect(keyArgs.setup({ choices })).toEqual({ choices });
+    expect(keyArgs.setMode({ slotId: "s", mode: "own" })).toEqual({ slotId: "s", mode: "own" });
+    expect(keyArgs.pick({ slotId: "s", path: "/k" })).toEqual({ slotId: "s", path: "/k" });
+    expect(keyArgs.slot({ slotId: "s" })).toEqual({ slotId: "s" });
   });
 });
 

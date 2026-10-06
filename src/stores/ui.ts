@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import type { KeySetupRequest } from "@/lib/key-slots";
 import { DEFAULT_SIDEBAR_WIDTH, clampSidebarWidth } from "@/lib/sidebar-width";
 
 /** What the New-config-file dialog should do after the file exists. */
@@ -91,6 +92,12 @@ interface UiState {
   /** Whether the review of synced hosts waiting for approval is open (approval toast, Settings → Sync). Session-only. */
   syncApprovalsOpen: boolean;
   setSyncApprovalsOpen: (open: boolean) => void;
+  /** The Keys dialog (toolbar button, Settings → Sync, the sidebar's missing-key marker). Session-only. */
+  keysOpen: boolean;
+  setKeysOpen: (open: boolean) => void;
+  /** "Keys used by synced hosts" (SP3 spec §7.1): open while non-null. Session-only. */
+  keySetup: KeySetupRequest | null;
+  setKeySetup: (request: KeySetupRequest | null) => void;
 }
 
 /**
@@ -143,6 +150,10 @@ export const useUiStore = create<UiState>()(
       setSyncMigration: (syncMigration) => set({ syncMigration }),
       syncApprovalsOpen: false,
       setSyncApprovalsOpen: (syncApprovalsOpen) => set({ syncApprovalsOpen }),
+      keysOpen: false,
+      setKeysOpen: (keysOpen) => set({ keysOpen }),
+      keySetup: null,
+      setKeySetup: (keySetup) => set({ keySetup }),
     }),
     {
       name: UI_STORAGE_KEY,

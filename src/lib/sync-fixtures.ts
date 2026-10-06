@@ -1,4 +1,6 @@
+import type { KeyCandidate } from "@/bindings/KeyCandidate";
 import type { SyncDeviceView } from "@/bindings/SyncDeviceView";
+import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import type { SyncOverview } from "@/bindings/SyncOverview";
 import type { SyncSpaceView } from "@/bindings/SyncSpaceView";
 
@@ -73,6 +75,41 @@ export function overview(overrides: Partial<SyncOverview> = {}): SyncOverview {
     key_slots: [],
     notices: [],
     phrase_cleanup_pending: false,
+    ...overrides,
+  };
+}
+
+export const SLOT_FINGERPRINT = "SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew";
+
+/** A synced slot this computer created, ready here, used by `web`. */
+export function keySlot(overrides: Partial<SyncKeySlotView> = {}): SyncKeySlotView {
+  return {
+    id: "3fa2c1d90123456789abcdef01234567",
+    name: "id_mac",
+    mode: "synced",
+    fingerprint: SLOT_FINGERPRINT,
+    key_type: "ssh-ed25519",
+    has_passphrase: false,
+    origin_device: "MacBook-A",
+    origin_is_this: true,
+    value: "~/.ssh/sshelter/keys/id_mac-3fa2c1d9",
+    hosts: ["web"],
+    status: { kind: "ready", file: "/home/f/.ssh/id_mac", synced_copy: false, fingerprint: SLOT_FINGERPRINT },
+    devices: [],
+    ...overrides,
+  };
+}
+
+/** A key that `web` uses and no slot holds yet. */
+export function keyCandidate(overrides: Partial<KeyCandidate> = {}): KeyCandidate {
+  return {
+    path: "/home/f/.ssh/id_mac",
+    default_name: "id_mac",
+    fingerprint: SLOT_FINGERPRINT,
+    has_passphrase: false,
+    unsyncable: null,
+    existing_slot: null,
+    hosts: [{ alias: "web", space_name: "Personal", value: "~/.ssh/id_mac", locked: null }],
     ...overrides,
   };
 }

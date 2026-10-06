@@ -4,12 +4,15 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
 import type { DuplicateAlias } from "@/bindings/DuplicateAlias";
+import type { KeyCandidates } from "@/bindings/KeyCandidates";
+import type { KeyChoice } from "@/bindings/KeyChoice";
 import type { MigrationFailure } from "@/bindings/MigrationFailure";
 import type { MigrationReport } from "@/bindings/MigrationReport";
 import type { NewSpaceGroup } from "@/bindings/NewSpaceGroup";
 import type { PendingApprovalView } from "@/bindings/PendingApprovalView";
 import type { ReviewOutcome } from "@/bindings/ReviewOutcome";
 import type { ReviewedVersion } from "@/bindings/ReviewedVersion";
+import type { SlotMode } from "@/bindings/SlotMode";
 import type { SyncOverview } from "@/bindings/SyncOverview";
 import { tauriInvoke } from "@/lib/ipc";
 import { queryKeys } from "@/lib/queries";
@@ -342,6 +345,49 @@ export function useResolveShadowed() {
       toast.error("Could not update the host", { description: errorMessage(error) });
     },
   });
+}
+
+/**
+ * Keys used by synced hosts that no slot holds yet. Under ["config"], so a reload, a sync apply and the key slot commands
+ * refresh it; host edits don't, but the setup dialog's query turns on when it opens and so fetches it again.
+ */
+export const keyCandidatesKey = ["config", "keyCandidates"] as const;
+
+export function fetchKeyCandidates(): Promise<KeyCandidates> {
+  return tauriInvoke<KeyCandidates>("sync_key_candidates");
+}
+
+export function useKeyCandidates(enabled: boolean) {
+  return useQuery<KeyCandidates>({ queryKey: keyCandidatesKey, queryFn: fetchKeyCandidates, enabled });
+}
+
+/** The key slot commands' arguments, in the backend's camelCase. */
+export const keyArgs = {
+  setup: (v: { choices: KeyChoice[] }) => ({ choices: v.choices }),
+  setMode: (v: { slotId: string; mode: SlotMode }) => ({ slotId: v.slotId, mode: v.mode }),
+  pick: (v: { slotId: string; path: string }) => ({ slotId: v.slotId, path: v.path }),
+  slot: (v: { slotId: string }) => ({ slotId: v.slotId }),
+};
+
+/** Create or reuse slots and rewrite the hosts (it can fail after creating a slot, so a failure re-reads everything). */
+export function useSetupKeys() {
+  return useOverviewMutation("sync_setup_keys", "Could not set up the key", keyArgs.setup, true);
+}
+
+export function useKeySetMode() {
+  return useOverviewMutation("sync_key_set_mode", "Could not change how the key is shared", keyArgs.setMode);
+}
+
+export function useKeyPick() {
+  return useOverviewMutation("sync_key_pick", "Could not use that key", keyArgs.pick);
+}
+
+export function useKeyUseSynced() {
+  return useOverviewMutation("sync_key_use_synced", "Could not use the synced key", keyArgs.slot);
+}
+
+export function useKeyDeleteCopy() {
+  return useOverviewMutation("sync_key_delete_copy", "Could not delete the copy", keyArgs.slot);
 }
 
 /*
