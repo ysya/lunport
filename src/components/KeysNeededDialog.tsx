@@ -49,7 +49,7 @@ export function KeysNeededDialog() {
               Synced hosts on this computer use keys that stay on your other computers. Pick a key on this computer for each, or do it later in Keys.
             </DialogDescription>
           </DialogHeader>
-          <div className="settings-group">
+          <div className="settings-group max-h-[40vh] overflow-y-auto">
             {slots.map((slot) => (
               <div key={slot.id} className="flex items-center justify-between gap-3 px-3 py-2">
                 <div className="min-w-0">

@@ -95,11 +95,13 @@ export function keysNeededNoticeIndex(o: SyncOverview): number | null {
 }
 
 /**
- * The "keys needed" notice once no slot needs a key picked here (picked in the dialog or in Keys, or the origin
- * started syncing it), so it can be dismissed; null while there is something left to pick, or no notice.
+ * The "keys needed" notice once there are slots and none needs a key picked here (picked in the dialog or in Keys, or the
+ * origin started syncing it), so it can be dismissed; null while there is something left to pick, or no notice.
+ * No slots at all is not "nothing left to pick": the overview has none while the account keys are unavailable (a locked
+ * keychain), and the one-shot notice must wait for them instead of being used up unseen.
  */
 export function finishedKeysNeededNotice(o: SyncOverview): number | null {
-  return slotsNeedingKey(o).length === 0 ? keysNeededNoticeIndex(o) : null;
+  return o.key_slots.length > 0 && slotsNeedingKey(o).length === 0 ? keysNeededNoticeIndex(o) : null;
 }
 
 /** After a sync code change: which synced keys to replace if a computer was lost (spec §6.6). */

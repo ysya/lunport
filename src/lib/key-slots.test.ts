@@ -169,6 +169,13 @@ describe("the Keys for this computer notice", () => {
     expect(finishedKeysNeededNotice(overview({ notices, key_slots: [keySlot({ status: { kind: "needs_key", waiting_for_sync: true } })] }))).toBe(0);
     expect(finishedKeysNeededNotice(overview({ key_slots: [keySlot()] }))).toBeNull();
   });
+
+  it("waits while there are no slots at all: the overview has none while the account keys are unavailable (a locked keychain)", () => {
+    const notices = [{ kind: "keys_needed" as const, names: ["id_mac"] }];
+    expect(finishedKeysNeededNotice(overview({ notices, key_slots: [] }))).toBeNull();
+    // As soon as the slots are there again, the notice is judged by them.
+    expect(finishedKeysNeededNotice(overview({ notices, key_slots: [keySlot()] }))).toBe(0);
+  });
 });
 
 describe("the once-per-computer setup prompt", () => {

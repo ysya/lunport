@@ -144,7 +144,8 @@ export function KeysDialog() {
         <TooltipContent>SSH keys</TooltipContent>
       </Tooltip>
 
-      <DialogContent className="sm:max-w-lg">
+      {/* Never taller than the window (it is centered, so what ran past the edge would be out of reach): it scrolls instead. */}
+      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-lg">
         {deployFor ? (
           <>
             <DialogHeader>

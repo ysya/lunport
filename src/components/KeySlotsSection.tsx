@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 
+import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { TONE_TEXT } from "@/components/sync-primitives";
 import {
@@ -27,6 +28,8 @@ export type SlotAction = "sync" | "stop" | "pick" | "useSynced" | "syncNew" | "d
 /** One slot in the Keys dialog. Exported for the markup tests. */
 export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; busy: boolean; onAction: (action: SlotAction) => void }) {
   const status = slotStatusText(slot.status);
+  // The file this computer uses, for the states that name one (spec §7.2: "the file this computer uses and its state").
+  const file = "file" in slot.status ? slot.status.file : null;
   const actions = slotActions(slot);
   const hosts = hostsLine(slot);
   const devices = deviceLine(slot);
@@ -44,6 +47,7 @@ export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; bu
           {slot.fingerprint ? ` · ${slot.fingerprint}` : ""}
         </p>
         <p className={cn("text-xs", TONE_TEXT[status.tone])}>{status.text}</p>
+        {file && <p className="font-mono text-xs break-all text-muted-foreground">{file}</p>}
         {hosts && <p className="text-xs text-muted-foreground">{hosts}</p>}
         {devices && <p className="text-xs text-muted-foreground">{devices}</p>}
       </div>
@@ -55,6 +59,46 @@ export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; bu
         {actions.stopSyncing && button("stop", "Stop syncing", "ghost")}
         {actions.deleteCopy && button("delete", "Delete copy", "ghost", "text-destructive hover:text-destructive")}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The keys of this computer to pick from: a note while they are scanned and when there are none (the likely case on a
+ * computer that just joined), otherwise one button per key. Exported for the markup tests.
+ */
+export function KeyChoices({
+  keys,
+  loading,
+  busy,
+  onChoose,
+}: {
+  keys: KeyInfo[] | undefined;
+  loading: boolean;
+  busy: boolean;
+  onChoose: (path: string) => void;
+}) {
+  if (loading || !keys || keys.length === 0) {
+    return (
+      <p className="py-6 text-center text-sm text-muted-foreground select-none">
+        {loading ? "Scanning keys…" : "No private keys in ~/.ssh. Choose one with Browse…"}
+      </p>
+    );
+  }
+  return (
+    <div className="settings-group max-h-[40vh] overflow-y-auto">
+      {keys.map((k) => (
+        <button
+          key={k.private_path}
+          type="button"
+          disabled={busy}
+          className="flex w-full flex-col items-start px-3 py-2 text-left hover:bg-muted/60"
+          onClick={() => onChoose(k.private_path)}
+        >
+          <span className="font-mono text-sm">{k.name}</span>
+          <span className="text-xs break-all text-muted-foreground">{k.fingerprint_sha256 ?? k.private_path}</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -82,20 +126,7 @@ export function PickKeyDialog({ slot, onClose }: { slot: SyncKeySlotView | null;
           <DialogDescription>Hosts that use {name} will use the key you pick, on this computer only.</DialogDescription>
         </DialogHeader>
         {replacesCopy && <p className="text-sm text-muted-foreground">The synced copy on this computer is kept as a .previous file.</p>}
-        <div className="settings-group max-h-[40vh] overflow-y-auto">
-          {(keys.data ?? []).map((k) => (
-            <button
-              key={k.private_path}
-              type="button"
-              disabled={pick.isPending}
-              className="flex w-full flex-col items-start px-3 py-2 text-left hover:bg-muted/60"
-              onClick={() => choose(k.private_path)}
-            >
-              <span className="font-mono text-sm">{k.name}</span>
-              <span className="text-xs break-all text-muted-foreground">{k.fingerprint_sha256 ?? k.private_path}</span>
-            </button>
-          ))}
-        </div>
+        <KeyChoices keys={keys.data} loading={keys.isLoading} busy={pick.isPending} onChoose={choose} />
         <DialogFooter>
           <Button type="button" variant="outline" disabled={pick.isPending} onClick={() => void browse()}>
             Browse…
@@ -141,10 +172,13 @@ export function KeySlotsSection() {
   return (
     <section className="space-y-1.5">
       <h3 className="px-1 text-xs font-medium text-muted-foreground select-none">Keys used by synced hosts</h3>
-      <div className="settings-group">
-        {slots.map((slot) => (
-          <KeySlotRow key={slot.id} slot={slot} busy={busy} onAction={(action) => act(slot, action)} />
-        ))}
+      {/* Capped like the key list above it, so a long list scrolls here instead of pushing the dialog off the window. */}
+      <div className="-mx-1 max-h-[30vh] overflow-y-auto px-1">
+        <div className="settings-group">
+          {slots.map((slot) => (
+            <KeySlotRow key={slot.id} slot={slot} busy={busy} onAction={(action) => act(slot, action)} />
+          ))}
+        </div>
       </div>
       <PickKeyDialog slot={picking} onClose={() => setPicking(null)} />
       <AlertDialog open={deleting !== null} onOpenChange={(next) => !next && setDeleting(null)}>
@@ -158,6 +192,7 @@ export function KeySlotsSection() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              variant="destructive"
               onClick={() => {
                 if (deleting) deleteCopy.mutate({ slotId: deleting.id });
                 setDeleting(null);
