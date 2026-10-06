@@ -4366,7 +4366,7 @@ dependencies = [
 
 [[package]]
 name = "sshelter"
-version = "0.15.1"
+version = "0.16.0"
 dependencies = [
  "base64 0.22.1",
  "bip39",
@@ -4396,6 +4396,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "ts-rs",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
