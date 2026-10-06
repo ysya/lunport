@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "approval",
+  "description": "The SSH agent's approval window: it lists and answers pending requests (app commands) and listens for their updates. Nothing else.",
+  "windows": ["approval"],
+  "permissions": ["core:default"]
+}
