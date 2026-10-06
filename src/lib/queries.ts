@@ -4,6 +4,7 @@ import {
   useQueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
+import { homeDir } from "@tauri-apps/api/path";
 import { toast } from "sonner";
 import { tauriInvoke } from "@/lib/ipc";
 import { useSettingsStore } from "@/stores/settings";
@@ -120,6 +121,20 @@ export function usePlatform() {
   return useQuery<string>({
     queryKey: ["app", "platform"],
     queryFn: () => tauriInvoke<string>("app_platform"),
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+}
+
+/**
+ * The current user's home directory — the one the backend's `~/.ssh` is in (Tauri resolves both with
+ * `dirs::home_dir`). Cached indefinitely. Key paths are written as `~/.ssh/…` only when they are inside its
+ * `.ssh` directory (`toTildeSshPath`); until it is known, or if it can't be read, they are written as given.
+ */
+export function useHomeDir() {
+  return useQuery<string>({
+    queryKey: ["app", "homeDir"],
+    queryFn: () => homeDir(),
     staleTime: Infinity,
     gcTime: Infinity,
   });

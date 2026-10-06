@@ -58,6 +58,7 @@ import {
   useDeleteHostPassword,
   useKeys,
   useKeyHygiene,
+  useHomeDir,
 } from "@/lib/queries";
 import { toTildeSshPath } from "@/lib/identity-file";
 import { identityFileChanged } from "@/lib/key-slots";
@@ -1065,8 +1066,9 @@ function FieldControl({ def, control, register, setValue }: FieldControlProps) {
  * IdentityFile input with two pick affordances: a dropdown of the private keys
  * detected in ~/.ssh (fetched lazily when the menu opens) and a native file
  * dialog for anything else. Both write through setValue so the form dirties
- * and saves exactly like hand-typed text; paths under ~/.ssh are written in
- * their `~` form, matching ssh_config convention.
+ * and saves exactly like hand-typed text; paths inside the user's own ~/.ssh are
+ * written in their `~` form, matching ssh_config convention (any other path,
+ * e.g. a backup's or WSL's .ssh, as picked).
  */
 function IdentityFileControl({
   id,
@@ -1081,6 +1083,7 @@ function IdentityFileControl({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const keysQ = useKeys({ enabled: menuOpen });
+  const home = useHomeDir().data ?? null;
   const pick = (value: string) =>
     setValue(name, value, { shouldDirty: true, shouldTouch: true });
 
@@ -1090,7 +1093,7 @@ function IdentityFileControl({
       directory: false,
       title: "Choose an identity file",
     });
-    if (typeof picked === "string") pick(toTildeSshPath(picked));
+    if (typeof picked === "string") pick(toTildeSshPath(picked, home));
   };
 
   return (
@@ -1127,7 +1130,7 @@ function IdentityFileControl({
               <DropdownMenuItem
                 key={k.private_path}
                 className="font-mono"
-                onSelect={() => pick(toTildeSshPath(k.private_path))}
+                onSelect={() => pick(toTildeSshPath(k.private_path, home))}
               >
                 {k.name}
               </DropdownMenuItem>

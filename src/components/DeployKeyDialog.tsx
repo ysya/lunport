@@ -20,6 +20,7 @@ import {
   useDeployKeyDirect,
   useDeployPreflight,
   useHasHostPassword,
+  useHomeDir,
   useHostsQuery,
   useKeyHygiene,
   useKeys,
@@ -140,6 +141,9 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
 
   // Only rendered while the dialog is open, so the lazy keys query can run.
   const keysQ = useKeys({ enabled: true });
+  // `~` in the host's IdentityFile is this user's home; keys elsewhere (another drive, WSL) are written as picked.
+  const homeQ = useHomeDir();
+  const home = homeQ.data ?? null;
   const platform = usePlatform();
   const hygiene = useKeyHygiene(alias);
   const hasPassword = useHasHostPassword(alias);
@@ -176,11 +180,12 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
       setPublicPath(initialPub);
       return;
     }
-    if (hygiene.isPending) return;
+    // The home directory too: until it is known a `~/.ssh/…` IdentityFile matches no key.
+    if (hygiene.isPending || homeQ.isPending) return;
     const identityFiles = (hygiene.data?.identity_files ?? []).map((f) => f.path);
-    const preset = pickDefaultPublicKey(identityFiles, keysQ.data);
+    const preset = pickDefaultPublicKey(identityFiles, keysQ.data, home);
     if (preset) setPublicPath(preset);
-  }, [publicPath, keysQ.data, hygiene.isPending, hygiene.data, initialPub]);
+  }, [publicPath, keysQ.data, hygiene.isPending, hygiene.data, initialPub, homeQ.isPending, home]);
 
   const busy = precheck.isPending || trust.isPending || deploy.isPending;
 
@@ -211,9 +216,9 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
     if (outcome.kind === "added" || outcome.kind === "alreadyPresent") {
       // The key is on the remote now — make sure ssh will actually offer it.
       const privateAbs = publicPath.replace(/\.pub$/, "");
-      const value = toTildeSshPath(privateAbs);
+      const value = toTildeSshPath(privateAbs, home);
       const existing = (hygiene.data?.identity_files ?? []).map((f) => f.path);
-      const action = identityFileAction(existing, privateAbs);
+      const action = identityFileAction(existing, privateAbs, home);
       if (action === "already") setIdentityNote("The host config already points at this key.");
       else if (ambiguous.has(alias)) setIdentityNote(identityFileNote(alias, value));
       else if (action === "write") writeIdentityFile(value);
