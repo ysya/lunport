@@ -40,6 +40,7 @@ bip39 = { version = "2", features = ["rand"] }
 hkdf = "0.12"
 hmac = "0.12"
 chacha20poly1305 = "0.10"
+zeroize = "1"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 
 [dev-dependencies]

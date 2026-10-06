@@ -15,6 +15,7 @@ mod settings_io;
 mod state;
 mod tray;
 mod updater_channel;
+mod vault;
 
 use config::commands::*;
 use config::intel::{config_effective, config_jump_chain, config_key_hygiene, config_lint};

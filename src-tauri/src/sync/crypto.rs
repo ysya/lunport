@@ -190,6 +190,34 @@ pub fn open(keys: &ChainKeys, kind: &str, id_hash: &str, sealed: &Sealed) -> Res
         .map_err(|_| AppError::Other("record cannot be decrypted with this chain".to_string()))
 }
 
+/// 用一把原始的 32 bytes 金鑰加密(保管庫,key roadmap 第 2 階段 spec §4.1):AAD 由呼叫端給。回傳(nonce, ciphertext),都是 base64。
+pub fn seal_raw(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<(String, String), AppError> {
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::fill(&mut nonce).map_err(|e| AppError::Other(format!("cannot draw nonce: {e}")))?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    let ciphertext = cipher
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+        .map_err(|_| AppError::Other("encryption failed".to_string()))?;
+    Ok((B64.encode(nonce), B64.encode(ciphertext)))
+}
+
+/// `seal_raw` 的反向。金鑰、AAD 或密文不對都回錯誤(不分辨原因)。
+pub fn open_raw(key: &[u8; 32], aad: &[u8], nonce_b64: &str, ciphertext_b64: &str) -> Result<Vec<u8>, AppError> {
+    let nonce = B64
+        .decode(nonce_b64)
+        .map_err(|_| AppError::Other("vault nonce is not valid base64".to_string()))?;
+    if nonce.len() != NONCE_LEN {
+        return Err(AppError::Other("vault nonce has the wrong length".to_string()));
+    }
+    let ciphertext = B64
+        .decode(ciphertext_b64)
+        .map_err(|_| AppError::Other("vault ciphertext is not valid base64".to_string()))?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+    cipher
+        .decrypt(XNonce::from_slice(&nonce), Payload { msg: &ciphertext, aad })
+        .map_err(|_| AppError::Other("vault entry cannot be decrypted".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +402,24 @@ mod tests {
         assert!(shown.contains(&keys.chain_id));
         assert!(!shown.contains(&keys.auth_token));
         assert!(!shown.contains(&keys.enc_key_b64()));
+    }
+
+    #[test]
+    fn raw_seal_round_trips_and_binds_the_aad() {
+        let key = [7u8; 32];
+        let (nonce, ciphertext) = seal_raw(&key, b"sshelter-vault-v1\nabc", b"secret").unwrap();
+        assert_eq!(open_raw(&key, b"sshelter-vault-v1\nabc", &nonce, &ciphertext).unwrap(), b"secret");
+        assert!(open_raw(&key, b"sshelter-vault-v1\nxyz", &nonce, &ciphertext).is_err(), "another AAD does not open it");
+        assert!(open_raw(&[8u8; 32], b"sshelter-vault-v1\nabc", &nonce, &ciphertext).is_err(), "another key does not open it");
+        let (second, _) = seal_raw(&key, b"a", b"secret").unwrap();
+        assert_ne!(nonce, second, "every seal draws a fresh nonce");
+    }
+
+    #[test]
+    fn raw_open_rejects_a_malformed_nonce() {
+        let key = [7u8; 32];
+        let (_, ciphertext) = seal_raw(&key, b"a", b"x").unwrap();
+        assert!(open_raw(&key, b"a", "AAAA", &ciphertext).is_err());
+        assert!(open_raw(&key, b"a", "not base64!", &ciphertext).is_err());
     }
 }
