@@ -64,5 +64,12 @@ tauri-plugin-global-shortcut = "2.3.2"
 # SP3 金鑰插槽:Windows 上把插槽目錄與私鑰設成只有目前使用者能存取(src/sync/slot_files_windows.rs)。
 # 0.61 已在 Cargo.lock(tempfile 等的相依),不需下載。Win32_Storage_FileSystem 與 Win32_System_SystemServices 只為了
 # FILE_ALL_ACCESS 與 SECURITY_DESCRIPTOR_REVISION 兩個常數。
+# 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):Win32_System_Diagnostics_ToolHelp 給程序快照(找父程序),
+# 程序的執行檔路徑用 Win32_System_Threading 的 QueryFullProcessImageNameW。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemServices", "Win32_System_Threading"] }
+
+# 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):macOS 用 libc 的 proc_pidinfo、proc_pidpath 與 sysctl(KERN_PROCARGS2);
+# Linux 只讀 /proc。libc 已在 Cargo.lock(其他套件的相依),不需下載。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
