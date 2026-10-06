@@ -110,6 +110,13 @@ fn run_app(mcp_keep_alive: bool) {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // SSH agent 的核准視窗(金鑰保管庫 spec §7.4):關掉它就是拒絕等待中的請求;它的焦點與同步的輪詢無關。
+            if window.label() == agent::prompt::APPROVAL_WINDOW {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    window.app_handle().state::<state::AppState>().agent.prompts.deny_all();
+                }
+                return;
+            }
             // 視窗在前景時以一般間隔輪詢、回到前景立刻同步一輪(同步退避期間要等退避結束,spec §6.4);不在前景時省 relay 的配額(Sync v2)。
             if let tauri::WindowEvent::Focused(focused) = event {
                 sync::engine::window_focused(window.app_handle(), *focused);
