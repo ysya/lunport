@@ -28,6 +28,7 @@ import {
   Cloud,
   TriangleAlert,
   Settings2,
+  KeyRound,
 } from "lucide-react";
 
 import type { HostSummary } from "@/bindings/HostSummary";
@@ -98,6 +99,7 @@ import { hostMatches, parseQuery } from "@/lib/host-filter";
 import { toast } from "sonner";
 import { buildNewOrder } from "@/lib/reorder";
 import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
+import { hostsMissingKey } from "@/lib/key-slots";
 import { useSyncOverview } from "@/lib/sync";
 import { openSyncSettings } from "@/lib/sync-events";
 import { useAmbiguousNames, useShadowedCopies, useSpaceFileLabels } from "@/lib/sync-labels";
@@ -184,6 +186,8 @@ interface HostRowProps {
    * the row's end, with file-addressed fixes.
    */
   shadow?: { winner: string; inSpace: boolean; onKeepAsLocal: () => void; onRemoveCopy: () => void };
+  /** The host's synced key slot has no key on this computer yet: marked at the row's end, with a pointer to Keys. */
+  missingKey?: boolean;
   /** Row can be drag-reordered (within its source file). Off while searching. */
   draggable?: boolean;
   /** True while THIS row is the drag source — rendered semi-transparent. */
@@ -218,6 +222,7 @@ function HostRow({
   onRemove,
   lockedReason,
   shadow,
+  missingKey,
   draggable,
   dragging,
   indicator,
@@ -327,6 +332,11 @@ function HostRow({
             title={shadowTooltip(host.alias, shadow.winner, shadow.inSpace)}
           >
             <TriangleAlert className="size-3" aria-label={`Also in ${shadow.winner}, which ssh reads first`} />
+          </span>
+        )}
+        {missingKey && (
+          <span className="shrink-0 text-amber-600 dark:text-amber-400" title="This host's key isn't on this computer — pick one in Keys.">
+            <KeyRound className="size-3" aria-label="This host's key isn't on this computer" />
           </span>
         )}
       </button>
@@ -641,6 +651,8 @@ export function HostList({ hosts, isLoading }: HostListProps) {
   const spaceLabels = useSpaceFileLabels();
   // A paused or missing space: its group header carries a warning marker with the error.
   const spaceProblems = useMemo(() => spaceFileProblems(overview.data?.spaces ?? []), [overview.data?.spaces]);
+  // Hosts whose synced key slot has no key on this computer: their rows say so.
+  const missingKeys = useMemo(() => hostsMissingKey(overview.data), [overview.data]);
   // Copies of an alias that a space file shadows (ssh reads the space's copy first).
   const shadows = useShadowedCopies(hosts);
   // Auto heuristic over the FULL file set (the "clear back to this" baseline)…
@@ -1430,6 +1442,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                               onRemove={() => setRemoveTarget({ alias: host.alias, file: host.source_file })}
                               lockedReason={lockedReasonFor(host)}
                               shadow={shadowFor(host)}
+                              missingKey={missingKeys.has(host.alias)}
                               showTags={showHostTags && groupMode === "file"}
                               // Draggable when reordering OR a cross-file move
                               // is possible (single-host files can drag out).

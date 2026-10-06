@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { errorMessage } from "@/lib/sync";
 import type { Tone } from "@/lib/sync-overview";
 import { copyText } from "@/lib/clipboard";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -69,16 +70,19 @@ const COPY = {
  * user confirms they saved the words; `shown` closes freely. Owners keep `words`
  * in component state and set it back to null in `onDone`. `description` replaces the
  * mode's own text when the state calls for another (the old code during a sync code change).
+ * `note` is shown under the description, e.g. which synced keys to replace after a sync code change.
  */
 export function SyncCodeDialog({
   words,
   mode,
   description,
+  note,
   onDone,
 }: {
   words: string | null;
   mode: keyof typeof COPY;
   description?: string;
+  note?: string;
   onDone: () => void;
 }) {
   const [saved, setSaved] = useState(false);
@@ -109,6 +113,7 @@ export function SyncCodeDialog({
           <DialogTitle>{copy.title}</DialogTitle>
           <DialogDescription>{description ?? copy.description}</DialogDescription>
         </DialogHeader>
+        {note && <p className={cn("text-sm", TONE_TEXT.warning)}>{note}</p>}
         <WordGrid words={words ?? ""} />
         {copy.confirm !== null && (
           <>

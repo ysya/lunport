@@ -410,6 +410,11 @@ describe("noticeRows", () => {
     ]);
   });
 
+  it("leaves the keys notice to its dialog and to the row that counts the slots", () => {
+    const o = overview({ notices: [{ kind: "keys_needed", names: ["id_mac"] }, { kind: "new_sync_code" }] });
+    expect(noticeRows(o).map((n) => n.index)).toEqual([1]);
+  });
+
   it("keeps saying what is still true after leaving, and says of the rest what they were about, instead of what they can't do any more", () => {
     const left = { kind: "left_account" as const, kept_files: ["/home/f/.ssh/sshelter-local/personal-3fa2c1d9.config"] };
     const deleted = { kind: "space_deleted" as const, name: "Work", by_device: "MacBook-B" };

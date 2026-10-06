@@ -19,6 +19,7 @@ import { isWildcardOnly } from "@/lib/host-display";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 
+import { KeySlotsSection } from "@/components/KeySlotsSection";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,7 +49,9 @@ const KEY_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** Toolbar button + a dialog managing ~/.ssh keys: list, copy, deploy, generate. */
 export function KeysDialog() {
-  const [open, setOpen] = useState(false);
+  // In the UI store, so Settings → Sync can open it too.
+  const open = useUiStore((s) => s.keysOpen);
+  const setOpen = useUiStore((s) => s.setKeysOpen);
   // When set, the dialog shows the host picker to deploy THIS key's .pub.
   const [deployFor, setDeployFor] = useState<KeyInfo | null>(null);
   // "app" hands off to the in-app deploy dialog; "terminal" runs ssh-copy-id.
@@ -245,6 +248,8 @@ export function KeysDialog() {
                 </div>
               </div>
             )}
+
+            <KeySlotsSection />
 
             <NewKeySection existingNames={keys.map((k) => k.name)} />
           </>

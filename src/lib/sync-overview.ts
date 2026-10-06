@@ -260,7 +260,8 @@ export function strayFilesNote(files: readonly string[]): string {
 const TRUE_AFTER_LEAVING = new Set<SyncNotice["kind"]>(["left_account", "space_deleted"]);
 
 /**
- * Notices for the pane, with the index `sync_dismiss_notice` needs. The upgrade has its own dialog.
+ * Notices for the pane, with the index `sync_dismiss_notice` needs. The upgrade and the keys notice have their own
+ * dialogs (the slots that need a key have their own row).
  * The backend keeps notices when this computer leaves, but most of them are about the account it
  * left: "SSHelter renames the space's file on the next sync" and "Show the new sync code" are not
  * true any more. Without an account only the notices that stay true read as they were; the others
@@ -268,7 +269,7 @@ const TRUE_AFTER_LEAVING = new Set<SyncNotice["kind"]>(["left_account", "space_d
  */
 export function noticeRows(o: SyncOverview): NoticeRow[] {
   return o.notices.flatMap((notice, index) => {
-    if (notice.kind === "upgraded") return [];
+    if (notice.kind === "upgraded" || notice.kind === "keys_needed") return [];
     if (!o.joined && !TRUE_AFTER_LEAVING.has(notice.kind)) {
       return [{ index, title: noticeMessage(notice).title, description: "This was about the sync account this computer has since left.", showsNewCode: false }];
     }

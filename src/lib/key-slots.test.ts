@@ -4,11 +4,13 @@ import { keyCandidate, keySlot, overview, SPOOFED_NAME, SPOOFED_NAME_SHOWN } fro
 import {
   choiceFor,
   deviceLine,
+  finishedKeysNeededNotice,
   hostsLine,
   hostsMissingKey,
   identityFileChanged,
   isValidSlotName,
   keySetupAskedBefore,
+  keysNeededNoticeIndex,
   keysToAsk,
   lockedNote,
   needsKeyLabel,
@@ -149,6 +151,23 @@ describe("a slot row", () => {
     });
     expect([...hostsMissingKey(o)].sort()).toEqual(["api", "db"]);
     expect(hostsMissingKey(undefined).size).toBe(0);
+  });
+});
+
+describe("the Keys for this computer notice", () => {
+  it("is found by its kind", () => {
+    expect(keysNeededNoticeIndex(overview({ notices: [{ kind: "new_sync_code" }, { kind: "keys_needed", names: ["id_mac"] }] }))).toBe(1);
+    expect(keysNeededNoticeIndex(overview())).toBeNull();
+  });
+
+  it("is finished once no slot needs a key picked here", () => {
+    const notices = [{ kind: "keys_needed" as const, names: ["id_mac"] }];
+    const needing = keySlot({ mode: "own", fingerprint: null, status: { kind: "needs_key", waiting_for_sync: false } });
+    expect(finishedKeysNeededNotice(overview({ notices, key_slots: [needing] }))).toBeNull();
+    // Picked here or in Keys, or the origin started syncing it: nothing left to ask.
+    expect(finishedKeysNeededNotice(overview({ notices, key_slots: [keySlot()] }))).toBe(0);
+    expect(finishedKeysNeededNotice(overview({ notices, key_slots: [keySlot({ status: { kind: "needs_key", waiting_for_sync: true } })] }))).toBe(0);
+    expect(finishedKeysNeededNotice(overview({ key_slots: [keySlot()] }))).toBeNull();
   });
 });
 

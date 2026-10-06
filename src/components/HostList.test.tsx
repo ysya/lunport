@@ -3,9 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { HostSummary } from "@/bindings/HostSummary";
+import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { queryKeys } from "@/lib/queries";
 import { syncDuplicatesKey, syncOverviewKey } from "@/lib/sync";
-import { SPOOFED_NAME, SPOOFED_NAME_SHOWN, overview, space } from "@/lib/sync-fixtures";
+import { SPOOFED_NAME, SPOOFED_NAME_SHOWN, keySlot, overview, space } from "@/lib/sync-fixtures";
 import { HostList } from "./HostList";
 
 /*
@@ -25,7 +26,13 @@ function host(alias: string, file: string, patterns: string[] = [alias]): HostSu
 
 function render(
   hosts: HostSummary[],
-  options: { spaceError?: string; spaceName?: string; shadowed?: { alias: string; local_file: string }[]; overviewKnown?: boolean } = {},
+  options: {
+    spaceError?: string;
+    spaceName?: string;
+    shadowed?: { alias: string; local_file: string }[];
+    overviewKnown?: boolean;
+    keySlots?: SyncKeySlotView[];
+  } = {},
 ): string {
   const queryClient = new QueryClient();
   queryClient.setQueryData(queryKeys.hosts, { files: [MAIN, LAB, WORK], hosts });
@@ -33,7 +40,10 @@ function render(
   if (options.overviewKnown !== false) {
     queryClient.setQueryData(
       syncOverviewKey,
-      overview({ spaces: [space({ id: "a".repeat(64), name: options.spaceName ?? "Work", file_path: WORK, last_error: options.spaceError ?? null })] }),
+      overview({
+        spaces: [space({ id: "a".repeat(64), name: options.spaceName ?? "Work", file_path: WORK, last_error: options.spaceError ?? null })],
+        key_slots: options.keySlots ?? [],
+      }),
     );
   }
   queryClient.setQueryData(syncDuplicatesKey, options.shadowed ?? []);
@@ -112,6 +122,32 @@ describe("a synced space's name, which another computer chose", () => {
     // The copy in the main config is shadowed by the space's copy: its marker names the space.
     expect(html).toContain(`aria-label="Also in ${SPOOFED_NAME_SHOWN}, which ssh reads first"`);
     expect(html).not.toMatch(/[\u202E\u200B]/);
+  });
+});
+
+describe("the marker on a host whose key isn't on this computer", () => {
+  // React writes the apostrophes of an attribute as `&#x27;`.
+  const TITLE = 'title="This host&#x27;s key isn&#x27;t on this computer — pick one in Keys."';
+  const needsKey = { kind: "needs_key" as const, waiting_for_sync: false };
+
+  it("points to Keys, once, on the row of the host that uses the slot", () => {
+    const html = render([host("web", WORK)], { keySlots: [keySlot({ hosts: ["web"], status: needsKey })] });
+    expect(html.split(TITLE).length - 1).toBe(1);
+    expect(html).toContain('aria-label="This host&#x27;s key isn&#x27;t on this computer"');
+  });
+
+  it("is only on the hosts that use the slot, and not on the other rows", () => {
+    const html = render([host("web", WORK), host("db", WORK)], { keySlots: [keySlot({ hosts: ["web"], status: needsKey })] });
+    expect(html.split(TITLE).length - 1).toBe(1);
+    const rows = html.split('<li class="animate-row-enter').slice(1);
+    expect(rows.map((row) => row.includes(TITLE))).toEqual([true, false]);
+  });
+
+  it("is also there when the slot failed, but not while the synced key is on its way or the key is ready", () => {
+    expect(render([host("web", WORK)], { keySlots: [keySlot({ hosts: ["web"], status: { kind: "error", message: "boom" } })] })).toContain(TITLE);
+    expect(render([host("web", WORK)], { keySlots: [keySlot({ hosts: ["web"], status: { kind: "needs_key", waiting_for_sync: true } })] })).not.toContain(TITLE);
+    expect(render([host("web", WORK)], { keySlots: [keySlot({ hosts: ["web"] })] })).not.toContain(TITLE);
+    expect(render([host("web", WORK)])).not.toContain(TITLE);
   });
 });
 

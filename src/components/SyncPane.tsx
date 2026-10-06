@@ -6,7 +6,9 @@ import { toast } from "sonner";
 import type { SyncFrozenView } from "@/bindings/SyncFrozenView";
 import type { SyncOverview } from "@/bindings/SyncOverview";
 import type { SyncRotationView } from "@/bindings/SyncRotationView";
-import { approvalsRowNote } from "@/lib/sync-approvals";
+import { listNames } from "@/lib/format";
+import { keysToAsk, needsKeyLabel, notSetUpLabel, slotsNeedingKey, syncedKeysNote } from "@/lib/key-slots";
+import { approvalsRowNote, revealHidden } from "@/lib/sync-approvals";
 import { SYNC_CODE_WORDS, cleanWordsInput, wordCount } from "@/lib/sync-migration";
 import {
   createAccount,
@@ -24,6 +26,7 @@ import {
   useCheckUnknownRelay,
   useDismissNotice,
   useForgetDevice,
+  useKeyCandidates,
   useLeaveAccount,
   useSetDeviceName,
   useSetRelayUrl,
@@ -132,6 +135,7 @@ export function SyncPane() {
       <SyncCodeDialog
         mode="changed"
         words={newCode}
+        note={syncedKeysNote(o) ?? undefined}
         onDone={() => {
           // Saved: the "new sync code" notice has done its job. Its place in the list is looked up now, not when
           // the dialog opened: another notice may have gone since, and the index is what the backend dismisses by.
@@ -451,6 +455,11 @@ function JoinedPane({
   const syncNow = useSyncNow();
   const dismiss = useDismissNotice();
   const openApprovals = useUiStore((s) => s.setSyncApprovalsOpen);
+  const candidates = useKeyCandidates(o.joined);
+  const notSetUp = keysToAsk(candidates.data, null).length;
+  const needing = slotsNeedingKey(o);
+  const setKeySetup = useUiStore((s) => s.setKeySetup);
+  const setKeysOpen = useUiStore((s) => s.setKeysOpen);
   // Relative times ("last sync 2m ago") keep moving while the overview itself does not change.
   const now = useNow();
   const status = statusLine(o, now);
@@ -493,6 +502,23 @@ function JoinedPane({
             >
               <Button type="button" size="sm" className="h-7" disabled={lock !== null} onClick={() => openApprovals(true)}>
                 <ShieldAlert className="size-3.5" /> Review…
+              </Button>
+            </SettingsRow>
+          )}
+          {notSetUp > 0 && (
+            <SettingsRow label={notSetUpLabel(notSetUp)} description="Choose whether each key goes to your other computers.">
+              <Button type="button" size="sm" className="h-7" onClick={() => setKeySetup({ aliases: null, reason: "settings" })}>
+                Set up…
+              </Button>
+            </SettingsRow>
+          )}
+          {needing.length > 0 && (
+            <SettingsRow
+              label={needsKeyLabel(needing.length)}
+              description={`Synced hosts use ${listNames(needing.map((s) => revealHidden(s.name)))}, which stay on your other computers.`}
+            >
+              <Button type="button" size="sm" className="h-7" onClick={() => setKeysOpen(true)}>
+                Pick…
               </Button>
             </SettingsRow>
           )}
@@ -621,6 +647,9 @@ function AccountSection({ overview: o, reading, onShowCode }: { overview: SyncOv
             <li>Every other computer stops syncing until you enter the new sync code on it. Changes it hasn't uploaded yet are kept and sent afterwards.</li>
             <li>Your relay must support freezing data; SSHelter checks that before it starts.</li>
             <li>You can cancel only until the old data is frozen.</li>
+            {o.key_slots.some((s) => s.mode === "synced") && (
+              <li>Keys you synced stay on every computer that has them. If a computer was lost, replace those keys on your servers.</li>
+            )}
           </ul>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={changeCode.isPending}>Cancel</AlertDialogCancel>
@@ -709,6 +738,7 @@ function LeaveSection({ overview: o }: { overview: SyncOverview }) {
               them, and you can later move their hosts into another sync account. Joining again needs the sync code.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {o.key_slots.length > 0 && <p className="text-sm text-muted-foreground">Keys in ~/.ssh/sshelter/keys stay on this computer.</p>}
           {unsentNote && <p className={cn("text-sm", TONE_TEXT.warning)}>{unsentNote}</p>}
           {rotationNote && <p className={cn("text-sm", TONE_TEXT.warning)}>{rotationNote}</p>}
           {deleteNote === null ? (

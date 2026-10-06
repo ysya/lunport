@@ -27,6 +27,7 @@ import { SyncMigrationDialog } from "@/components/SyncMigrationDialog";
 import { SyncUpgradeDialog } from "@/components/SyncUpgradeDialog";
 import { SyncApprovalDialog } from "@/components/SyncApprovalDialog";
 import { SyncKeyDialog } from "@/components/SyncKeyDialog";
+import { KeysNeededDialog } from "@/components/KeysNeededDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
@@ -246,6 +247,7 @@ function App() {
         <SyncUpgradeDialog />
         <SyncApprovalDialog />
         <SyncKeyDialog />
+        <KeysNeededDialog />
         <McpApprovalDialog />
         <Toaster />
       </div>

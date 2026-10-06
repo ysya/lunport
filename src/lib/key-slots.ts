@@ -88,6 +88,20 @@ export function slotsNeedingKey(o: SyncOverview): SyncKeySlotView[] {
   return o.key_slots.filter((s) => s.status.kind === "needs_key" && !s.status.waiting_for_sync);
 }
 
+/** Where the "keys needed" notice sits in the overview's notices (the backend dismisses notices by index). */
+export function keysNeededNoticeIndex(o: SyncOverview): number | null {
+  const index = o.notices.findIndex((n) => n.kind === "keys_needed");
+  return index < 0 ? null : index;
+}
+
+/**
+ * The "keys needed" notice once no slot needs a key picked here (picked in the dialog or in Keys, or the origin
+ * started syncing it), so it can be dismissed; null while there is something left to pick, or no notice.
+ */
+export function finishedKeysNeededNotice(o: SyncOverview): number | null {
+  return slotsNeedingKey(o).length === 0 ? keysNeededNoticeIndex(o) : null;
+}
+
 /** After a sync code change: which synced keys to replace if a computer was lost (spec §6.6). */
 export function syncedKeysNote(o: SyncOverview): string | null {
   const synced = o.key_slots.filter((s) => s.mode === "synced").map((s) => revealHidden(s.name));

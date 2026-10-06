@@ -3,8 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { SyncOverview } from "@/bindings/SyncOverview";
-import { syncOverviewKey } from "@/lib/sync";
-import { NOW, SPOOFED_NAME, SPOOFED_NAME_SHOWN, device, overview, space } from "@/lib/sync-fixtures";
+import { keyCandidatesKey, syncOverviewKey } from "@/lib/sync";
+import { NOW, SPOOFED_NAME, SPOOFED_NAME_SHOWN, device, keyCandidate, keySlot, overview, space } from "@/lib/sync-fixtures";
 import { SyncPane } from "./SyncPane";
 
 /*
@@ -141,5 +141,51 @@ describe("the Devices list", () => {
       overview({ devices: [device(), device({ id: "device-b", name: "MacBook-B", is_this: false, last_seen_ms: Date.now() - 3 * 3_600_000 })] }),
     );
     expect(text(html)).toContain("last seen 3h ago");
+  });
+});
+
+describe("key slot rows", () => {
+  it("ask to set up keys and to pick keys for this computer", () => {
+    const client = new QueryClient();
+    const o = overview({ key_slots: [keySlot({ status: { kind: "needs_key", waiting_for_sync: false }, mode: "own", fingerprint: null })] });
+    client.setQueryData(syncOverviewKey, o);
+    client.setQueryData(keyCandidatesKey, { keys: [keyCandidate()], unsupported: [] });
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <SyncPane />
+      </QueryClientProvider>,
+    );
+    expect(text(html)).toContain("1 key used by synced hosts isn't set up");
+    expect(html).toContain(">Set up…<");
+    expect(text(html)).toContain("1 key slot needs a key on this computer");
+    expect(html).toContain(">Pick…<");
+  });
+
+  it("stay hidden when there is nothing to do", () => {
+    const html = pane(overview());
+    expect(text(html)).not.toContain("isn't set up");
+    expect(text(html)).not.toContain("needs a key on this computer");
+    // Not even a row that counts none ("0 keys … aren't set up", "0 key slots need …").
+    expect(text(html)).not.toContain("n't set up");
+    expect(text(html)).not.toContain("a key on this computer");
+    expect(html).not.toContain(">Set up…<");
+    expect(html).not.toContain(">Pick…<");
+  });
+
+  it("count only what needs the user: a slot waiting for its synced key, or one that is ready, is not asked about", () => {
+    const o = overview({
+      key_slots: [keySlot({ status: { kind: "needs_key", waiting_for_sync: true }, mode: "own", fingerprint: null }), keySlot({ id: "b".repeat(32), name: "work" })],
+    });
+    const client = new QueryClient();
+    client.setQueryData(syncOverviewKey, o);
+    // A key that already has a slot is set up without asking: it is not "not set up".
+    client.setQueryData(keyCandidatesKey, { keys: [keyCandidate({ existing_slot: "a".repeat(32) })], unsupported: [] });
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <SyncPane />
+      </QueryClientProvider>,
+    );
+    expect(text(html)).not.toContain("n't set up");
+    expect(text(html)).not.toContain("a key on this computer");
   });
 });

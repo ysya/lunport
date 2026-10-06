@@ -267,6 +267,12 @@ describe("subscribeSyncEvents", () => {
     expect(useUiStore.getState()).toEqual(expect.objectContaining({ settingsOpen: true, settingsCategory: "sync" }));
   });
 
+  it("leaves the keys notice to its dialog", async () => {
+    const { emit } = await subscribed();
+    emit("sync://notice", { kind: "keys_needed", names: ["id_mac"] });
+    expect(toast.getToasts()).toEqual([]);
+  });
+
   it("ignores events that reach a subscription after it was dropped, and still releases its listeners", async () => {
     const bus = stubEventBus();
     const queryClient = new QueryClient();

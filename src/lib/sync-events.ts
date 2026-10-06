@@ -170,7 +170,8 @@ export function subscribeSyncEvents(queryClient: QueryClient): () => void {
     });
   });
   on<SyncNotice>("sync://notice", (notice) => {
-    if (notice.kind === "upgraded") return; // SyncUpgradeDialog explains it
+    // The upgrade and the keys notice have their own dialogs (SyncUpgradeDialog, KeysNeededDialog).
+    if (notice.kind === "upgraded" || notice.kind === "keys_needed") return;
     const message = noticeMessage(notice);
     toast.info(message.title, {
       description: message.description,
