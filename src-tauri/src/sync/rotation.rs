@@ -30,7 +30,7 @@ use crate::sync::runtime::{mutate, save_core};
 use crate::sync::space_files;
 use crate::sync::state::MNEMONIC_ACCOUNT;
 use crate::sync::state_v2::{
-    AccountState, FreezeInfo, RotatedSpace, RotationProgress, RotationStep, SealedRecord, SpaceState, SyncNotice,
+    AccountState, FreezeInfo, LocalSlot, RotatedSpace, RotationProgress, RotationStep, SealedRecord, SpaceState, SyncNotice,
     SyncStateV2, NEXT_MNEMONIC_ACCOUNT,
 };
 
@@ -617,6 +617,22 @@ fn delete_old(env: &SyncEnv, s: &SyncStateV2, keys: &ChainKeys, rotation: &Rotat
     Ok(Stepped::Advanced)
 }
 
+/// 換到新帳戶時這台的插槽記錄(SP3 spec §6.6;N1)。新帳戶接續了舊帳戶的 space(`mapping` 的 key 裡有舊帳戶的 space)才是同一個帳戶換了同步碼:
+/// 在舊帳戶學到的記錄改記成新帳戶(`LocalSlot::learned_in`:新帳戶裡沒有它們時照樣補寫,`slots::republish`),這台同意上傳的那把
+/// (`uploaded_fingerprint`)照舊。沒有接續舊帳戶任何 space 的帳戶 —— 被擋下、又沒有勾選任何 space 的電腦,`rejoin_account` 收下任何帳戶的同步碼 ——
+/// 是加入了另一個帳戶:同 `account::install_account`,同意一律清掉、學到的帳戶不改(不補寫進去)。舊帳戶一個 space 都沒有時無從確認,也當成另一個帳戶。
+/// 在更早的帳戶學到的記錄(離開之後留下的)兩種情況都不改記。
+fn carry_key_slots(slots: &mut BTreeMap<String, LocalSlot>, old: Option<&AccountState>, new_chain: &str, mapping: &BTreeMap<String, String>) {
+    let continued = old.filter(|old| space_entries(old).iter().any(|e| mapping.contains_key(&e.id))).map(|old| old.chain_id.as_str());
+    for local in slots.values_mut() {
+        match continued {
+            Some(old_chain) if local.learned_in.as_deref() == Some(old_chain) => local.learned_in = Some(new_chain.to_string()),
+            Some(_) => {}
+            None => local.uploaded_fingerprint = None,
+        }
+    }
+}
+
 /// 依 `previous_id` 把這台勾選的 space 帶進新帳戶(spec §7.5「保留勾選、檔名、待核准項目」):記錄的 seq 屬於舊 chain
 /// → 歸零;cursor 歸零、基線已建立(第一輪以一般 LWW 合併,未上傳的修改照原時間戳上傳)。對不到新 space 的不帶。
 fn carry_spaces(old: &BTreeMap<String, SpaceState>, mapping: &BTreeMap<String, String>) -> BTreeMap<String, SpaceState> {
@@ -673,7 +689,7 @@ fn unmapped_selected_files(env: &SyncEnv, mapping: &BTreeMap<String, String>) ->
 }
 
 /// 換成新帳戶(第 7 步與其他電腦的重新加入共用):在 doc 鎖內、以**最新**的狀態(含期間存檔當下規劃的修改)依
-/// `mapping`(舊 space id → 新 space id)帶過勾選的 space,一次換掉並存檔;再把 keychain 的同步碼換成新碼。
+/// `mapping`(舊 space id → 新 space id)帶過勾選的 space 與這台的插槽記錄(`carry_key_slots`),一次換掉並存檔;再把 keychain 的同步碼換成新碼。
 ///
 /// 這台勾選、新帳戶卻沒有接續的 space(更換之前還沒送出去的新 space、期間被別台刪除的)先改成本機檔案(同離開帳戶:
 /// `keep_files_local`,搬到 `~/.ssh/sshelter-local/`、主 config 的 Include 原地換成新路徑),**再**讓狀態不再勾選它們 —— 否則下一輪改寫
@@ -713,6 +729,7 @@ fn install_new_account(
         core.failed_rounds = 0;
         core.batch_failures = 0;
         let s = core.state.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+        carry_key_slots(&mut s.key_slots, s.account.as_ref(), &account.chain_id, mapping);
         s.spaces = carry_spaces(&s.spaces, mapping);
         s.account = Some(account);
         s.rotation = None;
@@ -2278,5 +2295,100 @@ mod tests {
         let _ = sync_once(&c.env());
         assert!(c.read(&c.space_path(&new_personal)).contains(&file), "the host is there");
         assert!(!c.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file).exists(), "no key was landed on the computer that joined later");
+    }
+
+    /// 沒有 SP3 的電腦更換同步碼時,新帳戶裡沒有插槽的記錄(這裡在複製完之後從 relay 拿掉它們來模擬,SP3 spec §6.6)。換到新帳戶
+    /// (`install_new_account`)是同一個帳戶的延續:用到插槽的主機還在的電腦照樣把它寫回新帳戶 —— 重新加入的 B 從同步來的副本,做完更換的 A
+    /// 從自己連到的金鑰(A 在更換之前就選了同步它,這個同意跟著帶過來)。
+    #[test]
+    fn key_slots_a_sync_code_change_left_behind_are_written_again_into_the_new_account() {
+        use crate::sync::slot_rules::{test_keys, SlotMode};
+        use crate::sync::slots::tests::{create_slot_on, use_slot};
+        use crate::sync::slots::{open_key_secret, slot, slot_record_exists};
+        let (relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        start_rotation(&a.env()).unwrap();
+        let next = new_code(&a);
+        for _ in 0..3 {
+            tick(&a); // 第 2 步、第 3 步、第 4 至 5 步
+        }
+        assert_eq!(step(&a), Some(RotationStep::Deleting), "the copy is done");
+        let new_keys = crypto::derive_account(&next).unwrap();
+        let new_account =
+            || merge_account(&AccountState::new(&new_keys.chain_id), &new_keys, &relay.pull(&new_keys.chain_id, &new_keys.auth_token, 0).unwrap()).section;
+        let left_behind = || {
+            relay.drop_kinds(&new_keys.chain_id, &[RecordKind::KeySlot.as_str(), RecordKind::Key.as_str()]);
+            assert!(!slot_record_exists(&new_account(), &id), "the new account has no record of the slot");
+        };
+        let written_again = |by: &str| {
+            let account = new_account();
+            assert_eq!(slot(&account, &id).map(|p| p.mode), Some(SlotMode::Synced), "{by} writes the keyslot again");
+            assert_eq!(open_key_secret(&account, &new_keys, &id).as_deref(), Some(test_keys::plain().as_str()), "{by} writes the key again");
+        };
+
+        left_behind();
+        settle(&b);
+        rejoin_account(&b.env(), &next).unwrap();
+        settle(&b);
+        written_again("B, from its synced copy,");
+
+        left_behind();
+        finish(&a);
+        written_again("A, from its own key,");
+        assert_eq!(a.state().key_slots[&id].uploaded_fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT), "the consent comes along");
+        assert!(a.read(&a.space_path(&entry_named(&a, "Personal").id)).contains(&file));
+    }
+
+    /// 被擋下(別台更換了同步碼)、又沒有勾選任何 space 的電腦,`rejoin_account` 收下任何帳戶的同步碼。輸入的若是另一個帳戶的 —— 它沒有接續舊帳戶的
+    /// 任何 space —— 那是加入另一個帳戶,不是同一個帳戶的延續:同建立、加入帳戶,這台同意上傳的那把不帶過去,在舊帳戶學到的插槽也不寫進那個帳戶
+    /// (主 config 裡用到它的主機之後搬進那個帳戶的 space 也一樣)。
+    #[test]
+    fn a_rejoin_into_an_account_that_does_not_continue_this_one_carries_no_key_slot() {
+        use crate::sync::migrate::move_hosts_into_space;
+        use crate::sync::slot_rules::{test_keys, SlotMode, SLOT_DIR};
+        use crate::sync::slots::tests::create_slot_on;
+        use crate::sync::slots::{key_secret_key, slot_record_exists};
+        use crate::sync::spaces::select_space;
+        let (relay, clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        let web = format!("Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/sshelter/keys/{file}\n");
+        let db = "Host db\n  HostName 10.0.0.2\n";
+        a.save_in_app(&a.space_path(&personal), &format!("{web}\n{db}"));
+        settle(&a);
+        settle(&b);
+        // A 把 `web` 搬到主 config(Personal 留著 `db`),再取消勾選 Personal:這台沒有勾選任何 space,`web` 照樣用著插槽(記錄與連結留著)。
+        a.save_in_app(&a.space_path(&personal), db);
+        a.save_in_app(&a.main_path(), &format!("{}\n{web}", a.main_config()));
+        settle(&a);
+        unselect_space(&a.env(), &personal).unwrap();
+        settle(&a);
+        assert!(a.state().key_slots.contains_key(&id));
+        start_rotation(&b.env()).unwrap();
+        finish(&b);
+        settle(&a);
+        assert!(a.state().frozen().is_some(), "A missed the change");
+
+        let c = TestDevice::new("c", &relay, &clock);
+        let unrelated = create_account(&c.env(), "MacBook-C").unwrap();
+        settle(&c);
+        rejoin_account(&a.env(), &unrelated).unwrap();
+        let theirs = c.state().spaces.keys().next().unwrap().clone();
+        select_space(&a.env(), &theirs).unwrap();
+        settle(&a);
+        assert_eq!(move_hosts_into_space(&a.env(), true, vec!["web".to_string()], &theirs, false).unwrap().moved, vec!["web".to_string()]);
+        settle(&a);
+        settle(&c);
+
+        assert!(c.read(&c.space_path(&theirs)).contains(&file), "the host reaches the other account");
+        assert!(!c.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file).exists(), "but no key lands there");
+        let keys = crypto::derive_account(&unrelated).unwrap();
+        let on_relay = merge_account(&AccountState::new(&keys.chain_id), &keys, &relay.pull(&keys.chain_id, &keys.auth_token, 0).unwrap()).section;
+        assert!(!slot_record_exists(&on_relay, &id), "no keyslot in that account");
+        assert!(!on_relay.sealed.contains_key(&key_secret_key(&keys, &id)), "no key in that account");
+        assert_eq!(a.state().key_slots[&id].uploaded_fingerprint, None, "an account that does not continue this one gets no consent");
+        assert_eq!(std::fs::read_to_string(a.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file)).unwrap(), test_keys::plain(), "web still works here");
     }
 }

@@ -218,7 +218,8 @@ pub struct LocalSlot {
     /// 這台電腦自己把哪一把金鑰(指紋)上傳成這個插槽的同步金鑰:只有這台的使用者在這台選了同步它(建立插槽時選「Sync key」、
     /// 或之後的「Sync this key」「Sync the new key」)才會設定,帳戶裡別人的變更不會動它。補寫 `key`(spec §6.6)時,連到本機金鑰的
     /// 插槽只認它:`payload` 是帳戶裡最新的 `keyslot`,帳戶裡的任何成員都改得動(改成 `synced`、填上公開的指紋),證明不了使用者
-    /// 同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。
+    /// 同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。建立或加入帳戶時一律清掉(`account::install_account`,同一個同步碼
+    /// 重新加入也一樣):在之前的帳戶裡同意的,不算同意上傳到這個帳戶。更換同步碼是同一個帳戶的延續,照舊(`rotation::install_new_account`)。
     #[serde(default)]
     pub uploaded_fingerprint: Option<String>,
     /// 這個插槽的連結收起來了:沒有主機用到而拿掉了連結檔,或路徑上被換成了別的檔案(`slots::park_link`);有主機用到的 symlink 插槽,
@@ -228,6 +229,17 @@ pub struct LocalSlot {
     /// 不移除、也不收編路徑上的檔案。
     #[serde(default)]
     pub parked: bool,
+    /// 這筆記錄是在哪一個帳戶學到的(帳戶 chain id,`AccountState::chain_id`):這台在那個帳戶裡第一次看到這個插槽(`slots::reconcile` 建立記錄)、
+    /// 在那裡建立它(`slot_setup::create_slot`)、落地或改用了那裡的同步金鑰(`slots::reconcile`、`slots::use_synced`)、在那裡選了同步它
+    /// (`slots::set_mode`),或在那裡第一次為它挑了金鑰、沿用了它(`slots::pick`、`slot_setup::reuse_slot`)。補寫帳戶裡不見的插槽
+    /// (`slots::republish`,spec §6.6)只做在現在這個帳戶學到的記錄:離開之後建立或加入的另一個帳戶,收不到在之前的帳戶學到的 `keyslot`,
+    /// 也收不到那裡同步來的私鑰。
+    ///
+    /// 帳戶裡之後出現同 id 的 `keyslot`,不會把記錄改記成那個帳戶:這台在新帳戶的 `device.slots` 列著留下來的插槽 id,新帳戶的成員可以發佈一個
+    /// 同 id 的插槽,讓舊帳戶同步來的副本看起來像是新帳戶的。只有更換同步碼(`rotation::install_new_account`:新帳戶接續了舊帳戶的 space)把舊
+    /// chain 改記成新的。None = 不知道(這個欄位之前寫的狀態檔):當成「不是現在的帳戶」,不補寫。
+    #[serde(default)]
+    pub learned_in: Option<String>,
 }
 
 /// 插槽裡放的東西(SP3 spec §4.2)。
@@ -694,6 +706,7 @@ mod tests {
                 }),
                 uploaded_fingerprint: Some("SHA256:vUthAmDZoxYXCTAPEZUn5qtWSMHWQCEcUfpnyM05mMs".to_string()),
                 parked: false,
+                learned_in: Some(account_keys.chain_id.clone()),
             },
         );
         s.key_slots.insert(
@@ -711,6 +724,7 @@ mod tests {
                 payload: None,
                 uploaded_fingerprint: None,
                 parked: true,
+                learned_in: None,
             },
         );
         s
@@ -770,20 +784,23 @@ mod tests {
                 payload: None,
                 uploaded_fingerprint: Some("SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew".into()),
                 parked: true,
+                learned_in: Some("a".repeat(64)),
             },
         );
         let back: SyncStateV2 = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
         assert_eq!(back.key_slots, state.key_slots);
 
         // 沒有 `uploaded_fingerprint` 的記錄(這個欄位之前寫的狀態檔)讀進來是 None:沒有人同意過上傳,不會補寫私鑰。沒有 `parked` 的
-        // 記錄讀進來是 false:連結還在原位(收起來之前的版本不會收起連結)。
+        // 記錄讀進來是 false:連結還在原位(收起來之前的版本不會收起連結)。沒有 `learned_in` 的記錄讀進來是 None:不知道是在哪個帳戶學到的,
+        // 當成不是現在的帳戶(不補寫)。
         let mut json = serde_json::to_value(&state).unwrap();
         let entry = json["key_slots"]["3fa2c1d90123456789abcdef01234567"].as_object_mut().unwrap();
         entry.remove("uploaded_fingerprint");
         entry.remove("parked");
+        entry.remove("learned_in");
         let older: SyncStateV2 = serde_json::from_value(json).unwrap();
         let older = &older.key_slots["3fa2c1d90123456789abcdef01234567"];
-        assert_eq!((older.uploaded_fingerprint.as_deref(), older.parked), (None, false));
+        assert_eq!((older.uploaded_fingerprint.as_deref(), older.parked, older.learned_in.as_deref()), (None, false, None));
     }
 
     #[test]

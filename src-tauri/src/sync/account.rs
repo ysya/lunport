@@ -165,7 +165,12 @@ pub fn space_payload(name: &str, created_at_ms: u64, previous_id: Option<String>
     SpacePayload { schema: SCHEMA_VERSION, name: name.to_string(), slug: slugify(name), created_at_ms, previous_id }
 }
 
-/// 加入帳戶前,把狀態的帳戶部分換成 `account`(生命週期變更:換 generation、計數歸零)。呼叫端持有 doc 鎖。
+/// 加入帳戶前,把狀態的帳戶部分換成 `account`(生命週期變更:換 generation、計數歸零)。呼叫端持有 doc 鎖。建立帳戶與加入帳戶都經過這裡。
+///
+/// 這台的插槽記錄(離開時留下的連結與副本,`~/.ssh/sshelter-local/` 的主機還用著)留著,但在之前的帳戶裡選了同步的金鑰,不算同意上傳到這個帳戶
+/// (SP3 N1):每一筆的 `uploaded_fingerprint` 都清掉 —— 用同一個同步碼重新加入也一樣,要上傳就在這個帳戶再選一次。在別的帳戶學到的記錄
+/// (`LocalSlot::learned_in`:建立的帳戶一定不是;加入的除非就是學到它的那個帳戶)在帳戶裡沒有它們時也不補寫進來(`slots::republish`)。
+/// 更換同步碼不走這裡(`rotation::install_new_account`)。
 fn install_account(env: &SyncEnv, account: AccountState, keys: ChainKeys, device_name: String, spaces: Vec<(String, SpaceState)>) -> Result<(), AppError> {
     let now = env.now();
     let mut core = env.runtime.core.lock().unwrap();
@@ -181,6 +186,9 @@ fn install_account(env: &SyncEnv, account: AccountState, keys: ChainKeys, device
     s.phrase_cleanup_pending = false;
     s.last_sync_ms = None;
     s.last_error = None;
+    for local in s.key_slots.values_mut() {
+        local.uploaded_fingerprint = None;
+    }
     let ids = selected_ids(s);
     let (device_id, name) = (s.device_id.clone(), s.device_name.clone());
     plan_device(s.account.as_mut().expect("just set"), &device_id, &name, env.platform, &ids, now);

@@ -21,8 +21,8 @@ use crate::sync::slot_rules::{
     IdentityTarget, KeySlotPayload, SlotMode, SLOT_DIR, SLOT_SCHEMA,
 };
 use crate::sync::slots::{
-    account_still_ready, contested_and_not_held, in_the_way_message, live_slots, local_key_fingerprint, put_key_secret, put_slot, slot,
-    source_gone_message, write_linked_public, CONTESTED_MESSAGE,
+    account_still_ready, contested_and_not_held, in_the_way_message, learned_now, live_slots, local_key_fingerprint, put_key_secret,
+    put_slot, slot, source_gone_message, write_linked_public, CONTESTED_MESSAGE,
 };
 use crate::sync::state_v2::{LocalSlot, SlotSource, SyncStateV2};
 
@@ -432,7 +432,10 @@ fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id:
     let slot_path = keys_dir.join(&file);
     // 連結用的路徑與記進 `Linked` 的路徑出自同一個字串(`candidate.path`):`slots::maintain` 每一輪(Unix)確認 symlink 正好指到記錄的路徑。
     let link = link_free_slot(keys_dir, &slot_path, Path::new(&candidate.path))?;
+    let chain = state.account.as_ref().map(|a| a.chain_id.clone()).unwrap_or_default();
     let result = mutate(env, |s| {
+        // 這台第一次有這個插槽的記錄:是在快照裡插槽所在的帳戶學到的(提交時帳戶換了就不記)。已經有的記錄(收起來的)照舊。
+        let learned_here = learned_now(s, &chain);
         let local = s.key_slots.entry(slot_id.to_string()).or_insert_with(|| LocalSlot {
             file_name: file.clone(),
             source: None,
@@ -441,6 +444,7 @@ fn reuse_slot(env: &SyncEnv, keys_dir: &Path, candidate: &KeyCandidate, slot_id:
             payload: None,
             uploaded_fingerprint: None,
             parked: false,
+            learned_in: learned_here,
         });
         // 收起來的記錄原本就是這台建立的(`origin`)就還是;其他電腦連到自己挑的金鑰,不是。
         let origin = matches!(&local.source, Some(SlotSource::Linked { origin: true, .. }));
@@ -542,6 +546,8 @@ fn create_slot(
                 // 只有使用者在這台選了「Sync key」,上傳的這把金鑰才算是這台自己上傳的(補寫 `key` 時只認它,見 `LocalSlot::uploaded_fingerprint`)。
                 uploaded_fingerprint: facts.map(|f| f.fingerprint.clone()),
                 parked: false,
+                // 在這個帳戶建立的(`account_still_ready` 確認過帳戶就是 `account_keys` 的那一個)。
+                learned_in: Some(account_keys.chain_id.clone()),
             },
         );
         Ok(())
@@ -842,6 +848,8 @@ mod tests {
         assert_eq!(state.key_slots[&synced].uploaded_fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT), "the key it uploaded");
         assert_eq!(state.key_slots[&own].uploaded_fingerprint, None, "a kept key is never uploaded");
         assert!(state.key_slots.values().all(|l| !l.parked));
+        let chain = state.account.as_ref().unwrap().chain_id.clone();
+        assert!(state.key_slots.values().all(|l| l.learned_in.as_deref() == Some(chain.as_str())), "both were made in this account");
         // 同步的金鑰上傳了(記錄與密文都在帳戶裡),狀態檔裡卻只有密文。
         assert!(crate::sync::slots::open_key_secret(state.account.as_ref().unwrap(), &a.runtime.core.lock().unwrap().account_keys.clone().unwrap(), &synced).is_some());
         let saved = std::fs::read_to_string(a.home.path().join("data").join("sync-state.json")).unwrap();
@@ -880,6 +888,7 @@ mod tests {
         let local = a.state().key_slots[&id].clone();
         assert!(matches!(&local.source, Some(SlotSource::Linked { origin: false, .. })), "{local:?}");
         assert_eq!((local.uploaded_fingerprint.as_deref(), local.parked), (None, false));
+        assert_eq!(local.learned_in, a.state().account.map(|a| a.chain_id), "the first reuse records the account the slot is in");
     }
 
     /// 三條路建好的插槽(第一次沿用別台發佈的、Sync、Keep)都以連結時用的那個路徑記錄:下一輪維護(Unix 上會檢查連結正好指到記錄的路徑)

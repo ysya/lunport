@@ -151,6 +151,14 @@ impl FakeRelay {
         self.inner.lock().unwrap().chains.remove(chain);
     }
 
+    /// 拿掉一條 chain 上這幾種記錄的每一列(`Envelope::kind` 是明文),watermark 不變:模擬沒有 SP3 的電腦更換同步碼 —— 它的複製步驟
+    /// 不帶 `keyslot` 與 `key`,新帳戶裡沒有這兩種記錄(SP3 spec §6.6)。
+    pub fn drop_kinds(&self, chain: &str, kinds: &[&str]) {
+        if let Some(c) = self.inner.lock().unwrap().chains.get_mut(chain) {
+            c.rows.retain(|_, e| !kinds.contains(&e.kind.as_str()));
+        }
+    }
+
     /// 自架 relay 從舊備份還原:只留 seq ≤ `keep` 的列,watermark 退回 `keep`。
     pub fn roll_back(&self, chain: &str, keep: u64) {
         let mut inner = self.inner.lock().unwrap();
