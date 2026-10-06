@@ -664,8 +664,9 @@ pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path) -> Vec<
     out
 }
 
-/// 一個帳戶裡的插槽在這台的狀態。錯誤優先;`synced` 的插槽,這台用的若不是同步的那把,依情況是 SourceChanged(這台是
-/// 來源)或 SyncedAvailable。
+/// 一個帳戶裡的插槽在這台的狀態。錯誤優先;`synced` 的插槽,這台連到的若不是同步的那把:目前同步的那把是這台上傳的
+/// (`LocalSlot::uploaded_fingerprint`),表示這台自己的金鑰之後換了 → SourceChanged(「Sync the new key」);不是這台上傳的(建立插槽的
+/// 那台也一樣:別台同步了自己的金鑰,這台的金鑰並沒有換)→ SyncedAvailable。
 pub fn slot_status(
     local: Option<&LocalSlot>,
     payload: &KeySlotPayload,
@@ -678,11 +679,15 @@ pub fn slot_status(
     }
     let here = slot_path.display().to_string();
     let synced = payload.mode == SlotMode::Synced;
+    let uploaded_current = local
+        .and_then(|l| l.uploaded_fingerprint.as_deref())
+        .is_some_and(|uploaded| payload.fingerprint.as_deref() == Some(uploaded));
     match local.and_then(|l| l.source.as_ref()) {
-        Some(SlotSource::Linked { path, link, fingerprint, origin }) => {
-            if synced && *origin && fingerprint != &payload.fingerprint {
+        Some(SlotSource::Linked { path, link, fingerprint, .. }) => {
+            let differs = synced && fingerprint != &payload.fingerprint;
+            if differs && uploaded_current {
                 SlotStatusView::SourceChanged { file: path.clone() }
-            } else if synced && !origin && has_secret && fingerprint != &payload.fingerprint {
+            } else if differs && has_secret {
                 SlotStatusView::SyncedAvailable { file: path.clone() }
             } else if !needed {
                 // 連結沒有主機用到就收起來了(`park_link`),插槽裡沒有東西;只有複製檔是真的放在插槽裡的金鑰,可以刪除。
@@ -946,9 +951,27 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 刪除沒有主機用到的副本(同步來的,或 Windows 上的複製檔)與它的 `.pub`。用得到的插槽不能刪。路徑上的檔案必須還是這筆記錄放的那一份:
-/// 以模組讀本機金鑰的方式(`local_key_fingerprint`)推出的指紋等於記錄的指紋;不同(使用者換上的、別的插槽放的)就擋路,什麼都不刪。
-/// 副本已經不在了:只忘掉記錄,旁邊的 `.pub` 不能確定是自己的,不碰(同 `park_link`)。
+/// 插槽路徑 `path` 上的檔案還是不是這筆記錄放的那一份副本(刪除副本之前)。只看檔案本身的位元組,不看旁邊的 `.pub`:那是 SSHelter 從記錄的
+/// 金鑰寫的,私鑰的檔案被換掉時它還留著(`local_key_fingerprint` 對讀不懂的私鑰會改讀它,所以這裡不用它)。同步來的副本一定是 OpenSSH 格式:
+/// 以檔案本身推出的指紋等於記錄的指紋。複製檔:內容和記錄的原檔相同,或以檔案本身推出的指紋等於記錄的指紋(記錄沒有指紋就只看內容)。
+fn holds_recorded_copy(copy: &SlotSource, path: &Path) -> bool {
+    let own_fingerprint = || std::fs::read_to_string(path).ok().and_then(|text| inspect_private_key(&text).ok()).map(|f| f.fingerprint);
+    match copy {
+        SlotSource::SyncedCopy { fingerprint } => own_fingerprint().as_ref() == Some(fingerprint),
+        SlotSource::Linked { path: original, link: LinkKind::Copy, fingerprint, .. } => {
+            let same_bytes = matches!(
+                (slot_files::content_sha256(path), slot_files::content_sha256(Path::new(original))),
+                (Some(here), Some(there)) if here == there
+            );
+            same_bytes || fingerprint.as_ref().is_some_and(|recorded| own_fingerprint().as_ref() == Some(recorded))
+        }
+        SlotSource::Linked { .. } => false,
+    }
+}
+
+/// 刪除沒有主機用到的副本(同步來的,或 Windows 上的複製檔)與它的 `.pub`。用得到的插槽不能刪。路徑上的檔案必須還是這筆記錄放的那一份
+/// (`holds_recorded_copy`);不是(使用者換上的、別的插槽放的)就擋路,什麼都不刪。副本已經不在了:只忘掉記錄,旁邊的 `.pub` 不能確定是
+/// 自己的,不碰(同 `park_link`)。
 pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let (state, _keys, home) = snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
@@ -958,14 +981,13 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     if slot_hosts(&state).contains_key(&local.file_name) {
         return Err(AppError::Other(IN_USE_MESSAGE.to_string()));
     }
-    let recorded = match &local.source {
-        Some(SlotSource::SyncedCopy { fingerprint }) => Some(fingerprint.clone()),
-        Some(SlotSource::Linked { link: LinkKind::Copy, fingerprint, .. }) => fingerprint.clone(),
+    let copy = match &local.source {
+        Some(copy @ (SlotSource::SyncedCopy { .. } | SlotSource::Linked { link: LinkKind::Copy, .. })) => copy,
         _ => return Err(not_found()),
     };
     let path = home.join(SLOT_DIR).join(&local.file_name);
     if slot_files::occupied(&path) {
-        if local_key_fingerprint(&path) != recorded {
+        if !holds_recorded_copy(copy, &path) {
             return Err(AppError::Other(in_the_way_message(&path)));
         }
         slot_files::remove_slot(&path)?;
@@ -3254,11 +3276,21 @@ pub(crate) mod tests {
         assert_eq!(status(None, &own, true, false), SlotStatusView::NeedsKey { waiting_for_sync: false });
         assert_eq!(status(Some(&local(None, None)), &synced, true, true), SlotStatusView::NeedsKey { waiting_for_sync: true });
         assert_eq!(status(None, &synced, false, true), SlotStatusView::NotUsedHere);
-        // 連到金鑰:來源電腦且指紋還對 → Ready;換了金鑰 → SourceChanged;其他電腦連到的和同步的不同 → 可以改用同步的。
+        // 連到金鑰:指紋和同步的那把一樣 → Ready。這台上傳了目前同步的那把、之後自己的金鑰換了 → SourceChanged(不論它是不是建立插槽的
+        // 那台);連到的和同步的不同、而目前同步的那把不是這台上傳的 → 可以改用同步的(建立插槽的那台也一樣:它的金鑰沒有換)。
         let origin = local(Some(linked(Some(same), true, LinkKind::Symlink)), None);
         assert_eq!(status(Some(&origin), &synced, true, true), SlotStatusView::Ready { file: source.clone(), synced_copy: false, fingerprint: Some(same.into()) });
-        let changed = local(Some(linked(Some(other), true, LinkKind::Symlink)), None);
+        let uploaded = |fingerprint: &str, to: SlotSource| LocalSlot { uploaded_fingerprint: Some(fingerprint.into()), ..local(Some(to), None) };
+        let changed = uploaded(same, linked(Some(other), true, LinkKind::Symlink));
         assert_eq!(status(Some(&changed), &synced, true, true), SlotStatusView::SourceChanged { file: source.clone() });
+        assert_eq!(status(Some(&changed), &synced, true, false), SlotStatusView::SourceChanged { file: source.clone() }, "with or without the key record here");
+        let changed_elsewhere = uploaded(same, linked(Some(other), false, LinkKind::Symlink));
+        assert_eq!(status(Some(&changed_elsewhere), &synced, true, true), SlotStatusView::SourceChanged { file: source.clone() }, "the uploader need not be the origin");
+        let not_uploaded = local(Some(linked(Some(other), true, LinkKind::Symlink)), None);
+        assert_eq!(status(Some(&not_uploaded), &synced, true, true), SlotStatusView::SyncedAvailable { file: source.clone() }, "an origin that did not upload the synced key");
+        assert_eq!(status(Some(&not_uploaded), &synced, true, false), SlotStatusView::Ready { file: source.clone(), synced_copy: false, fingerprint: Some(other.into()) });
+        let uploaded_before = uploaded(other, linked(Some(other), true, LinkKind::Symlink));
+        assert_eq!(status(Some(&uploaded_before), &synced, true, true), SlotStatusView::SyncedAvailable { file: source.clone() }, "it uploaded a key that is no longer the synced one");
         let own_origin = local(Some(linked(None, true, LinkKind::Symlink)), None);
         assert_eq!(status(Some(&own_origin), &own, true, false), SlotStatusView::Ready { file: source.clone(), synced_copy: false, fingerprint: None });
         let picked = local(Some(linked(Some(other), false, LinkKind::Symlink)), None);
@@ -3942,5 +3974,106 @@ pub(crate) mod tests {
             assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::ECDSA_PUBLIC), "hard_link={hard_link}");
             assert!(matches!(view_of(&a)[0].status, SlotStatusView::SourceChanged { .. }), "hard_link={hard_link}: {:?}", view_of(&a)[0].status);
         }
+    }
+
+    // ── 修正第 1 輪:刪除副本只認檔案本身;「這台的金鑰換了」只告訴上傳了目前同步金鑰的那台 ───────────────────────────
+
+    /// 同步來的副本被換成了別種格式的私鑰(PEM、PKCS#8),旁邊 SSHelter 從記錄的金鑰寫的 `.pub` 還在:那不是這份副本,不刪。辨認副本只看
+    /// 檔案本身的位元組(同步來的副本一定是 OpenSSH 格式),不看旁邊的 `.pub`。
+    #[test]
+    fn a_key_in_another_format_put_over_a_synced_copy_is_never_deleted_as_the_copy() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+        settle(&a);
+        settle(&b);
+        let copy = home(&b).join(SLOT_DIR).join(&file);
+        assert_eq!(view_of(&b)[0].status, SlotStatusView::NotInUse { file: copy.display().to_string() });
+
+        for header in [concat!("-----BEGIN RSA ", "PRIVATE KEY-----"), concat!("-----BEGIN ", "PRIVATE KEY-----")] {
+            let footer = header.replace("BEGIN", "END");
+            std::fs::write(&copy, format!("{header}\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n{footer}\n")).unwrap();
+            assert_eq!(std::fs::read_to_string(public_path(&copy)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "SSHelter's .pub is still beside it");
+            refused(&b, &in_the_way_message(&copy), || delete_copy(&b.env(), &id));
+        }
+    }
+
+    /// 記錄沒有指紋的複製檔(舊式 PEM 金鑰,原檔旁邊也沒有 `.pub`):沒有指紋可比,只認內容和記錄的原檔相同的檔案。路徑上換成了別的檔案 →
+    /// 擋路,什麼都不刪;內容和原檔相同才刪,原檔不動。
+    #[test]
+    fn a_copy_with_no_recorded_fingerprint_is_deleted_only_while_it_holds_its_originals_bytes() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let pem = |body: &str| format!("{}\n{body}\n{}\n", concat!("-----BEGIN RSA ", "PRIVATE KEY-----"), concat!("-----END RSA ", "PRIVATE KEY-----"));
+        let original = pem("MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu");
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &original, "id_old");
+        let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_old"));
+        // Windows 建不了連結時的複製檔(這裡在 Unix 上手動做出來,狀態記著 `Copy`)。
+        std::fs::remove_file(&path).unwrap();
+        std::fs::copy(&source, &path).unwrap();
+        mutate(&a.env(), |s| {
+            if let Some(SlotSource::Linked { link, .. }) = s.key_slots.get_mut(&id).and_then(|l| l.source.as_mut()) {
+                *link = LinkKind::Copy;
+            }
+            Ok(())
+        })
+        .unwrap();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+        settle(&a);
+        let local = a.state().key_slots[&id].clone();
+        assert!(matches!(&local.source, Some(SlotSource::Linked { link: LinkKind::Copy, fingerprint: None, .. })), "{local:?}");
+        assert_eq!(view_of(&a)[0].status, SlotStatusView::NotInUse { file: path.display().to_string() });
+
+        std::fs::write(&path, pem("MIIBOwIBAAJBAL5anotherkeyAnotherKeyAnotherKeyAnotherKeyAnother0")).unwrap();
+        refused(&a, &in_the_way_message(&path), || delete_copy(&a.env(), &id));
+        // 讀不到的檔案(指到不存在的地方的 symlink)、原檔也暫時不在:兩邊都沒有內容,不算相同。
+        #[cfg(unix)]
+        {
+            let moved = a.ssh_dir().join("id_old.moved");
+            std::fs::rename(&source, &moved).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(a.ssh_dir().join("nowhere"), &path).unwrap();
+            refused(&a, &in_the_way_message(&path), || delete_copy(&a.env(), &id));
+            std::fs::remove_file(&path).unwrap();
+            std::fs::rename(&moved, &source).unwrap();
+        }
+
+        std::fs::copy(&source, &path).unwrap();
+        delete_copy(&a.env(), &id).unwrap();
+        assert!(!slot_files::occupied(&path));
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), original, "the original is untouched");
+        assert!(!a.state().key_slots.contains_key(&id));
+    }
+
+    /// 「This computer's key changed」只告訴上傳了插槽目前同步金鑰的那台:別台把自己挑的金鑰同步進一個 `own` 插槽之後,建立插槽的那台看到的
+    /// 是可以改用同步的金鑰(它自己的金鑰沒有換,不該被叫去「Sync the new key」把別台的蓋回來);上傳的那台之後換了金鑰,才是「這台的金鑰換了」。
+    #[test]
+    fn only_the_computer_that_uploaded_the_synced_key_is_told_its_key_changed() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let mine = b.ssh_dir().join("id_b");
+        std::fs::write(&mine, test_keys::ecdsa()).unwrap();
+        pick(&b.env(), &id, &mine.display().to_string()).unwrap();
+        set_mode(&b.env(), &id, SlotMode::Synced).unwrap();
+        settle(&b);
+        settle(&a);
+
+        let a_key = a.ssh_dir().join("id_mac").display().to_string();
+        assert_eq!(view_of(&a)[0].status, SlotStatusView::SyncedAvailable { file: a_key.clone() }, "A's key did not change");
+        assert!(matches!(view_of(&b)[0].status, SlotStatusView::Ready { synced_copy: false, .. }), "{:?}", view_of(&b)[0].status);
+
+        // B 就地換了自己的金鑰:目前同步的那把是 B 上傳的,所以 B 是「這台的金鑰換了」;A 還是可以改用同步的金鑰。
+        std::fs::write(&mine, test_keys::encrypted()).unwrap();
+        settle(&b);
+        settle(&a);
+        assert_eq!(view_of(&b)[0].status, SlotStatusView::SourceChanged { file: mine.display().to_string() });
+        assert_eq!(view_of(&a)[0].status, SlotStatusView::SyncedAvailable { file: a_key });
     }
 }

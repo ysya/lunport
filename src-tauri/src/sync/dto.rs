@@ -164,7 +164,7 @@ pub enum SlotStatusView {
     NotUsedHere,
     /// 插槽有同步的金鑰,這台用的卻是另一把(本機挑的,或舊的副本):可以改用。
     SyncedAvailable { file: String },
-    /// 建立插槽的這台,原檔換成了另一把金鑰;其他電腦還是上一把。
+    /// 目前同步的那把是這台上傳的,這台連到的金鑰之後換成了另一把;其他電腦還是上一把。
     SourceChanged { file: String },
     Error { message: String },
 }
