@@ -48,4 +48,9 @@ in_account: boolean,
 /**
  * 這台只在 SSHelter(私鑰在保管庫,經 agent 提供;金鑰保管庫 spec §4.3)。
  */
-in_vault: boolean, };
+in_vault: boolean, 
+/**
+ * 這台用的是檔案(SP3 的連結或同步來的副本):更新前留下的,或保管庫用不了時暫時落地的(金鑰保管庫 spec §4.3、§11)。畫面標「File for now」,
+ * 「Move」把它搬進保管庫。
+ */
+file_for_now: boolean, };

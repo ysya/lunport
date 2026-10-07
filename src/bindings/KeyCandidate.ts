@@ -19,7 +19,7 @@ default_name: string, fingerprint: string | null, has_passphrase: boolean | null
  */
 unsyncable: string | null, 
 /**
- * 已經有這把金鑰的插槽:這台建立或挑過、連到同一個檔案的,或帳戶裡同指紋的 `synced` 插槽(spec §6.1 第 1 步:直接
+ * 已經有這把金鑰的插槽:這台建立或挑過、連到同一個檔案的,金鑰在這台保管庫裡、指紋相同的,或帳戶裡同指紋的 `synced` 插槽(spec §6.1 第 1 步:直接
  * 沿用,不再詢問)。和帳戶裡另一個插槽同檔名、這台又沒有握著的插槽在這台不能用,不列在這裡。
  */
 existing_slot: string | null, hosts: Array<CandidateHost>, 

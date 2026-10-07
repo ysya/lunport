@@ -54,7 +54,7 @@ pub struct KeyCandidate {
     pub has_passphrase: Option<bool>,
     /// 不能同步的原因(只能 Keep on this computer);null = 可以同步。
     pub unsyncable: Option<String>,
-    /// 已經有這把金鑰的插槽:這台建立或挑過、連到同一個檔案的,或帳戶裡同指紋的 `synced` 插槽(spec §6.1 第 1 步:直接
+    /// 已經有這把金鑰的插槽:這台建立或挑過、連到同一個檔案的,金鑰在這台保管庫裡、指紋相同的,或帳戶裡同指紋的 `synced` 插槽(spec §6.1 第 1 步:直接
     /// 沿用,不再詢問)。和帳戶裡另一個插槽同檔名、這台又沒有握著的插槽在這台不能用,不列在這裡。
     pub existing_slot: Option<String>,
     pub hosts: Vec<CandidateHost>,
@@ -189,10 +189,11 @@ fn locked(patterns: &[String], counts: &BTreeMap<String, usize>) -> bool {
     patterns.iter().any(|p| counts.get(p).copied().unwrap_or(0) > 1)
 }
 
-/// 已經有這把金鑰的插槽:這台建立或挑過、連到同一個檔案的(帳戶裡仍在);或帳戶裡同指紋的 `synced` 插槽。和帳戶裡另一個插槽
-/// 同檔名、這台又沒有握著的插槽(`contested_and_not_held`)在這台不能用,不建議沿用。金鑰檔在插槽目錄裡的(`in_slot_dir`,例如之前的帳戶留下的
-/// 同步副本)沿用時要落地帳戶裡的金鑰(`reuse_slot`):同指紋的 `synced` 插槽,帳戶裡它的 `key` 要解得開、通過落地前的檢查才算(`account_keys` 是
-/// None 時解不開,不算)—— 不然沿用只會讓能連線的主機改指到沒有金鑰的插槽。
+/// 已經有這把金鑰的插槽:這台建立或挑過、連到同一個檔案的(帳戶裡仍在);金鑰在這台保管庫裡、指紋相同的(`SlotSource::Vault`:設定好的金鑰一律放進保管庫,
+/// 沒有連到的檔案可比,用指紋認 —— 不然「Keep on this computer」設定好的金鑰,下一台用它的主機又會被問一次、多出第二個插槽,違反 SP3 spec §6.1);或帳戶裡同指紋的
+/// `synced` 插槽。和帳戶裡另一個插槽同檔名、這台又沒有握著的插槽(`contested_and_not_held`)在這台不能用,不建議沿用。金鑰檔在插槽目錄裡的(`in_slot_dir`,
+/// 例如之前的帳戶留下的同步副本)沿用時要落地帳戶裡的金鑰(`reuse_slot`):同指紋的 `synced` 插槽,帳戶裡它的 `key` 要解得開、通過落地前的檢查才算
+/// (`account_keys` 是 None 時解不開,不算)—— 不然沿用只會讓能連線的主機改指到沒有金鑰的插槽。
 fn existing_slot_for(
     state: &SyncStateV2,
     key: &Path,
@@ -203,12 +204,17 @@ fn existing_slot_for(
     let account = state.account.as_ref()?;
     let live = live_slots(account);
     let usable = |id: &str| !contested_and_not_held(state, id);
-    let linked = state.key_slots.iter().find(|(id, local)| {
+    // 這台握著這把金鑰的插槽:連到同一個檔案的,或金鑰在保管庫裡、指紋相同的(保管庫的插槽沒有連到的檔案可比)。
+    let held_here = state.key_slots.iter().find(|(id, local)| {
         live.iter().any(|(l, _)| l == *id)
             && usable(id)
-            && matches!(&local.source, Some(SlotSource::Linked { path, .. }) if same_file(Path::new(path), key))
+            && match &local.source {
+                Some(SlotSource::Linked { path, .. }) => same_file(Path::new(path), key),
+                Some(SlotSource::Vault { fingerprint: in_vault, .. }) => fingerprint == Some(in_vault.as_str()),
+                _ => false,
+            }
     });
-    if let Some((id, _)) = linked {
+    if let Some((id, _)) = held_here {
         return Some(id.clone());
     }
     let fingerprint = fingerprint?;
@@ -501,6 +507,9 @@ fn rewrite_in(
 ///
 /// 之前的帳戶留下的插槽(`KeyCandidate.kept_slot`)收到「Sync key」或「Keep on this computer」:不建立新插槽,就地放進這個帳戶(`adopt_slot`;決定裡的
 /// 名稱不用,對話框也不讓改)。指到同一個候選裡之前的帳戶留下的其他插槽的主機,一樣改指到設定好的插槽(`rewrite_in`)。
+///
+/// 主機改寫完成之後,設定好的插槽馬上放進保管庫(`move_set_up_slots_into_vault`,金鑰保管庫 spec §4.3);放不進去的維持連結或副本(「File for now」),不讓設定失敗。
+/// 主機沒改寫成(撞到 `Conflict`)就不放:插槽留著,下一次沿用時再放。
 pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Result<Vec<String>, AppError> {
     refuse_while_sync_inactive(active, env.runtime)?;
     let account_keys = {
@@ -541,7 +550,33 @@ pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Resul
     if planned.is_empty() {
         return Ok(Vec::new());
     }
-    rewrite_hosts(env, &home, &planned)
+    let rewritten = rewrite_hosts(env, &home, &planned)?;
+    move_set_up_slots_into_vault(env, &planned);
+    Ok(rewritten)
+}
+
+/// 設定好的金鑰放進保管庫(金鑰保管庫 spec §4.3:金鑰一律在 SSHelter)。主機已經改指到插槽,插槽這時是連到原檔的連結或同步來的副本;搬不進去的留著檔案
+/// (「File for now」,「Move」再試),原因只記到 stderr。你的原檔不動。
+fn move_set_up_slots_into_vault(env: &SyncEnv, planned: &[Planned]) {
+    let ids: Vec<String> = {
+        let core = env.runtime.core.lock().unwrap();
+        let Some(state) = core.state.as_ref() else { return };
+        planned
+            .iter()
+            .filter_map(|p| {
+                state
+                    .key_slots
+                    .iter()
+                    .find(|(_, local)| local.file_name == p.file && crate::sync::slots::is_file_for_now(local))
+                    .map(|(id, _)| id.clone())
+            })
+            .collect()
+    };
+    for id in ids {
+        if let Err(e) = crate::sync::slots::set_delivery(env, &id, true) {
+            eprintln!("[sync] a key set up for synced hosts stays a file for now: {e}");
+        }
+    }
 }
 
 /// 改寫用到 `planned` 裡那些金鑰的主機,經 `persist_file` 寫回。鎖(doc、backed_up)只在內層區塊裡持有:通知(`applied` 會重建 tray、
@@ -967,6 +1002,8 @@ mod tests {
     /// 回傳(裝置、space 檔、金鑰檔、插槽 id、插槽路徑)。
     fn parked_slot() -> (TestDevice, PathBuf, PathBuf, String, PathBuf) {
         let (a, personal) = device("# main\n");
+        // 連結收起來(`parked`)是 SP3 的連結才有的:金鑰在保管庫的插槽沒有連結可收。
+        crate::sync::slots::tests::no_vault_on(&a);
         let key = put_key(&a, "id_mac", &test_keys::plain());
         let space = a.space_path(&personal);
         a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
@@ -1009,6 +1046,7 @@ mod tests {
     #[test]
     fn keeping_a_key_creates_an_own_slot_links_it_and_rewrites_only_those_lines() {
         let (a, personal) = device("# main\n");
+        crate::sync::slots::tests::no_vault_on(&a);
         let key = put_key(&a, "id_mac", &test_keys::plain());
         a.save_in_app(
             &a.space_path(&personal),
@@ -1042,6 +1080,126 @@ mod tests {
     #[cfg(not(unix))]
     fn local_link_kind() -> crate::sync::slot_files::LinkKind {
         crate::sync::slot_files::LinkKind::HardLink
+    }
+
+    /// 為同步的主機設定金鑰:主機改指到插槽之後,金鑰馬上放進保管庫(金鑰保管庫 spec §4.3),你的原檔不動。保管庫用不了就維持連結(「File for now」)。
+    #[test]
+    fn setting_up_a_key_puts_it_in_the_vault_and_leaves_the_file() {
+        let (a, personal) = device("# main\n");
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        a.save_in_app(&a.space_path(&personal), "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        setup_keys(&a.env(), true, vec![keep(&key, "personal")]).unwrap();
+        let id = live_slots(a.state().account.as_ref().unwrap())[0].0.clone();
+        assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "{:?}", a.state().key_slots[&id].source);
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), test_keys::plain(), "the original file is untouched");
+        assert!(!slot_files::occupied(&home(&a).join(SLOT_DIR).join(slot_file_name("personal", &id))));
+
+        let (b, personal_b) = device("# main\n");
+        crate::sync::slots::tests::no_vault_on(&b);
+        let key_b = put_key(&b, "id_mac", &test_keys::plain());
+        b.save_in_app(&b.space_path(&personal_b), "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        setup_keys(&b.env(), true, vec![keep(&key_b, "personal")]).unwrap();
+        let id_b = live_slots(b.state().account.as_ref().unwrap())[0].0.clone();
+        assert!(matches!(b.state().key_slots[&id_b].source, Some(SlotSource::Linked { .. })));
+    }
+
+    /// 「Sync key」設定的金鑰也放進保管庫,同步照舊:帳戶裡有這把金鑰、這台同意上傳的那把還記著,保管庫裡的那一筆是從你的檔案匯入的,你的原檔不動。
+    #[test]
+    fn a_key_set_up_to_sync_goes_into_the_vault_and_stays_synced() {
+        let (a, personal) = device("# main\n");
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        a.save_in_app(&a.space_path(&personal), "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        setup_keys(&a.env(), true, vec![sync(&key, "id_mac")]).unwrap();
+        settle(&a);
+
+        let state = a.state();
+        let id = live_slots(state.account.as_ref().unwrap())[0].0.clone();
+        let local = &state.key_slots[&id];
+        assert!(matches!(&local.source, Some(SlotSource::Vault { fingerprint, .. }) if fingerprint == test_keys::PLAIN_FINGERPRINT), "{local:?}");
+        assert_eq!(local.uploaded_fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT), "the key this computer chose to upload is still recorded");
+        let account_keys = a.runtime.core.lock().unwrap().account_keys.clone().unwrap();
+        assert_eq!(
+            crate::sync::slots::open_key_secret(state.account.as_ref().unwrap(), &account_keys, &id).as_deref(),
+            Some(test_keys::plain().as_str()),
+            "the account still holds the key"
+        );
+        let entry = crate::sync::slots::tests::vault_entry(&a, &id).expect("the key is in the vault");
+        assert_eq!(entry.private_key, test_keys::plain());
+        assert_eq!(entry.origin, crate::vault::store::EntryOrigin::Imported);
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), test_keys::plain(), "the original file is untouched");
+    }
+
+    /// 設定金鑰只搬它自己設定的插槽:更新前留下的檔案(SP3 的連結)不跟著搬,要使用者按「Move」(金鑰保管庫 spec §8:更新後不自動改任何東西)。
+    #[test]
+    fn setting_up_a_key_leaves_the_other_files_for_the_move_button() {
+        let (a, personal) = device("# main\n");
+        let (old, old_file) = crate::sync::slots::tests::create_slot_on(&a, SlotMode::Own, &test_keys::ecdsa(), "id_old");
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        a.save_in_app(
+            &a.space_path(&personal),
+            &format!("Host db\n  IdentityFile ~/.ssh/sshelter/keys/{old_file}\nHost web\n  IdentityFile ~/.ssh/id_mac\n"),
+        );
+        setup_keys(&a.env(), true, vec![keep(&key, "personal")]).unwrap();
+
+        let state = a.state();
+        let new = live_slots(state.account.as_ref().unwrap()).into_iter().map(|(id, _)| id).find(|id| *id != old).expect("the new slot");
+        assert!(matches!(state.key_slots[&new].source, Some(SlotSource::Vault { .. })), "the key set up now goes into the vault");
+        assert!(matches!(state.key_slots[&old].source, Some(SlotSource::Linked { .. })), "the one from before the update waits for Move");
+    }
+
+    /// 主機還沒改寫成,金鑰就還不放進保管庫(「主機改寫之後」才放):撞到 `Conflict` 時插槽維持連結(主機仍指著金鑰檔);沿用它把主機改寫完,金鑰才放進保管庫。
+    #[test]
+    fn a_conflict_while_rewriting_keeps_the_key_a_file_until_the_hosts_are_rewritten() {
+        let (a, personal) = device("# main\n");
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        let space = a.space_path(&personal);
+        a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        a.write_externally(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\nHost other\n  HostName 9.9.9.9\n");
+        assert!(matches!(setup_keys(&a.env(), true, vec![keep(&key, "id_mac")]), Err(AppError::Conflict(_))));
+        let id = live_slots(a.state().account.as_ref().unwrap())[0].0.clone();
+        assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Linked { .. })), "the hosts still use the key file, so the slot is still a file");
+        assert!(crate::sync::slots::tests::vault_entry(&a, &id).is_none(), "and nothing is in the vault yet");
+
+        assert_eq!(setup_keys(&a.env(), true, vec![reuse(&key, &id)]).unwrap(), vec!["web".to_string()]);
+        assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "the key goes into the vault once the hosts are rewritten");
+        assert!(!slot_files::occupied(&home(&a).join(SLOT_DIR).join(slot_file_name("id_mac", &id))));
+    }
+
+    /// 兩台主機用同一個金鑰檔,先後設定:只有一個插槽,它的金鑰在保管庫(SP3 spec §6.1:同一把金鑰不會有第二個插槽)。第一台設定好之後金鑰放進了保管庫,
+    /// 插槽不再連到金鑰檔 —— 第二台主機的候選靠保管庫那一筆的指紋認出這個插槽(`existing_slot`),沿用它。「Keep on this computer」(`own`,帳戶裡沒有指紋)與
+    /// 「Sync key」都一樣。
+    #[test]
+    fn two_hosts_using_the_same_key_file_end_up_with_one_slot_in_the_vault() {
+        for sync_it in [false, true] {
+            let (a, personal) = device("# main\n");
+            let key = put_key(&a, "id_mac", &test_keys::plain());
+            let space = a.space_path(&personal);
+            a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+            let first = if sync_it { sync(&key, "id_mac") } else { keep(&key, "id_mac") };
+            assert_eq!(setup_keys(&a.env(), true, vec![first]).unwrap(), vec!["web".to_string()], "sync: {sync_it}");
+
+            // 又一台主機用同一個金鑰檔:候選帶著剛設定好的插槽,畫面照 `existing_slot` 沿用它。
+            a.save_in_app(&space, &format!("{}Host db\n  IdentityFile ~/.ssh/id_mac\n", a.read(&space)));
+            let found = key_candidates(&a.env()).unwrap();
+            assert_eq!(found.keys.len(), 1, "sync: {sync_it}: {found:?}");
+            let existing = found.keys[0].existing_slot.clone().unwrap_or_else(|| panic!("sync: {sync_it}: the key already has a slot"));
+            assert_eq!(setup_keys(&a.env(), true, vec![reuse(&key, &existing)]).unwrap(), vec!["db".to_string()], "sync: {sync_it}");
+
+            let state = a.state();
+            assert_eq!(live_slots(state.account.as_ref().unwrap()).len(), 1, "sync: {sync_it}: no second slot in the account");
+            let in_vault: Vec<&String> =
+                state.key_slots.iter().filter(|(_, local)| matches!(local.source, Some(SlotSource::Vault { .. }))).map(|(id, _)| id).collect();
+            assert_eq!(in_vault, vec![&existing], "sync: {sync_it}: exactly one slot is in the vault");
+            assert_eq!(state.key_slots.len(), 1, "sync: {sync_it}: and this computer has no other slot record");
+            let stored = crate::vault::store::stored_ids(&crate::vault::store::vault_path(&a.env().state_path)).unwrap();
+            assert_eq!(stored, std::collections::BTreeSet::from([existing.clone()]), "sync: {sync_it}: one key in the vault");
+            let value = slot_value(&slot_file_name("id_mac", &existing));
+            assert_eq!(
+                a.read(&space),
+                format!("Host web\n  IdentityFile {value}\nHost db\n  IdentityFile {value}\n"),
+                "sync: {sync_it}: both hosts use the one slot"
+            );
+        }
     }
 
     #[test]
@@ -1091,6 +1249,7 @@ mod tests {
     #[test]
     fn a_conflict_while_rewriting_leaves_the_slot_ready_to_reuse() {
         let (a, personal) = device("# main\n");
+        crate::sync::slots::tests::no_vault_on(&a);
         let key = put_key(&a, "id_mac", &test_keys::plain());
         let space = a.space_path(&personal);
         a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
@@ -1121,6 +1280,7 @@ mod tests {
     #[test]
     fn reusing_a_slot_this_computer_holds_leaves_its_record_alone_and_rewrites_the_hosts() {
         let (a, personal) = device("# main\n");
+        crate::sync::slots::tests::no_vault_on(&a);
         let key = put_key(&a, "id_mac", &test_keys::plain());
         let space = a.space_path(&personal);
         a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
@@ -1192,6 +1352,7 @@ mod tests {
     #[test]
     fn a_file_in_the_slot_path_stops_the_first_reuse_before_anything_is_linked_or_rewritten() {
         let (a, personal) = device("# main\n");
+        crate::sync::slots::tests::no_vault_on(&a);
         let key = put_key(&a, "id_mac", &test_keys::plain());
         let space = a.space_path(&personal);
         a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
@@ -1338,6 +1499,7 @@ mod tests {
     #[test]
     fn reusing_a_held_slot_whose_key_is_not_in_place_leaves_the_hosts_alone() {
         let (a, personal) = device("# main\n");
+        crate::sync::slots::tests::no_vault_on(&a);
         let key = put_key(&a, "id_mac", &test_keys::plain());
         let space = a.space_path(&personal);
         a.save_in_app(&space, "Host web\n  IdentityFile ~/.ssh/id_mac\n");
@@ -1407,7 +1569,8 @@ mod tests {
             let out = setup_keys(&env, true, vec![keep(&key, "id_mac")]);
             assert_eq!(out.is_err(), conflict, "{out:?}");
             assert_eq!(*probe.all_free.lock().unwrap(), vec![true], "one applied(0), sent with no lock held (conflict: {conflict})");
-            assert_eq!(probe.wakes(), 1, "conflict: {conflict}");
+            // 成功時的第二次喚醒是金鑰搬進保管庫(`set_delivery`)發的,也在所有鎖放掉之後;撞到 `Conflict` 時主機沒改寫成,不搬。
+            assert_eq!(probe.wakes(), if conflict { 1 } else { 2 }, "conflict: {conflict}");
         }
     }
 
@@ -1586,6 +1749,9 @@ mod tests {
         if copy {
             // B 的副本是檔案(SP3 的 `SyncedCopy`):這些測試測的是就地放進新帳戶的副本。
             no_vault_on(&b);
+        } else {
+            // A 的插槽連到自己的金鑰檔(SP3 的 `Linked`):這些測試測的是就地放進新帳戶的連結。
+            no_vault_on(&a);
         }
         let key = put_key(&a, "id_mac", &test_keys::plain());
         a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/id_mac\n");

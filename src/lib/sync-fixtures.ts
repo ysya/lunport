@@ -99,6 +99,7 @@ export function keySlot(overrides: Partial<SyncKeySlotView> = {}): SyncKeySlotVi
     devices: [],
     in_account: true,
     in_vault: false,
+    file_for_now: false,
     ...overrides,
   };
 }

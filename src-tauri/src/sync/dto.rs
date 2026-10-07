@@ -155,6 +155,9 @@ pub struct SyncKeySlotView {
     pub in_account: bool,
     /// 這台只在 SSHelter(私鑰在保管庫,經 agent 提供;金鑰保管庫 spec §4.3)。
     pub in_vault: bool,
+    /// 這台用的是檔案(SP3 的連結或同步來的副本):更新前留下的,或保管庫用不了時暫時落地的(金鑰保管庫 spec §4.3、§11)。畫面標「File for now」,
+    /// 「Move」把它搬進保管庫。
+    pub file_for_now: bool,
 }
 
 /// 插槽在這台電腦上的狀態(SP3 spec §7.2、§7.3)。
@@ -188,6 +191,25 @@ pub struct SlotDeviceView {
     pub synced_copy: bool,
     /// 那台的金鑰在 SSHelter 的保管庫裡(那台是 2a 以後的版本)。
     pub in_vault: bool,
+}
+
+/// 「Move」搬不進保管庫的一把(金鑰保管庫 spec §8):插槽 id、名稱(來自帳戶,畫面以 `revealHidden` 顯示)與原因。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct MoveFailure {
+    pub slot_id: String,
+    pub name: String,
+    pub message: String,
+}
+
+/// 「Move」做完的結果:最新的狀態,與搬不進去的那些。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct MoveIntoVaultResult {
+    pub overview: SyncOverview,
+    pub failed: Vec<MoveFailure>,
 }
 
 /// Settings → Sync 的全部狀態(`sync_overview` 與 `sync://status`)。

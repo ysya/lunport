@@ -654,6 +654,16 @@ pub async fn sync_key_set_delivery(app: AppHandle, slot_id: String, vault: bool)
     run_then_overview(app, false, move |env| crate::sync::slots::set_delivery(env, &slot_id, vault)).await
 }
 
+/// 「Move」:這台還是檔案的插槽全部搬進保管庫(金鑰保管庫 spec §8)。不持有 lifecycle 鎖(同 `sync_key_set_delivery`)。
+#[tauri::command]
+pub async fn sync_key_move_all_into_vault(app: AppHandle) -> Result<crate::sync::dto::MoveIntoVaultResult, AppError> {
+    run(app, false, |env| {
+        let failed = crate::sync::slots::move_all_into_vault(env)?;
+        Ok(crate::sync::dto::MoveIntoVaultResult { overview: dto::overview(env)?, failed })
+    })
+    .await
+}
+
 /// 更換同步碼(spec §7.5):第 1 步在這裡做完,之後由背景執行緒逐步推進;進度在 `SyncOverview::rotation`,完成時
 /// 留下 `SyncNotice::NewSyncCode`(UI 以 `sync_show_words` 顯示新同步碼)。
 #[tauri::command]

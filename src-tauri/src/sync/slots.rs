@@ -237,6 +237,34 @@ pub fn vault_slot_files(state: &SyncStateV2) -> BTreeSet<String> {
         .collect()
 }
 
+/// 這台用的還是檔案(SP3 的連結,沒有收起來的;或同步來的副本)。「Move」把它搬進保管庫(金鑰保管庫 spec §8)。
+pub(crate) fn is_file_for_now(local: &LocalSlot) -> bool {
+    match &local.source {
+        Some(SlotSource::SyncedCopy { .. }) => true,
+        Some(SlotSource::Linked { .. }) => !local.parked,
+        _ => false,
+    }
+}
+
+/// 「Move」(金鑰保管庫 spec §8):這台還是檔案的插槽(`is_file_for_now`)一把一把搬進保管庫(`set_delivery`)。一把搬不進去就記下原因、繼續下一把;
+/// 回傳搬不進去的那些(畫面顯示原因,那一把維持檔案)。
+pub fn move_all_into_vault(env: &SyncEnv) -> Result<Vec<crate::sync::dto::MoveFailure>, AppError> {
+    let state = crate::sync::runtime::snapshot(env).ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+    let files: Vec<(String, String)> = state
+        .key_slots
+        .iter()
+        .filter(|(_, local)| is_file_for_now(local))
+        .map(|(id, local)| (id.clone(), local.payload.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| local.file_name.clone())))
+        .collect();
+    let mut failed = Vec::new();
+    for (slot_id, name) in files {
+        if let Err(e) = set_delivery(env, &slot_id, true) {
+            failed.push(crate::sync::dto::MoveFailure { slot_id, name, message: e.to_string() });
+        }
+    }
+    Ok(failed)
+}
+
 /// 保管庫裡這個插槽的那一筆不是記錄裡的那一把(指紋不同):不拿它當成這個插槽的金鑰(`vault_text`、`set_delivery`)。
 pub const VAULT_MISMATCH_MESSAGE: &str = "The key in SSHelter's vault doesn't match this slot.";
 
@@ -1023,6 +1051,7 @@ pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path, in_use:
                 .collect(),
             in_account,
             in_vault: state.key_slots.get(id).is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. }))),
+            file_for_now: state.key_slots.get(id).is_some_and(is_file_for_now),
         }
     };
     let mut out = Vec::new();
@@ -6916,5 +6945,135 @@ pub(crate) mod tests {
             assert_eq!(vault_entry(&a, &id).map(|entry| entry.private_key.clone()), Some(key), "{file} is in the vault");
             assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "{file} is recorded as only in SSHelter");
         }
+    }
+
+    // ── 「File for now」與一鍵「Move」(金鑰保管庫 spec §8)──────────────────────────────────────────────────────
+
+    /// 這台用的還是檔案(SP3 的連結):畫面標「File for now」;搬進保管庫之後就不是了。
+    #[test]
+    fn a_slot_still_served_as_a_file_says_so() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        assert!(view_of(&a)[0].file_for_now);
+        set_delivery(&a.env(), &id, true).unwrap();
+        assert!(!view_of(&a)[0].file_for_now);
+    }
+
+    /// 「Move」:這台還是檔案的插槽一把一把搬進保管庫;一把搬不進去(原檔不見了)就記下原因、繼續下一把,那一把維持檔案(金鑰保管庫 spec §8)。
+    #[test]
+    fn move_all_into_vault_moves_every_file_and_reports_the_ones_it_could_not() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (moved, moved_file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let (stuck, stuck_file) = create_slot_on(&a, SlotMode::Own, &test_keys::ecdsa(), "id_work");
+        use_slots(&a, &personal, &[&moved_file, &stuck_file]);
+        settle(&a);
+        let gone = home(&a).join(".ssh").join("id_work");
+        std::fs::remove_file(&gone).unwrap();
+
+        let failed = move_all_into_vault(&a.env()).unwrap();
+        assert!(matches!(a.state().key_slots[&moved].source, Some(SlotSource::Vault { .. })));
+        assert!(matches!(a.state().key_slots[&stuck].source, Some(SlotSource::Linked { .. })), "the one that failed stays a file");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].slot_id, stuck);
+        assert_eq!(failed[0].name, "id_work");
+        assert!(failed[0].message.contains("is gone"), "{}", failed[0].message);
+    }
+
+    /// 只有這台還用檔案的才標「File for now」:SP3 的連結(沒收起來的)與同步來的副本。收起來的連結(沒有主機用到,路徑上什麼都沒有)、保管庫裡的金鑰、
+    /// 這台還沒有金鑰的插槽都不是。
+    #[test]
+    fn only_a_link_in_use_and_a_synced_copy_are_files_for_now() {
+        let local = |source: Option<SlotSource>, parked: bool| LocalSlot {
+            file_name: "id_mac-3fa2c1d9".into(),
+            source,
+            last_error: None,
+            asked: false,
+            payload: None,
+            uploaded_fingerprint: None,
+            parked,
+            learned_in: None,
+            copy_from_another_account: false,
+        };
+        let linked = || SlotSource::Linked { path: "/home/f/.ssh/id_mac".into(), link: LinkKind::Symlink, fingerprint: None, origin: true };
+        let copy = SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() };
+        assert!(is_file_for_now(&local(Some(linked()), false)));
+        assert!(!is_file_for_now(&local(Some(linked()), true)), "a link that was put away serves nothing");
+        assert!(is_file_for_now(&local(Some(copy), false)));
+        assert!(!is_file_for_now(&local(Some(plain_in_the_vault()), false)));
+        assert!(!is_file_for_now(&local(None, false)), "this computer has no key for it yet");
+    }
+
+    /// 保管庫用不了時落地成檔案的同步金鑰(「File for now」,金鑰保管庫 spec §11):保管庫恢復之後「Move」把它搬進去 —— 金鑰原樣,插槽路徑上只剩 `.pub`,不再標
+    /// 「File for now」;已經都在保管庫的時候再按一次什麼都不做。
+    #[test]
+    fn a_key_that_landed_as_a_file_while_the_vault_was_down_moves_in_when_it_is_back() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        no_vault_on(&b);
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { .. })), "setup: the key landed as a file");
+        assert!(view_of(&b)[0].file_for_now);
+
+        vault_on_again(&b);
+        assert!(move_all_into_vault(&b.env()).unwrap().is_empty());
+        assert_landed_in_the_vault(&b, &id, &file, &test_keys::plain(), test_keys::PLAIN_PUBLIC);
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })));
+        assert!(!view_of(&b)[0].file_for_now);
+
+        let before = b.state();
+        assert!(move_all_into_vault(&b.env()).unwrap().is_empty(), "nothing is left to move");
+        assert_eq!(b.state(), before, "and nothing was touched");
+    }
+
+    /// 還在用檔案的插槽,保管庫又用不了(或鑰匙圈鎖著):「Move」每一把都記下原因,每一把都維持檔案、使用者的原檔不動,什麼也沒進保管庫。
+    #[test]
+    fn move_all_into_vault_reports_every_slot_when_the_vault_cannot_be_used() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (first, first_file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let (second, second_file) = create_slot_on(&a, SlotMode::Own, &test_keys::ecdsa(), "id_work");
+        use_slots(&a, &personal, &[&first_file, &second_file]);
+        settle(&a);
+        no_vault_on(&a);
+
+        let mut failed = move_all_into_vault(&a.env()).unwrap();
+        failed.sort_by(|x, y| x.name.cmp(&y.name));
+        assert_eq!(failed.iter().map(|f| (f.slot_id.as_str(), f.name.as_str())).collect::<Vec<_>>(), [(first.as_str(), "id_mac"), (second.as_str(), "id_work")]);
+        assert!(failed.iter().all(|f| !f.message.is_empty()));
+        for id in [&first, &second] {
+            assert!(matches!(a.state().key_slots[id].source, Some(SlotSource::Linked { .. })), "still a file");
+        }
+        assert!(view_of(&a).iter().all(|v| v.file_for_now));
+        assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_mac")).unwrap(), test_keys::plain(), "the user's own files are untouched");
+        assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_work")).unwrap(), test_keys::ecdsa());
+    }
+
+    /// 一把搬不進去不耽誤其他的(金鑰保管庫 spec §8):插槽路徑上被放了不是這個插槽的檔案(使用者的)→ 那一把擋路、維持連結,原因是擋路的檔案,檔案不動;
+    /// 其他的照搬。`move_all_into_vault` 依插槽 id 的順序做,擋路的是排最前面的那一把 —— 做到第一個失敗就放棄的話,後面的就留在原地。
+    #[cfg(unix)]
+    #[test]
+    fn a_file_in_the_way_stops_only_its_own_slot_from_moving() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (x, x_file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let (y, y_file) = create_slot_on(&a, SlotMode::Own, &test_keys::ecdsa(), "id_work");
+        use_slots(&a, &personal, &[&x_file, &y_file]);
+        settle(&a);
+        let (stuck, stuck_name, stuck_file, moved) = if x < y { (x, "id_mac", x_file, y) } else { (y, "id_work", y_file, x) };
+        let path = home(&a).join(SLOT_DIR).join(&stuck_file);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "mine").unwrap();
+
+        let failed = move_all_into_vault(&a.env()).unwrap();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert_eq!((failed[0].slot_id.as_str(), failed[0].name.as_str()), (stuck.as_str(), stuck_name));
+        assert_eq!(failed[0].message, in_the_way_message(&path));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine", "the file in the way is not replaced");
+        assert!(matches!(a.state().key_slots[&stuck].source, Some(SlotSource::Linked { .. })), "the one in the way stays a file");
+        assert!(vault_entry(&a, &stuck).is_none(), "and nothing of it is in the vault");
+        assert!(matches!(a.state().key_slots[&moved].source, Some(SlotSource::Vault { .. })), "the other one moved");
+        assert!(vault_entry(&a, &moved).is_some());
     }
 }
