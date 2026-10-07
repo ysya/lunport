@@ -473,19 +473,19 @@ pub(crate) mod test_keys {
         put_string(&mut public, &[7; 32]);
         put_string(&mut public, b"ssh:");
         let mut body = b"openssh-key-v1\0".to_vec();
-        put_string(&mut body, b"none"); // cipher
-        put_string(&mut body, b"none"); // kdf
-        put_string(&mut body, b""); // kdf options
+        put_string(&mut body, b"none"); // 加密方式(cipher)
+        put_string(&mut body, b"none"); // kdf 名稱
+        put_string(&mut body, b""); // kdf 選項
         body.extend_from_slice(&1u32.to_be_bytes()); // 一把金鑰
         put_string(&mut body, &public);
         let mut private = vec![1, 2, 3, 4, 1, 2, 3, 4]; // 兩個相同的 checkint
         put_string(&mut private, b"sk-ssh-ed25519@openssh.com");
         put_string(&mut private, &[7; 32]);
         put_string(&mut private, b"ssh:");
-        private.push(1); // flags
-        put_string(&mut private, b"handle"); // key handle
-        put_string(&mut private, b""); // reserved
-        put_string(&mut private, b"sp3-sk"); // comment
+        private.push(1); // flags(要求使用者在場)
+        put_string(&mut private, b"handle"); // key handle(硬體金鑰的代號)
+        put_string(&mut private, b""); // reserved(保留欄位)
+        put_string(&mut private, b"sp3-sk"); // comment(註解)
         let mut pad = 1u8;
         while private.len() % 8 != 0 {
             private.push(pad);
