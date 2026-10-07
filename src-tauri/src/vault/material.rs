@@ -53,6 +53,8 @@ pub fn agent_can_sign(data: &KeyData) -> bool {
     matches!(data.algorithm(), Algorithm::Ed25519 | Algorithm::Ecdsa { .. } | Algorithm::Rsa { .. })
 }
 
+/// 這把私鑰有沒有加密。目前只有測試用到,所以只在測試編譯。
+#[cfg(test)]
 pub fn is_encrypted(private_key: &str) -> bool {
     PrivateKey::from_openssh(private_key).is_ok_and(|key| key.is_encrypted())
 }

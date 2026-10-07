@@ -192,7 +192,7 @@ fn set_aside(path: &Path, kind: &str, now_ms: u64, reason: String) -> VaultError
     }
 }
 
-/// 開著的保管庫。改動(`put`、`remove`、`set_settings`)立刻寫回檔案;同一個行程裡的寫入要經 `with_vault` 互斥。
+/// 開著的保管庫。改動(`put`、`remove`,以及目前只有測試用的 `set_settings`)立刻寫回檔案;同一個行程裡的寫入要經 `with_vault` 互斥。
 pub struct Vault {
     path: PathBuf,
     key: Option<Zeroizing<[u8; 32]>>,
@@ -275,6 +275,8 @@ impl Vault {
         &self.file.settings
     }
 
+    /// 改這台的 agent 設定並存檔。目前只有測試用到,所以只在測試編譯;第 2 階段的設定畫面要用的時候,把 `#[cfg(test)]` 拿掉。
+    #[cfg(test)]
     pub fn set_settings(&mut self, settings: AgentSettings) -> Result<(), VaultError> {
         self.file.settings = settings;
         self.save()

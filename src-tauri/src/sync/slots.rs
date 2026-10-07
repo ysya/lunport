@@ -135,9 +135,11 @@ pub trait VaultKeys {
     fn restore(&self, slot_id: &str, entry: &VaultEntry) -> Result<(), AppError>;
 }
 
-/// 沒有保管庫可讀(測試、或只處理檔案來源的呼叫端)。
+/// 沒有保管庫可讀。只有測試用到(`reconcile`),所以只在測試編譯;production 的每一輪都用 `EnvVault`(`reconcile_with_vault`)。
+#[cfg(test)]
 pub struct NoVault;
 
+#[cfg(test)]
 impl VaultKeys for NoVault {
     fn private_key(&self, _slot_id: &str) -> Option<(Zeroizing<String>, EntryOrigin)> {
         None
@@ -568,7 +570,8 @@ pub fn reconcile_with_vault(
     round
 }
 
-/// 不讀保管庫的版本(補寫時讀不到保管庫裡的私鑰):測試與只處理檔案來源的呼叫端用。
+/// 不讀保管庫的版本(補寫時讀不到保管庫裡的私鑰)。只有測試用到,所以只在測試編譯;production 的每一輪走 `reconcile_with_vault`。
+#[cfg(test)]
 pub fn reconcile(
     state: &mut SyncStateV2,
     account_keys: &ChainKeys,
