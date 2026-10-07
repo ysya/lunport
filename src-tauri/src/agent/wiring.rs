@@ -178,13 +178,16 @@ pub enum WiringStatus {
 ///
 /// `agent/config` 只在 Include 已經放好之後(或載入的不是預設的 config)才寫,所以它存在就表示 Include 放過,之後不見了是使用者拿掉的,不自動加回。第一次放不進去
 /// (主 config 在載入之後被外部改過的 `Conflict`、備份或 I/O 錯誤)就回 Err,`agent/config` 還不存在,下一次 refresh 當成第一次重試 —— 不會被誤認成使用者拿掉了。
+///
+/// `endpoint` 查 `IdentityAgent` 的值(`crate::agent::identity_agent_value`;Windows 上是一次 SID 查詢,會失敗):只有 `agent/config` 要寫(沒有 `NotNeeded` 的)才呼叫,
+/// 而且在動主 config 之前 —— 查不到就回 Err,什麼都沒動。
 pub fn refresh(
     doc: &mut SshConfigDoc,
     backed_up: &mut HashSet<PathBuf>,
     retention: Option<usize>,
     home: &Path,
     vault_files: &BTreeSet<String>,
-    endpoint: &str,
+    endpoint: impl FnOnce() -> Result<String, AppError>,
 ) -> Result<WiringStatus, AppError> {
     let patterns = vault_host_patterns(doc, vault_files, home);
     let config_path = agent_config_path(home);
@@ -193,6 +196,7 @@ pub fn refresh(
     if patterns.is_empty() && !wired {
         return Ok(WiringStatus::NotNeeded);
     }
+    let endpoint = endpoint()?;
     let default_root = home.join(".ssh").join("config");
     let on_default_root = doc.files.first().is_some_and(|f| f.path == default_root);
     let present = on_default_root && doc.files[0].items.iter().any(is_agent_include);
@@ -207,7 +211,7 @@ pub fn refresh(
         // 使用者拿掉了:不自動加回。
         WiringStatus::IncludeMissing
     };
-    let content = render(&patterns, endpoint);
+    let content = render(&patterns, &endpoint);
     if std::fs::read_to_string(&config_path).ok().as_deref() != Some(content.as_str()) {
         slot_files::ensure_keys_dir(&agent_dir(home))?;
         crate::fsutil::atomic_write(&config_path, content.as_bytes(), 0o600)?;
@@ -239,13 +243,12 @@ fn put_include_first(doc: &mut SshConfigDoc, backed_up: &mut HashSet<PathBuf>, r
 /// (`applied(0)`),原本的錯誤照樣回給呼叫端記錄;下一次 refresh(下一次同步嘗試,或下一次改插槽的提供方式)就在新的 doc 上放得進去。
 pub fn refresh_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
     let Some(home) = env.ssh_dir.parent().map(Path::to_path_buf) else { return Ok(WiringStatus::NotNeeded) };
-    let endpoint = crate::agent::identity_agent_value()?;
     let mut doc_lock = env.doc.lock().unwrap();
     let Some(doc) = doc_lock.as_mut() else { return Ok(WiringStatus::NotNeeded) };
     let mut backed_up = env.backed_up.lock().unwrap();
     let retention = env.retention();
     let vault_files = env.runtime.core.lock().unwrap().state.as_ref().map(crate::sync::slots::vault_slot_files).unwrap_or_default();
-    let error = match refresh(doc, &mut backed_up, retention, &home, &vault_files, &endpoint) {
+    let error = match refresh(doc, &mut backed_up, retention, &home, &vault_files, crate::agent::identity_agent_value) {
         Err(error @ AppError::Conflict(_)) => error,
         other => return other,
     };
@@ -505,7 +508,16 @@ mod tests {
     }
 
     fn refresh_at(home: &Path, doc: &mut SshConfigDoc, vault_files: &BTreeSet<String>) -> Result<WiringStatus, AppError> {
-        refresh(doc, &mut HashSet::new(), None, home, vault_files, SOCK)
+        refresh_with(home, doc, vault_files, || Ok(SOCK.to_string()))
+    }
+
+    fn refresh_with(
+        home: &Path,
+        doc: &mut SshConfigDoc,
+        vault_files: &BTreeSet<String>,
+        endpoint: impl FnOnce() -> Result<String, AppError>,
+    ) -> Result<WiringStatus, AppError> {
+        refresh(doc, &mut HashSet::new(), None, home, vault_files, endpoint)
     }
 
     fn read(path: &Path) -> String {
@@ -532,6 +544,39 @@ mod tests {
         assert_eq!(refresh_at(home.path(), &mut doc, &BTreeSet::new()).unwrap(), WiringStatus::NotNeeded);
         assert!(!agent_dir(home.path()).exists(), "not even the directory");
         assert_eq!(read(&main_of(home.path())), WEB);
+    }
+
+    /// `IdentityAgent` 的值(Windows 上那是一次 SID 查詢)只有在 agent/config 要寫的時候才查:沒有主機用到保管庫的金鑰、也沒寫過 agent/config
+    /// 就不查,查不到也不影響。要用的時候查不到:在動主 config 與 agent/config 之前回錯誤,什麼都不動。
+    #[test]
+    fn the_agent_endpoint_is_looked_up_only_when_the_agent_config_is_written() {
+        let home = tempfile::tempdir().unwrap();
+        let mut doc = load_home_config(home.path(), WEB);
+        let lookups = std::cell::Cell::new(0);
+        let found = || {
+            lookups.set(lookups.get() + 1);
+            Ok(SOCK.to_string())
+        };
+        let missing = || {
+            lookups.set(lookups.get() + 1);
+            Err(AppError::Other("no pipe name".to_string()))
+        };
+
+        // 用不到 agent:不查。就算查會失敗,也不是這一輪的錯。
+        assert_eq!(refresh_with(home.path(), &mut doc, &BTreeSet::new(), missing).unwrap(), WiringStatus::NotNeeded);
+        assert_eq!(lookups.get(), 0, "nothing needs the agent, so nothing is looked up");
+
+        // 有主機用到、卻查不到:回錯誤,主 config 與 agent/config 都沒動。
+        let error = refresh_with(home.path(), &mut doc, &vault(), missing).unwrap_err();
+        assert!(error.to_string().contains("no pipe name"), "{error}");
+        assert_eq!(lookups.get(), 1);
+        assert_eq!(read(&main_of(home.path())), WEB, "the main config is untouched");
+        assert!(!agent_dir(home.path()).exists(), "and nothing was written");
+
+        // 有主機用到:查一次,寫出來。
+        assert_eq!(refresh_with(home.path(), &mut doc, &vault(), found).unwrap(), WiringStatus::Ready);
+        assert_eq!(lookups.get(), 2, "looked up once for the write");
+        assert_eq!(read(&agent_config_path(home.path())), render(&[vec!["web".to_string()]], SOCK));
     }
 
     #[test]
