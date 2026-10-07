@@ -93,7 +93,8 @@ pub trait AgentHost: Send + Sync {
     fn keys(&self) -> Vec<VaultKey>;
     /// 保管庫裡這把金鑰的私鑰原文(有 passphrase 的仍是加密狀態)。
     fn private_key(&self, slot_id: &str) -> Result<Option<Zeroizing<String>>, AppError>;
-    /// 這台的 agent 設定(保管庫檔頭);讀不到用預設值。
+    /// 這台的 agent 設定(保管庫檔頭)。讀不到時要往嚴格的一邊退(`always_ask`),不能退回預設值:預設值允許記住核准,而更嚴的設定正好讀不到
+    /// (production:`AppAgentHost::settings`)。
     fn settings(&self) -> AgentSettings;
     fn keychain(&self) -> &dyn Keychain;
     fn now_ms(&self) -> u64;

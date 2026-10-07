@@ -244,8 +244,9 @@ impl Vault {
         let Some(sealed) = self.file.entries.get(slot_id) else { return Ok(None) };
         let key = self.key.as_ref().ok_or(VaultError::KeyMissing)?;
         let plaintext = Zeroizing::new(open_raw(key, &aad(slot_id), &sealed.nonce, &sealed.ciphertext)?);
+        // 不帶 serde_json 的訊息:它會把出問題的字串值原文放進去(`invalid type: string "…"`),那可能就是私鑰。
         let entry = serde_json::from_slice::<VaultEntry>(&plaintext)
-            .map_err(|e| VaultError::Other(AppError::Other(format!("a vault entry is not readable: {e}"))))?;
+            .map_err(|_| VaultError::Other(AppError::Other("a vault entry is not readable".to_string())))?;
         Ok(Some(entry))
     }
 
@@ -490,6 +491,36 @@ mod tests {
 
         let reopened = Vault::open(&path, &keychain, 2).unwrap();
         assert!(reopened.get(&"b".repeat(32)).is_err(), "the AAD binds each entry to its slot id");
+    }
+
+    /// 解密之後讀不懂的一筆(格式對不上):錯誤只說讀不懂,不帶 serde_json 的訊息 —— 它會把出問題的字串值原文放進去,那可能就是私鑰。
+    #[test]
+    fn an_entry_in_the_wrong_shape_is_reported_without_quoting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        let slot = "a".repeat(32);
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &slot, &entry(&test_keys::plain())).unwrap();
+        let key: [u8; 32] = B64.decode(keychain.entry(VAULT_KEY_ACCOUNT).unwrap()).unwrap().try_into().unwrap();
+
+        // 兩種 serde_json 會引用值的錯誤:型別不對(`invalid type: string "…"`)與不認得的列舉值(`unknown variant `…``)。
+        let wrong_shapes = [
+            br#"{"private_key":"k","public_key":"p","fingerprint":"f","origin":"synced","added_at_ms":"TOP-SECRET-TEXT"}"#.as_slice(),
+            br#"{"private_key":"k","public_key":"p","fingerprint":"f","origin":"TOP-SECRET-TEXT","added_at_ms":5}"#.as_slice(),
+        ];
+        for plaintext in wrong_shapes {
+            let (nonce, ciphertext) = seal_raw(&key, &aad(&slot), plaintext).unwrap();
+            let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            file["entries"][&slot] = serde_json::json!({ "nonce": nonce, "ciphertext": ciphertext });
+            std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+
+            let error = Vault::open(&path, &keychain, 2).unwrap().get(&slot).unwrap_err();
+            let shown = error.to_string();
+            assert!(!shown.contains("TOP-SECRET-TEXT"), "the error quotes the entry: {shown}");
+            assert_eq!(shown, "a vault entry is not readable");
+            assert!(!format!("{error:?}").contains("TOP-SECRET-TEXT"), "nor does its Debug form");
+        }
     }
 
     #[test]

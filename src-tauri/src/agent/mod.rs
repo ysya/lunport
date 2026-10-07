@@ -74,27 +74,23 @@ impl broker::AgentHost for AppAgentHost {
         core.state.as_ref().map(broker::vault_keys).unwrap_or_default()
     }
 
+    /// 使用者按了允許,金鑰卻拿不出來(keychain 鎖著、保管庫讀不懂)時回錯誤;原因由 broker 記(`refused`,帶插槽 id),這裡不再記一次。
     fn private_key(&self, slot_id: &str) -> Result<Option<Zeroizing<String>>, AppError> {
-        let result = crate::sync::engine::with_env(&self.app, |env| {
+        crate::sync::engine::with_env(&self.app, |env| {
             with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.get(slot_id))
                 .map(|entry| entry.map(|entry| Zeroizing::new(entry.private_key.clone())))
                 .map_err(AppError::from)
         })
-        .and_then(|inner| inner);
-        // 使用者按了允許,金鑰卻拿不出來(keychain 鎖著、保管庫讀不懂):broker 只會拒絕,原因記在這裡。
-        if let Err(e) = &result {
-            eprintln!("[agent] cannot read the key from SSHelter's vault: {e}");
-        }
-        result
+        .and_then(|inner| inner)
     }
 
     fn settings(&self) -> AgentSettings {
-        crate::sync::engine::with_env(&self.app, |env| {
+        let result = crate::sync::engine::with_env(&self.app, |env| {
             with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| Ok(vault.settings().clone()))
+                .map_err(AppError::from)
         })
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
+        .and_then(|inner| inner);
+        settings_or_ask_every_time(result)
     }
 
     fn keychain(&self) -> &dyn Keychain {
@@ -106,19 +102,48 @@ impl broker::AgentHost for AppAgentHost {
     }
 
     fn host_name(&self, host_key: &KeyData) -> Option<String> {
-        let mut files = Vec::new();
-        if let Ok(ssh_dir) = crate::keys::ssh_dir() {
-            files.push(ssh_dir.join("known_hosts"));
-        }
-        #[cfg(unix)]
-        files.push(PathBuf::from("/etc/ssh/ssh_known_hosts"));
-        files.iter().filter_map(|path| std::fs::read_to_string(path).ok()).find_map(|text| broker::host_name_in(&text, host_key))
+        host_name_in_files(&known_hosts_files(), host_key)
     }
 
     fn ask(&self, request: prompt::AgentApprovalRequest) -> Option<prompt::AgentApprovalAnswer> {
         let surface = prompt::TauriPromptSurface { app: self.app.clone() };
         self.app.state::<AppState>().agent.prompts.ask(&surface, request, prompt::APPROVAL_TIMEOUT)
     }
+}
+
+/// 讀得到就用這台的設定;讀不到(保管庫讀不懂、keychain 鎖著)就往嚴格的一邊退:每次都問,原因記到 stderr。不能退回預設值:預設值允許記住核准,
+/// 而這台更嚴的設定(`always_ask`)正好讀不到,記住的核准就會在沒有視窗的情況下簽章。
+fn settings_or_ask_every_time(result: Result<AgentSettings, AppError>) -> AgentSettings {
+    result.unwrap_or_else(|e| {
+        eprintln!("[agent] cannot read the agent settings: {e}");
+        AgentSettings { always_ask: true, ..AgentSettings::default() }
+    })
+}
+
+/// 找主機名稱的 known_hosts 檔,依優先順序:使用者的、系統的(Unix 的 `/etc/ssh`,Windows 的 `%ProgramData%\ssh`)。
+fn known_hosts_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(ssh_dir) = crate::keys::ssh_dir() {
+        files.push(ssh_dir.join("known_hosts"));
+    }
+    #[cfg(unix)]
+    files.push(PathBuf::from("/etc/ssh/ssh_known_hosts"));
+    #[cfg(windows)]
+    {
+        if let Some(program_data) = std::env::var_os("ProgramData") {
+            files.push(PathBuf::from(program_data).join("ssh").join("ssh_known_hosts"));
+        }
+    }
+    files
+}
+
+/// 這些 known_hosts 檔裡,第一個認得這把主機金鑰的名稱(前面的檔案優先,讀不到的檔案跳過)。以位元組讀、不合法的 UTF-8 換成 U+FFFD:
+/// 一個壞掉的位元組(例如註解裡的非 UTF-8 文字)不該讓整個檔案讀不出來。
+fn host_name_in_files(files: &[PathBuf], host_key: &KeyData) -> Option<String> {
+    files
+        .iter()
+        .filter_map(|path| std::fs::read(path).ok())
+        .find_map(|bytes| broker::host_name_in(&String::from_utf8_lossy(&bytes), host_key))
 }
 
 /// 開 agent(SSHelter 的視窗程式啟動時,含 `--mcp-host`;`--mcp` 的 stdio 轉接不建 Tauri,不會到這裡)。開不起來只記下原因(spec §11),
@@ -162,5 +187,44 @@ fn listen(app: &tauri::AppHandle) -> Result<server::Started, AppError> {
     #[cfg(windows)]
     {
         pipe_windows::listen(&dir, &pipe_windows::pipe_name()?, handle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::slot_rules::test_keys;
+    use crate::vault::material::public_key_data;
+
+    /// 這台的設定讀不到時,往嚴格的一邊退:記住的核准不能在沒有視窗的情況下簽章,而更嚴的設定(`always_ask`)正好讀不到。
+    #[test]
+    fn settings_that_cannot_be_read_ask_every_time() {
+        let readable = AgentSettings { remember_minutes: 60, always_ask: false };
+        assert_eq!(settings_or_ask_every_time(Ok(readable.clone())), readable, "readable settings are used as they are");
+
+        let unreadable = settings_or_ask_every_time(Err(AppError::Other("the vault file is unreadable".to_string())));
+        assert!(unreadable.always_ask, "unreadable settings must not let a remembered approval sign without a prompt");
+        assert_eq!(unreadable.remember_minutes, AgentSettings::default().remember_minutes);
+    }
+
+    /// 以位元組讀、不合法的 UTF-8 換成 U+FFFD:一個壞掉的位元組不該讓整個 known_hosts 讀不出來;前面的檔案優先,讀不到的檔案跳過。
+    #[test]
+    fn a_bad_byte_does_not_hide_a_known_hosts_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = public_key_data(test_keys::ECDSA_PUBLIC).unwrap();
+        let mut with_bad_bytes = b"# caf\xe9 \xff\n".to_vec();
+        with_bad_bytes.extend_from_slice(format!("web {}\n", test_keys::ECDSA_PUBLIC).as_bytes());
+        let first = dir.path().join("known_hosts");
+        std::fs::write(&first, with_bad_bytes).unwrap();
+        let system = dir.path().join("ssh_known_hosts");
+        std::fs::write(&system, format!("lab {}\n", test_keys::ECDSA_PUBLIC)).unwrap();
+        let other_key = dir.path().join("other");
+        std::fs::write(&other_key, format!("elsewhere {}\n", test_keys::PLAIN_PUBLIC)).unwrap();
+        let missing = dir.path().join("missing");
+
+        let name = |files: &[&PathBuf]| host_name_in_files(&files.iter().map(|f| (*f).clone()).collect::<Vec<_>>(), &key);
+        assert_eq!(name(&[&missing, &first, &system]).as_deref(), Some("web"), "the bad bytes hide nothing, and the earlier file wins");
+        assert_eq!(name(&[&other_key, &system]).as_deref(), Some("lab"), "a file that does not know the key is passed over");
+        assert_eq!(name(&[&missing, &other_key]), None);
     }
 }

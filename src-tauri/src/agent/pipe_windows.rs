@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Foundation::{LocalFree, ERROR_PIPE_CONNECTED, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{LocalFree, ERROR_ACCESS_DENIED, ERROR_PIPE_CONNECTED, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, SetEntriesInAclW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
 };
@@ -31,16 +31,15 @@ use crate::agent::server::{dispatch, take_lock, Handler, Started};
 use crate::error::AppError;
 use crate::sync::slot_files_windows::current_user_token;
 
-/// 每個 pipe instance 共用的 SECURITY_ATTRIBUTES:DACL 只有一條「目前使用者:完全控制」。
+/// 每個 pipe instance 共用的 SECURITY_ATTRIBUTES:DACL 只有一條「目前使用者:完全控制」。`SetEntriesInAclW` 把 SID 複製進 ACE,所以讀 SID 用的
+/// `TOKEN_USER` 緩衝區只在 `new` 裡用到,不必跟著留下。
 struct OwnerOnly {
-    /// `TOKEN_USER`;ACL 裡的 SID 指進這裡。
-    _token: Vec<u64>,
     acl: *mut ACL,
     _descriptor: Box<SECURITY_DESCRIPTOR>,
     attributes: SECURITY_ATTRIBUTES,
 }
 
-// 指標只指向這個結構自己擁有的記憶體(token 緩衝區、LocalAlloc 的 ACL、Box 的描述元);整個結構一起搬到 listener 的執行緒,只在那裡使用。
+// 指標只指向這個結構自己擁有的記憶體(LocalAlloc 的 ACL、Box 的描述元);整個結構一起搬到 listener 的執行緒,只在那裡使用。
 unsafe impl Send for OwnerOnly {}
 
 impl Drop for OwnerOnly {
@@ -53,7 +52,7 @@ impl Drop for OwnerOnly {
 impl OwnerOnly {
     fn new() -> io::Result<Self> {
         let token = current_user_token()?;
-        // SAFETY: `token` holds an 8-byte aligned TOKEN_USER whose SID lives in `token`, which this struct keeps alive.
+        // SAFETY: `token` holds an 8-byte aligned TOKEN_USER whose SID points into `token`, which lives to the end of this function; SetEntriesInAclW copies the SID into the ACE.
         unsafe {
             let user = &*(token.as_ptr() as *const TOKEN_USER);
             let access = EXPLICIT_ACCESS_W {
@@ -85,7 +84,7 @@ impl OwnerOnly {
                 lpSecurityDescriptor: pointer,
                 bInheritHandle: 0,
             };
-            Ok(Self { _token: token, acl, _descriptor: descriptor, attributes })
+            Ok(Self { acl, _descriptor: descriptor, attributes })
         }
     }
 }
@@ -131,6 +130,15 @@ fn create_instance(path: &[u16], security: &OwnerOnly, first: bool, max_instance
     Ok(unsafe { OwnedHandle::from_raw_handle(handle as _) })
 }
 
+/// 第一個 instance 開不起來的說明:名稱已經有人用時,`FILE_FLAG_FIRST_PIPE_INSTANCE` 回 `ERROR_ACCESS_DENIED`(spec §11);其他錯誤不是名稱被佔用。
+fn first_instance_error(e: io::Error) -> AppError {
+    if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+        AppError::Other(format!("Another program is using SSHelter's agent pipe ({e})"))
+    } else {
+        AppError::Other(format!("Can't create SSHelter's agent pipe ({e})"))
+    }
+}
+
 /// 等一個連線;連上了回傳對方的 PID(拿不到 → None)。
 pub(crate) fn accept(pipe: &OwnedHandle) -> io::Result<Option<u32>> {
     let handle = pipe.as_raw_handle() as HANDLE;
@@ -148,13 +156,12 @@ pub(crate) fn accept(pipe: &OwnedHandle) -> io::Result<Option<u32>> {
     Ok(known.then_some(pid))
 }
 
-/// 在 `dir` 拿鎖,開 `\\.\pipe\<name>`,每條連線交給 `handle`。另一個 SSHelter 拿著鎖 → `OtherInstance`;名稱被別的程式佔用 → 錯誤。
+/// 在 `dir` 拿鎖,開 `\\.\pipe\<name>`,每條連線交給 `handle`。另一個 SSHelter 拿著鎖 → `OtherInstance`;名稱被別的程式佔用(或其他開不起來的原因)→ 錯誤。
 pub fn listen(dir: &Path, name: &str, handle: Handler) -> Result<Started, AppError> {
     let Some(lock) = take_lock(dir)? else { return Ok(Started::OtherInstance) };
     let security = OwnerOnly::new()?;
     let path = wide_pipe_path(name);
-    let first = create_instance(&path, &security, true, PIPE_UNLIMITED_INSTANCES)
-        .map_err(|e| AppError::Other(format!("Another program is using SSHelter's agent pipe ({e})")))?;
+    let first = create_instance(&path, &security, true, PIPE_UNLIMITED_INSTANCES).map_err(first_instance_error)?;
     std::thread::Builder::new().name("sshelter-agent".to_string()).spawn(move || {
         let _lock = lock;
         let active = Arc::new(AtomicUsize::new(0));
@@ -174,7 +181,11 @@ pub fn listen(dir: &Path, name: &str, handle: Handler) -> Result<Started, AppErr
             let served = std::mem::replace(&mut current, next);
             match connected {
                 Ok(pid) => dispatch(File::from(served), pid, &active, &handle),
-                Err(e) => eprintln!("[agent] a pipe connection failed: {e}"),
+                Err(e) => {
+                    eprintln!("[agent] a pipe connection failed: {e}");
+                    // 持續出錯時不要空轉(同 Unix 的 accept 迴圈)。
+                    std::thread::sleep(Duration::from_millis(50));
+                }
             }
         }
     })?;
@@ -209,6 +220,17 @@ mod tests {
         assert_eq!(read_frame(&mut client).unwrap().unwrap()[0], SSH_AGENT_IDENTITIES_ANSWER);
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some(std::process::id()));
         assert_eq!(listen(&agent, &name, serving(tx)).unwrap(), Started::OtherInstance);
+    }
+
+    /// 只有 `ERROR_ACCESS_DENIED`(`FILE_FLAG_FIRST_PIPE_INSTANCE` 遇到已經存在的名稱時回的錯誤)才說名稱被別的程式佔用;其他錯誤不是。
+    #[test]
+    fn only_access_denied_is_reported_as_a_taken_name() {
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
+        let taken = first_instance_error(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32)).to_string();
+        assert!(taken.contains("Another program is using SSHelter's agent pipe"), "{taken}");
+        let other = first_instance_error(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32)).to_string();
+        assert!(other.starts_with("Can't create SSHelter's agent pipe ("), "{other}");
+        assert!(!other.contains("Another program"), "{other}");
     }
 
     #[test]
