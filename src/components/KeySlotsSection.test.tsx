@@ -6,14 +6,16 @@ import { describe, expect, it } from "vitest";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { SlotStatusView } from "@/bindings/SlotStatusView";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
+import { agentProblemKey } from "@/lib/agent";
 import { syncOverviewKey } from "@/lib/sync";
 import { keySlot, overview, SLOT_FINGERPRINT, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import { AlertDialogAction, AlertDialogCancel, AlertDialogDescription, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { DeleteCopyConfirm, KeyChoices, KeySlotRow, KeySlotsSection, SyncKeyConfirm, type SlotAction } from "./KeySlotsSection";
+import { AgentProblemLine, DeleteCopyConfirm, KeepFileConfirm, KeyChoices, KeySlotRow, KeySlotsSection, SyncKeyConfirm, type SlotAction } from "./KeySlotsSection";
 
 /** A slot's row in the Keys dialog, rendered on the server: its words and the actions it offers. */
 const row = (slot = keySlot(), busy = false) => renderToStaticMarkup(<KeySlotRow slot={slot} busy={busy} onAction={() => {}} />);
-const text = (html: string) => html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
+/** The words of some markup, with the apostrophes React escapes put back. */
+const text = (html: string) => html.replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
 /** The lines of text of a row (its paragraphs), top to bottom, with the apostrophes React escapes put back. */
 const lines = (html: string) => [...html.matchAll(/<p [^>]*>(.*?)<\/p>/g)].map((m) => m[1].replace(/&#x27;/g, "'"));
 /** The opening tag of the button labelled `label`, without its closing ">". */
@@ -131,7 +133,7 @@ function pressEach(slot: SyncKeySlotView): Record<string, SlotAction> {
 
 describe("the buttons of a key slot", () => {
   it("each ask for their own action", () => {
-    expect(pressEach(keySlot({ mode: "own", fingerprint: null }))).toEqual({ "Sync this key": "sync", "Change…": "pick" });
+    expect(pressEach(keySlot({ mode: "own", fingerprint: null }))).toEqual({ "Sync this key": "sync", "Change…": "pick", "Only in SSHelter": "vault" });
     expect(pressEach(keySlot({ status: { kind: "synced_available", file: "/f" } }))).toEqual({
       "Use the synced key": "useSynced",
       "Change…": "pick",
@@ -146,6 +148,8 @@ describe("the buttons of a key slot", () => {
       "Pick a key on this computer…": "pick",
     });
     expect(pressEach(keySlot({ mode: "own", status: { kind: "not_in_use", file: "/f" } }))).toEqual({ "Delete copy": "delete" });
+    // A vault key: no Pick, no Use the synced key (the backend refuses both), but always a way back to a file.
+    expect(pressEach(keySlot({ in_vault: true }))).toEqual({ "Keep a file": "file", "Stop syncing": "stop" });
   });
 });
 
@@ -289,5 +293,58 @@ describe("the slots section of the Keys dialog", () => {
   it("shows nothing while there are no slots, or this computer is not in a sync account", () => {
     expect(section(overview())).toBe("");
     expect(section(overview({ joined: false, key_slots: [keySlot()] }))).toBe("");
+  });
+});
+
+describe("keeping a slot's key only in SSHelter", () => {
+  it("offers the move each way", () => {
+    expect(row(keySlot())).toContain(">Only in SSHelter<");
+    const vault = row(keySlot({ in_vault: true }));
+    expect(vault).toContain(">Keep a file<");
+    expect(vault).not.toContain(">Only in SSHelter<");
+    expect(lines(vault)).toContain("Only in SSHelter on this computer — programs ask before they use it");
+  });
+
+  it("asks before the key becomes a file any program can use", () => {
+    let kept = 0;
+    const tree = KeepFileConfirm({ slot: keySlot({ name: SPOOFED_NAME }), open: true, onCancel: () => {}, onConfirm: () => kept++ });
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Keep ${SPOOFED_NAME_SHOWN} as a file?`);
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual(["Any program on this computer can use the file without asking."]);
+    expect(elementsOf(tree, AlertDialogCancel).map(textIn)).toEqual(["Cancel"]);
+    const [action] = elementsOf(tree, AlertDialogAction);
+    expect(textIn(action)).toBe("Keep a file");
+    action.props.onClick!();
+    expect(kept).toBe(1);
+  });
+
+  it("shows why the agent can't be reached, with Fix for a removed Include", () => {
+    const missing = renderToStaticMarkup(<AgentProblemLine problem={{ kind: "include_missing" }} busy={false} onFix={() => {}} />);
+    expect(text(missing)).toContain("Hosts that use keys in SSHelter can't reach its agent.");
+    expect(missing).toContain(">Fix<");
+    const failed = renderToStaticMarkup(<AgentProblemLine problem={{ kind: "not_running", reason: "path too long" }} busy={false} onFix={() => {}} />);
+    expect(text(failed)).toContain("SSHelter's agent isn't running: path too long");
+    expect(failed).not.toContain(">Fix<");
+  });
+
+  it("warns that deleting a vault key may delete the only copy", () => {
+    const tree = DeleteCopyConfirm({ slot: keySlot({ in_vault: true, status: { kind: "not_in_use", file: "/f" } }), open: true, onCancel: () => {}, onConfirm: () => {} });
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
+      "The key id_mac kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.",
+    ]);
+  });
+
+  it("shows the problem above the rows only while a key is in the vault", () => {
+    const render = (slot: SyncKeySlotView) => {
+      const queryClient = new QueryClient();
+      queryClient.setQueryData(syncOverviewKey, overview({ key_slots: [slot] }));
+      queryClient.setQueryData(agentProblemKey, { kind: "include_missing" });
+      return renderToStaticMarkup(
+        <QueryClientProvider client={queryClient}>
+          <KeySlotsSection />
+        </QueryClientProvider>,
+      );
+    };
+    expect(text(render(keySlot({ in_vault: true })))).toContain("can't reach its agent");
+    expect(text(render(keySlot()))).not.toContain("can't reach its agent");
   });
 });

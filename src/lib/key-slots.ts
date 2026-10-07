@@ -199,7 +199,7 @@ export function slotActions(slot: SyncKeySlotView): SlotActions {
   if (!slot.in_account) {
     return { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: s.kind === "not_in_use" };
   }
-  return {
+  const actions: SlotActions = {
     syncThis: slot.mode === "own" && s.kind === "ready",
     stopSyncing: slot.mode === "synced",
     // A slot in `error` (its key is gone, a synced key didn't match) always has a way forward: pick a key here. Where picking
@@ -216,6 +216,23 @@ export function slotActions(slot: SyncKeySlotView): SlotActions {
     syncNew: s.kind === "source_changed",
     deleteCopy: s.kind === "not_in_use",
   };
+  // A key only in SSHelter may be the last copy: the backend refuses picking another key and using the synced one
+  // (`VAULT_FIRST_MESSAGE`) until it is kept as a file again, so those two aren't offered. The status line still says when a
+  // synced key is available.
+  return slot.in_vault ? { ...actions, pick: null, useSynced: false } : actions;
+}
+
+/**
+ * "Only in SSHelter" / "Keep a file" (key vault spec §4.3, §7.3): where this computer's copy can move. A file this computer
+ * uses can move into the vault; a vault key can always go back to a file.
+ */
+export function deliveryAction(slot: SyncKeySlotView): "vault" | "file" | null {
+  if (slot.in_vault) return "file";
+  return slot.in_account && slot.status.kind === "ready" ? "vault" : null;
+}
+
+export function deliveryLine(slot: SyncKeySlotView): string | null {
+  return slot.in_vault ? "Only in SSHelter on this computer — programs ask before they use it" : null;
 }
 
 export function hostsLine(slot: SyncKeySlotView): string | null {

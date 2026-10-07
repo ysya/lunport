@@ -19,6 +19,7 @@ mod updater_channel;
 mod vault;
 
 use agent::prompt::{agent_pending, agent_resolve};
+use agent::{agent_fix_include, agent_problem};
 use config::commands::*;
 use config::intel::{config_effective, config_jump_chain, config_key_hygiene, config_lint};
 use connect::{connect_launch, connect_list_terminals};
@@ -231,6 +232,8 @@ fn run_app(mcp_keep_alive: bool) {
             sync_resolve_shadowed,
             agent_pending,
             agent_resolve,
+            agent_problem,
+            agent_fix_include,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

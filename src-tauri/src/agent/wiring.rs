@@ -266,6 +266,34 @@ pub fn refresh_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
     Err(error)
 }
 
+/// 這台的 `ssh` 接不接得到 agent(畫面提示用;spec §6、§11):沒有主機用到只在 SSHelter 的金鑰、也從沒寫過 `agent/config` → NotNeeded;主 config
+/// 是預設的 `~/.ssh/config` 而且有 agent 的 Include → Ready;其他(使用者拿掉了,或第一次一直加不進去 —— `agent/config` 要等 Include 放好才寫)→ IncludeMissing。
+pub fn status(doc: &SshConfigDoc, home: &Path, vault_files: &BTreeSet<String>) -> WiringStatus {
+    let needed = agent_config_path(home).exists() || !vault_host_patterns(doc, vault_files, home).is_empty();
+    if !needed {
+        return WiringStatus::NotNeeded;
+    }
+    let default_root = home.join(".ssh").join("config");
+    match doc.files.first() {
+        Some(main) if main.path == default_root && main.items.iter().any(is_agent_include) => WiringStatus::Ready,
+        _ => WiringStatus::IncludeMissing,
+    }
+}
+
+/// 使用者按 Fix:把 Include 放回 `~/.ssh/config` 的第一行(spec §6:不會自己加回去)。載入的主 config 不是預設的那一個 → 錯誤。
+pub fn restore_include(
+    doc: &mut SshConfigDoc,
+    backed_up: &mut HashSet<PathBuf>,
+    retention: Option<usize>,
+    home: &Path,
+) -> Result<(), AppError> {
+    let default_root = home.join(".ssh").join("config");
+    if doc.files.first().map(|f| f.path.as_path()) != Some(default_root.as_path()) {
+        return Err(AppError::Other("SSHelter isn't using ~/.ssh/config, so it can't add the line there.".to_string()));
+    }
+    put_include_first(doc, backed_up, retention)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,5 +750,41 @@ mod tests {
         };
         let listed: Vec<String> = vault_host_patterns(&doc, &vault(), home).into_iter().map(|patterns| patterns.join(" ")).collect();
         assert_eq!(listed, ["quoted", "percent", "two"], "a Match block is not supported, and a .pub path is not a slot");
+    }
+
+    fn loaded(home: &Path, text: &str) -> SshConfigDoc {
+        let main = home.join(".ssh").join("config");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, text).unwrap();
+        crate::config::include::with_test_home(home, || crate::config::commands::load_doc_migrated(&main)).unwrap()
+    }
+
+    #[test]
+    fn status_tells_whether_ssh_reaches_the_agent() {
+        let home = tempfile::tempdir().unwrap();
+        let none = BTreeSet::new();
+        let doc = loaded(home.path(), "Host a\n  HostName x\n");
+        assert_eq!(status(&doc, home.path(), &none), WiringStatus::NotNeeded);
+        // A host on a vault key, but the first Include add never succeeded (agent/config is only written after it).
+        let vault = BTreeSet::from(["id_mac-11111111".to_string()]);
+        let on_vault = loaded(home.path(), "Host a\n  IdentityFile ~/.ssh/sshelter/keys/id_mac-11111111\n");
+        assert_eq!(status(&on_vault, home.path(), &vault), WiringStatus::IncludeMissing, "needed but not wired yet");
+        std::fs::create_dir_all(crate::agent::agent_dir(home.path())).unwrap();
+        std::fs::write(agent_config_path(home.path()), format!("{HEADER}\n")).unwrap();
+        assert_eq!(status(&doc, home.path(), &none), WiringStatus::IncludeMissing);
+        let doc = loaded(home.path(), "Include ~/.ssh/sshelter/agent/config\nHost a\n");
+        assert_eq!(status(&doc, home.path(), &none), WiringStatus::Ready);
+    }
+
+    #[test]
+    fn fix_puts_the_include_back_first_once_and_saves() {
+        let home = tempfile::tempdir().unwrap();
+        let mut doc = loaded(home.path(), "# mine\nHost a\n  HostName x\n");
+        let mut backed_up = HashSet::new();
+        restore_include(&mut doc, &mut backed_up, None, home.path()).unwrap();
+        let main = home.path().join(".ssh").join("config");
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "Include ~/.ssh/sshelter/agent/config\n# mine\nHost a\n  HostName x\n");
+        restore_include(&mut doc, &mut backed_up, None, home.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(&main).unwrap().matches("sshelter/agent/config").count(), 1);
     }
 }

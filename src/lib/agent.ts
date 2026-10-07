@@ -1,8 +1,12 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 
 import type { AgentApprovalAnswer } from "@/bindings/AgentApprovalAnswer";
 import type { AgentApprovalRequest } from "@/bindings/AgentApprovalRequest";
+import type { AgentProblem } from "@/bindings/AgentProblem";
 import { tauriInvoke } from "@/lib/ipc";
+import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 
 /**
@@ -76,4 +80,37 @@ export function buildAnswer(
 /** Allow (or Unlock) stays off while an answer is on its way and while a needed passphrase is still empty. */
 export function allowDisabled(r: AgentApprovalRequest, passphrase: string, busy: boolean): boolean {
   return busy || (r.needs_passphrase && passphrase.length === 0);
+}
+
+/** Under ["config"], so every sync overview mutation and config change refreshes it. */
+export const agentProblemKey = ["config", "agentProblem"] as const;
+
+export function useAgentProblem(enabled: boolean) {
+  return useQuery<AgentProblem | null>({
+    queryKey: agentProblemKey,
+    queryFn: () => tauriInvoke<AgentProblem | null>("agent_problem"),
+    enabled,
+  });
+}
+
+/** Fix: put the Include line back first in ~/.ssh/config (key vault spec §6). */
+export function useFixAgentInclude() {
+  const queryClient = useQueryClient();
+  return useMutation<AgentProblem | null, unknown, void>({
+    mutationFn: () => tauriInvoke<AgentProblem | null>("agent_fix_include"),
+    onSuccess: (problem) => {
+      queryClient.setQueryData(agentProblemKey, problem);
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
+    },
+    onError: (error) => toast.error("Could not fix ~/.ssh/config", { description: errorMessage(error) }),
+  });
+}
+
+export function agentProblemText(problem: AgentProblem): string {
+  switch (problem.kind) {
+    case "not_running":
+      return `SSHelter's agent isn't running: ${problem.reason}`;
+    case "include_missing":
+      return "Hosts that use keys in SSHelter can't reach its agent.";
+  }
 }

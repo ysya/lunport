@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AgentApprovalRequest } from "@/bindings/AgentApprovalRequest";
-import { allowDisabled, approvalTitle, buildAnswer, destination, programChainLine, programName, rememberLabel } from "@/lib/agent";
+import { agentProblemText, allowDisabled, approvalTitle, buildAnswer, destination, programChainLine, programName, rememberLabel } from "@/lib/agent";
 
 function request(over: Partial<AgentApprovalRequest> = {}): AgentApprovalRequest {
   return {
@@ -105,5 +105,12 @@ describe("allowDisabled", () => {
 
   it("does not wait for a passphrase nobody asked for", () => {
     expect(allowDisabled(request(), "", false)).toBe(false);
+  });
+});
+
+describe("the agent problem line", () => {
+  it("says why hosts on vault keys can't connect", () => {
+    expect(agentProblemText({ kind: "not_running", reason: "path too long" })).toBe("SSHelter's agent isn't running: path too long");
+    expect(agentProblemText({ kind: "include_missing" })).toBe("Hosts that use keys in SSHelter can't reach its agent.");
   });
 });

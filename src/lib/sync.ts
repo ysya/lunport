@@ -369,6 +369,7 @@ export const keyArgs = {
   setMode: (v: { slotId: string; mode: SlotMode }) => ({ slotId: v.slotId, mode: v.mode }),
   pick: (v: { slotId: string; path: string }) => ({ slotId: v.slotId, path: v.path }),
   slot: (v: { slotId: string }) => ({ slotId: v.slotId }),
+  delivery: (v: { slotId: string; vault: boolean }) => ({ slotId: v.slotId, vault: v.vault }),
 };
 
 /** Create or reuse slots and rewrite the hosts (it can fail after creating a slot, so a failure re-reads everything). */
@@ -392,6 +393,11 @@ export function useKeyUseSynced() {
 
 export function useKeyDeleteCopy() {
   return useOverviewMutation("sync_key_delete_copy", "Could not delete the copy", keyArgs.slot);
+}
+
+/** It moves the private key between the slot file and SSHelter's vault before the state changes: re-read everything on failure. */
+export function useKeySetDelivery() {
+  return useOverviewMutation("sync_key_set_delivery", "Could not change where the key is kept", keyArgs.delivery, true);
 }
 
 /*

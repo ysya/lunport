@@ -191,11 +191,81 @@ fn listen(app: &tauri::AppHandle) -> Result<server::Started, AppError> {
     }
 }
 
+/// 「Keys used by synced hosts」上方的提示(spec §6、§11)。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentProblem {
+    /// agent 開不起來:用保管庫金鑰的主機暫時連不上。
+    NotRunning { reason: String },
+    /// `agent/config` 在,`~/.ssh/config` 卻沒有它的 Include。
+    IncludeMissing,
+}
+
+/// 要顯示的提示:agent 開不起來優先,其次是 Include 不見了。另一個 SSHelter 在提供不算問題。
+pub fn problem(status: &AgentStatus, wiring: wiring::WiringStatus) -> Option<AgentProblem> {
+    if let AgentStatus::Failed(reason) = status {
+        return Some(AgentProblem::NotRunning { reason: reason.clone() });
+    }
+    (wiring == wiring::WiringStatus::IncludeMissing).then_some(AgentProblem::IncludeMissing)
+}
+
+/// 使用者的家目錄(`~/.ssh` 的上一層)。
+pub(crate) fn home_dir() -> Result<PathBuf, AppError> {
+    let ssh_dir = crate::keys::ssh_dir()?;
+    ssh_dir.parent().map(Path::to_path_buf).ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))
+}
+
+fn current_problem(state: &AppState) -> Result<Option<AgentProblem>, AppError> {
+    let home = home_dir()?;
+    let wiring = {
+        // doc → core,同 `config/commands.rs` 的順序。
+        let doc_lock = state.doc.lock().unwrap();
+        let vault_files =
+            state.sync.core.lock().unwrap().state.as_ref().map(crate::sync::slots::vault_slot_files).unwrap_or_default();
+        doc_lock.as_ref().map_or(wiring::WiringStatus::NotNeeded, |doc| wiring::status(doc, &home, &vault_files))
+    };
+    let status = state.agent.status.lock().unwrap().clone();
+    Ok(problem(&status, wiring))
+}
+
+#[tauri::command]
+pub fn agent_problem(state: tauri::State<AppState>) -> Result<Option<AgentProblem>, AppError> {
+    current_problem(&state)
+}
+
+/// Fix:把 Include 放回 `~/.ssh/config` 的第一行,回傳之後的提示。
+#[tauri::command]
+pub fn agent_fix_include(state: tauri::State<AppState>) -> Result<Option<AgentProblem>, AppError> {
+    let home = home_dir()?;
+    {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("The SSH config isn't loaded yet.".to_string()))?;
+        let mut backed_up = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
+        wiring::restore_include(doc, &mut backed_up, retention, &home)?;
+    }
+    current_problem(&state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::wiring::WiringStatus;
     use crate::sync::slot_rules::test_keys;
     use crate::vault::material::public_key_data;
+
+    #[test]
+    fn a_failed_agent_comes_first_and_another_instance_is_fine() {
+        assert_eq!(
+            problem(&AgentStatus::Failed("path too long".into()), WiringStatus::IncludeMissing),
+            Some(AgentProblem::NotRunning { reason: "path too long".into() })
+        );
+        assert_eq!(problem(&AgentStatus::Running, WiringStatus::IncludeMissing), Some(AgentProblem::IncludeMissing));
+        assert_eq!(problem(&AgentStatus::OtherInstance, WiringStatus::Ready), None);
+        assert_eq!(problem(&AgentStatus::Running, WiringStatus::NotNeeded), None);
+    }
 
     /// 這台的設定讀不到時,往嚴格的一邊退:記住的核准不能在沒有視窗的情況下簽章,而更嚴的設定(`always_ask`)正好讀不到。
     #[test]

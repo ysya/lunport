@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { keyCandidate, keySlot, overview, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import {
   choiceFor,
+  deliveryAction,
+  deliveryLine,
   deviceLine,
   finishedKeysNeededNotice,
   hostsLine,
@@ -255,5 +257,30 @@ describe("the once-per-computer setup prompt", () => {
     vi.stubGlobal("localStorage", { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); } });
     expect(keySetupAskedBefore()).toBe(false);
     expect(() => rememberKeySetupAsked()).not.toThrow();
+  });
+});
+
+describe("a vault row's actions", () => {
+  it("hides Pick and Use the synced key, which the backend refuses for a vault key", () => {
+    const actions = slotActions(keySlot({ in_vault: true, status: { kind: "synced_available", file: "/f" } }));
+    expect(actions.pick).toBeNull();
+    expect(actions.useSynced).toBe(false);
+    expect(actions.stopSyncing).toBe(true);
+    expect(slotActions(keySlot({ in_vault: true, mode: "own", fingerprint: null })).syncThis).toBe(true);
+  });
+});
+
+describe("where this computer keeps a slot's key", () => {
+  it("offers Only in SSHelter for a ready file and Keep a file for a vault key", () => {
+    expect(deliveryAction(keySlot())).toBe("vault");
+    expect(deliveryAction(keySlot({ in_vault: true }))).toBe("file");
+    expect(deliveryAction(keySlot({ in_vault: true, in_account: false, status: { kind: "not_in_use", file: "/f" } }))).toBe("file");
+    expect(deliveryAction(keySlot({ status: { kind: "needs_key", waiting_for_sync: false } }))).toBeNull();
+    expect(deliveryAction(keySlot({ in_account: false }))).toBeNull();
+  });
+
+  it("says when the key is only in SSHelter", () => {
+    expect(deliveryLine(keySlot({ in_vault: true }))).toBe("Only in SSHelter on this computer — programs ask before they use it");
+    expect(deliveryLine(keySlot())).toBeNull();
   });
 });

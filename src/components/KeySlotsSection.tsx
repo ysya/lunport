@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 
+import type { AgentProblem } from "@/bindings/AgentProblem";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { TONE_TEXT } from "@/components/sync-primitives";
@@ -17,14 +18,15 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { deviceLine, hostsLine, slotActions, slotStatusText, syncConfirmText } from "@/lib/key-slots";
+import { agentProblemText, useAgentProblem, useFixAgentInclude } from "@/lib/agent";
+import { deliveryAction, deliveryLine, deviceLine, hostsLine, slotActions, slotStatusText, syncConfirmText } from "@/lib/key-slots";
 import { useKeys } from "@/lib/queries";
-import { useKeyDeleteCopy, useKeyPick, useKeySetMode, useKeyUseSynced, useSyncOverview } from "@/lib/sync";
+import { useKeyDeleteCopy, useKeyPick, useKeySetDelivery, useKeySetMode, useKeyUseSynced, useSyncOverview } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 import { useLastNonNull } from "@/lib/use-last-non-null";
 import { cn } from "@/lib/utils";
 
-export type SlotAction = "sync" | "stop" | "pick" | "useSynced" | "syncNew" | "delete";
+export type SlotAction = "sync" | "stop" | "pick" | "useSynced" | "syncNew" | "delete" | "vault" | "file";
 
 /** One slot in the Keys dialog. Exported for the markup tests. */
 export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; busy: boolean; onAction: (action: SlotAction) => void }) {
@@ -32,6 +34,8 @@ export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; bu
   // The file this computer uses, for the states that name one (spec §7.2: "the file this computer uses and its state").
   const file = "file" in slot.status ? slot.status.file : null;
   const actions = slotActions(slot);
+  const delivery = deliveryAction(slot);
+  const kept = deliveryLine(slot);
   const hosts = hostsLine(slot);
   const devices = deviceLine(slot);
   const button = (action: SlotAction, label: string, variant: "outline" | "ghost" = "outline", extra = "") => (
@@ -48,6 +52,7 @@ export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; bu
           {slot.fingerprint ? ` · ${slot.fingerprint}` : ""}
         </p>
         <p className={cn("text-xs", TONE_TEXT[status.tone])}>{status.text}</p>
+        {kept && <p className="text-xs text-muted-foreground">{kept}</p>}
         {file && <p className="font-mono text-xs break-all text-muted-foreground">{file}</p>}
         {hosts && <p className="text-xs text-muted-foreground">{hosts}</p>}
         {devices && <p className="text-xs text-muted-foreground">{devices}</p>}
@@ -57,6 +62,8 @@ export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; bu
         {actions.syncNew && button("syncNew", "Sync the new key")}
         {actions.useSynced && button("useSynced", "Use the synced key")}
         {actions.pick && button("pick", actions.pick === "pick" ? "Pick a key on this computer…" : "Change…")}
+        {delivery === "vault" && button("vault", "Only in SSHelter")}
+        {delivery === "file" && button("file", "Keep a file")}
         {actions.stopSyncing && button("stop", "Stop syncing", "ghost")}
         {actions.deleteCopy && button("delete", "Delete copy", "ghost", "text-destructive hover:text-destructive")}
       </div>
@@ -174,7 +181,8 @@ export function SyncKeyConfirm({
 
 /**
  * The confirm before this computer's copy of a key is deleted. It says nothing about the original key: for a copy whose
- * original was replaced or removed, this copy may be the last one. No hooks: exported for the tests.
+ * original was replaced or removed, this copy may be the last one. A key kept only in SSHelter says that the vault entry
+ * is what goes, and that it may be the last copy. No hooks: exported for the tests.
  */
 export function DeleteCopyConfirm({
   slot,
@@ -193,7 +201,9 @@ export function DeleteCopyConfirm({
         <AlertDialogHeader>
           <AlertDialogTitle>Delete this copy?</AlertDialogTitle>
           <AlertDialogDescription>
-            The copy of {slot ? revealHidden(slot.name) : ""} on this computer is deleted. Other computers aren't affected.
+            {slot?.in_vault
+              ? `The key ${revealHidden(slot.name)} kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`
+              : `The copy of ${slot ? revealHidden(slot.name) : ""} on this computer is deleted. Other computers aren't affected.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -207,21 +217,71 @@ export function DeleteCopyConfirm({
   );
 }
 
+/** The confirm before a vault key becomes a file again: any program can use a file without asking. No hooks: exported for the tests. */
+export function KeepFileConfirm({
+  slot,
+  open,
+  onCancel,
+  onConfirm,
+}: {
+  slot: SyncKeySlotView | null;
+  open: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Keep {slot ? revealHidden(slot.name) : ""} as a file?</AlertDialogTitle>
+          <AlertDialogDescription>Any program on this computer can use the file without asking.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirm}>Keep a file</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** Why ssh can't reach SSHelter's agent (key vault spec §6, §11), with Fix when the Include line was removed. Exported for the tests. */
+export function AgentProblemLine({ problem, busy, onFix }: { problem: AgentProblem; busy: boolean; onFix: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-1">
+      <p className={cn("text-xs", TONE_TEXT.error)}>{agentProblemText(problem)}</p>
+      {problem.kind === "include_missing" && (
+        <Button type="button" size="sm" variant="outline" className="h-7 shrink-0" disabled={busy} onClick={onFix}>
+          Fix
+        </Button>
+      )}
+    </div>
+  );
+}
+
 /** "Keys used by synced hosts" in the Keys dialog (SP3 spec §7.2). Nothing while there are no slots. */
 export function KeySlotsSection() {
   const overview = useSyncOverview();
   const setMode = useKeySetMode();
   const switchToSynced = useKeyUseSynced();
   const deleteCopy = useKeyDeleteCopy();
+  const delivery = useKeySetDelivery();
+  const fix = useFixAgentInclude();
   const [picking, setPicking] = useState<SyncKeySlotView | null>(null);
   const [syncing, setSyncing] = useState<SyncKeySlotView | null>(null);
   const [deleting, setDeleting] = useState<SyncKeySlotView | null>(null);
-  // What the two confirms show while they animate out (their slot state is already null by then).
+  const [keeping, setKeeping] = useState<SyncKeySlotView | null>(null);
+  // What the confirms show while they animate out (their slot state is already null by then).
   const shownSyncing = useLastNonNull(syncing);
   const shownDeleting = useLastNonNull(deleting);
+  const shownKeeping = useLastNonNull(keeping);
   const slots = overview.data?.joined ? overview.data.key_slots : [];
+  const anyInVault = slots.some((s) => s.in_vault);
+  // Asked only while a key is in the vault; a hook, so it comes before the early return below.
+  const problemQuery = useAgentProblem(anyInVault);
+  const problem = anyInVault ? (problemQuery.data ?? null) : null;
   if (slots.length === 0) return null;
-  const busy = setMode.isPending || switchToSynced.isPending || deleteCopy.isPending;
+  const busy = setMode.isPending || switchToSynced.isPending || deleteCopy.isPending || delivery.isPending || fix.isPending;
   const act = (slot: SyncKeySlotView, action: SlotAction) => {
     const name = revealHidden(slot.name);
     switch (action) {
@@ -242,11 +302,33 @@ export function KeySlotsSection() {
       case "delete":
         setDeleting(slot);
         break;
+      case "vault":
+        delivery.mutate(
+          { slotId: slot.id, vault: true },
+          {
+            onSuccess: () =>
+              toast.success(
+                `${name} is now only in SSHelter on this computer`,
+                anyInVault
+                  ? undefined
+                  : {
+                      description:
+                        "Hosts that use it connect only while SSHelter is open. In Settings, turn on Launch at login and Keep running in menu bar when window closes.",
+                    },
+              ),
+          },
+        );
+        break;
+      case "file":
+        // A file can be used by any program without asking: confirm first (`KeepFileConfirm`).
+        setKeeping(slot);
+        break;
     }
   };
   return (
     <section className="space-y-1.5">
       <h3 className="px-1 text-xs font-medium text-muted-foreground select-none">Keys used by synced hosts</h3>
+      {problem && <AgentProblemLine problem={problem} busy={busy} onFix={() => fix.mutate()} />}
       {/* Capped like the key list above it, so a long list scrolls here instead of pushing the dialog off the window. */}
       <div className="-mx-1 max-h-[30vh] overflow-y-auto px-1">
         <div className="settings-group">
@@ -275,6 +357,18 @@ export function KeySlotsSection() {
         onConfirm={() => {
           if (deleting) deleteCopy.mutate({ slotId: deleting.id });
           setDeleting(null);
+        }}
+      />
+      <KeepFileConfirm
+        slot={shownKeeping}
+        open={keeping !== null}
+        onCancel={() => setKeeping(null)}
+        onConfirm={() => {
+          if (keeping) {
+            const name = revealHidden(keeping.name);
+            delivery.mutate({ slotId: keeping.id, vault: false }, { onSuccess: () => toast.success(`${name} is kept as a file on this computer`) });
+          }
+          setKeeping(null);
         }}
       />
     </section>
