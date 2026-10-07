@@ -126,7 +126,7 @@ describe("the agent problem line", () => {
   });
 });
 
-describe("the key channel that closed unused", () => {
+describe("the key channel that ssh asked too late", () => {
   it("listens on the event the backend emits", () => {
     expect(CONNECT_EXPIRED_EVENT).toBe("agent://connect-expired");
   });
@@ -135,7 +135,7 @@ describe("the key channel that closed unused", () => {
     expect(connectExpiredMessage("web")).toEqual({
       title: "Connect to web again",
       description:
-        "ssh didn't ask SSHelter for the key within a minute (a new host's fingerprint question may still be open), so SSHelter stopped offering it.",
+        "SSHelter offers the key for one minute after Connect, and ssh asked for it later (a new host's fingerprint question may have been open).",
     });
   });
 

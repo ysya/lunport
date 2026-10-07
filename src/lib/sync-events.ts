@@ -119,8 +119,8 @@ export function openSyncSettings(): void {
  * Sync engine → UI. Status pushes refresh every overview reader without polling;
  * applied remote changes refresh the config views (a newly synced host can shadow
  * a local one) and the approval list; conflicts, hosts held for approval and
- * notices surface as toasts, and so does a Connect whose one-shot key channel closed
- * before ssh used it (`agent://connect-expired`, key vault spec §11).
+ * notices surface as toasts, and so does a Connect whose ssh asked its one-shot key
+ * channel for the key after the one-minute window (`agent://connect-expired`, key vault spec §11).
  * The backend starts a round itself when the window regains focus, so nothing
  * here asks for one — a second round would double the relay usage.
  * Returns the unsubscribe function.

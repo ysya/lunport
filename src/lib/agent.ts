@@ -15,7 +15,7 @@ import { revealHidden } from "@/lib/sync-approvals";
  */
 
 export const APPROVALS_EVENT = "agent://approvals";
-/** Emitted with the host alias when a Connect's one-shot key channel closed before ssh used it (`oneshot::CONNECT_EXPIRED_EVENT`). */
+/** Emitted with the host alias when ssh asked a Connect's one-shot key channel for the key after its one-minute window (`oneshot::CONNECT_EXPIRED_EVENT`). */
 export const CONNECT_EXPIRED_EVENT = "agent://connect-expired";
 
 export function fetchPending(): Promise<AgentApprovalRequest[]> {
@@ -117,11 +117,11 @@ export function agentProblemText(problem: AgentProblem): string {
   }
 }
 
-/** The one-shot key channel for `alias` closed before ssh asked for the key (key vault spec §5.6, §11). */
+/** ssh asked the one-shot key channel for `alias` for the key after its one-minute window, so it was not offered (key vault spec §5.6, §11). */
 export function connectExpiredMessage(alias: string): { title: string; description: string } {
   return {
     title: `Connect to ${revealHidden(alias)} again`,
     description:
-      "ssh didn't ask SSHelter for the key within a minute (a new host's fingerprint question may still be open), so SSHelter stopped offering it.",
+      "SSHelter offers the key for one minute after Connect, and ssh asked for it later (a new host's fingerprint question may have been open).",
   };
 }

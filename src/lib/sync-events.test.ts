@@ -275,7 +275,7 @@ describe("subscribeSyncEvents", () => {
     expect(useUiStore.getState()).toEqual(expect.objectContaining({ settingsOpen: true, settingsCategory: "sync" }));
   });
 
-  it("toasts a key channel that closed before ssh asked for the key, naming the host", async () => {
+  it("toasts a Connect whose ssh asked for the key after the channel's one-minute window, naming the host", async () => {
     const { emit } = await subscribed();
     emit("agent://connect-expired", "web");
     expect(toast.getToasts()).toEqual([
@@ -283,7 +283,7 @@ describe("subscribeSyncEvents", () => {
         type: "warning",
         title: "Connect to web again",
         description:
-          "ssh didn't ask SSHelter for the key within a minute (a new host's fingerprint question may still be open), so SSHelter stopped offering it.",
+          "SSHelter offers the key for one minute after Connect, and ssh asked for it later (a new host's fingerprint question may have been open).",
       }),
     ]);
   });
