@@ -132,6 +132,12 @@ describe("the approval window", () => {
     expect(source).toMatch(/<ApprovalCard\s+key=\{request\.id\}/);
   });
 
+  it("holds the passphrase field's Enter back with the same check as the Allow button", () => {
+    expect(source).toContain("const cannotAllow = allowDisabled(request, passphrase, busy, armed);");
+    expect(source).toContain('if (e.key === "Enter" && !cannotAllow) answer(true);');
+    expect(source).toContain("disabled={cannotAllow}");
+  });
+
   it("arms a card from a timer that starts when the card mounts", () => {
     expect(source).toMatch(/useEffect\(\(\) => armAfterDelay\(\(\) => setArmed\(true\)\), \[\]\);/);
   });
