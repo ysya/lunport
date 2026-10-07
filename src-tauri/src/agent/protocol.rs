@@ -51,7 +51,7 @@ pub enum Request {
     Identities,
     Sign { key: KeyData, data: Vec<u8>, flags: u32 },
     SessionBind { host_key: KeyData, session_id: Vec<u8>, signature: Signature, forwarding: bool },
-    /// session-bind 以外的擴充(名稱)。
+    /// session-bind 以外的擴充(名稱;`Session::handle` 把它記到 stderr 再拒絕)。
     Extension(String),
     /// 不支援的種類,或讀不懂的內容。
     Unsupported,

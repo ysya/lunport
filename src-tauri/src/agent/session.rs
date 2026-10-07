@@ -24,7 +24,7 @@ pub struct SignRequest {
 /// 決定給哪些金鑰、簽不簽(`agent::broker::Connection`)。
 pub trait SignAuthority {
     fn identities(&self) -> Vec<(KeyData, String)>;
-    /// 要簽就回傳 signature blob(`string 演算法, string 簽章`),不簽回 None。可能等核准視窗(最多 60 秒)。
+    /// 要簽就回傳 signature blob(`string 演算法, string 簽章`),不簽回 None。可能等核准視窗與接著的 passphrase 視窗,整個等待有上限(`broker::SHARED_ANSWER_WAIT`)。
     fn sign(&self, request: &SignRequest) -> Option<Vec<u8>>;
 }
 
@@ -66,7 +66,12 @@ impl Session {
                 self.forwarded |= forwarding;
                 vec![SSH_AGENT_SUCCESS]
             }
-            Request::Extension(_) | Request::Unsupported => vec![SSH_AGENT_FAILURE],
+            Request::Extension(name) => {
+                // 名稱來自對方,可能含看不見的字元:用 `{:?}` 記,控制字元會跳脫。
+                eprintln!("[agent] unsupported extension request: {name:?}");
+                vec![SSH_AGENT_FAILURE]
+            }
+            Request::Unsupported => vec![SSH_AGENT_FAILURE],
         }
     }
 }

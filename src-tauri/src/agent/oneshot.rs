@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(mode(&channel.path), 0o600);
         assert_eq!(channel.path, run.join(&channel.name));
         assert!(channel.name.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')), "{}", channel.name);
-        // 用掉它:背景執行緒到此結束,不留到逾時。
+        // 用掉它:背景執行緒到此結束,不留到通道的壽命(`LIFETIME`)結束。
         drop(UnixStream::connect(&channel.path).unwrap());
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
@@ -716,7 +716,7 @@ mod tests {
         nothing_was_called(&late_rx);
     }
 
-    /// 等到結果之後的決定(不經背景執行緒,所以取消與連線、逾時剛好同時發生的情形也能測):取消了就什麼都不做。
+    /// 等到結果之後的決定(不經背景執行緒,所以取消剛好與連線(授權時間之內,或來得太晚的 late)、壽命結束同時發生的情形也能測):取消了就什麼都不做。
     #[cfg(unix)]
     #[test]
     fn once_cancelled_nothing_is_served_and_nothing_is_reported() {
