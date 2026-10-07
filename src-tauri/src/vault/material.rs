@@ -57,6 +57,13 @@ pub fn is_encrypted(private_key: &str) -> bool {
     PrivateKey::from_openssh(private_key).is_ok_and(|key| key.is_encrypted())
 }
 
+/// agent 讀得懂這把私鑰嗎(`open` 不回 `Unreadable`)?`inspect_private_key`(同步讀標頭用的)只看標頭與公鑰段,`ssh-key` 另外會挑剔其他欄位
+/// (例如不是 UTF-8 的 comment):讀不懂的金鑰搬進保管庫之後 agent 打不開它,所以「Only in SSHelter」先用它擋下(`sync::slots::set_delivery`)。
+/// 要 passphrase(`NeedsPassphrase`)與加密方式解不開(`UnsupportedCipher`,有自己的訊息)都是解析成功,算讀得懂。
+pub fn agent_can_read(private_key: &str) -> bool {
+    !matches!(open(private_key, None), Err(OpenError::Unreadable))
+}
+
 /// 這把私鑰要是加密過、加密方式又不在 `SUPPORTED_CIPHERS` 上,回傳那個名稱(`open` 回 `UnsupportedCipher` 的判斷)。
 fn unsupported_cipher_of(key: &PrivateKey) -> Option<String> {
     if !key.is_encrypted() {
@@ -246,6 +253,32 @@ mod tests {
         for (kind, public) in [("sk-ed25519", test_keys::sk_public()), ("dsa", test_keys::dsa_public())] {
             let data = public_key_data(&public).unwrap_or_else(|| panic!("{kind}: setup: the public key parses"));
             assert!(!agent_can_sign(&data), "{kind}");
+        }
+    }
+
+    /// `inspect_private_key` 只看標頭與公鑰段;`ssh-key` 另外會挑剔其他欄位(例如不是 UTF-8 的 comment)。agent 讀不懂的金鑰不能搬進保管庫。
+    #[test]
+    fn a_key_ssh_key_rejects_is_not_readable_by_the_agent() {
+        use crate::sync::slot_rules::inspect_private_key;
+        let broken = test_keys::unreadable_comment();
+        assert!(inspect_private_key(&broken).is_ok(), "setup: SP3 reads its header and public key");
+        assert_eq!(open(&broken, None).err(), Some(OpenError::Unreadable), "setup: but the agent's parser does not");
+        assert!(!agent_can_read(&broken));
+        assert!(!agent_can_read("not a key"));
+        assert!(!agent_can_read("-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n"), "not the OpenSSH format");
+    }
+
+    /// 解析得了就算讀得懂:沒有加密的、要 passphrase 的(`NeedsPassphrase`),以及加密方式解不開的(`UnsupportedCipher`:另有訊息說明,不是讀不懂)。
+    #[test]
+    fn a_key_that_parses_is_readable_whatever_else_is_wrong_with_it() {
+        for (what, key) in [
+            ("plain", test_keys::plain()),
+            ("ecdsa", test_keys::ecdsa()),
+            ("rsa", test_keys::rsa()),
+            ("passphrase", test_keys::encrypted()),
+            ("unsupported cipher", test_keys::encrypted_with_3des_label()),
+        ] {
+            assert!(agent_can_read(&key), "{what}");
         }
     }
 

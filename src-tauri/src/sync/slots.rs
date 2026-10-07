@@ -241,6 +241,10 @@ pub const VAULT_KEY_TYPE_MESSAGE: &str =
 pub const VAULT_KEY_CIPHER_MESSAGE: &str =
     "SSHelter's agent can't open this key's encryption. Re-encrypt it with `ssh-keygen -p`, then try again.";
 
+/// 「Only in SSHelter」拒絕 agent 讀不懂的金鑰(`ssh-key` 解析不了,`vault::material::agent_can_read`):同步讀標頭用的 `inspect_private_key` 比 `ssh-key` 寬鬆,
+/// 例如 comment 不是 UTF-8 的金鑰,它收、`ssh-key` 不收。
+pub const VAULT_KEY_UNREADABLE_MESSAGE: &str = "SSHelter's agent can't read this key, so it stays as a file.";
+
 // ── 每一輪在這台維護插槽(SP3 spec §6.2–§6.6)──────────────────────────────────────────────────
 //
 // 一個檔案是不是 SSHelter 放的,只看這個插槽 id 自己的本機記錄(`SyncStateV2::key_slots[id]`),不看檔名:插槽檔名
@@ -1494,8 +1498,8 @@ fn forget_remembered_passphrase(env: &SyncEnv, slot_id: &str) {
 /// 這台的插槽改成只在 SSHelter(`vault` = true:私鑰放進保管庫,插槽目錄只留 `.pub`)或改回檔案(插槽路徑放私鑰的副本,保管庫不再留它)。
 /// 使用者自己的原檔一律不碰;插槽路徑上可能是某把金鑰僅存名字的 hard link 或複製檔,改名保留(`retire_key`)而不刪除。
 ///
-/// 搬進保管庫:先確認 agent 簽得了、打得開這把金鑰(`material::agent_can_sign`、`material::unsupported_cipher`),不行就拒絕
-/// (`VAULT_KEY_TYPE_MESSAGE`、`VAULT_KEY_CIPHER_MESSAGE`),插槽、插槽檔與保管庫都不動。然後放進保管庫,再處理插槽路徑上這個插槽自己的東西 —— 連結現在就拿掉(金鑰還在原檔;之後的步驟失敗,記錄還是連結,下一輪照它
+/// 搬進保管庫:先確認 agent 簽得了、打得開、讀得懂這把金鑰(`material::agent_can_sign`、`material::unsupported_cipher`、`material::agent_can_read`),不行就拒絕
+/// (`VAULT_KEY_TYPE_MESSAGE`、`VAULT_KEY_CIPHER_MESSAGE`、`VAULT_KEY_UNREADABLE_MESSAGE`),插槽、插槽檔與保管庫都不動。然後放進保管庫,再處理插槽路徑上這個插槽自己的東西 —— 連結現在就拿掉(金鑰還在原檔;之後的步驟失敗,記錄還是連結,下一輪照它
 /// 重新連結),複製檔與可能是僅存名字的 hard link 改名保留;同步來的副本要等記錄提交之後才拿掉(只拿掉私鑰,`.pub` 留著)。先刪的話,之後的步驟
 /// 一失敗,記錄還說插槽裡有副本、檔案卻不見了,帳戶裡沒有這把金鑰時(Stop syncing 之後、之前的帳戶留下的副本)它只剩保管庫裡一筆沒有記錄用到的。
 /// 兩次檢查之間出現在路徑上的檔案不是這個插槽的:擋路,不碰。
@@ -1530,12 +1534,16 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
         let text = readable_key(Some(&local), &keys_dir)
             .ok_or_else(|| AppError::Other(source_gone_message(&slot_path.display().to_string())))?;
         let facts = inspect_private_key(&text).map_err(|e| AppError::Other(e.message().to_string()))?;
-        // agent 簽不了、打不開的金鑰不搬進保管庫:搬進去插槽檔就沒了,agent 卻不列出它、也簽不了,用它的主機會無聲地連不上。放進保管庫之前拒絕,什麼都不動。
+        // agent 簽不了、打不開、讀不懂的金鑰不搬進保管庫:搬進去插槽檔就沒了,agent 卻不列出它、也簽不了,用它的主機會無聲地連不上。放進保管庫之前拒絕,什麼都不動。
+        // 先看種類,再看加密方式,最後看 `ssh-key` 讀不讀得懂(`inspect_private_key` 只看標頭與公鑰段,比 `ssh-key` 寬鬆)。
         if !material::public_key_data(&facts.public_key).is_some_and(|data| material::agent_can_sign(&data)) {
             return Err(AppError::Other(VAULT_KEY_TYPE_MESSAGE.to_string()));
         }
         if material::unsupported_cipher(&text).is_some() {
             return Err(AppError::Other(VAULT_KEY_CIPHER_MESSAGE.to_string()));
+        }
+        if !material::agent_can_read(&text) {
+            return Err(AppError::Other(VAULT_KEY_UNREADABLE_MESSAGE.to_string()));
         }
         match occupant(Some(&local), &local.file_name, &slot_path) {
             Occupant::NotOurs => return Err(AppError::Other(in_the_way_message(&slot_path))),
@@ -6083,6 +6091,25 @@ pub(crate) mod tests {
         set_delivery(&a.env(), &id, true).unwrap();
         settle(&a);
         assert_eq!(a.keychain.entry(&mine).as_deref(), Some("test-passphrase"));
+    }
+
+    /// `inspect_private_key` 讀得懂標頭與公鑰、`ssh-key` 卻讀不懂的金鑰(例如 comment 不是 UTF-8):搬進保管庫之後 agent 打不開它,插槽檔卻已經沒了。
+    /// 同樣拒絕、什麼都不動。
+    #[test]
+    fn a_key_the_agent_cannot_read_stays_a_file() {
+        let key = test_keys::unreadable_comment();
+        assert!(inspect_private_key(&key).is_ok(), "setup: SP3 reads its header and public key");
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &key, "id_unreadable");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let slot = home(&a).join(SLOT_DIR).join(&file);
+
+        refused(&a, VAULT_KEY_UNREADABLE_MESSAGE, || set_delivery(&a.env(), &id, true));
+        assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Linked { .. })), "the slot is still linked");
+        assert!(slot_files::occupied(&slot), "its slot file is still there");
+        assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_unreadable")).unwrap(), key, "so is the user's own file");
+        assert!(vault_ids(&a).is_empty(), "the vault holds nothing for it");
     }
 
     /// 種類與加密方式 agent 都處理得了的金鑰(Ed25519、ECDSA、RSA;有 passphrase 的用支援的加密方式)照常搬進保管庫。

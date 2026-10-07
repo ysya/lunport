@@ -495,6 +495,16 @@ pub(crate) mod test_keys {
         armor_bytes(&body)
     }
 
+    /// 沒有加密的 ed25519 私鑰(同 `plain()`),comment 換成不是 UTF-8 的位元組(長度不變,金鑰本身不動):`inspect_private_key` 只看標頭與公鑰段,讀得懂;
+    /// `ssh-key` 把 comment 當字串讀,讀不懂,所以 agent 打不開它。
+    pub fn unreadable_comment() -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let mut bytes = STANDARD.decode(PLAIN_BODY.concat()).unwrap();
+        let comment = bytes.windows(8).rposition(|w| w == b"sp3-test").expect("the fixture ends with its comment");
+        bytes[comment + 4..comment + 8].copy_from_slice(&[0xff, 0xfe, 0xfd, 0xfc]);
+        armor_bytes(&bytes)
+    }
+
     /// 加密過的測試私鑰,標頭裡的加密方式改標成 `3des-cbc`(`ssh-key` 0.6.7 讀得懂、但解不開)。只換標頭裡的名稱,金鑰的位元組不動。
     pub fn encrypted_with_3des_label() -> String {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
