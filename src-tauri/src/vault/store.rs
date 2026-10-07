@@ -28,6 +28,9 @@ pub const VAULT_KEY_ACCOUNT: &str = "vault:key";
 pub const VAULT_KEY_ACCOUNT_PREFIX: &str = "vault:key:";
 /// 記住核准的預設時間(分鐘;spec §5.3)。
 pub const DEFAULT_REMEMBER_MINUTES: u32 = 240;
+/// 換掉的金鑰改存的 id 前綴(金鑰保管庫 spec §4.3):`retired:<插槽 id>:<毫秒>`,撞名再加 `-1`、`-2`……。它不是插槽 id:agent 不提供它、
+/// 同步的每一輪也不把它當成插槽的金鑰;計畫 2b 的 Keychain 列出它們,可匯出或刪除。
+pub const RETIRED_PREFIX: &str = "retired:";
 /// 這一版讀寫的最新格式:檔頭有 `key_account` 的檔案。
 const VAULT_VERSION: u32 = 2;
 /// 檔頭沒有 `key_account` 的檔案(計畫 1 寫的,或之後沿用 `vault:key` 的)維持第 1 版,舊版照常開啟。有 `key_account` 的是第 2 版:舊版看到「更新版的格式」
@@ -38,6 +41,12 @@ const AAD_PREFIX: &str = "sshelter-vault-v1";
 /// 保管庫檔的路徑:和 `sync-state.json` 同一個資料夾。
 pub fn vault_path(state_path: &Path) -> PathBuf {
     state_path.with_file_name(VAULT_FILE)
+}
+
+/// `id` 是換掉的金鑰(`RETIRED_PREFIX`),不是插槽的。目前只有測試用到,所以只在測試編譯;計畫 2b 的 Keychain 列出 retired 項目的時候,把 `#[cfg(test)]` 拿掉。
+#[cfg(test)]
+pub fn is_retired_id(id: &str) -> bool {
+    id.starts_with(RETIRED_PREFIX)
 }
 
 /// 這筆私鑰從哪裡來(spec §4.1):在這台產生、從檔案匯入、或從帳戶同步來。補寫帳戶裡的 `key`(SP3 §6.6)時,只有同步來的才不必這台的同意。
@@ -217,7 +226,7 @@ fn set_aside(path: &Path, kind: &str, now_ms: u64, reason: String) -> VaultError
     }
 }
 
-/// 開著的保管庫。改動(`put`、`remove`,以及目前只有測試用的 `set_settings`)立刻寫回檔案;同一個行程裡的寫入要經 `with_vault` 互斥。
+/// 開著的保管庫。改動(`put`、`replace`、`remove`,以及目前只有測試用的 `set_settings`)立刻寫回檔案;同一個行程裡的寫入要經 `with_vault` 互斥。
 pub struct Vault {
     path: PathBuf,
     key: Option<Zeroizing<[u8; 32]>>,
@@ -260,7 +269,7 @@ impl Vault {
         Ok(Vault { path: path.to_path_buf(), key, file })
     }
 
-    /// 保管庫裡的插槽 id(排序過)。
+    /// 保管庫裡每一筆的 id(排序過):插槽 id,與換掉的金鑰的 retired 項目(`is_retired_id`)。
     pub fn ids(&self) -> Vec<String> {
         self.file.entries.keys().cloned().collect()
     }
@@ -275,16 +284,51 @@ impl Vault {
         Ok(Some(entry))
     }
 
-    /// 放進(或取代)一筆,立刻存檔。第一次存東西時才產生金鑰並寫進 keychain。
+    /// 放進(或取代)一筆,立刻存檔。第一次存東西時才產生金鑰並寫進 keychain。取代的時候舊的那一筆就沒了:插槽的金鑰換人一律用 `replace`。
     pub fn put(&mut self, keychain: &dyn Keychain, slot_id: &str, entry: &VaultEntry) -> Result<(), VaultError> {
         self.ensure_key(keychain)?;
+        self.seal_into(slot_id, entry)?;
+        self.save()
+    }
+
+    /// 放進這個插槽的金鑰;原本是另一把(指紋不同)就把它改存成 retired 項目(`RETIRED_PREFIX`),不丟掉(spec §4.3:私鑰不自動刪除)。
+    /// 兩件事一起存檔,回傳 retired 項目的 id。原本那一筆解不開就什麼都不改、回錯誤:不能換掉一把讀不出來的金鑰。
+    pub fn replace(&mut self, keychain: &dyn Keychain, slot_id: &str, entry: &VaultEntry, now_ms: u64) -> Result<Option<String>, VaultError> {
+        self.ensure_key(keychain)?;
+        let retired = match self.get(slot_id)? {
+            Some(old) if old.fingerprint != entry.fingerprint => {
+                let id = self.free_retired_id(slot_id, now_ms);
+                self.seal_into(&id, &old)?;
+                Some(id)
+            }
+            _ => None,
+        };
+        self.seal_into(slot_id, entry)?;
+        self.save()?;
+        Ok(retired)
+    }
+
+    /// 把 `entry` 以 `id` 加密放進記憶體裡的檔案(不存檔)。
+    fn seal_into(&mut self, id: &str, entry: &VaultEntry) -> Result<(), VaultError> {
         let key = self.key.as_ref().ok_or(VaultError::KeyMissing)?;
         let plaintext = Zeroizing::new(
             serde_json::to_vec(entry).map_err(|e| VaultError::Other(AppError::Other(e.to_string())))?,
         );
-        let (nonce, ciphertext) = seal_raw(key, &aad(slot_id), &plaintext)?;
-        self.file.entries.insert(slot_id.to_string(), SealedEntry { nonce, ciphertext });
-        self.save()
+        let (nonce, ciphertext) = seal_raw(key, &aad(id), &plaintext)?;
+        self.file.entries.insert(id.to_string(), SealedEntry { nonce, ciphertext });
+        Ok(())
+    }
+
+    /// 第一個沒人用的 retired id:`retired:<插槽 id>:<毫秒>`,撞名加 `-1`、`-2`……。
+    fn free_retired_id(&self, slot_id: &str, now_ms: u64) -> String {
+        let base = format!("{RETIRED_PREFIX}{slot_id}:{now_ms}");
+        let mut id = base.clone();
+        let mut n = 0u32;
+        while self.file.entries.contains_key(&id) {
+            n += 1;
+            id = format!("{base}-{n}");
+        }
+        id
     }
 
     /// 拿掉一筆並存檔;回傳原本有沒有。
@@ -364,7 +408,7 @@ pub fn with_vault<T>(
     f(&mut vault)
 }
 
-/// 保管庫檔裡的插槽 id。不讀 keychain、不搬任何檔案:同步的每一輪用它確認「只在 SSHelter」的插槽還在保管庫裡(金鑰保管庫 spec §11)。
+/// 保管庫檔裡每一筆的 id(插槽 id,與 retired 項目)。不讀 keychain、不搬任何檔案:同步的每一輪用它確認「只在 SSHelter」的插槽還在保管庫裡(金鑰保管庫 spec §11)。
 /// 檔案不存在 → 空的;讀不懂 → `Unreadable { kept_as: None, .. }`;更新版的格式 → `Newer`。
 pub fn stored_ids(path: &Path) -> Result<BTreeSet<String>, VaultError> {
     let bytes = match std::fs::read(path) {
@@ -395,6 +439,17 @@ mod tests {
             fingerprint: test_keys::PLAIN_FINGERPRINT.to_string(),
             origin: EntryOrigin::Synced,
             added_at_ms: 5,
+        }
+    }
+
+    /// 另一把金鑰(ECDSA):指紋和 `entry` 的不同,換插槽的金鑰用。
+    fn ecdsa_entry() -> VaultEntry {
+        VaultEntry {
+            private_key: test_keys::ecdsa(),
+            public_key: test_keys::ECDSA_PUBLIC.to_string(),
+            fingerprint: test_keys::ECDSA_FINGERPRINT.to_string(),
+            origin: EntryOrigin::Imported,
+            added_at_ms: 9,
         }
     }
 
@@ -702,6 +757,87 @@ mod tests {
         assert!(vault.remove(&"a".repeat(32)).unwrap());
         assert!(!vault.remove(&"a".repeat(32)).unwrap());
         assert!(Vault::open(&path, &keychain, 2).unwrap().ids().is_empty());
+    }
+
+    /// 換掉一個插槽的金鑰:舊的改存成 `retired:<插槽 id>:<毫秒>`,不丟掉;兩件事一起存檔。
+    #[test]
+    fn replacing_a_key_keeps_the_old_one_as_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        let slot = "a".repeat(32);
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &slot, &entry(&test_keys::plain())).unwrap();
+        let retired = vault.replace(&keychain, &slot, &ecdsa_entry(), 42).unwrap();
+
+        let id = retired.expect("the old key is kept");
+        assert_eq!(id, format!("{RETIRED_PREFIX}{slot}:42"));
+        assert!(is_retired_id(&id));
+        let reopened = Vault::open(&path, &keychain, 2).unwrap();
+        assert_eq!(reopened.get(&slot).unwrap().unwrap().private_key, test_keys::ecdsa());
+        assert_eq!(reopened.get(&id).unwrap().unwrap().private_key, test_keys::plain());
+    }
+
+    /// 同一把金鑰(指紋相同)放回去:不留 retired 項目。
+    #[test]
+    fn replacing_with_the_same_key_retires_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
+        assert_eq!(vault.replace(&keychain, &"a".repeat(32), &entry(&test_keys::plain()), 5).unwrap(), None);
+        assert_eq!(Vault::open(&path, &keychain, 2).unwrap().ids(), vec!["a".repeat(32)]);
+    }
+
+    /// 同一毫秒換兩次:第二個 retired 項目換個名字(`-1`),第一個不被蓋掉。
+    #[test]
+    fn two_replacements_in_the_same_millisecond_keep_both_old_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        let slot = "a".repeat(32);
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &slot, &entry(&test_keys::plain())).unwrap();
+        vault.replace(&keychain, &slot, &ecdsa_entry(), 7).unwrap();
+        let second = vault.replace(&keychain, &slot, &entry(&test_keys::plain()), 7).unwrap().unwrap();
+        assert_eq!(second, format!("{RETIRED_PREFIX}{slot}:7-1"));
+        let reopened = Vault::open(&path, &keychain, 2).unwrap();
+        assert_eq!(reopened.get(&format!("{RETIRED_PREFIX}{slot}:7")).unwrap().unwrap().private_key, test_keys::plain());
+        assert_eq!(reopened.get(&second).unwrap().unwrap().private_key, test_keys::ecdsa());
+    }
+
+    /// 這個插槽原本沒有金鑰:直接放進去。
+    #[test]
+    fn replacing_into_an_empty_slot_just_puts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        assert_eq!(vault.replace(&keychain, &"a".repeat(32), &ecdsa_entry(), 3).unwrap(), None);
+        assert_eq!(Vault::open(&path, &keychain, 2).unwrap().ids(), vec!["a".repeat(32)]);
+    }
+
+    /// 原本那一筆解不開:什麼都不改、回錯誤 —— 不能換掉一把讀不出來的金鑰,也不留 retired 項目,檔案不動。
+    #[test]
+    fn replacing_a_key_that_cannot_be_opened_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        let (a, b) = ("a".repeat(32), "b".repeat(32));
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &a, &entry(&test_keys::plain())).unwrap();
+        vault.put(&keychain, &b, &entry(&test_keys::plain())).unwrap();
+        // b 的那一筆換成 a 的密文:AAD 綁的是插槽 id,對不上,解不開(同 `an_entry_copied_under_another_slot_id_does_not_open`)。
+        let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        file["entries"][&b] = file["entries"][&a].clone();
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut vault = Vault::open(&path, &keychain, 2).unwrap();
+        assert!(vault.replace(&keychain, &b, &ecdsa_entry(), 5).is_err());
+        assert_eq!(vault.ids(), vec![a.clone(), b.clone()], "no retired entry was made");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the file is untouched");
     }
 
     #[test]

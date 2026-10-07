@@ -131,7 +131,7 @@ pub trait VaultKeys {
     fn private_key(&self, slot_id: &str) -> Option<(Zeroizing<String>, EntryOrigin)>;
     /// 保管庫裡有沒有這一筆;保管庫讀不了(格式不認得、讀不懂、I/O 錯誤)→ None,呼叫端什麼都不做。
     fn holds(&self, slot_id: &str) -> Option<bool>;
-    /// 放回一筆(從帳戶取回的同步金鑰)。
+    /// 放進一筆(從帳戶取回、或同步來的金鑰)。原本是另一把的話它改存成 retired 項目(`Vault::replace`),不會丟掉。
     fn restore(&self, slot_id: &str, entry: &VaultEntry) -> Result<(), AppError>;
 }
 
@@ -174,13 +174,14 @@ impl VaultKeys for EnvVault<'_, '_> {
 
     fn restore(&self, slot_id: &str, entry: &VaultEntry) -> Result<(), AppError> {
         let path = vault_path(&self.env.state_path);
-        Ok(with_vault(self.env.runtime, &path, self.env.keychain, self.env.now(), |vault| vault.put(self.env.keychain, slot_id, entry))?)
+        let now = self.env.now();
+        Ok(with_vault(self.env.runtime, &path, self.env.keychain, now, |vault| vault.replace(self.env.keychain, slot_id, entry, now).map(|_| ()))?)
     }
 }
 
 pub const VAULT_ENTRY_LOST: &str = "This key was lost from SSHelter's vault. Pick it again on this computer.";
 
-/// 只在 SSHelter 的插槽,保管庫裡卻沒有它(保管庫檔讀不懂、或 `vault:key` 不見而搬到旁邊之後;金鑰保管庫 spec §11):帳戶裡有同一把同步金鑰
+/// 只在 SSHelter 的插槽,保管庫裡卻沒有它(保管庫檔讀不懂、或保管庫的金鑰不見而搬到旁邊之後;金鑰保管庫 spec §11):帳戶裡有同一把同步金鑰
 /// 就放回保管庫;沒有就讓這台回到「還沒有金鑰」,之後照 SP3 的流程落地同步的金鑰或請使用者挑。保管庫讀不了(`holds` 是 None)就不動。
 ///
 /// 放回去的那一筆一律記成 `Imported`:記錄分不出那把原本是這台自己的金鑰還是從這個帳戶同步來的,記成 `Synced` 的話,之後補寫 `key`(`republish`)
@@ -5586,7 +5587,7 @@ pub(crate) mod tests {
         settle(&a);
         settle(&b);
         set_delivery(&b.env(), &id, true).unwrap();
-        // 保管庫檔不見了(例如 `vault:key` 從 keychain 消失之後被搬到旁邊)。
+        // 保管庫檔不見了(例如保管庫的金鑰從 keychain 消失之後被搬到旁邊)。
         std::fs::remove_file(crate::vault::store::vault_path(&b.env().state_path)).unwrap();
         settle(&b);
         assert_eq!(vault_entry(&b, &id).unwrap().private_key, test_keys::plain(), "restored from the account");
@@ -5975,6 +5976,32 @@ pub(crate) mod tests {
         recover_vault_entry(&mut local, SLOT_ID, &account, &keys, 5, &failing);
         assert_eq!(local.last_error.as_deref(), Some("keychain error: locked"));
         assert!(matches!(local.source, Some(SlotSource::Vault { .. })));
+    }
+
+    /// `EnvVault::restore` 放回一筆時,這個插槽原本是另一把金鑰的話,它改存成 retired 項目(`Vault::replace`):同步的一輪放回金鑰,不會弄丟任何一把。
+    #[test]
+    fn restoring_over_another_key_keeps_the_old_one_as_retired() {
+        let (relay, clock) = (crate::sync::fake_relay::FakeRelay::new(), crate::sync::testkit::TestClock::new());
+        let a = TestDevice::new("a", &relay, &clock);
+        let env = a.env();
+        let entry = |private_key: String, public_key: &str, fingerprint: &str| VaultEntry {
+            private_key,
+            public_key: public_key.to_string(),
+            fingerprint: fingerprint.to_string(),
+            origin: EntryOrigin::Imported,
+            added_at_ms: 1,
+        };
+        let vault = EnvVault { env: &env };
+
+        vault.restore(SLOT_ID, &entry(test_keys::plain(), test_keys::PLAIN_PUBLIC, test_keys::PLAIN_FINGERPRINT)).unwrap();
+        assert_eq!(vault_ids(&a), BTreeSet::from([SLOT_ID.to_string()]), "an empty slot just gets the key");
+
+        vault.restore(SLOT_ID, &entry(test_keys::ecdsa(), test_keys::ECDSA_PUBLIC, test_keys::ECDSA_FINGERPRINT)).unwrap();
+        assert_eq!(vault_entry(&a, SLOT_ID).unwrap().private_key, test_keys::ecdsa(), "the slot has the restored key");
+        let retired_prefix = format!("{}{SLOT_ID}:", crate::vault::store::RETIRED_PREFIX);
+        let retired: Vec<String> = vault_ids(&a).into_iter().filter(|id| id.starts_with(&retired_prefix)).collect();
+        assert_eq!(retired.len(), 1, "{:?}", vault_ids(&a));
+        assert_eq!(vault_entry(&a, &retired[0]).unwrap().private_key, test_keys::plain(), "the key it replaced is kept, not dropped");
     }
 
     // ── 「Only in SSHelter」只收 agent 簽得了、打得開的金鑰 ───────────────────────────────────────────
