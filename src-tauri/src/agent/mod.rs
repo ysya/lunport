@@ -199,7 +199,7 @@ fn listen(app: &tauri::AppHandle) -> Result<server::Started, AppError> {
 pub enum AgentProblem {
     /// agent 開不起來:用保管庫金鑰的主機暫時連不上。
     NotRunning { reason: String },
-    /// `agent/config` 在,`~/.ssh/config` 卻沒有它的 Include。
+    /// 用到保管庫金鑰的主機接不到 agent:`~/.ssh/config` 沒有 `agent/config` 的 Include(使用者拿掉了,或第一次一直放不進去,`agent/config` 還沒寫),或載入的不是預設的 config。
     IncludeMissing,
 }
 
@@ -235,17 +235,10 @@ pub fn agent_problem(state: tauri::State<AppState>) -> Result<Option<AgentProble
     current_problem(&state)
 }
 
-/// Fix:把 Include 放回 `~/.ssh/config` 的第一行,回傳之後的提示。
+/// Fix:把 Include 放回 `~/.ssh/config` 的第一行,連同 `agent/config` 一起補齊(`wiring::fix_env`),回傳之後的提示。錯誤回給畫面(Fix 的 toast)。
 #[tauri::command]
-pub fn agent_fix_include(state: tauri::State<AppState>) -> Result<Option<AgentProblem>, AppError> {
-    let home = home_dir()?;
-    {
-        let mut doc_lock = state.doc.lock().unwrap();
-        let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("The SSH config isn't loaded yet.".to_string()))?;
-        let mut backed_up = state.backed_up.lock().unwrap();
-        let retention = *state.backup_retention.lock().unwrap();
-        wiring::restore_include(doc, &mut backed_up, retention, &home)?;
-    }
+pub fn agent_fix_include(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<Option<AgentProblem>, AppError> {
+    crate::sync::engine::with_env(&app, wiring::fix_env).and_then(|fixed| fixed)?;
     current_problem(&state)
 }
 
@@ -262,7 +255,13 @@ mod tests {
             problem(&AgentStatus::Failed("path too long".into()), WiringStatus::IncludeMissing),
             Some(AgentProblem::NotRunning { reason: "path too long".into() })
         );
+        assert_eq!(
+            problem(&AgentStatus::Failed("path too long".into()), WiringStatus::Ready),
+            Some(AgentProblem::NotRunning { reason: "path too long".into() }),
+            "a failed agent is a problem however well ssh is wired"
+        );
         assert_eq!(problem(&AgentStatus::Running, WiringStatus::IncludeMissing), Some(AgentProblem::IncludeMissing));
+        assert_eq!(problem(&AgentStatus::NotStarted, WiringStatus::IncludeMissing), Some(AgentProblem::IncludeMissing));
         assert_eq!(problem(&AgentStatus::OtherInstance, WiringStatus::Ready), None);
         assert_eq!(problem(&AgentStatus::Running, WiringStatus::NotNeeded), None);
     }

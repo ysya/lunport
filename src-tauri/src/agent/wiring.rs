@@ -169,7 +169,8 @@ pub enum WiringStatus {
     /// 這台沒有任何主機用到只在 SSHelter 的金鑰,也從沒寫過 `agent/config`。
     NotNeeded,
     Ready,
-    /// `agent/config` 在,`~/.ssh/config` 卻沒有它的 Include(使用者拿掉了,或載入的不是預設的 config):不自動加回(spec §6、§11)。
+    /// 有主機用到只在 SSHelter 的金鑰(或 `agent/config` 已經在),`ssh` 卻接不到 agent:`~/.ssh/config` 沒有它的 Include(使用者拿掉了,或第一次一直放不進去 ——
+    /// `agent/config` 要等 Include 放好才寫,還不存在),或載入的不是預設的 config。使用者拿掉的不自動加回(spec §6、§11),由 Fix 補上(`fix_env`)。
     IncludeMissing,
 }
 
@@ -266,16 +267,17 @@ pub fn refresh_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
     Err(error)
 }
 
-/// 這台的 `ssh` 接不接得到 agent(畫面提示用;spec §6、§11):沒有主機用到只在 SSHelter 的金鑰、也從沒寫過 `agent/config` → NotNeeded;主 config
-/// 是預設的 `~/.ssh/config` 而且有 agent 的 Include → Ready;其他(使用者拿掉了,或第一次一直加不進去 —— `agent/config` 要等 Include 放好才寫)→ IncludeMissing。
+/// 這台的 `ssh` 接不接得到 agent(畫面提示用;spec §6、§11):沒有主機用到只在 SSHelter 的金鑰、也從沒寫過 `agent/config` → NotNeeded;`agent/config` 在、主 config
+/// 是預設的 `~/.ssh/config` 而且有 agent 的 Include → Ready;其他 → IncludeMissing:使用者拿掉了 Include,第一次一直加不進去(`agent/config` 要等 Include 放好才寫),
+/// `agent/config` 被刪了(Include 指到不存在的檔案,什麼都接不到),或載入的不是預設的 config。
 pub fn status(doc: &SshConfigDoc, home: &Path, vault_files: &BTreeSet<String>) -> WiringStatus {
-    let needed = agent_config_path(home).exists() || !vault_host_patterns(doc, vault_files, home).is_empty();
-    if !needed {
+    let written = agent_config_path(home).exists();
+    if !written && vault_host_patterns(doc, vault_files, home).is_empty() {
         return WiringStatus::NotNeeded;
     }
     let default_root = home.join(".ssh").join("config");
     match doc.files.first() {
-        Some(main) if main.path == default_root && main.items.iter().any(is_agent_include) => WiringStatus::Ready,
+        Some(main) if written && main.path == default_root && main.items.iter().any(is_agent_include) => WiringStatus::Ready,
         _ => WiringStatus::IncludeMissing,
     }
 }
@@ -292,6 +294,22 @@ pub fn restore_include(
         return Err(AppError::Other("SSHelter isn't using ~/.ssh/config, so it can't add the line there.".to_string()));
     }
     put_include_first(doc, backed_up, retention)
+}
+
+/// 使用者按 Fix:先把 Include 放回 `~/.ssh/config` 的第一行(`restore_include`;拿 doc、backed_up、retention 的鎖,順序同 `refresh_env`),放掉所有鎖之後再 `refresh_env`
+/// —— 第一次的 Include 一直沒放進去過的話,`agent/config` 也還不存在(它要等 Include 放好才寫),現在一併寫出來,`ssh` 立刻接得到 agent,不必等下一次同步嘗試。
+/// 不能在拿著鎖的時候呼叫 `refresh_env`:它自己拿 doc 鎖,`std::sync::Mutex` 不能重入。錯誤(config 還沒載入、載入的不是預設的 config、存檔衝突、I/O)都回給呼叫端:
+/// 畫面要讓按了 Fix 的人知道它有沒有成,不像 `set_delivery` 的更新只記到 stderr。
+pub fn fix_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
+    let home = env.ssh_dir.parent().map(Path::to_path_buf).ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))?;
+    {
+        let mut doc_lock = env.doc.lock().unwrap();
+        let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("The SSH config isn't loaded yet.".to_string()))?;
+        let mut backed_up = env.backed_up.lock().unwrap();
+        let retention = env.retention();
+        restore_include(doc, &mut backed_up, retention, &home)?;
+    }
+    refresh_env(env)
 }
 
 #[cfg(test)]
@@ -769,11 +787,80 @@ mod tests {
         let vault = BTreeSet::from(["id_mac-11111111".to_string()]);
         let on_vault = loaded(home.path(), "Host a\n  IdentityFile ~/.ssh/sshelter/keys/id_mac-11111111\n");
         assert_eq!(status(&on_vault, home.path(), &vault), WiringStatus::IncludeMissing, "needed but not wired yet");
+        // The Include is there but agent/config was never written: ssh reads an Include of a missing file, which reaches nothing.
+        let included = loaded(home.path(), "Include ~/.ssh/sshelter/agent/config\nHost a\n  IdentityFile ~/.ssh/sshelter/keys/id_mac-11111111\n");
+        assert_eq!(status(&included, home.path(), &vault), WiringStatus::IncludeMissing, "an Include whose file was never written is not Ready");
         std::fs::create_dir_all(crate::agent::agent_dir(home.path())).unwrap();
         std::fs::write(agent_config_path(home.path()), format!("{HEADER}\n")).unwrap();
         assert_eq!(status(&doc, home.path(), &none), WiringStatus::IncludeMissing);
         let doc = loaded(home.path(), "Include ~/.ssh/sshelter/agent/config\nHost a\n");
         assert_eq!(status(&doc, home.path(), &none), WiringStatus::Ready);
+    }
+
+    /// Fix 把第一次一直沒放進去的 Include 補上,也一併寫出 `agent/config`(它要等 Include 放好才寫):按了 Fix,`ssh` 立刻接得到 agent,不必等下一次同步嘗試。
+    #[test]
+    fn fix_finishes_the_wiring_when_the_first_include_never_landed() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::testkit::{TestClock, TestDevice};
+        let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), WEB);
+        put_in_vault(&d, SLOT);
+        let status_now = || status(d.doc.lock().unwrap().as_ref().unwrap(), d.home.path(), &vault());
+        assert_eq!(status_now(), WiringStatus::IncludeMissing, "a host on a vault key, and neither the Include nor agent/config is there");
+        assert!(!agent_config_path(d.home.path()).exists());
+
+        assert_eq!(fix_env(&d.env()).unwrap(), WiringStatus::Ready);
+        assert_eq!(read(&d.main_path()), format!("Include {INCLUDE_TOKEN}\n{WEB}"));
+        assert!(read(&agent_config_path(d.home.path())).contains("Host web\n  IdentityAgent "), "agent/config lists the host");
+        assert_eq!(status_now(), WiringStatus::Ready);
+    }
+
+    /// 使用者在編輯器裡拿掉 Include、app 重新載入之後按 Fix:Include 放回第一行,`agent/config` 還是原來那份(它一直跟著主機走)。
+    #[test]
+    fn fix_puts_back_an_include_the_user_removed() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::testkit::{TestClock, TestDevice};
+        let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), WEB);
+        put_in_vault(&d, SLOT);
+        assert_eq!(refresh_env(&d.env()).unwrap(), WiringStatus::Ready);
+        let agent_config = read(&agent_config_path(d.home.path()));
+
+        d.write_externally(&d.main_path(), WEB);
+        d.reload();
+        let status_now = || status(d.doc.lock().unwrap().as_ref().unwrap(), d.home.path(), &vault());
+        assert_eq!(status_now(), WiringStatus::IncludeMissing, "the user took the line out");
+        assert_eq!(refresh_env(&d.env()).unwrap(), WiringStatus::IncludeMissing, "and the app does not add it back by itself");
+
+        assert_eq!(fix_env(&d.env()).unwrap(), WiringStatus::Ready);
+        assert_eq!(read(&d.main_path()), format!("Include {INCLUDE_TOKEN}\n{WEB}"));
+        assert_eq!(read(&agent_config_path(d.home.path())), agent_config, "agent/config is as it was");
+        assert_eq!(status_now(), WiringStatus::Ready);
+    }
+
+    /// Fix 做不到的事回錯誤給畫面(Fix 的 toast),什麼都不覆寫:config 還沒載入、主 config 在載入之後被外部改過(`Conflict`)、載入的不是 `~/.ssh/config`。
+    #[test]
+    fn fix_reports_what_it_cannot_do_and_writes_nothing() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::testkit::{TestClock, TestDevice};
+        let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), WEB);
+        put_in_vault(&d, SLOT);
+        let edited = format!("# edited elsewhere\n{WEB}");
+        d.write_externally(&d.main_path(), &edited);
+        let error = fix_env(&d.env()).unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)), "{error}");
+        assert_eq!(read(&d.main_path()), edited, "the edit made elsewhere is never overwritten");
+        assert!(!agent_config_path(d.home.path()).exists(), "and there is no agent config without its Include");
+
+        // A config ssh does not read by default: there is nothing to put the line in.
+        let other = d.home.path().join("elsewhere");
+        std::fs::write(&other, WEB).unwrap();
+        *d.doc.lock().unwrap() = Some(d.env().load_doc(&other).unwrap());
+        let error = fix_env(&d.env()).unwrap_err();
+        assert_eq!(error.to_string(), "SSHelter isn't using ~/.ssh/config, so it can't add the line there.");
+        assert_eq!(read(&other), WEB);
+        assert!(!agent_config_path(d.home.path()).exists());
+
+        *d.doc.lock().unwrap() = None;
+        assert_eq!(fix_env(&d.env()).unwrap_err().to_string(), "The SSH config isn't loaded yet.");
     }
 
     #[test]

@@ -28,6 +28,7 @@ import {
   syncUnmovableKey,
   useKeyDeleteCopy,
   useKeyPick,
+  useKeySetDelivery,
   useKeySetMode,
   useKeyUseSynced,
   useSetupKeys,
@@ -165,6 +166,8 @@ describe("key slot commands", () => {
     expect(keyArgs.setMode({ slotId: "s", mode: "own" })).toEqual({ slotId: "s", mode: "own" });
     expect(keyArgs.pick({ slotId: "s", path: "/k" })).toEqual({ slotId: "s", path: "/k" });
     expect(keyArgs.slot({ slotId: "s" })).toEqual({ slotId: "s" });
+    expect(keyArgs.delivery({ slotId: "s", vault: true })).toEqual({ slotId: "s", vault: true });
+    expect(keyArgs.delivery({ slotId: "s", vault: false })).toEqual({ slotId: "s", vault: false });
   });
 });
 
@@ -219,6 +222,18 @@ describe("a failed key slot command", () => {
     expect(queryClient.getQueryState(keyCandidatesKey)?.isInvalidated).toBe(true);
   });
 
+  it("asks the backend to move the key and says what could not be moved", async () => {
+    const calls = stubBackend(async () => {
+      throw "The key in SSHelter's vault doesn't match this slot.";
+    });
+    const { mutateAsync } = renderHook(new QueryClient(), useKeySetDelivery);
+    await expect(mutateAsync({ slotId: "s", vault: false })).rejects.toBe("The key in SSHelter's vault doesn't match this slot.");
+    expect(calls).toEqual([["sync_key_set_delivery", { slotId: "s", vault: false }]]);
+    expect(toast.getToasts()).toEqual([
+      expect.objectContaining({ title: "Could not change where the key is kept", description: "The key in SSHelter's vault doesn't match this slot." }),
+    ]);
+  });
+
   it("re-reads the views after a failed pick or use of the synced key, which can fail after the slot's key was moved aside", async () => {
     stubBackend(async () => {
       throw "boom";
@@ -234,6 +249,8 @@ describe("a failed key slot command", () => {
     };
     expect(await reread((qc) => renderHook(qc, useKeyPick).mutateAsync({ slotId: "s", path: "/k" }))).toEqual([true, true, true]);
     expect(await reread((qc) => renderHook(qc, useKeyUseSynced).mutateAsync({ slotId: "s" }))).toEqual([true, true, true]);
+    // Moving a key into the vault or out of it writes files and the vault before the state changes: it re-reads, too.
+    expect(await reread((qc) => renderHook(qc, useKeySetDelivery).mutateAsync({ slotId: "s", vault: true }))).toEqual([true, true, true]);
     // The mode change and the copy delete keep the cached views on a failure, as they did.
     expect(await reread((qc) => renderHook(qc, useKeySetMode).mutateAsync({ slotId: "s", mode: "own" }))).toEqual([false, false, false]);
     expect(await reread((qc) => renderHook(qc, useKeyDeleteCopy).mutateAsync({ slotId: "s" }))).toEqual([false, false, false]);

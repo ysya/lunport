@@ -31,8 +31,9 @@ export type SlotAction = "sync" | "stop" | "pick" | "useSynced" | "syncNew" | "d
 /** One slot in the Keys dialog. Exported for the markup tests. */
 export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; busy: boolean; onAction: (action: SlotAction) => void }) {
   const status = slotStatusText(slot.status);
-  // The file this computer uses, for the states that name one (spec §7.2: "the file this computer uses and its state").
-  const file = "file" in slot.status ? slot.status.file : null;
+  // The file this computer uses, for the states that name one (spec §7.2: "the file this computer uses and its state"). A key
+  // only in SSHelter has no file here (its slot path holds only the .pub): the delivery line says where the key is.
+  const file = !slot.in_vault && "file" in slot.status ? slot.status.file : null;
   const actions = slotActions(slot);
   const delivery = deliveryAction(slot);
   const kept = deliveryLine(slot);
@@ -249,7 +250,8 @@ export function KeepFileConfirm({
 export function AgentProblemLine({ problem, busy, onFix }: { problem: AgentProblem; busy: boolean; onFix: () => void }) {
   return (
     <div className="flex items-center justify-between gap-3 px-1">
-      <p className={cn("text-xs", TONE_TEXT.error)}>{agentProblemText(problem)}</p>
+      {/* A failure reason can end with a long socket path: it wraps instead of pushing Fix out of the dialog. */}
+      <p className={cn("min-w-0 text-xs break-words", TONE_TEXT.error)}>{agentProblemText(problem)}</p>
       {problem.kind === "include_missing" && (
         <Button type="button" size="sm" variant="outline" className="h-7 shrink-0" disabled={busy} onClick={onFix}>
           Fix

@@ -107,12 +107,20 @@ describe("the file a slot uses", () => {
       expect(lines(row(keySlot({ status }))).slice(3), status.kind).toEqual(["Used by web"]);
     }
   });
+
+  it("is left out for a key only in SSHelter: its slot path holds only the .pub, and the line above says where the key is", () => {
+    for (const status of named) {
+      const html = row(keySlot({ in_vault: true, status }));
+      expect(lines(html).slice(3), status.kind).toEqual(["Only in SSHelter on this computer — programs ask before they use it", "Used by web"]);
+      expect(html, status.kind).not.toContain(FILE);
+    }
+  });
 });
 
 /** The buttons of an element tree: its elements that have an `onClick`, in the order they are drawn. */
-function buttonsIn(node: ReactNode, found: ReactElement<{ onClick?: () => void; children?: ReactNode }>[] = []) {
+function buttonsIn(node: ReactNode, found: ReactElement<{ onClick?: () => void; children?: ReactNode; disabled?: boolean }>[] = []) {
   if (Array.isArray(node)) node.forEach((child) => buttonsIn(child, found));
-  else if (isValidElement<{ onClick?: () => void; children?: ReactNode }>(node)) {
+  else if (isValidElement<{ onClick?: () => void; children?: ReactNode; disabled?: boolean }>(node)) {
     if (typeof node.props.onClick === "function") found.push(node);
     buttonsIn(node.props.children, found);
   }
@@ -326,10 +334,38 @@ describe("keeping a slot's key only in SSHelter", () => {
     expect(failed).not.toContain(">Fix<");
   });
 
+  it("turns Fix off while something is running, and presses it through onFix", () => {
+    const problem = { kind: "include_missing" } as const;
+    // The line has no hooks: calling it gives its element tree, whose button can be read and pressed.
+    const fixButton = (busy: boolean, onFix = () => {}) => buttonsIn(AgentProblemLine({ problem, busy, onFix }))[0];
+    expect(fixButton(true).props.disabled).toBe(true);
+    expect(fixButton(false).props.disabled).toBe(false);
+    let fixed = 0;
+    const fix = fixButton(false, () => fixed++);
+    expect(textIn(fix)).toBe("Fix");
+    fix.props.onClick!();
+    expect(fixed).toBe(1);
+  });
+
+  it("lets a long reason wrap instead of pushing Fix out of the dialog", () => {
+    const reason = `socket path is too long: /home/${"x".repeat(200)}/.ssh/sshelter/agent/sock`;
+    const html = renderToStaticMarkup(<AgentProblemLine problem={{ kind: "not_running", reason }} busy={false} onFix={() => {}} />);
+    const opening = html.slice(html.indexOf("<p "), html.indexOf(">", html.indexOf("<p ")));
+    for (const cls of ["min-w-0", "break-words"]) expect(opening).toContain(cls);
+  });
+
   it("warns that deleting a vault key may delete the only copy", () => {
     const tree = DeleteCopyConfirm({ slot: keySlot({ in_vault: true, status: { kind: "not_in_use", file: "/f" } }), open: true, onCancel: () => {}, onConfirm: () => {} });
     expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
       "The key id_mac kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.",
+    ]);
+  });
+
+  it("reveals hidden characters in the name of the vault key it deletes", () => {
+    const slot = keySlot({ in_vault: true, name: SPOOFED_NAME, status: { kind: "not_in_use", file: "/f" } });
+    const tree = DeleteCopyConfirm({ slot, open: true, onCancel: () => {}, onConfirm: () => {} });
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
+      `The key ${SPOOFED_NAME_SHOWN} kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`,
     ]);
   });
 
