@@ -201,19 +201,27 @@ describe("subscribeSyncEvents", () => {
     const bus = stubEventBus();
     const queryClient = new QueryClient();
     const stop = subscribeSyncEvents(queryClient);
-    await vi.waitFor(() => expect(bus.handlers.size).toBe(5));
+    await vi.waitFor(() => expect(bus.handlers.size).toBe(6));
     return { ...bus, queryClient, stop };
   }
 
   it("listens to the engine's events and never asks for a sync round itself", async () => {
     const { handlers, commands, emit, stop } = await subscribed();
-    expect([...handlers.keys()].sort()).toEqual(["sync://applied", "sync://approval", "sync://conflict", "sync://notice", "sync://status"]);
+    expect([...handlers.keys()].sort()).toEqual([
+      "agent://connect-expired",
+      "sync://applied",
+      "sync://approval",
+      "sync://conflict",
+      "sync://notice",
+      "sync://status",
+    ]);
     // Every handler runs once: only the "Sync now" button may start a round.
     emit("sync://status", { joined: true, device_name: "MacBook-A" });
     emit("sync://applied", 1);
     emit("sync://approval", [{ space_id: "a", space_name: "Work", aliases: ["web"] }]);
     emit("sync://conflict", [{ space_id: "a", space_name: "Work", aliases: ["web"] }]);
     emit("sync://notice", { kind: "space_deleted", name: "Work", by_device: "MacBook-A" });
+    emit("agent://connect-expired", "web");
     stop();
     expect(commands.filter((c) => c.startsWith("sync_"))).toEqual([]);
   });
@@ -267,6 +275,27 @@ describe("subscribeSyncEvents", () => {
     expect(useUiStore.getState()).toEqual(expect.objectContaining({ settingsOpen: true, settingsCategory: "sync" }));
   });
 
+  it("toasts a key channel that closed before ssh asked for the key, naming the host", async () => {
+    const { emit } = await subscribed();
+    emit("agent://connect-expired", "web");
+    expect(toast.getToasts()).toEqual([
+      expect.objectContaining({
+        type: "warning",
+        title: "Connect to web again",
+        description:
+          "ssh didn't ask SSHelter for the key within a minute (a new host's fingerprint question may still be open), so SSHelter stopped offering it.",
+      }),
+    ]);
+  });
+
+  it("shows the hidden characters of the host's name in that toast", async () => {
+    const { emit } = await subscribed();
+    emit("agent://connect-expired", SPOOFED_NAME);
+    const [shown] = toast.getToasts();
+    expect(shown).toEqual(expect.objectContaining({ title: `Connect to ${SPOOFED_NAME_SHOWN} again` }));
+    expect(JSON.stringify(shown)).not.toMatch(/[\u202E\u200B]/);
+  });
+
   it("leaves the keys notice to its dialog", async () => {
     const { emit } = await subscribed();
     emit("sync://notice", { kind: "keys_needed", names: ["id_mac"] });
@@ -287,6 +316,7 @@ describe("subscribeSyncEvents", () => {
     bus.emit("sync://applied", 2);
     bus.emit("sync://conflict", [{ space_id: "a", space_name: "Work", aliases: ["web"] }]);
     bus.emit("sync://notice", { kind: "space_deleted", name: "Work", by_device: "MacBook-A" });
+    bus.emit("agent://connect-expired", "web");
     expect(queryClient.getQueryData(syncOverviewKey)).toBeUndefined();
     expect(queryClient.getQueryState(["config", "hosts"])?.isInvalidated).toBe(false);
     expect(queryClient.getQueryState(syncApprovalsKey)?.isInvalidated).toBe(false);

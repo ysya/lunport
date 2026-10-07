@@ -568,14 +568,25 @@ pub fn connect_launch(
 
     let new_tab = new_tab.unwrap_or(false);
     // 用「只在 SSHelter」金鑰的主機經一次性通道連(金鑰保管庫 spec §5.6);其他主機照舊(含密碼自動填入)。
-    let spec = match crate::agent::oneshot::prepare(&app, &alias)? {
-        Some(options) => build_launch_command(&terminal_id, &ssh_argv(&options, &alias), new_tab)?,
+    // The channel closes itself unless it is kept: any `?` before `keep` below drops it, which cancels it.
+    let channel = crate::agent::oneshot::prepare(&app, &alias)?;
+    let spec = match &channel {
+        Some(channel) => build_launch_command(
+            &terminal_id,
+            &ssh_argv(&crate::agent::oneshot::ssh_options(channel), &alias),
+            new_tab,
+        )?,
         None => match password_autofill_env(&state, &alias) {
             Some(env_pairs) => build_autofill_launch(&terminal_id, &alias, new_tab, &env_pairs)?,
             None => build_launch(&terminal_id, &alias, new_tab)?,
         },
     };
-    launch(&spec)
+    launch(&spec)?;
+    // The terminal started: leave the channel to its ssh.
+    if let Some(channel) = channel {
+        channel.keep();
+    }
+    Ok(())
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

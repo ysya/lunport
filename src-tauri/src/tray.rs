@@ -152,11 +152,22 @@ fn quick_connect(app: &tauri::AppHandle, alias: &str) -> Result<(), crate::error
         .next()
         .ok_or_else(|| AppError::Other("no terminal found".to_string()))?;
 
-    let spec = match crate::agent::oneshot::prepare(app, alias)? {
-        Some(options) => crate::connect::build_launch_command(&terminal.id, &crate::connect::ssh_argv(&options, alias), false)?,
+    // The channel closes itself unless it is kept: any `?` before `keep` below drops it, which cancels it.
+    let channel = crate::agent::oneshot::prepare(app, alias)?;
+    let spec = match &channel {
+        Some(channel) => crate::connect::build_launch_command(
+            &terminal.id,
+            &crate::connect::ssh_argv(&crate::agent::oneshot::ssh_options(channel), alias),
+            false,
+        )?,
         None => crate::connect::build_launch(&terminal.id, alias, false)?,
     };
-    crate::connect::launch(&spec)
+    crate::connect::launch(&spec)?;
+    // The terminal started: leave the channel to its ssh.
+    if let Some(channel) = channel {
+        channel.keep();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
