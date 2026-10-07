@@ -648,6 +648,12 @@ pub async fn sync_key_delete_copy(app: AppHandle, slot_id: String) -> Result<Syn
     run_then_overview(app, false, move |env| crate::sync::slots::delete_copy(env, &slot_id)).await
 }
 
+/// 這台的插槽改成只在 SSHelter,或改回檔案(金鑰保管庫 spec §4.3;只改這台)。
+#[tauri::command]
+pub async fn sync_key_set_delivery(app: AppHandle, slot_id: String, vault: bool) -> Result<SyncOverview, AppError> {
+    run_then_overview(app, false, move |env| crate::sync::slots::set_delivery(env, &slot_id, vault)).await
+}
+
 /// 更換同步碼(spec §7.5):第 1 步在這裡做完,之後由背景執行緒逐步推進;進度在 `SyncOverview::rotation`,完成時
 /// 留下 `SyncNotice::NewSyncCode`(UI 以 `sync_show_words` 顯示新同步碼)。
 #[tauri::command]

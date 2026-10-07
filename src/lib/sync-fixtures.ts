@@ -98,6 +98,7 @@ export function keySlot(overrides: Partial<SyncKeySlotView> = {}): SyncKeySlotVi
     status: { kind: "ready", file: "/home/f/.ssh/id_mac", synced_copy: false, fingerprint: SLOT_FINGERPRINT },
     devices: [],
     in_account: true,
+    in_vault: false,
     ...overrides,
   };
 }

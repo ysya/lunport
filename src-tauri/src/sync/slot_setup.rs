@@ -18,8 +18,8 @@ use crate::sync::migrate::{refuse_while_sync_inactive, selected_space_files};
 use crate::sync::runtime::mutate;
 use crate::sync::slot_files::{self, LinkKind};
 use crate::sync::slot_rules::{
-    default_slot_name, inspect_private_key, new_slot_id, resolve_identity_value, slot_file_name, slot_file_of_value, slot_value,
-    valid_slot_name, IdentityTarget, KeySlotPayload, SlotMode, SLOT_DIR, SLOT_SCHEMA,
+    default_slot_name, inspect_private_key, new_slot_id, public_path, resolve_identity_value, slot_file_name, slot_file_of_value,
+    slot_value, valid_slot_name, IdentityTarget, KeySlotPayload, SlotMode, SLOT_DIR, SLOT_SCHEMA,
 };
 use crate::sync::slots::{
     account_still_ready, contested_and_not_held, file_name_in_use, in_the_way_message, land, landable_key, learned_now, live_slots,
@@ -303,7 +303,8 @@ fn kept_name(id: &str, local: &LocalSlot) -> Option<String> {
 }
 
 /// 這台讀得到的、之前的帳戶留下的插槽的私鑰檔:連到的金鑰檔(`Linked`,要是私鑰檔),或插槽裡同步來的副本(`SyncedCopy`,要仍是記錄裡那個指紋的
-/// 私鑰)。其他(沒有來源、檔案不見或換了)→ None。
+/// 私鑰)。其他(沒有來源、檔案不見或換了)→ None。只在 SSHelter 的插槽(`SlotSource::Vault`)沒有私鑰檔,也是 None:金鑰保管庫的第一份計畫
+/// 不把保管庫裡的金鑰當成之前的帳戶留下的插槽提供。
 fn kept_key(local: &LocalSlot, keys_dir: &Path) -> Option<PathBuf> {
     match local.source.as_ref()? {
         SlotSource::Linked { path, .. } => Some(PathBuf::from(path)).filter(|key| is_private_key_file(key)),
@@ -313,6 +314,7 @@ fn kept_key(local: &LocalSlot, keys_dir: &Path) -> Option<PathBuf> {
                 && std::fs::read_to_string(&copy).is_ok_and(|text| inspect_private_key(&text).is_ok_and(|f| f.fingerprint == *fingerprint));
             recorded.then_some(copy)
         }
+        SlotSource::Vault { .. } => None,
     }
 }
 
@@ -713,8 +715,9 @@ fn land_reused_slot(
 }
 
 /// 這台握著的插槽(`reuse_slot` 的捷徑:什麼都不動、直接改寫主機)放的金鑰,現在是不是真的在插槽路徑 `<keys_dir>/<file>` 上:記錄的檔名就是 `file`
-/// (帳戶裡改了名的話,這筆記錄說的是舊路徑,下一輪才從頭來過),連到的原檔還在(`Linked`),同步來的副本還在(`SyncedCopy`)。不是的話回
-/// `source_gone_message`(沒有金鑰的那個路徑):改寫主機只會讓一台能連線的主機改指到沒有金鑰的插槽。
+/// (帳戶裡改了名的話,這筆記錄說的是舊路徑,下一輪才從頭來過),連到的原檔還在(`Linked`),同步來的副本還在(`SyncedCopy`),只在 SSHelter 的
+/// 插槽旁的 `.pub` 還在(`Vault`:`ssh` 據它向 agent 要私鑰)。不是的話回 `source_gone_message`(沒有金鑰的那個路徑):改寫主機只會讓一台能連線
+/// 的主機改指到沒有金鑰的插槽。
 fn held_in_place(held: &LocalSlot, file: &str, keys_dir: &Path) -> Result<(), AppError> {
     let slot_path = keys_dir.join(file);
     let gone = |path: &Path| Err(AppError::Other(source_gone_message(&path.display().to_string())));
@@ -724,6 +727,7 @@ fn held_in_place(held: &LocalSlot, file: &str, keys_dir: &Path) -> Result<(), Ap
     match &held.source {
         Some(SlotSource::Linked { path, .. }) if !Path::new(path).is_file() => gone(Path::new(path)),
         Some(SlotSource::SyncedCopy { .. }) if !slot_path.is_file() => gone(&slot_path),
+        Some(SlotSource::Vault { .. }) if !public_path(&slot_path).is_file() => gone(&slot_path),
         _ => Ok(()),
     }
 }

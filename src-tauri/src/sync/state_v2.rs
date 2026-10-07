@@ -203,7 +203,7 @@ impl SealedRecord {
 pub struct LocalSlot {
     /// 插槽檔名(`<name>-<插槽 id 前 8>`)。
     pub file_name: String,
-    /// 插槽裡放的是什麼;None = 這台還沒有它的金鑰。
+    /// 插槽裡放的是什麼(只在 SSHelter 的金鑰:私鑰在保管庫,插槽裡只有 `.pub`);None = 這台還沒有它的金鑰。
     #[serde(default)]
     pub source: Option<SlotSource>,
     /// 最近一次維護這個插槽的錯誤(給使用者看;只有路徑與原因,不含金鑰內容)。
@@ -217,8 +217,9 @@ pub struct LocalSlot {
     pub payload: Option<KeySlotPayload>,
     /// 這台電腦自己把哪一把金鑰(指紋)上傳成這個插槽的同步金鑰:只有這台的使用者在這台選了同步它(建立插槽時選「Sync key」、
     /// 或之後的「Sync this key」「Sync the new key」)才會設定,帳戶裡別人的變更不會動它。補寫 `key`(spec §6.6)時,連到本機金鑰的
-    /// 插槽只認它:`payload` 是帳戶裡最新的 `keyslot`,帳戶裡的任何成員都改得動(改成 `synced`、填上公開的指紋),證明不了使用者
-    /// 同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。建立或加入另一個帳戶時清掉(`account::install_account`:記錄學到的帳戶
+    /// 插槽、以及保管庫裡不是從這個帳戶同步來的金鑰(`SlotSource::Vault`)只認它:`payload` 是帳戶裡最新的 `keyslot`,帳戶裡的任何成員
+    /// 都改得動(改成 `synced`、填上公開的指紋),證明不了使用者同意把這把私鑰交出去。None = 這台沒有為這個插槽上傳過金鑰。建立或加入
+    /// 另一個帳戶時清掉(`account::install_account`:記錄學到的帳戶
     /// `learned_in` 不是加入的那一個):在別的帳戶裡同意的,不算同意上傳到這個帳戶;用同一個同步碼重新加入同一個帳戶照舊。更換同步碼是同一個
     /// 帳戶的延續,也照舊(`rotation::install_new_account`)。
     #[serde(default)]
@@ -245,7 +246,9 @@ pub struct LocalSlot {
     /// (`slot_setup::adopt_slot`,「Sync key」與「Keep on this computer」都算)。補寫 `key`(`slots::republish`,spec §6.6)時,這樣的副本
     /// 要這台的使用者在這裡選過同步它(`uploaded_fingerprint` 是它的指紋)才算握有 —— 它的位元組來自之前的帳戶,不是這個帳戶。只對同步來的副本有意義:
     /// 每個把 `SyncedCopy` 放進記錄的地方都重新設定它 —— 從帳戶落地同步的金鑰時清掉(`slots::land_into`、`slots::use_synced`、
-    /// `slot_setup::reuse_slot`)。false = 不是。
+    /// `slot_setup::reuse_slot`);從保管庫改回檔案(`slots::set_delivery`)時,保管庫那一筆不是從這個帳戶同步來的(來源不是 `Synced`)
+    /// 就設成 true。副本搬進保管庫(`SlotSource::Vault`)時照舊留著:保管庫那一筆的來源依它記成 `Imported` 或 `Synced`,補寫時一樣只有
+    /// `Synced`、而且這個旗標是 false 的才不必這台的同意。false = 不是。
     #[serde(default)]
     pub copy_from_another_account: bool,
 }
@@ -258,6 +261,9 @@ pub enum SlotSource {
     Linked { path: String, link: LinkKind, fingerprint: Option<String>, origin: bool },
     /// 同步來的私鑰(檔案就在插槽裡)。
     SyncedCopy { fingerprint: String },
+    /// 只在 SSHelter(金鑰保管庫 spec §4.3):私鑰在保管庫(`vault.json`),插槽目錄只放 `.pub`,插槽路徑本身沒有檔案;`ssh` 經 SSHelter 的
+    /// agent 取用。`public_key` 用來在每一輪重寫 `.pub`(不必開保管庫),`has_passphrase` 給畫面說明。
+    Vault { fingerprint: String, public_key: String, has_passphrase: bool },
 }
 
 /// 一個這台勾選的 space(spec §4.4)。
@@ -693,7 +699,7 @@ mod tests {
             checked_at_ms: 50,
         });
         s.legacy_v1_backup = Some(LEGACY_BACKUP_FILE.to_string());
-        // 兩種插槽來源都有,`LocalSlot` 的每個欄位在其中一筆裡都不是預設值(`parked` 只有連結的記錄用得到)。
+        // 三種插槽來源都有,`LocalSlot` 的每個欄位在其中一筆裡都不是預設值(`parked` 只有連結的記錄用得到)。
         s.key_slots.insert(
             "3fa2c1d90123456789abcdef01234567".to_string(),
             LocalSlot {
@@ -734,6 +740,24 @@ mod tests {
                 uploaded_fingerprint: None,
                 parked: true,
                 learned_in: None,
+                copy_from_another_account: false,
+            },
+        );
+        s.key_slots.insert(
+            "89abcdef0123456789abcdef01234567".to_string(),
+            LocalSlot {
+                file_name: "deploy-89abcdef".to_string(),
+                source: Some(SlotSource::Vault {
+                    fingerprint: "SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew".to_string(),
+                    public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF5M9xdffT0p33BD1LiLFTiEvrjv4IZMFADC81ex4ndf".to_string(),
+                    has_passphrase: true,
+                }),
+                last_error: None,
+                asked: false,
+                payload: None,
+                uploaded_fingerprint: None,
+                parked: false,
+                learned_in: Some(account_keys.chain_id.clone()),
                 copy_from_another_account: false,
             },
         );

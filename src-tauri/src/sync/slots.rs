@@ -1,10 +1,12 @@
 //! SP3 金鑰插槽的引擎(spec `docs/superpowers/specs/2026-10-05-sp3-key-slots-design.md` §4、§6):帳戶裡 `keyslot` 與
-//! `key` 記錄的讀寫、每一輪在這台維護插槽(`reconcile`)與給 UI 的插槽檢視(`views`)、模式切換與挑選(Task 6)。
+//! `key` 記錄的讀寫、每一輪在這台維護插槽(`reconcile`)與給 UI 的插槽檢視(`views`)、模式切換與挑選(Task 6),以及只在 SSHelter 的
+//! 插槽(金鑰保管庫 spec §4.3:`SlotSource::Vault`,`set_delivery`)。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::config::model::{Directive, Item, SshConfigDoc};
 use crate::config::parser::parse_file;
@@ -24,6 +26,7 @@ use crate::sync::slot_rules::{
     SLOT_SCHEMA,
 };
 use crate::sync::state_v2::{sealed_key, AccountState, LocalSlot, SealedRecord, SlotSource, SyncNotice, SyncStateV2};
+use crate::vault::store::{vault_path, with_vault, EntryOrigin, VaultEntry};
 
 // ── 帳戶記錄 ──────────────────────────────────────────────────────────────────────────────────
 
@@ -114,6 +117,110 @@ pub(crate) fn landable_key(
     let facts = check_synced_key(&secret, payload).map_err(Some)?;
     Ok((secret, facts))
 }
+
+// ── 只在 SSHelter 的插槽(金鑰保管庫 spec §4.3、§4.4、§11)──────────────────────────────────────────
+//
+// 「Only in SSHelter」= `SlotSource::Vault`:私鑰在保管庫(`vault.json`),插槽目錄只放 `<file>.pub`,插槽路徑本身沒有檔案,`ssh` 經 SSHelter
+// 的 agent 取用。每一輪只維護 `.pub`、回報擋路的檔案,從不把私鑰落地到這樣的插槽(`maintain`);保管庫裡不見的那一筆從帳戶放回去
+// (`recover_vault_entry`);補寫帳戶裡的 `key` 時照 SP3 的同意規則讀保管庫裡的私鑰(`republish`)。搬進、搬出保管庫是使用者的動作(`set_delivery`)。
+
+/// 同步的一輪用到的保管庫:補寫帳戶裡的 `key`(SP3 spec §6.6)要讀私鑰;「只在 SSHelter」的插槽要確認保管庫裡還有它,沒有就從帳戶放回去
+/// (金鑰保管庫 spec §11)。`holds` 只讀檔案裡的 id,不讀 keychain;`private_key` 與 `restore` 才開保管庫。
+pub trait VaultKeys {
+    fn private_key(&self, slot_id: &str) -> Option<(Zeroizing<String>, EntryOrigin)>;
+    /// 保管庫裡有沒有這一筆;保管庫讀不了(格式不認得、讀不懂、I/O 錯誤)→ None,呼叫端什麼都不做。
+    fn holds(&self, slot_id: &str) -> Option<bool>;
+    /// 放回一筆(從帳戶取回的同步金鑰)。
+    fn restore(&self, slot_id: &str, entry: &VaultEntry) -> Result<(), AppError>;
+}
+
+/// 沒有保管庫可讀(測試、或只處理檔案來源的呼叫端)。
+pub struct NoVault;
+
+impl VaultKeys for NoVault {
+    fn private_key(&self, _slot_id: &str) -> Option<(Zeroizing<String>, EntryOrigin)> {
+        None
+    }
+
+    fn holds(&self, _slot_id: &str) -> Option<bool> {
+        None
+    }
+
+    fn restore(&self, _slot_id: &str, _entry: &VaultEntry) -> Result<(), AppError> {
+        Err(AppError::Other("SSHelter's vault is not available here".to_string()))
+    }
+}
+
+/// 經 `SyncEnv` 開保管庫(`vault::store::with_vault`)。開不了(keychain 鎖著、檔案讀不懂)就當成沒有。
+pub struct EnvVault<'a, 'b> {
+    pub env: &'a SyncEnv<'b>,
+}
+
+impl VaultKeys for EnvVault<'_, '_> {
+    fn private_key(&self, slot_id: &str) -> Option<(Zeroizing<String>, EntryOrigin)> {
+        let path = vault_path(&self.env.state_path);
+        with_vault(self.env.runtime, &path, self.env.keychain, self.env.now(), |vault| vault.get(slot_id))
+            .ok()
+            .flatten()
+            .map(|entry| (Zeroizing::new(entry.private_key.clone()), entry.origin))
+    }
+
+    fn holds(&self, slot_id: &str) -> Option<bool> {
+        crate::vault::store::stored_ids(&vault_path(&self.env.state_path)).ok().map(|ids| ids.contains(slot_id))
+    }
+
+    fn restore(&self, slot_id: &str, entry: &VaultEntry) -> Result<(), AppError> {
+        let path = vault_path(&self.env.state_path);
+        Ok(with_vault(self.env.runtime, &path, self.env.keychain, self.env.now(), |vault| vault.put(self.env.keychain, slot_id, entry))?)
+    }
+}
+
+pub const VAULT_ENTRY_LOST: &str = "This key was lost from SSHelter's vault. Pick it again on this computer.";
+
+/// 只在 SSHelter 的插槽,保管庫裡卻沒有它(保管庫檔讀不懂、或 `vault:key` 不見而搬到旁邊之後;金鑰保管庫 spec §11):帳戶裡有同一把同步金鑰
+/// 就放回保管庫;沒有就讓這台回到「還沒有金鑰」,之後照 SP3 的流程落地同步的金鑰或請使用者挑。保管庫讀不了(`holds` 是 None)就不動。
+fn recover_vault_entry(
+    local: &mut LocalSlot,
+    slot_id: &str,
+    account: &AccountState,
+    account_keys: &ChainKeys,
+    now_ms: u64,
+    vault: &dyn VaultKeys,
+) {
+    let Some(SlotSource::Vault { fingerprint, .. }) = &local.source else { return };
+    if vault.holds(slot_id) != Some(false) {
+        return;
+    }
+    let restored = open_key_secret(account, account_keys, slot_id).and_then(|text| {
+        let facts = inspect_private_key(&text).ok()?;
+        (&facts.fingerprint == fingerprint).then(|| VaultEntry {
+            private_key: text.clone(),
+            public_key: facts.public_key.clone(),
+            fingerprint: facts.fingerprint.clone(),
+            origin: if local.copy_from_another_account { EntryOrigin::Imported } else { EntryOrigin::Synced },
+            added_at_ms: now_ms,
+        })
+    });
+    match restored {
+        Some(entry) => local.last_error = vault.restore(slot_id, &entry).err().map(|e| e.to_string()),
+        None => {
+            local.source = None;
+            local.last_error = Some(VAULT_ENTRY_LOST.to_string());
+        }
+    }
+}
+
+/// 這台「只在 SSHelter」的插槽檔名(`SlotSource::Vault`):`agent::wiring` 據此列出要走 agent 的主機。
+pub fn vault_slot_files(state: &SyncStateV2) -> BTreeSet<String> {
+    state
+        .key_slots
+        .values()
+        .filter(|local| matches!(local.source, Some(SlotSource::Vault { .. })))
+        .map(|local| local.file_name.clone())
+        .collect()
+}
+
+pub const VAULT_FIRST_MESSAGE: &str = "This key is only in SSHelter. Choose Keep a file first.";
 
 // ── 每一輪在這台維護插槽(SP3 spec §6.2–§6.6)──────────────────────────────────────────────────
 //
@@ -320,12 +427,16 @@ pub fn add_notice(notices: &mut Vec<SyncNotice>, notice: &SyncNotice) {
 /// 兩種「用到」:勾選的 space 裡的主機用到的插槽是這台「需要」的(`slot_hosts`,spec §6.2)—— 只有它們會落地同步的金鑰、問使用者要金鑰、
 /// 補寫帳戶裡不見的記錄;`in_use`(`config_slot_hosts`:整份 config 裡用到的,含主 config 與 `~/.ssh/sshelter-local/` 的主機)只決定連結留不留 ——
 /// 任何主機用到的插槽都照常維護、不收起來,帳戶裡完全找不到的也不移除(spec §4.2:沒有任何主機用到、或 `keyslot` 被刪除才移除連結)。
-pub fn reconcile(
+///
+/// `vault` = 這台的保管庫(金鑰保管庫 spec §4.3、§11):有主機用到的「只在 SSHelter」的插槽,每一輪確認保管庫裡還有它(`recover_vault_entry`);
+/// 補寫這樣的插槽的 `key` 時從這裡讀私鑰(`republish`)。
+pub fn reconcile_with_vault(
     state: &mut SyncStateV2,
     account_keys: &ChainKeys,
     home: &Path,
     in_use: &BTreeMap<String, Vec<String>>,
     now_ms: u64,
+    vault: &dyn VaultKeys,
 ) -> SlotRound {
     let mut round = SlotRound::default();
     let needed = slot_hosts(state);
@@ -376,6 +487,7 @@ pub fn reconcile(
                     local.last_error = None;
                 }
             }
+            recover_vault_entry(&mut local, id, account, account_keys, now_ms, vault);
             if is_needed && local.source.is_none() && local.last_error.is_none() && payload.mode == SlotMode::Own && !local.asked {
                 local.asked = true;
                 asked.push(payload.name.clone());
@@ -403,7 +515,7 @@ pub fn reconcile(
         let recorded = slot_record_exists(account, &id);
         if !recorded && needed.contains_key(&local.file_name) {
             if let Some(payload) = local.payload.clone() {
-                if republish(account, account_keys, &id, &payload, &local, &path, &device_id, now_ms) {
+                if republish(account, account_keys, &id, &payload, &local, &path, &device_id, now_ms, vault) {
                     round.changed = true;
                     continue;
                 }
@@ -415,6 +527,7 @@ pub fn reconcile(
         } else {
             drop_link(&mut local, &path);
         }
+        recover_vault_entry(&mut local, &id, account, account_keys, now_ms, vault);
         if local.source.is_none() {
             state.key_slots.remove(&id);
             round.changed = true;
@@ -432,14 +545,28 @@ pub fn reconcile(
     round
 }
 
+/// 不讀保管庫的版本(補寫時讀不到保管庫裡的私鑰):測試與只處理檔案來源的呼叫端用。
+pub fn reconcile(
+    state: &mut SyncStateV2,
+    account_keys: &ChainKeys,
+    home: &Path,
+    in_use: &BTreeMap<String, Vec<String>>,
+    now_ms: u64,
+) -> SlotRound {
+    reconcile_with_vault(state, account_keys, home, in_use, now_ms, &NoVault)
+}
+
 /// 這台的 `device.slots` 裡這個插槽那一項。連結(symlink / hard link)只在有主機用到(`used`:勾選的 space 或整份 config 裡的任何主機)、
 /// 而且連結真的在插槽路徑上的時候才列:收起來的(`LocalSlot::parked`,`park_link`)連結,插槽路徑上現在沒有這個插槽的東西;複製檔與同步來的
-/// 副本是真的放在插槽裡的金鑰,一直列著。
+/// 副本是真的放在插槽裡的金鑰,一直列著。保管庫裡的金鑰(`SlotSource::Vault`)也一直列著,記成 SSHelter 保管的副本(`synced_copy`)。
 fn device_slot(slot_id: &str, local: &LocalSlot, used: bool) -> Option<DeviceSlot> {
     match &local.source {
         Some(SlotSource::Linked { link, fingerprint, .. }) => ((used && !local.parked) || *link == LinkKind::Copy)
             .then(|| DeviceSlot { slot_id: slot_id.to_string(), fingerprint: fingerprint.clone(), synced_copy: false }),
         Some(SlotSource::SyncedCopy { fingerprint }) => {
+            Some(DeviceSlot { slot_id: slot_id.to_string(), fingerprint: Some(fingerprint.clone()), synced_copy: true })
+        }
+        Some(SlotSource::Vault { fingerprint, .. }) => {
             Some(DeviceSlot { slot_id: slot_id.to_string(), fingerprint: Some(fingerprint.clone()), synced_copy: true })
         }
         None => None,
@@ -556,6 +683,7 @@ fn drop_link(local: &mut LocalSlot, path: &Path) {
 /// 這台有主機用到的插槽,維護這台已經放進去的東西:連結的確認原檔還在、hard link 與複製跟上原檔。收起來的連結(`parked`)只在路徑空著的
 /// 時候重新連結;symlink 的插槽路徑上不是自己的 symlink 就是擋路(記錄收起來)。回傳 true = 插槽裡沒有這台的東西(沒有來源,或同步來的副本
 /// 被刪掉了;`source` 已清掉):要不要落地同步的金鑰由呼叫端決定 —— 只有勾選的 space 用到的插槽才落地(`land_into`,spec §6.2)。
+/// 只在 SSHelter 的插槽(`SlotSource::Vault`)只維護 `.pub`、回報擋路的檔案,一律回 false:私鑰在保管庫,從不落地到插槽路徑上。
 fn maintain(local: &mut LocalSlot, keys_dir: &Path, path: &Path) -> bool {
     match local.source.clone() {
         Some(SlotSource::Linked { path: source, link, origin, fingerprint: recorded }) => {
@@ -606,6 +734,22 @@ fn maintain(local: &mut LocalSlot, keys_dir: &Path, path: &Path) -> bool {
             };
             local.source = Some(SlotSource::Linked { path: source, link, fingerprint, origin });
             local.parked = false;
+            local.last_error = None;
+            false
+        }
+        Some(SlotSource::Vault { public_key, .. }) => {
+            // 只在 SSHelter:插槽路徑上不該有檔案(`ssh` 會先讀它)。出現了就擋路、不碰;`.pub` 不見或不對就從記錄重寫。
+            if slot_files::occupied(path) {
+                local.last_error = Some(in_the_way_message(path));
+                return false;
+            }
+            let current = std::fs::read_to_string(public_path(path)).ok();
+            if current.as_deref().map(str::trim) != Some(public_key.trim()) {
+                if let Err(e) = slot_files::ensure_keys_dir(keys_dir).and_then(|()| slot_files::write_public(path, &public_key)) {
+                    local.last_error = Some(e.to_string());
+                    return false;
+                }
+            }
             local.last_error = None;
             false
         }
@@ -692,6 +836,10 @@ pub(crate) fn check_synced_key(secret: &str, payload: &KeySlotPayload) -> Result
 /// 補寫的一定是這個帳戶自己掉了的記錄(N1):在別的帳戶學到的記錄(`LocalSlot::learned_in` 不是現在的帳戶;不知道的也算)什麼都不寫 ——
 /// 離開帳戶 A、建立或加入另一個帳戶之後,`~/.ssh/sshelter-local/` 裡用到 A 的插槽的主機被搬進新帳戶的 space,新帳戶裡當然沒有那個插槽;
 /// 照寫的話,A 的插槽與私鑰(這台選了同步的那把,或 A 同步來的副本)就進了新帳戶、落地到新帳戶的每一台電腦。回傳有沒有寫(沒寫的,呼叫端照常維護)。
+///
+/// 只在 SSHelter 的金鑰(`SlotSource::Vault`)從保管庫讀(`vault`),規則同上:這台同意上傳過的那把(`uploaded_fingerprint`),或從這個帳戶
+/// 同步來、不是之前的帳戶留下的(保管庫那一筆的來源是 `Synced`,`copy_from_another_account` 是 false)。保管庫裡那一筆的私鑰本身也要是記錄裡的
+/// 那一把(以私鑰推出的指紋):同意與來源說的都是記錄裡的金鑰,不是保管庫裡剛好放著的另一把。
 #[allow(clippy::too_many_arguments)]
 fn republish(
     account: &mut AccountState,
@@ -702,6 +850,7 @@ fn republish(
     path: &Path,
     device_id: &str,
     now_ms: u64,
+    vault: &dyn VaultKeys,
 ) -> bool {
     if local.learned_in.as_deref() != Some(account.chain_id.as_str()) {
         return false;
@@ -719,6 +868,13 @@ fn republish(
         {
             std::fs::read_to_string(path).ok().filter(|text| inspect_private_key(text).is_ok_and(|f| f.fingerprint == *fingerprint))
         }
+        // 保管庫裡的私鑰:這台同意上傳過的那把,或從這個帳戶同步來、不是之前的帳戶留下的;而且就是記錄裡的那一把。
+        Some(SlotSource::Vault { fingerprint, .. }) => vault.private_key(slot_id).and_then(|(text, origin)| {
+            let recorded = inspect_private_key(&text).is_ok_and(|f| f.fingerprint == *fingerprint);
+            let consented = local.uploaded_fingerprint.as_deref() == Some(fingerprint.as_str());
+            let from_this_account = origin == EntryOrigin::Synced && !local.copy_from_another_account;
+            (recorded && (consented || from_this_account)).then(|| text.to_string())
+        }),
         Some(SlotSource::SyncedCopy { .. }) | None => None,
     };
     let matching = readable.filter(|text| {
@@ -777,6 +933,7 @@ pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path, in_use:
                 })
                 .collect(),
             in_account,
+            in_vault: state.key_slots.get(id).is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. }))),
         }
     };
     let mut out = Vec::new();
@@ -826,16 +983,21 @@ fn kept_status(local: &LocalSlot, source: &SlotSource, slot_path: &Path) -> Slot
         SlotSource::SyncedCopy { fingerprint } => {
             SlotStatusView::Ready { file: slot_path.display().to_string(), synced_copy: true, fingerprint: Some(fingerprint.clone()) }
         }
+        SlotSource::Vault { fingerprint, .. } => {
+            SlotStatusView::Ready { file: slot_path.display().to_string(), synced_copy: false, fingerprint: Some(fingerprint.clone()) }
+        }
     }
 }
 
 /// 這台插槽裡那把金鑰(`readable_key`:連到的金鑰,或仍是記錄裡那一把的同步副本)有沒有 passphrase;讀不到、讀不懂 → None。每次組 overview
-/// 都可能跑,所以先確認它是不超過 64 KiB 的私鑰檔(`slot_setup::is_private_key_file`:一般檔案),不會卡在 FIFO 之類的檔案上。
+/// 都可能跑,所以先確認它是不超過 64 KiB 的私鑰檔(`slot_setup::is_private_key_file`:一般檔案),不會卡在 FIFO 之類的檔案上。只在 SSHelter 的
+/// 金鑰看記錄(`SlotSource::Vault::has_passphrase`),不開保管庫。
 fn local_key_passphrase(local: Option<&LocalSlot>, keys_dir: &Path) -> Option<bool> {
     let local = local?;
     let file = match local.source.as_ref()? {
         SlotSource::Linked { path, .. } => PathBuf::from(path),
         SlotSource::SyncedCopy { .. } => keys_dir.join(&local.file_name),
+        SlotSource::Vault { has_passphrase, .. } => return Some(*has_passphrase),
     };
     if !crate::sync::slot_setup::is_private_key_file(&file) {
         return None;
@@ -893,6 +1055,15 @@ pub fn slot_status(
                 SlotStatusView::Ready { file: here, synced_copy: true, fingerprint: Some(fingerprint.clone()) }
             }
         }
+        Some(SlotSource::Vault { fingerprint, .. }) => {
+            if synced && has_secret && Some(fingerprint) != payload.fingerprint.as_ref() {
+                SlotStatusView::SyncedAvailable { file: here }
+            } else if !used {
+                SlotStatusView::NotInUse { file: here }
+            } else {
+                SlotStatusView::Ready { file: here, synced_copy: false, fingerprint: Some(fingerprint.clone()) }
+            }
+        }
         None if needed => SlotStatusView::NeedsKey { waiting_for_sync: synced },
         None if used => SlotStatusView::NeedsKey { waiting_for_sync: false },
         None => SlotStatusView::NotUsedHere,
@@ -904,7 +1075,9 @@ pub fn slot_status(
 // 和每一輪的維護一樣,插槽路徑上的東西是不是 SSHelter 放的,只看這個插槽 id 自己的本機記錄(spec §4.2):挑金鑰與改用同步的金鑰
 // 只換掉記錄擁有的東西(`occupant`),其他的一律回 `in_the_way_message`;刪除副本只刪路徑上仍是記錄裡那一份的副本。被換掉的金鑰
 // 改名保留(`retire_key`,計畫裁定 3;spec §1 私鑰不自動刪除),只有連結本身直接拿掉。和帳戶裡另一個插槽同檔名、這台又沒有握著的
-// 插槽(`contested_and_not_held`)一律拒絕。拒絕的時候,檔案與狀態都不動。
+// 插槽(`contested_and_not_held`)一律拒絕。拒絕的時候,檔案與狀態都不動。只在 SSHelter 的插槽(`SlotSource::Vault`)不挑金鑰、不改用
+// 同步的金鑰(`refuse_in_vault`):保管庫裡的私鑰可能是那把金鑰僅存的一份,換掉就沒了;要先改回檔案(`set_delivery`),被換掉的金鑰才照上面
+// 改名保留。
 
 pub const IN_USE_MESSAGE: &str = "Hosts on this computer still use this key; change them first.";
 
@@ -921,7 +1094,8 @@ fn contested_error() -> AppError {
 }
 
 /// 讀這台插槽裡的私鑰:連到的金鑰(這台的使用者連給這個插槽的那把),或同步來的副本。副本只認這筆記錄自己的路徑上、仍是記錄裡那一把
-/// 的檔案(同 `republish`):那個位置可能被換成了別的檔案(使用者的、別的插槽放的),不能把它當成這個插槽的金鑰上傳。
+/// 的檔案(同 `republish`):那個位置可能被換成了別的檔案(使用者的、別的插槽放的),不能把它當成這個插槽的金鑰上傳。只在 SSHelter 的
+/// 金鑰不在檔案裡 → None(要它的呼叫端自己讀保管庫,`vault_text`)。
 fn readable_key(local: Option<&LocalSlot>, keys_dir: &Path) -> Option<String> {
     let local = local?;
     match local.source.as_ref()? {
@@ -929,7 +1103,24 @@ fn readable_key(local: Option<&LocalSlot>, keys_dir: &Path) -> Option<String> {
         SlotSource::SyncedCopy { fingerprint } => std::fs::read_to_string(keys_dir.join(&local.file_name))
             .ok()
             .filter(|text| inspect_private_key(text).is_ok_and(|f| f.fingerprint == *fingerprint)),
+        SlotSource::Vault { .. } => None,
     }
+}
+
+/// 保管庫裡這個插槽的私鑰原文。
+fn vault_text(env: &SyncEnv, slot_id: &str) -> Result<Option<String>, AppError> {
+    let path = vault_path(&env.state_path);
+    Ok(with_vault(env.runtime, &path, env.keychain, env.now(), |vault| vault.get(slot_id))?.map(|entry| entry.private_key.clone()))
+}
+
+/// 只在 SSHelter 的插槽(`SlotSource::Vault`)不接受挑金鑰與改用同步的金鑰(`VAULT_FIRST_MESSAGE`):保管庫裡的私鑰可能是那把金鑰僅存的
+/// 一份,換掉就沒了。使用者先「Keep a file」改回檔案(`set_delivery`),之後挑金鑰、改用同步的金鑰照 SP3 把被換掉的那把改名保留。
+/// 在動作讀檔、動到任何東西之前檢查(快照之後立刻)。
+fn refuse_in_vault(state: &SyncStateV2, slot_id: &str) -> Result<(), AppError> {
+    if state.key_slots.get(slot_id).is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. }))) {
+        return Err(AppError::Other(VAULT_FIRST_MESSAGE.to_string()));
+    }
+    Ok(())
 }
 
 /// 會寫帳戶記錄的動作(`set_mode`、`slot_setup::create_slot`)要等更換同步碼:進行中(第 2 步起)或這台已被別台擋下時,帳戶區段之後會被整個換掉 ——
@@ -974,7 +1165,7 @@ enum Occupant {
     /// 改名保留(`retire_key`),不刪除。
     OwnKey,
     /// 不是這個插槽的:這台沒有它的記錄、記錄沒有來源或記著別的檔名、記錄收起來了(`parked`),或是 symlink 的記錄、路徑上卻不是指到
-    /// 記錄原檔的 symlink(同 `maintain` 每一輪的檢查)。不覆蓋、不移除。
+    /// 記錄原檔的 symlink(同 `maintain` 每一輪的檢查);只在 SSHelter 的記錄(`SlotSource::Vault`)在插槽路徑上什麼都不擁有。不覆蓋、不移除。
     NotOurs,
 }
 
@@ -986,6 +1177,7 @@ fn occupant(local: Option<&LocalSlot>, file: &str, path: &Path) -> Occupant {
     let Some(local) = local.filter(|l| l.file_name == file && !l.parked) else { return Occupant::NotOurs };
     match &local.source {
         None => Occupant::NotOurs,
+        Some(SlotSource::Vault { .. }) => Occupant::NotOurs,
         Some(SlotSource::SyncedCopy { .. }) => Occupant::OwnKey,
         Some(SlotSource::Linked { path: source, link: LinkKind::Symlink, .. }) => {
             if std::fs::read_link(path).is_ok_and(|target| target.as_path() == Path::new(source)) {
@@ -1009,9 +1201,10 @@ fn retire_key(path: &Path) -> Result<(), AppError> {
 }
 
 /// 改成同步(`own` → `synced`;建立插槽的那台換了金鑰後的「Sync the new key」也是它)或停止同步(`synced` → `own`,
-/// `key` 寫 tombstone;別台的副本留著)。同步要在讀得到這把私鑰的電腦上做,並在這台的插槽記錄上記下上傳的是哪一把
-/// (`LocalSlot::uploaded_fingerprint`:補寫 `key` 時只認它),記錄也從此是這個帳戶的(`LocalSlot::learned_in`:同意是在這個帳戶給的);停止同步
-/// 清掉同意。更換同步碼進行中、或這台已被別台擋下時拒絕(`account_ready`,提交時再檢查一次;原因見 `account_still_ready`):什麼都不讀、不寫。
+/// `key` 寫 tombstone;別台的副本留著)。同步要在讀得到這把私鑰的電腦上做(只在 SSHelter 的金鑰從保管庫讀,`vault_text`),並在這台的
+/// 插槽記錄上記下上傳的是哪一把(`LocalSlot::uploaded_fingerprint`:補寫 `key` 時只認它),記錄也從此是這個帳戶的(`LocalSlot::learned_in`:
+/// 同意是在這個帳戶給的);停止同步清掉同意。更換同步碼進行中、或這台已被別台擋下時拒絕(`account_ready`,提交時再檢查一次;原因見
+/// `account_still_ready`):什麼都不讀、不寫。
 pub fn set_mode(env: &SyncEnv, slot_id: &str, mode: SlotMode) -> Result<(), AppError> {
     let (state, keys, home) = snapshot(env)?;
     account_ready(&state, Some(&keys))?;
@@ -1019,7 +1212,10 @@ pub fn set_mode(env: &SyncEnv, slot_id: &str, mode: SlotMode) -> Result<(), AppE
     let payload = slot(account, slot_id).ok_or_else(not_found)?;
     let not_here = || AppError::Other(not_here_message(&device_name(account, &payload.origin_device_id)));
     let text = match mode {
-        SlotMode::Synced => Some(readable_key(state.key_slots.get(slot_id), &home.join(SLOT_DIR)).ok_or_else(not_here)?),
+        SlotMode::Synced => Some(match state.key_slots.get(slot_id).and_then(|l| l.source.as_ref()) {
+            Some(SlotSource::Vault { .. }) => vault_text(env, slot_id)?.ok_or_else(not_here)?,
+            _ => readable_key(state.key_slots.get(slot_id), &home.join(SLOT_DIR)).ok_or_else(not_here)?,
+        }),
         SlotMode::Own => None,
     };
     let facts = match &text {
@@ -1066,13 +1262,14 @@ pub fn set_mode(env: &SyncEnv, slot_id: &str, mode: SlotMode) -> Result<(), AppE
 /// `slot_files::link` 原子地換成新的;同步來的副本、複製檔與可能是某把金鑰僅存名字的 hard link 先改名保留(計畫裁定 3)。連結之後
 /// `.pub` 從挑的這把金鑰重寫;記錄的路徑就是連結用的那個(每一輪在 Unix 上確認 symlink 正好指到它)。`.pub` 或記錄寫不進去就把剛放的
 /// 連結收回,下一輪依原本的記錄維護。這台同意上傳過的那把(`uploaded_fingerprint`)不變:挑的金鑰不會因此被上傳。記錄在哪個帳戶學到的
-/// (`learned_in`)也不變;這台還沒有記錄的話,就是快照裡插槽所在的帳戶(提交時帳戶換了就不記)。
+/// (`learned_in`)也不變;這台還沒有記錄的話,就是快照裡插槽所在的帳戶(提交時帳戶換了就不記)。只在 SSHelter 的插槽拒絕(`refuse_in_vault`)。
 pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
     let source = PathBuf::from(path);
     if !source.is_absolute() || !crate::sync::slot_setup::is_private_key_file(&source) {
         return Err(AppError::Other(format!("{path} isn't a private key file")));
     }
     let (state, keys, home) = snapshot(env)?;
+    refuse_in_vault(&state, slot_id)?;
     let account = state.account.as_ref().ok_or_else(not_found)?;
     let payload = slot(account, slot_id).ok_or_else(not_found)?;
     if contested_and_not_held(&state, slot_id) {
@@ -1130,9 +1327,10 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
 /// 自己的(`occupant`):自己的連結拿掉(連到的金鑰本身不動),舊副本、複製檔與可能是某把金鑰僅存名字的 hard link 改名保留(計畫裁定 3);
 /// 路徑上的東西不是它的(收起來的記錄、symlink 不是指到記錄的原檔……)就擋路。這台沒有在插槽裡放東西的話,同每一輪,`land` 只寫進空著
 /// 的路徑。落地之後的記錄不是收起來的,是快照裡那個帳戶的(`learned_in`:插槽裡的私鑰來自那裡;提交時帳戶換了就不改記),副本也不再是之前的帳戶的
-/// (`copy_from_another_account`)。
+/// (`copy_from_another_account`)。只在 SSHelter 的插槽拒絕(`refuse_in_vault`):保管庫裡那把可能是它僅存的一份。
 pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let (state, keys, home) = snapshot(env)?;
+    refuse_in_vault(&state, slot_id)?;
     let account = state.account.as_ref().ok_or_else(not_found)?;
     let payload = slot(account, slot_id).ok_or_else(not_found)?;
     if contested_and_not_held(&state, slot_id) {
@@ -1198,13 +1396,15 @@ fn holds_recorded_copy(copy: &SlotSource, path: &Path) -> bool {
             same_bytes || fingerprint.as_ref().is_some_and(|recorded| own_fingerprint().as_ref() == Some(recorded))
         }
         SlotSource::Linked { .. } => false,
+        SlotSource::Vault { .. } => false,
     }
 }
 
 /// 刪除沒有主機用到的副本(同步來的,或 Windows 上的複製檔)與它的 `.pub`。用得到的插槽不能刪:勾選的 space 裡的主機,以及整份 config 裡的任何
 /// 主機(主 config、`~/.ssh/sshelter-local/`……,`config_slot_uses`;config 還沒載入就不知道有沒有,不刪)。路徑上的檔案必須還是這筆記錄放的那一份
 /// (`holds_recorded_copy`);不是(使用者換上的、別的插槽放的)就擋路,什麼都不刪。副本已經不在了:只忘掉記錄,旁邊的 `.pub` 不能確定是
-/// 自己的,不碰(同 `park_link`)。
+/// 自己的,不碰(同 `park_link`)。只在 SSHelter 的金鑰(`SlotSource::Vault`):插槽路徑上有檔案就擋路;否則拿掉保管庫裡那一筆與插槽旁的
+/// `.pub`(那是這筆記錄每一輪維護的),再忘掉記錄。
 pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let (state, _keys, home) = snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
@@ -1214,6 +1414,20 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let in_use = config_slot_uses(env).ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
     if slot_hosts(&state).contains_key(&local.file_name) || in_use.contains_key(&local.file_name) {
         return Err(AppError::Other(IN_USE_MESSAGE.to_string()));
+    }
+    if matches!(local.source, Some(SlotSource::Vault { .. })) {
+        let path = home.join(SLOT_DIR).join(&local.file_name);
+        if slot_files::occupied(&path) {
+            return Err(AppError::Other(in_the_way_message(&path)));
+        }
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.remove(slot_id))?;
+        let _ = std::fs::remove_file(public_path(&path));
+        mutate(env, |s| {
+            s.key_slots.remove(slot_id);
+            Ok(())
+        })?;
+        env.events.wake();
+        return Ok(());
     }
     let copy = match &local.source {
         Some(copy @ (SlotSource::SyncedCopy { .. } | SlotSource::Linked { link: LinkKind::Copy, .. })) => copy,
@@ -1230,6 +1444,95 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
         s.key_slots.remove(slot_id);
         Ok(())
     })?;
+    env.events.wake();
+    Ok(())
+}
+
+/// 這台的插槽改成只在 SSHelter(`vault` = true:私鑰放進保管庫,插槽目錄只留 `.pub`)或改回檔案(插槽路徑放私鑰的副本,保管庫不再留它)。
+/// 使用者自己的原檔一律不碰;插槽路徑上可能是某把金鑰僅存名字的 hard link 或複製檔,改名保留(`retire_key`)而不刪除。
+///
+/// 改回檔案時,先寫插槽檔與 `.pub`,記錄改成同步來的副本(`SyncedCopy`;保管庫那一筆不是從這個帳戶同步來的,`copy_from_another_account`
+/// 就設成 true,補寫 `key` 時要這台的同意),最後才拿掉保管庫那一筆:拿不掉只留下一筆沒有記錄用到的(agent 不提供它),不會有記錄說金鑰在
+/// 保管庫、保管庫裡卻沒有它。
+pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), AppError> {
+    let (state, _keys, home) = snapshot(env)?;
+    if contested_and_not_held(&state, slot_id) {
+        return Err(contested_error());
+    }
+    let local = state.key_slots.get(slot_id).cloned().ok_or_else(not_found)?;
+    let keys_dir = home.join(SLOT_DIR);
+    let slot_path = keys_dir.join(&local.file_name);
+    let vault_file = vault_path(&env.state_path);
+    let now = env.now();
+    if vault {
+        let origin = match &local.source {
+            Some(SlotSource::Vault { .. }) => return Ok(()),
+            Some(SlotSource::SyncedCopy { .. }) if !local.copy_from_another_account => EntryOrigin::Synced,
+            Some(SlotSource::SyncedCopy { .. } | SlotSource::Linked { .. }) => EntryOrigin::Imported,
+            None => return Err(AppError::Other("This computer doesn't have this key yet.".to_string())),
+        };
+        let text = readable_key(Some(&local), &keys_dir)
+            .ok_or_else(|| AppError::Other(source_gone_message(&slot_path.display().to_string())))?;
+        let facts = inspect_private_key(&text).map_err(|e| AppError::Other(e.message().to_string()))?;
+        match occupant(Some(&local), &local.file_name, &slot_path) {
+            Occupant::NotOurs => return Err(AppError::Other(in_the_way_message(&slot_path))),
+            Occupant::OwnLink | Occupant::OwnKey | Occupant::Empty => {}
+        }
+        let entry = VaultEntry {
+            private_key: text,
+            public_key: facts.public_key.clone(),
+            fingerprint: facts.fingerprint.clone(),
+            origin,
+            added_at_ms: now,
+        };
+        with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.put(env.keychain, slot_id, &entry))?;
+        match occupant(Some(&local), &local.file_name, &slot_path) {
+            Occupant::OwnLink => slot_files::remove_slot(&slot_path)?,
+            Occupant::OwnKey => match &local.source {
+                // 同步來的副本(SSHelter 放的,`readable_key` 確認過仍是記錄裡那一把):同一份私鑰剛放進保管庫,插槽裡這份直接拿掉。
+                Some(SlotSource::SyncedCopy { .. }) => slot_files::remove_slot(&slot_path)?,
+                // 複製檔或可能是僅存名字的 hard link:改名保留。
+                _ => retire_key(&slot_path)?,
+            },
+            Occupant::Empty | Occupant::NotOurs => {}
+        }
+        slot_files::ensure_keys_dir(&keys_dir)?;
+        slot_files::write_public(&slot_path, &facts.public_key)?;
+        mutate(env, |s| {
+            let local = s.key_slots.get_mut(slot_id).ok_or_else(not_found)?;
+            local.source = Some(SlotSource::Vault {
+                fingerprint: facts.fingerprint.clone(),
+                public_key: facts.public_key.clone(),
+                has_passphrase: facts.has_passphrase,
+            });
+            local.last_error = None;
+            local.parked = false;
+            Ok(())
+        })?;
+    } else {
+        let Some(SlotSource::Vault { .. }) = &local.source else { return Ok(()) };
+        if slot_files::occupied(&slot_path) {
+            return Err(AppError::Other(in_the_way_message(&slot_path)));
+        }
+        let entry = with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.get(slot_id))?
+            .ok_or_else(|| AppError::Other("This key is missing from SSHelter's vault.".to_string()))?;
+        slot_files::ensure_keys_dir(&keys_dir)?;
+        slot_files::write_private(&slot_path, entry.private_key.as_bytes())?;
+        slot_files::write_public(&slot_path, &entry.public_key)?;
+        let from_this_account = entry.origin == EntryOrigin::Synced;
+        let fingerprint = entry.fingerprint.clone();
+        mutate(env, |s| {
+            let local = s.key_slots.get_mut(slot_id).ok_or_else(not_found)?;
+            local.source = Some(SlotSource::SyncedCopy { fingerprint: fingerprint.clone() });
+            local.copy_from_another_account = local.copy_from_another_account || !from_this_account;
+            local.last_error = None;
+            Ok(())
+        })?;
+        // 記錄已經是檔案了:保管庫那一筆拿不掉也只是一筆沒有記錄用到的,不影響這台用檔案連線。
+        if let Err(e) = with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.remove(slot_id)) {
+            eprintln!("[sync] a key kept as a file again is still in SSHelter's vault: {e}");
+        }
+    }
     env.events.wake();
     Ok(())
 }
@@ -4775,5 +5078,313 @@ pub(crate) mod tests {
         assert!(after.frozen().is_some(), "the freeze the round recorded is there");
         after.account.as_mut().unwrap().frozen = None;
         assert_eq!(after, before, "no record and no local state was written");
+    }
+
+    // ── 只在 SSHelter 的插槽(金鑰保管庫 spec §4.3、§4.4)────────────────────────────────────────────────
+
+    fn vault_entry(d: &TestDevice, id: &str) -> Option<crate::vault::store::VaultEntry> {
+        let env = d.env();
+        let path = crate::vault::store::vault_path(&env.state_path);
+        crate::vault::store::with_vault(env.runtime, &path, env.keychain, 1, |v| v.get(id)).unwrap()
+    }
+
+    #[test]
+    fn a_synced_copy_moves_into_the_vault_and_back_to_a_file() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let slot = home(&b).join(SLOT_DIR).join(&file);
+        assert_eq!(std::fs::read_to_string(&slot).unwrap(), test_keys::plain());
+
+        set_delivery(&b.env(), &id, true).unwrap();
+        assert!(!slot.exists(), "no private key file is left in the slot");
+        assert_eq!(std::fs::read_to_string(public_path(&slot)).unwrap().trim(), test_keys::PLAIN_PUBLIC);
+        let entry = vault_entry(&b, &id).expect("the key is in the vault");
+        assert_eq!(entry.private_key, test_keys::plain());
+        assert_eq!(entry.origin, crate::vault::store::EntryOrigin::Synced);
+        assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::Vault { fingerprint, .. }) if fingerprint == test_keys::PLAIN_FINGERPRINT));
+        assert_eq!(vault_slot_files(&b.state()), BTreeSet::from([file.clone()]));
+        assert!(view_of(&b).remove(0).in_vault);
+
+        settle(&b);
+        assert!(!slot.exists(), "a round never lands a file into a vault slot");
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })));
+
+        set_delivery(&b.env(), &id, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&slot).unwrap(), test_keys::plain());
+        assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { fingerprint }) if fingerprint == test_keys::PLAIN_FINGERPRINT));
+        assert!(vault_entry(&b, &id).is_none(), "the vault no longer holds it");
+        assert!(!b.state().key_slots[&id].copy_from_another_account, "it came from this account");
+        assert!(vault_slot_files(&b.state()).is_empty());
+    }
+
+    #[test]
+    fn a_linked_key_moves_into_the_vault_and_the_original_file_stays() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let original = a.ssh_dir().join("id_mac");
+        let slot = home(&a).join(SLOT_DIR).join(&file);
+
+        set_delivery(&a.env(), &id, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), test_keys::plain(), "the user's own file is untouched");
+        assert!(!slot_files::occupied(&slot), "SSHelter's link is gone");
+        assert!(public_path(&slot).is_file());
+        assert_eq!(vault_entry(&a, &id).unwrap().origin, crate::vault::store::EntryOrigin::Imported);
+
+        set_delivery(&a.env(), &id, false).unwrap();
+        assert!(b_copy_flag(&a, &id), "an imported key returns as a copy that still needs this computer's consent to upload");
+    }
+
+    fn b_copy_flag(d: &TestDevice, id: &str) -> bool {
+        d.state().key_slots[id].copy_from_another_account
+    }
+
+    #[test]
+    fn a_vault_slot_gets_its_pub_back_and_reports_a_file_in_the_way() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let slot = home(&b).join(SLOT_DIR).join(&file);
+
+        std::fs::remove_file(public_path(&slot)).unwrap();
+        settle(&b);
+        assert_eq!(std::fs::read_to_string(public_path(&slot)).unwrap().trim(), test_keys::PLAIN_PUBLIC, "the .pub is written again");
+
+        std::fs::write(&slot, "someone else's file").unwrap();
+        settle(&b);
+        assert_eq!(b.state().key_slots[&id].last_error.as_deref(), Some(in_the_way_message(&slot).as_str()));
+        assert_eq!(std::fs::read_to_string(&slot).unwrap(), "someone else's file", "never overwritten");
+    }
+
+    #[test]
+    fn republish_restores_a_vault_key_from_this_account_but_not_an_imported_one_without_consent() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let keys = account_keys(&b);
+        let lost = |d: &TestDevice| {
+            let mut state = d.state();
+            let account = state.account.as_mut().unwrap();
+            account.records.remove(&record_key(RecordKind::KeySlot, &id));
+            account.sealed.remove(&key_secret_key(&keys, &id));
+            state
+        };
+
+        let mut state = lost(&b);
+        let env = b.env();
+        reconcile_with_vault(&mut state, &keys, &home(&b), &NO_OTHER_HOSTS, 1_000, &EnvVault { env: &env });
+        assert_eq!(open_key_secret(state.account.as_ref().unwrap(), &keys, &id).as_deref(), Some(test_keys::plain().as_str()), "a synced key from this account comes back");
+
+        mutate(&b.env(), |s| {
+            s.key_slots.get_mut(&id).unwrap().copy_from_another_account = true;
+            Ok(())
+        })
+        .unwrap();
+        let mut state = lost(&b);
+        let env = b.env();
+        reconcile_with_vault(&mut state, &keys, &home(&b), &NO_OTHER_HOSTS, 2_000, &EnvVault { env: &env });
+        assert!(slot(state.account.as_ref().unwrap(), &id).is_some(), "the keyslot is written again");
+        assert_eq!(open_key_secret(state.account.as_ref().unwrap(), &keys, &id), None, "but no key without consent");
+    }
+
+    /// 保管庫裡的金鑰可能是那把金鑰僅存的一份:改用同步的金鑰要先改回檔案(「Keep a file」),之後 SP3 的 `use_synced` 照舊把被換掉的那把改名保留。
+    #[test]
+    fn using_the_synced_key_on_a_vault_slot_is_refused() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        // A 把另一把金鑰同步進這個插槽。
+        std::fs::write(a.ssh_dir().join("id_mac"), test_keys::ecdsa()).unwrap();
+        settle(&a);
+        set_mode(&a.env(), &id, SlotMode::Synced).unwrap();
+        settle(&a);
+        settle(&b);
+        assert!(matches!(view_of(&b).remove(0).status, SlotStatusView::SyncedAvailable { .. }));
+
+        refused(&b, VAULT_FIRST_MESSAGE, || use_synced(&b.env(), &id));
+        assert_eq!(vault_entry(&b, &id).unwrap().private_key, test_keys::plain(), "the vault still holds the plain key");
+        assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::Vault { fingerprint, .. }) if fingerprint == test_keys::PLAIN_FINGERPRINT));
+        assert!(!slot_files::occupied(&home(&b).join(SLOT_DIR).join(&file)), "nothing is written at the slot path");
+    }
+
+    #[test]
+    fn deleting_an_unused_vault_key_removes_the_entry_and_the_pub() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        b.save_in_app(&b.space_path(&personal), "Host web\n  HostName 1.1.1.1\n");
+        settle(&b);
+        assert!(matches!(view_of(&b).remove(0).status, SlotStatusView::NotInUse { .. }));
+
+        delete_copy(&b.env(), &id).unwrap();
+        assert!(vault_entry(&b, &id).is_none());
+        assert!(!public_path(&home(&b).join(SLOT_DIR).join(&file)).exists());
+        assert!(!b.state().key_slots.contains_key(&id));
+    }
+
+    #[test]
+    fn a_lost_vault_entry_comes_back_from_the_account() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        // 保管庫檔不見了(例如 `vault:key` 從 keychain 消失之後被搬到旁邊)。
+        std::fs::remove_file(crate::vault::store::vault_path(&b.env().state_path)).unwrap();
+        settle(&b);
+        assert_eq!(vault_entry(&b, &id).unwrap().private_key, test_keys::plain(), "restored from the account");
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })));
+        assert_eq!(b.state().key_slots[&id].last_error, None);
+        assert!(!home(&b).join(SLOT_DIR).join(&file).exists(), "still no private key file in the slot");
+    }
+
+    #[test]
+    fn a_lost_vault_key_the_account_does_not_have_leaves_the_slot_without_a_key() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        set_delivery(&a.env(), &id, true).unwrap();
+        std::fs::remove_file(crate::vault::store::vault_path(&a.env().state_path)).unwrap();
+        settle(&a);
+        let local = a.state().key_slots.get(&id).cloned();
+        assert!(local.as_ref().is_none_or(|l| l.source.is_none()), "no longer delivered from the vault: {local:?}");
+        assert!(vault_slot_files(&a.state()).is_empty());
+        assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_mac")).unwrap(), test_keys::plain(), "the user's own file is untouched");
+    }
+
+    #[test]
+    fn an_unreadable_vault_changes_nothing_in_a_round() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let vault = crate::vault::store::vault_path(&b.env().state_path);
+        std::fs::write(&vault, "{ not json").unwrap();
+        settle(&b);
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "a round never acts on a vault it cannot read");
+        assert_eq!(std::fs::read_to_string(&vault).unwrap(), "{ not json", "and never moves it");
+    }
+
+    #[test]
+    fn picking_a_key_for_a_vault_slot_is_refused() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let other = b.ssh_dir().join("id_other");
+        std::fs::write(&other, test_keys::ecdsa()).unwrap();
+        refused(&b, VAULT_FIRST_MESSAGE, || pick(&b.env(), &id, &other.display().to_string()));
+    }
+
+    /// 補寫只在 SSHelter 的金鑰時,保管庫裡那一筆的私鑰本身要是記錄裡的那一把:這台同意上傳的是記錄裡的 plain,保管庫裡放著的卻是 ecdsa
+    /// (例如提交失敗留下的)時不上傳 —— 即使這台最後看到的 payload 填的正是 ecdsa 的指紋(帳戶裡的成員改得動)。
+    #[test]
+    fn republish_never_uploads_a_vault_key_other_than_the_recorded_one() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        set_delivery(&a.env(), &id, true).unwrap();
+        assert_eq!(a.state().key_slots[&id].uploaded_fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT), "setup: A chose to sync the plain key");
+        let keys = account_keys(&a);
+        let lost = |payload: KeySlotPayload| {
+            let mut state = a.state();
+            state.key_slots.get_mut(&id).unwrap().payload = Some(payload);
+            let account = state.account.as_mut().unwrap();
+            account.records.remove(&record_key(RecordKind::KeySlot, &id));
+            account.sealed.remove(&key_secret_key(&keys, &id));
+            state
+        };
+        let env = a.env();
+
+        // 保管庫裡是記錄裡的那一把:這台同意過,`key` 補回去。
+        let mut state = lost(a.state().key_slots[&id].payload.clone().unwrap());
+        reconcile_with_vault(&mut state, &keys, &home(&a), &NO_OTHER_HOSTS, 1_000, &EnvVault { env: &env });
+        assert_eq!(open_key_secret(state.account.as_ref().unwrap(), &keys, &id).as_deref(), Some(test_keys::plain().as_str()));
+
+        // 保管庫裡換成了另一把,最後看到的 payload 也是它的:不上傳。
+        let other = crate::vault::store::VaultEntry {
+            private_key: test_keys::ecdsa(),
+            public_key: test_keys::ECDSA_PUBLIC.to_string(),
+            fingerprint: test_keys::ECDSA_FINGERPRINT.to_string(),
+            origin: crate::vault::store::EntryOrigin::Imported,
+            added_at_ms: 1,
+        };
+        let vault = crate::vault::store::vault_path(&env.state_path);
+        crate::vault::store::with_vault(env.runtime, &vault, env.keychain, 1, |v| v.put(env.keychain, &id, &other)).unwrap();
+        let mut state = lost(ecdsa_payload(&device_id(&a)));
+        reconcile_with_vault(&mut state, &keys, &home(&a), &NO_OTHER_HOSTS, 2_000, &EnvVault { env: &env });
+        let account = state.account.as_ref().unwrap();
+        assert!(slot(account, &id).is_some(), "the keyslot is written again");
+        assert_eq!(open_key_secret(account, &keys, &id), None, "the vault's other key is never uploaded");
+    }
+
+    /// 只回答第一次讀取的 keychain,之後一律讀不到(同上鎖)。
+    struct FirstReadOnly<'a> {
+        inner: &'a crate::sync::testkit::MemKeychain,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::sync::env::Keychain for FirstReadOnly<'_> {
+        fn get(&self, account: &str) -> Result<Option<String>, AppError> {
+            if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                return Err(AppError::Other("keychain error: locked".to_string()));
+            }
+            self.inner.get(account)
+        }
+        fn set(&self, account: &str, secret: &str) -> Result<(), AppError> {
+            self.inner.set(account, secret)
+        }
+        fn delete(&self, account: &str) -> Result<(), AppError> {
+            self.inner.delete(account)
+        }
+    }
+
+    /// 改回檔案時,記錄先改成檔案、保管庫那一筆之後才拿掉:拿不掉(這裡是那一刻 keychain 讀不到)只留下一筆沒有記錄用到的 —— 不會有記錄說
+    /// 金鑰在保管庫、保管庫裡卻沒有它,插槽路徑上剛寫的檔案也不會被當成擋路的檔案。
+    #[test]
+    fn a_key_kept_as_a_file_again_stays_a_file_when_its_vault_entry_cannot_be_removed() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+
+        // keychain 只回答讀出那一筆的那一次,拿掉它的時候開不了保管庫。
+        let keychain = FirstReadOnly { inner: &b.keychain, reads: std::sync::atomic::AtomicUsize::new(0) };
+        let mut env = b.env();
+        env.keychain = &keychain;
+        set_delivery(&env, &id, false).unwrap();
+        let slot = home(&b).join(SLOT_DIR).join(&file);
+        assert_eq!(std::fs::read_to_string(&slot).unwrap(), test_keys::plain(), "the key is a file again");
+        assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { fingerprint }) if fingerprint == test_keys::PLAIN_FINGERPRINT));
+        assert!(vault_slot_files(&b.state()).is_empty());
+        assert_eq!(vault_entry(&b, &id).map(|e| e.fingerprint.clone()).as_deref(), Some(test_keys::PLAIN_FINGERPRINT), "the vault keeps an entry nothing uses");
+        settle(&b);
+        assert_eq!(b.state().key_slots[&id].last_error, None, "the file is not reported as in the way");
+        assert_eq!(std::fs::read_to_string(&slot).unwrap(), test_keys::plain());
     }
 }

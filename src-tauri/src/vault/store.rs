@@ -4,7 +4,7 @@
 //! 寫入一律原子(`slot_files::write_private`:暫存檔 → rename)、只有擁有者能讀寫:Unix 的暫存檔先設 0600 再寫;Windows 的暫存檔繼承資料夾的權限,
 //! rename 之後才設成只給擁有者的 DACL(檔案裡只有密文與不含祕密的檔頭,這段空檔可以接受)。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -332,6 +332,23 @@ pub fn with_vault<T>(
     f(&mut vault)
 }
 
+/// 保管庫檔裡的插槽 id。不讀 keychain、不搬任何檔案:同步的每一輪用它確認「只在 SSHelter」的插槽還在保管庫裡(金鑰保管庫 spec §11)。
+/// 檔案不存在 → 空的;讀不懂 → `Unreadable { kept_as: None, .. }`;更新版的格式 → `Newer`。
+pub fn stored_ids(path: &Path) -> Result<BTreeSet<String>, VaultError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(VaultError::Other(AppError::Io(e))),
+    };
+    let unreadable = |e: serde_json::Error| VaultError::Unreadable { kept_as: None, reason: e.to_string() };
+    let version = file_version(&bytes).map_err(unreadable)?;
+    if version > VAULT_VERSION {
+        return Err(VaultError::Newer { version });
+    }
+    let file = serde_json::from_slice::<VaultFile>(&bytes).map_err(unreadable)?;
+    Ok(file.entries.keys().cloned().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +635,29 @@ mod tests {
         assert!(shown.contains(&"a".repeat(32)), "the slot ids are listed");
         assert!(!shown.contains(&format!("{key:?}")), "the key bytes are not printed");
         assert!(!shown.contains("ciphertext"), "the sealed entries are not printed");
+    }
+
+    /// 同步的每一輪只看保管庫裡有哪些插槽 id(`stored_ids`):不讀 keychain,讀不懂、更新版的檔案都只回錯誤,檔案留在原處。
+    #[test]
+    fn stored_ids_reads_only_the_ids_and_never_moves_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        assert!(stored_ids(&path).unwrap().is_empty(), "a missing file holds nothing");
+
+        let keychain = MemKeychain::default();
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
+        vault.put(&keychain, &"b".repeat(32), &entry(&test_keys::plain())).unwrap();
+        // 鑰匙圈鎖著也一樣讀得到:`stored_ids` 不開任何一筆。
+        keychain.fail_reads.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(stored_ids(&path).unwrap(), BTreeSet::from(["a".repeat(32), "b".repeat(32)]));
+
+        std::fs::write(&path, b"{ not json").unwrap();
+        assert!(matches!(stored_ids(&path), Err(VaultError::Unreadable { kept_as: None, .. })));
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json".to_vec(), "the unreadable file stays where it is");
+        std::fs::write(&path, br#"{"version": 99, "entries": {}}"#).unwrap();
+        assert!(matches!(stored_ids(&path), Err(VaultError::Newer { version: 99 })));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing was set aside");
     }
 
     #[test]

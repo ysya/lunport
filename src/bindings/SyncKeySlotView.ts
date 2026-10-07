@@ -44,4 +44,8 @@ devices: Array<SlotDeviceView>,
  * 帳戶裡還有這個插槽。false = 帳戶裡已經沒有(被刪除,或離開之後建立、加入了別的帳戶),這台還留著它的檔案:同步、挑金鑰這些動作都不適用,
  * 只能刪除沒有主機用到的副本。
  */
-in_account: boolean, };
+in_account: boolean, 
+/**
+ * 這台只在 SSHelter(私鑰在保管庫,經 agent 提供;金鑰保管庫 spec §4.3)。
+ */
+in_vault: boolean, };
