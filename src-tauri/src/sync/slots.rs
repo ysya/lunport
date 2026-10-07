@@ -1437,7 +1437,7 @@ fn holds_recorded_copy(copy: &SlotSource, path: &Path) -> bool {
 /// 主機(主 config、`~/.ssh/sshelter-local/`……,`config_slot_uses`;config 還沒載入就不知道有沒有,不刪)。路徑上的檔案必須還是這筆記錄放的那一份
 /// (`holds_recorded_copy`);不是(使用者換上的、別的插槽放的)就擋路,什麼都不刪。副本已經不在了:只忘掉記錄,旁邊的 `.pub` 不能確定是
 /// 自己的,不碰(同 `park_link`)。只在 SSHelter 的金鑰(`SlotSource::Vault`):插槽路徑上有檔案就擋路;否則拿掉保管庫裡那一筆與插槽旁的
-/// `.pub`(那是這筆記錄每一輪維護的),再忘掉記錄。
+/// `.pub`(那是這筆記錄每一輪維護的),再忘掉記錄;記在這台 keychain 的 passphrase 也一起忘掉(`forget_remembered_passphrase`)。
 pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let (state, _keys, home) = snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
@@ -1454,6 +1454,7 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
             return Err(AppError::Other(in_the_way_message(&path)));
         }
         with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.remove(slot_id))?;
+        forget_remembered_passphrase(env, slot_id);
         let _ = std::fs::remove_file(public_path(&path));
         mutate(env, |s| {
             s.key_slots.remove(slot_id);
@@ -1481,6 +1482,15 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 金鑰離開保管庫(`set_delivery` 改回檔案、`delete_copy` 刪掉只在 SSHelter 的金鑰)時,忘掉記在這台 keychain 的 passphrase(`vault:passphrase:<插槽 id>`):
+/// 它是那把金鑰的。不忘掉的話,這個插槽之後放進別把有 passphrase 的金鑰(Keep a file → 另一把金鑰 → Only in SSHelter)時,核准視窗先當成記住了 passphrase、
+/// 不顯示輸入欄,拿舊的去試新金鑰而失敗,接著才跳第二個視窗。盡力而為:刪不掉(keychain 鎖著或被拒)只記到 stderr,不讓動作失敗(沒有這筆也算成功)。
+fn forget_remembered_passphrase(env: &SyncEnv, slot_id: &str) {
+    if let Err(e) = env.keychain.delete(&crate::agent::broker::passphrase_account(slot_id)) {
+        eprintln!("[sync] cannot forget the remembered passphrase of slot {slot_id}: {e}");
+    }
+}
+
 /// 這台的插槽改成只在 SSHelter(`vault` = true:私鑰放進保管庫,插槽目錄只留 `.pub`)或改回檔案(插槽路徑放私鑰的副本,保管庫不再留它)。
 /// 使用者自己的原檔一律不碰;插槽路徑上可能是某把金鑰僅存名字的 hard link 或複製檔,改名保留(`retire_key`)而不刪除。
 ///
@@ -1494,6 +1504,8 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
 /// 不是從這個帳戶同步來的,`copy_from_another_account` 就設成 true,補寫 `key` 時要這台的同意),最後才拿掉保管庫那一筆:拿不掉只留下一筆沒有記錄
 /// 用到的(agent 不提供它),不會有記錄說金鑰在保管庫、保管庫裡卻沒有它。`.pub` 寫不進去或提交被拒(記錄還是保管庫的)就收回剛寫的私鑰檔,
 /// 不留下一個下一輪被當成擋路的檔案。
+///
+/// 改回檔案時,記在這台 keychain 的 passphrase 一起忘掉(`forget_remembered_passphrase`;盡力而為,刪不掉不讓動作失敗)。
 ///
 /// 兩個方向做完都會更新 agent 的設定(`agent::wiring::refresh_env`):`agent/config` 列的主機跟著這個插槽走,第一次需要時 Include 也在這時放進主 config。
 /// 更新不成(例如主 config 在載入之後被別的程式改過,存檔撞上 `Conflict`)只記到 stderr、不讓搬動本身失敗:`agent/config` 要等 Include 放好才寫,所以放不進去的那一次它還不存在,
@@ -1610,6 +1622,8 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
         if let Err(e) = with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.remove(slot_id)) {
             eprintln!("[sync] a key kept as a file again is still in SSHelter's vault: {e}");
         }
+        // 金鑰已經不在保管庫裡了:記在這台的 passphrase 也忘掉(`forget_remembered_passphrase`)。
+        forget_remembered_passphrase(env, slot_id);
     }
     if let Err(e) = crate::agent::wiring::refresh_env(env) {
         eprintln!("[agent] could not update the agent config: {e}");
@@ -5996,6 +6010,79 @@ pub(crate) mod tests {
         assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Linked { .. })), "the slot is still linked");
         assert!(slot_files::occupied(&slot), "its slot file is still there");
         assert!(vault_ids(&a).is_empty(), "the vault holds nothing for it");
+    }
+
+    // ── 金鑰離開保管庫時,忘掉記在這台的 passphrase ─────────────────────────────────────────────────
+
+    /// 在 `d` 的 keychain 放一筆「記在這台」的 passphrase(核准視窗的「Remember on this computer」做的事),再放一筆別的插槽的。
+    fn remember_passphrases(d: &TestDevice, slot_id: &str) -> (String, String) {
+        use crate::sync::env::Keychain as _;
+        let (mine, other) = (crate::agent::broker::passphrase_account(slot_id), crate::agent::broker::passphrase_account("another-slot"));
+        d.keychain.set(&mine, "test-passphrase").unwrap();
+        d.keychain.set(&other, "someone else's").unwrap();
+        (mine, other)
+    }
+
+    /// 有 passphrase 的金鑰搬進保管庫、核准視窗記住了它的 passphrase;之後 Keep a file。
+    fn encrypted_key_in_the_vault(d: &TestDevice, personal: &str) -> String {
+        let (id, file) = create_slot_on(d, SlotMode::Own, &test_keys::encrypted(), "id_enc");
+        use_slot(d, personal, &file);
+        settle(d);
+        set_delivery(&d.env(), &id, true).unwrap();
+        id
+    }
+
+    /// Keep a file 之後,記在這台的 passphrase 是那把金鑰的:忘掉它。不然之後這個插槽放進別把有 passphrase 的金鑰、再按 Only in SSHelter 時,核准視窗先拿舊的
+    /// passphrase 去試新金鑰而失敗,再跳第二個視窗。別的插槽的 passphrase 不動。
+    #[test]
+    fn keeping_a_file_forgets_the_passphrase_remembered_for_the_key() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let id = encrypted_key_in_the_vault(&a, &personal);
+        let (mine, other) = remember_passphrases(&a, &id);
+
+        set_delivery(&a.env(), &id, false).unwrap();
+        assert_eq!(a.keychain.entry(&mine), None, "the passphrase belonged to the key that left the vault");
+        assert_eq!(a.keychain.entry(&other).as_deref(), Some("someone else's"), "another slot's passphrase is not touched");
+    }
+
+    /// 忘掉 passphrase 是盡力而為:keychain 拒絕刪除時,Keep a file 照樣成功(私鑰回到插槽、記錄改成檔案),只記到 stderr。
+    #[test]
+    fn a_passphrase_the_keychain_will_not_forget_does_not_fail_keep_a_file() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let id = encrypted_key_in_the_vault(&a, &personal);
+        let (mine, _other) = remember_passphrases(&a, &id);
+        a.keychain.fail_deletes.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        set_delivery(&a.env(), &id, false).expect("a refused delete must not fail the move");
+        assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { .. })), "the key is a file again");
+        assert!(slot_files::occupied(&home(&a).join(SLOT_DIR).join(&a.state().key_slots[&id].file_name)), "its private key is back in the slot");
+        assert_eq!(a.keychain.entry(&mine).as_deref(), Some("test-passphrase"), "the keychain refused, so the entry is still there");
+    }
+
+    /// 刪掉只在 SSHelter 的金鑰(`delete_copy` 的保管庫那一支)時,它記在這台的 passphrase 一起忘掉。
+    #[test]
+    fn deleting_a_vault_key_forgets_the_passphrase_remembered_for_it() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let id = encrypted_key_in_the_vault(&a, &personal);
+        let (mine, other) = remember_passphrases(&a, &id);
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 1.1.1.1\n");
+        settle(&a);
+
+        delete_copy(&a.env(), &id).unwrap();
+        assert!(vault_ids(&a).is_empty(), "setup: the key left the vault");
+        assert_eq!(a.keychain.entry(&mine), None, "so did its remembered passphrase");
+        assert_eq!(a.keychain.entry(&other).as_deref(), Some("someone else's"), "another slot's passphrase is not touched");
+    }
+
+    /// 一個還在保管庫裡的金鑰,它的 passphrase 不能被忘掉:`set_delivery(…, true)` 搬進去、與已經在保管庫裡的重複呼叫都不動它。
+    #[test]
+    fn a_key_that_stays_in_the_vault_keeps_its_remembered_passphrase() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let id = encrypted_key_in_the_vault(&a, &personal);
+        let (mine, _other) = remember_passphrases(&a, &id);
+        set_delivery(&a.env(), &id, true).unwrap();
+        settle(&a);
+        assert_eq!(a.keychain.entry(&mine).as_deref(), Some("test-passphrase"));
     }
 
     /// 種類與加密方式 agent 都處理得了的金鑰(Ed25519、ECDSA、RSA;有 passphrase 的用支援的加密方式)照常搬進保管庫。
