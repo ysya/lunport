@@ -429,6 +429,86 @@ pub(crate) mod test_keys {
     pub fn rsa() -> String {
         armor(RSA_BODY)
     }
+
+    /// 把一個 SSH string(`uint32` 長度 + 內容)接到 `out` 後面。
+    fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(bytes);
+    }
+
+    /// 把一個二進位的 OpenSSH 私鑰內容包成文字(每 70 字元一行)。
+    fn armor_bytes(bytes: &[u8]) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let b64 = STANDARD.encode(bytes);
+        let lines: Vec<&str> = b64.as_bytes().chunks(70).map(|c| std::str::from_utf8(c).unwrap()).collect();
+        armor(&lines)
+    }
+
+    /// 組一行公鑰:演算法名稱,後面每個欄位都是一個 SSH string(sk 金鑰的公鑰與 application、DSA 的四個 mpint 都是)。
+    pub fn public_line(algorithm: &str, fields: &[&[u8]]) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let mut blob = Vec::new();
+        put_string(&mut blob, algorithm.as_bytes());
+        for field in fields {
+            put_string(&mut blob, field);
+        }
+        format!("{algorithm} {}", STANDARD.encode(blob))
+    }
+
+    /// `sk-ssh-ed25519@openssh.com`(FIDO 安全金鑰)的公鑰那一行。
+    pub fn sk_public() -> String {
+        public_line("sk-ssh-ed25519@openssh.com", &[&[7; 32], b"ssh:"])
+    }
+
+    /// `ssh-dss`(DSA)的公鑰那一行(四個 mpint 隨便填,`ssh-key` 讀得懂就好)。
+    pub fn dsa_public() -> String {
+        public_line("ssh-dss", &[&[1], &[2], &[3], &[4]])
+    }
+
+    /// 沒有加密的 `sk-ssh-ed25519@openssh.com` 私鑰檔,照 OpenSSH 的 `openssh-key-v1` 格式手工組出來(私鑰段:公鑰、application、flags、key handle、
+    /// reserved、comment,補到 8 的倍數)。`inspect_private_key` 讀得懂,但 SSHelter 的 agent 簽不了這種金鑰。
+    pub fn security_key() -> String {
+        let mut public = Vec::new();
+        put_string(&mut public, b"sk-ssh-ed25519@openssh.com");
+        put_string(&mut public, &[7; 32]);
+        put_string(&mut public, b"ssh:");
+        let mut body = b"openssh-key-v1\0".to_vec();
+        put_string(&mut body, b"none"); // cipher
+        put_string(&mut body, b"none"); // kdf
+        put_string(&mut body, b""); // kdf options
+        body.extend_from_slice(&1u32.to_be_bytes()); // 一把金鑰
+        put_string(&mut body, &public);
+        let mut private = vec![1, 2, 3, 4, 1, 2, 3, 4]; // 兩個相同的 checkint
+        put_string(&mut private, b"sk-ssh-ed25519@openssh.com");
+        put_string(&mut private, &[7; 32]);
+        put_string(&mut private, b"ssh:");
+        private.push(1); // flags
+        put_string(&mut private, b"handle"); // key handle
+        put_string(&mut private, b""); // reserved
+        put_string(&mut private, b"sp3-sk"); // comment
+        let mut pad = 1u8;
+        while private.len() % 8 != 0 {
+            private.push(pad);
+            pad += 1;
+        }
+        put_string(&mut body, &private);
+        armor_bytes(&body)
+    }
+
+    /// 加密過的測試私鑰,標頭裡的加密方式改標成 `3des-cbc`(`ssh-key` 0.6.7 讀得懂、但解不開)。只換標頭裡的名稱,金鑰的位元組不動。
+    pub fn encrypted_with_3des_label() -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let bytes = STANDARD.decode(ENC_BODY.concat()).unwrap();
+        let (magic, rest) = bytes.split_at(b"openssh-key-v1\0".len());
+        let (old_len, after_len) = rest.split_at(4);
+        assert_eq!(old_len, 10u32.to_be_bytes(), "the fixture is expected to start with `aes256-ctr`");
+        let (old_name, tail) = after_len.split_at(10);
+        assert_eq!(old_name, b"aes256-ctr");
+        let mut relabelled = magic.to_vec();
+        put_string(&mut relabelled, b"3des-cbc");
+        relabelled.extend_from_slice(tail);
+        armor_bytes(&relabelled)
+    }
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ use crate::sync::slot_rules::{
     SLOT_SCHEMA,
 };
 use crate::sync::state_v2::{sealed_key, AccountState, LocalSlot, SealedRecord, SlotSource, SyncNotice, SyncStateV2};
+use crate::vault::material;
 use crate::vault::store::{vault_path, with_vault, EntryOrigin, VaultEntry};
 
 // ── 帳戶記錄 ──────────────────────────────────────────────────────────────────────────────────
@@ -231,6 +232,14 @@ pub const VAULT_FIRST_MESSAGE: &str = "This key is only in SSHelter. Choose Keep
 
 /// 保管庫裡這個插槽的那一筆不是記錄裡的那一把(指紋不同):不拿它當成這個插槽的金鑰(`vault_text`、`set_delivery`)。
 pub const VAULT_MISMATCH_MESSAGE: &str = "The key in SSHelter's vault doesn't match this slot.";
+
+/// 「Only in SSHelter」拒絕 agent 簽不了的種類(不是 Ed25519、ECDSA、RSA:`sk-*` 的安全金鑰、DSA;`vault::material::agent_can_sign`)。
+pub const VAULT_KEY_TYPE_MESSAGE: &str =
+    "SSHelter's agent can't use this kind of key (for example a security key or a DSA key), so it stays as a file.";
+
+/// 「Only in SSHelter」拒絕 agent 解不開的加密方式(不在 `vault::material::SUPPORTED_CIPHERS` 上,例如 `3des-cbc`)。
+pub const VAULT_KEY_CIPHER_MESSAGE: &str =
+    "SSHelter's agent can't open this key's encryption. Re-encrypt it with `ssh-keygen -p`, then try again.";
 
 // ── 每一輪在這台維護插槽(SP3 spec §6.2–§6.6)──────────────────────────────────────────────────
 //
@@ -1475,7 +1484,8 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
 /// 這台的插槽改成只在 SSHelter(`vault` = true:私鑰放進保管庫,插槽目錄只留 `.pub`)或改回檔案(插槽路徑放私鑰的副本,保管庫不再留它)。
 /// 使用者自己的原檔一律不碰;插槽路徑上可能是某把金鑰僅存名字的 hard link 或複製檔,改名保留(`retire_key`)而不刪除。
 ///
-/// 搬進保管庫:先放進保管庫,再處理插槽路徑上這個插槽自己的東西 —— 連結現在就拿掉(金鑰還在原檔;之後的步驟失敗,記錄還是連結,下一輪照它
+/// 搬進保管庫:先確認 agent 簽得了、打得開這把金鑰(`material::agent_can_sign`、`material::unsupported_cipher`),不行就拒絕
+/// (`VAULT_KEY_TYPE_MESSAGE`、`VAULT_KEY_CIPHER_MESSAGE`),插槽、插槽檔與保管庫都不動。然後放進保管庫,再處理插槽路徑上這個插槽自己的東西 —— 連結現在就拿掉(金鑰還在原檔;之後的步驟失敗,記錄還是連結,下一輪照它
 /// 重新連結),複製檔與可能是僅存名字的 hard link 改名保留;同步來的副本要等記錄提交之後才拿掉(只拿掉私鑰,`.pub` 留著)。先刪的話,之後的步驟
 /// 一失敗,記錄還說插槽裡有副本、檔案卻不見了,帳戶裡沒有這把金鑰時(Stop syncing 之後、之前的帳戶留下的副本)它只剩保管庫裡一筆沒有記錄用到的。
 /// 兩次檢查之間出現在路徑上的檔案不是這個插槽的:擋路,不碰。
@@ -1508,6 +1518,13 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
         let text = readable_key(Some(&local), &keys_dir)
             .ok_or_else(|| AppError::Other(source_gone_message(&slot_path.display().to_string())))?;
         let facts = inspect_private_key(&text).map_err(|e| AppError::Other(e.message().to_string()))?;
+        // agent 簽不了、打不開的金鑰不搬進保管庫:搬進去插槽檔就沒了,agent 卻不列出它、也簽不了,用它的主機會無聲地連不上。放進保管庫之前拒絕,什麼都不動。
+        if !material::public_key_data(&facts.public_key).is_some_and(|data| material::agent_can_sign(&data)) {
+            return Err(AppError::Other(VAULT_KEY_TYPE_MESSAGE.to_string()));
+        }
+        if material::unsupported_cipher(&text).is_some() {
+            return Err(AppError::Other(VAULT_KEY_CIPHER_MESSAGE.to_string()));
+        }
         match occupant(Some(&local), &local.file_name, &slot_path) {
             Occupant::NotOurs => return Err(AppError::Other(in_the_way_message(&slot_path))),
             Occupant::OwnLink | Occupant::OwnKey | Occupant::Empty => {}
@@ -5933,5 +5950,63 @@ pub(crate) mod tests {
         recover_vault_entry(&mut local, SLOT_ID, &account, &keys, 5, &failing);
         assert_eq!(local.last_error.as_deref(), Some("keychain error: locked"));
         assert!(matches!(local.source, Some(SlotSource::Vault { .. })));
+    }
+
+    // ── 「Only in SSHelter」只收 agent 簽得了、打得開的金鑰 ───────────────────────────────────────────
+
+    /// 保管庫檔裡有哪些插槽 id(只讀檔裡的 id,不開 keychain)。
+    fn vault_ids(d: &TestDevice) -> BTreeSet<String> {
+        crate::vault::store::stored_ids(&vault_path(&d.env().state_path)).unwrap()
+    }
+
+    /// 安全金鑰(`sk-*`)的 agent 簽不了:搬進保管庫的話插槽檔就沒了,agent 卻不列出它、也簽不了,用它的主機會無聲地連不上。拒絕,
+    /// 插槽的記錄、插槽檔、使用者的原檔與保管庫都不動。
+    #[test]
+    fn a_security_key_stays_a_file_because_the_agent_cannot_sign_with_it() {
+        let sk = test_keys::security_key();
+        assert!(inspect_private_key(&sk).is_ok(), "setup: SP3 reads it as an OpenSSH private key");
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &sk, "id_sk");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let slot = home(&a).join(SLOT_DIR).join(&file);
+        let before = a.state().key_slots[&id].source.clone();
+        assert!(matches!(before, Some(SlotSource::Linked { .. })) && slot_files::occupied(&slot), "setup: the slot links to the key file");
+
+        refused(&a, VAULT_KEY_TYPE_MESSAGE, || set_delivery(&a.env(), &id, true));
+        assert_eq!(a.state().key_slots[&id].source, before, "the slot still has its source");
+        assert!(slot_files::occupied(&slot), "and its slot file");
+        assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_sk")).unwrap(), sk, "the user's own file is untouched");
+        assert!(vault_ids(&a).is_empty(), "the vault holds nothing for it");
+        assert!(crate::agent::broker::vault_keys(&a.state()).is_empty(), "so the agent has nothing to list");
+    }
+
+    /// 加密方式不在 `SUPPORTED_CIPHERS` 上的金鑰(例如 `3des-cbc`),agent 連對的 passphrase 都解不開:同樣拒絕、什麼都不動。
+    #[test]
+    fn a_key_encrypted_in_a_way_the_agent_cannot_open_stays_a_file() {
+        let key = test_keys::encrypted_with_3des_label();
+        assert!(inspect_private_key(&key).is_ok_and(|facts| facts.has_passphrase), "setup: SP3 reads it as an encrypted OpenSSH private key");
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &key, "id_3des");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        let slot = home(&a).join(SLOT_DIR).join(&file);
+
+        refused(&a, VAULT_KEY_CIPHER_MESSAGE, || set_delivery(&a.env(), &id, true));
+        assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Linked { .. })), "the slot is still linked");
+        assert!(slot_files::occupied(&slot), "its slot file is still there");
+        assert!(vault_ids(&a).is_empty(), "the vault holds nothing for it");
+    }
+
+    /// 種類與加密方式 agent 都處理得了的金鑰(Ed25519、ECDSA、RSA;有 passphrase 的用支援的加密方式)照常搬進保管庫。
+    #[test]
+    fn every_kind_the_agent_can_sign_with_still_moves_into_the_vault() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        for (file, key) in [("id_ed", test_keys::plain()), ("id_ecdsa", test_keys::ecdsa()), ("id_rsa", test_keys::rsa()), ("id_enc", test_keys::encrypted())] {
+            let (id, _) = create_slot_on(&a, SlotMode::Own, &key, file);
+            set_delivery(&a.env(), &id, true).unwrap_or_else(|e| panic!("{file}: {e}"));
+            assert_eq!(vault_entry(&a, &id).map(|entry| entry.private_key.clone()), Some(key), "{file} is in the vault");
+            assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "{file} is recorded as only in SSHelter");
+        }
     }
 }

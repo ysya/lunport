@@ -5,7 +5,7 @@ use rsa::signature::{RandomizedSigner, SignatureEncoding};
 use ssh_encoding::Encode;
 use ssh_key::private::{KeypairData, RsaKeypair};
 use ssh_key::public::KeyData;
-use ssh_key::{PrivateKey, PublicKey};
+use ssh_key::{Algorithm, PrivateKey, PublicKey};
 
 use crate::error::AppError;
 
@@ -29,7 +29,7 @@ pub const SUPPORTED_CIPHERS: &[&str] = &[
 pub enum OpenError {
     /// 有 passphrase,沒有給。
     NeedsPassphrase,
-    /// passphrase 不對(加密方式是支援的那幾種,所以錯的一定是 passphrase)。
+    /// passphrase 不對,或加密內容損毀(加密方式是支援的那幾種,但 `ssh-key` 解密失敗時分不出是哪一個)。
     WrongPassphrase,
     /// 這種加密方式解不開。
     UnsupportedCipher(String),
@@ -47,19 +47,39 @@ pub fn public_key_data(public_key_line: &str) -> Option<KeyData> {
     PublicKey::from_openssh(public_key_line.trim()).ok().map(|key| key.key_data().clone())
 }
 
+/// agent 簽得了這種金鑰嗎:Ed25519、ECDSA、RSA。`sk-*`(FIDO 安全金鑰,簽章要靠硬體)與 DSA 不行。這是唯一的規則:agent 列出金鑰、比對簽章請求
+/// (`agent::broker`),和「Only in SSHelter」收不收這把金鑰(`sync::slots::set_delivery`)都看它 —— 簽不了的金鑰不列出,也不搬進保管庫。
+pub fn agent_can_sign(data: &KeyData) -> bool {
+    matches!(data.algorithm(), Algorithm::Ed25519 | Algorithm::Ecdsa { .. } | Algorithm::Rsa { .. })
+}
+
 pub fn is_encrypted(private_key: &str) -> bool {
     PrivateKey::from_openssh(private_key).is_ok_and(|key| key.is_encrypted())
+}
+
+/// 這把私鑰要是加密過、加密方式又不在 `SUPPORTED_CIPHERS` 上,回傳那個名稱(`open` 回 `UnsupportedCipher` 的判斷)。
+fn unsupported_cipher_of(key: &PrivateKey) -> Option<String> {
+    if !key.is_encrypted() {
+        return None;
+    }
+    let cipher = key.cipher().as_str();
+    (!SUPPORTED_CIPHERS.contains(&cipher)).then(|| cipher.to_string())
+}
+
+/// 私鑰原文的加密方式 agent 解不開(例如 `3des-cbc`)就回傳它的名稱;沒有加密、解得開,或讀不懂(那是 `open` 要回報的 `Unreadable`)都是 None。
+/// 不必 passphrase,也不解密:「Only in SSHelter」用它在搬進保管庫之前拒絕這把金鑰。
+pub fn unsupported_cipher(private_key: &str) -> Option<String> {
+    PrivateKey::from_openssh(private_key).ok().and_then(|key| unsupported_cipher_of(&key))
 }
 
 /// 解析私鑰原文;有 passphrase 的用 `passphrase` 解開。
 pub fn open(private_key: &str, passphrase: Option<&str>) -> Result<Material, OpenError> {
     let key = PrivateKey::from_openssh(private_key).map_err(|_| OpenError::Unreadable)?;
+    if let Some(cipher) = unsupported_cipher_of(&key) {
+        return Err(OpenError::UnsupportedCipher(cipher));
+    }
     if !key.is_encrypted() {
         return Ok(Material { key });
-    }
-    let cipher = key.cipher().as_str().to_string();
-    if !SUPPORTED_CIPHERS.contains(&cipher.as_str()) {
-        return Err(OpenError::UnsupportedCipher(cipher));
     }
     let Some(passphrase) = passphrase else { return Err(OpenError::NeedsPassphrase) };
     key.decrypt(passphrase).map(|key| Material { key }).map_err(|_| OpenError::WrongPassphrase)
@@ -133,7 +153,7 @@ mod tests {
     use crate::sync::slot_rules::test_keys;
     use ssh_encoding::Decode;
 
-    /// Verify an Ed25519, ECDSA or rsa-sha2 signature blob with ssh-key.
+    /// 用 ssh-key 驗證 Ed25519、ECDSA 或 rsa-sha2 的簽章 blob。
     fn verify(public_line: &str, data: &[u8], blob: &[u8]) {
         use signature::Verifier;
         let key = public_key_data(public_line).unwrap();
@@ -141,7 +161,7 @@ mod tests {
         key.verify(data, &signature).unwrap();
     }
 
-    /// Split a signature blob into (algorithm, raw signature).
+    /// 把簽章 blob 拆成(演算法, 原始簽章)。
     fn split(blob: &[u8]) -> (String, Vec<u8>) {
         let mut r = blob;
         let algorithm = String::decode(&mut r).unwrap();
@@ -169,7 +189,7 @@ mod tests {
         assert_eq!(split(&blob).0, "rsa-sha2-256");
         verify(test_keys::RSA_PUBLIC, b"hello", &blob);
 
-        // No flag: legacy ssh-rsa (SHA-1), which ssh-key 0.6.7 cannot decode; verify with the rsa crate.
+        // 沒有 flag:舊的 ssh-rsa(SHA-1),ssh-key 0.6.7 解不了,改用 rsa 套件驗證。
         let (algorithm, raw) = split(&material.sign(b"hello", 0).unwrap());
         assert_eq!(algorithm, "ssh-rsa");
         use rsa::signature::Verifier as _;
@@ -191,28 +211,10 @@ mod tests {
         verify(test_keys::ENC_PUBLIC, b"x", &material.sign(b"x", 0).unwrap());
     }
 
-    /// 加密過的測試私鑰,標頭裡的加密方式改標成 `3des-cbc`(`ssh-key` 0.6.7 讀得懂、但解不開)。只換標頭裡的名稱,金鑰的位元組不動。
-    fn encrypted_with_3des_label() -> String {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        let bytes = STANDARD.decode(test_keys::ENC_BODY.concat()).unwrap();
-        let (magic, rest) = bytes.split_at(b"openssh-key-v1\0".len());
-        let (old_len, after_len) = rest.split_at(4);
-        assert_eq!(old_len, 10u32.to_be_bytes(), "the fixture is expected to start with `aes256-ctr`");
-        let (old_name, tail) = after_len.split_at(10);
-        assert_eq!(old_name, b"aes256-ctr");
-        let mut relabelled = magic.to_vec();
-        relabelled.extend_from_slice(&8u32.to_be_bytes());
-        relabelled.extend_from_slice(b"3des-cbc");
-        relabelled.extend_from_slice(tail);
-        let b64 = STANDARD.encode(relabelled);
-        let lines: Vec<&str> = b64.as_bytes().chunks(70).map(|c| std::str::from_utf8(c).unwrap()).collect();
-        test_keys::armor(&lines)
-    }
-
     #[test]
     fn an_unsupported_cipher_is_reported_before_any_passphrase_is_tried() {
         // `ssh-key` 對「passphrase 不對」與「解不開這種加密方式」回同一種錯誤(連對的 passphrase 都會被當成錯的),所以要先看加密方式。
-        let text = encrypted_with_3des_label();
+        let text = test_keys::encrypted_with_3des_label();
         assert!(is_encrypted(&text));
         let expected = Some(OpenError::UnsupportedCipher("3des-cbc".to_string()));
         assert_eq!(open(&text, None).err(), expected);
@@ -233,5 +235,27 @@ mod tests {
         let commented = public_key_data(&format!("{} someone@host\n", test_keys::PLAIN_PUBLIC)).unwrap();
         assert_eq!(bare, commented);
         assert_eq!(public_key_data("garbage"), None);
+    }
+
+    #[test]
+    fn the_agent_signs_only_with_ed25519_ecdsa_and_rsa_keys() {
+        for (kind, public) in [("ed25519", test_keys::PLAIN_PUBLIC.to_string()), ("ecdsa", test_keys::ECDSA_PUBLIC.to_string()), ("rsa", test_keys::RSA_PUBLIC.to_string())] {
+            assert!(agent_can_sign(&public_key_data(&public).unwrap()), "{kind}");
+        }
+        // 讀得懂的公鑰,agent 卻簽不了:安全金鑰的簽章要靠硬體,DSA 不支援。
+        for (kind, public) in [("sk-ed25519", test_keys::sk_public()), ("dsa", test_keys::dsa_public())] {
+            let data = public_key_data(&public).unwrap_or_else(|| panic!("{kind}: setup: the public key parses"));
+            assert!(!agent_can_sign(&data), "{kind}");
+        }
+    }
+
+    #[test]
+    fn an_encryption_the_agent_cannot_open_is_named_without_a_passphrase() {
+        assert_eq!(unsupported_cipher(&test_keys::encrypted_with_3des_label()), Some("3des-cbc".to_string()));
+        assert_eq!(unsupported_cipher(&test_keys::encrypted()), None, "aes256-ctr is on the supported list");
+        assert_eq!(unsupported_cipher(&test_keys::plain()), None, "no encryption at all");
+        assert_eq!(unsupported_cipher("not a key"), None, "an unreadable key is `open`'s to report");
+        // `open` 與這個判斷是同一條規則:認得出的加密方式才有機會問 passphrase。
+        assert_eq!(open(&test_keys::encrypted_with_3des_label(), Some("test-passphrase")).err(), Some(OpenError::UnsupportedCipher("3des-cbc".to_string())));
     }
 }

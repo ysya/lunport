@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use ssh_key::public::KeyData;
-use ssh_key::{Algorithm, HashAlg};
+use ssh_key::HashAlg;
 use zeroize::Zeroizing;
 
 use crate::agent::approval::{remember_minutes, verdict, ApprovalCache, ApprovalKey, KeyProtection, Verdict};
@@ -219,11 +219,10 @@ fn remembered_passphrase(host: &dyn AgentHost, slot_id: &str) -> Option<Zeroizin
     host.keychain().get(&passphrase_account(slot_id)).ok().flatten().map(Zeroizing::new)
 }
 
-/// 這把金鑰的公鑰,只限 agent 簽得了的種類(Ed25519、ECDSA、RSA):`sk-*`(FIDO)與 DSA 的金鑰不列出,也不比對簽章請求,
-/// 免得使用者核准之後才發現簽不出來。
+/// 這把金鑰的公鑰,只限 agent 簽得了的種類(`material::agent_can_sign`:Ed25519、ECDSA、RSA):`sk-*`(FIDO)與 DSA 的金鑰不列出,
+/// 也不比對簽章請求,免得使用者核准之後才發現簽不出來。
 fn signable_public_key(key: &VaultKey) -> Option<KeyData> {
-    material::public_key_data(&key.public_key)
-        .filter(|data| matches!(data.algorithm(), Algorithm::Ed25519 | Algorithm::Ecdsa { .. } | Algorithm::Rsa { .. }))
+    material::public_key_data(&key.public_key).filter(material::agent_can_sign)
 }
 
 /// 一個簽章請求要顯示的一切。
@@ -1126,18 +1125,6 @@ mod tests {
 
     // agent 簽不了的金鑰、保管庫裡對不上的內容、核准的主機與金鑰、使用者允許之後的拒絕、等待的上限、到期與中毒的鎖。
 
-    /// 組一行公鑰:演算法名稱,後面每個欄位都是一個 SSH string(sk 金鑰的公鑰與 application、DSA 的四個 mpint 都是)。
-    fn public_line(algorithm: &str, fields: &[&[u8]]) -> String {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        use ssh_encoding::Encode;
-        let mut blob = Vec::new();
-        algorithm.encode(&mut blob).unwrap();
-        for field in fields {
-            field.encode(&mut blob).unwrap();
-        }
-        format!("{algorithm} {}", STANDARD.encode(blob))
-    }
-
     /// 在替身主機上加一把沒有 passphrase 的金鑰。
     fn add_key(host: &mut FakeHost, slot_id: &str, name: &str, public: &str, fingerprint: &str, private: String) {
         host.keys.push(VaultKey {
@@ -1154,8 +1141,7 @@ mod tests {
     fn keys_the_agent_cannot_sign_with_are_neither_listed_nor_matched() {
         let broker = Broker::default();
         let mut host = FakeHost::new();
-        let sk = public_line("sk-ssh-ed25519@openssh.com", &[&[7; 32], b"ssh:"]);
-        let dsa = public_line("ssh-dss", &[&[1], &[2], &[3], &[4]]);
+        let (sk, dsa) = (test_keys::sk_public(), test_keys::dsa_public());
         assert!(material::public_key_data(&sk).is_some() && material::public_key_data(&dsa).is_some(), "the fixtures are valid public keys");
         add_key(&mut host, &"1".repeat(32), "id_sk", &sk, "SHA256:sk", test_keys::plain());
         add_key(&mut host, &"2".repeat(32), "id_dsa", &dsa, "SHA256:dsa", test_keys::plain());
