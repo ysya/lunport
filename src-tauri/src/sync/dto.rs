@@ -156,7 +156,8 @@ pub struct SyncKeySlotView {
     /// 這台只在 SSHelter(私鑰在保管庫,經 agent 提供;金鑰保管庫 spec §4.3)。
     pub in_vault: bool,
     /// 這台用的是檔案(SP3 的連結或同步來的副本):更新前留下的,或保管庫用不了時暫時落地的(金鑰保管庫 spec §4.3、§11)。畫面標「File for now」,
-    /// 「Move」把它搬進保管庫。
+    /// 「Move」把它搬進保管庫。agent 永遠放不下的金鑰(安全金鑰與 DSA、解不開的加密方式、讀不懂的、舊式 PEM)不算:它們只能留在檔案,不標、Move 也不碰;
+    /// 現在讀不到金鑰(原檔不見)的還算,Move 會說明原因。
     pub file_for_now: bool,
 }
 

@@ -237,7 +237,8 @@ pub fn vault_slot_files(state: &SyncStateV2) -> BTreeSet<String> {
         .collect()
 }
 
-/// 這台用的還是檔案(SP3 的連結,沒有收起來的;或同步來的副本)。「Move」把它搬進保管庫(金鑰保管庫 spec §8)。
+/// 這台用的還是檔案(SP3 的連結,沒有收起來的;或同步來的副本)。「Move」把它搬進保管庫(金鑰保管庫 spec §8)。畫面的「File for now」與「Move」另外要看金鑰搬不搬得進去
+/// (`can_move_into_vault`)。
 pub(crate) fn is_file_for_now(local: &LocalSlot) -> bool {
     match &local.source {
         Some(SlotSource::SyncedCopy { .. }) => true,
@@ -246,14 +247,33 @@ pub(crate) fn is_file_for_now(local: &LocalSlot) -> bool {
     }
 }
 
-/// 「Move」(金鑰保管庫 spec §8):這台還是檔案的插槽(`is_file_for_now`)一把一把搬進保管庫(`set_delivery`)。一把搬不進去就記下原因、繼續下一把;
-/// 回傳搬不進去的那些(畫面顯示原因,那一把維持檔案)。
+/// 這台還是檔案的插槽(`is_file_for_now`),它的金鑰有沒有搬進保管庫的一天:金鑰讀得到、卻永遠放不進去 —— `inspect_private_key` 讀不懂(例如舊式 PEM),或 agent 用不了
+/// (`agent_refusal`:安全金鑰與 DSA、解不開的加密方式、`ssh-key` 讀不懂)—— 回 false。這樣的金鑰「File for now」不標、「Move」不碰:標了,提示會一直出現,按了一定失敗
+/// (金鑰保管庫 spec §8)。現在讀不到金鑰(連結斷了、原檔不見、副本被刪掉)是暫時的,算搬得進去:「Move」會回報原因。每次組 overview 都會跑,所以讀之前先確認它是不超過
+/// 64 KiB 的私鑰檔(同 `local_key_passphrase`,不會卡在 FIFO 之類的檔案上),不是的話當成讀不到。只看金鑰本身,不看保管庫現在能不能用。
+fn can_move_into_vault(local: &LocalSlot, keys_dir: &Path) -> bool {
+    let file = match &local.source {
+        Some(SlotSource::Linked { path, .. }) => PathBuf::from(path),
+        Some(SlotSource::SyncedCopy { .. }) => keys_dir.join(&local.file_name),
+        _ => return true,
+    };
+    if !crate::sync::slot_setup::is_private_key_file(&file) {
+        return true;
+    }
+    let Some(text) = readable_key(Some(local), keys_dir).map(Zeroizing::new) else { return true };
+    inspect_private_key(&text).is_ok_and(|facts| agent_refusal(&text, &facts).is_none())
+}
+
+/// 「Move」(金鑰保管庫 spec §8):這台還是檔案、金鑰又搬得進去的插槽(`is_file_for_now`、`can_move_into_vault`,同畫面的「File for now」)一把一把搬進保管庫(`set_delivery`)。
+/// 一把搬不進去就記下原因、繼續下一把;回傳搬不進去的那些(畫面顯示原因,那一把維持檔案)。永遠搬不進去的金鑰(安全金鑰……)不碰、也不回報。
 pub fn move_all_into_vault(env: &SyncEnv) -> Result<Vec<crate::sync::dto::MoveFailure>, AppError> {
     let state = crate::sync::runtime::snapshot(env).ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+    let home = env.ssh_dir.parent().ok_or_else(|| AppError::Other("cannot determine the home directory".to_string()))?;
+    let keys_dir = home.join(SLOT_DIR);
     let files: Vec<(String, String)> = state
         .key_slots
         .iter()
-        .filter(|(_, local)| is_file_for_now(local))
+        .filter(|(_, local)| is_file_for_now(local) && can_move_into_vault(local, &keys_dir))
         .map(|(id, local)| (id.clone(), local.payload.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| local.file_name.clone())))
         .collect();
     let mut failed = Vec::new();
@@ -1051,7 +1071,7 @@ pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path, in_use:
                 .collect(),
             in_account,
             in_vault: state.key_slots.get(id).is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. }))),
-            file_for_now: state.key_slots.get(id).is_some_and(is_file_for_now),
+            file_for_now: state.key_slots.get(id).is_some_and(|local| is_file_for_now(local) && can_move_into_vault(local, &keys_dir)),
         }
     };
     let mut out = Vec::new();
@@ -7075,5 +7095,103 @@ pub(crate) mod tests {
         assert!(vault_entry(&a, &stuck).is_none(), "and nothing of it is in the vault");
         assert!(matches!(a.state().key_slots[&moved].source, Some(SlotSource::Vault { .. })), "the other one moved");
         assert!(vault_entry(&a, &moved).is_some());
+    }
+
+    /// agent 永遠放不下的金鑰(安全金鑰、解不開的加密方式、`ssh-key` 讀不懂的、舊式 PEM)留在檔案:不標「File for now」(提示會一直出現、「Move」一定失敗),
+    /// 「Move」不碰它、也不回報它 —— 它的記錄與檔案原封不動;旁邊搬得進去的照搬。
+    #[test]
+    fn a_key_that_can_never_go_into_the_vault_is_not_a_file_for_now_and_move_leaves_it_alone() {
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n";
+        let kinds = [
+            ("a security key", test_keys::security_key()),
+            ("a cipher the agent cannot open", test_keys::encrypted_with_3des_label()),
+            ("a key ssh-key cannot read", test_keys::unreadable_comment()),
+            ("a legacy PEM key", pem.to_string()),
+        ];
+        for (what, text) in kinds {
+            let (_relay, _clock, a, _b, _words, personal) = pair();
+            let (never, never_file) = create_slot_on(&a, SlotMode::Own, &text, "id_never");
+            let (movable, movable_file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+            use_slots(&a, &personal, &[&never_file, &movable_file]);
+            settle(&a);
+            let before = a.state().key_slots[&never].clone();
+            let slot_path = home(&a).join(SLOT_DIR).join(&never_file);
+            assert!(is_file_for_now(&before) && slot_files::occupied(&slot_path), "{what}: setup: a link in use");
+
+            let shown = view_of(&a);
+            let flag = |id: &str| shown.iter().find(|v| v.id == id).map(|v| v.file_for_now);
+            assert_eq!((flag(&never), flag(&movable)), (Some(false), Some(true)), "{what}: only the key that can move is a file for now");
+
+            let failed = move_all_into_vault(&a.env()).unwrap();
+            assert!(failed.is_empty(), "{what}: nothing is reported for it: {failed:?}");
+            assert_eq!(a.state().key_slots[&never], before, "{what}: its record is untouched");
+            assert!(slot_files::occupied(&slot_path), "{what}: and so is its slot file");
+            assert_eq!(std::fs::read_to_string(a.ssh_dir().join("id_never")).unwrap(), text, "{what}: and the user's own file");
+            assert!(vault_entry(&a, &never).is_none(), "{what}: nothing of it is in the vault");
+            assert!(matches!(a.state().key_slots[&movable].source, Some(SlotSource::Vault { .. })), "{what}: the key next to it moved");
+        }
+    }
+
+    /// 同步來的金鑰 agent 永遠放不下(安全金鑰):落地成檔案(`SyncedCopy`),同樣不標「File for now」、「Move」不碰它。
+    #[test]
+    fn a_synced_key_the_agent_cannot_hold_is_not_a_file_for_now_either() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::security_key(), "id_sk");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let before = b.state().key_slots[&id].clone();
+        assert!(matches!(before.source, Some(SlotSource::SyncedCopy { .. })), "setup: it landed as a file");
+        assert!(!view_of(&b)[0].file_for_now);
+
+        assert!(move_all_into_vault(&b.env()).unwrap().is_empty());
+        assert_eq!(b.state().key_slots[&id], before);
+        assert_eq!(std::fs::read_to_string(home(&b).join(SLOT_DIR).join(&file)).unwrap(), test_keys::security_key(), "its copy is still the file ssh uses");
+        assert!(vault_entry(&b, &id).is_none());
+    }
+
+    /// 現在讀不到金鑰(連結斷了、原檔不見,或同步來的副本被刪掉)不算「永遠搬不進去」:仍標「File for now」,「Move」回報原因,那一把維持檔案。
+    #[test]
+    fn a_key_that_cannot_be_read_right_now_is_still_a_file_for_now_and_move_says_why() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        no_vault_on(&b);
+        let (linked, linked_file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &linked_file);
+        settle(&a);
+        settle(&b);
+        vault_on_again(&b);
+
+        // A:連到的原檔不見了,插槽的連結懸空。
+        std::fs::remove_file(a.ssh_dir().join("id_mac")).unwrap();
+        assert!(view_of(&a)[0].file_for_now, "a dangling link is still a file for now");
+        let failed = move_all_into_vault(&a.env()).unwrap();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert_eq!((failed[0].slot_id.as_str(), failed[0].name.as_str()), (linked.as_str(), "id_mac"));
+        assert!(failed[0].message.contains("is gone"), "{}", failed[0].message);
+        assert!(matches!(a.state().key_slots[&linked].source, Some(SlotSource::Linked { .. })), "and it stays a file");
+
+        // A:原檔被換成不是金鑰的東西(不像私鑰的檔案,overview 不讀它):一樣還算,「Move」說明讀不出私鑰。
+        std::fs::write(a.ssh_dir().join("id_mac"), "not a key\n").unwrap();
+        assert!(view_of(&a)[0].file_for_now, "a file that is no key any more is still a file for now");
+        let failed = move_all_into_vault(&a.env()).unwrap();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].message.contains(crate::sync::slot_rules::Unsyncable::Unreadable.message()), "{}", failed[0].message);
+        assert!(matches!(a.state().key_slots[&linked].source, Some(SlotSource::Linked { .. })), "and it stays a file");
+
+        // B:同步來的副本被刪掉了,或被換成另一把金鑰(不是記錄裡的那一把,`readable_key` 讀不到)。
+        assert!(matches!(b.state().key_slots[&linked].source, Some(SlotSource::SyncedCopy { .. })), "setup: B has a synced copy");
+        let copy = home(&b).join(SLOT_DIR).join(&linked_file);
+        std::fs::remove_file(&copy).unwrap();
+        for (what, other) in [("deleted", None), ("replaced by another key", Some(test_keys::ecdsa()))] {
+            if let Some(text) = other {
+                std::fs::write(&copy, text).unwrap();
+            }
+            assert!(view_of(&b)[0].file_for_now, "a copy that was {what} is still a file for now");
+            let failed = move_all_into_vault(&b.env()).unwrap();
+            assert_eq!(failed.len(), 1, "{what}: {failed:?}");
+            assert_eq!(failed[0].slot_id, linked, "{what}");
+            assert!(failed[0].message.contains("is gone"), "{what}: {}", failed[0].message);
+            assert!(matches!(b.state().key_slots[&linked].source, Some(SlotSource::SyncedCopy { .. })), "{what}: and it stays a file");
+        }
     }
 }
