@@ -132,7 +132,8 @@ pub trait VaultKeys {
     fn private_key(&self, slot_id: &str) -> Option<(Zeroizing<String>, EntryOrigin)>;
     /// 保管庫裡有沒有這一筆;保管庫讀不了(格式不認得、讀不懂、I/O 錯誤)→ None,呼叫端什麼都不做。
     fn holds(&self, slot_id: &str) -> Option<bool>;
-    /// 放進一筆(從帳戶取回、或同步來的金鑰)。原本是另一把的話它改存成 retired 項目(`Vault::replace`),不會丟掉。
+    /// 放進一筆(從帳戶取回、或同步來的金鑰)。原本是另一把的話它改存成 retired 項目(`Vault::replace`),不會丟掉;記在這台的 passphrase 是它的,一起忘掉
+    /// (`forget_remembered_passphrase`)。
     fn restore(&self, slot_id: &str, entry: &VaultEntry) -> Result<(), AppError>;
 }
 
@@ -176,7 +177,11 @@ impl VaultKeys for EnvVault<'_, '_> {
     fn restore(&self, slot_id: &str, entry: &VaultEntry) -> Result<(), AppError> {
         let path = vault_path(&self.env.state_path);
         let now = self.env.now();
-        Ok(with_vault(self.env.runtime, &path, self.env.keychain, now, |vault| vault.replace(self.env.keychain, slot_id, entry, now).map(|_| ()))?)
+        let retired = with_vault(self.env.runtime, &path, self.env.keychain, now, |vault| vault.replace(self.env.keychain, slot_id, entry, now))?;
+        if retired.is_some() {
+            forget_remembered_passphrase(self.env, slot_id);
+        }
+        Ok(())
     }
 }
 
@@ -1350,8 +1355,8 @@ enum IntoVault {
 
 /// 把 `text`(這台要給插槽 `slot_id` 用的私鑰)放進保管庫,插槽目錄只留 `.pub`。插槽路徑上只動這個插槽自己的東西(`occupant`):自己的連結拿掉
 /// (連到的原檔不動)、自己的副本或複製檔改名保留(`retire_key`);別人的東西 → 擋路,什麼都不做。保管庫裡原本是另一把的話,它改存成 retired
-/// (`Vault::replace`)。不提交記錄:呼叫端用 `Done` 的來源提交。放進保管庫之後的步驟(拿掉連結、寫 `.pub`)失敗回 Err:保管庫多了一筆,
-/// 記錄還是原本的,下一輪照原本的記錄維護。
+/// (`Vault::replace`),記在這台的 passphrase 是它的,一起忘掉(`forget_remembered_passphrase`);同一把不動它。不提交記錄:呼叫端用 `Done` 的來源提交。
+/// 放進保管庫之後的步驟(拿掉連結、寫 `.pub`)失敗回 Err:保管庫多了一筆,記錄還是原本的,下一輪照原本的記錄維護。
 #[allow(clippy::too_many_arguments)]
 fn into_vault(
     env: &SyncEnv,
@@ -1379,8 +1384,11 @@ fn into_vault(
         origin,
         added_at_ms: now,
     };
-    if let Err(e) = with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, now, |v| v.replace(env.keychain, slot_id, &entry, now)) {
-        return Ok(IntoVault::AsFile(AppError::from(e).to_string()));
+    match with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, now, |v| v.replace(env.keychain, slot_id, &entry, now)) {
+        Err(e) => return Ok(IntoVault::AsFile(AppError::from(e).to_string())),
+        // 原本是另一把金鑰(改存成 retired 了):記在這台的 passphrase 是它的,不是新金鑰的。
+        Ok(Some(_)) => forget_remembered_passphrase(env, slot_id),
+        Ok(None) => {}
     }
     match here {
         Occupant::OwnLink => slot_files::remove_slot(&slot_path)?,
@@ -1424,13 +1432,18 @@ fn refresh_agent(env: &SyncEnv) {
     }
 }
 
+/// 這個插槽在這台的記錄說金鑰在保管庫裡(`SlotSource::Vault`)。
+fn is_in_vault(local: Option<&LocalSlot>) -> bool {
+    local.is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. })))
+}
+
 /// 在這台為插槽挑一把金鑰(本機挑的優先,spec §6.2)。路徑上只有這個插槽自己的東西可以換掉(`occupant`):自己的連結由
 /// `slot_files::link` 原子地換成新的;同步來的副本、複製檔與可能是某把金鑰僅存名字的 hard link 先改名保留(計畫裁定 3)。連結之後
 /// `.pub` 從挑的這把金鑰重寫;記錄的路徑就是連結用的那個(每一輪在 Unix 上確認 symlink 正好指到它)。`.pub` 或記錄寫不進去就把剛放的
 /// 連結收回,下一輪依原本的記錄維護。這台同意上傳過的那把(`uploaded_fingerprint`)不變:挑的金鑰不會因此被上傳。記錄在哪個帳戶學到的
 /// (`learned_in`)也不變;這台還沒有記錄的話,就是快照裡插槽所在的帳戶(提交時帳戶換了就不記)。先試保管庫:複製一份進去(你的原檔不動,
 /// `into_vault`);讀不懂(例如舊式 PEM)、agent 用不了、保管庫用不了 → 照 SP3 連結原檔(「File for now」)。成功之後一律更新 agent 的設定(`refresh_agent`):
-/// 原本在保管庫的插槽改成連結時,用它的主機當場不再走 agent。
+/// 原本在保管庫的插槽改成連結時,用它的主機當場不再走 agent,記在這台的 passphrase 也忘掉(`forget_remembered_passphrase`:金鑰離開了保管庫)。
 pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
     let source = PathBuf::from(path);
     if !source.is_absolute() || !crate::sync::slot_setup::is_private_key_file(&source) {
@@ -1489,6 +1502,10 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
         let _ = slot_files::remove_slot(&slot_path);
         return Err(e);
     }
+    // 原本只在 SSHelter 的插槽(快照裡它的記錄說金鑰在保管庫)改成連結了:金鑰離開保管庫(同 Keep a file),記在這台的 passphrase 是它的,一起忘掉。
+    if is_in_vault(state.key_slots.get(slot_id)) {
+        forget_remembered_passphrase(env, slot_id);
+    }
     refresh_agent(env);
     env.events.wake();
     Ok(())
@@ -1498,7 +1515,8 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
 /// 自己的(`occupant`):自己的連結拿掉(連到的金鑰本身不動),舊副本、複製檔與可能是某把金鑰僅存名字的 hard link 改名保留(計畫裁定 3);
 /// 路徑上的東西不是它的(收起來的記錄、symlink 不是指到記錄的原檔……)就擋路。這台沒有在插槽裡放東西的話,同每一輪,`land` 只寫進空著
 /// 的路徑。落地之後的記錄不是收起來的,是快照裡那個帳戶的(`learned_in`:插槽裡的私鑰來自那裡;提交時帳戶換了就不改記),副本也不再是之前的帳戶的
-/// (`copy_from_another_account`)。先放進保管庫(這台原本那把改存成 retired,`into_vault`);放不進去照 SP3 落地成檔案。
+/// (`copy_from_another_account`)。先放進保管庫(這台原本那把改存成 retired,`into_vault`);放不進去照 SP3 落地成檔案,原本在保管庫的插槽因此離開保管庫時,
+/// 記在這台的 passphrase 也忘掉(`forget_remembered_passphrase`)。
 pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let (state, keys, home) = snapshot(env)?;
     let account = state.account.as_ref().ok_or_else(not_found)?;
@@ -1515,8 +1533,8 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let file = slot_file_name(&payload.name, slot_id);
     let slot_path = keys_dir.join(&file);
     let local = state.key_slots.get(slot_id);
-    let source = match into_vault(env, local, slot_id, &file, &keys_dir, &secret, &facts, EntryOrigin::Synced)? {
-        IntoVault::Done(source) => source,
+    let (source, left_the_vault) = match into_vault(env, local, slot_id, &file, &keys_dir, &secret, &facts, EntryOrigin::Synced)? {
+        IntoVault::Done(source) => (source, false),
         IntoVault::AsFile(reason) => {
             eprintln!("[sync] slot {slot_id} gets a file for now: {reason}");
             if local.is_some_and(|l| l.source.is_some()) {
@@ -1527,7 +1545,8 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
                     Occupant::Empty => {}
                 }
             }
-            SlotSource::SyncedCopy { fingerprint: land(&secret, &payload, &keys_dir, &slot_path).map_err(AppError::Other)? }
+            let fingerprint = land(&secret, &payload, &keys_dir, &slot_path).map_err(AppError::Other)?;
+            (SlotSource::SyncedCopy { fingerprint }, is_in_vault(local))
         }
     };
     mutate(env, |s| {
@@ -1553,6 +1572,11 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
         local.copy_from_another_account = local.learned_in.as_deref() != Some(keys.chain_id.as_str());
         Ok(())
     })?;
+    // 原本只在 SSHelter 的插槽改成檔案了(上面的 `AsFile`):金鑰離開保管庫(同 Keep a file),記在這台的 passphrase 是它的,一起忘掉。放進保管庫的(`Done`)不在這裡:
+    // 換掉另一把金鑰時,`into_vault` 已經忘掉了。
+    if left_the_vault {
+        forget_remembered_passphrase(env, slot_id);
+    }
     refresh_agent(env);
     env.events.wake();
     Ok(())
@@ -1626,9 +1650,11 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 金鑰離開保管庫(`set_delivery` 改回檔案、`delete_copy` 刪掉只在 SSHelter 的金鑰)時,忘掉記在這台 keychain 的 passphrase(`vault:passphrase:<插槽 id>`):
-/// 它是那把金鑰的。不忘掉的話,這個插槽之後放進別把有 passphrase 的金鑰(Keep a file → 另一把金鑰 → Only in SSHelter)時,核准視窗先當成記住了 passphrase、
-/// 不顯示輸入欄,拿舊的去試新金鑰而失敗,接著才跳第二個視窗。盡力而為:刪不掉(keychain 鎖著或被拒)只記到 stderr,不讓動作失敗(沒有這筆也算成功)。
+/// 插槽的金鑰變了 —— 離開保管庫(`set_delivery` 改回檔案、`delete_copy` 刪掉只在 SSHelter 的金鑰、`pick` 與 `use_synced` 放不進保管庫而改用連結或檔案),或被另一把
+/// 取代(`Vault::replace` 把原本那把改存成 retired:`into_vault`、`set_delivery` 搬進來、`EnvVault::restore`)—— 時,忘掉記在這台 keychain 的 passphrase
+/// (`vault:passphrase:<插槽 id>`):它是原本那把金鑰的。不忘掉的話,這個插槽的新金鑰第一次用的時候,核准視窗先當成記住了 passphrase、不顯示輸入欄,拿舊的去試
+/// 新金鑰而失敗,接著才跳第二個視窗;新金鑰沒有 passphrase 的話,舊的就一直留在 keychain。同一把金鑰放回去(`Vault::replace` 回 `None`)不動它。盡力而為:
+/// 刪不掉(keychain 鎖著或被拒)只記到 stderr,不讓動作失敗(沒有這筆也算成功)。
 fn forget_remembered_passphrase(env: &SyncEnv, slot_id: &str) {
     if let Err(e) = env.keychain.delete(&crate::agent::broker::passphrase_account(slot_id)) {
         eprintln!("[sync] cannot forget the remembered passphrase of slot {slot_id}: {e}");
@@ -1655,7 +1681,7 @@ fn agent_refusal(text: &str, facts: &KeyFacts) -> Option<&'static str> {
 ///
 /// 搬進保管庫:先確認 agent 簽得了、打得開、讀得懂這把金鑰(`agent_refusal`:`material::agent_can_sign`、`material::unsupported_cipher`、`material::agent_can_read`),不行就拒絕
 /// (`VAULT_KEY_TYPE_MESSAGE`、`VAULT_KEY_CIPHER_MESSAGE`、`VAULT_KEY_UNREADABLE_MESSAGE`),插槽、插槽檔與保管庫都不動。然後放進保管庫(保管庫裡這個插槽原本是另一把金鑰的話,
-/// 它改存成 retired,不被蓋掉:`Vault::replace`),再處理插槽路徑上這個插槽自己的東西 —— 連結現在就拿掉(金鑰還在原檔;之後的步驟失敗,記錄還是連結,下一輪照它
+/// 它改存成 retired,不被蓋掉:`Vault::replace`;記在這台的 passphrase 是它的,一起忘掉),再處理插槽路徑上這個插槽自己的東西 —— 連結現在就拿掉(金鑰還在原檔;之後的步驟失敗,記錄還是連結,下一輪照它
 /// 重新連結),複製檔與可能是僅存名字的 hard link 改名保留;同步來的副本要等記錄提交之後才拿掉(只拿掉私鑰,`.pub` 留著)。先刪的話,之後的步驟
 /// 一失敗,記錄還說插槽裡有副本、檔案卻不見了,帳戶裡沒有這把金鑰時(Stop syncing 之後、之前的帳戶留下的副本)它只剩保管庫裡一筆沒有記錄用到的。
 /// 兩次檢查之間出現在路徑上的檔案不是這個插槽的:擋路,不碰。
@@ -1704,7 +1730,10 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
             origin,
             added_at_ms: now,
         };
-        with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.replace(env.keychain, slot_id, &entry, now).map(|_| ()))?;
+        // 保管庫裡原本是另一把金鑰(改存成 retired 了):記在這台的 passphrase 是它的,一起忘掉。
+        if with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.replace(env.keychain, slot_id, &entry, now))?.is_some() {
+            forget_remembered_passphrase(env, slot_id);
+        }
         let synced_copy = local.source.as_ref().filter(|source| matches!(source, SlotSource::SyncedCopy { .. }));
         match occupant(Some(&local), &local.file_name, &slot_path) {
             // 第一次檢查之後才出現在路徑上的檔案:不是這個插槽的,不碰(保管庫多了一筆沒有記錄用到的)。
@@ -6642,7 +6671,7 @@ pub(crate) mod tests {
         assert!(vault_ids(&a).is_empty(), "the vault holds nothing for it");
     }
 
-    // ── 金鑰離開保管庫時,忘掉記在這台的 passphrase ─────────────────────────────────────────────────
+    // ── 金鑰離開保管庫、或被插槽的另一把金鑰換掉時,忘掉記在這台的 passphrase ─────────────────────────────
 
     /// 在 `d` 的 keychain 放一筆「記在這台」的 passphrase(核准視窗的「Remember on this computer」做的事),再放一筆別的插槽的。
     fn remember_passphrases(d: &TestDevice, slot_id: &str) -> (String, String) {
@@ -6713,6 +6742,149 @@ pub(crate) mod tests {
         set_delivery(&a.env(), &id, true).unwrap();
         settle(&a);
         assert_eq!(a.keychain.entry(&mine).as_deref(), Some("test-passphrase"));
+    }
+
+    /// 保管庫裡的插槽改挑另一把金鑰(Change…):原本那把改存成 retired,記在這台的 passphrase 是它的,一起忘掉。不然新金鑰第一次用的時候,核准視窗先拿舊的 passphrase 去試而失敗,
+    /// 再跳第二個視窗;新金鑰沒有 passphrase 的話,舊的就一直留在 keychain。別的插槽的 passphrase 不動。
+    #[test]
+    fn picking_another_key_for_a_vault_slot_forgets_the_passphrase_remembered_for_the_key_it_replaces() {
+        let (_a, b, id, _file) = own_slot_waiting_on_b();
+        pick(&b.env(), &id, &key_file_on(&b, "id_enc", &test_keys::encrypted()).display().to_string()).unwrap();
+        assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::Vault { has_passphrase: true, .. })), "setup: the encrypted key is in the vault");
+        let (mine, other) = remember_passphrases(&b, &id);
+
+        pick(&b.env(), &id, &key_file_on(&b, "id_b", &test_keys::ecdsa()).display().to_string()).unwrap();
+        assert_eq!(b.keychain.entry(&mine), None, "the passphrase belonged to the key that was replaced");
+        assert_eq!(b.keychain.entry(&other).as_deref(), Some("someone else's"), "another slot's passphrase is not touched");
+    }
+
+    /// 同上,「Use the synced key」:同步的那把取代保管庫裡這台原本的金鑰,原本那把的 passphrase 一起忘掉。
+    #[test]
+    fn using_the_synced_key_forgets_the_passphrase_remembered_for_the_key_it_replaces() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        pick(&b.env(), &id, &key_file_on(&b, "id_enc", &test_keys::encrypted()).display().to_string()).unwrap();
+        assert!(matches!(view_of(&b)[0].status, SlotStatusView::SyncedAvailable { .. }), "setup: {:?}", view_of(&b)[0].status);
+        let (mine, other) = remember_passphrases(&b, &id);
+
+        use_synced(&b.env(), &id).unwrap();
+        assert_eq!(vault_entry(&b, &id).unwrap().private_key, test_keys::plain(), "setup: the synced key replaced it");
+        assert_eq!(b.keychain.entry(&mine), None, "the passphrase belonged to the key that was replaced");
+        assert_eq!(b.keychain.entry(&other).as_deref(), Some("someone else's"), "another slot's passphrase is not touched");
+    }
+
+    /// 挑的是保管庫裡本來就有的那一把(指紋相同,`Vault::replace` 不留 retired):它的 passphrase 還是對的,不能忘掉。
+    #[test]
+    fn picking_the_same_key_again_keeps_the_passphrase_remembered_for_it() {
+        let (_a, b, id, _file) = own_slot_waiting_on_b();
+        let enc = key_file_on(&b, "id_enc", &test_keys::encrypted());
+        pick(&b.env(), &id, &enc.display().to_string()).unwrap();
+        let (mine, _other) = remember_passphrases(&b, &id);
+
+        pick(&b.env(), &id, &enc.display().to_string()).unwrap();
+        assert_eq!(vault_ids(&b), BTreeSet::from([id.clone()]), "setup: the same key is not kept as a retired entry");
+        assert_eq!(b.keychain.entry(&mine).as_deref(), Some("test-passphrase"));
+    }
+
+    /// 同上,「Use the synced key」用的就是保管庫裡本來有的那一把(指紋相同):它的 passphrase 還是對的,不能忘掉。
+    #[test]
+    fn using_the_synced_key_that_is_already_in_the_vault_keeps_the_passphrase_remembered_for_it() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::encrypted(), "id_enc");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::Vault { has_passphrase: true, .. })), "setup: the synced encrypted key landed in the vault");
+        let (mine, _other) = remember_passphrases(&b, &id);
+
+        use_synced(&b.env(), &id).unwrap();
+        assert_eq!(vault_ids(&b), BTreeSet::from([id.clone()]), "setup: the same key is not kept as a retired entry");
+        assert_eq!(b.keychain.entry(&mine).as_deref(), Some("test-passphrase"));
+    }
+
+    /// 保管庫裡的插槽改挑一把放不進保管庫的金鑰(安全金鑰、舊式 PEM),照 SP3 連結原檔:原本那把離開了保管庫(同 Keep a file),記在這台的 passphrase 一起忘掉。
+    #[test]
+    fn a_vault_slot_that_falls_back_to_a_link_forgets_the_passphrase_remembered_for_its_key() {
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n";
+        for (name, text) in [("id_sk", test_keys::security_key()), ("id_pem", pem.to_string())] {
+            let (_a, b, id, _file) = own_slot_waiting_on_b();
+            pick(&b.env(), &id, &key_file_on(&b, "id_enc", &test_keys::encrypted()).display().to_string()).unwrap();
+            let (mine, other) = remember_passphrases(&b, &id);
+
+            pick(&b.env(), &id, &key_file_on(&b, name, &text).display().to_string()).unwrap();
+            assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::Linked { .. })), "{name}: setup: the slot links the file now");
+            assert_eq!(b.keychain.entry(&mine), None, "{name}: the passphrase belonged to the key that left the vault");
+            assert_eq!(b.keychain.entry(&other).as_deref(), Some("someone else's"), "{name}: another slot's passphrase is not touched");
+        }
+    }
+
+    /// 保管庫裡的插槽「Use the synced key」,同步的卻是 agent 用不了的金鑰(安全金鑰):照 SP3 落地成檔案,這台原本在保管庫的金鑰離開了,記在這台的 passphrase 一起忘掉。
+    #[test]
+    fn a_vault_slot_that_gets_the_synced_key_as_a_file_forgets_the_passphrase_remembered_for_its_key() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::security_key(), "id_sk");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { .. })), "setup: the synced key is a file for now");
+        pick(&b.env(), &id, &key_file_on(&b, "id_enc", &test_keys::encrypted()).display().to_string()).unwrap();
+        assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "setup: B's own key is in the vault");
+        let (mine, other) = remember_passphrases(&b, &id);
+
+        use_synced(&b.env(), &id).unwrap();
+        assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { .. })), "the synced key is a file again");
+        assert_eq!(b.keychain.entry(&mine), None, "the passphrase belonged to the key that left the vault");
+        assert_eq!(b.keychain.entry(&other).as_deref(), Some("someone else's"), "another slot's passphrase is not touched");
+    }
+
+    /// 在 `d` 的保管庫放一筆 `slot_id` 底下的舊項目:有 passphrase 的金鑰(例如留下來的,不是這個插槽目前記錄的那一把)。
+    fn put_encrypted_key_under(d: &TestDevice, slot_id: &str) {
+        let env = d.env();
+        let leftover = VaultEntry {
+            private_key: test_keys::encrypted(),
+            public_key: test_keys::ENC_PUBLIC.to_string(),
+            fingerprint: test_keys::ENC_FINGERPRINT.to_string(),
+            origin: EntryOrigin::Imported,
+            added_at_ms: 1,
+        };
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.put(env.keychain, slot_id, &leftover)).unwrap();
+    }
+
+    /// `set_delivery` 把插槽的金鑰搬進保管庫,保管庫裡原本有這個插槽 id 的另一把(留下來的舊項目)改存成 retired:記在這台的 passphrase 是那一把的,一起忘掉。
+    #[test]
+    fn moving_a_key_in_over_a_leftover_vault_entry_forgets_the_passphrase_remembered_for_it() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        put_encrypted_key_under(&a, &id);
+        let (mine, other) = remember_passphrases(&a, &id);
+
+        set_delivery(&a.env(), &id, true).unwrap();
+        assert_eq!(vault_entry(&a, &id).unwrap().private_key, test_keys::plain(), "setup: the slot's own key replaced it");
+        assert_eq!(a.keychain.entry(&mine), None, "the passphrase belonged to the key that was there");
+        assert_eq!(a.keychain.entry(&other).as_deref(), Some("someone else's"), "another slot's passphrase is not touched");
+    }
+
+    /// 同步的金鑰落進保管庫(一輪的 `land_in_vault`,經 `EnvVault::restore`),保管庫裡原本有這個插槽 id 的另一把(留下來的舊項目)改存成 retired:
+    /// 記在這台的 passphrase 是那一把的,一起忘掉。
+    #[test]
+    fn a_synced_key_landing_over_another_key_in_the_vault_forgets_the_passphrase_remembered_for_it() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        put_encrypted_key_under(&b, &id);
+        let (mine, other) = remember_passphrases(&b, &id);
+
+        settle(&b);
+        assert_landed_in_the_vault(&b, &id, &file, &test_keys::plain(), test_keys::PLAIN_PUBLIC);
+        assert_eq!(vault_ids(&b).len(), 2, "setup: the key that was there is kept as a retired entry: {:?}", vault_ids(&b));
+        assert_eq!(b.keychain.entry(&mine), None, "the passphrase belonged to the key that was there");
+        assert_eq!(b.keychain.entry(&other).as_deref(), Some("someone else's"), "another slot's passphrase is not touched");
     }
 
     /// `inspect_private_key` 讀得懂標頭與公鑰、`ssh-key` 卻讀不懂的金鑰(例如 comment 不是 UTF-8):搬進保管庫之後 agent 打不開它,插槽檔卻已經沒了。
