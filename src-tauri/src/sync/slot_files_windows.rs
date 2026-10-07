@@ -25,7 +25,7 @@ fn wide(path: &Path) -> Vec<u16> {
 
 /// 目前使用者的 `TOKEN_USER`(放在回傳的緩衝區裡;SID 指標指進緩衝區)。緩衝區是 `Vec<u64>` 而不是 `Vec<u8>`:
 /// `TOKEN_USER` 含指標,起點必須 8 位元組對齊,`Vec<u8>` 只保證 1 位元組(得倚賴配置器的行為),`Vec<u64>` 由型別保證 8。
-fn current_user_token() -> io::Result<Vec<u64>> {
+pub(crate) fn current_user_token() -> io::Result<Vec<u64>> {
     unsafe {
         let mut token: HANDLE = ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {

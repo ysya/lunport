@@ -106,6 +106,8 @@ fn run_app(mcp_keep_alive: bool) {
         .setup(move |app| {
             mcp::initialize(app.handle(), mcp_keep_alive)?;
             sync::engine::initialize(app.handle())?;
+            // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
+            agent::start(app.handle());
             tray::rebuild_tray(app.handle(), &[])?;
             Ok(())
         })

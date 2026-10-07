@@ -66,8 +66,10 @@ tauri-plugin-global-shortcut = "2.3.2"
 # FILE_ALL_ACCESS 與 SECURITY_DESCRIPTOR_REVISION 兩個常數。
 # 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):Win32_System_Diagnostics_ToolHelp 給程序快照(找父程序),
 # 程序的執行檔路徑用 Win32_System_Threading 的 QueryFullProcessImageNameW。
+# agent 的 named pipe(src/agent/pipe_windows.rs):Win32_System_Pipes 給 CreateNamedPipeW、ConnectNamedPipe 與 GetNamedPipeClientProcessId,
+# ConnectNamedPipe 的參數含 OVERLAPPED 指標,windows-sys 把它放在 Win32_System_IO 後面。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 # 金鑰保管庫的 agent 認出連上來的程式(src/agent/peer.rs):macOS 用 libc 的 proc_pidinfo、proc_pidpath 與 sysctl(KERN_PROCARGS2);
 # Linux 只讀 /proc。libc 已在 Cargo.lock(其他套件的相依),不需下載。
