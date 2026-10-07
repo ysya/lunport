@@ -300,7 +300,8 @@ impl Broker {
         } else {
             self.approve(host, &ask, &settings)?
         };
-        // 最後一道關,只用請求指名的那把金鑰簽(`cached` 與 `unlock` 已經只認指名的那把):保管庫裡的內容跟記錄的公鑰對不上,就不用視窗沒顯示過的金鑰簽。
+        // 每一條路都會經過的一道關,不能當成多餘的拿掉:沒有加密的金鑰、用 keychain 裡記住的 passphrase 解開的金鑰,`unlock` 都是不經 `names` 就回傳,
+        // 只有輸入 passphrase 的那條路在存下來之前先查過一次。保管庫裡的內容跟記錄的公鑰對不上,就不用視窗沒顯示過的金鑰簽。
         if !ask.names(&material) {
             return None;
         }
@@ -1203,6 +1204,23 @@ mod tests {
         let asked = host.asked();
         assert_eq!(asked.len(), 2, "the approval was not remembered either");
         assert!(!asked[1].preapproved && asked[1].needs_passphrase, "and the opened key was not kept");
+    }
+
+    /// `unlock` 用 keychain 裡記住的 passphrase 解開時不經 `names` 就回傳(沒有加密的金鑰也一樣):`sign` 最後那一道 `names` 要擋下內容跟記錄不符的金鑰,
+    /// 不能因為看起來多餘就拿掉。
+    #[test]
+    fn a_key_opened_with_the_remembered_passphrase_is_still_checked_against_the_recorded_key() {
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        // 記錄說 `ENC_ID` 這個插槽是 RSA 金鑰(有 passphrase),保管庫裡放的卻是加密過的 ed25519 金鑰,而 keychain 記著它的 passphrase。
+        host.keys[1].public_key = test_keys::RSA_PUBLIC.into();
+        host.keys[1].fingerprint = test_keys::RSA_FINGERPRINT.into();
+        host.keychain.set(&passphrase_account(ENC_ID), "test-passphrase").unwrap();
+        host.answer(allow(false));
+        assert!(broker.sign(&host, &rsa_request(), Some(&program("claude")), None).is_none(), "the entry is not the recorded key, so nothing is signed");
+        assert_eq!(host.asked().len(), 1, "the window was shown for the recorded key");
+        assert!(!host.asked()[0].needs_passphrase, "the remembered passphrase opened the entry, which is how it got past `unlock`");
+        assert_eq!(broker.kept().1, 0, "and nothing was kept open");
     }
 
     #[test]
