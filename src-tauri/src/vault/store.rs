@@ -275,7 +275,7 @@ impl Vault {
         &self.file.settings
     }
 
-    /// 改這台的 agent 設定並存檔。目前只有測試用到,所以只在測試編譯;第 2 階段的設定畫面要用的時候,把 `#[cfg(test)]` 拿掉。
+    /// 改這台的 agent 設定並存檔。目前只有測試用到,所以只在測試編譯;plan 2 的設定畫面要用的時候,把 `#[cfg(test)]` 拿掉。
     #[cfg(test)]
     pub fn set_settings(&mut self, settings: AgentSettings) -> Result<(), VaultError> {
         self.file.settings = settings;
