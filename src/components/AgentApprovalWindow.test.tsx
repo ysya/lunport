@@ -69,7 +69,7 @@ describe("ApprovalCardView", () => {
   });
 
   it("escapes hidden characters in names", () => {
-    expect(render(request({ host: "we‮b" }))).toContain("we⟨U+202E⟩b");
+    expect(render(request({ host: "we\u202Eb" }))).toContain("we⟨U+202E⟩b");
   });
 
   it("has Allow and Deny on once it is armed", () => {
