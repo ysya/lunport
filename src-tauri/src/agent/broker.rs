@@ -281,10 +281,12 @@ impl Broker {
             return None;
         }
         let keys = host.keys();
-        let key = keys.iter().find(|k| signable_public_key(k).as_ref() == Some(&request.key))?;
-        if grant.is_some_and(|g| g.slot_id != key.slot_id) {
-            return None;
-        }
+        // Connect 的授權依插槽 id 找金鑰:兩個插槽可能放同一把公鑰,只比公鑰會找到另一個插槽;沒有授權才用公鑰找。
+        let names_the_request = |k: &&VaultKey| signable_public_key(k).as_ref() == Some(&request.key);
+        let key = match grant {
+            Some(grant) => keys.iter().find(|k| k.slot_id == grant.slot_id).filter(names_the_request)?,
+            None => keys.iter().find(names_the_request)?,
+        };
         let settings = host.settings();
         let host_fingerprint = request.host_key.as_ref().map(|k| k.fingerprint(HashAlg::Sha256).to_string());
         let host_display = request
@@ -299,7 +301,7 @@ impl Broker {
         } else {
             self.approve(host, &ask, &settings)?
         };
-        // 只用請求指名的那把金鑰簽:保管庫裡的內容跟記錄的公鑰對不上,就不用視窗沒顯示過的金鑰簽。
+        // 最後一道關,只用請求指名的那把金鑰簽(`cached` 與 `unlock` 已經只認指名的那把):保管庫裡的內容跟記錄的公鑰對不上,就不用視窗沒顯示過的金鑰簽。
         if !ask.names(&material) {
             return None;
         }
@@ -379,7 +381,7 @@ impl Broker {
     /// 跳核准視窗,需要 passphrase 就一起問。允許了才解開私鑰;要記住的,解開之後才記住。
     fn ask_and_unlock(&self, host: &dyn AgentHost, ask: &Ask, approval_key: Option<&ApprovalKey>) -> Option<Arc<Material>> {
         let needs_passphrase = ask.key.has_passphrase
-            && self.cached(&ask.key.slot_id, host.now_ms()).is_none()
+            && self.cached(&ask.key.slot_id, &ask.request.key, host.now_ms()).is_none()
             && remembered_passphrase(host, &ask.key.slot_id).is_none();
         let answer = Answer::from(host.ask(ask.prompt(false, needs_passphrase, approval_key.is_some(), None))?);
         if !answer.allow {
@@ -397,7 +399,7 @@ impl Broker {
     /// 再問(`preapproved`:只要 passphrase),一共三次。使用者已經允許卻打不開的原因記到 stderr(`refused`)。
     fn unlock(&self, host: &dyn AgentHost, ask: &Ask, mut supplied: Option<(Zeroizing<String>, bool)>) -> Option<Arc<Material>> {
         let slot_id = &ask.key.slot_id;
-        if let Some(material) = self.cached(slot_id, host.now_ms()) {
+        if let Some(material) = self.cached(slot_id, &ask.request.key, host.now_ms()) {
             return Some(material);
         }
         let text = match host.private_key(slot_id) {
@@ -473,10 +475,18 @@ impl Broker {
         None
     }
 
-    fn cached(&self, slot_id: &str, now_ms: u64) -> Option<Arc<Material>> {
+    /// 這個插槽在記憶體裡解開的私鑰,限請求指名的這把(`key`)。插槽放的金鑰換過(Keep a file → 另一把金鑰 → Only in SSHelter,插槽 id 沒變)時,
+    /// 這個插槽的舊項目已經不是它的金鑰:丟掉、回傳 None,不拿舊的擋住新的(`names` 會拒絕它,`needs_passphrase` 也會因為它而不問新金鑰的 passphrase)。
+    fn cached(&self, slot_id: &str, key: &KeyData, now_ms: u64) -> Option<Arc<Material>> {
         let mut unlocked = self.unlocked.lock().unwrap();
         unlocked.retain(|_, u| u.live(now_ms));
-        unlocked.get(slot_id).map(|u| Arc::clone(&u.material))
+        if let Some(opened) = unlocked.get(slot_id) {
+            if opened.material.key_data() == *key {
+                return Some(Arc::clone(&opened.material));
+            }
+            unlocked.remove(slot_id);
+        }
+        None
     }
 
     /// 記住核准;這把金鑰解開的私鑰至少留到這個核准到期(spec §5.5)。
@@ -643,6 +653,15 @@ mod tests {
         use ssh_encoding::Decode;
         let signature = ssh_key::Signature::decode(&mut &blob[..]).unwrap();
         material::public_key_data(public).unwrap().verify(b"to sign", &signature).is_ok()
+    }
+
+    /// 等條件成立,最多 5 秒(不然出錯時平行的測試會卡住)。
+    fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -891,13 +910,9 @@ mod tests {
             })
         };
         let first = sign(Arc::clone(&broker), Arc::clone(&host));
-        while host.asked().is_empty() {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("the first request is asking", || !host.asked().is_empty());
         let others: Vec<_> = (0..3).map(|_| sign(Arc::clone(&broker), Arc::clone(&host))).collect();
-        while broker.waiting() < 3 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("three requests wait for its answer", || broker.waiting() >= 3);
         *host.gate.lock().unwrap() = true;
         host.opened.notify_all();
         assert!(first.join().unwrap().is_some());
@@ -984,13 +999,9 @@ mod tests {
         *host.gate.lock().unwrap() = false;
         host.answer(Some(AgentApprovalAnswer { allow: false, remember: true, ..Default::default() }));
         let first = sign_in_thread(&broker, &host);
-        while host.asked().is_empty() {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("the first request is asking", || !host.asked().is_empty());
         let others: Vec<_> = (0..3).map(|_| sign_in_thread(&broker, &host)).collect();
-        while broker.waiting() < 3 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("three requests wait for its answer", || broker.waiting() >= 3);
         *host.gate.lock().unwrap() = true;
         host.opened.notify_all();
         assert!(first.join().unwrap().is_none());
@@ -1012,13 +1023,9 @@ mod tests {
         *host.host.gate.lock().unwrap() = false;
         let started = Instant::now();
         let first = sign_in_thread(&broker, &host);
-        while host.host.asked().is_empty() {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("the first request is asking", || !host.host.asked().is_empty());
         let others: Vec<_> = (0..2).map(|_| sign_in_thread(&broker, &host)).collect();
-        while broker.waiting() < 2 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("two requests wait for its answer", || broker.waiting() >= 2);
         *host.host.gate.lock().unwrap() = true;
         host.host.opened.notify_all();
         assert!(first.join().is_err(), "the window's panic reaches the request that asked");
@@ -1317,5 +1324,100 @@ mod tests {
         .is_err());
         broker.expire(0);
         broker.clear();
+    }
+
+    // 插槽放的金鑰換過(Keep a file → 另一把金鑰 → Only in SSHelter,插槽 id 沒變)與 Connect 的授權依插槽 id 找金鑰。
+
+    /// 把 `ENC_ID` 這個插槽換成沒有 passphrase 的 RSA 金鑰:記錄(公鑰、指紋)與保管庫裡的私鑰都換了,插槽 id 不變。
+    fn swap_in_the_rsa_key(host: &mut FakeHost) {
+        host.keys[1].public_key = test_keys::RSA_PUBLIC.into();
+        host.keys[1].fingerprint = test_keys::RSA_FINGERPRINT.into();
+        host.keys[1].has_passphrase = false;
+        host.private.insert(ENC_ID.to_string(), test_keys::rsa());
+    }
+
+    /// 簽 RSA 金鑰的請求(要 SHA-256 的簽章)。
+    fn rsa_request() -> SignRequest {
+        let mut rsa = request(test_keys::RSA_PUBLIC, Some(host_key()));
+        rsa.flags = material::SSH_AGENT_RSA_SHA2_256;
+        rsa
+    }
+
+    #[test]
+    fn a_slots_new_key_signs_after_its_own_approval_while_the_old_key_is_still_open() {
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        host.answer(with_passphrase("test-passphrase", false));
+        assert!(broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_some());
+        assert_eq!(broker.kept().1, 1, "setup: the passphrase key stays open in memory");
+
+        swap_in_the_rsa_key(&mut host);
+        host.answer(allow(false));
+        let blob = broker.sign(&host, &rsa_request(), Some(&program("claude")), None).expect("the slot's new key signs; the old opened key must not block it");
+        assert!(verifies(test_keys::RSA_PUBLIC, &blob));
+        let asked = host.asked();
+        assert_eq!(asked.len(), 2, "the new key asked for its own approval; the old key's remembered approval is not its");
+        assert_eq!(asked[1].key_fingerprint, test_keys::RSA_FINGERPRINT);
+        assert_eq!(broker.kept().1, 0, "the old key's opened entry is gone");
+    }
+
+    #[test]
+    fn a_connect_grant_on_a_slot_whose_key_changed_signs_with_the_new_key() {
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        host.answer(with_passphrase("test-passphrase", false));
+        assert!(broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_some());
+
+        swap_in_the_rsa_key(&mut host);
+        let blob = broker
+            .sign(&host, &rsa_request(), None, Some(&Grant { slot_id: ENC_ID.into() }))
+            .expect("Connect on the slot's new key signs; the old opened key must not block it");
+        assert!(verifies(test_keys::RSA_PUBLIC, &blob));
+        assert_eq!(host.asked().len(), 1, "a grant asks for nothing (the new key has no passphrase)");
+        assert_eq!(broker.kept().1, 0, "the old key's opened entry is gone");
+    }
+
+    #[test]
+    fn a_stale_opened_key_does_not_hide_the_passphrase_the_slots_new_key_needs() {
+        let broker = Broker::default();
+        let host = FakeHost::new();
+        // 記憶體裡留著的是這個插槽 id 以前的金鑰(沒有 passphrase 的那把 ed25519);插槽現在放的是有 passphrase 的金鑰。
+        let old = Arc::new(material::open(&test_keys::plain(), None).unwrap());
+        broker.unlocked.lock().unwrap().insert(ENC_ID.to_string(), Unlocked { material: old, expires_ms: u64::MAX });
+        host.answer(with_passphrase("test-passphrase", false));
+        let blob = broker
+            .sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("claude")), None)
+            .expect("the window asks for the passphrase of the key the slot holds now");
+        assert!(verifies(test_keys::ENC_PUBLIC, &blob));
+        assert!(host.asked()[0].needs_passphrase, "the old opened key is not this key, so the passphrase is asked");
+    }
+
+    #[test]
+    fn an_opened_key_is_still_reused_while_the_slot_holds_that_key() {
+        let broker = Broker::default();
+        let host = FakeHost::new();
+        host.answer(with_passphrase("test-passphrase", false));
+        assert!(broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_some());
+        host.answer(allow(false));
+        assert!(broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("iterm2")), None).is_some());
+        assert!(!host.asked()[1].needs_passphrase, "the same key is still open in memory");
+        assert_eq!(broker.kept().1, 1, "and its entry was not dropped");
+    }
+
+    #[test]
+    fn a_connect_grant_finds_its_key_by_slot_id_when_two_slots_hold_the_same_public_key() {
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        let second = "5".repeat(32);
+        add_key(&mut host, &second, "id_mac_again", test_keys::PLAIN_PUBLIC, test_keys::PLAIN_FINGERPRINT, test_keys::plain());
+        let blob = broker
+            .sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(host_key())), None, Some(&Grant { slot_id: second.clone() }))
+            .expect("the grant is for the second slot, which holds the requested key");
+        assert!(verifies(test_keys::PLAIN_PUBLIC, &blob));
+        assert!(host.asked().is_empty());
+        assert!(
+            broker.sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(host_key())), None, Some(&Grant { slot_id: "6".repeat(32) })).is_none(),
+            "a grant for a slot that holds no vault key signs nothing"
+        );
     }
 }
