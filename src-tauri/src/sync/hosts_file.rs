@@ -799,7 +799,8 @@ mod tests {
         let (mut only, _) = parse_file(&format!("{agent}\n"));
         assert!(ensure_include(&mut only, &list(&[WORK])));
         assert_eq!(serialize_items(&only, true), format!("{agent}\nInclude {WORK}\n"));
-        // 同一行還列著別的路徑:agent 的 token 仍算「它的」,同步的 Include 排在那一行之後。
+        // 同一行還列著別的路徑:agent 的 token 仍算「它的」,同步的 Include 排在那一行之後(之後 `agent::wiring::ensure_include_first` 會把那一行拆開 —— 我們的單獨放最前面,
+        // 使用者的路徑接在後面 —— 下一輪同步再把同步的 Include 排進它們之間)。
         let (mut shared, _) = parse_file(&format!("{agent} ~/.ssh/a.config\nHost a\n"));
         assert!(ensure_include(&mut shared, &list(&[WORK])));
         assert_eq!(serialize_items(&shared, true), format!("{agent} ~/.ssh/a.config\nInclude {WORK}\nHost a\n"));

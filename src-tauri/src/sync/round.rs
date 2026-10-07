@@ -265,6 +265,11 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
     };
     // 更換同步碼的最後一步留下的 keychain 換碼:補做(`rotation::retry_pending_swap`;沒有待補的就什麼都不做)。
     crate::sync::rotation::retry_pending_swap(env);
+    // agent 的設定(金鑰保管庫 spec §6):主機或插槽變了就重寫 `agent/config`;第一次需要時把 Include 放在主 config 的第一行。每一次同步嘗試的最後都對一次,不論那一輪走到
+    // 哪裡 —— 一輪常在金鑰那一步之前就結束(凍結、被限流、拉取失敗、relay 出錯,退避最長 15 分鐘),而這個只看這台的 config 與保管庫、不需要 relay。這裡沒有持有任何鎖。
+    if let Err(e) = crate::agent::wiring::refresh_env(env) {
+        eprintln!("[agent] could not update the agent config: {e}");
+    }
     env.events.status();
     outcome
 }
@@ -660,11 +665,6 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
                 env.events.notice(notice);
             }
         }
-    }
-
-    // 6c. agent 的設定(金鑰保管庫 spec §6):主機或插槽變了就重寫 `agent/config`;第一次需要時把 Include 放在主 config 的第一行。
-    if let Err(e) = crate::agent::wiring::refresh_env(env) {
-        eprintln!("[agent] could not update the agent config: {e}");
     }
 
     // 7. 上傳(唯讀模式不上傳)。帳戶與各 space 分開;撞到凍結的 chain 就停止這一輪所有上傳。被限流(任何一個 `429`)之後

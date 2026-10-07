@@ -81,40 +81,72 @@ fn agent_tokens_in(items: &[Item]) -> usize {
         .sum()
 }
 
-/// 抽走 `items`(含區塊裡的行)每一行生效中的 `Include` 的 agent token:整行只有它就移除整行,一起列著的別的路徑留在原地(同
-/// `hosts_file::ensure_include`:使用者的 Include 不能因為我們搬動自己的 token 而不見)。
+/// 以空白為界的 agent token 在 `text` 裡的位置(同 `split_whitespace` 斷詞:前後都是空白或字串的頭尾)。
+fn standalone_agent_token(text: &str) -> Option<usize> {
+    text.match_indices(INCLUDE_TOKEN).map(|(at, _)| at).find(|&at| {
+        text[..at].chars().next_back().is_none_or(char::is_whitespace) && text[at + INCLUDE_TOKEN.len()..].chars().next().is_none_or(char::is_whitespace)
+    })
+}
+
+/// 把 `value`(一行 Include 的值)裡每個 agent 的 token 剪掉,連同它前面的那一段空白(排在最前面的,連同後面的那一段):別的路徑、它們之間的空白(tab、
+/// 連續的空格)、帶引號而且路徑裡有空格的,一個位元組都不動 —— 不是把剩下的 token 用單一空格重新接起來。整行只有它就剪成空字串。
+fn without_agent_tokens(value: &str) -> String {
+    let mut text = value.to_string();
+    while let Some(at) = standalone_agent_token(&text) {
+        let end = at + INCLUDE_TOKEN.len();
+        let (from, to) = if at > 0 { (text[..at].trim_end().len(), end) } else { (0, text.len() - text[end..].trim_start().len()) };
+        text.replace_range(from..to, "");
+    }
+    text
+}
+
+/// 抽走 `items`(含區塊裡的行)每一行生效中的 `Include` 的 agent token:整行只有它就移除整行,一起列著的別的路徑留在原地、位元組不動(`without_agent_tokens`;
+/// 同 `hosts_file::ensure_include`:使用者的 Include 不能因為我們搬動自己的 token 而不見或被改寫)。
 fn take_agent_tokens(items: &mut Vec<Item>) {
     for i in (0..items.len()).rev() {
-        let rest: Vec<String> = match &mut items[i] {
+        let emptied = match &mut items[i] {
             Item::Host(h) => {
                 take_agent_tokens(&mut h.body);
-                continue;
+                false
             }
             Item::Match(m) => {
                 take_agent_tokens(&mut m.body);
-                continue;
+                false
             }
             Item::Directive(d) if lists_agent_token(d) => {
-                d.value.split_whitespace().filter(|t| !is_agent_include_token(t)).map(str::to_string).collect()
+                let rest = without_agent_tokens(&d.value);
+                if rest.is_empty() {
+                    true
+                } else {
+                    // 縮排、分隔符、行尾註解與行尾的 CR 都在欄位裡,`dirty` 重新組出來的就是原來的那一行少了我們的 token。
+                    d.value = rest;
+                    d.dirty = true;
+                    d.enabled = true; // 它是生效中的一行;標成 dirty 之後仍要寫成生效的一行,不能變成註解
+                    false
+                }
             }
-            _ => continue,
+            _ => false,
         };
-        if rest.is_empty() {
+        if emptied {
             items.remove(i);
-        } else if let Item::Directive(d) = &mut items[i] {
-            d.value = rest.join(" ");
-            d.dirty = true;
-            d.enabled = true; // 它是生效中的一行;標成 dirty 之後仍要寫成生效的一行,不能變成註解
         }
     }
 }
 
-/// 把 agent 的 Include 放在 `items` 的第 0 項:第 0 項已經是它(ssh 先讀它)、別處(含區塊裡)也沒有它的 token 就不動(回傳 false);其他位置的
-/// 一併抽走再插到最前面。CRLF 的檔案插入 CRLF 的一行;空檔案加上結尾換行。
+/// 把 agent 的 Include 放在 `items` 的第 0 項:第 0 項已經只列我們的 token、別處(含區塊裡)也沒有它的 token 就不動(回傳 false);第 0 項只列我們的 token、別處還有,
+/// 就只清掉別處的(第 0 項連同使用者加在那一行的空白與註解原樣留著)。其他情形 —— 第 0 項是別的東西,或除了我們的 token 還列著使用者的路徑 —— 把每一行裡我們的 token
+/// 抽走(別的路徑留在原地、位元組不動),再把只有我們 token 的一行插到最前面:使用者的那一行接在它後面,同步的 Include 才排得進它們之間(同步檔先讀,spec §10)。
+/// CRLF 的檔案插入 CRLF 的一行;空檔案加上結尾換行。
 pub fn ensure_include_first(items: &mut Vec<Item>, trailing_newline: &mut bool) -> bool {
-    let first = matches!(items.first(), Some(Item::Directive(d)) if lists_agent_token(d) && d.value.split_whitespace().next().is_some_and(is_agent_include_token));
-    if first && agent_tokens_in(items) == 1 {
-        return false;
+    let first_is_only_ours = matches!(items.first(), Some(Item::Directive(d)) if lists_agent_token(d) && d.value.split_whitespace().eq([INCLUDE_TOKEN]));
+    if first_is_only_ours {
+        if agent_tokens_in(&items[1..]) == 0 {
+            return false;
+        }
+        let mut rest = items.split_off(1);
+        take_agent_tokens(&mut rest);
+        items.append(&mut rest);
+        return true;
     }
     let crlf = items.iter().any(|item| match item {
         Item::Blank(s) | Item::Comment(s) => s.ends_with('\r'),
@@ -141,7 +173,10 @@ pub enum WiringStatus {
     IncludeMissing,
 }
 
-/// 重寫 `agent/config`(內容有變才寫),第一次寫時在主 config 的第一行加上 Include。呼叫端持有 doc 與 backed_up 的鎖。
+/// 重寫 `agent/config`(內容有變才寫),第一次需要時在主 config 的第一行加上 Include。呼叫端持有 doc 與 backed_up 的鎖。
+///
+/// `agent/config` 只在 Include 已經放好之後(或載入的不是預設的 config)才寫,所以它存在就表示 Include 放過,之後不見了是使用者拿掉的,不自動加回。第一次放不進去
+/// (主 config 在載入之後被外部改過的 `Conflict`、備份或 I/O 錯誤)就回 Err,`agent/config` 還不存在,下一次 refresh 當成第一次重試 —— 不會被誤認成使用者拿掉了。
 pub fn refresh(
     doc: &mut SshConfigDoc,
     backed_up: &mut HashSet<PathBuf>,
@@ -152,26 +187,31 @@ pub fn refresh(
 ) -> Result<WiringStatus, AppError> {
     let patterns = vault_host_patterns(doc, vault_files, home);
     let config_path = agent_config_path(home);
-    let first_time = !config_path.exists();
-    if patterns.is_empty() && first_time {
+    // agent/config 只在 Include 已經放好之後(或載入的不是預設的 config)才寫:它存在就表示 Include 放過,之後不見了是使用者拿掉的(spec §6、§11)。
+    let wired = config_path.exists();
+    if patterns.is_empty() && !wired {
         return Ok(WiringStatus::NotNeeded);
     }
+    let default_root = home.join(".ssh").join("config");
+    let on_default_root = doc.files.first().is_some_and(|f| f.path == default_root);
+    let present = on_default_root && doc.files[0].items.iter().any(is_agent_include);
+    let status = if !on_default_root {
+        // 仍然寫 agent/config:提示(Task 11 的 `status`)要靠它知道需要接上。
+        WiringStatus::IncludeMissing
+    } else if present || !wired {
+        // 寫不進去 → Err,agent/config 還不存在,下一次 refresh 當成第一次重試。
+        put_include_first(doc, backed_up, retention)?;
+        WiringStatus::Ready
+    } else {
+        // 使用者拿掉了:不自動加回。
+        WiringStatus::IncludeMissing
+    };
     let content = render(&patterns, endpoint);
     if std::fs::read_to_string(&config_path).ok().as_deref() != Some(content.as_str()) {
         slot_files::ensure_keys_dir(&agent_dir(home))?;
         crate::fsutil::atomic_write(&config_path, content.as_bytes(), 0o600)?;
     }
-    let default_root = home.join(".ssh").join("config");
-    let Some(main) = doc.files.first() else { return Ok(WiringStatus::IncludeMissing) };
-    if main.path != default_root {
-        return Ok(WiringStatus::IncludeMissing);
-    }
-    let present = main.items.iter().any(is_agent_include);
-    if !present && !first_time {
-        return Ok(WiringStatus::IncludeMissing);
-    }
-    put_include_first(doc, backed_up, retention)?;
-    Ok(WiringStatus::Ready)
+    Ok(status)
 }
 
 /// 把 agent 的 Include 放在主 config(`doc.files[0]`)的第 0 項並存檔;已經在那裡就什麼都不做。存檔失敗時記憶體裡的 doc 復原。
@@ -191,23 +231,39 @@ fn put_include_first(doc: &mut SshConfigDoc, backed_up: &mut HashSet<PathBuf>, r
     Ok(())
 }
 
-/// 同步執行緒與命令用:取保管庫的插槽檔名(只短暫拿 core 鎖),再拿 doc 與 backed_up 的鎖呼叫 `refresh`。config 還沒載入就什麼都不做。
+/// 同步執行緒與命令用:先拿 doc 與 backed_up 的鎖,再在鎖裡短暫拿 core 鎖讀保管庫的插槽檔名(doc 然後 core,`config::commands` 與存檔 hook 同一個順序),呼叫 `refresh`。
+/// 插槽檔名不在 doc 鎖外先讀:兩邊同時更新時,後拿到 doc 鎖的那一個讀到的不會比先寫的那一個舊,`agent/config` 不會被過時的集合蓋回去。config 還沒載入就什麼都不做。
+///
+/// 主 config 在載入之後被外部改過、Include 存不進去(`Conflict`)時,把過期的 doc 整份重載(同 `files::prepare_files` 對同步自己的 Include),放掉所有鎖之後通知前端
+/// (`applied(0)`),原本的錯誤照樣回給呼叫端記錄;下一次 refresh(下一次同步嘗試,或下一次改插槽的提供方式)就在新的 doc 上放得進去。
 pub fn refresh_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
     let Some(home) = env.ssh_dir.parent().map(Path::to_path_buf) else { return Ok(WiringStatus::NotNeeded) };
-    let vault_files = env
-        .runtime
-        .core
-        .lock()
-        .unwrap()
-        .state
-        .as_ref()
-        .map(crate::sync::slots::vault_slot_files)
-        .unwrap_or_default();
     let endpoint = crate::agent::identity_agent_value()?;
     let mut doc_lock = env.doc.lock().unwrap();
     let Some(doc) = doc_lock.as_mut() else { return Ok(WiringStatus::NotNeeded) };
     let mut backed_up = env.backed_up.lock().unwrap();
-    refresh(doc, &mut backed_up, env.retention(), &home, &vault_files, &endpoint)
+    let retention = env.retention();
+    let vault_files = env.runtime.core.lock().unwrap().state.as_ref().map(crate::sync::slots::vault_slot_files).unwrap_or_default();
+    let error = match refresh(doc, &mut backed_up, retention, &home, &vault_files, &endpoint) {
+        Err(error @ AppError::Conflict(_)) => error,
+        other => return other,
+    };
+    // 磁碟上的主 config 沒動,in-memory 的也已退回原樣(`put_include_first`);整份重載讓 doc 回到磁碟上的內容。重載不了就清掉 doc(前端重新載入之前什麼都不寫)。
+    let Some(main) = doc_lock.as_ref().and_then(|doc| doc.files.first()).map(|file| file.path.clone()) else { return Err(error) };
+    let error = match env.load_doc(&main) {
+        Ok(fresh) => {
+            *doc_lock = Some(fresh);
+            error
+        }
+        Err(reload) => {
+            *doc_lock = None;
+            AppError::Other(format!("{error}; reloading the config afterwards also failed: {reload}"))
+        }
+    };
+    drop(backed_up);
+    drop(doc_lock);
+    env.events.applied(0);
+    Err(error)
 }
 
 #[cfg(test)]
@@ -279,7 +335,7 @@ mod tests {
         assert!(!is_agent_include_token("~/.ssh/sshelter/work-11111111.config"));
     }
 
-    /// 搬動 agent 的 Include 時,使用者在同一行列的別的路徑不能不見(同 `hosts_file::ensure_include`);已經排在那一行最前面的不動。
+    /// 搬動 agent 的 Include 時,使用者在同一行列的別的路徑不能不見(同 `hosts_file::ensure_include`)。
     #[test]
     fn moving_the_include_keeps_the_other_paths_listed_with_it() {
         let ours = "~/.ssh/sshelter/agent/config";
@@ -297,12 +353,74 @@ mod tests {
             with_include(&format!("Host a\n  HostName x\n  Include ~/.ssh/b.config {ours}\nMatch all\n  Include {ours}\n  User u\n")),
             format!("Include {ours}\nHost a\n  HostName x\n  Include ~/.ssh/b.config\nMatch all\n  User u\n")
         );
-        // 已經在第一行、而且排在那一行最前面:不動。
-        let (mut items, mut trailing) = parse_file(&format!("Include {ours} ~/.ssh/a.config\nHost a\n"));
-        assert!(!ensure_include_first(&mut items, &mut trailing));
-        assert_eq!(serialize_items(&items, trailing), format!("Include {ours} ~/.ssh/a.config\nHost a\n"));
         // 重複列的 token 收成一個。
         assert_eq!(with_include(&format!("Include {ours} {ours}\nHost a\n")), format!("Include {ours}\nHost a\n"));
+    }
+
+    /// 一行 Include 裡我們的 token 和使用者的路徑並列:只剪掉我們的 token 與它前面的空白(排在最前面的,連同後面的空白),別的位元組 —— tab、連續的空格、
+    /// 帶引號而且路徑裡有空格的、行尾註解、CRLF —— 一個都不動,不是把剩下的 token 用單一空格重新接起來。
+    #[test]
+    fn moving_the_include_leaves_the_users_other_bytes_on_a_shared_line_alone() {
+        let ours = INCLUDE_TOKEN;
+        let user = "~/.ssh/a.config\t\"~/my  dir/b.config\"";
+        // 排在最後:tab 與引號裡的兩個空格都在。
+        assert_eq!(
+            with_include(&format!("AddKeysToAgent yes\nInclude {user} {ours} # note\nHost a\n")),
+            format!("Include {ours}\nAddKeysToAgent yes\nInclude {user} # note\nHost a\n")
+        );
+        // 排在中間:前面的空白(tab 加空格)連它一起剪,後面的空白留著隔開兩邊。
+        assert_eq!(
+            with_include(&format!("Include ~/.ssh/a.config\t {ours} \t~/.ssh/c.config\nHost a\n")),
+            format!("Include {ours}\nInclude ~/.ssh/a.config \t~/.ssh/c.config\nHost a\n")
+        );
+        // 區塊裡、CRLF:縮排、分隔符、行尾的 CR 都照舊。
+        assert_eq!(
+            with_include(&format!("Host a\r\n  Include={user}  {ours}\r\n  HostName x\r\n")),
+            format!("Include {ours}\r\nHost a\r\n  Include={user}\r\n  HostName x\r\n")
+        );
+    }
+
+    /// 剪 token 的規則:連同它前面的那一段空白剪掉(排在最前面的,連同後面的那一段),別的空白原樣;以空白為界的才算(`...config.bak`、前面黏著字的、帶引號的都不是)。
+    #[test]
+    fn only_our_token_and_the_whitespace_before_it_are_cut() {
+        let ours = INCLUDE_TOKEN;
+        for (value, expected) in [
+            (ours.to_string(), ""),
+            (format!("a {ours}"), "a"),
+            (format!("{ours} a"), "a"),
+            (format!("{ours} \t a"), "a"),
+            (format!("a  {ours}  b"), "a  b"),
+            (format!("a\t{ours} b"), "a b"),
+            (format!("{ours} {ours} b"), "b"),
+            (format!("a {ours} {ours}"), "a"),
+            (format!("a {ours}.bak"), &format!("a {ours}.bak")),
+            (format!("a x{ours}"), &format!("a x{ours}")),
+            (format!("a \"{ours}\""), &format!("a \"{ours}\"")),
+        ] {
+            assert_eq!(without_agent_tokens(&value), expected, "{value:?}");
+        }
+    }
+
+    /// 第 0 項除了我們的 token 還列著使用者的路徑:拆開 —— 我們的單獨一行放在最前面,使用者的那一行(原樣,只少了我們的 token)接在後面 —— 同步的 Include 才
+    /// 排得進我們和使用者的檔案之間(同步檔先讀,spec §10)。第 0 項只有我們的 token 就留著不動,連同使用者加在那一行的空白與註解,別處多出來的才清掉。
+    #[test]
+    fn a_shared_first_line_is_split_and_a_lone_one_is_kept_as_the_user_wrote_it() {
+        let ours = INCLUDE_TOKEN;
+        let (mut items, mut trailing) = parse_file(&format!("Include {ours}  ~/.ssh/a.config # mine\nHost a\n"));
+        assert!(ensure_include_first(&mut items, &mut trailing));
+        assert_eq!(serialize_items(&items, trailing), format!("Include {ours}\nInclude ~/.ssh/a.config # mine\nHost a\n"));
+        assert!(!ensure_include_first(&mut items, &mut trailing), "and then it is settled");
+        // 同步的 Include 排在我們和使用者的那一行之間。
+        let work = "~/.ssh/sshelter/work-3fa2c1d9.config".to_string();
+        assert!(crate::sync::hosts_file::ensure_include(&mut items, &[work.clone()]));
+        assert_eq!(serialize_items(&items, trailing), format!("Include {ours}\nInclude {work}\nInclude ~/.ssh/a.config # mine\nHost a\n"));
+
+        // 第 0 項只有我們的 token:加了註解與空白的那一行原樣留著,別處多出來的(區塊裡的)才清掉。
+        let (mut items, mut trailing) = parse_file(&format!("Include   {ours}   # keep\nHost a\n  Include {ours}\n"));
+        assert!(ensure_include_first(&mut items, &mut trailing));
+        assert_eq!(serialize_items(&items, trailing), format!("Include   {ours}   # keep\nHost a\n"));
+        let (mut items, mut trailing) = parse_file(&format!("Include {ours} # keep\nHost a\n"));
+        assert!(!ensure_include_first(&mut items, &mut trailing));
     }
 
     /// 註解掉的 Include(解析成註解,或被停用而序列化成註解的那一行)不算,也不被動到。
@@ -326,12 +444,18 @@ mod tests {
         BTreeSet::from([SLOT.to_string()])
     }
 
-    /// 載入 `home/.ssh/config`(內容 `text`,production 載入的主 config 就是這個路徑);`~` 指到 `home`。
+    /// 載入 `home/.ssh/config`(production 載入的主 config 就是這個路徑);`~` 指到 `home`。
+    fn load_home(home: &Path) -> SshConfigDoc {
+        let main = home.join(".ssh").join("config");
+        crate::config::include::with_test_home(home, || crate::config::include::load_doc(&main)).unwrap()
+    }
+
+    /// 把 `text` 寫成 `home/.ssh/config` 再載入。
     fn load_home_config(home: &Path, text: &str) -> SshConfigDoc {
         let main = home.join(".ssh").join("config");
         std::fs::create_dir_all(main.parent().unwrap()).unwrap();
         std::fs::write(&main, text).unwrap();
-        crate::config::include::with_test_home(home, || crate::config::include::load_doc(&main)).unwrap()
+        load_home(home)
     }
 
     fn refresh_at(home: &Path, doc: &mut SshConfigDoc, vault_files: &BTreeSet<String>) -> Result<WiringStatus, AppError> {
@@ -427,6 +551,29 @@ mod tests {
         assert!(matches!(error, AppError::Conflict(_)), "{error}");
         assert_eq!(read(&main_of(home.path())), edited, "the edit made elsewhere is still there");
         assert_eq!(serialize_items(&doc.files[0].items, doc.files[0].trailing_newline), loaded, "and the loaded copy is as it was");
+
+        // agent/config 要等 Include 放好才寫:它存在就表示 Include 放過。第一次放不進去,它還不存在 —— 重載之後的下一次 refresh 當成第一次重試,
+        // 不是以為「使用者拿掉了」而永遠停在 IncludeMissing。
+        assert!(!agent_config_path(home.path()).exists(), "no agent config without its Include");
+        let mut doc = load_home(home.path());
+        assert_eq!(refresh_at(home.path(), &mut doc, &vault()).unwrap(), WiringStatus::Ready);
+        assert_eq!(read(&main_of(home.path())), format!("Include {INCLUDE_TOKEN}\n{edited}"));
+        assert!(read(&agent_config_path(home.path())).contains("Host web\n  IdentityAgent "));
+    }
+
+    /// 使用者拿掉 Include 之後不會被加回去:agent/config 在了、Include 卻不在,就是他拿掉的(重載之後也一樣);agent/config 仍跟著主機重寫。
+    #[test]
+    fn a_removal_after_the_first_add_sticks() {
+        let home = tempfile::tempdir().unwrap();
+        let mut doc = load_home_config(home.path(), WEB);
+        assert_eq!(refresh_at(home.path(), &mut doc, &vault()).unwrap(), WiringStatus::Ready);
+        std::fs::write(main_of(home.path()), WEB).unwrap();
+
+        let mut doc = load_home(home.path());
+        assert_eq!(refresh_at(home.path(), &mut doc, &vault()).unwrap(), WiringStatus::IncludeMissing);
+        assert_eq!(refresh_at(home.path(), &mut doc, &BTreeSet::new()).unwrap(), WiringStatus::IncludeMissing);
+        assert_eq!(read(&main_of(home.path())), WEB, "not added back");
+        assert_eq!(read(&agent_config_path(home.path())), format!("{HEADER}\n"), "the agent config still follows the hosts");
     }
 
     #[test]
@@ -442,6 +589,102 @@ mod tests {
             assert_eq!(refresh_at(home.path(), &mut doc, &vault()).unwrap(), WiringStatus::Ready, "{text:?}");
             assert_eq!(std::fs::read(main_of(home.path())).unwrap(), expected.as_bytes(), "{text:?}");
         }
+    }
+
+    /// 只在 SSHelter 的插槽記錄(檔名 `file`)。
+    fn vault_slot(file: &str) -> crate::sync::state_v2::LocalSlot {
+        use crate::sync::state_v2::{LocalSlot, SlotSource};
+        LocalSlot {
+            file_name: file.to_string(),
+            source: Some(SlotSource::Vault { fingerprint: "SHA256:x".into(), public_key: "ssh-ed25519 AAAA".into(), has_passphrase: false }),
+            last_error: None,
+            asked: false,
+            payload: None,
+            uploaded_fingerprint: None,
+            parked: false,
+            learned_in: None,
+            copy_from_another_account: false,
+        }
+    }
+
+    /// 這台把 `file` 這個插槽放進保管庫(只改狀態,不經過 `set_delivery`)。
+    fn put_in_vault(d: &crate::sync::testkit::TestDevice, file: &str) {
+        d.runtime.core.lock().unwrap().state.as_mut().unwrap().key_slots.insert("slot".to_string(), vault_slot(file));
+    }
+
+    /// 第一次放 Include 時主 config 在載入之後被外部改過(存檔撞上 `Conflict`):記憶體裡的 doc 整份重載(同 `files::prepare_files` 對同步自己的 Include),
+    /// 放掉所有鎖之後才通知(`applied(0)`,前端重讀),原本的錯誤照樣回給呼叫端記錄;下一次 refresh 就在新的 doc 上把 Include 放進去。
+    #[test]
+    fn a_stale_config_is_reloaded_when_the_include_cannot_be_saved() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::testkit::{AppliedProbe, TestClock, TestDevice};
+        let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), WEB);
+        put_in_vault(&d, SLOT);
+        let edited = format!("# edited elsewhere\n{WEB}");
+        d.write_externally(&d.main_path(), &edited);
+
+        let probe = AppliedProbe::new(&d);
+        let mut env = d.env();
+        env.events = &probe;
+        let error = refresh_env(&env).unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)), "the original error is returned: {error}");
+        assert_eq!(*probe.all_free.lock().unwrap(), [true], "announced once, after every lock was released");
+        assert_eq!(read(&d.main_path()), edited, "the edit made elsewhere is never overwritten");
+        assert!(!agent_config_path(d.home.path()).exists(), "no agent config without its Include");
+        {
+            let doc = d.doc.lock().unwrap();
+            let loaded = &doc.as_ref().expect("the config is loaded again").files[0];
+            assert_eq!(serialize_items(&loaded.items, loaded.trailing_newline), edited, "the loaded copy is what is on disk now");
+        }
+
+        // 下一次(不必再手動重載)就放得進去。
+        assert_eq!(refresh_env(&d.env()).unwrap(), WiringStatus::Ready);
+        assert_eq!(read(&d.main_path()), format!("Include {INCLUDE_TOKEN}\n{edited}"));
+        assert!(read(&agent_config_path(d.home.path())).contains("Host web\n  IdentityAgent "));
+    }
+
+    /// 重載也失敗(這裡是主 config 整個不見了,存檔的衝突保護把「檔案不見了」也當成 `Conflict`):doc 清掉 —— 前端重新載入之前什麼都不寫 —— 錯誤說明帶著兩個原因。
+    #[test]
+    fn a_config_that_cannot_be_loaded_again_is_cleared() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::testkit::{AppliedProbe, TestClock, TestDevice};
+        let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), WEB);
+        put_in_vault(&d, SLOT);
+        std::fs::remove_file(d.main_path()).unwrap();
+
+        let probe = AppliedProbe::new(&d);
+        let mut env = d.env();
+        env.events = &probe;
+        let error = refresh_env(&env).unwrap_err();
+        assert!(error.to_string().contains("reloading the config afterwards also failed"), "{error}");
+        assert_eq!(*probe.all_free.lock().unwrap(), [true]);
+        assert!(d.doc.lock().unwrap().is_none(), "nothing is written until the config is loaded again");
+        assert_eq!(refresh_env(&d.env()).unwrap(), WiringStatus::NotNeeded);
+        assert!(!agent_config_path(d.home.path()).exists());
+    }
+
+    /// `refresh_env` 先拿 doc 鎖,再在鎖裡短暫拿 core 鎖讀保管庫的插槽檔名(doc 然後 core,`config::commands` 與存檔 hook 同一個順序):讀到的不會是比 doc 舊的集合,
+    /// 拿它寫出去的 `agent/config` 也就不會過時。
+    #[test]
+    fn the_vault_slots_are_read_while_the_config_is_held() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::testkit::{TestClock, TestDevice};
+        let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), WEB);
+        // 這台還沒有只在 SSHelter 的插槽。測試拿著 core 鎖,讓 refresh_env 停在要讀插槽檔名的那一刻。
+        let mut core = d.runtime.core.lock().unwrap();
+        let status = std::thread::scope(|scope| {
+            let refresh = scope.spawn(|| refresh_env(&d.env()));
+            let started = std::time::Instant::now();
+            while d.doc.try_lock().is_ok() {
+                assert!(started.elapsed() < std::time::Duration::from_secs(5), "refresh_env waited for core before it took the config lock");
+                std::thread::yield_now();
+            }
+            // 它拿著 doc 鎖、被 core 鎖擋住:現在才把插槽放進保管庫(還握著 core 鎖)、再放掉 —— 它讀到的是新的。
+            core.state.as_mut().unwrap().key_slots.insert("slot".to_string(), vault_slot(SLOT));
+            drop(core);
+            refresh.join().unwrap()
+        });
+        assert_eq!(status.unwrap(), WiringStatus::Ready, "it saw the slot that was put in the vault while it waited");
     }
 
     /// config 還沒載入(`doc` 是 None)就什麼都不做;載入了、也沒有用到保管庫的金鑰就一樣。

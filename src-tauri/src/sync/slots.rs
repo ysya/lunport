@@ -1486,7 +1486,8 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
 /// 不留下一個下一輪被當成擋路的檔案。
 ///
 /// 兩個方向做完都會更新 agent 的設定(`agent::wiring::refresh_env`):`agent/config` 列的主機跟著這個插槽走,第一次需要時 Include 也在這時放進主 config。
-/// 更新不成(例如主 config 在載入之後被別的程式改過)只記到 stderr、不讓搬動本身失敗;下一輪同步(`round::run_round` 的 6c)會再做一次。
+/// 更新不成(例如主 config 在載入之後被別的程式改過,存檔撞上 `Conflict`)只記到 stderr、不讓搬動本身失敗:`agent/config` 要等 Include 放好才寫,所以放不進去的那一次它還不存在,
+/// 下一次更新(每次同步嘗試的最後,`round::sync_once`)當成第一次重試;過期的 doc 在那一次失敗時已經重載。
 pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), AppError> {
     let (state, _keys, home) = snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
@@ -5444,6 +5445,7 @@ pub(crate) mod tests {
     }
 
     /// 主 config 在載入之後被別的程式改過:agent 的設定更新不了(第一次要把 Include 放進去,存檔會撞上 `Conflict`)也不讓搬進保管庫失敗,別的程式的修改一個字都不動。
+    /// 放不進去的那一次 `agent/config` 還沒寫(它存在就表示 Include 放過),所以下一次嘗試當成第一次重試,不是以為使用者拿掉了而一直停在 IncludeMissing。
     #[test]
     fn a_main_config_edited_elsewhere_does_not_stop_a_key_moving_into_the_vault() {
         let (_relay, _clock, a, b, _words, personal) = pair();
@@ -5457,6 +5459,81 @@ pub(crate) mod tests {
         set_delivery(&b.env(), &id, true).unwrap();
         assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "the key is in the vault");
         assert_eq!(std::fs::read_to_string(b.main_path()).unwrap(), edited, "the edit made elsewhere is never overwritten");
+        let config = crate::agent::wiring::agent_config_path(&home(&b));
+        assert!(!config.exists(), "no agent config until the Include is in place");
+
+        b.reload();
+        settle(&b);
+        let main = std::fs::read_to_string(b.main_path()).unwrap();
+        assert!(main.starts_with("Include ~/.ssh/sshelter/agent/config\n"), "the next attempt adds it: {main}");
+        assert!(main.ends_with("# edited elsewhere\n"), "next to the edit made elsewhere: {main}");
+        assert!(std::fs::read_to_string(&config).unwrap().contains("Host web\n  IdentityAgent "));
+    }
+
+    /// 同一件事,使用者什麼都不必做:放不進去時 `refresh_env` 已經把過期的 doc 整份重載(並通知前端),下一次同步嘗試就放得進去。
+    #[test]
+    fn a_stale_config_heals_by_itself_so_the_next_sync_attempt_adds_the_include() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let edited = format!("{}# edited elsewhere\n", std::fs::read_to_string(b.main_path()).unwrap());
+        b.write_externally(&b.main_path(), &edited);
+        let announced = b.events.applied.lock().unwrap().len();
+
+        set_delivery(&b.env(), &id, true).unwrap();
+        assert_eq!(b.events.applied.lock().unwrap()[announced..], [0], "the front end is told the config was loaded again");
+        settle(&b);
+        let main = std::fs::read_to_string(b.main_path()).unwrap();
+        assert!(main.starts_with("Include ~/.ssh/sshelter/agent/config\n"), "{main}");
+        assert!(main.ends_with("# edited elsewhere\n"), "{main}");
+    }
+
+    /// 每一次同步嘗試最後的那一次更新,通知前端(`applied(0)`)時沒有持有 doc、backed_up 或 core 鎖。
+    #[test]
+    fn the_refresh_at_the_end_of_a_sync_attempt_tells_the_front_end_with_no_lock_held() {
+        use crate::sync::testkit::AppliedProbe;
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        // 第一次放 Include 撞上 `Conflict`(`set_delivery` 重載了 doc);之後主 config 又被改了一次,下一次嘗試的最後再撞上一次。
+        let edit = |note: &str| b.write_externally(&b.main_path(), &format!("{}{note}\n", std::fs::read_to_string(b.main_path()).unwrap()));
+        edit("# edited elsewhere");
+        set_delivery(&b.env(), &id, true).unwrap();
+        edit("# and again");
+
+        let probe = AppliedProbe::new(&b);
+        let mut env = b.env();
+        env.events = &probe;
+        crate::sync::round::sync_once(&env).unwrap();
+        assert_eq!(*probe.all_free.lock().unwrap(), [true], "announced once, with every lock released");
+    }
+
+    /// 一輪常在金鑰那一步之前就結束(帳戶拉不到、被限流、relay 出錯,退避最長 15 分鐘),而 agent 的設定只看這台的 config 與保管庫、不需要 relay:
+    /// 每一次同步嘗試的最後都對一次,不論那一輪走到哪裡。
+    #[test]
+    fn a_sync_attempt_that_ends_early_still_updates_the_agent_config() {
+        let (relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let config = crate::agent::wiring::agent_config_path(&home(&b));
+        assert!(!std::fs::read_to_string(&config).unwrap().contains("Host db"));
+
+        // B 在這台加了一台用這個插槽的主機,之後 relay 一直拉不到帳戶:這一輪在拉取帳戶那一步就結束了。
+        let uses = format!("  IdentityFile ~/.ssh/sshelter/keys/{file}\n");
+        b.save_in_app(&b.space_path(&personal), &format!("Host web\n  HostName 10.0.0.1\n{uses}Host db\n  HostName 10.0.0.2\n{uses}"));
+        let account = b.state().account.as_ref().unwrap().chain_id.clone();
+        let synced_before = b.state().last_sync_ms;
+        relay.set_rate_limited(&account, true);
+        crate::sync::round::sync_once(&b.env()).unwrap();
+        assert_eq!(b.state().last_sync_ms, synced_before, "the round ended before it did anything");
+        assert!(std::fs::read_to_string(&config).unwrap().contains("Host db\n"), "the host is listed all the same");
     }
 
     #[test]
