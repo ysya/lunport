@@ -79,9 +79,61 @@ export function buildAnswer(
   };
 }
 
-/** Allow (or Unlock) stays off while an answer is on its way and while a needed passphrase is still empty. */
-export function allowDisabled(r: AgentApprovalRequest, passphrase: string, busy: boolean): boolean {
-  return busy || (r.needs_passphrase && passphrase.length === 0);
+/**
+ * How long a new approval card keeps Allow (and Unlock) off after it mounts. The next queued request replaces the answered one
+ * within milliseconds, so without this a double click, or a quick second click, would answer a request the user never saw: another
+ * program or host, remembered for hours. Longer than a double click (500 ms by default on macOS and Windows), short enough not to
+ * be in the way. Deny and Cancel are never held back: they fail closed.
+ */
+export const ALLOW_ARM_DELAY_MS = 700;
+
+/** Calls `arm` once `ALLOW_ARM_DELAY_MS` has passed. Returns the function that cancels it, for a card that goes away first. */
+export function armAfterDelay(arm: () => void): () => void {
+  const timer = setTimeout(arm, ALLOW_ARM_DELAY_MS);
+  return () => clearTimeout(timer);
+}
+
+/**
+ * Allow (or Unlock) stays off until the card is armed (`ALLOW_ARM_DELAY_MS`), while an answer is on its way and while a needed
+ * passphrase is still empty. The passphrase field's Enter goes through the same check.
+ */
+export function allowDisabled(r: AgentApprovalRequest, passphrase: string, busy: boolean, armed: boolean): boolean {
+  return !armed || busy || (r.needs_passphrase && passphrase.length === 0);
+}
+
+/**
+ * Whether the card on screen is the request the user already answered: its answer is on the way, or the hub has not dropped it
+ * yet. It follows the request, not the IPC call. Once the hub drops the answered request, the next one heads the list as a card
+ * of its own, and that card is not busy (it is unarmed instead, `ALLOW_ARM_DELAY_MS`).
+ */
+export function isAnswering(answeredId: string | null, head: AgentApprovalRequest | undefined): boolean {
+  return head !== undefined && head.id === answeredId;
+}
+
+/** The answered id once the answer for `failedId` was rejected: cleared so the user can answer again, unless another request was answered since. */
+export function afterFailedAnswer(answeredId: string | null, failedId: string): string | null {
+  return answeredId === failedId ? null : answeredId;
+}
+
+/**
+ * The pending list reaches the window two ways: one `fetchPending()` when it opens, and an `agent://approvals` event for every
+ * change after that, each carrying the whole list. A fetch still in flight may have read the list before the change an event
+ * reports, and would put an older list back, so once an event has arrived the fetch's result is ignored.
+ */
+export function pendingFeed(set: (list: AgentApprovalRequest[]) => void): {
+  fromFetch: (list: AgentApprovalRequest[]) => void;
+  fromEvent: (list: AgentApprovalRequest[]) => void;
+} {
+  let sawEvent = false;
+  return {
+    fromFetch: (list) => {
+      if (!sawEvent) set(list);
+    },
+    fromEvent: (list) => {
+      sawEvent = true;
+      set(list);
+    },
+  };
 }
 
 /** Under ["config"], so every sync overview mutation and config change refreshes it. */

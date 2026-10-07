@@ -1,14 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentApprovalRequest } from "@/bindings/AgentApprovalRequest";
 import {
+  afterFailedAnswer,
   agentProblemText,
+  ALLOW_ARM_DELAY_MS,
   allowDisabled,
   approvalTitle,
+  armAfterDelay,
   buildAnswer,
   CONNECT_EXPIRED_EVENT,
   connectExpiredMessage,
   destination,
+  isAnswering,
+  pendingFeed,
   programChainLine,
   programName,
   rememberLabel,
@@ -104,18 +109,113 @@ describe("buildAnswer", () => {
 });
 
 describe("allowDisabled", () => {
+  it("is on until the card is armed, even for a request that would otherwise be allowed", () => {
+    expect(allowDisabled(request(), "", false, false)).toBe(true);
+    expect(allowDisabled(request({ needs_passphrase: true }), "hunter2", false, false)).toBe(true);
+    expect(allowDisabled(request({ preapproved: true, needs_passphrase: true }), "hunter2", false, false)).toBe(true);
+  });
+
   it("is on while an answer is on its way", () => {
-    expect(allowDisabled(request(), "", true)).toBe(true);
-    expect(allowDisabled(request({ needs_passphrase: true }), "hunter2", true)).toBe(true);
+    expect(allowDisabled(request(), "", true, true)).toBe(true);
+    expect(allowDisabled(request({ needs_passphrase: true }), "hunter2", true, true)).toBe(true);
   });
 
   it("waits for a needed passphrase", () => {
-    expect(allowDisabled(request({ needs_passphrase: true }), "", false)).toBe(true);
-    expect(allowDisabled(request({ needs_passphrase: true }), "hunter2", false)).toBe(false);
+    expect(allowDisabled(request({ needs_passphrase: true }), "", false, true)).toBe(true);
+    expect(allowDisabled(request({ needs_passphrase: true }), "hunter2", false, true)).toBe(false);
   });
 
   it("does not wait for a passphrase nobody asked for", () => {
-    expect(allowDisabled(request(), "", false)).toBe(false);
+    expect(allowDisabled(request(), "", false, true)).toBe(false);
+  });
+});
+
+describe("the arming delay", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is longer than a double click and short enough not to be in the way", () => {
+    expect(ALLOW_ARM_DELAY_MS).toBeGreaterThanOrEqual(500);
+    expect(ALLOW_ARM_DELAY_MS).toBeLessThanOrEqual(1000);
+  });
+
+  it("arms a card only once the delay has passed", () => {
+    vi.useFakeTimers();
+    const arm = vi.fn();
+    armAfterDelay(arm);
+    vi.advanceTimersByTime(ALLOW_ARM_DELAY_MS - 1);
+    expect(arm).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(arm).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(ALLOW_ARM_DELAY_MS * 2);
+    expect(arm).toHaveBeenCalledTimes(1);
+  });
+
+  it("never arms a card that went away first", () => {
+    vi.useFakeTimers();
+    const arm = vi.fn();
+    const cancel = armAfterDelay(arm);
+    vi.advanceTimersByTime(ALLOW_ARM_DELAY_MS - 1);
+    cancel();
+    vi.advanceTimersByTime(ALLOW_ARM_DELAY_MS * 2);
+    expect(arm).not.toHaveBeenCalled();
+  });
+});
+
+describe("the window's busy rule", () => {
+  const first = request({ id: "approval-1" });
+  const second = request({ id: "approval-2" });
+
+  it("is busy only while the card on screen is the request that was answered", () => {
+    expect(isAnswering(null, first)).toBe(false);
+    expect(isAnswering("approval-1", first)).toBe(true);
+  });
+
+  it("is not busy for the next request, which arrives as a card of its own", () => {
+    expect(isAnswering("approval-1", second)).toBe(false);
+    expect(isAnswering("approval-1", undefined)).toBe(false);
+  });
+
+  it("lets a rejected answer be given again", () => {
+    expect(afterFailedAnswer("approval-1", "approval-1")).toBeNull();
+  });
+
+  it("leaves a newer answer alone when an older one is rejected late", () => {
+    expect(afterFailedAnswer("approval-2", "approval-1")).toBe("approval-2");
+    expect(afterFailedAnswer(null, "approval-1")).toBeNull();
+  });
+});
+
+describe("the pending list feed", () => {
+  const older = [request({ id: "approval-1" }), request({ id: "approval-2" })];
+  const newer = [request({ id: "approval-2" })];
+
+  function feed() {
+    const seen: AgentApprovalRequest[][] = [];
+    return { seen, feed: pendingFeed((list) => seen.push(list)) };
+  }
+
+  it("takes the fetched list while no event has arrived", () => {
+    const { seen, feed: f } = feed();
+    f.fromFetch(older);
+    expect(seen).toEqual([older]);
+  });
+
+  it("ignores a fetch that finishes after an event, so it cannot put an older list back", () => {
+    const { seen, feed: f } = feed();
+    f.fromEvent(newer);
+    f.fromFetch(older);
+    expect(seen).toEqual([newer]);
+  });
+
+  it("keeps taking events, and drops a fetch whenever it comes once an event has", () => {
+    const { seen, feed: f } = feed();
+    f.fromFetch(older);
+    f.fromEvent(newer);
+    f.fromEvent([]);
+    f.fromFetch(older);
+    expect(seen).toEqual([older, newer, []]);
   });
 });
 

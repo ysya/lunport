@@ -6,32 +6,41 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
+  afterFailedAnswer,
   allowDisabled,
   approvalTitle,
+  armAfterDelay,
   buildAnswer,
   destination,
   fetchPending,
+  isAnswering,
   onApprovals,
+  pendingFeed,
   programChainLine,
   rememberLabel,
   resolveApproval,
 } from "@/lib/agent";
 import { isImeKey } from "@/lib/ime";
 
-/** One request: what asks, for which key and destination, and the answer. Exported for the markup tests. */
-export function ApprovalCard({
+/**
+ * One request: what asks, for which key and destination, and the answer. `armed` says whether Allow (Unlock) may be pressed yet
+ * (`ApprovalCard` arms it after `ALLOW_ARM_DELAY_MS`); Deny (Cancel) never waits. Exported for the markup tests.
+ */
+export function ApprovalCardView({
   request,
   busy,
+  armed,
   onAnswer,
 }: {
   request: AgentApprovalRequest;
   busy: boolean;
+  armed: boolean;
   onAnswer: (answer: AgentApprovalAnswer) => void;
 }) {
   const [remember, setRemember] = useState(request.rememberable);
   const [passphrase, setPassphrase] = useState("");
   const [rememberPassphrase, setRememberPassphrase] = useState(false);
-  const cannotAllow = allowDisabled(request, passphrase, busy);
+  const cannotAllow = allowDisabled(request, passphrase, busy, armed);
   const chain = programChainLine(request);
   const answer = (allow: boolean) => onAnswer(buildAnswer(request, allow, { remember, passphrase, rememberPassphrase }));
   return (
@@ -79,15 +88,38 @@ export function ApprovalCard({
   );
 }
 
+/**
+ * A request's card. The window keys it by request id, so every request gets a card of its own, and Allow (Unlock) stays off for
+ * `ALLOW_ARM_DELAY_MS` after the card mounts. The card that replaces an answered one is therefore never ready for the click
+ * that answered the one before it.
+ */
+export function ApprovalCard({
+  request,
+  busy,
+  onAnswer,
+}: {
+  request: AgentApprovalRequest;
+  busy: boolean;
+  onAnswer: (answer: AgentApprovalAnswer) => void;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => armAfterDelay(() => setArmed(true)), []);
+  return <ApprovalCardView request={request} busy={busy} armed={armed} onAnswer={onAnswer} />;
+}
+
 /** The `approval` window (spec §7.4): shows the oldest waiting request; Rust opens and destroys the window. */
 export default function AgentApprovalWindow() {
   const [pending, setPending] = useState<AgentApprovalRequest[]>([]);
-  const [busy, setBusy] = useState(false);
+  // The request the user answered last. Its card stays busy for as long as the hub still lists it (`isAnswering`), whatever the IPC call does.
+  const [answeredId, setAnsweredId] = useState<string | null>(null);
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let live = true;
-    void fetchPending().then((list) => live && setPending(list));
-    void onApprovals((list) => setPending(list)).then((u) => {
+    const feed = pendingFeed((list) => {
+      if (live) setPending(list);
+    });
+    void fetchPending().then(feed.fromFetch);
+    void onApprovals(feed.fromEvent).then((u) => {
       if (live) unlisten = u;
       else u();
     });
@@ -102,10 +134,11 @@ export default function AgentApprovalWindow() {
     <ApprovalCard
       key={request.id}
       request={request}
-      busy={busy}
+      busy={isAnswering(answeredId, request)}
       onAnswer={(answer) => {
-        setBusy(true);
-        void resolveApproval(request.id, answer).finally(() => setBusy(false));
+        setAnsweredId(request.id);
+        // A rejected answer (the call failed, or the request was already gone) leaves the card as it was, so the user can answer again.
+        void resolveApproval(request.id, answer).catch(() => setAnsweredId((current) => afterFailedAnswer(current, request.id)));
       }}
     />
   );
