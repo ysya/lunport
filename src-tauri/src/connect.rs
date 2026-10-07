@@ -513,6 +513,11 @@ fn password_autofill_env(
     ])
 }
 
+/// `ssh <options…> <alias>`。
+pub fn ssh_argv(options: &[String], alias: &str) -> Vec<String> {
+    std::iter::once("ssh".to_string()).chain(options.iter().cloned()).chain(std::iter::once(alias.to_string())).collect()
+}
+
 /// Spawn the launch spec detached, inheriting the environment. Not unit-tested (side effect).
 pub fn launch(spec: &LaunchSpec) -> Result<(), AppError> {
     std::process::Command::new(&spec.program)
@@ -530,9 +535,11 @@ pub fn connect_list_terminals() -> Vec<TerminalInfo> {
 }
 
 // (async): the auto-fill prechecks spawn `ssh -V`, `ssh -G`, and
-// `ssh-keygen -F` — that must not run on the main thread.
+// `ssh-keygen -F`, and the vault-key check (`oneshot::prepare`) spawns `ssh -G`
+// — that must not run on the main thread.
 #[tauri::command(async)]
 pub fn connect_launch(
+    app: tauri::AppHandle,
     state: tauri::State<crate::state::AppState>,
     alias: String,
     terminal_override: Option<String>,
@@ -560,9 +567,13 @@ pub fn connect_launch(
     };
 
     let new_tab = new_tab.unwrap_or(false);
-    let spec = match password_autofill_env(&state, &alias) {
-        Some(env_pairs) => build_autofill_launch(&terminal_id, &alias, new_tab, &env_pairs)?,
-        None => build_launch(&terminal_id, &alias, new_tab)?,
+    // 用「只在 SSHelter」金鑰的主機經一次性通道連(金鑰保管庫 spec §5.6);其他主機照舊(含密碼自動填入)。
+    let spec = match crate::agent::oneshot::prepare(&app, &alias)? {
+        Some(options) => build_launch_command(&terminal_id, &ssh_argv(&options, &alias), new_tab)?,
+        None => match password_autofill_env(&state, &alias) {
+            Some(env_pairs) => build_autofill_launch(&terminal_id, &alias, new_tab, &env_pairs)?,
+            None => build_launch(&terminal_id, &alias, new_tab)?,
+        },
     };
     launch(&spec)
 }
@@ -573,6 +584,46 @@ pub fn connect_launch(
 mod tests {
     use super::*;
     use crate::config::include::load_doc;
+
+    #[test]
+    fn ssh_argv_puts_the_options_before_the_alias() {
+        let options = vec!["-o".to_string(), "ForwardAgent=no".to_string()];
+        assert_eq!(ssh_argv(&options, "web"), vec!["ssh", "-o", "ForwardAgent=no", "web"]);
+        assert_eq!(ssh_argv(&[], "web"), vec!["ssh", "web"]);
+    }
+
+    /// 一次性通道的選項到每一種終端機都原樣、在主機名稱之前:交給 shell 的(AppleScript 的 `do script`、xfce4-terminal)把 `~` 單引號起來
+    /// (沒引號的 `~` 會被 shell 展開成可能含空白的家目錄路徑),直接執行的(Linux 的終端機、wt、cmd)不經 shell,整串原樣當引數。
+    #[test]
+    fn the_channel_options_reach_every_terminal_before_the_alias() {
+        let unix = ssh_argv(
+            &["-o".to_string(), "IdentityAgent=~/.ssh/sshelter/agent/run/0a1b2c3d".to_string(), "-o".to_string(), "ForwardAgent=no".to_string()],
+            "web",
+        );
+        let quoted = "ssh -o 'IdentityAgent=~/.ssh/sshelter/agent/run/0a1b2c3d' -o ForwardAgent=no web";
+        for new_tab in [false, true] {
+            let terminal = build_launch_command("terminal", &unix, new_tab).unwrap();
+            assert_eq!(terminal.args.last().unwrap(), &format!("tell application \"Terminal\" to do script \"{quoted}\""));
+            let iterm = build_launch_command("iterm2", &unix, new_tab).unwrap();
+            let carrying = iterm.args.iter().filter(|a| a.ends_with(&format!("command \"{quoted}\""))).count();
+            assert_eq!(carrying, if new_tab { 2 } else { 1 }, "the new-tab script names the command twice: {:?}", iterm.args);
+        }
+        assert_eq!(build_launch_command("xfce4-terminal", &unix, false).unwrap().args, vec!["-e".to_string(), quoted.to_string()]);
+        for (id, prefix) in [("gnome-terminal", vec!["--"]), ("konsole", vec!["-e"]), ("kitty", vec![]), ("wezterm", vec!["start", "--"])] {
+            let spec = build_launch_command(id, &unix, false).unwrap();
+            let expected: Vec<String> = prefix.into_iter().map(String::from).chain(unix.iter().cloned()).collect();
+            assert_eq!(spec.args, expected, "{id}");
+        }
+
+        let windows = ssh_argv(
+            &["-o".to_string(), "IdentityAgent=//./pipe/sshelter-connect-00".to_string(), "-o".to_string(), "ForwardAgent=no".to_string()],
+            "web",
+        );
+        assert_eq!(build_launch_command("wt", &windows, false).unwrap().args, windows);
+        let cmd = build_launch_command("cmd", &windows, false).unwrap();
+        assert_eq!(cmd.args[..5], ["/c", "start", "", "cmd", "/k"].map(String::from));
+        assert_eq!(cmd.args[5..], windows[..]);
+    }
 
     #[test]
     fn windows_terminal_spec_execs_argv_directly() {

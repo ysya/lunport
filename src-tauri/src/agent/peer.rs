@@ -123,6 +123,11 @@ pub fn process_chain(pid: u32) -> Vec<ProcInfo> {
     walk(pid, proc_info)
 }
 
+/// `pid` 的執行檔名稱(小寫、去掉 `.exe`);讀不到(程序已經結束)→ None。
+pub fn executable_base(pid: u32) -> Option<String> {
+    base_lower(&proc_info(pid)?)
+}
+
 /// `process_chain` 的走法;讀一個程序的函式由呼叫端給(測試用假的)。
 fn walk(pid: u32, mut read: impl FnMut(u32) -> Option<ProcInfo>) -> Vec<ProcInfo> {
     let mut out: Vec<ProcInfo> = Vec::new();
@@ -478,6 +483,15 @@ mod tests {
         );
     }
 
+    /// `executable_base` 讀出的名稱:小寫、沒有 `.exe`(Windows 的 `SSH.EXE` 與 `ssh.exe` 是同一個程式),讀不到路徑 → None。
+    #[test]
+    fn the_base_name_is_lowercase_and_has_no_exe_extension() {
+        assert_eq!(base_lower(&p(1, 0, r"C:\Windows\System32\OpenSSH\SSH.EXE", &[])).as_deref(), Some("ssh"));
+        assert_eq!(base_lower(&p(1, 0, "/usr/bin/ssh", &[])).as_deref(), Some("ssh"));
+        assert_eq!(base_lower(&p(1, 0, "/opt/homebrew/bin/SSH-Add", &[])).as_deref(), Some("ssh-add"));
+        assert_eq!(base_lower(&ProcInfo { pid: 1, ppid: 0, path: None, argv: vec![] }), None);
+    }
+
     #[test]
     fn file_name_drops_exe_in_any_case_and_never_cuts_inside_a_character() {
         assert_eq!(file_name(r"C:\x\ssh.exe"), "ssh");
@@ -532,6 +546,30 @@ mod tests {
         assert_eq!(chain[0].pid, pid);
         assert_eq!(chain[0].argv, vec!["sh"], "only argv[0] of a program that is not an interpreter");
         assert!(chain.iter().all(|p| p.argv.iter().all(|a| !a.contains("secret-token"))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_executable_base_name_of_a_live_process_and_of_a_gone_one() {
+        let base = executable_base(std::process::id()).unwrap();
+        assert!(!base.is_empty() && !base.contains('/'));
+        assert_eq!(executable_base(u32::MAX - 7), None);
+    }
+
+    /// 別的程序(連上通道的 ssh 就是別的程序):名稱是它自己的執行檔,結束之後讀不到。期望值用 PATH 上找到的 `sleep` 解開 symlink 後的檔名
+    /// (系統回報的是真正的路徑,例如 busybox 的 applet 是 `busybox`)。
+    #[cfg(unix)]
+    #[test]
+    fn the_executable_base_of_another_live_process_is_its_own_file_name() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let base = executable_base(pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap()).map(|dir| dir.join("sleep")).find(|p| p.is_file()).unwrap();
+        let expected = sleep.canonicalize().unwrap().file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+        assert_eq!(base, Some(expected));
+        assert_eq!(executable_base(pid), None, "gone once it has been waited for");
     }
 
     #[test]

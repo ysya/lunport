@@ -156,6 +156,12 @@ pub(crate) fn accept(pipe: &OwnedHandle) -> io::Result<Option<u32>> {
     Ok(known.then_some(pid))
 }
 
+/// Connect 的一次性 pipe:只有一個 instance,名稱已經存在就失敗(`FILE_FLAG_FIRST_PIPE_INSTANCE`)。描述元在建立時複製,用完即丟。
+pub(crate) fn one_shot(name: &str) -> io::Result<OwnedHandle> {
+    let security = OwnerOnly::new()?;
+    create_instance(&wide_pipe_path(name), &security, true, 1)
+}
+
 /// 在 `dir` 拿鎖,開 `\\.\pipe\<name>`,每條連線交給 `handle`。另一個 SSHelter 拿著鎖 → `OtherInstance`;名稱被別的程式佔用(或其他開不起來的原因)→ 錯誤。
 pub fn listen(dir: &Path, name: &str, handle: Handler) -> Result<Started, AppError> {
     let Some(lock) = take_lock(dir)? else { return Ok(Started::OtherInstance) };
@@ -231,6 +237,16 @@ mod tests {
         let other = first_instance_error(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32)).to_string();
         assert!(other.starts_with("Can't create SSHelter's agent pipe ("), "{other}");
         assert!(!other.contains("Another program"), "{other}");
+    }
+
+    /// Connect 的一次性 pipe 只有一個 instance,名稱被佔用時開不起來(`FILE_FLAG_FIRST_PIPE_INSTANCE`),instance 關掉之後名稱又空出來。
+    #[test]
+    fn a_one_shot_pipe_cannot_be_opened_twice_under_one_name() {
+        let name = format!("sshelter-oneshot-test-{}", std::process::id());
+        let first = one_shot(&name).unwrap();
+        assert!(one_shot(&name).is_err(), "the name is taken");
+        drop(first);
+        assert!(one_shot(&name).is_ok(), "free again once the only instance is closed");
     }
 
     #[test]

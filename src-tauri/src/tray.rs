@@ -122,32 +122,40 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         }
         other => {
             if let Some(alias) = other.strip_prefix("connect:") {
-                if let Err(e) = quick_connect(app, alias) {
-                    eprintln!("[tray] quick-connect '{alias}' failed: {e}");
-                }
+                // Off the menu thread: a host on a vault key runs `ssh -G` first (key vault spec §5.6).
+                let (app, alias) = (app.clone(), alias.to_string());
+                std::thread::spawn(move || {
+                    if let Err(e) = quick_connect(&app, &alias) {
+                        eprintln!("[tray] quick-connect '{alias}' failed: {e}");
+                    }
+                });
             }
         }
     }
 }
 
-/// Validate + build_launch with the first detected terminal, then launch.
+/// Validate, then launch with the first detected terminal: a host on a vault key through a one-shot channel.
 fn quick_connect(app: &tauri::AppHandle, alias: &str) -> Result<(), crate::error::AppError> {
     use crate::error::AppError;
 
     let state = app.state::<crate::state::AppState>();
-    let doc_lock = state.doc.lock().unwrap();
-    let doc = doc_lock
-        .as_ref()
-        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-
-    crate::connect::validate_alias(doc, alias)?;
+    {
+        let doc_lock = state.doc.lock().unwrap();
+        let doc = doc_lock
+            .as_ref()
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        crate::connect::validate_alias(doc, alias)?;
+    }
 
     let terminal = crate::connect::detect_terminals()
         .into_iter()
         .next()
         .ok_or_else(|| AppError::Other("no terminal found".to_string()))?;
 
-    let spec = crate::connect::build_launch(&terminal.id, alias, false)?;
+    let spec = match crate::agent::oneshot::prepare(app, alias)? {
+        Some(options) => crate::connect::build_launch_command(&terminal.id, &crate::connect::ssh_argv(&options, alias), false)?,
+        None => crate::connect::build_launch(&terminal.id, alias, false)?,
+    };
     crate::connect::launch(&spec)
 }
 
