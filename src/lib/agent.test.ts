@@ -6,6 +6,7 @@ import {
   agentProblemText,
   ALLOW_ARM_DELAY_MS,
   allowDisabled,
+  answerRejectedMessage,
   approvalTitle,
   armAfterDelay,
   buildAnswer,
@@ -184,6 +185,25 @@ describe("the window's busy rule", () => {
   it("leaves a newer answer alone when an older one is rejected late", () => {
     expect(afterFailedAnswer("approval-2", "approval-1")).toBe("approval-2");
     expect(afterFailedAnswer(null, "approval-1")).toBeNull();
+  });
+});
+
+describe("the warning for a rejected answer", () => {
+  it("names the request and the reason", () => {
+    expect(answerRejectedMessage("approval-3", new Error("that request was already answered or has expired"))).toBe(
+      "[agent] the answer to approval-3 was rejected: that request was already answered or has expired",
+    );
+  });
+
+  it("takes the reason from a rejection that is not an Error (the backend rejects with its message as a string)", () => {
+    expect(answerRejectedMessage("approval-3", "that request was already answered or has expired")).toBe(
+      "[agent] the answer to approval-3 was rejected: that request was already answered or has expired",
+    );
+  });
+
+  // The helper is given the request id and the error only, so there is nothing of the answer (a passphrase can be in it) to log.
+  it("has no way to carry the answer", () => {
+    expect(answerRejectedMessage.length).toBe(2);
   });
 });
 

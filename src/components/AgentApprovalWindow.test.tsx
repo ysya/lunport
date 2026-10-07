@@ -145,7 +145,15 @@ describe("the approval window", () => {
   it("is busy by the request it answered, not by the call that answers it", () => {
     expect(source).toContain("busy={isAnswering(answeredId, request)}");
     expect(source).toMatch(/setAnsweredId\(request\.id\);/);
-    expect(source).toMatch(/\.catch\(\(\) => setAnsweredId\(\(current\) => afterFailedAnswer\(current, request\.id\)\)\)/);
+    expect(source).toContain("setAnsweredId((current) => afterFailedAnswer(current, request.id));");
+  });
+
+  it("warns in the console about a rejected answer with the request and the reason, and never with the answer", () => {
+    expect(source).toMatch(/\.catch\(\(error: unknown\) => \{/);
+    expect(source).toContain("console.warn(answerRejectedMessage(request.id, error));");
+    const warnings = source.match(/console\.warn\([^;]*;/g) ?? [];
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).not.toMatch(/passphrase|\banswer\b/);
   });
 
   it("feeds the list through the feed that drops a fetch that is older than an event", () => {

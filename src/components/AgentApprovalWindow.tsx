@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import {
   afterFailedAnswer,
   allowDisabled,
+  answerRejectedMessage,
   approvalTitle,
   armAfterDelay,
   buildAnswer,
@@ -138,7 +139,11 @@ export default function AgentApprovalWindow() {
       onAnswer={(answer) => {
         setAnsweredId(request.id);
         // A rejected answer (the call failed, or the request was already gone) leaves the card as it was, so the user can answer again.
-        void resolveApproval(request.id, answer).catch(() => setAnsweredId((current) => afterFailedAnswer(current, request.id)));
+        // The console says which request and why; the line is built from the id and the error only, never from the answer.
+        void resolveApproval(request.id, answer).catch((error: unknown) => {
+          console.warn(answerRejectedMessage(request.id, error));
+          setAnsweredId((current) => afterFailedAnswer(current, request.id));
+        });
       }}
     />
   );

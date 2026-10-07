@@ -102,6 +102,14 @@ export function allowDisabled(r: AgentApprovalRequest, passphrase: string, busy:
 }
 
 /**
+ * The console line for an answer the backend rejected (the call failed, or the request was already gone): which request, and why.
+ * It is given the request id and the error only, so nothing of the answer, which can carry a passphrase, can end up in it.
+ */
+export function answerRejectedMessage(requestId: string, error: unknown): string {
+  return `[agent] the answer to ${requestId} was rejected: ${errorMessage(error)}`;
+}
+
+/**
  * Whether the card on screen is the request the user already answered: its answer is on the way, or the hub has not dropped it
  * yet. It follows the request, not the IPC call. Once the hub drops the answered request, the next one heads the list as a card
  * of its own, and that card is not busy (it is unarmed instead, `ALLOW_ARM_DELAY_MS`).
