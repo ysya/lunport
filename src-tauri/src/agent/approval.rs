@@ -59,9 +59,14 @@ pub struct ApprovalCache {
 }
 
 impl ApprovalCache {
+    /// 丟掉所有到期的核准(到期的那一刻就算到期):不必等下一次查詢,agent 的執行期定時呼叫(`Broker::expire`)。
+    pub fn prune(&mut self, now_ms: u64) {
+        self.entries.retain(|_, expires| *expires > now_ms);
+    }
+
     /// 有沒有還沒到期的核准;順便丟掉所有到期的。
     pub fn is_remembered(&mut self, key: &ApprovalKey, now_ms: u64) -> bool {
-        self.entries.retain(|_, expires| *expires > now_ms);
+        self.prune(now_ms);
         self.entries.contains_key(key)
     }
 
@@ -122,6 +127,18 @@ mod tests {
         assert!(!cache.is_remembered(&other_host, 1_000), "another host asks again");
         assert!(!cache.is_remembered(&key("claude"), 1_000 + 15 * 60_000), "expired at the boundary");
         assert_eq!(cache.len(), 0, "expired entries are dropped");
+    }
+
+    #[test]
+    fn prune_drops_the_expired_without_a_lookup() {
+        let mut cache = ApprovalCache::default();
+        cache.remember(key("short"), 0, 15);
+        cache.remember(key("long"), 0, 240);
+        cache.prune(15 * 60_000 - 1);
+        assert_eq!(cache.len(), 2, "nothing has expired yet");
+        cache.prune(15 * 60_000);
+        assert_eq!(cache.len(), 1, "expired at the boundary, the same as a lookup decides");
+        assert!(cache.is_remembered(&key("long"), 15 * 60_000));
     }
 
     #[test]

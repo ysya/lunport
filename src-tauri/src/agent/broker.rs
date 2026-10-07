@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use ssh_key::public::KeyData;
-use ssh_key::HashAlg;
+use ssh_key::{Algorithm, HashAlg};
 use zeroize::Zeroizing;
 
 use crate::agent::approval::{remember_minutes, verdict, ApprovalCache, ApprovalKey, KeyProtection, Verdict};
@@ -115,6 +115,17 @@ struct Unlocked {
     expires_ms: u64,
 }
 
+impl Unlocked {
+    /// 還沒到期(到期的那一刻就算到期,同 `ApprovalCache`)。
+    fn live(&self, now_ms: u64) -> bool {
+        self.expires_ms > now_ms
+    }
+}
+
+/// 等第一個請求最多多久:它可能先跳核准視窗,再跳最多 `PASSPHRASE_ATTEMPTS` 次只要 passphrase 的視窗,每個最多 `APPROVAL_TIMEOUT`;
+/// 再加一點讀保管庫與解密的時間。有上限:主機的呼叫卡住(例如 keychain 的存取對話框)時,等的執行緒不會永遠掛著。
+const SHARED_ANSWER_WAIT: Duration = Duration::from_secs(APPROVAL_TIMEOUT.as_secs() * (PASSPHRASE_ATTEMPTS as u64 + 1) + 10);
+
 /// 正在問的「金鑰 × 主機 × 程式」:同時到的相同請求等這一個答案(spec §5.3)。
 #[derive(Default)]
 struct Pending {
@@ -129,13 +140,13 @@ impl Pending {
         self.done.notify_all();
     }
 
-    /// 等第一個請求的答案;等太久(視窗本身最多 60 秒)當成拒絕。
+    /// 等第一個請求的答案,最多 `SHARED_ANSWER_WAIT`(第一個請求可能連跳好幾個視窗);等不到(主機卡住)當成拒絕。
     fn wait(&self) -> bool {
         self.followers.fetch_add(1, Ordering::SeqCst);
         let answer = self.answer.lock().unwrap_or_else(PoisonError::into_inner);
         let (answer, _) = self
             .done
-            .wait_timeout_while(answer, APPROVAL_TIMEOUT + Duration::from_secs(5), |answer| answer.is_none())
+            .wait_timeout_while(answer, SHARED_ANSWER_WAIT, |answer| answer.is_none())
             .unwrap_or_else(PoisonError::into_inner);
         answer.unwrap_or(false)
     }
@@ -156,8 +167,8 @@ impl Drop for First<'_> {
     }
 }
 
-/// agent 在記憶體裡的狀態(`AgentRuntime::broker`):記住的核准、解開的私鑰、正在問的請求。螢幕鎖定(Plan 3)時 `clear`;SSHelter 結束時
-/// 跟著行程消失。
+/// agent 在記憶體裡的狀態(`AgentRuntime::broker`):記住的核准、解開的私鑰、正在問的請求。到期的由 `expire` 丟掉(執行期每分鐘呼叫一次),
+/// 螢幕鎖定(Plan 3)時 `clear`;SSHelter 結束時跟著行程消失。
 #[derive(Default)]
 pub struct Broker {
     approvals: Mutex<ApprovalCache>,
@@ -176,6 +187,42 @@ fn shorten(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max).collect();
     out.push('…');
     out
+}
+
+/// 視窗的回答:passphrase 一拿到就包進 `Zeroizing`,不管有沒有允許、用不用得到,放掉時都會清掉。
+struct Answer {
+    allow: bool,
+    remember: bool,
+    passphrase: Option<Zeroizing<String>>,
+    remember_passphrase: bool,
+}
+
+impl From<AgentApprovalAnswer> for Answer {
+    fn from(answer: AgentApprovalAnswer) -> Self {
+        Answer {
+            allow: answer.allow,
+            remember: answer.remember,
+            passphrase: answer.passphrase.map(Zeroizing::new),
+            remember_passphrase: answer.remember_passphrase,
+        }
+    }
+}
+
+/// 使用者已經允許(或是 Connect)、請求卻還是被拒絕:原因記到 stderr。只有插槽 id 與原因,不含金鑰內容、passphrase 與簽的資料。
+fn refused(slot_id: &str, why: impl std::fmt::Display) {
+    eprintln!("[agent] refused a request for slot {slot_id}: {why}");
+}
+
+/// 記在 keychain 的 passphrase(沒有或讀不到 → None);一拿到就包進 `Zeroizing`。
+fn remembered_passphrase(host: &dyn AgentHost, slot_id: &str) -> Option<Zeroizing<String>> {
+    host.keychain().get(&passphrase_account(slot_id)).ok().flatten().map(Zeroizing::new)
+}
+
+/// 這把金鑰的公鑰,只限 agent 簽得了的種類(Ed25519、ECDSA、RSA):`sk-*`(FIDO)與 DSA 的金鑰不列出,也不比對簽章請求,
+/// 免得使用者核准之後才發現簽不出來。
+fn signable_public_key(key: &VaultKey) -> Option<KeyData> {
+    material::public_key_data(&key.public_key)
+        .filter(|data| matches!(data.algorithm(), Algorithm::Ed25519 | Algorithm::Ecdsa { .. } | Algorithm::Rsa { .. }))
 }
 
 /// 一個簽章請求要顯示的一切。
@@ -205,15 +252,24 @@ impl Ask<'_> {
             preapproved,
         }
     }
+
+    /// 解開的私鑰就是請求指名的那一把嗎?保管庫裡的內容跟記錄的公鑰對不上(被換掉或壞掉了)就不能用:視窗沒顯示過的金鑰不簽。
+    fn names(&self, material: &Material) -> bool {
+        let same = material.key_data() == self.request.key;
+        if !same {
+            refused(&self.key.slot_id, "the vault entry is not the key the request names");
+        }
+        same
+    }
 }
 
 impl Broker {
-    /// 列出的金鑰:這台只在 SSHelter 的金鑰;一次性通道只列它那一把。列出不必核准(公鑰不是祕密)。
+    /// 列出的金鑰:這台只在 SSHelter 的金鑰(而且是 agent 簽得了的種類);一次性通道只列它那一把。列出不必核准(公鑰不是祕密)。
     pub fn identities(&self, host: &dyn AgentHost, grant: Option<&Grant>) -> Vec<(KeyData, String)> {
         host.keys()
             .into_iter()
             .filter(|key| grant.is_none_or(|g| g.slot_id == key.slot_id))
-            .filter_map(|key| material::public_key_data(&key.public_key).map(|data| (data, key.name)))
+            .filter_map(|key| signable_public_key(&key).map(|data| (data, key.name)))
             .collect()
     }
 
@@ -224,7 +280,7 @@ impl Broker {
             return None;
         }
         let keys = host.keys();
-        let key = keys.iter().find(|k| material::public_key_data(&k.public_key).as_ref() == Some(&request.key))?;
+        let key = keys.iter().find(|k| signable_public_key(k).as_ref() == Some(&request.key))?;
         if grant.is_some_and(|g| g.slot_id != key.slot_id) {
             return None;
         }
@@ -242,13 +298,29 @@ impl Broker {
         } else {
             self.approve(host, &ask, &settings)?
         };
-        material.sign(&request.data, request.flags).ok()
+        // 只用請求指名的那把金鑰簽:保管庫裡的內容跟記錄的公鑰對不上,就不用視窗沒顯示過的金鑰簽。
+        if !ask.names(&material) {
+            return None;
+        }
+        match material.sign(&request.data, request.flags) {
+            Ok(blob) => Some(blob),
+            Err(e) => {
+                refused(&key.slot_id, e);
+                None
+            }
+        }
     }
 
-    /// 忘掉記住的核准與解開的私鑰(螢幕鎖定;spec §5.3)。
+    /// 忘掉記住的核准與解開的私鑰(螢幕鎖定;spec §5.3)。鎖中毒也照樣清:清除不能因為別的執行緒 panic 過就做不到。
     pub fn clear(&self) {
-        self.approvals.lock().unwrap().clear();
-        self.unlocked.lock().unwrap().clear();
+        self.approvals.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        self.unlocked.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+
+    /// 把到期的記住的核准與解開的私鑰丟掉(spec §5.5:時間到就清除,不等下一個請求)。agent 的執行期每分鐘呼叫一次。
+    pub fn expire(&self, now_ms: u64) {
+        self.approvals.lock().unwrap_or_else(PoisonError::into_inner).prune(now_ms);
+        self.unlocked.lock().unwrap_or_else(PoisonError::into_inner).retain(|_, u| u.live(now_ms));
     }
 
     /// 核准這次請求並解開私鑰;沒有允許(拒絕、逾時、passphrase 錯三次)→ None。
@@ -291,8 +363,10 @@ impl Broker {
             return if pending.wait() { self.unlock(host, ask, None) } else { None };
         }
         let mut first = First { broker: self, key: approval_key, pending, allowed: false };
-        // 上一個相同的請求可能在這個請求查過之後才記住:再查一次。
-        let material = if self.approvals.lock().unwrap().is_remembered(&first.key, host.now_ms()) {
+        // 上一個相同的請求可能在這個請求查過之後才記住:再查一次(時間先取好,鎖裡不呼叫主機)。
+        let now = host.now_ms();
+        let remembered = self.approvals.lock().unwrap().is_remembered(&first.key, now);
+        let material = if remembered {
             self.unlock(host, ask, None)
         } else {
             self.ask_and_unlock(host, ask, Some(&first.key))
@@ -305,15 +379,12 @@ impl Broker {
     fn ask_and_unlock(&self, host: &dyn AgentHost, ask: &Ask, approval_key: Option<&ApprovalKey>) -> Option<Arc<Material>> {
         let needs_passphrase = ask.key.has_passphrase
             && self.cached(&ask.key.slot_id, host.now_ms()).is_none()
-            && !matches!(host.keychain().get(&passphrase_account(&ask.key.slot_id)), Ok(Some(_)));
-        let answer = host.ask(ask.prompt(false, needs_passphrase, approval_key.is_some(), None))?;
+            && remembered_passphrase(host, &ask.key.slot_id).is_none();
+        let answer = Answer::from(host.ask(ask.prompt(false, needs_passphrase, approval_key.is_some(), None))?);
         if !answer.allow {
             return None;
         }
-        let supplied = answer
-            .passphrase
-            .filter(|_| needs_passphrase)
-            .map(|passphrase| (Zeroizing::new(passphrase), answer.remember_passphrase));
+        let supplied = answer.passphrase.filter(|_| needs_passphrase).map(|passphrase| (passphrase, answer.remember_passphrase));
         let material = self.unlock(host, ask, supplied)?;
         if let (Some(key), true) = (approval_key, answer.remember) {
             self.remember(key.clone(), &ask.key.slot_id, host.now_ms(), ask.minutes);
@@ -322,28 +393,45 @@ impl Broker {
     }
 
     /// 解開這把金鑰:記憶體裡解開的 → 不需要 passphrase → keychain 記住的 passphrase(不對就刪掉)→ 核准視窗帶回來的(`supplied`)或
-    /// 再問(`preapproved`:只要 passphrase),一共三次。
+    /// 再問(`preapproved`:只要 passphrase),一共三次。使用者已經允許卻打不開的原因記到 stderr(`refused`)。
     fn unlock(&self, host: &dyn AgentHost, ask: &Ask, mut supplied: Option<(Zeroizing<String>, bool)>) -> Option<Arc<Material>> {
         let slot_id = &ask.key.slot_id;
         if let Some(material) = self.cached(slot_id, host.now_ms()) {
             return Some(material);
         }
-        let text = host.private_key(slot_id).ok().flatten()?;
+        let text = match host.private_key(slot_id) {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                refused(slot_id, "the vault has no entry for this key");
+                return None;
+            }
+            Err(e) => {
+                refused(slot_id, format!("cannot read the key from the vault: {e}"));
+                return None;
+            }
+        };
         match material::open(&text, None) {
             Ok(material) => return Some(Arc::new(material)),
             Err(OpenError::NeedsPassphrase) => {}
-            Err(_) => return None,
+            Err(e) => {
+                refused(slot_id, format!("cannot open the key: {e:?}"));
+                return None;
+            }
         }
         let account = passphrase_account(slot_id);
         if supplied.is_none() {
-            if let Ok(Some(saved)) = host.keychain().get(&account) {
-                let saved = Zeroizing::new(saved);
+            if let Some(saved) = remembered_passphrase(host, slot_id) {
                 match material::open(&text, Some(&saved)) {
                     Ok(material) => return Some(Arc::new(material)),
                     Err(OpenError::WrongPassphrase) => {
-                        let _ = host.keychain().delete(&account);
+                        if let Err(e) = host.keychain().delete(&account) {
+                            eprintln!("[agent] cannot forget the stale remembered passphrase of slot {slot_id}: {e}");
+                        }
                     }
-                    Err(_) => return None,
+                    Err(e) => {
+                        refused(slot_id, format!("cannot open the key: {e:?}"));
+                        return None;
+                    }
                 }
             }
         }
@@ -352,15 +440,19 @@ impl Broker {
             let (passphrase, remember) = match supplied.take() {
                 Some(given) => given,
                 None => {
-                    let answer = host.ask(ask.prompt(true, true, false, error.take()))?;
+                    let answer = Answer::from(host.ask(ask.prompt(true, true, false, error.take()))?);
                     if !answer.allow {
                         return None;
                     }
-                    (Zeroizing::new(answer.passphrase.unwrap_or_default()), answer.remember_passphrase)
+                    (answer.passphrase.unwrap_or_default(), answer.remember_passphrase)
                 }
             };
             match material::open(&text, Some(&passphrase)) {
                 Ok(material) => {
+                    // 存進 keychain、留在記憶體之前先確認這就是請求指名的那一把:對不上的內容什麼都不留。
+                    if !ask.names(&material) {
+                        return None;
+                    }
                     let material = Arc::new(material);
                     // 記住了:每次簽章時才用它解開,不留解開的私鑰(spec §5.5)。存不進 keychain 就留在記憶體。
                     let saved = remember && host.keychain().set(&account, &passphrase).is_ok();
@@ -371,7 +463,10 @@ impl Broker {
                     return Some(material);
                 }
                 Err(OpenError::WrongPassphrase) => error = Some(WRONG_PASSPHRASE.to_string()),
-                Err(_) => return None,
+                Err(e) => {
+                    refused(slot_id, format!("cannot open the key: {e:?}"));
+                    return None;
+                }
             }
         }
         None
@@ -379,7 +474,7 @@ impl Broker {
 
     fn cached(&self, slot_id: &str, now_ms: u64) -> Option<Arc<Material>> {
         let mut unlocked = self.unlocked.lock().unwrap();
-        unlocked.retain(|_, u| u.expires_ms > now_ms);
+        unlocked.retain(|_, u| u.live(now_ms));
         unlocked.get(slot_id).map(|u| Arc::clone(&u.material))
     }
 
@@ -396,6 +491,12 @@ impl Broker {
     #[cfg(test)]
     fn waiting(&self) -> usize {
         self.asking.lock().unwrap().values().map(|p| p.followers.load(Ordering::SeqCst)).sum()
+    }
+
+    /// 記在記憶體裡的核准數與解開的私鑰數(測試用;還沒清掉的過期項目也算)。
+    #[cfg(test)]
+    fn kept(&self) -> (usize, usize) {
+        (self.approvals.lock().unwrap().len(), self.unlocked.lock().unwrap().len())
     }
 }
 
@@ -1013,5 +1114,207 @@ mod tests {
         assert_eq!(connect.identities().len(), 1, "a grant lists only its own key");
         assert!(connect.sign(&request(test_keys::PLAIN_PUBLIC, Some(host_key()))).is_none(), "and signs only with it");
         assert_eq!(host.asked().len(), 1, "without asking");
+    }
+
+    // agent 簽不了的金鑰、保管庫裡對不上的內容、核准的主機與金鑰、使用者允許之後的拒絕、等待的上限、到期與中毒的鎖。
+
+    /// 組一行公鑰:演算法名稱,後面每個欄位都是一個 SSH string(sk 金鑰的公鑰與 application、DSA 的四個 mpint 都是)。
+    fn public_line(algorithm: &str, fields: &[&[u8]]) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use ssh_encoding::Encode;
+        let mut blob = Vec::new();
+        algorithm.encode(&mut blob).unwrap();
+        for field in fields {
+            field.encode(&mut blob).unwrap();
+        }
+        format!("{algorithm} {}", STANDARD.encode(blob))
+    }
+
+    /// 在替身主機上加一把沒有 passphrase 的金鑰。
+    fn add_key(host: &mut FakeHost, slot_id: &str, name: &str, public: &str, fingerprint: &str, private: String) {
+        host.keys.push(VaultKey {
+            slot_id: slot_id.into(),
+            name: name.into(),
+            fingerprint: fingerprint.into(),
+            public_key: public.into(),
+            has_passphrase: false,
+        });
+        host.private.insert(slot_id.into(), private);
+    }
+
+    #[test]
+    fn keys_the_agent_cannot_sign_with_are_neither_listed_nor_matched() {
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        let sk = public_line("sk-ssh-ed25519@openssh.com", &[&[7; 32], b"ssh:"]);
+        let dsa = public_line("ssh-dss", &[&[1], &[2], &[3], &[4]]);
+        assert!(material::public_key_data(&sk).is_some() && material::public_key_data(&dsa).is_some(), "the fixtures are valid public keys");
+        add_key(&mut host, &"1".repeat(32), "id_sk", &sk, "SHA256:sk", test_keys::plain());
+        add_key(&mut host, &"2".repeat(32), "id_dsa", &dsa, "SHA256:dsa", test_keys::plain());
+        let names: Vec<String> = broker.identities(&host, None).into_iter().map(|(_, name)| name).collect();
+        assert_eq!(names, vec!["id_mac", "id_enc"], "only Ed25519, ECDSA and RSA keys are listed");
+        for public in [&sk, &dsa] {
+            assert!(broker.sign(&host, &request(public, Some(host_key())), Some(&program("claude")), None).is_none());
+        }
+        assert!(host.asked().is_empty(), "and nobody is asked about them");
+    }
+
+    #[test]
+    fn ed25519_ecdsa_and_rsa_vault_keys_are_listed_and_sign() {
+        use crate::vault::material::SSH_AGENT_RSA_SHA2_256;
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        let (ecdsa_id, rsa_id) = ("3".repeat(32), "4".repeat(32));
+        add_key(&mut host, &ecdsa_id, "id_ecdsa", test_keys::ECDSA_PUBLIC, test_keys::ECDSA_FINGERPRINT, test_keys::ecdsa());
+        add_key(&mut host, &rsa_id, "id_rsa", test_keys::RSA_PUBLIC, test_keys::RSA_FINGERPRINT, test_keys::rsa());
+        let names: Vec<String> = broker.identities(&host, None).into_iter().map(|(_, name)| name).collect();
+        assert_eq!(names, vec!["id_mac", "id_enc", "id_ecdsa", "id_rsa"]);
+        for (public, slot_id, flags) in [(test_keys::ECDSA_PUBLIC, ecdsa_id, 0), (test_keys::RSA_PUBLIC, rsa_id, SSH_AGENT_RSA_SHA2_256)] {
+            let mut ask = request(public, Some(host_key()));
+            ask.flags = flags;
+            let blob = broker.sign(&host, &ask, None, Some(&Grant { slot_id })).unwrap();
+            assert!(verifies(public, &blob));
+        }
+    }
+
+    #[test]
+    fn a_vault_entry_that_is_not_the_recorded_key_never_signs() {
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        // 保管庫裡這個插槽放的是另一把金鑰(被換掉或壞掉了)。
+        host.private.insert(ID.to_string(), test_keys::ecdsa());
+        host.answer(allow(false));
+        assert!(broker.sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_none());
+        assert_eq!(host.asked().len(), 1, "the window was shown for the recorded key");
+
+        host.private.insert(ID.to_string(), test_keys::plain());
+        host.answer(allow(false));
+        let blob = broker.sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(host_key())), Some(&program("claude")), None).unwrap();
+        assert!(verifies(test_keys::PLAIN_PUBLIC, &blob), "once the entry is the recorded key again it signs");
+    }
+
+    #[test]
+    fn a_mismatched_entry_keeps_nothing_it_was_opened_with() {
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        // 記錄說這是那把 RSA 金鑰,保管庫裡放的卻是加密過的 ed25519 金鑰。
+        host.keys[1].public_key = test_keys::RSA_PUBLIC.into();
+        host.keys[1].fingerprint = test_keys::RSA_FINGERPRINT.into();
+        host.answer(with_passphrase("test-passphrase", true));
+        assert!(broker.sign(&host, &request(test_keys::RSA_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_none());
+        assert_eq!(host.keychain.entry(&passphrase_account(ENC_ID)), None, "its passphrase is not saved");
+
+        host.answer(with_passphrase("test-passphrase", true));
+        assert!(broker.sign(&host, &request(test_keys::RSA_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_none());
+        let asked = host.asked();
+        assert_eq!(asked.len(), 2, "the approval was not remembered either");
+        assert!(!asked[1].preapproved && asked[1].needs_passphrase, "and the opened key was not kept");
+    }
+
+    #[test]
+    fn a_remembered_approval_is_for_that_host_and_that_key_only() {
+        let broker = Broker::default();
+        let host = FakeHost::new();
+        let claude = program("claude");
+        host.answer(allow(true));
+        assert!(broker.sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(host_key())), Some(&claude), None).is_some());
+
+        let elsewhere = material::public_key_data(test_keys::RSA_PUBLIC).unwrap();
+        host.answer(allow(false));
+        assert!(broker.sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(elsewhere)), Some(&claude), None).is_some());
+        assert_eq!(host.asked().len(), 2, "another host asks again");
+
+        host.answer(with_passphrase("test-passphrase", false));
+        assert!(broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&claude), None).is_some());
+        let asked = host.asked();
+        assert_eq!(asked.len(), 3, "another key asks again");
+        // 這把金鑰有 passphrase,不管核准記沒記住都會問一次:要是整個核准視窗,而不只是問 passphrase,才算核准沒記住。
+        assert!(!asked[2].preapproved, "with the whole approval window, not only for the passphrase");
+
+        assert!(broker.sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(host_key())), Some(&claude), None).is_some());
+        assert_eq!(host.asked().len(), 3, "and the first approval is still remembered");
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_opened_after_the_user_allowed_is_refused() {
+        let broker = Broker::default();
+        let mut host = FakeHost::new();
+        host.private.remove(ID);
+        host.answer(allow(false));
+        assert!(broker.sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_none(), "no vault entry");
+        host.private.insert(ID.to_string(), "not a key".to_string());
+        host.answer(allow(false));
+        assert!(broker.sign(&host, &request(test_keys::PLAIN_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_none(), "unreadable");
+        assert_eq!(host.asked().len(), 2, "the user was asked both times");
+    }
+
+    #[test]
+    fn a_stale_remembered_passphrase_that_cannot_be_forgotten_is_still_asked_again() {
+        let broker = Broker::default();
+        let host = FakeHost::new();
+        host.keychain.set(&passphrase_account(ENC_ID), "old").unwrap();
+        host.keychain.fail_deletes.store(true, Ordering::SeqCst);
+        host.answer(allow(false));
+        host.answer(with_passphrase("test-passphrase", false));
+        assert!(broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_some());
+        assert_eq!(host.keychain.entry(&passphrase_account(ENC_ID)).as_deref(), Some("old"), "the keychain refused the delete");
+    }
+
+    #[test]
+    fn waiters_outlast_the_longest_thing_the_first_request_can_do() {
+        // 最長的路:核准視窗沒帶 passphrase,接著每一次輸入的 passphrase 都不對。
+        let broker = Broker::default();
+        let host = FakeHost::new();
+        host.answer(allow(false));
+        for _ in 0..PASSPHRASE_ATTEMPTS {
+            host.answer(with_passphrase("wrong", false));
+        }
+        assert!(broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("claude")), None).is_none());
+        let windows = host.asked().len();
+        assert_eq!(windows, PASSPHRASE_ATTEMPTS + 1, "the approval window, then one window per attempt");
+        assert!(SHARED_ANSWER_WAIT > APPROVAL_TIMEOUT * u32::try_from(windows).unwrap(), "each window may take its whole timeout");
+    }
+
+    #[test]
+    fn expire_drops_what_has_run_out_without_waiting_for_the_next_request() {
+        let broker = Broker::default();
+        let host = FakeHost::new();
+        host.answer(with_passphrase("test-passphrase", false));
+        broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("claude")), None).unwrap();
+        assert_eq!(broker.kept(), (1, 1), "one remembered approval and one opened key");
+
+        host.advance(240 * 60_000 - 1);
+        broker.expire(host.now_ms());
+        assert_eq!(broker.kept(), (1, 1), "the window has not ended yet");
+
+        host.advance(1);
+        broker.expire(host.now_ms());
+        assert_eq!(broker.kept(), (0, 0), "both are dropped when the window ends, with no request in between");
+
+        host.answer(with_passphrase("test-passphrase", false));
+        broker.sign(&host, &request(test_keys::ENC_PUBLIC, Some(host_key())), Some(&program("claude")), None).unwrap();
+        let again = &host.asked()[1];
+        assert!(!again.preapproved && again.needs_passphrase, "asks for the approval and the passphrase again");
+    }
+
+    #[test]
+    fn clear_and_expire_survive_a_poisoned_lock() {
+        let broker = Arc::new(Broker::default());
+        let (a, b) = (Arc::clone(&broker), Arc::clone(&broker));
+        // 兩把鎖都在持有的執行緒 panic 時中毒。
+        assert!(std::thread::spawn(move || {
+            let _guard = a.approvals.lock().unwrap();
+            panic!("poisons the approvals lock");
+        })
+        .join()
+        .is_err());
+        assert!(std::thread::spawn(move || {
+            let _guard = b.unlocked.lock().unwrap();
+            panic!("poisons the opened keys lock");
+        })
+        .join()
+        .is_err());
+        broker.expire(0);
+        broker.clear();
     }
 }
