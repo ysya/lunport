@@ -2,6 +2,8 @@
 pub mod approval;
 pub mod broker;
 pub mod oneshot;
+#[cfg(test)]
+mod openssh_tests;
 pub mod peer;
 #[cfg(windows)]
 pub mod pipe_windows;

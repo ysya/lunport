@@ -1,5 +1,7 @@
-# Runs the key slot tests on Windows: hard links and the owner-only DACL (SP3 Task 2). The copy fallback (used when
-# a hard link can't be made, for example across drives) is not exercised on CI.
+# Runs the platform-dependent tests on Windows: the key slots' hard links and owner-only DACL (SP3 Task 2), and the key
+# vault and SSH agent tests (the agent's named pipe and its owner-only DACL, Windows program identification, and the real
+# Win32-OpenSSH tools against the agent). The copy fallback (used when a hard link can't be made, for example across
+# drives) is not exercised on CI.
 # macOS can only type-check the Windows code; the permission behavior has to be seen on Windows.
 name: windows key slots
 
@@ -34,7 +36,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path ../dist | Out-Null
           Set-Content -Path ../dist/index.html -Value "<!doctype html>"
-      # Only the platform-dependent slot tests: identity path parsing (slot_rules) and the files, links and DACL
-      # (slot_files, slot_files_windows). The rest of the suite runs on macOS; parts of it use the system keychain.
-      - name: Key slot tests
-        run: cargo test --lib -- sync::slot_rules sync::slot_files
+      # The platform-dependent tests: identity path parsing (slot_rules), the slot files, links and DACL (slot_files,
+      # slot_files_windows), the key vault (vault::) and the SSH agent (agent:: covers the named pipe, program identification and
+      # the real ssh-add / ssh-keygen against the agent). The rest of the suite runs on macOS; parts of it use the system keychain.
+      - name: Key slot, vault and agent tests
+        env:
+          SSHELTER_REQUIRE_OPENSSH: "1"
+        # Quoted: an unquoted `vault:: agent::` is read as a YAML mapping and the workflow would not load.
+        run: "cargo test --lib -- sync::slot_rules sync::slot_files vault:: agent::"
