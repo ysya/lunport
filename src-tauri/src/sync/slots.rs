@@ -1429,7 +1429,8 @@ fn refresh_agent(env: &SyncEnv) {
 /// `.pub` 從挑的這把金鑰重寫;記錄的路徑就是連結用的那個(每一輪在 Unix 上確認 symlink 正好指到它)。`.pub` 或記錄寫不進去就把剛放的
 /// 連結收回,下一輪依原本的記錄維護。這台同意上傳過的那把(`uploaded_fingerprint`)不變:挑的金鑰不會因此被上傳。記錄在哪個帳戶學到的
 /// (`learned_in`)也不變;這台還沒有記錄的話,就是快照裡插槽所在的帳戶(提交時帳戶換了就不記)。先試保管庫:複製一份進去(你的原檔不動,
-/// `into_vault`);讀不懂(例如舊式 PEM)、agent 用不了、保管庫用不了 → 照 SP3 連結原檔(「File for now」)。
+/// `into_vault`);讀不懂(例如舊式 PEM)、agent 用不了、保管庫用不了 → 照 SP3 連結原檔(「File for now」)。成功之後一律更新 agent 的設定(`refresh_agent`):
+/// 原本在保管庫的插槽改成連結時,用它的主機當場不再走 agent。
 pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
     let source = PathBuf::from(path);
     if !source.is_absolute() || !crate::sync::slot_setup::is_private_key_file(&source) {
@@ -1488,6 +1489,7 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
         let _ = slot_files::remove_slot(&slot_path);
         return Err(e);
     }
+    refresh_agent(env);
     env.events.wake();
     Ok(())
 }
@@ -6095,6 +6097,32 @@ pub(crate) mod tests {
         pick(&b.env(), &id, &key_file_on(&b, "id_b", &test_keys::ecdsa()).display().to_string()).unwrap();
         assert!(std::fs::read_to_string(&config).unwrap().contains("Host web\n  IdentityAgent "));
         assert!(std::fs::read_to_string(b.main_path()).unwrap().starts_with("Include ~/.ssh/sshelter/agent/config\n"));
+    }
+
+    /// 金鑰在保管庫的插槽改挑一把放不進保管庫的金鑰(agent 用不了的安全金鑰、`ssh-key` 讀不懂的舊式 PEM),照 SP3 連結原檔:用這個插槽的主機當場不再走 agent
+    /// (`agent/config` 只剩標頭),不等下一輪同步。
+    #[test]
+    fn picking_a_key_that_cannot_go_into_the_vault_takes_the_slots_hosts_out_of_the_agent_config() {
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n";
+        for (name, text) in [("id_sk", test_keys::security_key()), ("id_pem", pem.to_string())] {
+            let (_a, b, id, _file) = own_slot_waiting_on_b();
+            let config = crate::agent::wiring::agent_config_path(&home(&b));
+            pick(&b.env(), &id, &key_file_on(&b, "id_b", &test_keys::ecdsa()).display().to_string()).unwrap();
+            assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "{name}: setup: the key is in the vault");
+            assert!(std::fs::read_to_string(&config).unwrap().contains("Host web\n  IdentityAgent "), "{name}: setup: the host goes through the agent");
+
+            let picked = key_file_on(&b, name, &text);
+            pick(&b.env(), &id, &picked.display().to_string()).unwrap();
+            assert!(
+                matches!(&b.state().key_slots[&id].source, Some(SlotSource::Linked { path, .. }) if *path == picked.display().to_string()),
+                "{name}: the slot links the file now"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&config).unwrap(),
+                format!("{}\n", crate::agent::wiring::HEADER),
+                "{name}: no host is left in the agent config, and no sync round ran"
+            );
+        }
     }
 
     /// 這台的插槽連到自己的金鑰,別台同步了另一把:「Use the synced key」把同步的那把放進保管庫(來源 Synced),拿掉連結,連到的原檔不動;
