@@ -422,7 +422,7 @@ mod tests {
             last_seen_ms: 2,
             keys: Vec::new(),
             spaces: Vec::new(),
-            slots: vec![crate::sync::slot_rules::DeviceSlot { slot_id: "0".repeat(32), fingerprint: None, synced_copy: true }],
+            slots: vec![crate::sync::slot_rules::DeviceSlot { slot_id: "0".repeat(32), fingerprint: None, synced_copy: true, in_vault: false }],
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert!(serde_json::from_value::<Sp1DevicePayload>(json.clone()).is_ok());

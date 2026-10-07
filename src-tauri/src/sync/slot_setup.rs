@@ -1053,8 +1053,7 @@ mod tests {
         settle(&a);
         settle(&b);
         let id = live_slots(b.state().account.as_ref().unwrap())[0].0.clone();
-        let landed = home(&b).join(SLOT_DIR).join(slot_file_name("id_mac", &id));
-        assert_eq!(std::fs::read_to_string(landed).unwrap(), test_keys::plain());
+        crate::sync::slots::tests::assert_landed_in_the_vault(&b, &id, &slot_file_name("id_mac", &id), &test_keys::plain(), test_keys::PLAIN_PUBLIC);
     }
 
     #[test]
@@ -1582,8 +1581,12 @@ mod tests {
     /// 離開 A、和新的第三台 C 換到另一個帳戶(`join` = 加入 C 建立的,否則自己建立),再用搬移精靈把 `~/.ssh/sshelter-local/` 裡的 `web` 搬進新帳戶的
     /// Personal。新帳戶裡沒有這個插槽(N1:不會自己寫進去)。
     fn kept_after_a_move(copy: bool, join: bool) -> Kept {
-        use crate::sync::slots::tests::{move_to_another_account, move_web_into};
+        use crate::sync::slots::tests::{move_to_another_account, move_web_into, no_vault_on};
         let (relay, clock, a, b, _words, personal) = pair();
+        if copy {
+            // B 的副本是檔案(SP3 的 `SyncedCopy`):這些測試測的是就地放進新帳戶的副本。
+            no_vault_on(&b);
+        }
         let key = put_key(&a, "id_mac", &test_keys::plain());
         a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/id_mac\n");
         setup_keys(&a.env(), true, vec![sync(&key, "mac")]).unwrap();
@@ -1613,7 +1616,7 @@ mod tests {
     /// 名稱是插槽的名稱(不是金鑰檔名),`web` 列著它的插槽路徑;新帳戶裡還什麼都沒有。「Sync key」就地放進新帳戶:同一個 id、`synced`、這把金鑰的
     /// 指紋與私鑰,不建立第二個插槽;`web` 一個字都不改;這台記下記錄是新帳戶的、同意上傳的是這把;新帳戶的另一台在同一個路徑落地這把金鑰。
     fn a_linked_slot_from_the_previous_account_is_offered_and_synced_in_place(join: bool) {
-        use crate::sync::slots::tests::account_on_relay;
+        use crate::sync::slots::tests::{account_on_relay, assert_landed_in_the_vault};
         use crate::sync::slots::{key_secret_key, open_key_secret, slot_record_exists};
         let k = kept_after_a_move(false, join);
         let found = k.offered();
@@ -1643,7 +1646,8 @@ mod tests {
         assert_eq!(open_key_secret(&theirs, &k.keys, &k.id).as_deref(), Some(test_keys::plain().as_str()), "and so is its key");
         assert_eq!(live_ids(&theirs), vec![k.id.clone()], "no second slot");
         settle(&k.c);
-        assert_eq!(std::fs::read_to_string(k.slot_path(&k.c)).unwrap(), test_keys::plain(), "the other computer lands it at the same path");
+        // 新帳戶的另一台在同一個插槽落地這把金鑰:放進它的保管庫,插槽路徑上只有 `.pub`。
+        assert_landed_in_the_vault(&k.c, &k.id, &k.file, &test_keys::plain(), test_keys::PLAIN_PUBLIC);
         assert_eq!(std::fs::read_to_string(k.slot_path(&k.d)).unwrap(), test_keys::plain(), "and web still reaches it here");
         assert!(k.offered().keys.is_empty(), "nothing is left to ask");
     }
@@ -1661,7 +1665,7 @@ mod tests {
     /// 同上,選「Keep on this computer」:新帳戶裡是同一個 id 的 `own` 插槽、沒有私鑰;這台不算同意上傳;新帳戶的另一台要在那裡挑一把金鑰。
     #[test]
     fn keeping_a_slot_from_the_previous_account_makes_it_an_own_slot_in_place() {
-        use crate::sync::slots::tests::account_on_relay;
+        use crate::sync::slots::tests::{account_on_relay, vault_entry};
         use crate::sync::slots::key_secret_key;
         let k = kept_after_a_move(false, true);
         let before = k.d.read(&k.space());
@@ -1679,12 +1683,13 @@ mod tests {
         let row = crate::sync::dto::overview(&k.c.env()).unwrap().key_slots.into_iter().find(|v| v.id == k.id).expect("the other computer lists the slot");
         assert_eq!(row.status, SlotStatusView::NeedsKey { waiting_for_sync: false });
         assert!(!slot_files::occupied(&k.slot_path(&k.c)));
+        assert!(vault_entry(&k.c, &k.id).is_none(), "and nothing is in the other computer's vault");
     }
 
     /// 之前的帳戶同步來、留在這台的副本(B):候選是那個副本本身(`synced_copy`),名稱是插槽的名稱。「Sync key」把它放進新帳戶(同一個 id、副本的
     /// 指紋與私鑰,這台記下同意上傳的是它),新帳戶的另一台落地它;「Keep on this computer」放成 `own`,沒有私鑰。這台的副本都不動。
     fn a_synced_copy_from_the_previous_account_is_set_up_in_place(sync_it: bool) {
-        use crate::sync::slots::tests::account_on_relay;
+        use crate::sync::slots::tests::{account_on_relay, assert_landed_in_the_vault, vault_entry};
         use crate::sync::slots::{key_secret_key, open_key_secret};
         let k = kept_after_a_move(true, true);
         let copy = k.slot_path(&k.d);
@@ -1713,11 +1718,13 @@ mod tests {
         if sync_it {
             assert_eq!((payload.mode, payload.fingerprint.as_deref()), (SlotMode::Synced, Some(test_keys::PLAIN_FINGERPRINT)));
             assert_eq!(open_key_secret(&theirs, &k.keys, &k.id).as_deref(), Some(test_keys::plain().as_str()));
-            assert_eq!(std::fs::read_to_string(k.slot_path(&k.c)).unwrap(), test_keys::plain(), "the other computer lands it");
+            // 新帳戶的另一台落地它:放進它的保管庫,插槽路徑上只有 `.pub`。
+            assert_landed_in_the_vault(&k.c, &k.id, &k.file, &test_keys::plain(), test_keys::PLAIN_PUBLIC);
         } else {
             assert_eq!((payload.mode, payload.fingerprint), (SlotMode::Own, None));
             assert!(!theirs.sealed.contains_key(&key_secret_key(&k.keys, &k.id)), "no key goes up");
             assert!(!slot_files::occupied(&k.slot_path(&k.c)));
+            assert!(vault_entry(&k.c, &k.id).is_none(), "and none lands in the other computer's vault");
         }
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), test_keys::plain(), "web still reaches the copy here");
     }

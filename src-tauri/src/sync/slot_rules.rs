@@ -70,6 +70,10 @@ pub struct DeviceSlot {
     pub slot_id: String,
     pub fingerprint: Option<String>,
     pub synced_copy: bool,
+    /// 這台的金鑰在 SSHelter 的保管庫裡(`SlotSource::Vault`;金鑰保管庫 spec §7.3,別台的明細寫「in SSHelter」)。只在 true 時寫出:
+    /// 其他插槽的 `device` 記錄和 SP3 寫的一樣。SP3 讀到會略過這個欄位;它寫的記錄沒有這個欄位 → false。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_vault: bool,
 }
 
 /// 插槽 id:32 字元小寫 hex(隨機 16 bytes)。
@@ -731,5 +735,16 @@ mod tests {
             "This key isn't in the OpenSSH format, so it can't be synced. Convert it with ssh-keygen -p -f <file>, or keep it on this computer."
         );
         assert_eq!(Unsyncable::Unreadable.message(), "This file couldn't be read as an OpenSSH private key.");
+    }
+
+    /// `in_vault` 只在 true 時寫出:沒放進保管庫的插槽,`device` 記錄和 SP3 寫的一模一樣;SP3 寫的(沒有這個欄位)讀成 false。
+    #[test]
+    fn a_device_slot_names_the_vault_only_when_the_key_is_in_it() {
+        let sp3 = serde_json::json!({ "slot_id": "0".repeat(32), "fingerprint": null, "synced_copy": true });
+        let file = DeviceSlot { slot_id: "0".repeat(32), fingerprint: None, synced_copy: true, in_vault: false };
+        assert_eq!(serde_json::to_value(&file).unwrap(), sp3);
+        assert_eq!(serde_json::from_value::<DeviceSlot>(sp3).unwrap(), file);
+        let vault = DeviceSlot { in_vault: true, ..file };
+        assert_eq!(serde_json::to_value(&vault).unwrap()["in_vault"], true);
     }
 }

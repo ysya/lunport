@@ -29,7 +29,7 @@ const DISABLED = 'disabled=""';
 
 describe("a key slot in the Keys dialog", () => {
   it("shows how the key is shared, its state here, its hosts and the other computers", () => {
-    const t = text(row(keySlot({ hosts: ["web", "db"], devices: [{ name: "FRANK-DESKTOP", fingerprint: null, synced_copy: true }] })));
+    const t = text(row(keySlot({ hosts: ["web", "db"], devices: [{ name: "FRANK-DESKTOP", fingerprint: null, synced_copy: true, in_vault: false }] })));
     expect(t).toContain("id_mac");
     expect(t).toContain("Synced to your computers");
     expect(t).toContain("SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew");

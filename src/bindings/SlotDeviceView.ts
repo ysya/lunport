@@ -3,4 +3,8 @@
 /**
  * 另一台電腦的插槽狀況。
  */
-export type SlotDeviceView = { name: string, fingerprint: string | null, synced_copy: boolean, };
+export type SlotDeviceView = { name: string, fingerprint: string | null, synced_copy: boolean, 
+/**
+ * 那台的金鑰在 SSHelter 的保管庫裡(那台是 2a 以後的版本)。
+ */
+in_vault: boolean, };

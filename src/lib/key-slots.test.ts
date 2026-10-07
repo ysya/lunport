@@ -200,7 +200,7 @@ describe("a slot row", () => {
     expect(hostsLine(keySlot({ hosts: ["web", "db"] }))).toBe("Used by web and db");
     expect(hostsLine(keySlot({ hosts: [] }))).toBeNull();
     expect(
-      deviceLine(keySlot({ devices: [{ name: SPOOFED_NAME, fingerprint: null, synced_copy: true }, { name: "FRANK-DESKTOP", fingerprint: "SHA256:x", synced_copy: false }] })),
+      deviceLine(keySlot({ devices: [{ name: SPOOFED_NAME, fingerprint: null, synced_copy: true, in_vault: false }, { name: "FRANK-DESKTOP", fingerprint: "SHA256:x", synced_copy: false, in_vault: false }] })),
     ).toBe(`${SPOOFED_NAME_SHOWN}: synced copy · FRANK-DESKTOP: its own key`);
     expect(deviceLine(keySlot())).toBeNull();
   });

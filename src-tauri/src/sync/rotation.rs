@@ -2144,8 +2144,8 @@ mod tests {
 
     #[test]
     fn changing_the_sync_code_carries_the_key_slots() {
-        use crate::sync::slot_rules::{test_keys, SlotMode, SLOT_DIR};
-        use crate::sync::slots::tests::{create_slot_on, use_slot};
+        use crate::sync::slot_rules::{test_keys, SlotMode};
+        use crate::sync::slots::tests::{assert_landed_in_the_vault, create_slot_on, use_slot};
         use crate::sync::slots::{live_slots, open_key_secret};
         let (_relay, _clock, a, b, _words, personal) = pair();
         let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
@@ -2161,13 +2161,12 @@ mod tests {
         let keys = a.env().runtime.core.lock().unwrap().account_keys.clone().unwrap();
         assert_eq!(open_key_secret(&account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()));
 
-        // B 以新同步碼重新加入:插槽還在,副本照常。
+        // B 以新同步碼重新加入:插槽還在,金鑰照常(在 B 的保管庫裡)。
         settle(&b);
         rejoin_account(&b.env(), &next).unwrap();
         settle(&b);
         assert_eq!(live_slots(b.state().account.as_ref().unwrap())[0].0, id);
-        let copy = b.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file);
-        assert_eq!(std::fs::read_to_string(copy).unwrap(), test_keys::plain());
+        assert_landed_in_the_vault(&b, &id, &file, &test_keys::plain(), test_keys::PLAIN_PUBLIC);
     }
 
     /// `changing_the_sync_code_carries_the_key_slots` 證明不了複製步驟:更換之後這台自己的下一輪會把還有主機在用的插槽補寫回新帳戶
@@ -2257,7 +2256,7 @@ mod tests {
     fn stopping_to_sync_a_key_waits_for_the_sync_code_change_and_then_leaves_no_key_in_the_new_account() {
         use crate::sync::account::{join_account, ROTATING_MESSAGE};
         use crate::sync::slot_rules::{test_keys, SlotMode, SLOT_DIR};
-        use crate::sync::slots::tests::{create_slot_on, refused, use_slot};
+        use crate::sync::slots::tests::{assert_landed_in_the_vault, create_slot_on, refused, use_slot, vault_entry};
         use crate::sync::slots::{key_secret_key, open_key_secret, set_mode, slot};
         use crate::sync::spaces::select_space;
         let (relay, clock, a, b, _words, personal) = pair();
@@ -2296,12 +2295,11 @@ mod tests {
         assert!(tombstone.deleted && tombstone.payload.is_null(), "the key record on the relay carries no secret");
         assert_eq!(slot(&on_relay, &id).map(|p| p.mode), Some(SlotMode::Own));
 
-        // 有副本的 B 重新加入:照舊留著它(停止同步不刪別台的副本),不再有同步的金鑰。之後才加入的 C 沒有金鑰可以落地。
+        // 有金鑰的 B 重新加入:照舊留著它(停止同步不刪別台的金鑰),不再有同步的金鑰。之後才加入的 C 沒有金鑰可以落地。
         settle(&b);
         rejoin_account(&b.env(), &next).unwrap();
         settle(&b);
-        let copy = b.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file);
-        assert_eq!(std::fs::read_to_string(&copy).unwrap(), test_keys::plain(), "B keeps its copy");
+        assert_landed_in_the_vault(&b, &id, &file, &test_keys::plain(), test_keys::PLAIN_PUBLIC); // B keeps its key
         assert_eq!(open_key_secret(b.state().account.as_ref().unwrap(), &keys, &id), None);
         let c = TestDevice::new("c", &relay, &clock);
         join_account(&c.env(), &next, "MacBook-C").unwrap();
@@ -2310,6 +2308,7 @@ mod tests {
         let _ = sync_once(&c.env());
         assert!(c.read(&c.space_path(&new_personal)).contains(&file), "the host is there");
         assert!(!c.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file).exists(), "no key was landed on the computer that joined later");
+        assert!(vault_entry(&c, &id).is_none(), "not into its vault either");
     }
 
     /// 沒有 SP3 的電腦更換同步碼時,新帳戶裡沒有插槽的記錄(這裡在複製完之後從 relay 拿掉它們來模擬,SP3 spec §6.6)。換到新帳戶
@@ -2364,7 +2363,7 @@ mod tests {
     fn a_rejoin_into_an_account_that_does_not_continue_this_one_carries_no_key_slot() {
         use crate::sync::migrate::move_hosts_into_space;
         use crate::sync::slot_rules::{test_keys, SlotMode, SLOT_DIR};
-        use crate::sync::slots::tests::create_slot_on;
+        use crate::sync::slots::tests::{create_slot_on, vault_entry};
         use crate::sync::slots::{key_secret_key, slot_record_exists};
         use crate::sync::spaces::select_space;
         let (relay, clock, a, b, _words, personal) = pair();
@@ -2399,6 +2398,7 @@ mod tests {
 
         assert!(c.read(&c.space_path(&theirs)).contains(&file), "the host reaches the other account");
         assert!(!c.ssh_dir().parent().unwrap().join(SLOT_DIR).join(&file).exists(), "but no key lands there");
+        assert!(vault_entry(&c, &id).is_none(), "not into its vault either");
         let keys = crypto::derive_account(&unrelated).unwrap();
         let on_relay = merge_account(&AccountState::new(&keys.chain_id), &keys, &relay.pull(&keys.chain_id, &keys.auth_token, 0).unwrap()).section;
         assert!(!slot_record_exists(&on_relay, &id), "no keyslot in that account");

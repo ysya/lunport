@@ -186,6 +186,8 @@ pub struct SlotDeviceView {
     pub name: String,
     pub fingerprint: Option<String>,
     pub synced_copy: bool,
+    /// 那台的金鑰在 SSHelter 的保管庫裡(那台是 2a 以後的版本)。
+    pub in_vault: bool,
 }
 
 /// Settings → Sync 的全部狀態(`sync_overview` 與 `sync://status`)。
