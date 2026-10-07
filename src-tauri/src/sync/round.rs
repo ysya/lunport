@@ -662,6 +662,11 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
         }
     }
 
+    // 6c. agent 的設定(金鑰保管庫 spec §6):主機或插槽變了就重寫 `agent/config`;第一次需要時把 Include 放在主 config 的第一行。
+    if let Err(e) = crate::agent::wiring::refresh_env(env) {
+        eprintln!("[agent] could not update the agent config: {e}");
+    }
+
     // 7. 上傳(唯讀模式不上傳)。帳戶與各 space 分開;撞到凍結的 chain 就停止這一輪所有上傳。被限流(任何一個 `429`)之後
     //    這一輪不再對 relay 發任何請求:不上傳、不刪 chain。
     let read_only = work.read_only();

@@ -8,6 +8,7 @@ pub mod prompt;
 pub mod protocol;
 pub mod server;
 pub mod session;
+pub mod wiring;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

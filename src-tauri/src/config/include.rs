@@ -83,6 +83,10 @@ fn load_recursive(
     for pattern_str in &include_patterns {
         // Each include value may contain multiple whitespace-separated patterns.
         for token in pattern_str.split_whitespace() {
+            // SSHelter 自己產生的 agent 設定(金鑰保管庫 spec §6):不是使用者的 config,讀進來會讓主機重複出現。
+            if crate::agent::wiring::is_agent_include_token(token) {
+                continue;
+            }
             // Expand ~ and environment variables.
             let Some(expanded) = expand_token(token) else { continue };
 
@@ -117,8 +121,9 @@ fn load_recursive(
 }
 
 /// `~` 與環境變數展開。測試建置可以用 `with_test_home` 把 `~` 指到暫存的家目錄(thread-local):同步引擎的 Include
-/// 一律寫成 `~/.ssh/sshelter/...`,測試不能因此讀到開發者真正的家目錄。
-fn expand_token(token: &str) -> Option<String> {
+/// 一律寫成 `~/.ssh/sshelter/...`,測試不能因此讀到開發者真正的家目錄。`config::intel` 展開 `IdentityFile` 的值也用它(插槽路徑同樣是
+/// `~/.ssh/sshelter/keys/...`):lint 的測試才能在暫存的家目錄裡放一個只有 `.pub` 的插槽,而不碰真正的 `~/.ssh`。
+pub(crate) fn expand_token(token: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(home) = TEST_HOME.with(|h| h.borrow().clone()) {
         if let Some(rest) = token.strip_prefix("~/") {
@@ -308,6 +313,34 @@ mod tests {
         assert!(res.is_err(), "an unreadable MAIN config must be a fatal error");
 
         let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    /// SSHelter 自己產生的 agent 設定(金鑰保管庫 spec §6)不是使用者的 config:`Include` 它的 token 不讀,同一行的其他路徑與其他 Include 照讀。
+    /// 讀進來的話,它列的主機會在主機清單裡出現兩次,主機頁也可能打開到產生的那份。
+    #[test]
+    fn the_generated_agent_config_is_never_loaded() {
+        let home = tempfile::tempdir().unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir_all(ssh.join("sshelter/agent")).unwrap();
+        std::fs::write(ssh.join("sshelter/agent/config"), "Host web\n  IdentityAgent ~/.ssh/sshelter/agent/sock\n").unwrap();
+        std::fs::write(ssh.join("a.config"), "Host a\n  HostName 10.0.0.1\n").unwrap();
+        std::fs::write(ssh.join("b.config"), "Host b\n  HostName 10.0.0.2\n").unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            "Include ~/.ssh/sshelter/agent/config ~/.ssh/a.config\nInclude ~/.ssh/b.config\nHost web\n  HostName 10.0.0.9\n",
+        )
+        .unwrap();
+
+        let doc = with_test_home(home.path(), || load_doc(&ssh.join("config"))).unwrap();
+        let loaded: Vec<PathBuf> = doc.files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(loaded, vec![ssh.join("config"), ssh.join("a.config"), ssh.join("b.config")]);
+        assert_eq!(find_host_file_index(&doc, "web"), Some(0), "the host is listed once, from the user's own file");
+
+        // 只是名字像的檔案不是它:照常讀。
+        std::fs::write(ssh.join("sshelter/agent/config.bak"), "Host old\n").unwrap();
+        std::fs::write(ssh.join("config"), "Include ~/.ssh/sshelter/agent/config.bak\n").unwrap();
+        let doc = with_test_home(home.path(), || load_doc(&ssh.join("config"))).unwrap();
+        assert_eq!(doc.files.len(), 2);
     }
 
     #[test]

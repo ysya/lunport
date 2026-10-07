@@ -1484,6 +1484,9 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
 /// 不是從這個帳戶同步來的,`copy_from_another_account` 就設成 true,補寫 `key` 時要這台的同意),最後才拿掉保管庫那一筆:拿不掉只留下一筆沒有記錄
 /// 用到的(agent 不提供它),不會有記錄說金鑰在保管庫、保管庫裡卻沒有它。`.pub` 寫不進去或提交被拒(記錄還是保管庫的)就收回剛寫的私鑰檔,
 /// 不留下一個下一輪被當成擋路的檔案。
+///
+/// 兩個方向做完都會更新 agent 的設定(`agent::wiring::refresh_env`):`agent/config` 列的主機跟著這個插槽走,第一次需要時 Include 也在這時放進主 config。
+/// 更新不成(例如主 config 在載入之後被別的程式改過)只記到 stderr、不讓搬動本身失敗;下一輪同步(`round::run_round` 的 6c)會再做一次。
 pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), AppError> {
     let (state, _keys, home) = snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
@@ -1589,6 +1592,9 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
         if let Err(e) = with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.remove(slot_id)) {
             eprintln!("[sync] a key kept as a file again is still in SSHelter's vault: {e}");
         }
+    }
+    if let Err(e) = crate::agent::wiring::refresh_env(env) {
+        eprintln!("[agent] could not update the agent config: {e}");
     }
     env.events.wake();
     Ok(())
@@ -5299,6 +5305,158 @@ pub(crate) mod tests {
         assert!(vault_entry(&b, &id).is_none());
         assert!(!public_path(&home(&b).join(SLOT_DIR).join(&file)).exists());
         assert!(!b.state().key_slots.contains_key(&id));
+    }
+
+    #[test]
+    fn moving_a_key_into_the_vault_wires_its_hosts_to_the_agent() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let home = home(&b);
+        let config = std::fs::read_to_string(crate::agent::wiring::agent_config_path(&home)).unwrap();
+        assert!(config.starts_with(crate::agent::wiring::HEADER));
+        assert!(config.contains("Host web\n  IdentityAgent "));
+        let main = std::fs::read_to_string(b.main_path()).unwrap();
+        assert!(main.starts_with("Include ~/.ssh/sshelter/agent/config\n"), "{main}");
+
+        // A sync round keeps both Includes, ours first, and the loader never sees agent/config.
+        settle(&b);
+        settle(&b);
+        let main = std::fs::read_to_string(b.main_path()).unwrap();
+        let lines: Vec<&str> = main.lines().collect();
+        assert_eq!(lines[0], "Include ~/.ssh/sshelter/agent/config");
+        // The sync Include comes right after ours; the file's own leading comment (`# main`) is not a read line, so it may sit between them.
+        let next = lines.iter().skip(1).find(|line| !line.starts_with('#')).expect("the sync Include is still there");
+        assert!(next.starts_with("Include ~/.ssh/sshelter/") && next.ends_with(".config"), "the sync Include comes right after ours: {main}");
+        b.reload();
+        let doc = b.doc.lock().unwrap();
+        assert!(doc.as_ref().unwrap().files.iter().all(|f| f.path != crate::agent::wiring::agent_config_path(&home)));
+    }
+
+    #[test]
+    fn a_removed_include_is_reported_and_not_added_back() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let main = std::fs::read_to_string(b.main_path()).unwrap();
+        std::fs::write(b.main_path(), main.replacen("Include ~/.ssh/sshelter/agent/config\n", "", 1)).unwrap();
+        b.reload();
+        assert_eq!(crate::agent::wiring::refresh_env(&b.env()).unwrap(), crate::agent::wiring::WiringStatus::IncludeMissing);
+        assert!(!std::fs::read_to_string(b.main_path()).unwrap().contains("sshelter/agent/config"));
+    }
+
+    /// 每一輪同步結束前都會對一次 agent 的設定:主機同步進來、開始(或不再)用保管庫的金鑰時,`agent/config` 跟著變,不必等使用者再做什麼。
+    #[test]
+    fn a_sync_round_keeps_the_agent_config_in_step_with_the_hosts() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let config = crate::agent::wiring::agent_config_path(&home(&b));
+        let listed = || -> Vec<String> {
+            let mut hosts: Vec<String> =
+                std::fs::read_to_string(&config).unwrap().lines().filter(|line| line.starts_with("Host ")).map(String::from).collect();
+            hosts.sort();
+            hosts
+        };
+        assert_eq!(listed(), ["Host web"]);
+
+        // A 又有一台主機用這個插槽:同步進 B 之後,B 的那一輪就把它列進去。
+        let uses = format!("  IdentityFile ~/.ssh/sshelter/keys/{file}\n");
+        a.save_in_app(&a.space_path(&personal), &format!("Host web\n  HostName 10.0.0.1\n{uses}Host db\n  HostName 10.0.0.2\n{uses}"));
+        settle(&a);
+        settle(&b);
+        assert_eq!(listed(), ["Host db", "Host web"]);
+
+        // 其中一台改成不用它:列表跟著少一台。
+        a.save_in_app(&a.space_path(&personal), &format!("Host web\n  HostName 10.0.0.1\n{uses}Host db\n  HostName 10.0.0.2\n"));
+        settle(&a);
+        settle(&b);
+        assert_eq!(listed(), ["Host web"]);
+        assert!(std::fs::read_to_string(b.main_path()).unwrap().starts_with("Include ~/.ssh/sshelter/agent/config\n"));
+    }
+
+    /// 改回檔案:主機不再走 agent,`agent/config` 只剩標頭;Include 留著(只有使用者會拿掉它)。
+    #[test]
+    fn keeping_a_file_again_takes_the_hosts_out_of_the_agent_config_and_leaves_the_include() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        let config = crate::agent::wiring::agent_config_path(&home(&b));
+        assert!(std::fs::read_to_string(&config).unwrap().contains("Host web\n"));
+        let main = std::fs::read_to_string(b.main_path()).unwrap();
+
+        set_delivery(&b.env(), &id, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), format!("{}\n", crate::agent::wiring::HEADER), "no host is left in it");
+        assert_eq!(std::fs::read_to_string(b.main_path()).unwrap(), main, "the Include stays");
+    }
+
+    /// 沒有用「只在 SSHelter」的電腦(絕大多數):每一輪的那一步什麼都不留 —— 沒有 agent 的目錄、`agent/config`,主 config 也沒有那一行。
+    #[test]
+    fn a_computer_that_keeps_its_keys_in_files_never_gets_an_agent_config() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (_id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        settle(&a);
+        settle(&b);
+        for d in [&a, &b] {
+            assert!(!crate::agent::agent_dir(&home(d)).exists(), "no agent directory");
+            assert!(!std::fs::read_to_string(d.main_path()).unwrap().contains("sshelter/agent/config"));
+        }
+    }
+
+    /// 沒有變的一輪不重寫任何檔案:同步的 Include 與 agent 的 Include 各自排好之後,不會每一輪互相搬動(主 config 會被寫兩次),`agent/config` 也不重寫。
+    #[test]
+    fn a_quiet_round_rewrites_neither_the_main_config_nor_the_agent_config() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        set_delivery(&b.env(), &id, true).unwrap();
+        settle(&b);
+        let paths = [b.main_path(), crate::agent::wiring::agent_config_path(&home(&b))];
+        let before: Vec<String> = paths.iter().map(|path| std::fs::read_to_string(path).unwrap()).collect();
+        for path in &paths {
+            // 修改時間設回很久以前:之後沒有被重寫,就還是那個值。
+            std::fs::File::options().write(true).open(path).unwrap().set_modified(std::time::UNIX_EPOCH).unwrap();
+        }
+
+        settle(&b);
+        settle(&b);
+        for (path, before) in paths.iter().zip(&before) {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(), before, "{}", path.display());
+            assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), std::time::UNIX_EPOCH, "{} was written again", path.display());
+        }
+    }
+
+    /// 主 config 在載入之後被別的程式改過:agent 的設定更新不了(第一次要把 Include 放進去,存檔會撞上 `Conflict`)也不讓搬進保管庫失敗,別的程式的修改一個字都不動。
+    #[test]
+    fn a_main_config_edited_elsewhere_does_not_stop_a_key_moving_into_the_vault() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let edited = format!("{}# edited elsewhere\n", std::fs::read_to_string(b.main_path()).unwrap());
+        b.write_externally(&b.main_path(), &edited);
+
+        set_delivery(&b.env(), &id, true).unwrap();
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "the key is in the vault");
+        assert_eq!(std::fs::read_to_string(b.main_path()).unwrap(), edited, "the edit made elsewhere is never overwritten");
     }
 
     #[test]

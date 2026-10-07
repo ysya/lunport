@@ -40,13 +40,13 @@ fn has_our_token(item: &Item) -> bool {
     enabled_include(item).is_some_and(|d| d.value.split_whitespace().any(is_our_include_token))
 }
 
-/// 同步 Include 的位置:前導註解/空行之後、其他任何項目(既有 Include、全域指令、Host/Match)之前。
+/// 同步 Include 的位置:前導註解/空行與 SSHelter agent 的 Include(`agent::wiring`,必須是第一行)之後、其他任何項目(既有 Include、全域指令、Host/Match)之前。
 /// 刻意不用 `newfile::include_insert_index`(它插在最後一個 Include **之後**):ssh 是
-/// first-obtained-wins,同步檔必須是第一個被讀到的定義,spec §10 的遮蔽承諾才成立。
+/// first-obtained-wins,同步檔必須是第一個被讀到的定義(agent 的 Include 除外:它排在最前面,spec §6),spec §10 的遮蔽承諾才成立。
 fn sync_include_index(items: &[Item]) -> usize {
     items
         .iter()
-        .position(|i| !matches!(i, Item::Blank(_) | Item::Comment(_)))
+        .position(|i| !matches!(i, Item::Blank(_) | Item::Comment(_)) && !crate::agent::wiring::is_agent_include(i))
         .unwrap_or(items.len())
 }
 
@@ -773,6 +773,36 @@ mod tests {
         assert!(ensure_include(&mut items, &list(&[WORK, HOME])));
         assert!(ensure_include(&mut items, &list(&[HOME, WORK])));
         assert_eq!(serialize_items(&items, true), format!("# main\n\nInclude {HOME} {WORK}\nInclude ~/.ssh/other.config\nHost a\n"));
+    }
+
+    /// SSHelter 的 agent Include(`agent::wiring`,金鑰保管庫 spec §6)是第一行:同步的 Include 排在它後面 —— 前導註解與空行之後、其他任何項目之前 ——
+    /// 清單換了或清空也不動它;它在子目錄裡,不是同步的 token。
+    #[test]
+    fn ensure_include_goes_after_the_agent_include_and_leaves_it_alone() {
+        let agent = "Include ~/.ssh/sshelter/agent/config";
+        assert!(!is_our_include_token("~/.ssh/sshelter/agent/config"));
+        let (mut items, _) = parse_file(&format!("{agent}\n# main\n\nAddKeysToAgent yes\nHost a\n  HostName 1\n"));
+        assert!(ensure_include(&mut items, &list(&[WORK])));
+        assert_eq!(serialize_items(&items, true), format!("{agent}\n# main\n\nInclude {WORK}\nAddKeysToAgent yes\nHost a\n  HostName 1\n"));
+        assert!(!ensure_include(&mut items, &list(&[WORK])));
+        // 清單換了:整行換掉,位置不變。
+        assert!(ensure_include(&mut items, &list(&[HOME, WORK])));
+        assert_eq!(
+            serialize_items(&items, true),
+            format!("{agent}\n# main\n\nInclude {HOME} {WORK}\nAddKeysToAgent yes\nHost a\n  HostName 1\n")
+        );
+        // 沒有勾選任何 space:只拿掉同步的那一行。
+        assert!(ensure_include(&mut items, &[]));
+        assert_eq!(serialize_items(&items, true), format!("{agent}\n# main\n\nAddKeysToAgent yes\nHost a\n  HostName 1\n"));
+        assert!(!ensure_include(&mut items, &[]));
+        // 只有 agent 的 Include 的檔案:同步的 Include 接在它後面。
+        let (mut only, _) = parse_file(&format!("{agent}\n"));
+        assert!(ensure_include(&mut only, &list(&[WORK])));
+        assert_eq!(serialize_items(&only, true), format!("{agent}\nInclude {WORK}\n"));
+        // 同一行還列著別的路徑:agent 的 token 仍算「它的」,同步的 Include 排在那一行之後。
+        let (mut shared, _) = parse_file(&format!("{agent} ~/.ssh/a.config\nHost a\n"));
+        assert!(ensure_include(&mut shared, &list(&[WORK])));
+        assert_eq!(serialize_items(&shared, true), format!("{agent} ~/.ssh/a.config\nInclude {WORK}\nHost a\n"));
     }
 
     #[test]

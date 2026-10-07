@@ -115,6 +115,13 @@ fn doc_defines_alias(doc: &SshConfigDoc, host: &str) -> bool {
     })
 }
 
+/// `IdentityFile` 展開後的 `path` 算不算「在」:檔案存在,或它是「只在 SSHelter」的插槽(金鑰保管庫 spec §6)—— 插槽路徑上沒有私鑰、只有 `.pub`,
+/// 金鑰由 SSHelter 的 agent 提供。`value` 是 `IdentityFile` 原本的值(只有 `~/.ssh/sshelter/keys/<檔名>` 這種寫法才是插槽路徑);一般的 `IdentityFile`
+/// 旁邊有 `.pub` 不算。
+fn identity_file_present(value: &str, path: &Path) -> bool {
+    path.exists() || (crate::sync::slot_rules::slot_file_of_value(value).is_some() && crate::sync::slot_rules::public_path(path).is_file())
+}
+
 /// `account_slot_files` = 這台的同步帳戶裡還在的插槽檔名(不在帳戶裡是空的,`sync::slots::account_slot_files`):缺檔的插槽路徑依帳戶裡有沒有這個插槽
 /// 說明(SP3 spec §7.3)。
 pub fn lint(doc: &SshConfigDoc, account_slot_files: &BTreeSet<String>) -> Vec<LintIssue> {
@@ -178,8 +185,8 @@ pub fn lint(doc: &SshConfigDoc, account_slot_files: &BTreeSet<String>) -> Vec<Li
                 if d.key == "identityfile" {
                     // Skip values with %tokens (e.g. %d/%h) — can't resolve statically.
                     if !d.value.contains('%') {
-                        if let Ok(expanded) = shellexpand::full(&d.value) {
-                            if !Path::new(expanded.as_ref()).exists() {
+                        if let Some(expanded) = crate::config::include::expand_token(&d.value) {
+                            if !identity_file_present(&d.value, Path::new(&expanded)) {
                                 issues.push(LintIssue {
                                     rule: "missing-identity-file".to_string(),
                                     severity: "error".to_string(),
@@ -366,10 +373,8 @@ pub fn key_hygiene(doc: &SshConfigDoc, alias: &str) -> KeyHygiene {
                 let (path, exists) = if d.value.contains('%') {
                     (d.value.clone(), true)
                 } else {
-                    let expanded = shellexpand::full(&d.value)
-                        .map(|c| c.into_owned())
-                        .unwrap_or_else(|_| d.value.clone());
-                    let exists = Path::new(&expanded).exists();
+                    let expanded = crate::config::include::expand_token(&d.value).unwrap_or_else(|| d.value.clone());
+                    let exists = identity_file_present(&d.value, Path::new(&expanded));
                     (d.value.clone(), exists)
                 };
                 identity_files.push(IdentityFileInfo { path, exists });
@@ -594,6 +599,53 @@ mod tests {
         assert_eq!(message(&["SP3-LINT-MISSING-00000000", "x-22222222"]), in_account, "whatever the case of the file name");
         assert_eq!(message(&["sp3-lint-other-11111111"]), not_in_account);
         assert_eq!(message(&[]), not_in_account, "not in an account");
+    }
+
+    /// 這份設定(兩個插槽路徑)的家目錄是 `dir`:`v` 只有 `.pub`(只在 SSHelter 的插槽,金鑰保管庫 spec §6),`m` 什麼都沒有。
+    fn vault_slot_doc() -> (SshConfigDoc, tempfile::TempDir) {
+        let (doc, dir) = doc_with(
+            "Host v\n  IdentityFile ~/.ssh/sshelter/keys/vaulted-11111111\nHost m\n  IdentityFile ~/.ssh/sshelter/keys/missing-22222222\n",
+        );
+        let keys = dir.path().join(".ssh/sshelter/keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("vaulted-11111111.pub"), "ssh-ed25519 AAAA test\n").unwrap();
+        (doc, dir)
+    }
+
+    /// 只在 SSHelter 的插槽:插槽路徑上沒有私鑰、只有 `.pub`,金鑰由 SSHelter 的 agent 提供 —— 不算找不到;`.pub` 也沒有的插槽路徑照舊要報。
+    #[test]
+    fn a_vault_slot_with_only_its_pub_is_not_a_missing_identity_file() {
+        let (doc, dir) = vault_slot_doc();
+        let issues = crate::config::include::with_test_home(dir.path(), || lint(&doc, &BTreeSet::new()));
+        assert!(
+            issues.iter().all(|i| !(i.rule == "missing-identity-file" && i.alias.as_deref() == Some("v"))),
+            "{issues:?}"
+        );
+        assert!(issues.iter().any(|i| i.rule == "missing-identity-file" && i.alias.as_deref() == Some("m")), "{issues:?}");
+    }
+
+    /// 只有 `.pub` 的路徑只對插槽路徑成立:一般的 `IdentityFile` 旁邊有 `.pub`、私鑰卻不在,仍是找不到。
+    #[test]
+    fn a_pub_file_beside_an_ordinary_missing_key_does_not_hide_it() {
+        let keydir = tempfile::tempdir().unwrap();
+        let key = keydir.path().join("id_gone");
+        std::fs::write(keydir.path().join("id_gone.pub"), "ssh-ed25519 AAAA test\n").unwrap();
+        let (doc, _dir) = doc_with(&format!("Host g\n  IdentityFile {}\n", key.display()));
+        let issues = lint(&doc, &BTreeSet::new());
+        assert!(issues.iter().any(|i| i.rule == "missing-identity-file" && i.alias.as_deref() == Some("g")), "{issues:?}");
+        let hygiene = key_hygiene(&doc, "g");
+        assert!(!hygiene.identity_files[0].exists);
+    }
+
+    /// 同一條規則給 Keys 的主機頁(`key_hygiene`):只有 `.pub` 的插槽路徑算存在。
+    #[test]
+    fn key_hygiene_counts_a_vault_slot_with_only_its_pub_as_existing() {
+        let (doc, dir) = vault_slot_doc();
+        let exists = |alias: &str| {
+            crate::config::include::with_test_home(dir.path(), || key_hygiene(&doc, alias)).identity_files.remove(0).exists
+        };
+        assert!(exists("v"));
+        assert!(!exists("m"));
     }
 
     /// `config_lint` 的接線(`lint_current`):帳戶裡還在的插槽,檔名取自同步狀態。
