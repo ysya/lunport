@@ -100,6 +100,7 @@ export function keySlot(overrides: Partial<SyncKeySlotView> = {}): SyncKeySlotVi
     in_account: true,
     in_vault: false,
     file_for_now: false,
+    vault_has_passphrase: null,
     ...overrides,
   };
 }

@@ -1072,6 +1072,10 @@ pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path, in_use:
             in_account,
             in_vault: state.key_slots.get(id).is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. }))),
             file_for_now: state.key_slots.get(id).is_some_and(|local| is_file_for_now(local) && can_move_into_vault(local, &keys_dir)),
+            vault_has_passphrase: match state.key_slots.get(id).and_then(|l| l.source.as_ref()) {
+                Some(SlotSource::Vault { has_passphrase, .. }) => Some(*has_passphrase),
+                _ => None,
+            },
         }
     };
     let mut out = Vec::new();
@@ -1257,6 +1261,22 @@ fn vault_text(env: &SyncEnv, slot_id: &str, fingerprint: &str) -> Result<Option<
         return Err(AppError::Other(VAULT_MISMATCH_MESSAGE.to_string()));
     }
     Ok(Some(entry.private_key.clone()))
+}
+
+/// 「Export private key…」的對象不是只在 SSHelter 的金鑰(它本來就是這台的檔案)。
+pub const NOT_IN_VAULT_MESSAGE: &str = "This key isn't in SSHelter on this computer.";
+
+/// 「Export private key…」要寫的內容(金鑰保管庫 spec §7.3.2):這個插槽在保管庫裡的私鑰(要是記錄裡那一把,`vault_text`),可選擇加上 passphrase
+/// (`vault::export::export_text`)。回傳(預設檔名 = 插槽名稱、內容)。不改任何東西。
+pub fn export_private(env: &SyncEnv, slot_id: &str, passphrase: Option<&str>) -> Result<(String, Zeroizing<String>), AppError> {
+    let (state, _keys, _home) = snapshot(env)?;
+    let local = state.key_slots.get(slot_id).ok_or_else(not_found)?;
+    let Some(SlotSource::Vault { fingerprint, .. }) = &local.source else {
+        return Err(AppError::Other(NOT_IN_VAULT_MESSAGE.to_string()));
+    };
+    let text = Zeroizing::new(vault_text(env, slot_id, fingerprint)?.ok_or_else(|| AppError::Other(VAULT_ENTRY_LOST.to_string()))?);
+    let name = local.payload.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| local.file_name.clone());
+    Ok((name, crate::vault::export::export_text(text.as_str(), passphrase)?))
 }
 
 /// 會寫帳戶記錄的動作(`set_mode`、`slot_setup::create_slot`)要等更換同步碼:進行中(第 2 步起)或這台已被別台擋下時,帳戶區段之後會被整個換掉 ——
@@ -7193,5 +7213,81 @@ pub(crate) mod tests {
             assert!(failed[0].message.contains("is gone"), "{what}: {}", failed[0].message);
             assert!(matches!(b.state().key_slots[&linked].source, Some(SlotSource::SyncedCopy { .. })), "{what}: and it stays a file");
         }
+    }
+
+    // ── 「Export private key…」(金鑰保管庫 spec §7.3.2)──────────────────────────────────────────────────────
+
+    /// 匯出只在 SSHelter 的金鑰:內容是保管庫裡記錄的那一把,預設檔名是插槽名稱;不是只在 SSHelter 的插槽拒絕。
+    #[test]
+    fn exporting_gives_the_vault_key_and_refuses_a_key_that_is_a_file() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let (name, text) = export_private(&b.env(), &id, None).unwrap();
+        assert_eq!(name, "id_mac");
+        assert_eq!(text.as_str(), test_keys::plain());
+        assert_eq!(view_of(&b)[0].vault_has_passphrase, Some(false));
+        assert_eq!(export_private(&a.env(), &id, None).unwrap_err().to_string(), NOT_IN_VAULT_MESSAGE, "A still links its file");
+        assert_eq!(view_of(&a)[0].vault_has_passphrase, None);
+    }
+
+    /// 匯出什麼都不改(金鑰保管庫 spec §7.3.2):加上的 passphrase 只在匯出的文字上,保管庫裡的仍是原本那一把,插槽的記錄原封不動。有 passphrase 的金鑰照原樣匯出
+    /// (`vault_has_passphrase` 是 `Some(true)`,畫面不提供再加一個),硬要加就拒絕。
+    #[test]
+    fn exporting_changes_nothing_and_a_passphrase_only_goes_on_the_exported_text() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (plain, plain_file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        let (locked, locked_file) = create_slot_on(&a, SlotMode::Synced, &test_keys::encrypted(), "id_enc");
+        use_slots(&a, &personal, &[&plain_file, &locked_file]);
+        settle(&a);
+        settle(&b);
+        let flag = |id: &str| view_of(&b).into_iter().find(|v| v.id == id).and_then(|v| v.vault_has_passphrase);
+        assert_eq!((flag(&plain), flag(&locked)), (Some(false), Some(true)), "setup: both keys are in B's vault");
+        let before = b.state();
+
+        let (name, protected) = export_private(&b.env(), &plain, Some("correct horse")).unwrap();
+        assert_eq!(name, "id_mac");
+        let facts = inspect_private_key(protected.as_str()).unwrap();
+        assert!(facts.has_passphrase, "the exported text is protected");
+        assert_eq!(facts.fingerprint, test_keys::PLAIN_FINGERPRINT, "and it is the same key");
+        assert_eq!(vault_entry(&b, &plain).unwrap().private_key, test_keys::plain(), "the vault still holds the key without a passphrase");
+
+        let (_, as_stored) = export_private(&b.env(), &locked, None).unwrap();
+        assert_eq!(as_stored.as_str(), test_keys::encrypted(), "a key with a passphrase is exported as it is");
+        assert_eq!(export_private(&b.env(), &locked, Some("x")).unwrap_err().to_string(), crate::vault::export::ALREADY_PROTECTED_MESSAGE);
+
+        assert_eq!(b.state(), before, "no record changed");
+        assert_eq!((flag(&plain), flag(&locked)), (Some(false), Some(true)));
+    }
+
+    /// 保管庫給不出記錄裡的那把金鑰就說明原因,不匯出別把,錯誤訊息也不帶金鑰:插槽不存在、保管庫裡那一筆不是記錄裡的那一把、那一筆不見了。
+    #[test]
+    fn exporting_says_why_when_the_vault_cannot_give_the_recorded_key() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        let env = b.env();
+        assert!(matches!(export_private(&env, "ffffffffffffffffffffffffffffffff", None), Err(AppError::NotFound(_))), "no such slot");
+
+        let other = VaultEntry {
+            private_key: test_keys::ecdsa(),
+            public_key: test_keys::ECDSA_PUBLIC.to_string(),
+            fingerprint: test_keys::ECDSA_FINGERPRINT.to_string(),
+            origin: EntryOrigin::Imported,
+            added_at_ms: 1,
+        };
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.put(env.keychain, &id, &other)).unwrap();
+        let mismatch = export_private(&env, &id, Some("correct horse")).unwrap_err().to_string();
+        assert_eq!(mismatch, VAULT_MISMATCH_MESSAGE, "another key is never exported in its place");
+        assert_key_hidden(&mismatch, "the mismatch message");
+
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&id)).unwrap();
+        let lost = export_private(&env, &id, None).unwrap_err().to_string();
+        assert_eq!(lost, VAULT_ENTRY_LOST);
+        assert_key_hidden(&lost, "the lost-key message");
     }
 }

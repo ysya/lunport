@@ -54,4 +54,8 @@ in_vault: boolean,
  * 「Move」把它搬進保管庫。agent 永遠放不下的金鑰(安全金鑰與 DSA、解不開的加密方式、讀不懂的、舊式 PEM)不算:它們只能留在檔案,不標、Move 也不碰;
  * 現在讀不到金鑰(原檔不見)的還算,Move 會說明原因。
  */
-file_for_now: boolean, };
+file_for_now: boolean, 
+/**
+ * 這台保管庫裡的這把金鑰有沒有 passphrase(`SlotSource::Vault`);金鑰不在保管庫 → None。「Export private key…」只在沒有時提供加一個。
+ */
+vault_has_passphrase: boolean | null, };

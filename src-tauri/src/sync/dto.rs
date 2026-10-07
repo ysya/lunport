@@ -159,6 +159,8 @@ pub struct SyncKeySlotView {
     /// 「Move」把它搬進保管庫。agent 永遠放不下的金鑰(安全金鑰與 DSA、解不開的加密方式、讀不懂的、舊式 PEM)不算:它們只能留在檔案,不標、Move 也不碰;
     /// 現在讀不到金鑰(原檔不見)的還算,Move 會說明原因。
     pub file_for_now: bool,
+    /// 這台保管庫裡的這把金鑰有沒有 passphrase(`SlotSource::Vault`);金鑰不在保管庫 → None。「Export private key…」只在沒有時提供加一個。
+    pub vault_has_passphrase: Option<bool>,
 }
 
 /// 插槽在這台電腦上的狀態(SP3 spec §7.2、§7.3)。

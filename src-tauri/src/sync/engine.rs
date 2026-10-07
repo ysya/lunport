@@ -664,6 +664,23 @@ pub async fn sync_key_move_all_into_vault(app: AppHandle) -> Result<crate::sync:
     .await
 }
 
+/// 「Export private key…」(金鑰保管庫 spec §7.3.2):把這個插槽在保管庫裡的私鑰存成使用者選的檔案。存檔對話框由這裡開(同 `settings_export`):
+/// 路徑一定來自使用者,畫面沒辦法指定要寫到哪。內容先準備好:保管庫打不開、passphrase 加不上,就不開對話框。取消 → None。
+/// 寫檔交給 `vault::export::save_export`:不能寫到 `~/.ssh/sshelter/` 底下,檔案只有擁有者能讀寫。家目錄同引擎(`keys::ssh_dir` 的上一層)。
+#[tauri::command]
+pub async fn sync_key_export_private(app: AppHandle, slot_id: String, passphrase: Option<String>) -> Result<Option<String>, AppError> {
+    use tauri_plugin_dialog::DialogExt;
+    let passphrase = passphrase.map(zeroize::Zeroizing::new);
+    let (name, text) =
+        run(app.clone(), false, move |env| crate::sync::slots::export_private(env, &slot_id, passphrase.as_ref().map(|p| p.as_str()))).await?;
+    let Some(picked) = app.dialog().file().set_file_name(&name).blocking_save_file() else { return Ok(None) };
+    let path = picked.into_path().map_err(|e| AppError::Other(e.to_string()))?;
+    let ssh_dir = crate::keys::ssh_dir()?;
+    let home = ssh_dir.parent().ok_or_else(|| AppError::Other("cannot determine the home directory".to_string()))?;
+    crate::vault::export::save_export(&path, home, text.as_str())?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
 /// 更換同步碼(spec §7.5):第 1 步在這裡做完,之後由背景執行緒逐步推進;進度在 `SyncOverview::rotation`,完成時
 /// 留下 `SyncNotice::NewSyncCode`(UI 以 `sync_show_words` 顯示新同步碼)。
 #[tauri::command]
