@@ -36,6 +36,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path ../dist | Out-Null
           Set-Content -Path ../dist/index.html -Value "<!doctype html>"
+      # Which OpenSSH the agent tests will use (the Win32-OpenSSH in System32 when it exists, else the first one on PATH). Never fails the job.
+      - name: OpenSSH on the runner
+        continue-on-error: true
+        run: |
+          Get-Command ssh, ssh-add, ssh-keygen -All -ErrorAction SilentlyContinue | Format-Table Name, Source -AutoSize
+          ssh -V
       # The platform-dependent tests: identity path parsing (slot_rules), the slot files, links and DACL (slot_files,
       # slot_files_windows), the key vault (vault::) and the SSH agent (agent:: covers the named pipe, program identification and
       # the real ssh-add / ssh-keygen against the agent). The rest of the suite runs on macOS; parts of it use the system keychain.

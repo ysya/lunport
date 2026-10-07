@@ -1,11 +1,11 @@
 //! 用真的 OpenSSH 工具測 agent(金鑰保管庫 spec §12):`ssh-add -L` 列出、`ssh-keygen -Y sign` 經 agent 簽章、`ssh-keygen -Y verify` 驗證。
-//! 不需要 sshd,也不碰真的 `~/.ssh`:工具只讀 `SSH_AUTH_SOCK` 與測試目錄裡的檔案。工具不在 PATH 上就略過;CI 設
-//! `SSHELTER_REQUIRE_OPENSSH=1` 時改成失敗。
+//! 不需要 sshd,也不碰真的 `~/.ssh`:工具只讀 `SSH_AUTH_SOCK` 與測試目錄裡的檔案。工具不在 PATH 上就略過;環境變數
+//! `SSHELTER_REQUIRE_OPENSSH` 剛好是 `1`(CI 設的)時改成失敗;別的值(包括空字串與 `0`)都不算。每次執行工具都有期限(`TOOL_TIMEOUT`)。
 
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ssh_key::public::KeyData;
 use zeroize::Zeroizing;
@@ -95,13 +95,41 @@ fn tool(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-/// OpenSSH 的工具找不找得到;`SSHELTER_REQUIRE_OPENSSH` 有設時找不到就失敗。探測只為了看工具起不起得來:`ssh-add` 在回報選項錯誤之前
-/// 就先連 `SSH_AUTH_SOCK`,所以探測時把它指到一個不存在的端點,免得連上開發者真正的 agent。
+/// 不存在的 agent 端點:不需要 agent 的工具(探測與 `-Y verify`)把 `SSH_AUTH_SOCK` 指到這裡,免得連上開發者真正的 agent
+/// (`ssh-add` 在回報選項錯誤之前就先連它)。
+const NOWHERE: &str = if cfg!(windows) { r"\\.\pipe\sshelter-no-such-agent" } else { "/nonexistent/sshelter-no-such-agent" };
+
+/// 一次工具執行最多等多久。
+const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `run` 的本體,期限由呼叫端給(測試用短的)。起不來(找不到工具)回 `Err`;逾時就砍掉它,讀完它的輸出,然後 panic:訊息有完整的命令列與
+/// 它到那一刻為止的 stderr。stdin 照呼叫端設的(沒設就繼承);stdout 與 stderr 是 pipe,結束之後才讀:這些工具的輸出很小,塞不滿 pipe。
+fn run_within(command: &mut Command, timeout: Duration) -> std::io::Result<std::process::Output> {
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let deadline = Instant::now() + timeout;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let out = child.wait_with_output()?;
+            panic!("{command:?} did not finish within {timeout:?} and was killed; its stderr so far: {}", stderr(&out));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.wait_with_output()
+}
+
+/// 執行工具,最多等 `TOOL_TIMEOUT`;逾時就砍掉它,並把它的 stderr 放進失敗訊息(CI 上卡住的工具不該讓整個 job 等到 30 分鐘)。
+fn run(command: &mut Command) -> std::process::Output {
+    run_within(command, TOOL_TIMEOUT).unwrap_or_else(|e| panic!("cannot run {command:?}: {e}"))
+}
+
+/// OpenSSH 的工具找不找得到;環境變數 `SSHELTER_REQUIRE_OPENSSH` 剛好是 `1` 時找不到就失敗。探測只為了看工具起不起得來(起不來是值,不是
+/// panic,所以用 `run_within`),`SSH_AUTH_SOCK` 指到 `NOWHERE`。
 fn have(name: &str) -> bool {
-    let nowhere = if cfg!(windows) { r"\\.\pipe\sshelter-no-such-agent" } else { "/nonexistent/sshelter-no-such-agent" };
-    let found = Command::new(tool(name)).arg("-?").env("SSH_AUTH_SOCK", nowhere).output().is_ok();
+    let found = run_within(Command::new(tool(name)).arg("-?").env("SSH_AUTH_SOCK", NOWHERE), TOOL_TIMEOUT).is_ok();
     if !found {
-        assert!(std::env::var_os("SSHELTER_REQUIRE_OPENSSH").is_none(), "{name} is not found");
+        let required = std::env::var("SSHELTER_REQUIRE_OPENSSH").is_ok_and(|v| v == "1");
+        assert!(!required, "{name} is not found");
         eprintln!("skipped: {name} is not found");
     }
     found
@@ -167,7 +195,7 @@ fn ssh_add_lists_the_vault_keys_without_asking() {
         return;
     }
     let agent = start();
-    let out = Command::new(tool("ssh-add")).arg("-L").env("SSH_AUTH_SOCK", &agent.endpoint).output().unwrap();
+    let out = run(Command::new(tool("ssh-add")).arg("-L").env("SSH_AUTH_SOCK", &agent.endpoint));
     assert!(out.status.success(), "{}", stderr(&out));
     let listed = String::from_utf8_lossy(&out.stdout);
     for public in [test_keys::PLAIN_PUBLIC, test_keys::ECDSA_PUBLIC, test_keys::RSA_PUBLIC] {
@@ -190,24 +218,22 @@ fn ssh_keygen_signs_through_the_agent_and_the_signature_verifies() {
         let public_file = files.join(format!("{name}.pub"));
         std::fs::write(&public_file, format!("{public} {name}\n")).unwrap();
         let _ = std::fs::remove_file(&signature);
-        let out = Command::new(tool("ssh-keygen"))
+        let out = run(Command::new(tool("ssh-keygen"))
             .args(["-Y", "sign", "-n", "test", "-f"])
             .arg(&public_file)
             .arg(&data)
-            .env("SSH_AUTH_SOCK", &agent.endpoint)
-            .output()
-            .unwrap();
+            .env("SSH_AUTH_SOCK", &agent.endpoint));
         assert!(out.status.success(), "{name}: {}", stderr(&out));
         let signers = files.join("allowed_signers");
         std::fs::write(&signers, format!("test@sshelter {public}\n")).unwrap();
-        let verify = Command::new(tool("ssh-keygen"))
+        // 驗證只看簽章與 allowed_signers 裡的公鑰,不需要 agent:`SSH_AUTH_SOCK` 指到 `NOWHERE`,同探測。
+        let verify = run(Command::new(tool("ssh-keygen"))
             .args(["-Y", "verify", "-n", "test", "-I", "test@sshelter", "-f"])
             .arg(&signers)
             .arg("-s")
             .arg(&signature)
             .stdin(std::fs::File::open(&data).unwrap())
-            .output()
-            .unwrap();
+            .env("SSH_AUTH_SOCK", NOWHERE));
         assert!(verify.status.success(), "{name}: {}", stderr(&verify));
     }
     let asked = agent.host.asked.lock().unwrap();
@@ -236,11 +262,45 @@ fn a_one_shot_channel_lists_only_its_key_and_only_once() {
     let endpoint = channel.path.display().to_string();
     #[cfg(windows)]
     let endpoint = format!(r"\\.\pipe\{}", channel.name);
-    let out = Command::new(tool("ssh-add")).arg("-L").env("SSH_AUTH_SOCK", &endpoint).output().unwrap();
+    let out = run(Command::new(tool("ssh-add")).arg("-L").env("SSH_AUTH_SOCK", &endpoint));
     assert!(out.status.success(), "{}", stderr(&out));
     let listed = String::from_utf8_lossy(&out.stdout);
     assert!(listed.contains(test_keys::ECDSA_PUBLIC), "{listed}");
     assert!(!listed.contains(test_keys::PLAIN_PUBLIC), "only the granted key: {listed}");
-    let again = Command::new(tool("ssh-add")).arg("-L").env("SSH_AUTH_SOCK", &endpoint).output().unwrap();
-    assert!(!again.status.success(), "the channel is gone after its first connection");
+    assert_eq!(listed.lines().count(), 1, "exactly one key is listed: {listed}");
+    // 第二次要的是「連不上」:ssh-add 連不到 agent 時結束碼是 2,連上了但 agent 沒有金鑰時是 1(只是「沒列出東西」不夠)。
+    let again = run(Command::new(tool("ssh-add")).arg("-L").env("SSH_AUTH_SOCK", &endpoint));
+    assert_eq!(
+        again.status.code(),
+        Some(2),
+        "the channel is gone after its first connection: ssh-add must fail to reach it (exit 2; exit 1 = it connected): stderr: {}, stdout: {}",
+        stderr(&again),
+        String::from_utf8_lossy(&again.stdout)
+    );
+}
+
+/// 立刻結束的命令:`run` 回傳它的輸出。命令用測試程式自己(兩個平台都有),它只列出這個測試的名稱就結束。
+#[test]
+fn run_returns_the_output_of_a_command_that_exits_at_once() {
+    let name = "run_returns_the_output_of_a_command_that_exits_at_once";
+    let out = run(Command::new(std::env::current_exe().unwrap()).args(["--list", name]));
+    assert!(out.status.success(), "{}", stderr(&out));
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(listed.contains(&format!("{name}: test")), "{listed}");
+}
+
+/// 逾時的命令被砍掉而不是等它跑完,失敗訊息有它的命令列與到那一刻為止的 stderr。`exec` 讓 sleep 取代 sh:砍 sh 不會留下還握著 pipe 的子行程。
+/// stderr 的句子不整句出現在命令列裡(`printf` 把它拆開),所以訊息裡有整句就是真的讀到了 stderr。
+#[cfg(unix)]
+#[test]
+fn a_command_that_outlives_its_deadline_is_killed_and_named() {
+    let started = Instant::now();
+    let payload = std::panic::catch_unwind(|| {
+        run_within(Command::new("sh").args(["-c", "printf 'no %s yet\\n' answer >&2; exec sleep 5"]), Duration::from_millis(500))
+    })
+    .expect_err("a command that outlives its deadline must panic");
+    let message = payload.downcast_ref::<String>().expect("a formatted panic message");
+    assert!(message.contains(r#""sh""#) && message.contains("exec sleep 5"), "the message names the command: {message}");
+    assert!(message.contains("no answer yet"), "the message carries the stderr so far: {message}");
+    assert!(started.elapsed() < Duration::from_secs(4), "killed at the deadline, not waited for: {:?}", started.elapsed());
 }
