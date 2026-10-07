@@ -1,6 +1,7 @@
 //! 金鑰保管庫檔(key roadmap 第 2 階段 spec §4.1):這台電腦持有的私鑰,存在 `sync-state.json` 旁邊的 `vault.json`。每一筆以
-//! XChaCha20-Poly1305 個別加密(AAD = `sshelter-vault-v1` + 換行 + 插槽 id),金鑰是 32 bytes 的隨機值,base64 存在系統 keychain 的
-//! `vault:key`。私鑰原文原樣保存:有 passphrase 的仍是加密狀態(spec §5.5)。檔頭只有格式版本與這台的 agent 設定(不含祕密)。
+//! XChaCha20-Poly1305 個別加密(AAD = `sshelter-vault-v1` + 換行 + 插槽 id),金鑰是 32 bytes 的隨機值,base64 存在系統 keychain:新的保管庫用
+//! 自己的帳戶 `vault:key:<16 個 hex>`(記在檔頭的 `key_account`),計畫 1 的保管庫用 `vault:key`。私鑰原文原樣保存:有 passphrase 的仍是加密狀態(spec §5.5)。
+//! 檔頭只有格式版本、金鑰所在的 keychain 帳戶名稱與這台的 agent 設定(不含祕密)。
 //! 寫入一律原子(`slot_files::write_private`:暫存檔 → rename)、只有擁有者能讀寫:Unix 的暫存檔先設 0600 再寫;Windows 的暫存檔繼承資料夾的權限,
 //! rename 之後才設成只給擁有者的 DACL(檔案裡只有密文與不含祕密的檔頭,這段空檔可以接受)。
 
@@ -20,10 +21,18 @@ use crate::sync::runtime::SyncRuntime;
 use crate::sync::slot_files;
 
 pub const VAULT_FILE: &str = "vault.json";
+/// 計畫 1 的保管庫(檔頭沒有 `key_account`)把金鑰放在這個 keychain 帳戶。
 pub const VAULT_KEY_ACCOUNT: &str = "vault:key";
+/// 新的保管庫各用自己的帳戶 `vault:key:<16 個 hex>`,名稱記在檔頭的 `key_account`(計畫 1 的後續事項):keychain 誤報「沒有這筆」時,
+/// 新的金鑰不會蓋掉舊的,搬到旁邊的保管庫檔仍解得開。
+pub const VAULT_KEY_ACCOUNT_PREFIX: &str = "vault:key:";
 /// 記住核准的預設時間(分鐘;spec §5.3)。
 pub const DEFAULT_REMEMBER_MINUTES: u32 = 240;
-const VAULT_VERSION: u32 = 1;
+/// 這一版讀寫的最新格式:檔頭有 `key_account` 的檔案。
+const VAULT_VERSION: u32 = 2;
+/// 檔頭沒有 `key_account` 的檔案(計畫 1 寫的,或之後沿用 `vault:key` 的)維持第 1 版,舊版照常開啟。有 `key_account` 的是第 2 版:舊版看到「更新版的格式」
+/// 就原地不動,不會因為在 `vault:key` 找不到金鑰而把它當成缺金鑰搬到旁邊。
+const LEGACY_VERSION: u32 = 1;
 const AAD_PREFIX: &str = "sshelter-vault-v1";
 
 /// 保管庫檔的路徑:和 `sync-state.json` 同一個資料夾。
@@ -94,6 +103,9 @@ struct SealedEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct VaultFile {
     version: u32,
+    /// 這個檔案的金鑰所在的 keychain 帳戶;沒有 = `VAULT_KEY_ACCOUNT`(計畫 1 的檔案)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_account: Option<String>,
     #[serde(default)]
     settings: AgentSettings,
     #[serde(default)]
@@ -102,7 +114,13 @@ struct VaultFile {
 
 impl Default for VaultFile {
     fn default() -> Self {
-        Self { version: VAULT_VERSION, settings: AgentSettings::default(), entries: BTreeMap::new() }
+        Self { version: LEGACY_VERSION, key_account: None, settings: AgentSettings::default(), entries: BTreeMap::new() }
+    }
+}
+
+impl VaultFile {
+    fn key_account(&self) -> &str {
+        self.key_account.as_deref().unwrap_or(VAULT_KEY_ACCOUNT)
     }
 }
 
@@ -110,7 +128,7 @@ impl Default for VaultFile {
 pub enum VaultError {
     /// 防禦用:已開啟的保管庫有項目卻沒有金鑰(`get`、`put`)。`open` 之後不會發生:有項目卻缺金鑰的檔案在 `open` 就搬到旁邊了,回的是 `Unreadable`。
     KeyMissing,
-    /// 讀不懂、或有項目卻缺 keychain 的 `vault:key` 的保管庫檔:已搬到同一個資料夾的 `kept_as`(搬不動是 None),之後從空的保管庫開始(spec §4.1、§11)。
+    /// 讀不懂、或有項目卻缺它的 keychain 帳戶裡的金鑰的保管庫檔:已搬到同一個資料夾的 `kept_as`(搬不動是 None),之後從空的保管庫開始(spec §4.1、§11)。
     Unreadable { kept_as: Option<String>, reason: String },
     /// 更新版 SSHelter 寫的格式:原地不動,保管庫停用。
     Newer { version: u32 },
@@ -154,8 +172,15 @@ fn invalid_key() -> VaultError {
     VaultError::Other(AppError::Other("the vault key in the keychain is not valid".to_string()))
 }
 
-fn read_key(keychain: &dyn Keychain) -> Result<Option<Zeroizing<[u8; 32]>>, VaultError> {
-    let Some(text) = keychain.get(VAULT_KEY_ACCOUNT)? else { return Ok(None) };
+/// 新的保管庫金鑰的 keychain 帳戶名稱:`vault:key:` 加 8 個隨機 bytes 的 hex。
+fn new_key_account() -> Result<String, VaultError> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).map_err(|e| VaultError::Other(AppError::Other(format!("cannot draw the vault key: {e}"))))?;
+    Ok(format!("{VAULT_KEY_ACCOUNT_PREFIX}{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+}
+
+fn read_key(keychain: &dyn Keychain, account: &str) -> Result<Option<Zeroizing<[u8; 32]>>, VaultError> {
+    let Some(text) = keychain.get(account)? else { return Ok(None) };
     let text = Zeroizing::new(text);
     let bytes = Zeroizing::new(B64.decode(text.as_bytes()).map_err(|_| invalid_key())?);
     if bytes.len() != 32 {
@@ -208,7 +233,7 @@ impl std::fmt::Debug for Vault {
 
 impl Vault {
     /// 開啟 `path` 的保管庫。檔案不存在 → 空的(什麼都不寫,金鑰也還不產生)。先只看 `version`:比本 app 新的格式原地不動,回 `Newer`。
-    /// 讀不懂的檔案、或有項目卻缺 keychain 的 `vault:key` 的檔案(spec §11)不覆寫,搬到旁邊(`vault.unreadable-<ms>.json`、`vault.keyless-<ms>.json`)並回
+    /// 讀不懂的檔案、或有項目卻缺它的 keychain 帳戶裡的金鑰的檔案(spec §11)不覆寫,搬到旁邊(`vault.unreadable-<ms>.json`、`vault.keyless-<ms>.json`)並回
     /// `Unreadable`;下一次開啟從空的保管庫開始,第一次 `put` 才產生新的金鑰。keychain 讀取出錯(可能只是暫時鎖著)或存的值不是 32 bytes 的 base64
     /// 時回 `Other`,什麼都不搬。
     pub fn open(path: &Path, keychain: &dyn Keychain, now_ms: u64) -> Result<Vault, VaultError> {
@@ -228,7 +253,7 @@ impl Vault {
             Ok(file) => file,
             Err(e) => return Err(set_aside(path, "unreadable", now_ms, e.to_string())),
         };
-        let key = read_key(keychain)?;
+        let key = read_key(keychain, file.key_account())?;
         if key.is_none() && !file.entries.is_empty() {
             return Err(set_aside(path, "keyless", now_ms, "the vault's key is missing from the keychain".to_string()));
         }
@@ -282,22 +307,26 @@ impl Vault {
         self.save()
     }
 
-    /// 確保 `self.key` 有值(已有、keychain 裡有、或第一次存東西時新產生並寫進 keychain),金鑰留在 `self.key`,不再複製出去。
+    /// 確保 `self.key` 有值(已有、檔案記的 keychain 帳戶裡有、或第一次存東西時新產生):新的金鑰一律放在新的帳戶(`vault:key:<16 個 hex>`),
+    /// 記進檔頭、格式改成第 2 版。絕不寫到已經有名字的帳戶上:那裡的金鑰可能還是某個搬到旁邊的保管庫檔要用的。金鑰留在 `self.key`,不再複製出去。
     fn ensure_key(&mut self, keychain: &dyn Keychain) -> Result<(), VaultError> {
         if self.key.is_some() {
             return Ok(());
         }
-        if let Some(key) = read_key(keychain)? {
+        if let Some(key) = read_key(keychain, self.file.key_account())? {
             self.key = Some(key);
             return Ok(());
         }
         if !self.file.entries.is_empty() {
             return Err(VaultError::KeyMissing);
         }
+        let account = new_key_account()?;
         let mut key = Zeroizing::new([0u8; 32]);
         getrandom::fill(key.as_mut()).map_err(|e| VaultError::Other(AppError::Other(format!("cannot draw the vault key: {e}"))))?;
         let encoded = Zeroizing::new(B64.encode(key.as_ref()));
-        keychain.set(VAULT_KEY_ACCOUNT, &encoded)?;
+        keychain.set(&account, &encoded)?;
+        self.file.key_account = Some(account);
+        self.file.version = VAULT_VERSION;
         self.key = Some(key);
         Ok(())
     }
@@ -369,6 +398,76 @@ mod tests {
         }
     }
 
+    /// 這個保管庫檔的金鑰所在的 keychain 帳戶:檔頭的 `key_account`,沒有就是計畫 1 的 `vault:key`。
+    fn account_of(path: &Path) -> String {
+        let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        file["key_account"].as_str().unwrap_or(VAULT_KEY_ACCOUNT).to_string()
+    }
+
+    /// 新的保管庫把金鑰放在自己的帳戶(`vault:key:<16 個 hex>`),帳戶名稱記在檔頭,格式是第 2 版;`vault:key` 不碰。
+    #[test]
+    fn a_new_vault_keeps_its_key_under_an_account_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
+
+        let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(file["version"], 2);
+        let account = account_of(&path);
+        let suffix = account.strip_prefix(VAULT_KEY_ACCOUNT_PREFIX).expect("an account of its own");
+        assert_eq!(suffix.len(), 16);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "{account}");
+        assert!(keychain.entry(&account).is_some(), "the key is under that account");
+        assert_eq!(keychain.entry(VAULT_KEY_ACCOUNT), None, "vault:key is never written");
+        let got = Vault::open(&path, &keychain, 2).unwrap().get(&"a".repeat(32)).unwrap().unwrap();
+        assert_eq!(got.private_key, test_keys::plain());
+    }
+
+    /// keychain 一時找不到計畫 1 的 `vault:key`:檔案搬到旁邊,之後新的金鑰放到新的帳戶,`vault:key` 不會被蓋掉;
+    /// 等 keychain 又找得到它,搬到旁邊的檔案照樣解得開(計畫 1 的後續事項)。
+    #[test]
+    fn a_key_the_keychain_cannot_find_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        let old_key = B64.encode([7u8; 32]);
+        keychain.set(VAULT_KEY_ACCOUNT, &old_key).unwrap();
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
+        assert_eq!(account_of(&path), VAULT_KEY_ACCOUNT, "a vault that found vault:key keeps using it");
+
+        keychain.delete(VAULT_KEY_ACCOUNT).unwrap();
+        assert!(matches!(Vault::open(&path, &keychain, 2), Err(VaultError::Unreadable { kept_as: Some(_), .. })));
+        let mut fresh = Vault::open(&path, &keychain, 3).unwrap();
+        fresh.put(&keychain, &"b".repeat(32), &entry(&test_keys::plain())).unwrap();
+        assert_eq!(keychain.entry(VAULT_KEY_ACCOUNT), None, "the new key went to an account of its own");
+        assert_ne!(account_of(&path), VAULT_KEY_ACCOUNT);
+
+        keychain.set(VAULT_KEY_ACCOUNT, &old_key).unwrap();
+        let kept = Vault::open(&dir.path().join("vault.keyless-2.json"), &keychain, 4).unwrap();
+        assert_eq!(kept.get(&"a".repeat(32)).unwrap().unwrap().private_key, test_keys::plain());
+        let current = Vault::open(&path, &keychain, 5).unwrap();
+        assert_eq!(current.get(&"b".repeat(32)).unwrap().unwrap().private_key, test_keys::plain());
+    }
+
+    /// 計畫 1 寫的保管庫檔(沒有 `key_account`,第 1 版)照舊開得了,再存東西也不改帳戶與版本:舊版 SSHelter 還讀得懂它。
+    #[test]
+    fn a_plan_1_vault_keeps_its_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE);
+        let keychain = MemKeychain::default();
+        keychain.set(VAULT_KEY_ACCOUNT, &B64.encode([5u8; 32])).unwrap();
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        vault.put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
+        let mut again = Vault::open(&path, &keychain, 2).unwrap();
+        again.put(&keychain, &"b".repeat(32), &entry(&test_keys::plain())).unwrap();
+        let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(file["version"], 1);
+        assert!(file.get("key_account").is_none());
+    }
+
     #[test]
     fn an_absent_vault_opens_empty_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -392,7 +491,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains(test_keys::PLAIN_BODY[1]), "the file holds no private key text");
         assert!(!text.contains("PRIVATE KEY"));
-        assert!(keychain.entry(VAULT_KEY_ACCOUNT).is_some(), "the key lives in the keychain");
+        assert!(keychain.entry(&account_of(&path)).is_some(), "the key lives in the keychain");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -417,8 +516,9 @@ mod tests {
         let mut vault = Vault::open(&path, &keychain, 1).unwrap();
         vault.put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
         let original = std::fs::read(&path).unwrap();
+        let account = account_of(&path);
 
-        // 鑰匙圈裡的 `vault:key` 不見了:舊檔搬到旁邊保留(spec §11),不蓋掉、也不留在原處讓之後的存檔蓋掉。
+        // 鑰匙圈裡這個保管庫的金鑰不見了:舊檔搬到旁邊保留(spec §11),不蓋掉、也不留在原處讓之後的存檔蓋掉。
         let empty = MemKeychain::default();
         match Vault::open(&path, &empty, 2) {
             Err(VaultError::Unreadable { kept_as: Some(name), reason }) => {
@@ -427,7 +527,7 @@ mod tests {
             }
             other => panic!("expected Unreadable, got {other:?}"),
         }
-        assert_eq!(empty.entry(VAULT_KEY_ACCOUNT), None, "opening never draws a replacement key");
+        assert_eq!(empty.entry(&account), None, "opening never draws a replacement key");
         assert!(!path.exists(), "vault.json is gone, so nothing can overwrite the old entries");
         assert_eq!(std::fs::read(dir.path().join("vault.keyless-2.json")).unwrap(), original, "the kept file has the original bytes");
 
@@ -435,7 +535,7 @@ mod tests {
         let mut fresh = Vault::open(&path, &empty, 3).unwrap();
         assert!(fresh.ids().is_empty());
         fresh.put(&empty, &"b".repeat(32), &entry(&test_keys::plain())).unwrap();
-        assert!(empty.entry(VAULT_KEY_ACCOUNT).is_some(), "the first put drew a new key");
+        assert!(empty.entry(&account_of(&path)).is_some(), "the first put drew a new key");
         let got = Vault::open(&path, &empty, 4).unwrap().get(&"b".repeat(32)).unwrap().unwrap();
         assert_eq!(got.private_key, test_keys::plain());
     }
@@ -454,10 +554,11 @@ mod tests {
         assert!(matches!(Vault::open(&path, &keychain, 2), Err(VaultError::Other(_))));
         keychain.fail_reads.store(false, std::sync::atomic::Ordering::SeqCst);
         // 存的值不是 32 bytes 的 base64:一樣只回錯誤、不動檔案。
+        let account = account_of(&path);
         let short = B64.encode([1u8; 16]);
         for bad in ["not base64!", short.as_str()] {
             let broken = MemKeychain::default();
-            broken.set(VAULT_KEY_ACCOUNT, bad).unwrap();
+            broken.set(&account, bad).unwrap();
             assert!(matches!(Vault::open(&path, &broken, 3), Err(VaultError::Other(_))), "{bad}");
         }
         assert_eq!(std::fs::read(&path).unwrap(), original);
@@ -504,7 +605,7 @@ mod tests {
         let slot = "a".repeat(32);
         let mut vault = Vault::open(&path, &keychain, 1).unwrap();
         vault.put(&keychain, &slot, &entry(&test_keys::plain())).unwrap();
-        let key: [u8; 32] = B64.decode(keychain.entry(VAULT_KEY_ACCOUNT).unwrap()).unwrap().try_into().unwrap();
+        let key: [u8; 32] = B64.decode(keychain.entry(&account_of(&path)).unwrap()).unwrap().try_into().unwrap();
 
         // 兩種 serde_json 會引用值的錯誤:型別不對(`invalid type: string "…"`)與不認得的列舉值(`unknown variant `…``)。
         let wrong_shapes = [
@@ -551,10 +652,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(VAULT_FILE);
         let keychain = MemKeychain::default();
-        // 這裡的 `entries` 是陣列,v1 的型別讀不進去:只有 `version` 決定它算不算更新的格式。
-        let original = br#"{"version": 2, "entries": []}"#;
+        // 這裡的 `entries` 是陣列,這一版(第 2 版)的型別讀不進去:只有 `version` 決定它算不算更新的格式。
+        let original = br#"{"version": 3, "entries": []}"#;
         std::fs::write(&path, original).unwrap();
-        assert!(matches!(Vault::open(&path, &keychain, 5), Err(VaultError::Newer { version: 2 })));
+        assert!(matches!(Vault::open(&path, &keychain, 5), Err(VaultError::Newer { version: 3 })));
         assert_eq!(std::fs::read(&path).unwrap(), original.to_vec(), "the file is untouched");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing was set aside");
     }
@@ -663,7 +764,7 @@ mod tests {
         let keychain = MemKeychain::default();
         let mut vault = Vault::open(&path, &keychain, 1).unwrap();
         vault.put(&keychain, &"a".repeat(32), &entry(&test_keys::plain())).unwrap();
-        let key = B64.decode(keychain.entry(VAULT_KEY_ACCOUNT).unwrap()).unwrap();
+        let key = B64.decode(keychain.entry(&account_of(&path)).unwrap()).unwrap();
         let shown = format!("{vault:?}");
         assert!(shown.contains(&"a".repeat(32)), "the slot ids are listed");
         assert!(!shown.contains(&format!("{key:?}")), "the key bytes are not printed");
