@@ -238,7 +238,8 @@ export function KeyDetailFor({
   // What the confirms show while they animate out (their slot state is already null by then).
   const shownSyncing = useLastNonNull(syncing);
   const shownDeleting = useLastNonNull(deleting);
-  const slots = overview.data?.joined ? overview.data.key_slots : [];
+  // Not only while joined: a key kept in SSHelter after leaving the account still has its detail and its exports.
+  const slots = overview.data?.key_slots ?? [];
   const slot = selection?.kind === "slot" ? (slots.find((s) => s.id === selection.id) ?? null) : null;
   const file = selection?.kind === "file" ? ((keys.data ?? []).find((k) => k.private_path === selection.path) ?? null) : null;
   const busy = setMode.isPending || switchToSynced.isPending || deleteCopy.isPending || delivery.isPending;

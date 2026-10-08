@@ -1030,13 +1030,26 @@ fn republish(
 /// 找不到、這台的主機還用著的(離開之後建立或加入了別的帳戶,`~/.ssh/sshelter-local/` 的主機還指著它;`kept_status`,不能刪除)。和別的插槽
 /// 同檔名、這台又沒有握著的插槽,狀態一律是 `CONTESTED_MESSAGE`(不論有沒有主機用到)。`in_use` = 整份 config 裡用到的插槽(`config_slot_hosts`):
 /// 那些主機也列在 `hosts`,帳戶裡的插槽有任何主機用到就不是「沒有用到」。
-pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path, in_use: &BTreeMap<String, Vec<String>>) -> Vec<SyncKeySlotView> {
-    let Some(account) = state.account.as_ref() else { return Vec::new() };
+///
+/// 沒有帳戶(`state.account` 是 None;離開了帳戶,或從沒加入):只有第二種 —— 這台還有來源與 payload 的每一個插槽記錄(金鑰多半在這台的保管庫裡,常常是這台僅存的
+/// 一份),同樣是 `in_account` = false、沒有其他電腦,主機還用著的是 `kept_status`、其他的是 Not in use。`account_keys` 只在有帳戶時用到(帳戶裡的 `key` 有沒有
+/// 這把);有帳戶、帳戶金鑰卻還沒載入(keychain 鎖著、同步碼不見了)時分不出帳戶裡的插槽在這台的狀態,照舊什麼都不列。
+pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path, in_use: &BTreeMap<String, Vec<String>>) -> Vec<SyncKeySlotView> {
+    let account = state.account.as_ref();
+    if account.is_some() && account_keys.is_none() {
+        return Vec::new();
+    }
     let needed = slot_hosts(state);
-    let all_devices = devices(account);
+    let all_devices = account.map(devices).unwrap_or_default();
     let keys_dir = home.join(SLOT_DIR);
-    let live = live_slots(account);
+    let live = account.map(live_slots).unwrap_or_default();
     let uses = file_name_uses(&live);
+    // 建立插槽的電腦的名稱:帳戶裡的裝置記錄(找不到就是它的 id,`device_name`)。沒有帳戶時只認得這台自己。
+    let origin_name = |device_id: &str| match account {
+        Some(account) => device_name(account, device_id),
+        None if device_id == state.device_id => state.device_name.clone(),
+        None => device_id.to_string(),
+    };
     let used = |file: &str| needed.contains_key(file) || in_use.contains_key(file);
     // 用到這個插槽檔名的主機:勾選的 space 裡的與整份 config 裡的,排序、不重複。
     let hosts = |file: &str| -> Vec<String> {
@@ -1052,7 +1065,7 @@ pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path, in_use:
             key_type: payload.key_type.clone(),
             has_passphrase: payload.has_passphrase,
             local_has_passphrase,
-            origin_device: device_name(account, &payload.origin_device_id),
+            origin_device: origin_name(&payload.origin_device_id),
             origin_is_this: payload.origin_device_id == state.device_id,
             value: slot_value(&slot_file_name(&payload.name, id)),
             hosts,
@@ -1079,21 +1092,23 @@ pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path, in_use:
         }
     };
     let mut out = Vec::new();
-    for (id, payload) in &live {
-        let file = slot_file_name(&payload.name, id);
-        let local = state.key_slots.get(id);
-        let status = if contested(&uses, local, &file) {
-            SlotStatusView::Error { message: CONTESTED_MESSAGE.to_string() }
-        } else {
-            let has_secret = account.sealed.get(&key_secret_key(account_keys, id)).is_some_and(|s| !s.envelope.deleted);
-            slot_status(local, payload, needed.contains_key(&file), used(&file), has_secret, &keys_dir.join(&file))
-        };
-        // 「Sync this key」(`own` 而且 Ready)與「Sync the new key」(SourceChanged)上傳的是這台插槽裡的那把,不是帳戶裡現在的那把:
-        // 上傳之前的確認說明的是它有沒有 passphrase。其他的列不提供上傳,不讀金鑰。
-        let uploads = matches!(status, SlotStatusView::SourceChanged { .. })
-            || (payload.mode == SlotMode::Own && matches!(status, SlotStatusView::Ready { .. }));
-        let local_has_passphrase = if uploads { local_key_passphrase(local, &keys_dir) } else { None };
-        out.push(view(id, payload, status, hosts(&file), local_has_passphrase, true));
+    if let (Some(account), Some(account_keys)) = (account, account_keys) {
+        for (id, payload) in &live {
+            let file = slot_file_name(&payload.name, id);
+            let local = state.key_slots.get(id);
+            let status = if contested(&uses, local, &file) {
+                SlotStatusView::Error { message: CONTESTED_MESSAGE.to_string() }
+            } else {
+                let has_secret = account.sealed.get(&key_secret_key(account_keys, id)).is_some_and(|s| !s.envelope.deleted);
+                slot_status(local, payload, needed.contains_key(&file), used(&file), has_secret, &keys_dir.join(&file))
+            };
+            // 「Sync this key」(`own` 而且 Ready)與「Sync the new key」(SourceChanged)上傳的是這台插槽裡的那把,不是帳戶裡現在的那把:
+            // 上傳之前的確認說明的是它有沒有 passphrase。其他的列不提供上傳,不讀金鑰。
+            let uploads = matches!(status, SlotStatusView::SourceChanged { .. })
+                || (payload.mode == SlotMode::Own && matches!(status, SlotStatusView::Ready { .. }));
+            let local_has_passphrase = if uploads { local_key_passphrase(local, &keys_dir) } else { None };
+            out.push(view(id, payload, status, hosts(&file), local_has_passphrase, true));
+        }
     }
     for (id, local) in &state.key_slots {
         if live.iter().any(|(l, _)| l == id) {
@@ -1101,9 +1116,9 @@ pub fn views(state: &SyncStateV2, account_keys: &ChainKeys, home: &Path, in_use:
         }
         let (Some(source), Some(payload)) = (&local.source, &local.payload) else { continue };
         let path = keys_dir.join(&local.file_name);
-        // 帳戶裡完全找不到、這台的主機還用著(`reconcile` 因此留著它):Ready 或錯誤,不能刪。被刪除的(tombstone)照 spec §4.2:連結已經移除,
+        // 帳戶裡完全找不到(或根本沒有帳戶)、這台的主機還用著(`reconcile` 因此留著它):Ready 或錯誤,不能刪。被刪除的(tombstone)照 spec §4.2:連結已經移除,
         // 留下的副本與複製檔是 Not in use(主機還指著它的話,刪除副本會被拒絕)。
-        if !slot_record_exists(account, id) && used(&local.file_name) {
+        if !account.is_some_and(|account| slot_record_exists(account, id)) && used(&local.file_name) {
             out.push(view(id, payload, kept_status(local, source, &path), hosts(&local.file_name), None, false));
         } else {
             out.push(view(id, payload, SlotStatusView::NotInUse { file: path.display().to_string() }, Vec::new(), None, false));
@@ -1267,9 +1282,9 @@ fn vault_text(env: &SyncEnv, slot_id: &str, fingerprint: &str) -> Result<Option<
 pub const NOT_IN_VAULT_MESSAGE: &str = "This key isn't in SSHelter on this computer.";
 
 /// 「Export private key…」要寫的內容(金鑰保管庫 spec §7.3.2):這個插槽在保管庫裡的私鑰(要是記錄裡那一把,`vault_text`),可選擇加上 passphrase
-/// (`vault::export::export_text`)。回傳(預設檔名 = 插槽名稱、內容)。不改任何東西。
+/// (`vault::export::export_text`)。回傳(預設檔名 = 插槽名稱、內容)。不改任何東西。不需要帳戶(`local_snapshot`)。
 pub fn export_private(env: &SyncEnv, slot_id: &str, passphrase: Option<&str>) -> Result<(String, Zeroizing<String>), AppError> {
-    let (state, _keys, _home) = snapshot(env)?;
+    let (state, _home) = local_snapshot(env)?;
     let local = state.key_slots.get(slot_id).ok_or_else(not_found)?;
     let Some(SlotSource::Vault { fingerprint, .. }) = &local.source else {
         return Err(AppError::Other(NOT_IN_VAULT_MESSAGE.to_string()));
@@ -1300,7 +1315,7 @@ pub(crate) fn learned_now(s: &SyncStateV2, chain_id: &str) -> Option<String> {
     s.account.as_ref().filter(|a| a.chain_id == chain_id).map(|a| a.chain_id.clone())
 }
 
-/// 快照:(狀態、帳戶金鑰、家目錄)。
+/// 快照:(狀態、帳戶金鑰、家目錄)。要帳戶的動作用(挑金鑰、改用同步的金鑰、改成同步或停止同步)。
 fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError> {
     let core = env.runtime.core.lock().unwrap();
     let state = core.state.clone().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
@@ -1308,6 +1323,14 @@ fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError
     drop(core);
     let home = env.ssh_dir.parent().map(Path::to_path_buf).ok_or_else(|| AppError::Other("cannot determine the home directory".to_string()))?;
     Ok((state, keys, home))
+}
+
+/// 快照:(狀態、家目錄),不要帳戶金鑰。只動這台的插槽與保管庫的動作用(`export_private`、`set_delivery`、`delete_copy`):沒有加入帳戶也做得到 —— 離開帳戶之後,
+/// 這台的保管庫還有那些金鑰,常常是這台僅存的一份(金鑰保管庫 spec §4.3)。
+fn local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
+    let state = env.runtime.core.lock().unwrap().state.clone().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+    let home = env.ssh_dir.parent().map(Path::to_path_buf).ok_or_else(|| AppError::Other("cannot determine the home directory".to_string()))?;
+    Ok((state, home))
 }
 
 /// 使用者的動作要在插槽路徑上放新的東西之前,路徑上現在的東西對這個插槽 id 自己的本機記錄來說是什麼(spec §4.2)。
@@ -1674,9 +1697,9 @@ fn holds_recorded_copy(copy: &SlotSource, path: &Path) -> bool {
 /// 主機(主 config、`~/.ssh/sshelter-local/`……,`config_slot_uses`;config 還沒載入就不知道有沒有,不刪)。路徑上的檔案必須還是這筆記錄放的那一份
 /// (`holds_recorded_copy`);不是(使用者換上的、別的插槽放的)就擋路,什麼都不刪。副本已經不在了:只忘掉記錄,旁邊的 `.pub` 不能確定是
 /// 自己的,不碰(同 `park_link`)。只在 SSHelter 的金鑰(`SlotSource::Vault`):插槽路徑上有檔案就擋路;否則拿掉保管庫裡那一筆與插槽旁的
-/// `.pub`(那是這筆記錄每一輪維護的),再忘掉記錄;記在這台 keychain 的 passphrase 也一起忘掉(`forget_remembered_passphrase`)。
+/// `.pub`(那是這筆記錄每一輪維護的),再忘掉記錄;記在這台 keychain 的 passphrase 也一起忘掉(`forget_remembered_passphrase`)。不需要帳戶(`local_snapshot`)。
 pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
-    let (state, _keys, home) = snapshot(env)?;
+    let (state, home) = local_snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
         return Err(contested_error());
     }
@@ -1765,8 +1788,10 @@ fn agent_refusal(text: &str, facts: &KeyFacts) -> Option<&'static str> {
 /// 兩個方向做完都會更新 agent 的設定(`agent::wiring::refresh_env`):`agent/config` 列的主機跟著這個插槽走,第一次需要時 Include 也在這時放進主 config。
 /// 更新不成(例如主 config 在載入之後被別的程式改過,存檔撞上 `Conflict`)只記到 stderr、不讓搬動本身失敗:`agent/config` 要等 Include 放好才寫,所以放不進去的那一次它還不存在,
 /// 下一次更新(每次同步嘗試的最後,`round::sync_once`)當成第一次重試;過期的 doc 在那一次失敗時已經重載。
+///
+/// 不需要帳戶(`local_snapshot`):只動這台的插槽、插槽檔與保管庫,離開帳戶之後「Move」照樣搬得動。
 pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), AppError> {
-    let (state, _keys, home) = snapshot(env)?;
+    let (state, home) = local_snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
         return Err(contested_error());
     }
@@ -2433,7 +2458,7 @@ pub(crate) mod tests {
 
     /// 這台的插槽檢視(同 overview:整份 config 裡用到的插槽一起算)。
     fn view_of(d: &TestDevice) -> Vec<SyncKeySlotView> {
-        views(&d.state(), &account_keys(d), &home(d), &config_slot_uses(&d.env()).expect("config loaded"))
+        views(&d.state(), Some(&account_keys(d)), &home(d), &config_slot_uses(&d.env()).expect("config loaded"))
     }
 
     #[test]
@@ -7289,5 +7314,66 @@ pub(crate) mod tests {
         let lost = export_private(&env, &id, None).unwrap_err().to_string();
         assert_eq!(lost, VAULT_ENTRY_LOST);
         assert_key_hidden(&lost, "the lost-key message");
+    }
+
+    // ── 沒有同步帳戶時,這台留著的金鑰(金鑰保管庫 spec §4.3「沒加入同步帳戶也能用」)──────────────────────────────
+
+    /// overview 裡 `id` 這個插槽的那一列。
+    fn overview_row(d: &TestDevice, id: &str) -> Option<SyncKeySlotView> {
+        crate::sync::dto::overview(&d.env()).unwrap().key_slots.into_iter().find(|v| v.id == id)
+    }
+
+    /// 離開帳戶之後(沒有帳戶、也沒有帳戶金鑰),同步來的金鑰還在這台的保管庫裡,`~/.ssh/sshelter-local/` 的 `web` 還用著它 —— 它常常是這台僅存的一份。
+    /// overview 照樣列出它:不在帳戶裡、沒有其他電腦、主機還用著就是 Ready;「Export private key…」照樣匯出。主機不再用它之後是 Not in use,刪除副本也做得到。
+    #[test]
+    fn a_key_in_the_vault_stays_listed_and_exportable_after_leaving_the_account() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "setup: B keeps the synced key in its vault");
+        crate::sync::account::leave_account(&b.env(), false).unwrap();
+        assert!(b.state().account.is_none() && b.runtime.core.lock().unwrap().account_keys.is_none(), "setup: B has no account now");
+
+        let o = crate::sync::dto::overview(&b.env()).unwrap();
+        assert!(!o.joined);
+        let row = o.key_slots.iter().find(|v| v.id == id).expect("the key in the vault is still listed");
+        assert!(row.in_vault && !row.in_account && row.devices.is_empty() && !row.file_for_now, "{row:?}");
+        assert!(matches!(row.status, SlotStatusView::Ready { synced_copy: false, .. }), "web still uses it: {:?}", row.status);
+        assert_eq!(row.hosts, vec!["web".to_string()]);
+        assert_eq!(row.vault_has_passphrase, Some(false));
+        let (name, text) = export_private(&b.env(), &id, None).unwrap();
+        assert_eq!((name.as_str(), text.as_str()), ("id_mac", test_keys::plain().as_str()), "and it still exports");
+
+        // `web` 不再用它(它的檔案在離開帳戶時搬到了 `~/.ssh/sshelter-local/`):Not in use,刪除副本拿掉保管庫裡那一筆。
+        let kept = b.doc.lock().unwrap().as_ref().unwrap().files.iter().map(|f| f.path.clone()).find(|p| p.to_string_lossy().contains("sshelter-local"));
+        b.save_in_app(&kept.expect("web's file moved to sshelter-local"), "Host web\n  HostName 10.0.0.1\n");
+        let row = overview_row(&b, &id).expect("still listed");
+        assert!(matches!(row.status, SlotStatusView::NotInUse { .. }) && row.hosts.is_empty(), "{:?}", row.status);
+        delete_copy(&b.env(), &id).unwrap();
+        assert!(overview_row(&b, &id).is_none(), "the deleted key is gone from the list");
+        assert!(vault_entry(&b, &id).is_none(), "and from the vault");
+    }
+
+    /// 「Move」不需要帳戶:保管庫用不了時落地成檔案的金鑰(「File for now」),離開帳戶、保管庫又能用之後,一樣搬得進保管庫 —— 只動這台的插槽與保管庫。
+    #[test]
+    fn a_file_for_now_moves_into_the_vault_without_an_account() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        no_vault_on(&b);
+        let (id, file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        settle(&b);
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::SyncedCopy { .. })), "setup: the key landed as a file");
+        crate::sync::account::leave_account(&b.env(), false).unwrap();
+        vault_on_again(&b);
+        assert!(overview_row(&b, &id).expect("listed without an account").file_for_now, "Move offers it");
+
+        assert!(move_all_into_vault(&b.env()).unwrap().is_empty(), "nothing failed");
+        assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "{:?}", b.state().key_slots[&id].source);
+        assert_landed_in_the_vault(&b, &id, &file, &test_keys::plain(), test_keys::PLAIN_PUBLIC);
+        let row = overview_row(&b, &id).unwrap();
+        assert!(row.in_vault && !row.file_for_now && !row.in_account, "{row:?}");
     }
 }

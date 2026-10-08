@@ -1,11 +1,15 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
 
 import type { KeyInfo } from "@/bindings/KeyInfo";
+import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import type { KeychainSelection } from "@/lib/keychain";
-import { keySlot, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
-import { KeychainListView } from "./KeychainList";
+import { queryKeys } from "@/lib/queries";
+import { syncOverviewKey } from "@/lib/sync";
+import { keySlot, overview, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
+import { KeychainList, KeychainListView } from "./KeychainList";
 import { buttonsIn, HIDDEN_CHARS, text, textIn } from "./test-markup";
 
 function keyFile(name: string, overrides: Partial<KeyInfo> = {}): KeyInfo {
@@ -111,5 +115,28 @@ describe("the Keychain's list", () => {
     // The key type is shown in the row (the markup's text); the reason is in the row's tooltip (an attribute).
     expect(text(html)).toContain(SPOOFED_NAME_SHOWN);
     expect(html).toContain(`title="Couldn&#x27;t move into SSHelter: The key ${SPOOFED_NAME_SHOWN} is gone."`);
+  });
+});
+
+describe("the Keychain without a sync account", () => {
+  // A server render reads a zustand store's initial state (no selection, no Move failures): only the queries are filled in.
+  const render = (slots: SyncKeySlotView[]) => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(syncOverviewKey, overview({ joined: false, account_short: null, devices: [], spaces: [], key_slots: slots }));
+    queryClient.setQueryData(queryKeys.keys, []);
+    return text(
+      renderToStaticMarkup(
+        <QueryClientProvider client={queryClient}>
+          <KeychainList />
+        </QueryClientProvider>,
+      ),
+    );
+  };
+
+  it("still lists the keys this computer keeps in SSHelter, for example after leaving the account", () => {
+    const t = render([keySlot({ in_account: false, in_vault: true })]);
+    expect(t).toContain("id_mac");
+    expect(t).toContain("Not in your sync account");
+    expect(t).not.toContain("No keys in SSHelter yet");
   });
 });

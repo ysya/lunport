@@ -148,7 +148,8 @@ export function KeychainList() {
   const [query, setQuery] = useState("");
   const [filesOpen, setFilesOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const slots = overview.data?.joined ? overview.data.key_slots : [];
+  // Not only while joined: after leaving the account this computer keeps its keys in SSHelter (the backend lists them).
+  const slots = overview.data?.key_slots ?? [];
   const files = keys.data ?? [];
   return (
     <div className="flex min-h-0 flex-1 flex-col">

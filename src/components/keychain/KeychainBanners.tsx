@@ -120,7 +120,8 @@ export function KeychainBannersFor({
   onMoveFailures: (failures: MoveFailure[]) => void;
 }) {
   const overview = useSyncOverview();
-  const slots = overview.data?.joined ? overview.data.key_slots : [];
+  // Not only while joined: keys kept in SSHelter after leaving the account still need the agent, launch at login and Move.
+  const slots = overview.data?.key_slots ?? [];
   const anyInVault = slots.some((s) => s.in_vault);
   // SSHelter's agent matters only once a key is in SSHelter: nothing is asked before.
   const problemQuery = useAgentProblem(anyInVault);

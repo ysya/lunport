@@ -207,9 +207,16 @@ describe("a key file's detail", () => {
 
 describe("the detail pane", () => {
   // A server render reads a zustand store's initial state, so the selection is handed in (`KeyDetailFor`), not set in the store.
-  const pane = (selection: KeychainSelection | null, slots: SyncKeySlotView[], keys: KeyInfo[], moveFailures: MoveFailure[] = []) => {
+  const pane = (
+    selection: KeychainSelection | null,
+    slots: SyncKeySlotView[],
+    keys: KeyInfo[],
+    moveFailures: MoveFailure[] = [],
+    joined = true,
+  ) => {
     const queryClient = new QueryClient();
-    queryClient.setQueryData(syncOverviewKey, overview({ key_slots: slots }));
+    const account = joined ? {} : { joined: false, account_short: null, devices: [], spaces: [] };
+    queryClient.setQueryData(syncOverviewKey, overview({ ...account, key_slots: slots }));
     queryClient.setQueryData(queryKeys.keys, keys);
     return text(
       renderToStaticMarkup(
@@ -230,6 +237,14 @@ describe("the detail pane", () => {
     const t = pane({ kind: "slot", id: slot.id }, [slot], [], [{ slot_id: slot.id, name: "id_mac", message: "boom" }]);
     expect(t).toContain("id_mac");
     expect(t).toContain("Couldn't move into SSHelter: boom");
+  });
+
+  it("shows the selected slot without a sync account, with what it can still do here", () => {
+    const slot = keySlot({ in_account: false, in_vault: true });
+    const t = pane({ kind: "slot", id: slot.id }, [slot], [], [], false);
+    expect(t).toContain("id_mac");
+    expect(t).toContain("Export private key…");
+    expect(t).not.toContain("Choose a key from the list.");
   });
 
   it("shows the selected key file", () => {

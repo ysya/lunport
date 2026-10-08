@@ -105,9 +105,13 @@ describe("the banners above the Keychain's list", () => {
 
 describe("this computer's banners", () => {
   // A server render reads a zustand store's initial state: the dismissed hint and the menu-bar setting are handed in.
-  const render = (slots: SyncKeySlotView[], o: { launchAtLogin?: boolean; dismissed?: boolean; closeToTray?: boolean } = {}) => {
+  const render = (
+    slots: SyncKeySlotView[],
+    o: { launchAtLogin?: boolean; dismissed?: boolean; closeToTray?: boolean; joined?: boolean } = {},
+  ) => {
     const queryClient = new QueryClient();
-    queryClient.setQueryData(syncOverviewKey, overview({ key_slots: slots }));
+    const account = o.joined === false ? { joined: false, account_short: null, devices: [], spaces: [] } : {};
+    queryClient.setQueryData(syncOverviewKey, overview({ ...account, key_slots: slots }));
     queryClient.setQueryData(agentProblemKey, { kind: "include_missing" });
     if (o.launchAtLogin !== undefined) queryClient.setQueryData(launchAtLoginKey, o.launchAtLogin);
     return text(
@@ -128,6 +132,13 @@ describe("this computer's banners", () => {
     expect(render([keySlot({ file_for_now: true }), keySlot({ id: "b".repeat(32), file_for_now: true })])).toContain(
       "2 keys can move into SSHelter",
     );
+  });
+
+  it("stay without a sync account: the keys this computer keeps in SSHelter still need the agent, launch at login and Move", () => {
+    const t = render([keySlot({ in_account: false, in_vault: true })], { joined: false, launchAtLogin: false });
+    expect(t).toContain("can't reach its agent");
+    expect(t).toContain("Keys in SSHelter work only while SSHelter is running.");
+    expect(render([keySlot({ in_account: false, file_for_now: true })], { joined: false })).toContain("1 key can move into SSHelter");
   });
 
   it("suggest launch at login until it is on, SSHelter keeps running in the menu bar, or the hint is dismissed", () => {
