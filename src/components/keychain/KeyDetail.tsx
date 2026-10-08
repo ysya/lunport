@@ -204,12 +204,8 @@ function NoKeySelected() {
 export function KeyDetailPane() {
   const selection = useUiStore((s) => s.keychainSelection);
   const moveFailures = useUiStore((s) => s.moveFailures);
-  const setSidebarView = useUiStore((s) => s.setSidebarView);
-  const setSelectedAlias = useUiStore((s) => s.setSelectedAlias);
-  const showHost = (alias: string) => {
-    setSidebarView("hosts");
-    setSelectedAlias(alias);
-  };
+  // Pressing a host shows it in Hosts: selecting a host switches the sidebar to Hosts (the store's rule, see `setSelectedAlias`).
+  const showHost = useUiStore((s) => s.setSelectedAlias);
   return <KeyDetailFor selection={selection} moveFailures={moveFailures} onShowHost={showHost} />;
 }
 

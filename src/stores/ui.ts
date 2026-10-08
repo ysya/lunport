@@ -39,9 +39,12 @@ interface UiState {
    * a row (the command palette, a lint issue, a host just added or renamed).
    */
   selectedFile: string | null;
-  /** Selects by alias alone: forgets the file. */
+  /**
+   * Selects by alias alone: forgets the file. Selecting a host (not null) also switches the sidebar to Hosts: the main pane shows a
+   * key's detail while the Keychain is the sidebar's view, so the host would not show. Clearing the selection keeps the view.
+   */
   setSelectedAlias: (alias: string | null) => void;
-  /** Selects one row: its alias and the file it is in. */
+  /** Selects one row: its alias and the file it is in. Switches the sidebar to Hosts, like `setSelectedAlias` does for a host. */
   selectHost: (alias: string, file: string) => void;
   /** Free-text host-list filter. */
   search: string;
@@ -135,8 +138,9 @@ export const useUiStore = create<UiState>()(
     (set) => ({
       selectedAlias: null,
       selectedFile: null,
-      setSelectedAlias: (selectedAlias) => set({ selectedAlias, selectedFile: null }),
-      selectHost: (selectedAlias, selectedFile) => set({ selectedAlias, selectedFile }),
+      setSelectedAlias: (selectedAlias) =>
+        set((s) => ({ selectedAlias, selectedFile: null, sidebarView: selectedAlias === null ? s.sidebarView : "hosts" })),
+      selectHost: (selectedAlias, selectedFile) => set({ selectedAlias, selectedFile, sidebarView: "hosts" }),
       search: "",
       setSearch: (search) => set({ search }),
       collapsedGroups: [],

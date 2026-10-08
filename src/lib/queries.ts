@@ -22,7 +22,6 @@ import type { LintIssue } from "@/bindings/LintIssue";
 import type { Suggestion } from "@/bindings/Suggestion";
 import type { BackupInfo } from "@/bindings/BackupInfo";
 import type { KeyInfo } from "@/bindings/KeyInfo";
-import type { AgentStatus } from "@/bindings/AgentStatus";
 import type { KnownHostEntry } from "@/bindings/KnownHostEntry";
 import type { DeployOutcome } from "@/bindings/DeployOutcome";
 import type { NewFilePlan } from "@/bindings/NewFilePlan";
@@ -46,9 +45,8 @@ export const queryKeys = {
   jumpChain: (alias: string) => ["config", "jumpChain", alias] as const,
   discover: ["discover", "hosts"] as const,
   backups: ["config", "backups"] as const,
-  // Both live under ["keys"] so one invalidation refreshes the list AND agent.
+  // Under ["keys"] with the Git ssh hint (`useGitSshHint`), so one invalidation of ["keys"] refreshes both.
   keys: ["keys", "list"] as const,
-  agent: ["keys", "agent"] as const,
   knownHosts: ["known_hosts"] as const,
   hostPassword: (alias: string) => ["hostPassword", alias] as const,
 };
@@ -594,18 +592,6 @@ export function useRemoveKnownHosts() {
       queryClient.invalidateQueries({ queryKey: queryKeys.knownHosts });
       toast.error("Failed to remove host key", { description: errMessage(e) });
     },
-  });
-}
-
-/** ssh-agent status (running + loaded key count). Lazy, like {@link useKeys}. */
-export function useAgentStatus(
-  options?: Omit<UseQueryOptions<AgentStatus>, "queryKey" | "queryFn">,
-) {
-  return useQuery<AgentStatus>({
-    queryKey: queryKeys.agent,
-    queryFn: () => tauriInvoke<AgentStatus>("keys_agent_status"),
-    enabled: false,
-    ...options,
   });
 }
 

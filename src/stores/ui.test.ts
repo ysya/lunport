@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useUiStore } from "./ui";
 
 afterEach(() => {
-  useUiStore.setState({ selectedAlias: null, selectedFile: null });
+  useUiStore.setState({ selectedAlias: null, selectedFile: null, sidebarView: "hosts" });
 });
 
 describe("the host selection", () => {
@@ -21,6 +21,26 @@ describe("the host selection", () => {
     useUiStore.getState().selectHost("web", "/home/f/.ssh/config");
     useUiStore.getState().setSelectedAlias(null);
     expect(useUiStore.getState()).toEqual(expect.objectContaining({ selectedAlias: null, selectedFile: null }));
+  });
+
+  // The main pane shows a key's detail while the sidebar shows the Keychain, so a host selected from anywhere (the palette, a lint
+  // issue, a host just added, a key's detail) must bring the host list back, or the selection would not show.
+  it("shows Hosts when a host is selected by its alias", () => {
+    useUiStore.setState({ sidebarView: "keychain" });
+    useUiStore.getState().setSelectedAlias("web");
+    expect(useUiStore.getState()).toEqual(expect.objectContaining({ selectedAlias: "web", sidebarView: "hosts" }));
+  });
+
+  it("shows Hosts when a host row is selected", () => {
+    useUiStore.setState({ sidebarView: "keychain" });
+    useUiStore.getState().selectHost("web", "/home/f/.ssh/config");
+    expect(useUiStore.getState()).toEqual(expect.objectContaining({ selectedAlias: "web", selectedFile: "/home/f/.ssh/config", sidebarView: "hosts" }));
+  });
+
+  it("keeps the sidebar's view when the selection is cleared", () => {
+    useUiStore.setState({ sidebarView: "keychain", selectedAlias: "web" });
+    useUiStore.getState().setSelectedAlias(null);
+    expect(useUiStore.getState()).toEqual(expect.objectContaining({ selectedAlias: null, sidebarView: "keychain" }));
   });
 });
 
