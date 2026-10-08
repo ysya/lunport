@@ -1290,7 +1290,11 @@ fn ensure_desktop_bridge() -> Result<RuntimeInfo, String> {
             }
         }
     }
-    Err("SSHelter desktop did not start within 12 seconds".to_string())
+    // Only one SSHelter runs: an open SSHelter whose bridge doesn't answer is not replaced.
+    Err(
+        "SSHelter didn't answer within 12 seconds. If it is open, quit it and open it again."
+            .to_string(),
+    )
 }
 
 /// Start the MCP host outside the adapter's process group: an AI tool that ends its session by
