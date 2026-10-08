@@ -1,3 +1,4 @@
+import type { KeyHygiene } from "@/bindings/KeyHygiene";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import { identityFileAction, identityPointsAt } from "@/lib/identity-file";
 
@@ -61,4 +62,13 @@ export function keyOptions(keys: readonly KeyInfo[], handedOver: string | null, 
 export function afterDeploy(identityFiles: string[], privateAbs: string, home: string | null, attach: boolean): "write" | "already" | "offer" {
   if (!attach) return identityFileAction(identityFiles, privateAbs, home);
   return identityFiles.length > 0 && identityFiles.every((f) => identityPointsAt(f, privateAbs, home)) ? "already" : "write";
+}
+
+/**
+ * The host's IdentityFile values (its key checks, `useKeyHygiene`) once they are read; null while the read is on its way, and
+ * after it failed. A failed read is not a host without IdentityFile: Export to host's attach line would say "{host} will use
+ * {key}" while the write replaces the host's lines (key vault spec §7.3.1).
+ */
+export function knownIdentityFiles(hygiene: { isSuccess: boolean; data?: KeyHygiene }): string[] | null {
+  return hygiene.isSuccess && hygiene.data ? hygiene.data.identity_files.map((f) => f.path) : null;
 }

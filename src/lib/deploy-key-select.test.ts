@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KeyInfo } from "@/bindings/KeyInfo";
-import { afterDeploy, keyOptions, pickDefaultPublicKey } from "./deploy-key-select";
+import { afterDeploy, keyOptions, knownIdentityFiles, pickDefaultPublicKey } from "./deploy-key-select";
 
 const HOME = "/home/f";
 
@@ -131,5 +131,20 @@ describe("the host's IdentityFile after a deploy", () => {
     expect(afterDeploy(["~/.ssh/id_rsa"], KEY, HOME, true)).toBe("write");
     expect(afterDeploy(["~/.ssh/id_mac", "~/.ssh/id_rsa"], KEY, HOME, true)).toBe("write");
     expect(afterDeploy(["~/.ssh/id_mac"], KEY, HOME, true)).toBe("already");
+  });
+});
+
+describe("knownIdentityFiles", () => {
+  const hygiene = { identity_files: [{ path: "~/.ssh/id_old", exists: true }], identities_only: false, explicit: true };
+
+  it("gives the host's IdentityFile values once they are read, an empty list for a host that has none", () => {
+    expect(knownIdentityFiles({ isSuccess: true, data: hygiene })).toEqual(["~/.ssh/id_old"]);
+    expect(knownIdentityFiles({ isSuccess: true, data: { ...hygiene, identity_files: [], explicit: false } })).toEqual([]);
+  });
+
+  it("knows nothing while the read is on its way, nor after it failed: a failed read is not a host without IdentityFile", () => {
+    // Pending: no data yet. Failed: TanStack keeps the last data it had, but this read failed.
+    expect(knownIdentityFiles({ isSuccess: false })).toBeNull();
+    expect(knownIdentityFiles({ isSuccess: false, data: hygiene })).toBeNull();
   });
 });

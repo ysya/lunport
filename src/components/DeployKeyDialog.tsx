@@ -11,7 +11,7 @@ import {
 
 import type { DeployOutcome } from "@/bindings/DeployOutcome";
 import type { HostSummary } from "@/bindings/HostSummary";
-import { afterDeploy, keyOptions, pickDefaultPublicKey } from "@/lib/deploy-key-select";
+import { afterDeploy, keyOptions, knownIdentityFiles, pickDefaultPublicKey } from "@/lib/deploy-key-select";
 import { toTildeSshPath } from "@/lib/identity-file";
 import { attachText } from "@/lib/keychain";
 import {
@@ -180,10 +180,12 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
   const attach = initialPub !== null;
   const options = keyOptions(keysQ.data ?? [], initialPub, initialName);
   const selected = options.find((o) => o.value === publicPath) ?? null;
-  // What the deploy will do to the host's settings, said before Deploy is pressed (Export to host only).
+  // What the deploy will do to the host's settings, said before Deploy is pressed (Export to host only), once the host's
+  // IdentityFile lines are known: a failed read is not a host without any.
+  const hostIdentityFiles = knownIdentityFiles(hygiene);
   const attachLine =
-    attach && selected && !hygiene.isPending && !ambiguous.has(alias)
-      ? attachText(alias, selected.name, (hygiene.data?.identity_files ?? []).map((f) => f.path), publicPath.replace(/\.pub$/, ""), home)
+    attach && selected && hostIdentityFiles !== null && !ambiguous.has(alias)
+      ? attachText(alias, selected.name, hostIdentityFiles, publicPath.replace(/\.pub$/, ""), home)
       : null;
 
   // Preselect once both sources have settled — seeding from keys alone would
@@ -214,7 +216,9 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
           // A synced host's IdentityFile now points at this key, which no slot may hold yet (SP3 spec §7.1).
           useUiStore.getState().setKeySetup({ aliases: [alias], reason: "saved" });
         },
-        // Errors already toast via useSetIdentityFile; the offer button stays usable.
+        // The hook already toasts the error, which goes away. Export to host writes without asking (no offer is on the result
+        // screen then), so the offer appears as the way to try again; it was already there for a plain deploy.
+        onError: () => setIdentityOffer(value),
       },
     );
   }
