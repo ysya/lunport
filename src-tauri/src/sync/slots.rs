@@ -7625,6 +7625,32 @@ pub(crate) mod tests {
         assert_eq!(row.status, SlotStatusView::NotInUse { file: slot.display().to_string() });
     }
 
+    /// 只在這台的金鑰(沒有帳戶;Keychain 的「Delete key…」):有主機用到(整份 config 裡的任何主機,`config_slot_uses`)就拒絕 —— 保管庫裡那一筆、插槽旁的 `.pub`
+    /// 與記錄都不動;沒有主機用到之後,保管庫那一筆、`.pub` 與記錄一起拿掉,這一列從 Keychain 消失。
+    #[test]
+    fn delete_copy_without_an_account_deletes_a_key_only_on_this_computer_that_no_host_uses() {
+        let (relay, clock) = (crate::sync::fake_relay::FakeRelay::new(), crate::sync::testkit::TestClock::new());
+        let d = TestDevice::new("mac", &relay, &clock);
+        let (id, file) = local_key_on(&d, &test_keys::plain(), "laptop");
+        let pub_path = public_path(&home(&d).join(SLOT_DIR).join(&file));
+        assert!(d.state().account.is_none(), "setup: no account");
+        d.save_in_app(&d.main_path(), &format!("Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/sshelter/keys/{file}\n"));
+        assert!(config_slot_uses(&d.env()).unwrap().contains_key(&file), "setup: web uses the key");
+
+        refused(&d, IN_USE_MESSAGE, || delete_copy(&d.env(), &id));
+        assert_eq!(vault_entry(&d, &id).map(|entry| entry.private_key.clone()), Some(test_keys::plain()), "the key is still in the vault");
+        assert!(slot_files::occupied(&pub_path), "and its .pub is still there");
+        assert!(overview_row(&d, &id).is_some_and(|row| row.local_only), "and the row stays");
+
+        d.save_in_app(&d.main_path(), "Host web\n  HostName 10.0.0.1\n");
+        assert!(overview_row(&d, &id).is_some_and(|row| row.hosts.is_empty()), "setup: no host uses the key now");
+        delete_copy(&d.env(), &id).unwrap();
+        assert!(vault_entry(&d, &id).is_none(), "the vault entry is gone");
+        assert!(!slot_files::occupied(&pub_path), "so is the .pub");
+        assert!(!d.state().key_slots.contains_key(&id), "and the record");
+        assert!(overview_row(&d, &id).is_none(), "and the row");
+    }
+
     /// 跑不了同步引擎的行程(`save_blocked`:例如第二個 SSHelter;沒有帳戶時它不再因為沒有帳戶金鑰而先失敗):「Move」與「Delete copy」在動任何東西之前就以
     /// `mutate` 的理由拒絕 —— 連結還在、保管庫沒變、記錄沒變。不然檔案與保管庫先動了、記錄卻寫不進去:跑引擎的那個行程還記著連結,沒有帳戶可以對照著修回來
     /// (沒有帳戶時同步嘗試只補回有主機用到的連結)。
