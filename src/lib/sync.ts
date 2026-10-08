@@ -76,24 +76,26 @@ export function useSyncOverview(refetchInterval: number | false = false) {
 }
 
 /**
- * Non-secret commands that answer with the new overview: prime the cache, then
+ * Non-secret commands whose answer carries the new overview: prime the cache with it, then
  * refetch the config views (space files come and go) and the approval list.
  * `refetchOnError`: the command can do part of its work and still answer with an
  * error, so a failure re-reads everything too. `failure` is the toast's title, or
  * picks one from the error's text; null shows no toast, for a caller that reports
- * the failures itself (one summary for a loop of calls).
+ * the failures itself (one summary for a loop of calls). `overviewOf` picks the
+ * overview out of the answer; the mutation resolves to the whole answer.
  */
-function useOverviewMutation<TVars>(
+function useOverviewCommand<TVars, TResult>(
   cmd: string,
   failure: string | ((message: string) => string) | null,
   args: (vars: TVars) => Record<string, unknown>,
-  refetchOnError = false,
+  refetchOnError: boolean,
+  overviewOf: (result: TResult) => SyncOverview,
 ) {
   const queryClient = useQueryClient();
-  return useMutation<SyncOverview, unknown, TVars>({
-    mutationFn: (vars) => tauriInvoke<SyncOverview>(cmd, args(vars)),
-    onSuccess: (overview) => {
-      queryClient.setQueryData(syncOverviewKey, overview);
+  return useMutation<TResult, unknown, TVars>({
+    mutationFn: (vars) => tauriInvoke<TResult>(cmd, args(vars)),
+    onSuccess: (result) => {
+      queryClient.setQueryData(syncOverviewKey, overviewOf(result));
       void queryClient.invalidateQueries({ queryKey: ["config"] });
       void queryClient.invalidateQueries({ queryKey: syncApprovalsKey });
     },
@@ -105,6 +107,16 @@ function useOverviewMutation<TVars>(
       toast.error(typeof failure === "string" ? failure : failure(message), { description: revealHidden(message) });
     },
   });
+}
+
+/** The commands that answer with the overview itself (see `useOverviewCommand`). */
+function useOverviewMutation<TVars>(
+  cmd: string,
+  failure: string | ((message: string) => string) | null,
+  args: (vars: TVars) => Record<string, unknown>,
+  refetchOnError = false,
+) {
+  return useOverviewCommand<TVars, SyncOverview>(cmd, failure, args, refetchOnError, (overview) => overview);
 }
 
 const noArgs = () => ({});
@@ -406,18 +418,13 @@ export function useKeySetDelivery() {
  * answers with the ones it couldn't, which the caller shows. A failed call re-reads everything: some keys may have moved.
  */
 export function useKeyMoveAllIntoVault() {
-  const queryClient = useQueryClient();
-  return useMutation<MoveIntoVaultResult, unknown, void>({
-    mutationFn: () => tauriInvoke<MoveIntoVaultResult>("sync_key_move_all_into_vault"),
-    onSuccess: (result) => {
-      queryClient.setQueryData(syncOverviewKey, result.overview);
-      void queryClient.invalidateQueries({ queryKey: ["config"] });
-    },
-    onError: (error) => {
-      refreshSyncViews(queryClient);
-      toast.error("Could not move the keys into SSHelter", { description: revealHidden(errorMessage(error)) });
-    },
-  });
+  return useOverviewCommand<void, MoveIntoVaultResult>(
+    "sync_key_move_all_into_vault",
+    "Could not move the keys into SSHelter",
+    noArgs,
+    true,
+    (result) => result.overview,
+  );
 }
 
 /**

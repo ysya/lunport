@@ -1,7 +1,5 @@
 import { readFileSync } from "node:fs";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 
@@ -36,20 +34,7 @@ import {
   useSetupKeys,
 } from "./sync";
 import { overview, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "./sync-fixtures";
-
-/** Stub the backend: every plugin command ends in `window.__TAURI_INTERNALS__.invoke`. */
-function stubBackend(reply: (cmd: string, args: unknown) => Promise<unknown>): Array<[string, unknown]> {
-  const calls: Array<[string, unknown]> = [];
-  vi.stubGlobal("window", {
-    __TAURI_INTERNALS__: {
-      invoke: (cmd: string, args: unknown) => {
-        calls.push([cmd, args]);
-        return reply(cmd, args);
-      },
-    },
-  });
-  return calls;
-}
+import { renderHook, stubBackend } from "./test-ipc";
 
 beforeEach(() => {
   // sonner's `toast.dismiss` schedules through requestAnimationFrame, which Node lacks.
@@ -174,17 +159,6 @@ describe("key slot commands", () => {
 });
 
 describe("a failed key slot command", () => {
-  /** Run a hook the way a component does and hand back what it returned (a server render: no effects run, nothing subscribes). */
-  function renderHook<T>(queryClient: QueryClient, useHook: () => T): T {
-    let result!: T;
-    const Probe = () => {
-      result = useHook();
-      return null;
-    };
-    renderToStaticMarkup(createElement(QueryClientProvider, { client: queryClient }, createElement(Probe)));
-    return result;
-  }
-
   it("shows the backend's message with hidden characters revealed: it can name another computer", async () => {
     // `sync_key_set_mode` refuses on a computer without the key, naming the one that has it (the name comes from that computer).
     const refusal = (device: string) => `Do this on a computer that has this key, such as ${device}.`;
@@ -340,17 +314,6 @@ describe("the shadow list's place in the query cache", () => {
 });
 
 describe("Move and Export private key", () => {
-  /** Run a hook the way a component does and hand back what it returned (a server render: no effects run, nothing subscribes). */
-  function renderHook<T>(queryClient: QueryClient, useHook: () => T): T {
-    let result!: T;
-    const Probe = () => {
-      result = useHook();
-      return null;
-    };
-    renderToStaticMarkup(createElement(QueryClientProvider, { client: queryClient }, createElement(Probe)));
-    return result;
-  }
-
   it("Move puts the new overview in place and hands back the keys that could not move", async () => {
     const failed = [{ slot_id: "s", name: "id_work", message: "The key this slot points to is gone: /home/f/.ssh/id_work." }];
     const moved = overview({ last_sync_ms: 1 });
@@ -372,6 +335,26 @@ describe("Move and Export private key", () => {
     await expect(renderHook(queryClient, useKeyMoveAllIntoVault).mutateAsync()).rejects.toBe("boom");
     expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Could not move the keys into SSHelter", description: "boom" })]);
     expect(queryClient.getQueryState(syncOverviewKey)?.isInvalidated).toBe(true);
+  });
+
+  it("a failed Move shows the backend's message with hidden characters revealed: it can name a key from another computer", async () => {
+    const refusal = (name: string) => `Could not move ${name}: SSHelter's vault is not available.`;
+    stubBackend(async () => {
+      throw refusal(SPOOFED_NAME);
+    });
+    await expect(renderHook(new QueryClient(), useKeyMoveAllIntoVault).mutateAsync()).rejects.toBe(refusal(SPOOFED_NAME));
+    expect(toast.getToasts()).toEqual([
+      expect.objectContaining({ title: "Could not move the keys into SSHelter", description: refusal(SPOOFED_NAME_SHOWN) }),
+    ]);
+  });
+
+  it("Move refreshes what every command that answers with the overview refreshes: the config views and the approvals", async () => {
+    stubBackend(async () => ({ overview: overview(), failed: [] }));
+    const queryClient = new QueryClient();
+    const views = [keyCandidatesKey, syncApprovalsKey];
+    for (const key of views) queryClient.setQueryData(key, []);
+    await renderHook(queryClient, useKeyMoveAllIntoVault).mutateAsync();
+    expect(views.map((key) => queryClient.getQueryState(key)?.isInvalidated)).toEqual([true, true]);
   });
 
   it("Export private key sends the passphrase, or null, and gives back where the file was saved", async () => {

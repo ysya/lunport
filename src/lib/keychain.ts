@@ -94,10 +94,13 @@ export function keyNameOfPath(value: string): string {
 
 /**
  * What Export to host does to the host (spec §7.3.1): "{host} will use {key} instead of {old keys}". The old keys are the host's
- * own IdentityFile lines that name another key. Null when the host already uses only this key. `keyPath` is the key's private
- * path (for a key in SSHelter, its slot path). Every name is shown through `revealHidden`.
+ * own IdentityFile lines that name another key. Null when the host already uses only this key, and while `home` isn't known:
+ * without it a `~/` or `%d/` value can't be matched against `keyPath`, so a host already on this key would read "{host} will use
+ * {key} instead of {key}". `keyPath` is the key's private path (for a key in SSHelter, its slot path). Every name is shown through
+ * `revealHidden`.
  */
 export function attachText(host: string, key: string, identityFiles: readonly string[], keyPath: string, home: string | null): string | null {
+  if (home === null) return null;
   const others = identityFiles.filter((f) => !identityPointsAt(f, keyPath, home));
   if (identityFiles.length > 0 && others.length === 0) return null;
   const uses = `${revealHidden(host)} will use ${revealHidden(key)}`;

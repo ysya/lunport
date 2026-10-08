@@ -12,7 +12,10 @@ export type NewFileIntent =
   | { kind: "addHost" }
   | { kind: "move"; aliases: string[] };
 
-/** localStorage key for persisted sidebar NAVIGATION state (scope + collapsed groups). */
+/**
+ * localStorage key for persisted sidebar NAVIGATION state (scope + collapsed groups, width, Hosts | Keychain view) and the
+ * dismissed Keychain launch hint (`launchHintDismissed`).
+ */
 export const UI_STORAGE_KEY = "sshelter-ui";
 
 export type SettingsCategory =
@@ -185,7 +188,8 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: UI_STORAGE_KEY,
-      // ONLY sidebar navigation/layout state survives restarts; everything else is session-only.
+      // ONLY sidebar navigation/layout state and the dismissed launch hint (`launchHintDismissed`) survive restarts; everything
+      // else is session-only.
       partialize: (s) => ({
         collapsedGroups: s.collapsedGroups,
         fileScope: s.fileScope,

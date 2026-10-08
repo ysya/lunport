@@ -140,6 +140,15 @@ describe("Export to host", () => {
     );
   });
 
+  it("says nothing while the home isn't known: a host already on this key would read as leaving it", () => {
+    const file = "/home/f/.ssh/id_ed25519";
+    // The home is what lets a `~/` value be matched against the key's path.
+    expect(attachText("web", "id_ed25519", ["~/.ssh/id_ed25519"], file, HOME)).toBeNull();
+    expect(attachText("web", "id_ed25519", ["~/.ssh/id_ed25519"], file, null)).toBeNull();
+    expect(attachText("web", "id_mac", ["~/.ssh/id_rsa"], KEY, null)).toBeNull();
+    expect(attachText("web", "id_mac", [], KEY, null)).toBeNull();
+  });
+
   it("names a key by the last part of its path", () => {
     expect(keyNameOfPath("~/.ssh/id_rsa")).toBe("id_rsa");
     expect(keyNameOfPath("\"C:\\Users\\f\\.ssh\\id work\"")).toBe("id work");

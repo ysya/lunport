@@ -803,7 +803,8 @@ export function useGitSshHint(enabled: boolean) {
 
 /**
  * Point a host at one key (Export to host, key vault spec §7.3.1): its IdentityFile lines are replaced by `value`. Refreshes the
- * host, the host list, the host's key checks and the key list (which hosts use each key file).
+ * host, the host list, the host's key checks, the key list (which hosts use each key file) and the sync overview (a key slot's
+ * state and hosts are worked out from the live config).
  */
 export function useSetIdentityFile() {
   const queryClient = useQueryClient();
@@ -814,6 +815,9 @@ export function useSetIdentityFile() {
       queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
       queryClient.invalidateQueries({ queryKey: queryKeys.keyHygiene(alias) });
       queryClient.invalidateQueries({ queryKey: ["keys"] });
+      // `syncOverviewKey` (lib/sync.ts) written out: sync.ts imports this module, and importing it back would make a cycle.
+      // queries.test.ts checks that it is the same key.
+      queryClient.invalidateQueries({ queryKey: ["sync", "overview"] });
     },
     // The backend's message names the host ("host 'web' not found"), whose alias comes from the config: show its hidden characters.
     onError: (e) => toast.error("Failed to save host", { description: revealHidden(errMessage(e)) }),
@@ -829,13 +833,17 @@ export function useLaunchAtLogin(enabled: boolean) {
 
 /**
  * The Keychain's launch hint (key vault spec §5.7): keys in SSHelter work only while it runs, so SSHelter opens at login and keeps
- * running in the menu bar when its window closes (both settings of Settings → General).
+ * running in the menu bar when its window closes (three settings of Settings → General: Launch at login, Show menu bar icon, Keep
+ * running in menu bar). The icon comes before close-to-tray: once the window hides on close, the menu bar item is the only way
+ * back to it, so a failure to show the icon leaves close-to-tray off.
  */
 export function useTurnOnLaunchAtLogin() {
   const queryClient = useQueryClient();
   return useMutation<void, unknown, void>({
     mutationFn: async () => {
       await autostartEnable();
+      useSettingsStore.getState().setTrayVisible(true);
+      await tauriInvoke<void>("tray_set_visible", { visible: true });
       useSettingsStore.getState().setCloseToTray(true);
       await tauriInvoke<void>("app_set_close_to_tray", { enabled: true });
     },
