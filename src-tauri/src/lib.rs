@@ -128,8 +128,14 @@ fn run_app(mcp_host: bool, start_hidden: bool) {
     // Only one SSHelter runs at a time: a second launch hands over to the running instance and
     // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
     // sync engine or the SSH agent starts. It must be the first plugin registered.
+    // Release builds only: a debug build (`tauri dev`) has the same identifier, and would hand
+    // over to the installed SSHelter instead of running next to it.
     #[cfg(desktop)]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(on_second_launch));
+    let builder = if cfg!(debug_assertions) {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(on_second_launch))
+    };
     let mut builder = builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
