@@ -790,7 +790,7 @@ export function useGitSshHint(enabled: boolean) {
 /**
  * Point a host at one key (Export to host, key vault spec §7.3.1): its IdentityFile lines are replaced by `value`. Refreshes the
  * host, the host list, the host's key checks, the key list (which hosts use each key file) and the sync overview (a key slot's
- * state and hosts are worked out from the live config).
+ * state and hosts are worked out from the live config). A failure re-reads the config, so a retry works after a Conflict.
  */
 export function useSetIdentityFile() {
   const queryClient = useQueryClient();
@@ -805,8 +805,14 @@ export function useSetIdentityFile() {
       // queries.test.ts checks that it is the same key.
       queryClient.invalidateQueries({ queryKey: ["sync", "overview"] });
     },
-    // The backend's message names the host ("host 'web' not found"), whose alias comes from the config: show its hidden characters.
-    onError: (e) => toast.error("Failed to save host", { description: revealHidden(errMessage(e)) }),
+    onError: (e) => {
+      // A Conflict means the file changed under us, and the backend keeps its old copy until the config is read again: without
+      // this, "Use this key" would fail the same way on every press (the deploy dialog is modal, so Reload from disk is out of reach).
+      // Re-reading the config (`useHostsQuery`'s `config_load`) is what lets the retry work.
+      queryClient.invalidateQueries({ queryKey: ["config"] });
+      // The backend's message names the host ("host 'web' not found"), whose alias comes from the config: show its hidden characters.
+      toast.error("Failed to save host", { description: revealHidden(errMessage(e)) });
+    },
   });
 }
 

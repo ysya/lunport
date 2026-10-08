@@ -1,7 +1,8 @@
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 
+import { tauriInvoke } from "@/lib/ipc";
 import { SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import { useSettingsStore } from "@/stores/settings";
 import { queryKeys, useSetIdentityFile, useTurnOnLaunchAtLogin } from "./queries";
@@ -46,6 +47,25 @@ describe("pointing a host at one key", () => {
     expect(shown).toEqual(expect.objectContaining({ title: "Failed to save host", description: expect.stringContaining(SPOOFED_NAME_SHOWN) }));
     // Not even the right-to-left override (U+202E) that SPOOFED_NAME carries is left in what is shown.
     expect(shown).toEqual(expect.objectContaining({ description: expect.not.stringContaining(String.fromCodePoint(0x202e)) }));
+  });
+
+  it("reads the config again after a failed write, so that Use this key works next time: a Conflict means the file changed under us", async () => {
+    const calls = stubBackend(async (cmd) => {
+      if (cmd === "config_set_identity_file") throw "file changed on disk since it was loaded: /home/f/.ssh/config";
+      return { files: [], hosts: [] };
+    });
+    const queryClient = new QueryClient();
+    // The host list as the app and the deploy dialog keep it (`useHostsQuery`): its `config_load` reloads the backend's copy from disk.
+    const hosts = new QueryObserver(queryClient, { queryKey: queryKeys.hosts, queryFn: () => tauriInvoke("config_load") });
+    const stop = hosts.subscribe(() => {});
+    await vi.waitFor(() => expect(hosts.getCurrentResult().isSuccess).toBe(true));
+    calls.length = 0;
+
+    const { mutateAsync } = renderHook(queryClient, useSetIdentityFile);
+    await expect(mutateAsync({ alias: "web", value: "~/.ssh/sshelter/keys/id_mac-3fa2c1d9" })).rejects.toMatch("changed on disk");
+    await vi.waitFor(() => expect(calls.map(([cmd]) => cmd)).toEqual(["config_set_identity_file", "config_load"]));
+    expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Failed to save host" })]);
+    stop();
   });
 });
 
