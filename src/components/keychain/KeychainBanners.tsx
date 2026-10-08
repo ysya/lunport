@@ -2,6 +2,7 @@ import { toast } from "sonner";
 
 import type { AgentProblem } from "@/bindings/AgentProblem";
 import type { MoveFailure } from "@/bindings/MoveFailure";
+import type { MoveIntoVaultResult } from "@/bindings/MoveIntoVaultResult";
 import { TONE_TEXT } from "@/components/sync-primitives";
 import { Button } from "@/components/ui/button";
 import { agentProblemText, useAgentProblem, useFixAgentInclude } from "@/lib/agent";
@@ -98,6 +99,26 @@ export function KeychainBannersView({
   );
 }
 
+/**
+ * Runs Move and reports what it couldn't move: the reasons the rows and the detail show, and the toasts. Through Move's promise, not
+ * `mutate`'s callbacks: TanStack skips those once the component has unmounted (switching to Hosts while Move runs), and the reasons
+ * would be lost. The store and the toasts outlive the Keychain. A failed call is already shown by the hook. Exported for the tests.
+ */
+export async function moveAndReport(move: () => Promise<MoveIntoVaultResult>, onMoveFailures: (failures: MoveFailure[]) => void): Promise<void> {
+  let failed: MoveFailure[];
+  try {
+    ({ failed } = await move());
+  } catch {
+    return;
+  }
+  onMoveFailures(failed);
+  if (failed.length === 0) toast.success("Moved into SSHelter");
+  else
+    toast.error(`${plural(failed.length, "key")} couldn't move into SSHelter`, {
+      description: failed.map((f) => `${revealHidden(f.name)}: ${revealHidden(f.message)}`).join("\n"),
+    });
+}
+
 /** This computer's banners: the store's part. A server render reads a store's initial state, so the tests use `KeychainBannersFor`. */
 export function KeychainBanners() {
   const dismissed = useUiStore((s) => s.launchHintDismissed);
@@ -134,17 +155,7 @@ export function KeychainBannersFor({
   const gitHintQuery = useGitSshHint(anyInVault && windows);
   const gitHint = anyInVault && windows ? (gitHintQuery.data ?? null) : null;
   const busy = fix.isPending || move.isPending || turnOn.isPending;
-  const runMove = () =>
-    move.mutate(undefined, {
-      onSuccess: ({ failed }) => {
-        onMoveFailures(failed);
-        if (failed.length === 0) toast.success("Moved into SSHelter");
-        else
-          toast.error(`${plural(failed.length, "key")} couldn't move into SSHelter`, {
-            description: failed.map((f) => `${revealHidden(f.name)}: ${revealHidden(f.message)}`).join("\n"),
-          });
-      },
-    });
+  const runMove = () => void moveAndReport(() => move.mutateAsync(), onMoveFailures);
   const copyGitHint = async () => {
     if (gitHint === null) return;
     try {
@@ -164,9 +175,11 @@ export function KeychainBannersFor({
       onFix={() => fix.mutate()}
       onMove={runMove}
       onLaunch={() =>
-        turnOn.mutate(undefined, {
-          onSuccess: () => toast.success("SSHelter now opens at login and keeps running in the menu bar when its window closes."),
-        })
+        // The promise, not `mutate`'s callback, for the same reason as Move (`moveAndReport`); the hook shows a failure.
+        void turnOn.mutateAsync().then(
+          () => toast.success("SSHelter now opens at login and keeps running in the menu bar when its window closes."),
+          () => {},
+        )
       }
       onDismissLaunch={onDismissLaunch}
       onCopyGit={() => void copyGitHint()}

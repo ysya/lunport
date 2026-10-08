@@ -1,14 +1,16 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationObserver, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ComponentProps } from "react";
 import { describe, expect, it } from "vitest";
 
+import type { MoveFailure } from "@/bindings/MoveFailure";
+import type { MoveIntoVaultResult } from "@/bindings/MoveIntoVaultResult";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { agentProblemKey } from "@/lib/agent";
 import { launchAtLoginKey } from "@/lib/queries";
 import { syncOverviewKey } from "@/lib/sync";
 import { keySlot, overview } from "@/lib/sync-fixtures";
-import { AgentProblemLine, KeychainBannersFor, KeychainBannersView } from "./KeychainBanners";
+import { AgentProblemLine, KeychainBannersFor, KeychainBannersView, moveAndReport } from "./KeychainBanners";
 import { buttonTag, buttonsIn, DISABLED, text, textIn } from "./test-markup";
 
 describe("the agent's problem", () => {
@@ -147,5 +149,29 @@ describe("this computer's banners", () => {
     expect(render(vault, { launchAtLogin: true })).not.toContain("work only while");
     expect(render(vault, { launchAtLogin: false, closeToTray: true })).not.toContain("work only while");
     expect(render(vault, { launchAtLogin: false, dismissed: true })).not.toContain("work only while");
+  });
+});
+
+describe("Move's report", () => {
+  const failure: MoveFailure = { slot_id: "a".repeat(32), name: "id_mac", message: "The key this slot points to is gone." };
+  const result: MoveIntoVaultResult = { overview: overview(), failed: [failure] };
+  // A mutation whose component has unmounted (switching to Hosts while Move runs): its observer has no listener left.
+  const unmounted = () => new MutationObserver<MoveIntoVaultResult>(new QueryClient(), { mutationFn: async () => result });
+
+  it("records why keys couldn't move even when the Keychain is gone before Move ends", async () => {
+    // TanStack skips `mutate`'s own callbacks then, so the reasons can't be recorded there.
+    let calledBack = false;
+    await unmounted().mutate(undefined, { onSuccess: () => (calledBack = true) });
+    expect(calledBack).toBe(false);
+
+    const recorded: MoveFailure[][] = [];
+    await moveAndReport(() => unmounted().mutate(), (failed) => recorded.push(failed));
+    expect(recorded).toEqual([[failure]]);
+  });
+
+  it("records nothing when Move itself failed: the hook shows that error", async () => {
+    const recorded: MoveFailure[][] = [];
+    await moveAndReport(() => Promise.reject(new Error("The vault is locked.")), (failed) => recorded.push(failed));
+    expect(recorded).toEqual([]);
   });
 });
