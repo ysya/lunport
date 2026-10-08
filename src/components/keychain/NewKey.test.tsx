@@ -11,7 +11,9 @@ import { useUiStore } from "@/stores/ui";
 import {
   GenerateKeyView,
   ImportKeyView,
+  importActions,
   importedNote,
+  needsMoveConfirm,
   submitGenerate,
   submitImport,
   type GenerateKeyState,
@@ -37,6 +39,7 @@ const importState = (overrides: Partial<ImportKeyState> = {}): ImportKeyState =>
   name: "key",
   keepFile: false,
   busy: false,
+  asking: false,
   ...overrides,
 });
 const noop = () => {};
@@ -369,5 +372,113 @@ describe("adding and generating a key", () => {
     });
     expect(await submitGenerate(new QueryClient(), generateState())).toBeNull();
     expect(toasts()).toEqual([{ title: "Could not generate the key", description: "no room for the key" }]);
+  });
+  describe("pressing Add to SSHelter", () => {
+    /** The pane without React: the form's state in a box, and its handlers made again after every change, as a render makes them. */
+    function pane(initial: ImportKeyState) {
+      const box = { state: initial, shown: [] as string[] };
+      const update = (patch: Partial<ImportKeyState>) => {
+        box.state = { ...box.state, ...patch };
+      };
+      const press = (button: "add" | "confirm" | "cancel") =>
+        importActions({ state: box.state, update, queryClient: new QueryClient(), show: (slotId) => box.shown.push(slotId) })[button]();
+      return { box, press };
+    }
+
+    it("asks only when a chosen file would be moved: Keep the file too and a pasted key remove no file", () => {
+      expect(needsMoveConfirm(chosenFile())).toBe(true);
+      expect(needsMoveConfirm(chosenFile({ keepFile: true }))).toBe(false);
+      expect(needsMoveConfirm(importState({ text: KEY_TEXT }))).toBe(false);
+      expect(needsMoveConfirm(importState({ source: "file", path: null }))).toBe(false);
+    });
+
+    it("asks before it moves a file, and sends nothing until the user confirms", async () => {
+      const calls = stubBackend(async () => added({ removed_file: true }));
+      const form = pane(chosenFile({ name: "work" }));
+      await form.press("add");
+      expect(form.box.state).toMatchObject({ asking: true, busy: false });
+      expect(calls).toEqual([]);
+      expect(toasts()).toEqual([]);
+      await form.press("confirm");
+      expect(form.box.state.asking).toBe(false);
+      expect(calls).toEqual([["sync_key_import_file", { name: "work", path: "/home/f/.ssh/id_work", keepFile: false }]]);
+      expect(toasts()).toEqual([{ title: "work is in SSHelter", description: "Removed /home/f/.ssh/id_work." }]);
+      expect(form.box.shown).toEqual(["s"]);
+    });
+
+    it("leaves the form as it was when the user cancels, and sends nothing", async () => {
+      const calls = stubBackend(async () => added());
+      // Text pasted earlier stays in the form while a file is chosen.
+      const filled = chosenFile({ name: "work", text: KEY_TEXT });
+      const form = pane(filled);
+      await form.press("add");
+      await form.press("cancel");
+      // The pasted text, the chosen file and its preview, the name and the choice to move: all as they were.
+      expect(form.box.state).toEqual(filled);
+      expect(calls).toEqual([]);
+      expect(toasts()).toEqual([]);
+      expect(form.box.shown).toEqual([]);
+      // Pressing Add again asks again.
+      await form.press("add");
+      expect(form.box.state.asking).toBe(true);
+      expect(calls).toEqual([]);
+    });
+
+    it("adds Keep the file too at once, without a confirm", async () => {
+      const calls = stubBackend(async () => added());
+      const form = pane(chosenFile({ name: "work", keepFile: true }));
+      await form.press("add");
+      expect(form.box.state.asking).toBe(false);
+      expect(calls).toEqual([["sync_key_import_file", { name: "work", path: "/home/f/.ssh/id_work", keepFile: true }]]);
+      expect(form.box.shown).toEqual(["s"]);
+    });
+
+    it("adds a pasted key at once: there is no file to remove", async () => {
+      const calls = stubBackend(async () => added());
+      const form = pane(importState({ text: KEY_TEXT, name: "laptop" }));
+      await form.press("add");
+      expect(form.box.state.asking).toBe(false);
+      expect(calls).toEqual([["sync_key_import_text", { name: "laptop", text: KEY_TEXT }]]);
+      expect(form.box.shown).toEqual(["s"]);
+    });
+
+    it("sends a Move once even if the confirm is pressed again while it is sent (the dialog stays on screen while it fades)", async () => {
+      let answer!: (result: unknown) => void;
+      const calls = stubBackend(() => new Promise((resolve) => (answer = resolve)));
+      const form = pane(chosenFile({ name: "work" }));
+      await form.press("add");
+      const first = form.press("confirm");
+      await form.press("confirm");
+      expect(calls).toHaveLength(1);
+      answer(added({ removed_file: true }));
+      await first;
+      expect(form.box.shown).toEqual(["s"]);
+    });
+
+    it("is busy while a key is sent", async () => {
+      let answer!: (result: unknown) => void;
+      stubBackend(() => new Promise((resolve) => (answer = resolve)));
+      const form = pane(chosenFile({ keepFile: true }));
+      const sending = form.press("add");
+      expect(form.box.state.busy).toBe(true);
+      expect(form.box.shown).toEqual([]);
+      answer(added());
+      await sending;
+      expect(form.box.shown).toEqual(["s"]);
+    });
+
+    it("comes back to the same filled form when a confirmed Move is refused, and says why", async () => {
+      const refusal = "Your SSH config changed on disk since SSHelter loaded it. Reload it, then try again.";
+      stubBackend(async () => {
+        throw new Error(refusal);
+      });
+      const filled = chosenFile({ name: "work" });
+      const form = pane(filled);
+      await form.press("add");
+      await form.press("confirm");
+      expect(form.box.state).toEqual(filled);
+      expect(form.box.shown).toEqual([]);
+      expect(toasts()).toEqual([{ title: "Could not add the key", description: refusal }]);
+    });
   });
 });

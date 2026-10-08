@@ -22,6 +22,7 @@ import { syncConfirmText } from "@/lib/key-slots";
 import { useKeys } from "@/lib/queries";
 import { errorMessage, exportPrivateKey, useKeyPick } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
+import { basename } from "@/lib/utils";
 
 /**
  * The keys of this computer to pick from: a note while they are scanned and when there are none (the likely case on a
@@ -195,6 +196,40 @@ export function DeleteKeyConfirm({
           <AlertDialogAction variant="destructive" onClick={onConfirm}>
             Delete
           </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/**
+ * The confirm before New key's "Add to SSHelter" moves a key file (spec §7.5): a Move removes the original, so the vault holds the
+ * only copy of the key on this computer. `path` is the file that goes (it stays set while the dialog closes). Its name and path come
+ * from the disk, so both are shown through `revealHidden`. No hooks: exported for the tests.
+ */
+export function MoveKeyConfirm({
+  path,
+  open,
+  onCancel,
+  onConfirm,
+}: {
+  path: string | null;
+  open: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{`Move ${path ? revealHidden(basename(path)) : ""} into SSHelter?`}</AlertDialogTitle>
+          <AlertDialogDescription>
+            {`SSHelter keeps the only copy of this key on this computer and removes ${path ? revealHidden(path) : ""}. Export private key… gets a file back.`}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirm}>Move into SSHelter</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

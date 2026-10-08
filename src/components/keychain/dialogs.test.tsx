@@ -1,15 +1,15 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ComponentProps, ReactNode } from "react";
+import type { ComponentProps, ReactElement, ReactNode } from "react";
 import { describe, expect, it } from "vitest";
 
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
-import { AlertDialogAction, AlertDialogCancel, AlertDialogDescription, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogDescription, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { keySlot, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
-import { DeleteCopyConfirm, DeleteKeyConfirm, ExportPrivateKeyForm, KeyChoices, replacedKeyNote, SyncKeyConfirm } from "./dialogs";
-import { buttonsIn, DISABLED, elementsOf, text, textIn } from "./test-markup";
+import { DeleteCopyConfirm, DeleteKeyConfirm, ExportPrivateKeyForm, KeyChoices, MoveKeyConfirm, replacedKeyNote, SyncKeyConfirm } from "./dialogs";
+import { buttonsIn, DISABLED, elementsOf, HIDDEN_CHARS, text, textIn } from "./test-markup";
 
 describe("the keys to pick from", () => {
   const key = (name: string, fingerprint: string | null): KeyInfo => ({
@@ -142,6 +142,55 @@ describe("deleting a key only on this computer", () => {
     expect(textIn(action)).toBe("Delete");
     action.props.onClick!();
     expect(deleted).toBe(1);
+  });
+});
+
+describe("the confirm before a Move removes a key file", () => {
+  const PATH = "/home/f/.ssh/id_work";
+  const confirm = (path: string | null = PATH, on: { onCancel?: () => void; onConfirm?: () => void; open?: boolean } = {}) =>
+    MoveKeyConfirm({ path, open: true, onCancel: () => {}, onConfirm: () => {}, ...on });
+  /** The dialog's own `onOpenChange`: what Cancel, Escape and a click outside end in. */
+  const closeDialog = (tree: ReactNode) => (elementsOf(tree, AlertDialog)[0] as unknown as ReactElement<{ onOpenChange: (open: boolean) => void }>).props.onOpenChange(false);
+
+  it("names the file, and says the vault keeps the only copy while the file goes", () => {
+    const tree = confirm();
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe("Move id_work into SSHelter?");
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
+      "SSHelter keeps the only copy of this key on this computer and removes /home/f/.ssh/id_work. Export private key… gets a file back.",
+    ]);
+  });
+
+  it("names a Windows file by its last part", () => {
+    expect(textIn(elementsOf(confirm("C:\\Users\\f\\.ssh\\id_work"), AlertDialogTitle))).toBe("Move id_work into SSHelter?");
+  });
+
+  it("reveals hidden characters in the file's name and path: they come from the disk", () => {
+    const tree = confirm(`/home/f/Downloads/${SPOOFED_NAME}`);
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Move ${SPOOFED_NAME_SHOWN} into SSHelter?`);
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
+      `SSHelter keeps the only copy of this key on this computer and removes /home/f/Downloads/${SPOOFED_NAME_SHOWN}. Export private key… gets a file back.`,
+    ]);
+    expect(textIn(tree)).not.toMatch(HIDDEN_CHARS);
+  });
+
+  it("moves only when Move into SSHelter is pressed; Cancel, Escape and a click outside leave everything as it is", () => {
+    let moved = 0;
+    let cancelled = 0;
+    const tree = confirm(PATH, { onConfirm: () => moved++, onCancel: () => cancelled++ });
+    expect(elementsOf(tree, AlertDialogCancel).map(textIn)).toEqual(["Cancel"]);
+    const [action] = elementsOf(tree, AlertDialogAction);
+    expect(textIn(action)).toBe("Move into SSHelter");
+    expect([moved, cancelled]).toEqual([0, 0]);
+    closeDialog(tree);
+    expect([moved, cancelled]).toEqual([0, 1]);
+    action.props.onClick!();
+    expect([moved, cancelled]).toEqual([1, 1]);
+  });
+
+  it("is open only when asked to be", () => {
+    const opened = (tree: ReactNode) => (elementsOf(tree, AlertDialog)[0] as unknown as ReactElement<{ open: boolean }>).props.open;
+    expect(opened(confirm())).toBe(true);
+    expect(opened(confirm(PATH, { open: false }))).toBe(false);
   });
 });
 

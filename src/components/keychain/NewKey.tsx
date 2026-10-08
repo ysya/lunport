@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import type { KeyAlgorithm } from "@/bindings/KeyAlgorithm";
 import type { KeyFilePreview } from "@/bindings/KeyFilePreview";
+import { MoveKeyConfirm } from "@/components/keychain/dialogs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -63,6 +64,8 @@ export interface ImportKeyState {
   name: string;
   keepFile: boolean;
   busy: boolean;
+  /** The Move confirm is open (see `needsMoveConfirm`). The form stays as it is under it. */
+  asking: boolean;
 }
 
 /**
@@ -277,6 +280,47 @@ export async function submitGenerate(queryClient: QueryClient, state: GenerateKe
   }
 }
 
+/**
+ * Whether "Add to SSHelter" has to ask first (spec §7.5): a chosen file that would be moved is removed, so the user confirms it. Keep
+ * the file too and a pasted key remove no file and are added at once. Exported for the tests.
+ */
+export function needsMoveConfirm(state: ImportKeyState): boolean {
+  return state.source === "file" && state.path !== null && !state.keepFile;
+}
+
+/**
+ * What the New key form's buttons do, apart from React (spec §7.5). `state` is the form as last drawn, `update` merges into it, and
+ * `show` is told the slot id of the key once it was added. "Add to SSHelter" opens the Move confirm for a Move and adds anything else at
+ * once; nothing is sent until the user confirms, and Cancel leaves the form exactly as it was. Exported for the tests.
+ */
+export function importActions({
+  state,
+  update,
+  queryClient,
+  show,
+}: {
+  state: ImportKeyState;
+  update: (patch: Partial<ImportKeyState>) => void;
+  queryClient: QueryClient;
+  show: (slotId: string) => void;
+}) {
+  const send = async () => {
+    update({ busy: true });
+    const slotId = await submitImport(queryClient, state);
+    if (slotId === null) update({ busy: false });
+    else show(slotId);
+  };
+  return {
+    add: () => (needsMoveConfirm(state) ? update({ asking: true }) : send()),
+    confirm: () => {
+      update({ asking: false });
+      // The dialog stays on screen while it fades out: pressing its button again must not send the key a second time.
+      return state.busy ? undefined : send();
+    },
+    cancel: () => update({ asking: false }),
+  };
+}
+
 /** The Keychain's main pane for New key or Generate key. Keyed by the caller per selection, so typed text and passphrases go with it. */
 export function NewKeyPane({ selection }: { selection: Extract<KeychainSelection, { kind: "new" }> }) {
   return selection.mode === "generate" ? <GenerateKeyPane /> : <ImportKeyPane initialPath={selection.path} />;
@@ -293,6 +337,7 @@ function ImportKeyPane({ initialPath }: { initialPath: string | null }) {
     name: "key",
     keepFile: false,
     busy: false,
+    asking: false,
   });
   const nameEdited = useRef(false);
   const update = (patch: Partial<ImportKeyState>) => setState((s) => ({ ...s, ...patch }));
@@ -312,31 +357,30 @@ function ImportKeyPane({ initialPath }: { initialPath: string | null }) {
   useEffect(() => {
     if (initialPath) choose(initialPath);
   }, [initialPath, choose]);
-  useFileDrop(!state.busy, choose);
+  // Not while a key is being added or the Move confirm is open: a file dropped then must not change what the user is confirming.
+  useFileDrop(!state.busy && !state.asking, choose);
   const pick = async () => {
     const picked = await openFileDialog({ multiple: false, directory: false, title: "Choose a private key" });
     if (typeof picked === "string") choose(picked);
   };
-  const add = async () => {
-    update({ busy: true });
-    const slotId = await submitImport(queryClient, state);
-    if (slotId === null) update({ busy: false });
-    else selectKey({ kind: "slot", id: slotId });
-  };
+  const actions = importActions({ state, update, queryClient, show: (slotId) => selectKey({ kind: "slot", id: slotId }) });
   return (
-    <ImportKeyView
-      state={state}
-      onSource={(source) => update({ source })}
-      onText={(text) => update({ text })}
-      onChoose={() => void pick()}
-      onName={(name) => {
-        nameEdited.current = true;
-        update({ name });
-      }}
-      onKeepFile={(keepFile) => update({ keepFile })}
-      onAdd={() => void add()}
-      onCancel={() => selectKey(null)}
-    />
+    <>
+      <ImportKeyView
+        state={state}
+        onSource={(source) => update({ source })}
+        onText={(text) => update({ text })}
+        onChoose={() => void pick()}
+        onName={(name) => {
+          nameEdited.current = true;
+          update({ name });
+        }}
+        onKeepFile={(keepFile) => update({ keepFile })}
+        onAdd={() => void actions.add()}
+        onCancel={() => selectKey(null)}
+      />
+      <MoveKeyConfirm path={state.path} open={state.asking} onCancel={actions.cancel} onConfirm={() => void actions.confirm()} />
+    </>
   );
 }
 
