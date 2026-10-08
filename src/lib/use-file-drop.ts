@@ -29,8 +29,8 @@ export function useFileDrop(enabled: boolean, onPath: (path: string) => void): v
           if (gone) stop();
           else unlisten = stop;
         },
-        // Without the listener a drop does nothing; "Choose a file…" still works, so this stays quiet (as `useCheckUnknownRelay` does).
-        () => undefined,
+        // Without the listener a drop does nothing; "Choose a file…" still works, so this only warns.
+        (error: unknown) => console.warn("[file-drop] could not listen for dropped files:", error),
       );
     return () => {
       gone = true;

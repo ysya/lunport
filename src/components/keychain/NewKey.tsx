@@ -233,8 +233,8 @@ export function importedNote(result: { removed_file: boolean; file_kept: string 
 
 /**
  * Add the pasted key or the chosen file (New key's "Add to SSHelter"), and tell the user how it went. Resolves to the new key's slot
- * id, or null after a toast said why nothing was added. Plain calls, not mutations: the key text must not stay in TanStack's cache.
- * Exported for the tests.
+ * id, or to null when nothing was added: after a toast said why, or with no toast when a file form has no file chosen (nothing is
+ * sent then). Plain calls, not mutations: the key text must not stay in TanStack's cache. Exported for the tests.
  */
 export async function submitImport(queryClient: QueryClient, state: ImportKeyState): Promise<string | null> {
   try {
