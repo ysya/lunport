@@ -8,7 +8,7 @@
 //! process running as the same OS account.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -1288,20 +1288,33 @@ fn answering_bridge() -> Option<RuntimeInfo> {
         .filter(|info| send_to_runtime(info, "ping", json!({}), PING_TIMEOUT).is_ok())
 }
 
+/// What a call got when it asked for the spawn locks.
+enum SpawnLocks<G> {
+    /// Start SSHelter while holding `G`.
+    Held(G),
+    /// Another adapter kept `mcp-spawn.lock` past the deadline: it may be stopped in the middle
+    /// of a start (its AI CLI suspended, for example).
+    Busy,
+}
+
 /// Return a bridge that answers. If none does, take the spawn locks and look again: a parallel
 /// call or another adapter may have started SSHelter meanwhile. Only if still none answers, start
 /// SSHelter once and wait for its bridge. Several near-simultaneous starts could each claim the
-/// single instance before the others see it (macOS), and leave two SSHelters running.
+/// single instance before the others see it (macOS), and leave two SSHelters running; so when
+/// another adapter keeps the locks too long, look once more instead of starting a second one.
 fn ensure_started<T, G>(
     mut answering: impl FnMut() -> Option<T>,
-    lock: impl FnOnce() -> Result<G, String>,
+    lock: impl FnOnce() -> SpawnLocks<G>,
     start: impl FnOnce() -> Result<(), String>,
     wait: Duration,
 ) -> Result<T, String> {
     if let Some(found) = answering() {
         return Ok(found);
     }
-    let _locks = lock()?;
+    let _locks = match lock() {
+        SpawnLocks::Held(locks) => locks,
+        SpawnLocks::Busy => return answering().ok_or_else(|| NO_ANSWER.to_string()),
+    };
     if let Some(found) = answering() {
         return Ok(found);
     }
@@ -1316,32 +1329,81 @@ fn ensure_started<T, G>(
     Err(NO_ANSWER.to_string())
 }
 
-/// Takes `SPAWN_LOCK` (this adapter's tool calls), then `mcp-spawn.lock` in the app data
-/// directory (other adapters, that is other AI sessions): an exclusive file lock that the system
-/// releases when its holder exits. Dropping the pair releases both.
-fn take_spawn_locks() -> Result<(MutexGuard<'static, ()>, File), String> {
+/// `SPAWN_LOCK`, and `mcp-spawn.lock` unless it can't be taken here.
+type SpawnGuards = (MutexGuard<'static, ()>, Option<File>);
+
+fn take_spawn_locks() -> SpawnLocks<SpawnGuards> {
+    // The deadline counts from before this call waits for the adapter's other calls, so a call
+    // never waits much longer than `START_WAIT` for the locks.
+    let deadline = Instant::now() + START_WAIT;
+    take_spawn_locks_at(spawn_lock_path().map_err(|e| e.to_string()), deadline)
+}
+
+/// Takes `SPAWN_LOCK` (this adapter's tool calls), then the exclusive file lock on `path`, by
+/// default `mcp-spawn.lock` in the app data directory (other adapters, that is other AI
+/// sessions), which the system releases when its holder exits. Dropping the guards releases both.
+/// A file lock that can't be taken here at all (no app data directory, a file system without
+/// locks) is skipped, as before there was one: only this adapter's calls wait for each other.
+fn take_spawn_locks_at(
+    path: Result<PathBuf, String>,
+    deadline: Instant,
+) -> SpawnLocks<SpawnGuards> {
     let calls = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-    let path = spawn_lock_path().map_err(|e| e.to_string())?;
-    let adapters = lock_file(&path).map_err(|e| format!("cannot lock {}: {e}", path.display()))?;
-    Ok((calls, adapters))
+    let file = match path {
+        Ok(path) => lock_file_until(&path, deadline),
+        Err(e) => FileLock::Unavailable(e),
+    };
+    match file {
+        FileLock::Held(file) => SpawnLocks::Held((calls, Some(file))),
+        FileLock::Busy => SpawnLocks::Busy,
+        FileLock::Unavailable(reason) => {
+            eprintln!("[mcp] starting SSHelter without mcp-spawn.lock: {reason}");
+            SpawnLocks::Held((calls, None))
+        }
+    }
 }
 
 fn spawn_lock_path() -> Result<PathBuf, AppError> {
     Ok(crate::fsutil::app_data_root()?.join("mcp-spawn.lock"))
 }
 
-/// Open `path`, creating it and its directory, and wait for an exclusive lock on it.
-fn lock_file(path: &Path) -> Result<File, AppError> {
-    if let Some(dir) = path.parent() {
-        fsutil::ensure_dir_secure(dir)?;
+enum FileLock {
+    Held(File),
+    /// Someone else still held it at the deadline.
+    Busy,
+    /// It can't be opened or locked here.
+    Unavailable(String),
+}
+
+/// Open `path`, creating it and its directory, and take an exclusive lock on it, trying until
+/// `deadline`.
+fn lock_file_until(path: &Path, deadline: Instant) -> FileLock {
+    let opened = path
+        .parent()
+        .map_or(Ok(()), fsutil::ensure_dir_secure)
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(path)
+                .map_err(|e| e.to_string())
+        });
+    let file = match opened {
+        Ok(file) => file,
+        Err(e) => return FileLock::Unavailable(format!("cannot open {}: {e}", path.display())),
+    };
+    loop {
+        match file.try_lock() {
+            Ok(()) => return FileLock::Held(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => thread::sleep(START_POLL),
+            Err(TryLockError::WouldBlock) => return FileLock::Busy,
+            Err(TryLockError::Error(e)) => {
+                return FileLock::Unavailable(format!("cannot lock {}: {e}", path.display()))
+            }
+        }
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)?;
-    file.lock()?;
-    Ok(file)
 }
 
 /// Start SSHelter in the background, or, when it already runs, hand over to it (single
@@ -1489,7 +1551,7 @@ mod tests {
         let mut answers = [None, Some("bridge")].into_iter();
         let found = ensure_started(
             || answers.next().flatten(),
-            || Ok(()),
+            || SpawnLocks::Held(()),
             || panic!("SSHelter already answers: starting it again could run two"),
             Duration::ZERO,
         );
@@ -1507,7 +1569,7 @@ mod tests {
                 thread::spawn(move || {
                     ensure_started(
                         || running.load(Ordering::SeqCst).then_some(()),
-                        || Ok(locks.lock().unwrap()),
+                        || SpawnLocks::Held(locks.lock().unwrap()),
                         || {
                             starts.fetch_add(1, Ordering::SeqCst);
                             // Its bridge answers a little later, as a real start's does.
@@ -1534,7 +1596,7 @@ mod tests {
         let mut starts = 0;
         let result: Result<(), String> = ensure_started(
             || None,
-            || Ok(()),
+            || SpawnLocks::Held(()),
             || {
                 starts += 1;
                 Ok(())
@@ -1546,18 +1608,90 @@ mod tests {
     }
 
     #[test]
+    fn when_another_adapter_keeps_the_locks_one_more_look_decides() {
+        let no_start = || -> Result<(), String> { panic!("the other adapter may be starting it") };
+        let mut answers = [None, Some("bridge")].into_iter();
+        let found = ensure_started(
+            || answers.next().flatten(),
+            || SpawnLocks::<()>::Busy,
+            no_start,
+            Duration::ZERO,
+        );
+        assert_eq!(found, Ok("bridge"));
+
+        let found: Result<(), String> =
+            ensure_started(|| None, || SpawnLocks::<()>::Busy, no_start, Duration::ZERO);
+        assert_eq!(found, Err(NO_ANSWER.to_string()));
+    }
+
+    fn held(lock: FileLock) -> File {
+        match lock {
+            FileLock::Held(file) => file,
+            FileLock::Busy => panic!("busy"),
+            FileLock::Unavailable(e) => panic!("{e}"),
+        }
+    }
+
+    #[test]
     fn the_spawn_lock_file_lets_one_adapter_in_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app-data").join("mcp-spawn.lock");
-        let first = lock_file(&path).unwrap();
-        let second = OpenOptions::new().write(true).open(&path).unwrap();
-        assert!(matches!(
-            second.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
-        ));
+        let first = held(lock_file_until(&path, Instant::now()));
+        let second = lock_file_until(&path, Instant::now());
+        assert!(matches!(second, FileLock::Busy));
         drop(first);
-        // Waits until the lock is free, and gets it.
-        lock_file(&path).unwrap();
+        // Free again: taken, even if it takes a few tries.
+        let soon = Instant::now() + Duration::from_secs(5);
+        held(lock_file_until(&path, soon));
+    }
+
+    #[test]
+    fn a_spawn_lock_held_past_the_deadline_ends_the_call_after_one_more_ping() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-spawn.lock");
+        // Another adapter holds it, stopped in the middle of a start.
+        let _other = held(lock_file_until(&path, Instant::now()));
+        let mut pings = 0;
+        let began = Instant::now();
+        let result: Result<(), String> = ensure_started(
+            || {
+                pings += 1;
+                None
+            },
+            || take_spawn_locks_at(Ok(path.clone()), began + Duration::from_millis(300)),
+            || panic!("the other adapter may be starting it"),
+            Duration::from_secs(5),
+        );
+        assert_eq!(result, Err(NO_ANSWER.to_string()));
+        assert_eq!(pings, 2, "the first look, and one more at the deadline");
+        assert!(began.elapsed() >= Duration::from_millis(300));
+        assert!(began.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn without_a_lock_file_the_call_still_starts_sshelter() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("file");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let path = not_a_dir.join("mcp-spawn.lock");
+        assert!(matches!(
+            lock_file_until(&path, Instant::now()),
+            FileLock::Unavailable(_)
+        ));
+
+        let mut starts = 0;
+        let mut answers = [None, None, Some("bridge")].into_iter();
+        let found = ensure_started(
+            || answers.next().flatten(),
+            || take_spawn_locks_at(Ok(path.clone()), Instant::now()),
+            || {
+                starts += 1;
+                Ok(())
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(found, Ok("bridge"));
+        assert_eq!(starts, 1);
     }
 
     #[test]
