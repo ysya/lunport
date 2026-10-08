@@ -1376,7 +1376,7 @@ fn readable_key(local: Option<&LocalSlot>, keys_dir: &Path) -> Option<String> {
 
 /// 保管庫裡這個插槽的私鑰原文。那一筆要是記錄裡的那一把(`fingerprint` = `SlotSource::Vault` 的指紋),不是就拒絕(`VAULT_MISMATCH_MESSAGE`),
 /// 不拿別把當成這個插槽的金鑰。
-fn vault_text(env: &SyncEnv, slot_id: &str, fingerprint: &str) -> Result<Option<String>, AppError> {
+pub(crate) fn vault_text(env: &SyncEnv, slot_id: &str, fingerprint: &str) -> Result<Option<String>, AppError> {
     let path = vault_path(&env.state_path);
     let Some(entry) = with_vault(env.runtime, &path, env.keychain, env.now(), |vault| vault.get(slot_id))? else { return Ok(None) };
     if entry.fingerprint != fingerprint {
@@ -1438,7 +1438,7 @@ fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError
 /// 狀態存不進去(`save_blocked`:別的 SSHelter 行程跑著同步引擎,或狀態檔留在原地)就在任何動作之前拒絕,理由同 `mutate`。這些動作先動檔案與保管庫、最後才提交記錄:
 /// 提交被拒的話,跑引擎的那個行程還記著原本的連結,檔案與保管庫卻已經動過了,沒有帳戶可以對照著修回來(同步嘗試只補回有主機用到的連結,
 /// `maintain_local`)。(有帳戶金鑰的 `snapshot` 不必:這種行程從來推導不出帳戶金鑰,那些動作本來就先失敗。)
-fn local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
+pub(crate) fn local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
     let state = {
         let core = env.runtime.core.lock().unwrap();
         if let Some(reason) = &core.save_blocked {
@@ -1636,7 +1636,7 @@ fn picked_record(s: &SyncStateV2, slot_id: &str, file: &str, payload: &KeySlotPa
 
 /// 更新 agent 的設定(`agent::wiring::refresh_env`):插槽進出保管庫之後,`agent/config` 列的主機跟著改。更新不成只記到 stderr,動作本身不算失敗
 /// (下一次同步嘗試的最後會再更新)。
-fn refresh_agent(env: &SyncEnv) {
+pub(crate) fn refresh_agent(env: &SyncEnv) {
     if let Err(e) = crate::agent::wiring::refresh_env(env) {
         eprintln!("[agent] could not update the agent config: {e}");
     }
@@ -1896,7 +1896,7 @@ fn forget_remembered_passphrase(env: &SyncEnv, slot_id: &str) {
 
 /// agent 用不了這把金鑰的原因(金鑰保管庫 spec §7.3、§11):種類簽不了、加密方式解不開、`ssh-key` 讀不懂。用不了的金鑰不放進保管庫 —— 放進去插槽檔就沒了,
 /// agent 卻不列出它、也簽不了,用它的主機會無聲地連不上。先看種類,再看加密方式,最後看讀不讀得懂(`inspect_private_key` 只看標頭與公鑰段,比 `ssh-key` 寬鬆)。
-fn agent_refusal(text: &str, facts: &KeyFacts) -> Option<&'static str> {
+pub(crate) fn agent_refusal(text: &str, facts: &KeyFacts) -> Option<&'static str> {
     if !material::public_key_data(&facts.public_key).is_some_and(|data| material::agent_can_sign(&data)) {
         return Some(VAULT_KEY_TYPE_MESSAGE);
     }
@@ -7503,7 +7503,7 @@ pub(crate) mod tests {
     // ── 沒有同步帳戶時,這台留著的金鑰(金鑰保管庫 spec §4.3「沒加入同步帳戶也能用」)──────────────────────────────
 
     /// overview 裡 `id` 這個插槽的那一列。
-    fn overview_row(d: &TestDevice, id: &str) -> Option<SyncKeySlotView> {
+    pub(crate) fn overview_row(d: &TestDevice, id: &str) -> Option<SyncKeySlotView> {
         crate::sync::dto::overview(&d.env()).unwrap().key_slots.into_iter().find(|v| v.id == id)
     }
 

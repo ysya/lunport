@@ -698,6 +698,39 @@ pub async fn sync_key_export_private(app: AppHandle, slot_id: String, passphrase
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
+/// 「New key」→ Paste(金鑰保管庫 spec §7.5):貼上的私鑰加進 SSHelter,成為只在這台的金鑰。回傳最新狀態與新插槽的 id。
+#[tauri::command]
+pub async fn sync_key_import_text(app: AppHandle, name: String, text: String) -> Result<crate::sync::dto::NewKeyResult, AppError> {
+    let text = zeroize::Zeroizing::new(text);
+    run(app, false, move |env| {
+        let slot_id = crate::sync::local_keys::import_text(env, &name, &text)?;
+        Ok(crate::sync::dto::NewKeyResult { overview: dto::overview(env)?, slot_id })
+    })
+    .await
+}
+
+/// 「New key」→ From a file 與 `~/.ssh` 的「Import」:`keep_file` = Keep the file too,否則 Move into SSHelter。
+#[tauri::command]
+pub async fn sync_key_import_file(app: AppHandle, name: String, path: String, keep_file: bool) -> Result<crate::sync::dto::ImportResult, AppError> {
+    run(app, false, move |env| {
+        let imported = crate::sync::local_keys::import_file(env, &name, &path, keep_file)?;
+        Ok(crate::sync::dto::ImportResult {
+            overview: dto::overview(env)?,
+            slot_id: imported.slot_id,
+            rewritten_hosts: imported.rewritten_hosts,
+            removed_file: imported.removed_file,
+            file_kept: imported.file_kept,
+        })
+    })
+    .await
+}
+
+/// 選了金鑰檔之後的預覽(只讀)。
+#[tauri::command]
+pub async fn sync_key_preview_file(app: AppHandle, path: String) -> Result<crate::sync::dto::KeyFilePreview, AppError> {
+    run(app, false, move |env| crate::sync::local_keys::preview_file(env, &path)).await
+}
+
 /// 更換同步碼(spec §7.5):第 1 步在這裡做完,之後由背景執行緒逐步推進;進度在 `SyncOverview::rotation`,完成時
 /// 留下 `SyncNotice::NewSyncCode`(UI 以 `sync_show_words` 顯示新同步碼)。
 #[tauri::command]

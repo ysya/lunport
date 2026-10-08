@@ -222,6 +222,42 @@ pub struct MoveIntoVaultResult {
     pub failed: Vec<MoveFailure>,
 }
 
+/// New key / Generate key 之後:最新狀態與新插槽的 id(畫面選到它)。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct NewKeyResult {
+    pub overview: SyncOverview,
+    pub slot_id: String,
+}
+
+/// 從檔案加進 SSHelter 之後(`local_keys::import_file`):改指到新插槽的主機、原檔移除了沒、Move 卻留下原檔的原因。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct ImportResult {
+    pub overview: SyncOverview,
+    pub slot_id: String,
+    pub rewritten_hosts: Vec<String>,
+    pub removed_file: bool,
+    pub file_kept: Option<String>,
+}
+
+/// 選了金鑰檔之後的預覽(`local_keys::preview_file`)。`problem` = 加不進去的原因。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct KeyFilePreview {
+    pub default_name: String,
+    pub fingerprint: Option<String>,
+    pub key_type: Option<String>,
+    pub has_passphrase: Option<bool>,
+    pub hosts: Vec<String>,
+    /// 檔案是 `ssh` 沒寫 `IdentityFile` 時會試的 `~/.ssh/id_*`(移走之後那些主機找不到它)。
+    pub default_identity: bool,
+    pub problem: Option<String>,
+}
+
 /// Settings → Sync 的全部狀態(`sync_overview` 與 `sync://status`)。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]

@@ -144,7 +144,7 @@ fn home_of(env: &SyncEnv) -> Result<PathBuf, AppError> {
 }
 
 /// 兩個路徑是不是同一個檔案(都要存在)。
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
@@ -171,7 +171,7 @@ pub(crate) fn is_private_key_file(path: &Path) -> bool {
 }
 
 /// 每個 pattern 在整份 config(所有檔案)出現在幾個 Host 區塊;超過一個的主機不改寫(SP1 FA3)。
-fn alias_counts(doc: &SshConfigDoc) -> BTreeMap<String, usize> {
+pub(crate) fn alias_counts(doc: &SshConfigDoc) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for file in &doc.files {
         for item in &file.items {
@@ -185,7 +185,7 @@ fn alias_counts(doc: &SshConfigDoc) -> BTreeMap<String, usize> {
     counts
 }
 
-fn locked(patterns: &[String], counts: &BTreeMap<String, usize>) -> bool {
+pub(crate) fn locked(patterns: &[String], counts: &BTreeMap<String, usize>) -> bool {
     patterns.iter().any(|p| counts.get(p).copied().unwrap_or(0) > 1)
 }
 
@@ -404,7 +404,7 @@ fn scan(
 /// 設定(候選的掃描與主機的改寫都只看它們):第一輪還沒跑完的 space,存檔 hook 不為它規劃任何記錄(`files::note_written`),而第一輪以 chain
 /// 為準 —— 在這之前改寫的主機會被寫回 chain 的版本,改寫就白費了(插槽還在,主機卻悄悄變回原樣)。搬移精靈與側邊欄搬移對這種 space 也是拒絕
 /// (`migrate::refuse_before_first_sync`)。它們的主機在那個 space 的第一輪之後的下一次掃描才會出現。旗標在取得勾選清單之後才讀(最新的值)。
-fn ready_space_files(env: &SyncEnv) -> Vec<(String, PathBuf)> {
+pub(crate) fn ready_space_files(env: &SyncEnv) -> Vec<(String, PathBuf)> {
     let selected = selected_space_files(env.runtime, &env.ssh_dir);
     let core = env.runtime.core.lock().unwrap();
     let Some(state) = core.state.as_ref() else { return Vec::new() };
