@@ -266,7 +266,8 @@ mod tests {
         let dir = short_dir();
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(&agent).unwrap();
-        drop(UnixListener::bind(agent.join("sock")).unwrap());
+        // 綁好就丟掉。在 `without_spawns` 裡:同時 spawn 出去的子程序拿到 listener 的複本,丟掉之後它還在聽(見 `crate::process`)。
+        crate::process::without_spawns(|| drop(UnixListener::bind(agent.join("sock")).unwrap()));
         assert!(UnixStream::connect(agent.join("sock")).is_err(), "nobody answers on it");
         let (tx, _rx) = mpsc::channel();
         assert_eq!(listen_unix(&agent, serving(tx)).unwrap(), Started::Running);
@@ -283,15 +284,18 @@ mod tests {
         assert!(!agent.exists(), "nothing was created");
     }
 
-    /// 鎖持有到拿著它的 `File` 放掉(行程死掉時由系統放掉,同一個效果);放掉之後下一個 SSHelter 拿得到。
+    /// 鎖持有到拿著它的 `File` 放掉(行程死掉時由系統放掉,同一個效果);放掉之後下一個 SSHelter 拿得到。整段在 `without_spawns` 裡:鎖檔有
+    /// CLOEXEC,但開著的時候 spawn 出去的子程序在換成新程式之前也握著它,鎖要到那時才放(見 `crate::process`)。
     #[test]
     fn the_lock_is_held_until_its_holder_lets_go() {
         let dir = short_dir();
         let agent = dir.path().join("agent");
-        let first = take_lock(&agent).unwrap().expect("nobody holds it yet");
-        assert!(take_lock(&agent).unwrap().is_none(), "held");
-        drop(first);
-        assert!(take_lock(&agent).unwrap().is_some(), "free once the holder is gone");
+        crate::process::without_spawns(|| {
+            let first = take_lock(&agent).unwrap().expect("nobody holds it yet");
+            assert!(take_lock(&agent).unwrap().is_none(), "held");
+            drop(first);
+            assert!(take_lock(&agent).unwrap().is_some(), "free once the holder is gone");
+        });
     }
 
     /// 上限含結尾的 NUL:剛好放得進 `sun_path` 的路徑(`SUN_PATH_MAX - 1` 個位元組)系統真的 bind 得起來,多一個位元組系統拒絕、
