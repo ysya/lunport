@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { MoveFailure } from "@/bindings/MoveFailure";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
+import { AddHostForKeyDialog, type AddHostForKeyTarget } from "@/components/keychain/AddHostForKeyDialog";
 import { DeleteCopyConfirm, DeleteKeyConfirm, ExportPrivateKeyDialog, PickKeyDialog, SyncKeyConfirm } from "@/components/keychain/dialogs";
 import { ExportToHostDialog, type ExportTarget } from "@/components/keychain/ExportToHostDialog";
 import { NewKeyPane } from "@/components/keychain/NewKey";
@@ -12,6 +13,7 @@ import { TONE_TEXT } from "@/components/sync-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
+import { toTildeSshPath } from "@/lib/identity-file";
 import { deviceLine, slotActions, slotStatusText, whereLine } from "@/lib/key-slots";
 import { formatDay, hasKeyHere, passphraseFact, slotBadges, slotFingerprint, slotPublicPath, type KeyBadge, type KeychainSelection } from "@/lib/keychain";
 import { useHomeDir, useKeys, useReadPublicKey } from "@/lib/queries";
@@ -22,7 +24,7 @@ import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 
 /** What a key's detail asks for. */
-export type KeyAction = "copy" | "exportHost" | "exportPrivate" | "move" | "sync" | "syncNew" | "useSynced" | "pick" | "stop" | "delete" | "deleteKey";
+export type KeyAction = "copy" | "exportHost" | "addHost" | "exportPrivate" | "move" | "sync" | "syncNew" | "useSynced" | "pick" | "stop" | "delete" | "deleteKey";
 
 export const BADGE_CLASS: Record<KeyBadge["tone"], string> = {
   plain: "",
@@ -55,8 +57,8 @@ function hostLinks(hosts: readonly string[], onHost: (alias: string) => void): R
 }
 
 /**
- * A key slot's detail (key vault spec §7.3). `keyHere` = this computer has the key and its .pub is known (Copy public key and
- * Export to host); `moveFailure` = why the last Move couldn't move it. No hooks: exported for the tests.
+ * A key slot's detail (key vault spec §7.3). `keyHere` = this computer has the key and its .pub is known (Copy public key, Export to
+ * host and Add a host for this key); `moveFailure` = why the last Move couldn't move it. No hooks: exported for the tests.
  */
 export function SlotKeyDetailView({
   slot,
@@ -122,6 +124,7 @@ export function SlotKeyDetailView({
         {button("exportHost", "Export to host…", { off: !keyHere })}
         {slot.in_vault && button("exportPrivate", "Export private key…")}
         {slot.file_for_now && button("move", "Move into SSHelter")}
+        {button("addHost", "Add a host for this key…", { off: !keyHere })}
       </div>
       <div className="settings-group">
         <Fact label="Fingerprint">
@@ -156,7 +159,7 @@ export function SlotKeyDetailView({
 
 /**
  * A key file in ~/.ssh (key vault spec §7.3): SSHelter doesn't manage it, and never deletes it (§7.6). "Import into SSHelter…" opens
- * New key with this file chosen. No hooks: exported for the tests.
+ * New key with this file chosen; "Add a host for this key…" needs the private file only. No hooks: exported for the tests.
  */
 export function FileKeyDetailView({
   file,
@@ -164,7 +167,7 @@ export function FileKeyDetailView({
   onHost,
 }: {
   file: KeyInfo;
-  onAction: (action: "copy" | "exportHost" | "import") => void;
+  onAction: (action: "copy" | "exportHost" | "import" | "addHost") => void;
   onHost: (alias: string) => void;
 }) {
   const hasPub = file.public_path !== null;
@@ -191,6 +194,9 @@ export function FileKeyDetailView({
         {/* Adding the key to SSHelter needs the private file only, so this does not wait for a .pub. */}
         <Button type="button" size="sm" variant="outline" className="h-7" onClick={() => onAction("import")}>
           Import into SSHelter…
+        </Button>
+        <Button type="button" size="sm" variant="outline" className="h-7" onClick={() => onAction("addHost")}>
+          Add a host for this key…
         </Button>
       </div>
       <div className="settings-group">
@@ -267,6 +273,7 @@ export function KeyDetailFor({
   const [deletingKey, setDeletingKey] = useState<SyncKeySlotView | null>(null);
   const [exporting, setExporting] = useState<SyncKeySlotView | null>(null);
   const [exportTarget, setExportTarget] = useState<ExportTarget | null>(null);
+  const [addHostFor, setAddHostFor] = useState<AddHostForKeyTarget | null>(null);
   // What the confirms show while they animate out (their slot state is already null by then).
   const shownSyncing = useLastNonNull(syncing);
   const shownDeleting = useLastNonNull(deleting);
@@ -311,6 +318,9 @@ export function KeyDetailFor({
         break;
       case "exportHost":
         if (publicPath) setExportTarget({ name: s.name, publicPath, inSSHelter: s.in_vault });
+        break;
+      case "addHost":
+        setAddHostFor({ name: s.name, value: s.value });
         break;
       case "exportPrivate":
         setExporting(s);
@@ -361,6 +371,7 @@ export function KeyDetailFor({
             onAction={(action) => {
               if (action === "copy") copyPublicKey(file.public_path, file.name);
               else if (action === "import") onSelect({ kind: "new", mode: "import", path: file.private_path });
+              else if (action === "addHost") setAddHostFor({ name: file.name, value: toTildeSshPath(file.private_path, home) });
               else if (file.public_path) setExportTarget({ name: file.name, publicPath: file.public_path, inSSHelter: false });
             }}
             onHost={onShowHost}
@@ -405,6 +416,7 @@ export function KeyDetailFor({
       />
       <ExportPrivateKeyDialog slot={exporting} onClose={() => setExporting(null)} />
       <ExportToHostDialog target={exportTarget} onClose={() => setExportTarget(null)} />
+      <AddHostForKeyDialog target={addHostFor} onClose={() => setAddHostFor(null)} />
     </>
   );
 }

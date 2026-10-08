@@ -7,6 +7,7 @@ import {
   attachText,
   formatDay,
   hasKeyHere,
+  hostAliasProblem,
   KEY_TYPES,
   keyNameOfPath,
   keychainSlots,
@@ -200,5 +201,21 @@ describe("Export to host", () => {
     expect(hasKeyHere(keySlot({ status: needsKey }))).toBe(false);
     expect(hasKeyHere(keySlot({ status: { kind: "error", message: "boom" } }))).toBe(false);
     expect(hasKeyHere(keySlot({ status: { kind: "not_used_here" } }))).toBe(false);
+  });
+});
+
+describe("Add a host for this key", () => {
+  it("checks a new host alias", () => {
+    const existing = new Set(["web"]);
+    expect(hostAliasProblem("", existing)).toBe("Enter a host alias.");
+    expect(hostAliasProblem("my host", existing)).toBe("A host alias can't contain spaces.");
+    expect(hostAliasProblem("web", existing)).toBe("web already exists.");
+    expect(hostAliasProblem("github.com", existing)).toBeNull();
+  });
+
+  it("ignores spaces around the alias, and reveals hidden characters in the alias that exists", () => {
+    expect(hostAliasProblem("  ", new Set())).toBe("Enter a host alias.");
+    expect(hostAliasProblem(" web ", new Set(["web"]))).toBe("web already exists.");
+    expect(hostAliasProblem(SPOOFED_NAME, new Set([SPOOFED_NAME]))).toBe(`${SPOOFED_NAME_SHOWN} already exists.`);
   });
 });

@@ -146,3 +146,12 @@ export function slotPublicPath(slot: SyncKeySlotView, home: string | null): stri
 export function hasKeyHere(slot: SyncKeySlotView): boolean {
   return ["ready", "synced_available", "source_changed", "not_in_use"].includes(slot.status.kind);
 }
+
+/** Why a new host alias can't be used (Add a host for this key), or null. */
+export function hostAliasProblem(alias: string, existing: ReadonlySet<string>): string | null {
+  const a = alias.trim();
+  if (a === "") return "Enter a host alias.";
+  if (/\s/.test(a)) return "A host alias can't contain spaces.";
+  if (existing.has(a)) return `${revealHidden(a)} already exists.`;
+  return null;
+}

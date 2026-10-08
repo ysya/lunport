@@ -45,7 +45,7 @@ function pressEach(slot: SyncKeySlotView): Record<string, KeyAction> {
   return pressed;
 }
 
-const COPY_EXPORT = { "Copy public key": "copy", "Export to host…": "exportHost" } as const;
+const COPY_EXPORT = { "Copy public key": "copy", "Export to host…": "exportHost", "Add a host for this key…": "addHost" } as const;
 
 describe("a key slot's detail", () => {
   it("shows its name, badges, type, fingerprint, where it is kept, its hosts and the other computers", () => {
@@ -112,15 +112,16 @@ describe("a key slot's detail", () => {
     expect(pressEach({ ...local, hosts: ["web"] })).toEqual({ ...COPY_EXPORT, "Export private key…": "exportPrivate" });
   });
 
-  it("turns the actions off while one runs, and Copy and Export to host off without a key here", () => {
+  it("turns the actions off while one runs, and Copy, Export to host and Add a host off without a key here", () => {
     const slot = keySlot({ status: { kind: "synced_available", file: "/f" } });
-    for (const label of ["Use the synced key", "Change…", "Stop syncing", "Copy public key", "Export to host…"]) {
+    for (const label of ["Use the synced key", "Change…", "Stop syncing", "Copy public key", "Export to host…", "Add a host for this key…"]) {
       expect(buttonTag(slotDetail(slot, { busy: true }), label)).toContain(DISABLED);
       expect(buttonTag(slotDetail(slot), label)).not.toContain(DISABLED);
     }
     const none = slotDetail(keySlot({ status: { kind: "needs_key", waiting_for_sync: false } }), { keyHere: false });
     expect(buttonTag(none, "Copy public key")).toContain(DISABLED);
     expect(buttonTag(none, "Export to host…")).toContain(DISABLED);
+    expect(buttonTag(none, "Add a host for this key…")).toContain(DISABLED);
     expect(buttonTag(none, "Pick a key on this computer…")).not.toContain(DISABLED);
   });
 
@@ -206,12 +207,13 @@ describe("a key file's detail", () => {
     buttonsIn(tree)
       .filter((b) => textIn(b) !== "web")
       .forEach((b) => b.props.onClick!());
-    expect(asked).toEqual(["copy", "exportHost", "import"]);
+    expect(asked).toEqual(["copy", "exportHost", "import", "addHost"]);
     const none = fileDetail(keyFile({ public_path: null }));
     expect(buttonTag(none, "Copy public key")).toContain(DISABLED);
     expect(buttonTag(none, "Export to host…")).toContain(DISABLED);
-    // Adding the key to SSHelter needs the private file only.
+    // Adding the key to SSHelter, or a host that uses it, needs the private file only.
     expect(buttonTag(none, "Import into SSHelter…")).not.toContain(DISABLED);
+    expect(buttonTag(none, "Add a host for this key…")).not.toContain(DISABLED);
     expect(text(none)).toContain("No .pub file next to it.");
   });
 
