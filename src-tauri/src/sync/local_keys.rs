@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
-use crate::config::model::Item;
+use crate::config::model::{Directive, Item, SshConfigDoc};
 use crate::error::AppError;
 use crate::sync::dto::KeyFilePreview;
 use crate::sync::env::SyncEnv;
@@ -16,12 +16,18 @@ use crate::sync::slot_rules::{
     default_slot_name, inspect_private_key, new_slot_id, public_path, resolve_identity_value, slot_file_name, slot_value, valid_slot_name,
     IdentityTarget, KeySlotPayload, SlotMode, Unsyncable, SLOT_DIR, SLOT_SCHEMA,
 };
-use crate::sync::slots::{agent_refusal, in_the_way_message, live_slots, local_snapshot, refresh_agent, vault_unreadable_message};
+use crate::sync::slot_setup::{is_private_key_file, same_file};
+use crate::sync::slots::{agent_refusal, in_the_way_message, live_slots, local_key_fingerprint, local_snapshot, refresh_agent, vault_unreadable_message};
 use crate::sync::state_v2::{LocalSlot, SlotSource, SyncStateV2};
 use crate::vault::store::{vault_path, with_vault, EntryOrigin, VaultEntry};
 
 pub const MANAGED_FILE_MESSAGE: &str = "SSHelter already manages this file.";
 pub const NOT_A_KEY_FILE_MESSAGE: &str = "This file isn't a private key.";
+
+/// Move 留下原檔的原因(`file_kept`;主機改不了的兩個原因帶著主機名稱,在 `point_hosts_at` 組):沒有載入 config、不在 Host 區塊裡的 `IdentityFile` 指到它、它是符號連結。
+pub const NO_CONFIG_MESSAGE: &str = "The file stays: SSHelter couldn't check which hosts use it (no config loaded).";
+pub const OUTSIDE_A_HOST_BLOCK_MESSAGE: &str = "The file stays: an IdentityFile outside a Host block names it, and SSHelter only switches hosts.";
+pub const LINK_MESSAGE: &str = "The file stays: it's a link to another file, so SSHelter didn't remove either.";
 
 /// 貼上的文字最多收這麼多(私鑰本身的上限是 16 KiB,`inspect_private_key`)。
 const MAX_PASTE_BYTES: usize = 64 * 1024;
@@ -45,12 +51,16 @@ pub(crate) fn bad_name(name: &str) -> AppError {
     ))
 }
 
-/// 已經在 SSHelter 的同一把金鑰(同指紋)的名稱:這台保管庫裡的(`SlotSource::Vault`),或帳戶裡記著這個指紋、還在的插槽。
+/// 插槽的名稱(給「已經在 SSHelter」的訊息):payload 的名稱,沒有就用插槽檔名。
+fn slot_name(local: &LocalSlot) -> String {
+    local.payload.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| local.file_name.clone())
+}
+
+/// 已經在 SSHelter 的同一把金鑰(同指紋)的名稱:這台保管庫裡的(`SlotSource::Vault`),或帳戶裡記著這個指紋、還在的插槽。只看狀態、不讀檔案;
+/// 經連結拿著這把金鑰的插槽要讀它連到的檔案,另由 `already_linked` 看(兩者合起來是 `already_held`)。
 pub fn already_in_sshelter(state: &SyncStateV2, fingerprint: &str) -> Option<String> {
     let here = state.key_slots.values().find_map(|local| match &local.source {
-        Some(SlotSource::Vault { fingerprint: f, .. }) if f == fingerprint => {
-            Some(local.payload.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| local.file_name.clone()))
-        }
+        Some(SlotSource::Vault { fingerprint: f, .. }) if f == fingerprint => Some(slot_name(local)),
         _ => None,
     });
     here.or_else(|| {
@@ -59,10 +69,39 @@ pub fn already_in_sshelter(state: &SyncStateV2, fingerprint: &str) -> Option<Str
     })
 }
 
+/// 插槽經連結(`SlotSource::Linked`;例如還是「File for now」、連到使用者的 `~/.ssh/id_x` 的 `own` 插槽)拿著的金鑰,也算已經在 SSHelter:連到的檔案現在的指紋
+/// (`slots::local_key_fingerprint`:OpenSSH 格式從私鑰的公開段讀,其他格式讀旁邊的 `.pub`,都不需要 passphrase)等於 `fingerprint`;或使用者選的是檔案(`file`)、而它正是
+/// 某個插槽連到的(`slot_setup::same_file`),不論內容 —— 把它再加進來、Move 掉,那個插槽的連結就指著一個不見的檔案。連到的檔案現在讀不到(不見了、被換成不是私鑰的東西)
+/// 就不算:那個插槽現在沒有拿著任何金鑰。收起來的連結(`LocalSlot::parked`)照算,記錄還指著那個檔案。要讀檔案(讀之前先確認它是不超過 64 KiB 的私鑰檔),
+/// 所以和只看狀態的 `already_in_sshelter` 分開。回傳插槽的名稱。
+pub fn already_linked(state: &SyncStateV2, fingerprint: &str, file: Option<&Path>) -> Option<String> {
+    state.key_slots.values().find_map(|local| {
+        let Some(SlotSource::Linked { path, .. }) = &local.source else { return None };
+        let linked = Path::new(path);
+        let holds_it = || is_private_key_file(linked) && local_key_fingerprint(linked).as_deref() == Some(fingerprint);
+        (file.is_some_and(|picked| same_file(linked, picked)) || holds_it()).then(|| slot_name(local))
+    })
+}
+
+/// 這把金鑰(`fingerprint`)已經在 SSHelter 的哪個插槽裡:這台保管庫裡的、帳戶裡同步的(`already_in_sshelter`),或經連結拿著它的(`already_linked`)。
+/// `file` = 使用者選的金鑰檔(貼上的文字沒有)。
+fn already_held(state: &SyncStateV2, fingerprint: &str, file: Option<&Path>) -> Option<String> {
+    already_in_sshelter(state, fingerprint).or_else(|| already_linked(state, fingerprint, file))
+}
+
+fn already_message(name: &str) -> String {
+    format!("This key is already in SSHelter as {name}.")
+}
+
 /// 把一把私鑰(OpenSSH 格式原文;有 passphrase 的照原樣)加進 SSHelter,成為只在這台的金鑰。回傳新插槽的 id。
-/// 先檢查(名稱、格式、agent 用得了、沒有同一把、插槽路徑空著),再依序放:保管庫 → `.pub` → 狀態;後面失敗就收回前面放的。
-/// 不需要帳戶;狀態存不進去的行程(`save_blocked`)在動任何東西之前就拒絕(`local_snapshot`)。
+/// 先檢查(名稱、格式、agent 用得了、沒有同一把 —— 保管庫裡的、帳戶裡同步的、經連結拿著的,見 `already_held` —— 、插槽路徑空著),再依序放:保管庫 → `.pub` → 狀態;
+/// 後面失敗就收回前面放的。不需要帳戶;狀態存不進去的行程(`save_blocked`)在動任何東西之前就拒絕(`local_snapshot`)。
 pub fn add_key(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin) -> Result<String, AppError> {
+    add_key_from(env, name, text, origin, None)
+}
+
+/// `add_key`,多一個 `picked` = 使用者選的金鑰檔(`import_file`):那個檔案正是某個插槽連到的,也算已經在 SSHelter(`already_linked`)。
+fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, picked: Option<&Path>) -> Result<String, AppError> {
     let (state, home) = local_snapshot(env)?;
     if !valid_slot_name(name) {
         return Err(bad_name(name));
@@ -71,8 +110,8 @@ pub fn add_key(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin) -> Re
     if let Some(message) = agent_refusal(text, &facts) {
         return Err(AppError::Other(message.to_string()));
     }
-    if let Some(existing) = already_in_sshelter(&state, &facts.fingerprint) {
-        return Err(AppError::Other(format!("This key is already in SSHelter as {existing}.")));
+    if let Some(existing) = already_held(&state, &facts.fingerprint, picked) {
+        return Err(AppError::Other(already_message(&existing)));
     }
     let id = new_slot_id()?;
     let file = slot_file_name(name, &id);
@@ -166,7 +205,7 @@ fn key_file(path: &str, home: &Path) -> Result<PathBuf, AppError> {
     if inside {
         return Err(AppError::Other(MANAGED_FILE_MESSAGE.to_string()));
     }
-    if !path.is_absolute() || !crate::sync::slot_setup::is_private_key_file(&path) {
+    if !path.is_absolute() || !is_private_key_file(&path) {
         return Err(AppError::Other(NOT_A_KEY_FILE_MESSAGE.to_string()));
     }
     Ok(path)
@@ -176,8 +215,8 @@ fn home_of(env: &SyncEnv) -> Result<PathBuf, AppError> {
     env.ssh_dir.parent().map(Path::to_path_buf).ok_or_else(|| AppError::Other("cannot determine the home directory".to_string()))
 }
 
-/// 選了檔案之後、加進去之前給畫面看的(只讀):預設名稱、指紋、類型、有沒有 passphrase、用到它的主機、是不是 `ssh` 預設會試的檔名,
-/// 以及加不進去的原因(`problem`)。
+/// 選了檔案之後、加進去之前給畫面看的(只讀):預設名稱、指紋、類型、有沒有 passphrase、Move 會改的主機(`hosts_naming`:每一個指到它的 Host 區塊,萬用字元的也算)、
+/// 是不是 `ssh` 預設會試的檔名,以及加不進去的原因(`problem`)。
 pub fn preview_file(env: &SyncEnv, path: &str) -> Result<KeyFilePreview, AppError> {
     let home = home_of(env)?;
     let file_name = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -200,7 +239,7 @@ pub fn preview_file(env: &SyncEnv, path: &str) -> Result<KeyFilePreview, AppErro
     preview.default_identity = key.parent() == Some(env.ssh_dir.as_path()) && DEFAULT_IDENTITIES.contains(&file_name.as_str());
     preview.hosts = {
         let doc = env.doc.lock().unwrap();
-        doc.as_ref().map(|doc| crate::keys::hosts_using(doc, &home, &key)).unwrap_or_default()
+        doc.as_ref().map(|doc| hosts_naming(doc, &home, &key)).unwrap_or_default()
     };
     let text = Zeroizing::new(std::fs::read_to_string(&key)?);
     match inspect_private_key(&text) {
@@ -208,7 +247,7 @@ pub fn preview_file(env: &SyncEnv, path: &str) -> Result<KeyFilePreview, AppErro
         Ok(facts) => {
             preview.problem = agent_refusal(&text, &facts).map(str::to_string).or_else(|| {
                 let state = crate::sync::runtime::snapshot(env)?;
-                already_in_sshelter(&state, &facts.fingerprint).map(|name| format!("This key is already in SSHelter as {name}."))
+                already_held(&state, &facts.fingerprint, Some(&key)).map(|name| already_message(&name))
             });
             preview.fingerprint = Some(facts.fingerprint);
             preview.key_type = Some(facts.key_type);
@@ -219,13 +258,13 @@ pub fn preview_file(env: &SyncEnv, path: &str) -> Result<KeyFilePreview, AppErro
 }
 
 /// 「New key」→ From a file(與 `~/.ssh` 的「Import」)。`keep_file` = 「Keep the file too」:原檔與主機都不動。否則「Move into SSHelter」:
-/// `IdentityFile` 指到這個檔案的主機改指到新的插槽(`point_hosts_at`),全部改好才移除原檔(只有私鑰檔;旁邊的 `.pub` 留著)。改不了就一台都不改、
-/// 原檔留著:金鑰照樣加進來了,`file_kept` 說明原因。
+/// `IdentityFile` 指到這個檔案的主機改指到新的插槽(`point_hosts_at`),全部改好才移除原檔(只有私鑰檔;旁邊的 `.pub` 留著)。還有東西指著它、或它是符號連結
+/// (`point_hosts_at` 列的原因)就一台都不改、原檔留著:金鑰照樣加進來了,`file_kept` 說明原因。這個檔案正是某個插槽連到的(`already_linked`)則根本不加。
 pub fn import_file(env: &SyncEnv, name: &str, path: &str, keep_file: bool) -> Result<ImportedKey, AppError> {
     let home = home_of(env)?;
     let key = key_file(path, &home)?;
     let text = Zeroizing::new(std::fs::read_to_string(&key)?);
-    let slot_id = add_key(env, name, &text, EntryOrigin::Imported)?;
+    let slot_id = add_key_from(env, name, &text, EntryOrigin::Imported, Some(&key))?;
     let mut imported = ImportedKey { slot_id: slot_id.clone(), rewritten_hosts: Vec::new(), removed_file: false, file_kept: None };
     if keep_file {
         return Ok(imported);
@@ -249,11 +288,87 @@ fn names(aliases: &[String]) -> String {
     aliases.join(", ")
 }
 
-/// 「Move into SSHelter」:載入的每個 config 檔裡,生效的 `IdentityFile` 指到 `key` 的主機改指到插槽 `slot_file`。全有或全無:
-/// 有一台改不了 —— 同名的主機不只一份(改哪一份都不對,同 SP3 的 `slot_setup::rewrite_in`)、在勾選了而第一輪還沒跑完的 space 裡(第一輪以 chain 為準,
-/// 改了會被蓋回去)—— 就一台都不改,回 Err(原因)。寫檔失敗:已寫的留著,記憶體裡的 doc 重載,回 Err(原因)。改了的話,之後更新 agent 的設定
-/// (那些主機改走 agent)。回傳改了的主機(依出現順序、不重複)。鎖:先拿 doc、backed_up,勾選的 space 在持有 doc 鎖時才取(短暫拿 core 鎖,同
-/// `slot_setup::rewrite_hosts`:第一輪的旗標在 doc 鎖裡改,取了清單之後才有人退回基線輪的話,改寫就白費了);存檔 hook 只拿 core。
+/// 把 `alias` 放進 `list`(已經有就不放)。
+fn push_unique(list: &mut Vec<String>, alias: &str) {
+    if !list.iter().any(|a| a == alias) {
+        list.push(alias.to_string());
+    }
+}
+
+/// 這一行是不是生效中的 `IdentityFile`、而且指到 `key`(值的解析同主機的 `IdentityFile`,`slot_setup::same_file` 認同一個檔案;寫出來會變成註解的行不算)。
+/// 預覽(`hosts_naming`)與 Move(`point_hosts_at`)都靠這一個判斷,兩邊不會各說各的。
+fn names_the_key(d: &Directive, home: &Path, key: &Path) -> bool {
+    d.key == "identityfile"
+        && !d.serializes_as_comment()
+        && matches!(resolve_identity_value(&d.value, home), IdentityTarget::File(target) if same_file(&target, key))
+}
+
+/// Host 區塊裡一行指到金鑰檔的 `IdentityFile`:那一行在 doc 裡的位置(檔案、區塊、行),與區塊的 pattern。
+struct NamingLine {
+    file_idx: usize,
+    item_idx: usize,
+    line_idx: usize,
+    patterns: Vec<String>,
+}
+
+impl NamingLine {
+    /// 主機的名稱:區塊的第一個 pattern(萬用字元的 Host 也是)。
+    fn alias(&self) -> String {
+        self.patterns.first().cloned().unwrap_or_default()
+    }
+}
+
+/// doc 裡每一個 Host 區塊(載入的每一個檔案)的、指到 `key` 的 `IdentityFile`,依出現順序。一台主機可以有好幾行,同名的主機也可以有好幾份。
+fn host_lines_naming(doc: &SshConfigDoc, home: &Path, key: &Path) -> Vec<NamingLine> {
+    let mut out = Vec::new();
+    for (file_idx, file) in doc.files.iter().enumerate() {
+        for (item_idx, item) in file.items.iter().enumerate() {
+            let Item::Host(host) = item else { continue };
+            for (line_idx, line) in host.body.iter().enumerate() {
+                if matches!(line, Item::Directive(d) if names_the_key(d, home, key)) {
+                    out.push(NamingLine { file_idx, item_idx, line_idx, patterns: host.patterns.clone() });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 給畫面看的主機(`KeyFilePreview::hosts`):`host_lines_naming` 的主機名稱,依出現順序、不重複。沒有東西擋著的時候,Move 改的就是這些(`point_hosts_at`)。
+fn hosts_naming(doc: &SshConfigDoc, home: &Path, key: &Path) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for line in host_lines_naming(doc, home, key) {
+        push_unique(&mut hosts, &line.alias());
+    }
+    hosts
+}
+
+/// 不在 Host 區塊裡、指到 `key` 的 `IdentityFile`:載入的任何一個檔案最上層的指令,或 `Match` 區塊裡的。Move 只改主機,改不了這樣的行。
+fn names_outside_hosts(doc: &SshConfigDoc, home: &Path, key: &Path) -> bool {
+    let names_it = |item: &Item| matches!(item, Item::Directive(d) if names_the_key(d, home, key));
+    doc.files.iter().any(|file| {
+        file.items.iter().any(|item| match item {
+            Item::Match(block) => block.body.iter().any(|line| names_it(line)),
+            other => names_it(other),
+        })
+    })
+}
+
+/// 路徑本身是符號連結(`symlink_metadata`:不跟著連結走)。
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// 「Move into SSHelter」:載入的每個 config 檔裡,生效的 `IdentityFile` 指到 `key` 的主機改指到插槽 `slot_file`。全有或全無 —— 下面任何一個原因成立,就一台都不改、
+/// 回 Err(原因),原檔留著(原因在改寫之前就全部看完;依這個順序,同時有好幾個就說最前面的):
+/// - 沒有載入 config(`NO_CONFIG_MESSAGE`):看不出哪些主機用到這個檔案,不能當成沒有。
+/// - 同名的主機不只一份(改哪一份都不對,同 SP3 的 `slot_setup::rewrite_in`)。
+/// - 在勾選了而第一輪還沒跑完的 space 裡(第一輪以 chain 為準,改了會被蓋回去)。
+/// - 不在 Host 區塊裡的 `IdentityFile` 指到它(`OUTSIDE_A_HOST_BLOCK_MESSAGE`:檔案最上層或 `Match` 區塊裡),Move 只改主機,原檔一刪那一行就指著不見的檔案。
+/// - 它是符號連結(`LINK_MESSAGE`):連結和它指到的檔案都不動。
+/// 寫檔失敗:已寫的留著,記憶體裡的 doc 重載,回 Err(原因)。改了的話,之後更新 agent 的設定(那些主機改走 agent)。回傳改了的主機(依出現順序、不重複)。
+/// 鎖:先拿 doc、backed_up,勾選的 space 在持有 doc 鎖時才取(短暫拿 core 鎖,同 `slot_setup::rewrite_hosts`:第一輪的旗標在 doc 鎖裡改,取了清單之後才有人退回
+/// 基線輪的話,改寫就白費了);存檔 hook 只拿 core。
 fn point_hosts_at(env: &SyncEnv, home: &Path, key: &Path, slot_file: &str) -> Result<Vec<String>, String> {
     let result = {
         let mut doc_lock = env.doc.lock().unwrap();
@@ -261,37 +376,19 @@ fn point_hosts_at(env: &SyncEnv, home: &Path, key: &Path, slot_file: &str) -> Re
         let retention = env.retention();
         let selected: Vec<PathBuf> = crate::sync::migrate::selected_space_files(env.runtime, &env.ssh_dir).into_iter().map(|(_, p)| p).collect();
         let ready: Vec<PathBuf> = crate::sync::slot_setup::ready_space_files(env).into_iter().map(|(_, p)| p).collect();
-        let Some(doc) = doc_lock.as_mut() else { return Ok(Vec::new()) };
+        let Some(doc) = doc_lock.as_mut() else { return Err(NO_CONFIG_MESSAGE.to_string()) };
         let counts = crate::sync::slot_setup::alias_counts(doc);
         let (mut targets, mut locked, mut not_ready, mut rewritten) = (Vec::new(), Vec::<String>::new(), Vec::<String>::new(), Vec::<String>::new());
-        for (file_idx, file) in doc.files.iter().enumerate() {
-            for (item_idx, item) in file.items.iter().enumerate() {
-                let Item::Host(host) = item else { continue };
-                let alias = host.patterns.first().cloned().unwrap_or_default();
-                for (line_idx, line) in host.body.iter().enumerate() {
-                    let Item::Directive(d) = line else { continue };
-                    if d.key != "identityfile" || d.serializes_as_comment() {
-                        continue;
-                    }
-                    let IdentityTarget::File(target) = resolve_identity_value(&d.value, home) else { continue };
-                    if !crate::sync::slot_setup::same_file(&target, key) {
-                        continue;
-                    }
-                    if crate::sync::slot_setup::locked(&host.patterns, &counts) {
-                        if !locked.contains(&alias) {
-                            locked.push(alias.clone());
-                        }
-                    } else if selected.contains(&file.path) && !ready.contains(&file.path) {
-                        if !not_ready.contains(&alias) {
-                            not_ready.push(alias.clone());
-                        }
-                    } else {
-                        targets.push((file_idx, item_idx, line_idx));
-                        if !rewritten.contains(&alias) {
-                            rewritten.push(alias.clone());
-                        }
-                    }
-                }
+        for line in host_lines_naming(doc, home, key) {
+            let alias = line.alias();
+            let file_path = &doc.files[line.file_idx].path;
+            if crate::sync::slot_setup::locked(&line.patterns, &counts) {
+                push_unique(&mut locked, &alias);
+            } else if selected.contains(file_path) && !ready.contains(file_path) {
+                push_unique(&mut not_ready, &alias);
+            } else {
+                targets.push((line.file_idx, line.item_idx, line.line_idx));
+                push_unique(&mut rewritten, &alias);
             }
         }
         if !locked.is_empty() {
@@ -299,6 +396,12 @@ fn point_hosts_at(env: &SyncEnv, home: &Path, key: &Path, slot_file: &str) -> Re
         }
         if !not_ready.is_empty() {
             return Err(format!("The file stays: {} are in a space that hasn't finished its first sync.", names(&not_ready)));
+        }
+        if names_outside_hosts(doc, home, key) {
+            return Err(OUTSIDE_A_HOST_BLOCK_MESSAGE.to_string());
+        }
+        if is_link(key) {
+            return Err(LINK_MESSAGE.to_string());
         }
         let value = slot_value(slot_file);
         for (file_idx, item_idx, line_idx) in &targets {
@@ -720,5 +823,260 @@ mod tests {
         assert!(sk.fingerprint.is_some());
         assert_eq!(sk.has_passphrase, Some(false));
         assert!(!sk.default_identity, "id_sk isn't a name ssh tries by itself");
+    }
+
+    // ── Move 不刪還有東西指著的檔案(修正第 1 輪):沒載入 config、不在 Host 區塊裡的 `IdentityFile`、連結、插槽連到的檔案 ──────────────
+
+    const OUTSIDE_A_HOST_BLOCK: &str = "The file stays: an IdentityFile outside a Host block names it, and SSHelter only switches hosts.";
+
+    /// 選 `id_work`、Move(不留檔案)。回傳(裝置、檔案、結果)。
+    fn move_id_work(d: &TestDevice) -> (std::path::PathBuf, ImportedKey) {
+        let file = key_file(d, "id_work", &test_keys::plain());
+        let imported = import_file(&d.env(), "work", &file.display().to_string(), false).unwrap();
+        (file, imported)
+    }
+
+    /// Move 什麼都沒改:金鑰照樣加進來了,原檔留著,`file_kept` 是 `reason`,主 config 一個位元組都沒動,也沒有發出「config 變了」的通知。
+    fn assert_kept(d: &TestDevice, file: &std::path::Path, imported: &ImportedKey, reason: &str, main: &str) {
+        assert_eq!(imported.file_kept.as_deref(), Some(reason));
+        assert!(!imported.removed_file);
+        assert!(imported.rewritten_hosts.is_empty());
+        assert!(file.exists(), "the file stays");
+        assert!(d.state().key_slots.contains_key(&imported.slot_id), "the key was added all the same");
+        assert_eq!(d.main_config(), main, "no host was switched");
+        assert!(d.events.applied.lock().unwrap().is_empty(), "nothing changed, so nothing was announced");
+    }
+
+    /// 沒有載入 config:看不出哪些主機用到這個檔案,不能當成沒有。金鑰照樣加進來,原檔留著。
+    #[test]
+    fn a_move_without_a_loaded_config_keeps_the_file() {
+        let main = "Host web\n  IdentityFile ~/.ssh/id_work\n";
+        let d = device(main);
+        *d.doc.lock().unwrap() = None;
+        let (file, imported) = move_id_work(&d);
+        assert_kept(&d, &file, &imported, "The file stays: SSHelter couldn't check which hosts use it (no config loaded).", main);
+    }
+
+    /// 檔案最上層的 `IdentityFile`(不在任何 Host 區塊裡)指到這個檔案:Move 只改主機,改不了它 —— 一台都不改(連同樣指到這個檔案的 Host 區塊也不改),原檔留著。
+    #[test]
+    fn an_identityfile_at_the_top_of_a_config_file_keeps_the_file() {
+        let main = "IdentityFile ~/.ssh/id_work\nHost web\n  IdentityFile ~/.ssh/id_work\n";
+        let d = device(main);
+        let (file, imported) = move_id_work(&d);
+        assert_kept(&d, &file, &imported, OUTSIDE_A_HOST_BLOCK, main);
+    }
+
+    /// `Match` 區塊裡的 `IdentityFile` 也一樣。
+    #[test]
+    fn an_identityfile_in_a_match_block_keeps_the_file() {
+        let main = "Host web\n  IdentityFile ~/.ssh/id_work\nMatch host db\n  IdentityFile ~/.ssh/id_work\n";
+        let d = device(main);
+        let (file, imported) = move_id_work(&d);
+        assert_kept(&d, &file, &imported, OUTSIDE_A_HOST_BLOCK, main);
+    }
+
+    /// 載入的任何一個檔案都算:Include 進來的檔案最上層的 `IdentityFile`;兩個檔案都一個位元組沒動。
+    #[test]
+    fn an_identityfile_outside_a_host_block_in_an_included_file_keeps_the_file() {
+        let main = "Include ~/.ssh/extra.conf\nHost web\n  IdentityFile ~/.ssh/id_work\n";
+        let d = device(main);
+        let extra = d.ssh_dir().join("extra.conf");
+        std::fs::write(&extra, "IdentityFile ~/.ssh/id_work\n").unwrap();
+        d.reload();
+        let (file, imported) = move_id_work(&d);
+        assert_kept(&d, &file, &imported, OUTSIDE_A_HOST_BLOCK, main);
+        assert_eq!(d.read(&extra), "IdentityFile ~/.ssh/id_work\n");
+    }
+
+    /// 不在 Host 區塊裡、但不是指到這個檔案的 `IdentityFile`(別的金鑰)不擋;載入的 config 裡已經關掉(寫出來會變成註解)的那一行也不算。
+    #[test]
+    fn an_identityfile_outside_a_host_block_that_doesnt_count_doesnt_stop_the_move() {
+        let main = "IdentityFile ~/.ssh/id_other\nMatch host db\n  IdentityFile ~/.ssh/id_other\nHost web\n  IdentityFile ~/.ssh/id_work\n";
+        let d = device(main);
+        let (file, imported) = move_id_work(&d);
+        assert_eq!(imported.rewritten_hosts, vec!["web".to_string()]);
+        assert!(imported.removed_file && !file.exists());
+        let config = d.main_config();
+        assert!(config.contains("IdentityFile ~/.ssh/id_other\nMatch host db\n  IdentityFile ~/.ssh/id_other\n"), "{config}");
+
+        let d = device("IdentityFile ~/.ssh/id_work\nHost web\n  IdentityFile ~/.ssh/id_work\n");
+        {
+            let mut doc = d.doc.lock().unwrap();
+            let Some(Item::Directive(top)) = doc.as_mut().unwrap().files[0].items.first_mut() else { panic!("a directive at the top") };
+            crate::config::edit::set_directive_enabled(top, false);
+        }
+        let (file, imported) = move_id_work(&d);
+        assert_eq!(imported.rewritten_hosts, vec!["web".to_string()], "{:?}", imported.file_kept);
+        assert!(imported.removed_file && !file.exists());
+        assert!(d.main_config().contains("# IdentityFile ~/.ssh/id_work\nHost web\n"), "written as a comment: {}", d.main_config());
+    }
+
+    /// 不能改的原因有固定的先後:同名的主機有好幾份、第一輪還沒跑完的 space、不在 Host 區塊裡的 `IdentityFile`(、連結:見下面)。同時有好幾個,說最前面的那一個。
+    #[test]
+    fn the_reasons_to_keep_the_file_come_in_a_fixed_order() {
+        let main = "IdentityFile ~/.ssh/id_work\nHost web\n  IdentityFile ~/.ssh/id_work\nHost web\n  User me\n";
+        let d = device(main);
+        let (file, imported) = move_id_work(&d);
+        assert_kept(&d, &file, &imported, "The file stays: web have more than one copy, so SSHelter didn't change them.", main);
+
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let space_text = "IdentityFile ~/.ssh/id_work\nHost web\n  IdentityFile ~/.ssh/id_work\n";
+        a.save_in_app(&a.space_path(&personal), space_text);
+        mutate(&a.env(), |s| {
+            s.spaces.get_mut(&personal).unwrap().baseline_established = false;
+            Ok(())
+        })
+        .unwrap();
+        let (file, imported) = move_id_work(&a);
+        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: web are in a space that hasn't finished its first sync."));
+        assert!(file.exists());
+        assert_eq!(a.read(&a.space_path(&personal)), space_text);
+    }
+
+    /// 預覽列的就是 Move 會改的主機:每一個指到這個檔案的 Host 區塊(萬用字元的 Host 也是),用區塊的第一個 pattern 當名稱,依出現順序、不重複。
+    #[test]
+    fn the_preview_lists_the_hosts_the_move_switches_wildcards_included() {
+        let main = "Host *\n  IdentityFile ~/.ssh/id_work\nHost web db\n  IdentityFile ~/.ssh/id_work\n  IdentityFile \"%d/.ssh/id_work\"\nHost other\n  IdentityFile ~/.ssh/id_other\n";
+        let d = device(main);
+        let file = key_file(&d, "id_work", &test_keys::plain());
+        let path = file.display().to_string();
+        let preview = preview_file(&d.env(), &path).unwrap();
+        assert_eq!(preview.hosts, vec!["*".to_string(), "web".to_string()]);
+        assert_eq!(preview.problem, None);
+
+        let imported = import_file(&d.env(), "work", &path, false).unwrap();
+        assert_eq!(imported.rewritten_hosts, preview.hosts, "the move switches what the preview listed");
+        assert!(imported.removed_file);
+        let value = slot_value(&d.state().key_slots[&imported.slot_id].file_name);
+        let config = d.main_config();
+        assert!(config.contains(&format!("Host *\n  IdentityFile {value}\n")), "{config}");
+        assert!(config.contains(&format!("Host web db\n  IdentityFile {value}\n  IdentityFile {value}\n")), "{config}");
+        assert!(config.contains("Host other\n  IdentityFile ~/.ssh/id_other\n"), "{config}");
+    }
+
+    /// 經連結拿著這把金鑰的插槽(這裡是 `own`、還是「File for now」連到 `~/.ssh/id_x`)也是「已經在 SSHelter」:貼上、從檔案(Move 或 Keep)、同一把金鑰的另一個檔案,
+    /// 都以插槽的名稱拒絕,什麼都不寫,原檔不動。
+    #[test]
+    fn a_key_a_slot_holds_through_a_link_is_already_in_sshelter() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_x");
+        let file = a.ssh_dir().join("id_x");
+        let path = file.display().to_string();
+        let copy = key_file(&a, "id_copy", &test_keys::plain());
+        let state = a.state();
+        let sorted_folder = || {
+            let mut files = slot_dir_files(&a);
+            files.sort();
+            files
+        };
+        let folder = sorted_folder();
+        let message = "This key is already in SSHelter as id_x.";
+
+        assert_eq!(import_file(&a.env(), "work", &path, false).unwrap_err().to_string(), message, "Move into SSHelter");
+        assert_eq!(import_file(&a.env(), "work", &path, true).unwrap_err().to_string(), message, "Keep the file too");
+        assert_eq!(import_file(&a.env(), "work", &copy.display().to_string(), false).unwrap_err().to_string(), message, "the same key in another file");
+        assert_eq!(import_text(&a.env(), "again", &test_keys::plain()).unwrap_err().to_string(), message, "paste");
+        assert_eq!(preview_file(&a.env(), &path).unwrap().problem.as_deref(), Some(message), "the preview says so too");
+
+        assert!(file.exists() && copy.exists(), "both files stay");
+        assert_eq!(a.state(), state, "nothing was written to the state");
+        assert_eq!(sorted_folder(), folder, "or to the slot folder");
+        assert_eq!(vault_entries(&a), 0, "or to the vault");
+    }
+
+    /// `already_linked` 直接看:插槽連到的檔案正是使用者選的那個,不論裡面是什麼都算(Move 掉它,插槽的連結就指著不見的檔案);其他一律看連到的檔案現在的指紋
+    /// (OpenSSH 格式從私鑰的公開段讀,舊式 PEM 讀旁邊的 `.pub`),沒有選檔案(貼上)也一樣。
+    #[test]
+    fn a_slot_linked_to_the_picked_file_holds_it_whatever_the_file_says() {
+        let d = device("# main\n");
+        let linked = key_file(&d, "id_x", "not a key any more");
+        let other = key_file(&d, "id_y", &test_keys::ecdsa());
+        let id = crate::sync::slot_rules::new_slot_id().unwrap();
+        let slot = LocalSlot {
+            file_name: format!("laptop-{}", &id[..8]),
+            source: Some(SlotSource::Linked { path: linked.display().to_string(), link: crate::sync::slot_files::LinkKind::Symlink, fingerprint: None, origin: true }),
+            last_error: None,
+            asked: false,
+            payload: Some(KeySlotPayload {
+                schema: SLOT_SCHEMA,
+                name: "laptop".to_string(),
+                mode: SlotMode::Own,
+                origin_device_id: d.state().device_id,
+                created_at_ms: 1,
+                public_key: None,
+                fingerprint: None,
+                key_type: None,
+                has_passphrase: None,
+            }),
+            uploaded_fingerprint: None,
+            parked: true,
+            learned_in: None,
+            copy_from_another_account: false,
+            local_only: false,
+        };
+        mutate(&d.env(), |s| {
+            s.key_slots.insert(id.clone(), slot);
+            Ok(())
+        })
+        .unwrap();
+        let state = d.state();
+
+        // 檔案裡已經不是金鑰,讀不出指紋:只有「選的就是這個檔案」認得出它(收起來的連結也算)。
+        assert_eq!(already_linked(&state, "SHA256:anything", Some(&linked)).as_deref(), Some("laptop"));
+        assert_eq!(already_linked(&state, "SHA256:anything", Some(&other)), None, "another file");
+        assert_eq!(already_linked(&state, "SHA256:anything", None), None, "a paste has no file");
+
+        // 檔案裡是金鑰:看指紋,選不選檔案都一樣。
+        std::fs::write(&linked, test_keys::plain()).unwrap();
+        assert_eq!(already_linked(&state, test_keys::PLAIN_FINGERPRINT, None).as_deref(), Some("laptop"));
+        assert_eq!(already_linked(&state, test_keys::PLAIN_FINGERPRINT, Some(&other)).as_deref(), Some("laptop"));
+        assert_eq!(already_linked(&state, test_keys::ECDSA_FINGERPRINT, None), None, "another key");
+
+        // 舊式 PEM:公開段讀不出來,指紋來自旁邊的 `.pub`。
+        let (begin, end) = (concat!("-----BEGIN ", "RSA", " PRIVATE KEY-----"), concat!("-----END ", "RSA", " PRIVATE KEY-----"));
+        std::fs::write(&linked, format!("{begin}\nbm90IGEga2V5\n{end}\n")).unwrap();
+        assert_eq!(already_linked(&state, test_keys::ECDSA_FINGERPRINT, None), None, "no .pub beside it");
+        std::fs::write(public_path(&linked), format!("{} me@host\n", test_keys::ECDSA_PUBLIC)).unwrap();
+        assert_eq!(already_linked(&state, test_keys::ECDSA_FINGERPRINT, None).as_deref(), Some("laptop"));
+
+        // 其他來源的插槽不算:這一個不是連結了,就沒有東西指著那個檔案。
+        mutate(&d.env(), |s| {
+            s.key_slots.get_mut(&id).unwrap().source = None;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(already_linked(&d.state(), test_keys::ECDSA_FINGERPRINT, Some(&linked)), None);
+    }
+
+    /// 連到的檔案現在讀不到(不見了):那個插槽沒有拿著任何金鑰,同一把金鑰可以加進來。
+    #[test]
+    fn a_link_whose_file_is_gone_holds_no_key() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_x");
+        std::fs::remove_file(a.ssh_dir().join("id_x")).unwrap();
+        import_text(&a.env(), "again", &test_keys::plain()).unwrap();
+    }
+
+    /// 選的檔案本身是符號連結:連結和它指到的檔案都留著,一台主機都不改(說明原因);金鑰照樣加進來。不在 Host 區塊裡的 `IdentityFile` 的原因排在它前面。
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_keeps_the_link_and_its_target() {
+        let main = "Host web\n  IdentityFile ~/.ssh/id_work\n";
+        let d = device(main);
+        let target = key_file(&d, "work_key", &test_keys::plain());
+        let link = d.ssh_dir().join("id_work");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let imported = import_file(&d.env(), "work", &link.display().to_string(), false).unwrap();
+        assert_kept(&d, &link, &imported, "The file stays: it's a link to another file, so SSHelter didn't remove either.", main);
+        assert!(target.exists(), "and so does what it links to");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
+
+        let main = "IdentityFile ~/.ssh/id_work\nHost web\n  IdentityFile ~/.ssh/id_work\n";
+        let d = device(main);
+        let target = key_file(&d, "work_key", &test_keys::plain());
+        let link = d.ssh_dir().join("id_work");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let imported = import_file(&d.env(), "work", &link.display().to_string(), false).unwrap();
+        assert_kept(&d, &link, &imported, OUTSIDE_A_HOST_BLOCK, main);
     }
 }

@@ -252,6 +252,8 @@ pub struct KeyFilePreview {
     pub fingerprint: Option<String>,
     pub key_type: Option<String>,
     pub has_passphrase: Option<bool>,
+    /// Move into SSHelter 會改的主機:每一個 `IdentityFile` 指到這個檔案的 Host 區塊(萬用字元的 Host 也算),名稱是區塊的第一個 pattern,依出現順序、不重複。
+    /// 來自 config,畫面以 `revealHidden` 顯示。
     pub hosts: Vec<String>,
     /// 檔案是 `ssh` 沒寫 `IdentityFile` 時會試的 `~/.ssh/id_*`(移走之後那些主機找不到它)。
     pub default_identity: bool,
