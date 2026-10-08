@@ -79,8 +79,43 @@ pub fn run_mcp_host() {
     run_app(true);
 }
 
+/// Show, unminimize and focus the main window.
+pub(crate) fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// What a second launch does in the running SSHelter. `args` are the second process's
+/// arguments, executable path first, so its mode is `args[1]` (as in main.rs). An MCP host
+/// launch means an adapter could not reach the bridge: it needs the bridge, not a window.
+/// Any other launch is the user opening SSHelter again.
+#[cfg(desktop)]
+fn second_launch_shows_window(args: &[String]) -> bool {
+    args.get(1).map(String::as_str) != Some(mcp::HOST_FLAG)
+}
+
+/// The single-instance plugin stopped a second launch before it started anything and handed
+/// its arguments to this instance.
+#[cfg(desktop)]
+fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
+    if second_launch_shows_window(&args) {
+        show_main_window(app);
+    } else {
+        mcp::republish_bridge(app);
+    }
+}
+
 fn run_app(mcp_keep_alive: bool) {
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Only one SSHelter runs at a time: a second launch hands over to the running instance and
+    // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
+    // sync engine or the SSH agent starts. It must be the first plugin registered.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(on_second_launch));
+    let mut builder = builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_os::init())
@@ -242,4 +277,33 @@ fn run_app(mcp_keep_alive: bool) {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(all(test, desktop))]
+mod tests {
+    use super::*;
+
+    const EXE: &str = "/Applications/SSHelter.app/Contents/MacOS/sshelter";
+
+    /// The decision for a second launch with these arguments.
+    fn shows(list: &[&str]) -> bool {
+        let args: Vec<String> = list.iter().map(|s| s.to_string()).collect();
+        second_launch_shows_window(&args)
+    }
+
+    #[test]
+    fn a_second_mcp_host_launch_shows_no_window() {
+        assert!(!shows(&[EXE, "--mcp-host"]));
+        assert!(!shows(&[r"C:\SSHelter\sshelter.exe", "--mcp-host"]));
+    }
+
+    #[test]
+    fn any_other_second_launch_shows_the_window() {
+        assert!(shows(&[EXE]));
+        assert!(shows(&[]));
+        // Same rule as main.rs: only the first argument picks the mode.
+        assert!(shows(&[EXE, "--other", "--mcp-host"]));
+        assert!(shows(&[EXE, "--mcp"]));
+        assert!(shows(&[EXE, "--mcp-host=1"]));
+    }
 }

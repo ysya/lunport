@@ -56,10 +56,14 @@ ts-rs = "10"
 mockito = "1"
 
 # Desktop-only plugins (autostart and global shortcuts have no mobile support).
+# single-instance: a second launch hands its arguments to the running SSHelter and exits (lib.rs).
+# `~2.4.5` on purpose: 2.5.x requires tauri 2.12, and a caret requirement makes cargo upgrade tauri
+# (and its runtime crates) past the 2.11 that @tauri-apps/api is on. Move both to 2.12 together.
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-single-instance = "~2.4.5"
 
 # SP3 金鑰插槽:Windows 上把插槽目錄與私鑰設成只有目前使用者能存取(src/sync/slot_files_windows.rs)。
 # 0.61 已在 Cargo.lock(tempfile 等的相依),不需下載。Win32_Storage_FileSystem 與 Win32_System_SystemServices 只為了

@@ -28,6 +28,9 @@ use crate::error::AppError;
 use crate::fsutil;
 use crate::state::AppState;
 
+/// First argument that starts SSHelter as the MCP host (main.rs): the desktop app, in the background.
+pub const HOST_FLAG: &str = "--mcp-host";
+
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_BRIDGE_LINE: u64 = 1_048_576;
 const MAX_COMMAND_BYTES: usize = 16_384;
@@ -115,7 +118,8 @@ pub struct McpRuntime {
     pending: Mutex<HashMap<String, PendingApproval>>,
     recent: Mutex<VecDeque<McpAuditEntry>>,
     cancellations: Mutex<CancellationState>,
-    bridge_token: Mutex<Option<String>>,
+    /// This instance's bridge (port, token, pid): what it wrote to `mcp-runtime.json`.
+    bridge: Mutex<Option<RuntimeInfo>>,
     bridge_active: AtomicBool,
     pub keep_alive: AtomicBool,
     next_request_id: AtomicU64,
@@ -129,7 +133,7 @@ impl Default for McpRuntime {
             pending: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
             cancellations: Mutex::new(CancellationState::default()),
-            bridge_token: Mutex::new(None),
+            bridge: Mutex::new(None),
             bridge_active: AtomicBool::new(false),
             keep_alive: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
@@ -285,20 +289,16 @@ fn random_token() -> Result<String, AppError> {
 
 fn start_bridge(app: AppHandle) -> Result<(), AppError> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let port = listener.local_addr()?.port();
-    let token = random_token()?;
     let info = RuntimeInfo {
-        port,
-        token: token.clone(),
+        port: listener.local_addr()?.port(),
+        token: random_token()?,
         pid: std::process::id(),
     };
-    let bytes = serde_json::to_vec(&info)
-        .map_err(|e| AppError::Other(format!("cannot serialize MCP runtime info: {e}")))?;
-    fsutil::atomic_write(&runtime_path()?, &bytes, 0o600)?;
+    write_runtime_info(&info)?;
 
     {
         let state = app.state::<AppState>();
-        *state.mcp.bridge_token.lock().unwrap() = Some(token);
+        *state.mcp.bridge.lock().unwrap() = Some(info);
         state.mcp.bridge_active.store(true, Ordering::Relaxed);
     }
 
@@ -319,6 +319,26 @@ fn start_bridge(app: AppHandle) -> Result<(), AppError> {
         })
         .map_err(AppError::Io)?;
     Ok(())
+}
+
+/// `mcp-runtime.json` tells `--mcp` adapters which bridge to connect to and how to authenticate.
+fn write_runtime_info(info: &RuntimeInfo) -> Result<(), AppError> {
+    let bytes = serde_json::to_vec(info)
+        .map_err(|e| AppError::Other(format!("cannot serialize MCP runtime info: {e}")))?;
+    fsutil::atomic_write(&runtime_path()?, &bytes, 0o600)
+}
+
+/// A second `--mcp-host` launch was handed over to this instance (single instance, lib.rs): its
+/// adapter could not reach the bridge named in `mcp-runtime.json`. Point the file at this
+/// instance's bridge again, so the waiting adapter finds it.
+pub fn republish_bridge(app: &AppHandle) {
+    let info = app.state::<AppState>().mcp.bridge.lock().unwrap().clone();
+    // No bridge yet: this instance is still starting, and `start_bridge` writes the file.
+    if let Some(info) = info {
+        if let Err(e) = write_runtime_info(&info) {
+            eprintln!("[mcp] cannot rewrite the MCP runtime file: {e}");
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -430,8 +450,14 @@ fn monitor_bridge_disconnect(
 
 fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, String> {
     let state = app.state::<AppState>();
-    let expected = state.mcp.bridge_token.lock().unwrap().clone();
-    if expected.as_deref() != Some(envelope.token.as_str()) {
+    let authorized = state
+        .mcp
+        .bridge
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|bridge| bridge.token == envelope.token);
+    if !authorized {
         return Err("unauthorized local MCP bridge request".to_string());
     }
     state
@@ -623,11 +649,7 @@ fn run_approved(
     }
     state.mcp.keep_alive.store(true, Ordering::Relaxed);
 
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
+    crate::show_main_window(app);
     let _ = app.emit("mcp://approval-requested", &request);
 
     let approved = match rx.recv_timeout(APPROVAL_TIMEOUT) {
@@ -1201,7 +1223,7 @@ fn ensure_desktop_bridge() -> Result<RuntimeInfo, String> {
 
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate SSHelter: {e}"))?;
     Command::new(exe)
-        .arg("--mcp-host")
+        .arg(HOST_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
