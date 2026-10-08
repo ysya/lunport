@@ -127,10 +127,10 @@ describe("a synced space's name, which another computer chose", () => {
 
 describe("the marker on a host whose key isn't on this computer", () => {
   // React writes the apostrophes of an attribute as `&#x27;`.
-  const TITLE = 'title="This host&#x27;s key isn&#x27;t on this computer — pick one in Keys."';
+  const TITLE = 'title="This host&#x27;s key isn&#x27;t on this computer — pick one in Keychain."';
   const needsKey = { kind: "needs_key" as const, waiting_for_sync: false };
 
-  it("points to Keys, once, on the row of the host that uses the slot", () => {
+  it("points to the Keychain, once, on the row of the host that uses the slot", () => {
     const html = render([host("web", WORK)], { keySlots: [keySlot({ hosts: ["web"], status: needsKey })] });
     expect(html.split(TITLE).length - 1).toBe(1);
     expect(html).toContain('aria-label="This host&#x27;s key isn&#x27;t on this computer"');

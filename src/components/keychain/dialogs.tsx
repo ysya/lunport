@@ -19,9 +19,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { syncConfirmText } from "@/lib/key-slots";
-import { useKeys } from "@/lib/queries";
+import { useGenerateKey, useGenerateKeyInTerminal, useKeys } from "@/lib/queries";
 import { errorMessage, exportPrivateKey, useKeyPick } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
+import { useSettingsStore } from "@/stores/settings";
+import { useUiStore } from "@/stores/ui";
 
 /**
  * The keys of this computer to pick from: a note while they are scanned and when there are none (the likely case on a
@@ -100,8 +102,8 @@ export function PickKeyDialog({ slot, onClose }: { slot: SyncKeySlotView | null;
 }
 
 /**
- * The confirm before "Sync this key" / "Sync the new key" upload this computer's key to the account: once it syncs it
- * can't be taken back (stopping never deletes the copies), so say which key and whether a passphrase still protects it.
+ * The confirm before the detail's "Sync to your computers" / "Sync the new key" upload this computer's key to the account: once it
+ * syncs it can't be taken back (stopping never deletes the copies), so say which key and whether a passphrase still protects it.
  * `slot` is what to show (it stays set while the dialog closes); `open` whether it shows. No hooks: exported for the tests.
  */
 export function SyncKeyConfirm({
@@ -283,5 +285,100 @@ function ExportPrivateKeyFlow({ slot, onClose }: { slot: SyncKeySlotView; onClos
       onExport={() => void run()}
       onCancel={onClose}
     />
+  );
+}
+
+/** New-key name rule — mirrors the backend gate (`^[A-Za-z0-9][A-Za-z0-9._-]*$`, no `.pub`). */
+const KEY_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * "Generate a key file…" (key vault spec §7.2): a new ed25519 key file in ~/.ssh, at once without a passphrase or in Terminal with
+ * one. SSHelter doesn't manage the file. Plan 2b generates keys straight into SSHelter and removes this.
+ */
+export function GenerateKeyFileDialog({
+  open,
+  onOpenChange,
+  existingNames,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  existingNames: string[];
+}) {
+  const [name, setName] = useState("");
+  const [comment, setComment] = useState("");
+  const generate = useGenerateKey();
+  const generateInTerminal = useGenerateKeyInTerminal();
+  const terminalId = useSettingsStore((s) => s.terminalId);
+  const selectKey = useUiStore((s) => s.selectKey);
+  const trimmed = name.trim();
+  const validName = KEY_NAME_RE.test(trimmed) && !trimmed.endsWith(".pub");
+  const taken = existingNames.includes(trimmed);
+  const canSubmit = validName && !taken && !generate.isPending;
+  const close = () => {
+    setName("");
+    setComment("");
+    onOpenChange(false);
+  };
+  const handleGenerate = () => {
+    generate.mutate(
+      { name: trimmed, comment: comment.trim() || null },
+      {
+        onSuccess: (key) => {
+          toast.success(`Generated ${key.name}`, { description: key.fingerprint_sha256 ?? undefined });
+          selectKey({ kind: "file", path: key.private_path });
+          close();
+        },
+      },
+    );
+  };
+  const handleGenerateInTerminal = () => {
+    generateInTerminal.mutate(
+      { name: trimmed, comment: comment.trim() || null, terminalOverride: terminalId },
+      {
+        onSuccess: () => {
+          toast.success("Opening terminal…", { description: "ssh-keygen will ask for a passphrase there." });
+          close();
+        },
+      },
+    );
+  };
+  return (
+    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Generate a key file</DialogTitle>
+          <DialogDescription>{"A new ed25519 key in ~/.ssh. SSHelter doesn't manage it: any program can use it without asking."}</DialogDescription>
+        </DialogHeader>
+        <div className="flex gap-2">
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="id_ed25519_work"
+            aria-label="New key name"
+            spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="off"
+            className="h-7 flex-1 font-mono text-sm"
+          />
+          <Input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Comment (optional)" aria-label="New key comment" className="h-7 flex-1 text-sm" />
+        </div>
+        {taken && (
+          <p className="text-xs text-amber-600 dark:text-amber-500">
+            <span className="font-mono">{trimmed}</span> already exists.
+          </p>
+        )}
+        <p className="text-xs text-muted-foreground">
+          “Generate” sets no passphrase — anyone with the file can use it. Use “Generate in Terminal…” to protect the key with a passphrase.
+        </p>
+        <DialogFooter>
+          <Button type="button" variant="secondary" size="sm" className="h-7" disabled={!canSubmit || generateInTerminal.isPending} onClick={handleGenerateInTerminal}>
+            Generate in Terminal…
+          </Button>
+          <Button type="button" size="sm" className="h-7" disabled={!canSubmit} onClick={handleGenerate}>
+            Generate
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

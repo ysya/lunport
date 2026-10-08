@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { keyCandidate, keySlot, overview, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import {
   choiceFor,
-  deliveryAction,
-  deliveryLine,
   deviceLine,
   finishedKeysNeededNotice,
   hostsLine,
@@ -238,7 +236,7 @@ describe("the Keys for this computer notice", () => {
     const notices = [{ kind: "keys_needed" as const, names: ["id_mac"] }];
     const needing = keySlot({ mode: "own", fingerprint: null, status: { kind: "needs_key", waiting_for_sync: false } });
     expect(finishedKeysNeededNotice(overview({ notices, key_slots: [needing] }))).toBeNull();
-    // Picked here or in Keys, or the origin started syncing it: nothing left to ask.
+    // Picked here or in the Keychain, or the origin started syncing it: nothing left to ask.
     expect(finishedKeysNeededNotice(overview({ notices, key_slots: [keySlot()] }))).toBe(0);
     expect(finishedKeysNeededNotice(overview({ notices, key_slots: [keySlot({ status: { kind: "needs_key", waiting_for_sync: true } })] }))).toBe(0);
     expect(finishedKeysNeededNotice(overview({ key_slots: [keySlot()] }))).toBeNull();
@@ -284,20 +282,5 @@ describe("the line that says where the key is", () => {
     expect(whereLine(keySlot({ in_vault: true }))).toBe("In SSHelter — programs ask before they use it");
     expect(whereLine(keySlot({ file_for_now: true }))).toBe("File for now — any program can use it without asking");
     expect(whereLine(keySlot())).toBeNull();
-  });
-});
-
-describe("where this computer keeps a slot's key", () => {
-  it("offers Only in SSHelter for a ready file and Keep a file for a vault key", () => {
-    expect(deliveryAction(keySlot())).toBe("vault");
-    expect(deliveryAction(keySlot({ in_vault: true }))).toBe("file");
-    expect(deliveryAction(keySlot({ in_vault: true, in_account: false, status: { kind: "not_in_use", file: "/f" } }))).toBe("file");
-    expect(deliveryAction(keySlot({ status: { kind: "needs_key", waiting_for_sync: false } }))).toBeNull();
-    expect(deliveryAction(keySlot({ in_account: false }))).toBeNull();
-  });
-
-  it("says when the key is only in SSHelter", () => {
-    expect(deliveryLine(keySlot({ in_vault: true }))).toBe("Only in SSHelter on this computer — programs ask before they use it");
-    expect(deliveryLine(keySlot())).toBeNull();
   });
 });

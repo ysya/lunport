@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Bot, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
+import { Bot, KeyRound, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
 
 import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
@@ -19,7 +19,9 @@ import { AddHostDialog } from "@/components/AddHostDialog";
 import { LintDialog } from "@/components/LintDialog";
 import { DiscoverDialog } from "@/components/DiscoverDialog";
 import { BackupHistoryDialog } from "@/components/BackupHistoryDialog";
-import { KeysDialog } from "@/components/KeysDialog";
+import { KeyDetailPane } from "@/components/keychain/KeyDetail";
+import { KeychainList } from "@/components/keychain/KeychainList";
+import { SidebarSwitch } from "@/components/keychain/SidebarSwitch";
 import { KnownHostsDialog } from "@/components/KnownHostsDialog";
 import { DeployKeyDialog } from "@/components/DeployKeyDialog";
 import { NewConfigFileDialog } from "@/components/NewConfigFileDialog";
@@ -46,8 +48,9 @@ import {
 } from "@/components/ui/tooltip";
 
 /**
- * App shell: master-detail layout. The left pane is the host list; the right
- * pane is the host editor for the selected alias.
+ * App shell: master-detail layout. The sidebar shows the host list or the
+ * Keychain (key vault spec §7.1); the main pane shows the selected host's
+ * editor or the selected key's detail.
  *
  * Config is loaded on mount via `useHostsQuery` (a single `config_load` that
  * yields files + hosts). Errors are surfaced as a toast.
@@ -69,6 +72,9 @@ function App() {
   const platform = usePlatform();
   const isMac = platform.data === "macos";
   const selectedAlias = useUiStore((s) => s.selectedAlias);
+  const sidebarView = useUiStore((s) => s.sidebarView);
+  const setSidebarView = useUiStore((s) => s.setSidebarView);
+  const openKeychain = useUiStore((s) => s.openKeychain);
   const sidebarWidth = clampSidebarWidth(useUiStore((s) => s.sidebarWidth));
   const sidebarRef = useRef<HTMLElement>(null);
   const reload = useLoadConfig();
@@ -152,7 +158,22 @@ function App() {
 
             <LintDialog />
             <DiscoverDialog />
-            <KeysDialog />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  aria-label="Keychain"
+                  aria-pressed={sidebarView === "keychain"}
+                  onClick={() => (sidebarView === "keychain" ? setSidebarView("hosts") : openKeychain())}
+                >
+                  <KeyRound className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Keychain</TooltipContent>
+            </Tooltip>
             <KnownHostsDialog />
             <BackupHistoryDialog />
 
@@ -216,7 +237,15 @@ function App() {
             className="app-sidebar flex min-h-0 shrink-0 flex-col overflow-hidden border-r"
             style={{ width: `${sidebarWidth}rem`, maxWidth: "50vw" }}
           >
-            <HostList hosts={hosts} isLoading={isLoading} />
+            <SidebarSwitch />
+            {sidebarView === "keychain" ? (
+              <KeychainList />
+            ) : (
+              // HostList fills its parent (`h-full`): this wrapper is the room left under the switch.
+              <div className="flex min-h-0 flex-1 flex-col">
+                <HostList hosts={hosts} isLoading={isLoading} />
+              </div>
+            )}
           </aside>
           <SidebarResizeHandle sidebarRef={sidebarRef} />
 
@@ -228,7 +257,9 @@ function App() {
            * so it reads full at ~1600px without stretching absurdly ultra-wide.
            */}
           <main className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto">
-            {selectedAlias ? (
+            {sidebarView === "keychain" ? (
+              <KeyDetailPane />
+            ) : selectedAlias ? (
               <div className="mx-auto max-w-[720px] space-y-5 px-6 py-5 pb-24">
                 <DriftBanner />
                 {copies ? <DuplicateCopies alias={selectedAlias} copies={copies} /> : <HostEditor alias={selectedAlias} />}

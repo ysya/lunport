@@ -60,7 +60,7 @@ export function passphraseNote(k: KeyCandidate): string | null {
 }
 
 /**
- * The confirm before "Sync this key" / "Sync the new key" uploads this computer's key (it can't be taken back: stopping
+ * The confirm before "Sync to your computers" / "Sync the new key" uploads this computer's key (it can't be taken back: stopping
  * never deletes the copies). The note is about the key that goes — this computer's (`local_has_passphrase`), not the
  * synced one it replaces — and is left out when that isn't known.
  */
@@ -217,19 +217,6 @@ export function slotActions(slot: SyncKeySlotView): SlotActions {
     deleteCopy: s.kind === "not_in_use",
   };
   return actions;
-}
-
-/**
- * "Only in SSHelter" / "Keep a file" (key vault spec §4.3, §7.3): where this computer's copy can move. A file this computer
- * uses can move into the vault; a vault key can always go back to a file.
- */
-export function deliveryAction(slot: SyncKeySlotView): "vault" | "file" | null {
-  if (slot.in_vault) return "file";
-  return slot.in_account && slot.status.kind === "ready" ? "vault" : null;
-}
-
-export function deliveryLine(slot: SyncKeySlotView): string | null {
-  return slot.in_vault ? "Only in SSHelter on this computer — programs ask before they use it" : null;
 }
 
 /** Where this computer keeps the slot's key (key vault spec §4.3, §11); null for a key it serves some other way or doesn't have. */

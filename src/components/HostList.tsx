@@ -335,7 +335,7 @@ function HostRow({
           </span>
         )}
         {missingKey && (
-          <span className="shrink-0 text-amber-600 dark:text-amber-400" title="This host's key isn't on this computer — pick one in Keys.">
+          <span className="shrink-0 text-amber-600 dark:text-amber-400" title="This host's key isn't on this computer — pick one in Keychain.">
             <KeyRound className="size-3" aria-label="This host's key isn't on this computer" />
           </span>
         )}

@@ -459,7 +459,8 @@ function JoinedPane({
   const notSetUp = keysToAsk(candidates.data, null).length;
   const needing = slotsNeedingKey(o);
   const setKeySetup = useUiStore((s) => s.setKeySetup);
-  const setKeysOpen = useUiStore((s) => s.setKeysOpen);
+  const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
+  const openKeychain = useUiStore((s) => s.openKeychain);
   // Relative times ("last sync 2m ago") keep moving while the overview itself does not change.
   const now = useNow();
   const status = statusLine(o, now);
@@ -517,7 +518,16 @@ function JoinedPane({
               label={needsKeyLabel(needing.length)}
               description={`Synced hosts use ${listNames(needing.map((s) => revealHidden(s.name)))}, which stay on your other computers.`}
             >
-              <Button type="button" size="sm" className="h-7" onClick={() => setKeysOpen(true)}>
+              <Button
+                type="button"
+                size="sm"
+                className="h-7"
+                onClick={() => {
+                  // The Keychain is in the main window: close Settings and show the first key that needs one (key vault spec §7.1).
+                  setSettingsOpen(false);
+                  openKeychain({ kind: "slot", id: needing[0].id });
+                }}
+              >
                 Pick…
               </Button>
             </SettingsRow>

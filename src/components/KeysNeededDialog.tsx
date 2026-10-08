@@ -11,7 +11,7 @@ import { revealHidden } from "@/lib/sync-approvals";
 /**
  * "Keys for this computer" (SP3 spec §6.7, plan ruling 5): opens on the backend's `keys_needed` notice, which comes the
  * first time a synced host here needs a key that stays on another computer — for example right after joining. "Done"
- * dismisses the notice; the Settings row and the Keys dialog stay until each slot has a key. Once nothing is left to
+ * dismisses the notice; the Settings row and the Keychain stay until each slot has a key. Once nothing is left to
  * pick, the notice is dismissed by itself.
  */
 export function KeysNeededDialog() {
@@ -46,7 +46,7 @@ export function KeysNeededDialog() {
           <DialogHeader>
             <DialogTitle>Keys for this computer</DialogTitle>
             <DialogDescription>
-              Synced hosts on this computer use keys that stay on your other computers. Pick a key on this computer for each, or do it later in Keys.
+              Synced hosts on this computer use keys that stay on your other computers. Pick a key on this computer for each, or do it later in Keychain.
             </DialogDescription>
           </DialogHeader>
           <div className="settings-group max-h-[40vh] overflow-y-auto">
