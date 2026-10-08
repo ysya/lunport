@@ -437,10 +437,12 @@ fn scan_now(env: &SyncEnv) -> Result<(KeyCandidates, Option<SyncStateV2>), AppEr
 }
 
 /// 設定好的一把金鑰(`rewrite_in`):金鑰檔(`KeyCandidate.path`)、主機要改指到的插槽檔名,以及同一個候選裡之前的帳戶留下的插槽的檔名(`kept_files`)。
+/// `created` = 插槽是這一次設定建立的(「Sync key」或「Keep on this computer」,`create_slot`):只有它們在主機改寫之後放進保管庫(`move_set_up_slots_into_vault`)。
 struct Planned {
     key: PathBuf,
     file: String,
     kept_files: Vec<String>,
+    created: bool,
 }
 
 /// 把 `planned` 的主機改寫成指到它的插槽(`Planned::file`):指到金鑰檔的,以及指到同一個候選裡之前的帳戶留下的另一個插槽的(已經指到 `file` 的不動)。
@@ -508,8 +510,10 @@ fn rewrite_in(
 /// 之前的帳戶留下的插槽(`KeyCandidate.kept_slot`)收到「Sync key」或「Keep on this computer」:不建立新插槽,就地放進這個帳戶(`adopt_slot`;決定裡的
 /// 名稱不用,對話框也不讓改)。指到同一個候選裡之前的帳戶留下的其他插槽的主機,一樣改指到設定好的插槽(`rewrite_in`)。
 ///
-/// 主機改寫完成之後,設定好的插槽馬上放進保管庫(`move_set_up_slots_into_vault`,金鑰保管庫 spec §4.3);放不進去的維持連結或副本(「File for now」),不讓設定失敗。
-/// 主機沒改寫成(撞到 `Conflict`)就不放:插槽留著,下一次沿用時再放。
+/// 主機改寫完成之後,這一次建立的插槽(「Sync key」、「Keep on this computer」)馬上放進保管庫(`move_set_up_slots_into_vault`,金鑰保管庫 spec §4.3);
+/// 放不進去的維持連結(「File for now」),不讓設定失敗。沿用的插槽(Reuse:對話框自己送的,不問使用者)與就地放進帳戶的、之前的帳戶留下的插槽一律不搬:
+/// 它們可能是更新前留下的連結,用它們的每一台主機會因此開始要核准,使用者卻沒有按過「Move」(spec 決策 #12;「Move」照常提供)。
+/// 主機沒改寫成(撞到 `Conflict`)就不放:插槽留著連結,下一次掃描建議沿用它,之後由「Move」搬。
 pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Result<Vec<String>, AppError> {
     refuse_while_sync_inactive(active, env.runtime)?;
     let account_keys = {
@@ -528,6 +532,7 @@ pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Resul
     let mut planned: Vec<Planned> = Vec::new();
     for choice in choices {
         let Some(candidate) = listed(&choice.path) else { continue };
+        let created = matches!(choice.decision, KeyDecision::Sync { .. } | KeyDecision::Keep { .. }) && candidate.kept_slot.is_none();
         let file = match (choice.decision, &candidate.kept_slot) {
             (KeyDecision::Reuse { slot_id }, _) => reuse_slot(env, &account_keys, &keys_dir, candidate, &slot_id)?,
             // 已經有插槽的金鑰不建立第二個(spec §6.1 第 1 步:這把金鑰已經決定過了,前端對它送的是 Reuse)。畫面上的舊資料才會走到這裡(例如重新
@@ -545,7 +550,7 @@ pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Resul
             (KeyDecision::Sync { name }, None) => create_slot(env, &account_keys, &keys_dir, candidate, name, true)?,
             (KeyDecision::Keep { name }, None) => create_slot(env, &account_keys, &keys_dir, candidate, name, false)?,
         };
-        planned.push(Planned { key: PathBuf::from(&candidate.path), file, kept_files: kept_files(candidate) });
+        planned.push(Planned { key: PathBuf::from(&candidate.path), file, kept_files: kept_files(candidate), created });
     }
     if planned.is_empty() {
         return Ok(Vec::new());
@@ -555,14 +560,15 @@ pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Resul
     Ok(rewritten)
 }
 
-/// 設定好的金鑰放進保管庫(金鑰保管庫 spec §4.3:金鑰一律在 SSHelter)。主機已經改指到插槽,插槽這時是連到原檔的連結或同步來的副本;搬不進去的留著檔案
-/// (「File for now」,「Move」再試),原因只記到 stderr。你的原檔不動。
+/// 這一次設定建立的金鑰放進保管庫(金鑰保管庫 spec §4.3:金鑰一律在 SSHelter)。主機已經改指到插槽,插槽這時是連到原檔的連結;搬不進去的留著連結
+/// (「File for now」,「Move」再試),原因只記到 stderr。你的原檔不動。沿用的、就地放進帳戶的插槽不碰(`Planned::created`;見 `setup_keys`)。
 fn move_set_up_slots_into_vault(env: &SyncEnv, planned: &[Planned]) {
     let ids: Vec<String> = {
         let core = env.runtime.core.lock().unwrap();
         let Some(state) = core.state.as_ref() else { return };
         planned
             .iter()
+            .filter(|p| p.created)
             .filter_map(|p| {
                 state
                     .key_slots
@@ -1147,9 +1153,10 @@ mod tests {
         assert!(matches!(state.key_slots[&old].source, Some(SlotSource::Linked { .. })), "the one from before the update waits for Move");
     }
 
-    /// 主機還沒改寫成,金鑰就還不放進保管庫(「主機改寫之後」才放):撞到 `Conflict` 時插槽維持連結(主機仍指著金鑰檔);沿用它把主機改寫完,金鑰才放進保管庫。
+    /// 主機還沒改寫成,金鑰就不放進保管庫(「主機改寫之後」才放):撞到 `Conflict` 時插槽維持連結(主機仍指著金鑰檔)。之後沿用它把主機改寫完(對話框自己送的
+    /// Reuse,不問使用者),插槽也還是連結:設定只把這一次建立的插槽放進保管庫,沿用的一律不搬(金鑰保管庫 spec 決策 #12)。它是「File for now」,由「Move」搬。
     #[test]
-    fn a_conflict_while_rewriting_keeps_the_key_a_file_until_the_hosts_are_rewritten() {
+    fn a_conflict_while_rewriting_leaves_the_key_a_file_for_the_move_button() {
         let (a, personal) = device("# main\n");
         let key = put_key(&a, "id_mac", &test_keys::plain());
         let space = a.space_path(&personal);
@@ -1161,8 +1168,32 @@ mod tests {
         assert!(crate::sync::slots::tests::vault_entry(&a, &id).is_none(), "and nothing is in the vault yet");
 
         assert_eq!(setup_keys(&a.env(), true, vec![reuse(&key, &id)]).unwrap(), vec!["web".to_string()]);
-        assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "the key goes into the vault once the hosts are rewritten");
-        assert!(!slot_files::occupied(&home(&a).join(SLOT_DIR).join(slot_file_name("id_mac", &id))));
+        let local = a.state().key_slots[&id].clone();
+        assert!(matches!(local.source, Some(SlotSource::Linked { .. })), "the reuse that finishes the rewrite doesn't move it: {local:?}");
+        assert!(crate::sync::slots::tests::vault_entry(&a, &id).is_none(), "nothing went into the vault");
+        let row = crate::sync::dto::overview(&a.env()).unwrap().key_slots.into_iter().find(|v| v.id == id).expect("the slot is listed");
+        assert!(row.file_for_now, "it is a file for now, so Move offers it");
+    }
+
+    /// 更新前留下的連結(SP3 的 `Linked`):另一台主機也用那個金鑰檔,存檔之後設定自動沿用這個插槽(對話框的 `reuseChoices`,不問使用者)—— 主機改指到插槽,
+    /// 插槽照舊是連結,不被搬進保管庫:搬了的話,用它的每一台主機都會開始要核准,使用者卻沒有按過「Move」(金鑰保管庫 spec 決策 #12)。
+    #[test]
+    fn a_linked_slot_from_before_the_update_reused_by_setup_stays_a_link() {
+        let (a, personal) = device("# main\n");
+        let (id, file) = crate::sync::slots::tests::create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let key = a.ssh_dir().join("id_mac");
+        let space = a.space_path(&personal);
+        a.save_in_app(&space, &format!("Host web\n  IdentityFile ~/.ssh/sshelter/keys/{file}\nHost db\n  IdentityFile ~/.ssh/id_mac\n"));
+        let found = key_candidates(&a.env()).unwrap();
+        assert_eq!(found.keys.len(), 1, "{found:?}");
+        assert_eq!(found.keys[0].existing_slot.as_deref(), Some(id.as_str()), "setup: db's key already has the linked slot");
+
+        assert_eq!(setup_keys(&a.env(), true, vec![reuse(&key, &id)]).unwrap(), vec!["db".to_string()]);
+        let local = a.state().key_slots[&id].clone();
+        assert!(matches!(local.source, Some(SlotSource::Linked { .. })), "the slot stays a link: {local:?}");
+        assert!(crate::sync::slots::tests::vault_entry(&a, &id).is_none(), "nothing went into the vault");
+        assert_eq!(std::fs::read_to_string(home(&a).join(SLOT_DIR).join(&file)).unwrap(), test_keys::plain(), "the slot still links the key");
+        assert_eq!(a.read(&space), format!("Host web\n  IdentityFile ~/.ssh/sshelter/keys/{file}\nHost db\n  IdentityFile ~/.ssh/sshelter/keys/{file}\n"));
     }
 
     /// 兩台主機用同一個金鑰檔,先後設定:只有一個插槽,它的金鑰在保管庫(SP3 spec §6.1:同一把金鑰不會有第二個插槽)。第一台設定好之後金鑰放進了保管庫,
