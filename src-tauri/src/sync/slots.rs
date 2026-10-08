@@ -929,7 +929,7 @@ fn maintain(local: &mut LocalSlot, keys_dir: &Path, path: &Path) -> bool {
     }
 }
 
-/// 空的插槽:`synced` 而且私鑰到了就落地;`own` 等使用者挑,私鑰還沒到就等下一輪。落地先放進保管庫(金鑰保管庫 spec §4.3,`land_in_vault`)。以下情況
+/// 空的插槽:`synced` 而且私鑰到了就落地;`own` 等使用者挑,私鑰還沒到就等下一輪。落地先放進保管庫(金鑰保管庫 spec §4.3,`land_synced_key`)。以下情況
 /// 照 SP3 寫成檔案(`land`):插槽路徑上有東西、agent 用不了這把金鑰、或保管庫用不了(系統 keychain 鎖著、保管庫檔讀不懂)。`ssh` 照樣能用,
 /// 畫面標「File for now」,「Move」再試(§8、§11)。
 #[allow(clippy::too_many_arguments)]
@@ -949,15 +949,7 @@ fn land_into(
         return;
     }
     let Some(secret) = open_key_secret(account, account_keys, slot_id) else { return };
-    let landed = match land_in_vault(&secret, payload, slot_id, keys_dir, path, now_ms, vault) {
-        Ok(source) => Ok(source),
-        Err(Landing::Mismatch(message)) => Err(message),
-        Err(Landing::AsFile(reason)) => {
-            eprintln!("[sync] slot {slot_id} gets a file for now: {reason}");
-            land(&secret, payload, keys_dir, path).map(|fingerprint| SlotSource::SyncedCopy { fingerprint })
-        }
-    };
-    match landed {
+    match land_synced_key(&secret, payload, slot_id, keys_dir, path, now_ms, vault) {
         Ok(source) => {
             local.source = Some(source);
             // 插槽裡的私鑰來自這個帳戶:記錄是這個帳戶的(`LocalSlot::learned_in`),副本也是(`LocalSlot::copy_from_another_account`)。
@@ -965,6 +957,29 @@ fn land_into(
             local.copy_from_another_account = false;
         }
         Err(message) => local.last_error = Some(message),
+    }
+}
+
+/// 帳戶裡的私鑰落地到空的插槽 `path`:先放進保管庫(`land_in_vault`,金鑰保管庫 spec §4.3),放不進去才照 SP3 寫成檔案(`land`;§11:插槽路徑上有東西、agent 用不了、保管庫用不了,
+/// 原因只記到 stderr)。回傳插槽裡的來源(`Vault` 或 `SyncedCopy`);私鑰和插槽記錄對不上、或檔案也寫不成 → 錯誤訊息。每一輪(`land_into`)與使用者的沿用
+/// (`slot_setup::land_reused_slot`)落地帳戶裡的金鑰都走這裡 —— 「先保管庫、檔案是退路」只有這一份。保管庫與檔案是在呼叫端提交記錄之前寫的(呼叫端不持有任何鎖);
+/// 記錄寫不進去時要不要收回,由呼叫端決定。
+pub(crate) fn land_synced_key(
+    secret: &str,
+    payload: &KeySlotPayload,
+    slot_id: &str,
+    keys_dir: &Path,
+    path: &Path,
+    now_ms: u64,
+    vault: &dyn VaultKeys,
+) -> Result<SlotSource, String> {
+    match land_in_vault(secret, payload, slot_id, keys_dir, path, now_ms, vault) {
+        Ok(source) => Ok(source),
+        Err(Landing::Mismatch(message)) => Err(message),
+        Err(Landing::AsFile(reason)) => {
+            eprintln!("[sync] slot {slot_id} gets a file for now: {reason}");
+            land(secret, payload, keys_dir, path).map(|fingerprint| SlotSource::SyncedCopy { fingerprint })
+        }
     }
 }
 
@@ -2578,7 +2593,7 @@ pub(crate) mod tests {
     }
 
     /// `observer` 看到的 `device` 的插槽清單(來自帳戶裡那台的 `device` 記錄)。
-    fn device_slots_seen_by(observer: &TestDevice, device: &TestDevice) -> Vec<DeviceSlot> {
+    pub(crate) fn device_slots_seen_by(observer: &TestDevice, device: &TestDevice) -> Vec<DeviceSlot> {
         let id = device_id(device);
         let state = observer.state();
         crate::sync::merge::devices(state.account.as_ref().unwrap()).into_iter().find(|(d, _)| *d == id).expect("the device is listed").1.slots

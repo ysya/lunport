@@ -84,7 +84,8 @@ function slotFileOfValue(value: string): string | null {
 
 /**
  * The lines the setup rewrites. A new slot's id is only known once it exists, so its file name ends in "…". A slot kept from
- * the previous sync account goes in as it is: its full file name, and hosts that already use it aren't rewritten.
+ * the previous sync account, or a key only on this computer, goes in as it is: its full file name, and hosts that already use
+ * it aren't rewritten. For a key in SSHelter's vault that is every host (it has no key file other hosts could use), so no lines.
  */
 export function rewrittenLines(k: KeyCandidate, name: string): string[] {
   const hosts = k.hosts.filter((h) => h.locked === null);

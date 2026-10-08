@@ -29,8 +29,9 @@ import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 
 /**
- * One key's row: the hosts that use it, the question, what changes, and the two answers. A slot kept from the previous sync
- * account goes in under its own name: no Rename, and a note says where it came from. Exported for the markup tests.
+ * One key's row: the hosts that use it, the question, what changes, and the two answers. A slot that is already on this
+ * computer goes in under its own name: no Rename, and a note says where it came from (kept from the previous sync account, or
+ * a key in SSHelter's vault: only on this computer, or kept from the previous account). Exported for the markup tests.
  */
 export function KeySetupRow({
   candidate,

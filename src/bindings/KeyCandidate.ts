@@ -26,6 +26,7 @@ unsyncable: string | null,
 existing_slot: string | null, hosts: Array<CandidateHost>, 
 /**
  * 之前的帳戶留下的插槽(spec §7.1),或只在這台的金鑰(金鑰保管庫 spec §4.3,`KeptSlot::local_only`):「Sync key」與「Keep on this computer」把它就地放進
- * 這個帳戶(`adopt_slot`),不建立新插槽、不改名。同一把金鑰有好幾個時,是掃描時先遇到的那一個,用到其他那些的主機改指到它。null = 不是。
+ * 這個帳戶(`adopt_slot`),不建立新插槽、不改名。金鑰檔是同一個的有好幾個插槽時(連到金鑰檔的,或同步來的副本),是掃描時先遇到的那一個,用到其他那些的主機改指到它;
+ * 金鑰在保管庫裡的(`KeptSlot::in_vault`)沒有金鑰檔可以認出是同一把,每個插槽各是一個候選。null = 不是。
  */
 kept_slot: KeptSlot | null, };
