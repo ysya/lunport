@@ -194,11 +194,11 @@ pub fn lint(doc: &SshConfigDoc, account_slot_files: &BTreeSet<String>) -> Vec<Li
                                     file: file.clone(),
                                     alias: alias.clone(),
                                     keyword: Some(d.keyword.clone()),
-                                    // 插槽路徑(同步主機的金鑰位置):缺檔時不是讓使用者去找檔案。同步帳戶裡有這個插槽(檔名不分大小寫)→ 到 Keys 對話框為它挑一把
-                                    // 金鑰;沒有(或不在帳戶裡,例如之前的帳戶留下的插槽,SP3 spec §7.1)→ 這台無從為它挑金鑰,要到有這把金鑰的電腦上設定。
+                                    // 插槽路徑(同步主機的金鑰位置):缺檔時不是讓使用者去找檔案。同步帳戶裡有這個插槽(檔名不分大小寫)→ 到 Keychain 為它挑一把
+                                    // 金鑰(同主機清單的標記);沒有(或不在帳戶裡,例如之前的帳戶留下的插槽,SP3 spec §7.1)→ 這台無從為它挑金鑰,要到有這把金鑰的電腦上設定。
                                     message: match crate::sync::slot_rules::slot_file_of_value(&d.value) {
                                         Some(file) if account_slot_files.iter().any(|f| f.eq_ignore_ascii_case(&file)) => {
-                                            format!("IdentityFile not found: {} (a synced key slot \u{2014} pick a key for it in Keys)", d.value)
+                                            format!("IdentityFile not found: {} (a synced key slot \u{2014} pick a key for it in Keychain)", d.value)
                                         }
                                         Some(_) => format!(
                                             "IdentityFile not found: {} (a key slot your sync account doesn't have \u{2014} set the key up on the computer that has it)",
@@ -588,7 +588,7 @@ mod tests {
         );
     }
 
-    /// 缺檔的插槽路徑:同步帳戶裡有這個插槽(檔名不分大小寫)→ 到 Keys 為它挑一把金鑰;沒有(或不在任何帳戶裡)→ 到有這把金鑰的電腦上設定。
+    /// 缺檔的插槽路徑:同步帳戶裡有這個插槽(檔名不分大小寫)→ 到 Keychain 為它挑一把金鑰;沒有(或不在任何帳戶裡)→ 到有這把金鑰的電腦上設定。
     #[test]
     fn a_missing_key_slot_says_whether_the_sync_account_has_it() {
         let (doc, _dir) = doc_with("Host web\n IdentityFile ~/.ssh/sshelter/keys/sp3-lint-missing-00000000\n");
@@ -596,7 +596,7 @@ mod tests {
             let files: BTreeSet<String> = files.iter().map(|f| f.to_string()).collect();
             lint(&doc, &files).into_iter().find(|i| i.rule == "missing-identity-file").expect("flagged").message
         };
-        let in_account = "IdentityFile not found: ~/.ssh/sshelter/keys/sp3-lint-missing-00000000 (a synced key slot \u{2014} pick a key for it in Keys)";
+        let in_account = "IdentityFile not found: ~/.ssh/sshelter/keys/sp3-lint-missing-00000000 (a synced key slot \u{2014} pick a key for it in Keychain)";
         let not_in_account = "IdentityFile not found: ~/.ssh/sshelter/keys/sp3-lint-missing-00000000 (a key slot your sync account doesn't have \u{2014} set the key up on the computer that has it)";
         assert_eq!(message(&["sp3-lint-missing-00000000"]), in_account);
         assert_eq!(message(&["SP3-LINT-MISSING-00000000", "x-22222222"]), in_account, "whatever the case of the file name");
@@ -691,7 +691,7 @@ mod tests {
                 .map(|i| (i.alias, i.message))
                 .collect()
         };
-        let synced = |file: &str| format!("IdentityFile not found: ~/.ssh/sshelter/keys/{file} (a synced key slot \u{2014} pick a key for it in Keys)");
+        let synced = |file: &str| format!("IdentityFile not found: ~/.ssh/sshelter/keys/{file} (a synced key slot \u{2014} pick a key for it in Keychain)");
         let elsewhere = |file: &str| {
             format!("IdentityFile not found: ~/.ssh/sshelter/keys/{file} (a key slot your sync account doesn't have \u{2014} set the key up on the computer that has it)")
         };
