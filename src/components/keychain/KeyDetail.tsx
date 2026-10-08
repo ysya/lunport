@@ -75,7 +75,9 @@ export function SlotKeyDetailView({
   const status = slotStatusText(slot.status);
   const actions = slotActions(slot);
   const where = whereLine(slot);
-  const file = slot.file_for_now && "file" in slot.status ? slot.status.file : null;
+  // The file this computer uses, for the states that name one. A key in SSHelter has none (its slot path holds only the .pub):
+  // the line above says where the key is. A key SSHelter's agent can never hold stays a file without being a "file for now".
+  const file = !slot.in_vault && "file" in slot.status ? slot.status.file : null;
   const devices = deviceLine(slot);
   const button = (action: KeyAction, label: string, extra: { ghost?: boolean; destructive?: boolean; off?: boolean } = {}) => (
     <Button
@@ -108,7 +110,7 @@ export function SlotKeyDetailView({
               {b.label}
             </Badge>
           ))}
-          {slot.key_type && <span className="font-mono text-xs text-muted-foreground">{slot.key_type}</span>}
+          {slot.key_type && <span className="font-mono text-xs text-muted-foreground">{revealHidden(slot.key_type)}</span>}
         </div>
       </header>
       <div className="flex flex-wrap gap-1.5">

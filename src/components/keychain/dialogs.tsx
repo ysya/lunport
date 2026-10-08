@@ -228,7 +228,7 @@ export function ExportPrivateKeyForm({
         <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="button" disabled={busy || passphrase !== repeat} onClick={onExport}>
+        <Button type="button" disabled={busy || (passphrase !== "" && passphrase !== repeat)} onClick={onExport}>
           Export…
         </Button>
       </DialogFooter>
@@ -252,6 +252,11 @@ function ExportPrivateKeyFlow({ slot, onClose }: { slot: SyncKeySlotView; onClos
   const [passphrase, setPassphrase] = useState("");
   const [repeat, setRepeat] = useState("");
   const [busy, setBusy] = useState(false);
+  const changePassphrase = (value: string) => {
+    setPassphrase(value);
+    // The repeat goes with an empty passphrase: a copy typed for an earlier one must not come back with the next.
+    if (value === "") setRepeat("");
+  };
   const run = async () => {
     setBusy(true);
     try {
@@ -273,7 +278,7 @@ function ExportPrivateKeyFlow({ slot, onClose }: { slot: SyncKeySlotView; onClos
       passphrase={passphrase}
       repeat={repeat}
       busy={busy}
-      onPassphrase={setPassphrase}
+      onPassphrase={changePassphrase}
       onRepeat={setRepeat}
       onExport={() => void run()}
       onCancel={onClose}

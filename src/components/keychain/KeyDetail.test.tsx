@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { MoveFailure } from "@/bindings/MoveFailure";
+import type { SlotStatusView } from "@/bindings/SlotStatusView";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import type { KeychainSelection } from "@/lib/keychain";
 import { queryKeys } from "@/lib/queries";
@@ -128,12 +129,33 @@ describe("a key slot's detail", () => {
     expect(text(slotDetail(keySlot({ hosts: [] })))).toContain("No hosts use it.");
   });
 
-  it("reveals hidden characters in the names that come from other computers and the config", () => {
+  it("reveals hidden characters in the name, the key type, the hosts and the other computers' names, which come from elsewhere", () => {
     const html = slotDetail(
-      keySlot({ name: SPOOFED_NAME, hosts: [SPOOFED_NAME], devices: [{ name: SPOOFED_NAME, fingerprint: null, synced_copy: false, in_vault: false }] }),
+      keySlot({
+        name: SPOOFED_NAME,
+        key_type: SPOOFED_NAME,
+        hosts: [SPOOFED_NAME],
+        devices: [{ name: SPOOFED_NAME, fingerprint: null, synced_copy: false, in_vault: false }],
+      }),
     );
     expect(html).not.toMatch(HIDDEN_CHARS);
-    expect(text(html).split(SPOOFED_NAME_SHOWN).length - 1).toBe(3);
+    expect(text(html).split(SPOOFED_NAME_SHOWN).length - 1).toBe(4);
+  });
+
+  it("shows the file a key is kept in, unless the key is in SSHelter", () => {
+    const FILE = "/home/f/.ssh/id_work";
+    const named: SlotStatusView[] = [
+      { kind: "ready", file: FILE, synced_copy: false, fingerprint: SLOT_FINGERPRINT },
+      { kind: "not_in_use", file: FILE },
+      { kind: "synced_available", file: FILE },
+      { kind: "source_changed", file: FILE },
+    ];
+    for (const status of named) {
+      // A key SSHelter's agent can never hold stays a file without being a "file for now".
+      expect(text(slotDetail(keySlot({ status, in_vault: false, file_for_now: false }))), status.kind).toContain(FILE);
+      // A key in SSHelter has no file here: its slot path holds only the .pub.
+      expect(text(slotDetail(keySlot({ status, in_vault: true }))), status.kind).not.toContain(FILE);
+    }
   });
 
   it("reveals hidden characters in the reason a Move gave", () => {

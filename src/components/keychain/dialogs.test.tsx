@@ -179,6 +179,8 @@ describe("Export private key", () => {
     expect(exportButton(form({ passphrase: "x", repeat: "" })).props.disabled).toBe(true);
     expect(exportButton(form({ passphrase: "x", repeat: "y" })).props.disabled).toBe(true);
     expect(exportButton(form({ passphrase: "x", repeat: "x" })).props.disabled).toBe(false);
+    // No passphrase is a valid choice: a repeat left over from one that was emptied must not block the export.
+    expect(exportButton(form({ passphrase: "", repeat: "x" })).props.disabled).toBe(false);
     expect(exportButton(form({ busy: true })).props.disabled).toBe(true);
     let exported = 0;
     exportButton(form({ onExport: () => exported++ })).props.onClick!();
