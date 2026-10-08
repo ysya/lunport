@@ -313,7 +313,10 @@ fn start_bridge(app: AppHandle) -> Result<(), AppError> {
                             .name("sshelter-mcp-request".to_string())
                             .spawn(move || handle_bridge_connection(app, stream));
                     }
-                    Err(_) => break,
+                    // A failed accept (a connection aborted before it was accepted, no free file
+                    // descriptors) does not end the bridge: only one SSHelter runs, so no other
+                    // instance would take over.
+                    Err(_) => thread::sleep(Duration::from_millis(100)),
                 }
             }
         })
