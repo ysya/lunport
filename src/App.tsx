@@ -20,6 +20,7 @@ import { LintDialog } from "@/components/LintDialog";
 import { DiscoverDialog } from "@/components/DiscoverDialog";
 import { BackupHistoryDialog } from "@/components/BackupHistoryDialog";
 import { KeyDetailPane } from "@/components/keychain/KeyDetail";
+import { MainPaneContent } from "@/components/MainPane";
 import { KeychainList } from "@/components/keychain/KeychainList";
 import { SidebarSwitch } from "@/components/keychain/SidebarSwitch";
 import { KnownHostsDialog } from "@/components/KnownHostsDialog";
@@ -257,16 +258,21 @@ function App() {
            * so it reads full at ~1600px without stretching absurdly ultra-wide.
            */}
           <main className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto">
-            {sidebarView === "keychain" ? (
-              <KeyDetailPane />
-            ) : selectedAlias ? (
-              <div className="mx-auto max-w-[720px] space-y-5 px-6 py-5 pb-24">
-                <DriftBanner />
-                {copies ? <DuplicateCopies alias={selectedAlias} copies={copies} /> : <HostEditor alias={selectedAlias} />}
-              </div>
-            ) : (
-              <EmptySelection />
-            )}
+            {/* Hosts stays mounted (hidden) while the Keychain shows: the editor keeps its unsaved edits. */}
+            <MainPaneContent
+              keychain={sidebarView === "keychain"}
+              hosts={
+                selectedAlias ? (
+                  <div className="mx-auto max-w-[720px] space-y-5 px-6 py-5 pb-24">
+                    <DriftBanner />
+                    {copies ? <DuplicateCopies alias={selectedAlias} copies={copies} /> : <HostEditor alias={selectedAlias} />}
+                  </div>
+                ) : (
+                  <EmptySelection />
+                )
+              }
+              keyDetail={<KeyDetailPane />}
+            />
           </main>
         </div>
 
