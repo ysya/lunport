@@ -114,12 +114,7 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     let id = event.id().as_ref();
     match id {
         "quit" => app.exit(0),
-        "open" => {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }
+        "open" => crate::show_main_window(app),
         other => {
             if let Some(alias) = other.strip_prefix("connect:") {
                 // Off the menu thread: a host on a vault key runs `ssh -G` first (key vault spec §5.6).
