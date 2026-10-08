@@ -778,6 +778,40 @@ mod tests {
         assert_eq!(status.unwrap(), WiringStatus::Ready, "it saw the slot that was put in the vault while it waited");
     }
 
+    /// Export to host 把主機指到保管庫的金鑰(`config::commands::set_identity_file`,同 `config_set_identity_file` 拿 doc 與 backed_up 的鎖存檔),命令放掉鎖之後馬上
+    /// 更新 agent 的設定(`sync::engine::refresh_agent_config` 呼叫的就是 `refresh_env`):`agent/config` 當場列出那台主機,這台第一次用到保管庫的金鑰時主 config 的 Include
+    /// 也一起放好 —— 不必等下一次同步嘗試。之後沒有東西要改的更新什麼都不寫:`agent/config` 與主 config 都不重寫,主 config 也不再多一份備份。
+    #[test]
+    fn a_host_pointed_at_a_vault_key_is_wired_by_the_refresh_after_its_save() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::testkit::{TestClock, TestDevice};
+        let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), "Host web\n  HostName 10.0.0.1\n");
+        put_in_vault(&d, SLOT);
+        assert_eq!(refresh_env(&d.env()).unwrap(), WiringStatus::NotNeeded, "setup: no host uses the vault key yet");
+
+        {
+            let mut doc_lock = d.doc.lock().unwrap();
+            let mut backed_up = d.backed_up.lock().unwrap();
+            let doc = doc_lock.as_mut().unwrap();
+            let value = format!("~/.ssh/sshelter/keys/{SLOT}");
+            crate::config::commands::set_identity_file(doc, "web", &value, |doc, idx| persist_file(doc, idx, &mut backed_up, None)).unwrap();
+        }
+        assert_eq!(refresh_env(&d.env()).unwrap(), WiringStatus::Ready);
+        assert_eq!(read(&d.main_path()), format!("Include {INCLUDE_TOKEN}\nHost web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/sshelter/keys/{SLOT}\n"));
+        assert!(read(&agent_config_path(d.home.path())).contains("Host web\n  IdentityAgent "), "agent/config lists the host");
+
+        let backups = || {
+            let dir = crate::fsutil::backup_dir_for(&d.main_path()).unwrap();
+            std::fs::read_dir(dir).map(|entries| entries.count()).unwrap_or(0)
+        };
+        let before = backups();
+        age(&d.main_path());
+        age(&agent_config_path(d.home.path()));
+        assert_eq!(refresh_env(&d.env()).unwrap(), WiringStatus::Ready);
+        assert!(is_aged(&d.main_path()) && is_aged(&agent_config_path(d.home.path())), "nothing changed, so nothing was written");
+        assert_eq!(backups(), before, "and the main config was not backed up again");
+    }
+
     /// config 還沒載入(`doc` 是 None)就什麼都不做;載入了、也沒有用到保管庫的金鑰就一樣。
     #[test]
     fn refreshing_with_no_config_loaded_or_no_vault_key_does_nothing() {

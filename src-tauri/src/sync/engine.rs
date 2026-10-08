@@ -160,6 +160,23 @@ pub fn note_file_written(path: &Path, items: &[Item]) {
     let _ = with_env(app, |env| files::note_written(env, path, items));
 }
 
+/// config 的命令改了主機區塊(改 `IdentityFile`、新增、刪除、改名、搬動、複製……),而且已經放掉 doc 與 backed_up 的鎖之後呼叫:馬上更新 agent 的設定
+/// (`agent::wiring::refresh_env`,金鑰保管庫 spec §6「何時重寫:主機的 `IdentityFile` 變了」)。不然要等下一次同步嘗試的最後(前景約 45 秒、閒置 5 分鐘、
+/// 退避時最長約 15 分鐘):這段時間 `ssh` 對剛指到保管庫金鑰的主機沒有 `IdentityAgent`,只看得到插槽旁的 `.pub`;這台第一次用到保管庫的金鑰時,主 config 的
+/// Include 也還沒放。`refresh_env` 自己依序拿 doc → backed_up → core,所以不能在存檔 hook(`note_file_written`,呼叫端持有 doc 鎖)裡做。內容沒變就什麼都不寫:
+/// `agent/config` 一樣就不寫,Include 已經在第一行就不動主 config(`wiring::refresh`)。
+/// 更新不成只記到 stderr,存檔本身不算失敗(下一次同步嘗試的最後會再更新)。同步引擎在別的行程、或單元測試裡:什麼都不做(同 `note_file_written`)。
+pub fn refresh_agent_config() {
+    if !ENGINE_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(app) = APP.get() else { return };
+    match with_env(app, crate::agent::wiring::refresh_env) {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) | Err(e) => eprintln!("[agent] could not update the agent config: {e}"),
+    }
+}
+
 /// 背景執行緒的一次等待(每一輪結束時由 `round::next_delay` 與 `round::backoff_window` 決定):`deadline` 之前不跑下一輪,除非被喚醒(`runs_on`)。
 #[derive(Clone, Copy, Debug)]
 struct Wait {

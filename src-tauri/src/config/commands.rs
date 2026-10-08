@@ -668,6 +668,22 @@ pub fn load_doc_migrated(path: &Path) -> Result<crate::config::model::SshConfigD
 
 // ─── Tauri command wrappers ───────────────────────────────────────────────────
 
+/// 改了主機區塊的命令(改 `IdentityFile`、新增、刪除、改名、搬動、複製、重排、還原備份……)的外殼:`edit` 做完(它拿的 doc、backed_up 鎖都在它裡面放掉)而且存檔成功,
+/// 才馬上更新 agent 的設定(`sync::engine::refresh_agent_config`;金鑰保管庫 spec §6「何時重寫:主機的 `IdentityFile` 變了」),不必等下一次同步嘗試。
+/// 不能在拿著鎖的時候更新:它自己依序拿 doc → backed_up → core,`std::sync::Mutex` 不能重入。更新不成不讓存檔失敗(它只記到 stderr)。
+fn edit_hosts<T>(edit: impl FnOnce() -> Result<T, AppError>) -> Result<T, AppError> {
+    after_host_edit(edit, crate::sync::engine::refresh_agent_config)
+}
+
+/// `edit_hosts` 的本體:`refresh` 由呼叫端注入(測試用來確認它在 `edit` 放掉鎖之後、只在成功之後才跑)。
+fn after_host_edit<T>(edit: impl FnOnce() -> Result<T, AppError>, refresh: impl FnOnce()) -> Result<T, AppError> {
+    let result = edit();
+    if result.is_ok() {
+        refresh();
+    }
+    result
+}
+
 #[tauri::command]
 pub fn config_load(
     app: tauri::AppHandle,
@@ -861,18 +877,20 @@ pub fn config_save_host(
     alias: String,
     changes: Vec<HostFieldChange>,
 ) -> Result<Option<HostDetail>, AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
 
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let idx = apply_changes(doc, &alias, &changes)?;
-            persist_file(doc, idx, &mut backed_up_lock, retention)?;
-            Ok(host_detail(doc, &alias))
+        match doc_lock.as_mut() {
+            None => Err(AppError::Other("no config loaded".to_string())),
+            Some(doc) => {
+                let idx = apply_changes(doc, &alias, &changes)?;
+                persist_file(doc, idx, &mut backed_up_lock, retention)?;
+                Ok(host_detail(doc, &alias))
+            }
         }
-    }
+    })
 }
 
 /// Export to host 之後把主機連到這把金鑰(金鑰保管庫 spec §7.3.1):`edit::replace_identity_files` 改記憶體裡的 doc,`persist` 寫回。
@@ -896,14 +914,17 @@ pub fn set_identity_file(
 }
 
 /// Export to host 的「Use this key」:主機區塊裡生效的 IdentityFile 換成這把金鑰(`set_identity_file`)。回傳更新後的主機明細。
+/// 放掉鎖之後馬上更新 agent 的設定(`edit_hosts`):主機指到保管庫的金鑰時,`ssh` 立刻接得到 agent。
 #[tauri::command]
 pub fn config_set_identity_file(state: State<AppState>, alias: String, value: String) -> Result<Option<HostDetail>, AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
-    let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-    set_identity_file(doc, &alias, &value, |doc, idx| persist_file(doc, idx, &mut backed_up, retention))?;
-    Ok(host_detail(doc, &alias))
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
+        let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        set_identity_file(doc, &alias, &value, |doc, idx| persist_file(doc, idx, &mut backed_up, retention))?;
+        Ok(host_detail(doc, &alias))
+    })
 }
 
 #[tauri::command]
@@ -913,27 +934,29 @@ pub fn config_add_host(
     alias: String,
     fields: Vec<HostFieldChange>,
 ) -> Result<(), AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
 
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let idx = doc
-                .files
-                .iter()
-                .position(|f| f.path.to_string_lossy() == target_file.as_str())
-                .ok_or_else(|| AppError::NotFound(format!("file '{}' not found", target_file)))?;
+        match doc_lock.as_mut() {
+            None => Err(AppError::Other("no config loaded".to_string())),
+            Some(doc) => {
+                let idx = doc
+                    .files
+                    .iter()
+                    .position(|f| f.path.to_string_lossy() == target_file.as_str())
+                    .ok_or_else(|| AppError::NotFound(format!("file '{}' not found", target_file)))?;
 
-            let kv: Vec<(String, String)> = fields
-                .iter()
-                .map(|c| (c.keyword.clone(), c.value.clone()))
-                .collect();
-            edit::add_host(&mut doc.files[idx].items, &alias, &kv);
-            persist_file(doc, idx, &mut backed_up_lock, retention)
+                let kv: Vec<(String, String)> = fields
+                    .iter()
+                    .map(|c| (c.keyword.clone(), c.value.clone()))
+                    .collect();
+                edit::add_host(&mut doc.files[idx].items, &alias, &kv);
+                persist_file(doc, idx, &mut backed_up_lock, retention)
+            }
         }
-    }
+    })
 }
 
 #[tauri::command]
@@ -941,20 +964,22 @@ pub fn config_remove_host(
     state: State<AppState>,
     alias: String,
 ) -> Result<bool, AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
 
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let idx = find_host_file_index(doc, &alias)
-                .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
-            let removed = edit::remove_host(&mut doc.files[idx].items, &alias);
-            persist_file(doc, idx, &mut backed_up_lock, retention)?;
-            Ok(removed)
+        match doc_lock.as_mut() {
+            None => Err(AppError::Other("no config loaded".to_string())),
+            Some(doc) => {
+                let idx = find_host_file_index(doc, &alias)
+                    .ok_or_else(|| AppError::NotFound(format!("host '{}' not found", alias)))?;
+                let removed = edit::remove_host(&mut doc.files[idx].items, &alias);
+                persist_file(doc, idx, &mut backed_up_lock, retention)?;
+                Ok(removed)
+            }
         }
-    }
+    })
 }
 
 #[tauri::command]
@@ -963,19 +988,21 @@ pub fn config_rename_host(
     alias: String,
     patterns: Vec<String>,
 ) -> Result<Option<HostDetail>, AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
 
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let idx = rename_host(doc, &alias, &patterns)?;
-            persist_file(doc, idx, &mut backed_up_lock, retention)?;
-            // The host's identity may have changed: look it up by the NEW first pattern.
-            Ok(host_detail(doc, &patterns[0]))
+        match doc_lock.as_mut() {
+            None => Err(AppError::Other("no config loaded".to_string())),
+            Some(doc) => {
+                let idx = rename_host(doc, &alias, &patterns)?;
+                persist_file(doc, idx, &mut backed_up_lock, retention)?;
+                // The host's identity may have changed: look it up by the NEW first pattern.
+                Ok(host_detail(doc, &patterns[0]))
+            }
         }
-    }
+    })
 }
 
 #[tauri::command]
@@ -984,27 +1011,29 @@ pub fn config_move_host(
     alias: String,
     target_file: String,
 ) -> Result<(), AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
 
-    let doc = doc_lock
-        .as_ref()
-        .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-    // 拖進 sidebar 的某個 space 群組(目標是已載入的、這台勾選的 space 檔;spec §7.2 跨 space 搬移也走這裡):與搬移
-    // 精靈同一套規則(`migrate::refuse_move_into_space`,兩邊共用同一組檢查),都在任何改動之前 —— 這個行程沒有同步引擎就拒絕;目標 space 第一輪同步還沒完成就拒絕;
-    // 區塊含 wildcard、`Include` 或帶引號的 keyword 就拒絕;要搬的區塊有任何名字已經在目標檔裡也拒絕(重複會讓那個 space
-    // 停下)。`move_host_and_persist` 先寫目標檔、再從來源移除。鎖順序 doc → backed_up → core。
-    let target = crate::keys::ssh_dir().ok().and_then(|dir| {
-        crate::sync::migrate::selected_space_files(&state.sync, &dir)
-            .into_iter()
-            .find(|(_, path)| path.to_string_lossy() == target_file.as_str() && doc.files.iter().any(|f| &f.path == path))
-    });
-    if let Some((space_id, path)) = target {
-        crate::sync::migrate::refuse_move_into_space(doc, &state.sync, crate::sync::engine::engine_active(), &space_id, &path, &alias)?;
-    }
-    move_host_and_persist(&mut doc_lock, &alias, &target_file, |doc, idx| {
-        persist_file(doc, idx, &mut backed_up_lock, retention)
+        let doc = doc_lock
+            .as_ref()
+            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+        // 拖進 sidebar 的某個 space 群組(目標是已載入的、這台勾選的 space 檔;spec §7.2 跨 space 搬移也走這裡):與搬移
+        // 精靈同一套規則(`migrate::refuse_move_into_space`,兩邊共用同一組檢查),都在任何改動之前 —— 這個行程沒有同步引擎就拒絕;目標 space 第一輪同步還沒完成就拒絕;
+        // 區塊含 wildcard、`Include` 或帶引號的 keyword 就拒絕;要搬的區塊有任何名字已經在目標檔裡也拒絕(重複會讓那個 space
+        // 停下)。`move_host_and_persist` 先寫目標檔、再從來源移除。鎖順序 doc → backed_up → core。
+        let target = crate::keys::ssh_dir().ok().and_then(|dir| {
+            crate::sync::migrate::selected_space_files(&state.sync, &dir)
+                .into_iter()
+                .find(|(_, path)| path.to_string_lossy() == target_file.as_str() && doc.files.iter().any(|f| &f.path == path))
+        });
+        if let Some((space_id, path)) = target {
+            crate::sync::migrate::refuse_move_into_space(doc, &state.sync, crate::sync::engine::engine_active(), &space_id, &path, &alias)?;
+        }
+        move_host_and_persist(&mut doc_lock, &alias, &target_file, |doc, idx| {
+            persist_file(doc, idx, &mut backed_up_lock, retention)
+        })
     })
 }
 
@@ -1039,17 +1068,19 @@ pub fn config_duplicate_host(
     alias: String,
     new_alias: String,
 ) -> Result<(), AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
 
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let idx = duplicate_host(doc, &alias, &new_alias)?;
-            persist_file(doc, idx, &mut backed_up_lock, retention)
+        match doc_lock.as_mut() {
+            None => Err(AppError::Other("no config loaded".to_string())),
+            Some(doc) => {
+                let idx = duplicate_host(doc, &alias, &new_alias)?;
+                persist_file(doc, idx, &mut backed_up_lock, retention)
+            }
         }
-    }
+    })
 }
 
 /// Raw text of ONE loaded managed config file (read-only viewer). The path must resolve to
@@ -1075,17 +1106,20 @@ pub fn config_set_option_enabled(
     index: usize,
     enabled: bool,
 ) -> Result<(), AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
+    // 打開或關掉的可能是一行 `IdentityFile`:同樣要更新 agent 的設定。
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
 
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let idx = set_option_enabled(doc, &alias, &keyword, index, enabled)?;
-            persist_file(doc, idx, &mut backed_up_lock, retention)
+        match doc_lock.as_mut() {
+            None => Err(AppError::Other("no config loaded".to_string())),
+            Some(doc) => {
+                let idx = set_option_enabled(doc, &alias, &keyword, index, enabled)?;
+                persist_file(doc, idx, &mut backed_up_lock, retention)
+            }
         }
-    }
+    })
 }
 
 #[tauri::command]
@@ -1119,23 +1153,26 @@ pub fn config_reorder_hosts(
     file: String,
     order: Vec<String>,
 ) -> Result<(), AppError> {
-    let mut doc_lock = state.doc.lock().unwrap();
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    let retention = *state.backup_retention.lock().unwrap();
+    // `agent/config` 依主機在 config 裡的順序列出它們。
+    edit_hosts(|| {
+        let mut doc_lock = state.doc.lock().unwrap();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        let retention = *state.backup_retention.lock().unwrap();
 
-    match doc_lock.as_mut() {
-        None => Err(AppError::Other("no config loaded".to_string())),
-        Some(doc) => {
-            let idx = doc
-                .files
-                .iter()
-                .position(|f| f.path.to_string_lossy() == file.as_str())
-                .ok_or_else(|| AppError::NotFound(format!("file '{}' not found", file)))?;
+        match doc_lock.as_mut() {
+            None => Err(AppError::Other("no config loaded".to_string())),
+            Some(doc) => {
+                let idx = doc
+                    .files
+                    .iter()
+                    .position(|f| f.path.to_string_lossy() == file.as_str())
+                    .ok_or_else(|| AppError::NotFound(format!("file '{}' not found", file)))?;
 
-            edit::reorder_hosts(&mut doc.files[idx].items, &order);
-            persist_file(doc, idx, &mut backed_up_lock, retention)
+                edit::reorder_hosts(&mut doc.files[idx].items, &order);
+                persist_file(doc, idx, &mut backed_up_lock, retention)
+            }
         }
-    }
+    })
 }
 
 #[tauri::command]
@@ -1218,11 +1255,15 @@ pub fn config_restore_backup(
     let aliases = crate::tray::tray_aliases(&doc);
     let _ = crate::tray::rebuild_tray(&app, &aliases);
 
-    let mut doc_lock = state.doc.lock().unwrap();
-    *doc_lock = Some(doc);
+    {
+        let mut doc_lock = state.doc.lock().unwrap();
+        *doc_lock = Some(doc);
 
-    let mut backed_up_lock = state.backed_up.lock().unwrap();
-    backed_up_lock.clear();
+        let mut backed_up_lock = state.backed_up.lock().unwrap();
+        backed_up_lock.clear();
+    }
+    // 還原的是整個檔案:主機與它們的 `IdentityFile` 都可能變了。鎖都放掉之後才更新 agent 的設定(同 `edit_hosts`)。
+    crate::sync::engine::refresh_agent_config();
 
     Ok(LoadResult { files, hosts })
 }
@@ -2391,5 +2432,36 @@ mod tests {
         let (_dir, mut doc) = doc_of("Host web\n  IdentityFile ~/.ssh/id_rsa\n");
         let err = set_identity_file(&mut doc, "nope", "~/.ssh/id_mac", |_, _| panic!("nothing to save")).unwrap_err();
         assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    /// 改了主機區塊的命令(`after_host_edit`):agent 的設定在命令放掉它拿的鎖之後才更新(更新自己要拿 doc 與 backed_up 的鎖,`std::sync::Mutex` 不能重入),
+    /// 而且只在存檔成功之後 —— 失敗的存檔什麼都沒改。
+    #[test]
+    fn the_agent_config_is_refreshed_once_a_host_edit_has_let_go_of_its_locks_and_only_after_it_saved() {
+        let config = std::sync::Mutex::new(());
+        let refreshed = std::cell::Cell::new(0);
+        let refresh = || {
+            assert!(config.try_lock().is_ok(), "the edit still held the config while the agent config was refreshed");
+            refreshed.set(refreshed.get() + 1);
+        };
+        let saved = after_host_edit(
+            || {
+                let _held = config.lock().unwrap();
+                Ok::<_, AppError>("detail")
+            },
+            refresh,
+        );
+        assert_eq!(saved.unwrap(), "detail", "the command's answer is passed through");
+        assert_eq!(refreshed.get(), 1);
+
+        let failed = after_host_edit(
+            || {
+                let _held = config.lock().unwrap();
+                Err::<(), _>(AppError::Conflict("config".to_string()))
+            },
+            || refreshed.set(refreshed.get() + 1),
+        );
+        assert!(matches!(failed, Err(AppError::Conflict(_))), "the error is passed through");
+        assert_eq!(refreshed.get(), 1, "nothing was saved, so nothing is refreshed");
     }
 }
