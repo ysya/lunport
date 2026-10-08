@@ -265,7 +265,7 @@ pub fn vault_slot_files(state: &SyncStateV2) -> BTreeSet<String> {
 }
 
 /// 這台用的還是檔案(SP3 的連結,沒有收起來的;或同步來的副本)。「Move」把它搬進保管庫(金鑰保管庫 spec §8)。畫面的「File for now」與「Move」另外要看金鑰搬不搬得進去
-/// (`can_move_into_vault`)。
+/// (`move_refusal` 沒有原因)。
 pub(crate) fn is_file_for_now(local: &LocalSlot) -> bool {
     match &local.source {
         Some(SlotSource::SyncedCopy { .. }) => true,
@@ -293,8 +293,8 @@ pub(crate) fn move_refusal(local: &LocalSlot, keys_dir: &Path) -> Option<String>
     }
 }
 
-/// 金鑰搬得進保管庫(`move_refusal` 沒有原因)。「File for now」與「Move」只看這些:永遠搬不進去的金鑰不標「File for now」、「Move」也不碰 —— 標了,提示會一直出現,
-/// 按了一定失敗(金鑰保管庫 spec §8)。
+/// 金鑰搬得進保管庫(`move_refusal` 沒有原因),「Move」(`move_all_into_vault`)用;畫面的「File for now」看同一個條件(`views` 的 `stays_file`)。永遠搬不進去的金鑰不標
+/// 「File for now」、「Move」也不碰 —— 標了,提示會一直出現,按了一定失敗(金鑰保管庫 spec §8)。
 fn can_move_into_vault(local: &LocalSlot, keys_dir: &Path) -> bool {
     move_refusal(local, keys_dir).is_none()
 }
@@ -1148,7 +1148,7 @@ pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path,
             _ => None,
         });
         // 這台還是檔案的插槽,它的金鑰為什麼永遠搬不進保管庫(`move_refusal`,每一列只算一次):畫面的 `stays_file`;沒有原因才標「File for now」
-        // (`is_file_for_now` 而且 `can_move_into_vault`)。
+        // (`is_file_for_now` 而且 `move_refusal` 沒有原因)。
         let stays_file = local.filter(|l| is_file_for_now(l)).and_then(|l| move_refusal(l, &keys_dir));
         let file_for_now = local.is_some_and(is_file_for_now) && stays_file.is_none();
         SyncKeySlotView {
