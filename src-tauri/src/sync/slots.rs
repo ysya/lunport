@@ -267,8 +267,8 @@ fn can_move_into_vault(local: &LocalSlot, keys_dir: &Path) -> bool {
 /// 「Move」(金鑰保管庫 spec §8):這台還是檔案、金鑰又搬得進去的插槽(`is_file_for_now`、`can_move_into_vault`,同畫面的「File for now」)一把一把搬進保管庫(`set_delivery`)。
 /// 一把搬不進去就記下原因、繼續下一把;回傳搬不進去的那些(畫面顯示原因,那一把維持檔案)。永遠搬不進去的金鑰(安全金鑰……)不碰、也不回報。
 pub fn move_all_into_vault(env: &SyncEnv) -> Result<Vec<crate::sync::dto::MoveFailure>, AppError> {
-    let state = crate::sync::runtime::snapshot(env).ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
-    let home = env.ssh_dir.parent().ok_or_else(|| AppError::Other("cannot determine the home directory".to_string()))?;
+    // 狀態存不進去的行程整個拒絕(`local_snapshot`),不是每一把各報一次同樣的理由。
+    let (state, home) = local_snapshot(env)?;
     let keys_dir = home.join(SLOT_DIR);
     let files: Vec<(String, String)> = state
         .key_slots
@@ -1325,10 +1325,20 @@ fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError
     Ok((state, keys, home))
 }
 
-/// 快照:(狀態、家目錄),不要帳戶金鑰。只動這台的插槽與保管庫的動作用(`export_private`、`set_delivery`、`delete_copy`):沒有加入帳戶也做得到 —— 離開帳戶之後,
-/// 這台的保管庫還有那些金鑰,常常是這台僅存的一份(金鑰保管庫 spec §4.3)。
+/// 快照:(狀態、家目錄),不要帳戶金鑰。只動這台的插槽與保管庫的動作用(`export_private`、`set_delivery`、`delete_copy`、`move_all_into_vault`):沒有加入帳戶也做得到
+/// —— 離開帳戶之後,這台的保管庫還有那些金鑰,常常是這台僅存的一份(金鑰保管庫 spec §4.3)。
+///
+/// 狀態存不進去(`save_blocked`:別的 SSHelter 行程跑著同步引擎,或狀態檔留在原地)就在任何動作之前拒絕,理由同 `mutate`。這些動作先動檔案與保管庫、最後才提交記錄:
+/// 提交被拒的話,跑引擎的那個行程還記著原本的連結,沒有帳戶時也沒有哪一輪會把它放回來,用它的主機就連不上了。(有帳戶金鑰的 `snapshot` 不必:這種行程從來推導不出
+/// 帳戶金鑰,那些動作本來就先失敗。)
 fn local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
-    let state = env.runtime.core.lock().unwrap().state.clone().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+    let state = {
+        let core = env.runtime.core.lock().unwrap();
+        if let Some(reason) = &core.save_blocked {
+            return Err(AppError::Other(reason.clone()));
+        }
+        core.state.clone().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?
+    };
     let home = env.ssh_dir.parent().map(Path::to_path_buf).ok_or_else(|| AppError::Other("cannot determine the home directory".to_string()))?;
     Ok((state, home))
 }
@@ -6442,8 +6452,9 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(&slot).unwrap(), test_keys::plain());
     }
 
-    /// 搬進保管庫時狀態寫不進去:同步來的副本還留在插槽裡,記錄也還是它 —— 記錄提交之後才拿掉插槽裡的私鑰。先刪的話,帳戶裡沒有這把金鑰時
-    /// (Stop syncing 之後、之前的帳戶留下的副本),它只剩保管庫裡一筆沒有記錄用到的。
+    /// 搬進保管庫時記錄的提交被拒:同步來的副本還留在插槽裡,記錄也還是它 —— 記錄提交之後才拿掉插槽裡的私鑰。先刪的話,帳戶裡沒有這把金鑰時
+    /// (Stop syncing 之後、之前的帳戶留下的副本),它只剩保管庫裡一筆沒有記錄用到的。提交被拒用 v1 升級還沒做完(`mutate` 在改任何東西之前拒絕):
+    /// 狀態存不進去(`save_blocked`)的行程現在在動任何東西之前就拒絕(`local_snapshot`),走不到提交。
     #[test]
     fn a_synced_copy_stays_until_its_move_into_the_vault_is_saved() {
         let (_relay, _clock, a, b, _words, personal) = pair();
@@ -6456,19 +6467,19 @@ pub(crate) mod tests {
         let slot = home(&b).join(SLOT_DIR).join(&file);
         let before = b.state().key_slots[&id].clone();
 
-        b.runtime.core.lock().unwrap().save_blocked = Some("the state can't be saved".into());
-        assert_eq!(set_delivery(&b.env(), &id, true).unwrap_err().to_string(), "the state can't be saved");
+        b.runtime.core.lock().unwrap().legacy = Some(crate::sync::state::SyncState::fresh("B").unwrap());
+        assert_eq!(set_delivery(&b.env(), &id, true).unwrap_err().to_string(), crate::sync::runtime::UPGRADING_MESSAGE);
         assert_eq!(std::fs::read_to_string(&slot).unwrap(), test_keys::plain(), "the synced copy is still in the slot");
         assert_eq!(b.state().key_slots[&id], before, "the record is still the synced copy");
 
-        b.runtime.core.lock().unwrap().save_blocked = None;
+        b.runtime.core.lock().unwrap().legacy = None;
         set_delivery(&b.env(), &id, true).unwrap();
         assert!(!slot_files::occupied(&slot), "once the move is saved, the file goes");
         assert_eq!(std::fs::read_to_string(public_path(&slot)).unwrap().trim(), test_keys::PLAIN_PUBLIC, "and the .pub stays");
         assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })));
     }
 
-    /// 改回檔案時狀態寫不進去:剛寫的私鑰檔收回(記錄還說金鑰在保管庫,保管庫裡也還有它),不留下一個下一輪被當成擋路的檔案。
+    /// 改回檔案時記錄的提交被拒(同上,用 v1 升級還沒做完):剛寫的私鑰檔收回(記錄還說金鑰在保管庫,保管庫裡也還有它),不留下一個下一輪被當成擋路的檔案。
     #[test]
     fn keeping_a_file_whose_state_cannot_be_saved_takes_the_file_back() {
         let (_relay, _clock, a, b, _words, personal) = pair();
@@ -6480,14 +6491,14 @@ pub(crate) mod tests {
         let slot = home(&b).join(SLOT_DIR).join(&file);
         let before = b.state().key_slots[&id].clone();
 
-        b.runtime.core.lock().unwrap().save_blocked = Some("the state can't be saved".into());
-        assert_eq!(set_delivery(&b.env(), &id, false).unwrap_err().to_string(), "the state can't be saved");
+        b.runtime.core.lock().unwrap().legacy = Some(crate::sync::state::SyncState::fresh("B").unwrap());
+        assert_eq!(set_delivery(&b.env(), &id, false).unwrap_err().to_string(), crate::sync::runtime::UPGRADING_MESSAGE);
         assert!(!slot_files::occupied(&slot), "the copy just written is taken back");
         assert_eq!(std::fs::read_to_string(public_path(&slot)).unwrap().trim(), test_keys::PLAIN_PUBLIC, "the .pub stays");
         assert_eq!(b.state().key_slots[&id], before);
         assert_eq!(vault_entry(&b, &id).unwrap().private_key, test_keys::plain(), "the vault still holds the key");
 
-        b.runtime.core.lock().unwrap().save_blocked = None;
+        b.runtime.core.lock().unwrap().legacy = None;
         settle(&b);
         assert_eq!(b.state().key_slots[&id].last_error, None, "nothing is left in the way");
     }
@@ -7446,5 +7457,32 @@ pub(crate) mod tests {
         assert!(matches!(&local.source, Some(SlotSource::Linked { link: LinkKind::Copy, .. })), "it is a copy now: {local:?}");
         let row = overview_row(&a, &id).expect("the row stays");
         assert_eq!(row.status, SlotStatusView::NotInUse { file: slot.display().to_string() });
+    }
+
+    /// 跑不了同步引擎的行程(`save_blocked`:例如第二個 SSHelter;沒有帳戶時它不再因為沒有帳戶金鑰而先失敗):「Move」與「Delete copy」在動任何東西之前就以
+    /// `mutate` 的理由拒絕 —— 連結還在、保管庫沒變、記錄沒變。不然檔案與保管庫先動了、記錄卻寫不進去:跑引擎的那個行程還記著連結,沒有帳戶時也沒有哪一輪
+    /// 會把它放回來,用它的主機就連不上了。
+    #[test]
+    fn a_process_that_cannot_save_the_state_refuses_move_and_delete_copy_before_touching_anything() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (linked, linked_file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let (vaulted, _) = create_slot_on(&a, SlotMode::Own, &test_keys::ecdsa(), "id_old");
+        use_slot(&a, &personal, &linked_file);
+        settle(&a);
+        set_delivery(&a.env(), &vaulted, true).unwrap();
+        crate::sync::account::leave_account(&a.env(), false).unwrap();
+        let link = home(&a).join(SLOT_DIR).join(&linked_file);
+        assert!(overview_row(&a, &linked).expect("listed").file_for_now, "setup: Move offers the link");
+        let before = a.state();
+
+        let reason = crate::sync::engine::ANOTHER_ENGINE_MESSAGE;
+        a.runtime.core.lock().unwrap().save_blocked = Some(reason.to_string());
+        assert_eq!(move_all_into_vault(&a.env()).unwrap_err().to_string(), reason, "Move");
+        assert_eq!(set_delivery(&a.env(), &linked, true).unwrap_err().to_string(), reason, "Move into SSHelter");
+        assert_eq!(delete_copy(&a.env(), &vaulted).unwrap_err().to_string(), reason, "Delete copy");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), test_keys::plain(), "the link is still in place");
+        assert!(vault_entry(&a, &linked).is_none(), "nothing went into the vault");
+        assert_eq!(vault_entry(&a, &vaulted).map(|e| e.private_key.clone()), Some(test_keys::ecdsa()), "and nothing left it");
+        assert_eq!(a.state(), before, "no record changed");
     }
 }
