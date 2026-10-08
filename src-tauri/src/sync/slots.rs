@@ -1698,6 +1698,10 @@ fn holds_recorded_copy(copy: &SlotSource, path: &Path) -> bool {
 /// (`holds_recorded_copy`);不是(使用者換上的、別的插槽放的)就擋路,什麼都不刪。副本已經不在了:只忘掉記錄,旁邊的 `.pub` 不能確定是
 /// 自己的,不碰(同 `park_link`)。只在 SSHelter 的金鑰(`SlotSource::Vault`):插槽路徑上有檔案就擋路;否則拿掉保管庫裡那一筆與插槽旁的
 /// `.pub`(那是這筆記錄每一輪維護的),再忘掉記錄;記在這台 keychain 的 passphrase 也一起忘掉(`forget_remembered_passphrase`)。不需要帳戶(`local_snapshot`)。
+///
+/// 帳戶裡已經沒有(或根本沒有帳戶)的連結(symlink、hard link):做每一輪對它做的事(`drop_link`)—— 拿掉自己的連結與 `.pub`、忘掉記錄;原檔不見或內容不同的
+/// hard link 可能是那把金鑰僅存的名字,不拿掉,記成複製檔(這一列留著,之後可以當成副本刪掉)。沒有帳戶時沒有哪一輪會做這件事,不然這一列永遠刪不掉。
+/// 帳戶裡還在的插槽的連結照舊不刪(每一輪把沒有主機用到的收起來,`park_link`)。
 pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let (state, home) = local_snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
@@ -1718,6 +1722,24 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
         let _ = std::fs::remove_file(public_path(&path));
         mutate(env, |s| {
             s.key_slots.remove(slot_id);
+            Ok(())
+        })?;
+        env.events.wake();
+        return Ok(());
+    }
+    let live = state.account.as_ref().is_some_and(|account| live_slots(account).iter().any(|(id, _)| id == slot_id));
+    if !live && matches!(local.source, Some(SlotSource::Linked { link: LinkKind::Symlink | LinkKind::HardLink, .. })) {
+        let mut dropped = local.clone();
+        drop_link(&mut dropped, &home.join(SLOT_DIR).join(&local.file_name));
+        // 拿不掉連結:什麼都不記,把原因回給畫面(這一列照舊)。
+        if let Some(message) = dropped.last_error.take() {
+            return Err(AppError::Other(message));
+        }
+        mutate(env, |s| {
+            match dropped.source {
+                None => s.key_slots.remove(slot_id),
+                Some(_) => s.key_slots.insert(slot_id.to_string(), dropped.clone()),
+            };
             Ok(())
         })?;
         env.events.wake();
@@ -7323,6 +7345,13 @@ pub(crate) mod tests {
         crate::sync::dto::overview(&d.env()).unwrap().key_slots.into_iter().find(|v| v.id == id)
     }
 
+    /// 離開帳戶之後,`web` 所在的檔案(搬到了 `~/.ssh/sshelter-local/`)。
+    fn kept_local_file(d: &TestDevice) -> PathBuf {
+        let doc = d.doc.lock().unwrap();
+        let files = &doc.as_ref().expect("config loaded").files;
+        files.iter().map(|f| f.path.clone()).find(|p| p.to_string_lossy().contains("sshelter-local")).expect("web's file moved to sshelter-local")
+    }
+
     /// 離開帳戶之後(沒有帳戶、也沒有帳戶金鑰),同步來的金鑰還在這台的保管庫裡,`~/.ssh/sshelter-local/` 的 `web` 還用著它 —— 它常常是這台僅存的一份。
     /// overview 照樣列出它:不在帳戶裡、沒有其他電腦、主機還用著就是 Ready;「Export private key…」照樣匯出。主機不再用它之後是 Not in use,刪除副本也做得到。
     #[test]
@@ -7347,8 +7376,7 @@ pub(crate) mod tests {
         assert_eq!((name.as_str(), text.as_str()), ("id_mac", test_keys::plain().as_str()), "and it still exports");
 
         // `web` 不再用它(它的檔案在離開帳戶時搬到了 `~/.ssh/sshelter-local/`):Not in use,刪除副本拿掉保管庫裡那一筆。
-        let kept = b.doc.lock().unwrap().as_ref().unwrap().files.iter().map(|f| f.path.clone()).find(|p| p.to_string_lossy().contains("sshelter-local"));
-        b.save_in_app(&kept.expect("web's file moved to sshelter-local"), "Host web\n  HostName 10.0.0.1\n");
+        b.save_in_app(&kept_local_file(&b), "Host web\n  HostName 10.0.0.1\n");
         let row = overview_row(&b, &id).expect("still listed");
         assert!(matches!(row.status, SlotStatusView::NotInUse { .. }) && row.hosts.is_empty(), "{:?}", row.status);
         delete_copy(&b.env(), &id).unwrap();
@@ -7375,5 +7403,48 @@ pub(crate) mod tests {
         assert_landed_in_the_vault(&b, &id, &file, &test_keys::plain(), test_keys::PLAIN_PUBLIC);
         let row = overview_row(&b, &id).unwrap();
         assert!(row.in_vault && !row.file_for_now && !row.in_account, "{row:?}");
+    }
+
+    /// 沒有帳戶時沒有哪一輪會處理沒有主機用到的連結(`sync_once` 不做插槽的維護):「Delete copy」做每一輪對帳戶裡已經沒有的連結做的事(`drop_link`)——
+    /// 拿掉插槽路徑上的連結與它旁邊的 `.pub`,你的金鑰檔不動,記錄忘掉。不然這一列(Not in use)按了也刪不掉。
+    #[test]
+    fn delete_copy_without_an_account_removes_an_unused_link_and_leaves_the_key_file() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let (link, key) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+        write_linked_public(&link, &key).unwrap();
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        crate::sync::account::leave_account(&a.env(), false).unwrap();
+        a.save_in_app(&kept_local_file(&a), "Host web\n  HostName 10.0.0.1\n");
+        let row = overview_row(&a, &id).expect("listed without an account");
+        assert!(matches!(row.status, SlotStatusView::NotInUse { .. }) && !row.in_account, "setup: {:?}", row.status);
+
+        delete_copy(&a.env(), &id).unwrap();
+        assert!(!slot_files::occupied(&link) && !slot_files::occupied(&public_path(&link)), "the link and its .pub are gone");
+        assert_eq!(std::fs::read_to_string(&key).unwrap(), test_keys::plain(), "your key file is untouched");
+        assert!(!a.state().key_slots.contains_key(&id), "the record is gone");
+        assert!(overview_row(&a, &id).is_none(), "and so is the row");
+    }
+
+    /// 同上,hard link 的原檔不見了:插槽路徑上的是那把金鑰僅存的名字 —— 不刪,記成複製檔(同每一輪的 `drop_link`)。這一列還在,現在是一份副本。
+    #[test]
+    fn delete_copy_without_an_account_keeps_a_hard_link_that_is_the_last_name_of_a_key() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        make_it_a_hard_link(&a, &id, &file, "id_mac");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        crate::sync::account::leave_account(&a.env(), false).unwrap();
+        a.save_in_app(&kept_local_file(&a), "Host web\n  HostName 10.0.0.1\n");
+        std::fs::remove_file(a.ssh_dir().join("id_mac")).unwrap();
+        let slot = home(&a).join(SLOT_DIR).join(&file);
+
+        delete_copy(&a.env(), &id).unwrap();
+        assert_eq!(std::fs::read_to_string(&slot).unwrap(), test_keys::plain(), "the key's last name is kept");
+        let local = a.state().key_slots[&id].clone();
+        assert!(matches!(&local.source, Some(SlotSource::Linked { link: LinkKind::Copy, .. })), "it is a copy now: {local:?}");
+        let row = overview_row(&a, &id).expect("the row stays");
+        assert_eq!(row.status, SlotStatusView::NotInUse { file: slot.display().to_string() });
     }
 }
