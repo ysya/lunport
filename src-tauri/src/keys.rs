@@ -36,6 +36,9 @@ pub struct KeyInfo {
     pub comment: Option<String>,
     /// Loaded into the running ssh-agent (matched by SHA256 fingerprint).
     pub in_agent: bool,
+    /// Hosts whose live `IdentityFile` points at this key in the loaded config (first pattern of each block, wildcard-only
+    /// blocks skipped), sorted. Empty when no config is loaded.
+    pub hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +256,7 @@ fn key_info_for(dir: &Path, name: &str, agent_fingerprints: &HashSet<String>) ->
         fingerprint_sha256: fingerprint,
         comment,
         in_agent,
+        hosts: Vec::new(),
     }
 }
 
@@ -288,6 +292,46 @@ pub fn scan_keys(dir: &Path, agent_fingerprints: &HashSet<String>) -> Result<Vec
     Ok(out)
 }
 
+/// Hosts that use the key file `key_path`: every live `IdentityFile` in a `Host` block is resolved like the sync code does
+/// (`~/`, `%d/`, quotes, absolute paths; `resolve_identity_value`) and compared with `key_path`. A block counts under its
+/// first pattern; blocks whose first pattern is a wildcard or a negation are defaults, not hosts. Sorted, deduplicated.
+pub fn hosts_using(doc: &crate::config::model::SshConfigDoc, home: &Path, key_path: &Path) -> Vec<String> {
+    use crate::config::model::Item;
+    use crate::sync::slot_rules::{resolve_identity_value, IdentityTarget};
+    let mut out = std::collections::BTreeSet::new();
+    for file in &doc.files {
+        for item in &file.items {
+            let Item::Host(host) = item else { continue };
+            let Some(alias) = host.patterns.first() else { continue };
+            if alias.contains('*') || alias.contains('?') || alias.starts_with('!') {
+                continue;
+            }
+            let uses = host.body.iter().any(|line| {
+                matches!(line, Item::Directive(d)
+                    if d.key == "identityfile"
+                        && !d.serializes_as_comment()
+                        && matches!(resolve_identity_value(&d.value, home), IdentityTarget::File(path) if path == key_path))
+            });
+            if uses {
+                out.insert(alias.clone());
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Git for Windows ships its own `ssh`, which can't open named pipes, so it can't reach SSHelter's agent (key vault
+/// spec §10). Git has to use Windows' own OpenSSH instead.
+pub const GIT_SSH_COMMAND: &str = "C:/Windows/System32/OpenSSH/ssh.exe";
+
+/// Whether the Git hint is still needed for this `git config --global core.sshCommand` value (`None` = not set): yes
+/// unless it is Windows' OpenSSH. Case, slash direction and surrounding quotes don't matter.
+pub fn git_hint_needed(core_ssh_command: Option<&str>) -> bool {
+    let Some(value) = core_ssh_command else { return true };
+    let normalized = value.trim().trim_matches('"').trim_matches('\'').replace('\\', "/").to_ascii_lowercase();
+    normalized != GIT_SSH_COMMAND.to_ascii_lowercase()
+}
+
 // ─── Terminal plumbing ────────────────────────────────────────────────────────
 
 /// Launch `argv` in the user's terminal: explicit override id, else the first detected.
@@ -307,10 +351,31 @@ fn launch_in_terminal(terminal_override: Option<String>, argv: &[String]) -> Res
 // ─── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn keys_list() -> Result<Vec<KeyInfo>, AppError> {
+pub fn keys_list(state: tauri::State<crate::state::AppState>) -> Result<Vec<KeyInfo>, AppError> {
     let dir = ssh_dir()?;
     let (_, fingerprints) = agent_snapshot();
-    scan_keys(&dir, &fingerprints)
+    let mut keys = scan_keys(&dir, &fingerprints)?;
+    let doc = state.doc.lock().unwrap();
+    if let (Some(home), Some(doc)) = (dir.parent(), doc.as_ref()) {
+        for key in &mut keys {
+            key.hosts = hosts_using(doc, home, Path::new(&key.private_path));
+        }
+    }
+    Ok(keys)
+}
+
+/// The command the Keychain suggests on Windows when Git would use its own ssh (key vault spec §10); `None` on other
+/// systems, when git isn't installed, or when `core.sshCommand` already points at Windows' OpenSSH. The Keychain shows it
+/// only while this computer has keys in SSHelter. Never changes git's settings.
+#[tauri::command(async)]
+pub fn keys_git_ssh_hint() -> Option<String> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    // `git config --get` exits 1 when the key is unset; a missing git is an Err from `output()`.
+    let out = crate::process::background_command("git").args(["config", "--global", "--get", "core.sshCommand"]).output().ok()?;
+    let value = out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|v| !v.is_empty());
+    git_hint_needed(value.as_deref()).then(|| format!("git config --global core.sshCommand {GIT_SSH_COMMAND}"))
 }
 
 #[tauri::command]
@@ -672,6 +737,82 @@ mod tests {
         assert!(!keys[0].in_agent);
     }
 
+    // ── hosts using a key file ────────────────────────────────────────────────
+
+    /// The hosts that use a key file: the `~/`, `%d/`, quoted and absolute spellings all count; a commented-out line,
+    /// another key and a wildcard-only block don't; a block counts under its first pattern.
+    #[test]
+    fn hosts_using_a_key_follow_every_spelling_of_its_path() {
+        let home = tempfile::tempdir().unwrap();
+        let key = home.path().join(".ssh/id_mac");
+        let config = home.path().join(".ssh/config");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "Host web db\n  IdentityFile ~/.ssh/id_mac\nHost quoted\n  IdentityFile \"%d/.ssh/id_mac\"\nHost absolute\n  IdentityFile {}\nHost other\n  IdentityFile ~/.ssh/id_other\nHost old\n  # IdentityFile ~/.ssh/id_mac\nHost *\n  IdentityFile ~/.ssh/id_mac\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+        let doc = crate::config::include::load_doc(&config).unwrap();
+        assert_eq!(hosts_using(&doc, home.path(), &key), vec!["absolute".to_string(), "quoted".to_string(), "web".to_string()]);
+    }
+
+    /// Only live lines of real `Host` blocks count: hosts from included files do, an alias is listed once however many
+    /// blocks and lines name the key, and a negation or `?` first pattern, a `Match` block and an `IdentityFile` that is
+    /// switched off in the loaded config (it would be written as a comment) don't.
+    #[test]
+    fn hosts_using_a_key_count_only_live_lines_of_real_hosts() {
+        use crate::config::model::Item;
+        let home = tempfile::tempdir().unwrap();
+        let key = home.path().join(".ssh/id_mac");
+        let config = home.path().join(".ssh/config");
+        let extra = home.path().join(".ssh/extra.conf");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&extra, "Host included\n  identityfile = ~/.ssh/id_mac   # spelled out\nHost twice\n  IdentityFile ~/.ssh/id_mac\n").unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "Include {}\nHost twice\n  IdentityFile ~/.ssh/id_mac\n  IdentityFile \"%d/.ssh/id_mac\"\nHost !skip any\n  IdentityFile ~/.ssh/id_mac\nHost app?\n  IdentityFile ~/.ssh/id_mac\nMatch host matched\n  IdentityFile ~/.ssh/id_mac\nHost off\n  IdentityFile ~/.ssh/id_mac\n",
+                extra.display()
+            ),
+        )
+        .unwrap();
+        let mut doc = crate::config::include::load_doc(&config).unwrap();
+        assert_eq!(doc.files.len(), 2, "the included file is loaded too");
+        assert_eq!(hosts_using(&doc, home.path(), &key), vec!["included".to_string(), "off".to_string(), "twice".to_string()]);
+
+        // Switch the line off the way the app does: it stays in the loaded config, but would be written as a comment.
+        let host = crate::config::edit::find_host_mut(&mut doc.files[0].items, "off").unwrap();
+        for line in &mut host.body {
+            if let Item::Directive(d) = line {
+                crate::config::edit::set_directive_enabled(d, false);
+            }
+        }
+        assert_eq!(hosts_using(&doc, home.path(), &key), vec!["included".to_string(), "twice".to_string()]);
+    }
+
+    // ── Windows Git hint ──────────────────────────────────────────────────────
+
+    /// The Windows Git hint: needed when `core.sshCommand` is unset or isn't Windows' own OpenSSH; case, slash direction and
+    /// surrounding quotes or whitespace make no difference.
+    #[test]
+    fn the_git_hint_is_needed_until_git_uses_windows_openssh() {
+        assert!(git_hint_needed(None));
+        assert!(git_hint_needed(Some("ssh")));
+        assert!(git_hint_needed(Some("C:/Program Files/Git/usr/bin/ssh.exe")));
+        for done in [
+            "C:/Windows/System32/OpenSSH/ssh.exe",
+            "c:\\windows\\system32\\openssh\\ssh.exe",
+            "\"C:/Windows/System32/OpenSSH/ssh.exe\"",
+            "'C:/Windows/System32/OpenSSH/ssh.exe'",
+            "  C:/Windows/System32/OpenSSH/ssh.exe\n",
+        ] {
+            assert!(!git_hint_needed(Some(done)), "{done:?}");
+        }
+    }
+
     // ── ts-rs export sanity ───────────────────────────────────────────────────
 
     #[test]
@@ -685,6 +826,7 @@ mod tests {
             fingerprint_sha256: Some("SHA256:abc".into()),
             comment: Some("frank@laptop".into()),
             in_agent: true,
+            hosts: vec!["web".into()],
         };
         let _a = AgentStatus { running: true, key_count: 1 };
     }

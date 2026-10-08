@@ -171,6 +171,7 @@ describe("the keys to pick from", () => {
     fingerprint_sha256: fingerprint,
     comment: null,
     in_agent: false,
+    hosts: [],
   });
   const choices = (props: Partial<ComponentProps<typeof KeyChoices>> = {}) =>
     renderToStaticMarkup(<KeyChoices keys={[key("id_mac", "SHA256:abc")]} loading={false} busy={false} onChoose={() => {}} {...props} />);

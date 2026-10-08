@@ -14,6 +14,7 @@ function key(name: string, pub: string | null): KeyInfo {
     fingerprint_sha256: "SHA256:x",
     comment: null,
     in_agent: false,
+    hosts: [],
   };
 }
 

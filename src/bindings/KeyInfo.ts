@@ -13,4 +13,9 @@ key_type: string, bits: number | null, fingerprint_sha256: string | null, commen
 /**
  * Loaded into the running ssh-agent (matched by SHA256 fingerprint).
  */
-in_agent: boolean, };
+in_agent: boolean, 
+/**
+ * Hosts whose live `IdentityFile` points at this key in the loaded config (first pattern of each block, wildcard-only
+ * blocks skipped), sorted. Empty when no config is loaded.
+ */
+hosts: Array<string>, };

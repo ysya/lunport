@@ -28,8 +28,8 @@ use deploy::{
     secrets_get, secrets_has, secrets_set,
 };
 use keys::{
-    keys_agent_status, keys_deploy, keys_generate, keys_generate_in_terminal, keys_list,
-    keys_read_public,
+    keys_agent_status, keys_deploy, keys_generate, keys_generate_in_terminal, keys_git_ssh_hint,
+    keys_list, keys_read_public,
 };
 use known_hosts::{known_hosts_list, known_hosts_remove};
 use mcp::{mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
@@ -171,6 +171,7 @@ fn run_app(mcp_keep_alive: bool) {
             connect_launch,
             keys_list,
             keys_agent_status,
+            keys_git_ssh_hint,
             keys_read_public,
             keys_generate,
             keys_generate_in_terminal,
