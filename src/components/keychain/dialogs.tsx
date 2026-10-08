@@ -173,6 +173,36 @@ export function DeleteCopyConfirm({
   );
 }
 
+/** Delete a key only on this computer that no host uses (spec §7.5): it is the only copy unless the user exported one. No hooks: exported for the tests. */
+export function DeleteKeyConfirm({
+  slot,
+  open,
+  onCancel,
+  onConfirm,
+}: {
+  slot: SyncKeySlotView | null;
+  open: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{`Delete ${slot ? revealHidden(slot.name) : ""}?`}</AlertDialogTitle>
+          <AlertDialogDescription>{"SSHelter removes this key from this computer. It's the only copy unless you exported one."}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" onClick={onConfirm}>
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 /** What happens to the key a pick replaces on this computer (key vault spec §4.3); null when there is none to keep. */
 export function replacedKeyNote(slot: SyncKeySlotView): string | null {
   if (slot.in_vault) return "SSHelter keeps the key it replaces.";

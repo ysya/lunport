@@ -193,15 +193,18 @@ export interface SlotActions {
   useSynced: boolean;
   syncNew: boolean;
   deleteCopy: boolean;
+  /** Delete a key only on this computer that no host uses; the full Delete (spec §7.6) is plan 2b-2. */
+  deleteKey: boolean;
 }
 
 export function slotActions(slot: SyncKeySlotView): SlotActions {
   const s = slot.status;
+  const none: SlotActions = { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: false, deleteKey: false };
+  // A key only on this computer: nothing to sync or pick (the Sync key dialog asks once a synced host uses it); one no host uses can go.
+  if (slot.local_only) return { ...none, deleteKey: slot.hosts.length === 0 };
   // A slot the account no longer has (deleted, or kept for hosts outside the spaces after joining another account):
   // nothing to sync or pick it for; only a copy nobody uses can go.
-  if (!slot.in_account) {
-    return { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: s.kind === "not_in_use" };
-  }
+  if (!slot.in_account) return { ...none, deleteCopy: s.kind === "not_in_use" };
   const actions: SlotActions = {
     syncThis: slot.mode === "own" && s.kind === "ready",
     stopSyncing: slot.mode === "synced",
@@ -218,6 +221,7 @@ export function slotActions(slot: SyncKeySlotView): SlotActions {
     useSynced: s.kind === "synced_available",
     syncNew: s.kind === "source_changed",
     deleteCopy: s.kind === "not_in_use",
+    deleteKey: false,
   };
   return actions;
 }

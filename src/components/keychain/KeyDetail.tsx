@@ -5,14 +5,14 @@ import { toast } from "sonner";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { MoveFailure } from "@/bindings/MoveFailure";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
-import { DeleteCopyConfirm, ExportPrivateKeyDialog, PickKeyDialog, SyncKeyConfirm } from "@/components/keychain/dialogs";
+import { DeleteCopyConfirm, DeleteKeyConfirm, ExportPrivateKeyDialog, PickKeyDialog, SyncKeyConfirm } from "@/components/keychain/dialogs";
 import { ExportToHostDialog, type ExportTarget } from "@/components/keychain/ExportToHostDialog";
 import { TONE_TEXT } from "@/components/sync-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
 import { deviceLine, slotActions, slotStatusText, whereLine } from "@/lib/key-slots";
-import { hasKeyHere, slotBadges, slotFingerprint, slotPublicPath, type KeyBadge, type KeychainSelection } from "@/lib/keychain";
+import { formatDay, hasKeyHere, passphraseFact, slotBadges, slotFingerprint, slotPublicPath, type KeyBadge, type KeychainSelection } from "@/lib/keychain";
 import { useHomeDir, useKeys, useReadPublicKey } from "@/lib/queries";
 import { useKeyDeleteCopy, useKeySetDelivery, useKeySetMode, useKeyUseSynced, useSyncOverview } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 
 /** What a key's detail asks for. */
-export type KeyAction = "copy" | "exportHost" | "exportPrivate" | "move" | "sync" | "syncNew" | "useSynced" | "pick" | "stop" | "delete";
+export type KeyAction = "copy" | "exportHost" | "exportPrivate" | "move" | "sync" | "syncNew" | "useSynced" | "pick" | "stop" | "delete" | "deleteKey";
 
 export const BADGE_CLASS: Record<KeyBadge["tone"], string> = {
   plain: "",
@@ -79,6 +79,7 @@ export function SlotKeyDetailView({
   // the line above says where the key is. A key SSHelter's agent can never hold stays a file without being a "file for now".
   const file = !slot.in_vault && "file" in slot.status ? slot.status.file : null;
   const devices = deviceLine(slot);
+  const passphrase = passphraseFact(slot);
   const button = (action: KeyAction, label: string, extra: { ghost?: boolean; destructive?: boolean; off?: boolean } = {}) => (
     <Button
       key={action}
@@ -99,6 +100,7 @@ export function SlotKeyDetailView({
     actions.pick && button("pick", actions.pick === "pick" ? "Pick a key on this computer…" : "Change…"),
     actions.stopSyncing && button("stop", "Stop syncing", { ghost: true }),
     actions.deleteCopy && button("delete", "Delete copy", { ghost: true, destructive: true }),
+    actions.deleteKey && button("deleteKey", "Delete key…", { ghost: true, destructive: true }),
   ].filter(Boolean);
   return (
     <div className="space-y-5">
@@ -112,6 +114,7 @@ export function SlotKeyDetailView({
           ))}
           {slot.key_type && <span className="font-mono text-xs text-muted-foreground">{revealHidden(slot.key_type)}</span>}
         </div>
+        {slot.local_only && <p className="text-xs text-muted-foreground">Only this computer has this key. Export a copy to keep a backup.</p>}
       </header>
       <div className="flex flex-wrap gap-1.5">
         {button("copy", "Copy public key", { off: !keyHere })}
@@ -123,10 +126,19 @@ export function SlotKeyDetailView({
         <Fact label="Fingerprint">
           <p className="font-mono text-xs break-all">{slotFingerprint(slot) ?? "No key on this computer yet"}</p>
         </Fact>
+        <Fact label="Created">
+          <p className="text-xs">{formatDay(slot.created_at_ms)}</p>
+        </Fact>
+        {passphrase !== null && (
+          <Fact label="Passphrase">
+            <p className="text-xs">{passphrase}</p>
+          </Fact>
+        )}
         <Fact label="On this computer">
           <p className={cn("text-sm", TONE_TEXT[status.tone])}>{status.text}</p>
           {where && <p className="text-xs text-muted-foreground">{where}</p>}
           {file && <p className="font-mono text-xs break-all text-muted-foreground">{file}</p>}
+          {slot.stays_file && <p className="text-xs text-muted-foreground">{`It stays a file: ${revealHidden(slot.stays_file)}`}</p>}
           {moveFailure && <p className={cn("text-xs", TONE_TEXT.error)}>{`Couldn't move into SSHelter: ${revealHidden(moveFailure)}`}</p>}
         </Fact>
         <Fact label="Hosts">{hostLinks(slot.hosts, onHost)}</Fact>
@@ -233,11 +245,13 @@ export function KeyDetailFor({
   const [picking, setPicking] = useState<SyncKeySlotView | null>(null);
   const [syncing, setSyncing] = useState<SyncKeySlotView | null>(null);
   const [deleting, setDeleting] = useState<SyncKeySlotView | null>(null);
+  const [deletingKey, setDeletingKey] = useState<SyncKeySlotView | null>(null);
   const [exporting, setExporting] = useState<SyncKeySlotView | null>(null);
   const [exportTarget, setExportTarget] = useState<ExportTarget | null>(null);
   // What the confirms show while they animate out (their slot state is already null by then).
   const shownSyncing = useLastNonNull(syncing);
   const shownDeleting = useLastNonNull(deleting);
+  const shownDeletingKey = useLastNonNull(deletingKey);
   // Not only while joined: a key kept in SSHelter after leaving the account still has its detail and its exports.
   const slots = overview.data?.key_slots ?? [];
   const slot = selection?.kind === "slot" ? (slots.find((s) => s.id === selection.id) ?? null) : null;
@@ -293,6 +307,9 @@ export function KeyDetailFor({
       case "delete":
         setDeleting(s);
         break;
+      case "deleteKey":
+        setDeletingKey(s);
+        break;
     }
   };
 
@@ -343,6 +360,18 @@ export function KeyDetailFor({
         onConfirm={() => {
           if (deleting) deleteCopy.mutate({ slotId: deleting.id });
           setDeleting(null);
+        }}
+      />
+      <DeleteKeyConfirm
+        slot={shownDeletingKey}
+        open={deletingKey !== null}
+        onCancel={() => setDeletingKey(null)}
+        onConfirm={() => {
+          if (deletingKey) {
+            const name = revealHidden(deletingKey.name);
+            deleteCopy.mutate({ slotId: deletingKey.id }, { onSuccess: () => toast.success(`Deleted ${name}`) });
+          }
+          setDeletingKey(null);
         }}
       />
       <ExportPrivateKeyDialog slot={exporting} onClose={() => setExporting(null)} />

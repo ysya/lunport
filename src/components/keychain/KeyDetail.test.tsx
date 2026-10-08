@@ -102,6 +102,16 @@ describe("a key slot's detail", () => {
     });
   });
 
+  it("shows a key only on this computer with a backup note, its day and its passphrase, and offers Delete key while no host uses it", () => {
+    const local = keySlot({ local_only: true, in_account: false, mode: "own", in_vault: true, vault_has_passphrase: true, hosts: [] });
+    const t = text(slotDetail(local));
+    for (const part of ["This computer only", "Only this computer has this key. Export a copy to keep a backup.", "Created", "2023-11-15", "Passphrase", "Yes"]) {
+      expect(t).toContain(part);
+    }
+    expect(pressEach(local)).toEqual({ ...COPY_EXPORT, "Export private key…": "exportPrivate", "Delete key…": "deleteKey" });
+    expect(pressEach({ ...local, hosts: ["web"] })).toEqual({ ...COPY_EXPORT, "Export private key…": "exportPrivate" });
+  });
+
   it("turns the actions off while one runs, and Copy and Export to host off without a key here", () => {
     const slot = keySlot({ status: { kind: "synced_available", file: "/f" } });
     for (const label of ["Use the synced key", "Change…", "Stop syncing", "Copy public key", "Export to host…"]) {
@@ -119,6 +129,11 @@ describe("a key slot's detail", () => {
     expect(text(html)).toContain("File for now — any program can use it without asking");
     expect(text(html)).toContain("/home/f/.ssh/id_mac");
     expect(text(html)).toContain("Couldn't move into SSHelter: The key this slot points to is gone: /home/f/.ssh/id_mac.");
+  });
+
+  it("says why a file stays a file", () => {
+    const reason = "SSHelter's agent can't use this kind of key (for example a security key or a DSA key), so it stays as a file.";
+    expect(text(slotDetail(keySlot({ stays_file: reason })))).toContain(`It stays a file: ${reason}`);
   });
 
   it("shows a host in Hosts when it is pressed, and says when no host uses the key", () => {

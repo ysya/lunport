@@ -23,13 +23,14 @@ export function needsAttention(slot: SyncKeySlotView): boolean {
   return (s.kind === "needs_key" && !s.waiting_for_sync) || s.kind === "error";
 }
 
-/** A slot's badges (spec §7.2): how it is shared, then what needs doing. */
+/** A slot's badges (spec §7.2): how it is shared, then what needs doing. A key only on this computer has one badge that says both. */
 export function slotBadges(slot: SyncKeySlotView): KeyBadge[] {
-  const badges: KeyBadge[] = [{ label: slot.mode === "synced" ? "Synced" : "Own key on each computer", tone: "plain" }];
+  const shared = slot.local_only ? "This computer only" : slot.mode === "synced" ? "Synced" : "Own key on each computer";
+  const badges: KeyBadge[] = [{ label: shared, tone: "plain" }];
   const s = slot.status;
   if (s.kind === "needs_key" && !s.waiting_for_sync) badges.push({ label: "Needs a key", tone: "warning" });
   if (s.kind === "error") badges.push({ label: "Error", tone: "error" });
-  if (!slot.in_account) badges.push({ label: "Not in your sync account", tone: "warning" });
+  if (!slot.in_account && !slot.local_only) badges.push({ label: "Not in your sync account", tone: "warning" });
   if (slot.file_for_now) badges.push({ label: "File for now", tone: "warning" });
   return badges;
 }
@@ -37,6 +38,19 @@ export function slotBadges(slot: SyncKeySlotView): KeyBadge[] {
 /** The synced key's fingerprint, or else the one of the key this computer uses. */
 export function slotFingerprint(slot: SyncKeySlotView): string | null {
   return slot.fingerprint ?? (slot.status.kind === "ready" ? slot.status.fingerprint : null);
+}
+
+/** A day as YYYY-MM-DD in this computer's time zone (the detail's "Created"). */
+export function formatDay(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** The detail's "Passphrase": the key in SSHelter's, else the synced key's; null when unknown. */
+export function passphraseFact(slot: SyncKeySlotView): string | null {
+  const has = slot.vault_has_passphrase ?? slot.has_passphrase;
+  return has === null ? null : has ? "Yes" : "No";
 }
 
 /** Whether any field contains the search, ignoring case; an empty search matches everything. */

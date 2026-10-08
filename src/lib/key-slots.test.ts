@@ -171,7 +171,7 @@ describe("a slot row", () => {
   });
 
   it("offers the actions that fit", () => {
-    const none = { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: false };
+    const none = { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: false, deleteKey: false };
     expect(slotActions(keySlot())).toEqual({ ...none, stopSyncing: true, pick: "change" });
     expect(slotActions(keySlot({ mode: "own", fingerprint: null }))).toEqual({ ...none, syncThis: true, pick: "change" });
     expect(slotActions(keySlot({ mode: "own", status: { kind: "needs_key", waiting_for_sync: false } }))).toEqual({ ...none, pick: "pick" });
@@ -184,13 +184,20 @@ describe("a slot row", () => {
   });
 
   it("offers nothing but deleting an unused copy for a slot the account no longer has", () => {
-    const none = { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: false };
+    const none = { syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: false, deleteKey: false };
     // Kept for hosts outside the spaces (left the account, joined another): there is nothing to sync or pick it for.
     expect(slotActions(keySlot({ in_account: false }))).toEqual(none);
     expect(slotActions(keySlot({ in_account: false, mode: "own", fingerprint: null }))).toEqual(none);
     expect(slotActions(keySlot({ in_account: false, status: { kind: "error", message: "The key this slot points to is gone: /f." } }))).toEqual(none);
     // A deleted slot's copy nobody uses can still be deleted.
     expect(slotActions(keySlot({ in_account: false, status: { kind: "not_in_use", file: "/f" } }))).toEqual({ ...none, deleteCopy: true });
+  });
+
+  it("offers only Delete key for a key only on this computer, and only while no host uses it", () => {
+    const local = keySlot({ local_only: true, in_account: false, mode: "own", hosts: [] });
+    expect(slotActions(local)).toEqual({ syncThis: false, stopSyncing: false, pick: null, useSynced: false, syncNew: false, deleteCopy: false, deleteKey: true });
+    expect(slotActions({ ...local, hosts: ["web"] }).deleteKey).toBe(false);
+    expect(slotActions(keySlot()).deleteKey).toBe(false);
   });
 
   it("asks before a key is uploaded, saying whether a passphrase still protects the key that goes", () => {

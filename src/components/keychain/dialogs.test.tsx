@@ -8,7 +8,7 @@ import { AlertDialogAction, AlertDialogCancel, AlertDialogDescription, AlertDial
 import { DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { keySlot, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
-import { DeleteCopyConfirm, ExportPrivateKeyForm, KeyChoices, replacedKeyNote, SyncKeyConfirm } from "./dialogs";
+import { DeleteCopyConfirm, DeleteKeyConfirm, ExportPrivateKeyForm, KeyChoices, replacedKeyNote, SyncKeyConfirm } from "./dialogs";
 import { buttonsIn, DISABLED, elementsOf, text, textIn } from "./test-markup";
 
 describe("the keys to pick from", () => {
@@ -127,6 +127,21 @@ describe("deleting a key in SSHelter", () => {
     expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
       `The key ${SPOOFED_NAME_SHOWN} kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`,
     ]);
+  });
+});
+
+describe("deleting a key only on this computer", () => {
+  it("says it may be the only copy, and deletes on Delete", () => {
+    let deleted = 0;
+    const tree = DeleteKeyConfirm({ slot: keySlot({ name: SPOOFED_NAME, local_only: true }), open: true, onCancel: () => {}, onConfirm: () => deleted++ });
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Delete ${SPOOFED_NAME_SHOWN}?`);
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
+      "SSHelter removes this key from this computer. It's the only copy unless you exported one.",
+    ]);
+    const [action] = elementsOf(tree, AlertDialogAction);
+    expect(textIn(action)).toBe("Delete");
+    action.props.onClick!();
+    expect(deleted).toBe(1);
   });
 });
 

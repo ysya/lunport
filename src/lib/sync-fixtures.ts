@@ -102,7 +102,8 @@ export function keySlot(overrides: Partial<SyncKeySlotView> = {}): SyncKeySlotVi
     file_for_now: false,
     vault_has_passphrase: null,
     local_only: false,
-    // Noon UTC on 2023-11-15: the same day in every time zone the tests may run in.
+    // Noon UTC on 2023-11-15. The tests that show its day expect the local date 2023-11-15, which holds from UTC-12 to UTC+11; in UTC+12
+    // and later (New Zealand in November, for one) it is already the 16th.
     created_at_ms: 1_700_049_600_000,
     stays_file: null,
     ...overrides,

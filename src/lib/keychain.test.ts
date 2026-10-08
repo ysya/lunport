@@ -4,6 +4,7 @@ import type { KeyInfo } from "@/bindings/KeyInfo";
 import { keySlot, SLOT_FINGERPRINT, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import {
   attachText,
+  formatDay,
   hasKeyHere,
   keyNameOfPath,
   keychainSlots,
@@ -12,6 +13,7 @@ import {
   moveCount,
   needsAttention,
   otherKeyFiles,
+  passphraseFact,
   slotBadges,
   slotPublicPath,
 } from "./keychain";
@@ -71,6 +73,21 @@ describe("the In SSHelter list", () => {
     // A synced key on its way needs nothing done here.
     expect(slotBadges(keySlot({ status: { kind: "needs_key", waiting_for_sync: true } })).map((b) => b.label)).toEqual(["Synced"]);
     expect(needsAttention(keySlot({ file_for_now: true }))).toBe(false);
+  });
+
+  it("gives a key only on this computer one badge for how it is shared", () => {
+    const local = keySlot({ local_only: true, in_account: false, mode: "own" });
+    expect(slotBadges(local).map((b) => b.label)).toEqual(["This computer only"]);
+    expect(slotBadges({ ...local, status: { kind: "error", message: "gone" } }).map((b) => b.label)).toEqual(["This computer only", "Error"]);
+  });
+});
+
+describe("a key's facts", () => {
+  it("shows a day as YYYY-MM-DD, and whether the key has a passphrase", () => {
+    expect(formatDay(1_700_049_600_000)).toBe("2023-11-15");
+    expect(passphraseFact(keySlot({ vault_has_passphrase: true, has_passphrase: false }))).toBe("Yes");
+    expect(passphraseFact(keySlot({ vault_has_passphrase: null, has_passphrase: false }))).toBe("No");
+    expect(passphraseFact(keySlot({ vault_has_passphrase: null, has_passphrase: null }))).toBeNull();
   });
 });
 
