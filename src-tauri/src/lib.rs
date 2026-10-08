@@ -70,14 +70,28 @@ fn app_set_close_to_tray(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    run_app(false);
+    run_app(false, false);
 }
 
-/// Start SSHelter on behalf of a stdio MCP adapter (`--mcp-host`), in the background: no window
-/// until the user opens it or an MCP `run` request needs approval. Closing the window hides it
-/// instead of terminating active MCP access.
-pub fn run_mcp_host() {
-    run_app(true);
+/// The desktop app (main.rs).
+/// - `mcp_host`: started with `--mcp-host` by a stdio MCP adapter. Closing the window hides it
+///   instead of terminating active MCP access. (When SSHelter already runs, such a launch hands
+///   over without showing a window: `second_launch_shows_window`.)
+/// - `start_hidden`: see `starts_hidden`. The adapter's start runs in the background: no window
+///   until the user opens it or an MCP `run` request needs approval.
+pub fn run_desktop(mcp_host: bool, start_hidden: bool) {
+    run_app(mcp_host, start_hidden);
+}
+
+/// Set to `1` by the stdio MCP adapter on the SSHelter it starts (mcp.rs `host_command`).
+/// main.rs reads it, then removes it before anything else runs.
+pub const START_HIDDEN_ENV: &str = "SSHELTER_START_HIDDEN";
+
+/// Whether the main window starts hidden, from the value of `SSHELTER_START_HIDDEN`; nothing else
+/// decides it. A restart (an update's "Install & restart") reuses the arguments, `--mcp-host`
+/// included, but inherits an environment without the variable, so it comes back with its window.
+pub fn starts_hidden(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
 }
 
 /// Show, unminimize and focus the main window.
@@ -109,7 +123,7 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
     }
 }
 
-fn run_app(mcp_host: bool) {
+fn run_app(mcp_host: bool, start_hidden: bool) {
     let builder = tauri::Builder::default();
     // Only one SSHelter runs at a time: a second launch hands over to the running instance and
     // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
@@ -142,10 +156,10 @@ fn run_app(mcp_host: bool) {
     builder
         .manage(state::AppState::default())
         .setup(move |app| {
-            // The main window is created hidden (`"visible": false` in tauri.conf.json), so the
-            // MCP host never flashes it. A normal launch shows it before anything else starts,
-            // as when it was created visible.
-            if !mcp_host {
+            // The main window is created hidden (`"visible": false` in tauri.conf.json), so a
+            // hidden start never flashes it. Any other start shows it before anything else
+            // starts, as when it was created visible.
+            if !start_hidden {
                 if let Some(window) = app.get_webview_window("main") {
                     window.show()?;
                 }
@@ -322,5 +336,37 @@ mod tests {
         assert!(shows(&[EXE, "--other", "--mcp-host"]));
         assert!(shows(&[EXE, "--mcp"]));
         assert!(shows(&[EXE, "--mcp-host=1"]));
+    }
+
+    #[test]
+    fn only_the_adapter_flag_starts_the_window_hidden() {
+        use std::ffi::OsStr;
+        assert!(starts_hidden(Some(OsStr::new("1"))));
+        assert!(!starts_hidden(None));
+        assert!(!starts_hidden(Some(OsStr::new(""))));
+        assert!(!starts_hidden(Some(OsStr::new("0"))));
+        assert!(!starts_hidden(Some(OsStr::new("true"))));
+    }
+
+    /// A normal launch, the adapter's start and its restart after an update: visible, hidden,
+    /// visible. The environments are what each start sees; main.rs removes the variable.
+    #[test]
+    fn a_restart_of_an_adapter_started_sshelter_shows_its_window() {
+        use std::collections::HashMap;
+        use std::ffi::OsStr;
+        let hidden =
+            |env: &HashMap<&str, &str>| starts_hidden(env.get(START_HIDDEN_ENV).map(OsStr::new));
+
+        let normal_launch = HashMap::new();
+        assert!(!hidden(&normal_launch));
+
+        // mcp.rs `host_command` sets it; main.rs reads it and then removes it from the process.
+        let mut adapter_start = HashMap::from([(START_HIDDEN_ENV, "1")]);
+        assert!(hidden(&adapter_start));
+        adapter_start.remove(START_HIDDEN_ENV);
+
+        // tauri restarts with the same arguments (`--mcp-host`) and this process's environment.
+        let restart = adapter_start;
+        assert!(!hidden(&restart));
     }
 }

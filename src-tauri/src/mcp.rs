@@ -1360,10 +1360,13 @@ fn start_host() -> Result<(), String> {
     Ok(())
 }
 
+/// `--mcp-host` decides the hand-over and keeps SSHelter running when its window closes;
+/// `SSHELTER_START_HIDDEN=1` keeps the window hidden at this start only (lib.rs `starts_hidden`).
 fn host_command(exe: &Path) -> Command {
     let mut command = Command::new(exe);
     command
         .arg(HOST_FLAG)
+        .env(crate::START_HIDDEN_ENV, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1555,6 +1558,19 @@ mod tests {
         drop(first);
         // Waits until the lock is free, and gets it.
         lock_file(&path).unwrap();
+    }
+
+    #[test]
+    fn the_adapter_starts_the_mcp_host_with_its_window_hidden() {
+        use std::ffi::OsStr;
+        let command = host_command(Path::new("/usr/bin/sshelter"));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, [OsStr::new(HOST_FLAG)]);
+        let flag = command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new(crate::START_HIDDEN_ENV))
+            .and_then(|(_, value)| value);
+        assert!(crate::starts_hidden(flag));
     }
 
     #[cfg(unix)]
