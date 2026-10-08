@@ -88,11 +88,14 @@ interface UiState {
   deployKeyAlias: string | null;
   setDeployKeyAlias: (alias: string | null) => void;
   /**
-   * Public key the deploy dialog should preselect (used by the Keys dialog's
-   * per-key entry; null = derive from the host's IdentityFile). Session-only.
+   * Public key the deploy dialog should preselect: handed over by the Keychain's Export to host, which also makes the deploy
+   * point the host at it (key vault spec §7.3.1). Null = derive from the host's IdentityFile. Session-only.
    */
   deployKeyInitialPub: string | null;
   setDeployKeyInitialPub: (path: string | null) => void;
+  /** The handed-over key's name (a slot's name), for the deploy dialog's picker and its attach text. Session-only. */
+  deployKeyInitialName: string | null;
+  setDeployKeyInitialName: (name: string | null) => void;
   /** New-config-file dialog: open while non-null; says how to continue after. */
   newFileIntent: NewFileIntent | null;
   setNewFileIntent: (intent: NewFileIntent | null) => void;
@@ -169,6 +172,8 @@ export const useUiStore = create<UiState>()(
       setDeployKeyAlias: (deployKeyAlias) => set({ deployKeyAlias }),
       deployKeyInitialPub: null,
       setDeployKeyInitialPub: (deployKeyInitialPub) => set({ deployKeyInitialPub }),
+      deployKeyInitialName: null,
+      setDeployKeyInitialName: (deployKeyInitialName) => set({ deployKeyInitialName }),
       newFileIntent: null,
       setNewFileIntent: (newFileIntent) => set({ newFileIntent }),
       settingsOpen: false,

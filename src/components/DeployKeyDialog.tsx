@@ -9,14 +9,12 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { useQueryClient } from "@tanstack/react-query";
-
 import type { DeployOutcome } from "@/bindings/DeployOutcome";
 import type { HostSummary } from "@/bindings/HostSummary";
-import { pickDefaultPublicKey } from "@/lib/deploy-key-select";
-import { identityFileAction, toTildeSshPath } from "@/lib/identity-file";
+import { afterDeploy, keyOptions, pickDefaultPublicKey } from "@/lib/deploy-key-select";
+import { toTildeSshPath } from "@/lib/identity-file";
+import { attachText } from "@/lib/keychain";
 import {
-  queryKeys,
   useDeployKeyDirect,
   useDeployPreflight,
   useHasHostPassword,
@@ -27,9 +25,10 @@ import {
   usePlatform,
   usePrecheckHostKey,
   useRevealHostPassword,
-  useSaveHost,
+  useSetIdentityFile,
   useTrustHostKey,
 } from "@/lib/queries";
+import { revealHidden } from "@/lib/sync-approvals";
 import { useAmbiguousNames } from "@/lib/sync-labels";
 import { identityFileNote } from "@/lib/sync-sidebar";
 import { useUiStore } from "@/stores/ui";
@@ -104,6 +103,7 @@ export function DeployKeyDialog() {
   const alias = useUiStore((s) => s.deployKeyAlias);
   const setDeployKeyAlias = useUiStore((s) => s.setDeployKeyAlias);
   const setDeployKeyInitialPub = useUiStore((s) => s.setDeployKeyInitialPub);
+  const setDeployKeyInitialName = useUiStore((s) => s.setDeployKeyInitialName);
 
   return (
     <Dialog
@@ -112,6 +112,7 @@ export function DeployKeyDialog() {
         if (!next) {
           setDeployKeyAlias(null);
           setDeployKeyInitialPub(null);
+          setDeployKeyInitialName(null);
         }
       }}
     >
@@ -120,7 +121,13 @@ export function DeployKeyDialog() {
           <DeployKeyFlow
             key={alias}
             alias={alias}
-            onClose={() => setDeployKeyAlias(null)}
+            // Every close forgets the handed-over key: otherwise it would still be preselected, and attached, at the
+            // next Deploy from the host editor.
+            onClose={() => {
+              setDeployKeyAlias(null);
+              setDeployKeyInitialPub(null);
+              setDeployKeyInitialName(null);
+            }}
           />
         )}
       </DialogContent>
@@ -152,8 +159,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
   const precheck = usePrecheckHostKey();
   const trust = useTrustHostKey();
   const deploy = useDeployKeyDirect();
-  const saveHost = useSaveHost();
-  const queryClient = useQueryClient();
+  const setIdentityFile = useSetIdentityFile();
   // Writing IdentityFile finds the host by its name: with several copies, one in a synced space, that
   // would edit the first copy in load order (and sync it, if it is a space's). Not written then.
   const ambiguous = useAmbiguousNames(useHostsQuery().data?.hosts ?? NO_HOSTS);
@@ -167,10 +173,18 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
   const askpassBlocked = preflight.data ? !preflight.data.askpassSupported : false;
   const keychainMissing = preflight.data ? !preflight.data.keychainAvailable : false;
 
-  const deployable = (keysQ.data ?? []).filter((k) => k.public_path !== null);
-
-  // An explicit key handed over by the Keys dialog wins over any inference.
+  // A key handed over by the Keychain's Export to host wins over any inference, and the deploy then points the host at it
+  // (key vault spec §7.3.1). It may be a key in SSHelter, whose .pub `keys_list` doesn't list.
   const initialPub = useUiStore((s) => s.deployKeyInitialPub);
+  const initialName = useUiStore((s) => s.deployKeyInitialName);
+  const attach = initialPub !== null;
+  const options = keyOptions(keysQ.data ?? [], initialPub, initialName);
+  const selected = options.find((o) => o.value === publicPath) ?? null;
+  // What the deploy will do to the host's settings, said before Deploy is pressed (Export to host only).
+  const attachLine =
+    attach && selected && !hygiene.isPending && !ambiguous.has(alias)
+      ? attachText(alias, selected.name, (hygiene.data?.identity_files ?? []).map((f) => f.path), publicPath.replace(/\.pub$/, ""), home)
+      : null;
 
   // Preselect once both sources have settled — seeding from keys alone would
   // lock in the single-key fallback before the host's IdentityFile arrives.
@@ -189,19 +203,18 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
 
   const busy = precheck.isPending || trust.isPending || deploy.isPending;
 
-  /** Write `IdentityFile <value>` to this host and reflect it on the result screen. */
+  /** Point this host at the key, replacing its IdentityFile lines, and reflect it on the result screen. */
   function writeIdentityFile(value: string) {
-    saveHost.mutate(
-      { alias, changes: [{ keyword: "IdentityFile", value, remove: false }] },
+    setIdentityFile.mutate(
+      { alias, value },
       {
         onSuccess: () => {
           setIdentityOffer(null);
           setIdentityNote(`IdentityFile ${value} written to the host config.`);
-          queryClient.invalidateQueries({ queryKey: queryKeys.keyHygiene(alias) });
           // A synced host's IdentityFile now points at this key, which no slot may hold yet (SP3 spec §7.1).
           useUiStore.getState().setKeySetup({ aliases: [alias], reason: "saved" });
         },
-        // Errors already toast via useSaveHost; the offer button stays usable.
+        // Errors already toast via useSetIdentityFile; the offer button stays usable.
       },
     );
   }
@@ -218,7 +231,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
       const privateAbs = publicPath.replace(/\.pub$/, "");
       const value = toTildeSshPath(privateAbs, home);
       const existing = (hygiene.data?.identity_files ?? []).map((f) => f.path);
-      const action = identityFileAction(existing, privateAbs, home);
+      const action = afterDeploy(existing, privateAbs, home, attach);
       if (action === "already") setIdentityNote("The host config already points at this key.");
       else if (ambiguous.has(alias)) setIdentityNote(identityFileNote(alias, value));
       else if (action === "write") writeIdentityFile(value);
@@ -307,7 +320,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
         view={stage.view}
         identityNote={identityNote}
         identityOffer={identityOffer}
-        identityWriting={saveHost.isPending}
+        identityWriting={setIdentityFile.isPending}
         onWriteIdentity={writeIdentityFile}
         onRetry={() => setStage({ kind: "form" })}
         onClose={onClose}
@@ -346,7 +359,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
               <>
                 This machine&rsquo;s OpenSSH is older than 8.5 and cannot
                 auto-fill the password. Use the terminal-based deploy from the
-                Keys dialog instead.
+                Keychain instead.
               </>
             )}
           </p>
@@ -370,22 +383,18 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
               />
             </SelectTrigger>
             <SelectContent>
-              {deployable.map((k) => (
-                <SelectItem key={k.private_path} value={k.public_path ?? ""}>
-                  <span className="font-mono">{k.name}.pub</span>
-                  {k.key_type !== "unknown" && (
-                    <span className="text-muted-foreground"> · {k.key_type}</span>
-                  )}
+              {options.map((o) => (
+                <SelectItem key={o.value} value={o.value}>
+                  <span className="font-mono">{revealHidden(o.label)}</span>
+                  {o.keyType && <span className="text-muted-foreground"> · {o.keyType}</span>}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
-          {keysQ.isSuccess && deployable.length === 0 && (
-            <p className="text-xs text-destructive">
-              No deployable keys in ~/.ssh — generate one from the Keys dialog
-              first.
-            </p>
+          {keysQ.isSuccess && options.length === 0 && (
+            <p className="text-xs text-destructive">No deployable keys in ~/.ssh — generate one in the Keychain first.</p>
           )}
+          {attachLine && <p className="text-xs text-muted-foreground">{attachLine}</p>}
         </div>
 
         <div className="space-y-1.5">
@@ -537,7 +546,7 @@ function ResultStage({
           <DialogDescription>{view.message}</DialogDescription>
         </DialogHeader>
         <p className="text-sm text-muted-foreground">
-          Try the terminal-based deploy from the Keys dialog instead.
+          Try the terminal-based deploy from the Keychain instead.
         </p>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onRetry}>

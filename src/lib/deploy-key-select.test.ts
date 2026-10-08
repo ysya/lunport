@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KeyInfo } from "@/bindings/KeyInfo";
-import { pickDefaultPublicKey } from "./deploy-key-select";
+import { afterDeploy, keyOptions, pickDefaultPublicKey } from "./deploy-key-select";
 
 const HOME = "/home/f";
 
@@ -99,5 +99,37 @@ describe("pickDefaultPublicKey", () => {
     const keys = [key("a", "/home/f/.ssh/a.pub"), key("work", "/home/f/.ssh/work.pub")];
     expect(pickDefaultPublicKey(["~/.ssh/work"], keys, null)).toBeNull();
     expect(pickDefaultPublicKey(["/home/f/.ssh/work"], keys, null)).toBe("/home/f/.ssh/work.pub");
+  });
+});
+
+describe("the keys the deploy dialog offers", () => {
+  it("lists the ~/.ssh keys that have a .pub, and puts a key handed over from elsewhere first, under its name", () => {
+    const keys = [key("id_mac", "/home/f/.ssh/id_mac.pub"), key("nopub", null)];
+    expect(keyOptions(keys, null, null)).toEqual([{ value: "/home/f/.ssh/id_mac.pub", label: "id_mac.pub", name: "id_mac", keyType: "ED25519" }]);
+    const slot = "/home/f/.ssh/sshelter/keys/id_mac-3fa2c1d9.pub";
+    expect(keyOptions(keys, slot, "work")).toEqual([
+      { value: slot, label: "work", name: "work", keyType: null },
+      { value: "/home/f/.ssh/id_mac.pub", label: "id_mac.pub", name: "id_mac", keyType: "ED25519" },
+    ]);
+    expect(keyOptions(keys, slot, null)[0]).toEqual({ value: slot, label: "id_mac-3fa2c1d9", name: "id_mac-3fa2c1d9", keyType: null });
+    // A handed-over ~/.ssh key is already in the list: not twice.
+    expect(keyOptions(keys, "/home/f/.ssh/id_mac.pub", "id_mac").map((o) => o.value)).toEqual(["/home/f/.ssh/id_mac.pub"]);
+  });
+});
+
+describe("the host's IdentityFile after a deploy", () => {
+  const KEY = "/home/f/.ssh/id_mac";
+
+  it("follows the plain deploy's rules: write when there is none, never replace the user's choice", () => {
+    expect(afterDeploy([], KEY, HOME, false)).toBe("write");
+    expect(afterDeploy(["~/.ssh/id_mac", "~/.ssh/id_rsa"], KEY, HOME, false)).toBe("already");
+    expect(afterDeploy(["~/.ssh/id_rsa"], KEY, HOME, false)).toBe("offer");
+  });
+
+  it("points the host at the key for Export to host, unless it already uses only that key", () => {
+    expect(afterDeploy([], KEY, HOME, true)).toBe("write");
+    expect(afterDeploy(["~/.ssh/id_rsa"], KEY, HOME, true)).toBe("write");
+    expect(afterDeploy(["~/.ssh/id_mac", "~/.ssh/id_rsa"], KEY, HOME, true)).toBe("write");
+    expect(afterDeploy(["~/.ssh/id_mac"], KEY, HOME, true)).toBe("already");
   });
 });
