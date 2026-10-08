@@ -284,7 +284,8 @@ pub(crate) fn move_refusal(local: &LocalSlot, keys_dir: &Path) -> Option<String>
     }
 }
 
-/// 金鑰搬得進保管庫(`move_refusal` 沒有原因)。「File for now」與「Move」只看這些。
+/// 金鑰搬得進保管庫(`move_refusal` 沒有原因)。「File for now」與「Move」只看這些:永遠搬不進去的金鑰不標「File for now」、「Move」也不碰 —— 標了,提示會一直出現,
+/// 按了一定失敗(金鑰保管庫 spec §8)。
 fn can_move_into_vault(local: &LocalSlot, keys_dir: &Path) -> bool {
     move_refusal(local, keys_dir).is_none()
 }
@@ -613,7 +614,8 @@ pub fn reconcile_with_vault(
     // 這台記著、帳戶裡卻沒有的插槽。已刪除的(tombstone):移除連結、副本留著。完全找不到記錄而勾選的 space 裡的主機還用著:補寫(spec §6.6,
     // 例如在沒有 SP3 的電腦上更換了同步碼)—— 只補寫在這個帳戶學到的記錄(`republish`)。完全找不到記錄、只有不在勾選的 space 裡的主機用著(離開
     // 之後建立或加入了別的帳戶,`~/.ssh/sshelter-local/` 的主機還指著它),或在別的帳戶學到的記錄(那些主機之後被搬進這個帳戶的 space 也一樣):
-    // 連結與記錄留著、照常維護(不落地、不補寫),那些主機在這台照常能連線(spec §4.2)。
+    // 連結與記錄留著、照常維護(不落地、不補寫),那些主機在這台照常能連線(spec §4.2)。只在這台的金鑰(`LocalSlot::local_only`)不屬於任何帳戶,
+    // 帳戶裡本來就找不到:不論有沒有主機用到都照常維護(`.pub`、保管庫裡還在不在),保管庫裡那一筆不見了也不移除記錄(`recover_vault_entry`)。
     let gone: Vec<String> = state.key_slots.keys().filter(|id| !live.iter().any(|(l, _)| l == *id)).cloned().collect();
     for id in gone {
         let mut local = state.key_slots[&id].clone();
@@ -628,6 +630,7 @@ pub fn reconcile_with_vault(
             }
         }
         let before = local.clone();
+        // 只在這台的金鑰沒有主機用到也維護:`.pub` 不見了要補回來,保管庫裡那一筆還在不在也每一輪確認(下面的 `recover_vault_entry`)。
         if !recorded && (used(&local.file_name) || local.local_only) {
             maintain(&mut local, &keys_dir, &path);
         } else {
@@ -1098,12 +1101,11 @@ fn republish(
 ///
 /// 沒有帳戶(`state.account` 是 None;離開了帳戶,或從沒加入):只有第二種 —— 這台還有來源與 payload 的每一個插槽記錄(金鑰多半在這台的保管庫裡,常常是這台僅存的
 /// 一份),同樣是 `in_account` = false、沒有其他電腦,主機還用著的是 `kept_status`、其他的是 Not in use。`account_keys` 只在有帳戶時用到(帳戶裡的 `key` 有沒有
-/// 這把);有帳戶、帳戶金鑰卻還沒載入(keychain 鎖著、同步碼不見了)時分不出帳戶裡的插槽在這台的狀態,照舊什麼都不列。
+/// 這把);有帳戶、帳戶金鑰卻還沒載入(keychain 鎖著、同步碼不見了)時分不出帳戶裡的插槽在這台的狀態,照舊不列(帳戶裡的插槽,以及這台留著的舊副本);
+/// 只在這台的金鑰(`local_only`)跟帳戶無關,照樣列出。
 pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path, in_use: &BTreeMap<String, Vec<String>>) -> Vec<SyncKeySlotView> {
     let account = state.account.as_ref();
-    if account.is_some() && account_keys.is_none() {
-        return Vec::new();
-    }
+    let keys_missing = account.is_some() && account_keys.is_none();
     let needed = slot_hosts(state);
     let all_devices = account.map(devices).unwrap_or_default();
     let keys_dir = home.join(SLOT_DIR);
@@ -1128,6 +1130,10 @@ pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path,
             Some(SlotSource::Vault { public_key, .. }) => public_key.split_whitespace().next().map(str::to_string),
             _ => None,
         });
+        // 這台還是檔案的插槽,它的金鑰為什麼永遠搬不進保管庫(`move_refusal`,每一列只算一次):畫面的 `stays_file`;沒有原因才標「File for now」
+        // (`is_file_for_now` 而且 `can_move_into_vault`)。
+        let stays_file = local.filter(|l| is_file_for_now(l)).and_then(|l| move_refusal(l, &keys_dir));
+        let file_for_now = local.is_some_and(is_file_for_now) && stays_file.is_none();
         SyncKeySlotView {
             id: id.to_string(),
             name: payload.name.clone(),
@@ -1154,15 +1160,15 @@ pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path,
                 })
                 .collect(),
             in_account,
-            in_vault: state.key_slots.get(id).is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. }))),
-            file_for_now: state.key_slots.get(id).is_some_and(|local| is_file_for_now(local) && can_move_into_vault(local, &keys_dir)),
-            vault_has_passphrase: match state.key_slots.get(id).and_then(|l| l.source.as_ref()) {
+            in_vault: local.is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. }))),
+            file_for_now,
+            vault_has_passphrase: match local.and_then(|l| l.source.as_ref()) {
                 Some(SlotSource::Vault { has_passphrase, .. }) => Some(*has_passphrase),
                 _ => None,
             },
             local_only: local.is_some_and(|l| l.local_only),
             created_at_ms: payload.created_at_ms,
-            stays_file: local.filter(|l| is_file_for_now(l)).and_then(|l| move_refusal(l, &keys_dir)),
+            stays_file,
         }
     };
     let mut out = Vec::new();
@@ -1186,6 +1192,10 @@ pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path,
     }
     for (id, local) in &state.key_slots {
         if live.iter().any(|(l, _)| l == id) {
+            continue;
+        }
+        // 帳戶金鑰還沒載入:別的插槽分不出在這台的狀態,不列;只在這台的金鑰不看帳戶,照列。
+        if keys_missing && !local.local_only {
             continue;
         }
         let (Some(source), Some(payload)) = (&local.source, &local.payload) else { continue };
@@ -7938,5 +7948,32 @@ pub(crate) mod tests {
         assert!(maintain_without_account(&mut state, home.path(), &in_use, &FakeVault::new(Some(true))));
         assert_eq!(state.key_slots.keys().cloned().collect::<Vec<_>>(), vec![unused, local], "only the copy a host was using is forgotten");
         assert!(!state.key_slots.contains_key(&used));
+    }
+
+    /// 有帳戶、帳戶金鑰卻還沒載入(keychain 鎖著、同步碼不見了):帳戶裡的插槽與這台留著的舊副本分不出在這台的狀態,照舊不列;只在這台的金鑰跟帳戶無關,照樣列出。
+    #[test]
+    fn an_account_whose_keys_are_not_loaded_still_lists_the_keys_only_on_this_computer() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (shared, shared_file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &shared_file);
+        let (local, _) = local_key_on(&a, &test_keys::ecdsa(), "laptop");
+        // 帳戶裡沒有、這台留著的一份副本:沒有主機用到,金鑰載入時列為 Not in use。
+        let leftover = new_slot_id().unwrap();
+        let env = a.env();
+        mutate(&env, |s| {
+            let copy = SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() };
+            s.key_slots.insert(leftover.clone(), LocalSlot { source: Some(copy), payload: Some(synced_payload("old")), ..vault_record() });
+            Ok(())
+        })
+        .unwrap();
+        settle(&a);
+        let listed = |d: &TestDevice| -> BTreeSet<String> { crate::sync::dto::overview(&d.env()).unwrap().key_slots.into_iter().map(|v| v.id).collect() };
+        assert_eq!(listed(&a), BTreeSet::from([shared.clone(), local.clone(), leftover.clone()]), "setup: the keys are loaded, everything is listed");
+
+        a.runtime.core.lock().unwrap().account_keys = None;
+        assert_eq!(listed(&a), BTreeSet::from([local.clone()]), "only the key that doesn't depend on the account");
+        let row = overview_row(&a, &local).unwrap();
+        assert!(row.local_only && row.in_vault && !row.in_account, "{row:?}");
+        assert!(matches!(&row.status, SlotStatusView::Ready { fingerprint: Some(f), .. } if f == test_keys::ECDSA_FINGERPRINT), "{:?}", row.status);
     }
 }

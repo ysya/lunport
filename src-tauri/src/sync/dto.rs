@@ -364,15 +364,15 @@ pub fn overview(env: &SyncEnv) -> Result<SyncOverview, AppError> {
     let account_dirty = account
         .map(|a| a.records.values().filter(|l| l.dirty).count() + a.sealed.values().filter(|x| x.dirty).count())
         .unwrap_or(0) as u64;
-    // 有帳戶、帳戶金鑰卻還沒載入:照舊不列(分不出帳戶裡的插槽在這台的狀態)。沒有帳戶:這台留著的插槽照樣列出(`views`;離開帳戶之後,它們的金鑰
-    // 多半就在這台的保管庫裡,`ssh` 照常經 agent 用著它們)。
+    // 有帳戶、帳戶金鑰卻還沒載入:帳戶裡的插槽照舊不列(分不出它們在這台的狀態),只列只在這台的金鑰(`views`;它們跟帳戶無關)。沒有帳戶:這台留著的插槽照樣列出
+    // (離開帳戶之後,它們的金鑰多半就在這台的保管庫裡,`ssh` 照常經 agent 用著它們)。
     let key_slots = match env.ssh_dir.parent() {
-        Some(home) if account.is_none() || keys.is_some() => {
+        Some(home) => {
             // 整份 config 裡用到的插槽(短暫拿 doc 鎖;這裡沒有持有 doc 鎖或它之後的鎖)。config 還沒載入時當成沒有,只影響顯示:刪除副本自己會再查。
             let in_use = crate::sync::slots::config_slot_uses(env).unwrap_or_default();
             crate::sync::slots::views(&s, keys.as_ref(), home, &in_use)
         }
-        _ => Vec::new(),
+        None => Vec::new(),
     };
     Ok(SyncOverview {
         joined: s.joined(),
