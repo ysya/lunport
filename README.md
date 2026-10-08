@@ -47,7 +47,7 @@ Subsequent auto-updates install in-app and don't need this again.
 
 Open **Settings → AI Access**, enable access, and explicitly select each host an AI client may see. The same pane provides a ready-to-copy `codex mcp add` command that registers the installed SSHelter executable as a local stdio MCP server.
 
-The MCP adapter launches or reconnects to the SSHelter desktop approval center over an authenticated `127.0.0.1` bridge. It exposes three tools: `list_hosts`, `get_effective_config`, and `run`. `run` never executes until the desktop interface approves that exact request, and SSH output is bounded before it is returned to the client.
+The MCP adapter connects to the running SSHelter desktop app over an authenticated `127.0.0.1` bridge. When SSHelter isn't running, the adapter starts it in the background, without a window: the window opens when you open SSHelter (from its menu bar or tray icon, or by launching it again) or when a `run` request needs your approval. Only one SSHelter runs at a time; launching it again brings up the one already running. The adapter exposes three tools: `list_hosts`, `get_effective_config`, and `run`. `run` never executes until the desktop interface approves that exact request, and SSH output is bounded before it is returned to the client.
 
 MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so the host must already work with a key, agent, or other non-prompting authentication method. SSHelter does not forward passwords or key passphrases to the AI process. This gate controls requests made through SSHelter MCP; it is not an operating-system sandbox and cannot prevent another process running as your user from invoking `ssh` directly.
 
