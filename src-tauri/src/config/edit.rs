@@ -54,9 +54,10 @@ fn insert_directive(host: &mut HostBlock, keyword: &str, value: &str) {
 
 /// Point a host at one key (Export to host, key vault spec §7.3.1): the first live `IdentityFile` gets `value`, the
 /// other live ones are removed, commented-out lines stay. With none, the line is added after the last directive.
+/// A path with whitespace is written in double quotes (`quote_spaced_path`).
 /// Returns the old live values in order, as written (quotes kept), for "{host} will use {key} instead of …".
 pub fn replace_identity_files(host: &mut HostBlock, value: &str) -> Vec<String> {
-    let value = sanitize_value(value);
+    let value = quote_spaced_path(&sanitize_value(value));
     let live: Vec<usize> = host
         .body
         .iter()
@@ -92,6 +93,18 @@ pub fn replace_identity_files(host: &mut HostBlock, value: &str) -> Vec<String> 
 /// Strip CR/LF from a value so it can never inject extra physical lines on serialize.
 fn sanitize_value(value: &str) -> String {
     value.replace(['\r', '\n'], "")
+}
+
+/// A key path as ssh_config needs it: OpenSSH splits an unquoted value at whitespace, so a key file named
+/// "id_ed25519 copy" would be two arguments and the whole config rejected; in double quotes it is one. A value that already
+/// carries a double quote (quoted by the caller, or a name with a quote in it) is written as given. Only for paths:
+/// other fields (`set_host_field`) can hold several arguments on purpose.
+fn quote_spaced_path(value: &str) -> String {
+    if value.contains(char::is_whitespace) && !value.contains('"') {
+        format!("\"{value}\"")
+    } else {
+        value.to_string()
+    }
 }
 
 /// Infer the indent from the first Directive in a body; fall back to 4 spaces.
@@ -831,6 +844,34 @@ mod tests {
         }
         assert_eq!(replace_identity_files(host, "~/.ssh/new"), vec!["~/.ssh/a".to_string()]);
         assert_eq!(serialize_items(&items, nl), "Host web\n  IdentityFile ~/.ssh/new\n");
+    }
+
+    #[test]
+    fn test_replace_identity_files_quotes_a_path_with_spaces() {
+        // A key file named "id_ed25519 copy": unquoted, OpenSSH reads two arguments and rejects the whole config.
+        let (mut items, nl) = parse_file("Host web\n  IdentityFile ~/.ssh/a\nHost db\n  User x\n");
+        for alias in ["web", "db"] {
+            let host = find_host_mut(&mut items, alias).expect("host not found");
+            replace_identity_files(host, "~/.ssh/id_ed25519 copy");
+        }
+        assert_eq!(
+            serialize_items(&items, nl),
+            "Host web\n  IdentityFile \"~/.ssh/id_ed25519 copy\"\nHost db\n  User x\n  IdentityFile \"~/.ssh/id_ed25519 copy\"\n"
+        );
+    }
+
+    #[test]
+    fn test_replace_identity_files_keeps_a_quoted_line_for_the_same_path_and_never_quotes_twice() {
+        let original = "Host web\n  IdentityFile \"~/.ssh/my key\"  # mine\n";
+        let (mut items, nl) = parse_file(original);
+        let host = find_host_mut(&mut items, "web").expect("host 'web' not found");
+        assert_eq!(replace_identity_files(host, "~/.ssh/my key"), vec!["\"~/.ssh/my key\"".to_string()]);
+        assert!(matches!(&host.body[0], Item::Directive(d) if !d.dirty), "the line already names this path");
+        assert_eq!(serialize_items(&items, nl), original);
+        // A value that comes quoted already is written as given.
+        let host = find_host_mut(&mut items, "web").expect("host 'web' not found");
+        replace_identity_files(host, "\"C:/Users/me/.ssh/other key\"");
+        assert_eq!(serialize_items(&items, nl), "Host web\n  IdentityFile \"C:/Users/me/.ssh/other key\"  # mine\n");
     }
 
     #[test]

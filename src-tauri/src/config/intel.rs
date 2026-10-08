@@ -183,9 +183,10 @@ pub fn lint(doc: &SshConfigDoc, account_slot_files: &BTreeSet<String>) -> Vec<Li
 
                 // ── Rule 3: missing IdentityFile path ──
                 if d.key == "identityfile" {
-                    // Skip values with %tokens (e.g. %d/%h) — can't resolve statically.
+                    // Skip values with %tokens (e.g. %d/%h) — can't resolve statically. A quoted path is the file inside the quotes
+                    // (a key file whose name has a space is written that way).
                     if !d.value.contains('%') {
-                        if let Some(expanded) = crate::config::include::expand_token(&d.value) {
+                        if let Some(expanded) = crate::config::include::expand_token(crate::sync::slot_rules::unquote(&d.value)) {
                             if !identity_file_present(&d.value, Path::new(&expanded)) {
                                 issues.push(LintIssue {
                                     rule: "missing-identity-file".to_string(),
@@ -373,7 +374,9 @@ pub fn key_hygiene(doc: &SshConfigDoc, alias: &str) -> KeyHygiene {
                 let (path, exists) = if d.value.contains('%') {
                     (d.value.clone(), true)
                 } else {
-                    let expanded = crate::config::include::expand_token(&d.value).unwrap_or_else(|| d.value.clone());
+                    // A quoted path is the file inside the quotes (as the linter reads it).
+                    let unquoted = crate::sync::slot_rules::unquote(&d.value);
+                    let expanded = crate::config::include::expand_token(unquoted).unwrap_or_else(|| unquoted.to_string());
                     let exists = identity_file_present(&d.value, Path::new(&expanded));
                     (d.value.clone(), exists)
                 };
@@ -635,6 +638,31 @@ mod tests {
         assert!(issues.iter().any(|i| i.rule == "missing-identity-file" && i.alias.as_deref() == Some("g")), "{issues:?}");
         let hygiene = key_hygiene(&doc, "g");
         assert!(!hygiene.identity_files[0].exists);
+    }
+
+    /// 雙引號裡的金鑰路徑就是引號裡的那個檔案(檔名有空白的金鑰,SSHelter 寫成這樣:`edit::replace_identity_files`):lint 與主機頁(`key_hygiene`)都不把存在的
+    /// 檔案當成找不到 —— `~/` 開頭的也一樣。
+    #[test]
+    fn a_quoted_identity_file_is_the_file_inside_the_quotes() {
+        let (doc, dir) = doc_with("Host tilde\n  IdentityFile \"~/.ssh/id_ed25519 copy\"\nHost gone\n  IdentityFile \"~/.ssh/id_gone copy\"\n");
+        std::fs::create_dir_all(dir.path().join(".ssh")).unwrap();
+        std::fs::write(dir.path().join(".ssh/id_ed25519 copy"), "x").unwrap();
+        let keydir = tempfile::tempdir().unwrap();
+        let absolute = keydir.path().join("id work");
+        std::fs::write(&absolute, "x").unwrap();
+        let (abs_doc, _abs_dir) = doc_with(&format!("Host absolute\n  IdentityFile \"{}\"\n", absolute.display()));
+
+        let missing = |doc: &SshConfigDoc| -> Vec<Option<String>> {
+            let issues = crate::config::include::with_test_home(dir.path(), || lint(doc, &BTreeSet::new()));
+            issues.into_iter().filter(|i| i.rule == "missing-identity-file").map(|i| i.alias).collect()
+        };
+        assert_eq!(missing(&doc), vec![Some("gone".to_string())], "only the quoted path that really is missing");
+        assert!(missing(&abs_doc).is_empty());
+        let exists = |doc: &SshConfigDoc, alias: &str| {
+            crate::config::include::with_test_home(dir.path(), || key_hygiene(doc, alias)).identity_files.remove(0).exists
+        };
+        assert!(exists(&doc, "tilde") && exists(&abs_doc, "absolute"));
+        assert!(!exists(&doc, "gone"));
     }
 
     /// 同一條規則給 Keys 的主機頁(`key_hygiene`):只有 `.pub` 的插槽路徑算存在。
