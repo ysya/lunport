@@ -1883,6 +1883,21 @@ mod tests {
         assert!(vault_entry(&k.c, &k.id).is_none(), "and nothing is in the other computer's vault");
     }
 
+    /// 就地放進新帳戶的、之前的帳戶留下的連結(對 `kept_slot` 的候選選「Keep on this computer」或「Sync key」):插槽不是這一次設定建立的,保管庫能用也不搬進去 ——
+    /// 它可能是更新前留下的連結,用它的主機會因此開始要核准,要使用者自己按「Move」(同沿用的插槽,金鑰保管庫 spec 決策 #12)。
+    #[test]
+    fn a_linked_slot_from_the_previous_account_set_up_in_place_stays_a_link() {
+        for sync_it in [false, true] {
+            let k = kept_after_a_move(false, true);
+            crate::sync::slots::tests::vault_on_again(&k.d);
+            let choice = if sync_it { sync(&k.key(), "mac") } else { keep(&k.key(), "mac") };
+            setup_keys(&k.d.env(), true, vec![choice]).unwrap();
+            let local = k.d.state().key_slots[&k.id].clone();
+            assert!(matches!(&local.source, Some(SlotSource::Linked { origin: true, .. })), "sync: {sync_it}: the link stays: {local:?}");
+            assert!(crate::sync::slots::tests::vault_entry(&k.d, &k.id).is_none(), "sync: {sync_it}: nothing went into the vault");
+        }
+    }
+
     /// 之前的帳戶同步來、留在這台的副本(B):候選是那個副本本身(`synced_copy`),名稱是插槽的名稱。「Sync key」把它放進新帳戶(同一個 id、副本的
     /// 指紋與私鑰,這台記下同意上傳的是它),新帳戶的另一台落地它;「Keep on this computer」放成 `own`,沒有私鑰。這台的副本都不動。
     fn a_synced_copy_from_the_previous_account_is_set_up_in_place(sync_it: bool) {
