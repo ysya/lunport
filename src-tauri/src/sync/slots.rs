@@ -190,6 +190,15 @@ pub const VAULT_ENTRY_LOST: &str = "This key was lost from SSHelter's vault. Pic
 /// 只在這台的金鑰(`LocalSlot::local_only`)或沒有帳戶時的金鑰,保管庫裡那一筆不見了:沒有帳戶可以取回,記錄留著、標這個錯誤。
 pub const LOCAL_KEY_LOST_MESSAGE: &str = "This key is no longer in SSHelter's vault. If you exported a copy, add it again with New key.";
 
+/// 只在 SSHelter 的金鑰(`SlotSource::Vault`),保管庫裡那一筆確定不見了(`holds` 是 `Some(false)`;`None` = 保管庫讀不了,不判斷),而它沒有別處可以取回
+/// (只在這台的金鑰,或沒有帳戶):記錄與來源留著(清單照舊列出),標 `LOCAL_KEY_LOST_MESSAGE`;使用者匯出過的話可以再加進來。`recover_vault_entry` 與
+/// 本機維護(`maintain_local`)都經過這裡,「保管庫沒有它」的判斷只有一份。有帳戶的同步金鑰不走這裡:`recover_vault_entry` 從帳戶取回。
+fn mark_lost_if_gone(local: &mut LocalSlot, slot_id: &str, vault: &dyn VaultKeys) {
+    if matches!(local.source, Some(SlotSource::Vault { .. })) && vault.holds(slot_id) == Some(false) {
+        local.last_error = Some(LOCAL_KEY_LOST_MESSAGE.to_string());
+    }
+}
+
 /// 保管庫收不了的金鑰(`inspect_private_key` 讀不懂)的原因,給 Move 與 New key 用(同步的說法是 `Unsyncable::message`)。
 pub fn vault_unreadable_message(reason: Unsyncable) -> &'static str {
     match reason {
@@ -213,13 +222,13 @@ fn recover_vault_entry(
     now_ms: u64,
     vault: &dyn VaultKeys,
 ) {
-    let Some(SlotSource::Vault { fingerprint, .. }) = &local.source else { return };
-    if vault.holds(slot_id) != Some(false) {
+    if local.local_only {
+        // 只在這台的金鑰沒有別處可以取回(也不在帳戶裡,不必看帳戶):記錄與來源留著,標錯誤。
+        mark_lost_if_gone(local, slot_id, vault);
         return;
     }
-    if local.local_only {
-        // 只在這台的金鑰沒有別處可以取回:記錄與來源留著(清單照舊列出),標錯誤;使用者匯出過的話可以再加進來。
-        local.last_error = Some(LOCAL_KEY_LOST_MESSAGE.to_string());
+    let Some(SlotSource::Vault { fingerprint, .. }) = &local.source else { return };
+    if vault.holds(slot_id) != Some(false) {
         return;
     }
     let restored = open_key_secret(account, account_keys, slot_id).and_then(|text| {
@@ -535,7 +544,7 @@ pub fn add_notice(notices: &mut Vec<SyncNotice>, notice: &SyncNotice) {
 /// `vault` = 這台的保管庫(金鑰保管庫 spec §4.3、§11):有主機用到的「只在 SSHelter」的插槽,每一輪確認保管庫裡還有它(`recover_vault_entry`);
 /// 補寫這樣的插槽的 `key` 時從這裡讀私鑰(`republish`)。只在這台的金鑰(`LocalSlot::local_only`)不論有沒有主機用到都照常維護(`.pub`、保管庫裡還在不在)。
 ///
-/// 沒有帳戶(`state.account` 是 None)時什麼都不做:這台的插槽由 `maintain_without_account` 維護。
+/// 沒有帳戶(`state.account` 是 None)時什麼都不做。這台的插槽另外由 `maintain_local` 維護:每一次同步嘗試的最後都做,不論這一輪有沒有走到這裡、有沒有帳戶。
 pub fn reconcile_with_vault(
     state: &mut SyncStateV2,
     account_keys: &ChainKeys,
@@ -666,36 +675,44 @@ pub fn reconcile(
     reconcile_with_vault(state, account_keys, home, in_use, now_ms, &NoVault)
 }
 
-/// 沒有帳戶時,一次同步嘗試對這台插槽做的維護(`round::sync_once`;帳戶在的時候由 `reconcile_with_vault` 做)。只看這台:有主機用到的插槽,
-/// 以及只在這台的金鑰(`LocalSlot::local_only`)照常維護(`maintain`:連結、`.pub`、擋路的檔案);保管庫裡的金鑰再確認那一筆還在 ——
-/// 不在了也不移除記錄(沒有帳戶可以取回),標 `LOCAL_KEY_LOST_MESSAGE`。保管庫讀不了(`holds` 是 None)就不判斷。沒有主機用到的連結不動
-/// (使用者可以 Delete copy)。回傳 `key_slots` 有沒有變。呼叫端不持有任何鎖,負責提交。
-pub fn maintain_without_account(
-    state: &mut SyncStateV2,
+/// 一次同步嘗試最後對這台插槽做的本機維護(`round::sync_once` 的最後一步,不論這一輪走到哪裡、有沒有帳戶):不需要 relay、也不需要帳戶金鑰。一輪常在金鑰那一步
+/// (`reconcile_with_vault`)之前就結束了(被限流、拉取失敗、relay 出錯),帳戶金鑰也可能還沒載入;這台自己的東西不該等那些。`joined` = 有帳戶。
+///
+/// 只在這台的金鑰(`LocalSlot::local_only`)一律維護(`maintain`:連結、`.pub`、擋路的檔案),保管庫裡那一筆不見了就標 `LOCAL_KEY_LOST_MESSAGE`(`mark_lost_if_gone`) ——
+/// 完整的一輪對它們做的也是這些(`reconcile_with_vault` 的 `gone` 迴圈),所以兩邊做的事一樣,重複做沒有新的變化。
+/// 沒有帳戶時再加上其他的插槽:有主機用到的照常維護,保管庫裡的金鑰一樣確認那一筆還在(記錄留著,沒有帳戶可以取回),沒有來源的記錄(同步來的副本被刪掉了)忘掉,
+/// 和有帳戶時那一輪的 `gone` 迴圈一樣;沒有主機用到的連結不動(使用者可以 Delete copy)。有帳戶時其餘的插槽只有完整的一輪處理(落地同步的金鑰、取回保管庫的金鑰、
+/// 收起連結……),這裡不碰、也不忘掉任何記錄。
+/// 回傳 `slots` 有沒有變。呼叫端不持有任何鎖,負責提交。
+pub fn maintain_local(
+    slots: &mut BTreeMap<String, LocalSlot>,
+    joined: bool,
     home: &Path,
     in_use: &BTreeMap<String, Vec<String>>,
     vault: &dyn VaultKeys,
 ) -> bool {
-    if state.account.is_some() {
-        return false;
-    }
     let keys_dir = home.join(SLOT_DIR);
     let mut changed = false;
-    for (id, local) in state.key_slots.iter_mut() {
+    for (id, local) in slots.iter_mut() {
+        // 有帳戶:其餘的插槽是完整的一輪的事。
+        if joined && !local.local_only {
+            continue;
+        }
         let before = local.clone();
-        if in_use.contains_key(&local.file_name) || local.local_only {
+        if local.local_only || in_use.contains_key(&local.file_name) {
             let path = keys_dir.join(&local.file_name);
             maintain(local, &keys_dir, &path);
         }
-        if matches!(local.source, Some(SlotSource::Vault { .. })) && vault.holds(id) == Some(false) {
-            local.last_error = Some(LOCAL_KEY_LOST_MESSAGE.to_string());
-        }
+        mark_lost_if_gone(local, id, vault);
         changed |= *local != before;
     }
-    // 沒有來源的記錄(同步來的副本被刪掉了,`maintain` 清掉了 `source`)沒有帳戶可以再落地:忘掉它,同帳戶裡那一輪的 `gone` 迴圈。只在這台的金鑰一律留著。
-    let kept = state.key_slots.len();
-    state.key_slots.retain(|_, l| l.source.is_some() || l.local_only);
-    changed | (state.key_slots.len() != kept)
+    if joined {
+        return changed;
+    }
+    // 沒有來源的記錄(同步來的副本被刪掉了,`maintain` 清掉了 `source`)沒有帳戶可以再落地:忘掉它,和有帳戶時那一輪的 `gone` 迴圈一樣。只在這台的金鑰一律留著。
+    let kept = slots.len();
+    slots.retain(|_, l| l.source.is_some() || l.local_only);
+    changed | (slots.len() != kept)
 }
 
 /// 這台的 `device.slots` 裡這個插槽那一項。連結(symlink / hard link)只在有主機用到(`used`:勾選的 space 或整份 config 裡的任何主機)、
@@ -1414,7 +1431,7 @@ fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError
 ///
 /// 狀態存不進去(`save_blocked`:別的 SSHelter 行程跑著同步引擎,或狀態檔留在原地)就在任何動作之前拒絕,理由同 `mutate`。這些動作先動檔案與保管庫、最後才提交記錄:
 /// 提交被拒的話,跑引擎的那個行程還記著原本的連結,檔案與保管庫卻已經動過了,沒有帳戶可以對照著修回來(同步嘗試只補回有主機用到的連結,
-/// `maintain_without_account`)。(有帳戶金鑰的 `snapshot` 不必:這種行程從來推導不出帳戶金鑰,那些動作本來就先失敗。)
+/// `maintain_local`)。(有帳戶金鑰的 `snapshot` 不必:這種行程從來推導不出帳戶金鑰,那些動作本來就先失敗。)
 fn local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
     let state = {
         let core = env.runtime.core.lock().unwrap();
@@ -7508,7 +7525,7 @@ pub(crate) mod tests {
         assert!(row.in_vault && !row.file_for_now && !row.in_account, "{row:?}");
     }
 
-    /// 沒有帳戶時沒有哪一輪會處理沒有主機用到的連結(`sync_once` 只維護有主機用到的插槽與只在這台的金鑰,`maintain_without_account`):
+    /// 沒有帳戶時沒有哪一輪會處理沒有主機用到的連結(`sync_once` 只維護有主機用到的插槽與只在這台的金鑰,`maintain_local`):
     /// 「Delete copy」做每一輪對帳戶裡已經沒有的連結做的事(`drop_link`)—— 拿掉插槽路徑上的連結與它旁邊的 `.pub`,你的金鑰檔不動,記錄忘掉。不然這一列(Not in use)按了也刪不掉。
     #[test]
     fn delete_copy_without_an_account_removes_an_unused_link_and_leaves_the_key_file() {
@@ -7778,7 +7795,7 @@ pub(crate) mod tests {
         assert_eq!(row.key_type.as_deref(), Some("ecdsa-sha2-nistp256"));
     }
 
-    // ── 沒有帳戶時照顧這台的金鑰(`maintain_without_account`;金鑰保管庫 spec §4.3)──────────────────────
+    // ── 照顧這台的金鑰(`maintain_local`:每一次同步嘗試的最後,有沒有帳戶都做;金鑰保管庫 spec §4.3)──────────────────
 
     /// 沒有帳戶:每一次同步嘗試照樣維護這台的插槽 —— 被刪掉的 `.pub` 補回來。
     #[test]
@@ -7904,50 +7921,112 @@ pub(crate) mod tests {
         assert!(!b.state().key_slots.contains_key(&id), "the record went with the file");
     }
 
-    /// `maintain_without_account` 直接對一份狀態副本:保管庫裡那一筆確定不見了才標錯誤(讀不了、還在的都不判斷),再來一次沒有新的變化;有帳戶什麼都不做。
+    /// `maintain_local` 直接對一份插槽記錄:保管庫裡那一筆確定不見了才標錯誤(讀不了、還在的都不判斷),再來一次沒有新的變化。有沒有帳戶,只在這台的金鑰都一樣。
     #[test]
-    fn maintaining_without_an_account_marks_only_a_vault_entry_that_is_known_to_be_gone() {
+    fn maintaining_locally_marks_only_a_vault_entry_that_is_known_to_be_gone() {
         let home = tempfile::tempdir().unwrap();
-        let mut state = SyncStateV2::fresh("MacBook").unwrap();
-        state.key_slots.insert(SLOT_ID.into(), LocalSlot { local_only: true, ..vault_record() });
-        let run = |state: &mut SyncStateV2, holds| maintain_without_account(state, home.path(), &NO_OTHER_HOSTS, &FakeVault::new(holds));
+        for joined in [false, true] {
+            let mut slots = BTreeMap::from([(SLOT_ID.to_string(), LocalSlot { local_only: true, ..vault_record() })]);
+            let run = |slots: &mut BTreeMap<String, LocalSlot>, holds| maintain_local(slots, joined, home.path(), &NO_OTHER_HOSTS, &FakeVault::new(holds));
 
-        for holds in [None, Some(true)] {
-            let mut copy = state.clone();
-            assert!(!run(&mut copy, holds), "holds = {holds:?}: nothing to change");
-            assert_eq!(copy, state);
+            for holds in [None, Some(true)] {
+                let mut copy = slots.clone();
+                assert!(!run(&mut copy, holds), "joined = {joined}, holds = {holds:?}: nothing to change");
+                assert_eq!(copy, slots);
+            }
+            assert!(run(&mut slots, Some(false)), "joined = {joined}: the entry is gone");
+            assert_eq!(slots[SLOT_ID].last_error.as_deref(), Some(LOCAL_KEY_LOST_MESSAGE));
+            assert!(!run(&mut slots, Some(false)), "joined = {joined}: saying so twice changes nothing");
         }
-        assert!(run(&mut state, Some(false)), "the entry is gone");
-        assert_eq!(state.key_slots[SLOT_ID].last_error.as_deref(), Some(LOCAL_KEY_LOST_MESSAGE));
-        assert!(!run(&mut state, Some(false)), "saying so twice changes nothing");
-
-        // 有帳戶時這個函式什麼都不做(那是 `reconcile_with_vault` 的事)。
-        state.account = Some(AccountState::new("chain"));
-        state.key_slots.get_mut(SLOT_ID).unwrap().last_error = None;
-        let before = state.clone();
-        assert!(!run(&mut state, Some(false)));
-        assert_eq!(state, before);
     }
 
-    /// 同步來的副本被刪掉了:有主機用到的才維護、才發現,記錄跟著忘掉;沒有主機用到的不動。只在這台的金鑰就算沒有來源也不會被忘掉。
+    /// 沒有帳戶:同步來的副本被刪掉了,有主機用到的才維護、才發現,記錄跟著忘掉;沒有主機用到的不動。只在這台的金鑰就算沒有來源也不會被忘掉。
     #[test]
     fn maintaining_without_an_account_forgets_a_missing_copy_only_when_a_host_uses_it() {
         let home = tempfile::tempdir().unwrap();
-        let mut state = SyncStateV2::fresh("MacBook").unwrap();
         let copy = |file: &str| LocalSlot {
             file_name: file.into(),
             source: Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }),
             ..vault_record()
         };
         let (used, unused, local) = ("1".repeat(32), "2".repeat(32), "3".repeat(32));
-        state.key_slots.insert(used.clone(), copy("used-11111111"));
-        state.key_slots.insert(unused.clone(), copy("unused-22222222"));
-        state.key_slots.insert(local.clone(), LocalSlot { source: None, local_only: true, ..vault_record() });
+        let mut slots = BTreeMap::from([
+            (used.clone(), copy("used-11111111")),
+            (unused.clone(), copy("unused-22222222")),
+            (local.clone(), LocalSlot { source: None, local_only: true, ..vault_record() }),
+        ]);
         let in_use = BTreeMap::from([("used-11111111".to_string(), vec!["web".to_string()])]);
 
-        assert!(maintain_without_account(&mut state, home.path(), &in_use, &FakeVault::new(Some(true))));
-        assert_eq!(state.key_slots.keys().cloned().collect::<Vec<_>>(), vec![unused, local], "only the copy a host was using is forgotten");
-        assert!(!state.key_slots.contains_key(&used));
+        assert!(maintain_local(&mut slots, false, home.path(), &in_use, &FakeVault::new(Some(true))));
+        assert_eq!(slots.keys().cloned().collect::<Vec<_>>(), vec![unused, local], "only the copy a host was using is forgotten");
+        assert!(!slots.contains_key(&used));
+    }
+
+    /// 有帳戶時本機維護只照顧只在這台的金鑰:其餘的插槽(從帳戶取回保管庫的金鑰、落地同步的金鑰、收起連結……)是完整的一輪的事,這裡不碰 —— 帳戶裡取得回來的金鑰
+    /// 不能標成「不見了」,副本不見了或還在等金鑰的記錄(沒有來源)也不能忘掉。
+    #[test]
+    fn maintaining_with_an_account_only_looks_after_the_keys_only_on_this_computer() {
+        let home = tempfile::tempdir().unwrap();
+        let (local, synced, copy, waiting) = ("1".repeat(32), "2".repeat(32), "3".repeat(32), "4".repeat(32));
+        let mut slots = BTreeMap::from([
+            (local.clone(), LocalSlot { local_only: true, ..vault_record() }),
+            (synced.clone(), LocalSlot { file_name: "id_old-22222222".into(), ..vault_record() }),
+            (
+                copy.clone(),
+                LocalSlot {
+                    file_name: "used-33333333".into(),
+                    source: Some(SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() }),
+                    ..vault_record()
+                },
+            ),
+            (waiting.clone(), LocalSlot { file_name: "waits-44444444".into(), source: None, ..vault_record() }),
+        ]);
+        let others = (slots[&synced].clone(), slots[&copy].clone(), slots[&waiting].clone());
+        let in_use = BTreeMap::from([("used-33333333".to_string(), vec!["web".to_string()])]);
+
+        assert!(maintain_local(&mut slots, true, home.path(), &in_use, &FakeVault::new(Some(false))));
+        assert_eq!(slots[&local].last_error.as_deref(), Some(LOCAL_KEY_LOST_MESSAGE));
+        assert_eq!((slots[&synced].clone(), slots[&copy].clone(), slots[&waiting].clone()), others, "the account's slots are left to a full round");
+    }
+
+    /// 完整的一輪(`reconcile_with_vault`)與本機維護(`maintain_local`)對只在這台的金鑰做的事一樣:各種狀況下兩邊得到同一筆記錄,先跑一輪再做本機維護也沒有新的變化。
+    #[test]
+    fn the_local_pass_and_a_joined_round_agree_about_a_key_only_on_this_computer() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let (id, file) = local_key_on(&a, &test_keys::plain(), "laptop");
+        let slot_path = home(&a).join(SLOT_DIR).join(&file);
+        let keys = account_keys(&a);
+        let env = a.env();
+        let agree = |what: &str| {
+            let state = a.state();
+            let mut after_round = state.clone();
+            reconcile_with_vault(&mut after_round, &keys, &home(&a), &NO_OTHER_HOSTS, 1_000, &EnvVault { env: &env });
+            let mut after_pass = state.key_slots.clone();
+            maintain_local(&mut after_pass, true, &home(&a), &NO_OTHER_HOSTS, &EnvVault { env: &env });
+            assert_eq!(after_pass[&id], after_round.key_slots[&id], "{what}");
+            let mut again = after_round.key_slots.clone();
+            assert!(!maintain_local(&mut again, true, &home(&a), &NO_OTHER_HOSTS, &EnvVault { env: &env }), "{what}: nothing is left for the pass after a round");
+        };
+
+        agree("healthy");
+        std::fs::remove_file(public_path(&slot_path)).unwrap();
+        agree("the .pub is missing");
+        std::fs::write(public_path(&slot_path), format!("{}\n", test_keys::ECDSA_PUBLIC)).unwrap();
+        agree("the .pub is another key's");
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&id)).unwrap();
+        agree("the vault entry is gone");
+        std::fs::write(&slot_path, "not a file of ours").unwrap();
+        agree("a file is in the way and the vault entry is gone");
+        let facts = inspect_private_key(&test_keys::plain()).unwrap();
+        let entry = VaultEntry {
+            private_key: test_keys::plain(),
+            public_key: facts.public_key,
+            fingerprint: facts.fingerprint,
+            origin: EntryOrigin::Generated,
+            added_at_ms: 1,
+        };
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.put(env.keychain, &id, &entry)).unwrap();
+        agree("a file is in the way and the vault entry is back");
     }
 
     /// 有帳戶、帳戶金鑰卻還沒載入(keychain 鎖著、同步碼不見了):帳戶裡的插槽與這台留著的舊副本分不出在這台的狀態,照舊不列;只在這台的金鑰跟帳戶無關,照樣列出。
@@ -7975,5 +8054,85 @@ pub(crate) mod tests {
         let row = overview_row(&a, &local).unwrap();
         assert!(row.local_only && row.in_vault && !row.in_account, "{row:?}");
         assert!(matches!(&row.status, SlotStatusView::Ready { fingerprint: Some(f), .. } if f == test_keys::ECDSA_FINGERPRINT), "{:?}", row.status);
+    }
+
+    /// 有帳戶、帳戶金鑰卻還沒載入(keychain 鎖著、同步碼不見了):這時沒有一輪可以跑,只在這台的金鑰照樣被照顧到 —— `.pub` 補回來、保管庫裡那一筆不見了就標錯誤。
+    /// 帳戶裡的插槽不碰(那是完整的一輪的事)。
+    #[test]
+    fn with_an_account_whose_keys_are_not_loaded_a_sync_attempt_still_looks_after_the_keys_only_on_this_computer() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (shared, shared_file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &shared_file);
+        settle(&a);
+        let (lost, _) = local_key_on(&a, &test_keys::ecdsa(), "old");
+        let (healthy, healthy_file) = local_key_on(&a, &test_keys::plain(), "laptop");
+        let env = a.env();
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&lost)).unwrap();
+        let pub_path = public_path(&home(&a).join(SLOT_DIR).join(&healthy_file));
+        std::fs::remove_file(&pub_path).unwrap();
+        let shared_before = a.state().key_slots[&shared].clone();
+        a.runtime.core.lock().unwrap().account_keys = None;
+
+        crate::sync::round::sync_once(&a.env()).unwrap();
+        let state = a.state();
+        assert_eq!(state.key_slots[&lost].last_error.as_deref(), Some(LOCAL_KEY_LOST_MESSAGE));
+        assert!(matches!(state.key_slots[&lost].source, Some(SlotSource::Vault { .. })), "the record stays");
+        assert_eq!(std::fs::read_to_string(&pub_path).unwrap().trim(), test_keys::PLAIN_PUBLIC, "the .pub is back");
+        assert_eq!(state.key_slots[&healthy].last_error, None);
+        assert_eq!(state.key_slots[&shared], shared_before, "the account's slots are left to a full round");
+        let row = overview_row(&a, &lost).expect("still listed");
+        assert_eq!(row.status, SlotStatusView::Error { message: LOCAL_KEY_LOST_MESSAGE.to_string() });
+    }
+
+    /// 一輪在金鑰那一步(`reconcile_with_vault`)之前就結束了(relay 連不上、一條 chain 壞掉):只在這台的金鑰照樣被照顧到,不必等哪一輪走完。
+    #[test]
+    fn a_round_that_ends_before_the_slot_step_still_looks_after_the_keys_only_on_this_computer() {
+        type Breakage = fn(&crate::sync::fake_relay::FakeRelay, &str);
+        let breakages: [(&str, Breakage); 2] = [
+            ("the relay is unreachable", |relay: &crate::sync::fake_relay::FakeRelay, _personal: &str| relay.set_offline(true)),
+            ("a chain is broken", |relay: &crate::sync::fake_relay::FakeRelay, personal: &str| relay.set_broken(personal, true)),
+        ];
+        for (what, breakage) in breakages {
+            let (relay, _clock, a, _b, _words, personal) = pair();
+            let (lost, _) = local_key_on(&a, &test_keys::ecdsa(), "old");
+            let (healthy, healthy_file) = local_key_on(&a, &test_keys::plain(), "laptop");
+            let env = a.env();
+            with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&lost)).unwrap();
+            let pub_path = public_path(&home(&a).join(SLOT_DIR).join(&healthy_file));
+            std::fs::remove_file(&pub_path).unwrap();
+            breakage(&relay, &personal);
+
+            // 這一輪怎麼收尾不是這個測試的事:連不上是錯誤,壞掉的 chain 是退避。
+            let _ = crate::sync::round::sync_once(&a.env());
+            let state = a.state();
+            assert_eq!(state.key_slots[&lost].last_error.as_deref(), Some(LOCAL_KEY_LOST_MESSAGE), "{what}");
+            assert_eq!(std::fs::read_to_string(&pub_path).unwrap().trim(), test_keys::PLAIN_PUBLIC, "{what}: the .pub is back");
+            assert!(state.key_slots[&healthy].last_error.is_none(), "{what}");
+        }
+    }
+
+    /// 沒有東西要變就不提交。`commit` 不換 generation,只比 generation 看不出多餘的提交;狀態存不進去(`save_blocked`)的行程才看得出來 —— 多餘的提交會被 `save_core`
+    /// 拒絕、記成錯誤。有東西要變的那一次則真的被拒絕(對照:這個測試抓得到多餘的提交)。沒有帳戶,以及有帳戶但帳戶金鑰還沒載入(沒有一輪可以跑)各做一次。
+    #[test]
+    fn a_sync_attempt_that_finds_nothing_to_change_does_not_commit() {
+        let reason = "the state can't be saved";
+        let check = |d: &TestDevice, what: &str| {
+            let (id, _) = local_key_on(d, &test_keys::plain(), "laptop");
+            d.runtime.core.lock().unwrap().save_blocked = Some(reason.to_string());
+            crate::sync::round::sync_once(&d.env()).unwrap();
+            assert_eq!(d.state().last_error, None, "{what}: a healthy key needs no write");
+
+            let env = d.env();
+            with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&id)).unwrap();
+            let refused = crate::sync::round::sync_once(&d.env()).unwrap_err();
+            assert_eq!(refused.to_string(), reason, "{what}: this process really can't write");
+            assert_eq!(d.state().last_error.as_deref(), Some(reason), "{what}: and the refused write is recorded");
+        };
+
+        let (relay, clock) = (crate::sync::fake_relay::FakeRelay::new(), crate::sync::testkit::TestClock::new());
+        check(&TestDevice::new("mac", &relay, &clock), "without an account");
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        a.runtime.core.lock().unwrap().account_keys = None;
+        check(&a, "with an account whose keys are not loaded");
     }
 }

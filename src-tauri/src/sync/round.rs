@@ -27,7 +27,7 @@ use crate::sync::relay::{
 };
 use crate::sync::runtime::{commit, is_superseded, save_core, SyncCore};
 use crate::sync::spaces::{reconcile_space_files, ReconcileError, Reconciled};
-use crate::sync::state_v2::{AccountState, FreezeInfo, SyncStateV2};
+use crate::sync::state_v2::{AccountState, FreezeInfo, LocalSlot, SyncStateV2};
 
 pub const ACCOUNT_GONE_MESSAGE: &str =
     "This sync account no longer exists on the relay (deleted from another device or expired) — leave it on this device";
@@ -201,7 +201,7 @@ pub fn backoff_window(env: &SyncEnv) -> Duration {
 
 /// 一輪同步。錯誤寫進 `last_error`(只寫在產生它的那一代狀態上 —— `prepare_files` 換了 generation 之後才失敗的例外,由
 /// `run_round` 寫)並發 `sync://status`,永不 panic;被搶先、主 config 在載入之後被外部改過(`Conflict`:重跑)都不算錯誤。
-/// 沒有帳戶:不連 relay,只維護這台的插槽(`maintain_local_slots`)。
+/// 沒有帳戶:不連 relay。每一次同步嘗試的最後,不論那一輪走到哪裡、有沒有帳戶,還維護這台的插槽(`maintain_local_slots`)。
 pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
     if env.runtime.syncing.swap(true, Ordering::SeqCst) {
         return Ok(()); // 已在同步中
@@ -233,16 +233,14 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
         return outcome;
     }
     // 先補存上次沒寫進磁碟的狀態;然後 generation / 狀態 / 金鑰一次快照(同一把鎖)。
-    let (generation, snapshot, unjoined, save_error) = {
+    let (generation, snapshot, save_error) = {
         let mut core = env.runtime.core.lock().unwrap();
         let save_error = if core.unsaved { save_core(&mut core, &env.state_path).err() } else { None };
         let snapshot = match (core.state.as_ref(), core.account_keys.as_ref()) {
             (Some(s), Some(k)) if s.joined() => Some((s.clone(), k.clone())),
             _ => None,
         };
-        // 沒有帳戶:這台的插槽照樣維護(`maintain_local_slots`)。
-        let unjoined = core.state.as_ref().filter(|s| !s.joined()).cloned();
-        (core.generation, snapshot, unjoined, save_error)
+        (core.generation, snapshot, save_error)
     };
     let result = match (snapshot, save_error) {
         // 狀態還寫不進磁碟:不在未落盤的狀態上做任何網路操作。
@@ -252,10 +250,13 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
             crate::sync::rotation::drive_rotation(env, generation, s, keys)
         }
         (Some((s, keys)), None) => run_round(env, generation, s, keys, true).map(|_| ()),
-        (None, None) => match unjoined {
-            Some(s) => maintain_local_slots(env, generation, s),
-            None => Ok(()),
-        },
+        (None, None) => Ok(()),
+    };
+    // 這台插槽的本機維護:不需要 relay、也不需要帳戶金鑰,所以每一次同步嘗試都在最後做,不論上面那一輪走到哪裡(凍結、被限流、拉取失敗、relay 出錯、帳戶金鑰還沒載入,
+    // 或根本沒有帳戶)。那一輪可能剛改過狀態與 generation,所以重新快照,不沿用上面的。還在 `syncing` 之內做:不會和另一輪的提交交錯(提交不換 generation)。這裡沒有持有任何鎖。
+    let local = match local_slots_snapshot(env) {
+        Some((fresh, joined, slots)) => maintain_local_slots(env, fresh, joined, slots),
+        None => Ok(()),
     };
     env.runtime.syncing.store(false, Ordering::SeqCst);
     let outcome = match result {
@@ -269,6 +270,11 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
             Err(e)
         }
     };
+    // 本機維護自己的錯誤(多半是狀態存不進去)它已經記下了:這一輪沒有別的錯誤時才由它回報。被搶先不算錯誤。
+    let outcome = match (outcome, local) {
+        (Ok(()), Err(e)) if !is_superseded(&e) => Err(e),
+        (outcome, _) => outcome,
+    };
     // 更換同步碼的最後一步留下的 keychain 換碼:補做(`rotation::retry_pending_swap`;沒有待補的就什麼都不做)。
     crate::sync::rotation::retry_pending_swap(env);
     // agent 的設定(金鑰保管庫 spec §6):主機或插槽變了就重寫 `agent/config`;第一次需要時把 Include 放在主 config 的第一行。每一次同步嘗試的最後都對一次,不論那一輪走到
@@ -280,24 +286,37 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
     outcome
 }
 
-/// 沒有帳戶時這台插槽的維護(`slots::maintain_without_account`):檔案系統的動作不持有任何鎖,有變化才以快照時的 generation 提交 ——
-/// 這之間狀態被改過(使用者加了金鑰、加入了帳戶……)就作廢(`SUPERSEDED`,呼叫端不當成錯誤),下一次同步嘗試再做。
-fn maintain_local_slots(env: &SyncEnv, generation: u64, mut s: SyncStateV2) -> Result<(), AppError> {
+/// 本機維護(`maintain_local_slots`)的快照:generation、有沒有帳戶、這台的插槽記錄,在同一把鎖內一起取 —— 這一輪可能剛改過它們。沒有插槽記錄就沒有東西要維護,不複製。
+fn local_slots_snapshot(env: &SyncEnv) -> Option<(u64, bool, BTreeMap<String, LocalSlot>)> {
+    let core = env.runtime.core.lock().unwrap();
+    let s = core.state.as_ref().filter(|s| !s.key_slots.is_empty())?;
+    Some((core.generation, s.joined(), s.key_slots.clone()))
+}
+
+/// 這台插槽的本機維護(`slots::maintain_local`):檔案系統的動作不持有任何鎖,有變化才以快照時的 generation 提交 ——
+/// 這之間狀態被改過(使用者加了金鑰、加入或離開了帳戶……)就作廢(`SUPERSEDED`,呼叫端不當成錯誤),下一次同步嘗試再做。提交失敗(狀態存不進去)記成這一代狀態的 `last_error`。
+fn maintain_local_slots(env: &SyncEnv, generation: u64, joined: bool, mut slots: BTreeMap<String, LocalSlot>) -> Result<(), AppError> {
     let Some(home) = env.ssh_dir.parent() else { return Ok(()) };
-    if s.key_slots.is_empty() {
+    // 有帳戶時只看只在這台的金鑰,用不到哪些插槽有主機用到;沒有帳戶時 config 還沒載入就當成沒有主機用到:只維護只在這台的金鑰,連結一律不動。
+    let in_use = if joined { BTreeMap::new() } else { crate::sync::slots::config_slot_uses(env).unwrap_or_default() };
+    if !crate::sync::slots::maintain_local(&mut slots, joined, home, &in_use, &crate::sync::slots::EnvVault { env }) {
         return Ok(());
     }
-    // config 還沒載入就當成沒有主機用到:只維護只在這台的金鑰,連結一律不動。
-    let in_use = crate::sync::slots::config_slot_uses(env).unwrap_or_default();
-    if !crate::sync::slots::maintain_without_account(&mut s, home, &in_use, &crate::sync::slots::EnvVault { env }) {
-        return Ok(());
-    }
-    commit(env, generation, |latest| {
-        if latest.account.is_none() {
-            latest.key_slots = s.key_slots;
+    let committed = commit(env, generation, |latest| {
+        if latest.joined() == joined {
+            latest.key_slots = slots;
         }
         Ok(())
-    })
+    });
+    if let Err(e) = &committed {
+        if !is_superseded(e) {
+            let mut core = env.runtime.core.lock().unwrap();
+            if core.generation == generation {
+                note_error(&mut core, env, e);
+            }
+        }
+    }
+    committed
 }
 
 /// 把一輪的錯誤寫進 `last_error` 並存檔(存不了就留在記憶體,`unsaved` 讓下一輪先補寫)。呼叫端持有 core 鎖。
@@ -2442,35 +2461,55 @@ pub(crate) mod tests {
         assert!(b.state().last_error.is_none());
     }
 
-    /// 沒有帳戶時這台插槽的維護(`maintain_local_slots`)的檔案系統動作不持有任何鎖:提交的時候狀態已經被改過(使用者做了別的事,generation 換了)就作廢 ——
-    /// `SUPERSEDED`,不蓋掉比較新的狀態;`sync_once` 不當成錯誤,下一次同步嘗試用新的快照再做一次。
+    /// 本機維護(`maintain_local_slots`)的檔案系統動作不持有任何鎖:提交的時候狀態已經被改過(使用者做了別的事,generation 換了)就作廢 ——
+    /// `SUPERSEDED`,不蓋掉比較新的狀態;`sync_once` 不當成錯誤,下一次同步嘗試用新的快照再做一次。沒有帳戶與有帳戶各做一次。
     #[test]
     fn a_local_slot_pass_is_dropped_when_the_state_changed_meanwhile() {
         use crate::sync::slots::{tests::local_key_on, LOCAL_KEY_LOST_MESSAGE};
         use crate::vault::store::{vault_path, with_vault};
         let (relay, clock) = (FakeRelay::new(), TestClock::new());
-        let d = TestDevice::new("mac", &relay, &clock);
-        let (id, _) = local_key_on(&d, &crate::sync::slot_rules::test_keys::plain(), "laptop");
-        let env = d.env();
-        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&id)).unwrap();
-        let snapshot = d.state();
-        let generation = env.runtime.core.lock().unwrap().generation;
-        // 快照之後、提交之前:使用者改了別的東西。
-        crate::sync::runtime::mutate(&env, |s| {
-            s.device_name = "Renamed".into();
-            Ok(())
-        })
-        .unwrap();
+        let without_account = TestDevice::new("mac", &relay, &clock);
+        let (_relay, _clock, with_account, _b, _words, _personal) = pair();
+        for (what, d) in [("without an account", &without_account), ("with an account", &with_account)] {
+            let (id, _) = local_key_on(d, &crate::sync::slot_rules::test_keys::plain(), "laptop");
+            let env = d.env();
+            with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&id)).unwrap();
+            let (generation, joined, slots) = local_slots_snapshot(&env).expect("a slot to look at");
+            // 快照之後、提交之前:使用者改了別的東西。
+            crate::sync::runtime::mutate(&env, |s| {
+                s.device_name = "Renamed".into();
+                Ok(())
+            })
+            .unwrap();
 
-        let dropped = maintain_local_slots(&env, generation, snapshot).unwrap_err();
-        assert!(is_superseded(&dropped), "{dropped}");
-        let state = d.state();
-        assert_eq!((state.device_name.as_str(), state.key_slots[&id].last_error.as_deref()), ("Renamed", None), "the stale pass wrote nothing");
+            let dropped = maintain_local_slots(&env, generation, joined, slots).unwrap_err();
+            assert!(is_superseded(&dropped), "{what}: {dropped}");
+            let state = d.state();
+            assert_eq!((state.device_name.as_str(), state.key_slots[&id].last_error.as_deref()), ("Renamed", None), "{what}: the stale pass wrote nothing");
 
-        sync_once(&env).unwrap();
-        let state = d.state();
-        assert_eq!(state.key_slots[&id].last_error.as_deref(), Some(LOCAL_KEY_LOST_MESSAGE), "the next attempt does it again");
-        assert_eq!(state.device_name, "Renamed", "without undoing the change that came in between");
-        assert!(state.last_error.is_none(), "and the attempt leaves no error on the sync status");
+            sync_once(&env).unwrap();
+            let state = d.state();
+            assert_eq!(state.key_slots[&id].last_error.as_deref(), Some(LOCAL_KEY_LOST_MESSAGE), "{what}: the next attempt does it again");
+            assert_eq!(state.device_name, "Renamed", "{what}: without undoing the change that came in between");
+            assert!(state.last_error.is_none(), "{what}: and the attempt leaves no error on the sync status");
+        }
+    }
+
+    /// 本機維護的快照把 generation、有沒有帳戶、插槽記錄一起取;沒有插槽記錄的裝置沒有東西要維護,不複製、不做。
+    #[test]
+    fn the_local_pass_takes_one_snapshot_of_generation_account_and_slots_and_skips_a_device_without_slots() {
+        use crate::sync::slots::tests::local_key_on;
+        let (relay, clock) = (FakeRelay::new(), TestClock::new());
+        let without_account = TestDevice::new("mac", &relay, &clock);
+        let (_relay, _clock, with_account, _b, _words, _personal) = pair();
+        for (what, d, joined) in [("without an account", &without_account, false), ("with an account", &with_account, true)] {
+            assert!(local_slots_snapshot(&d.env()).is_none(), "{what}: no slot records, nothing to look after");
+            let (id, _) = local_key_on(d, &crate::sync::slot_rules::test_keys::plain(), "laptop");
+            let (generation, snapshot_joined, slots) = local_slots_snapshot(&d.env()).expect(what);
+            assert_eq!(generation, d.runtime.core.lock().unwrap().generation, "{what}");
+            assert_eq!(snapshot_joined, joined, "{what}");
+            assert_eq!(slots, d.state().key_slots, "{what}");
+            assert!(slots.contains_key(&id), "{what}");
+        }
     }
 }
