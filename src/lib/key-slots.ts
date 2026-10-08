@@ -98,13 +98,15 @@ export function rewrittenLines(k: KeyCandidate, name: string): string[] {
 }
 
 /**
- * Where a key slot kept from the previous sync account came from (SP3 spec §7.1): it goes into this account as it is, under
- * the same file name. Null for every other key.
+ * Where a key slot kept from the previous sync account, or a key only on this computer, came from (SP3 spec §7.1, key vault
+ * spec §4.3): it goes into this account as it is, under the same file name. Null for every other key.
  */
 export function keptNote(k: KeyCandidate): string | null {
   const kept = k.kept_slot;
   if (kept === null) return null;
   const hosts = `Its hosts keep using ~/.ssh/sshelter/keys/${kept.file_name}.`;
+  if (kept.local_only) return `This key is only on this computer, in SSHelter. ${hosts}`;
+  if (kept.in_vault) return `From your previous sync account, in SSHelter on this computer. ${hosts}`;
   return kept.synced_copy
     ? `This computer's copy, synced to it in your previous sync account. ${hosts}`
     : `From your previous sync account. ${hosts}`;

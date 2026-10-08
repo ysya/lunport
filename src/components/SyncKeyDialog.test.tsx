@@ -69,7 +69,7 @@ describe("a key slot kept from the previous sync account", () => {
   const kept = (synced_copy: boolean) =>
     keyCandidate({
       default_name: "mac",
-      kept_slot: { id: `3fa2c1d9${"0".repeat(24)}`, file_name: FILE, synced_copy },
+      kept_slot: { id: `3fa2c1d9${"0".repeat(24)}`, file_name: FILE, synced_copy, in_vault: false, local_only: false },
       hosts: [
         { alias: "web", space_name: "Personal", value: `~/.ssh/sshelter/keys/${FILE}`, locked: null },
         { alias: "db", space_name: "Personal", value: "~/.ssh/id_mac", locked: null },
@@ -101,6 +101,28 @@ describe("a key slot kept from the previous sync account", () => {
     const html = row();
     expect(html).toContain(">Rename<");
     expect(text(html)).not.toContain("previous sync account");
+  });
+});
+
+describe("a key in SSHelter that a synced host uses", () => {
+  const FILE = "laptop-3fa2c1d9";
+  const inSshelter = (local_only: boolean) =>
+    keyCandidate({
+      path: `/home/f/.ssh/sshelter/keys/${FILE}`,
+      default_name: "laptop",
+      kept_slot: { id: `3fa2c1d9${"0".repeat(24)}`, file_name: FILE, synced_copy: false, in_vault: true, local_only },
+      hosts: [{ alias: "web", space_name: "Personal", value: `~/.ssh/sshelter/keys/${FILE}`, locked: null }],
+    });
+
+  it("asks under its own name, says where the key is and offers both answers without rewriting anything", () => {
+    const html = row(inSshelter(true));
+    const t = text(html);
+    expect(html).not.toContain(">Rename<");
+    expect(t).toContain("web uses laptop.");
+    expect(t).toContain(`This key is only on this computer, in SSHelter. Its hosts keep using ~/.ssh/sshelter/keys/${FILE}.`);
+    expect(t).not.toContain("IdentityFile");
+    for (const label of ["Sync key", "Keep on this computer"]) expect(buttonTag(html, label)).not.toContain(DISABLED);
+    expect(text(row(inSshelter(false)))).toContain(`From your previous sync account, in SSHelter on this computer. Its hosts keep using ~/.ssh/sshelter/keys/${FILE}.`);
   });
 });
 

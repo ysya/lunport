@@ -7,11 +7,12 @@ import type { KeptSlot } from "./KeptSlot";
  */
 export type KeyCandidate = { 
 /**
- * 這台電腦上金鑰檔的完整路徑(`IdentityFile` 解析出來的)。之前的帳戶留下的插槽(`kept_slot`)是它的金鑰:連到的金鑰檔,或插槽裡同步來的副本。
+ * 這台電腦上金鑰檔的完整路徑(`IdentityFile` 解析出來的)。之前的帳戶留下的插槽(`kept_slot`)是它的金鑰:連到的金鑰檔,或插槽裡同步來的副本;
+ * 金鑰在這台保管庫裡的(`KeptSlot::in_vault`)沒有私鑰檔,是插槽路徑(主機指的就是它)。
  */
 path: string, 
 /**
- * 預設的插槽名稱:金鑰檔名;之前的帳戶留下的插槽是它自己的名稱(不能改)。
+ * 預設的插槽名稱:金鑰檔名;之前的帳戶留下的插槽與只在這台的金鑰是它們自己的名稱(不能改)。
  */
 default_name: string, fingerprint: string | null, has_passphrase: boolean | null, 
 /**
@@ -24,7 +25,7 @@ unsyncable: string | null,
  */
 existing_slot: string | null, hosts: Array<CandidateHost>, 
 /**
- * 之前的帳戶留下的插槽(spec §7.1):「Sync key」與「Keep on this computer」把它就地放進這個帳戶(`adopt_slot`),不建立新插槽、不改名。
- * 同一把金鑰有好幾個時,是掃描時先遇到的那一個,用到其他那些的主機改指到它。null = 不是。
+ * 之前的帳戶留下的插槽(spec §7.1),或只在這台的金鑰(金鑰保管庫 spec §4.3,`KeptSlot::local_only`):「Sync key」與「Keep on this computer」把它就地放進
+ * 這個帳戶(`adopt_slot`),不建立新插槽、不改名。同一把金鑰有好幾個時,是掃描時先遇到的那一個,用到其他那些的主機改指到它。null = 不是。
  */
 kept_slot: KeptSlot | null, };

@@ -87,7 +87,11 @@ describe("a key slot kept from the previous sync account", () => {
   const FILE = "mac-3fa2c1d9";
   const host = (alias: string, value: string, locked: string | null = null) => ({ alias, space_name: "Personal", value, locked });
   const kept = (synced_copy: boolean, hosts = [host("web", `~/.ssh/sshelter/keys/${FILE}`)]) =>
-    keyCandidate({ default_name: "mac", kept_slot: { id: `3fa2c1d9${"0".repeat(24)}`, file_name: FILE, synced_copy }, hosts });
+    keyCandidate({
+      default_name: "mac",
+      kept_slot: { id: `3fa2c1d9${"0".repeat(24)}`, file_name: FILE, synced_copy, in_vault: false, local_only: false },
+      hosts,
+    });
 
   it("says where the key came from and that its hosts keep their slot path", () => {
     expect(keptNote(kept(false))).toBe("From your previous sync account. Its hosts keep using ~/.ssh/sshelter/keys/mac-3fa2c1d9.");
@@ -95,6 +99,16 @@ describe("a key slot kept from the previous sync account", () => {
       "This computer's copy, synced to it in your previous sync account. Its hosts keep using ~/.ssh/sshelter/keys/mac-3fa2c1d9.",
     );
     expect(keptNote(keyCandidate())).toBeNull();
+  });
+
+  it("says where a kept key in SSHelter comes from", () => {
+    const kept = { id: "3fa2c1d90123456789abcdef01234567", file_name: "laptop-3fa2c1d9", synced_copy: false, in_vault: true, local_only: true };
+    expect(keptNote(keyCandidate({ kept_slot: kept }))).toBe(
+      "This key is only on this computer, in SSHelter. Its hosts keep using ~/.ssh/sshelter/keys/laptop-3fa2c1d9.",
+    );
+    expect(keptNote(keyCandidate({ kept_slot: { ...kept, local_only: false } }))).toBe(
+      "From your previous sync account, in SSHelter on this computer. Its hosts keep using ~/.ssh/sshelter/keys/laptop-3fa2c1d9.",
+    );
   });
 
   it("rewrites only the hosts that don't use the slot yet, to its full file name", () => {

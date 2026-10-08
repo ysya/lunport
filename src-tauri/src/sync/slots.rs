@@ -2450,7 +2450,7 @@ pub(crate) mod tests {
         d.ssh_dir().parent().unwrap().to_path_buf()
     }
 
-    fn account_keys(d: &TestDevice) -> ChainKeys {
+    pub(crate) fn account_keys(d: &TestDevice) -> ChainKeys {
         let env = d.env();
         let keys = env.runtime.core.lock().unwrap().account_keys.clone().expect("joined");
         keys
