@@ -851,9 +851,8 @@ fn execute_ssh(
         .env_remove("SSH_ASKPASS_REQUIRE");
 
     let started = Instant::now();
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("cannot start ssh: {e}"))?;
+    let mut child =
+        crate::process::spawn(&mut command).map_err(|e| format!("cannot start ssh: {e}"))?;
     let stdout = child
         .stdout
         .take()
@@ -1410,8 +1409,7 @@ fn lock_file_until(path: &Path, deadline: Instant) -> FileLock {
 /// instance): the running SSHelter rewrites the runtime file with its bridge.
 fn start_host() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate SSHelter: {e}"))?;
-    let mut host = host_command(&exe)
-        .spawn()
+    let mut host = crate::process::spawn(&mut host_command(&exe))
         .map_err(|e| format!("cannot start SSHelter desktop: {e}"))?;
     // A launch that hands over exits at once: reap it instead of leaving a zombie behind.
     let _ = thread::Builder::new()
@@ -1713,7 +1711,7 @@ mod tests {
         let mut command = Command::new("cat");
         command.stdin(Stdio::piped()).stdout(Stdio::null());
         detach_from_adapter(&mut command);
-        let mut child = command.spawn().unwrap();
+        let mut child = crate::process::spawn(&mut command).unwrap();
         let pid = child.id() as libc::pid_t;
         let group = unsafe { libc::getpgid(pid) };
         let ours = unsafe { libc::getpgid(0) };

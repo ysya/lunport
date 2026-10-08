@@ -188,12 +188,7 @@ pub fn parse_keygen_l(line: &str) -> Option<KeygenFields> {
 
 /// Run `ssh-keygen -l -f <path>` (argv, no shell) and parse its output. Any failure → None.
 fn keygen_fields(path: &Path) -> Option<KeygenFields> {
-    let out = crate::process::background_command("ssh-keygen")
-        .arg("-l")
-        .arg("-f")
-        .arg(path)
-        .output()
-        .ok()?;
+    let out = crate::process::output(crate::process::background_command("ssh-keygen").arg("-l").arg("-f").arg(path)).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -222,7 +217,7 @@ pub fn parse_agent_list(exit_code: Option<i32>, stdout: &str) -> (AgentStatus, H
 
 /// Run `ssh-add -l` ONCE and interpret it (see `parse_agent_list`).
 fn agent_snapshot() -> (AgentStatus, HashSet<String>) {
-    match crate::process::background_command("ssh-add").arg("-l").output() {
+    match crate::process::output(crate::process::background_command("ssh-add").arg("-l")) {
         Ok(out) => parse_agent_list(out.status.code(), &String::from_utf8_lossy(&out.stdout)),
         Err(_) => parse_agent_list(None, ""),
     }
@@ -375,7 +370,7 @@ pub fn keys_git_ssh_hint() -> Option<String> {
         return None;
     }
     // `git config --get` exits 1 when the key is unset; a missing git is an Err from `output()`.
-    let out = crate::process::background_command("git").args(["config", "--global", "--get", "core.sshCommand"]).output().ok()?;
+    let out = crate::process::output(crate::process::background_command("git").args(["config", "--global", "--get", "core.sshCommand"])).ok()?;
     let value = out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|v| !v.is_empty());
     git_hint_needed(value.as_deref()).then(|| format!("git config --global core.sshCommand {GIT_SSH_COMMAND}"))
 }
@@ -407,7 +402,7 @@ pub fn keys_generate(name: String, comment: Option<String>) -> Result<KeyInfo, A
     if let Some(c) = comment.as_deref() {
         cmd.arg("-C").arg(c);
     }
-    let out = cmd.output().map_err(AppError::Io)?;
+    let out = crate::process::output(&mut cmd).map_err(AppError::Io)?;
     if !out.status.success() {
         // stderr from ssh-keygen carries no key material.
         return Err(AppError::Other(format!(

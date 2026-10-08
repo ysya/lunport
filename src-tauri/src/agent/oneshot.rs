@@ -212,7 +212,8 @@ pub fn open(
     let name = random_hex(4)?;
     let path = run_dir.join(&name);
     crate::agent::server::check_socket_path(&path)?;
-    let listener = UnixListener::bind(&path)?;
+    // 建 socket 與接受連線都在 `without_spawns` 裡,同 `server::listen_unix`:子程序不能留著它們(見 `crate::process`)。
+    let listener = crate::process::without_spawns(|| UnixListener::bind(&path))?;
     let stop = Arc::new(Stop::default());
     // 兩個期限都從開啟算起(不是從背景執行緒開始跑算起)。
     let opened = std::time::Instant::now();
@@ -227,7 +228,7 @@ pub fn open(
                 if stop.cancelled.load(Ordering::SeqCst) {
                     break Waited::Cancelled;
                 }
-                match listener.accept() {
+                match crate::process::without_spawns(|| listener.accept()) {
                     Ok((stream, _)) => {
                         break if std::time::Instant::now() < grant_end { Waited::Connected(stream) } else { Waited::Late(stream) };
                     }

@@ -266,9 +266,7 @@ fn read_known_hosts() -> Vec<KnownHostEntry> {
 }
 
 fn read_tailscale_status() -> Vec<TailscalePeer> {
-    let output = crate::process::background_command("tailscale")
-        .args(["status", "--json"])
-        .output();
+    let output = crate::process::output(crate::process::background_command("tailscale").args(["status", "--json"]));
     match output {
         Ok(out) if out.status.success() => {
             let json = String::from_utf8_lossy(&out.stdout);

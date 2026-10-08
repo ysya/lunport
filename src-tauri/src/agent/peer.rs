@@ -533,11 +533,9 @@ mod tests {
     #[test]
     fn a_live_process_keeps_only_what_the_rules_read_of_its_command_line() {
         // `read line; : secret-token`:兩個指令,shell 不會直接換成別的程式;它停在內建的 read(等 stdin,我們不關),不會留下子程序。
-        let mut child = std::process::Command::new("sh")
-            .args(["-c", "read line; : secret-token"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child =
+            crate::process::spawn(std::process::Command::new("sh").args(["-c", "read line; : secret-token"]).stdin(std::process::Stdio::piped()))
+                .unwrap();
         let pid = child.id();
         let chain = process_chain(pid);
         child.kill().unwrap();
@@ -561,7 +559,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_executable_base_of_another_live_process_is_its_own_file_name() {
-        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut child = crate::process::spawn(std::process::Command::new("sleep").arg("30")).unwrap();
         let pid = child.id();
         let base = executable_base(pid);
         child.kill().unwrap();
@@ -575,9 +573,9 @@ mod tests {
     #[test]
     fn a_process_that_is_gone_gives_an_empty_chain() {
         #[cfg(unix)]
-        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let mut child = crate::process::spawn(&mut std::process::Command::new("true")).unwrap();
         #[cfg(windows)]
-        let mut child = std::process::Command::new("cmd").args(["/C", "exit"]).spawn().unwrap();
+        let mut child = crate::process::spawn(std::process::Command::new("cmd").args(["/C", "exit"])).unwrap();
         let pid = child.id();
         child.wait().unwrap();
         drop(child);

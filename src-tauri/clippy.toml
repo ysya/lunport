@@ -1,0 +1,6 @@
+# spawn 一律經過 `crate::process::spawn`/`output`:它們與 `without_spawns` 互斥,子程序才拿不到建立中的 socket 與鎖檔(見 src/process.rs)。
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "use crate::process::spawn (see SPAWNING in src/process.rs)" },
+    { path = "std::process::Command::output", reason = "use crate::process::output (see SPAWNING in src/process.rs)" },
+    { path = "std::process::Command::status", reason = "use crate::process::spawn and wait (see SPAWNING in src/process.rs)" },
+]

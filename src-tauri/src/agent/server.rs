@@ -98,21 +98,31 @@ pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let listener = UnixListener::bind(&sock)?;
+    // 建 socket 與接受連線都在 `without_spawns` 裡:macOS 的 socket 建好之後才另外設 CLOEXEC,中間 spawn 出去的子程序會一直握著它,
+    // SSHelter 結束之後 ssh 連得上卻沒人回應(見 `crate::process`)。
+    let listener = crate::process::without_spawns(|| UnixListener::bind(&sock))?;
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+    // 等連線時不拿鎖(`wait_for_connection`),有連線了才在鎖裡 accept;所以 listener 是 nonblocking,沒接到就回去等。
+    listener.set_nonblocking(true)?;
     std::thread::Builder::new().name("sshelter-agent".to_string()).spawn(move || {
         // 鎖跟著 listener 持有到行程結束。
         let _lock = lock;
         let active = Arc::new(AtomicUsize::new(0));
-        for stream in listener.incoming() {
-            let stream = match stream {
-                Ok(stream) => stream,
+        loop {
+            wait_for_connection(&listener);
+            let stream = match crate::process::without_spawns(|| listener.accept()) {
+                Ok((stream, _)) => stream,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => continue,
                 Err(_) => {
                     // 例如檔案描述元用完:稍等再接,不要空轉。
                     std::thread::sleep(std::time::Duration::from_millis(50));
                     continue;
                 }
             };
+            // macOS 接受的連線沿用 listener 的 nonblocking;連線本身要會等(讀取逾時才有作用)。
+            if stream.set_nonblocking(false).is_err() {
+                continue;
+            }
             // 不是同一個使用者:直接關掉。
             let Ok(pid) = peer(&stream) else { continue };
             let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
@@ -120,6 +130,19 @@ pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
         }
     })?;
     Ok(Started::Running)
+}
+
+/// 等到 `listener` 有連線可接,不拿任何鎖。被訊號打斷就回來(呼叫端的 accept 會沒接到,回來再等);出錯、或醒來卻沒有連線,先稍等,不要空轉。
+#[cfg(unix)]
+fn wait_for_connection(listener: &std::os::unix::net::UnixListener) {
+    use std::os::fd::AsRawFd;
+    let mut fd = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    // SAFETY: one pollfd, valid for the call; the listener keeps its fd open.
+    let rc = unsafe { libc::poll(&mut fd, 1, -1) };
+    let interrupted = rc < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
+    if !interrupted && (rc < 0 || fd.revents & libc::POLLIN == 0) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// 對方是同一個使用者(有效 UID)時回傳它的 PID(拿不到 → None);不是 → Err。
@@ -317,6 +340,26 @@ mod tests {
         }
         assert_eq!(ran.load(Ordering::SeqCst), 1);
         assert_eq!(active.load(Ordering::SeqCst), MAX_CONNECTIONS - 1, "the finished connection gave its slot back");
+    }
+
+    /// listener 是 nonblocking(在鎖裡 accept,見 `listen_unix`),接受的連線不是:macOS 的連線會沿用 listener 的設定,那樣 handler 讀不到資料就會
+    /// 出錯而不是等。連線帶著 CLOEXEC。
+    #[test]
+    fn an_accepted_connection_blocks_and_closes_on_exec() {
+        use std::os::fd::AsRawFd;
+        let dir = short_dir();
+        let agent = dir.path().join("agent");
+        let (tx, rx) = mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let handler: Handler = Arc::new(move |stream, _pid| {
+            let fd = stream.as_raw_fd();
+            // SAFETY: fcntl only reads the flags of an open fd.
+            let (status, descriptor) = unsafe { (libc::fcntl(fd, libc::F_GETFL), libc::fcntl(fd, libc::F_GETFD)) };
+            let _ = tx.lock().unwrap().send((status & libc::O_NONBLOCK, descriptor & libc::FD_CLOEXEC));
+        });
+        assert_eq!(listen_unix(&agent, handler).unwrap(), Started::Running);
+        let _client = UnixStream::connect(agent.join("sock")).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), (0, libc::FD_CLOEXEC));
     }
 
     /// 閒置的連線不能一直佔著名額:每條接受的連線都帶著 5 分鐘的讀取逾時。

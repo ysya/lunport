@@ -30,7 +30,7 @@ pub fn effective_config(
     }
     cmd.arg("-G").arg(alias);
 
-    let output = match cmd.output() {
+    let output = match crate::process::output(&mut cmd) {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(AppError::NotFound("ssh not found".to_string()));

@@ -485,9 +485,7 @@ pub(crate) fn is_default_config_root(state: &tauri::State<crate::state::AppState
 
 /// `ssh -V` 的輸出（版本寫在 stderr；順手併上 stdout 以防未來變動）。
 pub(crate) fn local_ssh_version() -> String {
-    crate::process::background_command("ssh")
-        .arg("-V")
-        .output()
+    crate::process::output(crate::process::background_command("ssh").arg("-V"))
         .map(|o| {
             let mut s = String::from_utf8_lossy(&o.stderr).into_owned();
             s.push_str(&String::from_utf8_lossy(&o.stdout));
@@ -545,7 +543,7 @@ fn run_ssh_deploy(
         cmd.env("DISPLAY", "sshelter");
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = crate::process::spawn(&mut cmd).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             AppError::NotFound("ssh not found".to_string())
         } else {
@@ -716,10 +714,9 @@ pub fn deploy_precheck_host_key(
     require_default_config_root(&state)?;
     let ep = resolve_endpoint(&state, &alias)?;
 
-    let scanned = match crate::process::background_command("ssh-keyscan")
-        .args(keyscan_target(&ep))
-        .output()
-    {
+    let scanned = match crate::process::output(
+        crate::process::background_command("ssh-keyscan").args(keyscan_target(&ep)),
+    ) {
         Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(HostKeyStatus::Unavailable {
@@ -732,11 +729,11 @@ pub fn deploy_precheck_host_key(
     // 用 `ssh-keygen -F` 查既有項目，而不是自己讀 known_hosts —— 它原生處理雜湊項目
     // （HashKnownHosts 在 Debian／Ubuntu 預設為 yes）。找不到時 exit 1、stdout 為空，
     // 那正是我們要的「這台是新主機」。
-    let known = crate::process::background_command("ssh-keygen")
-        .args(keygen_find_args(&ep))
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
+    let known = crate::process::output(
+        crate::process::background_command("ssh-keygen").args(keygen_find_args(&ep)),
+    )
+    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    .unwrap_or_default();
     Ok(compare_host_keys(&scanned, &known, &ep))
 }
 
@@ -1068,15 +1065,16 @@ mod tests {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        let mut child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(REMOTE_SCRIPT)
-            .env("HOME", home)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn /bin/sh");
+        let mut child = crate::process::spawn(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(REMOTE_SCRIPT)
+                .env("HOME", home)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .expect("spawn /bin/sh");
         child
             .stdin
             .take()

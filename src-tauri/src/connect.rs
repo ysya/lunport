@@ -497,10 +497,10 @@ fn password_autofill_env(
         return None;
     }
     let ep = crate::deploy::endpoint_from_effective(&pairs)?;
-    let known = crate::process::background_command("ssh-keygen")
-        .args(crate::deploy::keygen_find_args(&ep))
-        .output()
-        .ok()?;
+    let known = crate::process::output(
+        crate::process::background_command("ssh-keygen").args(crate::deploy::keygen_find_args(&ep)),
+    )
+    .ok()?;
     if String::from_utf8_lossy(&known.stdout).trim().is_empty() {
         return None;
     }
@@ -520,10 +520,7 @@ pub fn ssh_argv(options: &[String], alias: &str) -> Vec<String> {
 
 /// Spawn the launch spec detached, inheriting the environment. Not unit-tested (side effect).
 pub fn launch(spec: &LaunchSpec) -> Result<(), AppError> {
-    std::process::Command::new(&spec.program)
-        .args(&spec.args)
-        .spawn()
-        .map_err(AppError::Io)?;
+    crate::process::spawn(std::process::Command::new(&spec.program).args(&spec.args)).map_err(AppError::Io)?;
     Ok(())
 }
 

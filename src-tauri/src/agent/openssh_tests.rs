@@ -105,7 +105,7 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 /// `run` 的本體,期限由呼叫端給(測試用短的)。起不來(找不到工具)回 `Err`;逾時就砍掉它,讀完它的輸出,然後 panic:訊息有完整的命令列與
 /// 它到那一刻為止的 stderr。stdin 照呼叫端設的(沒設就繼承);stdout 與 stderr 是 pipe,結束之後才讀:這些工具的輸出很小,塞不滿 pipe。
 fn run_within(command: &mut Command, timeout: Duration) -> std::io::Result<std::process::Output> {
-    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = crate::process::spawn(command.stdout(Stdio::piped()).stderr(Stdio::piped()))?;
     let deadline = Instant::now() + timeout;
     while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
