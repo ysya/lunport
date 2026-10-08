@@ -4,11 +4,15 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
 import type { DuplicateAlias } from "@/bindings/DuplicateAlias";
+import type { ImportResult } from "@/bindings/ImportResult";
+import type { KeyAlgorithm } from "@/bindings/KeyAlgorithm";
 import type { KeyCandidates } from "@/bindings/KeyCandidates";
 import type { KeyChoice } from "@/bindings/KeyChoice";
+import type { KeyFilePreview } from "@/bindings/KeyFilePreview";
 import type { MigrationFailure } from "@/bindings/MigrationFailure";
 import type { MigrationReport } from "@/bindings/MigrationReport";
 import type { MoveIntoVaultResult } from "@/bindings/MoveIntoVaultResult";
+import type { NewKeyResult } from "@/bindings/NewKeyResult";
 import type { NewSpaceGroup } from "@/bindings/NewSpaceGroup";
 import type { PendingApprovalView } from "@/bindings/PendingApprovalView";
 import type { ReviewOutcome } from "@/bindings/ReviewOutcome";
@@ -434,6 +438,36 @@ export function useKeyMoveAllIntoVault() {
  */
 export function exportPrivateKey(slotId: string, passphrase: string | null): Promise<string | null> {
   return tauriInvoke<string | null>("sync_key_export_private", { slotId, passphrase });
+}
+
+/**
+ * New key (key vault spec §7.5): add a pasted private key to SSHelter. Like `exportPrivateKey`, these are plain calls, not
+ * mutations: the key text and a passphrase must not stay in TanStack's cache.
+ */
+export function importKeyText(name: string, text: string): Promise<NewKeyResult> {
+  return tauriInvoke<NewKeyResult>("sync_key_import_text", { name, text });
+}
+
+/** New key from a file, or Import from ~/.ssh: `keepFile` = "Keep the file too", otherwise "Move into SSHelter". */
+export function importKeyFile(name: string, path: string, keepFile: boolean): Promise<ImportResult> {
+  return tauriInvoke<ImportResult>("sync_key_import_file", { name, path, keepFile });
+}
+
+/** What adding a chosen key file would do (read-only). */
+export function previewKeyFile(path: string): Promise<KeyFilePreview> {
+  return tauriInvoke<KeyFilePreview>("sync_key_preview_file", { path });
+}
+
+/** Generate key (spec §7.5). An RSA key takes a few seconds; the backend makes it off the main thread. */
+export function generateKey(name: string, algorithm: KeyAlgorithm, comment: string, passphrase: string | null): Promise<NewKeyResult> {
+  return tauriInvoke<NewKeyResult>("sync_key_generate", { name, algorithm, comment, passphrase });
+}
+
+/** After a key was added: show the new overview at once, and re-read what it changed (hosts rewritten, a key file removed). */
+export function applyNewKey(queryClient: QueryClient, overview: SyncOverview): void {
+  queryClient.setQueryData(syncOverviewKey, overview);
+  void queryClient.invalidateQueries({ queryKey: ["config"] });
+  void queryClient.invalidateQueries({ queryKey: ["keys"] });
 }
 
 /*

@@ -7,17 +7,22 @@ import { queryKeys } from "./queries";
 import {
   RELAY_DEPLOY_URL,
   RELAY_UPDATE_URL,
+  applyNewKey,
   applyResolved,
   approveVersions,
   createAccount,
   exportPrivateKey,
   fetchKeyCandidates,
+  generateKey,
+  importKeyFile,
+  importKeyText,
   joinAccount,
   keyArgs,
   keyCandidatesKey,
   leaveFailureTitle,
   openRelayDeploy,
   openRelayUpdateGuide,
+  previewKeyFile,
   rejectVersions,
   rejoinAccount,
   showWords,
@@ -365,5 +370,34 @@ describe("Move and Export private key", () => {
       ["sync_key_export_private", { slotId: "s", passphrase: "correct horse" }],
       ["sync_key_export_private", { slotId: "s", passphrase: null }],
     ]);
+  });
+});
+
+describe("New key and Generate key", () => {
+  it("adds and generates keys with plain calls (no key text in the query cache)", async () => {
+    const calls = stubBackend(async () => ({ overview: overview(), slot_id: "s" }));
+    await importKeyText("laptop", "-----BEGIN OPENSSH PRIVATE KEY-----\n…");
+    await importKeyFile("work", "/home/f/.ssh/id_work", true);
+    await previewKeyFile("/home/f/.ssh/id_work");
+    // The Generate key form has no Comment field: it passes the key's name as the comment.
+    await generateKey("id_ed25519", "ed25519", "id_ed25519", null);
+    expect(calls).toEqual([
+      ["sync_key_import_text", { name: "laptop", text: "-----BEGIN OPENSSH PRIVATE KEY-----\n…" }],
+      ["sync_key_import_file", { name: "work", path: "/home/f/.ssh/id_work", keepFile: true }],
+      ["sync_key_preview_file", { path: "/home/f/.ssh/id_work" }],
+      ["sync_key_generate", { name: "id_ed25519", algorithm: "ed25519", comment: "id_ed25519", passphrase: null }],
+    ]);
+  });
+
+  it("puts the new overview in place and re-reads what a new key changed: the config views and the key files", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(syncOverviewKey, overview());
+    const views = [queryKeys.hosts, queryKeys.keys];
+    for (const key of views) queryClient.setQueryData(key, []);
+    const added = overview({ last_sync_ms: 1 });
+    applyNewKey(queryClient, added);
+    expect(queryClient.getQueryData(syncOverviewKey)).toEqual(added);
+    expect(queryClient.getQueryState(syncOverviewKey)?.isInvalidated).toBe(false);
+    expect(views.map((key) => queryClient.getQueryState(key)?.isInvalidated)).toEqual([true, true]);
   });
 });

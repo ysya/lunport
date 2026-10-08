@@ -4,7 +4,6 @@ import { ChevronRight, Search } from "lucide-react";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { MoveFailure } from "@/bindings/MoveFailure";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
-import { GenerateKeyFileDialog } from "@/components/keychain/dialogs";
 import { BADGE_CLASS } from "@/components/keychain/KeyDetail";
 import { KeychainBanners } from "@/components/keychain/KeychainBanners";
 import { Badge } from "@/components/ui/badge";
@@ -78,7 +77,7 @@ export function KeychainListView({
   onQuery,
   onSelect,
   onToggleFiles,
-  onGenerate,
+  onNew,
 }: {
   slots: SyncKeySlotView[];
   files: KeyInfo[];
@@ -89,7 +88,7 @@ export function KeychainListView({
   onQuery: (query: string) => void;
   onSelect: (selection: KeychainSelection) => void;
   onToggleFiles: () => void;
-  onGenerate: () => void;
+  onNew: (mode: "import" | "generate") => void;
 }) {
   const searching = query.trim() !== "";
   const showFiles = filesOpen || searching;
@@ -104,7 +103,17 @@ export function KeychainListView({
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-2">
         <section className="space-y-0.5">
-          <h3 className="section-label px-1">In SSHelter</h3>
+          <div className="flex flex-wrap items-center justify-between gap-x-2 px-1">
+            <h3 className="section-label px-0">In SSHelter</h3>
+            <div className="flex shrink-0 items-center">
+              <Button type="button" size="sm" variant="ghost" className="h-6 shrink-0 px-1.5 text-xs" onClick={() => onNew("import")}>
+                New key
+              </Button>
+              <Button type="button" size="sm" variant="ghost" className="h-6 shrink-0 px-1.5 text-xs" onClick={() => onNew("generate")}>
+                Generate key
+              </Button>
+            </div>
+          </div>
           {slots.length > 0 ? (
             slots.map((slot) => slotRow(slot, selection?.kind === "slot" && selection.id === slot.id, failureOf(slot), () => onSelect({ kind: "slot", id: slot.id })))
           ) : searching ? (
@@ -112,7 +121,7 @@ export function KeychainListView({
           ) : (
             <div className="space-y-0.5 px-1 py-2 text-xs">
               <p className="font-medium">No keys in SSHelter yet</p>
-              <p className="text-muted-foreground">Keys used by synced hosts appear here.</p>
+              <p className="text-muted-foreground">Add one with New key or Generate key. Keys used by synced hosts appear here too.</p>
             </div>
           )}
         </section>
@@ -122,9 +131,6 @@ export function KeychainListView({
               <ChevronRight className={cn("size-3 shrink-0 transition-transform", showFiles && "rotate-90")} aria-hidden />
               <span className="truncate">Other key files in ~/.ssh</span>
             </button>
-            <Button type="button" size="sm" variant="ghost" className="h-6 shrink-0 px-1.5 text-xs" onClick={onGenerate}>
-              Generate a key file…
-            </Button>
           </div>
           {showFiles &&
             (files.length > 0 ? (
@@ -147,7 +153,6 @@ export function KeychainList() {
   const moveFailures = useUiStore((s) => s.moveFailures);
   const [query, setQuery] = useState("");
   const [filesOpen, setFilesOpen] = useState(false);
-  const [generating, setGenerating] = useState(false);
   // Not only while joined: after leaving the account this computer keeps its keys in SSHelter (the backend lists them).
   const slots = overview.data?.key_slots ?? [];
   const files = keys.data ?? [];
@@ -164,9 +169,8 @@ export function KeychainList() {
         onQuery={setQuery}
         onSelect={selectKey}
         onToggleFiles={() => setFilesOpen((open) => !open)}
-        onGenerate={() => setGenerating(true)}
+        onNew={(mode) => selectKey({ kind: "new", mode, path: null })}
       />
-      <GenerateKeyFileDialog open={generating} onOpenChange={setGenerating} existingNames={files.map((k) => k.name)} />
     </div>
   );
 }

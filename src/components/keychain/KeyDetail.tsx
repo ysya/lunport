@@ -7,6 +7,7 @@ import type { MoveFailure } from "@/bindings/MoveFailure";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { DeleteCopyConfirm, DeleteKeyConfirm, ExportPrivateKeyDialog, PickKeyDialog, SyncKeyConfirm } from "@/components/keychain/dialogs";
 import { ExportToHostDialog, type ExportTarget } from "@/components/keychain/ExportToHostDialog";
+import { NewKeyPane } from "@/components/keychain/NewKey";
 import { TONE_TEXT } from "@/components/sync-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -153,8 +154,19 @@ export function SlotKeyDetailView({
   );
 }
 
-/** A key file in ~/.ssh (key vault spec §7.3): SSHelter doesn't manage it, and never deletes it (§7.6). No hooks: exported for the tests. */
-export function FileKeyDetailView({ file, onAction, onHost }: { file: KeyInfo; onAction: (action: "copy" | "exportHost") => void; onHost: (alias: string) => void }) {
+/**
+ * A key file in ~/.ssh (key vault spec §7.3): SSHelter doesn't manage it, and never deletes it (§7.6). "Import into SSHelter…" opens
+ * New key with this file chosen. No hooks: exported for the tests.
+ */
+export function FileKeyDetailView({
+  file,
+  onAction,
+  onHost,
+}: {
+  file: KeyInfo;
+  onAction: (action: "copy" | "exportHost" | "import") => void;
+  onHost: (alias: string) => void;
+}) {
   const hasPub = file.public_path !== null;
   return (
     <div className="space-y-5">
@@ -175,6 +187,10 @@ export function FileKeyDetailView({ file, onAction, onHost }: { file: KeyInfo; o
         </Button>
         <Button type="button" size="sm" variant="outline" className="h-7" disabled={!hasPub} onClick={() => onAction("exportHost")}>
           Export to host…
+        </Button>
+        {/* Adding the key to SSHelter needs the private file only, so this does not wait for a .pub. */}
+        <Button type="button" size="sm" variant="outline" className="h-7" onClick={() => onAction("import")}>
+          Import into SSHelter…
         </Button>
       </div>
       <div className="settings-group">
@@ -218,7 +234,8 @@ export function KeyDetailPane() {
   const moveFailures = useUiStore((s) => s.moveFailures);
   // Pressing a host shows it in Hosts: selecting a host switches the sidebar to Hosts (the store's rule, see `setSelectedAlias`).
   const showHost = useUiStore((s) => s.setSelectedAlias);
-  return <KeyDetailFor selection={selection} moveFailures={moveFailures} onShowHost={showHost} />;
+  const select = useUiStore((s) => s.selectKey);
+  return <KeyDetailFor selection={selection} moveFailures={moveFailures} onShowHost={showHost} onSelect={select} />;
 }
 
 /**
@@ -229,10 +246,12 @@ export function KeyDetailFor({
   selection,
   moveFailures,
   onShowHost,
+  onSelect,
 }: {
   selection: KeychainSelection | null;
   moveFailures: MoveFailure[];
   onShowHost: (alias: string) => void;
+  onSelect: (selection: KeychainSelection) => void;
 }) {
   const overview = useSyncOverview();
   const keys = useKeys({ enabled: true });
@@ -252,6 +271,15 @@ export function KeyDetailFor({
   const shownSyncing = useLastNonNull(syncing);
   const shownDeleting = useLastNonNull(deleting);
   const shownDeletingKey = useLastNonNull(deletingKey);
+  // New key and Generate key take the pane in place of a key's detail (spec §7.1). Keyed by what they were opened with, so a form
+  // opened for another file or kind starts fresh, and what was typed goes when the pane does.
+  if (selection?.kind === "new") {
+    return (
+      <div className="mx-auto max-w-[720px] px-6 py-5 pb-24">
+        <NewKeyPane key={`${selection.mode}:${selection.path ?? ""}`} selection={selection} />
+      </div>
+    );
+  }
   // Not only while joined: a key kept in SSHelter after leaving the account still has its detail and its exports.
   const slots = overview.data?.key_slots ?? [];
   const slot = selection?.kind === "slot" ? (slots.find((s) => s.id === selection.id) ?? null) : null;
@@ -332,6 +360,7 @@ export function KeyDetailFor({
             file={file}
             onAction={(action) => {
               if (action === "copy") copyPublicKey(file.public_path, file.name);
+              else if (action === "import") onSelect({ kind: "new", mode: "import", path: file.private_path });
               else if (file.public_path) setExportTarget({ name: file.name, publicPath: file.public_path, inSSHelter: false });
             }}
             onHost={onShowHost}

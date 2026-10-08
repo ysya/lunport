@@ -38,7 +38,7 @@ const props = (overrides: Partial<Props> = {}): Props => ({
   onQuery: () => {},
   onSelect: () => {},
   onToggleFiles: () => {},
-  onGenerate: () => {},
+  onNew: () => {},
   ...overrides,
 });
 const list = (overrides: Partial<Props> = {}) => renderToStaticMarkup(KeychainListView(props(overrides)));
@@ -63,7 +63,7 @@ describe("the Keychain's list", () => {
   it("says where keys come from while there are none, and when nothing matches a search", () => {
     const empty = text(list({ slots: [] }));
     expect(empty).toContain("No keys in SSHelter yet");
-    expect(empty).toContain("Keys used by synced hosts appear here.");
+    expect(empty).toContain("Add one with New key or Generate key. Keys used by synced hosts appear here too.");
     expect(text(list({ slots: [], files: [], query: "zzz" }))).toContain("No keys match.");
   });
 
@@ -86,13 +86,28 @@ describe("the Keychain's list", () => {
     expect(list()).not.toContain('aria-current="true"');
   });
 
-  it("opens the other key files, and offers to generate one", () => {
+  it("opens the other key files", () => {
     let toggled = 0;
-    let generated = 0;
-    const tree = KeychainListView(props({ onToggleFiles: () => toggled++, onGenerate: () => generated++ }));
+    const tree = KeychainListView(props({ onToggleFiles: () => toggled++ }));
     buttonsIn(tree).find((b) => textIn(b).includes("Other key files"))!.props.onClick!();
-    buttonsIn(tree).find((b) => textIn(b) === "Generate a key file…")!.props.onClick!();
-    expect([toggled, generated]).toEqual([1, 1]);
+    expect(toggled).toBe(1);
+  });
+
+  it("starts New key and Generate key, and no longer offers a key file", () => {
+    const asked: string[] = [];
+    for (const b of buttonsIn(KeychainListView(props({ onNew: (mode) => asked.push(mode) })))) {
+      if (textIn(b) === "New key" || textIn(b) === "Generate key") b.props.onClick!();
+    }
+    expect(asked).toEqual(["import", "generate"]);
+    expect(text(list())).not.toContain("Generate a key file…");
+    expect(text(list({ slots: [] }))).toContain("Add one with New key or Generate key. Keys used by synced hosts appear here too.");
+  });
+
+  it("offers New key and Generate key as buttons whether keys are listed, none are, or a search matches none", () => {
+    for (const overrides of [{}, { slots: [] }, { query: "zzz", slots: [] }]) {
+      const labels = buttonsIn(KeychainListView(props(overrides))).map(textIn);
+      expect(labels, JSON.stringify(overrides)).toEqual(expect.arrayContaining(["New key", "Generate key"]));
+    }
   });
 
   it("says on a row why the last Move couldn't move its key", () => {

@@ -206,10 +206,12 @@ describe("a key file's detail", () => {
     buttonsIn(tree)
       .filter((b) => textIn(b) !== "web")
       .forEach((b) => b.props.onClick!());
-    expect(asked).toEqual(["copy", "exportHost"]);
+    expect(asked).toEqual(["copy", "exportHost", "import"]);
     const none = fileDetail(keyFile({ public_path: null }));
     expect(buttonTag(none, "Copy public key")).toContain(DISABLED);
     expect(buttonTag(none, "Export to host…")).toContain(DISABLED);
+    // Adding the key to SSHelter needs the private file only.
+    expect(buttonTag(none, "Import into SSHelter…")).not.toContain(DISABLED);
     expect(text(none)).toContain("No .pub file next to it.");
   });
 
@@ -236,7 +238,7 @@ describe("the detail pane", () => {
     return text(
       renderToStaticMarkup(
         <QueryClientProvider client={queryClient}>
-          <KeyDetailFor selection={selection} moveFailures={moveFailures} onShowHost={() => {}} />
+          <KeyDetailFor selection={selection} moveFailures={moveFailures} onShowHost={() => {}} onSelect={() => {}} />
         </QueryClientProvider>,
       ),
     );
@@ -264,5 +266,32 @@ describe("the detail pane", () => {
 
   it("shows the selected key file", () => {
     expect(pane({ kind: "file", path: "/home/f/.ssh/id_ed25519" }, [], [keyFile()])).toContain("SSHelter doesn't manage this file");
+  });
+
+  it("shows the New key and Generate key forms", () => {
+    const render = (selection: KeychainSelection) =>
+      text(
+        renderToStaticMarkup(
+          <QueryClientProvider client={new QueryClient()}>
+            <KeyDetailFor selection={selection} moveFailures={[]} onShowHost={() => {}} onSelect={() => {}} />
+          </QueryClientProvider>,
+        ),
+      );
+    expect(render({ kind: "new", mode: "generate", path: null })).toContain("Generate key");
+    expect(render({ kind: "new", mode: "import", path: "/home/f/.ssh/id_work" })).toContain("/home/f/.ssh/id_work");
+  });
+
+  it("shows a form in place of the prompt to choose a key and of the keys, starting from the right source", () => {
+    const blank = pane({ kind: "new", mode: "import", path: null }, [keySlot()], []);
+    expect(blank).toContain("SSHelter keeps the key in its vault. Programs ask before they use it.");
+    expect(blank).toContain("Add to SSHelter");
+    expect(blank).not.toContain("No key selected");
+    expect(blank).not.toContain("id_mac");
+    const chosen = pane({ kind: "new", mode: "import", path: "/home/f/.ssh/id_work" }, [], []);
+    expect(chosen).not.toContain("No file chosen");
+    const generating = pane({ kind: "new", mode: "generate", path: null }, [keySlot()], []);
+    expect(generating).toContain("A new key made in SSHelter. It exists only in SSHelter until you export it.");
+    expect(generating).toContain("Ed25519");
+    expect(generating).not.toContain("No key selected");
   });
 });

@@ -1,5 +1,6 @@
-//! SSH key management: scan ~/.ssh for keypairs, agent status, ed25519 generation, public-key
-//! reads, and `ssh-copy-id` deployment via the user's terminal.
+//! SSH key management: scan ~/.ssh for keypairs, agent status, public-key reads, and
+//! `ssh-copy-id` deployment via the user's terminal. New keys are made inside SSHelter
+//! (`sync::local_keys`), not here.
 //!
 //! Security model (same as `connect.rs`): the WebView has NO shell permission — all IO/exec
 //! happens here, always as argv vectors (NEVER `sh -c`). Every key path coming from the front
@@ -49,7 +50,7 @@ pub struct AgentStatus {
     pub key_count: u32,
 }
 
-// ─── Path / name validation (security-critical) ───────────────────────────────
+// ─── Path validation (security-critical) ──────────────────────────────────────
 
 /// The user's ~/.ssh directory. Errors if the home dir is unknown.
 pub fn ssh_dir() -> Result<PathBuf, AppError> {
@@ -88,36 +89,6 @@ pub fn validate_public_path(path: &str, ssh_dir: &Path) -> Result<PathBuf, AppEr
         return Err(forbidden());
     }
     Ok(p)
-}
-
-/// Validate a new key NAME: `^[A-Za-z0-9][A-Za-z0-9._-]*$` (no leading dash/dot → no option
-/// injection, no hidden/relative paths, no separators), and not a `.pub` suffix (would collide
-/// with the generated public file naming).
-pub fn validate_key_name(name: &str) -> Result<(), AppError> {
-    let mut chars = name.chars();
-    let ok = matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        && !name.ends_with(".pub");
-    if ok {
-        Ok(())
-    } else {
-        Err(AppError::ForbiddenPath(format!("invalid key name: {name:?}")))
-    }
-}
-
-/// Resolve the target private-key path for generating `name` under `ssh_dir`, refusing when
-/// either `<name>` or `<name>.pub` already exists (incl. as symlink/dir — `symlink_metadata`).
-pub fn generate_target(ssh_dir: &Path, name: &str) -> Result<PathBuf, AppError> {
-    validate_key_name(name)?;
-    let target = ssh_dir.join(name);
-    if fs::symlink_metadata(&target).is_ok() {
-        return Err(AppError::Other(format!("~/.ssh/{name} already exists")));
-    }
-    let pub_target = ssh_dir.join(format!("{name}.pub"));
-    if fs::symlink_metadata(&pub_target).is_ok() {
-        return Err(AppError::Other(format!("~/.ssh/{name}.pub already exists")));
-    }
-    Ok(target)
 }
 
 // ─── Scanning ─────────────────────────────────────────────────────────────────
@@ -389,58 +360,6 @@ pub fn keys_read_public(path: String) -> Result<String, AppError> {
 }
 
 #[tauri::command]
-pub fn keys_generate(name: String, comment: Option<String>) -> Result<KeyInfo, AppError> {
-    let dir = ssh_dir()?;
-    crate::fsutil::ensure_dir_secure(&dir)?;
-    let target = generate_target(&dir, &name)?;
-
-    // Argv only, no shell. `-N ""` = empty passphrase (the UI carries the warning); `-q`
-    // silences the banner. The comment is the dedicated argument after `-C` — never parsed
-    // as an option.
-    let mut cmd = crate::process::background_command("ssh-keygen");
-    cmd.arg("-q").arg("-t").arg("ed25519").arg("-f").arg(&target).arg("-N").arg("");
-    if let Some(c) = comment.as_deref() {
-        cmd.arg("-C").arg(c);
-    }
-    let out = crate::process::output(&mut cmd).map_err(AppError::Io)?;
-    if !out.status.success() {
-        // stderr from ssh-keygen carries no key material.
-        return Err(AppError::Other(format!(
-            "ssh-keygen failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-
-    let (_, fingerprints) = agent_snapshot();
-    Ok(key_info_for(&dir, &name, &fingerprints))
-}
-
-#[tauri::command]
-pub fn keys_generate_in_terminal(
-    name: String,
-    comment: Option<String>,
-    terminal_override: Option<String>,
-) -> Result<(), AppError> {
-    let dir = ssh_dir()?;
-    crate::fsutil::ensure_dir_secure(&dir)?;
-    let target = generate_target(&dir, &name)?;
-
-    // Interactive ssh-keygen (passphrase prompts happen in the terminal). No `-N`.
-    let mut argv: Vec<String> = vec![
-        "ssh-keygen".into(),
-        "-t".into(),
-        "ed25519".into(),
-        "-f".into(),
-        target.to_string_lossy().into_owned(),
-    ];
-    if let Some(c) = comment {
-        argv.push("-C".into());
-        argv.push(c);
-    }
-    launch_in_terminal(terminal_override, &argv)
-}
-
-#[tauri::command]
 pub fn keys_deploy(
     state: tauri::State<crate::state::AppState>,
     alias: String,
@@ -490,49 +409,6 @@ mod tests {
 
     fn fixture_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
-    }
-
-    // ── name validation ───────────────────────────────────────────────────────
-
-    #[test]
-    fn validate_key_name_accepts_typical_names() {
-        for n in ["id_ed25519", "id_rsa", "work-2026", "a", "9key", "id.ed25519_work"] {
-            assert!(validate_key_name(n).is_ok(), "{n:?} should be accepted");
-        }
-    }
-
-    #[test]
-    fn validate_key_name_rejects_traversal_options_and_separators() {
-        for n in [
-            "", "-flag", ".hidden", "../escape", "a/b", "a\\b", "a b", "a;b", "key$",
-            "name.pub", "_lead",
-        ] {
-            let err = validate_key_name(n).unwrap_err();
-            assert!(matches!(err, AppError::ForbiddenPath(_)), "{n:?} → {err:?}");
-        }
-    }
-
-    // ── generate_target ───────────────────────────────────────────────────────
-
-    #[test]
-    fn generate_target_refuses_existing_private_or_public() {
-        let dir = fixture_dir();
-        std::fs::write(dir.path().join("exists"), PRIV_OPENSSH).unwrap();
-        assert!(generate_target(dir.path(), "exists").is_err(), "existing private refused");
-
-        std::fs::write(dir.path().join("half.pub"), PUB_LINE).unwrap();
-        assert!(generate_target(dir.path(), "half").is_err(), "existing .pub refused");
-
-        let ok = generate_target(dir.path(), "fresh").unwrap();
-        assert_eq!(ok, dir.path().join("fresh"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn generate_target_refuses_existing_symlink() {
-        let dir = fixture_dir();
-        std::os::unix::fs::symlink("/nonexistent", dir.path().join("link")).unwrap();
-        assert!(generate_target(dir.path(), "link").is_err(), "dangling symlink still refused");
     }
 
     // ── scanning / classification ─────────────────────────────────────────────

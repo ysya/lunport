@@ -1,3 +1,4 @@
+import type { KeyAlgorithm } from "@/bindings/KeyAlgorithm";
 import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { listNames, plural } from "@/lib/format";
@@ -9,8 +10,22 @@ import { revealHidden } from "@/lib/sync-approvals";
  * src/components/keychain.
  */
 
-/** What the Keychain's detail pane shows: a key slot (by id) or a key file in ~/.ssh (by its private path). */
-export type KeychainSelection = { kind: "slot"; id: string } | { kind: "file"; path: string };
+/**
+ * What the Keychain's main pane shows: a key slot (by id), a key file in ~/.ssh (by its private path), or the New key / Generate key
+ * form (New key with a file already chosen, from a key file's "Import into SSHelter…").
+ */
+export type KeychainSelection =
+  | { kind: "slot"; id: string }
+  | { kind: "file"; path: string }
+  | { kind: "new"; mode: "import" | "generate"; path: string | null };
+
+/** The kinds Generate key offers (spec §7.5), with the name each suggests. */
+export const KEY_TYPES: { algorithm: KeyAlgorithm; label: string; name: string }[] = [
+  { algorithm: "ed25519", label: "Ed25519", name: "id_ed25519" },
+  { algorithm: "rsa3072", label: "RSA 3072", name: "id_rsa" },
+  { algorithm: "rsa4096", label: "RSA 4096", name: "id_rsa" },
+  { algorithm: "ecdsa_p256", label: "ECDSA P-256", name: "id_ecdsa" },
+];
 
 export interface KeyBadge {
   label: string;

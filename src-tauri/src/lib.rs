@@ -27,10 +27,7 @@ use deploy::{
     deploy_key, deploy_precheck_host_key, deploy_preflight, deploy_trust_host_key, secrets_delete,
     secrets_get, secrets_has, secrets_set,
 };
-use keys::{
-    keys_agent_status, keys_deploy, keys_generate, keys_generate_in_terminal, keys_git_ssh_hint,
-    keys_list, keys_read_public,
-};
+use keys::{keys_agent_status, keys_deploy, keys_git_ssh_hint, keys_list, keys_read_public};
 use known_hosts::{known_hosts_list, known_hosts_remove};
 use mcp::{mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
 use settings_io::{settings_export, settings_import};
@@ -239,8 +236,6 @@ fn run_app(mcp_host: bool, start_hidden: bool) {
             keys_agent_status,
             keys_git_ssh_hint,
             keys_read_public,
-            keys_generate,
-            keys_generate_in_terminal,
             keys_deploy,
             deploy_precheck_host_key,
             deploy_trust_host_key,

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { KeyInfo } from "@/bindings/KeyInfo";
+import { isValidSlotName } from "@/lib/key-slots";
 import { keySlot, SLOT_FINGERPRINT, SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import {
   attachText,
   formatDay,
   hasKeyHere,
+  KEY_TYPES,
   keyNameOfPath,
   keychainSlots,
   launchHintNeeded,
@@ -88,6 +90,21 @@ describe("a key's facts", () => {
     expect(passphraseFact(keySlot({ vault_has_passphrase: true, has_passphrase: false }))).toBe("Yes");
     expect(passphraseFact(keySlot({ vault_has_passphrase: null, has_passphrase: false }))).toBe("No");
     expect(passphraseFact(keySlot({ vault_has_passphrase: null, has_passphrase: null }))).toBeNull();
+  });
+});
+
+describe("Generate key's kinds", () => {
+  it("offers Ed25519, RSA 3072, RSA 4096 and ECDSA P-256, each with the name it suggests", () => {
+    expect(KEY_TYPES).toEqual([
+      { algorithm: "ed25519", label: "Ed25519", name: "id_ed25519" },
+      { algorithm: "rsa3072", label: "RSA 3072", name: "id_rsa" },
+      { algorithm: "rsa4096", label: "RSA 4096", name: "id_rsa" },
+      { algorithm: "ecdsa_p256", label: "ECDSA P-256", name: "id_ecdsa" },
+    ]);
+  });
+
+  it("suggests only names a key can have", () => {
+    for (const { name } of KEY_TYPES) expect(isValidSlotName(name), name).toBe(true);
   });
 });
 

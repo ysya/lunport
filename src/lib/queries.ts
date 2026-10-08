@@ -595,49 +595,6 @@ export function useRemoveKnownHosts() {
   });
 }
 
-/**
- * Generate a new passphrase-LESS ed25519 keypair `~/.ssh/<name>` (the UI carries
- * the warning). Invalidates ["keys"] so the list refreshes with the new pair.
- */
-export function useGenerateKey() {
-  const queryClient = useQueryClient();
-  return useMutation<KeyInfo, unknown, { name: string; comment: string | null }>({
-    mutationFn: ({ name, comment }) =>
-      tauriInvoke<KeyInfo>("keys_generate", { name, comment }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["keys"] });
-    },
-    onError: (e) =>
-      toast.error("Failed to generate key", { description: errMessage(e) }),
-  });
-}
-
-/**
- * Launch INTERACTIVE `ssh-keygen` in the user's terminal (passphrase-protected
- * flow). The list is invalidated optimistically — the key appears once the user
- * finishes the prompts and reopens/refetches.
- */
-export function useGenerateKeyInTerminal() {
-  const queryClient = useQueryClient();
-  return useMutation<
-    void,
-    unknown,
-    { name: string; comment: string | null; terminalOverride?: string | null }
-  >({
-    mutationFn: ({ name, comment, terminalOverride }) =>
-      tauriInvoke<void>("keys_generate_in_terminal", {
-        name,
-        comment,
-        terminalOverride: terminalOverride ?? null,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["keys"] });
-    },
-    onError: (e) =>
-      toast.error("Failed to open terminal", { description: errMessage(e) }),
-  });
-}
-
 /** Launch `ssh-copy-id -i <pub> <alias>` in the user's terminal (interactive password). */
 export function useDeployKey() {
   return useMutation<
