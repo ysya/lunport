@@ -153,6 +153,7 @@ fn run_app(mcp_keep_alive: bool) {
             config_create_file,
             config_get_host,
             config_save_host,
+            config_set_identity_file,
             config_add_host,
             config_remove_host,
             config_rename_host,

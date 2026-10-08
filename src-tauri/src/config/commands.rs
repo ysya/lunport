@@ -875,6 +875,37 @@ pub fn config_save_host(
     }
 }
 
+/// Export to host 之後把主機連到這把金鑰(金鑰保管庫 spec §7.3.1):`edit::replace_identity_files` 改記憶體裡的 doc,`persist` 寫回。
+/// 寫不進去(檔案在載入之後被改過、I/O 錯誤)就把記憶體裡的那個檔案還原(同 `agent::wiring::put_include_first`),錯誤照樣回給呼叫端。回傳原本生效的值。
+pub fn set_identity_file(
+    doc: &mut crate::config::model::SshConfigDoc,
+    alias: &str,
+    value: &str,
+    persist: impl FnOnce(&mut crate::config::model::SshConfigDoc, usize) -> Result<(), AppError>,
+) -> Result<Vec<String>, AppError> {
+    let idx = find_host_file_index(doc, alias).ok_or_else(|| AppError::NotFound(format!("host '{alias}' not found")))?;
+    let saved = doc.files[idx].items.clone();
+    let host = edit::find_host_mut(&mut doc.files[idx].items, alias)
+        .ok_or_else(|| AppError::NotFound(format!("host '{alias}' not found in file")))?;
+    let old = edit::replace_identity_files(host, value);
+    if let Err(e) = persist(doc, idx) {
+        doc.files[idx].items = saved;
+        return Err(e);
+    }
+    Ok(old)
+}
+
+/// Export to host 的「Use this key」:主機區塊裡生效的 IdentityFile 換成這把金鑰(`set_identity_file`)。回傳更新後的主機明細。
+#[tauri::command]
+pub fn config_set_identity_file(state: State<AppState>, alias: String, value: String) -> Result<Option<HostDetail>, AppError> {
+    let mut doc_lock = state.doc.lock().unwrap();
+    let mut backed_up = state.backed_up.lock().unwrap();
+    let retention = *state.backup_retention.lock().unwrap();
+    let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    set_identity_file(doc, &alias, &value, |doc, idx| persist_file(doc, idx, &mut backed_up, retention))?;
+    Ok(host_detail(doc, &alias))
+}
+
 #[tauri::command]
 pub fn config_add_host(
     state: State<AppState>,
@@ -2285,5 +2316,80 @@ mod tests {
         assert!(unloadable.files.iter().all(|f| f.path != managed), "load_doc skips a non-UTF-8 include");
         let reloaded = load_doc(&main).unwrap();
         assert!(!load_wakes_sync(Some(&unloadable), &reloaded, Some(std::slice::from_ref(&managed))));
+    }
+
+    fn doc_of(text: &str) -> (tempfile::TempDir, crate::config::model::SshConfigDoc) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(&path, text).unwrap();
+        let doc = load_doc(&path).unwrap();
+        (dir, doc)
+    }
+
+    /// Export to host 之後:主機區塊裡生效的 IdentityFile 換成一行新的,註解掉的不動,其他區塊不動;回傳原本的值。
+    #[test]
+    fn setting_the_identity_file_replaces_every_live_line_of_the_host() {
+        let (_dir, mut doc) = doc_of(
+            "Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/id_rsa\n  # IdentityFile ~/.ssh/old\n  IdentityFile \"~/.ssh/id work\"\nHost db\n  IdentityFile ~/.ssh/id_rsa\n",
+        );
+        let old = set_identity_file(&mut doc, "web", "~/.ssh/sshelter/keys/id_mac-3fa2c1d9", |_, _| Ok(())).unwrap();
+        assert_eq!(old, vec!["~/.ssh/id_rsa".to_string(), "\"~/.ssh/id work\"".to_string()]);
+        assert_eq!(
+            serialize_items(&doc.files[0].items, doc.files[0].trailing_newline),
+            "Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/sshelter/keys/id_mac-3fa2c1d9\n  # IdentityFile ~/.ssh/old\nHost db\n  IdentityFile ~/.ssh/id_rsa\n"
+        );
+    }
+
+    /// 原本沒有 IdentityFile:加在最後一個指令之後。
+    #[test]
+    fn setting_the_identity_file_on_a_host_without_one_adds_it() {
+        let (_dir, mut doc) = doc_of("Host web\n  HostName 10.0.0.1\n\n# trailing\n");
+        assert!(set_identity_file(&mut doc, "web", "~/.ssh/id_mac", |_, _| Ok(())).unwrap().is_empty());
+        assert_eq!(
+            serialize_items(&doc.files[0].items, doc.files[0].trailing_newline),
+            "Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/id_mac\n\n# trailing\n"
+        );
+    }
+
+    /// 存不進去(例如檔案在載入之後被改過):記憶體裡的 doc 還原,錯誤照樣回給呼叫端。
+    #[test]
+    fn a_failed_save_leaves_the_loaded_config_as_it_was() {
+        let text = "Host web\n  IdentityFile ~/.ssh/id_rsa\n";
+        let (_dir, mut doc) = doc_of(text);
+        let err = set_identity_file(&mut doc, "web", "~/.ssh/id_mac", |_, _| Err(AppError::Conflict("config".to_string()))).unwrap_err();
+        assert!(matches!(err, AppError::Conflict(_)));
+        assert_eq!(serialize_items(&doc.files[0].items, doc.files[0].trailing_newline), text);
+    }
+
+    /// 主機在被 Include 的檔案裡,用真的 `persist_file` 存:改、存、失敗時還原的都是那個檔案(不是主 config);載入之後被別的程式改過就被擋下(Conflict),磁碟上別人的改動留著。
+    #[test]
+    fn setting_the_identity_file_edits_and_saves_the_file_that_holds_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = write_config(&dir, "hosts.config", "Host web\n  IdentityFile ~/.ssh/id_rsa\n");
+        let main_text = format!("Include {}\nHost local\n  User me\n", hosts.display());
+        let main = write_config(&dir, "config", &main_text);
+        let mut doc = load_doc(&main).unwrap();
+        let file = find_host_file_index(&doc, "web").unwrap();
+        assert_eq!(doc.files[file].path, hosts);
+        let mut backed_up: HashSet<PathBuf> = HashSet::new();
+
+        let old = set_identity_file(&mut doc, "web", "~/.ssh/id_mac", |doc, idx| persist_file(doc, idx, &mut backed_up, None)).unwrap();
+        assert_eq!(old, vec!["~/.ssh/id_rsa".to_string()]);
+        assert_eq!(std::fs::read_to_string(&hosts).unwrap(), "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), main_text, "the main config is not touched");
+
+        std::fs::write(&hosts, "Host web\n  IdentityFile ~/.ssh/external\n").unwrap();
+        let err = set_identity_file(&mut doc, "web", "~/.ssh/id_other", |doc, idx| persist_file(doc, idx, &mut backed_up, None)).unwrap_err();
+        assert!(matches!(err, AppError::Conflict(_)));
+        assert_eq!(serialize_items(&doc.files[file].items, doc.files[file].trailing_newline), "Host web\n  IdentityFile ~/.ssh/id_mac\n");
+        assert_eq!(std::fs::read_to_string(&hosts).unwrap(), "Host web\n  IdentityFile ~/.ssh/external\n");
+    }
+
+    /// 找不到這個主機:回 NotFound,什麼都不存。
+    #[test]
+    fn setting_the_identity_file_of_an_unknown_host_is_not_found() {
+        let (_dir, mut doc) = doc_of("Host web\n  IdentityFile ~/.ssh/id_rsa\n");
+        let err = set_identity_file(&mut doc, "nope", "~/.ssh/id_mac", |_, _| panic!("nothing to save")).unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
     }
 }

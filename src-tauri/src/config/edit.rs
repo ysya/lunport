@@ -39,18 +39,54 @@ pub fn set_host_field(host: &mut HostBlock, keyword: &str, value: &str) -> bool 
         }
     }
 
-    // Not found — infer indent and insert AFTER the last directive (before any trailing
-    // blank/comment run) so the new line stays visually inside the block.
+    // Not found — add it after the block's last directive.
+    insert_directive(host, keyword, &value);
+    true
+}
+
+/// Insert `keyword value` after the block's last directive (before any trailing blank/comment run), with the block's
+/// inferred indent.
+fn insert_directive(host: &mut HostBlock, keyword: &str, value: &str) {
     let indent = infer_indent(&host.body);
-    let insert_at = host
+    let insert_at = host.body.iter().rposition(|it| matches!(it, Item::Directive(_))).map(|i| i + 1).unwrap_or(host.body.len());
+    host.body.insert(insert_at, Item::Directive(Directive::new(keyword, value, &indent)));
+}
+
+/// Point a host at one key (Export to host, key vault spec §7.3.1): the first live `IdentityFile` gets `value`, the
+/// other live ones are removed, commented-out lines stay. With none, the line is added after the last directive.
+/// Returns the old live values in order, as written (quotes kept), for "{host} will use {key} instead of …".
+pub fn replace_identity_files(host: &mut HostBlock, value: &str) -> Vec<String> {
+    let value = sanitize_value(value);
+    let live: Vec<usize> = host
         .body
         .iter()
-        .rposition(|it| matches!(it, Item::Directive(_)))
-        .map(|i| i + 1)
-        .unwrap_or(host.body.len());
-    host.body
-        .insert(insert_at, Item::Directive(Directive::new(keyword, &value, &indent)));
-    true
+        .enumerate()
+        .filter(|(_, item)| matches!(item, Item::Directive(d) if d.key == "identityfile" && !d.serializes_as_comment()))
+        .map(|(i, _)| i)
+        .collect();
+    let Some((&first, rest)) = live.split_first() else {
+        insert_directive(host, "IdentityFile", &value);
+        return Vec::new();
+    };
+    let old: Vec<String> = live
+        .iter()
+        .filter_map(|&i| match &host.body[i] {
+            Item::Directive(d) => Some(d.value.clone()),
+            _ => None,
+        })
+        .collect();
+    for &i in rest.iter().rev() {
+        host.body.remove(i);
+    }
+    if let Item::Directive(d) = &mut host.body[first] {
+        if d.value != value {
+            d.value = value;
+            d.dirty = true;
+            // Re-dirtying a live line must keep it live (`serializes_as_comment` = !enabled && dirty).
+            d.enabled = true;
+        }
+    }
+    old
 }
 
 /// Strip CR/LF from a value so it can never inject extra physical lines on serialize.
@@ -721,6 +757,101 @@ mod tests {
             lines[fa + 1],
             "",
             "appended field must sit before the trailing blank, got:\n{edited}"
+        );
+    }
+
+    // ── Tests: replace_identity_files — point a host at one key ──────────────
+
+    #[test]
+    fn test_replace_identity_files_changes_the_first_live_line_and_removes_the_other_live_ones() {
+        let original = "Host web\n  HostName 10.0.0.1\n  IdentityFile  ~/.ssh/a  # work\n  # IdentityFile ~/.ssh/commented\n  IdentityFile \"~/.ssh/b c\"\n  IdentityFile ~/.ssh/disabled\n  User deploy\n\nHost db\n  IdentityFile ~/.ssh/a\n";
+        let (mut items, nl) = parse_file(original);
+
+        let host = find_host_mut(&mut items, "web").expect("host 'web' not found");
+        // A line disabled in this session serializes as a comment, so it is not live: it stays and is not reported.
+        let disabled = host
+            .body
+            .iter_mut()
+            .find_map(|it| match it {
+                Item::Directive(d) if d.key == "identityfile" && d.value == "~/.ssh/disabled" => Some(d),
+                _ => None,
+            })
+            .expect("disabled candidate not found");
+        set_directive_enabled(disabled, false);
+
+        let old = replace_identity_files(host, "~/.ssh/new");
+        assert_eq!(old, vec!["~/.ssh/a".to_string(), "\"~/.ssh/b c\"".to_string()]);
+        // The first live line keeps its place, indent, separator and inline comment; the other host is untouched.
+        assert_eq!(
+            serialize_items(&items, nl),
+            "Host web\n  HostName 10.0.0.1\n  IdentityFile  ~/.ssh/new  # work\n  # IdentityFile ~/.ssh/commented\n  # IdentityFile ~/.ssh/disabled\n  User deploy\n\nHost db\n  IdentityFile ~/.ssh/a\n"
+        );
+    }
+
+    #[test]
+    fn test_replace_identity_files_leaves_a_line_that_already_has_the_value_untouched() {
+        let original = "Host web\n  IdentityFile   ~/.ssh/a   # keep\n  IdentityFile ~/.ssh/b\n";
+        let (mut items, nl) = parse_file(original);
+
+        let host = find_host_mut(&mut items, "web").expect("host 'web' not found");
+        let old = replace_identity_files(host, "~/.ssh/a");
+        assert_eq!(old, vec!["~/.ssh/a".to_string(), "~/.ssh/b".to_string()]);
+        assert!(
+            matches!(&host.body[0], Item::Directive(d) if !d.dirty),
+            "a line that already has the value must not be re-rendered"
+        );
+        assert_eq!(serialize_items(&items, nl), "Host web\n  IdentityFile   ~/.ssh/a   # keep\n");
+    }
+
+    #[test]
+    fn test_replace_identity_files_adds_the_line_after_the_last_directive_when_none_is_live() {
+        // Only commented-out lines (one parsed comment, one disabled in this session): none is live.
+        let original = "Host web\n  IdentityFile ~/.ssh/off\n  # IdentityFile ~/.ssh/old\n  HostName 10.0.0.1\n\nHost db\n  User x\n";
+        let (mut items, nl) = parse_file(original);
+
+        let host = find_host_mut(&mut items, "web").expect("host 'web' not found");
+        if let Item::Directive(d) = &mut host.body[0] {
+            set_directive_enabled(d, false);
+        }
+        assert!(replace_identity_files(host, "~/.ssh/new").is_empty());
+        assert_eq!(
+            serialize_items(&items, nl),
+            "Host web\n  # IdentityFile ~/.ssh/off\n  # IdentityFile ~/.ssh/old\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/new\n\nHost db\n  User x\n"
+        );
+    }
+
+    #[test]
+    fn test_replace_identity_files_keeps_a_rewritten_line_live() {
+        // `enabled == false` on a clean line still serializes as its live raw text; re-dirtying it must not comment it out.
+        let (mut items, nl) = parse_file("Host web\n  IdentityFile ~/.ssh/a\n");
+
+        let host = find_host_mut(&mut items, "web").expect("host 'web' not found");
+        if let Item::Directive(d) = &mut host.body[0] {
+            d.enabled = false;
+        }
+        assert_eq!(replace_identity_files(host, "~/.ssh/new"), vec!["~/.ssh/a".to_string()]);
+        assert_eq!(serialize_items(&items, nl), "Host web\n  IdentityFile ~/.ssh/new\n");
+    }
+
+    #[test]
+    fn test_replace_identity_files_strips_newlines_no_injection() {
+        // Both paths: rewriting a live line (web) and adding one (db).
+        let original = "Host web\n  IdentityFile ~/.ssh/a\nHost db\n  User x\n";
+        let (mut items, nl) = parse_file(original);
+
+        for alias in ["web", "db"] {
+            let host = find_host_mut(&mut items, alias).expect("host not found");
+            replace_identity_files(host, "~/.ssh/new\r\n  ProxyCommand evil");
+        }
+        let edited = serialize_items(&items, nl);
+        assert_eq!(
+            edited.lines().count(),
+            original.lines().count() + 1,
+            "only db gains a line; a value newline must not inject another:\n{edited}"
+        );
+        assert!(
+            !edited.lines().any(|l| l.trim_start().starts_with("ProxyCommand")),
+            "no fabricated directive line:\n{edited}"
         );
     }
 }
