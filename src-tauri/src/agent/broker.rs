@@ -677,6 +677,7 @@ mod tests {
             parked: false,
             learned_in: None,
             copy_from_another_account: false,
+            local_only: false,
         };
         let vault = SlotSource::Vault {
             fingerprint: test_keys::PLAIN_FINGERPRINT.into(),
@@ -1098,6 +1099,7 @@ mod tests {
             parked: false,
             learned_in: None,
             copy_from_another_account: false,
+            local_only: false,
         };
         let mut state = SyncStateV2::fresh("mac").unwrap();
         state.key_slots.insert(ID.into(), slot("id_mac-01234567", "Work laptop"));

@@ -681,6 +681,7 @@ fn reuse_slot(env: &SyncEnv, account_keys: &ChainKeys, keys_dir: &Path, candidat
             parked: false,
             learned_in: learned_here,
             copy_from_another_account: false,
+            local_only: false,
         });
         // 收起來的記錄原本就是這台建立的(`origin`)就還是;其他電腦連到自己挑的金鑰,不是。
         let origin = matches!(&local.source, Some(SlotSource::Linked { origin: true, .. }));
@@ -734,6 +735,7 @@ fn land_reused_slot(
             parked: false,
             learned_in: learned_here.clone(),
             copy_from_another_account: false,
+            local_only: false,
         });
         local.file_name = file.to_string();
         local.source = Some(SlotSource::SyncedCopy { fingerprint: fingerprint.clone() });
@@ -921,6 +923,7 @@ fn create_slot(
                 // 在這個帳戶建立的(`account_still_ready` 確認過帳戶就是 `account_keys` 的那一個)。
                 learned_in: Some(account_keys.chain_id.clone()),
                 copy_from_another_account: false,
+                local_only: false,
             },
         );
         Ok(())
@@ -2413,6 +2416,7 @@ mod tests {
                     parked: true,
                     learned_in: Some(k.keys.chain_id.clone()),
                     copy_from_another_account: false,
+                    local_only: false,
                 },
             );
             Ok(())

@@ -101,6 +101,10 @@ export function keySlot(overrides: Partial<SyncKeySlotView> = {}): SyncKeySlotVi
     in_vault: false,
     file_for_now: false,
     vault_has_passphrase: null,
+    local_only: false,
+    // Noon UTC on 2023-11-15: the same day in every time zone the tests may run in.
+    created_at_ms: 1_700_049_600_000,
+    stays_file: null,
     ...overrides,
   };
 }

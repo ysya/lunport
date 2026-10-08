@@ -251,6 +251,10 @@ pub struct LocalSlot {
     /// `Synced`、而且這個旗標是 false 的才不必這台的同意。false = 不是。
     #[serde(default)]
     pub copy_from_another_account: bool,
+    /// 這台自己加進 SSHelter、不在任何帳戶裡的金鑰(金鑰保管庫 spec §4.3「This computer only」:New key 匯入或 Generate key 產生的)。
+    /// 收編進帳戶時清掉(`slot_setup::adopt_slot`)。帳戶的 `device.slots` 不列它:只在這台的金鑰不告訴帳戶。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_only: bool,
 }
 
 /// 插槽裡放的東西(SP3 spec §4.2)。
@@ -699,7 +703,7 @@ mod tests {
             checked_at_ms: 50,
         });
         s.legacy_v1_backup = Some(LEGACY_BACKUP_FILE.to_string());
-        // 三種插槽來源都有,`LocalSlot` 的每個欄位在其中一筆裡都不是預設值(`parked` 只有連結的記錄用得到)。
+        // 三種插槽來源都有,`LocalSlot` 的每個欄位在其中一筆裡都不是預設值(`parked` 只有連結的記錄用得到,`local_only` 只有保管庫的記錄用得到)。
         s.key_slots.insert(
             "3fa2c1d90123456789abcdef01234567".to_string(),
             LocalSlot {
@@ -722,6 +726,7 @@ mod tests {
                 parked: false,
                 learned_in: Some(account_keys.chain_id.clone()),
                 copy_from_another_account: true,
+                local_only: false,
             },
         );
         s.key_slots.insert(
@@ -741,6 +746,7 @@ mod tests {
                 parked: true,
                 learned_in: None,
                 copy_from_another_account: false,
+                local_only: false,
             },
         );
         s.key_slots.insert(
@@ -759,6 +765,7 @@ mod tests {
                 parked: false,
                 learned_in: Some(account_keys.chain_id.clone()),
                 copy_from_another_account: false,
+                local_only: true,
             },
         );
         s
@@ -820,6 +827,7 @@ mod tests {
                 parked: true,
                 learned_in: Some("a".repeat(64)),
                 copy_from_another_account: true,
+                local_only: false,
             },
         );
         let back: SyncStateV2 = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
@@ -839,6 +847,28 @@ mod tests {
         assert_eq!((older.uploaded_fingerprint.as_deref(), older.parked, older.learned_in.as_deref()), (None, false, None));
         // 沒有 `copy_from_another_account` 的記錄讀進來是 false:這個欄位之前,同步來的副本都是從帳戶落地的。
         assert!(!older.copy_from_another_account);
+    }
+
+    /// `local_only` 只在是 true 時寫出;舊的狀態檔沒有這個欄位,讀成 false。
+    #[test]
+    fn local_only_is_written_only_when_set() {
+        let slot = LocalSlot {
+            file_name: "laptop-3fa2c1d9".to_string(),
+            source: None,
+            last_error: None,
+            asked: false,
+            payload: None,
+            uploaded_fingerprint: None,
+            parked: false,
+            learned_in: None,
+            copy_from_another_account: false,
+            local_only: false,
+        };
+        assert!(serde_json::to_value(&slot).unwrap().get("local_only").is_none());
+        let old: LocalSlot = serde_json::from_str(r#"{"file_name":"laptop-3fa2c1d9"}"#).unwrap();
+        assert!(!old.local_only);
+        let set = LocalSlot { local_only: true, ..slot };
+        assert_eq!(serde_json::to_value(&set).unwrap()["local_only"], serde_json::json!(true));
     }
 
     #[test]

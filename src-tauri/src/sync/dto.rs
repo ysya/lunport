@@ -161,6 +161,13 @@ pub struct SyncKeySlotView {
     pub file_for_now: bool,
     /// 這台保管庫裡的這把金鑰有沒有 passphrase(`SlotSource::Vault`);金鑰不在保管庫 → None。「Export private key…」只在沒有時提供加一個。
     pub vault_has_passphrase: Option<bool>,
+    /// 這台自己加進 SSHelter、不在任何帳戶的金鑰(`LocalSlot::local_only`;畫面標「This computer only」)。
+    pub local_only: bool,
+    /// 插槽建立的時間(`KeySlotPayload::created_at_ms`;只在這台的金鑰 = 加進 SSHelter 的時間)。
+    #[cfg_attr(test, ts(type = "number"))]
+    pub created_at_ms: u64,
+    /// 這台還是檔案、而且永遠搬不進保管庫的原因(`slots::move_refusal`);其他 None。
+    pub stays_file: Option<String>,
 }
 
 /// 插槽在這台電腦上的狀態(SP3 spec §7.2、§7.3)。

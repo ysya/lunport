@@ -22,8 +22,8 @@ use crate::sync::runtime::{mutate, SyncRuntime};
 use crate::sync::slot_files::{self, LinkKind};
 use crate::sync::slot_rules::{
     inspect_private_key, parse_public_key, public_path, resolve_identity_value, slot_file_name, slot_file_of_value, slot_value,
-    valid_key_payload, valid_slot_payload, DeviceSlot, IdentityTarget, KeyFacts, KeyPayload, KeySlotPayload, SlotMode, SLOT_DIR,
-    SLOT_SCHEMA,
+    valid_key_payload, valid_slot_payload, DeviceSlot, IdentityTarget, KeyFacts, KeyPayload, KeySlotPayload, SlotMode, Unsyncable,
+    SLOT_DIR, SLOT_SCHEMA,
 };
 use crate::sync::state_v2::{sealed_key, AccountState, LocalSlot, SealedRecord, SlotSource, SyncNotice, SyncStateV2};
 use crate::vault::material;
@@ -187,8 +187,21 @@ impl VaultKeys for EnvVault<'_, '_> {
 
 pub const VAULT_ENTRY_LOST: &str = "This key was lost from SSHelter's vault. Pick it again on this computer.";
 
+/// 只在這台的金鑰(`LocalSlot::local_only`)或沒有帳戶時的金鑰,保管庫裡那一筆不見了:沒有帳戶可以取回,記錄留著、標這個錯誤。
+pub const LOCAL_KEY_LOST_MESSAGE: &str = "This key is no longer in SSHelter's vault. If you exported a copy, add it again with New key.";
+
+/// 保管庫收不了的金鑰(`inspect_private_key` 讀不懂)的原因,給 Move 與 New key 用(同步的說法是 `Unsyncable::message`)。
+pub fn vault_unreadable_message(reason: Unsyncable) -> &'static str {
+    match reason {
+        Unsyncable::TooLarge => "This key is larger than 16 KiB, which SSHelter's vault doesn't take.",
+        Unsyncable::NotOpenSsh => "This key isn't in the OpenSSH format. Convert it with ssh-keygen -p -f <file>, then try again.",
+        Unsyncable::Unreadable => "This isn't an OpenSSH private key SSHelter can read.",
+    }
+}
+
 /// 只在 SSHelter 的插槽,保管庫裡卻沒有它(保管庫檔讀不懂、或保管庫的金鑰不見而搬到旁邊之後;金鑰保管庫 spec §11):帳戶裡有同一把同步金鑰
 /// 就放回保管庫;沒有就讓這台回到「還沒有金鑰」,之後照 SP3 的流程落地同步的金鑰或請使用者挑。保管庫讀不了(`holds` 是 None)就不動。
+/// 只在這台的金鑰(`LocalSlot::local_only`)不在帳戶裡,沒有別處可以取回:記錄與來源留著,標 `LOCAL_KEY_LOST_MESSAGE`。
 ///
 /// 放回去的那一筆一律記成 `Imported`:記錄分不出那把原本是這台自己的金鑰還是從這個帳戶同步來的,記成 `Synced` 的話,之後補寫 `key`(`republish`)
 /// 就不必這台的同意了。放回成功不動 `last_error`(這一輪 `maintain` 的擋路訊息照舊顯示),放不回去才記下原因。
@@ -202,6 +215,11 @@ fn recover_vault_entry(
 ) {
     let Some(SlotSource::Vault { fingerprint, .. }) = &local.source else { return };
     if vault.holds(slot_id) != Some(false) {
+        return;
+    }
+    if local.local_only {
+        // 只在這台的金鑰沒有別處可以取回:記錄與來源留著(清單照舊列出),標錯誤;使用者匯出過的話可以再加進來。
+        local.last_error = Some(LOCAL_KEY_LOST_MESSAGE.to_string());
         return;
     }
     let restored = open_key_secret(account, account_keys, slot_id).and_then(|text| {
@@ -247,21 +265,28 @@ pub(crate) fn is_file_for_now(local: &LocalSlot) -> bool {
     }
 }
 
-/// 這台還是檔案的插槽(`is_file_for_now`),它的金鑰有沒有搬進保管庫的一天:金鑰讀得到、卻永遠放不進去 —— `inspect_private_key` 讀不懂(例如舊式 PEM),或 agent 用不了
-/// (`agent_refusal`:安全金鑰與 DSA、解不開的加密方式、`ssh-key` 讀不懂)—— 回 false。這樣的金鑰「File for now」不標、「Move」不碰:標了,提示會一直出現,按了一定失敗
-/// (金鑰保管庫 spec §8)。現在讀不到金鑰(連結斷了、原檔不見、副本被刪掉)是暫時的,算搬得進去:「Move」會回報原因。每次組 overview 都會跑,所以讀之前先確認它是不超過
-/// 64 KiB 的私鑰檔(同 `local_key_passphrase`,不會卡在 FIFO 之類的檔案上),不是的話當成讀不到。只看金鑰本身,不看保管庫現在能不能用。
-fn can_move_into_vault(local: &LocalSlot, keys_dir: &Path) -> bool {
+/// 這台還是檔案的插槽(`is_file_for_now`),它的金鑰為什麼永遠搬不進保管庫:`inspect_private_key` 讀不懂(例如舊式 PEM),或 agent 用不了
+/// (`agent_refusal`:安全金鑰與 DSA、解不開的加密方式、`ssh-key` 讀不懂)。現在讀不到金鑰(連結斷了、原檔不見、副本被刪掉)是暫時的,算搬得進去(None):
+/// 「Move」會回報原因。每次組 overview 都會跑,所以讀之前先確認它是不超過 64 KiB 的私鑰檔,不是的話當成讀不到。只看金鑰本身,不看保管庫現在能不能用。
+pub(crate) fn move_refusal(local: &LocalSlot, keys_dir: &Path) -> Option<String> {
     let file = match &local.source {
         Some(SlotSource::Linked { path, .. }) => PathBuf::from(path),
         Some(SlotSource::SyncedCopy { .. }) => keys_dir.join(&local.file_name),
-        _ => return true,
+        _ => return None,
     };
     if !crate::sync::slot_setup::is_private_key_file(&file) {
-        return true;
+        return None;
     }
-    let Some(text) = readable_key(Some(local), keys_dir).map(Zeroizing::new) else { return true };
-    inspect_private_key(&text).is_ok_and(|facts| agent_refusal(&text, &facts).is_none())
+    let text = readable_key(Some(local), keys_dir).map(Zeroizing::new)?;
+    match inspect_private_key(&text) {
+        Err(reason) => Some(vault_unreadable_message(reason).to_string()),
+        Ok(facts) => agent_refusal(&text, &facts).map(str::to_string),
+    }
+}
+
+/// 金鑰搬得進保管庫(`move_refusal` 沒有原因)。「File for now」與「Move」只看這些。
+fn can_move_into_vault(local: &LocalSlot, keys_dir: &Path) -> bool {
+    move_refusal(local, keys_dir).is_none()
 }
 
 /// 「Move」(金鑰保管庫 spec §8):這台還是檔案、金鑰又搬得進去的插槽(`is_file_for_now`、`can_move_into_vault`,同畫面的「File for now」)一把一把搬進保管庫(`set_delivery`)。
@@ -507,7 +532,7 @@ pub fn add_notice(notices: &mut Vec<SyncNotice>, notice: &SyncNotice) {
 /// 任何主機用到的插槽都照常維護、不收起來,帳戶裡完全找不到的也不移除(spec §4.2:沒有任何主機用到、或 `keyslot` 被刪除才移除連結)。
 ///
 /// `vault` = 這台的保管庫(金鑰保管庫 spec §4.3、§11):有主機用到的「只在 SSHelter」的插槽,每一輪確認保管庫裡還有它(`recover_vault_entry`);
-/// 補寫這樣的插槽的 `key` 時從這裡讀私鑰(`republish`)。
+/// 補寫這樣的插槽的 `key` 時從這裡讀私鑰(`republish`)。只在這台的金鑰(`LocalSlot::local_only`)不論有沒有主機用到都照常維護(`.pub`、保管庫裡還在不在)。
 pub fn reconcile_with_vault(
     state: &mut SyncStateV2,
     account_keys: &ChainKeys,
@@ -542,6 +567,7 @@ pub fn reconcile_with_vault(
             parked: false,
             learned_in: Some(account.chain_id.clone()),
             copy_from_another_account: false,
+            local_only: false,
         });
         if local.file_name != file {
             // 插槽建立之後不改名(spec §1 非目標),帳戶裡的名稱卻變了(只有帳戶裡的惡意成員寫得出來):這個插槽記著的檔案在舊路徑,
@@ -600,7 +626,7 @@ pub fn reconcile_with_vault(
             }
         }
         let before = local.clone();
-        if !recorded && used(&local.file_name) {
+        if !recorded && (used(&local.file_name) || local.local_only) {
             maintain(&mut local, &keys_dir, &path);
         } else {
             drop_link(&mut local, &path);
@@ -638,7 +664,12 @@ pub fn reconcile(
 /// 這台的 `device.slots` 裡這個插槽那一項。連結(symlink / hard link)只在有主機用到(`used`:勾選的 space 或整份 config 裡的任何主機)、
 /// 而且連結真的在插槽路徑上的時候才列:收起來的(`LocalSlot::parked`,`park_link`)連結,插槽路徑上現在沒有這個插槽的東西;複製檔與同步來的
 /// 副本是真的放在插槽裡的金鑰,一直列著。保管庫裡的金鑰(`SlotSource::Vault`)也一直列著,記成 SSHelter 保管的副本(`synced_copy`、`in_vault`)。
+/// 只在這台的金鑰(`LocalSlot::local_only`)不列。
 fn device_slot(slot_id: &str, local: &LocalSlot, used: bool) -> Option<DeviceSlot> {
+    // 只在這台的金鑰不告訴帳戶(`LocalSlot::local_only`)。
+    if local.local_only {
+        return None;
+    }
     match &local.source {
         Some(SlotSource::Linked { link, fingerprint, .. }) => ((used && !local.parked) || *link == LinkKind::Copy)
             .then(|| DeviceSlot { slot_id: slot_id.to_string(), fingerprint: fingerprint.clone(), synced_copy: false, in_vault: false }),
@@ -1029,7 +1060,7 @@ fn republish(
 /// 帳戶裡的插槽(依名稱),加上帳戶裡已經沒有、這台還留著東西的(`in_account` = false):被刪除的插槽留下的副本(Not in use),以及帳戶裡完全
 /// 找不到、這台的主機還用著的(離開之後建立或加入了別的帳戶,`~/.ssh/sshelter-local/` 的主機還指著它;`kept_status`,不能刪除)。和別的插槽
 /// 同檔名、這台又沒有握著的插槽,狀態一律是 `CONTESTED_MESSAGE`(不論有沒有主機用到)。`in_use` = 整份 config 裡用到的插槽(`config_slot_hosts`):
-/// 那些主機也列在 `hosts`,帳戶裡的插槽有任何主機用到就不是「沒有用到」。
+/// 那些主機也列在 `hosts`,帳戶裡的插槽有任何主機用到就不是「沒有用到」。只在這台的金鑰(`local_only`)一律是這台的金鑰(`kept_status`),不論有沒有主機用到。
 ///
 /// 沒有帳戶(`state.account` 是 None;離開了帳戶,或從沒加入):只有第二種 —— 這台還有來源與 payload 的每一個插槽記錄(金鑰多半在這台的保管庫裡,常常是這台僅存的
 /// 一份),同樣是 `in_account` = false、沒有其他電腦,主機還用著的是 `kept_status`、其他的是 Not in use。`account_keys` 只在有帳戶時用到(帳戶裡的 `key` 有沒有
@@ -1057,12 +1088,18 @@ pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path,
         all.into_iter().cloned().collect()
     };
     let view = |id: &str, payload: &KeySlotPayload, status: SlotStatusView, hosts: Vec<String>, local_has_passphrase: Option<bool>, in_account: bool| {
+        let local = state.key_slots.get(id);
+        // 帳戶的 `own` 插槽與只在這台的金鑰沒有記錄上的類型:這台的保管庫裡有那把,就用它的類型(公鑰的第一段)。
+        let vault_type = local.and_then(|l| match &l.source {
+            Some(SlotSource::Vault { public_key, .. }) => public_key.split_whitespace().next().map(str::to_string),
+            _ => None,
+        });
         SyncKeySlotView {
             id: id.to_string(),
             name: payload.name.clone(),
             mode: payload.mode,
             fingerprint: payload.fingerprint.clone(),
-            key_type: payload.key_type.clone(),
+            key_type: payload.key_type.clone().or(vault_type),
             has_passphrase: payload.has_passphrase,
             local_has_passphrase,
             origin_device: origin_name(&payload.origin_device_id),
@@ -1089,6 +1126,9 @@ pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path,
                 Some(SlotSource::Vault { has_passphrase, .. }) => Some(*has_passphrase),
                 _ => None,
             },
+            local_only: local.is_some_and(|l| l.local_only),
+            created_at_ms: payload.created_at_ms,
+            stays_file: local.filter(|l| is_file_for_now(l)).and_then(|l| move_refusal(l, &keys_dir)),
         }
     };
     let mut out = Vec::new();
@@ -1117,8 +1157,8 @@ pub fn views(state: &SyncStateV2, account_keys: Option<&ChainKeys>, home: &Path,
         let (Some(source), Some(payload)) = (&local.source, &local.payload) else { continue };
         let path = keys_dir.join(&local.file_name);
         // 帳戶裡完全找不到(或根本沒有帳戶)、這台的主機還用著(`reconcile` 因此留著它):Ready 或錯誤,不能刪。被刪除的(tombstone)照 spec §4.2:連結已經移除,
-        // 留下的副本與複製檔是 Not in use(主機還指著它的話,刪除副本會被拒絕)。
-        if !account.is_some_and(|account| slot_record_exists(account, id)) && used(&local.file_name) {
+        // 留下的副本與複製檔是 Not in use(主機還指著它的話,刪除副本會被拒絕)。只在這台的金鑰(`local_only`)一律是這台的金鑰,不論有沒有主機用到。
+        if local.local_only || (!account.is_some_and(|account| slot_record_exists(account, id)) && used(&local.file_name)) {
             out.push(view(id, payload, kept_status(local, source, &path), hosts(&local.file_name), None, false));
         } else {
             out.push(view(id, payload, SlotStatusView::NotInUse { file: path.display().to_string() }, Vec::new(), None, false));
@@ -1523,6 +1563,7 @@ fn picked_record(s: &SyncStateV2, slot_id: &str, file: &str, payload: &KeySlotPa
             None => learned_now(s, chain_id),
         },
         copy_from_another_account: false,
+        local_only: false,
     }
 }
 
@@ -1663,6 +1704,7 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
             parked: false,
             learned_in: None,
             copy_from_another_account: false,
+            local_only: false,
         });
         local.source = Some(source.clone());
         local.last_error = None;
@@ -2399,6 +2441,7 @@ pub(crate) mod tests {
                     // 同 `slot_setup::create_slot`:在這個帳戶建立的。
                     learned_in: Some(keys.chain_id.clone()),
                     copy_from_another_account: false,
+                    local_only: false,
                 },
             );
             Ok(())
@@ -4704,6 +4747,7 @@ pub(crate) mod tests {
             parked: false,
             learned_in: None,
             copy_from_another_account: false,
+            local_only: false,
         };
         let linked = |fingerprint: Option<&str>, origin: bool, link: LinkKind| SlotSource::Linked {
             path: "/h/.ssh/id_mac".into(),
@@ -4851,10 +4895,11 @@ pub(crate) mod tests {
                     parked: false,
                     learned_in: None,
                     copy_from_another_account: false,
+                    local_only: false,
                 },
             );
             // 沒有 payload、或沒有放東西的記錄不顯示。
-            s.key_slots.insert("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(), LocalSlot { file_name: "x-eeeeeeee".into(), source: None, last_error: None, asked: false, payload: None, uploaded_fingerprint: None, parked: false, learned_in: None, copy_from_another_account: false });
+            s.key_slots.insert("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(), LocalSlot { file_name: "x-eeeeeeee".into(), source: None, last_error: None, asked: false, payload: None, uploaded_fingerprint: None, parked: false, learned_in: None, copy_from_another_account: false, local_only: false });
             Ok(())
         })
         .unwrap();
@@ -5466,6 +5511,7 @@ pub(crate) mod tests {
             parked,
             learned_in: None,
             copy_from_another_account: false,
+            local_only: false,
         };
         let linked = |link| Some(SlotSource::Linked { path: key.display().to_string(), link, fingerprint: None, origin: false });
         let at = |local: &LocalSlot| occupant(Some(local), file, &path);
@@ -6638,6 +6684,7 @@ pub(crate) mod tests {
             parked: false,
             learned_in: None,
             copy_from_another_account: false,
+            local_only: false,
         }
     }
 
@@ -7093,6 +7140,7 @@ pub(crate) mod tests {
             parked,
             learned_in: None,
             copy_from_another_account: false,
+            local_only: false,
         };
         let linked = || SlotSource::Linked { path: "/home/f/.ssh/id_mac".into(), link: LinkKind::Symlink, fingerprint: None, origin: true };
         let copy = SlotSource::SyncedCopy { fingerprint: test_keys::PLAIN_FINGERPRINT.into() };
@@ -7484,5 +7532,205 @@ pub(crate) mod tests {
         assert!(vault_entry(&a, &linked).is_none(), "nothing went into the vault");
         assert_eq!(vault_entry(&a, &vaulted).map(|e| e.private_key.clone()), Some(test_keys::ecdsa()), "and nothing left it");
         assert_eq!(a.state(), before, "no record changed");
+    }
+
+    // ── 只在這台的金鑰(`LocalSlot::local_only`;金鑰保管庫 spec §4.3)──────────────────────────────────
+
+    /// 只在這台的金鑰(`LocalSlot::local_only`):私鑰在這台的保管庫,插槽目錄只有 `.pub`,記錄不在任何帳戶。回傳(插槽 id, 插槽檔名)。
+    pub(crate) fn local_key_on(d: &TestDevice, key_text: &str, name: &str) -> (String, String) {
+        let facts = inspect_private_key(key_text).unwrap();
+        let id = new_slot_id().unwrap();
+        let file = slot_file_name(name, &id);
+        let env = d.env();
+        let entry = VaultEntry {
+            private_key: key_text.to_string(),
+            public_key: facts.public_key.clone(),
+            fingerprint: facts.fingerprint.clone(),
+            origin: EntryOrigin::Generated,
+            added_at_ms: 1,
+        };
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.put(env.keychain, &id, &entry)).unwrap();
+        let path = home(d).join(SLOT_DIR).join(&file);
+        slot_files::ensure_keys_dir(path.parent().unwrap()).unwrap();
+        slot_files::write_public(&path, &facts.public_key).unwrap();
+        let device_id = d.state().device_id;
+        mutate(&env, |s| {
+            s.key_slots.insert(
+                id.clone(),
+                LocalSlot {
+                    file_name: file.clone(),
+                    source: Some(SlotSource::Vault {
+                        fingerprint: facts.fingerprint.clone(),
+                        public_key: facts.public_key.clone(),
+                        has_passphrase: facts.has_passphrase,
+                    }),
+                    last_error: None,
+                    asked: false,
+                    payload: Some(KeySlotPayload {
+                        schema: SLOT_SCHEMA,
+                        name: name.to_string(),
+                        mode: SlotMode::Own,
+                        origin_device_id: device_id.clone(),
+                        created_at_ms: 1_700_000_000_000,
+                        public_key: None,
+                        fingerprint: None,
+                        key_type: None,
+                        has_passphrase: None,
+                    }),
+                    uploaded_fingerprint: None,
+                    parked: false,
+                    learned_in: None,
+                    copy_from_another_account: false,
+                    local_only: true,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        (id, file)
+    }
+
+    /// 只在這台的金鑰不用加入帳戶就列在 Keychain:不論有沒有主機用到都是這台的金鑰(Ready,帶保管庫裡那把的指紋),類型從保管庫的公鑰來,
+    /// 時間是加進來的時候。
+    #[test]
+    fn a_key_only_on_this_computer_is_listed_ready_with_its_type_and_time() {
+        let (relay, clock) = (crate::sync::fake_relay::FakeRelay::new(), crate::sync::testkit::TestClock::new());
+        let d = TestDevice::new("mac", &relay, &clock);
+        let (id, file) = local_key_on(&d, &test_keys::plain(), "laptop");
+
+        let row = overview_row(&d, &id).expect("listed without an account");
+        assert!(row.local_only);
+        assert!(!row.in_account);
+        assert!(row.in_vault);
+        assert_eq!(row.key_type.as_deref(), Some("ssh-ed25519"));
+        assert_eq!(row.created_at_ms, 1_700_000_000_000);
+        assert_eq!(row.stays_file, None);
+        assert!(row.hosts.is_empty());
+        assert_eq!(row.value, slot_value(&file));
+        assert!(matches!(&row.status, SlotStatusView::Ready { fingerprint: Some(f), .. } if f == test_keys::PLAIN_FINGERPRINT));
+    }
+
+    /// 帳戶的 `device.slots` 不提只在這台的金鑰;帳戶裡其他的插槽照舊列著。
+    #[test]
+    fn a_key_only_on_this_computer_is_not_in_the_device_record() {
+        let (_relay, _clock, a, b, _words, personal) = pair();
+        let (shared, shared_file) = create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "id_mac");
+        use_slot(&a, &personal, &shared_file);
+        let (local, _) = local_key_on(&a, &test_keys::ecdsa(), "laptop");
+        settle(&a);
+        settle(&b);
+
+        let seen: Vec<String> = device_slots_seen_by(&b, &a).into_iter().map(|s| s.slot_id).collect();
+        assert!(seen.contains(&shared));
+        assert!(!seen.contains(&local), "a key only on this computer isn't mentioned in the account");
+    }
+
+    /// 只在這台的金鑰,保管庫裡的那一筆不見了:沒有別處可以取回,記錄留著、標錯誤,不會悄悄消失。
+    #[test]
+    fn a_key_only_on_this_computer_keeps_its_record_when_the_vault_loses_it() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let (id, _) = local_key_on(&a, &test_keys::plain(), "laptop");
+        let env = a.env();
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&id)).unwrap();
+        settle(&a);
+
+        let local = a.state().key_slots.get(&id).cloned().expect("the record stays");
+        assert!(matches!(local.source, Some(SlotSource::Vault { .. })));
+        assert_eq!(local.last_error.as_deref(), Some(LOCAL_KEY_LOST_MESSAGE));
+        let row = overview_row(&a, &id).expect("still listed");
+        assert_eq!(row.status, SlotStatusView::Error { message: LOCAL_KEY_LOST_MESSAGE.to_string() });
+    }
+
+    /// 只在這台的金鑰沒有主機用到,每一輪照樣維護它:`.pub` 被刪掉就從記錄重寫,不必等有主機用到它。
+    #[test]
+    fn a_key_only_on_this_computer_gets_its_pub_file_back_without_any_host_using_it() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let (id, file) = local_key_on(&a, &test_keys::plain(), "laptop");
+        let pub_file = public_path(&home(&a).join(SLOT_DIR).join(&file));
+        std::fs::remove_file(&pub_file).unwrap();
+        settle(&a);
+
+        assert_eq!(std::fs::read_to_string(&pub_file).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+        assert_eq!(a.state().key_slots[&id].last_error, None);
+    }
+
+    /// 這台還是檔案、agent 永遠用不了的金鑰(安全金鑰):不標「File for now」,但說明它為什麼留在檔案;搬得進去的檔案沒有這個說明。
+    #[test]
+    fn a_file_the_agent_can_never_hold_says_why_it_stays_a_file() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (sk, sk_file) = create_slot_on(&a, SlotMode::Own, &test_keys::security_key(), "id_sk");
+        let (plain, plain_file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        use_slots(&a, &personal, &[sk_file.as_str(), plain_file.as_str()]);
+        settle(&a);
+
+        let sk_row = overview_row(&a, &sk).unwrap();
+        assert!(!sk_row.file_for_now);
+        assert_eq!(sk_row.stays_file.as_deref(), Some(VAULT_KEY_TYPE_MESSAGE));
+        let plain_row = overview_row(&a, &plain).unwrap();
+        assert!(plain_row.file_for_now);
+        assert_eq!(plain_row.stays_file, None);
+    }
+
+    /// `move_refusal` 對每一種永遠搬不進保管庫的金鑰檔給出原因(畫面的 `stays_file`):agent 簽不了的種類、解不開的加密方式、`ssh-key` 讀不懂的,以及保管庫自己
+    /// 讀不懂的(舊式 PEM、太大)。搬得進去的、現在讀不到的(原檔不見、不像私鑰的檔案),以及金鑰已經在保管庫裡的,沒有原因。
+    #[test]
+    fn move_refusal_says_why_each_kind_of_file_can_never_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys_dir = dir.path().join("keys");
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        let linked = |file: &str, text: &str| {
+            let path = dir.path().join(file);
+            std::fs::write(&path, text).unwrap();
+            let source = SlotSource::Linked { path: path.display().to_string(), link: LinkKind::Symlink, fingerprint: None, origin: true };
+            LocalSlot { source: Some(source), ..vault_record() }
+        };
+        let refusal = |local: &LocalSlot| move_refusal(local, &keys_dir);
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n";
+        let too_large = format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n", "A".repeat(MAX_PRIVATE_KEY_BYTES));
+
+        assert_eq!(refusal(&linked("plain", &test_keys::plain())), None, "a key that can move has no reason");
+        assert_eq!(refusal(&linked("sk", &test_keys::security_key())).as_deref(), Some(VAULT_KEY_TYPE_MESSAGE));
+        assert_eq!(refusal(&linked("3des", &test_keys::encrypted_with_3des_label())).as_deref(), Some(VAULT_KEY_CIPHER_MESSAGE));
+        assert_eq!(refusal(&linked("odd", &test_keys::unreadable_comment())).as_deref(), Some(VAULT_KEY_UNREADABLE_MESSAGE));
+        assert_eq!(refusal(&linked("pem", pem)).as_deref(), Some(vault_unreadable_message(Unsyncable::NotOpenSsh)));
+        assert_eq!(refusal(&linked("big", &too_large)).as_deref(), Some(vault_unreadable_message(Unsyncable::TooLarge)));
+
+        // 現在讀不到金鑰是暫時的,沒有原因(「Move」會回報):原檔不見,或不像私鑰的檔案(overview 不讀它)。
+        let gone = linked("gone", &test_keys::plain());
+        std::fs::remove_file(dir.path().join("gone")).unwrap();
+        assert_eq!(refusal(&gone), None, "a key that is gone for now");
+        assert_eq!(refusal(&linked("note", "not a key\n")), None, "a file that is no key");
+
+        // 同步來的副本看插槽裡的檔案;金鑰已經在保管庫裡的沒有這個問題。
+        let sk = test_keys::security_key();
+        let copy = LocalSlot { source: Some(SlotSource::SyncedCopy { fingerprint: inspect_private_key(&sk).unwrap().fingerprint }), ..vault_record() };
+        std::fs::write(keys_dir.join(&copy.file_name), &sk).unwrap();
+        assert_eq!(refusal(&copy).as_deref(), Some(VAULT_KEY_TYPE_MESSAGE), "a synced copy is read from the slot");
+        assert_eq!(refusal(&vault_record()), None, "a key in the vault has nothing to move");
+    }
+
+    /// 保管庫收不了的金鑰的三種原因(Move 與 New key 顯示給使用者的字句)。
+    #[test]
+    fn the_vault_words_why_it_cannot_take_a_key() {
+        assert_eq!(vault_unreadable_message(Unsyncable::TooLarge), "This key is larger than 16 KiB, which SSHelter's vault doesn't take.");
+        assert_eq!(
+            vault_unreadable_message(Unsyncable::NotOpenSsh),
+            "This key isn't in the OpenSSH format. Convert it with ssh-keygen -p -f <file>, then try again."
+        );
+        assert_eq!(vault_unreadable_message(Unsyncable::Unreadable), "This isn't an OpenSSH private key SSHelter can read.");
+    }
+
+    /// 帳戶裡的 `own` 插槽沒有記錄上的類型:金鑰在這台保管庫裡就顯示它的類型。
+    #[test]
+    fn an_own_slot_in_the_vault_shows_this_computers_key_type() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::ecdsa(), "id_ec");
+        use_slot(&a, &personal, &file);
+        settle(&a);
+        set_delivery(&a.env(), &id, true).unwrap();
+
+        let row = overview_row(&a, &id).unwrap();
+        assert_eq!(row.mode, SlotMode::Own);
+        assert_eq!(row.key_type.as_deref(), Some("ecdsa-sha2-nistp256"));
     }
 }

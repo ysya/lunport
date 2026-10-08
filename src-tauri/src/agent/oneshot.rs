@@ -420,6 +420,7 @@ mod tests {
             parked: false,
             learned_in: None,
             copy_from_another_account: false,
+            local_only: false,
         }
     }
 

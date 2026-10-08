@@ -58,4 +58,16 @@ file_for_now: boolean,
 /**
  * 這台保管庫裡的這把金鑰有沒有 passphrase(`SlotSource::Vault`);金鑰不在保管庫 → None。「Export private key…」只在沒有時提供加一個。
  */
-vault_has_passphrase: boolean | null, };
+vault_has_passphrase: boolean | null, 
+/**
+ * 這台自己加進 SSHelter、不在任何帳戶的金鑰(`LocalSlot::local_only`;畫面標「This computer only」)。
+ */
+local_only: boolean, 
+/**
+ * 插槽建立的時間(`KeySlotPayload::created_at_ms`;只在這台的金鑰 = 加進 SSHelter 的時間)。
+ */
+created_at_ms: number, 
+/**
+ * 這台還是檔案、而且永遠搬不進保管庫的原因(`slots::move_refusal`);其他 None。
+ */
+stays_file: string | null, };
