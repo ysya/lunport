@@ -4,4 +4,13 @@ import type { SyncOverview } from "./SyncOverview";
 /**
  * 從檔案加進 SSHelter 之後(`local_keys::import_file`):改指到新插槽的主機、原檔移除了沒、Move 卻留下原檔的原因。
  */
-export type ImportResult = { overview: SyncOverview, slot_id: string, rewritten_hosts: Array<string>, removed_file: boolean, file_kept: string | null, };
+export type ImportResult = { overview: SyncOverview, slot_id: string, 
+/**
+ * 已經改指到新插槽的主機(存好的檔案裡的;名稱是區塊的第一個 pattern,來自 config,畫面以 `revealHidden` 顯示)。這些主機現在用的是只在這台的金鑰,畫面據此問同步的那幾台。
+ * Move 留下原檔時也可能有:寫檔寫到一半失敗,前面存好的檔案裡的主機已經改了,`file_kept` 說明沒改成的。
+ */
+rewritten_hosts: Array<string>, removed_file: boolean, 
+/**
+ * Move 沒有移除原檔的原因(整句,畫面照樣顯示);null = 移除了,或選的是 Keep the file too。
+ */
+file_kept: string | null, };

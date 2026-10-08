@@ -136,7 +136,7 @@ pub const KEPT_CHANGED_MESSAGE: &str = "That key slot changed since the list was
 /// 「Sync key」或「Keep on this computer」的那把金鑰已經不在候選裡(`setup_keys`;期間被設定好了,或主機變了):什麼都沒做。
 pub const SET_UP_MEANWHILE_MESSAGE: &str = "This key was set up in the meantime; nothing changed.";
 
-fn home_of(env: &SyncEnv) -> Result<PathBuf, AppError> {
+pub(crate) fn home_of(env: &SyncEnv) -> Result<PathBuf, AppError> {
     env.ssh_dir
         .parent()
         .map(Path::to_path_buf)
@@ -863,9 +863,7 @@ fn create_slot(
     sync: bool,
 ) -> Result<String, AppError> {
     if !valid_slot_name(&name) {
-        return Err(AppError::Other(format!(
-            "\"{name}\" can't be used as a key name: use letters, digits, '.', '_' or '-', start with a letter or digit, and don't end with .pub"
-        )));
+        return Err(crate::sync::local_keys::bad_name(&name));
     }
     // 「Sync key」上傳的是現在檔案裡的這把金鑰:先讀、先檢查(PEM、太大、讀不懂的在這裡就擋下,什麼都還沒建立)。「Keep」不讀私鑰。
     let uploaded = if sync {
@@ -1089,6 +1087,19 @@ mod tests {
     #[cfg(not(unix))]
     fn local_link_kind() -> crate::sync::slot_files::LinkKind {
         crate::sync::slot_files::LinkKind::HardLink
+    }
+
+    /// 名稱不合規的說法只有一份(`local_keys::bad_name`):「Keep on this computer」用了不合規的名稱,說的和「New key」一樣,什麼都沒建立,主機也沒改。
+    #[test]
+    fn a_bad_slot_name_is_refused_in_the_words_of_new_key() {
+        let (a, personal) = device("# main\n");
+        let key = put_key(&a, "id_mac", &test_keys::plain());
+        let space_text = "Host web\n  IdentityFile ~/.ssh/id_mac\n";
+        a.save_in_app(&a.space_path(&personal), space_text);
+        let refused = setup_keys(&a.env(), true, vec![keep(&key, "my key")]).unwrap_err().to_string();
+        assert_eq!(refused, crate::sync::local_keys::bad_name("my key").to_string());
+        assert!(live_slots(a.state().account.as_ref().unwrap()).is_empty(), "no slot was made");
+        assert_eq!(a.read(&a.space_path(&personal)), space_text, "and no host was changed");
     }
 
     /// 為同步的主機設定金鑰:主機改指到插槽之後,金鑰馬上放進保管庫(金鑰保管庫 spec §4.3),你的原檔不動。保管庫用不了就維持連結(「File for now」)。

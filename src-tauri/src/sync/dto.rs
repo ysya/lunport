@@ -238,8 +238,11 @@ pub struct NewKeyResult {
 pub struct ImportResult {
     pub overview: SyncOverview,
     pub slot_id: String,
+    /// 已經改指到新插槽的主機(存好的檔案裡的;名稱是區塊的第一個 pattern,來自 config,畫面以 `revealHidden` 顯示)。這些主機現在用的是只在這台的金鑰,畫面據此問同步的那幾台。
+    /// Move 留下原檔時也可能有:寫檔寫到一半失敗,前面存好的檔案裡的主機已經改了,`file_kept` 說明沒改成的。
     pub rewritten_hosts: Vec<String>,
     pub removed_file: bool,
+    /// Move 沒有移除原檔的原因(整句,畫面照樣顯示);null = 移除了,或選的是 Keep the file too。
     pub file_kept: Option<String>,
 }
 
