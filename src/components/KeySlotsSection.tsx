@@ -1,10 +1,9 @@
 import { useState } from "react";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 
 import type { AgentProblem } from "@/bindings/AgentProblem";
-import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
+import { DeleteCopyConfirm, PickKeyDialog, SyncKeyConfirm } from "@/components/keychain/dialogs";
 import { TONE_TEXT } from "@/components/sync-primitives";
 import {
   AlertDialog,
@@ -17,11 +16,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { agentProblemText, useAgentProblem, useFixAgentInclude } from "@/lib/agent";
-import { deliveryAction, deliveryLine, deviceLine, hostsLine, slotActions, slotStatusText, syncConfirmText } from "@/lib/key-slots";
-import { useKeys } from "@/lib/queries";
-import { useKeyDeleteCopy, useKeyPick, useKeySetDelivery, useKeySetMode, useKeyUseSynced, useSyncOverview } from "@/lib/sync";
+import { deliveryAction, deliveryLine, deviceLine, hostsLine, slotActions, slotStatusText } from "@/lib/key-slots";
+import { useKeyDeleteCopy, useKeySetDelivery, useKeySetMode, useKeyUseSynced, useSyncOverview } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 import { useLastNonNull } from "@/lib/use-last-non-null";
 import { cn } from "@/lib/utils";
@@ -69,152 +66,6 @@ export function KeySlotRow({ slot, busy, onAction }: { slot: SyncKeySlotView; bu
         {actions.deleteCopy && button("delete", "Delete copy", "ghost", "text-destructive hover:text-destructive")}
       </div>
     </div>
-  );
-}
-
-/**
- * The keys of this computer to pick from: a note while they are scanned and when there are none (the likely case on a
- * computer that just joined), otherwise one button per key. Exported for the markup tests.
- */
-export function KeyChoices({
-  keys,
-  loading,
-  busy,
-  onChoose,
-}: {
-  keys: KeyInfo[] | undefined;
-  loading: boolean;
-  busy: boolean;
-  onChoose: (path: string) => void;
-}) {
-  if (loading || !keys || keys.length === 0) {
-    return (
-      <p className="py-6 text-center text-sm text-muted-foreground select-none">
-        {loading ? "Scanning keys…" : "No private keys in ~/.ssh. Choose one with Browse…"}
-      </p>
-    );
-  }
-  return (
-    <div className="settings-group max-h-[40vh] overflow-y-auto">
-      {keys.map((k) => (
-        <button
-          key={k.private_path}
-          type="button"
-          disabled={busy}
-          className="flex w-full flex-col items-start px-3 py-2 text-left hover:bg-muted/60"
-          onClick={() => onChoose(k.private_path)}
-        >
-          <span className="font-mono text-sm">{k.name}</span>
-          <span className="text-xs break-all text-muted-foreground">{k.fingerprint_sha256 ?? k.private_path}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/** Pick one of this computer's keys for a slot (only this computer changes). */
-export function PickKeyDialog({ slot, onClose }: { slot: SyncKeySlotView | null; onClose: () => void }) {
-  const keys = useKeys({ enabled: slot !== null });
-  const pick = useKeyPick();
-  const name = slot ? revealHidden(slot.name) : "";
-  const choose = (path: string) => {
-    if (!slot) return;
-    const file = path.split(/[\\/]/).pop() ?? path;
-    pick.mutate({ slotId: slot.id, path }, { onSuccess: () => { toast.success(`${name} uses ${file} on this computer`); onClose(); } });
-  };
-  const browse = async () => {
-    const picked = await openFileDialog({ multiple: false, directory: false, title: "Choose a private key" });
-    if (typeof picked === "string") choose(picked);
-  };
-  const replacesCopy = slot?.status.kind === "ready" && slot.status.synced_copy;
-  return (
-    <Dialog open={slot !== null} onOpenChange={(next) => !next && !pick.isPending && onClose()}>
-      <DialogContent className="sm:max-w-md" showCloseButton={!pick.isPending}>
-        <DialogHeader>
-          <DialogTitle>Pick a key on this computer</DialogTitle>
-          <DialogDescription>Hosts that use {name} will use the key you pick, on this computer only.</DialogDescription>
-        </DialogHeader>
-        {replacesCopy && <p className="text-sm text-muted-foreground">The synced copy on this computer is kept as a .previous file.</p>}
-        <KeyChoices keys={keys.data} loading={keys.isLoading} busy={pick.isPending} onChoose={choose} />
-        <DialogFooter>
-          <Button type="button" variant="outline" disabled={pick.isPending} onClick={() => void browse()}>
-            Browse…
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/**
- * The confirm before "Sync this key" / "Sync the new key" upload this computer's key to the account: once it syncs it
- * can't be taken back (stopping never deletes the copies), so say which key and whether a passphrase still protects it.
- * `slot` is what to show (it stays set while the dialog closes); `open` whether it shows. No hooks: exported for the tests.
- */
-export function SyncKeyConfirm({
-  slot,
-  open,
-  onCancel,
-  onConfirm,
-}: {
-  slot: SyncKeySlotView | null;
-  open: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const text = slot ? syncConfirmText(slot) : null;
-  return (
-    <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
-      {/* Without a passphrase note nothing describes the dialog: say so, or Radix warns that the description is missing. */}
-      <AlertDialogContent {...(text?.description ? {} : { "aria-describedby": undefined })}>
-        <AlertDialogHeader>
-          <AlertDialogTitle>{text?.title}</AlertDialogTitle>
-          {text?.description && <AlertDialogDescription>{text.description}</AlertDialogDescription>}
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onConfirm}>Sync key</AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
-}
-
-/**
- * The confirm before this computer's copy of a key is deleted. It says nothing about the original key: for a copy whose
- * original was replaced or removed, this copy may be the last one. A key kept only in SSHelter says that the vault entry
- * is what goes, and that it may be the last copy. No hooks: exported for the tests.
- */
-export function DeleteCopyConfirm({
-  slot,
-  open,
-  onCancel,
-  onConfirm,
-}: {
-  slot: SyncKeySlotView | null;
-  open: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Delete this copy?</AlertDialogTitle>
-          <AlertDialogDescription>
-            {slot?.in_vault
-              ? `The key ${revealHidden(slot.name)} kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`
-              : `The copy of ${slot ? revealHidden(slot.name) : ""} on this computer is deleted. Other computers aren't affected.`}
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" onClick={onConfirm}>
-            Delete copy
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
   );
 }
 

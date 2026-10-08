@@ -28,6 +28,12 @@ export function buttonTag(html: string, label: string): string {
 /** The shared Button's class names carry `disabled:` variants, so only the attribute itself says a button is off. */
 export const DISABLED = 'disabled=""';
 
+/**
+ * The invisible characters `SPOOFED_NAME` carries (a right-to-left override and a zero-width space): none may reach the markup.
+ * Built from code points, so no invisible character is in this file.
+ */
+export const HIDDEN_CHARS = new RegExp(`[${String.fromCodePoint(0x202e, 0x200b)}]`);
+
 /** The text of an element tree, in drawing order. */
 export function textIn(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);

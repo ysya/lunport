@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
-import { PickKeyDialog } from "@/components/KeySlotsSection";
+import { PickKeyDialog } from "@/components/keychain/dialogs";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { finishedKeysNeededNotice, hostsLine, keysNeededNoticeIndex, slotsNeedingKey } from "@/lib/key-slots";
