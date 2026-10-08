@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { tauriInvoke } from "@/lib/ipc";
 import { useSettingsStore } from "@/stores/settings";
 import { applyOrderToHosts } from "@/lib/reorder";
+import { revealHidden } from "@/lib/sync-approvals";
 import type { LoadResult } from "@/bindings/LoadResult";
 import type { HostDetail } from "@/bindings/HostDetail";
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
@@ -814,7 +815,8 @@ export function useSetIdentityFile() {
       queryClient.invalidateQueries({ queryKey: queryKeys.keyHygiene(alias) });
       queryClient.invalidateQueries({ queryKey: ["keys"] });
     },
-    onError: (e) => toast.error("Failed to save host", { description: errMessage(e) }),
+    // The backend's message names the host ("host 'web' not found"), whose alias comes from the config: show its hidden characters.
+    onError: (e) => toast.error("Failed to save host", { description: revealHidden(errMessage(e)) }),
   });
 }
 

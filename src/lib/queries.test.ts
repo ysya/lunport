@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 
+import { SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "@/lib/sync-fixtures";
 import { useSettingsStore } from "@/stores/settings";
 import { queryKeys, useSetIdentityFile, useTurnOnLaunchAtLogin } from "./queries";
 
@@ -55,6 +56,20 @@ describe("pointing a host at one key", () => {
     await renderHook(queryClient, useSetIdentityFile).mutateAsync({ alias: "web", value: "~/.ssh/sshelter/keys/id_mac-3fa2c1d9" });
     expect(calls).toEqual([["config_set_identity_file", { alias: "web", value: "~/.ssh/sshelter/keys/id_mac-3fa2c1d9" }]]);
     expect(keys.map((key) => queryClient.getQueryState(key)?.isInvalidated)).toEqual([true, true, true, true]);
+  });
+
+  it("shows a failure with hidden characters revealed: the backend's message names the host, whose alias comes from the config", async () => {
+    const message = `host '${SPOOFED_NAME}' not found`;
+    stubBackend(async () => {
+      throw message;
+    });
+    const { mutateAsync } = renderHook(new QueryClient(), useSetIdentityFile);
+    await expect(mutateAsync({ alias: SPOOFED_NAME, value: "~/.ssh/sshelter/keys/id_mac-3fa2c1d9" })).rejects.toBe(message);
+    const [shown, ...others] = toast.getToasts();
+    expect(others).toEqual([]);
+    expect(shown).toEqual(expect.objectContaining({ title: "Failed to save host", description: expect.stringContaining(SPOOFED_NAME_SHOWN) }));
+    // Not even the right-to-left override (U+202E) that SPOOFED_NAME carries is left in what is shown.
+    expect(shown).toEqual(expect.objectContaining({ description: expect.not.stringContaining(String.fromCodePoint(0x202e)) }));
   });
 });
 
