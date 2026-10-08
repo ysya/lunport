@@ -79,3 +79,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 # Linux 只讀 /proc。libc 已在 Cargo.lock(其他套件的相依),不需下載。
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# 在 debug 建置裡產生 RSA 金鑰(vault::generate)要好幾分鐘;只替大數運算的套件開最佳化就降到幾秒(rsa 套件的 README 也這樣建議)。
+# release 建置不受影響。
+[profile.dev.package.num-bigint-dig]
+opt-level = 3

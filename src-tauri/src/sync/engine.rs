@@ -731,6 +731,23 @@ pub async fn sync_key_preview_file(app: AppHandle, path: String) -> Result<crate
     run(app, false, move |env| crate::sync::local_keys::preview_file(env, &path)).await
 }
 
+/// 「Generate key」(金鑰保管庫 spec §7.5)。產生 RSA 要幾秒:在 `run` 的 blocking 執行緒上做,不卡住畫面。
+#[tauri::command]
+pub async fn sync_key_generate(
+    app: AppHandle,
+    name: String,
+    algorithm: crate::vault::generate::KeyAlgorithm,
+    comment: String,
+    passphrase: Option<String>,
+) -> Result<crate::sync::dto::NewKeyResult, AppError> {
+    let passphrase = passphrase.map(zeroize::Zeroizing::new);
+    run(app, false, move |env| {
+        let slot_id = crate::sync::local_keys::generate_key(env, &name, algorithm, &comment, passphrase.as_ref().map(|p| p.as_str()))?;
+        Ok(crate::sync::dto::NewKeyResult { overview: dto::overview(env)?, slot_id })
+    })
+    .await
+}
+
 /// 更換同步碼(spec §7.5):第 1 步在這裡做完,之後由背景執行緒逐步推進;進度在 `SyncOverview::rotation`,完成時
 /// 留下 `SyncNotice::NewSyncCode`(UI 以 `sync_show_words` 顯示新同步碼)。
 #[tauri::command]

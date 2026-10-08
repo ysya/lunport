@@ -303,6 +303,22 @@ fn import_file_with(
     Ok(imported)
 }
 
+/// 「Generate key」:在 SSHelter 裡產生一把金鑰(`vault::generate`),加進來成為只在這台的金鑰(來源記成產生的)。名稱先檢查:產生 RSA 要幾秒,
+/// 不要白做。
+pub fn generate_key(
+    env: &SyncEnv,
+    name: &str,
+    algorithm: crate::vault::generate::KeyAlgorithm,
+    comment: &str,
+    passphrase: Option<&str>,
+) -> Result<String, AppError> {
+    if !valid_slot_name(name) {
+        return Err(bad_name(name));
+    }
+    let text = crate::vault::generate::generate(algorithm, comment, passphrase)?;
+    add_key(env, name, &text, EntryOrigin::Generated)
+}
+
 /// 主機名稱的清單(訊息用)。
 fn names(aliases: &[String]) -> String {
     aliases.join(", ")
@@ -755,6 +771,27 @@ mod tests {
         settle(&a);
         assert!(!slot_record_exists(a.state().account.as_ref().unwrap(), &id));
         assert!(overview_row(&a, &id).unwrap().local_only);
+    }
+
+    /// Generate key:產生的金鑰成為只在這台的金鑰,來源記成產生的;名稱不合規在產生之前就拒絕。
+    #[test]
+    fn a_generated_key_is_a_key_only_on_this_computer() {
+        let d = device("# main\n");
+        let id = generate_key(&d.env(), "id_ed25519", crate::vault::generate::KeyAlgorithm::Ed25519, "me@laptop", None).unwrap();
+        assert!(d.state().key_slots[&id].local_only);
+        assert_eq!(vault_entry(&d, &id).unwrap().origin, EntryOrigin::Generated);
+        assert!(generate_key(&d.env(), "bad name", crate::vault::generate::KeyAlgorithm::Ed25519, "", None).is_err());
+    }
+
+    /// 產生時給了 passphrase:保管庫裡放的是加密的私鑰,記錄註明有 passphrase,agent 用這個 passphrase 打得開(加密方式在它解得開的清單上)。
+    #[test]
+    fn a_generated_key_with_a_passphrase_is_kept_encrypted() {
+        let d = device("# main\n");
+        let id = generate_key(&d.env(), "work", crate::vault::generate::KeyAlgorithm::Ed25519, "me@laptop", Some("correct horse")).unwrap();
+        assert!(matches!(d.state().key_slots[&id].source, Some(SlotSource::Vault { has_passphrase: true, .. })));
+        let entry = vault_entry(&d, &id).unwrap();
+        assert!(crate::vault::material::is_encrypted(&entry.private_key));
+        assert!(crate::vault::material::open(&entry.private_key, Some("correct horse")).is_ok());
     }
 
     /// Keep the file too:原檔、主機都不動。
