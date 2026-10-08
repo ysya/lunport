@@ -1057,6 +1057,8 @@ pub(crate) fn check_synced_key(secret: &str, payload: &KeySlotPayload) -> Result
 /// 同步來、不是之前的帳戶留下的(保管庫那一筆的來源是 `Synced`,`copy_from_another_account` 是 false)。保管庫裡那一筆的私鑰本身也要是記錄裡的
 /// 那一把(以私鑰推出的指紋):同意與來源說的都是記錄裡的金鑰,不是保管庫裡剛好放著的另一把。只在 `holds` 說保管庫讀得懂、有這一筆時才開它
 /// (開讀不懂的保管庫會把檔案搬到旁邊,一輪同步不做這件事)。
+///
+/// 只在這台的金鑰(`LocalSlot::local_only`)一律不補寫,不看其他欄位:它不屬於任何帳戶,帳戶裡本來就沒有它。
 #[allow(clippy::too_many_arguments)]
 fn republish(
     account: &mut AccountState,
@@ -1069,6 +1071,10 @@ fn republish(
     now_ms: u64,
     vault: &dyn VaultKeys,
 ) -> bool {
+    // 只在這台的金鑰不屬於任何帳戶(`LocalSlot::local_only`):不補寫。`learned_in` 是 None 就已經擋下它;這一行是萬一記錄的其他欄位過得了下面的檢查時的第二道防線。
+    if local.local_only {
+        return false;
+    }
     if local.learned_in.as_deref() != Some(account.chain_id.as_str()) {
         return false;
     }
@@ -6510,6 +6516,42 @@ pub(crate) mod tests {
         let account = state.account.as_ref().unwrap();
         assert!(slot(account, &id).is_some(), "the keyslot is written again");
         assert_eq!(open_key_secret(account, &keys, &id), None, "the vault's other key is never uploaded");
+    }
+
+    /// 只在這台的金鑰(`LocalSlot::local_only`)絕不補寫進帳戶,`keyslot` 和 `key` 都不寫:就算記錄的其他欄位都過得了 `republish` 的檢查 —— 在現在的帳戶學到的
+    /// (`learned_in`)、payload 是 `synced`、這台同意上傳過那把(`uploaded_fingerprint`)、勾選的 space 裡的主機還用著它。對照:同一筆記錄不是只在這台的金鑰時,
+    /// 正是這樣把 `keyslot` 與私鑰都補寫進去(沒有這個對照,測試擋不擋都過得了)。
+    #[test]
+    fn republish_never_writes_a_key_only_on_this_computer_to_the_account() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (id, file) = local_key_on(&a, &test_keys::plain(), "laptop");
+        use_slot(&a, &personal, &file);
+        let chain_id = a.state().account.as_ref().unwrap().chain_id.clone();
+        let origin = device_id(&a);
+        mutate(&a.env(), |s| {
+            let local = s.key_slots.get_mut(&id).unwrap();
+            local.learned_in = Some(chain_id.clone());
+            local.uploaded_fingerprint = Some(test_keys::PLAIN_FINGERPRINT.to_string());
+            local.payload = Some(KeySlotPayload { name: "laptop".into(), ..synced_payload(&origin) });
+            Ok(())
+        })
+        .unwrap();
+        let keys = account_keys(&a);
+        let env = a.env();
+
+        let mut control = a.state();
+        control.key_slots.get_mut(&id).unwrap().local_only = false;
+        reconcile_with_vault(&mut control, &keys, &home(&a), &NO_OTHER_HOSTS, 1_000, &EnvVault { env: &env });
+        let account = control.account.as_ref().unwrap();
+        assert!(slot(account, &id).is_some(), "setup: without local_only the keyslot is written to the account");
+        assert_eq!(open_key_secret(account, &keys, &id).as_deref(), Some(test_keys::plain().as_str()), "setup: and so is the key");
+
+        let mut state = a.state();
+        reconcile_with_vault(&mut state, &keys, &home(&a), &NO_OTHER_HOSTS, 1_000, &EnvVault { env: &env });
+        let account = state.account.as_ref().unwrap();
+        assert!(!slot_record_exists(account, &id), "no keyslot, not even a tombstone");
+        assert_eq!(open_key_secret(account, &keys, &id), None, "and no key");
+        assert!(state.key_slots[&id].local_only, "the record stays a key only on this computer");
     }
 
     /// 只回答第一次讀取的 keychain,之後一律讀不到(同上鎖)。
