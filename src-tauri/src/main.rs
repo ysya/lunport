@@ -10,7 +10,7 @@ fn main() {
 
     match std::env::args().nth(1).as_deref() {
         Some("--mcp") => sshelter_lib::mcp::run_stdio(),
-        Some("--mcp-host") => sshelter_lib::run_mcp_host(),
+        Some(sshelter_lib::mcp::HOST_FLAG) => sshelter_lib::run_mcp_host(),
         _ => sshelter_lib::run(),
     }
 }
