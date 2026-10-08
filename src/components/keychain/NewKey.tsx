@@ -321,12 +321,26 @@ export function importActions({
   };
 }
 
-/** The Keychain's main pane for New key or Generate key. Keyed by the caller per selection, so typed text and passphrases go with it. */
-export function NewKeyPane({ selection }: { selection: Extract<KeychainSelection, { kind: "new" }> }) {
-  return selection.mode === "generate" ? <GenerateKeyPane /> : <ImportKeyPane initialPath={selection.path} />;
+type NewSelection = Extract<KeychainSelection, { kind: "new" }>;
+
+/**
+ * Show the key that was just added, unless the user has gone elsewhere meanwhile (an RSA key takes seconds to make, a Move a moment):
+ * a New key form they started since, with what they typed in it, stays. `opened` is the selection this form was opened with; the same
+ * values count, because pressing New key again selects a new object for the same form. Exported for the tests.
+ */
+export function showNewKey(opened: NewSelection, slotId: string): void {
+  const now = useUiStore.getState().keychainSelection;
+  if (now?.kind !== "new" || now.mode !== opened.mode || now.path !== opened.path) return;
+  useUiStore.getState().selectKey({ kind: "slot", id: slotId });
 }
 
-function ImportKeyPane({ initialPath }: { initialPath: string | null }) {
+/** The Keychain's main pane for New key or Generate key. Keyed by the caller per selection, so typed text and passphrases go with it. */
+export function NewKeyPane({ selection }: { selection: NewSelection }) {
+  return selection.mode === "generate" ? <GenerateKeyPane selection={selection} /> : <ImportKeyPane selection={selection} />;
+}
+
+function ImportKeyPane({ selection }: { selection: NewSelection }) {
+  const initialPath = selection.path;
   const queryClient = useQueryClient();
   const selectKey = useUiStore((s) => s.selectKey);
   const [state, setState] = useState<ImportKeyState>({
@@ -363,7 +377,7 @@ function ImportKeyPane({ initialPath }: { initialPath: string | null }) {
     const picked = await openFileDialog({ multiple: false, directory: false, title: "Choose a private key" });
     if (typeof picked === "string") choose(picked);
   };
-  const actions = importActions({ state, update, queryClient, show: (slotId) => selectKey({ kind: "slot", id: slotId }) });
+  const actions = importActions({ state, update, queryClient, show: (slotId) => showNewKey(selection, slotId) });
   return (
     <>
       <ImportKeyView
@@ -384,7 +398,7 @@ function ImportKeyPane({ initialPath }: { initialPath: string | null }) {
   );
 }
 
-function GenerateKeyPane() {
+function GenerateKeyPane({ selection }: { selection: NewSelection }) {
   const queryClient = useQueryClient();
   const selectKey = useUiStore((s) => s.selectKey);
   const [state, setState] = useState<GenerateKeyState>({ algorithm: DEFAULT_KIND.algorithm, name: DEFAULT_KIND.name, passphrase: "", repeat: "", busy: false });
@@ -394,7 +408,7 @@ function GenerateKeyPane() {
     update({ busy: true });
     const slotId = await submitGenerate(queryClient, state);
     if (slotId === null) update({ busy: false });
-    else selectKey({ kind: "slot", id: slotId });
+    else showNewKey(selection, slotId);
   };
   return (
     <GenerateKeyView

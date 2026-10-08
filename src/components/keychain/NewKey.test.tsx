@@ -14,6 +14,7 @@ import {
   importActions,
   importedNote,
   needsMoveConfirm,
+  showNewKey,
   submitGenerate,
   submitImport,
   type GenerateKeyState,
@@ -268,7 +269,7 @@ describe("adding and generating a key", () => {
   afterEach(() => {
     for (const t of toast.getToasts()) toast.dismiss(t.id);
     vi.unstubAllGlobals();
-    useUiStore.setState({ keySetup: null });
+    useUiStore.setState({ keySetup: null, keychainSelection: null });
   });
 
   it("adds a pasted key with a plain call, puts the new overview in place, and hands back the new key", async () => {
@@ -375,13 +376,13 @@ describe("adding and generating a key", () => {
   });
   describe("pressing Add to SSHelter", () => {
     /** The pane without React: the form's state in a box, and its handlers made again after every change, as a render makes them. */
-    function pane(initial: ImportKeyState) {
+    function pane(initial: ImportKeyState, show?: (slotId: string) => void) {
       const box = { state: initial, shown: [] as string[] };
       const update = (patch: Partial<ImportKeyState>) => {
         box.state = { ...box.state, ...patch };
       };
       const press = (button: "add" | "confirm" | "cancel") =>
-        importActions({ state: box.state, update, queryClient: new QueryClient(), show: (slotId) => box.shown.push(slotId) })[button]();
+        importActions({ state: box.state, update, queryClient: new QueryClient(), show: show ?? ((slotId) => box.shown.push(slotId)) })[button]();
       return { box, press };
     }
 
@@ -467,6 +468,22 @@ describe("adding and generating a key", () => {
       expect(form.box.shown).toEqual(["s"]);
     });
 
+    it("tells the user about a key added after they went to another form, and leaves that form alone", async () => {
+      let answer!: (result: unknown) => void;
+      stubBackend(() => new Promise((resolve) => (answer = resolve)));
+      const opened = { kind: "new", mode: "import", path: "/home/f/.ssh/id_work" } as const;
+      useUiStore.setState({ keychainSelection: opened });
+      const form = pane(chosenFile({ keepFile: true }), (slotId) => showNewKey(opened, slotId));
+      const sending = form.press("add");
+      // While the key is sent, the user starts a Generate key form.
+      const elsewhere = { kind: "new", mode: "generate", path: null } as const;
+      useUiStore.setState({ keychainSelection: elsewhere });
+      answer(added());
+      await sending;
+      expect(useUiStore.getState().keychainSelection).toBe(elsewhere);
+      expect(toasts()).toEqual([{ title: "id_work is in SSHelter", description: "The file stays: any program can use it without asking." }]);
+    });
+
     it("comes back to the same filled form when a confirmed Move is refused, and says why", async () => {
       const refusal = "Your SSH config changed on disk since SSHelter loaded it. Reload it, then try again.";
       stubBackend(async () => {
@@ -480,5 +497,41 @@ describe("adding and generating a key", () => {
       expect(form.box.shown).toEqual([]);
       expect(toasts()).toEqual([{ title: "Could not add the key", description: refusal }]);
     });
+  });
+});
+
+describe("showing the key that was just added", () => {
+  const generating = { kind: "new", mode: "generate", path: null } as const;
+  afterEach(() => useUiStore.setState({ keychainSelection: null }));
+
+  it("selects the new key while the form it was made in is still showing", () => {
+    // Pressing Generate key again selects a new object with the same values: it is the same form.
+    useUiStore.setState({ keychainSelection: { kind: "new", mode: "generate", path: null } });
+    showNewKey(generating, "s");
+    expect(useUiStore.getState().keychainSelection).toEqual({ kind: "slot", id: "s" });
+  });
+
+  it("leaves the user where they went while a slow RSA key was made: a New key form they started, another key, or nothing", () => {
+    const elsewhere = [
+      { kind: "new", mode: "import", path: null },
+      { kind: "slot", id: "other" },
+      { kind: "file", path: "/home/f/.ssh/id_work" },
+      null,
+    ] as const;
+    for (const selection of elsewhere) {
+      useUiStore.setState({ keychainSelection: selection });
+      showNewKey(generating, "s");
+      // The very same selection: nothing was selected over it.
+      expect(useUiStore.getState().keychainSelection).toBe(selection);
+    }
+  });
+
+  it("tells the forms for two different files apart", () => {
+    const other = { kind: "new", mode: "import", path: "/home/f/.ssh/id_b" } as const;
+    useUiStore.setState({ keychainSelection: other });
+    showNewKey({ kind: "new", mode: "import", path: "/home/f/.ssh/id_a" }, "s");
+    expect(useUiStore.getState().keychainSelection).toBe(other);
+    showNewKey({ kind: "new", mode: "import", path: "/home/f/.ssh/id_b" }, "s");
+    expect(useUiStore.getState().keychainSelection).toEqual({ kind: "slot", id: "s" });
   });
 });
