@@ -685,6 +685,7 @@ fn run_approved(
     }
     state.mcp.keep_alive.store(true, Ordering::Relaxed);
 
+    // Also brings up the window of an MCP host that started in the background.
     crate::show_main_window(app);
     let _ = app.emit("mcp://approval-requested", &request);
 

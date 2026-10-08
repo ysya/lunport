@@ -73,8 +73,9 @@ pub fn run() {
     run_app(false);
 }
 
-/// Start the desktop approval center on behalf of a stdio MCP adapter.
-/// Closing the window hides it instead of terminating active MCP access.
+/// Start SSHelter on behalf of a stdio MCP adapter (`--mcp-host`), in the background: no window
+/// until the user opens it or an MCP `run` request needs approval. Closing the window hides it
+/// instead of terminating active MCP access.
 pub fn run_mcp_host() {
     run_app(true);
 }
@@ -108,7 +109,7 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
     }
 }
 
-fn run_app(mcp_keep_alive: bool) {
+fn run_app(mcp_host: bool) {
     let builder = tauri::Builder::default();
     // Only one SSHelter runs at a time: a second launch hands over to the running instance and
     // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
@@ -141,7 +142,15 @@ fn run_app(mcp_keep_alive: bool) {
     builder
         .manage(state::AppState::default())
         .setup(move |app| {
-            mcp::initialize(app.handle(), mcp_keep_alive)?;
+            // The main window is created hidden (`"visible": false` in tauri.conf.json), so the
+            // MCP host never flashes it. A normal launch shows it before anything else starts,
+            // as when it was created visible.
+            if !mcp_host {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.show()?;
+                }
+            }
+            mcp::initialize(app.handle(), mcp_host)?;
             sync::engine::initialize(app.handle())?;
             // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
             agent::start(app.handle());
@@ -278,6 +287,10 @@ fn run_app(mcp_keep_alive: bool) {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match event {
+            // macOS: clicking SSHelter in the Dock or opening it from Finder while it runs starts
+            // no second process; it sends Reopen. Bring back the window, even a hidden one.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main_window(app),
             tauri::RunEvent::Exit => mcp::forget_bridge(app),
             _ => {}
         });
