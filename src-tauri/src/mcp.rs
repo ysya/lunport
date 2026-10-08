@@ -1258,14 +1258,25 @@ fn ensure_desktop_bridge() -> Result<RuntimeInfo, String> {
         }
     }
 
+    // Starts SSHelter in the background, or, when it already runs, hands over to it (single
+    // instance): the running SSHelter rewrites the runtime file with its bridge.
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate SSHelter: {e}"))?;
-    Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg(HOST_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    detach_from_adapter(&mut command);
+    let mut host = command
         .spawn()
         .map_err(|e| format!("cannot start SSHelter desktop: {e}"))?;
+    // A launch that hands over exits at once: reap it instead of leaving a zombie behind.
+    let _ = thread::Builder::new()
+        .name("sshelter-mcp-host-wait".to_string())
+        .spawn(move || {
+            let _ = host.wait();
+        });
 
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
@@ -1277,6 +1288,24 @@ fn ensure_desktop_bridge() -> Result<RuntimeInfo, String> {
         }
     }
     Err("SSHelter desktop did not start within 12 seconds".to_string())
+}
+
+/// Start the MCP host outside the adapter's process group: an AI tool that ends its session by
+/// killing its MCP server's process group must not take SSHelter down with it.
+fn detach_from_adapter(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+        // Its own process group: the adapter's console Ctrl+C / Ctrl+Break does not reach it.
+        // No console: closing the console the AI tool runs in does not end it either.
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
 }
 
 fn bridge_call(method: &str, params: Value) -> Result<Value, String> {
@@ -1368,5 +1397,21 @@ mod tests {
             !remove_runtime_file_if_owned(&path, 4242).unwrap(),
             "a missing file is fine"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_host_starts_in_its_own_process_group() {
+        let mut command = Command::new("cat");
+        command.stdin(Stdio::piped()).stdout(Stdio::null());
+        detach_from_adapter(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        let group = unsafe { libc::getpgid(pid) };
+        let ours = unsafe { libc::getpgid(0) };
+        drop(child.stdin.take()); // `cat` exits at end of input.
+        child.wait().unwrap();
+        assert_eq!(group, pid);
+        assert_ne!(group, ours);
     }
 }
