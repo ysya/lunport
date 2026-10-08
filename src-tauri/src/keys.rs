@@ -350,7 +350,9 @@ fn launch_in_terminal(terminal_override: Option<String>, argv: &[String]) -> Res
 
 // ─── Tauri commands ───────────────────────────────────────────────────────────
 
-#[tauri::command]
+// (async): it runs `ssh-add -l` and `ssh-keygen -l` for each key and waits for the config lock, and the Keychain asks for it
+// again whenever the window regains focus — none of that may block the main thread.
+#[tauri::command(async)]
 pub fn keys_list(state: tauri::State<crate::state::AppState>) -> Result<Vec<KeyInfo>, AppError> {
     let dir = ssh_dir()?;
     let (_, fingerprints) = agent_snapshot();
