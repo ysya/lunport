@@ -12,6 +12,7 @@ import {
   applyResolved,
   approveVersions,
   createAccount,
+  exportPrivateKey,
   fetchKeyCandidates,
   joinAccount,
   keyArgs,
@@ -27,6 +28,7 @@ import {
   syncOverviewKey,
   syncUnmovableKey,
   useKeyDeleteCopy,
+  useKeyMoveAllIntoVault,
   useKeyPick,
   useKeySetDelivery,
   useKeySetMode,
@@ -334,5 +336,51 @@ describe("the shadow list's place in the query cache", () => {
     }
     // The key is compared whole: a host whose alias is a part of it is refreshed too.
     expect(invalidated(queryClient, queryKeys.host("syncDuplicates"))).toBe(true);
+  });
+});
+
+describe("Move and Export private key", () => {
+  /** Run a hook the way a component does and hand back what it returned (a server render: no effects run, nothing subscribes). */
+  function renderHook<T>(queryClient: QueryClient, useHook: () => T): T {
+    let result!: T;
+    const Probe = () => {
+      result = useHook();
+      return null;
+    };
+    renderToStaticMarkup(createElement(QueryClientProvider, { client: queryClient }, createElement(Probe)));
+    return result;
+  }
+
+  it("Move puts the new overview in place and hands back the keys that could not move", async () => {
+    const failed = [{ slot_id: "s", name: "id_work", message: "The key this slot points to is gone: /home/f/.ssh/id_work." }];
+    const moved = overview({ last_sync_ms: 1 });
+    const calls = stubBackend(async () => ({ overview: moved, failed }));
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(syncOverviewKey, overview());
+    const result = await renderHook(queryClient, useKeyMoveAllIntoVault).mutateAsync();
+    expect(calls).toEqual([["sync_key_move_all_into_vault", {}]]);
+    expect(result.failed).toEqual(failed);
+    expect(queryClient.getQueryData(syncOverviewKey)).toEqual(moved);
+  });
+
+  it("a failed Move says so and re-reads everything", async () => {
+    stubBackend(async () => {
+      throw "boom";
+    });
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(syncOverviewKey, overview());
+    await expect(renderHook(queryClient, useKeyMoveAllIntoVault).mutateAsync()).rejects.toBe("boom");
+    expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Could not move the keys into SSHelter", description: "boom" })]);
+    expect(queryClient.getQueryState(syncOverviewKey)?.isInvalidated).toBe(true);
+  });
+
+  it("Export private key sends the passphrase, or null, and gives back where the file was saved", async () => {
+    const calls = stubBackend(async () => "/home/f/Desktop/id_mac");
+    expect(await exportPrivateKey("s", "correct horse")).toBe("/home/f/Desktop/id_mac");
+    expect(await exportPrivateKey("s", null)).toBe("/home/f/Desktop/id_mac");
+    expect(calls).toEqual([
+      ["sync_key_export_private", { slotId: "s", passphrase: "correct horse" }],
+      ["sync_key_export_private", { slotId: "s", passphrase: null }],
+    ]);
   });
 });

@@ -35,7 +35,7 @@ describe("a key slot in the Keys dialog", () => {
     expect(t).toContain("SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew");
     expect(t).toContain("Ready");
     expect(t).toContain("Used by web and db");
-    expect(t).toContain("FRANK-DESKTOP: synced copy");
+    expect(t).toContain("FRANK-DESKTOP: a synced file");
     expect(row()).toContain(">Stop syncing<");
     expect(row()).toContain(">Change…<");
   });
@@ -156,8 +156,8 @@ describe("the buttons of a key slot", () => {
       "Pick a key on this computer…": "pick",
     });
     expect(pressEach(keySlot({ mode: "own", status: { kind: "not_in_use", file: "/f" } }))).toEqual({ "Delete copy": "delete" });
-    // A vault key: no Pick, no Use the synced key (the backend refuses both), but always a way back to a file.
-    expect(pressEach(keySlot({ in_vault: true }))).toEqual({ "Keep a file": "file", "Stop syncing": "stop" });
+    // A vault key offers Change… too (the key it replaces stays in SSHelter), and still a way back to a file until Task 12.
+    expect(pressEach(keySlot({ in_vault: true }))).toEqual({ "Change…": "pick", "Keep a file": "file", "Stop syncing": "stop" });
   });
 });
 

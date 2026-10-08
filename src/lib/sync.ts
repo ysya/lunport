@@ -8,6 +8,7 @@ import type { KeyCandidates } from "@/bindings/KeyCandidates";
 import type { KeyChoice } from "@/bindings/KeyChoice";
 import type { MigrationFailure } from "@/bindings/MigrationFailure";
 import type { MigrationReport } from "@/bindings/MigrationReport";
+import type { MoveIntoVaultResult } from "@/bindings/MoveIntoVaultResult";
 import type { NewSpaceGroup } from "@/bindings/NewSpaceGroup";
 import type { PendingApprovalView } from "@/bindings/PendingApprovalView";
 import type { ReviewOutcome } from "@/bindings/ReviewOutcome";
@@ -398,6 +399,34 @@ export function useKeyDeleteCopy() {
 /** It moves the private key between the slot file and SSHelter's vault before the state changes: re-read everything on failure. */
 export function useKeySetDelivery() {
   return useOverviewMutation("sync_key_set_delivery", "Could not change where the key is kept", keyArgs.delivery, true);
+}
+
+/**
+ * Move (key vault spec §8): every key this computer still serves as a file goes into SSHelter's vault. It moves what it can and
+ * answers with the ones it couldn't, which the caller shows. A failed call re-reads everything: some keys may have moved.
+ */
+export function useKeyMoveAllIntoVault() {
+  const queryClient = useQueryClient();
+  return useMutation<MoveIntoVaultResult, unknown, void>({
+    mutationFn: () => tauriInvoke<MoveIntoVaultResult>("sync_key_move_all_into_vault"),
+    onSuccess: (result) => {
+      queryClient.setQueryData(syncOverviewKey, result.overview);
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
+    },
+    onError: (error) => {
+      refreshSyncViews(queryClient);
+      toast.error("Could not move the keys into SSHelter", { description: revealHidden(errorMessage(error)) });
+    },
+  });
+}
+
+/**
+ * Export private key (key vault spec §7.3.2): the backend asks where to save the key, then writes it. Resolves to the saved path,
+ * or null when the save dialog was cancelled. Not a TanStack mutation: a mutation keeps its variables in the query cache, and
+ * these can carry a passphrase (as with the sync-code calls below).
+ */
+export function exportPrivateKey(slotId: string, passphrase: string | null): Promise<string | null> {
+  return tauriInvoke<string | null>("sync_key_export_private", { slotId, passphrase });
 }
 
 /*

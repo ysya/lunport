@@ -28,6 +28,7 @@ import {
   syncConfirmText,
   syncedKeysNote,
   usesLine,
+  whereLine,
 } from "./key-slots";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -200,8 +201,16 @@ describe("a slot row", () => {
     expect(hostsLine(keySlot({ hosts: ["web", "db"] }))).toBe("Used by web and db");
     expect(hostsLine(keySlot({ hosts: [] }))).toBeNull();
     expect(
-      deviceLine(keySlot({ devices: [{ name: SPOOFED_NAME, fingerprint: null, synced_copy: true, in_vault: false }, { name: "FRANK-DESKTOP", fingerprint: "SHA256:x", synced_copy: false, in_vault: false }] })),
-    ).toBe(`${SPOOFED_NAME_SHOWN}: synced copy · FRANK-DESKTOP: its own key`);
+      deviceLine(
+        keySlot({
+          devices: [
+            { name: SPOOFED_NAME, fingerprint: null, synced_copy: true, in_vault: true },
+            { name: "FRANK-DESKTOP", fingerprint: "SHA256:x", synced_copy: false, in_vault: false },
+            { name: "OLD-LAPTOP", fingerprint: "SHA256:x", synced_copy: true, in_vault: false },
+          ],
+        }),
+      ),
+    ).toBe(`${SPOOFED_NAME_SHOWN}: in SSHelter · FRANK-DESKTOP: its own key file · OLD-LAPTOP: a synced file`);
     expect(deviceLine(keySlot())).toBeNull();
   });
 
@@ -261,12 +270,20 @@ describe("the once-per-computer setup prompt", () => {
 });
 
 describe("a vault row's actions", () => {
-  it("hides Pick and Use the synced key, which the backend refuses for a vault key", () => {
+  it("offers Change… and Use the synced key: the key it replaces stays in SSHelter", () => {
     const actions = slotActions(keySlot({ in_vault: true, status: { kind: "synced_available", file: "/f" } }));
-    expect(actions.pick).toBeNull();
-    expect(actions.useSynced).toBe(false);
+    expect(actions.pick).toBe("change");
+    expect(actions.useSynced).toBe(true);
     expect(actions.stopSyncing).toBe(true);
     expect(slotActions(keySlot({ in_vault: true, mode: "own", fingerprint: null })).syncThis).toBe(true);
+  });
+});
+
+describe("the line that says where the key is", () => {
+  it("says SSHelter, a file for now, or nothing", () => {
+    expect(whereLine(keySlot({ in_vault: true }))).toBe("In SSHelter — programs ask before they use it");
+    expect(whereLine(keySlot({ file_for_now: true }))).toBe("File for now — any program can use it without asking");
+    expect(whereLine(keySlot())).toBeNull();
   });
 });
 

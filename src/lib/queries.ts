@@ -5,6 +5,7 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import { homeDir } from "@tauri-apps/api/path";
+import { enable as autostartEnable, isEnabled as autostartIsEnabled } from "@tauri-apps/plugin-autostart";
 import { toast } from "sonner";
 import { tauriInvoke } from "@/lib/ipc";
 import { useSettingsStore } from "@/stores/settings";
@@ -784,6 +785,60 @@ export function useReadPublicKey() {
     mutationFn: ({ path }) => tauriInvoke<string>("keys_read_public", { path }),
     onError: (e) =>
       toast.error("Failed to read public key", { description: errMessage(e) }),
+  });
+}
+
+/**
+ * The command the Keychain suggests on Windows so Git uses Windows' OpenSSH, which can reach SSHelter's agent (key vault spec
+ * §10); null when it isn't needed. Under ["keys"], so a refresh of the key list asks again. Ask only on Windows with a key in SSHelter.
+ */
+export function useGitSshHint(enabled: boolean) {
+  return useQuery<string | null>({
+    queryKey: ["keys", "gitSshHint"],
+    queryFn: () => tauriInvoke<string | null>("keys_git_ssh_hint"),
+    enabled,
+  });
+}
+
+/**
+ * Point a host at one key (Export to host, key vault spec §7.3.1): its IdentityFile lines are replaced by `value`. Refreshes the
+ * host, the host list, the host's key checks and the key list (which hosts use each key file).
+ */
+export function useSetIdentityFile() {
+  const queryClient = useQueryClient();
+  return useMutation<HostDetail | null, unknown, { alias: string; value: string }>({
+    mutationFn: ({ alias, value }) => tauriInvoke<HostDetail | null>("config_set_identity_file", { alias, value }),
+    onSuccess: (_data, { alias }) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.host(alias) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
+      queryClient.invalidateQueries({ queryKey: queryKeys.keyHygiene(alias) });
+      queryClient.invalidateQueries({ queryKey: ["keys"] });
+    },
+    onError: (e) => toast.error("Failed to save host", { description: errMessage(e) }),
+  });
+}
+
+export const launchAtLoginKey = ["app", "launchAtLogin"] as const;
+
+/** Whether SSHelter opens at login. The OS is the source of truth; Settings → General reads it again when it opens. */
+export function useLaunchAtLogin(enabled: boolean) {
+  return useQuery<boolean>({ queryKey: launchAtLoginKey, queryFn: () => autostartIsEnabled(), enabled });
+}
+
+/**
+ * The Keychain's launch hint (key vault spec §5.7): keys in SSHelter work only while it runs, so SSHelter opens at login and keeps
+ * running in the menu bar when its window closes (both settings of Settings → General).
+ */
+export function useTurnOnLaunchAtLogin() {
+  const queryClient = useQueryClient();
+  return useMutation<void, unknown, void>({
+    mutationFn: async () => {
+      await autostartEnable();
+      useSettingsStore.getState().setCloseToTray(true);
+      await tauriInvoke<void>("app_set_close_to_tray", { enabled: true });
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: launchAtLoginKey }),
+    onError: (e) => toast.error("Could not turn on launch at login", { description: errMessage(e) }),
   });
 }
 

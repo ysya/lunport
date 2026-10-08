@@ -11,7 +11,7 @@ import type { Tone } from "@/lib/sync-overview";
 
 /**
  * Key slots (SP3 spec docs/superpowers/specs/2026-10-05-sp3-key-slots-design.md): pure helpers for the
- * "Keys used by synced hosts" dialog, the Keys dialog's slot section, Settings → Sync and the sidebar.
+ * "Keys used by synced hosts" dialog, the Keychain, Settings → Sync and the sidebar.
  */
 
 /** Why the setup dialog opened: the hosts it is about (null = every host) and what opened it. */
@@ -146,7 +146,7 @@ export function keysNeededNoticeIndex(o: SyncOverview): number | null {
 }
 
 /**
- * The "keys needed" notice once there are slots and none needs a key picked here (picked in the dialog or in Keys, or the
+ * The "keys needed" notice once there are slots and none needs a key picked here (picked in the dialog or in the Keychain, or the
  * origin started syncing it), so it can be dismissed; null while there is something left to pick, or no notice.
  * No slots at all is not "nothing left to pick": the overview has none while the account keys are unavailable (a locked
  * keychain), and the one-shot notice must wait for them instead of being used up unseen.
@@ -216,10 +216,7 @@ export function slotActions(slot: SyncKeySlotView): SlotActions {
     syncNew: s.kind === "source_changed",
     deleteCopy: s.kind === "not_in_use",
   };
-  // A key only in SSHelter may be the last copy: the backend refuses picking another key and using the synced one
-  // (`VAULT_FIRST_MESSAGE`) until it is kept as a file again, so those two aren't offered. The status line still says when a
-  // synced key is available.
-  return slot.in_vault ? { ...actions, pick: null, useSynced: false } : actions;
+  return actions;
 }
 
 /**
@@ -235,14 +232,23 @@ export function deliveryLine(slot: SyncKeySlotView): string | null {
   return slot.in_vault ? "Only in SSHelter on this computer — programs ask before they use it" : null;
 }
 
+/** Where this computer keeps the slot's key (key vault spec §4.3, §11); null for a key it serves some other way or doesn't have. */
+export function whereLine(slot: SyncKeySlotView): string | null {
+  if (slot.in_vault) return "In SSHelter — programs ask before they use it";
+  if (slot.file_for_now) return "File for now — any program can use it without asking";
+  return null;
+}
+
 export function hostsLine(slot: SyncKeySlotView): string | null {
   return slot.hosts.length === 0 ? null : `Used by ${listNames(slot.hosts)}`;
 }
 
-/** The other computers' slots; their names come from those computers. */
+/** The other computers' slots (spec §7.3): in SSHelter, a synced file (an older build, or no vault there), or their own key file. Their names come from those computers. */
 export function deviceLine(slot: SyncKeySlotView): string | null {
   if (slot.devices.length === 0) return null;
-  return slot.devices.map((d) => `${revealHidden(d.name)}: ${d.synced_copy ? "synced copy" : "its own key"}`).join(" · ");
+  return slot.devices
+    .map((d) => `${revealHidden(d.name)}: ${d.in_vault ? "in SSHelter" : d.synced_copy ? "a synced file" : "its own key file"}`)
+    .join(" · ");
 }
 
 /** Sidebar hosts whose key isn't on this computer: a slot that needs a key picked here, or failed (not one whose synced key is on its way). */

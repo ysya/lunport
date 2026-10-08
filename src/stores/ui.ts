@@ -1,7 +1,9 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import type { MoveFailure } from "@/bindings/MoveFailure";
 import type { KeySetupRequest } from "@/lib/key-slots";
+import type { KeychainSelection } from "@/lib/keychain";
 import { DEFAULT_SIDEBAR_WIDTH, clampSidebarWidth } from "@/lib/sidebar-width";
 
 /** What the New-config-file dialog should do after the file exists. */
@@ -21,6 +23,9 @@ export type SettingsCategory =
   | "ai"
   | "sync"
   | "advanced";
+
+/** What the sidebar shows (key vault spec §7.1). */
+export type SidebarView = "hosts" | "keychain";
 
 interface UiState {
   /** Currently selected host alias in the master-detail layout (null = nothing selected). */
@@ -53,6 +58,20 @@ interface UiState {
   /** Sidebar width in rem, set by dragging its edge (persisted; see lib/sidebar-width). */
   sidebarWidth: number;
   setSidebarWidth: (width: number) => void;
+  /** The sidebar's Hosts | Keychain switch (persisted, like its width). */
+  sidebarView: SidebarView;
+  setSidebarView: (view: SidebarView) => void;
+  /** The key the Keychain's detail pane shows (null = none). Session-only. */
+  keychainSelection: KeychainSelection | null;
+  selectKey: (selection: KeychainSelection | null) => void;
+  /** Switch the sidebar to the Keychain; with `selection`, show that key (Settings → Sync's Pick…). */
+  openKeychain: (selection?: KeychainSelection) => void;
+  /** The Keychain's launch-at-login hint was dismissed (persisted; key vault spec §5.7). */
+  launchHintDismissed: boolean;
+  dismissLaunchHint: () => void;
+  /** The keys the last Move couldn't move, with why (key vault spec §8). Session-only. */
+  moveFailures: MoveFailure[];
+  setMoveFailures: (failures: MoveFailure[]) => void;
   /** Whether the "New host" dialog is open (driven by the command palette + toolbar). */
   addHostOpen: boolean;
   setAddHostOpen: (open: boolean) => void;
@@ -105,8 +124,8 @@ interface UiState {
  * 持久化偏好（theme、terminal、connection/lint/discovery 等)一律住在
  * `useSettingsStore`（zustand persist）。
  *
- * 例外：`collapsedGroups`、`fileScope`、`groupMode` 與 `sidebarWidth` 是側邊欄的「導覽／版面狀態」
- * （不是偏好設定），透過 `partialize` 單獨持久化到 `sshelter-ui`，其餘欄位維持 session-only。
+ * 例外：`collapsedGroups`、`fileScope`、`groupMode`、`sidebarWidth` 與 `sidebarView` 是側邊欄的「導覽／版面狀態」
+ * （不是偏好設定），`launchHintDismissed` 記得 Keychain 的提示已經按掉；它們透過 `partialize` 單獨持久化到 `sshelter-ui`，其餘欄位維持 session-only。
  */
 export const useUiStore = create<UiState>()(
   persist(
@@ -130,6 +149,15 @@ export const useUiStore = create<UiState>()(
       setGroupMode: (groupMode) => set({ groupMode }),
       sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
       setSidebarWidth: (width) => set({ sidebarWidth: clampSidebarWidth(width) }),
+      sidebarView: "hosts",
+      setSidebarView: (sidebarView) => set({ sidebarView }),
+      keychainSelection: null,
+      selectKey: (keychainSelection) => set({ keychainSelection }),
+      openKeychain: (selection) => set((s) => ({ sidebarView: "keychain", keychainSelection: selection ?? s.keychainSelection })),
+      launchHintDismissed: false,
+      dismissLaunchHint: () => set({ launchHintDismissed: true }),
+      moveFailures: [],
+      setMoveFailures: (moveFailures) => set({ moveFailures }),
       addHostOpen: false,
       setAddHostOpen: (addHostOpen) => set({ addHostOpen }),
       addHostTargetFile: null,
@@ -163,6 +191,8 @@ export const useUiStore = create<UiState>()(
         fileScope: s.fileScope,
         groupMode: s.groupMode,
         sidebarWidth: s.sidebarWidth,
+        sidebarView: s.sidebarView,
+        launchHintDismissed: s.launchHintDismissed,
       }),
     },
   ),
