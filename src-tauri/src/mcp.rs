@@ -341,6 +341,42 @@ pub fn republish_bridge(app: &AppHandle) {
     }
 }
 
+/// This instance is exiting: remove `mcp-runtime.json` if it still names this process, so
+/// adapters stop trying a bridge that is gone. A file another process wrote is left alone.
+pub fn forget_bridge(app: &AppHandle) {
+    let Some(info) = app.state::<AppState>().mcp.bridge.lock().unwrap().clone() else {
+        return;
+    };
+    let removed = runtime_path()
+        .map_err(|e| e.to_string())
+        .and_then(|path| remove_runtime_file_if_owned(&path, info.pid).map_err(|e| e.to_string()));
+    if let Err(e) = removed {
+        eprintln!("[mcp] cannot remove the MCP runtime file: {e}");
+    }
+}
+
+fn remove_runtime_file_if_owned(path: &Path, pid: u32) -> std::io::Result<bool> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if !runtime_file_names(&bytes, pid) {
+        return Ok(false);
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the contents of `mcp-runtime.json` name the process `pid`. Unreadable contents name
+/// nobody.
+fn runtime_file_names(contents: &[u8], pid: u32) -> bool {
+    serde_json::from_slice::<RuntimeInfo>(contents).is_ok_and(|info| info.pid == pid)
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct BridgeEnvelope {
     token: String,
@@ -1294,5 +1330,42 @@ mod tests {
         assert!(runtime.cancel_request("request-1"));
         assert!(flag.load(Ordering::Relaxed));
         runtime.finish_request("request-1");
+    }
+
+    fn runtime_json(pid: u32) -> Vec<u8> {
+        serde_json::to_vec(&RuntimeInfo {
+            port: 49152,
+            token: "ab".repeat(32),
+            pid,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn runtime_file_names_only_the_process_it_was_written_for() {
+        assert!(runtime_file_names(&runtime_json(4242), 4242));
+        assert!(!runtime_file_names(&runtime_json(4242), 4243));
+        assert!(!runtime_file_names(b"", 4242));
+        assert!(!runtime_file_names(b"not json", 4242));
+        assert!(!runtime_file_names(br#"{"port":1,"token":"t"}"#, 4242));
+    }
+
+    #[test]
+    fn exiting_removes_only_a_runtime_file_that_names_this_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-runtime.json");
+
+        std::fs::write(&path, runtime_json(4243)).unwrap();
+        assert!(!remove_runtime_file_if_owned(&path, 4242).unwrap());
+        assert!(path.exists(), "another instance's file must stay");
+
+        std::fs::write(&path, runtime_json(4242)).unwrap();
+        assert!(remove_runtime_file_if_owned(&path, 4242).unwrap());
+        assert!(!path.exists());
+
+        assert!(
+            !remove_runtime_file_if_owned(&path, 4242).unwrap(),
+            "a missing file is fine"
+        );
     }
 }

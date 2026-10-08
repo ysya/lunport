@@ -275,8 +275,12 @@ fn run_app(mcp_keep_alive: bool) {
             agent_problem,
             agent_fix_include,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            tauri::RunEvent::Exit => mcp::forget_bridge(app),
+            _ => {}
+        });
 }
 
 #[cfg(all(test, desktop))]
