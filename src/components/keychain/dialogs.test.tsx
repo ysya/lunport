@@ -164,6 +164,19 @@ describe("the confirm before a Move removes a key file", () => {
     expect(textIn(elementsOf(confirm("C:\\Users\\f\\.ssh\\id_work"), AlertDialogTitle))).toBe("Move id_work into SSHelter?");
   });
 
+  it("lets a long file name and path wrap anywhere, as other paths do: neither has a space to break at", () => {
+    const name = "k".repeat(70);
+    const path = `/home/f/${"a-folder-with-a-long-name/".repeat(4)}${name}`;
+    const tree = confirm(path);
+    const breaksAnywhere = elementsOf(tree, "span").filter((span) => String((span.props as { className?: string }).className).includes("break-all"));
+    expect(breaksAnywhere.map(textIn)).toEqual([name, path]);
+    // The sentences around them still wrap between words.
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Move ${name} into SSHelter?`);
+    expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
+      `SSHelter keeps the only copy of this key on this computer and removes ${path}. Export private key… gets a file back.`,
+    ]);
+  });
+
   it("reveals hidden characters in the file's name and path: they come from the disk", () => {
     const tree = confirm(`/home/f/Downloads/${SPOOFED_NAME}`);
     expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Move ${SPOOFED_NAME_SHOWN} into SSHelter?`);

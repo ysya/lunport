@@ -205,7 +205,8 @@ export function DeleteKeyConfirm({
 /**
  * The confirm before New key's "Add to SSHelter" moves a key file (spec §7.5): a Move removes the original, so the vault holds the
  * only copy of the key on this computer. `path` is the file that goes (it stays set while the dialog closes). Its name and path come
- * from the disk, so both are shown through `revealHidden`. No hooks: exported for the tests.
+ * from the disk, so both are shown through `revealHidden`, and both may break anywhere (like other paths): a long one has no space
+ * to wrap at. No hooks: exported for the tests.
  */
 export function MoveKeyConfirm({
   path,
@@ -218,13 +219,17 @@ export function MoveKeyConfirm({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const name = path ? revealHidden(basename(path)) : "";
+  const shownPath = path ? revealHidden(path) : "";
   return (
     <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>{`Move ${path ? revealHidden(basename(path)) : ""} into SSHelter?`}</AlertDialogTitle>
+          <AlertDialogTitle>
+            Move <span className="break-all">{name}</span> into SSHelter?
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            {`SSHelter keeps the only copy of this key on this computer and removes ${path ? revealHidden(path) : ""}. Export private key… gets a file back.`}
+            SSHelter keeps the only copy of this key on this computer and removes <span className="break-all">{shownPath}</span>. Export private key… gets a file back.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

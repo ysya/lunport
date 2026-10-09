@@ -408,8 +408,9 @@ export function useKeyUseSynced() {
   return useOverviewMutation("sync_key_use_synced", "Could not use the synced key", keyArgs.slot, true);
 }
 
-export function useKeyDeleteCopy() {
-  return useOverviewMutation("sync_key_delete_copy", "Could not delete the copy", keyArgs.slot);
+/** Delete copy, and Delete key… for a key only on this computer, which runs the same command: `failure` titles the toast of a failure. */
+export function useKeyDeleteCopy(failure = "Could not delete the copy") {
+  return useOverviewMutation("sync_key_delete_copy", failure, keyArgs.slot);
 }
 
 /** It moves the private key between the slot file and SSHelter's vault before the state changes: re-read everything on failure. */

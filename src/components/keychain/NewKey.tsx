@@ -322,9 +322,11 @@ export function importActions({
   return {
     add: () => (needsMoveConfirm(state) ? update({ asking: true }) : send()),
     confirm: () => {
+      // The dialog stays on screen while it fades out: a press on its button after Cancel or Escape must not move the file, and a
+      // second press must not send the key again.
+      if (!state.asking || state.busy) return undefined;
       update({ asking: false });
-      // The dialog stays on screen while it fades out: pressing its button again must not send the key a second time.
-      return state.busy ? undefined : send();
+      return send();
     },
     cancel: () => update({ asking: false }),
   };

@@ -437,6 +437,21 @@ describe("adding and generating a key", () => {
       expect(calls).toEqual([]);
     });
 
+    it("sends nothing when the fading Move button is pressed after Cancel or Escape: the file must not go", async () => {
+      const calls = stubBackend(async () => added({ removed_file: true }));
+      const filled = chosenFile({ name: "work" });
+      const form = pane(filled);
+      await form.press("add");
+      // Cancel and Escape both end in the confirm's onCancel.
+      await form.press("cancel");
+      // The dialog is still on screen while it fades out: its Move button reaches the handlers made for the form as it is now.
+      await form.press("confirm");
+      expect(calls).toEqual([]);
+      expect(form.box.state).toEqual(filled);
+      expect(toasts()).toEqual([]);
+      expect(form.box.shown).toEqual([]);
+    });
+
     it("adds Keep the file too at once, without a confirm", async () => {
       const calls = stubBackend(async () => added());
       const form = pane(chosenFile({ name: "work", keepFile: true }));

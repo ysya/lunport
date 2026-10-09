@@ -266,6 +266,8 @@ export function KeyDetailFor({
   const setMode = useKeySetMode();
   const switchToSynced = useKeyUseSynced();
   const deleteCopy = useKeyDeleteCopy();
+  // Delete key… runs the same command: a failure says the key couldn't be deleted, not a copy.
+  const deleteKey = useKeyDeleteCopy("Could not delete the key");
   const delivery = useKeySetDelivery();
   const [picking, setPicking] = useState<SyncKeySlotView | null>(null);
   const [syncing, setSyncing] = useState<SyncKeySlotView | null>(null);
@@ -291,7 +293,7 @@ export function KeyDetailFor({
   const slots = overview.data?.key_slots ?? [];
   const slot = selection?.kind === "slot" ? (slots.find((s) => s.id === selection.id) ?? null) : null;
   const file = selection?.kind === "file" ? ((keys.data ?? []).find((k) => k.private_path === selection.path) ?? null) : null;
-  const busy = setMode.isPending || switchToSynced.isPending || deleteCopy.isPending || delivery.isPending;
+  const busy = setMode.isPending || switchToSynced.isPending || deleteCopy.isPending || deleteKey.isPending || delivery.isPending;
 
   const copyPublicKey = (path: string | null, name: string) => {
     if (!path) return;
@@ -409,7 +411,7 @@ export function KeyDetailFor({
         onConfirm={() => {
           if (deletingKey) {
             const name = revealHidden(deletingKey.name);
-            deleteCopy.mutate({ slotId: deletingKey.id }, { onSuccess: () => toast.success(`Deleted ${name}`) });
+            deleteKey.mutate({ slotId: deletingKey.id }, { onSuccess: () => toast.success(`Deleted ${name}`) });
           }
           setDeletingKey(null);
         }}

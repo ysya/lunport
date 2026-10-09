@@ -215,6 +215,25 @@ describe("a failed key slot command", () => {
     ]);
   });
 
+  it("titles a failed deletion as its caller asks: Delete key… deletes a key, Delete copy a copy", async () => {
+    const inUse = "Hosts on this computer still use this key; change them first.";
+    const calls = stubBackend(async () => {
+      throw inUse;
+    });
+    const deleteKey = renderHook(new QueryClient(), () => useKeyDeleteCopy("Could not delete the key"));
+    await expect(deleteKey.mutateAsync({ slotId: "s" })).rejects.toBe(inUse);
+    const deleteCopy = renderHook(new QueryClient(), () => useKeyDeleteCopy());
+    await expect(deleteCopy.mutateAsync({ slotId: "s" })).rejects.toBe(inUse);
+    expect(calls).toEqual([
+      ["sync_key_delete_copy", { slotId: "s" }],
+      ["sync_key_delete_copy", { slotId: "s" }],
+    ]);
+    expect(toast.getToasts()).toEqual([
+      expect.objectContaining({ title: "Could not delete the key", description: inUse }),
+      expect.objectContaining({ title: "Could not delete the copy", description: inUse }),
+    ]);
+  });
+
   it("re-reads the views after a failed pick or use of the synced key, which can fail after the slot's key was moved aside", async () => {
     stubBackend(async () => {
       throw "boom";
