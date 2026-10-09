@@ -1,7 +1,8 @@
 /**
- * Key paths in ssh_config: writing a picked or deployed key as IdentityFile, and telling whether an IdentityFile
- * value names a given key file. Pure string logic — the actual write goes through the regular config_save_host
- * machinery. `home` is the current user's home directory (`useHomeDir`); null while it isn't known.
+ * Key paths in ssh_config: writing a picked or deployed key as IdentityFile (its `~/.ssh/…` form, in double quotes when
+ * it has whitespace), and telling whether an IdentityFile value names a given key file. Pure string logic — the actual
+ * write goes through the regular config_save_host machinery. `home` is the current user's home directory
+ * (`useHomeDir`); null while it isn't known.
  */
 
 /** Forward slashes, so Windows paths compare and print like the ones in ssh_config. */
@@ -56,6 +57,25 @@ export function identityPointsAt(entry: string, absPath: string, home: string | 
   if (rest === undefined) return samePath(value, absPath, windows);
   if (!home) return false;
   return samePath(`${slashes(home).replace(/\/+$/, "")}/${value.slice(rest.length)}`, absPath, windows);
+}
+
+/**
+ * A key path as ssh_config needs it, the inverse of what `identityPointsAt` reads: ssh splits an unquoted value at whitespace, so a
+ * key file named "id work" would be two arguments and ssh would reject the whole config; in double quotes it is one. A path that
+ * already has a double quote is written as it is. The backend's `quote_spaced_path` has the same rule for the IdentityFile it sets
+ * itself; `config_save_host` and `config_add_host` write the values they are given as they are.
+ */
+export function sshPathValue(path: string): string {
+  return /\s/.test(path) && !path.includes('"') ? `"${path}"` : path;
+}
+
+/**
+ * The IdentityFile value the host editor writes for a key the user picked: a key file by its path (from the list of ~/.ssh keys or
+ * the file dialog, so `toTildeSshPath`) or a key in SSHelter by its slot path (a `~/` value already, which stays as it is), quoted
+ * when it has whitespace (`sshPathValue`).
+ */
+export function pickedIdentityFile(path: string, home: string | null): string {
+  return sshPathValue(toTildeSshPath(path, home));
 }
 
 /**

@@ -3,6 +3,7 @@ import type { KeyInfo } from "@/bindings/KeyInfo";
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { listNames, plural } from "@/lib/format";
 import { identityPointsAt } from "@/lib/identity-file";
+import { slotFileOfValue } from "@/lib/key-slots";
 import { revealHidden } from "@/lib/sync-approvals";
 
 /**
@@ -154,4 +155,17 @@ export function hostAliasProblem(alias: string, existing: ReadonlySet<string>): 
   if (/\s/.test(a)) return "A host alias can't contain spaces.";
   if (existing.has(a)) return `${revealHidden(a)} already exists.`;
   return null;
+}
+
+/** The keys in SSHelter the host editor offers for IdentityFile (spec §7.5): the ones this computer has, by name. */
+export function pickableSlots(slots: readonly SyncKeySlotView[]): SyncKeySlotView[] {
+  return slots.filter(hasKeyHere).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/** The note under a host's IdentityFile when it names a key in SSHelter (spec §11): ssh can use it only while SSHelter runs. */
+export function sshelterKeyNote(value: string, slots: readonly SyncKeySlotView[]): string | null {
+  const file = slotFileOfValue(value);
+  if (file === null) return null;
+  const slot = slots.find((s) => s.in_vault && slotFileOfValue(s.value) === file);
+  return slot ? `${revealHidden(slot.name)} is in SSHelter: ssh can use it only while SSHelter is running.` : null;
 }

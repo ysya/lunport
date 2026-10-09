@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { identityFileAction, identityPointsAt, toTildeSshPath } from "./identity-file";
+import { identityFileAction, identityPointsAt, pickedIdentityFile, sshPathValue, toTildeSshPath } from "./identity-file";
 
 const MAC_HOME = "/Users/frank";
 const WIN_HOME = "C:\\Users\\frank";
@@ -74,6 +74,62 @@ describe("identityPointsAt", () => {
   it("matches only the same absolute path while the home directory is not known", () => {
     expect(identityPointsAt("/home/f/.ssh/work", "/home/f/.ssh/work", null)).toBe(true);
     expect(identityPointsAt("~/.ssh/work", "/home/f/.ssh/work", null)).toBe(false);
+  });
+});
+
+describe("sshPathValue", () => {
+  it("puts a path with whitespace in double quotes, as ssh reads one argument only then", () => {
+    expect(sshPathValue("~/.ssh/id work")).toBe('"~/.ssh/id work"');
+    expect(sshPathValue("~/.ssh/id\twork")).toBe('"~/.ssh/id\twork"');
+    expect(sshPathValue("/Volumes/My Disk/keys/id_rsa")).toBe('"/Volumes/My Disk/keys/id_rsa"');
+    expect(sshPathValue("C:\\Users\\frank\\My Keys\\id")).toBe('"C:\\Users\\frank\\My Keys\\id"');
+  });
+
+  it("writes a path as it is when there is nothing to quote, or a double quote is in it already", () => {
+    expect(sshPathValue("~/.ssh/sshelter/keys/id_mac-3fa2c1d9")).toBe("~/.ssh/sshelter/keys/id_mac-3fa2c1d9");
+    expect(sshPathValue("C:\\Users\\frank\\.ssh\\id_win")).toBe("C:\\Users\\frank\\.ssh\\id_win");
+    // Quoted by the caller already, or a name with a quote in it: the backend's quote_spaced_path leaves both alone as well.
+    expect(sshPathValue('"~/.ssh/id work"')).toBe('"~/.ssh/id work"');
+    expect(sshPathValue('~/.ssh/id "work"')).toBe('~/.ssh/id "work"');
+  });
+
+  it("writes what identityPointsAt reads back as the same file", () => {
+    const file = "/Users/frank/.ssh/my key";
+    expect(identityPointsAt(sshPathValue("~/.ssh/my key"), file, MAC_HOME)).toBe(true);
+    expect(identityPointsAt(sshPathValue(file), file, MAC_HOME)).toBe(true);
+  });
+});
+
+describe("pickedIdentityFile", () => {
+  it("puts a picked key file whose path has a space in double quotes", () => {
+    // In the home's .ssh: the ~ form, quoted.
+    expect(pickedIdentityFile("/Users/frank/.ssh/id work", MAC_HOME)).toBe('"~/.ssh/id work"');
+    expect(pickedIdentityFile("C:\\Users\\frank\\.ssh\\id work", WIN_HOME)).toBe('"~/.ssh/id work"');
+    // Anywhere else, as picked, quoted.
+    expect(pickedIdentityFile("/Volumes/My Disk/id_rsa", MAC_HOME)).toBe('"/Volumes/My Disk/id_rsa"');
+    expect(pickedIdentityFile("D:\\My Keys\\deploy", WIN_HOME)).toBe('"D:\\My Keys\\deploy"');
+    // While the home is not known: as picked, quoted.
+    expect(pickedIdentityFile("/Users/frank/.ssh/id work", null)).toBe('"/Users/frank/.ssh/id work"');
+  });
+
+  it("writes a picked key file with nothing to quote in its ~ form, or as picked outside the home's .ssh", () => {
+    expect(pickedIdentityFile("/Users/frank/.ssh/id_ed25519", MAC_HOME)).toBe("~/.ssh/id_ed25519");
+    expect(pickedIdentityFile("C:\\Users\\frank\\.ssh\\id_win", WIN_HOME)).toBe("~/.ssh/id_win");
+    expect(pickedIdentityFile("/opt/keys/deploy", MAC_HOME)).toBe("/opt/keys/deploy");
+    expect(pickedIdentityFile("/Users/frank/.ssh/id_ed25519", null)).toBe("/Users/frank/.ssh/id_ed25519");
+  });
+
+  it("writes a key in SSHelter as its slot path", () => {
+    for (const home of [MAC_HOME, WIN_HOME, null]) {
+      expect(pickedIdentityFile("~/.ssh/sshelter/keys/id_mac-3fa2c1d9", home)).toBe("~/.ssh/sshelter/keys/id_mac-3fa2c1d9");
+    }
+  });
+
+  it("writes a value that identityPointsAt reads back as the key file picked", () => {
+    const file = "/Users/frank/.ssh/id work";
+    expect(identityPointsAt(pickedIdentityFile(file, MAC_HOME), file, MAC_HOME)).toBe(true);
+    const winFile = "C:\\Users\\frank\\.ssh\\id work";
+    expect(identityPointsAt(pickedIdentityFile(winFile, WIN_HOME), winFile, WIN_HOME)).toBe(true);
   });
 });
 

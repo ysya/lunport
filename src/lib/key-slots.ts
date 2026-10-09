@@ -72,7 +72,7 @@ export function syncConfirmText(slot: SyncKeySlotView): { title: string; descrip
  * The slot file an IdentityFile value names, as the backend reads it (`slot_rules::slot_file_of_value`): `~/` or `%d/`, then
  * `.ssh/sshelter/keys/<file>` with no further separator, maybe in double quotes; null for any other value.
  */
-function slotFileOfValue(value: string): string | null {
+export function slotFileOfValue(value: string): string | null {
   let v = value.trim();
   if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
   const prefix = ["~/", "%d/"].find((p) => v.startsWith(p));

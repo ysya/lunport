@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { initialAddHostTarget } from "@/lib/add-host-target";
+import { sshPathValue } from "@/lib/identity-file";
 import { hostAliasProblem } from "@/lib/keychain";
 import { useAddHost, useHostsQuery } from "@/lib/queries";
 import { syncOverviewKey } from "@/lib/sync";
@@ -106,15 +107,9 @@ export function AddHostForKeyView({
 }
 
 /**
- * A key path as ssh_config needs it: ssh splits an unquoted value at whitespace, so a key file named "id work" would be two arguments
- * and ssh would reject the whole config; in double quotes it is one. A path that already has a double quote is written as it is
- * (the backend's `quote_spaced_path` has the same rule for the IdentityFile it sets). `config_add_host` writes values as given.
+ * The new host's lines: HostName and User when they were typed, and always IdentityFile, the key (`sshPathValue`: `config_add_host`
+ * writes values as given). Exported for the tests.
  */
-function sshPathValue(path: string): string {
-  return /\s/.test(path) && !path.includes('"') ? `"${path}"` : path;
-}
-
-/** The new host's lines: HostName and User when they were typed, and always IdentityFile, the key. Exported for the tests. */
 export function newHostFields(state: AddHostForKeyState, identityFile: string): HostFieldChange[] {
   const fields: HostFieldChange[] = [];
   const push = (keyword: string, value: string) => fields.push({ keyword, value, remove: false });

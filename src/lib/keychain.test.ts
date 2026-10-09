@@ -17,8 +17,10 @@ import {
   needsAttention,
   otherKeyFiles,
   passphraseFact,
+  pickableSlots,
   slotBadges,
   slotPublicPath,
+  sshelterKeyNote,
 } from "./keychain";
 
 const needsKey = { kind: "needs_key" as const, waiting_for_sync: false };
@@ -217,5 +219,24 @@ describe("Add a host for this key", () => {
     expect(hostAliasProblem("  ", new Set())).toBe("Enter a host alias.");
     expect(hostAliasProblem(" web ", new Set(["web"]))).toBe("web already exists.");
     expect(hostAliasProblem(SPOOFED_NAME, new Set([SPOOFED_NAME]))).toBe(`${SPOOFED_NAME_SHOWN} already exists.`);
+  });
+});
+
+describe("the host editor's IdentityFile", () => {
+  it("offers the keys this computer has, by name", () => {
+    const b = keySlot({ id: "b", name: "b-key" });
+    const a = keySlot({ id: "a", name: "a-key" });
+    const missing = keySlot({ id: "c", name: "c-key", status: { kind: "needs_key", waiting_for_sync: false } });
+    expect(pickableSlots([b, missing, a]).map((s) => s.name)).toEqual(["a-key", "b-key"]);
+  });
+
+  it("explains under IdentityFile that a key in SSHelter needs SSHelter running", () => {
+    const slot = keySlot({ name: SPOOFED_NAME, in_vault: true, value: "~/.ssh/sshelter/keys/id_mac-3fa2c1d9" });
+    expect(sshelterKeyNote("~/.ssh/sshelter/keys/id_mac-3fa2c1d9", [slot])).toBe(
+      `${SPOOFED_NAME_SHOWN} is in SSHelter: ssh can use it only while SSHelter is running.`,
+    );
+    expect(sshelterKeyNote('"%d/.ssh/sshelter/keys/id_mac-3fa2c1d9"', [slot])).not.toBeNull();
+    expect(sshelterKeyNote("~/.ssh/sshelter/keys/id_mac-3fa2c1d9", [{ ...slot, in_vault: false }])).toBeNull();
+    expect(sshelterKeyNote("~/.ssh/id_ed25519", [slot])).toBeNull();
   });
 });

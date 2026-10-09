@@ -60,14 +60,17 @@ import {
   useKeyHygiene,
   useHomeDir,
 } from "@/lib/queries";
-import { toTildeSshPath } from "@/lib/identity-file";
+import { pickedIdentityFile } from "@/lib/identity-file";
 import { identityFileChanged } from "@/lib/key-slots";
+import { pickableSlots, sshelterKeyNote } from "@/lib/keychain";
 import { copyText } from "@/lib/clipboard";
 import { isImeKey } from "@/lib/ime";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
 import { isWildcardOnly } from "@/lib/host-display";
+import { useSyncOverview } from "@/lib/sync";
+import { revealHidden } from "@/lib/sync-approvals";
 import { useFileLabels, useSpaceFileLabels } from "@/lib/sync-labels";
 import { removalSyncNote } from "@/lib/sync-sidebar";
 import { basename, cn } from "@/lib/utils";
@@ -957,25 +960,34 @@ const UNSET = "__unset__";
 /**
  * A single settings row: label on the LEFT (system font, muted), control area
  * on the RIGHT (right-aligned, value in mono), compact fixed height. Used for
- * every editor field.
+ * every editor field. A `description` is a line of help under the row, as wide
+ * as the row.
  */
 function SettingsRow({
   id,
   label,
+  description,
   children,
 }: {
   id?: string;
   label: string;
+  description?: string;
   children: ReactNode;
 }) {
   return (
-    <div className="flex min-h-9 items-center justify-between gap-4 px-3 py-1.5">
+    <div
+      className={cn(
+        "flex min-h-9 items-center justify-between gap-x-4 px-3 py-1.5",
+        description && "flex-wrap gap-y-0.5",
+      )}
+    >
       <Label htmlFor={id} className="shrink-0 text-sm font-normal text-muted-foreground">
         {label}
       </Label>
       <div className="flex min-w-0 max-w-[62%] flex-1 items-center justify-end">
         {children}
       </div>
+      {description && <p className="basis-full text-xs text-muted-foreground">{description}</p>}
     </div>
   );
 }
@@ -1040,12 +1052,18 @@ function FieldControl({ def, control, register, setValue }: FieldControlProps) {
     );
   }
 
-  // IdentityFile gets picker affordances: detected ~/.ssh keys + a file dialog.
+  // IdentityFile gets picker affordances (keys in SSHelter, detected ~/.ssh keys,
+  // a file dialog) and a note when it names a key in SSHelter.
   if (def.keyword === "IdentityFile") {
     return (
-      <SettingsRow id={id} label={def.label}>
-        <IdentityFileControl id={id} name={name} register={register} setValue={setValue} />
-      </SettingsRow>
+      <IdentityFileRow
+        id={id}
+        name={name}
+        label={def.label}
+        control={control}
+        register={register}
+        setValue={setValue}
+      />
     );
   }
 
@@ -1063,12 +1081,42 @@ function FieldControl({ def, control, register, setValue }: FieldControlProps) {
 }
 
 /**
- * IdentityFile input with two pick affordances: a dropdown of the private keys
- * detected in ~/.ssh (fetched lazily when the menu opens) and a native file
- * dialog for anything else. Both write through setValue so the form dirties
- * and saves exactly like hand-typed text; paths inside the user's own ~/.ssh are
- * written in their `~` form, matching ssh_config convention (any other path,
- * e.g. a backup's or WSL's .ssh, as picked).
+ * The IdentityFile row: the field with its pickers, and, when it names a key
+ * in SSHelter, the note that SSHelter must run for ssh to use it (key vault
+ * spec §11). A component of its own so the hooks run unconditionally. Exported
+ * for the tests.
+ */
+export function IdentityFileRow({
+  id,
+  name,
+  label,
+  control,
+  register,
+  setValue,
+}: {
+  id: string;
+  name: `firstClass.${string}`;
+  label: string;
+} & Pick<FieldControlProps, "control" | "register" | "setValue">) {
+  const value = useWatch({ control, name }) ?? "";
+  const slots = useSyncOverview().data?.key_slots ?? [];
+  return (
+    <SettingsRow id={id} label={label} description={sshelterKeyNote(value, slots) ?? undefined}>
+      <IdentityFileControl id={id} name={name} register={register} setValue={setValue} />
+    </SettingsRow>
+  );
+}
+
+/**
+ * IdentityFile input with three pick affordances: a dropdown of the keys in
+ * SSHelter (the ones this computer has, by their slot path) and of the private
+ * keys detected in ~/.ssh (fetched lazily when the menu opens), and a native
+ * file dialog for anything else. All write through setValue so the form
+ * dirties and saves exactly like hand-typed text, which stays possible. What is
+ * picked is written as `pickedIdentityFile` says: paths inside the user's own
+ * ~/.ssh in their `~` form, matching ssh_config convention (any other path,
+ * e.g. a backup's or WSL's .ssh, as picked), and in double quotes when they have
+ * whitespace (ssh reads an unquoted one as two arguments).
  */
 function IdentityFileControl({
   id,
@@ -1084,8 +1132,9 @@ function IdentityFileControl({
   const [menuOpen, setMenuOpen] = useState(false);
   const keysQ = useKeys({ enabled: menuOpen });
   const home = useHomeDir().data ?? null;
-  const pick = (value: string) =>
-    setValue(name, value, { shouldDirty: true, shouldTouch: true });
+  const sshelterKeys = pickableSlots(useSyncOverview().data?.key_slots ?? []);
+  const pick = (path: string) =>
+    setValue(name, pickedIdentityFile(path, home), { shouldDirty: true, shouldTouch: true });
 
   const browse = async () => {
     const picked = await openFileDialog({
@@ -1093,7 +1142,7 @@ function IdentityFileControl({
       directory: false,
       title: "Choose an identity file",
     });
-    if (typeof picked === "string") pick(toTildeSshPath(picked, home));
+    if (typeof picked === "string") pick(picked);
   };
 
   return (
@@ -1112,12 +1161,29 @@ function IdentityFileControl({
             size="icon"
             className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
             aria-label="Pick a detected key"
-            title="Pick a key from ~/.ssh"
+            title="Pick a key"
           >
             <KeyRound className="size-3.5" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-56">
+          {sshelterKeys.length > 0 && (
+            <>
+              <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                Keys in SSHelter
+              </DropdownMenuLabel>
+              {sshelterKeys.map((s) => (
+                <DropdownMenuItem
+                  key={s.id}
+                  className="font-mono"
+                  onSelect={() => pick(s.value)}
+                >
+                  {revealHidden(s.name)}
+                </DropdownMenuItem>
+              ))}
+              <DropdownMenuSeparator />
+            </>
+          )}
           <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
             Keys in ~/.ssh
           </DropdownMenuLabel>
@@ -1130,7 +1196,7 @@ function IdentityFileControl({
               <DropdownMenuItem
                 key={k.private_path}
                 className="font-mono"
-                onSelect={() => pick(toTildeSshPath(k.private_path, home))}
+                onSelect={() => pick(k.private_path)}
               >
                 {k.name}
               </DropdownMenuItem>
