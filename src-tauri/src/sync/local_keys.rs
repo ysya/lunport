@@ -20,7 +20,7 @@ use crate::sync::slot_rules::{
 use crate::sync::slot_setup::{home_of, is_private_key_file, same_file};
 use crate::sync::slots::{
     agent_refusal, in_the_way_message, live_slots, local_key_fingerprint, local_snapshot, not_found, refresh_agent, vault_unreadable_message, EnvVault,
-    VaultKeys,
+    VaultKeys, VAULT_KEY_TYPE_MESSAGE, VAULT_KEY_UNREADABLE_MESSAGE,
 };
 use crate::sync::state_v2::{LocalSlot, SlotSource, SyncStateV2};
 use crate::vault::store::{vault_path, with_vault, EntryOrigin, VaultEntry};
@@ -41,6 +41,11 @@ pub const CHANGED_MESSAGE: &str = "The file stays: it changed while SSHelter was
 const MISMATCH: &str = "it doesn't match";
 /// 同一件事在 Move 動手之前就看到了(`import_file`):載入的 config 和磁碟上的不一樣,什麼都沒加,重新載入之後再來一次。
 pub const RELOAD_FIRST_MESSAGE: &str = "Your SSH config changed on disk since SSHelter loaded it. Reload it, then try again.";
+
+/// 貼上的文字 agent 用不了(`refusal_for`):`slots::agent_refusal` 的那兩句說「so it stays as a file」,選的檔案確實留著;貼上的沒有檔案,改說 SSHelter 收不了它。
+pub const PASTED_KEY_TYPE_MESSAGE: &str =
+    "SSHelter's agent can't use this kind of key (for example a security key or a DSA key), so SSHelter can't keep it.";
+pub const PASTED_KEY_UNREADABLE_MESSAGE: &str = "SSHelter's agent can't read this key, so SSHelter can't keep it.";
 
 /// 貼上的文字最多收這麼多(私鑰本身的上限是 16 KiB,`inspect_private_key`)。
 const MAX_PASTE_BYTES: usize = 64 * 1024;
@@ -114,6 +119,19 @@ fn already_message(name: &str) -> String {
     format!("This key is already in SSHelter as {name}.")
 }
 
+/// agent 用不了這把金鑰的原因(`slots::agent_refusal`),照金鑰從哪裡來說:選的檔案(`picked`)照原句(它說檔案留著,檔案確實留著);貼上的文字沒有檔案,
+/// 說「留在檔案」的那兩句換成 `PASTED_KEY_TYPE_MESSAGE`、`PASTED_KEY_UNREADABLE_MESSAGE`,其他的(加密方式)不提檔案,照原句。
+fn refusal_for(message: &'static str, picked: Option<&Path>) -> &'static str {
+    if picked.is_some() {
+        return message;
+    }
+    match message {
+        VAULT_KEY_TYPE_MESSAGE => PASTED_KEY_TYPE_MESSAGE,
+        VAULT_KEY_UNREADABLE_MESSAGE => PASTED_KEY_UNREADABLE_MESSAGE,
+        other => other,
+    }
+}
+
 /// 保管庫裡那一筆確定不見了的同一把金鑰(同指紋)的記錄(`SlotSource::Vault`,`holds` 是 `Some(false)`;`None` = 保管庫讀不了,看不出來,不算):
 /// (插槽 id、記錄)。`LOCAL_KEY_LOST_MESSAGE` 請使用者用 New key 再加一次這把金鑰,加的時候就放回這筆記錄(`restore_into`),不是拒絕。
 fn lost_record(state: &SyncStateV2, fingerprint: &str, vault: &dyn VaultKeys) -> Option<(String, LocalSlot)> {
@@ -174,7 +192,7 @@ fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, pick
     let (state, home) = local_snapshot(env)?;
     let facts = inspect_private_key(text).map_err(|e| AppError::Other(vault_unreadable_message(e).to_string()))?;
     if let Some(message) = agent_refusal(text, &facts) {
-        return Err(AppError::Other(message.to_string()));
+        return Err(AppError::Other(refusal_for(message, picked).to_string()));
     }
     match fate(&state, &facts.fingerprint, picked, &EnvVault { env }) {
         Fate::Restore(slot_id, local) => return restore_into(env, &home, &slot_id, &local, text, &facts),
@@ -859,7 +877,7 @@ mod tests {
     use crate::sync::runtime::mutate;
     use crate::sync::slot_rules::{public_path, slot_value, test_keys, SlotMode, SLOT_DIR};
     use crate::sync::slots::tests::{create_slot_on, overview_row, vault_entry};
-    use crate::sync::slots::{slot_record_exists, LOCAL_KEY_LOST_MESSAGE, VAULT_KEY_TYPE_MESSAGE};
+    use crate::sync::slots::{slot_record_exists, LOCAL_KEY_LOST_MESSAGE, VAULT_KEY_CIPHER_MESSAGE, VAULT_KEY_TYPE_MESSAGE, VAULT_KEY_UNREADABLE_MESSAGE};
     use crate::sync::state_v2::SlotSource;
     use crate::sync::testkit::{TestClock, TestDevice};
     use crate::vault::store::EntryOrigin;
@@ -909,14 +927,19 @@ mod tests {
         assert_eq!(vault_entry(&d, &id).unwrap().private_key, test_keys::encrypted());
     }
 
-    /// 不是私鑰的文字、agent 用不了的金鑰、不合規的名稱:拒絕,什麼都不寫。
+    /// 不是私鑰的文字、agent 用不了的金鑰、不合規的名稱:拒絕,什麼都不寫。貼上的文字沒有檔案:agent 用不了就說 SSHelter 收不了它(不說「留在檔案」)。
     #[test]
     fn what_cant_go_into_the_vault_is_refused_and_nothing_is_written() {
         let d = device("# main\n");
         let before = d.state();
         let refused = |name: &str, text: &str| import_text(&d.env(), name, text).unwrap_err().to_string();
         assert_eq!(refused("laptop", "hello"), "This isn't an OpenSSH private key SSHelter can read.");
-        assert_eq!(refused("sk", &test_keys::security_key()), VAULT_KEY_TYPE_MESSAGE);
+        assert_eq!(
+            refused("sk", &test_keys::security_key()),
+            "SSHelter's agent can't use this kind of key (for example a security key or a DSA key), so SSHelter can't keep it."
+        );
+        assert_eq!(refused("odd", &test_keys::unreadable_comment()), "SSHelter's agent can't read this key, so SSHelter can't keep it.");
+        assert_eq!(refused("old", &test_keys::encrypted_with_3des_label()), VAULT_KEY_CIPHER_MESSAGE, "this one names no file");
         assert_eq!(
             refused("my key", &test_keys::plain()),
             "\"my key\" can't be used as a key name: use letters, digits, '.', '_' or '-', start with a letter or digit, and don't end with .pub"
@@ -924,6 +947,18 @@ mod tests {
         assert_eq!(d.state(), before);
         assert!(slot_dir_files(&d).is_empty());
         assert!(crate::vault::store::stored_ids(&crate::vault::store::vault_path(&d.env().state_path)).unwrap().is_empty());
+    }
+
+    /// 選的檔案 agent 用不了:說它留在檔案(檔案確實留著),什麼都不寫。
+    #[test]
+    fn a_chosen_file_the_agent_cant_use_stays_a_file() {
+        let d = device("# main\n");
+        let before = d.state();
+        let refused = |file: &std::path::Path| import_file(&d.env(), "key", &file.display().to_string(), false).unwrap_err().to_string();
+        assert_eq!(refused(&key_file(&d, "id_sk", &test_keys::security_key())), VAULT_KEY_TYPE_MESSAGE);
+        assert_eq!(refused(&key_file(&d, "id_odd", &test_keys::unreadable_comment())), VAULT_KEY_UNREADABLE_MESSAGE);
+        assert_eq!(d.state(), before);
+        assert!(slot_dir_files(&d).is_empty());
     }
 
     /// 同一把金鑰不加第二次:說它已經叫什麼(這台保管庫裡的,或帳戶裡同步的插槽)。
