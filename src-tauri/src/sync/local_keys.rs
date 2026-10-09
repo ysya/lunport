@@ -35,6 +35,10 @@ pub const CONFIG_CHANGED_MESSAGE: &str = "The file stays: your SSH config change
 pub const OUTSIDE_A_HOST_BLOCK_MESSAGE: &str = "The file stays: an IdentityFile outside a Host block names it, and SSHelter only switches hosts.";
 pub const UNRESOLVED_MESSAGE: &str = "The file stays: an IdentityFile SSHelter can't resolve (a token, a variable or a relative path) may name it.";
 pub const LINK_MESSAGE: &str = "The file stays: it's a link to another file, so SSHelter didn't remove either.";
+/// 主機都改好之後、移除之前再讀一次原檔,已經不是加進來的那把金鑰(`move_file`)。保管庫那一份讀不回來、原檔讀不了的原因帶著錯誤,在 `move_file` 組。
+pub const CHANGED_MESSAGE: &str = "The file stays: it changed while SSHelter was adding it.";
+/// 保管庫裡讀回來的那一筆不是加進來的那把金鑰(或沒有那一筆):`The file stays: SSHelter couldn't confirm its copy in the vault ({error}).` 的 `{error}`。
+const MISMATCH: &str = "it doesn't match";
 /// 同一件事在 Move 動手之前就看到了(`import_file`):載入的 config 和磁碟上的不一樣,什麼都沒加,重新載入之後再來一次。
 pub const RELOAD_FIRST_MESSAGE: &str = "Your SSH config changed on disk since SSHelter loaded it. Reload it, then try again.";
 
@@ -53,10 +57,11 @@ pub struct ImportedKey {
     pub file_kept: Option<String>,
 }
 
-/// 加進來的金鑰(`add_key_from`):插槽 id,與插槽檔名(Move 把主機改指到它;放回去的是那筆記錄原本的檔名)。
+/// 加進來的金鑰(`add_key_from`):插槽 id、插槽檔名(Move 把主機改指到它;放回去的是那筆記錄原本的檔名)、指紋(Move 拿它核對保管庫裡的那一份與原檔)。
 struct Added {
     slot_id: String,
     file_name: String,
+    fingerprint: String,
 }
 
 /// 名稱不合規(同 `slot_setup::create_slot` 的說法)。
@@ -247,7 +252,7 @@ fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, pick
         }
         return Err(e);
     }
-    Ok(Added { slot_id: id, file_name: file })
+    Ok(Added { slot_id: id, file_name: file, fingerprint: facts.fingerprint.clone() })
 }
 
 /// 把再加一次的金鑰放回保管庫那一筆不見了的記錄(`lost_record`):同一個插槽 id、同一個插槽檔名、記錄的名稱不變,用它的主機不必改寫就又能用。依序:
@@ -299,7 +304,7 @@ fn restore_into(env: &SyncEnv, home: &Path, slot_id: &str, local: &LocalSlot, te
         }
         return Err(e);
     }
-    Ok(Added { slot_id: slot_id.to_string(), file_name: local.file_name.clone() })
+    Ok(Added { slot_id: slot_id.to_string(), file_name: local.file_name.clone(), fingerprint: facts.fingerprint.clone() })
 }
 
 /// 「New key」→ Paste:貼上的文字換行統一成 LF、去掉前後空白,結尾一個換行,再加進來(來源記成匯入)。
@@ -377,9 +382,10 @@ pub fn preview_file(env: &SyncEnv, path: &str) -> Result<KeyFilePreview, AppErro
     Ok(preview)
 }
 
-/// 「New key」→ From a file(與 `~/.ssh` 的「Import」)。`keep_file` = 「Keep the file too」:原檔與主機都不動。否則「Move into SSHelter」:
-/// `IdentityFile` 指到這個檔案的主機改指到新的插槽(`point_hosts_at`),全部改好才移除原檔(只有私鑰檔;旁邊的 `.pub` 留著)。還有東西指著它、或它是符號連結
-/// (`point_hosts_at` 列的原因)就一台都不改、原檔留著:金鑰照樣加進來了,`file_kept` 說明原因。這個檔案正是某個插槽連到的(`fate`)則根本不加。
+/// 「New key」→ From a file(與 `~/.ssh` 的「Import」)。`keep_file` = 「Keep the file too」:原檔與主機都不動。否則「Move into SSHelter」(`move_file`):
+/// 先核對保管庫裡的那一份,`IdentityFile` 指到這個檔案的主機改指到新的插槽(`point_hosts_at`),全部改好、再讀一次原檔還是這把金鑰,才移除原檔(只有私鑰檔;
+/// 旁邊的 `.pub` 留著)。還有東西指著它、或它是符號連結(`point_hosts_at` 列的原因),或保管庫那一份核對不了,就一台都不改、原檔留著:金鑰照樣加進來了,
+/// `file_kept` 說明原因。這個檔案正是某個插槽連到的(`fate`)則根本不加。
 /// 保管庫裡那一筆不見了的同一把金鑰放回那筆記錄(`restore_into`),主機改指到那筆記錄原本的插槽檔。
 /// Move 還要先確認載入的 config 沒有在磁碟上變過(`config_changed`):畫面還沒重新載入的外部編輯可能加了一台指到這個檔案的主機,Move 看不到它,刪掉檔案那一台就壞了。
 /// 變過就在動任何東西之前拒絕(`RELOAD_FIRST_MESSAGE`,什麼都沒加)。Keep the file too 不動主機,不受影響。
@@ -402,23 +408,73 @@ fn import_file_with(
     }
     let text = Zeroizing::new(std::fs::read_to_string(&key)?);
     let added = add_key_from(env, name, &text, EntryOrigin::Imported, Some(&key))?;
-    let mut imported = ImportedKey { slot_id: added.slot_id.clone(), rewritten_hosts: Vec::new(), removed_file: false, file_kept: None };
     if keep_file {
-        return Ok(imported);
+        return Ok(ImportedKey { slot_id: added.slot_id, rewritten_hosts: Vec::new(), removed_file: false, file_kept: None });
     }
-    match point_hosts_at(env, &home, &key, &added.file_name, persist) {
+    Ok(move_file(env, &home, &key, &added, persist))
+}
+
+/// 「Move into SSHelter」在金鑰加進來(`added`)之後的步驟(spec §7.5「匯入並核對指紋之後,移除原檔」),依序:
+/// - 讀回保管庫裡這個插槽的那一筆、核對指紋(`confirm_in_vault`)。讀不了、或不是這把金鑰 → 一台主機都不改、原檔留著(金鑰照樣加進來了)。
+/// - 指到原檔 `key` 的主機改指到插槽(`point_hosts_at`),全部改好才往下。
+/// - 移除之前再讀一次原檔、核對指紋(`still_the_key`)。讀不了、或已經是別的內容(加的時候被換掉了)→ 原檔留著。已經改好的主機不改回來:它們用的是上面核對過的
+///   保管庫那一份。
+/// - 移除原檔(只有私鑰檔;旁邊的 `.pub` 留著)。
+/// `persist` 同 `import_file_with`。
+fn move_file(
+    env: &SyncEnv,
+    home: &Path,
+    key: &Path,
+    added: &Added,
+    persist: impl FnMut(&mut SshConfigDoc, usize, &mut HashSet<PathBuf>, Option<usize>) -> Result<(), AppError>,
+) -> ImportedKey {
+    let mut imported = ImportedKey { slot_id: added.slot_id.clone(), rewritten_hosts: Vec::new(), removed_file: false, file_kept: None };
+    if let Err(error) = confirm_in_vault(env, &added.slot_id, &added.fingerprint) {
+        imported.file_kept = Some(format!("The file stays: SSHelter couldn't confirm its copy in the vault ({error})."));
+        return imported;
+    }
+    match point_hosts_at(env, home, key, &added.file_name, persist) {
         Ok(rewritten) => imported.rewritten_hosts = rewritten,
         Err(kept) => {
             imported.rewritten_hosts = kept.switched;
             imported.file_kept = Some(kept.reason);
-            return Ok(imported);
+            return imported;
         }
     }
-    match std::fs::remove_file(&key) {
+    match still_the_key(key, &added.fingerprint) {
+        Err(e) => {
+            imported.file_kept = Some(format!("The file stays: it couldn't be read again ({e})."));
+            return imported;
+        }
+        Ok(false) => {
+            imported.file_kept = Some(CHANGED_MESSAGE.to_string());
+            return imported;
+        }
+        Ok(true) => {}
+    }
+    match std::fs::remove_file(key) {
         Ok(()) => imported.removed_file = true,
         Err(e) => imported.file_kept = Some(format!("The file stays: it couldn't be removed ({e}).")),
     }
-    Ok(imported)
+    imported
+}
+
+/// 保管庫裡插槽 `slot_id` 的那一筆就是 `fingerprint` 這把金鑰(Move 移除原檔之前,`move_file`)。不是的話回原因(`The file stays: SSHelter couldn't confirm its
+/// copy in the vault ({error}).` 的 `{error}`):保管庫讀不了 → 保管庫自己的錯誤;沒有那一筆、讀不懂、或是另一把 → `MISMATCH`。
+fn confirm_in_vault(env: &SyncEnv, slot_id: &str, fingerprint: &str) -> Result<(), String> {
+    let entry = with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.get(slot_id)).map_err(|e| e.to_string())?;
+    let same = entry.is_some_and(|entry| inspect_private_key(&entry.private_key).is_ok_and(|facts| facts.fingerprint == fingerprint));
+    if same {
+        Ok(())
+    } else {
+        Err(MISMATCH.to_string())
+    }
+}
+
+/// 再讀一次原檔:還是 `fingerprint` 這把金鑰嗎(Move 移除原檔之前,`move_file`)。讀不了 → 錯誤;讀得到、內容卻不是這把金鑰(不是私鑰了也算)→ false。
+fn still_the_key(key: &Path, fingerprint: &str) -> std::io::Result<bool> {
+    let text = Zeroizing::new(std::fs::read_to_string(key)?);
+    Ok(inspect_private_key(&text).is_ok_and(|facts| facts.fingerprint == fingerprint))
 }
 
 /// 「Generate key」:在 SSHelter 裡產生一把金鑰(`vault::generate`),加進來成為只在這台的金鑰(來源記成產生的)。名稱先檢查:產生 RSA 要幾秒,
@@ -1983,5 +2039,96 @@ mod tests {
         assert_eq!(refused.to_string(), "not found: that key slot no longer exists");
         assert!(vault_entry(&d, &id).is_none(), "the entry went again");
         assert!(slot_dir_files(&d).is_empty(), "and so did the .pub");
+    }
+
+    // ── Move 核對保管庫裡的那一份、移除之前再讀一次原檔(最後一輪修正 Important 2;spec §7.5「匯入並核對指紋之後,移除原檔」)────────────────
+
+    /// `id_work`(plain)用 Keep the file too 加進來之後、要 Move 的樣子:(原檔、加進來的金鑰)。
+    fn added_id_work(d: &TestDevice) -> (std::path::PathBuf, Added) {
+        let file = key_file(d, "id_work", &test_keys::plain());
+        let imported = import_file(&d.env(), "work", &file.display().to_string(), true).unwrap();
+        let file_name = d.state().key_slots[&imported.slot_id].file_name.clone();
+        (file, Added { slot_id: imported.slot_id, file_name, fingerprint: test_keys::PLAIN_FINGERPRINT.to_string() })
+    }
+
+    /// 保管庫裡這個插槽的那一筆換成 `text` 這把金鑰。
+    fn put_in_vault(d: &TestDevice, slot_id: &str, text: &str) {
+        let facts = inspect_private_key(text).unwrap();
+        let entry =
+            VaultEntry { private_key: text.to_string(), public_key: facts.public_key, fingerprint: facts.fingerprint, origin: EntryOrigin::Imported, added_at_ms: 1 };
+        let env = d.env();
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.put(env.keychain, slot_id, &entry)).unwrap();
+    }
+
+    /// 加進來之後,保管庫裡這個插槽的那一筆不是這把金鑰(被換成另一把,或不見了):對不上,一台主機都不改、原檔留著(金鑰照樣加進來了)。
+    #[test]
+    fn a_move_whose_copy_in_the_vault_doesnt_match_keeps_the_file() {
+        let main = "Host web\n  IdentityFile ~/.ssh/id_work\n";
+        let reason = "The file stays: SSHelter couldn't confirm its copy in the vault (it doesn't match).";
+        let d = device(main);
+        let (file, added) = added_id_work(&d);
+        put_in_vault(&d, &added.slot_id, &test_keys::ecdsa());
+        let imported = move_file(&d.env(), d.home.path(), &file, &added, crate::config::commands::persist_file);
+        assert_kept(&d, &file, &imported, reason, main);
+
+        let d = device(main);
+        let (file, added) = added_id_work(&d);
+        let env = d.env();
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |v| v.remove(&added.slot_id)).unwrap();
+        let imported = move_file(&d.env(), d.home.path(), &file, &added, crate::config::commands::persist_file);
+        assert_kept(&d, &file, &imported, reason, main);
+    }
+
+    /// 加進來之後保管庫讀不了(這裡是 keychain 鎖著):確認不了,說保管庫的原因,一台主機都不改、原檔留著。
+    #[test]
+    fn a_move_that_cant_read_its_copy_back_from_the_vault_keeps_the_file() {
+        let main = "Host web\n  IdentityFile ~/.ssh/id_work\n";
+        let d = device(main);
+        let (file, added) = added_id_work(&d);
+        d.keychain.fail_reads.store(true, std::sync::atomic::Ordering::SeqCst);
+        let imported = move_file(&d.env(), d.home.path(), &file, &added, crate::config::commands::persist_file);
+        d.keychain.fail_reads.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_kept(&d, &file, &imported, "The file stays: SSHelter couldn't confirm its copy in the vault (keychain error: locked).", main);
+    }
+
+    /// 改好主機之後、移除原檔之前,原檔被換成另一把金鑰(別的程式在這時寫了它):留著它現在的樣子,說它變了。已經改好的主機不改回來 —— 它們用的是核對過的
+    /// 保管庫那一份。
+    #[test]
+    fn a_file_that_changes_while_it_is_moved_stays() {
+        let d = device("Host web\n  IdentityFile ~/.ssh/id_work\n");
+        let file = key_file(&d, "id_work", &test_keys::plain());
+        let imported = import_file_with(&d.env(), "work", &file.display().to_string(), false, |doc, idx, backed_up, retention| {
+            crate::config::commands::persist_file(doc, idx, backed_up, retention)?;
+            std::fs::write(&file, test_keys::ecdsa()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: it changed while SSHelter was adding it."));
+        assert!(!imported.removed_file);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), test_keys::ecdsa(), "the file stays as it is now");
+        assert_eq!(imported.rewritten_hosts, vec!["web".to_string()], "web was switched");
+        let value = slot_value(&d.state().key_slots[&imported.slot_id].file_name);
+        assert!(d.main_config().contains(&format!("IdentityFile {value}")), "and stays switched: {}", d.main_config());
+        assert_eq!(vault_entry(&d, &imported.slot_id).unwrap().fingerprint, test_keys::PLAIN_FINGERPRINT, "to the copy in the vault");
+    }
+
+    /// 移除之前再讀一次,讀不了(這裡是原檔的位置換成了一個資料夾):留著,說讀不了的原因;已經改好的主機一樣不改回來。
+    #[test]
+    fn a_file_that_cant_be_read_again_before_it_is_removed_stays() {
+        let d = device("Host web\n  IdentityFile ~/.ssh/id_work\n");
+        let file = key_file(&d, "id_work", &test_keys::plain());
+        let imported = import_file_with(&d.env(), "work", &file.display().to_string(), false, |doc, idx, backed_up, retention| {
+            crate::config::commands::persist_file(doc, idx, backed_up, retention)?;
+            std::fs::remove_file(&file).unwrap();
+            std::fs::create_dir(&file).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let error = std::fs::read_to_string(&file).unwrap_err();
+        assert_eq!(imported.file_kept, Some(format!("The file stays: it couldn't be read again ({error}).")));
+        assert!(!imported.removed_file && file.is_dir(), "nothing was removed");
+        assert_eq!(imported.rewritten_hosts, vec!["web".to_string()]);
     }
 }
