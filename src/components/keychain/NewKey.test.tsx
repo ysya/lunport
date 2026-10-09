@@ -334,6 +334,18 @@ describe("adding and generating a key", () => {
     expect(toasts()).toEqual([{ title: "Could not add the key", description: refusal }]);
   });
 
+  it("names the key that was put back, not the name typed: a lost key goes back into its own record", async () => {
+    // The backend answers with the record it restored; its name may come from another computer.
+    const restored = keySlot({ id: "s", name: SPOOFED_NAME, mode: "own", fingerprint: null, local_only: true, in_account: false, in_vault: true });
+    stubBackend(async () => added({ overview: overview({ key_slots: [restored] }) }));
+    expect(await submitImport(new QueryClient(), importState({ text: KEY_TEXT, name: "typed" }))).toBe("s");
+    expect(await submitImport(new QueryClient(), chosenFile({ name: "typed", keepFile: true }))).toBe("s");
+    expect(toasts()).toEqual([
+      { title: `${SPOOFED_NAME_SHOWN} is in SSHelter`, description: undefined },
+      { title: `${SPOOFED_NAME_SHOWN} is in SSHelter`, description: "The file stays: any program can use it without asking." },
+    ]);
+  });
+
   it("asks for nothing when a file form has no file", async () => {
     const calls = stubBackend(async () => added());
     expect(await submitImport(new QueryClient(), importState({ source: "file", path: null }))).toBeNull();

@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import type { KeyAlgorithm } from "@/bindings/KeyAlgorithm";
 import type { KeyFilePreview } from "@/bindings/KeyFilePreview";
+import type { SyncOverview } from "@/bindings/SyncOverview";
 import { MoveKeyConfirm } from "@/components/keychain/dialogs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -232,6 +233,14 @@ export function importedNote(result: { removed_file: boolean; file_kept: string 
 }
 
 /**
+ * The name of the key that was just added, as the new overview lists it. A key whose entry was lost from the vault goes back into its
+ * own record, which keeps its name whatever was typed. That name can come from another computer: shown through `revealHidden`.
+ */
+function addedName(overview: SyncOverview, slotId: string, typed: string): string {
+  return revealHidden(overview.key_slots.find((s) => s.id === slotId)?.name ?? typed);
+}
+
+/**
  * Add the pasted key or the chosen file (New key's "Add to SSHelter"), and tell the user how it went. Resolves to the new key's slot
  * id, or to null when nothing was added: after a toast said why, or with no toast when a file form has no file chosen (nothing is
  * sent then). Plain calls, not mutations: the key text must not stay in TanStack's cache. Exported for the tests.
@@ -241,14 +250,14 @@ export async function submitImport(queryClient: QueryClient, state: ImportKeySta
     if (state.source === "paste") {
       const result = await importKeyText(state.name, state.text);
       applyNewKey(queryClient, result.overview);
-      toast.success(`${state.name} is in SSHelter`);
+      toast.success(`${addedName(result.overview, result.slot_id, state.name)} is in SSHelter`);
       return result.slot_id;
     }
     if (state.path === null) return null;
     const result = await importKeyFile(state.name, state.path, state.keepFile);
     applyNewKey(queryClient, result.overview);
     const note = importedNote(result, state.path, state.keepFile);
-    toast.success(`${state.name} is in SSHelter`, note ? { description: note } : undefined);
+    toast.success(`${addedName(result.overview, result.slot_id, state.name)} is in SSHelter`, note ? { description: note } : undefined);
     // Hosts now pointing at a key only on this computer: the Sync key dialog asks about the synced ones (spec §4.3). A move that
     // stopped halfway lists the hosts it did switch.
     if (result.rewritten_hosts.length > 0) useUiStore.getState().setKeySetup({ aliases: result.rewritten_hosts, reason: "saved" });

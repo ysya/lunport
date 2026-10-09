@@ -1367,7 +1367,7 @@ pub fn not_here_message(device: &str) -> String {
     format!("Do this on a computer that has this key, such as {device}.")
 }
 
-fn not_found() -> AppError {
+pub(crate) fn not_found() -> AppError {
     AppError::NotFound("that key slot no longer exists".to_string())
 }
 
