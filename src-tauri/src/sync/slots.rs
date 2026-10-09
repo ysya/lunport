@@ -187,12 +187,15 @@ impl VaultKeys for EnvVault<'_, '_> {
 
 pub const VAULT_ENTRY_LOST: &str = "This key was lost from SSHelter's vault. Pick it again on this computer.";
 
-/// 只在這台的金鑰(`LocalSlot::local_only`)或沒有帳戶時的金鑰,保管庫裡那一筆不見了:沒有帳戶可以取回,記錄留著、標這個錯誤。
+/// 只在這台的金鑰(`LocalSlot::local_only`)或沒有帳戶時的金鑰,保管庫裡那一筆不見了:沒有帳戶可以取回,記錄留著、標這個錯誤。使用者用 New key 再加一次
+/// 這把金鑰,就放回這筆記錄(`local_keys::restore_into`)。
 pub const LOCAL_KEY_LOST_MESSAGE: &str = "This key is no longer in SSHelter's vault. If you exported a copy, add it again with New key.";
 
 /// 只在 SSHelter 的金鑰(`SlotSource::Vault`),保管庫裡那一筆確定不見了(`holds` 是 `Some(false)`;`None` = 保管庫讀不了,不判斷),而它沒有別處可以取回
-/// (只在這台的金鑰,或沒有帳戶):記錄與來源留著(清單照舊列出),標 `LOCAL_KEY_LOST_MESSAGE`;使用者匯出過的話可以再加進來。`recover_vault_entry` 與
-/// 本機維護(`maintain_local`)都經過這裡,「保管庫沒有它」的判斷只有一份。有帳戶的同步金鑰不走這裡:`recover_vault_entry` 從帳戶取回。
+/// (只在這台的金鑰,或沒有帳戶):記錄與來源留著(清單照舊列出),標 `LOCAL_KEY_LOST_MESSAGE`;使用者匯出過的話,用 New key 再加一次就放回這筆記錄。
+/// 標這個錯誤的只有這裡:`recover_vault_entry`(只在這台的金鑰)與本機維護(`maintain_local`)都經過這裡。「保管庫沒有它」(`holds`)本身不只這裡看:
+/// 有帳戶的同步金鑰由 `recover_vault_entry` 自己看,從帳戶取回(取不回就讓這台回到還沒有金鑰,`VAULT_ENTRY_LOST`);New key 要放回去之前也看
+/// (`local_keys::lost_record`)。
 fn mark_lost_if_gone(local: &mut LocalSlot, slot_id: &str, vault: &dyn VaultKeys) {
     if matches!(local.source, Some(SlotSource::Vault { .. })) && vault.holds(slot_id) == Some(false) {
         local.last_error = Some(LOCAL_KEY_LOST_MESSAGE.to_string());
@@ -678,8 +681,10 @@ pub fn reconcile(
 /// 一次同步嘗試最後對這台插槽做的本機維護(`round::sync_once` 的最後一步,不論這一輪走到哪裡、有沒有帳戶):不需要 relay、也不需要帳戶金鑰。一輪常在金鑰那一步
 /// (`reconcile_with_vault`)之前就結束了(被限流、拉取失敗、relay 出錯),帳戶金鑰也可能還沒載入;這台自己的東西不該等那些。`joined` = 有帳戶。
 ///
-/// 只在這台的金鑰(`LocalSlot::local_only`)一律維護(`maintain`:連結、`.pub`、擋路的檔案),保管庫裡那一筆不見了就標 `LOCAL_KEY_LOST_MESSAGE`(`mark_lost_if_gone`) ——
-/// 完整的一輪對它們做的也是這些(`reconcile_with_vault` 的 `gone` 迴圈),所以兩邊做的事一樣,重複做沒有新的變化。
+/// 只在這台的金鑰(`LocalSlot::local_only`)一律維護(`maintain`:連結、`.pub`、擋路的檔案),保管庫裡那一筆不見了就標 `LOCAL_KEY_LOST_MESSAGE`(`mark_lost_if_gone`)。
+/// 有帳戶時完整的一輪對只在這台的金鑰做的也是這兩件事(`reconcile_with_vault` 的 `gone` 迴圈),兩邊得到同一筆記錄(測試
+/// `the_local_pass_and_a_joined_round_agree_about_a_key_only_on_this_computer` 釘住的那些狀況),所以兩邊都做沒有新的變化。`gone` 迴圈對其他的記錄還多做幾件事
+/// (拿掉沒有主機用到的連結,`drop_link`;忘掉沒有來源的記錄),有帳戶時這裡不碰那些記錄。
 /// 沒有帳戶時再加上其他的插槽:有主機用到的照常維護,保管庫裡的金鑰一樣確認那一筆還在(記錄留著,沒有帳戶可以取回),沒有來源的記錄(同步來的副本被刪掉了)忘掉,
 /// 和有帳戶時那一輪的 `gone` 迴圈一樣;沒有主機用到的連結不動(使用者可以 Delete copy)。有帳戶時其餘的插槽只有完整的一輪處理(落地同步的金鑰、取回保管庫的金鑰、
 /// 收起連結……),這裡不碰、也不忘掉任何記錄。
