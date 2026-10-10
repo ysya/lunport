@@ -126,21 +126,60 @@ imported: { source: "~/.ssh/config", at_ms, unsupported: [{keyword, value}] } | 
 ### 6.1 介面
 
 ```rust
-trait SshEngine {
-    fn connect(&self, target: Target, host_key: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError>;
+// 所有方法都是同步呼叫:引擎內部有自己的 tokio runtime(§4)。引擎只做連線;提示、保管庫、UI 都在 broker(§7)。
+pub trait SshEngine: Send + Sync {
+    /// 建立到 target 的連線(跳板鏈、每一跳的主機金鑰檢查、認證)。HostKeyUnknown/HostKeyMismatch 帶回觀察到的金鑰:
+    /// 呼叫端問使用者、釘住,再呼叫一次(§6.2 第 3 步)。
+    fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError>;
 }
-trait Session {
-    fn shell(&self, pty: Pty) -> Result<ShellChannel, SessionError>;   // 雙向位元組流 + 結束碼
-    fn exec(&self, command: &str, timeout: Duration) -> Result<ExecResult, SessionError>; // 無 PTY
-    fn window_change(&self, cols: u16, rows: u16);
+pub trait Session: Send + Sync {
+    fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError>;
+    fn exec(&self, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError>; // 無 PTY;到上限就 close(),連線仍可用
+    fn is_alive(&self) -> bool;                              // 連線自己的狀態(§6.2 第 3 步),不是錯誤的種類
+    fn disconnect_reason(&self) -> Option<DisconnectReason>; // 出事那一跳自己的紀錄(§6.2 第 2 步)
+    fn close(&self);                                         // 明確關閉整條鏈:每一跳 disconnect()
+}
+pub trait ShellChannel: Send {
+    fn write(&self, data: &[u8]) -> Result<(), SessionError>;               // stdin
+    fn read(&self, buf: &mut [u8]) -> Result<usize, SessionError>;           // PTY 輸出(stdout/stderr 合併);0 = 已結束
+    fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError>; // shell 就緒前送的會被忽略,broker 記住最後一次再送(§7.2)
+    fn exited(&self) -> Option<Exit>;                                        // 結束後才有值
     fn close(&self);
 }
-trait HostKeyPolicy { fn check(&self, host: &HostRef, key: &HostKey) -> HostKeyVerdict; } // Pinned | Unknown | Mismatch
-trait AuthSource {
-    fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError>; // 保管庫 Material::sign;RSA 的雜湊由引擎傳入(sha256 | sha512),見 §6.3
-    fn password(&self, host: &HostRef) -> Option<Secret>;
-    fn interactive(&self, host: &HostRef, prompts: &[Prompt]) -> Option<Vec<Secret>>;
+pub trait HostKeyPolicy: Send + Sync {
+    /// 在 russh 的 callback 裡同步呼叫:只查表,不等人、不碰 UI(§6.2 第 3 步)。
+    fn check(&self, hop: &HopRef, key: &HostKey) -> HostKeyVerdict;         // Pinned | Unknown | Mismatch { pinned }
 }
+pub trait AuthSource: Send + Sync {
+    /// 保管庫 Material::sign;RSA 的雜湊由引擎傳入(sha256 | sha512),見 §6.3;必須快(不問 passphrase、不等核准)。
+    fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError>;
+    fn password(&self, hop: &HopRef) -> Option<Secret>;                      // 已有的密碼(keychain 或剛問到的);None = 不試密碼
+    fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>>; // 在 deadline 前回答;None = 放棄 → 引擎丟掉連線
+}
+
+pub struct Target { pub hops: Vec<Hop> }   // 依序經過,最後一個是目標;每一跳自帶設定
+pub struct Hop {
+    pub id: HostId, pub alias: String, pub hostname: String, pub port: u16, pub user: String,
+    pub auth: AuthMethod,                   // Key { key_id } | Password | Interactive(依序嘗試的起點;伺服器拒絕才換下一個)
+    pub pinned: Option<HostKey>,            // 已釘住時限縮 preferred.key 成它的演算法家族
+    pub connect_timeout: Duration, pub keepalive_every: Duration, pub keepalive_max_missed: u32,
+    pub nodelay: bool,                      // shell 用的連線 true
+}
+pub struct HostKey { pub algorithm: String, pub public_key: Vec<u8>, pub fingerprint: String } // "SHA256:…"
+pub enum ConnectError {
+    BadJumpChain { why: String },
+    Unreachable { hop: HopRef, reason: String },                       // DNS、TCP
+    Timeout { hop: HopRef, phase: Phase },                              // Tcp | Handshake | Auth
+    HostKeyUnknown { hop: HopRef, key: HostKey },
+    HostKeyMismatch { hop: HopRef, key: HostKey, pinned: HostKey },
+    NoCommonHostKeyAlgorithm { hop: HopRef, ours: Vec<String>, theirs: Vec<String> },
+    AuthFailed { hop: HopRef, tried: Vec<AuthMethod>, reason: String }, // 含「RSA 只能 SHA-1」
+    AuthAbandoned { hop: HopRef, reason: String },                      // sign 出錯、提示逾時或取消:連線已丟掉
+    Protocol { hop: HopRef, text: String },                             // russh 的錯誤文字,不含秘密
+}
+pub struct ExecResult { pub ended: Ended, pub exit_code: Option<u32>, pub signal: Option<String>, pub stdout: Vec<u8>, pub stderr: Vec<u8>, pub truncated: bool }
+pub enum Ended { Exited, Signaled, TimedOut, Disconnected }
+pub enum Exit { Code(u32), Signal(String), Disconnected }
 ```
 
 `Target` 是 host 記錄解析後的結果(含跳板鏈)。`HostKeyPolicy` 與 `AuthSource` 由 broker 實作:它決定提示送給誰(決策 7)。引擎不碰保管庫、不碰 UI。
@@ -173,7 +212,7 @@ trait AuthSource {
 長度前綴的訊框:`u32 長度 | u8 型別 | 內容`。控制訊息是 JSON,資料訊息是原始位元組。
 
 - 用戶端 → app:`hello{client: "connect" | "mcp", client_info?}`、`open_shell{host, pty{cols, rows, term}}`、`exec{host, command, timeout_secs}`、`data`(stdin)、`window_change{cols, rows}`、`answer{question_id, value | cancel}`、`close`。
-- app → 用戶端:`opened{session_id}`、`data`(stdout/stderr 合併,因為是 PTY)、`exec_result{ended: exited | signaled | timed_out | disconnected, exit_code (可空), signal (可空), stdout, stderr}`(第 0 期:被訊號殺掉的指令沒有結束碼,連線中斷也沒有;不能回 0)、`question{question_id, kind: host_key_notice | passphrase | password | interactive, text, echo: bool}`、`event{connected | disconnected{reason} | error{kind, text}}`、`exited{code (可空), signal (可空)}`;跳板的 `disconnected{reason}` 取自出事那一跳自己的紀錄(§6.2 第 2 步)。
+- app → 用戶端:`opened{session_id}`、`data`(stdout/stderr 合併,因為是 PTY)、`exec_result{ended: exited | signaled | timed_out | disconnected, exit_code (可空), signal (可空), stdout, stderr}`(第 0 期:被訊號殺掉的指令沒有結束碼,連線中斷也沒有;不能回 0)、`question{question_id, kind: host_key_notice | passphrase | password | interactive, text, echo: bool, deadline_ms}`(逾時視同取消:連線丟掉,§6.2 第 4 步)、`event{connected | disconnected{reason} | error{kind, text}}`、`exited{code (可空), signal (可空)}`;跳板的 `disconnected{reason}` 取自出事那一跳自己的紀錄(§6.2 第 2 步)。
 - `host` 可以是 alias 或 host id;alias 在多個 space 重複時回錯誤要求用 id。
 
 ### 7.2 Broker 規則
@@ -243,6 +282,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 - **新視窗**:主機金鑰指紋確認(仿現有核准視窗);MCP `ask` 模式的提問視窗(passphrase、密碼、2FA)。主機明細顯示釘住的金鑰與「Forget pinned key」。
 - **進行中的 session**:設定或側欄一小區,可關閉。
 - **設定**:AI Access(允許清單用主機 id、核准模式單選加確認視窗、最近 10 筆含請求者);Advanced(再次匯入、清理);Sync 的檔案相關文字刪除。介面字串英文。
+- (第 0 期後的介面後果,細節在 1d 的計畫)主機金鑰確認:第一次連線會先失敗(引擎回 `HostKeyUnknown`,連線不留著等人),視窗問完、釘住後 broker 自動重連,使用者看到的是「確認 → 連上」,CLI 這段印 `Waiting for you to confirm {alias}'s host key in SSHelter.`;不符時同樣先失敗、警告視窗、接受才重連。認證提示(passphrase、密碼、2FA)有期限,逾時或取消後連線已丟掉,要再連一次(§11 的 `Authentication for {alias} was abandoned`),視窗要讓人看得出「這次作廢,請重連」。進行中的 session 清單與 AI Access 的最近 10 筆顯示結束方式(`ended`:正常結束碼、被訊號終止、逾時、連線中斷),不再把中斷顯示成 0。
 
 ## 11. 錯誤處理
 
