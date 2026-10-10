@@ -13,7 +13,10 @@ use sshelter_lib::vault::material::open;
 struct Login {
     result: AuthResult,
     signer: VaultSigner,
-    /// What `best_supported_rsa_hash` said, flattened: `None` means plain ssh-rsa.
+    /// What `best_supported_rsa_hash` said, as russh gave it: `Some(Some(hash))` = the server lists rsa-sha2-*; `Some(None)` = it sends
+    /// `server-sig-algs` and lists ssh-rsa only; `None` = it sent no `server-sig-algs` at all.
+    raw_hash: Option<Option<HashAlg>>,
+    /// The same, flattened: `None` means plain ssh-rsa (SHA-1), whichever of the two ways above got there.
     hash_alg: Option<HashAlg>,
     /// What `echo` printed over the session that the vault's signature opened (empty when the login failed).
     echoed: String,
@@ -27,7 +30,8 @@ async fn log_in_through_the_vault(server: &Server, presented_public_line: &str, 
     let public = russh::keys::PublicKey::from_openssh(presented_public_line).expect("russh parses the public key line");
 
     let mut connection = within(30, "connect", connect(server.sshd.port, Config::default(), HostKeyVerdict::AcceptAny)).await.expect("connect");
-    let hash_alg = within(10, "server-sig-algs", connection.handle.best_supported_rsa_hash()).await.expect("best_supported_rsa_hash").flatten();
+    let raw_hash = within(10, "server-sig-algs", connection.handle.best_supported_rsa_hash()).await.expect("best_supported_rsa_hash");
+    let hash_alg = raw_hash.flatten();
     let result = within(30, "authenticate_publickey_with", connection.handle.authenticate_publickey_with(server.sshd.user.as_str(), public, hash_alg, &mut signer))
         .await
         .expect("authenticate_publickey_with");
@@ -36,7 +40,7 @@ async fn log_in_through_the_vault(server: &Server, presented_public_line: &str, 
     } else {
         String::new()
     };
-    Login { result, signer, hash_alg, echoed }
+    Login { result, signer, raw_hash, hash_alg, echoed }
 }
 
 /// A scratch sshd with a `host_key` host key (and `server_config` in front of its defaults) that accepts a fresh `kind` user key, and the vault login to it.
@@ -72,6 +76,7 @@ async fn an_rsa_3072_key_in_the_vault_logs_in_with_a_sha2_signature() {
     let (login, server) = login_with(&tools, KeyKind::Rsa3072, KeyKind::Ed25519, &[]).await;
     assert!(login.result.success(), "refused; sshd log: {}", server.sshd.log());
     let algorithm = login.signer.last_algorithm.clone().unwrap_or_default();
+    fact("signer.rsa.best_supported_rsa_hash_raw", format!("{:?}", login.raw_hash));
     fact("signer.rsa.hash_alg_offered_by_russh", format!("{:?}", login.hash_alg));
     fact("signer.rsa.algorithm_on_the_wire", &algorithm);
     assert!(algorithm == "rsa-sha2-512" || algorithm == "rsa-sha2-256", "a modern server must get a SHA-2 RSA signature, got {algorithm}");
@@ -84,13 +89,14 @@ async fn an_rsa_3072_key_in_the_vault_logs_in_with_a_sha2_signature() {
 /// refuses SHA-1 signatures altogether (set SPIKE_SKIP_SHA1=1, e.g. on RHEL/Fedora crypto policies).
 #[tokio::test(flavor = "multi_thread")]
 async fn an_rsa_key_in_the_vault_logs_in_to_a_server_that_only_speaks_ssh_rsa_sha1() {
-    if std::env::var_os("SPIKE_SKIP_SHA1").is_some() {
-        eprintln!("skipped: SPIKE_SKIP_SHA1 is set");
+    if std::env::var("SPIKE_SKIP_SHA1").is_ok_and(|v| v == "1") {
+        eprintln!("skipped: SPIKE_SKIP_SHA1=1");
         return;
     }
     let Some(tools) = tools() else { return };
     let (login, server) =
         login_with(&tools, KeyKind::Rsa3072, KeyKind::Rsa3072, &["HostKeyAlgorithms ssh-rsa", "PubkeyAcceptedAlgorithms ssh-rsa"]).await;
+    fact("signer.sha1_only.best_supported_rsa_hash_raw", format!("{:?}", login.raw_hash));
     fact("signer.sha1_only.hash_alg_offered_by_russh", format!("{:?}", login.hash_alg));
     fact("signer.sha1_only.algorithm_on_the_wire", login.signer.last_algorithm.clone().unwrap_or_default());
     assert!(login.result.success(), "refused; sshd log: {}", server.sshd.log());

@@ -12,8 +12,53 @@
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
+
+/// How long one run of a helper tool (ssh-keygen, sshd -t, id, ssh) may take. A tool still running after that is killed and fails the test,
+/// so a stuck one cannot hang CI. The same idea as `TOOL_TIMEOUT` in src-tauri/src/agent/openssh_tests.rs.
+const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `Command::output()` with a deadline of `TOOL_TIMEOUT`.
+fn run_bounded(command: &mut Command) -> Output {
+    run_within(command, TOOL_TIMEOUT)
+}
+
+/// `Command::output()` with a deadline: stdin is closed, stdout and stderr are captured (each read on its own thread, so a chatty tool cannot
+/// fill a pipe and block), and a tool still running after `timeout` is killed and the test panics with its command line and its stderr.
+fn run_within(command: &mut Command, timeout: Duration) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("cannot run {command:?}: {error}"));
+    let (stdout, stderr) = (read_in_background(child.stdout.take()), read_in_background(child.stderr.take()));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().expect("wait for the tool") {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+                panic!("{command:?} did not finish within {timeout:?} and was killed; its stderr so far: {stderr}");
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() }
+}
+
+fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
+}
 
 /// The OpenSSH programs the tests need.
 pub struct Tools {
@@ -90,13 +135,9 @@ pub struct TestKey {
 
 pub fn generate_key(tools: &Tools, dir: &Path, name: &str, kind: KeyKind) -> TestKey {
     let private_path = dir.join(name);
-    let out = Command::new(&tools.ssh_keygen)
-        .args(["-q", "-N", "", "-C", "spike"])
-        .args(kind.keygen_args())
-        .arg("-f")
-        .arg(&private_path)
-        .output()
-        .expect("run ssh-keygen");
+    let out = run_bounded(
+        Command::new(&tools.ssh_keygen).args(["-q", "-N", "", "-C", "spike"]).args(kind.keygen_args()).arg("-f").arg(&private_path),
+    );
     assert!(out.status.success(), "ssh-keygen failed: {}", String::from_utf8_lossy(&out.stderr));
     let mut public_path = private_path.clone().into_os_string();
     public_path.push(".pub");
@@ -136,6 +177,8 @@ pub struct Sshd {
 
 impl Sshd {
     pub fn start(tools: &Tools, options: SshdOptions) -> Sshd {
+        // Asked before the first sshd starts: a panic in here must not leave a listener behind.
+        let user = current_user();
         let dir = tempfile::Builder::new().prefix("spike-sshd-").tempdir().expect("temp dir");
         let host_key = generate_key(tools, dir.path(), "hostkey", options.host_key);
         let authorized = dir.path().join("authorized_keys");
@@ -152,7 +195,7 @@ impl Sshd {
             let port = free_port();
             std::fs::write(&config_path, config_text(port, &host_key.private_path, &authorized, &options.extra_config)).expect("write sshd_config");
             // `-t` checks the config and the keys without starting anything, so a typo fails here, in sshd's own words.
-            let check = Command::new(&tools.sshd).arg("-t").arg("-f").arg(&config_path).output().expect("run sshd -t");
+            let check = run_bounded(Command::new(&tools.sshd).arg("-t").arg("-f").arg(&config_path));
             assert!(
                 check.status.success(),
                 "sshd -t rejected the config:\n{}\n--- config:\n{}",
@@ -169,7 +212,7 @@ impl Sshd {
                 .spawn()
                 .expect("start sshd");
             if wait_for_banner(&mut child, port) {
-                return Sshd { port, user: current_user(), host_public_line: host_key.public_line, dir, child };
+                return Sshd { port, user, host_public_line: host_key.public_line, dir, child };
             }
             let _ = child.kill();
             let _ = child.wait();
@@ -204,6 +247,8 @@ fn config_text(port: u16, host_key: &Path, authorized_keys: &Path, extra: &[Stri
         "PubkeyAuthentication yes".to_string(),
         format!("AuthorizedKeysFile \"{}\"", authorized_keys.display()),
         "StrictModes no".to_string(),
+        // sshd runs ~/.ssh/rc by default, which would let the developer's real home directory into the test.
+        "PermitUserRC no".to_string(),
         "LogLevel ERROR".to_string(),
     ]);
     lines.join("\n") + "\n"
@@ -235,34 +280,87 @@ fn wait_for_banner(child: &mut Child, port: u16) -> bool {
 }
 
 fn current_user() -> String {
-    let out = Command::new("id").arg("-un").output().expect("run id -un");
+    let out = run_bounded(Command::new("id").arg("-un"));
     assert!(out.status.success(), "id -un failed");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// Runs the system `ssh` client against `sshd`. `-F /dev/null` keeps it from reading the real ~/.ssh/config; the agent and known_hosts are off.
-pub fn system_ssh(tools: &Tools, sshd: &Sshd, identity: &Path, remote_command: &str) -> std::process::Output {
-    Command::new(&tools.ssh)
-        .args(["-F", "/dev/null", "-p"])
-        .arg(sshd.port.to_string())
-        .arg("-i")
-        .arg(identity)
-        .args([
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "IdentityAgent=none",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-        ])
-        .arg(format!("{}@127.0.0.1", sshd.user))
-        .arg(remote_command)
-        .output()
-        .expect("run ssh")
+/// It gives up connecting after 10 s (`ConnectTimeout`) and is killed, with the test failing, if the whole run takes longer than `TOOL_TIMEOUT`.
+pub fn system_ssh(tools: &Tools, sshd: &Sshd, identity: &Path, remote_command: &str) -> Output {
+    run_bounded(
+        Command::new(&tools.ssh)
+            .args(["-F", "/dev/null", "-p"])
+            .arg(sshd.port.to_string())
+            .arg("-i")
+            .arg(identity)
+            .args([
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "IdentityAgent=none",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "LogLevel=ERROR",
+            ])
+            .arg(format!("{}@127.0.0.1", sshd.user))
+            .arg(remote_command),
+    )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    use super::run_within;
+
+    /// A tool that outlives its deadline is killed instead of waited for, and the failure names it and carries its stderr so far.
+    /// (`exec` makes sleep replace sh, so killing it leaves no child holding the pipes; the stderr sentence is split by `printf`, so
+    /// finding it whole in the message proves the pipe was really read.)
+    #[test]
+    fn a_tool_that_outlives_its_deadline_is_killed_and_named() {
+        let started = Instant::now();
+        let payload = std::panic::catch_unwind(|| {
+            run_within(Command::new("sh").args(["-c", "printf 'no %s yet\\n' answer >&2; exec sleep 5"]), Duration::from_millis(500))
+        })
+        .expect_err("a tool that outlives its deadline must panic");
+        let message = payload.downcast_ref::<String>().expect("a formatted panic message");
+        assert!(message.contains("exec sleep 5"), "the message names the command: {message}");
+        assert!(message.contains("no answer yet"), "the message carries the stderr so far: {message}");
+        assert!(started.elapsed() < Duration::from_secs(4), "killed at the deadline, not waited for: {:?}", started.elapsed());
+    }
+
+    /// Four MiB on stdout and on stderr is far more than a pipe holds: the readers must keep up or the tool would block until the deadline.
+    #[test]
+    fn output_far_larger_than_a_pipe_arrives_complete_and_does_not_deadlock() {
+        let started = Instant::now();
+        let out = run_within(Command::new("sh").args(["-c", "head -c 4194304 /dev/zero; head -c 4194304 /dev/zero >&2"]), Duration::from_secs(20));
+        assert!(out.status.success());
+        assert_eq!((out.stdout.len(), out.stderr.len()), (4_194_304, 4_194_304));
+        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn the_exit_code_and_both_streams_come_back_like_output_does() {
+        let out = run_within(Command::new("sh").args(["-c", "printf out; printf err >&2; exit 3"]), Duration::from_secs(20));
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!((out.stdout.as_slice(), out.stderr.as_slice()), (b"out".as_slice(), b"err".as_slice()));
+    }
+
+    /// `Command::output()` closes stdin and so does `run_within`: a tool that reads it sees end-of-file at once instead of waiting for input.
+    #[test]
+    fn stdin_is_closed_so_a_tool_that_reads_it_does_not_wait() {
+        let started = Instant::now();
+        let out = run_within(&mut Command::new("cat"), Duration::from_secs(20));
+        assert!(out.status.success() && out.stdout.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
 }
