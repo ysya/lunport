@@ -1,0 +1,26 @@
+[package]
+name = "russh-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Phase 0 spike for SSHelter's own SSH client. Throwaway, not product code."
+
+# Its own workspace root: the crate belongs to no workspace, and its Cargo.lock is not src-tauri's.
+[workspace]
+
+[features]
+default = ["app-vault"]
+# The app library (sshelter_lib: Tauri and everything it links). Task 2 signs through its vault::material.
+# The Windows job builds with --no-default-features (see .github/workflows/spike-windows.yml).
+app-vault = ["dep:sshelter"]
+
+[dependencies]
+russh = "=0.64.1"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tempfile = "3"
+thiserror = "2"
+sshelter = { path = "../../src-tauri", optional = true }
+
+[dev-dependencies]
+# The app's ssh-key (the vault's version) under another name, so a test can hold it next to the ssh-key russh pins.
+ssh-key-app = { package = "ssh-key", version = "0.6.7" }
