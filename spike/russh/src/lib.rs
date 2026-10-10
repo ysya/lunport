@@ -18,3 +18,7 @@ pub async fn within<T>(seconds: u64, what: &str, future: impl std::future::Futur
 }
 
 pub mod harness;
+pub mod client;
+pub mod fixture;
+#[cfg(feature = "app-vault")]
+pub mod signer;
