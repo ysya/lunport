@@ -1,7 +1,7 @@
 # SSHelter 自有 SSH 用戶端(Termius 模式)設計
 
 - 日期:2026-10-10
-- 狀態:已核准。使用者 2026-10-10 分段核准:方向(A、A1、B1、第一版範圍、做法 1)與第 4–13 節的內容。
+- 狀態:已核准。使用者 2026-10-10 分段核准:方向(A、A1、B1、第一版範圍、做法 1)與第 4–13 節的內容。2026-10-11 依第 0 期試驗報告(`2026-10-10-own-ssh-spike-report.md`,判定 GO)修訂:§4、§6.1–6.3、§7.1–7.3、§8.2、§11–§13、§15–§16;修訂處標「(第 0 期)」。
 - 取代:`2026-10-07-key-vault-agent-design.md` 第 0 節「用系統的 `ssh`,由 SSHelter 的 agent 提供金鑰」這個前提,以及該文件的 §5(agent)、§6(接線)、§8(搬遷)、§9(MCP)與 §10 的 agent 相關內容;分支 `feat/mcp-ssh-exec` 上的 `2026-10-10-mcp-ssh-exec-design.md`(其核准模式、log 與請求者辨識的決定併入本文件第 8 節)。
 - 不動:0.17 系列照常維護;本設計在新的主版本 1.0 實作(第 13 節)。
 - 相關:金鑰保管庫格式(`vault/`)與同步鏈的密碼學(`sync/crypto.rs`)沿用,不在本文件重述。
@@ -67,7 +67,7 @@ SSHelter 原本是「`~/.ssh/config` 的編輯器,加上同步與金鑰保管庫
 - **連線 runtime**:一個專用的 tokio runtime 跑 russh。同步引擎與它之間只用 channel 傳訊息,不共用鎖;保管庫的簽章在 runtime 裡呼叫時用 `spawn_blocking`。
 - **`ssh/` 模組**:SSHelter 自己的介面(第 6 節的 `SshEngine`、`Session`)。只有 `ssh/russh_engine.rs` import russh。
 - **Session broker**(`session/` 模組):session 表(id、主機、狀態、擁有者、開始時間),核准與 log 的入口。
-- **本機 IPC 伺服器**(`ipc/` 模組):從 `agent/server.rs`(`listen_unix`、`take_lock`、`check_socket_path`、`peer`)、`agent/pipe_windows.rs`(`listen`、`pipe_name`)、`agent/peer.rs`(`process_chain`、`identify`)搬過來,去掉 agent 協定。socket 在 `<app data>/ipc/sock`(macOS 的 socket 路徑上限 104 bytes,這台實測 69;超過時 `check_socket_path` 回明確錯誤,不退回其他目錄);Windows 用 per-user SID 的 named pipe。只接受同使用者;對端 pid 往上找程序鏈,去掉 SSHelter 自己的執行檔,得到「Terminal → zsh」或「Claude → claude」這種名稱鏈與識別值。
+- **本機 IPC 伺服器**(`ipc/` 模組):第 0 期已從 `agent/server.rs`(`listen_unix`、`take_lock`、`check_socket_path`、`peer`)、`agent/pipe_windows.rs`(`listen`、`pipe_name`)、`agent/peer.rs`(`process_chain`、`identify`)搬到 `src-tauri/src/ipc/`(行為不變,`agent/` 暫時仍用它;第 1 期刪 `agent/` 時去掉 agent 協定;`ipc/mod.rs` 的守門測試保證 `ipc/` 不再指回 `agent`)。socket 在 `<app data>/ipc/sock`(macOS 的 socket 路徑上限 104 bytes,這台實測 69;超過時 `check_socket_path` 回明確錯誤,不退回其他目錄);Windows 用 per-user SID 的 named pipe。只接受同使用者;對端 pid 往上找程序鏈,去掉 SSHelter 自己的執行檔,得到「Terminal → zsh」或「Claude → claude」這種名稱鏈與識別值。
 - **保管庫**(`vault/`)、**MCP 的政策、核准視窗、log**(`mcp.rs` 的這部分)沿用。
 
 **兩個薄用戶端,都是 SSHelter 同一個執行檔:**
@@ -137,7 +137,7 @@ trait Session {
 }
 trait HostKeyPolicy { fn check(&self, host: &HostRef, key: &HostKey) -> HostKeyVerdict; } // Pinned | Unknown | Mismatch
 trait AuthSource {
-    fn sign(&self, key_id: &str, data: &[u8]) -> Result<Signature, AuthError>;        // 保管庫 Material::sign
+    fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError>; // 保管庫 Material::sign;RSA 的雜湊由引擎傳入(sha256 | sha512),見 §6.3
     fn password(&self, host: &HostRef) -> Option<Secret>;
     fn interactive(&self, host: &HostRef, prompts: &[Prompt]) -> Option<Vec<Secret>>;
 }
@@ -145,21 +145,26 @@ trait AuthSource {
 
 `Target` 是 host 記錄解析後的結果(含跳板鏈)。`HostKeyPolicy` 與 `AuthSource` 由 broker 實作:它決定提示送給誰(決策 7)。引擎不碰保管庫、不碰 UI。
 
+`sign` 的合約(第 0 期):russh 的 `Signer::auth_sign(&mut self, &AgentIdentity, Option<HashAlg>, Vec<u8>)` 把待簽緩衝區與**呼叫端選的** `hash_alg` 原樣交給簽章器,russh 自己不檢查;引擎把 `hash_alg` 轉成 `rsa_hash` 傳給 `sign`,RSA 金鑰而 `rsa_hash` 是 `None`(伺服器只接受 SHA-1)時引擎不呼叫 `sign`、直接回 `ConnectError::AuthFailed` 並說明原因。`sign`、`password`、`interactive` 都要**快**:russh 在等簽章與等 keyboard-interactive 的回答時把整條 session 停住、不讀 socket,等待期間伺服器的 `LoginGraceTime` 照跑,`disconnect()` 也變成 no-op(§6.2 第 4 步)。passphrase 的輸入、保管庫解鎖、核准等使用者互動都在呼叫引擎之前做完;keyboard-interactive 的提示本來就在認證途中回答,所以有逾時(§6.2 第 4 步)。
+
 ### 6.2 流程
 
 1. 解析 host 記錄:跳板鏈展開成 `[jump1, jump2, …, target]`,每一跳都是已儲存的主機;循環或缺主機 → `ConnectError::BadJumpChain`。
-2. 連第一跳(TCP + 連線逾時);之後每一跳:在前一跳的 session 上開 direct-tcpip 通道到下一跳的 hostname:port,把通道當成串流再跑一次連線(russh:`channel_open_direct_tcpip` → `into_stream` → `connect_stream`)。
-3. 每一跳做主機金鑰檢查(`HostKeyPolicy`):`Pinned` 繼續;`Unknown` → broker 在 app 視窗要求確認(接受後寫進該主機記錄並同步);`Mismatch` → 警告視窗,只有按「接受新金鑰」才更新,否則 `ConnectError::HostKeyMismatch`。
-4. 認證依序:公鑰(`key_id`;有 passphrase 則走現有的「輸入或記住」)→ 密碼(keychain;沒有就問,可勾記住)→ keyboard-interactive。全部失敗 → `ConnectError::AuthFailed{tried}`。
-5. keepalive:每 `keepalive_secs` 一次,連續 `keepalive_max_missed` 次沒回應就斷線並通知擁有者。
+2. 連第一跳(TCP + 握手);之後每一跳:在前一跳的 session 上開 direct-tcpip 通道到下一跳的 hostname:port,把通道當成串流再跑一次連線(russh:`channel_open_direct_tcpip` → `into_stream` → `connect_stream`)。(第 0 期)russh 沒有連線或握手的逾時,`connect` 會一直等:每一跳的 `connect`(含握手)都用 `tokio::time::timeout` 包住,時間取 host 記錄的 `connect_timeout_secs`;§11 的「連不上」要涵蓋握手沒有回應。跳板鏈由一個連線物件擁有整條生命週期,關閉一律用明確的 `disconnect()`(只丟掉外層的 `Handle` 不會結束任何一跳);外層先沒了時 russh 不會替內層呼叫 `Handler::disconnected`、內層的 `Handle` future 與 `is_closed()` 只回答「結束了」,所以斷線原因取自出事那一跳自己的紀錄(內層自己先結束、外層還活著的情況尚未量測,§16)。
+3. 每一跳做主機金鑰檢查(`HostKeyPolicy`):`Pinned` 繼續;`Unknown` → broker 在 app 視窗要求確認(接受後寫進該主機記錄並同步);`Mismatch` → 警告視窗,只有按「接受新金鑰」才更新,否則 `ConnectError::HostKeyMismatch`。(第 0 期)**引擎的 `check_server_key` 不等人**:russh 在這個 callback 回來之前不讀 socket,等待期間伺服器的 `LoginGraceTime`(引擎無從得知)照跑,答得慢時 `connect` 仍回 Ok 但連線已死、失敗要到之後的呼叫才浮現、面貌依呼叫而異,甚至第一次呼叫還能得到正常的拒絕。所以:`Unknown`/`Mismatch` 時 handler 記下金鑰(演算法、公鑰、指紋)並回 `false`,這次 `connect` 以 `UnknownKey` 失敗;broker 拿記下的金鑰問使用者;接受(釘住並同步)後**重連**,第二次 `Pinned` 直接通過。引擎自己記下「拒絕的原因」(沒看過 vs 不符),因為 russh 兩種都回同一個 `UnknownKey`。已釘住的主機把 `Config::preferred.key` 限縮成釘住的演算法家族(伺服器之後新增別種金鑰或 russh 升版改預設順序時才不會誤報不符;沒有共同演算法時用 `NoCommonAlgo` 的 `ours`/`theirs` 組訊息)。連線是否還活著一律看連線自己的狀態(`Handle` future 是否已結束、`is_closed()`、handler 記下的 `disconnected`),不看錯誤的 variant,並在第一次呼叫失敗之後才判斷(`connect` 剛回來時 `is_closed()` 一律 false)。
+4. 認證依序:公鑰(`key_id`;有 passphrase 則走現有的「輸入或記住」)→ 密碼(keychain;沒有就問,可勾記住)→ keyboard-interactive。全部失敗 → `ConnectError::AuthFailed{tried}`。(第 0 期)**只有伺服器拒絕時,才在同一條連線上換下一個方法**(拒絕時呼叫回 `AuthResult::Failure` 並列出剩下的方法,連線仍可用):`sign` 回錯誤、`password`/`interactive` 回 `None`、提示逾時或被取消,一律丟掉這條連線(`Handle`),需要時重連,不在同一條連線上換方法——russh 在等簽章與等 keyboard-interactive 回答時把 session 停住,出錯後 session 卡死、`authenticate_*` 永遠沒有回答、`disconnect()` 是 no-op(讀 russh 0.64.1 原始碼推得,§12 的測試要量)。每個 `authenticate_*` 都用 `tokio::time::timeout` 包住;keyboard-interactive 的提示給使用者的等待有上限(取 `connect_timeout_secs` 的 4 倍,最少 60 秒),逾時或取消 → 丟掉連線;等待期間若伺服器先斷(寬限時間),重連後再問一次(一次性密碼要重新產生)。
+5. keepalive:每 `keepalive_secs` 一次,連續 `keepalive_max_missed` 次沒回應就斷線並通知擁有者。(第 0 期)russh 預設關閉 keepalive(`keepalive_interval: None`),引擎自己設;russh 的語意是「這麼久沒收到任何東西才送一次」、超過 `keepalive_max` 次沒回應才斷,察覺斷線要 **(`keepalive_max_missed` + 1) × `keepalive_secs`**(§11 的 `{n}` 用這個值);keepalive 只在認證完成後計時,認證前由第 2 步的逾時與第 3 步的存活檢查負責。
 
 ### 6.3 紀律與限制
 
 - 每個 channel 都有專屬的讀取工作(russh 已知:沒人讀的 channel 會卡住整條連線,維護者拒絕修改)。
-- 演算法用 russh 預設(mlkem768x25519、curve25519-sha256、chacha20-poly1305、aes-gcm、rsa-sha2、strict-kex),但把 `ssh-rsa`(SHA-1)從主機金鑰與簽章演算法清單拿掉(russh 的預設清單含它;2026-10-10 起草第 0 期計畫時發現);第一版不提供舊演算法,只給 rsa-sha2-256/512 的主機就連不上,錯誤訊息說明原因。
+- 演算法用 russh 預設(mlkem768x25519、curve25519-sha256、chacha20-poly1305、aes-gcm、rsa-sha2、strict-kex),第一版不提供舊演算法;拿掉 `ssh-rsa`(SHA-1)分成兩件事(第 0 期):(a) 主機金鑰:`Config::preferred.key` = `Preferred::DEFAULT.key` 去掉 `Rsa { hash: None }`;只給 ssh-rsa 的主機連不上,錯誤訊息用 `NoCommonAlgo` 的 `ours` 與 `theirs` 說明原因(已驗證);(b) 登入簽章:**拒絕 SHA-1 是引擎自己的檢查**,不是 russh 的設定——`preferred.key` 只管主機金鑰與協商,使用者認證的雜湊由呼叫端傳給 `Signer`,預設會簽 SHA-1;RSA 金鑰且 `hash_alg` 為 `None` 就不簽、回明確錯誤;`best_supported_rsa_hash()` 只對 RSA 金鑰呼叫(伺服器還沒送 `server-sig-algs` 時它最多等 1 秒)。(b) 要有一個會擋下來的測試(§12)。
+- (第 0 期)每個 channel 的讀取工作到 IPC 之間用有界佇列並定好滿了怎麼辦(終端機暫停時不能拖住整條連線);exec 的輸出設上限,到了就 `close()`,連線仍可用。
+- (第 0 期)shell 用的連線設 `nodelay = true`(russh 預設 false、Nagle 開著;`connect_stream` 的跳板要自己對 socket 設,russh 只在 `connect` 裡套用)。
+- (第 0 期)不要假設輸出的換行是 `\n`:Windows OpenSSH 的 exec 輸出以 CRLF 結尾(對 `echo` 觀察到);`ssh_exec` 照原樣回位元組,SSHelter 自己切行的地方兩種都要收。
 - 不支援 sk-* 金鑰;不做 agent forwarding。
 - 版本釘死 `=0.64.x`;升版是獨立的任務,要跑整合測試。
-- 待試驗(第 13 節第 0 期):ssh-key 0.6.7(保管庫)與 russh 釘的 ssh-key 0.7.0-rc 並存;Windows 實機連線;`Signer` 接 `Material::sign` 的簽章格式。
+- 第 0 期已驗證:ssh-key 0.6.7(保管庫)與 russh 釘的 ssh-key 0.7.0-rc 並存;Windows 實機連線;`Signer` 接 `Material::sign`(Ed25519、ECDSA P-256、RSA 3072 都登入成功);見試驗報告。
 
 ## 7. Session broker、本機 IPC、CLI
 
@@ -168,7 +173,7 @@ trait AuthSource {
 長度前綴的訊框:`u32 長度 | u8 型別 | 內容`。控制訊息是 JSON,資料訊息是原始位元組。
 
 - 用戶端 → app:`hello{client: "connect" | "mcp", client_info?}`、`open_shell{host, pty{cols, rows, term}}`、`exec{host, command, timeout_secs}`、`data`(stdin)、`window_change{cols, rows}`、`answer{question_id, value | cancel}`、`close`。
-- app → 用戶端:`opened{session_id}`、`data`(stdout/stderr 合併,因為是 PTY)、`exec_result{exit_code, stdout, stderr, timed_out}`、`question{question_id, kind: host_key_notice | passphrase | password | interactive, text, echo: bool}`、`event{connected | disconnected{reason} | error{kind, text}}`、`exited{code}`。
+- app → 用戶端:`opened{session_id}`、`data`(stdout/stderr 合併,因為是 PTY)、`exec_result{ended: exited | signaled | timed_out | disconnected, exit_code (可空), signal (可空), stdout, stderr}`(第 0 期:被訊號殺掉的指令沒有結束碼,連線中斷也沒有;不能回 0)、`question{question_id, kind: host_key_notice | passphrase | password | interactive, text, echo: bool}`、`event{connected | disconnected{reason} | error{kind, text}}`、`exited{code (可空), signal (可空)}`;跳板的 `disconnected{reason}` 取自出事那一跳自己的紀錄(§6.2 第 2 步)。
 - `host` 可以是 alias 或 host id;alias 在多個 space 重複時回錯誤要求用 id。
 
 ### 7.2 Broker 規則
@@ -178,6 +183,7 @@ trait AuthSource {
 - 提示的去向(決策 7):擁有者是 `connect` → `question` 訊框送到 CLI,在終端機裡問;擁有者是 `mcp` 且模式 `ask` → app 視窗;`mcp` 且 `auto_log` → 回 `error{needs_interaction}`。主機金鑰的確認永遠在 app 視窗(決策 6),CLI 只收到 `host_key_notice`。
 - 每個 session 寫一筆 log(第 8.4 節的同一份 log,`client` 欄位區分 connect 與 mcp)。
 - 請求者辨識:接受連線時做一次(peer uid 檢查 → pid → 程序鏈 → 去掉自己的執行檔 → `identify`),附在該連線的每個請求上;認不出來顯示 `an unknown program`。
+- 視窗大小(第 0 期):broker 記住每個 session 最後一次的 `window_change`,PTY 建好、shell 就緒後再送一次(PTY 之前送的會被忽略)。
 
 ### 7.3 `sshelter connect <alias>`
 
@@ -202,7 +208,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 
 - `list_hosts`:允許清單上的主機(alias、hostname、user、port、tags、space)。
 - `get_host(alias)`:該主機的結構化欄位,不含任何秘密與主機金鑰的公鑰。
-- `ssh_exec(alias, command, timeout_seconds 1–300 預設 60)`:走 broker 的 `exec`(無 PTY),回 stdout、stderr、結束碼、是否逾時。
+- `ssh_exec(alias, command, timeout_seconds 1–300 預設 60)`:走 broker 的 `exec`(無 PTY),回 stdout、stderr、`ended`(exited | signaled | timed_out | disconnected)、結束碼(可空)、signal(可空);被訊號殺掉或連線中斷時明說,不回 0(第 0 期)。
 - 呼叫舊名 `run`:JSON-RPC 錯誤,訊息 `run was renamed to ssh_exec`。
 - 不設 `_meta["anthropic/requiresUserInteraction"]`(決策 12)。
 
@@ -247,14 +253,16 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 | 主機金鑰未確認 | app 視窗問;CLI 印 `Waiting for you to confirm {alias}'s host key in SSHelter.`;MCP `auto_log` 回 `needs interaction: host key not confirmed` |
 | 主機金鑰不符 | 警告視窗;拒絕 → `The host key of {alias} changed. Connection refused.` |
 | 認證失敗 | `Authentication failed for {user}@{alias} (tried: publickey, password).` |
-| keepalive 連續沒回應 | `Connection to {alias} lost (no response for {n} seconds).` |
+| keepalive 連續沒回應 | `Connection to {alias} lost (no response for {n} seconds).`,`{n}` = (`keepalive_max_missed` + 1) × `keepalive_secs`(第 0 期) |
+| 連線在指令執行中斷掉 | `Connection to {alias} lost while the command was running.`;MCP 回 `ended: disconnected`,沒有結束碼(第 0 期) |
+| 簽章器出錯、提示逾時或被取消 | 連線丟掉:`Authentication for {alias} was abandoned ({reason}).`;使用者再連一次(第 0 期) |
 | IPC 連不上 app | `SSHelter did not start within 12 seconds.` |
 | russh 回報的協定錯誤 | `SSH error: {text}`,不含金鑰或密碼 |
 
 ## 12. 測試、CI、安全
 
 - 單元測試照舊(inline);引擎在介面後面,所以 broker、MCP、CLI 的測試用假引擎(`FakeEngine`:可編排主機金鑰結果、認證結果、輸出、斷線)。
-- 整合測試:真引擎對本機臨時 `sshd`(repo 裡還沒有起 sshd 的測試架構,`agent/openssh_tests.rs` 只用 ssh-keygen 與 ssh-add;第 0 期要建一套:臨時目錄、隨機埠、測試用主機金鑰與 authorized_keys、以一般使用者執行 `sshd -D -f <設定>`,工具不在 PATH 上就略過;測試不碰使用者的 `~/.ssh`),涵蓋公鑰(從保管庫簽章)、密碼、keyboard-interactive、PTY 與 window change、exec、兩層跳板、主機金鑰的三種結果、keepalive 斷線。macOS/Linux 的 CI 跑;Windows CI 新增一個工作:對 Windows OpenSSH server 連線加 exec,證明 Windows 跑得起來。
+- 整合測試:真引擎對本機臨時 `sshd`。第 0 期已建好這套架構(`spike/russh/src/harness.rs`:臨時目錄、先綁 socket 取得空閒埠、測試用主機金鑰與 authorized_keys、以一般使用者執行 `sshd -D -e -f <設定>`、`PermitUserRC no`、工具不在 PATH 上就略過、不碰使用者的 `~/.ssh`),第 1 期搬進 app 的測試支援程式碼(改用 `crate::process`,順便讓逾時殺掉子行程後的等待有上限),每個測試自己起一個 sshd、不共用;非共用不可的長迴圈設 `PerSourcePenalties no`(OpenSSH ≥ 9.8 才認得,不能放進預設設定)。涵蓋公鑰(從保管庫簽章)、密碼、keyboard-interactive、PTY 與 window change、exec、兩層跳板、主機金鑰的三種結果、keepalive 斷線;第 0 期之後必加:拒絕 SHA-1 RSA 簽章的檢查(§6.3 b);`sign` 回錯誤之後 `authenticate_none` 與 `disconnect()` 的行為(session 卡死的量測);被放棄的 keyboard-interactive;經過跳板的大量輸出(流量控制);未認證且閒置超過 `keepalive_interval` 時 CPU 不空轉(讀原始碼懷疑的點)。密碼與 keyboard-interactive 的**成功**路徑臨時 sshd 沒有 PAM 走不到,要用有 PAM 的 sshd 容器(CI 的 Linux 工作)。CI:macOS、Linux(新增;`vault::` 在 `zeroize` 1.9.1 下)都跑;Windows 的 `test-windows.yml` 加上引擎的整合測試(對 runner 的 OpenSSH server;第 0 期的 `spike-windows.yml` 已證明做法),並在加了 russh 的 `src-tauri/Cargo.lock` 下建置整個 app(第 0 期只建了試驗 crate)。
 - 兩台電腦的同步測試在記錄層用 `FakeRelay`(不再需要檔案);搬遷測試用固定的 ssh_config 樣本。
 - CLI 測試:協定編解碼、raw mode 的進出與還原(假的 termios);Windows console 的部分列入手動清單。
 - 安全:`cargo audit` 進 CI;russh 的公告每月看一次;私鑰只在 app 行程;IPC 只接受同使用者;MCP `auto_log` 絕不接受主機金鑰、絕不代答提示。
@@ -263,7 +271,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 
 | 期 | 內容 | 產出 |
 |---|---|---|
-| 0 試驗(幾天) | russh 與 ssh-key 0.6.7 並存;對本機 sshd 連線、exec、shell;Windows 實機;`Signer` 接 `Material::sign`;IPC 搬成 `ipc/` 的可行性 | 可不可行的事實;必要時回到本文件修改 |
+| 0 試驗(完成 2026-10-11) | russh 與 ssh-key 0.6.7 並存;對本機 sshd 連線、exec、shell;Windows 實機;`Signer` 接 `Material::sign`;IPC 搬成 `ipc/` | 判定 GO;報告 `2026-10-10-own-ssh-spike-report.md`;本文件依它修訂(標「(第 0 期)」處);`ipc/` 已搬、隨 beta 0.17.0-9 出貨 |
 | 1 核心 | 資料模型與 schema 3、匯入、引擎、broker、IPC、`sshelter connect`、Connect 按鈕、最小主機編輯器、主機金鑰釘住 | 使用者日常可以用它連線 |
 | 2 MCP | `ssh_exec`、核准模式、log、請求者辨識、AI Access 頁 | AI 可以用 |
 | 3 收尾 | Keychain 清理、session 清單、Windows 終端機、搬遷清理、文件、手動檢查清單、`cargo audit` | 1.0.0-1 beta |
@@ -282,11 +290,11 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 
 ## 15. 查證紀錄(2026-10-10)
 
-- russh 0.64.1(2026-10-05);2026 年 182 個 commit、58 個 open issues、實質單一維護者;MSRV 1.89;tokio 硬相依;預設 aws-lc-rs;釘 `ssh-key =0.7.0-rc.11`、`rsa =0.10.0-rc.18`;`authenticate_publickey_with(user, PublicKey, hash_alg, &mut impl Signer)` 的 `Signer::auth_sign(&AgentIdentity, Vec<u8>)` 收待簽緩衝區,要回傳「原緩衝區 + u32 長度 + 簽章 blob」(docs.rs 2026-10-10,fetch 後以編譯器確認);`check_server_key` 預設全拒;預設協商 ed25519、ecdsa、rsa-sha2-512/256、ssh-rsa,不含 sk-*;channel 提供 PTY、`window_change`、shell、exec、subsystem、direct-tcpip、`tcpip_forward`、keepalive;ProxyJump 無內建,用 direct-tcpip + `connect_stream`;Windows 只有 CI 建置、測試只跑 Linux;2026 年 19 則 GHSA(多為對端觸發的 DoS/panic),RustSec 2026-0154 已修;沒人讀的 channel 會卡住連線(PR 730 被拒)。
+- russh 0.64.1(2026-10-05);2026 年 182 個 commit、58 個 open issues、實質單一維護者;MSRV 1.89;tokio 硬相依;預設 aws-lc-rs;釘 `ssh-key =0.7.0-rc.11`、`rsa =0.10.0-rc.18`;`authenticate_publickey_with(user, PublicKey, hash_alg, &mut impl Signer)` 的 `Signer::auth_sign(&mut self, &AgentIdentity, Option<HashAlg>, Vec<u8>) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send` 收待簽緩衝區與呼叫端選的雜湊,要回傳「原緩衝區 + u32 長度 + 簽章 blob」(第 0 期以編譯器確認,三種金鑰登入成功);`check_server_key` 預設全拒;預設協商 ed25519、ecdsa、rsa-sha2-512/256、ssh-rsa,不含 sk-*;channel 提供 PTY、`window_change`、shell、exec、subsystem、direct-tcpip、`tcpip_forward`、keepalive;ProxyJump 無內建,用 direct-tcpip + `connect_stream`;Windows 只有 CI 建置、測試只跑 Linux;2026 年 19 則 GHSA(多為對端觸發的 DoS/panic),RustSec 2026-0154 已修;沒人讀的 channel 會卡住連線(PR 730 被拒)。
 - russh-sftp 3.0.1(2026-09-28),SFTP v3,之後用。
 - `ssh2`(libssh2 綁定)0.9.6:C 相依、同步 API、文件無自訂簽章、libssh2 正式版停在 2024-10、2026 年有 client 端 CVE;不採用。
 - 保管庫的 `vault/material.rs` `Material::sign(data, flags)` 可對任意位元組簽章(Ed25519、ECDSA、RSA),可當 `AuthSource::sign` 的實作。
-- lib crate 名稱是 `sshelter_lib`(crate-type 含 rlib,可用路徑相依),但 `lib.rs` 的 `mod vault` 不是 `pub`:試驗要開放可見性或在試驗 crate 裡複製簽章那段。`tokio 1.52`、`aws-lc-rs 1.18`、`ring 0.17`、`rustls 0.23` 已在 app 的 Cargo.lock 裡,所以 TLS 那一層不會多一套;但 russh 會帶進第二組 RustCrypto 的 rc 版本(`ssh-key 0.7.0-rc.11`、`rsa 0.10.0-rc.18` 等),和 app 現用的 `ssh-key 0.6.7`、`rsa 0.9` 並存,第 0 期要驗證編譯與執行都沒問題。
+- lib crate 名稱是 `sshelter_lib`(crate-type 含 rlib,可用路徑相依),但 `lib.rs` 的 `mod vault` 不是 `pub`:試驗要開放可見性或在試驗 crate 裡複製簽章那段。`tokio 1.52`、`aws-lc-rs 1.18`、`ring 0.17`、`rustls 0.23` 已在 app 的 Cargo.lock 裡,所以 TLS 那一層不會多一套;但 russh 會帶進第二組 RustCrypto 的 rc 版本(`ssh-key 0.7.0-rc.11`、`rsa 0.10.0-rc.18` 等),和 app 現用的 `ssh-key 0.6.7`、`rsa 0.9` 並存。第 0 期驗證:兩代並存、編譯、互認公鑰都沒問題;以試驗 crate 的 `Cargo.lock` 計多 92 個套件(34 個新 crate + 58 個既有 crate 的第二版本)、3 個預覽版(pkcs1、rsa、ssh-key),`zeroize` 被迫從 1.8.2 升到 1.9.1——加進 `src-tauri/` 時要重算、重跑整個 lib 測試(特別是 `vault::`),`cargo audit` 與升版要看兩代。`lib.rs` 的 `mod vault` 已在第 0 期改成 `pub mod vault;`。
 - 同步引擎是阻塞式執行緒(`reqwest::blocking` 不能跑在 tokio 上),所以連線 runtime 要分開。
 - 現有記錄模型:`Record{kind,id,version,updated_at_ms,device_id,deleted,payload}`;space 鏈的 `host` 記錄今天是整段 Host 文字(`HostPayload{schema,text}`);帳戶 `schema_version` 超過支援的值就唯讀。
 - Windows 的 release 版是 `windows_subsystem = "windows"`,沒有 console;`GetNamedPipeClientProcessId` 已在 `agent/pipe_windows.rs` 使用。
@@ -296,8 +304,9 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 
 ## 16. 待試驗與未決
 
-- ssh-key 0.6.7 與 0.7.0-rc 並存(第 0 期)。
-- Windows:russh 實機連線;`AttachConsole` + VT 模式在 Windows Terminal 與傳統 console 的行為(第 0 期與第 3 期)。
+- Windows:`AttachConsole` + VT 模式在 Windows Terminal 與傳統 console 的行為(第 3 期);PTY/ConPTY 與視窗大小沒量過。
+- 第 0 期沒量到、第 1 期要補(§12):密碼與 keyboard-interactive 的成功路徑(PAM);`sign` 出錯與被放棄的 keyboard-interactive 之後的 session;內層跳板自己先結束、外層還活著時的 `disconnected`;Linux 與其他版本的 sshd(所有計時只在 macOS OpenSSH 10.3p1 量過);長時間連線與 rekey;沒有 `server-sig-algs` 的老伺服器;app 加上 russh 後的 Windows build;`cargo audit` 對兩代 RustCrypto 的結果。
+- 試驗 crate `spike/` 的壽命:它的 lock 記了 app 的整個相依圖,`src-tauri/Cargo.toml` 一變,它的 `--locked` Windows 工作就壞;harness 搬進 app 之後刪掉 `spike/` 與 `spike-windows.yml`(報告留著)。
 - 同一個 alias 在不同 space 重複時 CLI 的選法(本文件:回錯誤要求用 id;UI 可以禁止同名)。
 - keyboard-interactive 的提示在 MCP `ask` 模式下送 app 視窗,是否需要遮蔽輸入(`echo` 旗標已在協定裡,視窗照它做)。
 - 1.0 的 beta 何時開始發到唯一的 beta 通道(使用者決定)。
