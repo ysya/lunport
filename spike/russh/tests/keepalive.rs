@@ -58,7 +58,7 @@ async fn a_connection_cut_during_an_exec_ends_it_without_an_exit_status() {
     let proxy = Proxy::start(server.sshd.port).await;
     let connection = server.connect_and_login(proxy.port, Config::default(), HostKeyVerdict::AcceptAny).await;
 
-    let mut channel = connection.handle.channel_open_session().await.unwrap();
+    let mut channel = within(20, "open a session channel", connection.handle.channel_open_session()).await.unwrap();
     channel.exec(true, "sleep 30").await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 

@@ -20,7 +20,7 @@ async fn authenticate_none_lists_the_methods_the_server_offers() {
     let server = Server::start(&tools, &[]);
     let mut connection = unauthenticated(&server).await;
 
-    let result = connection.handle.authenticate_none(server.sshd.user.as_str()).await.unwrap();
+    let result = within(20, "authenticate_none", connection.handle.authenticate_none(server.sshd.user.as_str())).await.unwrap();
     let AuthResult::Failure { remaining_methods, partial_success } = result else { panic!("a key-only server accepted `none`") };
     fact("auth.none.remaining_methods", format!("{remaining_methods:?}"));
     assert!(!partial_success);
@@ -35,7 +35,7 @@ async fn a_password_is_refused_by_a_key_only_server_and_the_refusal_lists_what_r
     let server = Server::start(&tools, &[]);
     let mut connection = unauthenticated(&server).await;
 
-    let result = login_password(&mut connection.handle, &server.sshd.user, "not-the-password").await.unwrap();
+    let result = within(20, "password login", login_password(&mut connection.handle, &server.sshd.user, "not-the-password")).await.unwrap();
     let AuthResult::Failure { remaining_methods, .. } = result else { panic!("the password was accepted") };
     fact("auth.password.remaining_methods", format!("{remaining_methods:?}"));
     assert!(remaining_methods.contains(&MethodKind::PublicKey));
@@ -47,16 +47,22 @@ async fn keyboard_interactive_is_refused_by_a_key_only_server() {
     let server = Server::start(&tools, &[]);
     let mut connection = unauthenticated(&server).await;
 
-    let response = connection.handle.authenticate_keyboard_interactive_start(server.sshd.user.as_str(), None::<String>).await.unwrap();
+    let response = within(20, "keyboard-interactive start", connection.handle.authenticate_keyboard_interactive_start(server.sshd.user.as_str(), None::<String>))
+        .await
+        .unwrap();
     assert!(matches!(response, KeyboardInteractiveAuthResponse::Failure { .. }), "got {response:?}");
 
     // The helper that will drive the prompts on a real host agrees: refused, and it never asked a question.
     let mut connection = unauthenticated(&server).await;
     let mut asked = 0;
-    let accepted = login_keyboard_interactive(&mut connection.handle, &server.sshd.user, |_, _, _| {
-        asked += 1;
-        Vec::new()
-    })
+    let accepted = within(
+        20,
+        "keyboard-interactive login",
+        login_keyboard_interactive(&mut connection.handle, &server.sshd.user, |_, _, _| {
+            asked += 1;
+            Vec::new()
+        }),
+    )
     .await
     .unwrap();
     assert!(!accepted);

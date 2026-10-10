@@ -16,7 +16,7 @@ async fn a_second_channel_works_while_the_first_is_drained_in_the_background() {
     let server = Server::start(&tools, &[]);
     let connection = server.session().await;
 
-    let mut busy = connection.handle.channel_open_session().await.unwrap();
+    let mut busy = within(20, "open the busy channel", connection.handle.channel_open_session()).await.unwrap();
     busy.exec(true, "yes spike").await.unwrap();
     let reader = tokio::spawn(async move {
         let mut bytes = 0usize;
@@ -42,7 +42,7 @@ async fn observe_an_unread_channel_next_to_a_working_one() {
     let server = Server::start(&tools, &[]);
     let connection = server.session().await;
 
-    let mut unread = connection.handle.channel_open_session().await.unwrap();
+    let mut unread = within(20, "open the unread channel", connection.handle.channel_open_session()).await.unwrap();
     unread.exec(true, "yes spike").await.unwrap();
     // Give the server time to fill russh's window and queue for the unread channel.
     tokio::time::sleep(Duration::from_secs(2)).await;

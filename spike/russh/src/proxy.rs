@@ -122,7 +122,8 @@ mod tests {
     async fn round_trip(client: &mut TcpStream, bytes: &[u8]) -> Vec<u8> {
         client.write_all(bytes).await.unwrap();
         let mut reply = vec![0u8; bytes.len()];
-        client.read_exact(&mut reply).await.unwrap();
+        // Bounded: if forwarding broke, the test must fail here instead of hanging `cargo test --lib`.
+        tokio::time::timeout(Duration::from_secs(3), client.read_exact(&mut reply)).await.expect("echo in time").unwrap();
         reply
     }
 

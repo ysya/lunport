@@ -64,7 +64,7 @@ async fn a_reader_that_stops_at_a_cap_and_closes_the_channel_leaves_the_connecti
     let server = Server::start(&tools, &[]);
     let connection = server.session().await;
 
-    let mut channel = connection.handle.channel_open_session().await.unwrap();
+    let mut channel = within(20, "open a session channel", connection.handle.channel_open_session()).await.unwrap();
     channel.exec(true, "yes spike").await.unwrap();
     let mut read = 0usize;
     within(30, "reading up to the cap", async {
@@ -94,7 +94,7 @@ async fn a_command_timeout_is_ours_to_enforce_and_the_connection_survives_it() {
     let server = Server::start(&tools, &[]);
     let connection = server.session().await;
 
-    let mut channel = connection.handle.channel_open_session().await.unwrap();
+    let mut channel = within(20, "open a session channel", connection.handle.channel_open_session()).await.unwrap();
     channel.exec(true, "sleep 30").await.unwrap();
     let started = Instant::now();
     let waited = tokio::time::timeout(Duration::from_secs(1), drain(&mut channel)).await;

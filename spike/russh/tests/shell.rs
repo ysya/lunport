@@ -1,7 +1,10 @@
 //! Task 3b: an interactive shell with a PTY: a prompt, a command, the exit status, the window size.
 //!
-//! The scratch sshd forces `/bin/sh` (`ForceCommand`), so the prompt and the startup files are the same on every machine instead of
-//! the developer's zsh configuration. The markers are chosen so the PTY's echo of what was typed can never be mistaken for the answer.
+//! The scratch sshd forces `/bin/sh` (`ForceCommand`), so the interactive shell is the same POSIX sh on every machine and the prompt does
+//! not depend on the developer's zsh configuration. That is the whole extent of the isolation: sshd starts a ForceCommand, like an exec
+//! request, through the user's LOGIN shell with `-c` (sshd_config(5)), and zsh sources `~/.zshenv` even for `-c`. It is not a leak of
+//! `~/.ssh`, but a `.zshenv` that prints to stdout would break the `out.text()` assertions in tests/exec.rs as well.
+//! The markers are chosen so the PTY's echo of what was typed can never be mistaken for the answer.
 
 use std::time::Instant;
 
@@ -40,7 +43,7 @@ async fn the_size_given_with_the_pty_request_is_the_initial_size() {
     let server = Server::start(&tools, SHELL_SERVER);
     let connection = server.session().await;
 
-    let mut channel = open_shell(&connection.handle, "xterm-256color", 97, 31).await.unwrap();
+    let mut channel = within(20, "open the shell", open_shell(&connection.handle, "xterm-256color", 97, 31)).await.unwrap();
     within(20, "the prompt", read_until(&mut channel, "$ ")).await.unwrap();
     assert_eq!(within(10, "stty size", stty_size(&mut channel)).await.unwrap(), "31 97");
 }
@@ -51,7 +54,7 @@ async fn a_window_change_while_the_shell_runs_is_applied() {
     let server = Server::start(&tools, SHELL_SERVER);
     let connection = server.session().await;
 
-    let mut channel = open_shell(&connection.handle, "xterm-256color", 80, 24).await.unwrap();
+    let mut channel = within(20, "open the shell", open_shell(&connection.handle, "xterm-256color", 80, 24)).await.unwrap();
     within(20, "the prompt", read_until(&mut channel, "$ ")).await.unwrap();
     channel.window_change(100, 30, 0, 0).await.unwrap();
     assert_eq!(within(10, "stty size", stty_size(&mut channel)).await.unwrap(), "30 100");
@@ -65,7 +68,7 @@ async fn a_window_change_sent_before_the_shell_is_ready_is_not_lost() {
     let server = Server::start(&tools, SHELL_SERVER);
     let connection = server.session().await;
 
-    let mut channel = connection.handle.channel_open_session().await.unwrap();
+    let mut channel = within(20, "open a session channel", connection.handle.channel_open_session()).await.unwrap();
     channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await.unwrap();
     channel.window_change(120, 40, 0, 0).await.unwrap();
     channel.request_shell(true).await.unwrap();
@@ -82,7 +85,7 @@ async fn observe_a_window_change_sent_before_the_pty_request() {
     let server = Server::start(&tools, SHELL_SERVER);
     let connection = server.session().await;
 
-    let mut channel = connection.handle.channel_open_session().await.unwrap();
+    let mut channel = within(20, "open a session channel", connection.handle.channel_open_session()).await.unwrap();
     channel.window_change(120, 40, 0, 0).await.unwrap();
     channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await.unwrap();
     channel.request_shell(true).await.unwrap();

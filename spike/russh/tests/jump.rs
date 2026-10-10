@@ -56,7 +56,7 @@ async fn a_jump_to_a_closed_port_fails_cleanly() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     let started = std::time::Instant::now();
-    let result = first.handle.channel_open_direct_tcpip("127.0.0.1", u32::from(closed_port), "127.0.0.1", 0).await;
+    let result = within(20, "open a direct-tcpip channel to a closed port", first.handle.channel_open_direct_tcpip("127.0.0.1", u32::from(closed_port), "127.0.0.1", 0)).await;
     let error = result.err().expect("nothing listens there");
     fact("jump.closed_port.error", format!("{error:?}"));
     fact("jump.closed_port.after_ms", started.elapsed().as_millis());
@@ -67,11 +67,13 @@ async fn a_jump_to_a_closed_port_fails_cleanly() {
 /// Hop lifetimes: when the outer connection goes away, the inner one (carried inside it) must end too, or the broker leaks sessions.
 ///
 /// It does end. What differs from the brief is HOW the end shows up. The brief waited for the second hop's `Handler::disconnected`
-/// (`wait_for_disconnect(10)`) and that timed out: "timed out after 10 s: russh to report the disconnect". Measured: the second hop's
-/// `Handle` future resolves at once with a BrokenPipe, `is_closed()` is true and every call on it fails, but russh never calls
-/// `disconnected` for it. In `client::Session::run` the inner stream is shut down BEFORE the callback; the shutdown sends an EOF through the
-/// first hop's channel, which fails because the first hop is gone, and the `?` returns first. The end-of-session signal an engine can
-/// rely on is the `Handle` future (or `is_closed()`), not the callback.
+/// (`wait_for_disconnect(10)`) and that timed out: "timed out after 10 s: russh to report the disconnect". Measured, and asserted below:
+/// the second hop's `Handle` future resolves at once and `is_closed()` is true, but russh never calls `disconnected` for it. In
+/// `client::Session::run` the inner stream is shut down BEFORE the callback; the shutdown sends an EOF through the first hop's channel, which
+/// fails because the first hop is gone, and the `?` returns first. So the end-of-session signal an engine can rely on is the `Handle` future
+/// (or `is_closed()`), not the callback. What that future yields (BrokenPipe, "channel closed") is the SECONDARY error of the failed
+/// shutdown, not the cause: the cause is only in the first hop's own record (`first.observed`), so an inner hop's disconnect reason has to
+/// be taken from the outer hop.
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_the_first_hop_ends_the_second() {
     let Some(tools) = tools() else { return };
@@ -80,14 +82,20 @@ async fn closing_the_first_hop_ends_the_second() {
     let mut second = within(30, "the second handshake", handshake_through(&first, &b, HostKeyVerdict::AcceptAny)).await.expect("jump");
     b.login(&mut second).await;
 
-    first.handle.disconnect(Disconnect::ByApplication, "", "en").await.unwrap();
+    within(20, "disconnect the first hop", first.handle.disconnect(Disconnect::ByApplication, "", "en")).await.unwrap();
     // the design expected: `second.observed.wait_for_disconnect(10)` returns a reason, as it does for a single hop (tests/keepalive.rs)
-    let ended = within(10, "the second hop to end after the first was disconnected", second.handle).await;
+    let ended = within(10, "the second hop to end after the first was disconnected", &mut second.handle).await;
     fact("jump.close_first_hop.second_hop_end", format!("{ended:?}"));
     assert!(ended.is_err(), "the second hop's session task must end with an error when its carrier is gone, got {ended:?}");
+    fact("jump.close_first_hop.second_hop_is_closed", second.handle.is_closed());
+    assert!(second.handle.is_closed(), "the session task has ended, so the handle must say so");
     let reason = second.observed.disconnect.lock().unwrap().clone();
     fact("jump.close_first_hop.second_hop_reason", format!("{reason:?}"));
     assert_eq!(reason, None, "russh called Handler::disconnected for an inner hop: the callback has become usable, update the comment above");
+    // The cause is in the first hop's own record (the wait is bounded and does not depend on which of the two ends is recorded first).
+    let first_reason = first.observed.wait_for_disconnect(10).await;
+    fact("jump.close_first_hop.first_hop_reason", &first_reason);
+    assert_eq!(first_reason, "Error(Disconnect)", "a disconnect we asked for reaches our own handler as Error(Disconnect)");
 }
 
 /// A fact, not a requirement (found while investigating the test above): what the second hop sees when the first goes away in the two

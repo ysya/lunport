@@ -19,35 +19,37 @@ use std::time::{Duration, Instant};
 /// so a stuck one cannot hang CI. The same idea as `TOOL_TIMEOUT` in src-tauri/src/agent/openssh_tests.rs.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `Command::output()` with a deadline of `TOOL_TIMEOUT`.
+/// `Command::output()` with a deadline of `TOOL_TIMEOUT`. A tool that cannot be started, or does not finish in time, fails the test.
 fn run_bounded(command: &mut Command) -> Output {
-    run_within(command, TOOL_TIMEOUT)
+    run_within(command, TOOL_TIMEOUT).unwrap_or_else(|message| panic!("{message}"))
 }
 
 /// `Command::output()` with a deadline: stdin is closed, stdout and stderr are captured (each read on its own thread, so a chatty tool cannot
-/// fill a pipe and block), and a tool still running after `timeout` is killed and the test panics with its command line and its stderr.
-fn run_within(command: &mut Command, timeout: Duration) -> Output {
+/// fill a pipe and block), and a tool still running after `timeout` is killed. `Err` carries the command line and, for a kill, the tool's
+/// stderr so far. It returns the error instead of panicking so that the unit test of the deadline leaves no "panicked at" line in the
+/// output of `--nocapture` runs, which Task 6 collects.
+fn run_within(command: &mut Command, timeout: Duration) -> Result<Output, String> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|error| panic!("cannot run {command:?}: {error}"));
+        .map_err(|error| format!("cannot run {command:?}: {error}"))?;
     let (stdout, stderr) = (read_in_background(child.stdout.take()), read_in_background(child.stderr.take()));
     let deadline = Instant::now() + timeout;
     let status = loop {
-        match child.try_wait().expect("wait for the tool") {
+        match child.try_wait().map_err(|error| format!("cannot wait for {command:?}: {error}"))? {
             Some(status) => break status,
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
-                panic!("{command:?} did not finish within {timeout:?} and was killed; its stderr so far: {stderr}");
+                return Err(format!("{command:?} did not finish within {timeout:?} and was killed; its stderr so far: {stderr}"));
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     };
-    Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() }
+    Ok(Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
 }
 
 fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
@@ -322,27 +324,32 @@ mod tests {
 
     use super::run_within;
 
-    /// A tool that outlives its deadline is killed instead of waited for, and the failure names it and carries its stderr so far.
+    /// A tool that outlives its deadline is killed instead of waited for, and the error names it and carries its stderr so far.
     /// (`exec` makes sleep replace sh, so killing it leaves no child holding the pipes; the stderr sentence is split by `printf`, so
     /// finding it whole in the message proves the pipe was really read.)
     #[test]
     fn a_tool_that_outlives_its_deadline_is_killed_and_named() {
         let started = Instant::now();
-        let payload = std::panic::catch_unwind(|| {
-            run_within(Command::new("sh").args(["-c", "printf 'no %s yet\\n' answer >&2; exec sleep 5"]), Duration::from_millis(500))
-        })
-        .expect_err("a tool that outlives its deadline must panic");
-        let message = payload.downcast_ref::<String>().expect("a formatted panic message");
+        let message = run_within(Command::new("sh").args(["-c", "printf 'no %s yet\\n' answer >&2; exec sleep 5"]), Duration::from_millis(500))
+            .expect_err("a tool that outlives its deadline must be an error");
         assert!(message.contains("exec sleep 5"), "the message names the command: {message}");
+        assert!(message.contains("did not finish within 500ms and was killed"), "the message says what happened: {message}");
         assert!(message.contains("no answer yet"), "the message carries the stderr so far: {message}");
         assert!(started.elapsed() < Duration::from_secs(4), "killed at the deadline, not waited for: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_tool_that_cannot_be_started_is_an_error_that_names_it() {
+        let message = run_within(&mut Command::new("/nonexistent/spike-tool"), Duration::from_secs(5)).expect_err("there is no such tool");
+        assert!(message.contains("cannot run") && message.contains("/nonexistent/spike-tool"), "{message}");
     }
 
     /// Four MiB on stdout and on stderr is far more than a pipe holds: the readers must keep up or the tool would block until the deadline.
     #[test]
     fn output_far_larger_than_a_pipe_arrives_complete_and_does_not_deadlock() {
         let started = Instant::now();
-        let out = run_within(Command::new("sh").args(["-c", "head -c 4194304 /dev/zero; head -c 4194304 /dev/zero >&2"]), Duration::from_secs(20));
+        let out = run_within(Command::new("sh").args(["-c", "head -c 4194304 /dev/zero; head -c 4194304 /dev/zero >&2"]), Duration::from_secs(20))
+            .expect("the tool finishes");
         assert!(out.status.success());
         assert_eq!((out.stdout.len(), out.stderr.len()), (4_194_304, 4_194_304));
         assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
@@ -350,7 +357,7 @@ mod tests {
 
     #[test]
     fn the_exit_code_and_both_streams_come_back_like_output_does() {
-        let out = run_within(Command::new("sh").args(["-c", "printf out; printf err >&2; exit 3"]), Duration::from_secs(20));
+        let out = run_within(Command::new("sh").args(["-c", "printf out; printf err >&2; exit 3"]), Duration::from_secs(20)).expect("the tool finishes");
         assert_eq!(out.status.code(), Some(3));
         assert_eq!((out.stdout.as_slice(), out.stderr.as_slice()), (b"out".as_slice(), b"err".as_slice()));
     }
@@ -359,7 +366,7 @@ mod tests {
     #[test]
     fn stdin_is_closed_so_a_tool_that_reads_it_does_not_wait() {
         let started = Instant::now();
-        let out = run_within(&mut Command::new("cat"), Duration::from_secs(20));
+        let out = run_within(&mut Command::new("cat"), Duration::from_secs(20)).expect("the tool finishes");
         assert!(out.status.success() && out.stdout.is_empty());
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
     }
