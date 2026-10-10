@@ -7,6 +7,7 @@ mod deploy;
 mod discover;
 mod error;
 mod fsutil;
+mod ipc;
 mod keys;
 mod known_hosts;
 pub mod mcp;

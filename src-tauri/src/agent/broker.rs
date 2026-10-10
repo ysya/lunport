@@ -11,10 +11,10 @@ use ssh_key::HashAlg;
 use zeroize::Zeroizing;
 
 use crate::agent::approval::{remember_minutes, verdict, ApprovalCache, ApprovalKey, KeyProtection, Verdict};
-use crate::agent::peer::Program;
 use crate::agent::prompt::{AgentApprovalAnswer, AgentApprovalRequest, APPROVAL_TIMEOUT};
 use crate::agent::session::{SignAuthority, SignRequest};
 use crate::error::AppError;
+use crate::ipc::peer::Program;
 use crate::sync::env::Keychain;
 use crate::sync::state_v2::{SlotSource, SyncStateV2};
 use crate::vault::material::{self, Material, OpenError};

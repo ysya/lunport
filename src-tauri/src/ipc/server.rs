@@ -187,42 +187,43 @@ pub(crate) fn peer(_stream: &std::os::unix::net::UnixStream) -> Result<Option<u3
     Err(())
 }
 
-/// 兩個平台的端點測試共用:不提供任何金鑰的 authority,以及把對方 PID 送出來再服務連線的 handler。
+/// 兩個平台的端點測試共用:不認得任何協定的 handler。端點測試只看連線、權限與名額,不看協定的內容,所以對方連上來送一個位元組(`PING`),
+/// handler 先把對方的 PID 送出來,再回一個位元組(`PONG`)。
 #[cfg(test)]
 pub(crate) mod testing {
+    use std::io::{Read, Write};
     use std::sync::mpsc::Sender;
     use std::sync::{Arc, Mutex};
 
-    use ssh_key::public::KeyData;
-
     use super::Handler;
-    use crate::agent::session::{serve, SignAuthority, SignRequest};
 
-    pub struct NoKeys;
+    pub const PING: u8 = 0x70;
+    pub const PONG: u8 = 0x71;
 
-    impl SignAuthority for NoKeys {
-        fn identities(&self) -> Vec<(KeyData, String)> {
-            Vec::new()
-        }
-        fn sign(&self, _request: &SignRequest) -> Option<Vec<u8>> {
-            None
-        }
-    }
-
-    pub fn serving(pids: Sender<Option<u32>>) -> Handler {
+    pub fn echoing(pids: Sender<Option<u32>>) -> Handler {
         let pids = Mutex::new(pids);
         Arc::new(move |mut stream, pid| {
             let _ = pids.lock().unwrap().send(pid);
-            let _ = serve(&mut stream, &NoKeys);
+            let mut byte = [0u8; 1];
+            if stream.read_exact(&mut byte).is_ok() && byte[0] == PING {
+                let _ = stream.write_all(&[PONG]);
+            }
         })
+    }
+
+    /// 在 `stream` 上送出 `PING`,回傳讀到的那個位元組(對方沒回應就 panic)。
+    pub fn ping(stream: &mut (impl Read + Write)) -> u8 {
+        stream.write_all(&[PING]).unwrap();
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).unwrap();
+        byte[0]
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::testing::serving;
+    use super::testing::{echoing, ping, PONG};
     use super::*;
-    use crate::agent::protocol::{read_frame, write_frame, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENT_IDENTITIES_ANSWER};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::mpsc;
@@ -233,10 +234,9 @@ mod tests {
         tempfile::Builder::new().prefix("sa").tempdir_in("/tmp").unwrap()
     }
 
-    fn identities(sock: &Path) -> u8 {
-        let mut stream = UnixStream::connect(sock).unwrap();
-        write_frame(&mut stream, &[SSH_AGENTC_REQUEST_IDENTITIES]).unwrap();
-        read_frame(&mut stream).unwrap().unwrap()[0]
+    /// 連上 `sock`,送 `PING`,回傳讀到的位元組(handler 在運作就是 `PONG`)。
+    fn pong(sock: &Path) -> u8 {
+        ping(&mut UnixStream::connect(sock).unwrap())
     }
 
     #[test]
@@ -244,8 +244,8 @@ mod tests {
         let dir = short_dir();
         let agent = dir.path().join("agent");
         let (tx, rx) = mpsc::channel();
-        assert_eq!(listen_unix(&agent, serving(tx)).unwrap(), Started::Running);
-        assert_eq!(identities(&agent.join("sock")), SSH_AGENT_IDENTITIES_ANSWER);
+        assert_eq!(listen_unix(&agent, echoing(tx)).unwrap(), Started::Running);
+        assert_eq!(pong(&agent.join("sock")), PONG);
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some(std::process::id()));
         assert_eq!(std::fs::metadata(&agent).unwrap().permissions().mode() & 0o777, 0o700);
         assert_eq!(std::fs::metadata(agent.join("sock")).unwrap().permissions().mode() & 0o777, 0o600);
@@ -256,9 +256,9 @@ mod tests {
         let dir = short_dir();
         let agent = dir.path().join("agent");
         let (tx, _rx) = mpsc::channel();
-        assert_eq!(listen_unix(&agent, serving(tx.clone())).unwrap(), Started::Running);
-        assert_eq!(listen_unix(&agent, serving(tx)).unwrap(), Started::OtherInstance);
-        assert_eq!(identities(&agent.join("sock")), SSH_AGENT_IDENTITIES_ANSWER, "the first one still answers");
+        assert_eq!(listen_unix(&agent, echoing(tx.clone())).unwrap(), Started::Running);
+        assert_eq!(listen_unix(&agent, echoing(tx)).unwrap(), Started::OtherInstance);
+        assert_eq!(pong(&agent.join("sock")), PONG, "the first one still answers");
     }
 
     #[test]
@@ -270,8 +270,8 @@ mod tests {
         crate::process::without_spawns(|| drop(UnixListener::bind(agent.join("sock")).unwrap()));
         assert!(UnixStream::connect(agent.join("sock")).is_err(), "nobody answers on it");
         let (tx, _rx) = mpsc::channel();
-        assert_eq!(listen_unix(&agent, serving(tx)).unwrap(), Started::Running);
-        assert_eq!(identities(&agent.join("sock")), SSH_AGENT_IDENTITIES_ANSWER);
+        assert_eq!(listen_unix(&agent, echoing(tx)).unwrap(), Started::Running);
+        assert_eq!(pong(&agent.join("sock")), PONG);
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod tests {
         let dir = short_dir();
         let agent = dir.path().join("a".repeat(120));
         let (tx, _rx) = mpsc::channel();
-        let err = listen_unix(&agent, serving(tx)).unwrap_err().to_string();
+        let err = listen_unix(&agent, echoing(tx)).unwrap_err().to_string();
         assert!(err.contains("too long"), "{err}");
         assert!(!agent.exists(), "nothing was created");
     }

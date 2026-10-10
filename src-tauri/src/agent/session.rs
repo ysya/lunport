@@ -86,6 +86,25 @@ pub fn serve(stream: &mut (impl Read + Write), authority: &dyn SignAuthority) ->
     Ok(())
 }
 
+/// 不提供任何金鑰的 authority:只想測連線與端點、不在乎簽章的測試用(`oneshot`)。
+#[cfg(test)]
+pub(crate) mod testing {
+    use ssh_key::public::KeyData;
+
+    use super::{SignAuthority, SignRequest};
+
+    pub struct NoKeys;
+
+    impl SignAuthority for NoKeys {
+        fn identities(&self) -> Vec<(KeyData, String)> {
+            Vec::new()
+        }
+        fn sign(&self, _request: &SignRequest) -> Option<Vec<u8>> {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

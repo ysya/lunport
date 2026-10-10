@@ -4,12 +4,8 @@ pub mod broker;
 pub mod oneshot;
 #[cfg(test)]
 mod openssh_tests;
-pub mod peer;
-#[cfg(windows)]
-pub mod pipe_windows;
 pub mod prompt;
 pub mod protocol;
-pub mod server;
 pub mod session;
 pub mod wiring;
 
@@ -21,6 +17,9 @@ use tauri::Manager;
 use zeroize::Zeroizing;
 
 use crate::error::AppError;
+#[cfg(windows)]
+use crate::ipc::pipe_windows;
+use crate::ipc::{peer, server};
 use crate::state::AppState;
 use crate::sync::env::{Clock, Keychain, OsKeychain, SystemClock};
 use crate::vault::store::{vault_path, with_vault, AgentSettings};

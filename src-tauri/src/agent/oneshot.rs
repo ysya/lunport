@@ -15,9 +15,10 @@ use std::time::Duration;
 use tauri::{Emitter, Manager};
 
 use crate::agent::broker::{Connection, Grant};
-use crate::agent::server::Stream;
-use crate::agent::{agent_dir, home_dir, peer, session, AppAgentHost};
+use crate::agent::{agent_dir, home_dir, session, AppAgentHost};
 use crate::error::AppError;
+use crate::ipc::peer;
+use crate::ipc::server::Stream;
 use crate::state::AppState;
 use crate::sync::slot_rules::{resolve_identity_value, IdentityTarget};
 use crate::sync::state_v2::{SlotSource, SyncStateV2};
@@ -175,15 +176,15 @@ fn settle(waited: Waited, cancelled: bool, serve: Box<dyn FnOnce(Stream, Option<
         Waited::Connected(stream) if !cancelled => {
             // macOS 的 accept 沿用 listener 的 non-blocking;不是同一個使用者就不服務。
             if stream.set_nonblocking(false).is_ok() {
-                if let Ok(pid) = crate::agent::server::peer(&stream) {
-                    let _ = stream.set_read_timeout(Some(crate::agent::server::IDLE_TIMEOUT));
+                if let Ok(pid) = crate::ipc::server::peer(&stream) {
+                    let _ = stream.set_read_timeout(Some(crate::ipc::server::IDLE_TIMEOUT));
                     serve(stream, pid);
                 }
             }
         }
         // 別的使用者連上來的不算 ssh 來得太晚;離開這裡時 `stream` 被丟掉,對方看到連線關了。
         Waited::Late(stream) if !cancelled => {
-            if crate::agent::server::peer(&stream).is_ok() {
+            if crate::ipc::server::peer(&stream).is_ok() {
                 late();
             }
         }
@@ -211,7 +212,7 @@ pub fn open(
     sweep_stale(run_dir, std::time::SystemTime::now(), CHANNEL_LIFETIME * 2);
     let name = random_hex(4)?;
     let path = run_dir.join(&name);
-    crate::agent::server::check_socket_path(&path)?;
+    crate::ipc::server::check_socket_path(&path)?;
     // 建 socket 與接受連線都在 `without_spawns` 裡,同 `server::listen_unix`:子程序不能留著它們(見 `crate::process`)。
     let listener = crate::process::without_spawns(|| UnixListener::bind(&path))?;
     let stop = Arc::new(Stop::default());
@@ -292,7 +293,7 @@ pub fn open(
     lifetime: Duration,
 ) -> Result<Channel, AppError> {
     let name = format!("sshelter-connect-{}", random_hex(16)?);
-    let pipe = crate::agent::pipe_windows::one_shot(&name)?;
+    let pipe = crate::ipc::pipe_windows::one_shot(&name)?;
     let client_path = format!(r"\\.\pipe\{name}");
     let stop = Arc::new(Stop::default());
     let shared = Arc::clone(&stop);
@@ -312,7 +313,7 @@ pub fn open(
                 }
             });
         }
-        let accepted = crate::agent::pipe_windows::accept(&pipe);
+        let accepted = crate::ipc::pipe_windows::accept(&pipe);
         let past_grant = std::time::Instant::now() >= grant_end;
         stop.connected.store(true, Ordering::SeqCst);
         let cancelled = stop.cancelled.load(Ordering::SeqCst);
@@ -404,7 +405,7 @@ pub fn prepare(app: &tauri::AppHandle, alias: &str) -> Result<Option<Channel>, A
 mod tests {
     use super::*;
     use crate::agent::protocol::{read_frame, write_frame, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENT_IDENTITIES_ANSWER};
-    use crate::agent::server::testing::NoKeys;
+    use crate::agent::session::testing::NoKeys;
     use crate::sync::state_v2::LocalSlot;
     use std::path::PathBuf;
     use std::sync::mpsc;

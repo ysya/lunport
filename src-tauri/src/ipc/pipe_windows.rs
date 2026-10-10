@@ -27,8 +27,8 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 
-use crate::agent::server::{dispatch, take_lock, Handler, Started};
 use crate::error::AppError;
+use crate::ipc::server::{dispatch, take_lock, Handler, Started};
 use crate::sync::slot_files_windows::current_user_token;
 
 /// 每個 pipe instance 共用的 SECURITY_ATTRIBUTES:DACL 只有一條「目前使用者:完全控制」。`SetEntriesInAclW` 把 SID 複製進 ACE,所以讀 SID 用的
@@ -201,8 +201,7 @@ pub fn listen(dir: &Path, name: &str, handle: Handler) -> Result<Started, AppErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::protocol::{read_frame, write_frame, SSH_AGENTC_REQUEST_IDENTITIES, SSH_AGENT_IDENTITIES_ANSWER};
-    use crate::agent::server::testing::serving;
+    use crate::ipc::server::testing::{echoing, ping, PONG};
     use std::sync::mpsc;
 
     #[test]
@@ -220,12 +219,11 @@ mod tests {
         let agent = dir.path().join("agent");
         let name = format!("sshelter-test-{}", std::process::id());
         let (tx, rx) = mpsc::channel();
-        assert_eq!(listen(&agent, &name, serving(tx.clone())).unwrap(), Started::Running);
+        assert_eq!(listen(&agent, &name, echoing(tx.clone())).unwrap(), Started::Running);
         let mut client = std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\{name}")).unwrap();
-        write_frame(&mut client, &[SSH_AGENTC_REQUEST_IDENTITIES]).unwrap();
-        assert_eq!(read_frame(&mut client).unwrap().unwrap()[0], SSH_AGENT_IDENTITIES_ANSWER);
+        assert_eq!(ping(&mut client), PONG);
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some(std::process::id()));
-        assert_eq!(listen(&agent, &name, serving(tx)).unwrap(), Started::OtherInstance);
+        assert_eq!(listen(&agent, &name, echoing(tx)).unwrap(), Started::OtherInstance);
     }
 
     /// 只有 `ERROR_ACCESS_DENIED`(`FILE_FLAG_FIRST_PIPE_INSTANCE` 遇到已經存在的名稱時回的錯誤)才說名稱被別的程式佔用;其他錯誤不是。
@@ -256,7 +254,7 @@ mod tests {
         let security = OwnerOnly::new().unwrap();
         let _squatter = create_instance(&wide_pipe_path(&name), &security, true, PIPE_UNLIMITED_INSTANCES).unwrap();
         let (tx, _rx) = mpsc::channel();
-        let err = listen(&dir.path().join("agent"), &name, serving(tx)).unwrap_err().to_string();
+        let err = listen(&dir.path().join("agent"), &name, echoing(tx)).unwrap_err().to_string();
         assert!(err.contains("Another program"), "{err}");
     }
 }

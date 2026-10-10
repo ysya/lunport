@@ -12,9 +12,10 @@ use zeroize::Zeroizing;
 
 use crate::agent::broker::{AgentHost, Broker, Connection, Grant, VaultKey};
 use crate::agent::prompt::{AgentApprovalAnswer, AgentApprovalRequest};
-use crate::agent::server::{Handler, Stream};
-use crate::agent::{oneshot, peer, session};
+use crate::agent::{oneshot, session};
 use crate::error::AppError;
+use crate::ipc::peer;
+use crate::ipc::server::{Handler, Stream};
 use crate::sync::env::{Clock, Keychain, SystemClock};
 use crate::sync::slot_rules::test_keys;
 use crate::sync::testkit::MemKeychain;
@@ -171,7 +172,7 @@ fn start() -> Running {
     let agent_dir = dir.path().join("agent");
     #[cfg(unix)]
     let endpoint = {
-        crate::agent::server::listen_unix(&agent_dir, handler).unwrap();
+        crate::ipc::server::listen_unix(&agent_dir, handler).unwrap();
         agent_dir.join("sock").display().to_string()
     };
     #[cfg(windows)]
@@ -179,7 +180,7 @@ fn start() -> Running {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let name = format!("sshelter-ossh-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
-        crate::agent::pipe_windows::listen(&agent_dir, &name, handler).unwrap();
+        crate::ipc::pipe_windows::listen(&agent_dir, &name, handler).unwrap();
         format!(r"\\.\pipe\{name}")
     };
     Running { dir, endpoint, host, broker }
