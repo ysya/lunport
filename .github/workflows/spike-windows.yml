@@ -1,0 +1,94 @@
+# Phase 0 spike (docs/superpowers/plans/2026-10-10-own-ssh-phase0-spike.md, Task 4): does russh connect to Windows OpenSSH and run a command?
+# It starts the runner's own OpenSSH server and runs spike/russh's `windows_exec` test against it.
+#
+# - The spike is built with --no-default-features, without the app library: src-tauri/build.rs embeds the Common Controls manifest only into
+#   the artifacts of the src-tauri package, so a test executable of another crate that linked the app library may not start on Windows
+#   (0xc0000139). The vault signs the same bytes on every platform, and test-windows.yml already runs vault:: on Windows.
+# - `workflow_dispatch` only shows up in the Actions tab once this file is on the default branch, so the push trigger below is what lets the
+#   spike branch run it before anything is merged.
+name: spike windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [next/own-ssh]
+    paths: ["spike/**", ".github/workflows/spike-windows.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  russh:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: spike/russh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./spike/russh -> target"
+
+      # VERIFY on the runner. The image ships the OpenSSH client; the server is a Feature on Demand. If that capability cannot be added,
+      # the Chocolatey package (Win32-OpenSSH) is the fallback. The service creates its host keys the first time it starts.
+      - name: Install and start the OpenSSH server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $capability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
+          $capability | Format-Table Name, State
+          if ($capability.State -ne 'Installed') {
+            try {
+              Add-WindowsCapability -Online -Name $capability.Name | Out-Null
+            } catch {
+              Write-Warning "Feature on Demand failed ($_); trying Chocolatey"
+              choco install openssh -y --no-progress --params '"/SSHServerFeature"'
+            }
+          }
+          Get-Service sshd | Format-Table Name, Status, StartType
+          Set-Service -Name sshd -StartupType Manual
+          Start-Service sshd
+          Get-Service sshd | Format-Table Name, Status, StartType
+
+      # The runner user is an Administrator, so Win32-OpenSSH reads C:\ProgramData\ssh\administrators_authorized_keys for it (the
+      # "Match Group administrators" block of the default sshd_config) and refuses the file unless only SYSTEM and Administrators can write it.
+      # The Windows client refuses a private key other users can read. VERIFY the icacls lines on the runner.
+      - name: Authorize a throwaway key for the runner user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $openssh = Join-Path $env:SystemRoot 'System32\OpenSSH'
+          $dir = Join-Path $env:RUNNER_TEMP 'spike-ssh'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $key = Join-Path $dir 'id_ed25519'
+          & "$openssh\ssh-keygen.exe" -q -t ed25519 -N '' -C spike -f $key
+          if ($LASTEXITCODE -ne 0) { throw 'ssh-keygen failed' }
+          icacls.exe $key /inheritance:r /grant "$($env:USERNAME):F" | Out-Null
+          $authorized = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+          Get-Content "$key.pub" | Set-Content -Path $authorized -Encoding ascii
+          icacls.exe $authorized /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+          Restart-Service sshd
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value 'SPIKE_SSH_PORT=22'
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SPIKE_SSH_USER=$env:USERNAME"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SPIKE_SSH_KEY=$key"
+
+      # Separates a server that is set up wrong from a russh that cannot talk to it.
+      - name: The OpenSSH client logs in
+        shell: pwsh
+        run: |
+          $openssh = Join-Path $env:SystemRoot 'System32\OpenSSH'
+          & "$openssh\ssh.exe" -V
+          & "$openssh\ssh.exe" -F NUL -p $env:SPIKE_SSH_PORT -i $env:SPIKE_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL "$env:SPIKE_SSH_USER@127.0.0.1" 'echo client-ok'
+          if ($LASTEXITCODE -ne 0) { throw "the OpenSSH client could not log in (exit $LASTEXITCODE): the server setup is wrong, not russh" }
+
+      - name: Connect and exec with russh
+        env:
+          RUST_BACKTRACE: "1"
+        run: cargo test --locked --no-default-features --test windows_exec -- --nocapture
+
+      - name: What the OpenSSH server logged
+        if: failure()
+        shell: pwsh
+        run: Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 40 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
