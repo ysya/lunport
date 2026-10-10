@@ -22,3 +22,4 @@ pub mod client;
 pub mod fixture;
 #[cfg(feature = "app-vault")]
 pub mod signer;
+pub mod shell;
