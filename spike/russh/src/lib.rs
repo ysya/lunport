@@ -24,3 +24,4 @@ pub mod fixture;
 pub mod signer;
 pub mod shell;
 pub mod auth;
+pub mod proxy;
