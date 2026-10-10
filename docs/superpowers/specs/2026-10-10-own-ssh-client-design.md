@@ -64,7 +64,7 @@ SSHelter 原本是「`~/.ssh/config` 的編輯器,加上同步與金鑰保管庫
 **只有 app 行程持有金鑰和連線。** app(Tauri)裡:
 
 - **同步引擎**:現有的阻塞式執行緒(`sync/engine.rs`),不動。
-- **連線 runtime**:一個專用的 tokio runtime 跑 russh。同步引擎與它之間只用 channel 傳訊息,不共用鎖;保管庫的簽章在 runtime 裡呼叫時用 `spawn_blocking`。
+- **連線 runtime**:一個專用的 tokio runtime 跑 russh。同步引擎與它之間只用 channel 傳訊息,不共用鎖;保管庫的簽章(`AuthSource::sign`)與主機金鑰查表(`HostKeyPolicy::check`)在呼叫 `connect` 的那條執行緒上執行,russh 的 task 用 channel 把請求送過來(借用的 `&dyn` 進不了 'static 的 task);兩者都必須快。
 - **`ssh/` 模組**:SSHelter 自己的介面(第 6 節的 `SshEngine`、`Session`)。只有 `ssh/russh_engine.rs` import russh。
 - **Session broker**(`session/` 模組):session 表(id、主機、狀態、擁有者、開始時間),核准與 log 的入口。
 - **本機 IPC 伺服器**(`ipc/` 模組):第 0 期已從 `agent/server.rs`(`listen_unix`、`take_lock`、`check_socket_path`、`peer`)、`agent/pipe_windows.rs`(`listen`、`pipe_name`)、`agent/peer.rs`(`process_chain`、`identify`)搬到 `src-tauri/src/ipc/`(行為不變,`agent/` 暫時仍用它;第 1 期刪 `agent/` 時去掉 agent 協定;`ipc/mod.rs` 的守門測試保證 `ipc/` 不再指回 `agent`)。socket 在 `<app data>/ipc/sock`(macOS 的 socket 路徑上限 104 bytes,這台實測 69;超過時 `check_socket_path` 回明確錯誤,不退回其他目錄);Windows 用 per-user SID 的 named pipe。只接受同使用者;對端 pid 往上找程序鏈,去掉 SSHelter 自己的執行檔,得到「Terminal → zsh」或「Claude → claude」這種名稱鏈與識別值。
@@ -139,7 +139,7 @@ pub trait Session: Send + Sync {
     fn disconnect_reason(&self) -> Option<DisconnectReason>; // 出事那一跳自己的紀錄(§6.2 第 2 步)
     fn close(&self);                                         // 明確關閉整條鏈:每一跳 disconnect()
 }
-pub trait ShellChannel: Send {
+pub trait ShellChannel: Send + Sync {
     fn write(&self, data: &[u8]) -> Result<(), SessionError>;               // stdin
     fn read(&self, buf: &mut [u8]) -> Result<usize, SessionError>;           // PTY 輸出(stdout/stderr 合併);0 = 已結束
     fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError>; // shell 就緒前送的會被忽略,broker 記住最後一次再送(§7.2)
@@ -147,12 +147,13 @@ pub trait ShellChannel: Send {
     fn close(&self);
 }
 pub trait HostKeyPolicy: Send + Sync {
-    /// 在 russh 的 callback 裡同步呼叫:只查表,不等人、不碰 UI(§6.2 第 3 步)。
+    /// 引擎在呼叫 connect 的執行緒上同步呼叫(russh 的 callback 把問題送過來):只查表,不等人、不碰 UI(§6.2 第 3 步)。
     fn check(&self, hop: &HopRef, key: &HostKey) -> HostKeyVerdict;         // Pinned | Unknown | Mismatch { pinned }
 }
 pub trait AuthSource: Send + Sync {
     /// 保管庫 Material::sign;RSA 的雜湊由引擎傳入(sha256 | sha512),見 §6.3;必須快(不問 passphrase、不等核准)。
     fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError>;
+    fn public_key(&self, key_id: &str) -> Option<String>;                    // 該金鑰的 OpenSSH 公鑰行(公鑰登入要先送公鑰);None = 金鑰不存在
     fn password(&self, hop: &HopRef) -> Option<Secret>;                      // 已有的密碼(keychain 或剛問到的);None = 不試密碼
     fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>>; // 在 deadline 前回答;None = 放棄 → 引擎丟掉連線
 }
@@ -178,7 +179,7 @@ pub enum ConnectError {
     Protocol { hop: HopRef, text: String },                             // russh 的錯誤文字,不含秘密
 }
 pub struct ExecResult { pub ended: Ended, pub exit_code: Option<u32>, pub signal: Option<String>, pub stdout: Vec<u8>, pub stderr: Vec<u8>, pub truncated: bool }
-pub enum Ended { Exited, Signaled, TimedOut, Disconnected }
+pub enum Ended { Exited, Signaled, TimedOut, Truncated, Disconnected } // Truncated:引擎在 output_cap 關掉 channel,結束碼不明、連線仍可用
 pub enum Exit { Code(u32), Signal(String), Disconnected }
 ```
 
@@ -212,7 +213,7 @@ pub enum Exit { Code(u32), Signal(String), Disconnected }
 長度前綴的訊框:`u32 長度 | u8 型別 | 內容`。控制訊息是 JSON,資料訊息是原始位元組。
 
 - 用戶端 → app:`hello{client: "connect" | "mcp", client_info?}`、`open_shell{host, pty{cols, rows, term}}`、`exec{host, command, timeout_secs}`、`data`(stdin)、`window_change{cols, rows}`、`answer{question_id, value | cancel}`、`close`。
-- app → 用戶端:`opened{session_id}`、`data`(stdout/stderr 合併,因為是 PTY)、`exec_result{ended: exited | signaled | timed_out | disconnected, exit_code (可空), signal (可空), stdout, stderr}`(第 0 期:被訊號殺掉的指令沒有結束碼,連線中斷也沒有;不能回 0)、`question{question_id, kind: host_key_notice | passphrase | password | interactive, text, echo: bool, deadline_ms}`(逾時視同取消:連線丟掉,§6.2 第 4 步)、`event{connected | disconnected{reason} | error{kind, text}}`、`exited{code (可空), signal (可空)}`;跳板的 `disconnected{reason}` 取自出事那一跳自己的紀錄(§6.2 第 2 步)。
+- app → 用戶端:`opened{session_id}`、`data`(stdout/stderr 合併,因為是 PTY)、`exec_result{ended: exited | signaled | timed_out | truncated | disconnected, exit_code (可空), signal (可空), stdout, stderr, truncated: bool}`(第 0 期:被訊號殺掉的指令沒有結束碼,連線中斷也沒有;輸出到上限時 `truncated`,連線仍可用;不能回 0)、`question{question_id, kind: host_key_notice | passphrase | password | interactive, text, echo: bool, deadline_ms}`(逾時視同取消:連線丟掉,§6.2 第 4 步)、`event{connected | disconnected{reason} | error{kind, text}}`、`exited{code (可空), signal (可空)}`;跳板的 `disconnected{reason}` 取自出事那一跳自己的紀錄(§6.2 第 2 步)。
 - `host` 可以是 alias 或 host id;alias 在多個 space 重複時回錯誤要求用 id。
 
 ### 7.2 Broker 規則
@@ -247,7 +248,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 
 - `list_hosts`:允許清單上的主機(alias、hostname、user、port、tags、space)。
 - `get_host(alias)`:該主機的結構化欄位,不含任何秘密與主機金鑰的公鑰。
-- `ssh_exec(alias, command, timeout_seconds 1–300 預設 60)`:走 broker 的 `exec`(無 PTY),回 stdout、stderr、`ended`(exited | signaled | timed_out | disconnected)、結束碼(可空)、signal(可空);被訊號殺掉或連線中斷時明說,不回 0(第 0 期)。
+- `ssh_exec(alias, command, timeout_seconds 1–300 預設 60)`:走 broker 的 `exec`(無 PTY),回 stdout、stderr、`ended`(exited | signaled | timed_out | truncated | disconnected)、結束碼(可空)、signal(可空);被訊號殺掉、輸出到上限或連線中斷時明說,不回 0(第 0 期)。
 - 呼叫舊名 `run`:JSON-RPC 錯誤,訊息 `run was renamed to ssh_exec`。
 - 不設 `_meta["anthropic/requiresUserInteraction"]`(決策 12)。
 
