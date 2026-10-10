@@ -16,3 +16,5 @@ pub async fn within<T>(seconds: u64, what: &str, future: impl std::future::Futur
         Err(_) => panic!("timed out after {seconds} s: {what}"),
     }
 }
+
+pub mod harness;
