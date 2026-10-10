@@ -16,7 +16,7 @@ mod settings_io;
 mod state;
 mod tray;
 mod updater_channel;
-mod vault;
+pub mod vault;
 
 use agent::prompt::{agent_pending, agent_resolve};
 use agent::{agent_fix_include, agent_problem};
