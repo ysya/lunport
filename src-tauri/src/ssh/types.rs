@@ -139,7 +139,9 @@ pub struct Hop {
     /// The key on record for this host. When it is set the handshake offers only that key's algorithm family, so a server that later
     /// adds another key type is not mistaken for a changed key. Whether a presented key is trusted is `HostKeyPolicy`'s decision.
     pub pinned: Option<HostKey>,
-    /// TCP connect plus handshake must finish within this.
+    /// TCP connect plus handshake must finish within this. Once the connection is open, the engine waits for the server's answer to the
+    /// handshake and to each login request for this long at most, and less when `keepalive_every` is shorter: three quarters of it, but
+    /// not under a second (a silence that outlasts the interval makes the engine's SSH library spin before the login is done).
     pub connect_timeout: Duration,
     /// How long the link may be silent before a keepalive is sent; `Duration::ZERO` turns keepalive off.
     pub keepalive_every: Duration,

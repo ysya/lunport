@@ -11,7 +11,8 @@ pub enum ConnectError {
     BadJumpChain { why: String },
     /// DNS or TCP failed, or the jump host could not open a connection to `hop`.
     Unreachable { hop: HopRef, reason: String },
-    /// `hop` did not answer in time: its `connect_timeout` ran out during `phase`, or the server stopped answering the login.
+    /// `hop` did not answer in time: its `connect_timeout` ran out during `phase`, or the server stopped answering the login. The wait for
+    /// the handshake and for each login request can end sooner than `connect_timeout` when the keepalive interval is short (see `Hop`).
     Timeout { hop: HopRef, phase: Phase },
     /// Nothing is pinned for `hop` and the server presented `key`. The caller asks the user, pins the key and connects again.
     HostKeyUnknown { hop: HopRef, key: HostKey },
