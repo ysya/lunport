@@ -14,6 +14,7 @@ pub mod mcp;
 mod process;
 mod secrets;
 mod settings_io;
+pub mod ssh;
 mod state;
 mod tray;
 mod updater_channel;
