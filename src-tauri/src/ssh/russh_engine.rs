@@ -106,11 +106,14 @@ struct HopShared {
     observed: Mutex<Option<(HostKey, HostKeyVerdict)>>,
     /// Set by `Handler::disconnected`: how this hop's connection ended.
     ended: Mutex<Option<(DisconnectKind, String)>>,
+    /// Set by `Handler::disconnected`, just before `ended` is written, when the connection ended because the server had no login method
+    /// to offer (russh's `NoAuthMethod`).
+    no_login_method: std::sync::atomic::AtomicBool,
 }
 
 impl HopShared {
     fn new() -> Arc<HopShared> {
-        Arc::new(HopShared { observed: Mutex::new(None), ended: Mutex::new(None) })
+        Arc::new(HopShared { observed: Mutex::new(None), ended: Mutex::new(None), no_login_method: std::sync::atomic::AtomicBool::new(false) })
     }
 }
 
@@ -158,6 +161,9 @@ impl Handler for EngineHandler {
             RusshDisconnect::ReceivedDisconnect(info) => (DisconnectKind::ClosedByPeer, format!("the server closed the connection: {}", info.message)),
             RusshDisconnect::Error(error) => classify_end(error),
         };
+        if matches!(&reason, RusshDisconnect::Error(russh::Error::NoAuthMethod)) {
+            self.shared.no_login_method.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         *locked(&self.shared.ended) = Some(record);
         match reason {
             RusshDisconnect::ReceivedDisconnect(_) => Ok(()),
@@ -173,6 +179,7 @@ fn classify_end(error: &russh::Error) -> (DisconnectKind, String) {
         russh::Error::Disconnect => (DisconnectKind::ClosedByUs, "the connection was closed on our side".to_string()),
         russh::Error::HUP => (DisconnectKind::ClosedByPeer, "the server closed the connection".to_string()),
         russh::Error::IO(io) => (DisconnectKind::ConnectionLost, describe_io(io)),
+        russh::Error::NoAuthMethod => (DisconnectKind::Other, "the server offers no login method".to_string()),
         other => (DisconnectKind::Other, other.to_string()),
     }
 }
@@ -282,12 +289,12 @@ fn check_chain(target: &Target) -> Result<(), ConnectError> {
 }
 
 async fn connect_one(index: usize, hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Established, ConnectError> {
-    let mut handle = connect_hop(index, hop, via, host_keys).await?;
-    authenticate(hop, &mut handle, auth).await?;
+    let (mut handle, shared) = connect_hop(index, hop, via, host_keys).await?;
+    authenticate(hop, &mut handle, &shared, auth).await?;
     Ok(Established { handle })
 }
 
-async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy) -> Result<Handle<EngineHandler>, ConnectError> {
+async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy) -> Result<(Handle<EngineHandler>, Arc<HopShared>), ConnectError> {
     let reference = hop.reference();
     if via.is_some() || index > 0 {
         return Err(ConnectError::BadJumpChain { why: "jump hosts are not connected yet".to_string() });
@@ -322,7 +329,7 @@ async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_ke
     };
     let budget = hop.connect_timeout.max(Duration::from_secs(1));
     match tokio::time::timeout(budget, attempt).await {
-        Ok(result) => result,
+        Ok(result) => result.map(|handle| (handle, shared)),
         Err(_) => Err(ConnectError::Timeout { hop: reference, phase: phase.get() }),
     }
 }
@@ -450,17 +457,48 @@ enum Step {
     Skipped,
 }
 
-/// russh answers a login request with "refused, and no method is left" when its reply channel closes, which is also what a connection that
-/// died while we waited looks like. An answer that came from the server came over a connection that is still open.
-fn died_during_login(handle: &Handle<EngineHandler>, remaining: &MethodSet) -> bool {
-    remaining.is_empty() && handle.is_closed()
+/// How long `authenticate` waits for the handler's record of how a connection ended: russh closes the `Handle` first and calls the handler a
+/// moment later (spec §6.2 step 2).
+const LOGIN_END_WAIT: Duration = Duration::from_secs(1);
+
+/// What an answer to a login request that names no method to go on with came to.
+enum EmptyAnswer {
+    /// The server has no login method to offer: it said so, and russh then ended the connection with `NoAuthMethod`.
+    NoLoginMethod,
+    /// The connection ended some other way, or its end was not recorded in time: it was lost while we waited.
+    Lost,
+    /// Nothing ended the connection: a refusal like any other.
+    Refusal,
+}
+
+/// russh answers a login request with "refused, and no method is left" in two cases that have to be told apart: the server really named no
+/// method (russh passes that refusal on and then ends the connection with `NoAuthMethod`), and the connection died while we waited (the
+/// reply channel closed). The handler's record of how the connection ended decides. It may not be written yet, so it is waited for, but
+/// at most `wait`; if there is none by then, the connection is lost when it is `closed()` and a plain refusal when it is not.
+async fn classify_empty_answer(shared: &HopShared, closed: impl Fn() -> bool, wait: Duration) -> EmptyAnswer {
+    let deadline = Instant::now() + wait;
+    loop {
+        if locked(&shared.ended).is_some() {
+            return if shared.no_login_method.load(std::sync::atomic::Ordering::SeqCst) { EmptyAnswer::NoLoginMethod } else { EmptyAnswer::Lost };
+        }
+        if Instant::now() >= deadline {
+            return if closed() { EmptyAnswer::Lost } else { EmptyAnswer::Refusal };
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The failure for a server with no login method to offer, with what the methods that were skipped had to say.
+fn no_login_method(hop: &HopRef, tried: Vec<AuthMethod>, mut reasons: Vec<String>) -> ConnectError {
+    reasons.push("The server offers no login method.".to_string());
+    ConnectError::AuthFailed { hop: hop.clone(), tried, reason: reasons.join(" ") }
 }
 
 /// Logs in to a freshly connected hop. The methods of `hop.auth_sequence()` are tried in order, each only if the server still offers
 /// it; a refusal moves to the next method on the same connection. A method that cannot be tried here is skipped, and then the server is
 /// asked once what it does offer (`none`), so later methods are not sent blindly. Anything that is our fault (the signer failed, a
 /// prompt was cancelled or ran late) or the server's silence abandons the login: the caller drops the connection (spec §6.2 step 4).
-async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, auth: &dyn AuthSource) -> Result<(), ConnectError> {
+async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &HopShared, auth: &dyn AuthSource) -> Result<(), ConnectError> {
     let reference = hop.reference();
     let abandoned = |reason: &str| ConnectError::AuthAbandoned { hop: reference.clone(), reason: reason.to_string() };
     let timed_out = || ConnectError::Timeout { hop: reference.clone(), phase: Phase::Auth };
@@ -506,7 +544,11 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, auth: &dyn 
                     Ok(Err(SignerFailure::Sha1Refused)) => return Err(abandoned("an RSA signature with SHA-1 was asked for")),
                     Ok(Err(SignerFailure::Auth(error))) => return Err(abandoned(&error.to_string())),
                     Ok(Ok(AuthResult::Success)) => return Ok(()),
-                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) if died_during_login(handle, &remaining_methods) => return Err(lost(russh::Error::SendError)),
+                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) if remaining_methods.is_empty() => match classify_empty_answer(shared, || handle.is_closed(), LOGIN_END_WAIT).await {
+                        EmptyAnswer::NoLoginMethod => return Err(no_login_method(&reference, tried, reasons)),
+                        EmptyAnswer::Lost => return Err(lost(russh::Error::SendError)),
+                        EmptyAnswer::Refusal => Step::Refused(remaining_methods),
+                    },
                     Ok(Ok(AuthResult::Failure { remaining_methods, .. })) => Step::Refused(remaining_methods),
                 }
             }
@@ -518,7 +560,11 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, auth: &dyn 
             Step::Skipped if offered.is_none() => {
                 match tokio::time::timeout(call_limit, handle.authenticate_none(user)).await.map_err(|_| timed_out())?.map_err(lost)? {
                     AuthResult::Success => return Ok(()),
-                    AuthResult::Failure { remaining_methods, .. } if died_during_login(handle, &remaining_methods) => return Err(lost(russh::Error::SendError)),
+                    AuthResult::Failure { remaining_methods, .. } if remaining_methods.is_empty() => match classify_empty_answer(shared, || handle.is_closed(), LOGIN_END_WAIT).await {
+                        EmptyAnswer::NoLoginMethod => return Err(no_login_method(&reference, tried, reasons)),
+                        EmptyAnswer::Lost => return Err(lost(russh::Error::SendError)),
+                        EmptyAnswer::Refusal => offered = Some(remaining_methods),
+                    },
                     AuthResult::Failure { remaining_methods, .. } => offered = Some(remaining_methods),
                 }
             }
@@ -555,6 +601,7 @@ mod tests {
         let eof = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "early eof");
         assert_eq!(classify_end(&russh::Error::IO(eof)), (DisconnectKind::ConnectionLost, "early eof".to_string()));
         assert_eq!(classify_end(&russh::Error::Kex).0, DisconnectKind::Other);
+        assert_eq!(classify_end(&russh::Error::NoAuthMethod), (DisconnectKind::Other, "the server offers no login method".to_string()));
     }
 
     /// What stands on the other end of the question channel while the handler asks about a host key.
@@ -632,6 +679,47 @@ mod tests {
         assert!(matches!(decided, Ok(false)), "{decided:?}");
         assert!(questions.try_recv().is_err(), "the policy was not asked");
         assert!(locked(&shared.observed).is_none());
+    }
+
+    /// What a login answer with no method left is taken for (the integration tests have the real thing; the timing is pinned here).
+    #[test]
+    fn an_empty_login_answer_is_told_from_a_lost_connection_by_the_recorded_end_and_that_is_waited_for() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().expect("a runtime");
+        let wait = Duration::from_millis(600);
+        let ended = |shared: &HopShared, no_login_method: bool| {
+            shared.no_login_method.store(no_login_method, std::sync::atomic::Ordering::SeqCst);
+            *locked(&shared.ended) = Some((DisconnectKind::Other, "an end".to_string()));
+        };
+        let classify = |shared: &HopShared, closed: bool| runtime.block_on(classify_empty_answer(shared, || closed, wait));
+
+        // Already written down: no waiting.
+        let shared = HopShared::new();
+        ended(&shared, true);
+        let started = std::time::Instant::now();
+        assert!(matches!(classify(&shared, true), EmptyAnswer::NoLoginMethod));
+        let shared = HopShared::new();
+        ended(&shared, false);
+        assert!(matches!(classify(&shared, true), EmptyAnswer::Lost), "any other end is a lost connection");
+        assert!(started.elapsed() < Duration::from_millis(300), "a record that is there is not waited for");
+
+        // Written down a moment later, as russh does it (the handle is closed first, the handler is called after): it is waited for.
+        let shared = HopShared::new();
+        let writer = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                ended(&shared, true);
+            })
+        };
+        assert!(matches!(classify(&shared, true), EmptyAnswer::NoLoginMethod), "the end that shows up within the wait counts");
+        writer.join().unwrap();
+
+        // Never written down: after the wait it is the state of the handle that decides.
+        let shared = HopShared::new();
+        let started = std::time::Instant::now();
+        assert!(matches!(classify(&shared, true), EmptyAnswer::Lost));
+        assert!(started.elapsed() >= wait, "the wait is used up before the verdict");
+        assert!(matches!(classify(&shared, false), EmptyAnswer::Refusal), "nothing ended an open connection: a plain refusal");
     }
 
     fn key(algorithm: &str) -> HostKey {
