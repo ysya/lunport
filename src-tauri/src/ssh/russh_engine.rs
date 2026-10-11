@@ -673,14 +673,20 @@ impl SshEngine for RusshEngine {
 
 impl Drop for RusshSession {
     /// Sends the disconnects before it returns when it can, because this session may be the last thing keeping the runtime alive and a
-    /// task spawned now would die with it. On one of the runtime's own threads blocking is not allowed, so there a task does it.
+    /// task spawned now would die with it. Inside any tokio runtime context (a thread of the engine's runtime or of another one) blocking
+    /// is not allowed, so there a task does it, and the task keeps the engine's runtime alive until it is done.
     fn drop(&mut self) {
         self.connection.closing.store(true, Ordering::SeqCst);
         let connection = Arc::clone(&self.connection);
         if tokio::runtime::Handle::try_current().is_err() {
             let _ = self.runtime.handle().block_on(async { tokio::time::timeout(Duration::from_secs(3), connection.disconnect_all()).await });
         } else {
-            self.runtime.handle().spawn(async move { connection.disconnect_all().await });
+            // Used inside the task, so it is moved into it: the runtime cannot go away under the disconnect when this session is its last owner.
+            let runtime = Arc::clone(&self.runtime);
+            self.runtime.handle().spawn(async move {
+                connection.disconnect_all().await;
+                drop(runtime);
+            });
         }
     }
 }
@@ -1099,6 +1105,26 @@ mod tests {
         );
         assert_eq!(host_key_algorithms(Some(&key("sk-ssh-ed25519@openssh.com"))), defaults, "a type we do not offer restricts nothing");
         assert_eq!(host_key_algorithms(Some(&key("not-an-algorithm"))), defaults);
+    }
+
+    /// The keepalive settings of a host record reach russh's config as they are: an interval of zero is "off", and the number of unanswered
+    /// keepalives is russh's own `keepalive_max`, neither one more nor one less (russh gives up when more than that many went unanswered,
+    /// and a limit of zero means never). The timing tests would not notice a limit that is off by one.
+    #[test]
+    fn the_keepalive_settings_of_a_host_record_reach_the_config_unchanged() {
+        let mut hop = Hop::new("h1", "web", "127.0.0.1", 22, "tester", AuthMethod::Password);
+        let config = client_config(&hop);
+        assert_eq!((config.keepalive_interval, config.keepalive_max), (Some(Duration::from_secs(30)), 3), "the defaults of a host record");
+
+        hop.keepalive_every = Duration::from_secs(7);
+        hop.keepalive_max_missed = 5;
+        let config = client_config(&hop);
+        assert_eq!((config.keepalive_interval, config.keepalive_max), (Some(Duration::from_secs(7)), 5));
+
+        hop.keepalive_every = Duration::ZERO;
+        hop.keepalive_max_missed = 0;
+        let config = client_config(&hop);
+        assert_eq!((config.keepalive_interval, config.keepalive_max), (None, 0), "zero turns keepalive off");
     }
 
     /// The longest the engine waits for the server's answer during the handshake and the login: the connect timeout, but short of the

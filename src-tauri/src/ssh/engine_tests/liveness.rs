@@ -53,6 +53,23 @@ fn a_link_that_answers_keeps_the_session_alive_across_several_intervals() {
     assert_eq!(session.exec("echo still-here", Duration::from_secs(10), MIB).unwrap().stdout, b"still-here\n");
 }
 
+/// `keepalive_max_missed` = 0 means "never give up": keepalives go unanswered for as long as the link is silent and nothing closes the
+/// session. A limit that is off by one would close it after two intervals, long before the four seconds of silence here are over.
+#[test]
+fn a_keepalive_limit_of_zero_never_gives_up_on_a_silent_link() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let (session, proxy) = session_through_a_proxy(&server, Duration::from_secs(1), 0);
+
+    proxy.set(Mode::Blackhole);
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(session.is_alive(), "the session gave up on a silent link with a limit of zero: {:?}", session.disconnect_reason());
+
+    // The link comes back, the bytes it held reach the server, and the session is as good as it was.
+    proxy.set(Mode::Forward);
+    assert_eq!(session.exec("echo back", Duration::from_secs(10), MIB).unwrap().stdout, b"back\n");
+}
+
 #[test]
 fn a_link_that_is_cut_while_idle_is_noticed_as_a_lost_connection() {
     let Some(tools) = tools() else { return };
@@ -91,6 +108,23 @@ fn dropping_a_session_closes_the_connection_with_a_disconnect() {
     settle(session.as_ref());
 
     drop(session);
+    eventually("sshd to log a disconnect message", 5, || server.sshd.log().contains("Received disconnect"));
+}
+
+/// A session dropped on a thread of some other tokio runtime (the app's own, say) must not block there, so a task sends its disconnect.
+/// When the session is the last owner of the engine's runtime (the engine was dropped first) that runtime must not die under the task:
+/// the server has to hear the disconnect all the same.
+#[test]
+fn dropping_a_session_inside_another_runtime_still_sends_the_disconnect() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[LOG_LOGINS]);
+    // The engine is a temporary, so the session is the last owner of the runtime that drives the connection.
+    let session = open_session(&engine(), &server);
+    eventually("sshd to log the login", 3, || accepted_logins(&server) == 1);
+    settle(session.as_ref());
+
+    let other = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().expect("another runtime");
+    other.block_on(async move { drop(session) });
     eventually("sshd to log a disconnect message", 5, || server.sshd.log().contains("Received disconnect"));
 }
 

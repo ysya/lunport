@@ -21,6 +21,10 @@ pub trait SshEngine: Send + Sync {
 }
 
 /// One live connection (a whole jump chain), owned by whoever holds it. Dropping it closes it.
+///
+/// `shell`, `exec` and `close` block the calling thread, as `SshEngine::connect` does. Call them from a plain thread or from
+/// `tokio::task::spawn_blocking`, never from async code: the engine drives its own runtime with `block_on`, and that panics on a thread
+/// that is running async tasks.
 pub trait Session: Send + Sync {
     /// Opens a PTY shell on the destination host. Any number of channels can be open at once.
     fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError>;
@@ -45,7 +49,8 @@ pub trait Session: Send + Sync {
     fn close(&self);
 }
 
-/// An open shell. `read` blocks, so a shell is read on one thread while another writes.
+/// An open shell. `read` blocks, so a shell is read on one thread while another writes. `write`, `window_change` and `close` block the
+/// calling thread too, so the rule of `Session` holds here: a plain thread or `spawn_blocking`, never async code.
 pub trait ShellChannel: Send + Sync {
     /// Sends keystrokes (or pasted text) to the shell's stdin. A connection whose peer has stopped reading does not take them: after a
     /// while (the russh engine waits 30 s) the call fails with `SessionError::Timeout`.
