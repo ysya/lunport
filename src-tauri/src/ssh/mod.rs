@@ -6,6 +6,8 @@
 
 mod channel;
 mod error;
+#[cfg(test)]
+pub mod fake;
 mod traits;
 mod types;
 
