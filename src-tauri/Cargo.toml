@@ -50,6 +50,10 @@ rsa = { version = "0.9", features = ["sha2"] }
 sha1 = { version = "0.10", features = ["oid"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 signature = "2"
+# SSH engine (src/ssh/): russh is imported by src/ssh/russh_engine.rs only. Pinned to the exact version the phase-0 spike measured.
+russh = "=0.64.1"
+# russh runs on tokio. The engine owns a dedicated runtime (rt-multi-thread, net, time) and drives it with block_on; `macros` is for select!.
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 
 [dev-dependencies]
 ts-rs = "10"
