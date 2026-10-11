@@ -648,11 +648,16 @@ impl SshEngine for RusshEngine {
 }
 
 impl Drop for RusshSession {
-    /// Does not block (it may run on one of the runtime's own threads): the disconnect is sent by a task.
+    /// Sends the disconnects before it returns when it can, because this session may be the last thing keeping the runtime alive and a
+    /// task spawned now would die with it. On one of the runtime's own threads blocking is not allowed, so there a task does it.
     fn drop(&mut self) {
         self.connection.closing.store(true, Ordering::SeqCst);
         let connection = Arc::clone(&self.connection);
-        self.runtime.handle().spawn(async move { connection.disconnect_all().await });
+        if tokio::runtime::Handle::try_current().is_err() {
+            let _ = self.runtime.handle().block_on(async { tokio::time::timeout(Duration::from_secs(3), connection.disconnect_all()).await });
+        } else {
+            self.runtime.handle().spawn(async move { connection.disconnect_all().await });
+        }
     }
 }
 
@@ -1100,6 +1105,109 @@ mod tests {
         fn interactive(&self, _hop: &HopRef, _prompts: &[Prompt], _deadline: std::time::Instant) -> Option<Vec<Secret>> {
             None
         }
+    }
+
+    /// A bare russh handler for the measurements: it trusts any host key and writes down how the connection ended.
+    struct Bare {
+        ended: Arc<Mutex<Option<String>>>,
+    }
+
+    impl Handler for Bare {
+        type Error = russh::Error;
+
+        async fn check_server_key(&mut self, _key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+
+        async fn disconnected(&mut self, reason: RusshDisconnect<Self::Error>) -> Result<(), Self::Error> {
+            *locked(&self.ended) = Some(format!("{reason:?}"));
+            match reason {
+                RusshDisconnect::ReceivedDisconnect(_) => Ok(()),
+                RusshDisconnect::Error(error) => Err(error),
+            }
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("a runtime")
+    }
+
+    /// Spec §6.2 step 4, read from russh's source and measured here for the first time. When the signer fails, russh's session is left
+    /// waiting for a signature that never comes: later calls get no answer, `disconnect()` is accepted and does nothing, and only
+    /// dropping the `Handle` ends it. That is why a failed login drops the connection and never tries another method on it.
+    #[test]
+    fn a_session_whose_signer_failed_is_stuck_and_only_dropping_the_handle_ends_it() {
+        use crate::ssh::testing::fact;
+        use crate::ssh::testing::fixture::Server;
+        use crate::ssh::testing::harness::tools;
+
+        let Some(tools) = tools() else { return };
+        let server = Server::start(&tools, &[]);
+        let failing = server.vault("k1").failing_to_sign(AuthError::Refused("the vault is locked".into()));
+        let public = PublicKey::from_openssh(&server.key.public_line).expect("the user key");
+        let ended = Arc::new(Mutex::new(None));
+
+        runtime().block_on(async {
+            let mut handle = client::connect(Arc::new(Config::default()), ("127.0.0.1", server.sshd.port), Bare { ended: Arc::clone(&ended) }).await.expect("connects");
+            let mut signer = EngineSigner { auth: &failing, key_id: "k1" };
+            let result = tokio::time::timeout(Duration::from_secs(5), handle.authenticate_publickey_with(server.sshd.user.as_str(), public, None, &mut signer)).await;
+            fact("signer_failure.login_call", format!("{result:?}"));
+            assert!(matches!(result, Ok(Err(SignerFailure::Auth(_)))), "the signer's error comes straight back: {result:?}");
+
+            let next = tokio::time::timeout(Duration::from_secs(2), handle.authenticate_none(server.sshd.user.as_str())).await;
+            fact("signer_failure.authenticate_none_within_2s", format!("{next:?}"));
+            assert!(next.is_err(), "a call on the stuck session got an answer: {next:?}");
+
+            let disconnect = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            fact("signer_failure.disconnect_call", format!("{disconnect:?}"));
+            fact("signer_failure.is_closed_1s_after_disconnect", handle.is_closed());
+            assert!(disconnect.is_ok() && !handle.is_closed() && locked(&ended).is_none(), "disconnect() did something to a stuck session");
+
+            drop(handle);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while locked(&ended).is_none() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            fact("signer_failure.end_after_drop", format!("{:?}", locked(&ended)));
+            assert!(locked(&ended).is_some(), "dropping the handle did not end the session");
+        });
+    }
+
+    /// Review focus, read from russh's source (client/mod.rs, the keepalive branch of the session loop) and measured here: once the keepalive
+    /// timer has fired on a connection that is not logged in yet, nothing resets it and the loop spins. The engine never idles
+    /// unauthenticated (the password is fetched before connecting; a keyboard-interactive wait sits inside russh's blocked loop), so this
+    /// is not a bug of the engine; it is the reason for that rule, and the test turns red when a russh upgrade fixes it.
+    #[cfg(unix)]
+    #[test]
+    fn russh_spins_when_a_connection_idles_unauthenticated_past_the_keepalive_interval() {
+        use crate::ssh::testing::fixture::Server;
+        use crate::ssh::testing::harness::tools;
+        use crate::ssh::testing::{cpu_time_ms, fact, fact_in, is_child, rerun_alone};
+
+        const NAME: &str = "ssh::russh_engine::tests::russh_spins_when_a_connection_idles_unauthenticated_past_the_keepalive_interval";
+        let Some(tools) = tools() else { return };
+        if !is_child() {
+            let output = rerun_alone(NAME);
+            let cpu = |key: &str| -> u128 { fact_in(&output, key).expect("the child measured").parse().expect("a number") };
+            let (with_keepalive, without) = (cpu("idle.unauthenticated.keepalive_1s.cpu_ms"), cpu("idle.unauthenticated.no_keepalive.cpu_ms"));
+            // the design expected: an idle connection costs nothing, whatever its state
+            assert!(without < 200, "without keepalive an idle connection used {without} ms of CPU in 3 s");
+            assert!(with_keepalive > 1000, "russh no longer spins ({with_keepalive} ms of CPU in 3 s): the unauthenticated-idle rule can be relaxed");
+            return;
+        }
+        let server = Server::start(&tools, &[]);
+        runtime().block_on(async {
+            for (label, interval) in [("keepalive_1s", Some(Duration::from_secs(1))), ("no_keepalive", None)] {
+                let config = Config { keepalive_interval: interval, keepalive_max: 3, ..Config::default() };
+                let handle = client::connect(Arc::new(config), ("127.0.0.1", server.sshd.port), Bare { ended: Arc::default() }).await.expect("connects");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let before = cpu_time_ms();
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                fact(&format!("idle.unauthenticated.{label}.cpu_ms"), cpu_time_ms() - before);
+                assert!(!handle.is_closed());
+            }
+        });
     }
 
     /// The last line of defence for spec §6.3 b: even if the caller of the signer asked for SHA-1, an RSA key is never signed with it and
