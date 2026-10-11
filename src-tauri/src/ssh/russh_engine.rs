@@ -10,21 +10,25 @@
 //! connection instead of switching method on it; liveness is read from the connection's own state, never from an error variant.
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use russh::client::{self, AuthResult, Config, Handle, Handler};
+use russh::client::{self, AuthResult, Config, Handle, Handler, Msg};
 use russh::client::DisconnectReason as RusshDisconnect;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{Algorithm, HashAlg, PublicKey, PublicKeyOrCertificate};
-use russh::{AlgorithmKind, Disconnect, MethodKind, MethodSet, Preferred};
+use russh::{AlgorithmKind, Channel, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, MethodKind, MethodSet, Preferred, Sig};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
-use super::error::{AuthError, ConnectError};
-use super::traits::{AuthSource, HostKeyPolicy};
-use super::types::{AuthMethod, DisconnectKind, Hop, HopRef, HostKey, HostKeyVerdict, Phase, RsaHash, Target};
+use super::channel::{ByteQueue, ExitCell, QueuedShell, ShellInput};
+use super::error::{AuthError, ConnectError, SessionError};
+use super::traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
+use super::types::{
+    AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostKey, HostKeyVerdict, Phase, Pty, RsaHash, Target,
+};
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -69,6 +73,7 @@ impl Drop for RuntimeOwner {
 /// The russh engine. Cheap to create (it starts a small runtime), meant to live as long as the app.
 pub struct RusshEngine {
     runtime: Arc<RuntimeOwner>,
+    options: EngineOptions,
 }
 
 impl Default for RusshEngine {
@@ -90,7 +95,7 @@ impl RusshEngine {
             .build()
             .expect("the SSH engine's runtime");
         let handle = runtime.handle().clone();
-        RusshEngine { runtime: Arc::new(RuntimeOwner { runtime: Some(runtime), handle }) }
+        RusshEngine { runtime: Arc::new(RuntimeOwner { runtime: Some(runtime), handle }), options }
     }
 
     /// Connects every hop of `target` and logs in to each; the connection-level half of `SshEngine::connect`. Blocks the calling thread
@@ -226,7 +231,9 @@ fn client_config(hop: &Hop) -> Config {
 
 /// A hop that is connected and logged in.
 pub struct Established {
+    hop: HopRef,
     handle: Handle<EngineHandler>,
+    shared: Arc<HopShared>,
 }
 
 /// The whole chain, outermost hop first. Owns every hop's `Handle`; a connection is closed by an explicit `disconnect()` on each hop,
@@ -234,16 +241,50 @@ pub struct Established {
 /// drives it: when the engine that made it is dropped the runtime goes with it, and every hop ends.
 pub struct Connection {
     hops: Vec<Established>,
+    /// Set when we are the ones closing it, so that the reason is ours whatever order the hops notice in.
+    closing: AtomicBool,
 }
 
 impl Connection {
+    fn new() -> Connection {
+        Connection { hops: Vec::new(), closing: AtomicBool::new(false) }
+    }
+
     pub fn hop_count(&self) -> usize {
         self.hops.len()
     }
 
-    /// No hop's connection has ended.
+    /// No hop's connection has ended, and nobody is closing it.
     pub fn is_open(&self) -> bool {
-        self.hops.iter().all(|established| !established.handle.is_closed())
+        !self.closing.load(Ordering::SeqCst) && self.hops.iter().all(|established| !established.handle.is_closed())
+    }
+
+    /// The hop the user asked for: the last one.
+    fn destination(&self) -> Result<&Established, SessionError> {
+        self.hops.last().ok_or(SessionError::Closed)
+    }
+
+    /// Why the connection ended: the record of the outermost hop that has one (a hop that dies after its carrier is gone records nothing
+    /// useful, spec §6.2 step 2), else ours when we closed it. A hop whose `Handle` is closed but has not recorded anything yet is about
+    /// to (russh closes the handle first and calls the handler a moment later), so it is given a short while before the fallback is used.
+    fn reason(&self) -> Option<DisconnectReason> {
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        loop {
+            for established in &self.hops {
+                if let Some((kind, detail)) = locked(&established.shared.ended).clone() {
+                    return Some(DisconnectReason { hop: established.hop.clone(), kind, detail });
+                }
+            }
+            if self.closing.load(Ordering::SeqCst) {
+                let hop = self.hops.last()?.hop.clone();
+                return Some(DisconnectReason { hop, kind: DisconnectKind::ClosedByUs, detail: "the connection was closed on our side".to_string() });
+            }
+            let Some(closed) = self.hops.iter().find(|established| established.handle.is_closed()) else { return None };
+            if std::time::Instant::now() >= deadline {
+                return Some(DisconnectReason { hop: closed.hop.clone(), kind: DisconnectKind::ConnectionLost, detail: "the connection ended".to_string() });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Sends a disconnect on every hop, innermost first, and gives each a moment to leave before the next (outer) one goes.
@@ -262,7 +303,7 @@ impl Connection {
 
 async fn connect_chain(target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Connection, ConnectError> {
     check_chain(target)?;
-    let mut connection = Connection { hops: Vec::new() };
+    let mut connection = Connection::new();
     for (index, hop) in target.hops.iter().enumerate() {
         match connect_one(index, hop, connection.hops.last(), host_keys, auth).await {
             Ok(established) => connection.hops.push(established),
@@ -289,9 +330,10 @@ fn check_chain(target: &Target) -> Result<(), ConnectError> {
 }
 
 async fn connect_one(index: usize, hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Established, ConnectError> {
+    let reference = hop.reference();
     let (mut handle, shared) = connect_hop(index, hop, via, host_keys).await?;
     authenticate(hop, &mut handle, &shared, auth).await?;
-    Ok(Established { handle })
+    Ok(Established { hop: reference, handle, shared })
 }
 
 async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy) -> Result<(Handle<EngineHandler>, Arc<HopShared>), ConnectError> {
@@ -572,6 +614,248 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
         }
     }
     Err(ConnectError::AuthFailed { hop: reference, tried, reason: reasons.join(" ") })
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// The session: what a caller does with a connection.
+
+/// How long opening a channel, and the PTY and shell requests that follow it, may take.
+const CHANNEL_SETUP_LIMIT: Duration = Duration::from_secs(15);
+/// How long one write to a shell may wait for the connection's flow control.
+const SHELL_WRITE_LIMIT: Duration = Duration::from_secs(30);
+
+/// A live connection: the chain, the runtime that drives it, and what a caller does with it. Dropping it closes the connection.
+pub struct RusshSession {
+    runtime: Arc<RuntimeOwner>,
+    connection: Arc<Connection>,
+    options: EngineOptions,
+}
+
+impl SshEngine for RusshEngine {
+    fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
+        let connection = Arc::new(self.connect_chain(target, host_keys, auth)?);
+        Ok(Box::new(RusshSession { runtime: Arc::clone(&self.runtime), connection, options: self.options.clone() }))
+    }
+}
+
+impl Drop for RusshSession {
+    /// Does not block (it may run on one of the runtime's own threads): the disconnect is sent by a task.
+    fn drop(&mut self) {
+        self.connection.closing.store(true, Ordering::SeqCst);
+        let connection = Arc::clone(&self.connection);
+        self.runtime.handle().spawn(async move { connection.disconnect_all().await });
+    }
+}
+
+/// russh's errors on a call that needs the session, as the session's: a gone session is `Closed`, anything else is the server's answer.
+fn channel_error(error: russh::Error) -> SessionError {
+    match error {
+        russh::Error::SendError | russh::Error::RecvError | russh::Error::Disconnect => SessionError::Closed,
+        other => SessionError::Channel(other.to_string()),
+    }
+}
+
+async fn open_channel(established: &Established, limit: Duration) -> Result<Channel<Msg>, SessionError> {
+    match tokio::time::timeout(limit, established.handle.channel_open_session()).await {
+        Err(_) => Err(SessionError::Channel("opening a channel timed out".to_string())),
+        Ok(Ok(channel)) => Ok(channel),
+        Ok(Err(error)) => Err(channel_error(error)),
+    }
+}
+
+/// The signal's name without the `SIG` prefix.
+fn signal_name(signal: &Sig) -> String {
+    match signal {
+        Sig::Custom(name) => name.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+impl Session for RusshSession {
+    fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError> {
+        if !self.is_alive() {
+            return Err(SessionError::Closed);
+        }
+        let destination = self.connection.destination()?;
+        let handle = self.runtime.handle();
+        handle.block_on(async {
+            let channel = open_channel(destination, CHANNEL_SETUP_LIMIT).await?;
+            let setup = async {
+                channel.request_pty(true, &pty.term, u32::from(pty.cols), u32::from(pty.rows), 0, 0, &[]).await?;
+                channel.request_shell(true).await
+            };
+            match tokio::time::timeout(CHANNEL_SETUP_LIMIT, setup).await {
+                Err(_) => return Err(SessionError::Channel("starting the shell timed out".to_string())),
+                Ok(Err(error)) => return Err(channel_error(error)),
+                Ok(Ok(())) => {}
+            }
+            let (read_half, write_half) = channel.split();
+            let write_half = Arc::new(write_half);
+            let (queue, exit) = (ByteQueue::new(self.options.shell_queue_bytes), ExitCell::new());
+            let (closed_by_us, closed) = watch::channel(false);
+            tokio::spawn(read_shell(read_half, Arc::clone(&write_half), Arc::clone(&queue), Arc::clone(&exit), closed));
+            let input = RusshShellInput { write_half, runtime: self.runtime.handle(), closed_by_us };
+            Ok(Box::new(QueuedShell::new(Box::new(input), queue, exit)) as Box<dyn ShellChannel>)
+        })
+    }
+
+    fn exec(&self, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError> {
+        if !self.is_alive() {
+            return Err(SessionError::Closed);
+        }
+        let destination = self.connection.destination()?;
+        self.runtime.handle().block_on(exec_on(destination, command, timeout, output_cap))
+    }
+
+    fn is_alive(&self) -> bool {
+        self.connection.is_open()
+    }
+
+    fn disconnect_reason(&self) -> Option<DisconnectReason> {
+        if self.is_alive() {
+            None
+        } else {
+            self.connection.reason()
+        }
+    }
+
+    fn close(&self) {
+        self.connection.closing.store(true, Ordering::SeqCst);
+        self.runtime.handle().block_on(self.connection.disconnect_all());
+    }
+}
+
+/// Runs one command on its own channel and reads the channel until it ends, the output reaches `output_cap` bytes or `timeout` is up.
+async fn exec_on(destination: &Established, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError> {
+    let deadline = Instant::now() + timeout;
+    let mut channel = open_channel(destination, CHANNEL_SETUP_LIMIT.max(timeout)).await?;
+    channel.exec(true, command).await.map_err(channel_error)?;
+    let mut result = ExecResult { ended: Ended::Disconnected, exit_code: None, signal: None, stdout: Vec::new(), stderr: Vec::new(), truncated: false };
+    loop {
+        let message = match tokio::time::timeout_at(deadline, channel.wait()).await {
+            Err(_) => {
+                let _ = channel.close().await;
+                result.ended = Ended::TimedOut;
+                return Ok(result);
+            }
+            Ok(None) => break,
+            Ok(Some(message)) => message,
+        };
+        match message {
+            ChannelMsg::Data { data } => {
+                if !keep(&mut result.stdout, result.stderr.len(), &data, output_cap) {
+                    return Ok(cut_off(&channel, result).await);
+                }
+            }
+            ChannelMsg::ExtendedData { data, ext: 1 } => {
+                if !keep(&mut result.stderr, result.stdout.len(), &data, output_cap) {
+                    return Ok(cut_off(&channel, result).await);
+                }
+            }
+            ChannelMsg::ExitStatus { exit_status } => result.exit_code = Some(exit_status),
+            ChannelMsg::ExitSignal { signal_name: signal, .. } => result.signal = Some(signal_name(&signal)),
+            ChannelMsg::Failure => return Err(SessionError::Channel("the server refused to run the command".to_string())),
+            _ => {}
+        }
+    }
+    result.ended = if result.signal.is_some() {
+        Ended::Signaled
+    } else if result.exit_code.is_some() {
+        Ended::Exited
+    } else {
+        Ended::Disconnected
+    };
+    Ok(result)
+}
+
+/// Appends as much of `data` to `stream` as the cap leaves room for (`other` is the length of the other stream); false when some of it did not fit.
+fn keep(stream: &mut Vec<u8>, other: usize, data: &[u8], output_cap: usize) -> bool {
+    let room = output_cap.saturating_sub(stream.len() + other);
+    let fitting = room.min(data.len());
+    stream.extend_from_slice(&data[..fitting]);
+    fitting == data.len()
+}
+
+/// The output hit the cap: the channel is closed (the connection stays usable) and what was read is the result.
+async fn cut_off(channel: &Channel<Msg>, mut result: ExecResult) -> ExecResult {
+    let _ = channel.close().await;
+    result.truncated = true;
+    result.ended = Ended::Truncated;
+    result.exit_code = None;
+    result.signal = None;
+    result
+}
+
+/// The write side of a shell, on the engine's runtime.
+struct RusshShellInput {
+    write_half: Arc<ChannelWriteHalf<Msg>>,
+    runtime: tokio::runtime::Handle,
+    /// Tells the reader task that the shell was closed from our side: russh never ends a channel's reads after the channel was closed
+    /// locally (it ignores the server's close for it), so without this the reader would wait for ever.
+    closed_by_us: watch::Sender<bool>,
+}
+
+impl ShellInput for RusshShellInput {
+    fn write(&self, bytes: &[u8]) -> Result<(), SessionError> {
+        // The timer is created inside the future: building it before `block_on` would need a runtime on this thread.
+        match self.runtime.block_on(async { tokio::time::timeout(SHELL_WRITE_LIMIT, self.write_half.data(bytes)).await }) {
+            Err(_) => Err(SessionError::Channel("the connection did not take the input in time".to_string())),
+            Ok(result) => result.map_err(channel_error),
+        }
+    }
+
+    fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError> {
+        self.runtime.block_on(self.write_half.window_change(u32::from(cols), u32::from(rows), 0, 0)).map_err(channel_error)
+    }
+
+    fn close(&self) {
+        let _ = self.closed_by_us.send(true);
+        let _ = self.runtime.block_on(async { tokio::time::timeout(Duration::from_secs(2), self.write_half.close()).await });
+    }
+}
+
+impl Drop for RusshShellInput {
+    /// A shell that is dropped without being closed is closed here; nothing blocks (this may run on one of the runtime's threads).
+    fn drop(&mut self) {
+        let _ = self.closed_by_us.send(true);
+        let write_half = Arc::clone(&self.write_half);
+        self.runtime.spawn(async move {
+            let _ = write_half.close().await;
+        });
+    }
+}
+
+/// The one task that reads a shell's channel (spec §6.3: every channel has a reader, or russh stalls the whole connection). It moves the
+/// output into the queue without ever waiting for the consumer, and when the channel ends it records how, then closes the queue, in
+/// that order, so a consumer that sees the end of the output finds the exit.
+async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWriteHalf<Msg>>, queue: Arc<ByteQueue>, exit: Arc<ExitCell>, mut closed_by_us: watch::Receiver<bool>) {
+    let (mut code, mut signal, mut refused) = (None, None, false);
+    loop {
+        let message = tokio::select! {
+            message = read_half.wait() => message,
+            _ = closed_by_us.wait_for(|closed| *closed) => None,
+        };
+        let Some(message) = message else { break };
+        match message {
+            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                queue.push(data.to_vec());
+            }
+            ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+            ChannelMsg::ExitSignal { signal_name: name, .. } => signal = Some(signal_name(&name)),
+            ChannelMsg::Failure => {
+                refused = true;
+                let _ = write_half.close().await;
+                break;
+            }
+            _ => {}
+        }
+    }
+    exit.set(match (signal, code) {
+        (Some(signal), _) => Exit::Signal(signal),
+        (None, Some(code)) if !refused => Exit::Code(code),
+        _ => Exit::Disconnected,
+    });
+    queue.close();
 }
 
 #[cfg(test)]
