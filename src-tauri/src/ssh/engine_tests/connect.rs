@@ -271,6 +271,35 @@ fn an_rsa_key_is_never_signed_with_sha1() {
 }
 
 #[test]
+fn the_other_login_methods_are_refused_by_a_key_only_server_and_only_offered_methods_are_tried() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let policy = trusting();
+
+    // A hop that starts with a password: the server refuses it; keyboard-interactive is not on its list, so it is not tried.
+    let auth = server.vault("k1").with_password("not-the-password").with_answers(&["unused"]);
+    let hop = server.hop_with("web", server.sshd.port, AuthMethod::Password);
+    let error = engine().connect_chain(&Target { hops: vec![hop] }, &*policy, &auth).err().expect("no password login here");
+    assert!(matches!(&error, ConnectError::AuthFailed { tried, .. } if *tried == [AuthMethod::Password]), "{error:?}");
+    assert_eq!(auth.password_asked_for().len(), 1);
+    assert!(auth.prompts_seen().is_empty(), "keyboard-interactive was not tried");
+
+    // A hop that starts with keyboard-interactive: refused at once, no prompt ever shown.
+    let hop = server.hop_with("web", server.sshd.port, AuthMethod::Interactive);
+    let error = engine().connect_chain(&Target { hops: vec![hop] }, &*policy, &auth).err().expect("no keyboard-interactive login here");
+    assert!(matches!(&error, ConnectError::AuthFailed { tried, .. } if *tried == [AuthMethod::Interactive]), "{error:?}");
+    assert!(auth.prompts_seen().is_empty());
+
+    // A hop that starts with a key the server refuses: password and keyboard-interactive are not offered, so neither is asked for.
+    let stranger_dir = tempfile::tempdir().unwrap();
+    let stranger = generate_key(&tools, stranger_dir.path(), "stranger", KeyKind::Ed25519);
+    let auth = VaultAuth::new().with_key("k1", &stranger.private_text).with_password("pw");
+    let error = engine().connect_chain(&server.target("k1"), &*policy, &auth).err().expect("the key is not authorized");
+    assert!(matches!(&error, ConnectError::AuthFailed { tried, .. } if *tried == [AuthMethod::Key { key_id: "k1".into() }]), "{error:?}");
+    assert!(auth.password_asked_for().is_empty(), "the server does not offer passwords, so none was asked for");
+}
+
+#[test]
 fn a_key_that_is_not_in_the_vault_is_skipped_and_the_failure_says_so() {
     let Some(tools) = tools() else { return };
     let server = Server::start(&tools, &[]);
@@ -282,6 +311,46 @@ fn a_key_that_is_not_in_the_vault_is_skipped_and_the_failure_says_so() {
         }
         other => panic!("expected AuthFailed, got {other:?}"),
     }
+}
+
+/// A hop that starts with the password method asks for the password before it opens the connection: a person typing must not leave an
+/// unauthenticated connection waiting (the server's grace time runs; russh's loop spins).
+#[test]
+fn a_password_is_asked_for_before_the_connection_is_opened() {
+    use crate::ssh::{AuthSource, HopRef, Prompt, Secret, Signature};
+    use std::sync::Arc;
+
+    struct Probe {
+        proxy: Arc<Proxy>,
+        accepted_when_asked: std::sync::Mutex<Option<usize>>,
+    }
+    impl AuthSource for Probe {
+        fn public_key(&self, _key_id: &str) -> Option<String> {
+            None
+        }
+        fn sign(&self, _key_id: &str, _data: &[u8], _rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError> {
+            Err(AuthError::Refused("no keys here".into()))
+        }
+        fn password(&self, _hop: &HopRef) -> Option<Secret> {
+            *self.accepted_when_asked.lock().unwrap() = Some(self.proxy.accepted());
+            std::thread::sleep(Duration::from_millis(500));
+            Some(zeroize::Zeroizing::new("whatever".to_string()))
+        }
+        fn interactive(&self, _hop: &HopRef, _prompts: &[Prompt], _deadline: Instant) -> Option<Vec<Secret>> {
+            None
+        }
+    }
+
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let proxy = Arc::new(Proxy::start(server.sshd.port));
+    let probe = Probe { proxy: Arc::clone(&proxy), accepted_when_asked: std::sync::Mutex::new(None) };
+    let hop = server.hop_with("web", proxy.port, AuthMethod::Password);
+
+    let error = engine().connect_chain(&Target { hops: vec![hop] }, &*trusting(), &probe).err().expect("the server refuses passwords");
+    assert!(matches!(error, ConnectError::AuthFailed { .. }), "{error:?}");
+    assert_eq!(*probe.accepted_when_asked.lock().unwrap(), Some(0), "nothing had connected when the password was asked for");
+    assert_eq!(proxy.accepted(), 1, "the connection was made afterwards");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------

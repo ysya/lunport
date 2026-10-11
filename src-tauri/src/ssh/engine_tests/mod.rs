@@ -5,6 +5,7 @@ mod connect;
 mod exec;
 mod jump;
 mod liveness;
+mod login_methods;
 mod shell;
 
 use std::sync::{Arc, Mutex, PoisonError};

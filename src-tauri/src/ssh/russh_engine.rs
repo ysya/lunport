@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use russh::client::{self, AuthResult, Config, Handle, Handler, Msg};
+use russh::client::{self, AuthResult, Config, Handle, Handler, KeyboardInteractiveAuthResponse, Msg};
 use russh::client::DisconnectReason as RusshDisconnect;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{Algorithm, HashAlg, PublicKey, PublicKeyOrCertificate};
@@ -29,7 +29,7 @@ use super::channel::{ByteQueue, ExitCell, QueuedShell, ShellInput};
 use super::error::{AuthError, ConnectError, SessionError};
 use super::traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
 use super::types::{
-    AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostKey, HostKeyVerdict, Phase, Pty, RsaHash, Target,
+    AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostKey, HostKeyVerdict, Phase, Prompt, Pty, RsaHash, Secret, Target,
 };
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -41,13 +41,22 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct EngineOptions {
     /// Bytes of shell output kept between the channel reader and the thread that reads the shell (see `ByteQueue`).
     pub shell_queue_bytes: usize,
+    /// How long one keyboard-interactive answer may take. `None` = 4 × the hop's connect timeout, at least 60 s (spec §6.2 step 4).
+    pub prompt_wait: Option<Duration>,
     /// Worker threads of the engine's runtime.
     pub worker_threads: usize,
 }
 
 impl Default for EngineOptions {
     fn default() -> Self {
-        EngineOptions { shell_queue_bytes: 4 * 1024 * 1024, worker_threads: 2 }
+        EngineOptions { shell_queue_bytes: 4 * 1024 * 1024, prompt_wait: None, worker_threads: 2 }
+    }
+}
+
+impl EngineOptions {
+    /// The time a person gets to answer one keyboard-interactive round.
+    fn prompt_wait_for(&self, connect_timeout: Duration) -> Duration {
+        self.prompt_wait.unwrap_or_else(|| (connect_timeout * 4).max(Duration::from_secs(60)))
     }
 }
 
@@ -105,7 +114,7 @@ impl RusshEngine {
     /// Connects every hop of `target` and logs in to each; the connection-level half of `SshEngine::connect`. Blocks the calling thread
     /// (never call it from inside an async task).
     pub fn connect_chain(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Connection, ConnectError> {
-        self.runtime.handle().block_on(connect_chain(target, host_keys, auth))
+        self.runtime.handle().block_on(connect_chain(target, host_keys, auth, &self.options))
     }
 }
 
@@ -336,11 +345,11 @@ impl Connection {
     }
 }
 
-async fn connect_chain(target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Connection, ConnectError> {
+async fn connect_chain(target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource, options: &EngineOptions) -> Result<Connection, ConnectError> {
     check_chain(target)?;
     let mut connection = Connection::new();
     for hop in &target.hops {
-        match connect_one(hop, connection.hops.last(), host_keys, auth).await {
+        match connect_one(hop, connection.hops.last(), host_keys, auth, options).await {
             Ok(established) => connection.hops.push(established),
             Err(error) => {
                 connection.disconnect_all().await;
@@ -364,13 +373,25 @@ fn check_chain(target: &Target) -> Result<(), ConnectError> {
     Ok(())
 }
 
-async fn connect_one(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Established, ConnectError> {
+async fn connect_one(
+    hop: &Hop,
+    via: Option<&Established>,
+    host_keys: &dyn HostKeyPolicy,
+    auth: &dyn AuthSource,
+    options: &EngineOptions,
+) -> Result<Established, ConnectError> {
     let reference = hop.reference();
+    // A hop that starts with the password method asks for it before anything is connected: a person typing must not keep an
+    // unauthenticated connection waiting (the server's login grace time runs, and russh spins while it idles).
+    let password = (hop.auth == AuthMethod::Password).then(|| auth.password(&reference));
     let (mut handle, shared) = connect_hop(hop, via, host_keys).await?;
-    authenticate(hop, &mut handle, &shared, auth).await?;
+    authenticate(hop, &mut handle, &shared, auth, password, options).await?;
     Ok(Established { hop: reference, handle, shared })
 }
 
+/// Connects one hop: over TCP for the first, through a direct-tcpip channel of the hop in front of it for every later one (the way
+/// OpenSSH's ProxyJump does), and runs the handshake with the host key check. TCP (or the tunnel) plus handshake share the hop's
+/// connect timeout.
 async fn connect_hop(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy) -> Result<(Handle<EngineHandler>, Arc<HopShared>), ConnectError> {
     let reference = hop.reference();
     let shared = HopShared::new();
@@ -616,13 +637,14 @@ fn no_login_method(hop: &HopRef, tried: Vec<AuthMethod>, mut reasons: Vec<String
 /// it; a refusal moves to the next method on the same connection. A method that cannot be tried here is skipped, and then the server is
 /// asked once what it does offer (`none`), so later methods are not sent blindly. Anything that is our fault (the signer failed, a
 /// prompt was cancelled or ran late) or the server's silence abandons the login: the caller drops the connection (spec §6.2 step 4). Each
-/// request is given `stall_limit` to be answered.
-async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &HopShared, auth: &dyn AuthSource) -> Result<(), ConnectError> {
+/// request is given `stall_limit` to be answered, except the reply to a keyboard-interactive round, which gets `prompt_wait`.
+async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &HopShared, auth: &dyn AuthSource, mut prefetched_password: Option<Option<Secret>>, options: &EngineOptions) -> Result<(), ConnectError> {
     let reference = hop.reference();
     let abandoned = |reason: &str| ConnectError::AuthAbandoned { hop: reference.clone(), reason: reason.to_string() };
     let timed_out = || ConnectError::Timeout { hop: reference.clone(), phase: Phase::Auth };
     let lost = |_: russh::Error| ConnectError::Unreachable { hop: reference.clone(), reason: "the connection was lost during login".to_string() };
     let call_limit = stall_limit(hop);
+    let prompt_wait = options.prompt_wait_for(hop.connect_timeout);
     let user = hop.user.as_str();
     let mut tried: Vec<AuthMethod> = Vec::new();
     let mut reasons: Vec<String> = Vec::new();
@@ -671,8 +693,58 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
                     Ok(Ok(AuthResult::Failure { remaining_methods, .. })) => Step::Refused(remaining_methods),
                 }
             }
-            // Password and keyboard-interactive logins come in Task 11; until then these methods are skipped like any method with nothing to offer.
-            AuthMethod::Password | AuthMethod::Interactive => Step::Skipped,
+            AuthMethod::Password => 'password: {
+                let password = match prefetched_password.take() {
+                    Some(answer) => answer,
+                    None => auth.password(&reference),
+                };
+                let Some(password) = password else { break 'password Step::Skipped };
+                tried.push(method.clone());
+                match tokio::time::timeout(call_limit, handle.authenticate_password(user, password.as_str())).await {
+                    Err(_) => return Err(timed_out()),
+                    Ok(Err(error)) => return Err(lost(error)),
+                    Ok(Ok(AuthResult::Success)) => return Ok(()),
+                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) if remaining_methods.is_empty() => match classify_empty_answer(shared, || handle.is_closed(), LOGIN_END_WAIT).await {
+                        EmptyAnswer::NoLoginMethod => return Err(no_login_method(&reference, tried, reasons)),
+                        EmptyAnswer::Lost => return Err(lost(russh::Error::SendError)),
+                        EmptyAnswer::Refusal => Step::Refused(remaining_methods),
+                    },
+                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) => Step::Refused(remaining_methods),
+                }
+            }
+            AuthMethod::Interactive => {
+                tried.push(method.clone());
+                let mut response = tokio::time::timeout(call_limit, handle.authenticate_keyboard_interactive_start(user, None::<String>))
+                    .await
+                    .map_err(|_| timed_out())?
+                    .map_err(lost)?;
+                loop {
+                    match response {
+                        KeyboardInteractiveAuthResponse::Success => return Ok(()),
+                        KeyboardInteractiveAuthResponse::Failure { remaining_methods, .. } => break Step::Refused(remaining_methods),
+                        KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                            let answers = if prompts.is_empty() {
+                                Vec::new()
+                            } else {
+                                let prompts: Vec<Prompt> = prompts.into_iter().map(|prompt| Prompt { text: prompt.prompt, echo: prompt.echo }).collect();
+                                let deadline = std::time::Instant::now() + prompt_wait;
+                                let Some(answers) = auth.interactive(&reference, &prompts, deadline) else { return Err(abandoned("the prompt was cancelled")) };
+                                if std::time::Instant::now() > deadline {
+                                    return Err(abandoned("the prompt was answered after its deadline"));
+                                }
+                                if answers.len() != prompts.len() {
+                                    return Err(abandoned("the answers do not match the prompts"));
+                                }
+                                answers.iter().map(|answer| answer.to_string()).collect()
+                            };
+                            response = tokio::time::timeout(prompt_wait, handle.authenticate_keyboard_interactive_respond(answers))
+                                .await
+                                .map_err(|_| timed_out())?
+                                .map_err(lost)?;
+                        }
+                    }
+                }
+            }
         };
         match step {
             Step::Refused(remaining) => offered = Some(remaining),
@@ -1019,13 +1091,132 @@ async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWrite
     queue.close();
 }
 
+/// A small SSH server in process, on russh's own server side, for the logins that a scratch OpenSSH cannot do because it has no PAM:
+/// password and keyboard-interactive. It is a test fixture, not a model of any real server; the PAM job of the CI runs the same login
+/// tests against OpenSSH. It lives in this file because russh is named here and nowhere else (the test in `ssh/mod.rs`).
+#[cfg(test)]
+pub(crate) mod toy_server {
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    use russh::keys::PrivateKey;
+    use russh::server::{self, Auth, Config, Msg, Response, Server as _, Session};
+    use russh::{Channel, ChannelId, MethodKind, MethodSet};
+    use tokio::net::TcpListener;
+
+    use crate::sync::slot_rules::test_keys;
+
+    /// Who may log in, and what the server asks in keyboard-interactive.
+    #[derive(Clone)]
+    pub(crate) struct ToyLogin {
+        pub user: String,
+        pub password: String,
+        pub prompt: String,
+    }
+
+    /// The server's side of one client.
+    struct Toy {
+        login: Arc<ToyLogin>,
+    }
+
+    impl server::Handler for Toy {
+        type Error = russh::Error;
+
+        async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+            Ok(if user == self.login.user && password == self.login.password { Auth::Accept } else { Auth::reject() })
+        }
+
+        /// A single round: the prompt, then the answer is compared with the password.
+        async fn auth_keyboard_interactive<'a>(&'a mut self, user: &str, _submethods: &str, response: Option<Response<'a>>) -> Result<Auth, Self::Error> {
+            match response {
+                None => Ok(Auth::Partial {
+                    name: Cow::Borrowed(""),
+                    instructions: Cow::Borrowed(""),
+                    prompts: Cow::Owned(vec![(Cow::Owned(self.login.prompt.clone()), false)]),
+                }),
+                Some(mut response) => {
+                    let answer = response.next();
+                    let right = answer.is_some_and(|answer| answer[..] == *self.login.password.as_bytes());
+                    Ok(if user == self.login.user && right { Auth::Accept } else { Auth::reject() })
+                }
+            }
+        }
+
+        async fn auth_publickey_offered(&mut self, _user: &str, _key: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
+            Ok(Auth::reject())
+        }
+
+        async fn channel_open_session(&mut self, _channel: Channel<Msg>, reply: server::ChannelOpenHandle, _session: &mut Session) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        /// Whatever the command, it prints `ok` and exits 0.
+        async fn exec_request(&mut self, channel: ChannelId, _command: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+            session.channel_success(channel)?;
+            session.data(channel, b"ok\n".to_vec())?;
+            session.exit_status_request(channel, 0)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
+
+    struct Factory {
+        login: Arc<ToyLogin>,
+    }
+
+    impl server::Server for Factory {
+        type Handler = Toy;
+
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Toy {
+            Toy { login: Arc::clone(&self.login) }
+        }
+    }
+
+    /// The running server. Dropping it stops it.
+    pub(crate) struct ToyServer {
+        pub port: u16,
+        runtime: Option<tokio::runtime::Runtime>,
+    }
+
+    impl ToyServer {
+        pub(crate) fn start(login: ToyLogin) -> ToyServer {
+            let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().expect("the toy server's runtime");
+            let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0))).expect("bind the toy server");
+            let port = listener.local_addr().expect("the toy server's address").port();
+            let host_key = PrivateKey::from_openssh(&test_keys::plain()).expect("the test key is an OpenSSH private key");
+            let config = Config {
+                methods: MethodSet::from(&[MethodKind::PublicKey, MethodKind::Password, MethodKind::KeyboardInteractive][..]),
+                auth_rejection_time: std::time::Duration::from_millis(10),
+                auth_rejection_time_initial: Some(std::time::Duration::ZERO),
+                keys: vec![host_key],
+                ..Config::default()
+            };
+            let mut factory = Factory { login: Arc::new(login) };
+            runtime.spawn(async move {
+                let _ = factory.run_on_socket(Arc::new(config), &listener).await;
+            });
+            ToyServer { port, runtime: Some(runtime) }
+        }
+    }
+
+    impl Drop for ToyServer {
+        fn drop(&mut self) {
+            if let Some(runtime) = self.runtime.take() {
+                runtime.shutdown_background();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use russh::keys::EcdsaCurve;
     use russh::Signer;
 
     use super::*;
-    use crate::ssh::{AuthError, Prompt, Secret, Signature};
+    use crate::ssh::{AuthError, Signature};
     use crate::sync::slot_rules::test_keys;
 
     #[test]
@@ -1232,6 +1423,16 @@ mod tests {
         assert_eq!(choose_rsa_hash(Some(Some(HashAlg::Sha256))), RsaChoice::Use(HashAlg::Sha256));
         assert_eq!(choose_rsa_hash(Some(None)), RsaChoice::Sha1Only, "the server lists only ssh-rsa");
         assert_eq!(choose_rsa_hash(None), RsaChoice::Use(HashAlg::Sha256), "a server that never announced its algorithms is tried with SHA-256");
+    }
+
+    #[test]
+    fn a_keyboard_interactive_answer_gets_four_connect_timeouts_and_at_least_a_minute() {
+        let options = EngineOptions::default();
+        assert_eq!(options.prompt_wait_for(Duration::from_secs(15)), Duration::from_secs(60));
+        assert_eq!(options.prompt_wait_for(Duration::from_secs(30)), Duration::from_secs(120));
+        assert_eq!(options.prompt_wait_for(Duration::from_secs(5)), Duration::from_secs(60));
+        let short = EngineOptions { prompt_wait: Some(Duration::from_secs(2)), ..EngineOptions::default() };
+        assert_eq!(short.prompt_wait_for(Duration::from_secs(15)), Duration::from_secs(2));
     }
 
     /// Counts the calls to `sign` and the hash each one got.
