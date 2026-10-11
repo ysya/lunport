@@ -6,7 +6,8 @@
 //! is blocked in `connect`, which answers it.
 //!
 //! What the phase-0 spike taught, as rules (spec §6.2, §6.3): a handshake or a login call that waits for the application stalls the
-//! whole connection, so nothing here waits for a person inside a callback; every wait is bounded; a failed or abandoned login drops the
+//! whole connection, so nothing here waits for a person inside a callback; every wait is bounded, and the wait for the server's answer
+//! during the handshake and the login ends before the keepalive interval does (`stall_limit`); a failed or abandoned login drops the
 //! connection instead of switching method on it; liveness is read from the connection's own state, never from an error variant.
 
 use std::borrow::Cow;
@@ -218,6 +219,24 @@ fn host_key_algorithms(pinned: Option<&HostKey>) -> Vec<Algorithm> {
     }
 }
 
+/// How long the engine waits for the server to answer between its version line and the end of the login (the handshake, and each login
+/// request): the connect timeout, but never more than three quarters of the keepalive interval, and at least a second.
+///
+/// russh arms its keepalive timer when its session loop starts, which is as soon as the server's version line is in, and does nothing with
+/// it before the login is done. A packet from the server re-arms it, but once the interval has passed in silence the loop spins on the
+/// elapsed timer until the next packet comes (client/mod.rs: the `keepalive_timer` branch of `run_inner` acts only on a logged-in
+/// connection, and the timer is reset only after received data or a sent keepalive). Measured: about 4.2 s of CPU in a 6 s stall with a 2 s
+/// interval. The defaults (15 s connect timeout, 30 s interval) never get there; a host record with a short interval or a long connect
+/// timeout would. Not covered: the TCP connect (the timer does not exist yet), and the waits for a person, which keep their own limits (a
+/// host key question or a signature parks russh's loop, and the loop re-arms the timer when it moves on).
+fn stall_limit(hop: &Hop) -> Duration {
+    let budget = hop.connect_timeout.max(Duration::from_secs(1));
+    if hop.keepalive_every.is_zero() {
+        return budget;
+    }
+    budget.min(hop.keepalive_every.mul_f32(0.75).max(Duration::from_secs(1)))
+}
+
 /// russh's `Config` for one hop: keepalive from the host record (russh's own default is off), the host key list above, and nothing else
 /// changed from russh's defaults (mlkem768x25519, curve25519, chacha20-poly1305, aes-gcm, strict kex, rsa-sha2).
 fn client_config(hop: &Hop) -> Config {
@@ -356,6 +375,9 @@ async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_ke
         phase.set(Phase::Handshake);
         let connecting = client::connect_stream(config, tcp, handler);
         tokio::pin!(connecting);
+        // The handshake gets `stall_limit`, not the whole connect timeout: russh's keepalive timer runs from the server's version line.
+        let stall = tokio::time::sleep(stall_limit(hop));
+        tokio::pin!(stall);
         let connected = loop {
             tokio::select! {
                 connected = &mut connecting => break connected,
@@ -363,6 +385,7 @@ async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_ke
                     let verdict = host_keys.check(&reference, &question.key);
                     let _ = question.reply.send(verdict);
                 }
+                () = &mut stall => return Err(ConnectError::Timeout { hop: reference.clone(), phase: Phase::Handshake }),
             }
         };
         if connected.is_ok() {
@@ -540,13 +563,14 @@ fn no_login_method(hop: &HopRef, tried: Vec<AuthMethod>, mut reasons: Vec<String
 /// Logs in to a freshly connected hop. The methods of `hop.auth_sequence()` are tried in order, each only if the server still offers
 /// it; a refusal moves to the next method on the same connection. A method that cannot be tried here is skipped, and then the server is
 /// asked once what it does offer (`none`), so later methods are not sent blindly. Anything that is our fault (the signer failed, a
-/// prompt was cancelled or ran late) or the server's silence abandons the login: the caller drops the connection (spec §6.2 step 4).
+/// prompt was cancelled or ran late) or the server's silence abandons the login: the caller drops the connection (spec §6.2 step 4). Each
+/// request is given `stall_limit` to be answered.
 async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &HopShared, auth: &dyn AuthSource) -> Result<(), ConnectError> {
     let reference = hop.reference();
     let abandoned = |reason: &str| ConnectError::AuthAbandoned { hop: reference.clone(), reason: reason.to_string() };
     let timed_out = || ConnectError::Timeout { hop: reference.clone(), phase: Phase::Auth };
     let lost = |_: russh::Error| ConnectError::Unreachable { hop: reference.clone(), reason: "the connection was lost during login".to_string() };
-    let call_limit = hop.connect_timeout.max(Duration::from_secs(1));
+    let call_limit = stall_limit(hop);
     let user = hop.user.as_str();
     let mut tried: Vec<AuthMethod> = Vec::new();
     let mut reasons: Vec<String> = Vec::new();
@@ -1077,6 +1101,24 @@ mod tests {
         assert_eq!(host_key_algorithms(Some(&key("not-an-algorithm"))), defaults);
     }
 
+    /// The longest the engine waits for the server's answer during the handshake and the login: the connect timeout, but short of the
+    /// keepalive interval (a silence that outlasts the interval makes russh's loop spin, see `stall_limit`).
+    #[test]
+    fn a_wait_for_the_server_ends_before_the_keepalive_interval_does() {
+        let hop = |connect_secs: u64, keepalive_secs: u64| {
+            let mut hop = Hop::new("h1", "web", "127.0.0.1", 22, "tester", AuthMethod::Password);
+            hop.connect_timeout = Duration::from_secs(connect_secs);
+            hop.keepalive_every = Duration::from_secs(keepalive_secs);
+            hop
+        };
+        assert_eq!(stall_limit(&hop(15, 30)), Duration::from_secs(15), "the defaults: the connect timeout is the shorter of the two");
+        assert_eq!(stall_limit(&hop(60, 30)), Duration::from_millis(22_500), "a long connect timeout is cut to three quarters of the interval");
+        assert_eq!(stall_limit(&hop(6, 2)), Duration::from_millis(1_500));
+        assert_eq!(stall_limit(&hop(6, 1)), Duration::from_secs(1), "never under a second, whatever the interval");
+        assert_eq!(stall_limit(&hop(60, 0)), Duration::from_secs(60), "keepalive off: the connect timeout alone");
+        assert_eq!(stall_limit(&hop(0, 0)), Duration::from_secs(1), "a connect timeout of nothing still waits a second");
+    }
+
     #[test]
     fn the_rsa_hash_is_what_the_server_lists_and_never_sha1() {
         assert_eq!(choose_rsa_hash(Some(Some(HashAlg::Sha512))), RsaChoice::Use(HashAlg::Sha512));
@@ -1174,40 +1216,48 @@ mod tests {
         });
     }
 
-    /// Review focus, read from russh's source (client/mod.rs, the keepalive branch of the session loop) and measured here: once the keepalive
-    /// timer has fired on a connection that is not logged in yet, nothing resets it and the loop spins. The engine never idles
-    /// unauthenticated (the password is fetched before connecting; a keyboard-interactive wait sits inside russh's blocked loop), so this
-    /// is not a bug of the engine; it is the reason for that rule, and the test turns red when a russh upgrade fixes it.
-    #[cfg(unix)]
+    /// Review focus, read from russh's source (client/mod.rs: the `keepalive_timer` branch of the session loop acts only on a logged-in
+    /// connection, and the timer is re-armed only by received data or a sent keepalive) and measured here: once the keepalive interval has
+    /// passed on a connection that is not logged in, the loop spins on the elapsed timer until the server says something. That is the
+    /// reason for the engine's rules: a login never waits for a person while connected (the password is asked for before connecting), the
+    /// handshake and each login request are given up on before the interval is over (`stall_limit`), and a host key question or a
+    /// signature parks russh's loop, which re-arms the timer when it moves on. So the spin is no bug of the engine, and this test is the
+    /// canary for those rules: it turns red when a russh upgrade fixes the spin, and they can be relaxed then.
+    ///
+    /// The spin is measured as the time the workers of the test's own runtime are busy (the runtime's metrics). That is wall-clock time, so
+    /// it does not depend on how much CPU a loaded machine gives the process, which the process's CPU time did (it failed on one).
     #[test]
     fn russh_spins_when_a_connection_idles_unauthenticated_past_the_keepalive_interval() {
+        use crate::ssh::testing::fact;
         use crate::ssh::testing::fixture::Server;
         use crate::ssh::testing::harness::tools;
-        use crate::ssh::testing::{cpu_time_ms, fact, fact_in, is_child, rerun_alone};
 
-        const NAME: &str = "ssh::russh_engine::tests::russh_spins_when_a_connection_idles_unauthenticated_past_the_keepalive_interval";
         let Some(tools) = tools() else { return };
-        if !is_child() {
-            let output = rerun_alone(NAME);
-            let cpu = |key: &str| -> u128 { fact_in(&output, key).expect("the child measured").parse().expect("a number") };
-            let (with_keepalive, without) = (cpu("idle.unauthenticated.keepalive_1s.cpu_ms"), cpu("idle.unauthenticated.no_keepalive.cpu_ms"));
-            // the design expected: an idle connection costs nothing, whatever its state
-            assert!(without < 200, "without keepalive an idle connection used {without} ms of CPU in 3 s");
-            assert!(with_keepalive > 1000, "russh no longer spins ({with_keepalive} ms of CPU in 3 s): the unauthenticated-idle rule can be relaxed");
-            return;
-        }
         let server = Server::start(&tools, &[]);
-        runtime().block_on(async {
+        let runtime = runtime();
+        let metrics = runtime.handle().metrics();
+        let busy = || -> Duration { (0..metrics.num_workers()).map(|worker| metrics.worker_total_busy_duration(worker)).sum() };
+        let mut used = Vec::new();
+        runtime.block_on(async {
             for (label, interval) in [("keepalive_1s", Some(Duration::from_secs(1))), ("no_keepalive", None)] {
                 let config = Config { keepalive_interval: interval, keepalive_max: 3, ..Config::default() };
                 let handle = client::connect(Arc::new(config), ("127.0.0.1", server.sshd.port), Bare { ended: Arc::default() }).await.expect("connects");
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                let before = cpu_time_ms();
+                let before = busy();
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                fact(&format!("idle.unauthenticated.{label}.cpu_ms"), cpu_time_ms() - before);
+                let spent = busy() - before;
+                fact(&format!("idle.unauthenticated.{label}.busy_ms"), spent.as_millis());
+                used.push(spent);
                 assert!(!handle.is_closed());
             }
         });
+        let (with_keepalive, without) = (used[0], used[1]);
+        // the design expected: an idle connection costs nothing, whatever its state
+        assert!(without < Duration::from_millis(100), "without keepalive an idle connection kept the runtime busy for {without:?} in 3 s");
+        assert!(
+            with_keepalive > Duration::from_millis(1000),
+            "russh no longer spins ({with_keepalive:?} busy in 3 s): the unauthenticated-idle rule can be relaxed"
+        );
     }
 
     /// The last line of defence for spec §6.3 b: even if the caller of the signer asked for SHA-1, an RSA key is never signed with it and
