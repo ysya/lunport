@@ -9,6 +9,17 @@
 //! whole connection, so nothing here waits for a person inside a callback; every wait is bounded, and the wait for the server's answer
 //! during the handshake and the login ends before the keepalive interval does (`stall_limit`); a failed or abandoned login drops the
 //! connection instead of switching method on it; liveness is read from the connection's own state, never from an error variant.
+//!
+//! One of those rules cannot be kept everywhere, because the cause is in russh: it arms its keepalive timer at the server's version line
+//! and re-arms it only when a packet arrives, so until the login is done a wait that outlasts the keepalive interval makes its loop spin
+//! on the elapsed timer, a whole core until the wait ends (measured: 4.2 s of CPU in a 5 s wait at a 1 s interval). `stall_limit` ends
+//! the waits on the server that the engine can end: the handshake and each login request (`none`, public key with its signature,
+//! password, the start of keyboard-interactive). Not bounded by it: the TCP connect (the timer does not exist yet); the server's verdict
+//! on keyboard-interactive answers, which keeps `prompt_wait` because a PAM module may wait for a push approval longer than any interval,
+//! and which spins when it outlasts the interval; and the waits for a person. An answer to a keyboard-interactive round costs nothing,
+//! because russh is parked inside the login call until the answers are written, but a password asked for while the connection is open
+//! (the fallback after a refused key) spins like any other wait. Callers avoid that by asking a person before they connect, as the
+//! engine does for a hop that starts with the password method.
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +52,8 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct EngineOptions {
     /// Bytes of shell output kept between the channel reader and the thread that reads the shell (see `ByteQueue`).
     pub shell_queue_bytes: usize,
-    /// How long one keyboard-interactive answer may take. `None` = 4 × the hop's connect timeout, at least 60 s (spec §6.2 step 4).
+    /// How long one keyboard-interactive round may take: the person's answer, and then the server's verdict on it. `None` = 4 × the hop's
+    /// connect timeout, at least 60 s (spec §6.2 step 4).
     pub prompt_wait: Option<Duration>,
     /// Worker threads of the engine's runtime.
     pub worker_threads: usize,
@@ -637,7 +649,9 @@ fn no_login_method(hop: &HopRef, tried: Vec<AuthMethod>, mut reasons: Vec<String
 /// it; a refusal moves to the next method on the same connection. A method that cannot be tried here is skipped, and then the server is
 /// asked once what it does offer (`none`), so later methods are not sent blindly. Anything that is our fault (the signer failed, a
 /// prompt was cancelled or ran late) or the server's silence abandons the login: the caller drops the connection (spec §6.2 step 4). Each
-/// request is given `stall_limit` to be answered, except the reply to a keyboard-interactive round, which gets `prompt_wait`.
+/// request is given `stall_limit` to be answered, except the reply to a keyboard-interactive round, which gets `prompt_wait`. That wait
+/// and a call to `AuthSource::password` as a fallback (the connection is open while a person types) cost CPU when they outlast the
+/// keepalive interval; the module rules say how much and why.
 async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &HopShared, auth: &dyn AuthSource, mut prefetched_password: Option<Option<Secret>>, options: &EngineOptions) -> Result<(), ConnectError> {
     let reference = hop.reference();
     let abandoned = |reason: &str| ConnectError::AuthAbandoned { hop: reference.clone(), reason: reason.to_string() };
