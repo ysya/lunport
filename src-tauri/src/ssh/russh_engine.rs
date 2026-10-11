@@ -19,7 +19,8 @@ use russh::client::{self, AuthResult, Config, Handle, Handler, Msg};
 use russh::client::DisconnectReason as RusshDisconnect;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{Algorithm, HashAlg, PublicKey, PublicKeyOrCertificate};
-use russh::{AlgorithmKind, Channel, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, MethodKind, MethodSet, Preferred, Sig};
+use russh::{AlgorithmKind, Channel, ChannelMsg, ChannelOpenFailure, ChannelReadHalf, ChannelWriteHalf, Disconnect, MethodKind, MethodSet, Preferred, Sig};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -263,11 +264,14 @@ pub struct Connection {
     hops: Vec<Established>,
     /// Set when we are the ones closing it, so that the reason is ours whatever order the hops notice in.
     closing: AtomicBool,
+    /// Why the connection ended, written down the first time anybody sees that it has. Our own disconnects follow and make every hop
+    /// record `ClosedByUs`; this keeps the real cause.
+    ended: Mutex<Option<DisconnectReason>>,
 }
 
 impl Connection {
     fn new() -> Connection {
-        Connection { hops: Vec::new(), closing: AtomicBool::new(false) }
+        Connection { hops: Vec::new(), closing: AtomicBool::new(false), ended: Mutex::new(None) }
     }
 
     pub fn hop_count(&self) -> usize {
@@ -284,10 +288,19 @@ impl Connection {
         self.hops.last().ok_or(SessionError::Closed)
     }
 
-    /// Why the connection ended: the record of the outermost hop that has one (a hop that dies after its carrier is gone records nothing
-    /// useful, spec §6.2 step 2), else ours when we closed it. A hop whose `Handle` is closed but has not recorded anything yet is about
-    /// to (russh closes the handle first and calls the handler a moment later), so it is given a short while before the fallback is used.
+    /// Why the connection ended, once it has: written down at the first look, so that what the teardown does afterwards cannot change it.
     fn reason(&self) -> Option<DisconnectReason> {
+        let mut ended = locked(&self.ended);
+        if ended.is_none() {
+            *ended = self.find_reason();
+        }
+        ended.clone()
+    }
+
+    /// The record of the outermost hop that has one (a hop that dies after its carrier is gone records nothing useful, spec §6.2 step 2),
+    /// else ours when we closed it. A hop whose `Handle` is closed but has not recorded anything yet is about to (russh closes the handle
+    /// first and calls the handler a moment later), so it is given a short while before the fallback is used.
+    fn find_reason(&self) -> Option<DisconnectReason> {
         let deadline = std::time::Instant::now() + Duration::from_millis(300);
         loop {
             for established in &self.hops {
@@ -324,8 +337,8 @@ impl Connection {
 async fn connect_chain(target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Connection, ConnectError> {
     check_chain(target)?;
     let mut connection = Connection::new();
-    for (index, hop) in target.hops.iter().enumerate() {
-        match connect_one(index, hop, connection.hops.last(), host_keys, auth).await {
+    for hop in &target.hops {
+        match connect_one(hop, connection.hops.last(), host_keys, auth).await {
             Ok(established) => connection.hops.push(established),
             Err(error) => {
                 connection.disconnect_all().await;
@@ -349,55 +362,92 @@ fn check_chain(target: &Target) -> Result<(), ConnectError> {
     Ok(())
 }
 
-async fn connect_one(index: usize, hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Established, ConnectError> {
+async fn connect_one(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Established, ConnectError> {
     let reference = hop.reference();
-    let (mut handle, shared) = connect_hop(index, hop, via, host_keys).await?;
+    let (mut handle, shared) = connect_hop(hop, via, host_keys).await?;
     authenticate(hop, &mut handle, &shared, auth).await?;
     Ok(Established { hop: reference, handle, shared })
 }
 
-async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy) -> Result<(Handle<EngineHandler>, Arc<HopShared>), ConnectError> {
+async fn connect_hop(hop: &Hop, via: Option<&Established>, host_keys: &dyn HostKeyPolicy) -> Result<(Handle<EngineHandler>, Arc<HopShared>), ConnectError> {
     let reference = hop.reference();
-    if via.is_some() || index > 0 {
-        return Err(ConnectError::BadJumpChain { why: "jump hosts are not connected yet".to_string() });
-    }
     let shared = HopShared::new();
     let (questions_in, mut questions) = mpsc::unbounded_channel();
     let handler = EngineHandler { shared: Arc::clone(&shared), questions: questions_in };
     let config = Arc::new(client_config(hop));
     let phase = std::cell::Cell::new(Phase::Tcp);
     let attempt = async {
-        let tcp = TcpStream::connect((hop.hostname.as_str(), hop.port)).await.map_err(|error| ConnectError::Unreachable { hop: reference.clone(), reason: describe_io(&error) })?;
-        if hop.nodelay {
-            let _ = tcp.set_nodelay(true);
-        }
-        let (tcp, closer) = SocketGuard::new(tcp).map_err(|error| ConnectError::Unreachable { hop: reference.clone(), reason: describe_io(&error) })?;
-        phase.set(Phase::Handshake);
-        let connecting = client::connect_stream(config, tcp, handler);
-        tokio::pin!(connecting);
-        // The handshake gets `stall_limit`, not the whole connect timeout: russh's keepalive timer runs from the server's version line.
-        let stall = tokio::time::sleep(stall_limit(hop));
-        tokio::pin!(stall);
-        let connected = loop {
-            tokio::select! {
-                connected = &mut connecting => break connected,
-                Some(question) = questions.recv() => {
-                    let verdict = host_keys.check(&reference, &question.key);
-                    let _ = question.reply.send(verdict);
+        match via {
+            None => {
+                let tcp = TcpStream::connect((hop.hostname.as_str(), hop.port)).await.map_err(|error| ConnectError::Unreachable { hop: reference.clone(), reason: describe_io(&error) })?;
+                if hop.nodelay {
+                    let _ = tcp.set_nodelay(true);
                 }
-                () = &mut stall => return Err(ConnectError::Timeout { hop: reference.clone(), phase: Phase::Handshake }),
+                let (tcp, closer) = SocketGuard::new(tcp).map_err(|error| ConnectError::Unreachable { hop: reference.clone(), reason: describe_io(&error) })?;
+                phase.set(Phase::Handshake);
+                let handle = handshake(tcp, config, handler, &mut questions, host_keys, hop, &shared).await?;
+                closer.release();
+                Ok(handle)
             }
-        };
-        if connected.is_ok() {
-            closer.release();
+            Some(previous) => {
+                let tunnel = previous
+                    .handle
+                    .channel_open_direct_tcpip(hop.hostname.as_str(), u32::from(hop.port), "127.0.0.1", 0)
+                    .await
+                    .map_err(|error| tunnel_error(&reference, &previous.hop, error))?;
+                phase.set(Phase::Handshake);
+                handshake(tunnel.into_stream(), config, handler, &mut questions, host_keys, hop, &shared).await
+            }
         }
-        connected.map_err(|error| handshake_error(&reference, &shared, error))
     };
     let budget = hop.connect_timeout.max(Duration::from_secs(1));
     match tokio::time::timeout(budget, attempt).await {
         Ok(result) => result.map(|handle| (handle, shared)),
         Err(_) => Err(ConnectError::Timeout { hop: reference, phase: phase.get() }),
     }
+}
+
+/// The SSH handshake over `stream`. While it runs, the handler's host key questions are answered here, on the caller's thread, from `host_keys`.
+/// It is given `stall_limit(hop)`, not the whole connect timeout: russh's keepalive timer runs from the server's version line.
+async fn handshake<R>(
+    stream: R,
+    config: Arc<Config>,
+    handler: EngineHandler,
+    questions: &mut mpsc::UnboundedReceiver<KeyQuestion>,
+    host_keys: &dyn HostKeyPolicy,
+    hop: &Hop,
+    shared: &HopShared,
+) -> Result<Handle<EngineHandler>, ConnectError>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let reference = hop.reference();
+    let connecting = client::connect_stream(config, stream, handler);
+    tokio::pin!(connecting);
+    let stall = tokio::time::sleep(stall_limit(hop));
+    tokio::pin!(stall);
+    let connected = loop {
+        tokio::select! {
+            connected = &mut connecting => break connected,
+            Some(question) = questions.recv() => {
+                let verdict = host_keys.check(&reference, &question.key);
+                let _ = question.reply.send(verdict);
+            }
+            () = &mut stall => return Err(ConnectError::Timeout { hop: reference.clone(), phase: Phase::Handshake }),
+        }
+    };
+    connected.map_err(|error| handshake_error(&reference, shared, error))
+}
+
+/// Why the jump host `via` could not give us a connection to `hop`: it refused to open the tunnel, or it is gone.
+fn tunnel_error(hop: &HopRef, via: &HopRef, error: russh::Error) -> ConnectError {
+    let reason = match error {
+        russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed) => format!("{} could not connect to it", via.alias),
+        russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited) => format!("{} does not allow forwarding", via.alias),
+        russh::Error::ChannelOpenFailure(other) => format!("{} refused to open the connection ({other:?})", via.alias),
+        _ => format!("the connection to {} was lost", via.alias),
+    };
+    ConnectError::Unreachable { hop: hop.clone(), reason }
 }
 
 /// Turns what russh said about a failed handshake into a `ConnectError`. A rejected host key is the same `UnknownKey` whether the key
@@ -667,8 +717,31 @@ pub struct RusshSession {
 impl SshEngine for RusshEngine {
     fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
         let connection = Arc::new(self.connect_chain(target, host_keys, auth)?);
+        watch_connection(&self.runtime, Arc::clone(&connection));
         Ok(Box::new(RusshSession { runtime: Arc::clone(&self.runtime), connection, options: self.options.clone() }))
     }
+}
+
+/// How often the watcher looks at a connection.
+const WATCH_EVERY: Duration = Duration::from_millis(100);
+
+/// Watches a connection for as long as it lives. When one hop ends (the server dropped it, its keepalive ran out, the hop in front of it
+/// went away) every other hop is disconnected too, so that a chain never lingers half open (spec §6.2 step 2). It stops when the
+/// session is closed or dropped.
+fn watch_connection(runtime: &RuntimeOwner, connection: Arc<Connection>) {
+    runtime.handle().spawn(async move {
+        loop {
+            tokio::time::sleep(WATCH_EVERY).await;
+            if connection.closing.load(Ordering::SeqCst) {
+                return;
+            }
+            if connection.hops.iter().any(|established| established.handle.is_closed()) {
+                let _ = connection.reason();
+                connection.disconnect_all().await;
+                return;
+            }
+        }
+    });
 }
 
 impl Drop for RusshSession {
@@ -777,6 +850,9 @@ impl Session for RusshSession {
     }
 
     fn close(&self) {
+        if !self.connection.is_open() {
+            let _ = self.connection.reason();
+        }
         self.connection.closing.store(true, Ordering::SeqCst);
         self.runtime.handle().block_on(self.connection.disconnect_all());
     }

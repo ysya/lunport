@@ -3,6 +3,7 @@
 
 mod connect;
 mod exec;
+mod jump;
 mod liveness;
 mod shell;
 
