@@ -248,6 +248,7 @@ struct FakeSession {
     destination: HopRef,
     closed: Mutex<Option<DisconnectReason>>,
     /// The queue and exit cell of every shell opened here: when the session ends, so do they, as they do on a lost connection.
+    /// A shell is added while `closed` is held (see `shell`) and `close` ends them while it holds `closed`, so none is missed.
     shells: Mutex<Vec<(Arc<ByteQueue>, Arc<ExitCell>)>>,
 }
 
@@ -291,10 +292,6 @@ fn capped(mut result: ExecResult, cap: usize) -> ExecResult {
 
 impl Session for FakeSession {
     fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError> {
-        if !self.is_alive() {
-            return Err(SessionError::Closed);
-        }
-        self.shared.record(FakeEvent::ShellOpened { term: pty.term, cols: pty.cols, rows: pty.rows });
         let (output, exit, ends_at_once) = {
             let script = locked(&self.shared.script);
             (script.shell_output.clone(), script.shell_exit.clone(), script.shell_ends_at_once)
@@ -307,7 +304,18 @@ impl Session for FakeSession {
             cell.set(exit);
             queue.close();
         }
-        locked(&self.shells).push((Arc::clone(&queue), Arc::clone(&cell)));
+        {
+            // The check that the session is alive and the registration of the new shell are made under one lock, so a `close()` on another
+            // thread runs either before this (the call fails with `Closed` and records nothing) or after it (and ends this shell with the
+            // others): no shell is left open on a closed session. The lock covers only these steps, because a thread that opens shells in
+            // a loop would otherwise keep `close()` waiting. (`self.is_alive()` would lock `closed` again here.)
+            let closed = locked(&self.closed);
+            if closed.is_some() {
+                return Err(SessionError::Closed);
+            }
+            self.shared.record(FakeEvent::ShellOpened { term: pty.term, cols: pty.cols, rows: pty.rows });
+            locked(&self.shells).push((Arc::clone(&queue), Arc::clone(&cell)));
+        }
         let input = FakeShellInput { shared: Arc::clone(&self.shared), queue: Arc::clone(&queue), exit: Arc::clone(&cell) };
         Ok(Box::new(QueuedShell::new(Box::new(input), queue, cell)))
     }
@@ -673,10 +681,31 @@ mod tests {
             assert_eq!((reason.kind, reason.hop.alias.as_str(), reason.hop.id), (DisconnectKind::ClosedByUs, "web", HostId::from("id-web")));
             assert_eq!(read_some(shell.as_ref()), b"", "closing the session ends the shells opened from it");
             assert_eq!(shell.exited(), Some(Exit::Disconnected));
+            assert!(matches!(session.shell(Pty { term: "dumb".into(), cols: 80, rows: 24 }), Err(SessionError::Closed)), "a closed session opens no shells");
             assert_eq!(
                 engine.events(),
                 vec![FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::ShellOpened { term: "dumb".into(), cols: 80, rows: 24 }, FakeEvent::Closed]
             );
+
+            // A shell opened while another thread closes the session is either refused or ended by that close; none is left open. Many scripted
+            // chunks make a shell slow to build, which gives a close that is not synchronised with `shell` the time to slip in.
+            let racing = (0..64).fold(FakeEngine::new(), |engine, _| engine.with_shell_output(b"x"));
+            for _ in 0..200 {
+                let session: Arc<dyn Session> = Arc::from(connect(&racing, &direct("web"), &Auth::default()).unwrap());
+                let closer = std::thread::spawn({
+                    let session = Arc::clone(&session);
+                    move || session.close()
+                });
+                let mut opened = Vec::new();
+                for _ in 0..10_000 {
+                    match session.shell(Pty { term: "dumb".into(), cols: 80, rows: 24 }) {
+                        Ok(shell) => opened.push(shell),
+                        Err(_) => break,
+                    }
+                }
+                closer.join().unwrap();
+                assert!(opened.iter().all(|shell| shell.exited() == Some(Exit::Disconnected)), "a shell opened while the session was closing was left open");
+            }
         });
     }
 }
