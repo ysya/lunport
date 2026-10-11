@@ -199,6 +199,7 @@ impl AuthSource for VaultAuth {
         let flags = match rsa_hash {
             Some(RsaHash::Sha512) => SSH_AGENT_RSA_SHA2_512,
             Some(RsaHash::Sha256) => SSH_AGENT_RSA_SHA2_256,
+            // Flag 0 is SHA-1 for RSA, on purpose: the double does not refuse, so the engine's own refusal shows as a missing call in `sign_calls`.
             None => 0,
         };
         match material.sign(data, flags) {
@@ -262,18 +263,21 @@ mod tests {
     #[test]
     fn the_vault_double_signs_with_the_hash_it_is_given_and_records_the_call() {
         let auth = VaultAuth::new().with_key("ed", &test_keys::plain()).with_key("rsa", &test_keys::rsa());
-        assert_eq!(auth.public_key("ed").as_deref().map(|line| line.split(' ').next().unwrap_or_default().to_string()), Some("ssh-ed25519".to_string()));
+        assert_eq!(auth.public_key("ed").as_deref(), Some(test_keys::PLAIN_PUBLIC));
         assert_eq!(auth.public_key("missing"), None);
         let signature = auth.sign("ed", b"challenge", None).unwrap();
         assert_eq!(algorithm_of(&signature.0).as_deref(), Some("ssh-ed25519"));
         let signature = auth.sign("rsa", b"challenge", Some(RsaHash::Sha256)).unwrap();
         assert_eq!(algorithm_of(&signature.0).as_deref(), Some("rsa-sha2-256"));
+        let signature = auth.sign("rsa", b"challenge", Some(RsaHash::Sha512)).unwrap();
+        assert_eq!(algorithm_of(&signature.0).as_deref(), Some("rsa-sha2-512"));
         assert_eq!(auth.sign("missing", b"x", None), Err(AuthError::KeyUnavailable("no key missing in the vault double".into())));
         assert_eq!(
             auth.sign_calls(),
             vec![
                 SignCall { key_id: "ed".into(), rsa_hash: None, algorithm: Some("ssh-ed25519".into()) },
                 SignCall { key_id: "rsa".into(), rsa_hash: Some(RsaHash::Sha256), algorithm: Some("rsa-sha2-256".into()) },
+                SignCall { key_id: "rsa".into(), rsa_hash: Some(RsaHash::Sha512), algorithm: Some("rsa-sha2-512".into()) },
                 SignCall { key_id: "missing".into(), rsa_hash: None, algorithm: None },
             ]
         );

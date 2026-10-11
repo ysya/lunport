@@ -15,7 +15,9 @@ use tokio::sync::watch;
 pub enum Mode {
     /// Bytes flow both ways.
     Forward,
-    /// Bytes are read and held, nothing is delivered, the sockets stay open.
+    /// Bytes are read and held, nothing is delivered, the sockets stay open. A connection that has already held bytes does not notice the
+    /// client closing until the mode changes (`Forward` or `Cut`) or the proxy is dropped, so a test that expects `open_connections() == 0`
+    /// must `set(Mode::Cut)` first.
     Blackhole,
     /// Every connection is closed now, and new ones are closed on arrival.
     Cut,
@@ -84,12 +86,14 @@ impl Proxy {
         self.mode.send_replace(mode);
     }
 
-    /// Client connections that are open right now (accepted and not yet finished).
+    /// Client connections that are open right now (accepted and not yet finished). The count moves inside the connection's own task, so
+    /// right after a raw `connect()` it may still read 0: assert after a round trip through the proxy, or poll with `testing::eventually`.
     pub fn open_connections(&self) -> usize {
         self.stats.open.load(Ordering::SeqCst)
     }
 
-    /// Client connections accepted so far, including the ones that were cut on arrival.
+    /// Client connections accepted so far, including the ones that were cut on arrival. The count moves inside the connection's own task,
+    /// so right after a raw `connect()` it may still show the old value: assert after a round trip, or poll with `testing::eventually`.
     pub fn accepted(&self) -> usize {
         self.stats.accepted.load(Ordering::SeqCst)
     }
@@ -126,7 +130,13 @@ async fn pipe(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, mut mode: watch::
                 return;
             }
         }
-        if to.write_all(&buffer[..count]).await.is_err() {
+        // The target may have stopped reading (a stalled server, a full buffer): the write is raced against a Cut like the read, so a Cut
+        // ends this direction too instead of leaving it blocked in `write_all`.
+        let written = tokio::select! {
+            written = to.write_all(&buffer[..count]) => written,
+            _ = mode.wait_for(|mode| *mode == Mode::Cut) => break,
+        };
+        if written.is_err() {
             break;
         }
     }
@@ -135,7 +145,7 @@ async fn pipe(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, mut mode: watch::
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     use std::net::TcpStream;
     use std::time::{Duration, Instant};
 
@@ -185,6 +195,15 @@ mod tests {
         panic!("timed out waiting for: {what}");
     }
 
+    /// Whether a read shows that the other side closed the connection: end of stream, or a reset. A read that timed out shows the opposite
+    /// (the connection is still open and silent), so a test that took the timeout for a close could not fail.
+    fn closed(read: &std::io::Result<usize>) -> bool {
+        match read {
+            Ok(count) => *count == 0,
+            Err(error) => !matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
+        }
+    }
+
     #[test]
     fn forward_passes_bytes_both_ways() {
         let proxy = Proxy::start(echo_server());
@@ -219,11 +238,11 @@ mod tests {
         proxy.set(Mode::Cut);
         let mut byte = [0u8; 1];
         let read = client.read(&mut byte);
-        assert!(matches!(read, Ok(0) | Err(_)), "an open connection must end after a cut, got {read:?}");
+        assert!(closed(&read), "an open connection must be closed right after a cut, got {read:?}");
 
         let mut late = connect(proxy.port);
         let read = late.read(&mut byte);
-        assert!(matches!(read, Ok(0) | Err(_)), "a new connection must be closed on arrival, got {read:?}");
+        assert!(closed(&read), "a new connection must be closed on arrival, got {read:?}");
     }
 
     #[test]
