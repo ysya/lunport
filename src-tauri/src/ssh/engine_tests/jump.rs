@@ -38,6 +38,12 @@ fn open(pair: &Pair, target: &Target) -> Box<dyn Session> {
     engine().connect(target, &*TestPolicy::trusting(), &pair.vault).expect("the chain connects")
 }
 
+/// The server port in what `$SSH_CONNECTION` held for a command ("client-ip client-port server-ip server-port"): the port of the sshd
+/// that ran it. It tells the hosts of a chain apart, which an `echo` cannot (it prints the same on every host).
+fn server_port_in(ssh_connection: &str) -> Option<u16> {
+    ssh_connection.split_whitespace().nth(3)?.parse().ok()
+}
+
 #[test]
 fn a_two_hop_jump_runs_a_command_on_the_second_host_and_checks_each_hops_own_host_key() {
     let Some(tools) = tools() else { return };
@@ -46,8 +52,18 @@ fn a_two_hop_jump_runs_a_command_on_the_second_host_and_checks_each_hops_own_hos
     let target = chain(&pair, pair.a.sshd.port, pair.b.sshd.port);
 
     let session = engine().connect(&target, &*policy, &pair.vault).expect("the chain connects");
-    let result = session.exec("echo hop-$((20+22))", Duration::from_secs(20), MIB).unwrap();
-    assert_eq!((result.stdout.as_slice(), result.ended), (b"hop-42\n".as_slice(), Ended::Exited));
+    // The command prints the sshd's view of the connection it runs in; the server port in it is the port of the host that ran it.
+    let result = session.exec("echo hop-$((20+22)) $SSH_CONNECTION", Duration::from_secs(20), MIB).unwrap();
+    assert_eq!(result.ended, Ended::Exited);
+    let output = String::from_utf8_lossy(&result.stdout).into_owned();
+    let connection = output.strip_prefix("hop-42 ").unwrap_or_else(|| panic!("unexpected output {output:?}"));
+    assert_eq!(
+        server_port_in(connection),
+        Some(pair.b.sshd.port),
+        "the command did not run on the second host: {output:?} (a listens on {}, b on {})",
+        pair.a.sshd.port,
+        pair.b.sshd.port
+    );
 
     assert_ne!(pair.a.host_key(), pair.b.host_key());
     let seen: Vec<(String, _)> = policy.seen().into_iter().map(|(hop, key)| (hop.alias, key)).collect();
@@ -64,7 +80,10 @@ fn an_unknown_key_on_the_second_hop_stops_the_chain_and_closes_the_first_hop() {
     let policy = TestPolicy::knowing_nothing();
     policy.pin(&target.hops[0].reference(), pair.a.host_key());
 
-    let error = engine().connect(&target, &*policy, &pair.vault).err().expect("b is not pinned");
+    // The engine is held until the proxy has been looked at: dropping the last owner of its runtime closes every socket there is, and that
+    // would hide a jump host that `connect` left open.
+    let engine = engine();
+    let error = engine.connect(&target, &*policy, &pair.vault).err().expect("b is not pinned");
     match error {
         ConnectError::HostKeyUnknown { hop, key } => assert_eq!((hop.alias.as_str(), key), ("b", pair.b.host_key())),
         other => panic!("expected HostKeyUnknown, got {other:?}"),
@@ -81,8 +100,9 @@ fn a_jump_to_a_closed_port_fails_cleanly_and_names_the_jump_host() {
     let proxy_a = Proxy::start(pair.a.sshd.port);
     let target = chain(&pair, proxy_a.port, closed_port);
 
+    let engine = engine(); // held until the proxy has been looked at, as in the test above
     let started = Instant::now();
-    let error = engine().connect(&target, &*TestPolicy::trusting(), &pair.vault).err().expect("nothing listens there");
+    let error = engine.connect(&target, &*TestPolicy::trusting(), &pair.vault).err().expect("nothing listens there");
     fact("jump.closed_port.after_ms", started.elapsed().as_millis());
     match &error {
         ConnectError::Unreachable { hop, reason } => assert_eq!((hop.alias.as_str(), reason.as_str()), ("b", "a could not connect to it")),
@@ -96,9 +116,27 @@ fn a_jump_to_a_closed_port_fails_cleanly_and_names_the_jump_host() {
 fn a_jump_host_that_does_not_allow_forwarding_is_named_in_the_error() {
     let Some(tools) = tools() else { return };
     let pair = pair(&tools, &["AllowTcpForwarding no"], &[]);
-    let target = chain(&pair, pair.a.sshd.port, pair.b.sshd.port);
-    let error = engine().connect(&target, &*TestPolicy::trusting(), &pair.vault).err().expect("forwarding is off");
+    let proxy_a = Proxy::start(pair.a.sshd.port);
+    let target = chain(&pair, proxy_a.port, pair.b.sshd.port);
+    let engine = engine(); // held until the proxy has been looked at, as above
+    let error = engine.connect(&target, &*TestPolicy::trusting(), &pair.vault).err().expect("forwarding is off");
     assert!(matches!(&error, ConnectError::Unreachable { hop, reason } if hop.alias == "b" && reason == "a does not allow forwarding"), "{error:?}");
+    eventually("the proxy to see the first hop closed", 5, || proxy_a.open_connections() == 0);
+}
+
+/// The destination refuses the login: the error names it, and the jump host's connection does not linger. The vault holds the jump
+/// host's user key under the destination's key id, and the destination does not list that key.
+#[test]
+fn a_second_hop_that_refuses_the_login_is_named_and_the_first_hop_is_closed() {
+    let Some(tools) = tools() else { return };
+    let pair = pair(&tools, &[], &[]);
+    let vault = VaultAuth::new().with_key("ka", &pair.a.key.private_text).with_key("kb", &pair.a.key.private_text);
+    let proxy_a = Proxy::start(pair.a.sshd.port);
+    let target = chain(&pair, proxy_a.port, pair.b.sshd.port);
+    let engine = engine(); // held until the proxy has been looked at, as above
+    let error = engine.connect(&target, &*TestPolicy::trusting(), &vault).err().expect("b does not list the key");
+    assert!(matches!(&error, ConnectError::AuthFailed { hop, tried, .. } if hop.alias == "b" && tried.contains(&key("kb"))), "{error:?}");
+    eventually("the proxy to see the first hop closed", 5, || proxy_a.open_connections() == 0);
 }
 
 #[test]
@@ -149,6 +187,25 @@ fn when_the_inner_hop_ends_first_the_chain_comes_down_and_the_reason_is_the_inne
     assert_eq!(session.disconnect_reason().map(|again| again.hop.alias), Some("b".to_string()), "the reason does not change afterwards");
 }
 
+/// The watcher takes the first look at the reason before it tears the other hops down, so that what the teardown makes every hop record
+/// (`ClosedByUs`) cannot become the answer. The test above asks for the reason as soon as the session is dead, which is before the watcher's
+/// next look, so it would pass without that first look. Here nobody asks until the chain is down (the connection to the jump host is closed).
+#[test]
+fn a_reason_nobody_asked_for_before_the_chain_came_down_is_still_the_inner_hops() {
+    let Some(tools) = tools() else { return };
+    let pair = pair(&tools, &[], &[]);
+    let proxy_a = Proxy::start(pair.a.sshd.port);
+    let proxy_b = Proxy::start(pair.b.sshd.port);
+    let session = open(&pair, &chain(&pair, proxy_a.port, proxy_b.port));
+    eventually("the first hop to be counted", 3, || proxy_a.open_connections() == 1);
+
+    proxy_b.set(Mode::Cut);
+    eventually("the watcher to bring the outer hop down as well", 10, || proxy_a.open_connections() == 0);
+    assert!(!session.is_alive());
+    let reason = session.disconnect_reason().expect("a dead session says why");
+    assert_eq!((reason.hop.alias.as_str(), reason.kind), ("b", DisconnectKind::ConnectionLost), "{reason:?}");
+}
+
 /// Review focus: flow control through a jump. Sixteen times russh's 2 MiB window of output has to cross two hops.
 #[test]
 fn a_large_output_crosses_a_jump_without_stalling() {
@@ -158,9 +215,12 @@ fn a_large_output_crosses_a_jump_without_stalling() {
     let session = open(&pair, &chain(&pair, pair.a.sshd.port, pair.b.sshd.port));
 
     let started = Instant::now();
-    let result = session.exec(&format!("head -c {SIZE} /dev/zero"), Duration::from_secs(120), 64 * MIB).unwrap();
+    // The command first prints the sshd's view of its connection on stderr, so that the test can tell which host ran it.
+    let command = format!("echo \"$SSH_CONNECTION\" >&2; head -c {SIZE} /dev/zero");
+    let result = session.exec(&command, Duration::from_secs(120), 64 * MIB).unwrap();
     fact("jump.long_output.mib_per_second", format!("{:.1}", SIZE as f64 / 1_048_576.0 / started.elapsed().as_secs_f64()));
     assert_eq!((result.stdout.len(), result.ended, result.exit_code), (SIZE, Ended::Exited, Some(0)));
+    assert_eq!(server_port_in(&String::from_utf8_lossy(&result.stderr)), Some(pair.b.sshd.port), "the command did not run on the second host");
 }
 
 #[test]
