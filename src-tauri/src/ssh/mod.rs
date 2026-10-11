@@ -8,6 +8,8 @@ mod channel;
 mod error;
 #[cfg(test)]
 pub mod fake;
+#[cfg(test)]
+pub mod testing;
 mod traits;
 mod types;
 
