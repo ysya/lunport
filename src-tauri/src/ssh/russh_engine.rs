@@ -100,6 +100,8 @@ impl RusshEngine {
         RusshEngine { runtime: Arc::new(RuntimeOwner { runtime: Some(runtime), handle }), options }
     }
 
+    /// Attaches no watcher (a hop that ends does not take the rest of the chain down): sessions come from `SshEngine::connect`, not from this.
+    ///
     /// Connects every hop of `target` and logs in to each; the connection-level half of `SshEngine::connect`. Blocks the calling thread
     /// (never call it from inside an async task).
     pub fn connect_chain(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Connection, ConnectError> {
@@ -736,7 +738,10 @@ fn watch_connection(runtime: &RuntimeOwner, connection: Arc<Connection>) {
                 return;
             }
             if connection.hops.iter().any(|established| established.handle.is_closed()) {
-                let _ = connection.reason();
+                // The first look at the reason is what keeps it real, so it comes before the teardown. It can sleep for a while (see
+                // `find_reason`), which a worker of the runtime must not do: the blocking pool does it, and this task waits for it.
+                let first_look = Arc::clone(&connection);
+                let _ = tokio::task::spawn_blocking(move || first_look.reason()).await;
                 connection.disconnect_all().await;
                 return;
             }
