@@ -1,5 +1,6 @@
 //! `Session::exec`: a command without a PTY, its output, how it ended, and what happens when it does not end by itself.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use super::{engine, open_session, open_session_to};
@@ -7,7 +8,7 @@ use crate::ssh::testing::fixture::Server;
 use crate::ssh::testing::harness::tools;
 use crate::ssh::testing::proxy::{Mode, Proxy};
 use crate::ssh::testing::{eventually, fact};
-use crate::ssh::{AuthMethod, Ended, SessionError, Target};
+use crate::ssh::{AuthMethod, Ended, Session, SessionError, Target};
 
 const MIB: usize = 1024 * 1024;
 const ENOUGH: Duration = Duration::from_secs(20);
@@ -90,8 +91,9 @@ fn thirty_two_mebibytes_of_output_arrive_complete() {
     assert_eq!((result.stdout.len(), result.ended, result.exit_code, result.truncated), (SIZE, Ended::Exited, Some(0), false));
 }
 
-/// Review focus: a command that never stops printing. The caller's cap stops it, the channel is closed, and the same connection
-/// still serves the next command.
+/// Review focus: a command that never stops printing. The caller's cap stops it, the channel is closed (that the command is really gone
+/// from the server is pinned by `a_command_cut_off_at_the_cap_is_really_ended_on_the_server`), and the same connection still serves the
+/// next command.
 #[test]
 fn output_beyond_the_cap_is_cut_off_and_the_connection_survives() {
     let Some(tools) = tools() else { return };
@@ -123,7 +125,8 @@ fn output_that_exactly_fills_the_cap_is_not_truncated() {
     assert_eq!((over.truncated, over.ended, over.stdout.len() + over.stderr.len()), (true, Ended::Truncated, 10));
 }
 
-/// russh has no command timeout; the engine's is a deadline on the read and a close of the channel. What the command printed before is kept.
+/// russh has no command timeout; the engine's is a deadline on the read and a close of the channel (that the command is really gone from
+/// the server is pinned by `a_command_that_timed_out_is_really_ended_on_the_server`). What the command printed before is kept.
 #[test]
 fn a_command_that_outlives_its_timeout_is_cut_and_the_connection_survives() {
     let Some(tools) = tools() else { return };
@@ -140,6 +143,78 @@ fn a_command_that_outlives_its_timeout_is_cut_and_the_connection_survives() {
 
     let next = session.exec("echo alive", ENOUGH, MIB).unwrap();
     assert_eq!(next.stdout, b"alive\n");
+}
+
+/// Asks the server, through the same session, until the process whose id the command wrote to `pidfile` is gone. The result of `exec`
+/// reads the same whether or not the engine closed the channel behind a command it gave up on; only the server can tell: the command's
+/// next write meets a closed pipe and ends it, and without the close it would go on for ever.
+fn gone_from_the_server(session: &dyn Session, pidfile: &Path, what: &str) {
+    let mut pid = String::new();
+    eventually("the command to write its process id", 5, || {
+        pid = std::fs::read_to_string(pidfile).unwrap_or_default().trim().to_string();
+        !pid.is_empty()
+    });
+    assert!(pid.bytes().all(|byte| byte.is_ascii_digit()), "a process id: {pid:?}");
+    eventually(what, 5, || {
+        let asked = session.exec(&format!("kill -0 {pid} 2>/dev/null && echo alive || echo gone"), ENOUGH, MIB).unwrap();
+        asked.stdout == b"gone\n"
+    });
+}
+
+/// The engine closes the channel behind a command that outlived its timeout, and the command ends on the server.
+#[test]
+fn a_command_that_timed_out_is_really_ended_on_the_server() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let session = open_session(&engine(), &server);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let pidfile = dir.path().join("pid");
+
+    let command = format!("echo $$ > '{}'; while true; do echo x; sleep 0.05; done", pidfile.display());
+    let result = session.exec(&command, Duration::from_millis(1500), MIB).unwrap();
+    assert_eq!(result.ended, Ended::TimedOut);
+    gone_from_the_server(&*session, &pidfile, "the timed-out command to end on the server");
+}
+
+/// The same for a command stopped by the output cap.
+#[test]
+fn a_command_cut_off_at_the_cap_is_really_ended_on_the_server() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let session = open_session(&engine(), &server);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let pidfile = dir.path().join("pid");
+
+    let command = format!("echo $$ > '{}'; exec yes sshelter", pidfile.display());
+    let result = session.exec(&command, Duration::from_secs(30), 64 * 1024).unwrap();
+    assert_eq!(result.ended, Ended::Truncated);
+    gone_from_the_server(&*session, &pidfile, "the capped command to end on the server");
+}
+
+/// A command that has exited but left a background job holding its output keeps the channel open. The engine cannot tell that from a
+/// command that is still running, so it ends as `TimedOut`, with the status the command did report.
+#[test]
+fn a_command_that_exited_but_left_a_job_holding_its_output_times_out_with_its_exit_code() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let session = open_session(&engine(), &server);
+
+    let result = session.exec("sleep 5 & echo done; exit 5", Duration::from_secs(2), MIB).unwrap();
+    assert_eq!((result.ended, result.exit_code), (Ended::TimedOut, Some(5)));
+    assert_eq!(result.stdout, b"done\n");
+}
+
+/// A timeout the clock cannot add to the present (`Duration::MAX`) means no timeout; it must not panic inside the engine.
+#[test]
+fn a_timeout_too_large_for_the_clock_means_no_timeout() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let session = open_session(&engine(), &server);
+
+    for timeout in [Duration::MAX, Duration::from_secs(u64::MAX / 2), Duration::from_secs(10 * 365 * 24 * 3600)] {
+        let result = session.exec("echo fine", timeout, MIB).unwrap();
+        assert_eq!((result.stdout.as_slice(), result.ended, result.exit_code), (b"fine\n".as_slice(), Ended::Exited, Some(0)), "{timeout:?}");
+    }
 }
 
 #[test]

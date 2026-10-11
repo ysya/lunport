@@ -204,7 +204,9 @@ pub enum Ended {
     Exited,
     /// It was killed by a signal (`signal` says which); there is no exit status.
     Signaled,
-    /// It was still running when the caller's timeout passed; the engine closed the channel (the connection stays usable).
+    /// It was still running when the caller's timeout passed; the engine closed the channel (the connection stays usable). `exit_code`
+    /// can still be set: a command that has exited keeps its channel open for as long as a background job it started holds the output,
+    /// and then it ends as `TimedOut` with the status it reported.
     TimedOut,
     /// Its output reached the caller's cap and the engine closed the channel (`ExecResult::truncated` is true). Its exit status is
     /// unknown, and the connection is still alive and usable: this is not a lost connection.

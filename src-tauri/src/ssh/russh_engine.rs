@@ -623,6 +623,14 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
 const CHANNEL_SETUP_LIMIT: Duration = Duration::from_secs(15);
 /// How long one write to a shell may wait for the connection's flow control.
 const SHELL_WRITE_LIMIT: Duration = Duration::from_secs(30);
+/// How long one request on a channel (a command, a window change, a close) may wait to be handed to the connection. Every request of every
+/// channel goes through one queue of ten messages, and the connection stops emptying it while its peer does not read (the socket buffers
+/// are full: a dead link that keepalive has not given up on yet), so without this bound the caller's thread would wait for as long as the
+/// link stays dead. `Session::shell`'s and `Session::exec`'s other waits have their own bounds above.
+const SEND_LIMIT: Duration = Duration::from_secs(5);
+/// The longest `exec` timeout that is taken literally. Longer ones, up to `Duration::MAX`, mean "no timeout": the deadline is the present
+/// plus the timeout, which the clock cannot hold for the largest durations (and thirty years is what tokio itself uses for "never").
+const LONGEST_TIMEOUT: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 30);
 
 /// A live connection: the chain, the runtime that drives it, and what a caller does with it. Dropping it closes the connection.
 pub struct RusshSession {
@@ -651,7 +659,17 @@ impl Drop for RusshSession {
 fn channel_error(error: russh::Error) -> SessionError {
     match error {
         russh::Error::SendError | russh::Error::RecvError | russh::Error::Disconnect => SessionError::Closed,
+        // What a write to a channel says when the connection behind it is gone ("channel closed"): the same as the calls above.
+        russh::Error::IO(io) if io.kind() == std::io::ErrorKind::BrokenPipe => SessionError::Closed,
         other => SessionError::Channel(other.to_string()),
+    }
+}
+
+/// One request on a channel, given `SEND_LIMIT` to be handed to the connection; `Timeout` when it was not.
+async fn sent<T>(request: impl std::future::Future<Output = Result<T, russh::Error>>) -> Result<T, SessionError> {
+    match tokio::time::timeout(SEND_LIMIT, request).await {
+        Err(_) => Err(SessionError::Timeout),
+        Ok(result) => result.map_err(channel_error),
     }
 }
 
@@ -685,7 +703,10 @@ impl Session for RusshSession {
                 channel.request_shell(true).await
             };
             match tokio::time::timeout(CHANNEL_SETUP_LIMIT, setup).await {
-                Err(_) => return Err(SessionError::Channel("starting the shell timed out".to_string())),
+                Err(_) => {
+                    let _ = sent(channel.close()).await;
+                    return Err(SessionError::Channel("starting the shell timed out".to_string()));
+                }
                 Ok(Err(error)) => return Err(channel_error(error)),
                 Ok(Ok(())) => {}
             }
@@ -694,7 +715,7 @@ impl Session for RusshSession {
             let (queue, exit) = (ByteQueue::new(self.options.shell_queue_bytes), ExitCell::new());
             let (closed_by_us, closed) = watch::channel(false);
             tokio::spawn(read_shell(read_half, Arc::clone(&write_half), Arc::clone(&queue), Arc::clone(&exit), closed));
-            let input = RusshShellInput { write_half, runtime: self.runtime.handle(), closed_by_us };
+            let input = RusshShellInput { write_half, runtime: Arc::clone(&self.runtime), closed_by_us };
             Ok(Box::new(QueuedShell::new(Box::new(input), queue, exit)) as Box<dyn ShellChannel>)
         })
     }
@@ -726,15 +747,23 @@ impl Session for RusshSession {
 }
 
 /// Runs one command on its own channel and reads the channel until it ends, the output reaches `output_cap` bytes or `timeout` is up.
+///
+/// `timeout` runs from the start of the call and bounds the wait for the command's output. The other waits have bounds of their own: the
+/// channel is given `CHANNEL_SETUP_LIMIT` to open however short `timeout` is, so on a connection that does not answer a call can last that
+/// long before it reports anything, and the requests that start and end the command are given `SEND_LIMIT` each.
+///
+/// A command that has exited can still end as `TimedOut`, with the status it reported: a background job it started may hold its output,
+/// and the channel stays open for as long as that lasts.
 async fn exec_on(destination: &Established, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError> {
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + timeout.min(LONGEST_TIMEOUT);
     let mut channel = open_channel(destination, CHANNEL_SETUP_LIMIT.max(timeout)).await?;
-    channel.exec(true, command).await.map_err(channel_error)?;
+    // If the connection does not take the request, a close would not be taken either: the channel is left to the end of the connection.
+    sent(channel.exec(true, command)).await?;
     let mut result = ExecResult { ended: Ended::Disconnected, exit_code: None, signal: None, stdout: Vec::new(), stderr: Vec::new(), truncated: false };
     loop {
         let message = match tokio::time::timeout_at(deadline, channel.wait()).await {
             Err(_) => {
-                let _ = channel.close().await;
+                let _ = sent(channel.close()).await;
                 result.ended = Ended::TimedOut;
                 return Ok(result);
             }
@@ -754,7 +783,10 @@ async fn exec_on(destination: &Established, command: &str, timeout: Duration, ou
             }
             ChannelMsg::ExitStatus { exit_status } => result.exit_code = Some(exit_status),
             ChannelMsg::ExitSignal { signal_name: signal, .. } => result.signal = Some(signal_name(&signal)),
-            ChannelMsg::Failure => return Err(SessionError::Channel("the server refused to run the command".to_string())),
+            ChannelMsg::Failure => {
+                let _ = sent(channel.close()).await;
+                return Err(SessionError::Channel("the server refused to run the command".to_string()));
+            }
             _ => {}
         }
     }
@@ -778,7 +810,7 @@ fn keep(stream: &mut Vec<u8>, other: usize, data: &[u8], output_cap: usize) -> b
 
 /// The output hit the cap: the channel is closed (the connection stays usable) and what was read is the result.
 async fn cut_off(channel: &Channel<Msg>, mut result: ExecResult) -> ExecResult {
-    let _ = channel.close().await;
+    let _ = sent(channel.close()).await;
     result.truncated = true;
     result.ended = Ended::Truncated;
     result.exit_code = None;
@@ -786,10 +818,11 @@ async fn cut_off(channel: &Channel<Msg>, mut result: ExecResult) -> ExecResult {
     result
 }
 
-/// The write side of a shell, on the engine's runtime.
+/// The write side of a shell, on the engine's runtime. It owns the runtime, not just a handle to it: a shell can outlive the session and
+/// the engine that made it, and the tasks that read it and close its connection must still be able to run.
 struct RusshShellInput {
     write_half: Arc<ChannelWriteHalf<Msg>>,
-    runtime: tokio::runtime::Handle,
+    runtime: Arc<RuntimeOwner>,
     /// Tells the reader task that the shell was closed from our side: russh never ends a channel's reads after the channel was closed
     /// locally (it ignores the server's close for it), so without this the reader would wait for ever.
     closed_by_us: watch::Sender<bool>,
@@ -798,19 +831,19 @@ struct RusshShellInput {
 impl ShellInput for RusshShellInput {
     fn write(&self, bytes: &[u8]) -> Result<(), SessionError> {
         // The timer is created inside the future: building it before `block_on` would need a runtime on this thread.
-        match self.runtime.block_on(async { tokio::time::timeout(SHELL_WRITE_LIMIT, self.write_half.data(bytes)).await }) {
+        match self.runtime.handle().block_on(async { tokio::time::timeout(SHELL_WRITE_LIMIT, self.write_half.data(bytes)).await }) {
             Err(_) => Err(SessionError::Channel("the connection did not take the input in time".to_string())),
             Ok(result) => result.map_err(channel_error),
         }
     }
 
     fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError> {
-        self.runtime.block_on(self.write_half.window_change(u32::from(cols), u32::from(rows), 0, 0)).map_err(channel_error)
+        self.runtime.handle().block_on(sent(self.write_half.window_change(u32::from(cols), u32::from(rows), 0, 0)))
     }
 
     fn close(&self) {
         let _ = self.closed_by_us.send(true);
-        let _ = self.runtime.block_on(async { tokio::time::timeout(Duration::from_secs(2), self.write_half.close()).await });
+        let _ = self.runtime.handle().block_on(async { tokio::time::timeout(Duration::from_secs(2), self.write_half.close()).await });
     }
 }
 
@@ -819,8 +852,8 @@ impl Drop for RusshShellInput {
     fn drop(&mut self) {
         let _ = self.closed_by_us.send(true);
         let write_half = Arc::clone(&self.write_half);
-        self.runtime.spawn(async move {
-            let _ = write_half.close().await;
+        self.runtime.handle().spawn(async move {
+            let _ = sent(write_half.close()).await;
         });
     }
 }
@@ -844,7 +877,7 @@ async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWrite
             ChannelMsg::ExitSignal { signal_name: name, .. } => signal = Some(signal_name(&name)),
             ChannelMsg::Failure => {
                 refused = true;
-                let _ = write_half.close().await;
+                let _ = sent(write_half.close()).await;
                 break;
             }
             _ => {}
