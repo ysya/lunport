@@ -176,3 +176,70 @@ fn a_shell_on_the_second_host_works_through_the_jump() {
     eventually("the shell to report its exit", 10, || probe.shell.exited().is_some());
     assert_eq!(probe.shell.exited(), Some(crate::ssh::Exit::Code(4)));
 }
+
+/// Review focus: the tunnel branch of `connect_hop` has no `SocketGuard`, and needs none. A destination behind a jump host that sends
+/// its version line and then nothing is given up on after `stall_limit` (1.5 s here: a 2 s keepalive interval, a 6 s connect timeout),
+/// and the handshake task that russh started on the tunnel is detached by that. It ends because `connect_chain` disconnects the jump
+/// host next, which closes the channel the task was reading and writing. A task left behind would spin once the interval had passed
+/// (spec §6.2 step 2, and Task 9's test of the same wait on a socket), so the CPU time of the call and of the 2 s after it is measured;
+/// the process-wide CPU time is only meaningful when nothing else runs, so a child process of the test binary does the measuring. The
+/// jump host's connection must be closed afterwards, and so must the destination's end of the tunnel.
+#[cfg(unix)]
+#[test]
+fn a_destination_that_goes_quiet_behind_a_jump_host_is_given_up_on_and_leaves_nothing_behind() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use crate::ssh::testing::{cpu_time_ms, fact_in, is_child, rerun_alone};
+    use crate::ssh::{Hop, Phase};
+
+    const NAME: &str = "ssh::engine_tests::jump::a_destination_that_goes_quiet_behind_a_jump_host_is_given_up_on_and_leaves_nothing_behind";
+    let Some(tools) = tools() else { return };
+    if !is_child() {
+        let output = rerun_alone(NAME);
+        let measured = |key: &str| -> u128 { fact_in(&output, key).expect("the child measured").parse().expect("a number") };
+        let waited = measured("quiet_jump.waited_ms");
+        let (during, after) = (measured("quiet_jump.cpu_during_call_ms"), measured("quiet_jump.cpu_after_call_ms"));
+        assert!(waited < 3000, "the engine waited {waited} ms for a quiet destination with a keepalive interval of 2000 ms");
+        assert!(during < 500 && after < 500, "a quiet destination used {during} ms of CPU during the call and {after} ms in the 2 s after it");
+        return;
+    }
+    let jump = Server::start(&tools, &[]);
+    let proxy = Proxy::start(jump.sshd.port);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a port for the quiet destination");
+    let port = listener.local_addr().expect("its address").port();
+    let ended = Arc::new(AtomicBool::new(false));
+    let destination = {
+        let ended = Arc::clone(&ended);
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("the jump host connects");
+            socket.write_all(b"SSH-2.0-quiet\r\n").expect("the version line goes out");
+            // Takes in whatever the engine sends until the jump host closes its end of the tunnel.
+            let mut buffer = [0u8; 4096];
+            while matches!(socket.read(&mut buffer), Ok(count) if count > 0) {}
+            ended.store(true, Ordering::SeqCst);
+        })
+    };
+    let mut quiet = Hop::new("host-quiet", "quiet", "127.0.0.1", port, "tester", key("kb"));
+    quiet.keepalive_every = Duration::from_secs(2);
+    quiet.connect_timeout = Duration::from_secs(6);
+    let target = Target { hops: vec![jump.hop_with("a", proxy.port, key("ka")), quiet] };
+
+    // The engine stays alive to the end: shutting it down ends every task it runs, and that would hide one that is left behind spinning.
+    let engine = engine();
+    let (cpu_before, started) = (cpu_time_ms(), Instant::now());
+    let error = engine.connect_chain(&target, &*TestPolicy::trusting(), &jump.vault("ka")).err().expect("the destination never finishes its handshake");
+    fact("quiet_jump.waited_ms", started.elapsed().as_millis());
+    fact("quiet_jump.cpu_during_call_ms", cpu_time_ms() - cpu_before);
+    assert!(matches!(&error, ConnectError::Timeout { hop, phase: Phase::Handshake } if hop.alias == "quiet"), "{error:?}");
+
+    eventually("the proxy to see the first hop closed", 5, || proxy.open_connections() == 0);
+    eventually("the destination to see the jump host close its end of the tunnel", 5, || ended.load(Ordering::SeqCst));
+    fact("quiet_jump.closed_after_ms", started.elapsed().as_millis());
+    // The interval runs out 2 s after the destination's last packet; a task the engine left behind would spin from then on.
+    let cpu_before = cpu_time_ms();
+    std::thread::sleep(Duration::from_secs(2));
+    fact("quiet_jump.cpu_after_call_ms", cpu_time_ms() - cpu_before);
+    destination.join().expect("the quiet destination thread");
+}
