@@ -37,10 +37,14 @@ struct QueueState {
     unannounced: u64,
 }
 
-/// A byte queue with a hard size. The producer (the engine's channel reader) must never wait: russh stalls the whole connection behind a
+/// A byte queue with a size limit. The producer (the engine's channel reader) must never wait: russh stalls the whole connection behind a
 /// channel nobody reads. So when the reader is slower than the server (a paused terminal) and the queue is full, new chunks are
 /// discarded and counted instead, and the connection keeps going. The stream says so: the next chunk that is kept is preceded by a
 /// one-line notice that tells how many bytes are missing.
+///
+/// While the queue is open it holds at most `capacity` bytes plus one notice (a notice is 72 bytes plus the digits of the count), and
+/// `close` can add a second one. The exception is an empty queue, which accepts a chunk of any size, so a chunk larger than `capacity` is
+/// taken whole and progress is always possible. The queue has one reading thread: `push` wakes a single waiting reader.
 pub struct ByteQueue {
     state: Mutex<QueueState>,
     ready: Condvar,
@@ -65,15 +69,19 @@ impl ByteQueue {
         state.chunks.push_back(chunk);
     }
 
-    /// Appends `chunk` unless the queue is closed or would grow past its capacity. An empty queue accepts any chunk, so progress is always
-    /// possible. Returns false when the chunk was not kept; a chunk dropped for lack of room is added to `dropped_bytes`.
+    /// Appends `chunk` unless the queue is closed or the chunk would grow the queued bytes past `capacity`. The bound is `capacity` plus one
+    /// notice while the queue is open (the notice that goes in front of the first chunk kept after a gap is not part of the check) and up to
+    /// two notices at `close`; a notice is 72 bytes plus the digits of the count. An empty queue accepts a chunk of any size, so a chunk
+    /// larger than `capacity` is taken whole and progress is always possible. Returns false when the chunk was not kept; a chunk dropped for
+    /// lack of room is added to `dropped_bytes`, a chunk refused because the queue is closed is not. An empty chunk queues nothing: it is
+    /// accepted while the queue is open and refused once it is closed.
     pub fn push(&self, chunk: Vec<u8>) -> bool {
-        if chunk.is_empty() {
-            return true;
-        }
         let mut state = locked(&self.state);
         if state.closed {
             return false;
+        }
+        if chunk.is_empty() {
+            return true;
         }
         if state.bytes != 0 && state.bytes + chunk.len() > self.capacity {
             state.dropped += chunk.len() as u64;
@@ -175,7 +183,8 @@ pub trait ShellInput: Send + Sync {
     /// Sends `bytes` to the shell's stdin. May wait while the connection's flow control makes the engine wait; the engine bounds that.
     fn write(&self, bytes: &[u8]) -> Result<(), SessionError>;
     fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError>;
-    /// Closes the channel (the connection stays up).
+    /// Closes the channel (the connection stays up). After this the engine's reader must finish, setting the exit first and closing the queue
+    /// second, so that a `read` blocked on the queue returns 0: `QueuedShell::close` only calls this and does not close the queue itself.
     fn close(&self);
 }
 
@@ -204,8 +213,10 @@ impl ShellChannel for QueuedShell {
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, SessionError> {
+        debug_assert!(!buf.is_empty(), "ShellChannel::read needs a non-empty buffer: Ok(0) means the shell has ended");
         match self.output.read_until(buf, None) {
             QueueRead::Bytes(count) => Ok(count),
+            // A read without a deadline never times out; the arm only keeps the match exhaustive.
             QueueRead::Closed | QueueRead::Timeout => Ok(0),
         }
     }
@@ -243,6 +254,21 @@ mod tests {
         all
     }
 
+    /// Runs a test body on its own thread and gives it 10 s: a body stuck in a blocking call (a push that waits, a read that is never woken)
+    /// fails the test instead of hanging the suite.
+    fn bounded(body: impl FnOnce() + Send + 'static) {
+        let (finished, done) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            body();
+            let _ = finished.send(());
+        });
+        match done.recv_timeout(Duration::from_secs(10)) {
+            Ok(()) => runner.join().unwrap(),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the test body did not finish within 10 s: a call is blocked"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(runner.join().unwrap_err()),
+        }
+    }
+
     #[test]
     fn chunks_come_out_in_the_order_they_went_in_and_a_small_buffer_gets_part_of_a_chunk() {
         let queue = ByteQueue::new(1024);
@@ -263,80 +289,91 @@ mod tests {
 
     #[test]
     fn a_full_queue_drops_new_chunks_and_counts_them_instead_of_waiting() {
-        let queue = ByteQueue::new(10);
-        assert!(queue.push(vec![1; 6]));
-        let started = Instant::now();
-        assert!(!queue.push(vec![2; 6]), "6 + 6 bytes do not fit in 10");
-        assert!(started.elapsed() < Duration::from_millis(500), "a full queue must not make the producer wait");
-        assert_eq!(queue.dropped_bytes(), 6);
-        assert!(queue.push(vec![3; 4]), "4 bytes still fit next to the 6 queued");
-        assert_eq!(queue.dropped_bytes(), 6, "only the chunk that did not fit was counted");
+        bounded(|| {
+            let queue = ByteQueue::new(10);
+            assert!(queue.push(vec![1; 6]));
+            let started = Instant::now();
+            assert!(!queue.push(vec![2; 6]), "6 + 6 bytes do not fit in 10");
+            assert!(started.elapsed() < Duration::from_millis(500), "a full queue must not make the producer wait");
+            assert_eq!(queue.dropped_bytes(), 6);
+            assert!(queue.push(vec![3; 4]), "4 bytes still fit next to the 6 queued");
+            assert_eq!(queue.dropped_bytes(), 6, "only the chunk that did not fit was counted");
+        });
     }
 
     #[test]
     fn an_empty_queue_takes_a_chunk_bigger_than_its_capacity() {
-        let queue = ByteQueue::new(4);
-        assert!(queue.push(vec![9; 100]));
-        assert_eq!(queue.dropped_bytes(), 0);
-        assert!(!queue.push(vec![9; 1]), "but nothing fits next to it");
-        assert_eq!(queue.dropped_bytes(), 1);
+        bounded(|| {
+            let queue = ByteQueue::new(4);
+            assert!(queue.push(vec![9; 100]));
+            assert_eq!(queue.dropped_bytes(), 0);
+            assert!(!queue.push(vec![9; 1]), "but nothing fits next to it");
+            assert_eq!(queue.dropped_bytes(), 1);
+        });
     }
 
     #[test]
     fn the_stream_says_how_much_is_missing_before_the_next_chunk_it_keeps() {
-        let queue = ByteQueue::new(8);
-        assert!(queue.push(b"AAAAAA".to_vec()));
-        assert!(!queue.push(b"BBBBBB".to_vec()));
-        assert!(!queue.push(b"CCCC".to_vec()));
-        assert_eq!(queue.dropped_bytes(), 10);
-        let mut buf = [0u8; 64];
-        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(6), "the reader catches up");
-        assert!(queue.push(b"DD".to_vec()));
-        let rest = String::from_utf8(read_all(&queue)).unwrap();
-        assert_eq!(rest, "\r\n[SSHelter dropped 10 bytes of output because the terminal fell behind]\r\nDD");
-        assert!(queue.push(b"EE".to_vec()));
-        assert_eq!(read_all(&queue), b"EE", "the gap is announced once");
+        bounded(|| {
+            let queue = ByteQueue::new(8);
+            assert!(queue.push(b"AAAAAA".to_vec()));
+            assert!(!queue.push(b"BBBBBB".to_vec()));
+            assert!(!queue.push(b"CCCC".to_vec()));
+            assert_eq!(queue.dropped_bytes(), 10);
+            let mut buf = [0u8; 64];
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(6), "the reader catches up");
+            assert!(queue.push(b"DD".to_vec()));
+            let rest = String::from_utf8(read_all(&queue)).unwrap();
+            assert_eq!(rest, "\r\n[SSHelter dropped 10 bytes of output because the terminal fell behind]\r\nDD");
+            assert!(queue.push(b"EE".to_vec()));
+            assert_eq!(read_all(&queue), b"EE", "the gap is announced once");
+        });
     }
 
     #[test]
     fn closing_announces_a_gap_that_nothing_followed_and_then_reports_closed() {
-        let queue = ByteQueue::new(4);
-        queue.push(b"1234".to_vec());
-        assert!(!queue.push(b"5678".to_vec()));
-        queue.close();
-        assert!(!queue.push(b"too late".to_vec()), "nothing is accepted after close");
-        assert_eq!(queue.dropped_bytes(), 4, "a push after close is not a drop for lack of room");
-        let mut buf = [0u8; 128];
-        let mut all = Vec::new();
-        loop {
-            match queue.read_until(&mut buf, soon()) {
-                QueueRead::Bytes(count) => all.extend_from_slice(&buf[..count]),
-                QueueRead::Closed => break,
-                QueueRead::Timeout => panic!("a closed queue must not time out"),
+        bounded(|| {
+            let queue = ByteQueue::new(4);
+            queue.push(b"1234".to_vec());
+            assert!(!queue.push(b"5678".to_vec()));
+            queue.close();
+            assert!(!queue.push(b"too late".to_vec()), "nothing is accepted after close");
+            assert!(!queue.push(Vec::new()), "not even an empty chunk");
+            assert_eq!(queue.dropped_bytes(), 4, "a push after close is not a drop for lack of room");
+            let mut buf = [0u8; 128];
+            let mut all = Vec::new();
+            loop {
+                match queue.read_until(&mut buf, soon()) {
+                    QueueRead::Bytes(count) => all.extend_from_slice(&buf[..count]),
+                    QueueRead::Closed => break,
+                    QueueRead::Timeout => panic!("a closed queue must not time out"),
+                }
             }
-        }
-        assert_eq!(String::from_utf8(all).unwrap(), "1234\r\n[SSHelter dropped 4 bytes of output because the terminal fell behind]\r\n");
-        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Closed);
+            assert_eq!(String::from_utf8(all).unwrap(), "1234\r\n[SSHelter dropped 4 bytes of output because the terminal fell behind]\r\n");
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Closed);
+        });
     }
 
     #[test]
     fn a_waiting_reader_wakes_when_a_chunk_arrives_and_when_the_queue_closes() {
         let queue = ByteQueue::new(1024);
-        let producer = {
+        let (results, seen) = std::sync::mpsc::channel();
+        let reader = {
             let queue = Arc::clone(&queue);
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                queue.push(b"hello".to_vec());
-                std::thread::sleep(Duration::from_millis(100));
-                queue.close();
+                // No deadline: the open-ended wait is what is under test, so it runs on its own thread and the test waits for it with a timeout.
+                let mut buf = [0u8; 16];
+                let _ = results.send(queue.read_until(&mut buf, None));
+                let _ = results.send(queue.read_until(&mut buf, None));
             })
         };
-        let started = Instant::now();
-        let mut buf = [0u8; 16];
-        assert_eq!(queue.read_until(&mut buf, None), QueueRead::Bytes(5));
-        assert_eq!(queue.read_until(&mut buf, None), QueueRead::Closed);
-        assert!(started.elapsed() < Duration::from_secs(5), "woken by the producer, not by a timeout");
-        producer.join().unwrap();
+        let wait = Duration::from_secs(5);
+        std::thread::sleep(Duration::from_millis(100)); // let the reader reach its wait
+        queue.push(b"hello".to_vec());
+        assert_eq!(seen.recv_timeout(wait), Ok(QueueRead::Bytes(5)), "a chunk wakes a waiting reader (the queue is still open)");
+        queue.close();
+        assert_eq!(seen.recv_timeout(wait), Ok(QueueRead::Closed), "closing wakes a waiting reader");
+        reader.join().unwrap();
     }
 
     #[test]
@@ -370,28 +407,30 @@ mod tests {
 
     #[test]
     fn a_shell_forwards_to_its_input_reads_from_its_queue_and_finds_the_exit_when_the_read_ends() {
-        let (writes, resizes, closes) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicUsize::new(0)));
-        let input = CountingInput { writes: Arc::clone(&writes), resizes: Arc::clone(&resizes), closes: Arc::clone(&closes) };
-        let (queue, cell) = (ByteQueue::new(1024), ExitCell::new());
-        let shell = QueuedShell::new(Box::new(input), Arc::clone(&queue), Arc::clone(&cell));
+        bounded(|| {
+            let (writes, resizes, closes) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicUsize::new(0)));
+            let input = CountingInput { writes: Arc::clone(&writes), resizes: Arc::clone(&resizes), closes: Arc::clone(&closes) };
+            let (queue, cell) = (ByteQueue::new(1024), ExitCell::new());
+            let shell = QueuedShell::new(Box::new(input), Arc::clone(&queue), Arc::clone(&cell));
 
-        shell.write(b"ls\n").unwrap();
-        shell.window_change(120, 40).unwrap();
-        shell.close();
-        assert_eq!(*locked(&writes), vec![b"ls\n".to_vec()]);
-        assert_eq!(*locked(&resizes), vec![(120, 40)]);
-        assert_eq!(closes.load(Ordering::SeqCst), 1);
+            shell.write(b"ls\n").unwrap();
+            shell.window_change(120, 40).unwrap();
+            shell.close();
+            assert_eq!(*locked(&writes), vec![b"ls\n".to_vec()]);
+            assert_eq!(*locked(&resizes), vec![(120, 40)]);
+            assert_eq!(closes.load(Ordering::SeqCst), 1);
 
-        queue.push(b"prompt$ ".to_vec());
-        let mut buf = [0u8; 32];
-        assert_eq!(shell.read(&mut buf), Ok(8));
-        assert_eq!(&buf[..8], b"prompt$ ");
-        assert_eq!(shell.read_until(&mut buf, Instant::now() + Duration::from_millis(30)), QueueRead::Timeout);
-        assert_eq!(shell.exited(), None);
+            queue.push(b"prompt$ ".to_vec());
+            let mut buf = [0u8; 32];
+            assert_eq!(shell.read(&mut buf), Ok(8));
+            assert_eq!(&buf[..8], b"prompt$ ");
+            assert_eq!(shell.read_until(&mut buf, Instant::now() + Duration::from_millis(30)), QueueRead::Timeout);
+            assert_eq!(shell.exited(), None);
 
-        cell.set(Exit::Code(0));
-        queue.close();
-        assert_eq!(shell.read(&mut buf), Ok(0), "0 means the shell has ended");
-        assert_eq!(shell.exited(), Some(Exit::Code(0)), "and the exit is there by then");
+            cell.set(Exit::Code(0));
+            queue.close();
+            assert_eq!(shell.read(&mut buf), Ok(0), "0 means the shell has ended");
+            assert_eq!(shell.exited(), Some(Exit::Code(0)), "and the exit is there by then");
+        });
     }
 }
