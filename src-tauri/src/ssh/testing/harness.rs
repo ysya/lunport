@@ -7,6 +7,12 @@
 //! Operation not permitted`; password and keyboard-interactive login cannot work without PAM, so this sshd offers public keys only.
 //! Every test starts its own sshd. A test that needs one sshd for a long loop adds `PerSourcePenalties no` to its `extra_config`
 //! (OpenSSH 9.8 and later know the keyword, older ones refuse the config, so it cannot be a default).
+//!
+//! **A signal that kills the test process leaves its sshd behind.** `Drop` does not run then, and nothing else ties the sshd to the test
+//! process: the listener keeps running and its temp directory stays. The harness cleans up after the fact. `Sshd::start` writes
+//! `owner.pid` (the test process's pid, then the sshd's) into the directory, and every `Sshd::start` begins by sweeping the
+//! `sshelter-sshd-*` directories of the temp dir whose owner no longer exists (`sweep_stale`). So such a listener and directory stay until
+//! the next `Sshd::start` of any test process. By hand: `pkill -f 'sshelter-sshd-.*/sshd_config'` and `rm -r "$TMPDIR"/sshelter-sshd-*`.
 
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -20,8 +26,9 @@ use std::time::{Duration, Instant};
 /// test, so a stuck one cannot hang CI.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// After a tool was killed (or has exited) its pipes can stay open: a grandchild may have inherited them. The readers get this long to
-/// reach end-of-file; after that the output collected so far is used and the readers are left to end on their own.
+/// After a tool was killed (or has exited) its pipes can stay open: a grandchild may have inherited them. Each reader gets this long to
+/// reach end-of-file; after that the output collected so far is used and the readers are left to end on their own. The two readers are
+/// waited for one after the other, so a tool that ended while a grandchild holds both pipes delays its result by up to twice this.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 
 /// `Command::output()` with a deadline of `TOOL_TIMEOUT`. A tool that cannot be started, or does not finish in time, fails the test.
@@ -45,8 +52,11 @@ fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> PipeReader {
             let mut chunk = [0u8; 8192];
             loop {
                 match pipe.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
                     Ok(count) => sink.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(&chunk[..count]),
+                    // A signal that arrives during the read is no end of file: read again.
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
                 }
             }
         }
@@ -68,7 +78,9 @@ impl PipeReader {
 /// of the deadline leaves no "panicked at" line in the output of `--nocapture` runs.
 ///
 /// The readers are bounded too: when a grandchild keeps the pipes open after the tool is gone, waiting for end-of-file would last as
-/// long as the grandchild lives, so the readers get `PIPE_GRACE` and then the output so far is used (the spike's deferred Minor 2).
+/// long as the grandchild lives, so each reader gets `PIPE_GRACE` and then the output so far is used (the spike's deferred Minor 2). The
+/// readers are waited for one after the other: up to `2 * PIPE_GRACE` after a tool that ended by itself, `PIPE_GRACE` after a kill (only
+/// stderr is waited for then).
 pub(super) fn run_within(command: &mut Command, timeout: Duration) -> Result<Output, String> {
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = crate::process::spawn(command).map_err(|error| format!("cannot run {command:?}: {error}"))?;
@@ -159,9 +171,10 @@ pub struct TestKey {
     pub public_line: String,
 }
 
-/// Whether the vault's parser (`ssh-key` 0.6.7, which `Material::open` uses) reads this OpenSSH private key.
+/// Whether the vault reads this OpenSSH private key: its own predicate (`open` does not answer `Unreadable`), so that a fix of the
+/// vault's parsing reaches this harness without a change here.
 fn readable_by_the_vault(private_text: &str) -> bool {
-    ssh_key::PrivateKey::from_openssh(private_text).is_ok()
+    crate::vault::material::agent_can_read(private_text)
 }
 
 /// Makes a key pair with ssh-keygen. A key the vault's parser cannot read is thrown away and another is made: `ssh-key` 0.6.7 cannot
@@ -209,7 +222,13 @@ impl Default for SshdOptions {
     }
 }
 
-/// A running scratch sshd. Dropping it kills the listener (connections already open end when their client goes away).
+/// A running scratch sshd. Dropping it kills the listener and removes the directory (connections already open end when their client goes
+/// away).
+///
+/// **The limit:** `Drop` does not run when a signal kills the test process (`kill -9`, a CI runner cancelling the job), and nothing else
+/// ties the sshd to that process. The listener then keeps running and its directory stays until the next `Sshd::start` (of any test
+/// process) sweeps them, see `sweep_stale` and `owner.pid`. By hand: `pkill -f 'sshelter-sshd-.*/sshd_config'` and
+/// `rm -r "$TMPDIR"/sshelter-sshd-*`.
 pub struct Sshd {
     pub port: u16,
     /// The account sshd authenticates: the user running the tests (without root, sshd can only log in that user).
@@ -223,9 +242,11 @@ pub struct Sshd {
 impl Sshd {
     pub fn start(tools: &Tools, options: SshdOptions) -> Sshd {
         assert!(!options.host_keys.is_empty(), "a server needs at least one host key");
+        // What a test process killed by a signal left behind (module doc) goes first, before this server adds to it.
+        sweep_stale(&std::env::temp_dir());
         // Asked before the first sshd starts: a panic in here must not leave a listener behind.
         let user = current_user();
-        let dir = tempfile::Builder::new().prefix("sshelter-sshd-").tempdir().expect("temp dir");
+        let dir = tempfile::Builder::new().prefix(DIR_PREFIX).tempdir().expect("temp dir");
         let host_keys: Vec<TestKey> =
             options.host_keys.iter().enumerate().map(|(index, kind)| generate_key(tools, dir.path(), &format!("hostkey{index}"), *kind)).collect();
         let authorized = dir.path().join("authorized_keys");
@@ -254,6 +275,12 @@ impl Sshd {
             let mut command = Command::new(&tools.sshd);
             command.args(["-D", "-e", "-f"]).arg(&config_path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log));
             let mut child = crate::process::spawn(&mut command).expect("start sshd");
+            // At once: a later sweep finds this sshd through the file if a signal kills this process before `Drop` can run.
+            if let Err(error) = write_owner_file(dir.path(), std::process::id(), child.id()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("cannot write {OWNER_FILE}: {error}");
+            }
             if wait_for_banner(&mut child, port) {
                 let host_public_lines = host_keys.iter().map(|key| key.public_line.clone()).collect();
                 return Sshd { port, user, host_public_lines, dir, child };
@@ -282,6 +309,155 @@ impl Drop for Sshd {
         let _ = self.child.wait();
     }
 }
+
+/// The start of the name of every scratch directory (`tempfile` adds random characters); the sweep looks for it.
+const DIR_PREFIX: &str = "sshelter-sshd-";
+
+/// The file in a scratch directory that says whose it is: the pid of the test process on the first line, the pid of its sshd on the second.
+const OWNER_FILE: &str = "owner.pid";
+
+/// Writes `owner.pid`. It goes to a temporary name first and is renamed, so that a sweep that runs at the same moment finds either no
+/// file or a whole one.
+fn write_owner_file(dir: &Path, owner: u32, sshd: u32) -> std::io::Result<()> {
+    let temporary = dir.join(format!("{OWNER_FILE}.tmp"));
+    std::fs::write(&temporary, format!("{owner}\n{sshd}\n"))?;
+    std::fs::rename(&temporary, dir.join(OWNER_FILE))
+}
+
+/// The two pids of `owner.pid`, or `None` when the file is missing or is not exactly two lines with a pid each.
+#[cfg(unix)]
+fn read_owner_file(dir: &Path) -> Option<(u32, u32)> {
+    let text = std::fs::read_to_string(dir.join(OWNER_FILE)).ok()?;
+    let mut lines = text.lines();
+    let (owner, sshd) = (parse_pid(lines.next()?)?, parse_pid(lines.next()?)?);
+    lines.next().is_none().then_some((owner, sshd))
+}
+
+/// A pid, but never one that `kill` would treat as more than one process: 0 is the caller's whole process group and 1 is init (and -1,
+/// which does not parse as a `u32`, is every process the caller may signal).
+#[cfg(unix)]
+fn parse_pid(line: &str) -> Option<u32> {
+    line.trim().parse::<u32>().ok().filter(|pid| (2..=i32::MAX as u32).contains(pid))
+}
+
+/// One sweep at a time in this process: two tests that start a server together would otherwise both handle the same stale directory.
+#[cfg(unix)]
+static SWEEP: Mutex<()> = Mutex::new(());
+
+/// How long the sweep waits for an sshd it has killed to disappear.
+#[cfg(unix)]
+const KILL_WAIT: Duration = Duration::from_secs(5);
+
+/// Cleans up after test processes that a signal killed before `Drop` could run (module doc). In every `sshelter-sshd-*` directory of
+/// `root` (the temp dir) whose `owner.pid` names a process that no longer exists:
+/// - the sshd of that directory is killed, but only if its command line still names this directory's `sshd_config`: a pid can be reused
+///   by an unrelated program, and such a program is never killed;
+/// - the directory is removed in every case, since the directory of a dead owner is nobody else's.
+///
+/// Left alone: a directory whose owner still lives (another test, perhaps of another process), one without a usable `owner.pid` (made
+/// by an older harness, or by a test that is still starting its server), one that is not a directory of the current user, and one
+/// whose sshd cannot be checked because `ps` does not work. One line is printed for every directory that is swept. It assumes that `root`
+/// is not shared with processes of another pid namespace, and it never panics: a sweep that cannot do its work must not fail the test
+/// that started it.
+#[cfg(unix)]
+fn sweep_stale(root: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let _one_at_a_time = SWEEP.lock().unwrap_or_else(PoisonError::into_inner);
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(DIR_PREFIX) {
+            continue;
+        }
+        // `DirEntry::metadata` does not follow a symbolic link, so a link to a directory is not a directory here.
+        let Ok(metadata) = entry.metadata() else { continue };
+        if metadata.is_dir() && metadata.uid() == me {
+            sweep_directory(&entry.path());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn sweep_directory(dir: &Path) {
+    let Some((owner, sshd)) = read_owner_file(dir) else { return };
+    if process_exists(owner) {
+        return;
+    }
+    let config = dir.join("sshd_config").to_string_lossy().into_owned();
+    let sshd_fate = match command_line_of(sshd) {
+        Err(error) => {
+            eprintln!("not sweeping {}: cannot tell what pid {sshd} is: {error}", dir.display());
+            return;
+        }
+        Ok(None) => format!("its sshd (pid {sshd}) is gone already"),
+        Ok(Some(command)) if !command.contains(&config) => format!("pid {sshd}, once its sshd, is another program now ({command}) and is left running"),
+        Ok(Some(_)) => match kill_process(sshd) {
+            Err(error) => format!("its sshd (pid {sshd}) could not be killed: {error}"),
+            Ok(()) if wait_until_gone(sshd, &config) => format!("its sshd (pid {sshd}) killed"),
+            Ok(()) => format!("its sshd (pid {sshd}) is still there {KILL_WAIT:?} after SIGKILL"),
+        },
+    };
+    let directory_fate = match std::fs::remove_dir_all(dir) {
+        Ok(()) => "directory removed".to_string(),
+        Err(error) => format!("directory not removed: {error}"),
+    };
+    eprintln!("swept {}: its test process (pid {owner}) is gone; {sshd_fate}; {directory_fate}", dir.display());
+}
+
+/// Whether a process with this pid exists. A process of another user (`EPERM`) exists; so does a zombie.
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists, and `pid` is at least 2 (`parse_pid`), so it names one process.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn kill_process(pid: u32) -> std::io::Result<()> {
+    // SAFETY: as in `process_exists`, `pid` names one process.
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// What `ps` shows as the command line of `pid`; `Ok(None)` when no process has that pid. A zombie (dead, but its parent has not collected it
+/// yet) shows as `<defunct>` on macOS and as `[name] <defunct>` on Linux, which is not a command line anybody looks for. `Err` when `ps`
+/// itself does not work (not found, hung, or an answer that is neither a command line nor "no such process").
+#[cfg(unix)]
+fn command_line_of(pid: u32) -> Result<Option<String>, String> {
+    // `-ww`: the whole command line, whatever the width of a terminal or an exported COLUMNS.
+    let out = run_within(Command::new("ps").args(["-ww", "-o", "command=", "-p"]).arg(pid.to_string()), TOOL_TIMEOUT)?;
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !line.is_empty() {
+        return Ok(Some(line));
+    }
+    // `ps -p` prints nothing and exits with 1 when no process has the pid; anything else is a `ps` that does not work here.
+    if out.status.code() == Some(1) && out.stderr.is_empty() {
+        return Ok(None);
+    }
+    Err(format!("ps -p {pid} printed nothing and exited with {:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stderr).trim()))
+}
+
+/// Waits (up to `KILL_WAIT`) until `pid` no longer runs the sshd of `config`: it is gone, it is a zombie, or its pid has been reused.
+#[cfg(unix)]
+fn wait_until_gone(pid: u32, config: &str) -> bool {
+    let deadline = Instant::now() + KILL_WAIT;
+    loop {
+        match command_line_of(pid) {
+            Ok(None) => return true,
+            Ok(Some(command)) if !command.contains(config) => return true,
+            _ if Instant::now() >= deadline => return false,
+            _ => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+/// Windows never runs the scratch-sshd tests (see `tools`), so there is nothing to sweep.
+#[cfg(not(unix))]
+fn sweep_stale(_root: &Path) {}
 
 fn config_text(port: u16, host_keys: &[&Path], authorized_keys: &Path, extra: &[String]) -> String {
     let mut lines: Vec<String> = extra.to_vec();
@@ -528,5 +704,83 @@ K3AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBK5bQ2TTd8NDXcXp\n\
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("port {port} still accepts connections 5 s after the server was dropped");
+    }
+
+    /// The pid of a process that has run and been waited for: no process has it now.
+    #[cfg(unix)]
+    fn a_dead_pid() -> u32 {
+        let mut child = crate::process::spawn(&mut Command::new("true")).expect("run true");
+        let pid = child.id();
+        child.wait().expect("wait for true");
+        pid
+    }
+
+    /// Kills and collects its process when dropped, so that a failing assertion leaves nothing running.
+    #[cfg(unix)]
+    struct KillOnDrop(Child);
+
+    #[cfg(unix)]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A signal that kills the test process skips `Drop`, so its sshd keeps listening and its directory stays (module doc). The next
+    /// `Sshd::start` must find both through `owner.pid` and clean up. The dead owner is made up (the pid of a process that has exited),
+    /// since this test process cannot be killed here. The first server stays in scope on purpose: if an assertion fails, its `Drop`
+    /// still kills the listener and removes what is left of the directory. (It is also why this test does not `forget` it: the sshd is
+    /// this process's own child, and a child that was killed stays a zombie until its parent collects it.)
+    #[cfg(unix)]
+    #[test]
+    fn the_next_start_kills_the_sshd_of_a_dead_test_process_and_removes_its_directory() {
+        let Some(tools) = tools() else { return };
+        let mut stale = Sshd::start(&tools, SshdOptions::default());
+        let (dir, sshd_pid) = (stale.dir.path().to_path_buf(), stale.child.id());
+        assert_eq!(read_owner_file(&dir), Some((std::process::id(), sshd_pid)), "owner.pid names this test process and its sshd");
+
+        // While its owner lives, a sweep leaves the server alone.
+        sweep_stale(&std::env::temp_dir());
+        assert!(dir.exists() && stale.child.try_wait().unwrap().is_none(), "the server of a live owner is not touched by a sweep");
+
+        // From here on it looks like the server of a test process that a signal has killed.
+        write_owner_file(&dir, a_dead_pid(), sshd_pid).expect("rewrite owner.pid");
+        let _next = Sshd::start(&tools, SshdOptions::default()); // the sweep is the first thing it does
+
+        assert!(!dir.exists(), "the directory of the dead owner is removed");
+        let status = stale.child.try_wait().expect("ask for the exit status").expect("the sweep killed the sshd"); // this also collects the zombie
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGKILL), "killed by the sweep, not by itself: {status:?}");
+        assert_eq!(command_line_of(sshd_pid), Ok(None), "ps knows no such process any more");
+    }
+
+    /// What the sweep must not do. The directory of a dead owner is removed in any case, but the sshd pid in its file may belong to
+    /// another program by now: only a process whose command line names the directory's own `sshd_config` is killed, and `sleep 30` here
+    /// does not. A directory whose owner file is missing or makes no sense is not judged at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_sweep_removes_a_dead_owners_directory_but_kills_only_a_process_that_names_it() {
+        if tools().is_none() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let make = |name: &str| {
+            let dir = root.path().join(format!("{DIR_PREFIX}{name}"));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("sshd_config"), "Port 1\n").unwrap();
+            dir
+        };
+        let (reused, no_file, garbage) = (make("reused-pid"), make("no-owner-file"), make("garbage-owner-file"));
+        std::fs::write(garbage.join(OWNER_FILE), "not a pid\n").unwrap();
+        let mut other = KillOnDrop(
+            crate::process::spawn(Command::new("sleep").arg("30").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())).expect("start sleep"),
+        );
+        write_owner_file(&reused, a_dead_pid(), other.0.id()).unwrap();
+
+        sweep_stale(root.path());
+
+        assert!(!reused.exists(), "the directory of the dead owner is removed");
+        assert!(other.0.try_wait().unwrap().is_none(), "the sleep is still running: its command line does not name the directory");
+        assert!(no_file.exists() && garbage.exists(), "a directory without a usable owner.pid is left alone");
     }
 }
