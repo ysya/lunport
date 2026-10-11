@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::channel::{ByteQueue, ExitCell, QueuedShell, ShellInput};
 use super::error::{ConnectError, SessionError};
 use super::traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
-use super::types::{AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostKey, HostKeyVerdict, Prompt, Pty, RsaHash, Target};
+use super::types::{AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostKey, HostKeyVerdict, Prompt, Pty, RsaHash, Secret, Target};
 use crate::sync::slot_rules::test_keys;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -19,16 +19,20 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// How the fake server answers a login.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FakeLogin {
-    /// Every login succeeds; the auth source is not consulted.
+    /// Every login succeeds and the auth source is not consulted, with one exception that holds for every kind of login: a hop that
+    /// starts with the password method has its password asked for before its host key is checked, as the real engine does.
     Accept,
-    /// Every method is refused.
+    /// Every method is refused: `AuthFailed`, with the hop's whole `Hop::auth_sequence()` as `tried`.
     Refuse,
     /// The hop's key method: the fake asks the auth source for a signature over a fixed challenge and accepts any signature it gets
     /// (it has no public key to verify with). A signing error abandons the login, as in the real engine.
     Signature,
     /// The fake asks `AuthSource::password` and accepts only `expected`. `None` skips the method, so nothing was tried and the login fails.
+    /// A hop that starts with the password method is asked before its host key is checked; any other hop is asked during the login.
     Password(String),
-    /// The fake sends `prompts` to `AuthSource::interactive` and accepts only `answers`. `None` abandons the login.
+    /// The fake sends `prompts` to `AuthSource::interactive` and accepts only `answers`. `None` (a cancelled prompt) abandons the login,
+    /// and so does a number of answers that differs from the number of prompts, as in the real engine; the right number of wrong answers
+    /// is a refusal.
     Interactive { prompts: Vec<Prompt>, answers: Vec<String> },
 }
 
@@ -194,22 +198,24 @@ impl SshEngine for FakeEngine {
         }
         for hop in &target.hops {
             let reference = hop.reference();
+            // A hop that starts with the password method has its password asked for before anything is connected (`AuthSource::password`).
+            let prefetched = (hop.auth == AuthMethod::Password).then(|| auth.password(&reference));
             let key = keys.get(&hop.alias).unwrap_or(&key_default).clone();
             match host_keys.check(&reference, &key) {
                 HostKeyVerdict::Pinned => {}
                 HostKeyVerdict::Unknown => return Err(ConnectError::HostKeyUnknown { hop: reference, key }),
                 HostKeyVerdict::Mismatch { pinned } => return Err(ConnectError::HostKeyMismatch { hop: reference, key, pinned }),
             }
-            fake_login(hop, logins.get(&hop.alias).unwrap_or(&login_default), auth)?;
+            fake_login(hop, logins.get(&hop.alias).unwrap_or(&login_default), auth, prefetched)?;
         }
         self.shared.record(FakeEvent::Connect { aliases: target.hops.iter().map(|hop| hop.alias.clone()).collect() });
         let disconnect = locked(&self.shared.script).disconnect.clone();
         let destination = target.hops.last().map(Hop::reference).ok_or_else(|| ConnectError::BadJumpChain { why: "the target has no hosts".to_string() })?;
-        Ok(Box::new(FakeSession { shared: Arc::clone(&self.shared), destination, closed: Mutex::new(disconnect) }))
+        Ok(Box::new(FakeSession { shared: Arc::clone(&self.shared), destination, closed: Mutex::new(disconnect), shells: Mutex::new(Vec::new()) }))
     }
 }
 
-fn fake_login(hop: &Hop, login: &FakeLogin, auth: &dyn AuthSource) -> Result<(), ConnectError> {
+fn fake_login(hop: &Hop, login: &FakeLogin, auth: &dyn AuthSource, prefetched: Option<Option<Secret>>) -> Result<(), ConnectError> {
     let reference = hop.reference();
     let refused = |tried: Vec<AuthMethod>| ConnectError::AuthFailed { hop: reference.clone(), tried, reason: String::new() };
     let abandoned = |reason: &str| ConnectError::AuthAbandoned { hop: reference.clone(), reason: reason.to_string() };
@@ -220,7 +226,7 @@ fn fake_login(hop: &Hop, login: &FakeLogin, auth: &dyn AuthSource) -> Result<(),
             let AuthMethod::Key { key_id } = &hop.auth else { return Err(refused(vec![])) };
             auth.sign(key_id, b"fake-challenge", Some(RsaHash::Sha512)).map(|_| ()).map_err(|error| abandoned(&error.to_string()))
         }
-        FakeLogin::Password(expected) => match auth.password(&reference) {
+        FakeLogin::Password(expected) => match prefetched.unwrap_or_else(|| auth.password(&reference)) {
             None => Err(refused(vec![])),
             Some(given) if given.as_str() == expected => Ok(()),
             Some(_) => Err(refused(vec![AuthMethod::Password])),
@@ -229,6 +235,7 @@ fn fake_login(hop: &Hop, login: &FakeLogin, auth: &dyn AuthSource) -> Result<(),
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
             match auth.interactive(&reference, prompts, deadline) {
                 None => Err(abandoned("the prompt was cancelled")),
+                Some(given) if given.len() != prompts.len() => Err(abandoned("the answers do not match the prompts")),
                 Some(given) if given.iter().map(|answer| answer.as_str()).eq(answers.iter().map(String::as_str)) => Ok(()),
                 Some(_) => Err(refused(vec![AuthMethod::Interactive])),
             }
@@ -240,6 +247,8 @@ struct FakeSession {
     shared: Arc<Shared>,
     destination: HopRef,
     closed: Mutex<Option<DisconnectReason>>,
+    /// The queue and exit cell of every shell opened here: when the session ends, so do they, as they do on a lost connection.
+    shells: Mutex<Vec<(Arc<ByteQueue>, Arc<ExitCell>)>>,
 }
 
 struct FakeShellInput {
@@ -298,6 +307,7 @@ impl Session for FakeSession {
             cell.set(exit);
             queue.close();
         }
+        locked(&self.shells).push((Arc::clone(&queue), Arc::clone(&cell)));
         let input = FakeShellInput { shared: Arc::clone(&self.shared), queue: Arc::clone(&queue), exit: Arc::clone(&cell) };
         Ok(Box::new(QueuedShell::new(Box::new(input), queue, cell)))
     }
@@ -332,7 +342,18 @@ impl Session for FakeSession {
         if closed.is_none() {
             *closed = Some(DisconnectReason { hop: self.destination.clone(), kind: DisconnectKind::ClosedByUs, detail: "closed by the caller".to_string() });
             self.shared.record(FakeEvent::Closed);
+            for (queue, exit) in locked(&self.shells).iter() {
+                exit.set(Exit::Disconnected);
+                queue.close();
+            }
         }
+    }
+}
+
+/// "Dropping it closes it" (the `Session` contract): a session that is dropped without `close` is closed here.
+impl Drop for FakeSession {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -431,13 +452,25 @@ mod tests {
     #[test]
     fn a_scripted_exec_result_comes_back_for_exactly_that_command_and_is_cut_to_the_cap() {
         let killed = ExecResult { ended: Ended::Signaled, exit_code: None, signal: Some("KILL".into()), stdout: b"partial".to_vec(), stderr: vec![], truncated: false };
-        let engine = FakeEngine::new().with_exec("sleep 99", killed.clone());
+        let chatty = ExecResult { ended: Ended::Exited, exit_code: Some(3), signal: None, stdout: b"abc".to_vec(), stderr: b"defg".to_vec(), truncated: false };
+        let engine = FakeEngine::new().with_exec("sleep 99", killed.clone()).with_exec("chatty", chatty.clone());
         let session = connect(&engine, &direct("web"), &Auth::default()).unwrap();
         assert_eq!(exec(session.as_ref(), "sleep 99"), killed);
         assert_eq!(exec(session.as_ref(), "sleep 98").exit_code, Some(0));
 
         let cut = session.exec("sleep 99", SHORT, 4).unwrap();
         assert_eq!((cut.stdout.as_slice(), cut.truncated, cut.ended, cut.signal), (b"part".as_slice(), true, Ended::Truncated, None));
+
+        // The cap is a limit, not a threshold: output that exactly fills it is whole and keeps its status.
+        assert_eq!(session.exec("sleep 99", SHORT, 7).unwrap(), killed);
+        assert_eq!(session.exec("chatty", SHORT, 7).unwrap(), chatty);
+
+        // stdout and stderr share the cap, stdout first; a command that was cut has no status to report.
+        let cut = session.exec("chatty", SHORT, 5).unwrap();
+        assert_eq!((cut.stdout.as_slice(), cut.stderr.as_slice()), (b"abc".as_slice(), b"de".as_slice()));
+        assert_eq!((cut.ended, cut.truncated, cut.exit_code, cut.signal), (Ended::Truncated, true, None, None));
+        let cut = session.exec("chatty", SHORT, 2).unwrap();
+        assert_eq!((cut.stdout.as_slice(), cut.stderr.as_slice()), (b"ab".as_slice(), b"".as_slice()));
     }
 
     #[test]
@@ -455,6 +488,20 @@ mod tests {
             other => panic!("expected HostKeyMismatch, got {:?}", other.err()),
         }
         assert_eq!(engine.events(), vec![], "a failed connect leaves no event");
+
+        // The script decides which key a server presents: the same for every host, or its own for one host of a chain.
+        let presented = HostKey { algorithm: "ssh-ed25519".into(), public_key: vec![7], fingerprint: "SHA256:presented".into() };
+        let engine = FakeEngine::new().with_host_key(presented.clone());
+        match engine.connect(&direct("web"), &unknown, &Auth::default()) {
+            Err(ConnectError::HostKeyUnknown { key, .. }) => assert_eq!(key, presented),
+            other => panic!("expected HostKeyUnknown, got {:?}", other.err()),
+        }
+        let engine = FakeEngine::new().with_host_key_for("db", presented.clone());
+        let chain = Target { hops: vec![hop("bastion"), hop("db")] };
+        match connect(&engine, &chain, &Auth::default()) {
+            Err(ConnectError::HostKeyUnknown { hop, key }) => assert_eq!((hop.alias.as_str(), key), ("db", presented)),
+            other => panic!("expected the db to present its own key, got {:?}", other.err()),
+        }
     }
 
     #[test]
@@ -469,6 +516,12 @@ mod tests {
 
         let none = Auth::default();
         assert!(matches!(connect(&engine, &direct("web"), &none), Err(ConnectError::AuthFailed { tried, .. }) if tried.is_empty()), "no password: the method is skipped");
+
+        let by_password = Target { hops: vec![Hop::new("id-pw", "pw", "pw.example.com", 22, "deploy", AuthMethod::Password)] };
+        let unknown = Policy { accepted: None, pinned: None };
+        let asked = Auth { password: Some("hunter2".into()), ..Auth::default() };
+        assert!(matches!(engine.connect(&by_password, &unknown, &asked), Err(ConnectError::HostKeyUnknown { .. })));
+        assert_eq!(*locked(&asked.asked), vec!["password pw".to_string()], "a hop that starts with the password method is asked before its host key is looked at");
     }
 
     #[test]
@@ -481,6 +534,15 @@ mod tests {
         let wrong = Auth { answers: Some(vec!["000000".into()]), ..Auth::default() };
         assert!(matches!(connect(&engine, &direct("web"), &wrong), Err(ConnectError::AuthFailed { .. })));
         assert!(matches!(connect(&engine, &direct("web"), &Auth::default()), Err(ConnectError::AuthAbandoned { .. })), "a cancelled prompt abandons the login");
+
+        // A number of answers that does not match the number of prompts is not a wrong answer: the login is abandoned, as in the real engine.
+        for answers in [vec![], vec!["123456".to_string(), "654321".to_string()]] {
+            let mismatched = Auth { answers: Some(answers), ..Auth::default() };
+            match connect(&engine, &direct("web"), &mismatched) {
+                Err(ConnectError::AuthAbandoned { reason, .. }) => assert_eq!(reason, "the answers do not match the prompts"),
+                other => panic!("expected the login to be abandoned, got {:?}", other.err()),
+            }
+        }
     }
 
     #[test]
@@ -498,12 +560,18 @@ mod tests {
         let engine = FakeEngine::new().with_login_for("bastion", FakeLogin::Refuse);
         let target = Target { hops: vec![hop("bastion"), hop("db")] };
         match connect(&engine, &target, &Auth::default()) {
-            Err(ConnectError::AuthFailed { hop, .. }) => assert_eq!(hop.alias, "bastion"),
+            Err(ConnectError::AuthFailed { hop, tried, .. }) => {
+                assert_eq!(hop.alias, "bastion");
+                assert_eq!(tried, target.hops[0].auth_sequence(), "a refusal has tried every method of the hop's sequence");
+                assert_eq!(tried.len(), 3, "key, password, keyboard-interactive");
+            }
             other => panic!("expected the bastion to refuse, got {:?}", other.err()),
         }
         let engine = FakeEngine::new();
-        assert!(connect(&engine, &target, &Auth::default()).is_ok());
+        let session = connect(&engine, &target, &Auth::default()).expect("connects");
         assert_eq!(engine.events(), vec![FakeEvent::Connect { aliases: vec!["bastion".into(), "db".into()] }]);
+        drop(session);
+        assert_eq!(engine.events().last(), Some(&FakeEvent::Closed), "dropping a session closes it");
     }
 
     #[test]
@@ -521,6 +589,21 @@ mod tests {
         assert_eq!(connect(&engine, &direct("web"), &Auth::default()).err(), Some(error));
     }
 
+    /// Runs a test body on its own thread and gives it 10 s: `ShellChannel::read` has no deadline, so a fake that stopped closing its
+    /// queue would hang the suite instead of failing the test (the same runner as the tests of `channel.rs`).
+    fn bounded(body: impl FnOnce() + Send + 'static) {
+        let (finished, done) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            body();
+            let _ = finished.send(());
+        });
+        match done.recv_timeout(Duration::from_secs(10)) {
+            Ok(()) => runner.join().unwrap(),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the test body did not finish within 10 s: a call is blocked"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(runner.join().unwrap_err()),
+        }
+    }
+
     fn read_some(shell: &dyn ShellChannel) -> Vec<u8> {
         let mut buf = [0u8; 256];
         let count = shell.read(&mut buf).unwrap();
@@ -529,36 +612,40 @@ mod tests {
 
     #[test]
     fn a_shell_prints_its_script_records_the_input_and_ends_when_closed() {
-        let engine = FakeEngine::new().with_shell_output(b"welcome\r\n").with_shell_exit(Exit::Code(7));
-        let session = connect(&engine, &direct("web"), &Auth::default()).unwrap();
-        let shell = session.shell(Pty { term: "xterm-256color".into(), cols: 80, rows: 24 }).unwrap();
-        assert_eq!(read_some(shell.as_ref()), b"welcome\r\n");
-        shell.write(b"ls\n").unwrap();
-        shell.window_change(100, 30).unwrap();
-        assert_eq!(shell.exited(), None);
-        shell.close();
-        assert_eq!(read_some(shell.as_ref()), b"", "a closed shell reads 0");
-        assert_eq!(shell.exited(), Some(Exit::Code(7)));
-        assert_eq!(
-            engine.events(),
-            vec![
-                FakeEvent::Connect { aliases: vec!["web".into()] },
-                FakeEvent::ShellOpened { term: "xterm-256color".into(), cols: 80, rows: 24 },
-                FakeEvent::ShellInput(b"ls\n".to_vec()),
-                FakeEvent::WindowChange { cols: 100, rows: 30 },
-                FakeEvent::ShellClosed,
-            ]
-        );
+        bounded(|| {
+            let engine = FakeEngine::new().with_shell_output(b"welcome\r\n").with_shell_exit(Exit::Code(7));
+            let session = connect(&engine, &direct("web"), &Auth::default()).unwrap();
+            let shell = session.shell(Pty { term: "xterm-256color".into(), cols: 80, rows: 24 }).unwrap();
+            assert_eq!(read_some(shell.as_ref()), b"welcome\r\n");
+            shell.write(b"ls\n").unwrap();
+            shell.window_change(100, 30).unwrap();
+            assert_eq!(shell.exited(), None);
+            shell.close();
+            assert_eq!(read_some(shell.as_ref()), b"", "a closed shell reads 0");
+            assert_eq!(shell.exited(), Some(Exit::Code(7)));
+            assert_eq!(
+                engine.events(),
+                vec![
+                    FakeEvent::Connect { aliases: vec!["web".into()] },
+                    FakeEvent::ShellOpened { term: "xterm-256color".into(), cols: 80, rows: 24 },
+                    FakeEvent::ShellInput(b"ls\n".to_vec()),
+                    FakeEvent::WindowChange { cols: 100, rows: 30 },
+                    FakeEvent::ShellClosed,
+                ]
+            );
+        });
     }
 
     #[test]
     fn a_shell_that_ends_at_once_reports_its_exit_after_the_output() {
-        let engine = FakeEngine::new().with_shell_output(b"bye\r\n").with_shell_exit(Exit::Signal("HUP".into())).with_shell_ending_at_once();
-        let session = connect(&engine, &direct("web"), &Auth::default()).unwrap();
-        let shell = session.shell(Pty { term: "dumb".into(), cols: 80, rows: 24 }).unwrap();
-        assert_eq!(read_some(shell.as_ref()), b"bye\r\n");
-        assert_eq!(read_some(shell.as_ref()), b"");
-        assert_eq!(shell.exited(), Some(Exit::Signal("HUP".into())));
+        bounded(|| {
+            let engine = FakeEngine::new().with_shell_output(b"bye\r\n").with_shell_exit(Exit::Signal("HUP".into())).with_shell_ending_at_once();
+            let session = connect(&engine, &direct("web"), &Auth::default()).unwrap();
+            let shell = session.shell(Pty { term: "dumb".into(), cols: 80, rows: 24 }).unwrap();
+            assert_eq!(read_some(shell.as_ref()), b"bye\r\n");
+            assert_eq!(read_some(shell.as_ref()), b"");
+            assert_eq!(shell.exited(), Some(Exit::Signal("HUP".into())));
+        });
     }
 
     #[test]
@@ -574,14 +661,22 @@ mod tests {
 
     #[test]
     fn closing_is_recorded_once() {
-        let engine = FakeEngine::new();
-        let session = connect(&engine, &direct("web"), &Auth::default()).unwrap();
-        assert!(session.is_alive() && session.disconnect_reason().is_none());
-        session.close();
-        session.close();
-        assert!(!session.is_alive());
-        let reason = session.disconnect_reason().expect("closed");
-        assert_eq!((reason.kind, reason.hop.alias.as_str(), reason.hop.id), (DisconnectKind::ClosedByUs, "web", HostId::from("id-web")));
-        assert_eq!(engine.events(), vec![FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed]);
+        bounded(|| {
+            let engine = FakeEngine::new();
+            let session = connect(&engine, &direct("web"), &Auth::default()).unwrap();
+            let shell = session.shell(Pty { term: "dumb".into(), cols: 80, rows: 24 }).unwrap();
+            assert!(session.is_alive() && session.disconnect_reason().is_none());
+            session.close();
+            session.close();
+            assert!(!session.is_alive());
+            let reason = session.disconnect_reason().expect("closed");
+            assert_eq!((reason.kind, reason.hop.alias.as_str(), reason.hop.id), (DisconnectKind::ClosedByUs, "web", HostId::from("id-web")));
+            assert_eq!(read_some(shell.as_ref()), b"", "closing the session ends the shells opened from it");
+            assert_eq!(shell.exited(), Some(Exit::Disconnected));
+            assert_eq!(
+                engine.events(),
+                vec![FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::ShellOpened { term: "dumb".into(), cols: 80, rows: 24 }, FakeEvent::Closed]
+            );
+        });
     }
 }
