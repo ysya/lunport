@@ -1131,6 +1131,8 @@ pub(crate) mod toy_server {
     /// The server's side of one client.
     struct Toy {
         login: Arc<ToyLogin>,
+        /// How long the server thinks about the answers of a keyboard-interactive round before it says whether they are right.
+        verdict_delay: std::time::Duration,
     }
 
     impl server::Handler for Toy {
@@ -1149,6 +1151,9 @@ pub(crate) mod toy_server {
                     prompts: Cow::Owned(vec![(Cow::Owned(self.login.prompt.clone()), false)]),
                 }),
                 Some(mut response) => {
+                    if !self.verdict_delay.is_zero() {
+                        tokio::time::sleep(self.verdict_delay).await;
+                    }
                     let answer = response.next();
                     let right = answer.is_some_and(|answer| answer[..] == *self.login.password.as_bytes());
                     Ok(if user == self.login.user && right { Auth::Accept } else { Auth::reject() })
@@ -1178,13 +1183,14 @@ pub(crate) mod toy_server {
 
     struct Factory {
         login: Arc<ToyLogin>,
+        verdict_delay: std::time::Duration,
     }
 
     impl server::Server for Factory {
         type Handler = Toy;
 
         fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Toy {
-            Toy { login: Arc::clone(&self.login) }
+            Toy { login: Arc::clone(&self.login), verdict_delay: self.verdict_delay }
         }
     }
 
@@ -1196,6 +1202,12 @@ pub(crate) mod toy_server {
 
     impl ToyServer {
         pub(crate) fn start(login: ToyLogin) -> ToyServer {
+            ToyServer::start_slow(login, std::time::Duration::ZERO)
+        }
+
+        /// A server that takes `verdict_delay` to say whether the answers of a keyboard-interactive round are right, as a PAM module does
+        /// while it waits for a push approval.
+        pub(crate) fn start_slow(login: ToyLogin, verdict_delay: std::time::Duration) -> ToyServer {
             let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().expect("the toy server's runtime");
             let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0))).expect("bind the toy server");
             let port = listener.local_addr().expect("the toy server's address").port();
@@ -1207,7 +1219,7 @@ pub(crate) mod toy_server {
                 keys: vec![host_key],
                 ..Config::default()
             };
-            let mut factory = Factory { login: Arc::new(login) };
+            let mut factory = Factory { login: Arc::new(login), verdict_delay };
             runtime.spawn(async move {
                 let _ = factory.run_on_socket(Arc::new(config), &listener).await;
             });
