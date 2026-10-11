@@ -74,6 +74,9 @@ pub enum SessionError {
     Closed,
     /// A channel could not be opened or used (refused by the server, or the request failed).
     Channel(String),
+    /// The connection did not take a request in time: the other end has stopped reading (a dead link that keepalive has not given up on
+    /// yet), so there was no room to hand the request over. The connection may recover, or end by itself.
+    Timeout,
 }
 
 impl fmt::Display for SessionError {
@@ -81,6 +84,7 @@ impl fmt::Display for SessionError {
         match self {
             SessionError::Closed => write!(f, "The connection is closed."),
             SessionError::Channel(text) => write!(f, "SSH error: {text}"),
+            SessionError::Timeout => write!(f, "The connection did not take the request in time."),
         }
     }
 }
@@ -174,6 +178,7 @@ mod tests {
     fn session_and_auth_errors_have_plain_messages() {
         assert_eq!(SessionError::Closed.to_string(), "The connection is closed.");
         assert_eq!(SessionError::Channel("channel open refused".into()).to_string(), "SSH error: channel open refused");
+        assert_eq!(SessionError::Timeout.to_string(), "The connection did not take the request in time.");
         assert_eq!(AuthError::Refused("the vault is locked".into()).to_string(), "the key was not released: the vault is locked");
         assert_eq!(AuthError::KeyUnavailable("no such key".into()).to_string(), "the key is not available: no such key");
         assert_eq!(AuthError::Failed("bad key".into()).to_string(), "signing failed: bad key");

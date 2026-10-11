@@ -28,6 +28,11 @@ pub trait Session: Send + Sync {
     /// Runs `command` without a PTY and collects its output, for at most `timeout`. Output beyond `output_cap` bytes (stdout and stderr
     /// together) is not read: the engine closes the channel, sets `truncated` and ends the result as `Ended::Truncated`. A command that ends without a
     /// status, a timeout and the cap are results, not errors, and the connection survives all three.
+    ///
+    /// `timeout` bounds the wait for the command's output. The engine bounds the other waits of the call on their own (opening the channel,
+    /// handing a request to the connection), so on a connection that has stopped answering the call can outlast a short `timeout`; it
+    /// then ends as `Ended::TimedOut`, or fails with `SessionError::Timeout` (a request was not taken) or `SessionError::Channel` (the
+    /// channel did not open).
     fn exec(&self, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError>;
 
     /// Whether the connection (every hop of it) is still up, judged from the connection's own state and never from an error variant.
@@ -53,7 +58,8 @@ pub trait ShellChannel: Send + Sync {
     fn read(&self, buf: &mut [u8]) -> Result<usize, SessionError>;
 
     /// The terminal was resized. Sent to the server right away; the server ignores a resize that arrives before the PTY exists, so a
-    /// caller that has a size to apply sends it after `Session::shell` returns (the broker remembers the last one, spec §7.2).
+    /// caller that has a size to apply sends it after `Session::shell` returns (the broker remembers the last one, spec §7.2). A
+    /// connection whose peer has stopped reading does not take it: after a few seconds the call fails with `SessionError::Timeout`.
     fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError>;
 
     /// How the shell ended; `None` until it has. When `read` has returned 0 this is `Some`.
