@@ -302,6 +302,7 @@ async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_ke
         if hop.nodelay {
             let _ = tcp.set_nodelay(true);
         }
+        let (tcp, closer) = SocketGuard::new(tcp).map_err(|error| ConnectError::Unreachable { hop: reference.clone(), reason: describe_io(&error) })?;
         phase.set(Phase::Handshake);
         let connecting = client::connect_stream(config, tcp, handler);
         tokio::pin!(connecting);
@@ -314,6 +315,9 @@ async fn connect_hop(index: usize, hop: &Hop, via: Option<&Established>, host_ke
                 }
             }
         };
+        if connected.is_ok() {
+            closer.release();
+        }
         connected.map_err(|error| handshake_error(&reference, &shared, error))
     };
     let budget = hop.connect_timeout.max(Duration::from_secs(1));
@@ -336,6 +340,35 @@ fn handshake_error(hop: &HopRef, shared: &HopShared, error: russh::Error) -> Con
         russh::Error::IO(io) => ConnectError::Unreachable { hop: hop.clone(), reason: describe_io(&io) },
         russh::Error::HUP | russh::Error::Disconnect => ConnectError::Unreachable { hop: hop.clone(), reason: "the connection was closed during the handshake".to_string() },
         other => ConnectError::Protocol { hop: hop.clone(), text: other.to_string() },
+    }
+}
+
+/// A second handle to the socket of a hop, held here while russh drives the first. `connect_stream` starts russh's session task as soon as
+/// the server's version line is in. When the handshake then runs out of time, the future is dropped but the task is not (dropping the
+/// handle of a task only detaches it), and a task that is still in its first key exchange never ends by itself: it keeps the socket open
+/// and, once the keepalive interval has passed, loops on it without waiting. Dropped before `release`, the guard shuts the socket down,
+/// the task's reads fail and it ends.
+struct SocketGuard(Option<std::net::TcpStream>);
+
+impl SocketGuard {
+    /// `tcp` again, for russh, and the guard that holds the other handle to its socket.
+    fn new(tcp: TcpStream) -> std::io::Result<(TcpStream, SocketGuard)> {
+        let socket = tcp.into_std()?;
+        let spare = socket.try_clone()?;
+        Ok((TcpStream::from_std(socket)?, SocketGuard(Some(spare))))
+    }
+
+    /// The handshake is done: the connection belongs to russh, and the guard only lets go of its handle.
+    fn release(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        if let Some(socket) = self.0.take() {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
     }
 }
 
@@ -417,6 +450,12 @@ enum Step {
     Skipped,
 }
 
+/// russh answers a login request with "refused, and no method is left" when its reply channel closes, which is also what a connection that
+/// died while we waited looks like. An answer that came from the server came over a connection that is still open.
+fn died_during_login(handle: &Handle<EngineHandler>, remaining: &MethodSet) -> bool {
+    remaining.is_empty() && handle.is_closed()
+}
+
 /// Logs in to a freshly connected hop. The methods of `hop.auth_sequence()` are tried in order, each only if the server still offers
 /// it; a refusal moves to the next method on the same connection. A method that cannot be tried here is skipped, and then the server is
 /// asked once what it does offer (`none`), so later methods are not sent blindly. Anything that is our fault (the signer failed, a
@@ -467,6 +506,7 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, auth: &dyn 
                     Ok(Err(SignerFailure::Sha1Refused)) => return Err(abandoned("an RSA signature with SHA-1 was asked for")),
                     Ok(Err(SignerFailure::Auth(error))) => return Err(abandoned(&error.to_string())),
                     Ok(Ok(AuthResult::Success)) => return Ok(()),
+                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) if died_during_login(handle, &remaining_methods) => return Err(lost(russh::Error::SendError)),
                     Ok(Ok(AuthResult::Failure { remaining_methods, .. })) => Step::Refused(remaining_methods),
                 }
             }
@@ -478,6 +518,7 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, auth: &dyn 
             Step::Skipped if offered.is_none() => {
                 match tokio::time::timeout(call_limit, handle.authenticate_none(user)).await.map_err(|_| timed_out())?.map_err(lost)? {
                     AuthResult::Success => return Ok(()),
+                    AuthResult::Failure { remaining_methods, .. } if died_during_login(handle, &remaining_methods) => return Err(lost(russh::Error::SendError)),
                     AuthResult::Failure { remaining_methods, .. } => offered = Some(remaining_methods),
                 }
             }
@@ -514,6 +555,83 @@ mod tests {
         let eof = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "early eof");
         assert_eq!(classify_end(&russh::Error::IO(eof)), (DisconnectKind::ConnectionLost, "early eof".to_string()));
         assert_eq!(classify_end(&russh::Error::Kex).0, DisconnectKind::Other);
+    }
+
+    /// What stands on the other end of the question channel while the handler asks about a host key.
+    enum Listener {
+        /// The thread blocked in `connect`: it takes the question and answers it.
+        Answers(HostKeyVerdict),
+        /// It takes the question and drops the reply without answering.
+        DropsTheReply,
+        /// The channel is closed already (`connect` has returned).
+        Gone,
+    }
+
+    /// Puts the question of `check_server_key` for an ed25519 host key to a handler and returns what it decided and what it wrote down.
+    fn ask(listener: Listener) -> (bool, Option<(HostKey, HostKeyVerdict)>) {
+        let key = PublicKey::from_openssh(test_keys::PLAIN_PUBLIC).expect("an ed25519 key");
+        let offered = PublicKeyOrCertificate::from(key.clone());
+        let shared = HopShared::new();
+        let (questions_in, mut questions) = mpsc::unbounded_channel::<KeyQuestion>();
+        let mut handler = EngineHandler { shared: Arc::clone(&shared), questions: questions_in };
+        let runtime = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+        let decided = runtime.block_on(async {
+            match listener {
+                Listener::Gone => {
+                    drop(questions);
+                    handler.check_server_key(&offered).await
+                }
+                Listener::Answers(verdict) => {
+                    let (decided, ()) = tokio::join!(handler.check_server_key(&offered), async {
+                        let question = questions.recv().await.expect("the handler asks");
+                        assert_eq!(Some(question.key), host_key_of(&key), "the question carries the key the server presented");
+                        question.reply.send(verdict).expect("the handler waits for the answer");
+                    });
+                    decided
+                }
+                Listener::DropsTheReply => {
+                    let (decided, ()) = tokio::join!(handler.check_server_key(&offered), async {
+                        drop(questions.recv().await.expect("the handler asks"));
+                    });
+                    decided
+                }
+            }
+        });
+        let observed = locked(&shared.observed).clone();
+        (decided.expect("the handler does not fail"), observed)
+    }
+
+    /// Spec §6.2 step 3: the host key question fails closed. Only a key the policy pinned is trusted; an unknown or a changed key is written
+    /// down, so that `connect` can report it, and refused; a question nobody can answer is refused and writes nothing down.
+    #[test]
+    fn the_host_key_check_trusts_a_pinned_key_only_and_refuses_when_nobody_can_answer() {
+        let host_key = HostKey::from_openssh_line(test_keys::PLAIN_PUBLIC).expect("a host key");
+        let other = HostKey::from_openssh_line(test_keys::RSA_PUBLIC).expect("another host key");
+
+        assert_eq!(ask(Listener::Answers(HostKeyVerdict::Pinned)), (true, Some((host_key.clone(), HostKeyVerdict::Pinned))));
+        assert_eq!(ask(Listener::Answers(HostKeyVerdict::Unknown)), (false, Some((host_key.clone(), HostKeyVerdict::Unknown))));
+        let mismatch = HostKeyVerdict::Mismatch { pinned: other };
+        assert_eq!(ask(Listener::Answers(mismatch.clone())), (false, Some((host_key, mismatch))));
+        assert_eq!(ask(Listener::Gone), (false, None), "nobody is listening");
+        assert_eq!(ask(Listener::DropsTheReply), (false, None), "the question was taken and never answered");
+    }
+
+    /// The engine knows plain host keys only. A server that presents a certificate is refused without a question to the policy, and nothing
+    /// is written down.
+    #[test]
+    fn a_host_certificate_is_refused_without_asking_anyone() {
+        // From `ssh-keygen -s ca -h -I test-host -n example.com -V always:forever host.pub`; both keys were made for this test and thrown away.
+        const HOST_CERTIFICATE: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAINwwxhX0B8jFpZdoffWQvh2jZLQBC3rtcOkq/ItAuYJkAAAAIBGWOXFF4bRDJKRTnjiI74NFyaSQ0K04eH7+r9XZrddGAAAAAAAAAAAAAAACAAAACXRlc3QtaG9zdAAAAA8AAAALZXhhbXBsZS5jb20AAAAAAAAAAP//////////AAAAAAAAAAAAAAAAAAAAMwAAAAtzc2gtZWQyNTUxOQAAACCsPdhbEvHHpY8XoMBbREyLQmLsbf9e/jlR7y85GB3N1AAAAFMAAAALc3NoLWVkMjU1MTkAAABAWgvqqRWT0FGqC0f+j5p8cl9SZfczv/2DDxpy4Hpp2DG0Tf2F9WJScvlbOK06A72x0tP0AHrTY/KqJG2Y2L18CQ== host";
+        let certificate = russh::keys::Certificate::from_openssh(HOST_CERTIFICATE).expect("a host certificate");
+        let shared = HopShared::new();
+        let (questions_in, mut questions) = mpsc::unbounded_channel::<KeyQuestion>();
+        let mut handler = EngineHandler { shared: Arc::clone(&shared), questions: questions_in };
+        let runtime = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+
+        let decided = runtime.block_on(handler.check_server_key(&PublicKeyOrCertificate::from(certificate)));
+        assert!(matches!(decided, Ok(false)), "{decided:?}");
+        assert!(questions.try_recv().is_err(), "the policy was not asked");
+        assert!(locked(&shared.observed).is_none());
     }
 
     fn key(algorithm: &str) -> HostKey {

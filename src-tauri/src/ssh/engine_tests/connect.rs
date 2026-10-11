@@ -16,6 +16,52 @@ fn trusting() -> std::sync::Arc<TestPolicy> {
     TestPolicy::trusting()
 }
 
+/// Runs `work` on a helper thread and waits `seconds` for its result, so that a call that a timeout should have cut short fails the test
+/// instead of hanging the run (the shape of `bounded` in `channel.rs`, which returns nothing).
+fn bounded<T: Send + 'static>(seconds: u64, work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (finished, done) = std::sync::mpsc::channel();
+    let runner = std::thread::spawn(move || {
+        let _ = finished.send(work());
+    });
+    match done.recv_timeout(Duration::from_secs(seconds)) {
+        Ok(result) => {
+            runner.join().unwrap();
+            result
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the call did not return within {seconds} s: a timeout of the engine does not work"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(runner.join().unwrap_err()),
+    }
+}
+
+/// A vault double that runs `at_public_key` when the engine asks it for the public key of the login. That is the first thing the engine
+/// asks the auth source once the handshake is done, so a test can change the link at exactly that moment.
+struct LinkTrouble {
+    inner: VaultAuth,
+    at_public_key: Box<dyn Fn() + Send + Sync>,
+}
+
+impl LinkTrouble {
+    fn new(inner: VaultAuth, at_public_key: impl Fn() + Send + Sync + 'static) -> LinkTrouble {
+        LinkTrouble { inner, at_public_key: Box::new(at_public_key) }
+    }
+}
+
+impl crate::ssh::AuthSource for LinkTrouble {
+    fn public_key(&self, key_id: &str) -> Option<String> {
+        (self.at_public_key)();
+        crate::ssh::AuthSource::public_key(&self.inner, key_id)
+    }
+    fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<crate::ssh::Signature, AuthError> {
+        crate::ssh::AuthSource::sign(&self.inner, key_id, data, rsa_hash)
+    }
+    fn password(&self, hop: &crate::ssh::HopRef) -> Option<crate::ssh::Secret> {
+        crate::ssh::AuthSource::password(&self.inner, hop)
+    }
+    fn interactive(&self, hop: &crate::ssh::HopRef, prompts: &[crate::ssh::Prompt], deadline: Instant) -> Option<Vec<crate::ssh::Secret>> {
+        crate::ssh::AuthSource::interactive(&self.inner, hop, prompts, deadline)
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Host keys (spec §6.2 step 3). The engine never waits for a person: an unpinned key fails the connect with the key that was seen.
 
@@ -154,6 +200,21 @@ fn an_rsa_3072_key_in_the_vault_logs_in_with_a_sha2_signature() {
     assert!(matches!(calls[0].rsa_hash, Some(RsaHash::Sha512) | Some(RsaHash::Sha256)));
 }
 
+/// `best_supported_rsa_hash` is asked for RSA keys only. This server still accepts `ssh-rsa` next to Ed25519, which for an RSA key would
+/// mean "SHA-1 only"; an Ed25519 key must not be held to that.
+#[test]
+fn an_ed25519_key_logs_in_to_a_server_that_also_accepts_ssh_rsa() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start_with(&tools, &[KeyKind::Ed25519], KeyKind::Ed25519, &["PubkeyAcceptedAlgorithms ssh-ed25519,ssh-rsa", LOG_LOGINS]);
+    let auth = server.vault("k1");
+    // The engine owns the runtime that drives a connection: it must outlive the `Connection`, or the connection ends under the test.
+    let engine = engine();
+    let connection = engine.connect_chain(&server.target("k1"), &*trusting(), &auth).expect("the Ed25519 key logs in");
+    assert!(connection.is_open());
+    eventually("sshd to log the login", 3, || accepted_logins(&server) == 1);
+    assert_eq!(auth.sign_calls(), vec![SignCall { key_id: "k1".into(), rsa_hash: None, algorithm: Some("ssh-ed25519".into()) }]);
+}
+
 /// The server knows key A and is shown A's public key, but the vault signs with B: the server checks the signature and says no.
 #[test]
 fn a_signature_made_by_another_key_is_refused() {
@@ -260,50 +321,66 @@ fn a_handshake_that_never_gets_an_answer_times_out_after_the_connect_timeout() {
     let mut hop = server.hop_with("web", proxy.port, AuthMethod::Key { key_id: "k1".into() });
     hop.connect_timeout = Duration::from_secs(2);
 
+    let (target, auth) = (Target { hops: vec![hop] }, server.vault("k1"));
     let started = Instant::now();
-    let error = engine().connect_chain(&Target { hops: vec![hop] }, &*trusting(), &server.vault("k1")).err().expect("nothing answers");
+    let error = bounded(10, move || engine().connect_chain(&target, &*trusting(), &auth).err()).expect("nothing answers");
     let waited = started.elapsed();
     fact("handshake_stall.waited_ms", waited.as_millis());
     assert!(matches!(error, ConnectError::Timeout { phase: Phase::Handshake, .. }), "{error:?}");
     assert!(waited >= Duration::from_millis(1800) && waited < Duration::from_secs(6), "waited {waited:?}");
 }
 
+/// Review focus: a server that sends its version line and then says nothing. By then russh has started its session task; when the handshake
+/// times out the task would be left behind with the socket (and, after the keepalive interval, spin on it), so the engine closes the socket
+/// itself and the server sees the end of the connection.
+#[test]
+fn a_handshake_that_times_out_after_the_version_exchange_does_not_leave_the_socket_open() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let ended = std::sync::Arc::new(AtomicBool::new(false));
+    let server = {
+        let ended = std::sync::Arc::clone(&ended);
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.write_all(b"SSH-2.0-quiet\r\n").unwrap();
+            // Takes in whatever the client sends until the client's end of the connection is closed.
+            let mut buffer = [0u8; 4096];
+            while matches!(socket.read(&mut buffer), Ok(count) if count > 0) {}
+            ended.store(true, Ordering::SeqCst);
+        })
+    };
+    let mut hop = Hop::new("h1", "quiet", "127.0.0.1", port, "tester", AuthMethod::Key { key_id: "k1".into() });
+    hop.connect_timeout = Duration::from_secs(1);
+
+    // The engine stays alive to the end: shutting it down ends every task it runs, and that would hide the one that is left behind.
+    let engine = std::sync::Arc::new(engine());
+    let (runner, target) = (std::sync::Arc::clone(&engine), Target { hops: vec![hop] });
+    let error = bounded(10, move || runner.connect_chain(&target, &*trusting(), &VaultAuth::new()).err()).expect("the handshake never finishes");
+    assert!(matches!(error, ConnectError::Timeout { phase: Phase::Handshake, .. }), "{error:?}");
+    eventually("the server to see the engine close its end of the connection", 5, || ended.load(Ordering::SeqCst));
+    server.join().unwrap();
+}
+
 /// The server accepts the connection and the handshake and then goes silent in the middle of the login. After the handshake the first
 /// thing the engine asks the auth source is the public key, so this one turns the link into a black hole at that moment.
 #[test]
 fn a_server_that_stops_answering_during_the_login_times_out_in_the_auth_phase() {
-    use crate::ssh::{AuthSource, HopRef, Prompt, Secret, Signature};
-    use std::sync::Arc;
-
-    struct GoesQuiet {
-        inner: VaultAuth,
-        proxy: Arc<Proxy>,
-    }
-    impl AuthSource for GoesQuiet {
-        fn public_key(&self, key_id: &str) -> Option<String> {
-            self.proxy.set(Mode::Blackhole);
-            self.inner.public_key(key_id)
-        }
-        fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError> {
-            self.inner.sign(key_id, data, rsa_hash)
-        }
-        fn password(&self, hop: &HopRef) -> Option<Secret> {
-            self.inner.password(hop)
-        }
-        fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>> {
-            self.inner.interactive(hop, prompts, deadline)
-        }
-    }
-
     let Some(tools) = tools() else { return };
     let server = Server::start(&tools, &[]);
-    let proxy = Arc::new(Proxy::start(server.sshd.port));
+    let proxy = std::sync::Arc::new(Proxy::start(server.sshd.port));
     let mut hop = server.hop_with("web", proxy.port, AuthMethod::Key { key_id: "k1".into() });
     hop.connect_timeout = Duration::from_secs(2);
-    let auth = GoesQuiet { inner: server.vault("k1"), proxy: Arc::clone(&proxy) };
+    let quiet = std::sync::Arc::clone(&proxy);
+    let auth = LinkTrouble::new(server.vault("k1"), move || quiet.set(Mode::Blackhole));
 
+    // The engine outlives the call, so that what the proxy sees afterwards is what the engine itself closed.
+    let engine = std::sync::Arc::new(engine());
+    let (runner, target) = (std::sync::Arc::clone(&engine), Target { hops: vec![hop] });
     let started = Instant::now();
-    let error = engine().connect_chain(&Target { hops: vec![hop] }, &*trusting(), &auth).err().expect("the server went quiet");
+    let error = bounded(10, move || runner.connect_chain(&target, &*trusting(), &auth).err()).expect("the server went quiet");
     let waited = started.elapsed();
     assert!(matches!(error, ConnectError::Timeout { phase: Phase::Auth, .. }), "{error:?}");
     assert!(waited >= Duration::from_millis(1800) && waited < Duration::from_secs(6), "waited {waited:?}");
@@ -311,6 +388,39 @@ fn a_server_that_stops_answering_during_the_login_times_out_in_the_auth_phase() 
     // engine's side was closed, which the proxy then notices.
     proxy.set(Mode::Forward);
     eventually("the proxy to see the connection dropped", 5, || proxy.open_connections() == 0);
+}
+
+/// Review focus: the connection dies while the engine waits for the server's answer to a login request. russh then reports a refusal with
+/// no method left; the engine has to tell the two apart, because the user should be told that the link was lost, not that a key was
+/// refused.
+#[test]
+fn a_connection_that_is_cut_while_the_login_waits_for_the_server_is_lost_and_not_refused() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    // With the key in the vault the wait is for the answer to the public-key request; without it the engine asks the server what it offers
+    // (`none`) and the wait is for that answer.
+    for (vault, waiting_for) in [(server.vault("k1"), "the public-key request"), (VaultAuth::new(), "the request for the methods on offer")] {
+        let proxy = std::sync::Arc::new(Proxy::start(server.sshd.port));
+        let mut hop = server.hop_with("web", proxy.port, AuthMethod::Key { key_id: "k1".into() });
+        hop.connect_timeout = Duration::from_secs(5);
+        // From the moment the engine asks for the public key the server hears nothing; 600 ms later the link is cut.
+        let link = std::sync::Arc::clone(&proxy);
+        let auth = LinkTrouble::new(vault, move || {
+            link.set(Mode::Blackhole);
+            let link = std::sync::Arc::clone(&link);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(600));
+                link.set(Mode::Cut);
+            });
+        });
+
+        let target = Target { hops: vec![hop] };
+        let started = Instant::now();
+        let error = bounded(15, move || engine().connect_chain(&target, &*trusting(), &auth).err()).expect("the link was cut");
+        let waited = started.elapsed();
+        assert!(matches!(&error, ConnectError::Unreachable { reason, .. } if reason.contains("lost")), "waiting for {waiting_for}: {error:?}");
+        assert!(waited >= Duration::from_millis(500) && waited < Duration::from_secs(4), "waiting for {waiting_for}: waited {waited:?}");
+    }
 }
 
 /// Review focus: the vault is locked. `sign` fails; the login is abandoned with a clear error, quickly, and the connection is dropped
