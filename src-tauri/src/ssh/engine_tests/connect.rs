@@ -73,8 +73,10 @@ fn an_unknown_host_key_fails_fast_with_the_key_the_server_presented_and_leaves_n
     let hop = server.hop_with("web", proxy.port, AuthMethod::Key { key_id: "k1".into() });
     let policy = TestPolicy::knowing_nothing();
 
+    // The engine stays alive to the end, so that a connection the proxy sees closed was closed by the engine.
+    let engine = engine();
     let started = Instant::now();
-    let error = engine().connect_chain(&Target { hops: vec![hop.clone()] }, &*policy, &server.vault("k1")).err().expect("an unknown key stops the connect");
+    let error = engine.connect_chain(&Target { hops: vec![hop.clone()] }, &*policy, &server.vault("k1")).err().expect("an unknown key stops the connect");
     assert!(started.elapsed() < Duration::from_secs(5), "no waiting for a person: {:?}", started.elapsed());
     match error {
         ConnectError::HostKeyUnknown { hop: seen, key } => {
@@ -423,6 +425,24 @@ fn a_connection_that_is_cut_while_the_login_waits_for_the_server_is_lost_and_not
     }
 }
 
+/// Review focus: a server with every login method switched off answers the first request with an empty list. russh passes that refusal on
+/// and then ends the connection; the user has to be told that the login failed, not that the link was lost.
+#[test]
+fn a_server_that_offers_no_login_method_is_an_authentication_failure() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &["PubkeyAuthentication no"]);
+    // With the key in the vault the first request is the public-key one; without it the engine asks the server what it offers (`none`).
+    for (vault, tried) in [(server.vault("k1"), vec![AuthMethod::Key { key_id: "k1".into() }]), (VaultAuth::new(), vec![])] {
+        let engine = engine();
+        let error = engine.connect_chain(&server.target("k1"), &*trusting(), &vault).err().expect("there is nothing to log in with");
+        assert!(
+            matches!(&error, ConnectError::AuthFailed { tried: seen, reason, .. } if *seen == tried && reason.contains("The server offers no login method.")),
+            "tried {tried:?}: {error:?}"
+        );
+        assert!(error.to_string().starts_with("Authentication failed for "), "{error}");
+    }
+}
+
 /// Review focus: the vault is locked. `sign` fails; the login is abandoned with a clear error, quickly, and the connection is dropped
 /// (russh's session is stuck waiting for the signature, so it cannot be reused).
 #[test]
@@ -433,8 +453,10 @@ fn a_signer_that_fails_abandons_the_login_and_drops_the_connection() {
     let hop = server.hop_with("web", proxy.port, AuthMethod::Key { key_id: "k1".into() });
     let auth = server.vault("k1").failing_to_sign(AuthError::Refused("the vault is locked".into()));
 
+    // The engine stays alive to the end, so that a connection the proxy sees closed was closed by the engine.
+    let engine = engine();
     let started = Instant::now();
-    let error = engine().connect_chain(&Target { hops: vec![hop] }, &*trusting(), &auth).err().expect("the vault would not sign");
+    let error = engine.connect_chain(&Target { hops: vec![hop] }, &*trusting(), &auth).err().expect("the vault would not sign");
     assert!(started.elapsed() < Duration::from_secs(5), "no hang: {:?}", started.elapsed());
     assert!(matches!(&error, ConnectError::AuthAbandoned { reason, .. } if reason.contains("the vault is locked")), "{error:?}");
     assert!(error.to_string().starts_with("Authentication for web was abandoned"), "{error}");
