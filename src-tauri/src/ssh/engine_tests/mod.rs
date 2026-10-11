@@ -3,6 +3,7 @@
 
 mod connect;
 mod exec;
+mod liveness;
 mod shell;
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -38,6 +39,13 @@ fn open_session(engine: &RusshEngine, server: &Server) -> Box<dyn Session> {
 
 fn open_session_to(engine: &RusshEngine, target: &Target, auth: &VaultAuth) -> Box<dyn Session> {
     engine.connect(target, &*TestPolicy::trusting(), auth).expect("the engine connects")
+}
+
+/// Runs a command that does nothing, so that sshd has finished setting the session up. A client that leaves while sshd is still busy with
+/// that (on macOS it takes a moment after the login has been logged: BSM auditing) makes sshd die on a broken pipe before it reads the
+/// disconnect message, and then no "Received disconnect" is ever logged: a test that looks for the message must settle first.
+fn settle(session: &dyn Session) {
+    session.exec("true", Duration::from_secs(20), 1024).expect("a command runs");
 }
 
 /// Reads a shell on a thread of its own, as the broker will, so a test can wait for text to show up without ever blocking on the shell.
