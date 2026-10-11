@@ -85,6 +85,7 @@ pub struct SignCall {
 /// An `AuthSource` over real vault entries. Keys are registered under ids with `with_key`; passwords and answers come from the script.
 pub struct VaultAuth {
     keys: HashMap<String, (Material, String)>,
+    presented: HashMap<String, String>,
     password: Option<String>,
     password_delay: Duration,
     answers: Option<Vec<String>>,
@@ -100,6 +101,7 @@ impl VaultAuth {
     pub fn new() -> VaultAuth {
         VaultAuth {
             keys: HashMap::new(),
+            presented: HashMap::new(),
             password: None,
             password_delay: Duration::ZERO,
             answers: None,
@@ -117,6 +119,13 @@ impl VaultAuth {
         let material = open(private_text, None).expect("the vault opens the key");
         let public_line = ssh_key::PublicKey::new(material.key_data(), "").to_openssh().expect("the public key has an OpenSSH form");
         self.keys.insert(key_id.to_string(), (material, public_line));
+        self
+    }
+
+    /// `public_key(key_id)` answers `public_line` instead of the public half of the key registered under `key_id`: the login announces one
+    /// key and signs with another (the negative control of the signature check).
+    pub fn presenting_public_key(mut self, key_id: &str, public_line: &str) -> VaultAuth {
+        self.presented.insert(key_id.to_string(), public_line.to_string());
         self
     }
 
@@ -183,7 +192,7 @@ fn algorithm_of(blob: &[u8]) -> Option<String> {
 
 impl AuthSource for VaultAuth {
     fn public_key(&self, key_id: &str) -> Option<String> {
-        self.keys.get(key_id).map(|(_, public_line)| public_line.clone())
+        self.presented.get(key_id).cloned().or_else(|| self.keys.get(key_id).map(|(_, public_line)| public_line.clone()))
     }
 
     fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError> {
