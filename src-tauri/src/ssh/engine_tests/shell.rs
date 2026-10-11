@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use super::{engine, open_session, open_session_to, ShellProbe, SHELL_SERVER};
@@ -137,54 +137,127 @@ fn a_closed_session_refuses_shells() {
     assert!(matches!(session.shell(pty(80, 24)), Err(SessionError::Closed)));
 }
 
-/// Reads `shell` on a thread of its own until `read` returns 0, and reports what `exited()` said at that very moment (`None` also when a
-/// read failed). The thread is blocked in `read` before anything else happens, which is what the tests that use this need.
-fn exit_seen_when_the_read_ends(shell: &Arc<dyn ShellChannel>) -> Receiver<Option<Exit>> {
-    let (seen, report) = std::sync::mpsc::channel();
-    let shell = Arc::clone(shell);
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match shell.read(&mut buf) {
-                Ok(0) => {
-                    let _ = seen.send(shell.exited());
-                    return;
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    let _ = seen.send(None);
-                    return;
-                }
-            }
-        }
-    });
-    report
+/// Reads `shell` on a thread of its own until `read` returns 0. The thread keeps what it read and reports what `exited()` said at the very
+/// moment the read returned 0 (`None` also when a read failed). It is blocked in `read` before anything else happens.
+struct EndWatch {
+    text: Arc<Mutex<Vec<u8>>>,
+    exit: Receiver<Option<Exit>>,
 }
 
-/// Like `exit_seen_when_the_read_ends`, after `end` has made the shell end; `None` when the read did not end within ten seconds. Three
-/// more threads ask for the exit all the time while that happens. They keep the lock of the exit busy, which holds the reader up between
-/// recording the exit and closing the queue; if it ever closed the queue first, the reader that wakes up would be quick enough to see no
-/// exit. Done right, the reader is not affected by them.
-fn exit_seen_when_the_read_returns_zero(shell: &Arc<dyn ShellChannel>, end: impl FnOnce()) -> Option<Option<Exit>> {
-    let report = exit_seen_when_the_read_ends(shell);
-    let asking = Arc::new(AtomicBool::new(true));
-    let askers: Vec<_> = (0..3)
-        .map(|_| {
-            let (shell, asking) = (Arc::clone(shell), Arc::clone(&asking));
-            std::thread::spawn(move || {
-                while asking.load(Ordering::Relaxed) {
-                    let _ = shell.exited();
+impl EndWatch {
+    fn start(shell: &Arc<dyn ShellChannel>) -> EndWatch {
+        let (seen, exit) = std::sync::mpsc::channel();
+        let text = Arc::new(Mutex::new(Vec::new()));
+        let (shell, sink) = (Arc::clone(shell), Arc::clone(&text));
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match shell.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = seen.send(shell.exited());
+                        return;
+                    }
+                    Ok(count) => sink.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(&buf[..count]),
+                    Err(_) => {
+                        let _ = seen.send(None);
+                        return;
+                    }
                 }
-            })
-        })
-        .collect();
-    end();
-    let seen = report.recv_timeout(Duration::from_secs(10)).ok();
-    asking.store(false, Ordering::Relaxed);
-    for asker in askers {
-        let _ = asker.join();
+            }
+        });
+        EndWatch { text, exit }
     }
-    seen
+
+    /// Waits (up to `seconds`) until the shell has printed `needle`.
+    fn wait_for_text(&self, seconds: u64, needle: &str) {
+        let printed = || String::from_utf8_lossy(&self.text.lock().unwrap_or_else(PoisonError::into_inner)).contains(needle);
+        eventually(&format!("the shell to print {needle:?}"), seconds, printed);
+    }
+
+    /// What `exited()` said when the read returned 0; `None` when the read did not end within ten seconds.
+    fn exit_seen(&self) -> Option<Option<Exit>> {
+        self.exit.recv_timeout(Duration::from_secs(10)).ok()
+    }
+}
+
+/// Three threads that ask `shell` for its exit all the time, until this is dropped (which stops and joins them, also when the test
+/// panics, so that they cannot go on spinning). They keep the lock of the exit busy, which holds the reader up between recording the
+/// exit and closing the queue; if it ever closed the queue first, the thread that wakes up from `read` would be quick enough to see no
+/// exit. Done right, the reader is not affected by them.
+struct Askers {
+    asking: Arc<AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Askers {
+    fn start(shell: &Arc<dyn ShellChannel>) -> Askers {
+        let asking = Arc::new(AtomicBool::new(true));
+        let threads = (0..3)
+            .map(|_| {
+                let (shell, asking) = (Arc::clone(shell), Arc::clone(&asking));
+                std::thread::spawn(move || {
+                    while asking.load(Ordering::Relaxed) {
+                        let _ = shell.exited();
+                    }
+                })
+            })
+            .collect();
+        Askers { asking, threads }
+    }
+}
+
+impl Drop for Askers {
+    fn drop(&mut self) {
+        self.asking.store(false, Ordering::Relaxed);
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A test that panics while the askers run must not leave three threads spinning for the rest of the test run: dropping the guard stops
+/// and joins them, also while the panic unwinds.
+#[test]
+fn the_askers_stop_when_their_guard_is_dropped_by_a_panic() {
+    /// Counts how often it was asked for its exit.
+    struct Counting {
+        asked: AtomicUsize,
+    }
+
+    impl ShellChannel for Counting {
+        fn write(&self, _data: &[u8]) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn read(&self, _buf: &mut [u8]) -> Result<usize, SessionError> {
+            Ok(0)
+        }
+        fn window_change(&self, _cols: u16, _rows: u16) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn exited(&self) -> Option<Exit> {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+        fn close(&self) {}
+    }
+
+    let counting = Arc::new(Counting { asked: AtomicUsize::new(0) });
+    let shell: Arc<dyn ShellChannel> = counting.clone();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _askers = Askers::start(&shell);
+        for _ in 0..5000 {
+            if counting.asked.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the body of the test fails while the askers run");
+    }));
+    assert!(outcome.is_err(), "the body panicked");
+    let asked = counting.asked.load(Ordering::Relaxed);
+    assert!(asked > 0, "the askers did ask");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(counting.asked.load(Ordering::Relaxed), asked, "nobody asks any more once the guard is gone");
 }
 
 /// The reader records how the shell ended and only then closes the queue (`QueuedShell` promises that a `read` that returns 0 finds
@@ -198,25 +271,31 @@ fn when_a_blocked_read_returns_zero_the_exit_is_already_there() {
 
     for round in 0..20 {
         let shell: Arc<dyn ShellChannel> = Arc::from(session.shell(pty(80, 24)).unwrap());
-        let seen = exit_seen_when_the_read_returns_zero(&shell, || shell.write(b"exit 3\n").unwrap()).expect("a blocked read returns 0 when the shell ends");
+        let watch = EndWatch::start(&shell);
+        let _askers = Askers::start(&shell);
+        shell.write(b"exit 3\n").unwrap();
+        let seen = watch.exit_seen().expect("a blocked read returns 0 when the shell ends");
         assert_eq!(seen, Some(Exit::Code(3)), "shell {round}: the exit is set when read returns 0");
     }
 }
 
 /// A local `close()` ends a blocked `read` the same way. A shell that was closed has no status to report: it ended as `Disconnected`.
+/// The shell is closed once its prompt is there. Closed earlier, while its PTY is still being set up, it can stay stuck on the server for
+/// ever (its child blocks in opening a terminal whose master is gone) and hold a session and a PTY of the machine; with enough of those
+/// the machine runs out of PTYs and `shell()` fails. The server may have more sessions than the default ten for the same reason.
 #[test]
 fn a_local_close_ends_a_blocked_read_with_the_exit_already_set() {
     let Some(tools) = tools() else { return };
-    let server = Server::start(&tools, SHELL_SERVER);
+    let server = Server::start(&tools, &[SHELL_SERVER[0], "MaxSessions 50"]);
     let session = open_session(&engine(), &server);
 
     for round in 0..12 {
         let shell: Arc<dyn ShellChannel> = Arc::from(session.shell(pty(80, 24)).unwrap());
-        let closing = || {
-            std::thread::sleep(Duration::from_millis(50));
-            shell.close();
-        };
-        let seen = exit_seen_when_the_read_returns_zero(&shell, closing).expect("a blocked read returns 0 after close()");
+        let watch = EndWatch::start(&shell);
+        let _askers = Askers::start(&shell);
+        watch.wait_for_text(20, "$ ");
+        shell.close();
+        let seen = watch.exit_seen().expect("a blocked read returns 0 after close()");
         assert_eq!(seen, Some(Exit::Disconnected), "shell {round}: the exit is set when read returns 0");
     }
     assert!(session.is_alive(), "the shells were closed, the connection was not");
@@ -263,6 +342,11 @@ fn a_shell_whose_session_was_closed_answers_closed_to_every_call() {
 /// waits for room in it would hold up its caller for as long as the link stays dead. Each request is bounded: window changes come back
 /// (as `Timeout`), and the close behind a command that ran out of time does not keep `exec` from returning. The cut at the end releases
 /// everything that is still waiting.
+///
+/// The test assumes that the loopback connection and the proxy buffer less than the 15 MiB that the eight writers send: the engine takes
+/// all of it from the writers and then cannot flush it to the silent link, and that is what fills the queue. This is what macOS does
+/// (measured: all 960 chunks of 16 KiB are taken, and 20 of the 30 window changes find no room). A platform that buffers more does not
+/// wedge, and then the test fails with a message that says so instead of passing.
 #[test]
 fn requests_to_a_peer_that_stopped_reading_come_back_in_time_and_the_cut_releases_the_rest() {
     const BOUND: Duration = Duration::from_secs(20);

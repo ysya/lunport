@@ -13,6 +13,18 @@
 //! `owner.pid` (the test process's pid, then the sshd's) into the directory, and every `Sshd::start` begins by sweeping the
 //! `sshelter-sshd-*` directories of the temp dir whose owner no longer exists (`sweep_stale`). So such a listener and directory stay until
 //! the next `Sshd::start` of any test process. By hand: `pkill -f 'sshelter-sshd-.*/sshd_config'` and `rm -r "$TMPDIR"/sshelter-sshd-*`.
+//!
+//! **`Drop` and the sweep end the sessions with the listener.** For every connection the sshd forks a process (`sshd-session`), and that
+//! one forks another for the login, which forks the shell or the command; each of them starts a session of its own, so no process group
+//! reaches them, and they outlive a listener that is only killed. A login with a shell on a PTY then held that PTY for ever, and enough
+//! of them used up the PTYs of the machine. The parent chain is what links them, and it is lost the moment the listener dies (the children
+//! go to init). So the listener is stopped first, its descendants are read from `ps`, and all of them are killed (`kill_family`).
+//!
+//! That reaches what is still attached when the server is dropped (a connection or a login that a test left open). It cannot reach what
+//! was orphaned earlier. A test closes its client first, the session processes then exit, and a shell child that is stuck on the server
+//! stays behind with its PTY. (On macOS a shell child blocks for ever in opening its tty when the master is closed before the PTY is set
+//! up, which is what happens to a shell that is closed right after it was opened.) That is prevented, not cleaned up: a test closes a
+//! shell only once the prompt is there.
 
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -222,8 +234,8 @@ impl Default for SshdOptions {
     }
 }
 
-/// A running scratch sshd. Dropping it kills the listener and removes the directory (connections already open end when their client goes
-/// away).
+/// A running scratch sshd. Dropping it kills the listener and every process that descends from it (module doc) and removes the
+/// directory.
 ///
 /// **The limit:** `Drop` does not run when a signal kills the test process (`kill -9`, a CI runner cancelling the job), and nothing else
 /// ties the sshd to that process. The listener then keeps running and its directory stays until the next `Sshd::start` (of any test
@@ -277,16 +289,14 @@ impl Sshd {
             let mut child = crate::process::spawn(&mut command).expect("start sshd");
             // At once: a later sweep finds this sshd through the file if a signal kills this process before `Drop` can run.
             if let Err(error) = write_owner_file(dir.path(), std::process::id(), child.id()) {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop(&mut child);
                 panic!("cannot write {OWNER_FILE}: {error}");
             }
             if wait_for_banner(&mut child, port) {
                 let host_public_lines = host_keys.iter().map(|key| key.public_line.clone()).collect();
                 return Sshd { port, user, host_public_lines, dir, child };
             }
-            let _ = child.kill();
-            let _ = child.wait();
+            stop(&mut child);
             eprintln!("sshd did not come up on port {port} (attempt {attempt}); its log:\n{}", std::fs::read_to_string(&log_path).unwrap_or_default());
         }
         panic!("sshd did not start in 3 attempts");
@@ -305,9 +315,19 @@ impl Sshd {
 
 impl Drop for Sshd {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        stop(&mut self.child);
     }
+}
+
+/// Kills the sshd that `child` is and everything that descends from it (module doc), and collects the sshd. The family is only looked up
+/// while the sshd still runs (or is a zombie that has not been collected): its pid then belongs to nobody else.
+fn stop(child: &mut Child) {
+    #[cfg(unix)]
+    if matches!(child.try_wait(), Ok(None)) {
+        let _ = kill_family(child.id());
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The start of the name of every scratch directory (`tempfile` adds random characters); the sweep looks for it.
@@ -392,7 +412,7 @@ fn sweep_directory(dir: &Path) {
         }
         Ok(None) => format!("its sshd (pid {sshd}) is gone already"),
         Ok(Some(command)) if !command.contains(&config) => format!("pid {sshd}, once its sshd, is another program now ({command}) and is left running"),
-        Ok(Some(_)) => match kill_process(sshd) {
+        Ok(Some(_)) => match kill_family(sshd) {
             Err(error) => format!("its sshd (pid {sshd}) could not be killed: {error}"),
             Ok(()) if wait_until_gone(sshd, &config) => format!("its sshd (pid {sshd}) killed"),
             Ok(()) => format!("its sshd (pid {sshd}) is still there {KILL_WAIT:?} after SIGKILL"),
@@ -411,6 +431,59 @@ fn process_exists(pid: u32) -> bool {
     // SAFETY: signal 0 only checks that the process exists, and `pid` is at least 2 (`parse_pid`), so it names one process.
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// SIGKILL for the sshd `pid` and for every process that descends from it: the processes it forked for its connections, and the shells and
+/// commands of the logins on them (module doc). What a descendant has started in a way that leaves the parent chain (the background job
+/// of a shell that has ended) is not found. The result is that of the kill of the sshd itself.
+///
+/// The family is frozen before it is killed: every process found is stopped (SIGKILL works on a stopped process), and the look is
+/// repeated until it finds nothing new. A process that forks between the look and the kill would escape, and once its parent is gone
+/// nothing links it to the sshd any more; a stopped process forks nothing. A login that is just being set up is the case that needs this.
+#[cfg(unix)]
+fn kill_family(pid: u32) -> std::io::Result<()> {
+    let mut family = vec![pid];
+    // At most ten looks: a family that keeps growing is not one that a teardown can wait for.
+    for _ in 0..10 {
+        for &member in &family {
+            // SAFETY: as in `kill_process`, every member names one process: the sshd's own pid, or a pid that `descendants_of` parsed.
+            unsafe { libc::kill(member as libc::pid_t, libc::SIGSTOP) };
+        }
+        let found: Vec<u32> = descendants_of(pid).into_iter().filter(|member| !family.contains(member)).collect();
+        if found.is_empty() {
+            break;
+        }
+        family.extend(found);
+    }
+    let result = kill_process(pid);
+    for &member in &family[1..] {
+        let _ = kill_process(member);
+    }
+    result
+}
+
+/// Every process that descends from `root`: its children, their children and so on, from one snapshot of `ps`. Empty when `ps` does not
+/// work: a teardown that cannot look the family up kills what it can and must not fail the test.
+#[cfg(unix)]
+fn descendants_of(root: u32) -> Vec<u32> {
+    let Ok(out) = run_within(Command::new("ps").args(["-ax", "-o", "pid=,ppid="]), Duration::from_secs(5)) else { return Vec::new() };
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        if let (Some(pid), Some(parent)) = (fields.next().and_then(parse_pid), fields.next().and_then(|field| field.parse::<u32>().ok())) {
+            children.entry(parent).or_default().push(pid);
+        }
+    }
+    let (mut family, mut waiting) = (Vec::new(), vec![root]);
+    while let Some(parent) = waiting.pop() {
+        for &child in children.get(&parent).map(Vec::as_slice).unwrap_or_default() {
+            if child != root && !family.contains(&child) {
+                family.push(child);
+                waiting.push(child);
+            }
+        }
+    }
+    family
 }
 
 #[cfg(unix)]
@@ -704,6 +777,96 @@ K3AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBK5bQ2TTd8NDXcXp\n\
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("port {port} still accepts connections 5 s after the server was dropped");
+    }
+
+    /// Whether a process runs. A zombie (dead, but its parent has not collected it yet) does not: `ps` shows it as `<defunct>`.
+    #[cfg(unix)]
+    fn is_running(pid: u32) -> bool {
+        match command_line_of(pid) {
+            Ok(None) => false,
+            Ok(Some(command)) => !command.contains("<defunct>"),
+            Err(_) => true,
+        }
+    }
+
+    /// Waits (up to `seconds`) until none of `pids` runs; the ones that still do otherwise.
+    #[cfg(unix)]
+    fn still_running_after(pids: &[u32], seconds: u64) -> Vec<u32> {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        loop {
+            let alive: Vec<u32> = pids.iter().copied().filter(|pid| is_running(*pid)).collect();
+            if alive.is_empty() || Instant::now() >= deadline {
+                return alive;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// For every connection the listener forks a process (`sshd-session`; a copy of sshd before OpenSSH 9.8), in a session of its own. A
+    /// test that left a connection open used to leave these processes behind when its server was dropped. A connection that is only open
+    /// (no login) forks the same process, which keeps this test cheap.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_scratch_sshd_also_ends_the_session_processes_it_forked() {
+        let Some(tools) = tools() else { return };
+        let sshd = Sshd::start(&tools, SshdOptions::default());
+        let listener = sshd.child.id();
+        let before = descendants_of(listener);
+        let _connection = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, sshd.port)), Duration::from_secs(2)).expect("connect");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let forked = loop {
+            if let Some(pid) = descendants_of(listener).into_iter().find(|pid| !before.contains(pid)) {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "the listener forked no process for the connection");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(is_running(forked), "pid {forked} was forked for the connection and runs");
+
+        drop(sshd);
+        assert_eq!(still_running_after(&[forked], 2), Vec::<u32>::new(), "the process forked for the connection outlived the server");
+    }
+
+    /// The case that used up the PTYs: a login with a command on a PTY (`ssh -tt`) that is still open when the server is dropped. The
+    /// chain is the listener, `sshd-session [priv]`, `sshd-session user@tty` and the command, and each of the three has a session of its
+    /// own, so a process group would not reach any of them.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_scratch_sshd_also_ends_a_login_on_a_pty_that_is_still_open() {
+        let Some(tools) = tools() else { return };
+        let keys = tempfile::tempdir().unwrap();
+        let user = generate_key(&tools, keys.path(), "user", KeyKind::Ed25519);
+        let sshd = Sshd::start(&tools, SshdOptions { authorized_keys: vec![user.public_line.clone()], ..SshdOptions::default() });
+        let listener = sshd.child.id();
+        let mut command = Command::new(&tools.ssh);
+        command
+            .args(["-F", "/dev/null", "-tt", "-p"])
+            .arg(sshd.port.to_string())
+            .arg("-i")
+            .arg(&user.private_path)
+            .args(["-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no"])
+            .args(["-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR"])
+            .arg(format!("{}@127.0.0.1", sshd.user))
+            .arg("sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let _client = KillOnDrop(crate::process::spawn(&mut command).expect("start ssh"));
+
+        // The login is up when the command runs on the server: a descendant of the listener whose command line is `sleep 30`.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let family = loop {
+            let family = descendants_of(listener);
+            if family.iter().any(|pid| command_line_of(*pid) == Ok(Some("sleep 30".to_string()))) {
+                break family;
+            }
+            assert!(Instant::now() < deadline, "the login never ran its command; the listener's family: {family:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(family.len() >= 3, "the session processes and the command descend from the listener: {family:?}");
+
+        drop(sshd);
+        assert_eq!(still_running_after(&family, 2), Vec::<u32>::new(), "processes of the login outlived the server (the client is still connected)");
     }
 
     /// The pid of a process that has run and been waited for: no process has it now.
