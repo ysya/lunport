@@ -4,10 +4,12 @@
 //! russh is imported by exactly one file, `russh_engine.rs`; a test below keeps it that way. Swapping the engine later means replacing
 //! that file.
 
+mod channel;
 mod error;
 mod traits;
 mod types;
 
+pub use channel::{ByteQueue, ExitCell, QueueRead, QueuedShell, ShellInput};
 pub use error::{AuthError, ConnectError, SessionError};
 pub use traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
 pub use types::{

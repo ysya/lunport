@@ -1,0 +1,397 @@
+//! The plumbing between an engine's channel reader and the thread that reads a shell (own-ssh spec §6.3): a bounded byte queue that
+//! never holds the connection back, the cell that carries the shell's exit, and `QueuedShell`, the `ShellChannel` built from them.
+//! Engine-neutral: the russh engine and the fake engine both fill the same pieces.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
+
+use super::error::SessionError;
+use super::traits::ShellChannel;
+use super::types::Exit;
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What one read of the queue produced.
+#[derive(Debug, PartialEq, Eq)]
+pub enum QueueRead {
+    /// This many bytes were copied into the caller's buffer.
+    Bytes(usize),
+    /// Nothing arrived before the deadline; the queue is still open.
+    Timeout,
+    /// The queue is closed and everything in it has been read.
+    Closed,
+}
+
+struct QueueState {
+    chunks: VecDeque<Vec<u8>>,
+    /// How much of the first chunk has been read already.
+    front_read: usize,
+    /// Bytes queued and not read yet.
+    bytes: usize,
+    closed: bool,
+    dropped: u64,
+    /// Dropped bytes the stream does not mention yet.
+    unannounced: u64,
+}
+
+/// A byte queue with a hard size. The producer (the engine's channel reader) must never wait: russh stalls the whole connection behind a
+/// channel nobody reads. So when the reader is slower than the server (a paused terminal) and the queue is full, new chunks are
+/// discarded and counted instead, and the connection keeps going. The stream says so: the next chunk that is kept is preceded by a
+/// one-line notice that tells how many bytes are missing.
+pub struct ByteQueue {
+    state: Mutex<QueueState>,
+    ready: Condvar,
+    capacity: usize,
+}
+
+impl ByteQueue {
+    pub fn new(capacity: usize) -> Arc<ByteQueue> {
+        Arc::new(ByteQueue {
+            state: Mutex::new(QueueState { chunks: VecDeque::new(), front_read: 0, bytes: 0, closed: false, dropped: 0, unannounced: 0 }),
+            ready: Condvar::new(),
+            capacity,
+        })
+    }
+
+    fn notice(bytes: u64) -> Vec<u8> {
+        format!("\r\n[SSHelter dropped {bytes} bytes of output because the terminal fell behind]\r\n").into_bytes()
+    }
+
+    fn append(state: &mut QueueState, chunk: Vec<u8>) {
+        state.bytes += chunk.len();
+        state.chunks.push_back(chunk);
+    }
+
+    /// Appends `chunk` unless the queue is closed or would grow past its capacity. An empty queue accepts any chunk, so progress is always
+    /// possible. Returns false when the chunk was not kept; a chunk dropped for lack of room is added to `dropped_bytes`.
+    pub fn push(&self, chunk: Vec<u8>) -> bool {
+        if chunk.is_empty() {
+            return true;
+        }
+        let mut state = locked(&self.state);
+        if state.closed {
+            return false;
+        }
+        if state.bytes != 0 && state.bytes + chunk.len() > self.capacity {
+            state.dropped += chunk.len() as u64;
+            state.unannounced += chunk.len() as u64;
+            return false;
+        }
+        if state.unannounced > 0 {
+            let notice = ByteQueue::notice(state.unannounced);
+            state.unannounced = 0;
+            ByteQueue::append(&mut state, notice);
+        }
+        ByteQueue::append(&mut state, chunk);
+        self.ready.notify_one();
+        true
+    }
+
+    /// No more chunks will come. What is queued can still be read (after a notice, if bytes were dropped since the last one).
+    pub fn close(&self) {
+        let mut state = locked(&self.state);
+        if state.closed {
+            return;
+        }
+        if state.unannounced > 0 {
+            let notice = ByteQueue::notice(state.unannounced);
+            state.unannounced = 0;
+            ByteQueue::append(&mut state, notice);
+        }
+        state.closed = true;
+        self.ready.notify_all();
+    }
+
+    /// Copies queued bytes into `buf` (at most `buf.len()`, possibly part of a chunk), waiting until `deadline` for some to arrive; with
+    /// no deadline it waits for as long as the queue is open and empty. An empty `buf` reads nothing.
+    pub fn read_until(&self, buf: &mut [u8], deadline: Option<Instant>) -> QueueRead {
+        if buf.is_empty() {
+            return QueueRead::Bytes(0);
+        }
+        let mut state = locked(&self.state);
+        loop {
+            if let Some(front) = state.chunks.front() {
+                let taken = (front.len() - state.front_read).min(buf.len());
+                buf[..taken].copy_from_slice(&front[state.front_read..state.front_read + taken]);
+                let finished = state.front_read + taken == front.len();
+                state.bytes -= taken;
+                if finished {
+                    state.chunks.pop_front();
+                    state.front_read = 0;
+                } else {
+                    state.front_read += taken;
+                }
+                return QueueRead::Bytes(taken);
+            }
+            if state.closed {
+                return QueueRead::Closed;
+            }
+            state = match deadline {
+                None => self.ready.wait(state).unwrap_or_else(PoisonError::into_inner),
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return QueueRead::Timeout;
+                    }
+                    self.ready.wait_timeout(state, deadline - now).unwrap_or_else(PoisonError::into_inner).0
+                }
+            };
+        }
+    }
+
+    /// How many bytes were discarded because the reader fell behind.
+    pub fn dropped_bytes(&self) -> u64 {
+        locked(&self.state).dropped
+    }
+}
+
+/// Holds how a shell ended, once. The first value set wins.
+pub struct ExitCell {
+    value: Mutex<Option<Exit>>,
+}
+
+impl ExitCell {
+    pub fn new() -> Arc<ExitCell> {
+        Arc::new(ExitCell { value: Mutex::new(None) })
+    }
+
+    pub fn set(&self, exit: Exit) {
+        let mut value = locked(&self.value);
+        if value.is_none() {
+            *value = Some(exit);
+        }
+    }
+
+    pub fn get(&self) -> Option<Exit> {
+        locked(&self.value).clone()
+    }
+}
+
+/// The write side of a shell, supplied by the engine.
+pub trait ShellInput: Send + Sync {
+    /// Sends `bytes` to the shell's stdin. May wait while the connection's flow control makes the engine wait; the engine bounds that.
+    fn write(&self, bytes: &[u8]) -> Result<(), SessionError>;
+    fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError>;
+    /// Closes the channel (the connection stays up).
+    fn close(&self);
+}
+
+/// A `ShellChannel` made of an engine's `ShellInput`, the `ByteQueue` its channel reader fills and the `ExitCell` it sets. The reader
+/// sets the exit first and closes the queue second, so a `read` that returns 0 always finds `exited()` filled in.
+pub struct QueuedShell {
+    input: Box<dyn ShellInput>,
+    output: Arc<ByteQueue>,
+    exit: Arc<ExitCell>,
+}
+
+impl QueuedShell {
+    pub fn new(input: Box<dyn ShellInput>, output: Arc<ByteQueue>, exit: Arc<ExitCell>) -> QueuedShell {
+        QueuedShell { input, output, exit }
+    }
+
+    /// `ShellChannel::read` with a deadline instead of an open end: for tests and for callers that must also watch something else.
+    pub fn read_until(&self, buf: &mut [u8], deadline: Instant) -> QueueRead {
+        self.output.read_until(buf, Some(deadline))
+    }
+}
+
+impl ShellChannel for QueuedShell {
+    fn write(&self, data: &[u8]) -> Result<(), SessionError> {
+        self.input.write(data)
+    }
+
+    fn read(&self, buf: &mut [u8]) -> Result<usize, SessionError> {
+        match self.output.read_until(buf, None) {
+            QueueRead::Bytes(count) => Ok(count),
+            QueueRead::Closed | QueueRead::Timeout => Ok(0),
+        }
+    }
+
+    fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError> {
+        self.input.window_change(cols, rows)
+    }
+
+    fn exited(&self) -> Option<Exit> {
+        self.exit.get()
+    }
+
+    fn close(&self) {
+        self.input.close()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+
+    fn soon() -> Option<Instant> {
+        Some(Instant::now() + Duration::from_millis(50))
+    }
+
+    fn read_all(queue: &ByteQueue) -> Vec<u8> {
+        let mut all = Vec::new();
+        let mut buf = [0u8; 64];
+        while let QueueRead::Bytes(count) = queue.read_until(&mut buf, soon()) {
+            all.extend_from_slice(&buf[..count]);
+        }
+        all
+    }
+
+    #[test]
+    fn chunks_come_out_in_the_order_they_went_in_and_a_small_buffer_gets_part_of_a_chunk() {
+        let queue = ByteQueue::new(1024);
+        assert!(queue.push(b"hello world".to_vec()));
+        assert!(queue.push(b"!".to_vec()));
+        let mut buf = [0u8; 5];
+        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(5));
+        assert_eq!(&buf, b"hello");
+        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(5));
+        assert_eq!(&buf, b" worl");
+        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(1));
+        assert_eq!(&buf[..1], b"d");
+        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(1));
+        assert_eq!(&buf[..1], b"!");
+        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Timeout);
+        assert_eq!(queue.read_until(&mut [], soon()), QueueRead::Bytes(0), "an empty buffer reads nothing and does not wait");
+    }
+
+    #[test]
+    fn a_full_queue_drops_new_chunks_and_counts_them_instead_of_waiting() {
+        let queue = ByteQueue::new(10);
+        assert!(queue.push(vec![1; 6]));
+        let started = Instant::now();
+        assert!(!queue.push(vec![2; 6]), "6 + 6 bytes do not fit in 10");
+        assert!(started.elapsed() < Duration::from_millis(500), "a full queue must not make the producer wait");
+        assert_eq!(queue.dropped_bytes(), 6);
+        assert!(queue.push(vec![3; 4]), "4 bytes still fit next to the 6 queued");
+        assert_eq!(queue.dropped_bytes(), 6, "only the chunk that did not fit was counted");
+    }
+
+    #[test]
+    fn an_empty_queue_takes_a_chunk_bigger_than_its_capacity() {
+        let queue = ByteQueue::new(4);
+        assert!(queue.push(vec![9; 100]));
+        assert_eq!(queue.dropped_bytes(), 0);
+        assert!(!queue.push(vec![9; 1]), "but nothing fits next to it");
+        assert_eq!(queue.dropped_bytes(), 1);
+    }
+
+    #[test]
+    fn the_stream_says_how_much_is_missing_before_the_next_chunk_it_keeps() {
+        let queue = ByteQueue::new(8);
+        assert!(queue.push(b"AAAAAA".to_vec()));
+        assert!(!queue.push(b"BBBBBB".to_vec()));
+        assert!(!queue.push(b"CCCC".to_vec()));
+        assert_eq!(queue.dropped_bytes(), 10);
+        let mut buf = [0u8; 64];
+        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(6), "the reader catches up");
+        assert!(queue.push(b"DD".to_vec()));
+        let rest = String::from_utf8(read_all(&queue)).unwrap();
+        assert_eq!(rest, "\r\n[SSHelter dropped 10 bytes of output because the terminal fell behind]\r\nDD");
+        assert!(queue.push(b"EE".to_vec()));
+        assert_eq!(read_all(&queue), b"EE", "the gap is announced once");
+    }
+
+    #[test]
+    fn closing_announces_a_gap_that_nothing_followed_and_then_reports_closed() {
+        let queue = ByteQueue::new(4);
+        queue.push(b"1234".to_vec());
+        assert!(!queue.push(b"5678".to_vec()));
+        queue.close();
+        assert!(!queue.push(b"too late".to_vec()), "nothing is accepted after close");
+        assert_eq!(queue.dropped_bytes(), 4, "a push after close is not a drop for lack of room");
+        let mut buf = [0u8; 128];
+        let mut all = Vec::new();
+        loop {
+            match queue.read_until(&mut buf, soon()) {
+                QueueRead::Bytes(count) => all.extend_from_slice(&buf[..count]),
+                QueueRead::Closed => break,
+                QueueRead::Timeout => panic!("a closed queue must not time out"),
+            }
+        }
+        assert_eq!(String::from_utf8(all).unwrap(), "1234\r\n[SSHelter dropped 4 bytes of output because the terminal fell behind]\r\n");
+        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Closed);
+    }
+
+    #[test]
+    fn a_waiting_reader_wakes_when_a_chunk_arrives_and_when_the_queue_closes() {
+        let queue = ByteQueue::new(1024);
+        let producer = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                queue.push(b"hello".to_vec());
+                std::thread::sleep(Duration::from_millis(100));
+                queue.close();
+            })
+        };
+        let started = Instant::now();
+        let mut buf = [0u8; 16];
+        assert_eq!(queue.read_until(&mut buf, None), QueueRead::Bytes(5));
+        assert_eq!(queue.read_until(&mut buf, None), QueueRead::Closed);
+        assert!(started.elapsed() < Duration::from_secs(5), "woken by the producer, not by a timeout");
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn the_first_exit_wins() {
+        let cell = ExitCell::new();
+        assert_eq!(cell.get(), None);
+        cell.set(Exit::Code(3));
+        cell.set(Exit::Signal("KILL".into()));
+        assert_eq!(cell.get(), Some(Exit::Code(3)));
+    }
+
+    struct CountingInput {
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+        resizes: Arc<Mutex<Vec<(u16, u16)>>>,
+        closes: Arc<AtomicUsize>,
+    }
+
+    impl ShellInput for CountingInput {
+        fn write(&self, bytes: &[u8]) -> Result<(), SessionError> {
+            locked(&self.writes).push(bytes.to_vec());
+            Ok(())
+        }
+        fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError> {
+            locked(&self.resizes).push((cols, rows));
+            Ok(())
+        }
+        fn close(&self) {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_shell_forwards_to_its_input_reads_from_its_queue_and_finds_the_exit_when_the_read_ends() {
+        let (writes, resizes, closes) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicUsize::new(0)));
+        let input = CountingInput { writes: Arc::clone(&writes), resizes: Arc::clone(&resizes), closes: Arc::clone(&closes) };
+        let (queue, cell) = (ByteQueue::new(1024), ExitCell::new());
+        let shell = QueuedShell::new(Box::new(input), Arc::clone(&queue), Arc::clone(&cell));
+
+        shell.write(b"ls\n").unwrap();
+        shell.window_change(120, 40).unwrap();
+        shell.close();
+        assert_eq!(*locked(&writes), vec![b"ls\n".to_vec()]);
+        assert_eq!(*locked(&resizes), vec![(120, 40)]);
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+
+        queue.push(b"prompt$ ".to_vec());
+        let mut buf = [0u8; 32];
+        assert_eq!(shell.read(&mut buf), Ok(8));
+        assert_eq!(&buf[..8], b"prompt$ ");
+        assert_eq!(shell.read_until(&mut buf, Instant::now() + Duration::from_millis(30)), QueueRead::Timeout);
+        assert_eq!(shell.exited(), None);
+
+        cell.set(Exit::Code(0));
+        queue.close();
+        assert_eq!(shell.read(&mut buf), Ok(0), "0 means the shell has ended");
+        assert_eq!(shell.exited(), Some(Exit::Code(0)), "and the exit is there by then");
+    }
+}
