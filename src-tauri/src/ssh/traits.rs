@@ -26,7 +26,7 @@ pub trait Session: Send + Sync {
     fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError>;
 
     /// Runs `command` without a PTY and collects its output, for at most `timeout`. Output beyond `output_cap` bytes (stdout and stderr
-    /// together) is not read: the engine closes the channel, sets `truncated` and ends the result as `Ended::Truncated`. A command that ends without a
+    /// together) is not read: the engine asks for the channel to be closed, sets `truncated` and ends the result as `Ended::Truncated`. A command that ends without a
     /// status, a timeout and the cap are results, not errors, and the connection survives all three.
     ///
     /// `timeout` bounds the wait for the command's output. The engine bounds the other waits of the call on their own (opening the channel,
@@ -47,7 +47,8 @@ pub trait Session: Send + Sync {
 
 /// An open shell. `read` blocks, so a shell is read on one thread while another writes.
 pub trait ShellChannel: Send + Sync {
-    /// Sends keystrokes (or pasted text) to the shell's stdin.
+    /// Sends keystrokes (or pasted text) to the shell's stdin. A connection whose peer has stopped reading does not take them: after a
+    /// while (the russh engine waits 30 s) the call fails with `SessionError::Timeout`.
     fn write(&self, data: &[u8]) -> Result<(), SessionError>;
 
     /// Reads terminal output (stdout and stderr arrive merged on a PTY) into `buf` and returns how many bytes it wrote. Blocks until

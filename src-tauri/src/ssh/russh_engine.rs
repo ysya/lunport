@@ -238,7 +238,8 @@ pub struct Established {
 
 /// The whole chain, outermost hop first. Owns every hop's `Handle`; a connection is closed by an explicit `disconnect()` on each hop,
 /// because dropping the outer `Handle` ends nothing while an inner hop still holds one of its channels. It does not own the runtime that
-/// drives it: when the engine that made it is dropped the runtime goes with it, and every hop ends.
+/// drives it: the engine, the sessions made from it and the shells opened on those each keep the runtime alive, so it goes when the last
+/// of them is dropped, and every hop ends then.
 pub struct Connection {
     hops: Vec<Established>,
     /// Set when we are the ones closing it, so that the reason is ours whatever order the hops notice in.
@@ -757,8 +758,18 @@ impl Session for RusshSession {
 async fn exec_on(destination: &Established, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError> {
     let deadline = Instant::now() + timeout.min(LONGEST_TIMEOUT);
     let mut channel = open_channel(destination, CHANNEL_SETUP_LIMIT.max(timeout)).await?;
-    // If the connection does not take the request, a close would not be taken either: the channel is left to the end of the connection.
-    sent(channel.exec(true, command)).await?;
+    // If the connection does not take the request, the channel stays open on the server and holds one of its sessions. A close is tried in
+    // the background (it is bounded as well, and on a connection that does not take requests it may be given up too); the call does not wait.
+    match sent(channel.exec(true, command)).await {
+        Ok(()) => {}
+        Err(SessionError::Timeout) => {
+            tokio::spawn(async move {
+                let _ = sent(channel.close()).await;
+            });
+            return Err(SessionError::Timeout);
+        }
+        Err(error) => return Err(error),
+    }
     let mut result = ExecResult { ended: Ended::Disconnected, exit_code: None, signal: None, stdout: Vec::new(), stderr: Vec::new(), truncated: false };
     loop {
         let message = match tokio::time::timeout_at(deadline, channel.wait()).await {
@@ -808,7 +819,8 @@ fn keep(stream: &mut Vec<u8>, other: usize, data: &[u8], output_cap: usize) -> b
     fitting == data.len()
 }
 
-/// The output hit the cap: the channel is closed (the connection stays usable) and what was read is the result.
+/// The output hit the cap: the channel is asked to close (the connection stays usable; on a connection that does not take the request
+/// within `SEND_LIMIT` it is given up) and what was read is the result.
 async fn cut_off(channel: &Channel<Msg>, mut result: ExecResult) -> ExecResult {
     let _ = sent(channel.close()).await;
     result.truncated = true;
@@ -832,7 +844,7 @@ impl ShellInput for RusshShellInput {
     fn write(&self, bytes: &[u8]) -> Result<(), SessionError> {
         // The timer is created inside the future: building it before `block_on` would need a runtime on this thread.
         match self.runtime.handle().block_on(async { tokio::time::timeout(SHELL_WRITE_LIMIT, self.write_half.data(bytes)).await }) {
-            Err(_) => Err(SessionError::Channel("the connection did not take the input in time".to_string())),
+            Err(_) => Err(SessionError::Timeout),
             Ok(result) => result.map_err(channel_error),
         }
     }

@@ -204,12 +204,13 @@ pub enum Ended {
     Exited,
     /// It was killed by a signal (`signal` says which); there is no exit status.
     Signaled,
-    /// It was still running when the caller's timeout passed; the engine closed the channel (the connection stays usable). `exit_code`
-    /// can still be set: a command that has exited keeps its channel open for as long as a background job it started holds the output,
-    /// and then it ends as `TimedOut` with the status it reported.
+    /// It was still running when the caller's timeout passed; the engine asked for the channel to be closed (the connection stays
+    /// usable; on a connection that has stopped answering, that request is given up after a few seconds and the command runs on until
+    /// the connection ends). `exit_code` can still be set: a command that has exited keeps its channel open for as long as a background
+    /// job it started holds the output, and then it ends as `TimedOut` with the status it reported.
     TimedOut,
-    /// Its output reached the caller's cap and the engine closed the channel (`ExecResult::truncated` is true). Its exit status is
-    /// unknown, and the connection is still alive and usable: this is not a lost connection.
+    /// Its output reached the caller's cap and the engine asked for the channel to be closed, as for `TimedOut` (`ExecResult::truncated`
+    /// is true). Its exit status is unknown, and the connection is still alive and usable: this is not a lost connection.
     Truncated,
     /// The engine lost track of it: the channel ended without an exit status or a signal because the connection was lost.
     /// Never read this as exit code 0.
