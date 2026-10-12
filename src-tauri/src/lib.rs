@@ -1,5 +1,6 @@
 mod agent;
 pub mod askpass;
+pub mod cli;
 mod sync;
 mod config;
 mod connect;
