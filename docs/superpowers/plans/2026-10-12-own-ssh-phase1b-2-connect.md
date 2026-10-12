@@ -31,6 +31,31 @@ The input classes and failure modes the spec implies that no happy path exercise
 4. **The host-key window under pressure**: two questions at once, a question that times out or is withdrawn while the window shows it, the window closed with its close button, a keystroke or a second click that lands on the trust button the moment a new question appears. Pinned in Task 3: `a_changed_key_carries_the_pinned_one_and_answers_go_to_the_right_question`, `a_refusal_a_timeout_or_a_closed_window_is_no_trust`, `a_withdrawn_question_leaves_the_window` and `the_window_comes_to_the_front_only_for_a_new_question_at_the_head`, and the frontend's "keeps trust off until armed and both buttons off while an answer is on its way", "is not armed the moment a card mounts" and "arms the trust button after the delay, and a card that goes away first never arms".
 5. **Closing the window, quitting, or a client starting the app while sessions are open**: closing the main window must not end the sessions, quitting must end each one with a reason its terminal prints, and a client that found nobody listening must get a listener even when the app was already running. Pinned in Task 4: `closing_the_window_hides_it_while_sessions_are_open`; the quit path is plan 1b-1's `quitting_ends_every_session_and_tells_each_client_why`; the Tauri glue around them needs the running app and is on the checklist of "What is left for the user".
 
+## Amendments made during execution
+
+The task texts below are what the drafter wrote before review; review and fix rounds changed the code after them. The branch, not the
+task text, is the result, and the final review's list (`2026-10-13-own-ssh-phase1b-final-review-fixlist.md`) has the last word. The
+larger changes, by task (commit ranges on `next/own-ssh`):
+
+- Task 1: the CLI sanitises every text it prints outside the shell's data (the broker's `printable` rule, bidi controls included);
+  typeahead goes in `DATA_CHUNK` frames; the terminal is put back before `close`; secrets are wiped and hidden from `Debug`
+  (109dc87..81e4108).
+- Task 2: SIGQUIT is caught; queued keys are dropped after a question's flush; a panic on any thread ends the program (255); the
+  terminal is checked before SSHelter is reached or started (amendment 4e3cbe4..dc85988). Then the loop was redesigned: writer threads
+  for the terminal and the broker, bounded output and keys, a watchdog, Ctrl-Z that puts the terminal back and stops for real (SIGCONT
+  sets the mode again and asks again), a fatal failure to take over the signals, `args_os` (b53ac27..0645d5d); input typed at a question
+  is flushed when the session ends under it, a write that would block waits, an end the session came to waits for a slow terminal, a
+  hang-up is POLLHUP/EIO only (2db903a..66b596e); a signal ends that wait (805c5ce).
+- Task 4: `session::broker::QUIT_WAIT` (not a local 3 s), the bounded `ssh -G`, `VaultKey` without `has_passphrase` (da5bf0a..25690ca);
+  the listener is started once, decided under the status lock (5cc1bc7).
+- Task 6: one line adapted to Task 2's `Zeroizing` keys (f445229); the doubles are named and the assertions can fail (e4c4529, a654556).
+- Task 7: `ExecResult` kept for the tests; `#![cfg_attr(windows, allow(dead_code, unused_imports))]` on `session` and `ssh` (nothing calls
+  them on Windows until phase 3); the spec notes corrected — a slow terminal makes the engine drop output with a notice, SSH's window is
+  not involved (0240169..2546cce, 0864800, ed37ab3).
+- The final fix wave (5860056..ed37ab3): a partly read `ssh -G` answer is an error; the broker closes a connection before its entry
+  leaves the table; the CLI ends with a sentence on a message it cannot read; the host key window listens before it fetches; and the
+  smaller items of the final review's list.
+
 ## File Structure
 
 All paths under `src-tauri/src/` unless a path says otherwise.

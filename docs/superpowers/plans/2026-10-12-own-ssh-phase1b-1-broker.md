@@ -44,6 +44,25 @@ The input classes and failure modes the spec implies that no happy path exercise
 ## Amendments made during execution
 
 - **R8 amended (Task 2 review).** On `AuthFailed { password_wanted: true }` the broker asks the person and reconnects with the hop's ORIGINAL method order, answering `AuthSource::password` from memory at once; only a keyboard-interactive-only hop switches to password first (`AuthenticationMethods publickey,password` can never log in after a password-first reconnect). Task 2's patches below (its `error.rs`, `traits.rs` and spec §6.1 texts) and Task 9's connect loop still show the old "password first" contract; the branch follows the amendment: Task 2's fix round (39a42e5 banner cap of 64 KiB per hop, 20f4549 the contract texts, tests 1aaf67e and 6ae98f6) and Task 9's amendment. See the design brief's "R8 AMENDED" paragraph.
+- **The task texts below are what the drafter wrote before review; review and fix rounds changed the code after them.** The branch, not
+  the task text, is the result. The larger changes, by task (commit ranges on `next/own-ssh`; the final review's list,
+  `2026-10-13-own-ssh-phase1b-final-review-fixlist.md`, has the last word):
+  - Task 2: the banner is capped at 64 KiB per hop with a one-line notice; `PerSourcePenalties` removed from the harness (Ubuntu 24.04's
+    OpenSSH 9.6 rejects it); a toy server with partial success (`key_then_password`) pins the amended R8 (bfcd511..b594cf5).
+  - Task 6: one host id = one server (the contract, the pins keyed by it, two endpoints on one id refused); the pin decisions shared by the
+    store and the fake; a refused replace writes nothing; the file's format version is read first (2f92145..73b680e).
+  - Task 7: an `identityfile` list that is exactly one of OpenSSH's default lists (as `ssh -G` prints them), or `none`, names no key
+    file; only the first ProxyJump element expands its own jumps; more than five jump hosts refused; `ssh -G` runs through the bounded
+    `session::ssh_g::effective_within` (10 s, own process group) (8d284b2..ce4e1ca).
+  - Task 8: every server text (keyboard-interactive prompts included) goes through `printable`, which also replaces the bidi controls;
+    the real `(user@alias) ` prefix on every prompt line; cancelled, timed-out and gone answers are all remembered for the connect;
+    `has_passphrase` dropped (43de03b..cdcc2ec).
+  - Task 9: the amended R8 reconnect; an unanswered password prompt is "abandoned"; failure texts made printable; the round bound derived
+    from the chain; one host-key question per host per connect ("kept changing" refused); a pin made meanwhile reconnects instead of
+    asking (950c9b6..92582e9).
+  - Tasks 10 and 11: server texts sanitised in one place and capped at 512 characters; the session table (`Connecting`/`Open`,
+    `Told {No, ByEndAll, BySession}`); `end_all` returns only once every client it ended was told; `QUIT_WAIT` = `SETTLE` + 2 s; a
+    question too large for a frame is answered `Gone` (7920b56..5d319a7).
 
 ## File Structure
 
