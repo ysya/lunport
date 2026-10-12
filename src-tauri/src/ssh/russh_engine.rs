@@ -885,8 +885,10 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
             Step::Skipped => {}
         }
     }
-    // The server still offers the password method and no password was tried: one typed now could get in (the broker asks and connects
-    // again with the password first, rather than have a person type while this connection waits).
+    // The server still offers the password method and no password was tried: one typed now could get in. The broker asks the person and
+    // connects again with the hop's own method order, its `AuthSource::password` answering from memory at once (a person must not type
+    // while a connection waits). Only a hop with no password method in its sequence, one that starts with keyboard-interactive, is
+    // connected again with the password first: for a `publickey,password` server that would drop the key.
     let password_wanted = offered.as_ref().is_some_and(|offered| offered.contains(&MethodKind::Password)) && !tried.contains(&AuthMethod::Password);
     Err(ConnectError::AuthFailed { hop: reference, tried, reason: reasons.join(" "), password_wanted })
 }
