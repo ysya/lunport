@@ -2,6 +2,11 @@
 # vault and SSH agent tests (the agent's named pipe and its owner-only DACL, Windows program identification, and the real
 # Win32-OpenSSH tools against the agent). The copy fallback (used when a hard link can't be made, for example across
 # drives) is not exercised on CI.
+# It also builds the whole app with russh (cargo build --locked) and runs the SSH engine (src/ssh/): the tests that need no sshd,
+# and the engine against the runner's own OpenSSH server, which this job starts. A scratch sshd cannot run on Windows (Win32-OpenSSH's
+# sshd must run as a service), so the engine tests that start one print "skipped" here.
+# aws-lc-sys (russh's crypto) needs nothing installed: it is the same crate rustls already builds for the updater in the release
+# job on this runner image, and that job installs nothing for it.
 # macOS can only type-check the Windows code; the permission behavior has to be seen on Windows.
 name: windows key slots
 
@@ -19,7 +24,7 @@ permissions:
 jobs:
   slots:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: src-tauri
@@ -46,8 +51,75 @@ jobs:
       # slot_files_windows), the key vault (vault::), the local IPC transport (ipc:: covers the named pipe and program identification)
       # and the SSH agent (agent:: covers the real ssh-add / ssh-keygen against the agent). The rest of the suite runs on macOS; parts of
       # it use the system keychain.
-      - name: Key slot, vault and agent tests
+      - name: Key slot, vault, agent and engine tests
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `vault:: ipc:: agent::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --lib -- sync::slot_rules sync::slot_files vault:: ipc:: agent::"
+        # --locked: the committed Cargo.lock, with russh in it, is what is built.
+        run: "cargo test --locked --lib -- sync::slot_rules sync::slot_files vault:: ipc:: agent:: ssh::"
+      # The library and the binary, linked the way a release links them, with russh in the dependency graph.
+      - name: Build the whole app
+        run: cargo build --locked
+
+      # The runner image ships the OpenSSH client; the server is a Feature on Demand. If that capability cannot be added, the Chocolatey
+      # package (Win32-OpenSSH) is the fallback. The service creates its host keys the first time it starts.
+      - name: Install and start the OpenSSH server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $capability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
+          $capability | Format-Table Name, State
+          if ($capability.State -ne 'Installed') {
+            try {
+              Add-WindowsCapability -Online -Name $capability.Name | Out-Null
+            } catch {
+              Write-Warning "Feature on Demand failed ($_); trying Chocolatey"
+              choco install openssh -y --no-progress --params '"/SSHServerFeature"'
+            }
+          }
+          Get-Service sshd | Format-Table Name, Status, StartType
+          Set-Service -Name sshd -StartupType Manual
+          Start-Service sshd
+          Get-Service sshd | Format-Table Name, Status, StartType
+
+      # The runner user is an Administrator, so Win32-OpenSSH reads C:\ProgramData\ssh\administrators_authorized_keys for it (the
+      # "Match Group administrators" block of the default sshd_config) and refuses the file unless only SYSTEM and Administrators can write it.
+      # The Windows client refuses a private key other users can read.
+      - name: Authorize a throwaway key for the runner user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $openssh = Join-Path $env:SystemRoot 'System32\OpenSSH'
+          $dir = Join-Path $env:RUNNER_TEMP 'engine-ssh'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $key = Join-Path $dir 'id_ed25519'
+          & "$openssh\ssh-keygen.exe" -q -t ed25519 -N '' -C engine -f $key
+          if ($LASTEXITCODE -ne 0) { throw 'ssh-keygen failed' }
+          icacls.exe $key /inheritance:r /grant "$($env:USERNAME):F" | Out-Null
+          $authorized = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+          Get-Content "$key.pub" | Set-Content -Path $authorized -Encoding ascii
+          icacls.exe $authorized /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+          Restart-Service sshd
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value 'SSHELTER_TEST_SSH_PORT=22'
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_TEST_SSH_USER=$env:USERNAME"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_TEST_SSH_KEY=$key"
+
+      # Separates a server that is set up wrong from an engine that cannot talk to it.
+      - name: The OpenSSH client logs in
+        shell: pwsh
+        run: |
+          $openssh = Join-Path $env:SystemRoot 'System32\OpenSSH'
+          & "$openssh\ssh.exe" -V
+          & "$openssh\ssh.exe" -F NUL -p $env:SSHELTER_TEST_SSH_PORT -i $env:SSHELTER_TEST_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL "$env:SSHELTER_TEST_SSH_USER@127.0.0.1" 'echo client-ok'
+          if ($LASTEXITCODE -ne 0) { throw "the OpenSSH client could not log in (exit $LASTEXITCODE): the server setup is wrong, not the engine" }
+
+      - name: The engine against the runner's OpenSSH server
+        env:
+          RUST_BACKTRACE: "1"
+        # Quoted for the same reason as above.
+        run: "cargo test --locked --lib -- ssh::engine_tests::environment --nocapture"
+
+      - name: What the OpenSSH server logged
+        if: failure()
+        shell: pwsh
+        run: Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 40 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
