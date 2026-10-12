@@ -8,10 +8,18 @@ pub mod run;
 #[cfg(unix)]
 pub mod terminal;
 
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::sync::Arc;
+
 use crate::session::protocol::HostQuery;
 
 /// What `sshelter connect` prints when the app does not answer after it was started (spec §7.3, §11).
 pub const NOT_STARTED: &str = "SSHelter did not start within 12 seconds.";
+
+/// What `sshelter connect` prints when standard input is not a terminal (spec §7.3).
+pub const NEEDS_TERMINAL: &str = "sshelter connect needs a terminal.";
 
 /// How `sshelter connect` is used.
 pub const USAGE: &str = "usage: sshelter connect <alias>\n       sshelter connect --id <host id>";
@@ -30,14 +38,11 @@ pub fn term_from(value: Option<std::ffi::OsString>) -> String {
     value.and_then(|value| value.into_string().ok()).filter(|term| !term.is_empty()).unwrap_or_else(|| "xterm-256color".to_string())
 }
 
-/// `sshelter connect <arguments>`: returns the exit code (main.rs exits with it). Started before anything of Tauri.
+/// `sshelter connect <arguments>`: returns the exit code (main.rs exits with it). Started before anything of Tauri. The order is fixed:
+/// the arguments are looked at first (the usage, and 2), then the terminal (`sshelter connect needs a terminal.`, and 1), and only then is
+/// SSHelter reached, or started.
 #[cfg(unix)]
 pub fn run_connect(args: &[String]) -> i32 {
-    use std::os::unix::net::UnixStream;
-    use std::sync::Arc;
-
-    use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
-
     let host = match parse_args(args) {
         Ok(host) => host,
         Err(usage) => {
@@ -45,41 +50,66 @@ pub fn run_connect(args: &[String]) -> i32 {
             return 2;
         }
     };
+    let term = term_from(std::env::var_os("TERM"));
+    session(host, term, Arc::new(terminal::StdinTermios), reach_broker, &mut std::io::stderr())
+}
+
+/// The connection to the broker, at `<app data>/ipc/sock` (found without the app): if nothing answers there SSHelter is started, hidden,
+/// under the same locks as the MCP adapter's start, and waited for.
+#[cfg(unix)]
+fn reach_broker() -> Result<UnixStream, String> {
+    use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
+
     let socket = match crate::fsutil::app_data_root() {
         Ok(root) => crate::session::socket_path(&root),
-        Err(error) => {
-            eprintln!("sshelter: {error}");
-            return 1;
-        }
+        Err(error) => return Err(format!("sshelter: {error}")),
     };
-    let stream = match ensure_started(|| UnixStream::connect(&socket).ok(), take_spawn_locks, start_host, START_WAIT, NOT_STARTED) {
-        Ok(stream) => stream,
-        Err(text) => {
-            eprintln!("{text}");
-            return 1;
-        }
-    };
-    let mut tty = match terminal::Tty::new(Arc::new(terminal::StdinTermios)) {
+    ensure_started(|| UnixStream::connect(&socket).ok(), take_spawn_locks, start_host, START_WAIT, NOT_STARTED)
+}
+
+/// One session on the terminal `api`; `reach` finds the broker, starting SSHelter if it must. The terminal comes first: a program that
+/// has none must not start the app just to say so. Writes what the CLI says to `stderr` (the terminal's).
+#[cfg(unix)]
+fn session(
+    host: HostQuery,
+    term: String,
+    api: Arc<dyn terminal::TermiosApi>,
+    reach: impl FnOnce() -> Result<UnixStream, String>,
+    stderr: &mut dyn std::io::Write,
+) -> i32 {
+    let size = Arc::clone(&api);
+    let mut tty = match terminal::Tty::new(api) {
         Ok(tty) => tty,
         Err(_) => {
-            eprintln!("sshelter connect needs a terminal.");
+            let _ = writeln!(stderr, "{NEEDS_TERMINAL}");
+            return 1;
+        }
+    };
+    let stream = match reach() {
+        Ok(stream) => stream,
+        Err(text) => {
+            let _ = writeln!(stderr, "{text}");
             return 1;
         }
     };
     terminal::restore_on_panic(tty.restorer());
     let (sender, receiver) = std::sync::mpsc::channel();
     run::stdin_thread(sender.clone());
-    if let Err(error) = run::signal_thread(sender.clone(), || terminal::TermiosApi::size(&terminal::StdinTermios)) {
-        eprintln!("sshelter: cannot follow the terminal's size: {error}");
+    if let Err(error) = run::signal_thread(sender.clone(), move || size.size()) {
+        let _ = writeln!(stderr, "sshelter: cannot follow the terminal's size: {error}");
     }
-    let term = term_from(std::env::var_os("TERM"));
-    run::run(stream, host, term, &mut tty, (sender, receiver), &mut std::io::stdout(), &mut std::io::stderr())
+    run::run(stream, host, term, &mut tty, (sender, receiver), &mut std::io::stdout(), stderr)
 }
 
 /// Windows: the console work is phase 3 (spec §13, §16). A release build has no console, so the sentence shows only where one exists.
 #[cfg(windows)]
 pub fn run_connect(_args: &[String]) -> i32 {
-    eprintln!("sshelter connect is not supported on Windows yet.");
+    not_supported(&mut std::io::stderr())
+}
+
+#[cfg(any(windows, test))]
+fn not_supported(stderr: &mut dyn std::io::Write) -> i32 {
+    let _ = writeln!(stderr, "sshelter connect is not supported on Windows yet.");
     1
 }
 
@@ -105,6 +135,69 @@ mod tests {
         assert_eq!(term_from(Some("screen-256color".into())), "screen-256color");
         assert_eq!(term_from(Some("".into())), "xterm-256color");
         assert_eq!(term_from(None), "xterm-256color");
+    }
+
+    /// Wrong arguments are the first thing looked at: the usage and 2, before a terminal is asked for or SSHelter is reached.
+    #[cfg(unix)]
+    #[test]
+    fn wrong_arguments_exit_2_before_anything_else() {
+        assert_eq!(run_connect(&args(&[])), 2);
+        assert_eq!(run_connect(&args(&["-oProxyCommand=x"])), 2);
+        assert_eq!(run_connect(&args(&["web", "db"])), 2);
+    }
+
+    #[cfg(unix)]
+    mod before_the_session {
+        use std::io;
+
+        use super::*;
+        use crate::cli::terminal::fake::FakeTermios;
+        use crate::cli::terminal::TermiosApi;
+
+        /// Standard input that is not a terminal (a pipe, a file, /dev/null): its attributes cannot be read, as `tcgetattr` fails there.
+        struct NotATerminal;
+
+        impl TermiosApi for NotATerminal {
+            fn get(&self) -> io::Result<libc::termios> {
+                Err(io::Error::from_raw_os_error(libc::ENOTTY))
+            }
+            fn set(&self, _: &libc::termios, _: bool) -> io::Result<()> {
+                panic!("a terminal that is not there is never set")
+            }
+            fn size(&self) -> Option<(u16, u16)> {
+                None
+            }
+        }
+
+        fn session_on(api: Arc<dyn TermiosApi>, reach: impl FnOnce() -> Result<UnixStream, String>) -> (i32, String) {
+            let mut said = Vec::new();
+            let code = super::super::session(HostQuery::Alias("web".into()), "xterm-256color".into(), api, reach, &mut said);
+            (code, String::from_utf8(said).unwrap())
+        }
+
+        /// Without a terminal on standard input the CLI says so and ends with 1 (spec §7.3), and it does so before it reaches SSHelter, let
+        /// alone starts it: a program that cannot talk to a terminal must not launch the app just to say that.
+        #[test]
+        fn without_a_terminal_the_cli_says_so_before_it_reaches_or_starts_sshelter() {
+            let reach = || -> Result<UnixStream, String> { panic!("SSHelter must not be reached, let alone started, without a terminal") };
+            assert_eq!(session_on(Arc::new(NotATerminal), reach), (1, "sshelter connect needs a terminal.\n".to_string()));
+        }
+
+        /// Spec §11: when nothing answers after SSHelter was started, the sentence and 1; the terminal was never changed.
+        #[test]
+        fn when_nothing_answers_the_cli_says_sshelter_did_not_start_and_leaves_the_terminal_alone() {
+            let terminal = FakeTermios::new();
+            assert_eq!(session_on(terminal.clone(), || Err(NOT_STARTED.to_string())), (1, "SSHelter did not start within 12 seconds.\n".to_string()));
+            assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
+        }
+    }
+
+    /// Windows (plan 1b R4): the sentence, and a failing status.
+    #[test]
+    fn on_windows_the_cli_says_it_is_not_supported_yet_and_fails() {
+        let mut said = Vec::new();
+        assert_eq!(not_supported(&mut said), 1);
+        assert_eq!(String::from_utf8(said).unwrap(), "sshelter connect is not supported on Windows yet.\n");
     }
 
     /// Spec §11: the sentence, exactly, when the app does not answer.
