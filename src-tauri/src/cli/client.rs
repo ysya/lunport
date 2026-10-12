@@ -4,7 +4,7 @@
 //! key goes to the shell; at the end the terminal is put back before anything is printed. Every text the broker wrote (a notice, a
 //! question, a banner, an error) goes through `printable` before it is printed: the CLI does not trust the broker it talks to.
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::terminal::Mode;
 use crate::session::protocol::{kinds, ClientKind, ClientMessage, Event, HostQuery, PtyRequest, Question, QuestionKind, ServerMessage, DATA_CHUNK, PROTOCOL_VERSION};
@@ -143,26 +143,14 @@ impl Client {
             Input::Output(bytes) => vec![Action::Stdout(bytes)],
             Input::Closed => {
                 let reason = self.reason.take().unwrap_or_else(|| "The connection to SSHelter ended.".to_string());
-                self.finish(Some(reason), 255)
+                self.finish(false, Some(reason), 255)
             }
             Input::Stdin(bytes) => self.typed(&bytes),
             Input::StdinEnd | Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => self.answer(None),
-            Input::Interrupt => {
-                let mut actions = vec![Action::Send(ClientMessage::Close)];
-                actions.extend(self.finish(None, 130));
-                actions
-            }
-            Input::StdinEnd => {
-                let mut actions = vec![Action::Send(ClientMessage::Close)];
-                actions.extend(self.finish(None, 128 + libc::SIGHUP));
-                actions
-            }
+            Input::Interrupt => self.finish(true, None, 130),
+            Input::StdinEnd => self.finish(true, None, 128 + libc::SIGHUP),
             Input::Resize(cols, rows) => vec![Action::Send(ClientMessage::WindowChange { cols, rows })],
-            Input::Stop(signal) => {
-                let mut actions = vec![Action::Send(ClientMessage::Close)];
-                actions.extend(self.finish(None, 128 + signal));
-                actions
-            }
+            Input::Stop(signal) => self.finish(true, None, 128 + signal),
         }
     }
 
@@ -187,7 +175,7 @@ impl Client {
             ServerMessage::Event(Event::Connected) => Vec::new(),
             ServerMessage::Exited { code, signal } => {
                 let reason = self.reason.take();
-                self.finish(reason, exit_code(code, signal.as_deref()))
+                self.finish(false, reason, exit_code(code, signal.as_deref()))
             }
         }
     }
@@ -207,9 +195,11 @@ impl Client {
         };
         self.phase = Phase::Open;
         actions.push(Action::Mode(Mode::Raw, over_a_question));
-        if !self.typeahead.is_empty() {
-            actions.push(Action::SendData(std::mem::take(&mut *self.typeahead)));
+        // Typeahead is typed text like any other: it goes out in data frames of at most DATA_CHUNK bytes.
+        for chunk in self.typeahead.chunks(DATA_CHUNK) {
+            actions.push(Action::SendData(chunk.to_vec()));
         }
+        self.typeahead.zeroize();
         actions
     }
 
@@ -277,13 +267,18 @@ impl Client {
         actions
     }
 
-    /// The end: the terminal is put back first, then the reason is printed on a line of its own, then the program exits.
-    fn finish(&mut self, reason: Option<String>, code: i32) -> Vec<Action> {
+    /// The end: the terminal is put back first, so that nothing after it can leave it raw (a broker that stopped reading blocks the write
+    /// that tells it); then the broker is told when it is the program that leaves (`close`), the reason is printed on a line of its own,
+    /// and the program exits.
+    fn finish(&mut self, close: bool, reason: Option<String>, code: i32) -> Vec<Action> {
         // The cursor is not at the start of a line while the shell is open (it can be anywhere in what the shell wrote), nor while a
         // question's prompt is on it, whatever the terminal was before the question.
         let mid_line = matches!(self.phase, Phase::Open | Phase::Asking { .. });
         self.phase = Phase::Ended;
         let mut actions = vec![Action::Mode(Mode::Cooked, false)];
+        if close {
+            actions.push(Action::Send(ClientMessage::Close));
+        }
         if let Some(reason) = reason {
             actions.push(Action::Stderr(if mid_line { format!("\n{reason}\n") } else { format!("{reason}\n") }));
         }
@@ -339,6 +334,39 @@ mod tests {
         let mut client = started();
         assert!(client.handle(Input::Stdin(b"uptime\n".to_vec())).is_empty());
         assert_eq!(client.handle(Input::Message(ServerMessage::Opened { session_id: "1".into() })), [Action::Mode(Mode::Raw, false), Action::SendData(b"uptime\n".to_vec())]);
+    }
+
+    /// The payloads of the data frames in `actions`, in order.
+    fn data_frames(actions: &[Action]) -> Vec<Vec<u8>> {
+        actions.iter().filter_map(|action| if let Action::SendData(bytes) = action { Some(bytes.clone()) } else { None }).collect()
+    }
+
+    /// The protocol says keystrokes travel in data frames of at most DATA_CHUNK bytes: typeahead is no different.
+    #[test]
+    fn typeahead_goes_out_in_data_frames_of_at_most_data_chunk_bytes() {
+        for (typed, sizes) in [(3, vec![3]), (DATA_CHUNK, vec![DATA_CHUNK]), (DATA_CHUNK + 5, vec![DATA_CHUNK, 5]), (2 * DATA_CHUNK, vec![DATA_CHUNK, DATA_CHUNK])] {
+            let mut client = started();
+            client.handle(Input::Stdin(vec![b'x'; typed]));
+            let actions = client.handle(opens());
+            assert_eq!(actions[0], Action::Mode(Mode::Raw, false));
+            let frames = data_frames(&actions);
+            assert_eq!(frames.iter().map(Vec::len).collect::<Vec<_>>(), sizes, "{typed} bytes typed ahead");
+            assert_eq!(actions.len(), 1 + frames.len(), "nothing else: the data frames follow the mode");
+        }
+    }
+
+    /// What is typed while connecting is kept up to 64 KiB (the first 64 KiB: the rest is dropped).
+    #[test]
+    fn typeahead_is_kept_up_to_its_limit_and_the_rest_is_dropped() {
+        let mut client = started();
+        client.handle(Input::Stdin(vec![b'a'; 40 * 1024]));
+        client.handle(Input::Stdin(vec![b'b'; 40 * 1024]));
+        client.handle(Input::Stdin(b"more".to_vec()));
+        let kept = data_frames(&client.handle(opens())).concat();
+        let mut expected = vec![b'a'; 40 * 1024];
+        expected.extend(vec![b'b'; 24 * 1024]);
+        assert_eq!(kept.len(), 64 * 1024);
+        assert!(kept == expected, "the first 64 KiB are kept, as they were typed");
     }
 
     /// Spec §7.3: a question leaves raw mode (or the terminal as it was), asks without echo for a password, sends the answer and goes
@@ -436,9 +464,19 @@ mod tests {
         let mut client = opened();
         assert_eq!(client.handle(Input::Closed), [Action::Mode(Mode::Cooked, false), Action::Stderr("\nThe connection to SSHelter ended.\n".into()), Action::Exit(255)]);
         let mut client = opened();
-        assert_eq!(client.handle(Input::Stop(libc::SIGTERM)), [Action::Send(ClientMessage::Close), Action::Mode(Mode::Cooked, false), Action::Exit(128 + libc::SIGTERM)]);
+        assert_eq!(client.handle(Input::Stop(libc::SIGTERM)), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(128 + libc::SIGTERM)]);
         let mut client = started();
-        assert_eq!(client.handle(Input::Interrupt), [Action::Send(ClientMessage::Close), Action::Mode(Mode::Cooked, false), Action::Exit(130)], "Ctrl-C while connecting stops it");
+        assert_eq!(client.handle(Input::Interrupt), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(130)], "Ctrl-C while connecting stops it");
+    }
+
+    /// Spec §7.3: the end of input outside a question is the terminal going away, like SIGHUP. The terminal is put back before the broker
+    /// is told: a broker that stopped reading would block the write, and the terminal would stay raw under a program that is stuck.
+    #[test]
+    fn the_end_of_input_outside_a_question_is_the_terminal_going_away_and_the_terminal_is_put_back_before_the_broker_is_told() {
+        let hangup = [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(129)]; // 128 + SIGHUP
+        assert_eq!(started().handle(Input::StdinEnd), hangup);
+        assert_eq!(opened().handle(Input::StdinEnd), hangup);
+        assert_eq!(opened().handle(Input::Stop(libc::SIGHUP)), hangup);
     }
 
     fn event(event: Event) -> Input {
