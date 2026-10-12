@@ -1,6 +1,6 @@
 //! The I/O of `sshelter connect` (own-ssh spec §7.3): the broker's frames are read on a thread of their own, the person's keys on
-//! another, the signals (SIGWINCH, SIGINT, SIGTERM, SIGHUP) on a third with tokio's signal handling; everything meets in one queue, and
-//! the client (`client.rs`) says what to do with each.
+//! another, the signals (SIGWINCH, SIGINT, SIGTERM, SIGHUP, SIGQUIT) on a third with tokio's signal handling; everything meets in one
+//! queue, and the client (`client.rs`) says what to do with each.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -108,14 +108,33 @@ pub fn stdin_thread(sender: Sender<Input>) {
     });
 }
 
-/// Turns the signals into inputs: a resize (SIGWINCH, read with `size`), Ctrl-C while the terminal is not raw (SIGINT), and the end of the
-/// terminal or a request to stop (SIGHUP, SIGTERM). With handlers in place none of them ends the program on its own: the client decides,
-/// and the terminal is put back first.
+/// What the queue is told when `signal` stops the program or cancels a question: Ctrl-C cancels the question on the terminal (and ends
+/// the program when there is none); every other signal ends it, with the number its exit status (128 + n) is made of.
+fn input_for(signal: i32) -> Input {
+    if signal == libc::SIGINT {
+        Input::Interrupt
+    } else {
+        Input::Stop(signal)
+    }
+}
+
+/// Turns the signals into inputs: a resize (SIGWINCH, read with `size`), Ctrl-C (SIGINT), Ctrl-backslash (SIGQUIT), and the end of the
+/// terminal or a request to stop (SIGHUP, SIGTERM). A question keeps `ISIG` on (Ctrl-C cancels it), so Ctrl-backslash at a hidden
+/// password would deliver SIGQUIT too, and its default action ends the program with echo still off: neither the panic hook nor `Drop`
+/// run on a signal. With handlers in place none of them ends the program on its own: the client decides, and the terminal is put back
+/// first.
 pub fn signal_thread(sender: Sender<Input>, size: impl Fn() -> Option<(u16, u16)> + Send + 'static) -> std::io::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let (mut resize, mut interrupt, mut terminate, mut hangup) = runtime.block_on(async {
-        Ok::<_, std::io::Error>((signal(SignalKind::window_change())?, signal(SignalKind::interrupt())?, signal(SignalKind::terminate())?, signal(SignalKind::hangup())?))
+    // The handlers are installed here, before the thread runs: a signal that comes right after this returns finds them in place.
+    let (mut resize, mut interrupt, mut terminate, mut hangup, mut quit) = runtime.block_on(async {
+        Ok::<_, std::io::Error>((
+            signal(SignalKind::window_change())?,
+            signal(SignalKind::interrupt())?,
+            signal(SignalKind::terminate())?,
+            signal(SignalKind::hangup())?,
+            signal(SignalKind::quit())?,
+        ))
     })?;
     std::thread::spawn(move || {
         runtime.block_on(async move {
@@ -125,9 +144,10 @@ pub fn signal_thread(sender: Sender<Input>, size: impl Fn() -> Option<(u16, u16)
                         Some((cols, rows)) => Input::Resize(cols, rows),
                         None => continue,
                     },
-                    _ = interrupt.recv() => Input::Interrupt,
-                    _ = terminate.recv() => Input::Stop(libc::SIGTERM),
-                    _ = hangup.recv() => Input::Stop(libc::SIGHUP),
+                    _ = interrupt.recv() => input_for(libc::SIGINT),
+                    _ = terminate.recv() => input_for(libc::SIGTERM),
+                    _ = hangup.recv() => input_for(libc::SIGHUP),
+                    _ = quit.recv() => input_for(libc::SIGQUIT),
                 };
                 if sender.send(input).is_err() {
                     return;
@@ -276,5 +296,44 @@ mod tests {
         assert_eq!(code, 128 + libc::SIGHUP);
         assert!(setup.termios.is_start(&setup.termios.now()));
         eventually("the session to be closed", 10, || setup.engine.events().contains(&FakeEvent::Closed));
+    }
+
+    /// Every signal the CLI takes over becomes the input that ends the session the way a shell would report it: the terminal is put back
+    /// first, the broker is told, and the status is 128 + the signal's number (131 for SIGQUIT, which Ctrl-backslash sends at a question).
+    #[test]
+    fn each_signal_the_cli_takes_over_ends_the_session_with_128_plus_its_number() {
+        use crate::cli::client::Client;
+        use crate::cli::terminal::Mode;
+        use crate::session::protocol::{ClientMessage, ServerMessage};
+        assert_eq!(128 + libc::SIGQUIT, 131);
+        for (signal, status) in [(libc::SIGINT, 130), (libc::SIGTERM, 143), (libc::SIGHUP, 129), (libc::SIGQUIT, 131)] {
+            let (mut client, _) = Client::start(HostQuery::Alias("web".into()), "xterm-256color".into(), (80, 24));
+            client.handle(Input::Message(ServerMessage::Opened { session_id: "1".into() }));
+            assert_eq!(client.handle(input_for(signal)), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(status)], "signal {signal}");
+        }
+    }
+
+    /// The handlers are process-wide and stay for the life of the process, so the test that raises the signals for real runs alone, in a
+    /// process of its own (`rerun_alone`); a signal that was not taken over would end that process, and the test with it.
+    #[test]
+    fn the_signals_the_cli_takes_over_reach_the_queue_instead_of_ending_the_program() {
+        use crate::ssh::testing::{is_child, rerun_alone};
+        const NAME: &str = "cli::run::tests::the_signals_the_cli_takes_over_reach_the_queue_instead_of_ending_the_program";
+        if !is_child() {
+            rerun_alone(NAME);
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        signal_thread(sender, || Some((100, 30))).expect("the handlers are installed");
+        let next = |signal: i32| {
+            // SAFETY: `raise` only sends the signal to this thread, and every signal raised here has a handler by now.
+            assert_eq!(unsafe { libc::raise(signal) }, 0);
+            receiver.recv_timeout(std::time::Duration::from_secs(10)).unwrap_or_else(|_| panic!("signal {signal} did not arrive"))
+        };
+        assert!(matches!(next(libc::SIGWINCH), Input::Resize(100, 30)));
+        assert!(matches!(next(libc::SIGINT), Input::Interrupt));
+        assert!(matches!(next(libc::SIGTERM), Input::Stop(libc::SIGTERM)));
+        assert!(matches!(next(libc::SIGHUP), Input::Stop(libc::SIGHUP)));
+        assert!(matches!(next(libc::SIGQUIT), Input::Stop(libc::SIGQUIT)));
     }
 }
