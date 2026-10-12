@@ -83,18 +83,22 @@ impl PinStore {
         format!("SSHelter cannot read its pinned host keys in {} ({why}).", self.path.display())
     }
 
-    /// The whole file; a missing file is an empty one.
+    /// The whole file; a missing file is an empty one. The format version is read before anything else: a newer SSHelter may have changed
+    /// the structure, and its file is then in another format, not damaged.
     fn read(&self) -> Result<PinFile, String> {
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(PinFile { version: FILE_VERSION, pins: BTreeMap::new() }),
             Err(error) => return Err(self.unreadable(error)),
         };
-        let file: PinFile = serde_json::from_slice(&bytes).map_err(|_| self.unreadable("the file is damaged"))?;
-        if file.version != FILE_VERSION {
-            return Err(self.unreadable(format!("it is in format {}, which this version of SSHelter does not know", file.version)));
+        let damaged = || self.unreadable("the file is damaged");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| damaged())?;
+        match value.get("version").and_then(serde_json::Value::as_u64) {
+            Some(version) if version == u64::from(FILE_VERSION) => {}
+            Some(version) => return Err(self.unreadable(format!("it is in format {version}, which this version of SSHelter does not know"))),
+            None => return Err(damaged()),
         }
-        Ok(file)
+        serde_json::from_value(value).map_err(|_| damaged())
     }
 
     fn write(&self, file: &PinFile) -> Result<(), String> {
@@ -217,17 +221,28 @@ mod tests {
     }
 
     /// A file that cannot be read is an error, not "nothing pinned": a pinned host must not look new (the person would be asked to trust
-    /// whatever key is presented), and a pin written now must not wipe the others.
+    /// whatever key is presented), and a pin written now must not wipe the others. A file of another format version says so, also when the
+    /// newer format changed the structure, and one that is not in any format says that it is damaged.
     #[test]
     fn an_unreadable_or_newer_file_is_an_error_and_is_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app-data").join("host-pins.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let pins = store(&dir);
-        for contents in [&b"{ not json"[..], br#"{"version":2,"pins":{}}"#] {
+        for (contents, says) in [
+            (&b"{ not json"[..], "damaged"),
+            (br#"{"pins":{}}"#, "damaged"),
+            (br#"{"version":"one","pins":{}}"#, "damaged"),
+            (br#"{"version":1,"pins":["web"]}"#, "damaged"),
+            (br#"{"version":2,"pins":{}}"#, "format 2"),
+            (br#"{"version":2,"hosts":[{"id":"web"}]}"#, "format 2"),
+            (br#"{"version":3,"pins":["web"]}"#, "format 3"),
+        ] {
             std::fs::write(&path, contents).unwrap();
             let error = pins.get(&HostId::from("web")).unwrap_err();
             assert!(error.contains("host-pins.json"), "{error}");
+            assert!(error.contains(says), "{error}");
+            assert_eq!(error.contains("damaged"), says == "damaged", "{error}");
             assert!(pins.pin(&HostId::from("web"), &key(test_keys::PLAIN_PUBLIC)).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), contents, "the file is left as it was");
         }
