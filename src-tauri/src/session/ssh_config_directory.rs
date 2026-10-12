@@ -4,6 +4,11 @@
 //! (the SP3 slot rules), a password is the keychain's `host:<alias>`, and pins live in `host-pins.json` (`pins.rs`). A host id is its
 //! alias here. Never written: `~/.ssh` (spec §1). Never read: `~/.ssh/known_hosts`.
 //!
+//! The settings are read the way `ssh <alias>` reads them, because `sshelter connect` replaces that command: the app's source runs `ssh -G`
+//! without `-F`, so it reads the default config files (`~/.ssh/config` and the system's), as today's Connect does
+//! (`effective_config(alias, None)`), and not only the file the app has loaded (the hosts are the `Host` patterns of that one). `ssh -G`
+//! runs the `Match exec` commands of those files and waits for them, so the source has a deadline (`Sources::effective`, `ssh_g.rs`).
+//!
 //! What it cannot give the broker, and says so: a `ProxyCommand`, a key in a file instead of the vault (SSHelter's own client signs with
 //! vault keys only), and a `ProxyJump` that is anything but a chain of saved hosts, each one as it is saved.
 //!
@@ -209,7 +214,12 @@ pub fn vault_slot_of(identity_files: &[String], state: &SyncStateV2, home: &Path
 pub struct Sources {
     /// The ssh_config the app manages: the hosts one can connect to are its `Host` patterns.
     pub doc: Box<dyn Fn() -> Result<SshConfigDoc, String> + Send + Sync>,
-    /// `ssh -G <alias>`: the effective settings of a host, keywords in lower case.
+    /// `ssh -G <alias>`: the effective settings of a host, keywords in lower case. It is called on the thread that serves the client, for
+    /// every host of the chain, at every connect and reconnect, and it has to come back within a bound: `ssh -G` runs the `Match exec`
+    /// commands of the config and waits for them, and reads its `Include`d files, so a source without a deadline stalls the client's
+    /// connect with no word to the person and leaves its process behind, again at the next try. A source that cannot answer in time ends
+    /// what it started and returns `Err` with a sentence ("ssh -G did not finish within 10 seconds."), which the adapter turns into
+    /// `DirectoryError::Failed`. The app's source is `ssh_g::effective_within(alias, None, ssh_g::EFFECTIVE_DEADLINE)`.
     pub effective: Box<dyn Fn(&str) -> Result<Vec<(String, String)>, String> + Send + Sync>,
     /// The vault key the `IdentityFile` values name, if any (`vault_slot_of`).
     pub vault_key: Box<dyn Fn(&[String]) -> Option<String> + Send + Sync>,
