@@ -542,11 +542,12 @@ impl ClientLink for FrameLink {
     /// client is gone.
     fn send_all(&self, messages: &[ServerMessage]) -> std::io::Result<()> {
         let mut writer = locked(&self.writer);
-        if writer.finished {
-            return Err(after_exited());
-        }
         let mut unwritten = Ok(());
         for message in messages {
+            // Looked at for every message: one that follows `exited` in the same sequence is not written either.
+            if writer.finished {
+                return Err(after_exited());
+            }
             match write_control(&mut writer.stream, message) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
@@ -1419,6 +1420,14 @@ mod tests {
         drop(owner);
         drop(link);
         assert_eq!(written_to(&mut ours), [quit_sentence(), no_status()]);
+
+        // Not within one sequence either.
+        let (mut ours, theirs) = client_and_broker_ends();
+        let link = FrameLink::new(theirs);
+        let late = ServerMessage::Event(Event::Banner { text: "late".into() });
+        assert!(link.send_all(&[no_status(), late]).is_err());
+        drop(link);
+        assert_eq!(written_to(&mut ours), [no_status()]);
     }
 
     /// A client link that records how it was handed its messages: each call, with the messages of it.
