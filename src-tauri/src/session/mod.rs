@@ -19,8 +19,12 @@ pub fn ipc_dir(app_data: &Path) -> PathBuf {
 pub struct SessionRuntime {
     /// The host key questions waiting for the window.
     pub host_keys: std::sync::Arc<hostkey_window::HostKeyHub>,
+    /// The broker, once `app::start` built it.
+    pub broker: std::sync::Mutex<Option<std::sync::Arc<broker::Broker>>>,
+    pub status: std::sync::Mutex<app::BrokerStatus>,
 }
 
+pub mod app;
 pub mod auth;
 pub mod broker;
 pub mod connect;

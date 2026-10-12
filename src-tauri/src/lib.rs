@@ -125,6 +125,7 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
         show_main_window(app);
     } else {
         mcp::republish_bridge(app);
+        session::app::ensure_listening(app);
     }
 }
 
@@ -179,6 +180,8 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::engine::initialize(app.handle())?;
             // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
             agent::start(app.handle());
+            // The session broker that `sshelter connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
+            session::app::start(app.handle());
             tray::rebuild_tray(app.handle(), &[])?;
             Ok(())
         })
@@ -203,14 +206,12 @@ fn run_app(host: bool, start_hidden: bool) {
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.app_handle().state::<state::AppState>();
-                if state
-                    .close_to_tray
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    || state
-                        .mcp
-                        .keep_alive
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                {
+                // Open sessions keep the app running too: quitting would end them (own-ssh spec §4).
+                if session::app::hides_on_close(
+                    state.close_to_tray.load(std::sync::atomic::Ordering::Relaxed),
+                    state.mcp.keep_alive.load(std::sync::atomic::Ordering::Relaxed),
+                    session::app::has_sessions(window.app_handle()),
+                ) {
                     // Hide to tray instead of quitting; the tray "Open SSHelter" item
                     // (show + set_focus) brings it back.
                     api.prevent_close();
@@ -327,7 +328,11 @@ fn run_app(host: bool, start_hidden: bool) {
             // no second process; it sends Reopen. Bring back the window, even a hidden one.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_main_window(app),
-            tauri::RunEvent::Exit => mcp::forget_bridge(app),
+            tauri::RunEvent::Exit => {
+                mcp::forget_bridge(app);
+                // Quitting ends every session; each terminal is told why (own-ssh spec §4).
+                session::app::quit(app);
+            }
             _ => {}
         });
 }
