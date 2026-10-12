@@ -1175,7 +1175,7 @@ pub(crate) mod toy_server {
 
     use russh::keys::PrivateKey;
     use russh::server::{self, Auth, Config, Msg, Response, Server as _, Session};
-    use russh::{Channel, ChannelId, MethodKind, MethodSet};
+    use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
     use tokio::net::TcpListener;
 
     use crate::sync::slot_rules::test_keys;
@@ -1198,6 +1198,27 @@ pub(crate) mod toy_server {
         }
     }
 
+    /// What a toy server does besides logging people in. The default is the plain server: no banner, every request is answered with success.
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct ToyBehavior {
+        /// How long the server thinks about the answers of a keyboard-interactive round before it says whether they are right.
+        pub verdict_delay: std::time::Duration,
+        /// Sent as the authentication banner as soon as the client asks for the login service, so it reaches the client before the server's
+        /// answer to the first login request.
+        pub banner: Option<String>,
+        /// The request on a session channel that the server answers with a failure instead of a success.
+        pub refuses: Option<Refusal>,
+    }
+
+    /// A request on a session channel that a toy server turns down.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Refusal {
+        /// The request for a terminal (PTY).
+        Pty,
+        /// The request to start a shell.
+        Shell,
+    }
+
     /// The request that puts the prompts of one round to the client (no echo).
     fn ask(round: &[(String, String)]) -> Auth {
         Auth::Partial {
@@ -1210,8 +1231,7 @@ pub(crate) mod toy_server {
     /// The server's side of one client.
     struct Toy {
         login: Arc<ToyLogin>,
-        /// How long the server thinks about the answers of a keyboard-interactive round before it says whether they are right.
-        verdict_delay: std::time::Duration,
+        behavior: Arc<ToyBehavior>,
         /// The round of keyboard-interactive that the client is answering. A `Toy` is made for each client, so the count is that client's own.
         round: usize,
     }
@@ -1234,8 +1254,8 @@ pub(crate) mod toy_server {
                     Ok(ask(&rounds[0]))
                 }
                 Some(mut response) => {
-                    if !self.verdict_delay.is_zero() {
-                        tokio::time::sleep(self.verdict_delay).await;
+                    if !self.behavior.verdict_delay.is_zero() {
+                        tokio::time::sleep(self.behavior.verdict_delay).await;
                     }
                     let answered_right = rounds[self.round]
                         .iter()
@@ -1253,8 +1273,44 @@ pub(crate) mod toy_server {
             Ok(Auth::reject())
         }
 
+        /// The banner of `ToyBehavior`, if it has one: russh asks once per client, when the client requests the login service.
+        async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {
+            Ok(self.behavior.banner.clone())
+        }
+
         async fn channel_open_session(&mut self, _channel: Channel<Msg>, reply: server::ChannelOpenHandle, _session: &mut Session) -> Result<(), Self::Error> {
             reply.accept().await;
+            Ok(())
+        }
+
+        /// The terminal is given, unless the server was told to refuse it.
+        #[allow(clippy::too_many_arguments)]
+        async fn pty_request(
+            &mut self,
+            channel: ChannelId,
+            _term: &str,
+            _col_width: u32,
+            _row_height: u32,
+            _pix_width: u32,
+            _pix_height: u32,
+            _modes: &[(Pty, u32)],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            if self.behavior.refuses == Some(Refusal::Pty) {
+                session.channel_failure(channel)?;
+            } else {
+                session.channel_success(channel)?;
+            }
+            Ok(())
+        }
+
+        /// The shell starts (and says nothing), unless the server was told to refuse it.
+        async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
+            if self.behavior.refuses == Some(Refusal::Shell) {
+                session.channel_failure(channel)?;
+            } else {
+                session.channel_success(channel)?;
+            }
             Ok(())
         }
 
@@ -1271,14 +1327,14 @@ pub(crate) mod toy_server {
 
     struct Factory {
         login: Arc<ToyLogin>,
-        verdict_delay: std::time::Duration,
+        behavior: Arc<ToyBehavior>,
     }
 
     impl server::Server for Factory {
         type Handler = Toy;
 
         fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Toy {
-            Toy { login: Arc::clone(&self.login), verdict_delay: self.verdict_delay, round: 0 }
+            Toy { login: Arc::clone(&self.login), behavior: Arc::clone(&self.behavior), round: 0 }
         }
     }
 
@@ -1290,12 +1346,17 @@ pub(crate) mod toy_server {
 
     impl ToyServer {
         pub(crate) fn start(login: ToyLogin) -> ToyServer {
-            ToyServer::start_slow(login, std::time::Duration::ZERO)
+            ToyServer::start_with(login, ToyBehavior::default())
         }
 
         /// A server that takes `verdict_delay` to say whether the answers of a keyboard-interactive round are right, as a PAM module does
         /// while it waits for a push approval.
         pub(crate) fn start_slow(login: ToyLogin, verdict_delay: std::time::Duration) -> ToyServer {
+            ToyServer::start_with(login, ToyBehavior { verdict_delay, ..ToyBehavior::default() })
+        }
+
+        /// A server that behaves as `behavior` says.
+        pub(crate) fn start_with(login: ToyLogin, behavior: ToyBehavior) -> ToyServer {
             let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().expect("the toy server's runtime");
             let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0))).expect("bind the toy server");
             let port = listener.local_addr().expect("the toy server's address").port();
@@ -1307,7 +1368,7 @@ pub(crate) mod toy_server {
                 keys: vec![host_key],
                 ..Config::default()
             };
-            let mut factory = Factory { login: Arc::new(login), verdict_delay };
+            let mut factory = Factory { login: Arc::new(login), behavior: Arc::new(behavior) };
             runtime.spawn(async move {
                 let _ = factory.run_on_socket(Arc::new(config), &listener).await;
             });
