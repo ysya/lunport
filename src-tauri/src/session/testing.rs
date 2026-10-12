@@ -27,11 +27,11 @@ impl FakeKeys {
         let mut keys = HashMap::new();
         keys.insert(
             "k-plain".to_string(),
-            (VaultKey { name: "plain".into(), public_key: test_keys::PLAIN_PUBLIC.into(), has_passphrase: false }, test_keys::plain()),
+            (VaultKey { name: "plain".into(), public_key: test_keys::PLAIN_PUBLIC.into() }, test_keys::plain()),
         );
         keys.insert(
             "k-enc".to_string(),
-            (VaultKey { name: "laptop".into(), public_key: test_keys::ENC_PUBLIC.into(), has_passphrase: true }, test_keys::encrypted()),
+            (VaultKey { name: "laptop".into(), public_key: test_keys::ENC_PUBLIC.into() }, test_keys::encrypted()),
         );
         FakeKeys { keys }
     }
