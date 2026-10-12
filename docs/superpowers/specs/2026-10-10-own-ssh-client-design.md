@@ -347,7 +347,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 
 - Windows:`AttachConsole` + VT 模式在 Windows Terminal 與傳統 console 的行為(第 3 期);PTY/ConPTY 與視窗大小沒量過。
 - 第 0 期沒量到、第 1 期要補(§12):密碼與 keyboard-interactive 的成功路徑(PAM);`sign` 出錯與被放棄的 keyboard-interactive 之後的 session;內層跳板自己先結束、外層還活著時的 `disconnected`;Linux 與其他版本的 sshd(所有計時只在 macOS OpenSSH 10.3p1 量過);長時間連線與 rekey;沒有 `server-sig-algs` 的老伺服器;app 加上 russh 後的 Windows build;`cargo audit` 對兩代 RustCrypto 的結果。
-- 試驗 crate `spike/` 的壽命:它的 lock 記了 app 的整個相依圖,`src-tauri/Cargo.toml` 一變,它的 `--locked` Windows 工作就壞;harness 搬進 app 之後刪掉 `spike/` 與 `spike-windows.yml`(報告留著)。
+- 試驗 crate `spike/` 的壽命:已結束。它的 lock 記了 app 的整個相依圖,`src-tauri/Cargo.toml` 一變,它的 `--locked` Windows 工作就壞,所以第 1a 期在 harness 搬進 app(`src-tauri/src/ssh/testing/`)之後刪掉了 `spike/` 與 `spike-windows.yml`。報告 `2026-10-10-own-ssh-spike-report.md` 留著;它引用的 `spike/russh/...` 檔案只剩 git 歷史(刪除那個 commit 之前)裡看得到。
 - 同一個 alias 在不同 space 重複時 CLI 的選法(本文件:回錯誤要求用 id;UI 可以禁止同名)。
 - keyboard-interactive 的提示在 MCP `ask` 模式下送 app 視窗,是否需要遮蔽輸入(`echo` 旗標已在協定裡,視窗照它做)。
 - 1.0 的 beta 何時開始發到唯一的 beta 通道(使用者決定)。
