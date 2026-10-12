@@ -98,6 +98,8 @@ export function followPending(set: (list: HostKeyRequest[]) => void): () => void
 /**
  * The pending list reaches the window two ways: one fetch, started once the listener is registered (`followPending`), and an event for
  * every change. A fetch still in flight may have read an older list, so once an event has arrived the fetch's result is ignored.
+ * (After a rejected answer the window fetches the list once more, outside this guard: an event that arrives while that fetch is in
+ * flight can be overwritten by the older list until the next change. Plan 1d's rework of the window routes it through the guard.)
  */
 export function pendingFeed(set: (list: HostKeyRequest[]) => void): { fromFetch: (list: HostKeyRequest[]) => void; fromEvent: (list: HostKeyRequest[]) => void } {
   let sawEvent = false;
