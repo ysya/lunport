@@ -21,6 +21,10 @@ pub fn eventually(what: &str, seconds: u64, mut condition: impl FnMut() -> bool)
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    // A condition that became true during the last sleep is not a timeout.
+    if condition() {
+        return;
+    }
     panic!("timed out after {seconds} s waiting for: {what}");
 }
 
