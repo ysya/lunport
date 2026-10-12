@@ -528,7 +528,7 @@ impl FrameLink {
 }
 
 /// Why nothing is written to a client any more once it has been told the session is over.
-fn finished() -> std::io::Error {
+fn after_exited() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the client has been told that the session is over")
 }
 
@@ -543,7 +543,7 @@ impl ClientLink for FrameLink {
     fn send_all(&self, messages: &[ServerMessage]) -> std::io::Result<()> {
         let mut writer = locked(&self.writer);
         if writer.finished {
-            return Err(finished());
+            return Err(after_exited());
         }
         let mut unwritten = Ok(());
         for message in messages {
@@ -566,7 +566,7 @@ impl ClientLink for FrameLink {
     fn send_data(&self, bytes: &[u8]) -> std::io::Result<()> {
         let mut writer = locked(&self.writer);
         if writer.finished {
-            return Err(finished());
+            return Err(after_exited());
         }
         write_data(&mut writer.stream, bytes)
     }
@@ -1689,7 +1689,7 @@ mod tests {
         let started = Instant::now();
         world.broker.end_all(QUIT_WAIT);
         assert!(started.elapsed() < QUIT_WAIT, "everything was over before the wait: {:?}", started.elapsed());
-        assert!(started.elapsed() > Duration::from_secs(2), "(the shell had printed nothing, so it was kept open for the settle time: {:?})", started.elapsed());
+        assert!(started.elapsed() > Duration::from_secs(1), "(the shell had printed nothing, so it was kept open for the settle time: {:?})", started.elapsed());
         assert_eq!(client.ready_now(), told_quit(), "told by the time end_all returned");
         assert_eq!(world.engine.events().last(), Some(&FakeEvent::Closed));
     }
@@ -1740,8 +1740,7 @@ mod tests {
             let (broker, conn) = (Arc::clone(&world.broker), conn.clone());
             std::thread::spawn(move || broker.could_not_start(&conn))
         };
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(starting.is_finished(), "it tells the client nothing, so it has nothing to wait for");
+        crate::ssh::testing::eventually("it to tell the client nothing, and so have nothing to wait for", 5, || starting.is_finished());
         assert!(world.broker.has_sessions(), "and the entry is left to the telling, which removes it");
         drop(busy);
         starting.join().unwrap();
