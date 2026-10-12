@@ -1,8 +1,9 @@
 //! The session broker (own-ssh spec §4, §7.2): it serves the clients that connect to the local IPC socket, one session per connection.
 //! A connection says `hello`, asks for a shell (`open_shell`), and owns the session from then on: what the login needs is asked of it,
 //! its keystrokes and resizes go to the shell, and when it goes away the session is closed. The connection's own thread reads it; a
-//! second thread connects and pumps the shell. No read timeout applies once `hello` has arrived: an idle shell stays open for as long as
-//! its terminal does.
+//! second thread connects and pumps the shell. No read timeout applies once `open_shell` has arrived: an idle shell stays open for as
+//! long as its terminal does. A session is in the broker's table from `open_shell` on, connecting and open alike, so that the app sees
+//! it and, when it quits, can end it and tell its client why.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -17,10 +18,10 @@ use super::auth::{KeyStore, Owner, Reply};
 use super::connect::{CancelToken, Connector, HostKeyConfirmer, CANCELLED};
 use super::directory::HostDirectory;
 use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, HostQuery, Question, QuestionKind, ServerMessage, PROTOCOL_VERSION};
-use super::relay::{run_shell, ClientLink, ShellControl};
+use super::relay::{run_shell, tell, ClientLink, ShellControl};
 use crate::ipc::peer::{self, ProcInfo};
 use crate::ipc::server::{Handler, Stream};
-use crate::ssh::{HostId, Pty, SshEngine};
+use crate::ssh::{Hop, HostId, Pty, SshEngine};
 use crate::sync::env::Keychain;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -35,22 +36,66 @@ pub fn quit_reason(alias: &str) -> String {
     format!("SSHelter quit, so the connection to {alias} was closed.")
 }
 
-/// A session that is open: for the app (keep running while there are some, end them when quitting) and, in a later version, for the
-/// list of sessions (spec §10).
+/// Where a session is: asking the client what the login needs and connecting, or open (its shell is being opened, or is open).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionState {
+    Connecting,
+    Open,
+}
+
+/// A session, for the app (it keeps running while there are some, and ends them when it quits) and, in a later version, for the list of
+/// sessions (spec §10). It is in the table from the moment the client asked for a shell, not only once the connection is made: a client
+/// at a question, or at the host key window, has a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionInfo {
     pub id: u64,
+    /// The saved host's alias; until the connect has looked the host up (`Connecting`), what the client asked for.
     pub alias: String,
-    pub host_id: HostId,
+    /// `None` until the connect has looked the host up, unless the client asked for the host by its id.
+    pub host_id: Option<HostId>,
+    pub state: SessionState,
     /// Who asked for it: the process chain of the client, outermost first, without SSHelter's own executable (spec §7.2); `None` when it
     /// could not be told. Recorded now, shown from phase 2 on.
     pub requested_by: Option<Vec<String>>,
+    /// When the client asked for the shell.
     pub started_at_ms: u64,
+}
+
+/// What the connection's thread and the session's thread share for one session, and what the table keeps of it for `end_all`.
+#[derive(Clone)]
+struct Conn {
+    id: u64,
+    link: Arc<FrameLink>,
+    /// A handle on the connection, to close it with (`hang_up`).
+    closer: Arc<Stream>,
+    owner: Arc<ConnectionOwner>,
+    control: Arc<ShellControl>,
+    cancel: CancelToken,
+}
+
+/// Who has given the client of a session that was still being connected the outcome of the connect. Whoever comes second leaves it
+/// alone, so the client is told once. (An open session is told by the relay.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Told {
+    No,
+    /// `end_all` told it that the app is quitting. It closes the connection too, once it has written that: the client reads it before it
+    /// reads the end of the stream.
+    ByEndAll,
+    /// The session's thread told it why the connect failed.
+    BySession,
 }
 
 struct Entry {
     info: SessionInfo,
-    control: Arc<ShellControl>,
+    told: Told,
+    conn: Conn,
+}
+
+#[derive(Default)]
+struct Table {
+    entries: BTreeMap<u64, Entry>,
+    /// `end_all` has started: the app is quitting, and no session is started any more.
+    quitting: bool,
 }
 
 /// The broker. One per app; its handler serves the IPC socket.
@@ -60,8 +105,8 @@ pub struct Broker {
     keys: Arc<dyn KeyStore>,
     keychain: Arc<dyn Keychain>,
     confirmer: Arc<dyn HostKeyConfirmer>,
-    sessions: Mutex<BTreeMap<u64, Entry>>,
-    /// Notified whenever a session leaves `sessions` (`end_all` waits on it).
+    table: Mutex<Table>,
+    /// Notified whenever a session leaves the table (`end_all` waits on it).
     changed: Condvar,
     next_id: AtomicU64,
 }
@@ -74,7 +119,7 @@ impl Broker {
         keychain: Arc<dyn Keychain>,
         confirmer: Arc<dyn HostKeyConfirmer>,
     ) -> Arc<Broker> {
-        Arc::new(Broker { engine, directory, keys, keychain, confirmer, sessions: Mutex::new(BTreeMap::new()), changed: Condvar::new(), next_id: AtomicU64::new(0) })
+        Arc::new(Broker { engine, directory, keys, keychain, confirmer, table: Mutex::new(Table::default()), changed: Condvar::new(), next_id: AtomicU64::new(0) })
     }
 
     /// The IPC server's handler: each connection is served on the thread the server gives it.
@@ -83,30 +128,60 @@ impl Broker {
         Arc::new(move |stream, pid| broker.serve(stream, pid))
     }
 
-    /// The sessions that are open now, oldest first.
+    /// The sessions there are now, oldest first: those being connected as well as those that are open.
     pub fn sessions(&self) -> Vec<SessionInfo> {
-        locked(&self.sessions).values().map(|entry| entry.info.clone()).collect()
+        locked(&self.table).entries.values().map(|entry| entry.info.clone()).collect()
     }
 
+    /// Whether any client has a session, one that is still being connected (it is at a question, or at the host key window) as much as
+    /// one that is open.
     pub fn has_sessions(&self) -> bool {
-        !locked(&self.sessions).is_empty()
+        !locked(&self.table).entries.is_empty()
     }
 
-    /// The app is quitting (spec §4): every session ends, its client told why. Waits up to `wait` for them to close (each closes its own
-    /// shell and connection on its own thread).
+    /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. A session that is still being
+    /// connected is cancelled and its client told at once (the engine's connect cannot be interrupted, and the app does not wait for it);
+    /// one that is open, or whose shell is being opened, is ended through the relay, which closes its shell and tells its client. Waits up
+    /// to `wait` for the table to empty (each session closes its own shell and connection on its own thread).
     pub fn end_all(&self, wait: Duration) {
-        let entries: Vec<(String, Arc<ShellControl>)> = locked(&self.sessions).values().map(|entry| (entry.info.alias.clone(), Arc::clone(&entry.control))).collect();
-        for (alias, control) in entries {
+        let (connecting, open) = {
+            let mut table = locked(&self.table);
+            table.quitting = true;
+            let (mut connecting, mut open) = (Vec::new(), Vec::new());
+            for entry in table.entries.values_mut() {
+                match entry.info.state {
+                    SessionState::Connecting if entry.told == Told::No => {
+                        entry.told = Told::ByEndAll;
+                        connecting.push((entry.info.alias.clone(), entry.conn.clone()));
+                    }
+                    // The client of a session whose connect has failed is being told why; it is not told the app quit as well.
+                    SessionState::Connecting => {}
+                    SessionState::Open => open.push((entry.info.alias.clone(), Arc::clone(&entry.conn.control))),
+                }
+            }
+            (connecting, open)
+        };
+        for (alias, conn) in connecting {
+            // Whatever the session waits for gives up at once. Telling the client can block (a client that has stopped reading), so it is
+            // done on a thread of its own, which closes the connection when it has: the session's thread leaves that to it (`serve`).
+            conn.cancel.cancel();
+            conn.owner.gone();
+            std::thread::spawn(move || {
+                say_quit(conn.link.as_ref(), &alias);
+                hang_up(&conn.closer);
+            });
+        }
+        for (alias, control) in open {
             std::thread::spawn(move || control.end(&quit_reason(&alias)));
         }
         let deadline = Instant::now() + wait;
-        let mut sessions = locked(&self.sessions);
-        while !sessions.is_empty() {
+        let mut table = locked(&self.table);
+        while !table.entries.is_empty() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
-            sessions = self.changed.wait_timeout(sessions, left).unwrap_or_else(PoisonError::into_inner).0;
+            table = self.changed.wait_timeout(table, left).unwrap_or_else(PoisonError::into_inner).0;
         }
     }
 
@@ -116,7 +191,7 @@ impl Broker {
         let link = Arc::new(FrameLink { writer: Mutex::new(writer) });
         let mut reader = stream;
         let refuse = |kind: &str, text: &str| {
-            let _ = link.send(&ServerMessage::Event(Event::Error { kind: kind.to_string(), text: text.to_string() }));
+            let _ = tell(link.as_ref(), ServerMessage::Event(Event::Error { kind: kind.to_string(), text: text.to_string() }));
         };
         // `hello` first, within a short time; from then on no read timeout (an idle shell is not a dead client).
         let _ = set_read_timeout(&reader, Some(HELLO_WAIT));
@@ -145,24 +220,35 @@ impl Broker {
         let cancel = CancelToken::default();
         control.resize(pty.cols, pty.rows);
         let Ok(closer) = reader.try_clone() else { return };
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let conn = Conn { id, link: Arc::clone(&link), closer: Arc::new(closer), owner: Arc::clone(&owner), control: Arc::clone(&control), cancel: cancel.clone() };
+        // From here on the session is in the table, whatever it is doing, so that the app sees it and can end it.
+        if !self.enter(&conn, &host, requested_by) {
+            return say_quit(link.as_ref(), &host.to_string());
+        }
         let worker = {
-            let (broker, owner, control, cancel, link) = (Arc::clone(self), Arc::clone(&owner), Arc::clone(&control), cancel.clone(), Arc::clone(&link));
+            let (broker, conn) = (Arc::clone(self), conn.clone());
             let pty = Pty { term: pty.term, cols: pty.cols, rows: pty.rows };
-            let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
             std::thread::Builder::new().name("sshelter-session".to_string()).spawn(move || {
-                broker.run_session(id, &host, pty, owner.as_ref(), link.as_ref(), &control, &cancel, requested_by);
-                // The session is over: the connection is closed, which ends the reader below and tells the client.
-                hang_up(&closer);
+                broker.run_session(&conn, &host, pty);
+                // The session is over: it leaves the table, and the connection is closed, which ends the reader below and tells the client.
+                // `end_all` closes the connection of a client it told the app is quitting, after it has told it.
+                if broker.forget(conn.id) != Told::ByEndAll {
+                    hang_up(&conn.closer);
+                }
             })
         };
-        let Ok(worker) = worker else { return refuse(kinds::CONNECT, "SSHelter could not start the session.") };
+        let Ok(worker) = worker else {
+            self.forget(id);
+            return refuse(kinds::CONNECT, "SSHelter could not start the session.");
+        };
         // The client's messages, until it closes or goes away.
         loop {
             match read_frame(&mut reader) {
                 Ok(Some(Frame::Data(bytes))) => control.input(&bytes, link.as_ref()),
                 Ok(Some(Frame::Control(payload))) => match decode::<ClientMessage>(&payload) {
                     Ok(ClientMessage::WindowChange { cols, rows }) => control.resize(cols, rows),
-                    Ok(ClientMessage::Answer { question_id, value, cancel }) => owner.answer(&question_id, value, cancel),
+                    Ok(ClientMessage::Answer { question_id, value, cancel: cancelled }) => owner.answer(&question_id, value, cancelled),
                     Ok(ClientMessage::Close) => break,
                     Ok(_) | Err(_) => refuse(kinds::PROTOCOL, "SSHelter did not expect that message."),
                 },
@@ -176,20 +262,59 @@ impl Broker {
         let _ = worker.join();
     }
 
+    /// Puts the session in the table, still connecting; `false` when the app is quitting (`end_all` has started), and none is started.
+    fn enter(&self, conn: &Conn, query: &HostQuery, requested_by: Option<Vec<String>>) -> bool {
+        let started_at_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as u64).unwrap_or(0);
+        let host_id = match query {
+            HostQuery::Id(id) => Some(HostId::from(id.as_str())),
+            HostQuery::Alias(_) => None,
+        };
+        let info = SessionInfo { id: conn.id, alias: query.to_string(), host_id, state: SessionState::Connecting, requested_by, started_at_ms };
+        let mut table = locked(&self.table);
+        if table.quitting {
+            return false;
+        }
+        table.entries.insert(conn.id, Entry { info, told: Told::No, conn: conn.clone() });
+        true
+    }
+
+    /// The session is over: it leaves the table. Says whom the client of a session that was still being connected has been told by.
+    fn forget(&self, id: u64) -> Told {
+        let entry = locked(&self.table).entries.remove(&id);
+        self.changed.notify_all();
+        entry.map_or(Told::No, |entry| entry.told)
+    }
+
+    /// Whether the caller may tell the client of a session that is still connecting how its connect ended; `false` when `end_all` has
+    /// told it already.
+    fn claim(&self, id: u64) -> bool {
+        match locked(&self.table).entries.get_mut(&id) {
+            Some(entry) if entry.told != Told::No => false,
+            Some(entry) => {
+                entry.told = Told::BySession;
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// The connect has made a session to `destination`: the session becomes an open one. `false` when `end_all` has told its client the
+    /// app is quitting while the connect was going on: the session is then closed, not given a shell.
+    fn promote(&self, id: u64, destination: &Hop) -> bool {
+        let mut table = locked(&self.table);
+        let Some(entry) = table.entries.get_mut(&id) else { return false };
+        if entry.told != Told::No {
+            return false;
+        }
+        entry.info.state = SessionState::Open;
+        entry.info.alias = destination.alias.clone();
+        entry.info.host_id = Some(destination.id.clone());
+        true
+    }
+
     /// The session thread: connects, then runs the shell. A failure is told to the client (unless it is gone) as an error and an exit
     /// without a status.
-    #[allow(clippy::too_many_arguments)]
-    fn run_session(
-        &self,
-        id: u64,
-        host: &HostQuery,
-        pty: Pty,
-        owner: &dyn Owner,
-        link: &dyn ClientLink,
-        control: &Arc<ShellControl>,
-        cancel: &CancelToken,
-        requested_by: Option<Vec<String>>,
-    ) {
+    fn run_session(&self, conn: &Conn, host: &HostQuery, pty: Pty) {
         let connector = Connector {
             engine: self.engine.as_ref(),
             directory: self.directory.as_ref(),
@@ -197,24 +322,34 @@ impl Broker {
             keychain: self.keychain.as_ref(),
             confirmer: self.confirmer.as_ref(),
         };
-        let connected = match connector.connect(host, owner, cancel) {
+        let connected = match connector.connect(host, conn.owner.as_ref(), &conn.cancel) {
             Ok(connected) => connected,
             Err(failure) => {
-                if failure.kind != CANCELLED && !control.is_gone() {
-                    let _ = link.send(&ServerMessage::Event(Event::Error { kind: failure.kind, text: failure.text }));
-                    let _ = link.send(&ServerMessage::Exited { code: None, signal: None });
+                if failure.kind != CANCELLED && !conn.control.is_gone() && self.claim(conn.id) {
+                    could_not_open(conn.link.as_ref(), &failure.kind, &failure.text);
                 }
                 return;
             }
         };
         let Some(destination) = connected.target.hops.last() else { return };
-        let started_at_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as u64).unwrap_or(0);
-        let info = SessionInfo { id, alias: destination.alias.clone(), host_id: destination.id.clone(), requested_by, started_at_ms };
-        locked(&self.sessions).insert(id, Entry { info, control: Arc::clone(control) });
-        run_shell(connected, pty, link, control, &id.to_string());
-        locked(&self.sessions).remove(&id);
-        self.changed.notify_all();
+        if !self.promote(conn.id, destination) {
+            connected.session.close();
+            return;
+        }
+        run_shell(connected, pty, conn.link.as_ref(), &conn.control, &conn.id.to_string());
     }
+}
+
+/// A session that could not be opened: the error, then `exited` without a status (spec §7.2).
+fn could_not_open(link: &dyn ClientLink, kind: &str, text: &str) {
+    let _ = tell(link, ServerMessage::Event(Event::Error { kind: kind.to_string(), text: text.to_string() }));
+    let _ = tell(link, ServerMessage::Exited { code: None, signal: None });
+}
+
+/// Tells a client that the app quit under its session (spec §4).
+fn say_quit(link: &dyn ClientLink, alias: &str) {
+    let _ = tell(link, ServerMessage::Event(Event::Disconnected { reason: quit_reason(alias) }));
+    let _ = tell(link, ServerMessage::Exited { code: None, signal: None });
 }
 
 /// `read_frame` and `decode` for the first messages; `None` for the end of the stream or anything that is not a control message.
@@ -345,7 +480,7 @@ mod tests {
 
     use super::*;
     use crate::session::protocol::{read_frame, write_control, write_data, Frame, PtyRequest, QuestionKind, MAX_FRAME};
-    use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, WaitingConfirmer};
+    use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, GatedEngine, WaitingConfirmer};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods, FakeShell};
     use crate::ipc::peer::ProcInfo;
     use crate::ssh::{AuthMethod, Exit};
@@ -426,6 +561,8 @@ mod tests {
     struct World {
         broker: Arc<Broker>,
         engine: Arc<FakeEngine>,
+        /// The gates of the engine's connects and shell opens: open, unless the test closed one when it made the world.
+        gates: Arc<GatedEngine>,
         directory: Arc<FakeDirectory>,
         sock: std::path::PathBuf,
         _dir: tempfile::TempDir,
@@ -433,9 +570,15 @@ mod tests {
 
     /// A broker over `engine`, `directory` and `confirmer`, listening on a socket in a short temp directory (macOS limits socket paths).
     fn world_with(engine: FakeEngine, directory: FakeDirectory, confirmer: Arc<dyn HostKeyConfirmer>, keychain: MemKeychain) -> World {
+        world_gated(engine, directory, confirmer, keychain, |gated| gated)
+    }
+
+    /// Like `world_with`, with the gates of the engine made by `gate` (`GatedEngine::holding_connects`, `holding_shells`).
+    fn world_gated(engine: FakeEngine, directory: FakeDirectory, confirmer: Arc<dyn HostKeyConfirmer>, keychain: MemKeychain, gate: impl FnOnce(GatedEngine) -> GatedEngine) -> World {
         let (engine, directory) = (Arc::new(engine), Arc::new(directory));
+        let gates = Arc::new(gate(GatedEngine::new(Arc::clone(&engine))));
         let broker = Broker::new(
-            Arc::clone(&engine) as Arc<dyn SshEngine>,
+            Arc::clone(&gates) as Arc<dyn SshEngine>,
             Arc::clone(&directory) as Arc<dyn HostDirectory>,
             Arc::new(FakeKeys::new()),
             Arc::new(keychain),
@@ -444,14 +587,22 @@ mod tests {
         let dir = tempfile::Builder::new().prefix("sb").tempdir_in("/tmp").unwrap();
         let ipc = dir.path().join("ipc");
         assert_eq!(crate::ipc::server::listen_unix(&ipc, broker.handler()).unwrap(), crate::ipc::server::Started::Running);
-        World { broker, engine, directory, sock: ipc.join("sock"), _dir: dir }
+        World { broker, engine, gates, directory, sock: ipc.join("sock"), _dir: dir }
     }
 
     /// `web` is pinned and its password is saved: it connects without a question.
     fn world(engine: FakeEngine) -> World {
+        world_gated(engine, pinned_web(), Arc::new(FakeConfirmer::default()), saved_password(), |gated| gated)
+    }
+
+    fn pinned_web() -> FakeDirectory {
+        FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())
+    }
+
+    fn saved_password() -> MemKeychain {
         let keychain = MemKeychain::default();
         keychain.set("host:id-web", "saved").unwrap();
-        world_with(engine, FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key()), Arc::new(FakeConfirmer::default()), keychain)
+        keychain
     }
 
     fn remote(world: &World) -> FakeShell {
@@ -571,7 +722,8 @@ mod tests {
         assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
         let sessions = world.broker.sessions();
         assert_eq!(sessions.len(), 1);
-        assert_eq!((sessions[0].id, sessions[0].alias.as_str(), sessions[0].host_id.as_str()), (1, "web", "id-web"));
+        assert_eq!((sessions[0].id, sessions[0].alias.as_str(), sessions[0].host_id.as_ref().map(HostId::as_str)), (1, "web", Some("id-web")));
+        assert_eq!(sessions[0].state, SessionState::Open);
         assert!(world.broker.has_sessions());
         remote(&world).end(Exit::Code(0));
         client.rest();
@@ -719,5 +871,155 @@ mod tests {
             },
             other => panic!("{other:?}"),
         }
+    }
+
+    fn quit_sentence() -> ServerMessage {
+        ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to web was closed.".into() })
+    }
+
+    /// Plan 1b-1 review, Task 11 Important 2: a client that is being asked a question (here the password) has a session as much as one
+    /// whose shell is open. The app does not quit under it without saying why, and the window it closes does not quit the app.
+    #[test]
+    fn a_client_at_a_password_question_has_a_session_and_is_told_why_when_the_app_quits() {
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let world = world_with(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right"))), directory, Arc::new(FakeConfirmer::default()), MemKeychain::default());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        let ServerMessage::Question(question) = client.next_message() else { panic!("expected the password question") };
+        assert_eq!(question.kind, QuestionKind::Password);
+        assert!(world.broker.has_sessions(), "a client at a question has a session");
+        let sessions = world.broker.sessions();
+        assert_eq!(
+            (sessions.len(), sessions[0].id, sessions[0].alias.as_str(), sessions[0].host_id.clone(), sessions[0].state),
+            (1, 1, "web", None, SessionState::Connecting),
+            "listed as connecting, under the alias the client asked for, before the host has been looked up"
+        );
+        world.broker.end_all(Duration::from_secs(5));
+        assert_eq!(client.rest().1, [quit_sentence(), no_status()]);
+        crate::ssh::testing::eventually("the session to be forgotten", 5, || !world.broker.has_sessions());
+        assert!(world.engine.events().is_empty(), "nothing was connected");
+    }
+
+    /// What the app tells a client it ends is read before the end of the connection, whichever of the two finishes first: here the
+    /// session's thread is done with its connect long before the telling gets to write (the client's connection is busy meanwhile), and
+    /// it must not close the connection under it.
+    #[test]
+    fn the_connection_of_a_client_the_app_told_it_is_quitting_is_closed_after_it_was_told() {
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let world = world_with(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right"))), directory, Arc::new(FakeConfirmer::default()), MemKeychain::default());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        let ServerMessage::Question(_) = client.next_message() else { panic!("expected the password question") };
+        let link = Arc::clone(&locked(&world.broker.table).entries[&1].conn.link);
+        let busy = locked(&link.writer);
+        world.broker.end_all(Duration::from_secs(5));
+        assert!(!world.broker.has_sessions(), "the session's own thread has ended");
+        std::thread::sleep(Duration::from_millis(300));
+        drop(busy);
+        assert_eq!(client.rest().1, [quit_sentence(), no_status()]);
+    }
+
+    /// The same while the shell is being opened, which can take seconds: the shell is closed once the engine has opened it, the client was
+    /// never told it opened, and is told why it ended.
+    #[test]
+    fn a_client_whose_shell_is_still_opening_when_the_app_quits_is_told_why_and_loses_the_shell() {
+        let keychain = saved_password();
+        let world = world_gated(FakeEngine::new().with_shell_output(b"$ "), pinned_web(), Arc::new(FakeConfirmer::default()), keychain, |gated| gated.holding_shells());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        crate::ssh::testing::eventually("the shell to be being opened", 5, || world.gates.shell.entered() == 1);
+        assert!(world.broker.has_sessions());
+        let control = Arc::clone(&locked(&world.broker.table).entries[&1].conn.control);
+        let ending = {
+            let broker = Arc::clone(&world.broker);
+            std::thread::spawn(move || broker.end_all(Duration::from_secs(10)))
+        };
+        // The shell may only open once the app has said why the session ends: that is the case this test is about.
+        crate::ssh::testing::eventually("the session to be ended while its shell is being opened", 5, || control.quit_reason().is_some());
+        world.gates.shell.release();
+        ending.join().unwrap();
+        assert_eq!(client.rest(), (Vec::new(), vec![quit_sentence(), no_status()]), "never told the shell opened, and its prompt was not passed on");
+        let events = world.engine.events();
+        assert_eq!(&events[1..], [FakeEvent::ShellOpened { term: "xterm-256color".into(), cols: 80, rows: 24 }, FakeEvent::ShellClosed, FakeEvent::Closed], "{events:?}");
+        assert!(!world.broker.has_sessions());
+    }
+
+    /// A connect that is still going on when the app starts to quit: the client is told at once (the engine's connect cannot be
+    /// interrupted, and the app does not wait for it), and when the connect finishes meanwhile it ends at once: no shell is opened.
+    #[test]
+    fn a_connect_that_finishes_after_the_app_started_to_quit_ends_at_once_and_its_client_was_told_meanwhile() {
+        let world = world_gated(FakeEngine::new(), pinned_web(), Arc::new(FakeConfirmer::default()), saved_password(), |gated| gated.holding_connects());
+        let mut client = Client::connect(&world.sock);
+        client.stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.open("web");
+        crate::ssh::testing::eventually("the connect to be going on", 5, || world.gates.connect.entered() == 1);
+        let ending = {
+            let broker = Arc::clone(&world.broker);
+            std::thread::spawn(move || broker.end_all(Duration::from_secs(10)))
+        };
+        assert_eq!(client.next_message(), quit_sentence(), "told while the engine is still connecting");
+        assert_eq!(client.next_message(), no_status());
+        assert!(world.engine.events().is_empty(), "the connect has not finished");
+        world.gates.connect.release();
+        ending.join().unwrap();
+        assert_eq!(client.rest(), (Vec::new(), Vec::new()), "nothing more is said");
+        assert_eq!(world.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed], "connected, and closed at once: no shell");
+        assert!(!world.broker.has_sessions());
+    }
+
+    /// A client that asks for a shell after the app started to quit gets the same answer.
+    #[test]
+    fn a_client_that_asks_for_a_shell_while_the_app_quits_is_told_so() {
+        let world = world(FakeEngine::new());
+        world.broker.end_all(Duration::from_millis(10));
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        assert_eq!(client.rest().1, [quit_sentence(), no_status()]);
+        assert!(world.engine.events().is_empty(), "nothing was connected");
+    }
+
+    /// A `Conn` on a socket pair, for the tests of the table: the client's end is returned too.
+    fn conn_on_a_socket_pair(id: u64) -> (Conn, UnixStream) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let link = Arc::new(FrameLink { writer: Mutex::new(theirs.try_clone().unwrap()) });
+        let conn = Conn {
+            id,
+            link: Arc::clone(&link),
+            closer: Arc::new(theirs),
+            owner: Arc::new(ConnectionOwner { link, questions: Mutex::new(HashMap::new()), next_question: AtomicU64::new(0) }),
+            control: Arc::new(ShellControl::new()),
+            cancel: CancelToken::default(),
+        };
+        (conn, ours)
+    }
+
+    /// The client of a session that is still connecting is told how the connect ended by one of two parties, `end_all` (the app is
+    /// quitting) or the session's thread (it failed), and by one only; and a connect that has a session by then does not make it an open one.
+    #[test]
+    fn the_outcome_of_a_connect_is_told_by_one_party_and_a_session_told_the_app_quit_is_not_opened() {
+        let world = world(FakeEngine::new());
+        let web = Hop::new("id-web", "web", "web.example.com", 22, "deploy", AuthMethod::Password);
+        let query = HostQuery::Alias("web".into());
+
+        let (failing, _client) = conn_on_a_socket_pair(1);
+        assert!(world.broker.enter(&failing, &query, None));
+        assert!(world.broker.claim(1), "the first to tell");
+        assert!(!world.broker.claim(1), "and nobody after it");
+        assert!(!world.broker.promote(1, &web), "a session whose client was told the connect failed is not opened");
+        assert_eq!(world.broker.forget(1), Told::BySession);
+
+        let (quitting, mut client) = conn_on_a_socket_pair(2);
+        assert!(world.broker.enter(&quitting, &query, None));
+        world.broker.end_all(Duration::ZERO);
+        assert!(!world.broker.claim(2), "end_all told it first");
+        assert!(!world.broker.promote(2, &web), "a connect that finishes after end_all started does not make an open session");
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut told = Vec::new();
+        while let Some(Frame::Control(payload)) = read_frame(&mut client).unwrap() {
+            told.push(decode::<ServerMessage>(&payload).unwrap());
+        }
+        assert_eq!(told, [quit_sentence(), no_status()]);
+        assert_eq!(world.broker.forget(2), Told::ByEndAll);
+        assert!(!world.broker.enter(&conn_on_a_socket_pair(3).0, &query, None), "and no session is started once the app is quitting");
     }
 }
