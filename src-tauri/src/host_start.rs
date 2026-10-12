@@ -1,8 +1,9 @@
 //! Starting SSHelter in the background for a client that needs it and finds it not running (own-ssh spec §4): the MCP adapter, and
 //! `sshelter connect` from plan 1b on. Both start the same thing, the app as a host (`--host`, its window hidden), under the same two
-//! locks, so that they never start two. Moved here from `mcp.rs` unchanged, but for two things: the message for "nothing answered" is
-//! the caller's (spec §11 gives the CLI its own), and the flag is `--host`, with the old `--mcp-host` still accepted (an update's
-//! "Install & restart" starts the app again with the arguments it was started with).
+//! locks, so that they never start two. Moved here from `mcp.rs` unchanged, but for four things: the message for "nothing answered" is
+//! the caller's (spec §11 gives the CLI its own); the flag is `--host`, with the old `--mcp-host` still accepted (an update's
+//! "Install & restart" starts the app again with the arguments it was started with); the line it writes to stderr starts with `[host]`
+//! (not `[mcp]`); and the thread that reaps the app it started is `sshelter-host-wait` (not `sshelter-mcp-host-wait`).
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -79,8 +80,8 @@ pub(crate) fn ensure_started<T, G>(
 pub(crate) type SpawnGuards = (MutexGuard<'static, ()>, Option<File>);
 
 pub(crate) fn take_spawn_locks() -> SpawnLocks<SpawnGuards> {
-    // The deadline counts from before this call waits for the adapter's other calls, so a call
-    // never waits much longer than `START_WAIT` for the locks.
+    // The deadline counts from before this call waits for this process's other calls (the adapter's
+    // tool calls), so a call never waits much longer than `START_WAIT` for the locks.
     let deadline = Instant::now() + START_WAIT;
     take_spawn_locks_at(spawn_lock_path().map_err(|e| e.to_string()), deadline)
 }

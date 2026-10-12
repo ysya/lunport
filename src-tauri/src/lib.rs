@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_adapter_flag_starts_the_window_hidden() {
+    fn only_the_hidden_start_variable_starts_the_window_hidden() {
         use std::ffi::OsStr;
         assert!(starts_hidden(Some(OsStr::new("1"))));
         assert!(!starts_hidden(None));
@@ -377,10 +377,11 @@ mod tests {
         assert!(!starts_hidden(Some(OsStr::new("true"))));
     }
 
-    /// A normal launch, the adapter's start and its restart after an update: visible, hidden,
-    /// visible. The environments are what each start sees; main.rs removes the variable.
+    /// A normal launch, a client's start (the MCP adapter's, `sshelter connect`'s) and its restart
+    /// after an update: visible, hidden, visible. The environments are what each start sees;
+    /// main.rs removes the variable.
     #[test]
-    fn a_restart_of_an_adapter_started_sshelter_shows_its_window() {
+    fn a_restart_of_a_client_started_sshelter_shows_its_window() {
         use std::collections::HashMap;
         use std::ffi::OsStr;
         let hidden =
@@ -390,12 +391,12 @@ mod tests {
         assert!(!hidden(&normal_launch));
 
         // host_start.rs `host_command` sets it; main.rs reads it and then removes it from the process.
-        let mut adapter_start = HashMap::from([(START_HIDDEN_ENV, "1")]);
-        assert!(hidden(&adapter_start));
-        adapter_start.remove(START_HIDDEN_ENV);
+        let mut client_start = HashMap::from([(START_HIDDEN_ENV, "1")]);
+        assert!(hidden(&client_start));
+        client_start.remove(START_HIDDEN_ENV);
 
         // tauri restarts with the same arguments (`--host`) and this process's environment.
-        let restart = adapter_start;
+        let restart = client_start;
         assert!(!hidden(&restart));
     }
 }

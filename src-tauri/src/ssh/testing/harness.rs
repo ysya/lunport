@@ -7,7 +7,8 @@
 //! failed: Operation not permitted`; password and keyboard-interactive login cannot work without PAM, so this sshd offers public keys
 //! only.
 //! Every test starts its own sshd. A test that needs one sshd for a long loop adds `PerSourcePenalties no` to its `extra_config`
-//! (OpenSSH 9.8 and later know the keyword, older ones refuse the config, so it cannot be a default).
+//! (OpenSSH 9.8 and later know the keyword, older ones refuse the config, so it cannot be a default) — only after checking with `sshd -t`
+//! that the runner's OpenSSH knows the keyword (9.8 and later); no test in the suite passes it today.
 //!
 //! **A signal that kills the test process leaves its sshd behind.** `Drop` does not run then, and nothing else ties the sshd to the test
 //! process: the listener keeps running and its temp directory stays. The harness cleans up after the fact. `Sshd::start` writes

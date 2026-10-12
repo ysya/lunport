@@ -83,8 +83,8 @@ pub(crate) fn check_socket_path(sock: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 在 `dir`(`~/.ssh/sshelter/agent`)開 `sock`,接受同一使用者的連線,每條交給 `handle`。另一個 SSHelter 已經在提供 → `OtherInstance`;
-/// 沒人接聽的舊 `sock`(上次當掉留下的)由拿到鎖的這一個換掉。
+/// 在 `dir` 開 `sock`(agent 的 `~/.ssh/sshelter/agent`,或 broker 的 `<app data>/ipc`),接受同一使用者的連線,每條交給 `handle`。
+/// 另一個 SSHelter 已經在提供 → `OtherInstance`;沒人接聽的舊 `sock`(上次當掉留下的)由拿到鎖的這一個換掉。
 #[cfg(unix)]
 pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
     use std::os::unix::fs::PermissionsExt;
@@ -104,7 +104,7 @@ pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     // 等連線時不拿鎖(`wait_for_connection`),有連線了才在鎖裡 accept;所以 listener 是 nonblocking,沒接到就回去等。
     listener.set_nonblocking(true)?;
-    std::thread::Builder::new().name("sshelter-agent".to_string()).spawn(move || {
+    std::thread::Builder::new().name("sshelter-ipc-listener".to_string()).spawn(move || {
         // 鎖跟著 listener 持有到行程結束。
         let _lock = lock;
         let active = Arc::new(AtomicUsize::new(0));
