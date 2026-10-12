@@ -72,7 +72,7 @@ pub enum Reply {
     Cancelled,
     /// The deadline passed.
     TimedOut,
-    /// The client went away.
+    /// The client went away, or the question could not be put to it (too large for a frame: `ConnectionOwner::ask`).
     Gone,
 }
 
@@ -245,7 +245,7 @@ impl<'a> BrokerAuth<'a> {
                 }
             }
         }
-        let mut text_of_question = format!("Enter the passphrase for the key {}: ", key.name);
+        let mut text_of_question = format!("Enter the passphrase for the key {}: ", label(&key.name));
         for _ in 0..PASSPHRASE_ATTEMPTS {
             let passphrase = match self.owner.ask(QuestionKind::Passphrase, &text_of_question, false, Some(deadline_after(prompt_wait(hop)))) {
                 Reply::Answer(passphrase) => passphrase,
@@ -254,7 +254,7 @@ impl<'a> BrokerAuth<'a> {
             };
             match material::open(text, Some(&passphrase)) {
                 Ok(material) => return Ok(material),
-                Err(OpenError::WrongPassphrase) => text_of_question = format!("That passphrase didn't work. Enter the passphrase for the key {}: ", key.name),
+                Err(OpenError::WrongPassphrase) => text_of_question = format!("That passphrase didn't work. Enter the passphrase for the key {}: ", label(&key.name)),
                 Err(_) => return Err(format!("The key {} in SSHelter's vault cannot be read.", key.name)),
             }
         }
@@ -463,6 +463,15 @@ mod tests {
         assert!(owner.asked().iter().all(|asked| asked.kind == QuestionKind::Passphrase && !asked.echo && asked.deadline.is_some()));
         assert_eq!(world.keychain.entry(&passphrase_account("k-enc")), None, "the stale passphrase was forgotten");
         assert!(auth.sign("k-enc", b"challenge", None).is_ok());
+
+        // The key's name is the person's, and a vault key's may be anything: it is named on one line, without its controls, as the hops are.
+        let odd = World { keys: FakeKeys::new().with_encrypted_key("k-odd", "lap\u{1b}[2Jtop\n"), keychain: MemKeychain::default(), directory: FakeDirectory::new() };
+        let owner = FakeOwner::typing(&["wrong", TEST_PASSPHRASE]);
+        odd.auth(&owner).unlock(&target(AuthMethod::Key { key_id: "k-odd".into() })).unwrap();
+        assert_eq!(
+            owner.questions(),
+            ["Enter the passphrase for the key lap?[2Jtop?: ", "That passphrase didn't work. Enter the passphrase for the key lap?[2Jtop?: "]
+        );
     }
 
     #[test]

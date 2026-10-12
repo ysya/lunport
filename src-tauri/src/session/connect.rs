@@ -278,7 +278,7 @@ impl Connector<'_> {
     /// it is now. The refusal is the safest answer: the question has no place for a missing date, and a date that is made up (1970) or
     /// belongs to another key is worse than none.
     fn pinned_summary(&self, target: &Target, hop: &HopRef, pinned: &HostKey) -> Result<PinnedSummary, ConnectFailure> {
-        match self.directory.pinned(&hop.id).map_err(directory_failure)? {
+        match self.directory.pinned(&hop.id).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
             Some(record) if record.key.fingerprint == pinned.fingerprint => Ok(PinnedSummary { fingerprint: pinned.fingerprint.clone(), pinned_at_ms: record.pinned_at_ms }),
             _ => {
                 let sentence = format!("SSHelter's record of {}'s host key changed while it was connecting. Connect again.", hop.alias);
@@ -306,7 +306,7 @@ impl Connector<'_> {
         // down. The policy takes that pin and the next round decides: the server shows the pinned key (nothing to ask) or another one (a
         // changed key, with the pin and its date). From then on the policy has a pin for the host, so this happens once for each host.
         if pinned.is_none() {
-            if let Some(record) = self.directory.pinned(&hop.id).map_err(directory_failure)? {
+            if let Some(record) = self.directory.pinned(&hop.id).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
                 policy.pin(&hop.id, record.key.clone());
                 if let Some(refreshed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
                     refreshed.pinned = Some(record.key);
@@ -683,8 +683,37 @@ mod tests {
         }
     }
 
+    /// A directory whose pins could be read when the host was resolved, and cannot be any more (the file was damaged meanwhile): `resolve`
+    /// reads `resolved`, every call that reads or writes the pins goes to `store`, whose pins cannot be read.
+    struct PinsCannotBeRead {
+        resolved: FakeDirectory,
+        store: FakeDirectory,
+    }
+
+    impl HostDirectory for PinsCannotBeRead {
+        fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+            self.resolved.resolve(query)
+        }
+
+        fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
+            self.store.pinned(host)
+        }
+
+        fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
+            self.store.pin(host, key)
+        }
+
+        fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
+            self.store.replace_pin(host, previous, key)
+        }
+
+        fn password_account(&self, host: &HostId) -> String {
+            self.resolved.password_account(host)
+        }
+    }
+
     /// Spec §11: a failure on a jump host is said through it, and so is every way a jump host's key can end the connect: the person does not
-    /// trust it, trusts it and the pin cannot be written, or the directory's record of the pin moved on meanwhile.
+    /// trust it, trusts it and the pin cannot be written, the directory's record of the pin moved on meanwhile, or the pins cannot be read.
     #[test]
     fn a_host_key_problem_of_a_jump_host_is_said_through_it() {
         let key_hop = || AuthMethod::Key { key_id: "k-plain".into() };
@@ -712,6 +741,18 @@ mod tests {
             through(kinds::HOST, "SSHelter's record of bastion's host key changed while it was connecting. Connect again.")
         );
         assert!(trusting.confirmer.asked().is_empty());
+
+        // The pins cannot be read when the key is to be asked about: for a key the policy has no pin for, and for a changed one.
+        for (what, resolved) in [("unknown", chain()), ("changed", chain().with_pin("bastion", key(test_keys::ENC_PUBLIC)))] {
+            let unreadable = PinsCannotBeRead { resolved, store: FakeDirectory::new().with_unreadable_pins() };
+            let trusting = world(FakeEngine::new(), FakeDirectory::new()).deciding(vec![Decision::Trust]);
+            assert_eq!(
+                trusting.connect_through(&unreadable, &db, &trusting.owner).err(),
+                through(kinds::HOST, "SSHelter cannot read its pinned host keys in host-pins.json (the file is damaged)."),
+                "{what}"
+            );
+            assert!(trusting.confirmer.asked().is_empty(), "{what}");
+        }
     }
 
     /// Plan 1b R17: a pinned host whose server no longer has a key of the pinned type would fail with "no common algorithm", because the

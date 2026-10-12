@@ -35,6 +35,12 @@ impl FakeKeys {
         self
     }
 
+    /// The vault also holds the key of `k-enc` (`test_keys::encrypted()`, passphrase `TEST_PASSPHRASE`) as `key_id`, named `name`.
+    pub fn with_encrypted_key(mut self, key_id: &str, name: &str) -> FakeKeys {
+        self.keys.insert(key_id.to_string(), (VaultKey { name: name.into(), public_key: test_keys::ENC_PUBLIC.into() }, test_keys::encrypted()));
+        self
+    }
+
     pub fn new() -> FakeKeys {
         let mut keys = HashMap::new();
         keys.insert(
