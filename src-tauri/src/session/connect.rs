@@ -1,7 +1,8 @@
 //! Opening a session (own-ssh spec §6.2, §7.2, §10): the broker's connect loop around the engine. The engine fails fast where a person
 //! must decide (an unknown or changed host key, a password wanted after a refused key); the broker asks — the window for host keys, the
-//! session's owner for everything else — and connects again with what it learned. Every call here blocks: it runs on the thread of the
-//! client's connection, never in async code and never on the UI thread.
+//! session's owner for everything else — and connects again with what it learned. Every call here blocks: it runs on the session's own
+//! thread (`sshelter-session`, which the broker starts for each client; the client's connection thread only reads what the client sends,
+//! so an answer can reach a question that waits here), never in async code and never on the UI thread.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
