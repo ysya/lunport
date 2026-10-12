@@ -5,7 +5,12 @@
 //! alias here. Never written: `~/.ssh` (spec §1). Never read: `~/.ssh/known_hosts`.
 //!
 //! What it cannot give the broker, and says so: a `ProxyCommand`, a key in a file instead of the vault (SSHelter's own client signs with
-//! vault keys only), and a `ProxyJump` that is anything but a chain of saved hosts, each one as it is saved:
+//! vault keys only), and a `ProxyJump` that is anything but a chain of saved hosts, each one as it is saved.
+//!
+//! A host names a key file when an `IdentityFile` value that `ssh -G` prints is not a vault slot. It names no key when `ssh -G` prints
+//! `none` for it (`IdentityFile none`) or OpenSSH's whole default list, which `ssh -G` prints for a host that names no `IdentityFile`
+//! and for such a host only: a host that names `~/.ssh/id_ed25519` gets that one line, and it is a key file (`DEFAULT_IDENTITY_SEQUENCES`).
+//! The chain of jump hosts is refused when it has:
 //!
 //! - a jump host that is not a saved host;
 //! - a jump with a port or user of its own, as in `ProxyJump admin@bastion:2200` for a `bastion` saved with port 22. OpenSSH lets such an
@@ -31,8 +36,27 @@ use crate::sync::state_v2::{SlotSource, SyncStateV2};
 /// How many jump hosts deep a chain may go (as `config::intel::jump_chain` shows chains).
 const MAX_JUMPS: usize = 5;
 
-/// The `IdentityFile` values `ssh -G` lists when a host names none (OpenSSH 10.3p1): no key was chosen for the host.
-const DEFAULT_IDENTITY_FILES: &[&str] = &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss", "~/.ssh/id_dsa"];
+/// The lists of `IdentityFile` values that `ssh -G` prints for a host that names none, by OpenSSH version. OpenSSH adds its default key
+/// files when a host names no `IdentityFile`, and only then: a host with `IdentityFile ~/.ssh/id_ed25519` gets exactly that one line, and
+/// `IdentityFile none` gets `none`. So whether a host names a key is decided by the whole list `ssh -G` prints, never by the names of
+/// the files in it (`named_key_file`). 10.3p1 prints the first list (measured on a machine with it); the others are what
+/// `fill_default_options` in readconf.c makes, read in the sources at the tags V_7_6_P1, V_7_9_P1, V_8_0_P1, V_8_2_P1, V_8_4_P1,
+/// V_8_8_P1, V_8_9_P1, V_9_6_P1, V_9_9_P2, V_10_0_P1, V_10_1_P1 and V_10_2_P1. (A build without ECDSA support lacks the two ecdsa
+/// files; no such build is known.)
+const DEFAULT_IDENTITY_SEQUENCES: &[&[&str]] = &[
+    // 10.1 and later: no DSA and no XMSS any more.
+    &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk"],
+    // 9.8 to 10.0: XMSS is there, DSA only in a build that asks for it.
+    &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss"],
+    // 8.9 to 9.7, and a 9.8 to 10.0 built with DSA: DSA last.
+    &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss", "~/.ssh/id_dsa"],
+    // 8.2 to 8.8: DSA second.
+    &["~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss"],
+    // 7.9 to 8.1: no security-key files yet.
+    &["~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519", "~/.ssh/id_xmss"],
+    // 7.4 to 7.8: no XMSS either.
+    &["~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519"],
+];
 
 /// One element of a `ProxyJump` list: `[user@]host[:port]`, or `ssh://[user@]host[:port]`. A port or user written here has to be the saved
 /// host's own (`check_jump_is_the_saved_host`).
@@ -94,6 +118,17 @@ fn check_jump_is_the_saved_host(alias: &str, jump: &JumpSpec, saved: &Hop) -> Re
     Ok(())
 }
 
+/// The first key file that the `IdentityFile` values of a host (`ssh -G`'s, in order) name, if they name one. A host names no key when
+/// the list is empty, is a whole default list (`DEFAULT_IDENTITY_SEQUENCES`: OpenSSH adds those for a host that names none) or holds
+/// only `none` (OpenSSH loads no file for that value, whatever its case). Any other value is a key file the host logs in with; a `none`
+/// next to it skips itself and nothing else. A value that is a vault slot is dealt with before this (`Sources::vault_key`).
+fn named_key_file<'a>(identity_files: &[&'a str]) -> Option<&'a str> {
+    if DEFAULT_IDENTITY_SEQUENCES.iter().any(|sequence| *sequence == identity_files) {
+        return None;
+    }
+    identity_files.iter().copied().find(|file| !file.eq_ignore_ascii_case("none"))
+}
+
 /// The first value of `keyword` in `ssh -G`'s output.
 fn value<'a>(pairs: &'a [(String, String)], keyword: &str) -> Option<&'a str> {
     pairs.iter().find(|(key, _)| key == keyword).map(|(_, value)| value.as_str())
@@ -118,7 +153,7 @@ pub fn hop_from_effective(alias: &str, pairs: &[(String, String)], key_id: Optio
         Some(key_id) => AuthMethod::Key { key_id },
         None => {
             let identity_files: Vec<&str> = pairs.iter().filter(|(key, _)| key == "identityfile").map(|(_, value)| value.as_str()).collect();
-            if let Some(file) = identity_files.iter().find(|file| !DEFAULT_IDENTITY_FILES.contains(file)) {
+            if let Some(file) = named_key_file(&identity_files) {
                 return Err(DirectoryError::Unsupported(format!(
                     "{alias} logs in with the key file {file}, which SSHelter's own SSH client cannot use. Put the key in SSHelter (Keychain, Only in SSHelter) to connect with it."
                 )));
@@ -321,6 +356,89 @@ mod tests {
         assert!(matches!(hop_from_effective("x", &pairs("hostname x\nport 99999\n"), None, false), Err(DirectoryError::Unsupported(_))));
     }
 
+    /// What `ssh -G` prints for the key files of a host that names none, by OpenSSH version: OpenSSH adds its default key files when a host
+    /// names no `IdentityFile`, and only then. These are the lists `fill_default_options` in readconf.c makes (read at the tags V_7_6_P1,
+    /// V_7_9_P1, V_8_0_P1, V_8_2_P1, V_8_4_P1, V_8_8_P1, V_8_9_P1, V_9_6_P1, V_9_9_P2, V_10_0_P1, V_10_1_P1 and V_10_2_P1); the first is
+    /// what the 10.3p1 of a development machine prints.
+    const DEFAULT_LISTS: &[(&str, &[&str])] = &[
+        ("10.1 and later", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk"]),
+        ("9.8 to 10.0 without DSA", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss"]),
+        ("8.9 to 9.7", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss", "id_dsa"]),
+        ("8.2 to 8.8", &["id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss"]),
+        ("7.9 to 8.1", &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_xmss"]),
+        ("7.4 to 7.8", &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]),
+    ];
+
+    /// `ssh -G`'s lines for these key files in the `~/.ssh` of the person.
+    fn identity_lines(names: &[&str]) -> String {
+        names.iter().map(|name| format!("identityfile ~/.ssh/{name}\n")).collect()
+    }
+
+    /// The sentence for a host that logs in with a key file of its own.
+    fn key_file_refusal(alias: &str, file: &str) -> DirectoryError {
+        DirectoryError::Unsupported(format!(
+            "{alias} logs in with the key file {file}, which SSHelter's own SSH client cannot use. Put the key in SSHelter (Keychain, Only in SSHelter) to connect with it."
+        ))
+    }
+
+    /// `ssh -G` lists the default key files for a host that names no `IdentityFile`, and only for such a host: one that names
+    /// `~/.ssh/id_ed25519` itself gets exactly that line back, and it logs in with that file. Judging a file by its name would send such a
+    /// host to keyboard-interactive, instead of saying that its key is a file and not in SSHelter.
+    #[test]
+    fn a_host_that_names_one_default_named_key_file_logs_in_with_a_key_file_and_is_refused() {
+        for name in ["id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss"] {
+            let answer = pairs(&format!("hostname old\nuser me\n{}", identity_lines(&[name])));
+            for password_saved in [false, true] {
+                assert_eq!(
+                    hop_from_effective("old", &answer, None, password_saved),
+                    Err(key_file_refusal("old", &format!("~/.ssh/{name}"))),
+                    "{name}, password saved: {password_saved}"
+                );
+            }
+        }
+    }
+
+    /// A list of default-named files is the default only when it is a whole default list, in its order. A part of one, another order or
+    /// one more file are files that the host names itself; the first of them is the one the sentence names.
+    #[test]
+    fn a_list_of_default_named_files_that_is_not_a_whole_default_list_names_key_files() {
+        let newest = DEFAULT_LISTS[0].1;
+        let mut swapped = newest.to_vec();
+        swapped.swap(0, 1);
+        let mut one_more = newest.to_vec();
+        one_more.push("work_key");
+        let mut two_lists = DEFAULT_LISTS[1].1.to_vec();
+        two_lists.extend_from_slice(newest);
+        for names in [&newest[..4], &newest[1..], &swapped[..], &one_more[..], &two_lists[..], &newest[..2]] {
+            let answer = pairs(&format!("hostname old\nuser me\n{}", identity_lines(names)));
+            assert_eq!(hop_from_effective("old", &answer, None, false), Err(key_file_refusal("old", &format!("~/.ssh/{}", names[0]))), "{names:?}");
+        }
+    }
+
+    /// `IdentityFile none` loads no key file (OpenSSH compares the value with "none" without regard to case) and `ssh -G` prints it as
+    /// `identityfile none`: the host names no key, as a host with no `IdentityFile` at all, and so do the default lists of every OpenSSH.
+    #[test]
+    fn a_host_that_names_none_or_gets_a_whole_default_list_names_no_key() {
+        let mut cases: Vec<(String, String)> = DEFAULT_LISTS.iter().map(|(version, names)| (format!("the default list of {version}"), identity_lines(names))).collect();
+        for lines in ["identityfile none\n", "identityfile NONE\n", "identityfile none\nidentityfile None\n", ""] {
+            cases.push((format!("{lines:?}"), lines.to_string()));
+        }
+        for (what, lines) in &cases {
+            let answer = pairs(&format!("hostname mail\nuser me\n{lines}"));
+            assert_eq!(hop_from_effective("mail", &answer, None, false).map(|hop| hop.auth), Ok(AuthMethod::Interactive), "{what}");
+            assert_eq!(hop_from_effective("mail", &answer, None, true).map(|hop| hop.auth), Ok(AuthMethod::Password), "{what}");
+        }
+    }
+
+    /// `none` skips its own entry and nothing else: a key file named next to it is still one the host logs in with.
+    #[test]
+    fn a_key_file_named_next_to_none_is_still_a_key_file() {
+        let refused = |lines: &str| hop_from_effective("old", &pairs(&format!("hostname old\nuser me\n{lines}")), None, true);
+        assert_eq!(refused("identityfile none\nidentityfile ~/.ssh/work_key\n"), Err(key_file_refusal("old", "~/.ssh/work_key")));
+        assert_eq!(refused("identityfile ~/.ssh/work_key\nidentityfile none\n"), Err(key_file_refusal("old", "~/.ssh/work_key")));
+        assert_eq!(refused("identityfile none\nidentityfile ~/.ssh/id_ed25519\n"), Err(key_file_refusal("old", "~/.ssh/id_ed25519")));
+    }
+
     fn slot(file: &str, source: Option<SlotSource>) -> LocalSlot {
         LocalSlot {
             file_name: file.into(),
@@ -376,9 +494,9 @@ mod tests {
 
     fn effective() -> Vec<(&'static str, &'static str)> {
         vec![
-            ("web", "hostname web.example.com\nport 22\nuser deploy\nidentityfile ~/.ssh/id_rsa\n"),
+            ("web", "hostname web.example.com\nport 22\nuser deploy\nidentityfile ~/.ssh/id_rsa\nidentityfile ~/.ssh/id_ecdsa\nidentityfile ~/.ssh/id_ecdsa_sk\nidentityfile ~/.ssh/id_ed25519\nidentityfile ~/.ssh/id_ed25519_sk\n"),
             ("bastion", "hostname gate.example.com\nport 2200\nuser admin\nidentityfile ~/.ssh/sshelter/keys/id_mac-aaaaaaaa\n"),
-            ("db", "hostname db\nport 22\nuser deploy\nproxyjump admin@bastion:2200\nidentityfile ~/.ssh/id_rsa\n"),
+            ("db", "hostname db\nport 22\nuser deploy\nproxyjump admin@bastion:2200\nidentityfile none\n"),
             ("pc", "hostname pc\nport 22\nuser deploy\nproxycommand nc %h %p\n"),
             ("loop1", "hostname loop1\nproxyjump loop2\n"),
             ("loop2", "hostname loop2\nproxyjump loop1\n"),
@@ -414,6 +532,28 @@ mod tests {
         assert_eq!(refused("pc"), "pc uses ProxyCommand, which SSHelter's own SSH client does not support.");
         assert_eq!(refused("outside"), "outside jumps through gate.example.org, which is not a saved host.");
         assert_eq!(refused("loop1"), "The jump hosts go round in a circle: loop1 → loop2 → loop1.");
+    }
+
+    /// The key files a host names decide how it logs in, whether it is the host asked for or a jump host: none (or the default list)
+    /// starts with a password or keyboard-interactive, a file of its own is refused.
+    #[test]
+    fn a_host_is_judged_by_the_key_files_it_names_when_it_is_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let defaults = format!("hostname defaults\nport 22\nuser me\n{}", identity_lines(DEFAULT_LISTS[0].1));
+        let directory = directory_over(
+            &dir,
+            &[
+                ("named", "hostname named\nport 22\nuser me\nidentityfile ~/.ssh/id_ed25519\n"),
+                ("nothing", "hostname nothing\nport 22\nuser me\nidentityfile none\n"),
+                ("defaults", &defaults),
+                ("through", "hostname through\nport 22\nuser me\nidentityfile none\nproxyjump named\n"),
+            ],
+        );
+        let auth = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.last().unwrap().auth.clone());
+        assert_eq!(auth("nothing"), Ok(AuthMethod::Interactive));
+        assert_eq!(auth("defaults"), Ok(AuthMethod::Interactive));
+        assert_eq!(auth("named"), Err(key_file_refusal("named", "~/.ssh/id_ed25519")));
+        assert_eq!(auth("through"), Err(key_file_refusal("named", "~/.ssh/id_ed25519")), "the jump host's key counts as well");
     }
 
     /// A jump is the saved host, not a variant of it. The pin, the saved password and what a person typed belong to the host id, and an id
@@ -648,6 +788,26 @@ mod tests {
             ]
         );
         assert!(target.hops.iter().all(|hop| hop.auth == AuthMethod::Interactive));
+    }
+
+    /// The default key files against the real tool: `ssh -G` (with `-F`) lists them for a host that names no `IdentityFile`, prints
+    /// `none` for `IdentityFile none` and prints exactly what a host names otherwise. If this fails on a new OpenSSH, the list that
+    /// version prints is not in `DEFAULT_IDENTITY_SEQUENCES` yet.
+    #[test]
+    fn the_real_ssh_g_prints_the_default_key_files_only_for_a_host_that_names_none() {
+        let Some(_tools) = crate::ssh::testing::harness::tools() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "Host plain\n  HostName plain.example.com\nHost named\n  HostName named.example.com\n  IdentityFile ~/.ssh/id_ed25519\nHost nothing\n  HostName nothing.example.com\n  IdentityFile none\n",
+        )
+        .unwrap();
+        let directory = real_ssh_directory(&dir, &config);
+        let auth = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops[0].auth.clone());
+        assert_eq!(auth("plain"), Ok(AuthMethod::Interactive), "a host that names no key gets the default list");
+        assert_eq!(auth("nothing"), Ok(AuthMethod::Interactive), "IdentityFile none");
+        assert_eq!(auth("named"), Err(key_file_refusal("named", "~/.ssh/id_ed25519")), "one default-named file is a key file");
     }
 
     /// `ssh -G` names the local user for a host that has no `User` (the adapter does not look the name up itself), so a jump entry that
