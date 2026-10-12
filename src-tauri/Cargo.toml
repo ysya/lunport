@@ -53,7 +53,8 @@ signature = "2"
 # SSH engine (src/ssh/): russh is imported by src/ssh/russh_engine.rs only. Pinned to the exact version the phase-0 spike measured.
 russh = "=0.64.1"
 # russh runs on tokio. The engine owns a dedicated runtime (rt-multi-thread, net, time) and drives it with block_on; `macros` is for select!.
-# `signal`: `sshelter connect` follows the terminal's size (SIGWINCH) and stops cleanly on SIGINT, SIGTERM and SIGHUP (src/cli/run.rs).
+# `signal`: `sshelter connect` follows the terminal's size (SIGWINCH), stops cleanly on SIGINT, SIGTERM, SIGHUP and SIGQUIT, and puts the
+# terminal back for Ctrl-Z (SIGTSTP) and sets it again when it continues (SIGCONT) (src/cli/run.rs).
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
 
 [dev-dependencies]
