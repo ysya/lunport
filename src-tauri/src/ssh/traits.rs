@@ -1,7 +1,7 @@
 //! The engine interface, as spec §6.1 writes it. Everything here is synchronous: the broker, the CLI and the MCP adapter run on plain
 //! threads, and the engine hides its own runtime. Nothing in this file names russh.
 //!
-//! Two additions to the spec's block, both forced by the engine's job: `ShellChannel` is `Send + Sync` (a shell is read on one thread
+//! Two members of the spec's block are there since russh needs them: `ShellChannel` is `Send + Sync` (a shell is read on one thread
 //! while another writes, which needs a shared reference), and `AuthSource::public_key` exists (russh's public-key login announces the
 //! public key before it asks for a signature, and neither `Hop` nor `sign` carries it).
 
@@ -13,14 +13,18 @@ use super::types::{DisconnectReason, ExecResult, Exit, HopRef, HostKey, HostKeyV
 /// Opens connections. Implemented by the russh engine and by the fake used in broker, MCP and CLI tests.
 pub trait SshEngine: Send + Sync {
     /// Connects to every hop of `target` in order, checks each hop's host key with `host_keys`, logs in with `auth`, and returns the
-    /// session that owns the whole chain. Blocks until it is done or has failed; every wait inside is bounded.
+    /// session that owns the whole chain. Blocks until it is done or has failed. Every wait of the engine's own is bounded; a call into
+    /// `auth` lasts as long as the source takes (`AuthSource::password` gets no deadline, `AuthSource::interactive` gets one).
+    /// `host_keys` and `auth` are called on the thread that called `connect`, while it is blocked in it: do not hold a lock across
+    /// `connect` that the policy or the auth source takes.
     ///
     /// A host key that is not pinned never waits for the user: the call fails with `ConnectError::HostKeyUnknown` (or `HostKeyMismatch`)
     /// carrying the key the server presented, and the caller connects again once the user has decided (spec §6.2 step 3).
     fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError>;
 }
 
-/// One live connection (a whole jump chain), owned by whoever holds it. Dropping it closes it.
+/// One live connection (a whole jump chain), owned by whoever holds it. Dropping it closes it; on a plain thread the drop waits up to
+/// about 3 s for the disconnects to go out.
 ///
 /// `shell`, `exec` and `close` block the calling thread, as `SshEngine::connect` does. Call them from a plain thread or from
 /// `tokio::task::spawn_blocking`, never from async code: the engine drives its own runtime with `block_on`, and that panics on a thread
@@ -44,10 +48,12 @@ pub trait Session: Send + Sync {
     /// Whether the connection (every hop of it) is still up, judged from the connection's own state and never from an error variant.
     fn is_alive(&self) -> bool;
 
-    /// Why the connection ended, taken from the outermost hop that recorded a reason. `None` while it is alive.
+    /// Why the connection ended, taken from the outermost hop that recorded a reason. `None` while it is alive. The first call after the
+    /// end may wait up to 0.3 s for the hop that ended to write down why.
     fn disconnect_reason(&self) -> Option<DisconnectReason>;
 
-    /// Closes the connection: an explicit disconnect on every hop, innermost first. Safe to call twice.
+    /// Closes the connection: an explicit disconnect on every hop, innermost first. Safe to call twice. On a link that has stopped
+    /// answering it gives each hop up to about 2.5 s.
     fn close(&self);
 }
 
@@ -55,7 +61,8 @@ pub trait Session: Send + Sync {
 /// calling thread too, so the rule of `Session` holds here: a plain thread or `spawn_blocking`, never async code.
 pub trait ShellChannel: Send + Sync {
     /// Sends keystrokes (or pasted text) to the shell's stdin. A connection whose peer has stopped reading does not take them: after a
-    /// while (the russh engine waits 30 s) the call fails with `SessionError::Timeout`.
+    /// while (the russh engine waits 30 s) the call fails with `SessionError::Timeout`. A `Timeout` can follow a partial write: part of
+    /// `data` may have reached the shell, so sending all of it again can repeat input.
     fn write(&self, data: &[u8]) -> Result<(), SessionError>;
 
     /// Reads terminal output (stdout and stderr arrive merged on a PTY) into `buf` and returns how many bytes it wrote. Blocks until
@@ -79,11 +86,13 @@ pub trait ShellChannel: Send + Sync {
 
 /// Decides whether a server's host key is trusted.
 pub trait HostKeyPolicy: Send + Sync {
-    /// Called while the handshake is in progress, so it must be fast and must not block: a lookup, never a dialog.
+    /// Called on the thread that called `SshEngine::connect`, while the handshake is in progress, so it must be fast and must not block: a
+    /// lookup, never a dialog.
     fn check(&self, hop: &HopRef, key: &HostKey) -> HostKeyVerdict;
 }
 
-/// Where the engine gets signatures and secrets. Implemented by the broker, which decides who is asked (spec §6.1, decision 7).
+/// Where the engine gets signatures and secrets. Implemented by the broker, which decides who is asked (spec §6.1, decision 7). Every
+/// method is called on the thread that called `SshEngine::connect`.
 pub trait AuthSource: Send + Sync {
     /// The public half of the vault key `key_id` as an OpenSSH line (`<algorithm> <base64> [comment]`); `None` when there is no such key,
     /// in which case the key method is skipped.

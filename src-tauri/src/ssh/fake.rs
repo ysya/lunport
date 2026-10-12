@@ -80,6 +80,8 @@ impl Shared {
 
 /// The scripted engine. Build it with the `with_*` methods; the defaults are: the server presents `default_server_key()`, every login
 /// succeeds, every command exits 0 with no output, a shell prints nothing and exits with code 0 when it is closed, the connection never drops.
+/// Closing a session ends every shell opened on it with `Exit::Disconnected`, as a lost connection does; `with_shell_exit` is how a shell
+/// ends when it is closed itself (`ShellChannel::close`) or ends at once.
 pub struct FakeEngine {
     shared: Arc<Shared>,
 }
