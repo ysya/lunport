@@ -28,6 +28,20 @@ const SIGNAL_NAME_MAX: usize = 32;
 /// What the client is told when the name of the signal that ended the shell is not one it could read.
 const UNKNOWN_SIGNAL: &str = "UNKNOWN";
 
+/// The most characters of the text of an error or of a disconnect that a client is sent. A server chooses some of that text (an error's
+/// `Display` quotes the bytes the peer sent) and can make it larger than a frame, which holds 1 MiB: an event that does not fit is not
+/// written, and the client would be left with the `exited` that follows and no reason. A sentence is a few hundred characters.
+pub const TEXT_MAX_CHARS: usize = 512;
+
+/// `text` cut to `TEXT_MAX_CHARS` characters, on a character boundary, with `…` after what is left when it was longer.
+fn shortened(mut text: String) -> String {
+    if let Some((end, _)) = text.char_indices().nth(TEXT_MAX_CHARS) {
+        text.truncate(end);
+        text.push('…');
+    }
+    text
+}
+
 /// The name of the signal that ended the shell, in a form that is safe to pass on: a server names it (`Sig::Custom` carries any text it
 /// sends), and a program reads it, so only upper case letters, digits, `_`, `+` and `-` pass, up to `SIGNAL_NAME_MAX` of them. Anything
 /// else is `UNKNOWN`, which no signal is called, so a client that maps names to numbers finds none.
@@ -40,12 +54,14 @@ fn signal_name(name: &str) -> String {
 /// is the one exception), and this is where the text in it is made safe to print, as `ConnectFailure::new` does for a failure: some of
 /// it was written by a server (the `Display` of a protocol error can quote the bytes the peer sent, a signal has whatever name the
 /// server gave it), the rest comes from the person's configuration (aliases) or from the client's request, and none of it may reach a
-/// terminal with an escape sequence or a carriage return in it. A text that has no such character comes out as it went in. The `match`
+/// terminal with an escape sequence or a carriage return in it, and none of it may be larger than a frame. A text that has no such
+/// character and is short comes out as it went in. The text of an error or of a disconnect is cut to `TEXT_MAX_CHARS` after it is made
+/// printable; a banner is not, because it is long by nature (the engine keeps at most 64 KiB of it, which fits a frame). The `match`
 /// names every kind of message on purpose: a new one has to be put in one of the arms.
 fn made_safe(message: ServerMessage) -> ServerMessage {
     match message {
-        ServerMessage::Event(Event::Error { kind, text }) => ServerMessage::Event(Event::Error { kind, text: printable(&text) }),
-        ServerMessage::Event(Event::Disconnected { reason }) => ServerMessage::Event(Event::Disconnected { reason: printable(&reason) }),
+        ServerMessage::Event(Event::Error { kind, text }) => ServerMessage::Event(Event::Error { kind, text: shortened(printable(&text)) }),
+        ServerMessage::Event(Event::Disconnected { reason }) => ServerMessage::Event(Event::Disconnected { reason: shortened(printable(&reason)) }),
         ServerMessage::Event(Event::Banner { text }) => ServerMessage::Event(Event::Banner { text: printable(&text) }),
         ServerMessage::Exited { code, signal } => ServerMessage::Exited { code, signal: signal.map(|name| signal_name(&name)) },
         // The relay asks no questions (the owner's text is made printable where it is built: `shown_prompt`), `Opened` carries the
@@ -810,6 +826,35 @@ mod tests {
         let mut failing = start(FakeEngine::new().with_shell_error(SessionError::Channel("refused".into())), ShellControl::new());
         failing.finish();
         assert_eq!(failing.link.calls(), [2], "a shell that could not be opened");
+    }
+
+    /// A text a server chose can be as long as it likes (an error's `Display` quotes what the peer sent), and a frame holds 1 MiB: the
+    /// text of an error or of a disconnect is cut to a sentence's worth of characters, on a character boundary, so that the event is not
+    /// dropped for not fitting and the client left with an exit and no reason. A banner is a long text by nature: the engine bounds it.
+    #[test]
+    fn the_text_of_an_error_or_a_disconnect_is_cut_to_a_sentence_and_a_banner_is_not() {
+        let told = |message: ServerMessage| {
+            let link = Recorder::default();
+            tell(&link, message).unwrap();
+            link.split().1.remove(0)
+        };
+        let error = |text: String| ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text });
+        let disconnected = |reason: String| ServerMessage::Event(Event::Disconnected { reason });
+        // The cut is made at 512 characters, not at 512 bytes, and never inside a character of two bytes or three.
+        for c in ['x', 'é', '漢'] {
+            let cut = format!("{}…", c.to_string().repeat(512));
+            assert_eq!(told(error(c.to_string().repeat(2000))), error(cut.clone()), "an error of {c}");
+            assert_eq!(told(disconnected(c.to_string().repeat(2000))), disconnected(cut), "a disconnect of {c}");
+        }
+        // Up to the limit a text passes as it is; one character more and it is cut.
+        assert_eq!(told(error("é".repeat(512))), error("é".repeat(512)));
+        assert_eq!(told(error("é".repeat(513))), error(format!("{}…", "é".repeat(512))));
+        // The limit is on the text as the client reads it: what `printable` shortens (a carriage return before a line feed) counts as one.
+        assert_eq!(told(error("a\r\n".repeat(400))), error(format!("{}…", "a\n".repeat(256))));
+        assert_eq!(told(error("\u{1b}".repeat(600))), error(format!("{}…", "?".repeat(512))));
+        // A banner is as long as the server made it (within what the engine keeps), and is only made printable.
+        let banner = format!("{}\u{1b}[2J", "b".repeat(5000));
+        assert_eq!(told(ServerMessage::Event(Event::Banner { text: banner })), ServerMessage::Event(Event::Banner { text: format!("{}?[2J", "b".repeat(5000)) }));
     }
 
     /// The names SSH gives signals (RFC 4254 §6.10, and the real-time ones) are kept; anything else a server might send is `UNKNOWN`.

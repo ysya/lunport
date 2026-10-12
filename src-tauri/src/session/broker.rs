@@ -706,7 +706,7 @@ mod tests {
     use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, GatedEngine, WaitingConfirmer};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods, FakeShell};
     use crate::ipc::peer::ProcInfo;
-    use crate::ssh::{AuthMethod, AuthSource, ConnectError, Exit, HostKeyPolicy, Session, Target};
+    use crate::ssh::{AuthMethod, AuthSource, ConnectError, DisconnectKind, DisconnectReason, Exit, HostKeyPolicy, Session, SessionError, Target};
     use crate::sync::testkit::MemKeychain;
 
     /// What the client received.
@@ -1633,6 +1633,36 @@ mod tests {
             }
         }
         assert_eq!(told, [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]);
+    }
+
+    /// Texts a server chose can be larger than a frame (1 MiB): the text of a failure to connect, of a shell that cannot be opened and of a
+    /// lost connection reaches the client cut to a sentence, with the exit after it. Left whole, the event does not fit in a frame and is
+    /// not written, and the client learns that the session exited and not why.
+    #[test]
+    fn a_reason_larger_than_a_frame_still_reaches_the_client_cut_to_a_sentence() {
+        let web = Hop::new("id-web", "web", "web.example.com", 22, "deploy", AuthMethod::Password);
+        let huge = "x".repeat(2 * MAX_FRAME);
+        let lost = DisconnectReason { hop: web.reference(), kind: DisconnectKind::Other, detail: huge.clone() };
+        let engines = [
+            ("a connect that fails", FakeEngine::new().failing_with(ConnectError::Protocol { hop: web.reference(), text: huge.clone() }), Some(kinds::CONNECT)),
+            ("a shell that cannot be opened", FakeEngine::new().with_shell_error(SessionError::Channel(huge.clone())), Some(kinds::SHELL)),
+            ("a connection that was lost", FakeEngine::new().disconnecting_with(lost), None),
+        ];
+        for (what, engine, kind) in engines {
+            let world = world(engine);
+            let mut client = Client::connect(&world.sock);
+            client.open("web");
+            let (_, messages) = client.rest();
+            assert_eq!(messages.len(), 2, "{what}: the reason and the exit, and not the exit alone: {messages:?}");
+            let (message_kind, text) = match &messages[0] {
+                ServerMessage::Event(Event::Error { kind, text }) => (Some(kind.as_str()), text),
+                ServerMessage::Event(Event::Disconnected { reason }) => (None, reason),
+                other => panic!("{what}: expected a reason first, got {other:?}"),
+            };
+            assert_eq!(message_kind, kind, "{what}");
+            assert!(text.ends_with("xxx…") && text.chars().count() == 513, "{what}: {} characters, ending in {:?}", text.chars().count(), &text[text.len().saturating_sub(8)..]);
+            assert_eq!(messages[1], no_status(), "{what}");
+        }
     }
 
     /// Plan 1b-1 review round 2, Task 11 Minor 2: the thread for a session cannot be made. Its client is told so, unless the app quit
