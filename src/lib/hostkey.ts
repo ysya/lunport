@@ -70,8 +70,34 @@ export function answerRejectedMessage(requestId: string, error: unknown): string
 }
 
 /**
- * The pending list reaches the window two ways: one fetch when it opens, and an event for every change after that. A fetch still in
- * flight may have read an older list, so once an event has arrived the fetch's result is ignored.
+ * Gives the window the pending list, now and at every change, until the returned function is called (the window's effect). The listener
+ * is registered first and the list fetched after it: a change emitted between a fetch's answer and the listener's registration would be
+ * lost, and the window would go on showing a list that is no longer pending.
+ */
+export function followPending(set: (list: HostKeyRequest[]) => void): () => void {
+  let unlisten: UnlistenFn | undefined;
+  let live = true;
+  const feed = pendingFeed((list) => {
+    if (live) set(list);
+  });
+  void onHostKeyRequests(feed.fromEvent).then((u) => {
+    if (!live) {
+      u();
+      return;
+    }
+    unlisten = u;
+    // The listener is in place: every change from now on arrives as an event, and the fetch fills in what was pending before it.
+    void fetchPending().then(feed.fromFetch);
+  });
+  return () => {
+    live = false;
+    unlisten?.();
+  };
+}
+
+/**
+ * The pending list reaches the window two ways: one fetch, started once the listener is registered (`followPending`), and an event for
+ * every change. A fetch still in flight may have read an older list, so once an event has arrived the fetch's result is ignored.
  */
 export function pendingFeed(set: (list: HostKeyRequest[]) => void): { fromFetch: (list: HostKeyRequest[]) => void; fromEvent: (list: HostKeyRequest[]) => void } {
   let sawEvent = false;

@@ -8,11 +8,10 @@ import {
   armAfterDelay,
   buildHostKeyAnswer,
   fetchPending,
+  followPending,
   hostKeyBody,
   hostKeyButtons,
   hostKeyTitle,
-  onHostKeyRequests,
-  pendingFeed,
   resolveHostKey,
 } from "@/lib/hostkey";
 import { revealHidden } from "@/lib/sync-approvals";
@@ -68,22 +67,8 @@ export function HostKeyCard({ request, busy, onAnswer }: { request: HostKeyReque
 export default function HostKeyWindow() {
   const [pending, setPending] = useState<HostKeyRequest[]>([]);
   const [answeredId, setAnsweredId] = useState<string | null>(null);
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let live = true;
-    const feed = pendingFeed((list) => {
-      if (live) setPending(list);
-    });
-    void fetchPending().then(feed.fromFetch);
-    void onHostKeyRequests(feed.fromEvent).then((u) => {
-      if (live) unlisten = u;
-      else u();
-    });
-    return () => {
-      live = false;
-      unlisten?.();
-    };
-  }, []);
+  // The listener first, then the fetch (`followPending`): no change can fall between the two.
+  useEffect(() => followPending(setPending), []);
   const request = pending[0];
   if (!request) return null;
   return (
@@ -96,6 +81,8 @@ export default function HostKeyWindow() {
         void resolveHostKey(request.id, answer).catch((error: unknown) => {
           console.warn(answerRejectedMessage(request.id, error));
           setAnsweredId((current) => (current === request.id ? null : current));
+          // The question may have left the list before the window heard of it: the list as it is now.
+          void fetchPending().then(setPending);
         });
       }}
     />
