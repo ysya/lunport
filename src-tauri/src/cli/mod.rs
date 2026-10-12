@@ -95,12 +95,23 @@ fn session(
         }
     };
     terminal::restore_on_panic(tty.restorer());
-    let (sender, receiver) = std::sync::mpsc::channel();
-    run::stdin_thread(sender.clone());
-    if let Err(error) = run::signal_thread(sender.clone(), move || size.size()) {
+    let (inputs, queue) = run::queue();
+    run::stdin_thread(inputs.clone());
+    if let Err(error) = run::signal_thread(inputs.clone(), move || size.size()) {
         let _ = writeln!(stderr, "sshelter: cannot follow the terminal's size: {error}");
     }
-    run::run(stream, host, term, &mut tty, (sender, receiver), &mut std::io::stdout(), stderr)
+    run::run(stream, host, term, &mut tty, (inputs, queue), own_writer(std::io::stdout()), own_writer(std::io::stderr()))
+}
+
+/// Standard output or error for the terminal's writer: a duplicate of its descriptor, written directly. Std's handle holds a lock (and
+/// stdout a buffer) while it writes, and a writer stuck on a terminal that does not take its output would hold them; std's handle is
+/// used only when the descriptor cannot be had.
+#[cfg(unix)]
+fn own_writer<W: std::io::Write + std::os::fd::AsFd + Send + 'static>(handle: W) -> Box<dyn std::io::Write + Send> {
+    match handle.as_fd().try_clone_to_owned() {
+        Ok(descriptor) => Box::new(std::fs::File::from(descriptor)),
+        Err(_) => Box::new(handle),
+    }
 }
 
 /// Windows: the console work is phase 3 (spec §13, §16). A release build has no console, so the sentence shows only where one exists.

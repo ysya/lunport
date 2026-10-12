@@ -3,11 +3,10 @@
 
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use super::client::Input;
-use super::run::run;
+use super::run::{queue, run, Inputs};
 use super::terminal::fake::FakeTermios;
 use super::terminal::Tty;
 use crate::session::broker::Broker;
@@ -48,7 +47,7 @@ impl Shared {
 
 struct Session {
     termios: Arc<FakeTermios>,
-    keys: Sender<Input>,
+    keys: Inputs,
     stdout: Shared,
     stderr: Shared,
     run: std::thread::JoinHandle<i32>,
@@ -83,16 +82,16 @@ fn connect(server: &Server, port: u16, decisions: Vec<Decision>) -> Session {
     crate::ipc::server::listen_unix(&ipc, broker.handler()).unwrap();
     let stream = UnixStream::connect(crate::session::socket_path(dir.path())).unwrap();
     let termios = FakeTermios::new();
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (inputs, queue) = queue();
     let (stdout, stderr) = (Shared::default(), Shared::default());
     let run = {
-        let (termios, sender, mut stdout, mut stderr) = (Arc::clone(&termios), sender.clone(), stdout.clone(), stderr.clone());
+        let (termios, inputs, stdout, stderr) = (Arc::clone(&termios), inputs.clone(), stdout.clone(), stderr.clone());
         std::thread::spawn(move || {
             let mut tty = Tty::new(termios).unwrap();
-            run(stream, HostQuery::Alias("lab".into()), "xterm-256color".into(), &mut tty, (sender, receiver), &mut stdout, &mut stderr)
+            run(stream, HostQuery::Alias("lab".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(stdout), Box::new(stderr))
         })
     };
-    Session { termios, keys: sender, stdout, stderr, run, directory, _dir: dir }
+    Session { termios, keys: inputs, stdout, stderr, run, directory, _dir: dir }
 }
 
 fn raw(termios: &FakeTermios) -> bool {
