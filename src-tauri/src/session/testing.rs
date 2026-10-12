@@ -2,8 +2,9 @@
 //! `HostDirectory` must pass.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
@@ -12,7 +13,8 @@ use super::connect::{CancelToken, HostKeyConfirmer, HostKeyQuestion};
 use super::directory::{decide_pin, decide_replace, DirectoryError, HostDirectory, PinDecision, PinnedKey};
 use super::protocol::{HostQuery, QuestionKind};
 use super::ssh_config_directory::MAX_JUMPS;
-use crate::ssh::{AuthMethod, Hop, HostId, HostKey, Target};
+use crate::ssh::fake::FakeEngine;
+use crate::ssh::{AuthMethod, AuthSource, ConnectError, DisconnectReason, ExecResult, Hop, HostId, HostKey, HostKeyPolicy, Pty, Session, SessionError, ShellChannel, SshEngine, Target};
 use crate::sync::slot_rules::test_keys;
 
 /// The passphrase of `test_keys::encrypted()`.
@@ -371,6 +373,118 @@ impl HostKeyConfirmer for WaitingConfirmer {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         None
+    }
+}
+
+/// A place in a test where a thread waits until the test lets it through: for an engine call that must still be going on while something
+/// else happens (a connect, a shell that is being opened). The wait ends by itself after `GATE_LIMIT`, so that a test that forgot to
+/// release a gate fails instead of hanging.
+pub struct Gate {
+    open: Mutex<bool>,
+    changed: Condvar,
+    entered: AtomicUsize,
+}
+
+/// How long a thread waits at a gate nobody releases.
+const GATE_LIMIT: Duration = Duration::from_secs(15);
+
+impl Gate {
+    /// A gate that holds threads back until `release`.
+    pub fn closed() -> Arc<Gate> {
+        Arc::new(Gate { open: Mutex::new(false), changed: Condvar::new(), entered: AtomicUsize::new(0) })
+    }
+
+    /// A gate that lets everybody through (it still counts them).
+    pub fn open() -> Arc<Gate> {
+        let gate = Gate::closed();
+        gate.release();
+        gate
+    }
+
+    /// Lets the threads that wait go on, and everyone who comes later.
+    pub fn release(&self) {
+        *locked(&self.open) = true;
+        self.changed.notify_all();
+    }
+
+    /// How many threads have come to the gate, those that went through included.
+    pub fn entered(&self) -> usize {
+        self.entered.load(Ordering::SeqCst)
+    }
+
+    fn pass(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let deadline = Instant::now() + GATE_LIMIT;
+        let mut open = locked(&self.open);
+        while !*open {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            open = self.changed.wait_timeout(open, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+}
+
+/// A `FakeEngine` whose connects and shell opens wait at a gate first. Both gates are open until a test closes one
+/// (`holding_connects`, `holding_shells`).
+pub struct GatedEngine {
+    inner: Arc<FakeEngine>,
+    pub connect: Arc<Gate>,
+    pub shell: Arc<Gate>,
+}
+
+impl GatedEngine {
+    pub fn new(inner: Arc<FakeEngine>) -> GatedEngine {
+        GatedEngine { inner, connect: Gate::open(), shell: Gate::open() }
+    }
+
+    /// `connect` waits at a closed gate (`self.connect`) before it connects.
+    pub fn holding_connects(mut self) -> GatedEngine {
+        self.connect = Gate::closed();
+        self
+    }
+
+    /// `Session::shell` waits at a closed gate (`self.shell`) before it opens the shell.
+    pub fn holding_shells(mut self) -> GatedEngine {
+        self.shell = Gate::closed();
+        self
+    }
+}
+
+impl SshEngine for GatedEngine {
+    fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
+        self.connect.pass();
+        let inner = self.inner.connect(target, host_keys, auth)?;
+        Ok(Box::new(GatedSession { inner, shell: Arc::clone(&self.shell) }))
+    }
+}
+
+struct GatedSession {
+    inner: Box<dyn Session>,
+    shell: Arc<Gate>,
+}
+
+impl Session for GatedSession {
+    fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError> {
+        self.shell.pass();
+        self.inner.shell(pty)
+    }
+
+    fn exec(&self, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError> {
+        self.inner.exec(command, timeout, output_cap)
+    }
+
+    fn is_alive(&self) -> bool {
+        self.inner.is_alive()
+    }
+
+    fn disconnect_reason(&self) -> Option<DisconnectReason> {
+        self.inner.disconnect_reason()
+    }
+
+    fn close(&self) {
+        self.inner.close()
     }
 }
 
