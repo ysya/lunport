@@ -11,7 +11,6 @@ use zeroize::Zeroizing;
 use super::fake::{FakeEngine, FakeLogin, FakeMethods};
 use super::russh_engine::toy_server::{ToyLogin, ToyServer};
 use super::russh_engine::{EngineOptions, RusshEngine};
-use super::testing::eventually;
 use super::testing::fixture::Server;
 use super::testing::harness::tools;
 use super::testing::proxy::{Mode, Proxy};
@@ -383,7 +382,9 @@ fn a_cut_link_ends_the_shells(world: &ShellWorld) {
     (world.cut)();
     read_to_end(&shell, 15).expect("a shell on a cut link ends");
     assert_eq!(shell.exited(), Some(Exit::Disconnected));
-    eventually("the session to notice", 10, || !session.is_alive());
+    // The relay tells a lost connection from a closed channel by asking the session once its shell has ended (`Session::is_alive`): the
+    // session must already know by then.
+    assert!(!session.is_alive(), "the session knows its connection ended by the time the shell's read returned 0");
     assert_eq!(session.disconnect_reason().map(|reason| reason.kind), Some(DisconnectKind::ConnectionLost));
 }
 
