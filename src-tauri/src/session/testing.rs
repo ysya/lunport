@@ -8,6 +8,7 @@ use std::time::Instant;
 use zeroize::Zeroizing;
 
 use super::auth::{KeyStore, Owner, Reply, VaultKey};
+use super::connect::{CancelToken, HostKeyConfirmer, HostKeyQuestion};
 use super::directory::{decide_pin, decide_replace, DirectoryError, HostDirectory, PinDecision, PinnedKey};
 use super::protocol::{HostQuery, QuestionKind};
 use super::ssh_config_directory::MAX_JUMPS;
@@ -282,6 +283,48 @@ impl HostDirectory for FakeDirectory {
 
     fn password_account(&self, host: &HostId) -> String {
         format!("host:{host}")
+    }
+}
+
+/// What the person does in the fake host key window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// Trusts the key the window shows.
+    Trust,
+    /// Answers for this fingerprint (a window that showed another key: a stale answer).
+    TrustFingerprint(String),
+    /// Refuses (Cancel, Refuse) or closes the window.
+    Refuse,
+}
+
+/// SSHelter's host key window, scripted: each question takes the next decision (none left: `Refuse`). A cancelled wait is a refusal.
+#[derive(Default)]
+pub struct FakeConfirmer {
+    decisions: Mutex<VecDeque<Decision>>,
+    pub asked: Mutex<Vec<HostKeyQuestion>>,
+}
+
+impl FakeConfirmer {
+    pub fn deciding(decisions: Vec<Decision>) -> FakeConfirmer {
+        FakeConfirmer { decisions: Mutex::new(decisions.into()), asked: Mutex::new(Vec::new()) }
+    }
+
+    pub fn asked(&self) -> Vec<HostKeyQuestion> {
+        locked(&self.asked).clone()
+    }
+}
+
+impl HostKeyConfirmer for FakeConfirmer {
+    fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
+        locked(&self.asked).push(question.clone());
+        if cancel.is_cancelled() {
+            return None;
+        }
+        match locked(&self.decisions).pop_front().unwrap_or(Decision::Refuse) {
+            Decision::Trust => Some(question.fingerprint.clone()),
+            Decision::TrustFingerprint(fingerprint) => Some(fingerprint),
+            Decision::Refuse => None,
+        }
     }
 }
 

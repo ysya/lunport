@@ -215,6 +215,31 @@ fn an_unreachable_password_first_hop_was_asked_for_its_password_first() {
     unreachable_after_the_password(&real_engine(), closed_port);
 }
 
+/// A hop pinned to a key of another type: the handshake offers only that type, and the server has none (the broker then reconnects
+/// without the restriction to show the changed-key warning, plan 1b R17).
+fn pinned_type_missing(engine: &dyn SshEngine, target: &Target, auth: &dyn AuthSource) {
+    match engine.connect(target, &*super::testing::doubles::TestPolicy::trusting(), auth).err().expect("nothing in common") {
+        ConnectError::NoCommonHostKeyAlgorithm { hop, ours, theirs } => {
+            assert_eq!(hop.alias, "shell");
+            assert_eq!(ours, ["ecdsa-sha2-nistp256"]);
+            assert_eq!(theirs, ["ssh-ed25519"]);
+        }
+        other => panic!("expected NoCommonHostKeyAlgorithm, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_pin_of_another_key_type_finds_no_common_algorithm() {
+    let ecdsa = HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap();
+    let mut fake = fake_shells();
+    fake.target.hops[0].pinned = Some(ecdsa.clone());
+    pinned_type_missing(&*fake.engine, &fake.target, &*fake.auth);
+    if let Some(mut real) = real_shells() {
+        real.target.hops[0].pinned = Some(ecdsa);
+        pinned_type_missing(&*real.engine, &real.target, &*real.auth);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Shells. The server prints a prompt when a shell opens: a scratch OpenSSH with `/bin/sh` behind a proxy that can cut the link, or a
 // fake that prints "$ ".
