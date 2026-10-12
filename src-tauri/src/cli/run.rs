@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -68,26 +69,16 @@ impl Queue {
         self.kept.pop_front().or_else(|| self.receiver.recv().ok())
     }
 
-    /// Throws away what the person typed and the stdin thread has already queued, and wipes it; everything else stays, in order. A
-    /// question switches the terminal with `TCSAFLUSH`, which throws away what the terminal has not delivered yet, but a line the stdin
-    /// thread had read before that is in the queue (behind the question), where the flush cannot reach it and the question would take
-    /// it as its answer. A line the thread has read but not queued yet at this moment is not caught: it arrives after, as typed text.
+    /// Throws away what the person typed and the stdin thread has already queued; everything else stays, in order. (What is thrown away is
+    /// wiped as it is dropped, see `Input::Stdin`.) A question switches the terminal with `TCSAFLUSH`, which throws away what the
+    /// terminal has not delivered yet, but a line the stdin thread had read before that is in the queue (behind the question), where the
+    /// flush cannot reach it and the question would take it as its answer. A line the thread has read but not queued yet at this
+    /// moment is not caught: it arrives after, as typed text.
     fn forget_typed(&mut self) {
         while let Ok(input) = self.receiver.try_recv() {
             self.kept.push_back(input);
         }
-        self.kept.retain_mut(|input| !wipe_typed(input));
-    }
-}
-
-/// Wipes `input` when it is what the person typed (it can be a password); whether it was.
-fn wipe_typed(input: &mut Input) -> bool {
-    match input {
-        Input::Stdin(bytes) => {
-            bytes.zeroize();
-            true
-        }
-        _ => false,
+        self.kept.retain(|input| !matches!(input, Input::Stdin(_)));
     }
 }
 
@@ -167,7 +158,13 @@ fn write_answer(writer: &mut impl Write, question_id: &str, value: &str) -> std:
 
 /// Reads the person's keys into the queue until standard input ends (or the program does).
 pub fn stdin_thread(sender: Sender<Input>) {
-    keys_thread(std::io::stdin(), sender);
+    // Not through `std::io::stdin()`: its buffer keeps a copy of what is read through it, for as long as the program runs, unless the
+    // read is at least as large as that buffer (8 KiB; measured: a read of 8191 bytes leaves what was typed in it, one of 8192 does
+    // not), and what is typed can be a password. A duplicate of the descriptor is read directly, with no buffer of std's in between.
+    match std::io::stdin().as_fd().try_clone_to_owned() {
+        Ok(descriptor) => keys_thread(std::fs::File::from(descriptor), sender),
+        Err(_) => keys_thread(std::io::stdin(), sender),
+    }
 }
 
 /// `read_keys` on a thread of its own.
@@ -184,7 +181,7 @@ fn read_keys(mut source: impl Read, sender: &Sender<Input>) {
             // A question ends on Ctrl-D; the next question reads again.
             Ok(0) => Input::StdinEnd,
             Ok(count) => {
-                let typed = Input::Stdin(buf[..count].to_vec());
+                let typed = Input::Stdin(Zeroizing::new(buf[..count].to_vec()));
                 // What was typed may be a password: the copy that stays on this stack is wiped as well.
                 buf[..count].zeroize();
                 typed
@@ -337,7 +334,7 @@ mod tests {
         fn set(&self, termios: &libc::termios, discard_input: bool) -> std::io::Result<()> {
             if discard_input {
                 if let Some(line) = self.line.lock().unwrap().take() {
-                    self.queue.send(Input::Stdin(line)).unwrap();
+                    self.queue.send(Input::Stdin(Zeroizing::new(line))).unwrap();
                 }
             }
             self.inner.set(termios, discard_input)
@@ -398,7 +395,7 @@ mod tests {
         keychain.set("host:id-web", "saved").unwrap();
         let setup = connect(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key()), keychain);
         eventually("the terminal to be raw", 10, || raw(&setup.termios));
-        setup.keys.send(Input::Stdin(b"ls\r".to_vec())).unwrap();
+        setup.keys.send(Input::Stdin(Zeroizing::new(b"ls\r".to_vec()))).unwrap();
         eventually("the keys to reach the shell", 10, || setup.engine.events().contains(&FakeEvent::ShellInput(b"ls\r".to_vec())));
         let remote = setup.engine.shells().remove(0);
         remote.print(b"file.txt\r\n");
@@ -420,7 +417,7 @@ mod tests {
         let prompt = setup.termios.sets.lock().unwrap().last().copied().unwrap();
         assert!(prompt.1, "typeahead thrown away");
         assert_eq!((prompt.0.c_lflag & libc::ECHO, prompt.0.c_lflag & libc::ICANON), (0, libc::ICANON), "no echo, line editing on");
-        setup.keys.send(Input::Stdin(b"right\n".to_vec())).unwrap();
+        setup.keys.send(Input::Stdin(Zeroizing::new(b"right\n".to_vec()))).unwrap();
         eventually("the shell to open", 10, || raw(&setup.termios));
         setup.engine.shells().remove(0).end(Exit::Code(0));
         let (code, setup) = finish(setup);
@@ -509,7 +506,7 @@ mod tests {
         assert_eq!(setup.stderr.text(), "deploy@web's password: ", "the question still waits for its answer");
         let prompt = setup.termios.now();
         assert_eq!((prompt.c_lflag & libc::ECHO, prompt.c_lflag & libc::ICANON), (0, libc::ICANON), "still the prompt mode");
-        setup.keys.send(Input::Stdin(b"right\n".to_vec())).unwrap();
+        setup.keys.send(Input::Stdin(Zeroizing::new(b"right\n".to_vec()))).unwrap();
         eventually("the shell to open", 10, || raw(&setup.termios));
         setup.engine.shells().remove(0).end(Exit::Code(0));
         let (code, setup) = finish(setup);
@@ -523,32 +520,27 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut queue = Queue::new(receiver);
         sender.send(Input::Output(b"a".to_vec())).unwrap();
-        sender.send(Input::Stdin(b"hunter2\n".to_vec())).unwrap();
+        sender.send(Input::Stdin(Zeroizing::new(b"hunter2\n".to_vec()))).unwrap();
         sender.send(Input::Resize(100, 30)).unwrap();
-        sender.send(Input::Stdin(b"more".to_vec())).unwrap();
+        sender.send(Input::Stdin(Zeroizing::new(b"more".to_vec()))).unwrap();
         sender.send(Input::StdinEnd).unwrap();
         queue.forget_typed();
-        sender.send(Input::Stdin(b"after".to_vec())).unwrap();
+        sender.send(Input::Stdin(Zeroizing::new(b"after".to_vec()))).unwrap();
         drop(sender);
         let rest: Vec<Input> = std::iter::from_fn(|| queue.next()).collect();
         assert_eq!(format!("{rest:?}"), "[Output([97]), Resize(100, 30), StdinEnd, Stdin(<hidden>)]");
-        assert!(matches!(&rest[3], Input::Stdin(bytes) if bytes == b"after"), "typed after the flush: the question's own");
+        assert!(matches!(&rest[3], Input::Stdin(bytes) if &bytes[..] == b"after"), "typed after the flush: the question's own");
     }
 
-    /// What is thrown away may be a password: it is wiped, not just dropped.
+    /// What was typed may be a password: it is wiped wherever it is dropped, whichever path of the loop drops it. That is the type's doing,
+    /// so this fails to compile if what `Input::Stdin` or `Action::Answer` carries stops being wiped on drop.
     #[test]
-    fn typed_input_is_wiped_when_it_is_thrown_away() {
-        let mut typed = Input::Stdin(b"hunter2\n".to_vec());
-        let Input::Stdin(bytes) = &typed else { unreachable!() };
-        let (start, capacity) = (bytes.as_ptr(), bytes.capacity());
-        assert!(capacity >= 8);
-        assert!(wipe_typed(&mut typed));
-        // SAFETY: `typed` still owns the allocation (wiping clears the vector but keeps its memory), and its first 8 bytes were
-        // written when the vector was made, so they are initialised, and they must be zero now.
-        assert!(unsafe { std::slice::from_raw_parts(start, 8) }.iter().all(|byte| *byte == 0));
-        for mut other in [Input::Closed, Input::StdinEnd, Input::Interrupt, Input::Resize(1, 1), Input::Output(b"x".to_vec())] {
-            assert!(!wipe_typed(&mut other));
-        }
+    fn what_was_typed_is_wiped_wherever_it_is_dropped() {
+        fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+        let Input::Stdin(typed) = Input::Stdin(Zeroizing::new(b"hunter2\n".to_vec())) else { unreachable!() };
+        wiped_on_drop(&typed);
+        let Action::Answer { value, .. } = (Action::Answer { question_id: "q1".into(), value: Zeroizing::new("hunter2".to_string()) }) else { unreachable!() };
+        wiped_on_drop(&value);
     }
 
     /// A source of keys that is whatever the closure says each read is.
@@ -577,8 +569,8 @@ mod tests {
         drop(sender);
         let queued: Vec<Input> = receiver.iter().collect();
         assert_eq!(format!("{queued:?}"), "[Stdin(<hidden>), StdinEnd, Stdin(<hidden>), StdinEnd]", "an interrupted read is read again; the failure is the end");
-        assert!(matches!(&queued[0], Input::Stdin(bytes) if bytes == b"ls\r"));
-        assert!(matches!(&queued[2], Input::Stdin(bytes) if bytes == b"x"));
+        assert!(matches!(&queued[0], Input::Stdin(bytes) if &bytes[..] == b"ls\r"));
+        assert!(matches!(&queued[2], Input::Stdin(bytes) if &bytes[..] == b"x"));
     }
 
     #[test]
@@ -651,7 +643,7 @@ mod tests {
         let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
         let setup = connect(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password(&password))), directory, MemKeychain::default());
         eventually("the question", 10, || setup.stderr.text() == "deploy@web's password: ");
-        setup.keys.send(Input::Stdin(format!("{password}\n").into_bytes())).unwrap();
+        setup.keys.send(Input::Stdin(Zeroizing::new(format!("{password}\n").into_bytes()))).unwrap();
         eventually("the shell to open", 10, || raw(&setup.termios));
         setup.engine.shells().remove(0).end(Exit::Code(0));
         let (code, setup) = finish(setup);

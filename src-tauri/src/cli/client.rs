@@ -19,8 +19,9 @@ pub enum Input {
     Output(Vec<u8>),
     /// The broker closed the connection.
     Closed,
-    /// Bytes the person typed (a password, at a question).
-    Stdin(Vec<u8>),
+    /// Bytes the person typed (a password, at a question). They are wiped wherever they are dropped: `Zeroizing` does it, so no path
+    /// of the loop (a discarded line, an input that arrives after the end) has to remember to.
+    Stdin(Zeroizing<Vec<u8>>),
     /// Standard input ended (Ctrl-D on an empty line, at a question).
     StdinEnd,
     /// The terminal was resized.
@@ -60,7 +61,8 @@ pub enum Action {
     /// The answer to a question, typed by the person (a password, a passphrase, a code), for the broker as the protocol's answer message.
     /// The text stays in a `Zeroizing` string from the keys to here, and is wiped when the action is dropped, after it has been written.
     Answer { question_id: String, value: Zeroizing<String> },
-    /// Keystrokes for the shell: they can be a password too (typed at a prompt the shell shows), so the debug form leaves them out.
+    /// Keystrokes for the shell: they can be a password too (typed at a prompt the shell shows), so the debug form says how many and
+    /// leaves them out. Whoever writes them out wipes them (`run.rs`).
     SendData(Vec<u8>),
     Stdout(Vec<u8>),
     Stderr(String),
@@ -74,7 +76,7 @@ impl fmt::Debug for Action {
         match self {
             Action::Send(message) => f.debug_tuple("Send").field(message).finish(),
             Action::Answer { question_id, .. } => f.debug_struct("Answer").field("question_id", question_id).field("value", &format_args!("<hidden>")).finish(),
-            Action::SendData(_) => f.write_str("SendData(<hidden>)"),
+            Action::SendData(bytes) => write!(f, "SendData(<{} bytes>)", bytes.len()),
             Action::Stdout(bytes) => f.debug_tuple("Stdout").field(bytes).finish(),
             Action::Stderr(text) => f.debug_tuple("Stderr").field(text).finish(),
             Action::Mode(mode, discard_input) => f.debug_tuple("Mode").field(mode).field(discard_input).finish(),
@@ -204,11 +206,7 @@ impl Client {
                 let reason = self.reason.take().unwrap_or_else(|| "The connection to SSHelter ended.".to_string());
                 self.finish(false, Some(reason), 255)
             }
-            Input::Stdin(mut bytes) => {
-                let actions = self.typed(&bytes);
-                bytes.zeroize();
-                actions
-            }
+            Input::Stdin(bytes) => self.typed(&bytes),
             Input::StdinEnd | Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => self.answer(None),
             Input::Interrupt => self.finish(true, None, 130),
             Input::StdinEnd => self.finish(true, None, 128 + libc::SIGHUP),
@@ -387,18 +385,18 @@ mod tests {
     fn once_the_shell_is_open_the_terminal_is_raw_and_keys_output_and_resizes_pass_through() {
         let mut client = started();
         assert_eq!(client.handle(Input::Message(ServerMessage::Opened { session_id: "1".into() })), [Action::Mode(Mode::Raw, false)]);
-        assert_eq!(client.handle(Input::Stdin(b"ls\r".to_vec())), [Action::SendData(b"ls\r".to_vec())]);
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"ls\r".to_vec()))), [Action::SendData(b"ls\r".to_vec())]);
         assert_eq!(client.handle(Input::Output(b"file\r\n".to_vec())), [Action::Stdout(b"file\r\n".to_vec())]);
         assert_eq!(client.handle(Input::Resize(100, 30)), [Action::Send(ClientMessage::WindowChange { cols: 100, rows: 30 })]);
         let pasted = vec![b'x'; DATA_CHUNK + 10];
-        assert_eq!(client.handle(Input::Stdin(pasted)).len(), 2, "a large paste goes out in data frames of at most DATA_CHUNK bytes");
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(pasted))).len(), 2, "a large paste goes out in data frames of at most DATA_CHUNK bytes");
     }
 
     /// What was typed while connecting reaches the shell once it is open (OpenSSH behaves the same).
     #[test]
     fn typeahead_reaches_the_shell_once_it_opens() {
         let mut client = started();
-        assert!(client.handle(Input::Stdin(b"uptime\n".to_vec())).is_empty());
+        assert!(client.handle(Input::Stdin(Zeroizing::new(b"uptime\n".to_vec()))).is_empty());
         assert_eq!(client.handle(Input::Message(ServerMessage::Opened { session_id: "1".into() })), [Action::Mode(Mode::Raw, false), Action::SendData(b"uptime\n".to_vec())]);
     }
 
@@ -412,7 +410,7 @@ mod tests {
     fn typeahead_goes_out_in_data_frames_of_at_most_data_chunk_bytes() {
         for (typed, sizes) in [(3, vec![3]), (DATA_CHUNK, vec![DATA_CHUNK]), (DATA_CHUNK + 5, vec![DATA_CHUNK, 5]), (2 * DATA_CHUNK, vec![DATA_CHUNK, DATA_CHUNK])] {
             let mut client = started();
-            client.handle(Input::Stdin(vec![b'x'; typed]));
+            client.handle(Input::Stdin(Zeroizing::new(vec![b'x'; typed])));
             let actions = client.handle(opens());
             assert_eq!(actions[0], Action::Mode(Mode::Raw, false));
             let frames = data_frames(&actions);
@@ -425,9 +423,9 @@ mod tests {
     #[test]
     fn typeahead_is_kept_up_to_its_limit_and_the_rest_is_dropped() {
         let mut client = started();
-        client.handle(Input::Stdin(vec![b'a'; 40 * 1024]));
-        client.handle(Input::Stdin(vec![b'b'; 40 * 1024]));
-        client.handle(Input::Stdin(b"more".to_vec()));
+        client.handle(Input::Stdin(Zeroizing::new(vec![b'a'; 40 * 1024])));
+        client.handle(Input::Stdin(Zeroizing::new(vec![b'b'; 40 * 1024])));
+        client.handle(Input::Stdin(Zeroizing::new(b"more".to_vec())));
         let kept = data_frames(&client.handle(opens())).concat();
         let mut expected = vec![b'a'; 40 * 1024];
         expected.extend(vec![b'b'; 24 * 1024]);
@@ -440,14 +438,14 @@ mod tests {
     #[test]
     fn a_password_question_is_asked_without_echo_and_the_answer_is_sent() {
         let mut client = started();
-        client.handle(Input::Stdin(b"ls\n".to_vec()));
+        client.handle(Input::Stdin(Zeroizing::new(b"ls\n".to_vec())));
         assert_eq!(
             client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false)),
             [Action::Mode(Mode::Prompt { echo: false }, true), Action::Stderr("deploy@web's password: ".into())]
         );
-        assert!(client.handle(Input::Stdin(b"hunt".to_vec())).is_empty(), "the answer is collected until Enter");
+        assert!(client.handle(Input::Stdin(Zeroizing::new(b"hunt".to_vec()))).is_empty(), "the answer is collected until Enter");
         assert_eq!(
-            client.handle(Input::Stdin(b"er2\n".to_vec())),
+            client.handle(Input::Stdin(Zeroizing::new(b"er2\n".to_vec()))),
             [
                 Action::Stderr("\n".into()),
                 answered("q1", "hunter2"),
@@ -462,7 +460,7 @@ mod tests {
         let mut client = opened();
         assert_eq!(client.handle(question("q2", QuestionKind::Interactive, "(deploy@web) Code: ", true))[0], Action::Mode(Mode::Prompt { echo: true }, true));
         assert_eq!(
-            client.handle(Input::Stdin(b"123456\r\n".to_vec())),
+            client.handle(Input::Stdin(Zeroizing::new(b"123456\r\n".to_vec()))),
             [answered("q2", "123456"), Action::Mode(Mode::Raw, false)]
         );
     }
@@ -522,7 +520,7 @@ mod tests {
         let mut client = opened();
         let error = Event::Error { kind: kinds::INPUT.into(), text: "What you typed did not reach web in time: the connection is not responding.".into() };
         assert_eq!(client.handle(Input::Message(ServerMessage::Event(error))), [Action::Stderr("\r\n[What you typed did not reach web in time: the connection is not responding.]\r\n".into())]);
-        assert_eq!(client.handle(Input::Stdin(b"x".to_vec())), [Action::SendData(b"x".to_vec())]);
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"x".to_vec()))), [Action::SendData(b"x".to_vec())]);
     }
 
     #[test]
@@ -728,8 +726,8 @@ mod tests {
             client.handle(question("q2", QuestionKind::Interactive, "Code: ", true)),
             [Action::Stderr("\n".into()), cancelled("q1"), Action::Mode(Mode::Prompt { echo: true }, true), Action::Stderr("Code: ".into())]
         );
-        assert_eq!(client.handle(Input::Stdin(b"123456\n".to_vec())), [answered("q2", "123456"), Action::Mode(Mode::Cooked, false)]);
-        assert!(client.handle(Input::Stdin(b"ls\n".to_vec())).is_empty(), "connecting again: what is typed is kept for the shell");
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"123456\n".to_vec()))), [answered("q2", "123456"), Action::Mode(Mode::Cooked, false)]);
+        assert!(client.handle(Input::Stdin(Zeroizing::new(b"ls\n".to_vec()))).is_empty(), "connecting again: what is typed is kept for the shell");
         assert_eq!(client.handle(opens()), [Action::Mode(Mode::Raw, false), Action::SendData(b"ls\n".to_vec())]);
 
         let mut client = opened();
@@ -738,8 +736,8 @@ mod tests {
             client.handle(question("q2", QuestionKind::Interactive, "Code: ", true)),
             [Action::Stderr("\n".into()), cancelled("q1"), Action::Mode(Mode::Prompt { echo: true }, true), Action::Stderr("Code: ".into())]
         );
-        assert_eq!(client.handle(Input::Stdin(b"123456\n".to_vec())), [answered("q2", "123456"), Action::Mode(Mode::Raw, false)]);
-        assert_eq!(client.handle(Input::Stdin(b"ls\r".to_vec())), [Action::SendData(b"ls\r".to_vec())], "the shell is open again");
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"123456\n".to_vec()))), [answered("q2", "123456"), Action::Mode(Mode::Raw, false)]);
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"ls\r".to_vec()))), [Action::SendData(b"ls\r".to_vec())], "the shell is open again");
     }
 
     /// Nor does the broker open the shell under an unanswered question; if it did, the question is over, and what was typed for it must
@@ -748,9 +746,9 @@ mod tests {
     fn a_shell_that_opens_over_a_question_cancels_it_and_throws_away_what_was_typed_for_it() {
         let mut client = started();
         client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
-        assert!(client.handle(Input::Stdin(b"hun".to_vec())).is_empty());
+        assert!(client.handle(Input::Stdin(Zeroizing::new(b"hun".to_vec()))).is_empty());
         assert_eq!(client.handle(opens()), [Action::Stderr("\n".into()), cancelled("q1"), Action::Mode(Mode::Raw, true)]);
-        assert_eq!(client.handle(Input::Stdin(b"ls\r".to_vec())), [Action::SendData(b"ls\r".to_vec())], "only what is typed from now on reaches the shell");
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"ls\r".to_vec()))), [Action::SendData(b"ls\r".to_vec())], "only what is typed from now on reaches the shell");
     }
 
     #[test]
@@ -767,8 +765,8 @@ mod tests {
     /// form of `ClientMessage` leaves out an answer), while what is not typed stays as readable as a derived `Debug` makes it.
     #[test]
     fn what_is_typed_is_not_printed_by_debug() {
-        assert_eq!(format!("{:?}", Input::Stdin(b"hunter2\n".to_vec())), "Stdin(<hidden>)");
-        assert_eq!(format!("{:?}", Action::SendData(b"hunter2\n".to_vec())), "SendData(<hidden>)");
+        assert_eq!(format!("{:?}", Input::Stdin(Zeroizing::new(b"hunter2\n".to_vec()))), "Stdin(<hidden>)");
+        assert_eq!(format!("{:?}", Action::SendData(b"hunter2\n".to_vec())), "SendData(<8 bytes>)", "how many, not which");
         let answer = answered("q1", "hunter2");
         assert_eq!(format!("{answer:?}"), "Answer { question_id: \"q1\", value: <hidden> }");
         let sent = Action::Send(ClientMessage::Answer { question_id: "q1".into(), value: Some("hunter2".into()), cancel: false });
@@ -796,12 +794,12 @@ mod tests {
     #[test]
     fn typeahead_is_wiped_from_memory_when_a_question_throws_it_away_and_when_the_shell_takes_it() {
         let mut client = started();
-        client.handle(Input::Stdin(b"hunter2\n".to_vec()));
+        client.handle(Input::Stdin(Zeroizing::new(b"hunter2\n".to_vec())));
         client.handle(question("q1", QuestionKind::Password, "pw: ", false));
         assert!(wiped(&client.typeahead, 8), "thrown away by a question");
 
         let mut client = started();
-        client.handle(Input::Stdin(b"uptime\n".to_vec()));
+        client.handle(Input::Stdin(Zeroizing::new(b"uptime\n".to_vec())));
         client.handle(opens());
         assert!(wiped(&client.typeahead, 7), "sent to the shell");
     }
@@ -820,7 +818,7 @@ mod tests {
         let mut client = started();
         let typeahead = client.typeahead.as_ptr();
         for _ in 0..70 {
-            client.handle(Input::Stdin(vec![b'x'; 1000]));
+            client.handle(Input::Stdin(Zeroizing::new(vec![b'x'; 1000])));
         }
         assert_eq!(client.typeahead.as_ptr(), typeahead, "reallocated: the freed copies keep what was typed");
         assert_eq!(client.typeahead.len(), 64 * 1024);
@@ -828,7 +826,7 @@ mod tests {
         client.handle(question("q1", QuestionKind::Password, "pw: ", false));
         let line = line_of(&client).as_ptr();
         assert!(line_of(&client).capacity() >= 1024);
-        client.handle(Input::Stdin(vec![b'p'; 1000]));
+        client.handle(Input::Stdin(Zeroizing::new(vec![b'p'; 1000])));
         assert_eq!(line_of(&client).as_ptr(), line, "reallocated: the freed copy keeps the password");
     }
 
@@ -838,9 +836,9 @@ mod tests {
         let mut client = started();
         client.handle(question("q1", QuestionKind::Passphrase, "Enter the passphrase for the key laptop: ", false));
         for piece in [vec![b'a'; 1500], vec![b'b'; 700], vec![b'c'; 2000]] {
-            assert!(client.handle(Input::Stdin(piece)).is_empty());
+            assert!(client.handle(Input::Stdin(Zeroizing::new(piece))).is_empty());
         }
-        let actions = client.handle(Input::Stdin(b"\n".to_vec()));
+        let actions = client.handle(Input::Stdin(Zeroizing::new(b"\n".to_vec())));
         let expected = format!("{}{}{}", "a".repeat(1500), "b".repeat(700), "c".repeat(2000));
         assert_eq!(actions, [Action::Stderr("\n".into()), answered("q1", &expected), Action::Mode(Mode::Cooked, false)]);
     }
@@ -858,7 +856,7 @@ mod tests {
     fn an_answer_ends_at_a_bare_carriage_return_as_well() {
         let mut client = started();
         client.handle(question("q1", QuestionKind::Interactive, "(deploy@web) Code: ", true));
-        assert_eq!(client.handle(Input::Stdin(b"123456\r".to_vec())), [answered("q1", "123456"), Action::Mode(Mode::Cooked, false)]);
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"123456\r".to_vec()))), [answered("q1", "123456"), Action::Mode(Mode::Cooked, false)]);
     }
 
     /// What was typed at a question that shows it is still on the line, so the cancelled question ends its line too.
@@ -866,7 +864,7 @@ mod tests {
     fn cancelling_a_question_that_shows_what_is_typed_ends_its_line_too() {
         let mut client = started();
         client.handle(question("q1", QuestionKind::Interactive, "(deploy@web) Code: ", true));
-        assert!(client.handle(Input::Stdin(b"12".to_vec())).is_empty());
+        assert!(client.handle(Input::Stdin(Zeroizing::new(b"12".to_vec()))).is_empty());
         assert_eq!(client.handle(Input::Interrupt), [Action::Stderr("\n".into()), cancelled("q1"), Action::Mode(Mode::Cooked, false)]);
     }
 
@@ -874,7 +872,7 @@ mod tests {
     fn the_connected_event_changes_nothing_for_the_terminal() {
         let mut client = started();
         assert!(client.handle(event(Event::Connected)).is_empty());
-        assert!(client.handle(Input::Stdin(b"ls\n".to_vec())).is_empty(), "still connecting: what is typed is kept for the shell");
+        assert!(client.handle(Input::Stdin(Zeroizing::new(b"ls\n".to_vec()))).is_empty(), "still connecting: what is typed is kept for the shell");
         assert_eq!(client.handle(opens()), [Action::Mode(Mode::Raw, false), Action::SendData(b"ls\n".to_vec())]);
     }
 
