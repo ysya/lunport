@@ -173,9 +173,18 @@ struct Done {
 
 impl Connector<'_> {
     /// Opens a session to the saved host `query` names, asking `owner` (the person at the client's terminal) what the login needs and the
-    /// window about host keys, until it is open, it fails, or `cancel` is set.
+    /// window about host keys, until it is open, it fails, or `cancel` is set. Once `cancel` is set the connect is over, however it
+    /// came out: the failure is `cancelled` (nobody is told about it, whatever was being asked or tried when the client went away), and
+    /// a session that did open meanwhile is closed here, on the caller's thread, instead of being handed to a client that is gone.
     pub fn connect(&self, query: &HostQuery, owner: &dyn Owner, cancel: &CancelToken) -> Result<Connected, ConnectFailure> {
-        self.connect_within(query, owner, cancel, round_limit)
+        let result = self.connect_within(query, owner, cancel, round_limit);
+        if !cancel.is_cancelled() {
+            return result;
+        }
+        if let Ok(connected) = result {
+            connected.session.close();
+        }
+        Err(ConnectFailure::cancelled())
     }
 
     /// `connect` with the bound on the rounds given (`round_limit` is the one `connect` uses): the net itself is tested with a smaller one.
@@ -202,15 +211,14 @@ impl Connector<'_> {
                 // asked it before it connected (a hop that starts with the password method) and went on without it, to a host key that was
                 // not known yet, or a pinned key type the server no longer has, or a login that ended for want of the password ("no login
                 // method could be tried" when the server offers nothing else). The attempt is over (spec §10, §11): the window is not opened
-                // for it and nothing is pinned or connected again; the sentence is the abandonment, and the person connects again. When the
-                // client is the one that went away, nobody is told: the failure is `cancelled`.
+                // for it and nothing is pinned or connected again; the sentence is the abandonment, and the person connects again.
                 ConnectError::HostKeyUnknown { ref hop, .. }
                 | ConnectError::HostKeyMismatch { ref hop, .. }
                 | ConnectError::NoCommonHostKeyAlgorithm { ref hop, .. }
                 | ConnectError::AuthFailed { ref hop, .. }
                     if auth.cancelled(&hop.id) =>
                 {
-                    return Err(if cancel.is_cancelled() { ConnectFailure::cancelled() } else { password_abandoned(hop, &target) });
+                    return Err(password_abandoned(hop, &target));
                 }
                 ConnectError::HostKeyUnknown { hop, key } => self.confirm(&mut target, &policy, &mut done, owner, cancel, &hop, &key, None)?,
                 ConnectError::HostKeyMismatch { hop, key, pinned } => self.confirm(&mut target, &policy, &mut done, owner, cancel, &hop, &key, Some(pinned))?,
@@ -766,6 +774,48 @@ mod tests {
         fn host_key_notice(&self, _text: &str) {}
 
         fn banner(&self, _text: &str) {}
+    }
+
+    /// The person at the terminal who answers, and whose client goes away while the connect goes on: the token is set during the
+    /// question, which the answer then still ends (as when the connection breaks between the answer and the next thing the broker does).
+    struct AnswersThenGoes(CancelToken);
+
+    impl Owner for AnswersThenGoes {
+        fn ask(&self, _kind: QuestionKind, _text: &str, _echo: bool, _deadline: Option<std::time::Instant>) -> Reply {
+            self.0.cancel();
+            Reply::Answer(zeroize::Zeroizing::new("right".to_string()))
+        }
+
+        fn host_key_notice(&self, _text: &str) {}
+
+        fn banner(&self, _text: &str) {}
+    }
+
+    /// A connect that gets through after the client went away has nobody to serve: the session is closed there and then, on the thread
+    /// that connected, and the failure is `cancelled`, which nobody is told about; it is not handed over.
+    #[test]
+    fn a_connect_that_gets_through_after_the_client_went_away_closes_its_session() {
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let world = world(engine, FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key()));
+        let failed = world.connect_as(&web(), &AnswersThenGoes(world.cancel.clone()));
+        assert_eq!(failed.err(), Some(failure(CANCELLED, "The connection was cancelled.")));
+        assert_eq!(world.engine.events(), [FakeEvent::Connect { aliases: vec!["web".to_string()] }, FakeEvent::Closed], "the session was open, and is closed");
+    }
+
+    /// Whatever the client was asked when it went away, the failure is `cancelled`: a passphrase before anything connects, and a
+    /// keyboard-interactive prompt while the connection is open (the engine ends that one as an abandoned login, which is not what
+    /// happened to the person).
+    #[test]
+    fn a_client_that_goes_away_during_a_passphrase_or_a_keyboard_interactive_prompt_cancels_the_connect() {
+        let passphrase = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-enc".into() }));
+        let interactive = world(
+            FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::interactive("Password: ", "right"))),
+            FakeDirectory::new().with_host("web", AuthMethod::Interactive).with_pin("web", default_server_key()),
+        );
+        for (what, world) in [("a passphrase", passphrase), ("a keyboard-interactive prompt", interactive)] {
+            let failed = world.connect_as(&web(), &GoingOwner(world.cancel.clone())).err();
+            assert_eq!(failed, Some(failure(CANCELLED, "The connection was cancelled.")), "{what}");
+        }
     }
 
     /// What a server wrote can end up in a failure: a protocol error, the algorithms it offers. A failure is printed on the person's
