@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::auth::{prompt_wait, BrokerAuth, KeyStore, Owner, PinPolicy, Reply};
+use super::auth::{printable, prompt_wait, BrokerAuth, KeyStore, Owner, PinPolicy, Reply};
 use super::directory::{DirectoryError, HostDirectory};
 use super::protocol::{kinds, HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, ConnectError, HopRef, HostId, HostKey, Session, SshEngine, Target};
@@ -71,7 +71,8 @@ pub struct Connected {
     pub target: Target,
 }
 
-/// Why no session was opened: the sentence for the user (spec §11) and the `kind` word of the error event (`protocol::kinds`).
+/// Why no session was opened: the sentence for the user (spec §11) and the `kind` word of the error event (`protocol::kinds`). The text
+/// is printable (`printable`): it is shown outside the shell's own data stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectFailure {
     pub kind: String,
@@ -79,8 +80,12 @@ pub struct ConnectFailure {
 }
 
 impl ConnectFailure {
+    /// Every failure is made here, so this is where its text goes through `printable`: some of it was written by a server (a protocol
+    /// error, the algorithms a server offers) and some comes from the person's configuration or the client's request (aliases and user
+    /// names), and none of it may reach a terminal with an escape sequence or a carriage return in it. The sentences themselves have no
+    /// such character and come out as they are.
     fn new(kind: &str, text: impl Into<String>) -> ConnectFailure {
-        ConnectFailure { kind: kind.to_string(), text: text.into() }
+        ConnectFailure { kind: kind.to_string(), text: printable(&text.into()) }
     }
 
     fn cancelled() -> ConnectFailure {
@@ -530,6 +535,43 @@ mod tests {
         fn host_key_notice(&self, _text: &str) {}
 
         fn banner(&self, _text: &str) {}
+    }
+
+    /// What a server wrote can end up in a failure: a protocol error, the algorithms it offers. A failure is printed on the person's
+    /// terminal, so (plan 1b: server text outside the shell's own data stream goes through `printable`) nothing a terminal would act on
+    /// gets through: not an escape sequence that clears the screen or redraws a prompt, not a carriage return that overwrites the line.
+    #[test]
+    fn a_failure_carries_no_control_character_of_the_text_a_server_wrote() {
+        let hostile = "key exchange failed\u{1b}[2J\u{1b}[Hpassword: \rnow\r\nthen";
+        let safe = "key exchange failed?[2J?[Hpassword: ?now\nthen";
+        let key = || AuthMethod::Key { key_id: "k-plain".into() };
+        let directory = || FakeDirectory::new().with_host("bastion", key()).with_host_via("db", key(), &["bastion"]).with_pin("bastion", default_server_key());
+        let hop = |alias: &str| directory().resolve(&HostQuery::Alias(alias.into())).unwrap().hops.pop().unwrap().reference();
+        let db = HostQuery::Alias("db".into());
+        let protocol = |alias: &str| FakeEngine::new().failing_with(ConnectError::Protocol { hop: hop(alias), text: hostile.to_string() });
+
+        let on_the_destination = world(protocol("db"), directory());
+        assert_eq!(on_the_destination.connect(&db).err(), Some(failure(kinds::CONNECT, &format!("SSH error: {safe}"))));
+        let on_a_jump_host = world(protocol("bastion"), directory());
+        assert_eq!(on_a_jump_host.connect(&db).err(), Some(failure(kinds::CONNECT, &format!("Could not connect through bastion: SSH error: {safe}"))));
+
+        // The algorithms a server offers are its own text.
+        let offered = ConnectError::NoCommonHostKeyAlgorithm { hop: hop("db"), ours: vec!["ssh-ed25519".into()], theirs: vec!["ssh-dss\u{1b}[31m".into(), "evil\r\nline".into()] };
+        let no_common = world(FakeEngine::new().failing_with(offered), directory());
+        assert_eq!(
+            no_common.connect(&db).err(),
+            Some(failure(kinds::CONNECT, "Could not agree on a host key algorithm with db: the server offers ssh-dss?[31m, evil\nline, SSHelter accepts ssh-ed25519."))
+        );
+    }
+
+    /// Every failure is made in one place, which is where its text is made printable, so no route to a failure can forget it: the
+    /// directory's sentences (they name what the client asked for), the sentences of the engine and the broker's own.
+    #[test]
+    fn every_failure_text_is_printable_whatever_made_it() {
+        let nobody = world(FakeEngine::new(), FakeDirectory::new());
+        assert_eq!(nobody.connect(&HostQuery::Alias("we\u{1b}[2Jb".into())).err(), Some(failure(kinds::HOST, "No saved host is called we?[2Jb.")));
+        assert_eq!(ConnectFailure::new(kinds::CONNECT, "a\u{1b}[2Jb\rc\r\nd\te\u{202E}f").text, "a?[2Jb?c\nd\te?f", "controls and bidirectional marks, not tabs and line feeds");
+        assert_eq!(ConnectFailure::new(kinds::AUTH, "Authentication failed for deploy@web (tried: publickey).").text, "Authentication failed for deploy@web (tried: publickey).");
     }
 
     /// A client that goes away is not an abandoned login that anybody is told about (`cancelled`), whichever of the two asked for the
