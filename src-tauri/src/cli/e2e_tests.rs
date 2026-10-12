@@ -1,9 +1,13 @@
-//! `sshelter connect` the whole way (plan 1b): the CLI's loop with a fake terminal, the broker on a real socket, the real engine, and a
-//! scratch OpenSSH. The window that confirms host keys is scripted; nothing else is a double.
+//! `sshelter connect` the whole way (plan 1b): the CLI's loop, the broker on a real socket, the real engine, and a scratch OpenSSH.
+//! The doubles: the terminal (a `FakeTermios` under the real `Tty`; the keys go in through `Inputs::send`, so no keys, signal or
+//! watchdog thread runs, nor `own_writer`, `reach_broker` or main.rs), standard output and error (`Shared`), the host directory
+//! (`FakeDirectory`), the key store (`FakeKeys`), the keychain (`MemKeychain`), and the window that confirms host keys
+//! (`FakeConfirmer`, scripted).
 
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::client::Input;
 use super::run::{queue, run, Inputs};
@@ -54,20 +58,60 @@ struct Session {
     /// `Drop` puts the terminal back as well and would hide a run that did not.
     run: std::thread::JoinHandle<(i32, bool)>,
     directory: Arc<FakeDirectory>,
+    broker: Arc<Broker>,
     _dir: tempfile::TempDir,
 }
 
+/// How `sshelter connect` ended.
+struct Ended {
+    code: i32,
+    /// The run put the terminal back itself.
+    restored: bool,
+    stdout: String,
+    stderr: String,
+    directory: Arc<FakeDirectory>,
+    broker: Arc<Broker>,
+}
+
 impl Session {
-    fn type_text(&self, text: &str) {
-        self.keys.send(Input::Stdin(zeroize::Zeroizing::new(text.as_bytes().to_vec()))).unwrap();
+    /// What the CLI wrote, for a failure message.
+    fn said(&self) -> String {
+        format!("sshelter connect wrote to stderr {:?} and to stdout {:?}", self.stderr.text(), self.stdout.text())
     }
 
-    /// The end: the exit code, whether the run put the terminal back itself, what the CLI said, and the host directory.
-    fn finish(self) -> (i32, bool, String, Arc<FakeDirectory>) {
-        eventually("sshelter connect to end", 30, || self.run.is_finished());
-        let stderr = self.stderr.text();
+    /// Waits up to `seconds` for `condition`. The CLI ending before it, or the time running out, fails the test at once, with what the
+    /// CLI wrote.
+    fn wait_for(&self, what: &str, seconds: u64, condition: impl Fn(&Session) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        loop {
+            // The run's end is looked at first: a condition met as it ended counts.
+            let ended = self.run.is_finished();
+            if condition(self) {
+                return;
+            }
+            assert!(!ended, "sshelter connect ended before {what}; {}", self.said());
+            assert!(Instant::now() < deadline, "timed out after {seconds} s waiting for {what}; {}", self.said());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn type_text(&self, text: &str) {
+        let typed = self.keys.send(Input::Stdin(zeroize::Zeroizing::new(text.as_bytes().to_vec())));
+        assert!(typed.is_ok(), "sshelter connect had ended before {text:?} was typed; {}", self.said());
+    }
+
+    /// The end, which must come within 30 s.
+    fn finish(self) -> Ended {
+        self.wait_for("sshelter connect to end", 30, |session| session.run.is_finished());
         let (code, restored) = self.run.join().unwrap();
-        (code, restored, stderr, self.directory)
+        Ended { code, restored, stdout: self.stdout.text(), stderr: self.stderr.text(), directory: self.directory, broker: self.broker }
+    }
+}
+
+impl Ended {
+    /// The broker has forgotten the session (it leaves the broker's table once its thread is over).
+    fn forgotten(&self) {
+        eventually("the broker to forget the session", 10, || !self.broker.has_sessions());
     }
 }
 
@@ -96,7 +140,7 @@ fn connect(server: &Server, port: u16, decisions: Vec<Decision>) -> Session {
             (code, termios.is_start(&termios.now()))
         })
     };
-    Session { termios, keys: inputs, stdout, stderr, run, directory, _dir: dir }
+    Session { termios, keys: inputs, stdout, stderr, run, directory, broker, _dir: dir }
 }
 
 fn raw(termios: &FakeTermios) -> bool {
@@ -109,16 +153,17 @@ fn sshelter_connect_confirms_the_host_key_runs_a_shell_and_exits_with_its_status
     let Some(tools) = tools() else { return };
     let server = Server::start(&tools, &[SHELL]);
     let session = connect(&server, server.sshd.port, vec![Decision::Trust]);
-    eventually("the shell to open", 30, || raw(&session.termios));
-    eventually("a prompt", 20, || session.stdout.text().contains("$ "));
+    session.wait_for("the shell to open", 30, |session| raw(&session.termios));
+    session.wait_for("a prompt", 20, |session| session.stdout.text().contains("$ "));
     session.type_text("echo SSHELTER_$((6*7))\r");
-    eventually("the command's output", 20, || session.stdout.text().contains("SSHELTER_42"));
+    session.wait_for("the command's output", 20, |session| session.stdout.text().contains("SSHELTER_42"));
     session.type_text("exit 7\r");
-    let (code, restored, stderr, directory) = session.finish();
-    assert_eq!(code, 7);
-    assert_eq!(stderr, "Waiting for you to confirm lab's host key in SSHelter.\n");
-    assert!(restored, "the terminal is as it was");
-    assert_eq!(directory.pins().get(&HostId::from("host-lab")).map(|pin| pin.key.clone()), Some(server.host_key()));
+    let ended = session.finish();
+    assert_eq!(ended.code, 7);
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\n");
+    assert!(ended.restored, "the terminal is as it was");
+    assert_eq!(ended.directory.pins().get(&HostId::from("host-lab")).map(|pin| pin.key.clone()), Some(server.host_key()));
+    ended.forgotten();
 }
 
 /// The person does not trust the key: nothing is pinned, the CLI says so and exits 255, as ssh does for a refused key.
@@ -127,11 +172,13 @@ fn a_host_key_the_person_does_not_trust_ends_sshelter_connect() {
     let Some(tools) = tools() else { return };
     let server = Server::start(&tools, &[SHELL]);
     let session = connect(&server, server.sshd.port, vec![Decision::Refuse]);
-    let (code, restored, stderr, directory) = session.finish();
-    assert_eq!(code, 255);
-    assert_eq!(stderr, "Waiting for you to confirm lab's host key in SSHelter.\nThe host key of lab has not been confirmed yet.\n");
-    assert!(restored, "the terminal is as it was");
-    assert!(directory.pins().is_empty());
+    let ended = session.finish();
+    assert_eq!(ended.code, 255);
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\nThe host key of lab has not been confirmed yet.\n");
+    assert_eq!(ended.stdout, "", "no shell was opened, and nothing of one was shown");
+    assert!(ended.restored, "the terminal is as it was");
+    assert!(ended.directory.pins().is_empty());
+    ended.forgotten();
 }
 
 /// The link is cut while the shell runs: the CLI puts the terminal back, says the connection was lost, and exits 255 — never 0.
@@ -141,10 +188,11 @@ fn a_connection_lost_in_the_middle_of_a_shell_is_said_and_the_status_is_255() {
     let server = Server::start(&tools, &[SHELL]);
     let proxy = Proxy::start(server.sshd.port);
     let session = connect(&server, proxy.port, vec![Decision::Trust]);
-    eventually("a prompt", 30, || session.stdout.text().contains("$ "));
+    session.wait_for("a prompt", 30, |session| session.stdout.text().contains("$ "));
     proxy.set(Mode::Cut);
-    let (code, restored, stderr, _) = session.finish();
-    assert_eq!(code, 255);
-    assert_eq!(stderr, "Waiting for you to confirm lab's host key in SSHelter.\n\nConnection to lab lost (early eof).\n");
-    assert!(restored, "the terminal is as it was");
+    let ended = session.finish();
+    assert_eq!(ended.code, 255);
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\n\nConnection to lab lost (early eof).\n");
+    assert!(ended.restored, "the terminal is as it was");
+    ended.forgotten();
 }
