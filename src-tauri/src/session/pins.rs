@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use super::directory::PinnedKey;
+use super::directory::{decide_pin, decide_replace, PinDecision, PinnedKey};
 use crate::ssh::{HostId, HostKey};
 
 /// The version of the file's format; a file with another one is not read (and never overwritten).
@@ -116,10 +116,10 @@ impl PinStore {
     pub fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), String> {
         let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let mut file = self.read()?;
-        match file.pins.get(host.as_str()) {
-            Some(stored) if stored.fingerprint == key.fingerprint => Ok(()),
-            Some(_) => Err(format!("SSHelter did not pin the key of {host}: another key was pinned for it in the meantime.")),
-            None => {
+        match decide_pin(host, file.pins.get(host.as_str()).map(|stored| stored.fingerprint.as_str()), key) {
+            PinDecision::AlreadyPinned => Ok(()),
+            PinDecision::Refuse(sentence) => Err(sentence),
+            PinDecision::Write => {
                 file.pins.insert(host.as_str().to_string(), StoredPin::of(key, (self.clock)()));
                 self.write(&file)
             }
@@ -130,13 +130,13 @@ impl PinStore {
     pub fn replace(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), String> {
         let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let mut file = self.read()?;
-        match file.pins.get(host.as_str()) {
-            Some(stored) if stored.fingerprint == key.fingerprint => Ok(()),
-            Some(stored) if stored.fingerprint == previous.fingerprint => {
+        match decide_replace(host, file.pins.get(host.as_str()).map(|stored| stored.fingerprint.as_str()), previous, key) {
+            PinDecision::AlreadyPinned => Ok(()),
+            PinDecision::Refuse(sentence) => Err(sentence),
+            PinDecision::Write => {
                 file.pins.insert(host.as_str().to_string(), StoredPin::of(key, (self.clock)()));
                 self.write(&file)
             }
-            _ => Err(format!("SSHelter did not replace the key of {host}: the pinned key is not the one you were shown.")),
         }
     }
 }

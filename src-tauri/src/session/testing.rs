@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::directory::{DirectoryError, HostDirectory, PinnedKey};
+use super::directory::{decide_pin, decide_replace, DirectoryError, HostDirectory, PinDecision, PinnedKey};
 use super::protocol::HostQuery;
 use crate::ssh::{AuthMethod, Hop, HostId, HostKey, Target};
 
@@ -104,10 +104,10 @@ impl HostDirectory for FakeDirectory {
 
     fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
         let mut pins = locked(&self.pins);
-        match pins.get(host) {
-            Some(pinned) if pinned.key.fingerprint == key.fingerprint => Ok(()),
-            Some(_) => Err(DirectoryError::Failed(format!("SSHelter did not pin the key of {host}: another key was pinned for it in the meantime."))),
-            None => {
+        match decide_pin(host, pins.get(host).map(|pinned| pinned.key.fingerprint.as_str()), key) {
+            PinDecision::AlreadyPinned => Ok(()),
+            PinDecision::Refuse(sentence) => Err(DirectoryError::Failed(sentence)),
+            PinDecision::Write => {
                 pins.insert(host.clone(), PinnedKey { key: key.clone(), pinned_at_ms: PINNED_AT_MS });
                 Ok(())
             }
@@ -116,13 +116,13 @@ impl HostDirectory for FakeDirectory {
 
     fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
         let mut pins = locked(&self.pins);
-        match pins.get(host) {
-            Some(pinned) if pinned.key.fingerprint == key.fingerprint => Ok(()),
-            Some(pinned) if pinned.key.fingerprint == previous.fingerprint => {
+        match decide_replace(host, pins.get(host).map(|pinned| pinned.key.fingerprint.as_str()), previous, key) {
+            PinDecision::AlreadyPinned => Ok(()),
+            PinDecision::Refuse(sentence) => Err(DirectoryError::Failed(sentence)),
+            PinDecision::Write => {
                 pins.insert(host.clone(), PinnedKey { key: key.clone(), pinned_at_ms: PINNED_AT_MS });
                 Ok(())
             }
-            _ => Err(DirectoryError::Failed(format!("SSHelter did not replace the key of {host}: the pinned key is not the one you were shown."))),
         }
     }
 
