@@ -3,7 +3,9 @@
 //! the client (`client.rs`) says what to do with each, and the loop does it without waiting on anything that can stall: what goes to
 //! the terminal and what goes to the broker is written by a writer thread of each. A terminal that is slow, or a broker that stops
 //! reading (it does, for as long as a shell does not take what was typed), holds up its own writer and nothing else: keys reach the
-//! broker while output waits for the terminal, and a signal is handled at once.
+//! broker while output waits for the terminal, and a signal is handled at once. One wait can last: at an end the session came to (the
+//! shell exited, the broker ended the session or went away) the loop waits for the terminal to take the shell's last output, for as
+//! long as it goes on taking it, as OpenSSH does; a signal ends that wait (`Loop::perform`).
 //!
 //! Nothing piles up in the CLI without a bound. A frame from the broker counts against a budget until the terminal has taken it, and
 //! the thread that reads the frames waits while the budget is spent. The broker's relay then waits to write to the CLI and stops taking
