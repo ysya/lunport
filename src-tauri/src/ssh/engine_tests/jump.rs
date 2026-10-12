@@ -152,6 +152,44 @@ fn closing_the_session_disconnects_every_hop() {
     eventually("the jump host to log a disconnect message", 5, || pair.a.sshd.log().contains("Received disconnect"));
 }
 
+/// More than one jump (spec decision 4, ProxyJump with several levels): the third hop is opened with a `direct-tcpip` request on a session
+/// whose own transport is a channel of the first one, and closing has three hops to disconnect, the innermost first.
+#[test]
+fn a_three_hop_chain_runs_a_command_on_the_last_host_and_closing_disconnects_every_hop() {
+    let Some(tools) = tools() else { return };
+    let (a, b, c) = (Server::start(&tools, &[LOG_LOGINS]), Server::start(&tools, &[LOG_LOGINS]), Server::start(&tools, &[LOG_LOGINS]));
+    let vault = VaultAuth::new().with_key("ka", &a.key.private_text).with_key("kb", &b.key.private_text).with_key("kc", &c.key.private_text);
+    let target = Target {
+        hops: vec![a.hop_with("a", a.sshd.port, key("ka")), b.hop_with("b", b.sshd.port, key("kb")), c.hop_with("c", c.sshd.port, key("kc"))],
+    };
+    let policy = TestPolicy::trusting();
+
+    // The engine is held in a binding: it owns the runtime that drives the three connections.
+    let engine = engine();
+    let session = engine.connect(&target, &*policy, &vault).expect("the chain connects");
+    eventually("all three servers to log the login", 3, || accepted_logins(&a) == 1 && accepted_logins(&b) == 1 && accepted_logins(&c) == 1);
+
+    // This also settles the destination (see `settle`) before the session is closed.
+    let result = session.exec("echo $SSH_CONNECTION", Duration::from_secs(20), MIB).unwrap();
+    assert_eq!((result.ended, result.exit_code), (Ended::Exited, Some(0)));
+    let output = String::from_utf8_lossy(&result.stdout).into_owned();
+    assert_eq!(
+        server_port_in(&output),
+        Some(c.sshd.port),
+        "the command did not run on the third host: {output:?} (a listens on {}, b on {}, c on {})",
+        a.sshd.port,
+        b.sshd.port,
+        c.sshd.port
+    );
+    let aliases: Vec<String> = policy.seen().into_iter().map(|(hop, _)| hop.alias).collect();
+    assert_eq!(aliases, ["a", "b", "c"], "each hop was checked, in order");
+
+    session.close();
+    eventually("the destination to log a disconnect message", 5, || c.sshd.log().contains("Received disconnect"));
+    eventually("the second host to log a disconnect message", 5, || b.sshd.log().contains("Received disconnect"));
+    eventually("the first host to log a disconnect message", 5, || a.sshd.log().contains("Received disconnect"));
+}
+
 /// The outer link dies: the reason is the outer hop's own record. The inner hop only learns that its carrier is gone (spec §6.2 step 2).
 #[test]
 fn when_the_outer_link_is_cut_the_reason_is_the_outer_hops() {
