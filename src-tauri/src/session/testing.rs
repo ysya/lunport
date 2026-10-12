@@ -1,12 +1,105 @@
 //! Test doubles for the broker's tests (`#[cfg(test)]` in `session/mod.rs`): saved hosts in memory, and the checks every
 //! `HostDirectory` must pass.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
+use zeroize::Zeroizing;
+
+use super::auth::{KeyStore, Owner, Reply, VaultKey};
 use super::directory::{decide_pin, decide_replace, DirectoryError, HostDirectory, PinDecision, PinnedKey};
-use super::protocol::HostQuery;
+use super::protocol::{HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, Hop, HostId, HostKey, Target};
+use crate::sync::slot_rules::test_keys;
+
+/// The passphrase of `test_keys::encrypted()`.
+pub const TEST_PASSPHRASE: &str = "test-passphrase";
+
+/// A vault in memory: `k-plain` is the ed25519 test key without a passphrase (named "plain"), `k-enc` the one with the passphrase
+/// `TEST_PASSPHRASE` (named "laptop").
+pub struct FakeKeys {
+    keys: HashMap<String, (VaultKey, String)>,
+}
+
+impl FakeKeys {
+    pub fn new() -> FakeKeys {
+        let mut keys = HashMap::new();
+        keys.insert(
+            "k-plain".to_string(),
+            (VaultKey { name: "plain".into(), public_key: test_keys::PLAIN_PUBLIC.into(), has_passphrase: false }, test_keys::plain()),
+        );
+        keys.insert(
+            "k-enc".to_string(),
+            (VaultKey { name: "laptop".into(), public_key: test_keys::ENC_PUBLIC.into(), has_passphrase: true }, test_keys::encrypted()),
+        );
+        FakeKeys { keys }
+    }
+}
+
+impl KeyStore for FakeKeys {
+    fn key(&self, key_id: &str) -> Option<VaultKey> {
+        self.keys.get(key_id).map(|(key, _)| key.clone())
+    }
+
+    fn private_text(&self, key_id: &str) -> Result<Option<Zeroizing<String>>, String> {
+        Ok(self.keys.get(key_id).map(|(_, text)| Zeroizing::new(text.clone())))
+    }
+}
+
+/// One question the fake owner was asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asked {
+    pub kind: QuestionKind,
+    pub text: String,
+    pub echo: bool,
+    pub deadline: Option<Instant>,
+}
+
+/// The person at the client's terminal, scripted: each question takes the next reply (none left: `Reply::Gone`, the person left).
+/// Everything shown and asked is recorded.
+#[derive(Default)]
+pub struct FakeOwner {
+    replies: Mutex<VecDeque<Reply>>,
+    pub asked: Mutex<Vec<Asked>>,
+    pub notices: Mutex<Vec<String>>,
+    pub banners: Mutex<Vec<String>>,
+}
+
+impl FakeOwner {
+    pub fn answering(replies: Vec<Reply>) -> FakeOwner {
+        FakeOwner { replies: Mutex::new(replies.into()), ..FakeOwner::default() }
+    }
+
+    /// The person answers each question with these, in order.
+    pub fn typing(answers: &[&str]) -> FakeOwner {
+        FakeOwner::answering(answers.iter().map(|answer| Reply::Answer(Zeroizing::new(answer.to_string()))).collect())
+    }
+
+    pub fn asked(&self) -> Vec<Asked> {
+        locked(&self.asked).clone()
+    }
+
+    /// The texts of the questions asked, in order.
+    pub fn questions(&self) -> Vec<String> {
+        self.asked().into_iter().map(|asked| asked.text).collect()
+    }
+}
+
+impl Owner for FakeOwner {
+    fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
+        locked(&self.asked).push(Asked { kind, text: text.to_string(), echo, deadline });
+        locked(&self.replies).pop_front().unwrap_or(Reply::Gone)
+    }
+
+    fn host_key_notice(&self, text: &str) {
+        locked(&self.notices).push(text.to_string());
+    }
+
+    fn banner(&self, text: &str) {
+        locked(&self.banners).push(text.to_string());
+    }
+}
 
 pub fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
