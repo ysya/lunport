@@ -197,10 +197,12 @@ mod tests {
         let (old, new, other) = (key(test_keys::PLAIN_PUBLIC), key(test_keys::ECDSA_PUBLIC), key(test_keys::RSA_PUBLIC));
         pins.pin(&web, &old).unwrap();
         assert!(pins.replace(&web, &other, &new).is_err(), "the pin is not the key the person was shown as the old one");
+        assert_eq!(pins.get(&web).unwrap().map(|pin| pin.key), Some(old.clone()), "a refused replace writes nothing: the old key stays");
         pins.replace(&web, &old, &new).unwrap();
         assert_eq!(pins.get(&web).unwrap().map(|pin| pin.key), Some(new.clone()));
         pins.replace(&web, &old, &new).unwrap();
         assert!(pins.replace(&HostId::from("db"), &old, &new).is_err(), "nothing pinned: there is nothing to replace");
+        assert_eq!(pins.get(&HostId::from("db")), Ok(None), "a refused replace pins nothing");
     }
 
     #[test]
@@ -229,5 +231,21 @@ mod tests {
             assert!(pins.pin(&HostId::from("web"), &key(test_keys::PLAIN_PUBLIC)).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), contents, "the file is left as it was");
         }
+    }
+
+    /// Only a missing file means "nothing pinned"; a file that cannot be read for any other reason is an error as well. Here the path is a
+    /// directory: reading it fails with an error that is not "not found" (which one differs by platform, so only that is relied on).
+    #[test]
+    fn a_pin_file_that_cannot_be_read_for_a_reason_other_than_being_missing_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app-data").join("host-pins.json");
+        std::fs::create_dir_all(&path).unwrap();
+        let pins = store(&dir);
+        let web = HostId::from("web");
+        let error = pins.get(&web).unwrap_err();
+        assert!(error.contains("host-pins.json"), "{error}");
+        assert!(pins.pin(&web, &key(test_keys::PLAIN_PUBLIC)).is_err(), "nothing is pinned over what cannot be read");
+        assert!(pins.replace(&web, &key(test_keys::PLAIN_PUBLIC), &key(test_keys::ECDSA_PUBLIC)).is_err());
+        assert!(path.is_dir(), "what was at the path is left as it was");
     }
 }

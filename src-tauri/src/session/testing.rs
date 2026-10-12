@@ -131,18 +131,22 @@ impl HostDirectory for FakeDirectory {
     }
 }
 
-/// What every `HostDirectory` must do with pins, for a host `host` that has none yet: pin once (again is fine, another key is refused),
-/// and replace only from the key that is pinned. The resolved hop carries the pin.
+/// What every `HostDirectory` must do with pins, for the host `query` names, which has no pin yet: a replace has nothing to replace, pin
+/// once (again is fine, another key is refused), and replace only from the key that is pinned. A refused call writes nothing. The
+/// resolved hop carries the pin.
 pub fn check_the_pin_contract(directory: &dyn HostDirectory, query: &HostQuery, first: &HostKey, second: &HostKey, third: &HostKey) {
     let hop = directory.resolve(query).expect("the host resolves").hops.pop().expect("a hop");
     assert_eq!(hop.pinned, None, "nothing is pinned yet");
     assert_eq!(directory.pinned(&hop.id), Ok(None));
+    assert!(directory.replace_pin(&hop.id, first, second).is_err(), "nothing is pinned: there is nothing to replace");
+    assert_eq!(directory.pinned(&hop.id), Ok(None), "a refused replace pins nothing");
     directory.pin(&hop.id, first).expect("a first pin");
     directory.pin(&hop.id, first).expect("the same key again");
     assert!(directory.pin(&hop.id, second).is_err(), "another key is not pinned over the first");
     assert_eq!(directory.pinned(&hop.id).unwrap().map(|pin| pin.key), Some(first.clone()));
     assert_eq!(directory.resolve(query).unwrap().hops.pop().unwrap().pinned, Some(first.clone()), "the resolved hop carries the pin");
     assert!(directory.replace_pin(&hop.id, third, second).is_err(), "only the pinned key can be replaced");
+    assert_eq!(directory.pinned(&hop.id).unwrap().map(|pin| pin.key), Some(first.clone()), "a refused replace writes nothing: the pin stays");
     directory.replace_pin(&hop.id, first, second).expect("the changed key replaces the pinned one");
     assert_eq!(directory.pinned(&hop.id).unwrap().map(|pin| pin.key), Some(second.clone()));
 }
