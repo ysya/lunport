@@ -22,7 +22,8 @@ pub const PASSWORD_PROMPTS: usize = 3;
 /// What one host can ask of a connect, in connects, when the person answers everything it asks: the pin that another connection made
 /// meanwhile taken into the policy (once: the policy has a pin from then on), its host key confirmed (once, see
 /// `Done::asked_host_key`), the key type of a changed pin (once, plan 1b R17: `Done::unrestricted`) and its password typed
-/// `PASSWORD_PROMPTS` times. Each is followed by one more connect, and all but the first need one answer of the person.
+/// `PASSWORD_PROMPTS` times. Each is followed by one more connect. The host key question and the passwords each need one answer of the
+/// person; the pin taken meanwhile and the handshake without the pinned type need none.
 const ROUNDS_PER_HOP: usize = 1 + 1 + 1 + PASSWORD_PROMPTS;
 
 /// How many times a connect through `target` may go round: every host of the chain at the most it can ask (`ROUNDS_PER_HOP`), and the

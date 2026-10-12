@@ -196,7 +196,7 @@ pub fn hop_from_effective(alias: &str, pairs: &[(String, String)], key_id: Optio
 }
 
 /// The vault key ("Only in SSHelter" slot) that the first of `identity_files` (`ssh -G`'s values, in order) names, if any. Copied from
-/// `agent::oneshot`, which goes away with the one-shot channel.
+/// the one-shot key channel that plan 1b-2 deleted (`agent/oneshot.rs`).
 pub fn vault_slot_of(identity_files: &[String], state: &SyncStateV2, home: &Path) -> Option<String> {
     identity_files.iter().find_map(|value| {
         let IdentityTarget::Slot(file) = resolve_identity_value(value, home) else { return None };

@@ -248,7 +248,7 @@ fn a_banner_longer_than_the_cap_reaches_the_auth_source_cut_short() {
     let auth = VaultAuth::new().with_password(&login.password);
     let _session = engine().connect(&toy_target(&server, &login, AuthMethod::Password), &*TestPolicy::trusting(), &auth).expect("the login succeeds");
     let banners = auth.banners();
-    assert_eq!(banners.len(), 1, "one call to the auth source carries the whole banner");
+    assert_eq!(banners.len(), 1, "one call to the auth source carries the banner, cut at the cap, in one piece");
     let text = &banners[0].1;
     // The cap falls inside a line, so a line break and the notice follow the 64 KiB.
     assert_eq!(text.len(), MAX_BANNER_BYTES + 1 + BANNER_CUT_NOTICE.len());
