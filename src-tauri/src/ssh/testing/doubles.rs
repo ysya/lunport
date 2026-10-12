@@ -96,6 +96,7 @@ pub struct VaultAuth {
     password_asks: Mutex<Vec<HopRef>>,
     prompts: Mutex<Vec<Vec<Prompt>>>,
     banners: Mutex<Vec<(HopRef, String)>>,
+    calls: Mutex<Vec<&'static str>>,
 }
 
 impl VaultAuth {
@@ -113,6 +114,7 @@ impl VaultAuth {
             password_asks: Mutex::new(Vec::new()),
             prompts: Mutex::new(Vec::new()),
             banners: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -183,6 +185,16 @@ impl VaultAuth {
     pub fn banners(&self) -> Vec<(HopRef, String)> {
         locked(&self.banners).clone()
     }
+
+    /// The `AuthSource` methods the engine called, by name, in the order it called them (the other accessors keep one list per method and
+    /// say nothing about the order between them).
+    pub fn calls_in_order(&self) -> Vec<&'static str> {
+        locked(&self.calls).clone()
+    }
+
+    fn called(&self, method: &'static str) {
+        locked(&self.calls).push(method);
+    }
 }
 
 impl Default for VaultAuth {
@@ -199,10 +211,12 @@ fn algorithm_of(blob: &[u8]) -> Option<String> {
 
 impl AuthSource for VaultAuth {
     fn public_key(&self, key_id: &str) -> Option<String> {
+        self.called("public_key");
         self.presented.get(key_id).cloned().or_else(|| self.keys.get(key_id).map(|(_, public_line)| public_line.clone()))
     }
 
     fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError> {
+        self.called("sign");
         let record = |algorithm: Option<String>| locked(&self.signs).push(SignCall { key_id: key_id.to_string(), rsa_hash, algorithm });
         if let Some(error) = &self.sign_error {
             record(None);
@@ -231,12 +245,14 @@ impl AuthSource for VaultAuth {
     }
 
     fn password(&self, hop: &HopRef) -> Option<Secret> {
+        self.called("password");
         locked(&self.password_asks).push(hop.clone());
         std::thread::sleep(self.password_delay);
         self.password.clone().map(Zeroizing::new)
     }
 
     fn interactive(&self, _hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>> {
+        self.called("interactive");
         locked(&self.prompts).push(prompts.to_vec());
         if !self.overrun_deadline && Instant::now() + self.answer_delay > deadline {
             std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
@@ -247,6 +263,7 @@ impl AuthSource for VaultAuth {
     }
 
     fn banner(&self, hop: &HopRef, text: &str) {
+        self.called("banner");
         locked(&self.banners).push((hop.clone(), text.to_string()));
     }
 }
@@ -316,6 +333,9 @@ mod tests {
         assert_eq!(answers.iter().map(|answer| answer.as_str()).collect::<Vec<_>>(), ["one", "two"]);
         assert_eq!(auth.password_asked_for(), vec![hop("web")]);
         assert_eq!(auth.prompts_seen(), vec![prompts.to_vec()]);
+        auth.banner(&hop("web"), "Authorized use only.");
+        assert_eq!(auth.banners(), vec![(hop("web"), "Authorized use only.".to_string())]);
+        assert_eq!(auth.calls_in_order(), vec!["password", "interactive", "banner"], "the order of the calls is kept, which the lists above do not say");
 
         let silent = VaultAuth::new();
         assert!(silent.password(&hop("web")).is_none() && silent.interactive(&hop("web"), &prompts, deadline).is_none());
