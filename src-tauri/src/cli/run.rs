@@ -5,11 +5,12 @@
 //! reading (it does, for as long as a shell does not take what was typed), holds up its own writer and nothing else: keys reach the
 //! broker while output waits for the terminal, and a signal is handled at once.
 //!
-//! Nothing piles up without a bound. A frame from the broker counts against a budget until the terminal has taken it, and the thread
-//! that reads the frames waits while the budget is spent: the broker, and SSH's window behind it, then push back on the remote, as
-//! OpenSSH's window does. What was typed counts against another budget until the broker has taken it, and the keys stay in the
-//! terminal meanwhile. A size that waits for the broker gives way to a newer one. And a watchdog ends the program when its loop does
-//! not (`Watchdog`).
+//! Nothing piles up in the CLI without a bound. A frame from the broker counts against a budget until the terminal has taken it, and
+//! the thread that reads the frames waits while the budget is spent. The broker's relay then waits to write to the CLI and stops taking
+//! from the engine's queue for the shell, which never waits (spec §6.3): once that queue is full, the output that does not fit is
+//! dropped, and the stream says in a line how many bytes are missing. SSH's window is not involved, and the remote is not slowed down.
+//! What was typed counts against another budget until the broker has taken it, and the keys stay in the terminal meanwhile. A size
+//! that waits for the broker gives way to a newer one. And a watchdog ends the program when its loop does not (`Watchdog`).
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -177,8 +178,8 @@ enum Toward {
 }
 
 /// Bytes of one kind on their way through the program: counted when they are read, given back when they have been written where they
-/// go, or dropped (`Credit`). The thread that reads them waits while the budget is spent, so that what cannot be written yet stays where
-/// it came from.
+/// go, or dropped (`Credit`). The thread that reads them waits while the budget is spent, so that what cannot be written yet is not
+/// read: the keys stay in the terminal, and the broker's output in the broker (what becomes of it there: the module's doc).
 struct Budget {
     limit: usize,
     toward: Toward,
@@ -1704,9 +1705,10 @@ mod tests {
         let _ = printing.join();
     }
 
-    /// The remote prints far faster than the terminal takes it (here: not at all). What waits for the terminal is bounded: the CLI stops
-    /// reading, so the broker (and SSH's window behind it) push back on the remote. And a key does not wait behind that output: Ctrl-C
-    /// reaches the broker at once, as OpenSSH sends it.
+    /// The remote prints far faster than the terminal takes it (here: not at all). What waits for the terminal in the CLI is bounded: the
+    /// CLI stops reading its connection, and the broker's writes to it wait (the broker's relay then stops taking from the engine's queue,
+    /// which drops what does not fit; spec §6.3). And a key does not wait behind that output: Ctrl-C reaches the broker at once, as
+    /// OpenSSH sends it.
     #[test]
     fn keys_overtake_output_that_waits_for_the_terminal_and_what_waits_is_bounded() {
         let stdout = Stalled::default();
@@ -1725,7 +1727,7 @@ mod tests {
                 }
             })
         };
-        eventually("the remote to be held back", 10, || {
+        eventually("the broker's writes to wait", 10, || {
             let before = written.load(Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(300));
             written.load(Ordering::SeqCst) == before
