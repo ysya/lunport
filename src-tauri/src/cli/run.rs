@@ -554,14 +554,15 @@ impl BrokerWriter {
     }
 }
 
-/// Reads the broker's frames into the queue until the connection ends, or the loop is gone. A frame counts against the output budget
-/// until the terminal has taken what it brought; while the budget is spent, nothing more is read.
+/// Reads the broker's frames into the queue until the connection ends, a control message cannot be read (the session ends then:
+/// `Input::Unreadable`), or the loop is gone. A frame counts against the output budget until the terminal has taken what it brought;
+/// while the budget is spent, nothing more is read.
 fn read_broker(mut reader: UnixStream, inputs: &Inputs) {
     loop {
         let (input, bytes) = match read_frame(&mut reader) {
             Ok(Some(Frame::Control(payload))) => match decode::<ServerMessage>(&payload) {
                 Ok(message) => (Input::Message(message), payload.len()),
-                Err(_) => continue,
+                Err(_) => (Input::Unreadable, 0),
             },
             Ok(Some(Frame::Data(mut payload))) => {
                 let output = std::mem::take(&mut *payload);
@@ -570,8 +571,8 @@ fn read_broker(mut reader: UnixStream, inputs: &Inputs) {
             }
             Ok(None) | Err(_) => (Input::Closed, 0),
         };
-        let closed = matches!(input, Input::Closed);
-        if inputs.from_broker(input, bytes).is_err() || closed {
+        let last = matches!(input, Input::Closed | Input::Unreadable);
+        if inputs.from_broker(input, bytes).is_err() || last {
             return;
         }
     }
@@ -1860,6 +1861,18 @@ mod tests {
         assert!(restored, "the terminal is as it was");
         stdout.let_go();
         printing.join().unwrap();
+    }
+
+    /// A control message the CLI cannot read ends the session at once, with a sentence and the terminal put back. (It used to be
+    /// skipped: the run went on, and a question in it would have waited, unanswered, for the broker's deadline.)
+    #[test]
+    fn a_message_the_cli_cannot_read_ends_the_session_with_a_sentence() {
+        let stderr = Shared::default();
+        let mut hand = by_hand(FakeTermios::new(), Box::new(Shared::default()), Box::new(stderr.clone()));
+        hand.open();
+        write_frame(&mut hand.broker, CONTROL, br#"{"type":"teleport"}"#).unwrap();
+        assert_eq!(hand.ends_within(Duration::from_secs(5)), (255, true));
+        assert_eq!(stderr.text(), "\nSSHelter sent a message this version of sshelter cannot read. Quit SSHelter and open it again.\n");
     }
 
     /// A terminal whose descriptor another program left non-blocking: a write that would block says so (`WouldBlock`) instead of waiting,

@@ -19,6 +19,9 @@ pub enum Input {
     Output(Vec<u8>),
     /// The broker closed the connection.
     Closed,
+    /// The broker sent a control message this version of the CLI cannot read. Within one protocol version (`hello` checked it) that is
+    /// a bug of the app, and the session cannot go on without it: a question in it would wait, unanswered, for the broker's deadline.
+    Unreadable,
     /// Bytes the person typed (a password, at a question). They are wiped wherever they are dropped: `Zeroizing` does it, so no path
     /// of the loop (a discarded line, an input that arrives after the end) has to remember to.
     Stdin(Zeroizing<Vec<u8>>),
@@ -46,6 +49,7 @@ impl fmt::Debug for Input {
             Input::Message(message) => f.debug_tuple("Message").field(message).finish(),
             Input::Output(bytes) => f.debug_tuple("Output").field(bytes).finish(),
             Input::Closed => f.write_str("Closed"),
+            Input::Unreadable => f.write_str("Unreadable"),
             Input::Stdin(_) => f.write_str("Stdin(<hidden>)"),
             Input::StdinEnd => f.write_str("StdinEnd"),
             Input::Resize(cols, rows) => f.debug_tuple("Resize").field(cols).field(rows).finish(),
@@ -113,6 +117,9 @@ fn cancel(question_id: String) -> Action {
 
 /// What is said when a thread of the program panicked (the panic itself was reported by the hook, which put the terminal back first).
 const THREAD_FAILED: &str = "sshelter: an internal error stopped this session.";
+
+/// What is said when the broker sent a control message this CLI cannot read (`Input::Unreadable`).
+const UNREADABLE: &str = "SSHelter sent a message this version of sshelter cannot read. Quit SSHelter and open it again.";
 
 /// What the person typed before the shell opened is kept for it (as OpenSSH's typeahead reaches the shell), up to this many bytes.
 const TYPEAHEAD_LIMIT: usize = 64 * 1024;
@@ -210,6 +217,8 @@ impl Client {
                 let reason = self.reason.take().unwrap_or_else(|| "The connection to SSHelter ended.".to_string());
                 self.finish(false, Some(reason), 255)
             }
+            // The broker sees the stream end when the program exits: no `close` is needed.
+            Input::Unreadable => self.finish(false, Some(UNREADABLE.to_string()), 255),
             Input::Stdin(bytes) => self.typed(&bytes),
             Input::StdinEnd | Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => self.answer(None),
             Input::Interrupt => self.finish(true, None, 130),
@@ -585,6 +594,20 @@ mod tests {
         assert!(client.handle(Input::Output(b"late".to_vec())).is_empty(), "nothing after the end");
     }
 
+    /// A control message the CLI cannot read is a bug of the app within one protocol version (`hello` checked the version): the session
+    /// ends, with a sentence that says what to do, as the broker ends a connection that sends it one it cannot read (`kinds::PROTOCOL`),
+    /// instead of going on without it.
+    #[test]
+    fn a_message_the_cli_cannot_read_ends_the_session_with_a_sentence() {
+        const SENTENCE: &str = "SSHelter sent a message this version of sshelter cannot read. Quit SSHelter and open it again.";
+        assert_eq!(started().handle(Input::Unreadable), [Action::Mode(Mode::Cooked, false), Action::Stderr(format!("{SENTENCE}\n")), Action::Exit(255)]);
+        assert_eq!(
+            opened().handle(Input::Unreadable),
+            [Action::Mode(Mode::Cooked, false), Action::Stderr(format!("\n{SENTENCE}\n")), Action::Exit(255)],
+            "the cursor is somewhere in what the shell wrote"
+        );
+    }
+
     fn event(event: Event) -> Input {
         Input::Message(ServerMessage::Event(event))
     }
@@ -852,7 +875,10 @@ mod tests {
 
         assert_eq!(format!("{:?}", Input::Output(vec![104, 105])), "Output([104, 105])");
         assert_eq!(format!("{:?}", Input::Message(ServerMessage::Opened { session_id: "1".into() })), "Message(Opened { session_id: \"1\" })");
-        assert_eq!(format!("{:?}", [Input::Closed, Input::StdinEnd, Input::Interrupt, Input::Failed, Input::Continue]), "[Closed, StdinEnd, Interrupt, Failed, Continue]");
+        assert_eq!(
+            format!("{:?}", [Input::Closed, Input::Unreadable, Input::StdinEnd, Input::Interrupt, Input::Failed, Input::Continue]),
+            "[Closed, Unreadable, StdinEnd, Interrupt, Failed, Continue]"
+        );
         assert_eq!(format!("{:?}", [Input::Resize(100, 30), Input::Stop(15)]), "[Resize(100, 30), Stop(15)]");
         assert_eq!(format!("{:?}", Action::Stdout(vec![104, 105])), "Stdout([104, 105])");
         assert_eq!(format!("{:?}", Action::Stderr("pw: ".into())), "Stderr(\"pw: \")");
