@@ -4,6 +4,7 @@
 //! client's connection, never in async code and never on the UI thread.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -13,12 +14,21 @@ use super::protocol::{kinds, HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, ConnectError, HopRef, HostId, HostKey, Session, SshEngine, Target};
 use crate::sync::env::Keychain;
 
-/// How many passwords the person may type for one host in one connect (OpenSSH's `NumberOfPasswordPrompts`).
+/// How many passwords the person may type for one host in one connect (OpenSSH's `NumberOfPasswordPrompts`). The one that
+/// `BrokerAuth::password` asks before it connects a host that starts with the password method is the first of them.
 pub const PASSWORD_PROMPTS: usize = 3;
 
-/// How many times one connect may go round (host keys confirmed, a password typed, the key type of a changed pin): enough for every
-/// question on every hop of a chain, and a bound in case a server keeps changing its answer.
-const MAX_ROUNDS: usize = 12;
+/// What one host can ask of a connect, in connects, when the person answers everything it asks: its host key confirmed (once, see
+/// `Done::asked_host_key`), the key type of a changed pin (once, plan 1b R17: `Done::unrestricted`) and its password typed
+/// `PASSWORD_PROMPTS` times. Each is paid for by one answer and followed by one more connect.
+const ROUNDS_PER_HOP: usize = 1 + 1 + PASSWORD_PROMPTS;
+
+/// How many times a connect through `target` may go round: every host of the chain at the most it can ask (`ROUNDS_PER_HOP`), and the
+/// connect that gets through. Everything that makes the loop go round again is capped for each host (`Done`), so no server reaches
+/// this, whatever it does, and neither does a person who answers: it is a net under those caps, not a limit on what a chain may ask.
+fn round_limit(target: &Target) -> usize {
+    target.hops.len() * ROUNDS_PER_HOP + 1
+}
 
 /// The `kind` of a failure nobody is told about: the client went away.
 pub const CANCELLED: &str = "cancelled";
@@ -117,19 +127,24 @@ fn hop_of(error: &ConnectError) -> Option<&HopRef> {
     }
 }
 
-/// The failure the user sees for an engine error. A failure on a jump host is said through it (spec §11:
-/// `Could not connect through {jump alias}: {reason}`).
+/// The failure the user sees when the connect stops at `hop` (`None`: at the chain as a whole) for `reason`. A failure on a jump host
+/// is said through it (spec §11: `Could not connect through {jump alias}: {reason}`).
+fn failure_at(hop: Option<&HopRef>, target: &Target, kind: &str, reason: impl fmt::Display) -> ConnectFailure {
+    let destination = target.hops.last().map(|hop| &hop.id);
+    match hop {
+        Some(hop) if Some(&hop.id) != destination => ConnectFailure::new(kind, format!("Could not connect through {}: {reason}", hop.alias)),
+        _ => ConnectFailure::new(kind, reason.to_string()),
+    }
+}
+
+/// The failure the user sees for an engine error.
 fn failure_of(error: &ConnectError, target: &Target) -> ConnectFailure {
     let kind = match error {
         ConnectError::HostKeyUnknown { .. } | ConnectError::HostKeyMismatch { .. } => kinds::HOST_KEY,
         ConnectError::AuthFailed { .. } | ConnectError::AuthAbandoned { .. } => kinds::AUTH,
         _ => kinds::CONNECT,
     };
-    let destination = target.hops.last().map(|hop| &hop.id);
-    match hop_of(error) {
-        Some(hop) if Some(&hop.id) != destination => ConnectFailure::new(kind, format!("Could not connect through {}: {error}", hop.alias)),
-        _ => ConnectFailure::new(kind, error.to_string()),
-    }
+    failure_at(hop_of(error), target, kind, error)
 }
 
 /// The login of `hop` was abandoned because the person did not give the password (they cancelled the question, let it run out, or
@@ -143,10 +158,28 @@ fn directory_failure(error: DirectoryError) -> ConnectFailure {
     ConnectFailure::new(kinds::HOST, error.to_string())
 }
 
+/// What a connect has done for each host so far, for the things it does only so often. A pass of the loop that is not the last is one
+/// of these, so together they bound it (`round_limit`).
+#[derive(Default)]
+struct Done {
+    /// Hosts whose key the person has been asked about. Once is all a connect needs: after the key was trusted (or the changed one
+    /// accepted) the server presents that key. A server that then presents another one is not asked about again.
+    asked_host_key: HashSet<HostId>,
+    /// Hosts connected once more without the pinned key type (plan 1b R17).
+    unrestricted: HashSet<HostId>,
+    /// The passwords the person has been asked for, by host (`PASSWORD_PROMPTS` at the most).
+    passwords_typed: HashMap<HostId, usize>,
+}
+
 impl Connector<'_> {
     /// Opens a session to the saved host `query` names, asking `owner` (the person at the client's terminal) what the login needs and the
     /// window about host keys, until it is open, it fails, or `cancel` is set.
     pub fn connect(&self, query: &HostQuery, owner: &dyn Owner, cancel: &CancelToken) -> Result<Connected, ConnectFailure> {
+        self.connect_within(query, owner, cancel, round_limit)
+    }
+
+    /// `connect` with the bound on the rounds given (`round_limit` is the one `connect` uses): the net itself is tested with a smaller one.
+    fn connect_within(&self, query: &HostQuery, owner: &dyn Owner, cancel: &CancelToken, rounds: fn(&Target) -> usize) -> Result<Connected, ConnectFailure> {
         if cancel.is_cancelled() {
             return Err(ConnectFailure::cancelled());
         }
@@ -154,9 +187,8 @@ impl Connector<'_> {
         let auth = BrokerAuth::new(self.keys, self.keychain, owner, self.directory);
         auth.unlock(&target).map_err(|text| ConnectFailure::new(kinds::AUTH, text))?;
         let policy = PinPolicy::from_target(&target);
-        let mut unrestricted: HashSet<HostId> = HashSet::new();
-        let mut passwords_typed: HashMap<HostId, usize> = HashMap::new();
-        for _ in 0..MAX_ROUNDS {
+        let mut done = Done::default();
+        for _ in 0..rounds(&target) {
             if cancel.is_cancelled() {
                 return Err(ConnectFailure::cancelled());
             }
@@ -180,11 +212,11 @@ impl Connector<'_> {
                 {
                     return Err(if cancel.is_cancelled() { ConnectFailure::cancelled() } else { password_abandoned(hop, &target) });
                 }
-                ConnectError::HostKeyUnknown { hop, key } => self.confirm(&mut target, &policy, owner, cancel, &hop, &key, None)?,
-                ConnectError::HostKeyMismatch { hop, key, pinned } => self.confirm(&mut target, &policy, owner, cancel, &hop, &key, Some(pinned))?,
+                ConnectError::HostKeyUnknown { hop, key } => self.confirm(&mut target, &policy, &mut done, owner, cancel, &hop, &key, None)?,
+                ConnectError::HostKeyMismatch { hop, key, pinned } => self.confirm(&mut target, &policy, &mut done, owner, cancel, &hop, &key, Some(pinned))?,
                 // Plan 1b R17: the handshake offered only the pinned key's type and the server has none of it any more. Once more without the
                 // restriction: the policy still knows the pin, so a key of another type comes back as a changed key, with its warning.
-                ConnectError::NoCommonHostKeyAlgorithm { ref hop, .. } if policy.pinned(&hop.id).is_some() && unrestricted.insert(hop.id.clone()) => {
+                ConnectError::NoCommonHostKeyAlgorithm { ref hop, .. } if policy.pinned(&hop.id).is_some() && done.unrestricted.insert(hop.id.clone()) => {
                     if let Some(restricted) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
                         restricted.pinned = None;
                     }
@@ -194,7 +226,7 @@ impl Connector<'_> {
                     let refused = tried.contains(&AuthMethod::Password) && auth.password_source(&hop.id).is_some();
                     // The first time a hop is counted, a password the person typed is already there when `BrokerAuth::password` asked for it
                     // before the connect (a hop that starts with the password method): that was their first of `PASSWORD_PROMPTS`.
-                    let typed = passwords_typed.entry(hop.id.clone()).or_insert_with(|| usize::from(auth.password_source(&hop.id) == Some(PasswordSource::Typed)));
+                    let typed = done.passwords_typed.entry(hop.id.clone()).or_insert_with(|| usize::from(auth.password_source(&hop.id) == Some(PasswordSource::Typed)));
                     if !(password_wanted || refused) || *typed >= PASSWORD_PROMPTS {
                         return Err(failure_of(&error, &target));
                     }
@@ -224,7 +256,7 @@ impl Connector<'_> {
             }
         }
         let alias = target.hops.last().map(|hop| hop.alias.clone()).unwrap_or_default();
-        Err(ConnectFailure::new(kinds::CONNECT, format!("SSHelter gave up connecting to {alias}: the server kept asking for something new.")))
+        Err(ConnectFailure::new(kinds::CONNECT, format!("SSHelter gave up connecting to {alias} after too many attempts.")))
     }
 
     /// The pinned key `pinned`, which the key the server presented was compared with, as the question about a changed key shows it: its
@@ -247,12 +279,20 @@ impl Connector<'_> {
         &self,
         target: &mut Target,
         policy: &PinPolicy,
+        done: &mut Done,
         owner: &dyn Owner,
         cancel: &CancelToken,
         hop: &HopRef,
         key: &HostKey,
         pinned: Option<HostKey>,
     ) -> Result<(), ConnectFailure> {
+        // A host's key is asked about once in a connect. After the person trusted a key (or accepted the changed one) the server presents
+        // that key; one that presents another still is a server whose key keeps changing, and asking again for each key it shows would
+        // only teach clicking through. The sentence is about the server's key and blames nobody.
+        if !done.asked_host_key.insert(hop.id.clone()) {
+            let sentence = format!("The host key of {} kept changing while SSHelter was connecting. Connection refused.", hop.alias);
+            return Err(failure_at(Some(hop), target, kinds::HOST_KEY, sentence));
+        }
         // The summary first: when there is none to give, nobody is asked, and nobody is told to wait for a window that stays closed.
         let changed = match &pinned {
             None => None,
@@ -293,6 +333,7 @@ impl Connector<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use super::*;
@@ -302,7 +343,7 @@ mod tests {
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods};
     use crate::ssh::russh_engine::toy_server::{ToyBehavior, ToyLogin, ToyServer};
     use crate::ssh::russh_engine::{EngineOptions, RusshEngine};
-    use crate::ssh::{AuthMethod, Hop, HostKey};
+    use crate::ssh::{AuthMethod, AuthSource, Hop, HostKey, HostKeyPolicy, HostKeyVerdict};
     use crate::sync::slot_rules::test_keys;
     use crate::sync::testkit::MemKeychain;
 
@@ -316,8 +357,40 @@ mod tests {
         HostQuery::Alias("web".into())
     }
 
+    /// An engine that counts the connects it is asked for, the ones that fail too (`FakeEngine::events` only has the ones that got through).
+    /// It dereferences to the engine it wraps.
+    struct Counting<E> {
+        inner: E,
+        attempts: AtomicUsize,
+    }
+
+    impl<E> Counting<E> {
+        fn new(inner: E) -> Counting<E> {
+            Counting { inner, attempts: AtomicUsize::new(0) }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl<E> std::ops::Deref for Counting<E> {
+        type Target = E;
+
+        fn deref(&self) -> &E {
+            &self.inner
+        }
+    }
+
+    impl<E: SshEngine> SshEngine for Counting<E> {
+        fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.inner.connect(target, host_keys, auth)
+        }
+    }
+
     struct World {
-        engine: FakeEngine,
+        engine: Counting<FakeEngine>,
         directory: FakeDirectory,
         keys: FakeKeys,
         keychain: MemKeychain,
@@ -327,7 +400,7 @@ mod tests {
     }
 
     fn world(engine: FakeEngine, directory: FakeDirectory) -> World {
-        World { engine, directory, keys: FakeKeys::new(), keychain: MemKeychain::default(), confirmer: FakeConfirmer::default(), owner: FakeOwner::default(), cancel: CancelToken::default() }
+        World { engine: Counting::new(engine), directory, keys: FakeKeys::new(), keychain: MemKeychain::default(), confirmer: FakeConfirmer::default(), owner: FakeOwner::default(), cancel: CancelToken::default() }
     }
 
     impl World {
@@ -824,6 +897,142 @@ mod tests {
         world.cancel.cancel();
         assert_eq!(world.connect(&web()).err().map(|failure| failure.kind), Some(CANCELLED.to_string()));
         assert!(world.engine.events().is_empty());
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------
+    // How long a connect may go round. Every round after the first is paid for by one answer: a host key confirmed, the key type of a
+    // changed pin, a password typed. A person who answers everything right must never be turned away by the bound.
+
+    /// Five jump hosts and the destination, each a first contact whose server also wants a password after the key: twelve questions, all
+    /// answered right, and thirteen connects.
+    #[test]
+    fn a_chain_of_six_hosts_that_each_ask_for_a_host_key_and_a_password_connects() {
+        let key = || AuthMethod::Key { key_id: "k-plain".into() };
+        let directory = FakeDirectory::new()
+            .with_host("j1", key())
+            .with_host("j2", key())
+            .with_host("j3", key())
+            .with_host("j4", key())
+            .with_host("j5", key())
+            .with_host_via("db", key(), &["j1", "j2", "j3", "j4", "j5"]);
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let world = world(engine, directory).deciding(vec![Decision::Trust; 6]).typing(&["right"; 6]);
+        let connected = world.connect(&HostQuery::Alias("db".into())).expect("every question was answered right");
+        assert_eq!(connected.target.hops.len(), 6);
+        assert_eq!((world.confirmer.asked().len(), world.owner.asked().len(), world.engine.attempts()), (6, 6, 13));
+    }
+
+    /// Two typos and then the right password on each of three hosts (the limit is three passwords a host): the person did nothing wrong.
+    #[test]
+    fn two_typos_before_the_right_password_on_each_of_three_hosts_still_connect() {
+        let key = || AuthMethod::Key { key_id: "k-plain".into() };
+        let directory = FakeDirectory::new().with_host("j1", key()).with_host("j2", key()).with_host_via("db", key(), &["j1", "j2"]);
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let answers = ["x", "y", "right", "x", "y", "right", "x", "y", "right"];
+        let world = world(engine, directory).deciding(vec![Decision::Trust; 3]).typing(&answers);
+        world.connect(&HostQuery::Alias("db".into())).expect("the right password was typed within the limit on every host");
+        assert_eq!((world.confirmer.asked().len(), world.owner.asked().len(), world.engine.attempts()), (3, 9, 13));
+    }
+
+    /// The most that one host can ask of a connect, on every host of a chain of three: its pinned key is of a type its server no longer
+    /// has (the handshake is repeated without the restriction, plan 1b R17), the key it has now is accepted as the changed key it is, and
+    /// the password is typed wrong twice before it is right. Five rounds a host, and the one that gets in.
+    #[test]
+    fn a_chain_of_three_hosts_that_each_need_every_kind_of_round_connects() {
+        let key_hop = || AuthMethod::Key { key_id: "k-plain".into() };
+        let ecdsa = || key(test_keys::ECDSA_PUBLIC);
+        let directory = FakeDirectory::new()
+            .with_host("j1", key_hop())
+            .with_host("j2", key_hop())
+            .with_host_via("db", key_hop(), &["j1", "j2"])
+            .with_pin("j1", ecdsa())
+            .with_pin("j2", ecdsa())
+            .with_pin("db", ecdsa());
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let answers = ["x", "y", "right", "x", "y", "right", "x", "y", "right"];
+        let world = world(engine, directory).deciding(vec![Decision::Trust; 3]).typing(&answers);
+        let connected = world.connect(&HostQuery::Alias("db".into())).expect("every host got what it asked for");
+        assert_eq!((world.confirmer.asked().len(), world.owner.asked().len(), world.engine.attempts()), (3, 9, 16));
+        assert!(connected.target.hops.iter().all(|hop| hop.pinned == Some(default_server_key())), "every changed key was accepted");
+    }
+
+    /// A server whose host key is another one on every connect: several servers behind one name that do not share a key, or someone in the
+    /// middle. The n-th connect presents `keys[n]` (the last key from then on), whichever host of the chain it is about.
+    struct KeysInTurn {
+        keys: Vec<HostKey>,
+        connects: AtomicUsize,
+    }
+
+    impl SshEngine for KeysInTurn {
+        fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, _auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
+            let turn = self.connects.fetch_add(1, Ordering::SeqCst);
+            let key = self.keys[turn.min(self.keys.len() - 1)].clone();
+            let hop = target.hops[0].reference();
+            Err(match host_keys.check(&hop, &key) {
+                HostKeyVerdict::Pinned => ConnectError::Protocol { hop, text: "this server lets nobody in".to_string() },
+                HostKeyVerdict::Unknown => ConnectError::HostKeyUnknown { hop, key },
+                HostKeyVerdict::Mismatch { pinned } => ConnectError::HostKeyMismatch { hop, key, pinned },
+            })
+        }
+    }
+
+    /// The person trusted a key and the server shows another one on the next connect, and another after that: they are asked once, whatever
+    /// they would answer, and the connect ends with a sentence about the server's key, not about anything they did (and said through the
+    /// jump host when it is the jump host's key).
+    #[test]
+    fn a_server_whose_host_key_changes_after_it_was_trusted_is_asked_about_once() {
+        let server = || KeysInTurn { keys: vec![key(test_keys::PLAIN_PUBLIC), key(test_keys::ENC_PUBLIC), key(test_keys::ECDSA_PUBLIC), key(test_keys::RSA_PUBLIC)], connects: AtomicUsize::new(0) };
+        let refused = |text: &str| Some(failure(kinds::HOST_KEY, text));
+        let connect = |world: &World, server: &KeysInTurn, query: &str| {
+            let connector = Connector { engine: server, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer };
+            connector.connect(&HostQuery::Alias(query.into()), &world.owner, &world.cancel).err()
+        };
+
+        let unknown = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).deciding(vec![Decision::Trust; 4]);
+        let (first, rest) = (server(), "The host key of web kept changing while SSHelter was connecting. Connection refused.");
+        assert_eq!(connect(&unknown, &first, "web"), refused(rest));
+        assert_eq!((unknown.confirmer.asked().len(), first.connects.load(Ordering::SeqCst)), (1, 2), "one question, and the connect that showed the other key");
+        assert_eq!(unknown.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(key(test_keys::PLAIN_PUBLIC)), "the key the person trusted stays pinned");
+
+        // A key that was pinned and changed: the person accepts the new one, and the server shows yet another.
+        let changed = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", key(test_keys::RSA_PUBLIC))).deciding(vec![Decision::Trust; 4]);
+        assert_eq!(connect(&changed, &server(), "web"), refused(rest));
+        assert_eq!(changed.confirmer.asked().len(), 1);
+        assert_eq!(changed.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(key(test_keys::PLAIN_PUBLIC)));
+
+        let through = world(FakeEngine::new(), FakeDirectory::new().with_host("bastion", AuthMethod::Password).with_host_via("db", AuthMethod::Password, &["bastion"])).deciding(vec![Decision::Trust; 4]);
+        let sentence = "Could not connect through bastion: The host key of bastion kept changing while SSHelter was connecting. Connection refused.";
+        assert_eq!(connect(&through, &server(), "db"), refused(sentence));
+        assert_eq!(through.confirmer.asked().len(), 1);
+    }
+
+    /// The bound grows with the chain: every host at the most it can ask (its key, the key type of a changed pin, `PASSWORD_PROMPTS`
+    /// passwords), and the connect that gets through.
+    #[test]
+    fn the_bound_on_the_rounds_is_derived_from_the_chain() {
+        let chain = |hops: usize| Target { hops: (0..hops).map(|n| Hop::new(&format!("id-{n}"), &format!("h{n}"), "h.example.com", 22, "deploy", AuthMethod::Password)).collect() };
+        for hops in 1..=6 {
+            assert_eq!(round_limit(&chain(hops)), hops * (1 + 1 + PASSWORD_PROMPTS) + 1, "{hops} hosts");
+        }
+    }
+
+    /// The bound is a net under the caps: no server and no person reaches it (every round after the first is paid for by something that is
+    /// capped for each host), so it is tried with a smaller one. A connect that needs more rounds than it is given ends with a sentence
+    /// that blames nobody, and one that needs exactly as many gets through.
+    #[test]
+    fn a_connect_that_needs_more_rounds_than_it_is_given_ends_with_a_sentence_that_blames_nobody() {
+        let new = || world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).with_saved_password().deciding(vec![Decision::Trust]);
+        let within = |world: &World, rounds: fn(&Target) -> usize| {
+            let connector = Connector { engine: &world.engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer };
+            connector.connect_within(&web(), &world.owner, &world.cancel, rounds)
+        };
+        // The first round stops at the host key, which the person confirms; the second gets through.
+        let short = new();
+        assert_eq!(within(&short, |_| 1).err(), Some(failure(kinds::CONNECT, "SSHelter gave up connecting to web after too many attempts.")));
+        assert_eq!(short.engine.attempts(), 1);
+        let enough = new();
+        within(&enough, |_| 2).expect("two rounds are enough");
+        assert_eq!(enough.engine.attempts(), 2);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------
