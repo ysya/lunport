@@ -23,8 +23,8 @@ pub enum DirectoryError {
     /// Several saved hosts have this alias; the client has to name one by its id (spec §7.1).
     Ambiguous(String),
     /// The host is saved, but SSHelter's own client cannot connect to it as it is saved: it uses a ProxyCommand, or its key is not in
-    /// SSHelter, or its chain of jump hosts loops, includes a host that is not saved, names one host twice, or would give two endpoints
-    /// one host id.
+    /// SSHelter, or its chain of jump hosts loops, includes a host that is not saved, names one host twice, has more than five jump hosts
+    /// in all, or would give two endpoints one host id.
     Unsupported(String),
     /// Reading the saved hosts or the pins, or writing a pin, failed.
     Failed(String),
@@ -54,10 +54,11 @@ pub trait HostDirectory: Send + Sync {
     /// ready for the engine. The jump hosts are those of OpenSSH's routing of `ProxyJump a,b,c`, which is `ssh -J a,b -W host c`: the first
     /// jump host is reached the way it is saved, behind the jump hosts of its own, and a later one through the one before it, its own
     /// `ProxyJump` and `ProxyCommand` not used (`-J` replaces them). The pin of each hop is in `Hop::pinned`. A chain that loops, names a
-    /// host that is not saved, or would give two different endpoints one host id is an error here, before anything connects. So is a chain
-    /// that names one host twice without looping (`bastion,bastion`, a later jump host that the first one's own jump hosts have already,
-    /// the host itself as a later jump host): the broker keeps what it knows about a hop (typed passwords, cancels, the pin policy) by
-    /// host id, so a chain has one hop per id.
+    /// host that is not saved, would give two different endpoints one host id or has more than five jump hosts in all (counted over the
+    /// whole chain, however they are listed or nested) is an error here, before anything connects. So is a chain that names one host twice
+    /// without looping (`bastion,bastion`, a later jump host that the first one's own jump hosts have already, the host itself as a later
+    /// jump host): the broker keeps what it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain has one hop
+    /// per id.
     fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError>;
 
     /// The key pinned for `host`, if any. An error reading the pins is `Err`, never "nothing pinned": a host that was pinned must not

@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 use super::auth::{KeyStore, Owner, Reply, VaultKey};
 use super::directory::{decide_pin, decide_replace, DirectoryError, HostDirectory, PinDecision, PinnedKey};
 use super::protocol::{HostQuery, QuestionKind};
+use super::ssh_config_directory::MAX_JUMPS;
 use crate::ssh::{AuthMethod, Hop, HostId, HostKey, Target};
 use crate::sync::slot_rules::test_keys;
 
@@ -205,6 +206,11 @@ impl FakeDirectory {
             let path: Vec<&str> = above.iter().map(|hop| hop.alias.as_str()).collect();
             return Err(DirectoryError::Unsupported(format!("The jump hosts go round in a circle: {}.", path.join(" → "))));
         }
+        // More than `MAX_JUMPS` hosts above this one (the target first) are all jump hosts of the chain: refused at once, as the adapter does
+        // before it runs `ssh -G` for more hosts.
+        if above.len() > MAX_JUMPS + 1 {
+            return Err(DirectoryError::Unsupported(format!("{} needs more than {MAX_JUMPS} jump hosts.", above[0].alias)));
+        }
         let mut hops: Vec<Hop> = Vec::new();
         for (index, jump) in host.jumps.iter().enumerate() {
             let jump_host = match self.by_alias(jump) {
@@ -219,6 +225,10 @@ impl FakeDirectory {
                 return Err(DirectoryError::Unsupported(format!("{}'s jump hosts name {} twice.", host.hop.alias, twice.alias)));
             }
             hops.extend(jump_hops);
+            // Every hop gathered so far is a jump host of the chain asked for (`above[0]`), whatever level this host is on.
+            if hops.len() > MAX_JUMPS {
+                return Err(DirectoryError::Unsupported(format!("{} needs more than {MAX_JUMPS} jump hosts.", above[0].alias)));
+            }
         }
         if hops.iter().any(|seen| seen.id == host.hop.id) {
             return Err(DirectoryError::Unsupported(format!("{}'s jump hosts name {} twice.", host.hop.alias, host.hop.alias)));
@@ -416,6 +426,34 @@ mod tests {
         );
     }
 
+
+    /// A chain has at most five jump hosts, counted over the whole chain: the first jump host's own and the later ones together, however
+    /// they are written or nested, as the ssh_config adapter counts them. The sentence names the host that was asked for.
+    #[test]
+    fn a_chain_of_more_than_five_jump_hosts_is_refused_however_they_are_listed_or_nested() {
+        let directory = ["j1", "j2", "j3", "j4", "j5", "j6"]
+            .iter()
+            .fold(FakeDirectory::new(), |fake, alias| fake.with_host(alias, AuthMethod::Password))
+            .with_host_via("five", AuthMethod::Password, &["j1", "j2", "j3", "j4", "j5"])
+            .with_host_via("six", AuthMethod::Password, &["j1", "j2", "j3", "j4", "j5", "j6"])
+            .with_host_via("front", AuthMethod::Password, &["j1", "j2", "j3"])
+            .with_host_via("exact", AuthMethod::Password, &["front", "j4"])
+            .with_host_via("over", AuthMethod::Password, &["front", "j4", "j5"])
+            .with_host_via("nested", AuthMethod::Password, &["front"])
+            .with_host_via("deeper", AuthMethod::Password, &["nested"])
+            .with_host_via("deepest", AuthMethod::Password, &["deeper"])
+            .with_host_via("via-six", AuthMethod::Password, &["six"]);
+        let hops = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.len());
+        let too_many = |alias: &str| Err(DirectoryError::Unsupported(format!("{alias} needs more than 5 jump hosts.")));
+        assert_eq!(hops("five"), Ok(6), "five jump hosts in a list");
+        assert_eq!(hops("six"), too_many("six"), "six in a list: nothing is nested");
+        assert_eq!(hops("exact"), Ok(6), "the first jump host's three and itself, and one more: five");
+        assert_eq!(hops("over"), too_many("over"), "the first jump host's three and itself, and two more: six");
+        assert_eq!(hops("nested"), Ok(5));
+        assert_eq!(hops("deeper"), Ok(6), "five jump hosts, three levels deep");
+        assert_eq!(hops("deepest"), too_many("deepest"), "six jump hosts, only four levels deep");
+        assert_eq!(hops("via-six"), too_many("via-six"), "the host that was asked for, not the jump host that has the six");
+    }
 
     /// The sentence is the ssh_config adapter's, so a broker test sees what the app will say.
     #[test]

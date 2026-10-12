@@ -28,7 +28,8 @@
 //!   have already (`ProxyJump edge,bastion` for an `edge` behind `bastion`), the host itself as a later jump host. The broker keeps what
 //!   it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain has one hop per id. The sentence is about the
 //!   host whose jump hosts name a host twice: `web's jump hosts name bastion twice.`;
-//! - jump hosts nested more than five deep.
+//! - more than five jump hosts in all, counted over the whole chain: the first jump host's own and the later ones together, however they
+//!   are listed or nested (`ProxyJump h1,h2,h3,h4,h5,h6`, or six hosts one behind the other, or a mix).
 
 use std::path::Path;
 
@@ -40,8 +41,9 @@ use crate::ssh::{AuthMethod, Hop, HostId, HostKey, Target, DEFAULT_CONNECT_TIMEO
 use crate::sync::slot_rules::{resolve_identity_value, IdentityTarget};
 use crate::sync::state_v2::{SlotSource, SyncStateV2};
 
-/// How many jump hosts deep a chain may go (as `config::intel::jump_chain` shows chains).
-const MAX_JUMPS: usize = 5;
+/// How many jump hosts a chain may have in all, counted over the whole chain: the first jump host's own and the later ones together,
+/// however they are listed or nested (`config::intel::jump_chain` stops the chain it shows at the host and five more, the same limit).
+pub(super) const MAX_JUMPS: usize = 5;
 
 /// The lists of `IdentityFile` values that `ssh -G` prints for a host that names none, by OpenSSH version. OpenSSH adds its default key
 /// files when a host names no `IdentityFile`, and only then: a host with `IdentityFile ~/.ssh/id_ed25519` gets exactly that one line, and
@@ -134,6 +136,11 @@ fn named_key_file<'a>(identity_files: &[&'a str]) -> Option<&'a str> {
         return None;
     }
     identity_files.iter().copied().find(|file| !file.eq_ignore_ascii_case("none"))
+}
+
+/// The refusal of a chain with more than `MAX_JUMPS` jump hosts; `target` is the host that was asked for.
+fn too_many_jumps(target: &str) -> DirectoryError {
+    DirectoryError::Unsupported(format!("{target} needs more than {MAX_JUMPS} jump hosts."))
 }
 
 /// The first value of `keyword` in `ssh -G`'s output.
@@ -254,8 +261,10 @@ impl SshConfigDirectory {
             path.push(alias.to_string());
             return Err(DirectoryError::Unsupported(format!("The jump hosts go round in a circle: {}.", path.join(" → "))));
         }
+        // An early cut, before `ssh -G` is run for more hosts: every host above this one is a jump host of the chain, so with more than
+        // `MAX_JUMPS` of them above, the count below would refuse the chain anyway.
         if path.len() > MAX_JUMPS {
-            return Err(DirectoryError::Unsupported(format!("{} needs more than {MAX_JUMPS} jump hosts.", path[0])));
+            return Err(too_many_jumps(&path[0]));
         }
         path.push(alias.to_string());
         let pairs = self.settings(alias)?;
@@ -283,6 +292,10 @@ impl SshConfigDirectory {
                 return Err(DirectoryError::Unsupported(format!("{alias}'s jump hosts name {} twice.", twice.alias)));
             }
             hops.extend(jump_hops);
+            // Every hop gathered so far is a jump host of the chain asked for (`path[0]`), whatever level this host is on.
+            if hops.len() > MAX_JUMPS {
+                return Err(too_many_jumps(&path[0]));
+            }
         }
         let hop = self.hop_of(alias, &pairs)?;
         if hops.iter().any(|seen| seen.id == hop.id) {
@@ -838,6 +851,17 @@ mod tests {
             ("lost-down", &["bastion", "lost"]),
             ("lost-first", &["lost", "bastion"]),
             ("gone", &["bastion", "gate"]),
+            ("n1", &[]),
+            ("n2", &["n1"]),
+            ("n3", &["n2"]),
+            ("n4", &["n3"]),
+            ("n5", &["n4"]),
+            ("n6", &["n5"]),
+            ("n7", &["n6"]),
+            ("list5", &["n1", "n2", "n3", "n4", "n5"]),
+            ("list6", &["n1", "n2", "n3", "n4", "n5", "n6"]),
+            ("via-list6", &["list6"]),
+            ("mixed", &["n3", "n4", "n5", "n6"]),
         ];
         let fake = chains.iter().fold(FakeDirectory::new(), |fake, (alias, jumps)| fake.with_host_via(alias, AuthMethod::Password, jumps));
         let answers: Vec<(String, String)> = chains
@@ -873,6 +897,13 @@ mod tests {
         refused("lost", "lost jumps through gate, which is not a saved host.");
         refused("lost-first", "lost jumps through gate, which is not a saved host.");
         refused("gone", "gone jumps through gate, which is not a saved host.");
+        // At most five jump hosts in all, counted over the whole chain: nested, listed, or both.
+        assert_eq!(aliases(&adapter, "n6"), chain(&["n1", "n2", "n3", "n4", "n5", "n6"]), "five jump hosts, nested");
+        assert_eq!(aliases(&adapter, "list5"), chain(&["n1", "n2", "n3", "n4", "n5", "list5"]), "five jump hosts, listed");
+        refused("n7", "n7 needs more than 5 jump hosts.");
+        refused("list6", "list6 needs more than 5 jump hosts.");
+        refused("via-list6", "via-list6 needs more than 5 jump hosts.");
+        refused("mixed", "mixed needs more than 5 jump hosts.");
     }
 
     /// Five jump hosts one behind the other are fine, a sixth is not: the host that would need more than five is refused, by its own alias.
@@ -890,6 +921,72 @@ mod tests {
         let aliases = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.into_iter().map(|hop| hop.alias).collect::<Vec<_>>());
         assert_eq!(aliases("h1"), Ok(["h6", "h5", "h4", "h3", "h2", "h1"].map(String::from).to_vec()));
         assert_eq!(aliases("h0"), Err(DirectoryError::Unsupported("h0 needs more than 5 jump hosts.".to_string())));
+    }
+
+    /// A chain has at most five jump hosts, counted over the whole chain: the first jump host's own and the later ones together, however
+    /// they are written or nested. The sentence names the host that was asked for.
+    #[test]
+    fn a_chain_of_more_than_five_jump_hosts_is_refused_however_they_are_listed_or_nested() {
+        let plain = |alias: &str| (alias.to_string(), format!("hostname {alias}\nport 22\nuser ops\n"));
+        let jumping = |alias: &str, through: &str| (alias.to_string(), format!("hostname {alias}\nport 22\nuser ops\nproxyjump {through}\n"));
+        let answers: Vec<(String, String)> = vec![
+            plain("j1"),
+            plain("j2"),
+            plain("j3"),
+            plain("j4"),
+            plain("j5"),
+            plain("j6"),
+            jumping("five", "j1,j2,j3,j4,j5"),
+            jumping("six", "j1,j2,j3,j4,j5,j6"),
+            jumping("front", "j1,j2,j3"),
+            jumping("exact", "front,j4"),
+            jumping("over", "front,j4,j5"),
+            jumping("nested", "front"),
+            jumping("deeper", "nested"),
+            jumping("deepest", "deeper"),
+            jumping("via-six", "six"),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(&dir, &answers.iter().map(|(alias, text)| (alias.as_str(), text.as_str())).collect::<Vec<_>>());
+        let hops = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.len());
+        let too_many = |alias: &str| Err(DirectoryError::Unsupported(format!("{alias} needs more than 5 jump hosts.")));
+        assert_eq!(hops("five"), Ok(6), "five jump hosts in a list");
+        assert_eq!(hops("six"), too_many("six"), "six in a list: nothing is nested");
+        assert_eq!(hops("exact"), Ok(6), "the first jump host's three and itself, and one more: five");
+        assert_eq!(hops("over"), too_many("over"), "the first jump host's three and itself, and two more: six");
+        assert_eq!(hops("nested"), Ok(5));
+        assert_eq!(hops("deeper"), Ok(6), "five jump hosts, three levels deep");
+        assert_eq!(hops("deepest"), too_many("deepest"), "six jump hosts, only four levels deep");
+        assert_eq!(hops("via-six"), too_many("via-six"), "the host that was asked for, not the jump host that has the six");
+    }
+
+    /// `ssh -G` is run for every host of a chain (and may take a while), so a chain that is too long is refused as soon as it is known to be
+    /// too long, not after `ssh -G` was run for every host of it.
+    #[test]
+    fn a_chain_that_is_too_long_is_refused_before_ssh_g_is_run_for_all_of_it() {
+        let answers: std::collections::HashMap<String, Vec<(String, String)>> = (1..=20)
+            .map(|n| {
+                let jump = if n > 1 { format!("proxyjump n{}\n", n - 1) } else { String::new() };
+                (format!("n{n}"), pairs(&format!("hostname n{n}\nport 22\nuser ops\n{jump}")))
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, (1..=20).map(|n| format!("Host n{n}\n")).collect::<String>()).unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let sources = Sources {
+            doc: Box::new(move || crate::config::include::load_doc(&config).map_err(|error| error.to_string())),
+            effective: Box::new(move |alias| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                answers.get(alias).cloned().ok_or_else(|| format!("ssh -G does not know {alias}"))
+            }),
+            vault_key: Box::new(|_| None),
+            password_saved: Box::new(|_| false),
+        };
+        let directory = SshConfigDirectory::new(sources, PinStore::new(dir.path().join("host-pins.json")));
+        assert_eq!(directory.resolve(&HostQuery::Alias("n20".into())), Err(DirectoryError::Unsupported("n20 needs more than 5 jump hosts.".to_string())));
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) <= MAX_JUMPS + 1, "ssh -G ran {} times", calls.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
