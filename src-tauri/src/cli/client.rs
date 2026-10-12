@@ -33,6 +33,9 @@ pub enum Input {
     /// A thread of the program itself (the keys, the signals, the broker's frames) panicked or could not start: nothing would read from
     /// it any more, so the program ends. The panic hook has put the terminal back by then.
     Failed,
+    /// The program runs again after it was stopped (SIGCONT; Ctrl-Z put the terminal back, and the signal thread has set the mode again):
+    /// a question on the terminal is asked again, from the start, as OpenSSH's readpassphrase does.
+    Continue,
 }
 
 /// What was typed may be a password, so the debug form leaves it out (as `ClientMessage`'s does for an answer); the rest prints as a
@@ -49,6 +52,7 @@ impl fmt::Debug for Input {
             Input::Interrupt => f.write_str("Interrupt"),
             Input::Stop(signal) => f.debug_tuple("Stop").field(signal).finish(),
             Input::Failed => f.write_str("Failed"),
+            Input::Continue => f.write_str("Continue"),
         }
     }
 }
@@ -130,8 +134,8 @@ fn keep(line: &mut Zeroizing<Vec<u8>>, bytes: &[u8]) {
 
 enum Phase {
     Connecting,
-    /// A question is on the terminal; the answer is collected until Enter.
-    Asking { question_id: String, echo: bool, line: Zeroizing<Vec<u8>>, after: Mode },
+    /// A question is on the terminal (`prompt`, as it was printed); the answer is collected until Enter.
+    Asking { question_id: String, echo: bool, line: Zeroizing<Vec<u8>>, after: Mode, prompt: String },
     Open,
     Ended,
 }
@@ -213,6 +217,7 @@ impl Client {
             Input::Resize(cols, rows) => vec![Action::Send(ClientMessage::WindowChange { cols, rows })],
             Input::Stop(signal) => self.finish(true, None, 128 + signal),
             Input::Failed => self.finish(true, Some(THREAD_FAILED.to_string()), 255),
+            Input::Continue => self.continued(),
         }
     }
 
@@ -276,10 +281,24 @@ impl Client {
             actions.push(cancel(superseded.clone()));
         }
         self.typeahead.zeroize();
-        self.phase = Phase::Asking { question_id, echo, line: Zeroizing::new(Vec::with_capacity(ANSWER_CAPACITY)), after };
+        let prompt = printable(text);
         actions.push(Action::Mode(Mode::Prompt { echo }, true));
-        actions.push(Action::Stderr(printable(text)));
+        actions.push(Action::Stderr(prompt.clone()));
+        self.phase = Phase::Asking { question_id, echo, line: Zeroizing::new(Vec::with_capacity(ANSWER_CAPACITY)), after, prompt };
         actions
+    }
+
+    /// The program runs again after a stop. A question on the terminal starts over: what was collected of its answer is wiped, what was
+    /// typed meanwhile is thrown away with the terminal's pending input, and the prompt is printed again (the shell printed its own
+    /// lines while the program was stopped). Anything else goes on as it was.
+    fn continued(&mut self) -> Vec<Action> {
+        match &mut self.phase {
+            Phase::Asking { echo, line, prompt, .. } => {
+                line.zeroize();
+                vec![Action::Mode(Mode::Prompt { echo: *echo }, true), Action::Stderr(prompt.clone())]
+            }
+            Phase::Connecting | Phase::Open | Phase::Ended => Vec::new(),
+        }
     }
 
     fn typed(&mut self, bytes: &[u8]) -> Vec<Action> {
@@ -774,7 +793,7 @@ mod tests {
 
         assert_eq!(format!("{:?}", Input::Output(vec![104, 105])), "Output([104, 105])");
         assert_eq!(format!("{:?}", Input::Message(ServerMessage::Opened { session_id: "1".into() })), "Message(Opened { session_id: \"1\" })");
-        assert_eq!(format!("{:?}", [Input::Closed, Input::StdinEnd, Input::Interrupt, Input::Failed]), "[Closed, StdinEnd, Interrupt, Failed]");
+        assert_eq!(format!("{:?}", [Input::Closed, Input::StdinEnd, Input::Interrupt, Input::Failed, Input::Continue]), "[Closed, StdinEnd, Interrupt, Failed, Continue]");
         assert_eq!(format!("{:?}", [Input::Resize(100, 30), Input::Stop(15)]), "[Resize(100, 30), Stop(15)]");
         assert_eq!(format!("{:?}", Action::Stdout(vec![104, 105])), "Stdout([104, 105])");
         assert_eq!(format!("{:?}", Action::Stderr("pw: ".into())), "Stderr(\"pw: \")");
@@ -874,6 +893,40 @@ mod tests {
         assert!(client.handle(event(Event::Connected)).is_empty());
         assert!(client.handle(Input::Stdin(Zeroizing::new(b"ls\n".to_vec()))).is_empty(), "still connecting: what is typed is kept for the shell");
         assert_eq!(client.handle(opens()), [Action::Mode(Mode::Raw, false), Action::SendData(b"ls\n".to_vec())]);
+    }
+
+    /// Ctrl-Z at a question, then `fg`: the question starts over, as OpenSSH's readpassphrase does. Its prompt mode is set again (echo
+    /// off for a password: a job-control shell puts its own modes back, with echo on) and throws away what was typed meanwhile, the prompt
+    /// is printed again, and what was collected of the answer before the stop is gone: only what is typed now is the answer.
+    #[test]
+    fn a_question_starts_over_when_the_program_continues_after_a_stop() {
+        for (echo, after) in [(false, Mode::Cooked), (true, Mode::Raw)] {
+            let mut client = if after == Mode::Raw { opened() } else { started() };
+            client.handle(question("q1", QuestionKind::Password, "deploy@web's\u{1b}[2J password: ", echo));
+            assert!(client.handle(Input::Stdin(Zeroizing::new(b"hun".to_vec()))).is_empty(), "a part of the answer, ended by Ctrl-D");
+            assert_eq!(
+                client.handle(Input::Continue),
+                [Action::Mode(Mode::Prompt { echo }, true), Action::Stderr("deploy@web's?[2J password: ".into())],
+                "echo {echo}: asked again, the prompt as it was printed the first time"
+            );
+            assert!(line_of(&client).is_empty(), "what was collected before the stop is gone");
+            let ends = if echo { vec![] } else { vec![Action::Stderr("\n".into())] };
+            let mut expected = ends;
+            expected.extend([answered("q1", "ter2"), Action::Mode(after, false)]);
+            assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"ter2\n".to_vec()))), expected, "only what is typed after the stop");
+        }
+    }
+
+    /// Without a question on the terminal there is nothing to ask again: the signal thread has set the mode again (raw for the shell),
+    /// and the shell goes on.
+    #[test]
+    fn continuing_without_a_question_changes_nothing() {
+        assert!(started().handle(Input::Continue).is_empty());
+        let mut client = opened();
+        assert!(client.handle(Input::Continue).is_empty());
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"ls\r".to_vec()))), [Action::SendData(b"ls\r".to_vec())], "the shell is still open");
+        client.handle(Input::Stop(libc::SIGTERM));
+        assert!(client.handle(Input::Continue).is_empty(), "nothing after the end");
     }
 
     /// Spec §7.3 / plan 1b R10: the shell's status, 128 + the signal's number for a signal (as a shell reports it), 255 for neither.

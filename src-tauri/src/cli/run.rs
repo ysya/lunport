@@ -1,9 +1,9 @@
 //! The I/O of `sshelter connect` (own-ssh spec §7.3). Threads of their own read the broker's frames, the person's keys and the signals
-//! (SIGWINCH, SIGINT, SIGTERM, SIGHUP, SIGQUIT), and put what happened in one queue; the loop takes it out in order, the client
-//! (`client.rs`) says what to do with each, and the loop does it without waiting on anything that can stall: what goes to the terminal
-//! and what goes to the broker is written by a writer thread of each. A terminal that is slow, or a broker that stops reading (it does,
-//! for as long as a shell does not take what was typed), holds up its own writer and nothing else: keys reach the broker while output
-//! waits for the terminal, and a signal is handled at once.
+//! (SIGWINCH, SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP, SIGCONT), and put what happened in one queue; the loop takes it out in order,
+//! the client (`client.rs`) says what to do with each, and the loop does it without waiting on anything that can stall: what goes to
+//! the terminal and what goes to the broker is written by a writer thread of each. A terminal that is slow, or a broker that stops
+//! reading (it does, for as long as a shell does not take what was typed), holds up its own writer and nothing else: keys reach the
+//! broker while output waits for the terminal, and a signal is handled at once.
 //!
 //! Nothing piles up without a bound. A frame from the broker counts against a budget until the terminal has taken it, and the thread
 //! that reads the frames waits while the budget is spent: the broker, and SSH's window behind it, then push back on the remote, as
@@ -655,17 +655,28 @@ fn input_for(signal: i32) -> Input {
 /// password would deliver SIGQUIT too, and its default action ends the program with echo still off: neither the panic hook nor `Drop`
 /// run on a signal. With handlers in place none of them ends the program on its own: the client decides, and the terminal is put back
 /// first. A signal that ends the program arms `watchdog`, which ends it if the loop does not.
-pub fn signal_thread(inputs: Inputs, watchdog: Watchdog, size: impl Fn() -> Option<(u16, u16)> + Send + 'static) -> std::io::Result<()> {
+///
+/// Ctrl-Z (SIGTSTP, at a question or while connecting; `kill -TSTP` too) stops the program as OpenSSH does, with the terminal put back
+/// (`terminal`) for the shell; SIGCONT sets the program's mode again, since the shell does not, and the client asks a question on the
+/// terminal again (`Input::Continue`) and sends the size, which may have changed while the program was stopped.
+pub fn signal_thread(inputs: Inputs, terminal: Restorer, watchdog: Watchdog, size: impl Fn() -> Option<(u16, u16)> + Send + 'static) -> std::io::Result<()> {
+    signals(inputs, terminal, watchdog, size, stop_for_real)
+}
+
+/// `signal_thread`, stopping the program with `stop` (tests stop it in other ways).
+fn signals(inputs: Inputs, terminal: Restorer, watchdog: Watchdog, size: impl Fn() -> Option<(u16, u16)> + Send + 'static, stop: impl Fn() + Send + 'static) -> std::io::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     // The handlers are installed here, before the thread runs: a signal that comes right after this returns finds them in place.
-    let (mut resize, mut interrupt, mut terminate, mut hangup, mut quit) = runtime.block_on(async {
+    let (mut resize, mut interrupt, mut terminate, mut hangup, mut quit, mut suspend, mut continued) = runtime.block_on(async {
         Ok::<_, std::io::Error>((
             signal(SignalKind::window_change())?,
             signal(SignalKind::interrupt())?,
             signal(SignalKind::terminate())?,
             signal(SignalKind::hangup())?,
             signal(SignalKind::quit())?,
+            signal(SignalKind::from_raw(libc::SIGTSTP))?,
+            signal(SignalKind::from_raw(libc::SIGCONT))?,
         ))
     })?;
     spawn_worker("sshelter-signals", inputs, move |inputs| {
@@ -686,6 +697,14 @@ pub fn signal_thread(inputs: Inputs, watchdog: Watchdog, size: impl Fn() -> Opti
                     _ = terminate.recv() => ends(&inputs, libc::SIGTERM),
                     _ = hangup.recv() => ends(&inputs, libc::SIGHUP),
                     _ = quit.recv() => ends(&inputs, libc::SIGQUIT),
+                    _ = suspend.recv() => {
+                        terminal.suspend(&stop);
+                        Ok(())
+                    }
+                    _ = continued.recv() => {
+                        terminal.resume();
+                        inputs.send(Input::Continue).and_then(|()| sized(&inputs))
+                    }
                 };
                 if told.is_err() {
                     return;
@@ -694,6 +713,25 @@ pub fn signal_thread(inputs: Inputs, watchdog: Watchdog, size: impl Fn() -> Opti
         })
     });
     Ok(())
+}
+
+/// Stops the program the way SIGTSTP does without a handler, as OpenSSH's readpassphrase does: the default action is put back for a
+/// moment and the signal sent again. The program stops before `kill` returns, and goes on from there when it is continued (SIGCONT). In
+/// a process group no shell looks after (an orphaned one) the system discards the stop, as it would without the handler.
+fn stop_for_real() {
+    // SAFETY: `sigaction` with structures that are wholly initialised (zeroed, then the default action and an empty mask); the handler
+    // that was in place (tokio's) is put back as it was.
+    unsafe {
+        let mut default: libc::sigaction = std::mem::zeroed();
+        default.sa_sigaction = libc::SIG_DFL;
+        libc::sigemptyset(&mut default.sa_mask);
+        let mut handler: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGTSTP, &default, &mut handler) != 0 {
+            return;
+        }
+        libc::kill(libc::getpid(), libc::SIGTSTP);
+        libc::sigaction(libc::SIGTSTP, &handler, std::ptr::null_mut());
+    }
 }
 
 /// Ends the program when its loop does not. Once armed (a signal that ends the program, or the terminal gone), it gives the loop a
@@ -782,8 +820,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::cli::terminal::fake::FakeTermios;
-    use crate::cli::terminal::{Mode, TermiosApi};
+    use crate::cli::terminal::fake::{describe, FakeTermios};
+    use crate::cli::terminal::{attributes, Mode, TermiosApi};
     use crate::session::broker::Broker;
     use crate::session::connect::HostKeyConfirmer;
     use crate::session::directory::HostDirectory;
@@ -1082,7 +1120,9 @@ mod tests {
     }
 
     /// The handlers are process-wide and stay for the life of the process, so the test that raises the signals for real runs alone, in a
-    /// process of its own (`rerun_alone`); a signal that was not taken over would end that process, and the test with it.
+    /// process of its own (`rerun_alone`); a signal that was not taken over would end that process, and the test with it. Ctrl-Z
+    /// (SIGTSTP) does not stop this process here (the stop is replaced): `ctrl_z_really_stops_the_program_and_sigcont_runs_it_again`
+    /// stops one for real.
     #[test]
     fn the_signals_the_cli_takes_over_reach_the_queue_instead_of_ending_the_program() {
         use crate::ssh::testing::{is_child, rerun_alone};
@@ -1091,16 +1131,35 @@ mod tests {
             rerun_alone(NAME);
             return;
         }
-        let setup = signal_setup(Mode::Raw);
+        let setup = signal_setup(Mode::Prompt { echo: false });
         let (inputs, queue) = queue();
-        signal_thread(inputs, setup.watchdog.clone(), || Some((100, 30))).expect("the handlers are installed");
-        let next = |signal: i32| {
+        let (stopped, stops) = std::sync::mpsc::channel();
+        let at_the_stop = Arc::clone(&setup.termios);
+        let stop = move || stopped.send(at_the_stop.now()).unwrap();
+        signals(inputs, setup.tty.restorer(), setup.watchdog.clone(), || Some((100, 30)), stop).expect("the handlers are installed");
+        let raise = |signal: i32| {
             // SAFETY: `raise` only sends the signal to this thread, and every signal raised here has a handler by now.
             assert_eq!(unsafe { libc::raise(signal) }, 0);
+        };
+        let next = |signal: i32| {
+            raise(signal);
             next_input(&queue)
         };
         assert!(matches!(next(libc::SIGWINCH), Input::Resize(100, 30)));
         assert!(matches!(next(libc::SIGINT), Input::Interrupt));
+
+        // Ctrl-Z at a hidden password: the program stops with the terminal as it was at the start (echo on, for the shell), and the
+        // password's mode is set again after; SIGCONT sets it again (the shell put its own back), asks the question again and sends the
+        // size, which may have changed meanwhile.
+        raise(libc::SIGTSTP);
+        let while_stopped = stops.recv_timeout(Duration::from_secs(10)).expect("stopped");
+        assert!(setup.termios.is_start(&while_stopped), "stopped with the terminal put back: {}", describe(&while_stopped));
+        let hidden = attributes(&setup.termios.start, Mode::Prompt { echo: false });
+        eventually("the mode to be set again", 10, || describe(&setup.termios.now()) == describe(&hidden));
+        setup.termios.set(&setup.termios.start, false).unwrap(); // the shell's own modes, echo on
+        assert!(matches!(next(libc::SIGCONT), Input::Continue));
+        assert!(matches!(next_input(&queue), Input::Resize(100, 30)));
+        assert_eq!(describe(&setup.termios.now()), describe(&hidden), "echo is off again");
 
         // The signals that end the program arm the watchdog, which ends it (here: says it would) if the loop does not.
         let armed = Instant::now();
@@ -1114,9 +1173,72 @@ mod tests {
         // A panic on the signal thread (here: in the callback that reads the size) is told to the queue as well.
         let other = signal_setup(Mode::Cooked);
         let (failing, told) = super::queue();
-        signal_thread(failing, other.watchdog.clone(), || panic!("the size failed")).expect("a second set of handlers");
+        signals(failing, other.tty.restorer(), other.watchdog.clone(), || panic!("the size failed"), || {}).expect("a second set of handlers");
         assert!(matches!(next(libc::SIGWINCH), Input::Resize(100, 30)));
         assert!(matches!(next_input(&told), Input::Failed));
+    }
+
+    /// The variable that tells the test below that it is the process that stops.
+    const STOPPING_CHILD: &str = "SSHELTER_TEST_STOPPING_CHILD";
+
+    /// Ctrl-Z for real: the program stops (the process, all of it), with the terminal put back; it runs again when it is continued, and
+    /// then sets its mode again and asks the question again. The process that stops is a child of the test in a process group of its
+    /// own, as a job of a shell is (a stop in a group no shell looks after would be discarded); the test continues it after a pause, as
+    /// `fg` does.
+    #[test]
+    fn ctrl_z_really_stops_the_program_and_sigcont_runs_it_again() {
+        const NAME: &str = "cli::run::tests::ctrl_z_really_stops_the_program_and_sigcont_runs_it_again";
+        const PAUSE: Duration = Duration::from_millis(500);
+        if std::env::var_os(STOPPING_CHILD).is_none() {
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", NAME, "--nocapture", "--test-threads=1"]).env(STOPPING_CHILD, "1").process_group(0);
+            command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+            let mut child = crate::process::spawn(&mut command).unwrap();
+            let pid = child.id() as libc::pid_t;
+            let mut stderr = child.stderr.take().unwrap();
+            let said = std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = stderr.read_to_string(&mut text);
+                text
+            });
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let mut stops = 0;
+            let status = loop {
+                assert!(Instant::now() < deadline, "the child did not end within a minute");
+                let mut status = 0;
+                // SAFETY: waits on this test's own child; WNOHANG returns at once.
+                match unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED | libc::WNOHANG) } {
+                    0 => std::thread::sleep(Duration::from_millis(10)),
+                    reported if reported == pid && libc::WIFSTOPPED(status) => {
+                        assert_eq!(libc::WSTOPSIG(status), libc::SIGTSTP, "stopped as Ctrl-Z stops a program");
+                        stops += 1;
+                        std::thread::sleep(PAUSE);
+                        // SAFETY: continues this test's own child.
+                        assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+                    }
+                    reported if reported == pid => break status,
+                    _ => panic!("waitpid failed: {}", std::io::Error::last_os_error()),
+                }
+            };
+            let said = said.join().unwrap();
+            assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the child failed:\n{said}");
+            assert_eq!(stops, 1, "stopped once:\n{said}");
+            return;
+        }
+        let setup = signal_setup(Mode::Prompt { echo: false });
+        let (inputs, queue) = queue();
+        signal_thread(inputs, setup.tty.restorer(), setup.watchdog.clone(), || Some((100, 30))).expect("the handlers are installed");
+        let stopped_at = Instant::now();
+        // SAFETY: `raise` sends SIGTSTP to this thread, and it has a handler by now.
+        assert_eq!(unsafe { libc::raise(libc::SIGTSTP) }, 0);
+        assert!(matches!(next_input(&queue), Input::Continue));
+        assert!(stopped_at.elapsed() >= PAUSE, "the program was stopped until it was continued");
+        let hidden = attributes(&setup.termios.start, Mode::Prompt { echo: false });
+        let sets: Vec<String> = setup.termios.sets.lock().unwrap().iter().map(|(termios, _)| describe(termios)).collect();
+        assert_eq!(sets[..3], [describe(&hidden), describe(&setup.termios.start), describe(&hidden)], "put back for the stop, set again after");
+        assert_eq!(describe(&setup.termios.now()), describe(&hidden));
+        assert!(matches!(next_input(&queue), Input::Resize(100, 30)));
     }
 
     /// The watchdog ends the program (here: says it would) a grace time after it was armed, with the terminal put back and what was typed

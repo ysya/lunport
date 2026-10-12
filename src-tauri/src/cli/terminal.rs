@@ -1,7 +1,8 @@
 //! The terminal `sshelter connect` runs in (own-ssh spec §7.3): its modes and its size, through termios (`libc`, already a dependency
 //! on Unix). Raw while the shell runs, the way OpenSSH sets it; a prompt mode for questions (line editing on, echo off for a password);
 //! cooked otherwise. The mode the terminal had at the start comes back on every way out: the end of the program, a dropped `Tty`, a
-//! panic (`restore_on_panic`), and the watchdog that ends a program whose loop does not (`Restorer::hold_restored`).
+//! panic (`restore_on_panic`), the watchdog that ends a program whose loop does not (`Restorer::hold_restored`), and a stop (Ctrl-Z,
+//! `Restorer::suspend`), after which the program's mode is set again when it continues (`Restorer::resume`).
 
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError, TryLockError};
@@ -66,7 +67,8 @@ pub struct Tty {
 
 /// What a `Tty` and its `Restorer`s share: the terminal, its attributes of the start, and the mode it is in now. Every change of the
 /// terminal is made holding `mode`, so the program's threads change it one at a time and none undoes another's half way: the loop sets
-/// a mode (`Tty`), and the watchdog puts it back for good before it ends the program (`Restorer::hold_restored`).
+/// a mode (`Tty`); the signal thread puts the terminal back for a stop and sets the mode again when the program continues
+/// (`Restorer::suspend`, `Restorer::resume`); the watchdog puts it back for good before it ends the program (`Restorer::hold_restored`).
 struct Terminal {
     api: Arc<dyn TermiosApi>,
     original: libc::termios,
@@ -76,6 +78,14 @@ struct Terminal {
 impl Terminal {
     fn mode(&self) -> MutexGuard<'_, Mode> {
         self.mode.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sets `mode` again, the mode the program was in when it stopped. A question's prompt mode throws away what was typed meanwhile,
+    /// as it does when the question is asked (OpenSSH's readpassphrase does the same when it starts over after a stop).
+    fn set_again(&self, mode: Mode) {
+        if mode != Mode::Cooked {
+            let _ = self.api.set(&attributes(&self.original, mode), matches!(mode, Mode::Prompt { .. }));
+        }
     }
 }
 
@@ -111,7 +121,7 @@ impl Tty {
         }
     }
 
-    /// What puts the terminal back from elsewhere: the panic hook, the watchdog.
+    /// What puts the terminal back from elsewhere: the panic hook, the watchdog, the signal thread.
     pub fn restorer(&self) -> Restorer {
         Restorer { terminal: Arc::clone(&self.terminal) }
     }
@@ -123,7 +133,7 @@ impl Drop for Tty {
     }
 }
 
-/// Puts a terminal back to its attributes of the start, from wherever the program is.
+/// Puts a terminal back to its attributes of the start, from wherever the program is, and stops the program with its terminal put back.
 #[derive(Clone)]
 pub struct Restorer {
     terminal: Arc<Terminal>,
@@ -164,6 +174,29 @@ impl Restorer {
             self.put_back(&mut current, true);
             return Some(current);
         }
+    }
+
+    /// Ctrl-Z (SIGTSTP), on the signal thread: the terminal is put back as it was at the start, `stop` stops the program (the shell has
+    /// the terminal meanwhile), and when `stop` returns the program runs again and its mode is set again. The terminal is held all along,
+    /// so the loop cannot set its mode between the putting back and the stop. At a question, what was typed and not read yet is thrown
+    /// away before the stop, as OpenSSH's readpassphrase does: a part of a password must not reach the shell.
+    pub fn suspend(&self, stop: impl FnOnce()) {
+        let current = self.terminal.mode();
+        let mode = *current;
+        if mode != Mode::Cooked {
+            let _ = self.terminal.api.set(&self.terminal.original, matches!(mode, Mode::Prompt { .. }));
+        }
+        stop();
+        self.terminal.set_again(mode);
+        drop(current);
+    }
+
+    /// The program runs again after a stop (SIGCONT): the mode it is in is set again, since a job-control shell (bash 5, zsh 5.9) puts its
+    /// own modes back when it continues a job, not the job's. Returns that mode.
+    pub fn resume(&self) -> Mode {
+        let current = self.terminal.mode();
+        self.terminal.set_again(*current);
+        *current
     }
 
     fn put_back(&self, current: &mut Mode, discard_input: bool) {
@@ -385,6 +418,81 @@ mod tests {
         let count = api.sets.lock().unwrap().len();
         drop(tty);
         assert_eq!(api.sets.lock().unwrap().len(), count, "nothing more to put back");
+    }
+
+    /// Ctrl-Z: the shell gets the terminal back as it was at the start for the time the program is stopped, and the program's mode is
+    /// set again when it runs again: raw for an open shell, the question's prompt mode (echo off for a password) at a question. At a
+    /// question, what was typed and not read yet (a part of a password) is thrown away before the stop, and again when it is asked
+    /// again; raw mode keeps what was typed for the shell.
+    #[test]
+    fn a_stop_puts_the_terminal_back_while_stopped_and_sets_the_mode_again_after() {
+        for (mode, at_a_question) in [(Mode::Raw, false), (Mode::Prompt { echo: false }, true), (Mode::Prompt { echo: true }, true)] {
+            let api = FakeTermios::new();
+            let mut tty = Tty::new(api.clone()).unwrap();
+            tty.set_mode(mode, false).unwrap();
+            let mut while_stopped = None;
+            tty.restorer().suspend(|| while_stopped = Some(*api.sets.lock().unwrap().last().unwrap()));
+            let (stopped_with, discarded) = while_stopped.expect("stopped");
+            assert!(api.is_start(&stopped_with), "{mode:?}: the start's attributes while stopped");
+            assert_eq!(discarded, at_a_question, "{mode:?}: what was typed at a question is thrown away");
+            let (after, discarded) = *api.sets.lock().unwrap().last().unwrap();
+            assert_eq!(describe(&after), describe(&attributes(&api.start, mode)), "{mode:?}: the mode is set again");
+            assert_eq!(discarded, at_a_question);
+            assert_eq!(tty.mode(), mode);
+        }
+    }
+
+    /// While connecting the terminal is as it was at the start: a stop has nothing to put back, and nothing to set again.
+    #[test]
+    fn a_stop_in_the_mode_of_the_start_changes_nothing() {
+        let api = FakeTermios::new();
+        let tty = Tty::new(api.clone()).unwrap();
+        let mut stopped = false;
+        tty.restorer().suspend(|| stopped = true);
+        assert!(stopped);
+        assert!(api.sets.lock().unwrap().is_empty());
+    }
+
+    /// The loop cannot set its mode between the putting back and the stop (the program would stop with the terminal raw) nor while the
+    /// program is stopped: its change waits until the mode has been set again, and is made after.
+    #[test]
+    fn the_loop_cannot_change_the_mode_while_a_stop_holds_the_terminal() {
+        let api = FakeTermios::new();
+        let mut tty = Tty::new(api.clone()).unwrap();
+        tty.set_mode(Mode::Prompt { echo: false }, false).unwrap();
+        let restorer = tty.restorer();
+        let (go, started) = std::sync::mpsc::channel();
+        let the_loop = std::thread::spawn(move || {
+            started.recv().unwrap();
+            tty.set_mode(Mode::Raw, false).unwrap();
+            tty
+        });
+        restorer.suspend(|| {
+            go.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(api.is_start(&api.now()), "still put back while stopped: the loop waits");
+        });
+        let tty = the_loop.join().unwrap();
+        let sets = api.sets.lock().unwrap().clone();
+        let n = sets.len();
+        assert_eq!(describe(&sets[n - 2].0), describe(&attributes(&api.start, Mode::Prompt { echo: false })), "set again first");
+        assert_eq!(describe(&sets[n - 1].0), describe(&attributes(&api.start, Mode::Raw)), "then the loop's change");
+        assert_eq!(tty.mode(), Mode::Raw);
+    }
+
+    /// The program continued (SIGCONT) after the shell had put its own modes back: the program's mode is set again.
+    #[test]
+    fn after_a_stop_the_mode_is_set_again_whatever_the_shell_left() {
+        let api = FakeTermios::new();
+        let mut tty = Tty::new(api.clone()).unwrap();
+        tty.set_mode(Mode::Prompt { echo: false }, false).unwrap();
+        api.set(&api.start, false).unwrap(); // the shell's own modes: echo on
+        assert_eq!(tty.restorer().resume(), Mode::Prompt { echo: false });
+        assert_eq!(describe(&api.now()), describe(&attributes(&api.start, Mode::Prompt { echo: false })));
+        tty.restore();
+        let count = api.sets.lock().unwrap().len();
+        assert_eq!(tty.restorer().resume(), Mode::Cooked, "the mode of the start is the shell's: nothing to set again");
+        assert_eq!(api.sets.lock().unwrap().len(), count);
     }
 
     /// The watchdog puts the terminal back for good: what was typed is thrown away, and no mode is set while it holds the terminal.
