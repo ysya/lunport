@@ -22,7 +22,9 @@ pub enum DirectoryError {
     NotFound(String),
     /// Several saved hosts have this alias; the client has to name one by its id (spec §7.1).
     Ambiguous(String),
-    /// The host is saved, but SSHelter's own client cannot connect to it (a ProxyCommand, a key that is not in SSHelter).
+    /// The host is saved, but SSHelter's own client cannot connect to it as it is saved: it uses a ProxyCommand, or its key is not in
+    /// SSHelter, or its chain of jump hosts loops, includes a host that is not saved, names one host twice, or would give two endpoints
+    /// one host id.
     Unsupported(String),
     /// Reading the saved hosts or the pins, or writing a pin, failed.
     Failed(String),
@@ -48,9 +50,11 @@ impl std::error::Error for DirectoryError {}
 /// to the same id. Where a request would do that it returns an error (`Unsupported`, with the reason) instead: a jump written as
 /// `bastion:2200` is not the saved host `bastion` when that one is saved with port 22.
 pub trait HostDirectory: Send + Sync {
-    /// The saved host `query` names, with its jump hosts in front (each a saved host too), ready for the engine. The pin of each hop is in
-    /// `Hop::pinned`. A chain that loops, names a host that is not saved, or would give two different endpoints one host id is an error
-    /// here, before anything connects.
+    /// The saved host `query` names, with its jump hosts in front (each a saved host too, behind the jump hosts of its own: the hops are in
+    /// the order they are connected), ready for the engine. The pin of each hop is in `Hop::pinned`. A chain that loops, names a host that
+    /// is not saved, or would give two different endpoints one host id is an error here, before anything connects. So is a chain that
+    /// names one host twice without looping (`bastion,bastion`, or a jump host that two jump hosts of one host share): the broker keeps
+    /// what it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain has one hop per id.
     fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError>;
 
     /// The key pinned for `host`, if any. An error reading the pins is `Err`, never "nothing pinned": a host that was pinned must not
