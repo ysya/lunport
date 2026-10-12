@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use super::auth::printable;
 use super::connect::Connected;
 use super::protocol::{kinds, Event, ServerMessage, DATA_CHUNK};
 use crate::ssh::{DisconnectKind, DisconnectReason, Exit, Pty, Session, SessionError, ShellChannel, Target};
@@ -18,6 +19,39 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// How long a shell the client left is given to print something before it is closed anyway (plan 1b R22).
 pub const SETTLE: Duration = Duration::from_secs(3);
+
+/// The longest signal name that is passed on to the client: the names of RFC 4254 §6.10 have at most 6 characters, `RTMIN+31` has 8.
+const SIGNAL_NAME_MAX: usize = 32;
+
+/// What the client is told when the name of the signal that ended the shell is not one it could read.
+const UNKNOWN_SIGNAL: &str = "UNKNOWN";
+
+/// The name of the signal that ended the shell, in a form that is safe to pass on: a server names it (`Sig::Custom` carries any text it
+/// sends), and a program reads it, so only upper case letters, digits, `_`, `+` and `-` pass, up to `SIGNAL_NAME_MAX` of them. Anything
+/// else is `UNKNOWN`, which no signal is called, so a client that maps names to numbers finds none.
+fn signal_name(name: &str) -> String {
+    let safe = !name.is_empty() && name.len() <= SIGNAL_NAME_MAX && name.bytes().all(|byte| matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'+' | b'-'));
+    if safe { name.to_string() } else { UNKNOWN_SIGNAL.to_string() }
+}
+
+/// Sends `message` to the client. Everything the relay says goes through here (the shell's own output, `ClientLink::send_data`, is the one
+/// exception), and this is where the text in it is made safe to print, as `ConnectFailure::new` does for a failure: some of it was written
+/// by a server (the `Display` of a protocol error can quote the bytes the peer sent, a signal has whatever name the server gave it), the
+/// rest comes from the person's configuration (aliases) or from the client's request, and none of it may reach a terminal with an escape
+/// sequence or a carriage return in it. A text that has no such character comes out as it went in. The `match` names every kind of
+/// message on purpose: a new one has to be put in one of the arms.
+pub fn tell(link: &dyn ClientLink, message: ServerMessage) -> std::io::Result<()> {
+    let message = match message {
+        ServerMessage::Event(Event::Error { kind, text }) => ServerMessage::Event(Event::Error { kind, text: printable(&text) }),
+        ServerMessage::Event(Event::Disconnected { reason }) => ServerMessage::Event(Event::Disconnected { reason: printable(&reason) }),
+        ServerMessage::Event(Event::Banner { text }) => ServerMessage::Event(Event::Banner { text: printable(&text) }),
+        ServerMessage::Exited { code, signal } => ServerMessage::Exited { code, signal: signal.map(|name| signal_name(&name)) },
+        // The relay asks no questions (the owner's text is made printable where it is built: `shown_prompt`), `Opened` carries the
+        // broker's own number, and `Connected` carries nothing.
+        message @ (ServerMessage::Opened { .. } | ServerMessage::Question(_) | ServerMessage::Event(Event::Connected)) => message,
+    };
+    link.send(&message)
+}
 
 /// The client end of a shell: where its output and messages go. A write that fails means the client is gone.
 pub trait ClientLink: Send + Sync {
@@ -89,7 +123,7 @@ impl ShellControl {
             Err(SessionError::Timeout) => {
                 let alias = locked(&self.alias).clone();
                 let text = format!("What you typed did not reach {alias} in time: the connection is not responding.");
-                let _ = link.send(&ServerMessage::Event(Event::Error { kind: kinds::INPUT.to_string(), text }));
+                let _ = tell(link, ServerMessage::Event(Event::Error { kind: kinds::INPUT.to_string(), text }));
             }
             Err(error) => eprintln!("[session] input did not reach the shell: {error}"),
         }
@@ -207,14 +241,14 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
         Ok(shell) => Arc::from(shell),
         Err(error) => {
             let text = format!("SSHelter could not open a shell on {alias}: {}.", error.to_string().trim_end_matches('.'));
-            let _ = link.send(&ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }));
-            let _ = link.send(&ServerMessage::Exited { code: None, signal: None });
+            let _ = tell(link, ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }));
+            let _ = tell(link, ServerMessage::Exited { code: None, signal: None });
             session.close();
             return;
         }
     };
     control.opened(Arc::clone(&shell));
-    if link.send(&ServerMessage::Opened { session_id: session_id.to_string() }).is_err() {
+    if tell(link, ServerMessage::Opened { session_id: session_id.to_string() }).is_err() {
         control.gone.store(true, Ordering::SeqCst);
     }
     // The size the client sent while the shell was being opened, or the one it was opened with: sent once more now that the PTY exists
@@ -246,9 +280,9 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
             None => ending(shell.exited(), session.as_ref(), &target, &alias),
         };
         if let Some(event) = event {
-            let _ = link.send(&ServerMessage::Event(event));
+            let _ = tell(link, ServerMessage::Event(event));
         }
-        let _ = link.send(&exited);
+        let _ = tell(link, exited);
     }
     session.close();
 }
@@ -500,5 +534,73 @@ mod tests {
             ]
         );
         assert_eq!(running.engine.events().last(), Some(&FakeEvent::Closed));
+    }
+
+    /// What a client is shown outside the shell's own output may carry bytes a server chose (an error's text quotes the peer's bytes, a
+    /// signal has whatever name the server gave it): none of it reaches the terminal as an escape sequence (spec §7.1's `printable` rule).
+    #[test]
+    fn every_text_the_relay_frames_is_printable_wherever_it_came_from() {
+        let escape = "\u{1b}[2J\u{1b}]0;x\u{7}";
+
+        // A lost connection: the detail of the engine's error can quote the peer's bytes (`invalid label: '…'`).
+        let mut lost = start(FakeEngine::new(), ShellControl::new());
+        lost.wait_for_shell().print(b"$ ");
+        let hop = target().hops[0].reference();
+        lost.engine.disconnect_now(DisconnectReason { hop, kind: DisconnectKind::Other, detail: format!("invalid label: '{escape}'") });
+        lost.finish();
+        assert_eq!(
+            &lost.link.split().1[1..],
+            [
+                ServerMessage::Event(Event::Disconnected { reason: "Connection to web ended (invalid label: '?[2J?]0;x?').".into() }),
+                ServerMessage::Exited { code: None, signal: None },
+            ]
+        );
+
+        // A shell killed by a signal the server named as it pleased.
+        let mut killed = start(FakeEngine::new(), ShellControl::new());
+        killed.wait_for_shell().end(Exit::Signal("\u{1b}[2J".into()));
+        killed.finish();
+        let exited = killed.link.split().1.pop();
+        assert_eq!(exited, Some(ServerMessage::Exited { code: None, signal: Some("UNKNOWN".into()) }), "{exited:?}");
+
+        // A shell the engine could not open: its error text.
+        let mut failing = start(FakeEngine::new().with_shell_error(SessionError::Channel(format!("refused {escape}"))), ShellControl::new());
+        failing.finish();
+        assert_eq!(
+            failing.link.split().1[0],
+            ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "SSHelter could not open a shell on web: SSH error: refused ?[2J?]0;x?.".into() })
+        );
+
+        // A refused terminal or shell: the reason the engine gives.
+        let refused = FakeEngine::new().with_shell_exit(Exit::Refused(format!("refused {escape}"))).with_shell_ending_at_once();
+        let mut refusing = start(refused, ShellControl::new());
+        refusing.finish();
+        assert_eq!(
+            refusing.link.split().1[1],
+            ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "SSHelter could not open a shell on web: refused ?[2J?]0;x?.".into() })
+        );
+
+        // The sentence for the app quitting carries the alias of the host, which the person's configuration wrote.
+        let mut quitting = start(FakeEngine::new(), ShellControl::with_settle(Duration::from_millis(100)));
+        quitting.wait_for_shell().print(b"$ ");
+        quitting.control.end(&format!("SSHelter quit, so the connection to {escape} was closed."));
+        quitting.finish();
+        assert_eq!(
+            quitting.link.split().1[1],
+            ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to ?[2J?]0;x? was closed.".into() })
+        );
+    }
+
+    /// The names SSH gives signals (RFC 4254 §6.10, and the real-time ones) are kept; anything else a server might send is `UNKNOWN`.
+    #[test]
+    fn a_signal_name_passes_only_in_the_form_signals_are_named() {
+        for name in ["KILL", "TERM", "USR1", "RTMIN+3", "RTMAX-1", "ABRT", "X_Y"] {
+            assert_eq!(signal_name(name), name);
+        }
+        let long = "A".repeat(SIGNAL_NAME_MAX + 1);
+        for name in ["", "kill", "SIGKILL@example.com", "K ILL", "KILL\n", "\u{1b}[2J", "KİLL", long.as_str()] {
+            assert_eq!(signal_name(name), "UNKNOWN", "{name:?}");
+        }
+        assert_eq!(signal_name(&"A".repeat(SIGNAL_NAME_MAX)), "A".repeat(SIGNAL_NAME_MAX), "up to the limit it passes");
     }
 }
