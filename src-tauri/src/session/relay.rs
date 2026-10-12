@@ -1001,4 +1001,23 @@ mod tests {
         assert_eq!(lost_sentence(&silent(&jump), &through_jump), "Connection to jump lost (no response for 30 seconds).");
         assert_eq!(lost_sentence(&silent(&web), &through_jump), "Connection to web lost (no response for 120 seconds).");
     }
+
+    /// The wait before a shell nobody wants is closed is not served when the shell ends by itself meanwhile: there is nothing left to close,
+    /// and the session is not kept for the rest of the settle time.
+    #[test]
+    fn a_shell_nobody_wants_that_ends_by_itself_is_not_waited_for_and_not_closed() {
+        let (mut running, opening) = start_holding_the_shell(FakeEngine::new(), ShellControl::with_settle(Duration::from_secs(5)));
+        crate::ssh::testing::eventually("the shell to be being opened", 5, || opening.entered() == 1);
+        running.control.owner_gone();
+        opening.release();
+        crate::ssh::testing::eventually("the shell to open", 5, || !running.engine.shells().is_empty());
+        std::thread::sleep(Duration::from_millis(200));
+        let ended = Instant::now();
+        running.engine.shells().remove(0).end(Exit::Code(0));
+        running.finish();
+        assert!(ended.elapsed() < Duration::from_secs(3), "not kept for the settle time: {:?}", ended.elapsed());
+        let events = running.engine.events();
+        assert!(!events.contains(&FakeEvent::ShellClosed), "a shell that has ended is not closed: {events:?}");
+        assert_eq!(events.last(), Some(&FakeEvent::Closed));
+    }
 }
