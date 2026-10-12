@@ -216,6 +216,19 @@ impl Connector<'_> {
         Err(ConnectFailure::new(kinds::CONNECT, format!("SSHelter gave up connecting to {alias}: the server kept asking for something new.")))
     }
 
+    /// The pinned key `pinned`, which the key the server presented was compared with, as the question about a changed key shows it: its
+    /// fingerprint, and when the directory pinned it. The date is the one of the directory's record of that very key. A directory that no
+    /// longer holds it (another connection replaced or forgot the pin since this connect resolved the host) has no date to give, and a key
+    /// that is not pinned any more cannot be replaced either (`replace_pin` refuses it, after the person has decided), so the connect
+    /// ends here with a directory failure and connecting again starts from the pin as it is now. The refusal is the safest answer: the
+    /// question has no place for a missing date, and a date that is made up (1970) or belongs to another key is worse than none.
+    fn pinned_summary(&self, hop: &HopRef, pinned: &HostKey) -> Result<PinnedSummary, ConnectFailure> {
+        match self.directory.pinned(&hop.id).map_err(directory_failure)? {
+            Some(record) if record.key.fingerprint == pinned.fingerprint => Ok(PinnedSummary { fingerprint: pinned.fingerprint.clone(), pinned_at_ms: record.pinned_at_ms }),
+            _ => Err(directory_failure(DirectoryError::Failed(format!("SSHelter's record of {}'s host key changed while it was connecting. Connect again.", hop.alias)))),
+        }
+    }
+
     /// Asks the window about `key`, which `hop` presented (`pinned`: the key on record, for a changed key). When the person trusts exactly
     /// this key, it is pinned (or replaces the old pin) and the next round connects with it; anything else ends the connect.
     #[allow(clippy::too_many_arguments)]
@@ -229,14 +242,12 @@ impl Connector<'_> {
         key: &HostKey,
         pinned: Option<HostKey>,
     ) -> Result<(), ConnectFailure> {
-        owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in SSHelter.", hop.alias));
+        // The summary first: when there is none to give, nobody is asked, and nobody is told to wait for a window that stays closed.
         let changed = match &pinned {
             None => None,
-            Some(pinned) => {
-                let pinned_at_ms = self.directory.pinned(&hop.id).map_err(directory_failure)?.map(|pin| pin.pinned_at_ms).unwrap_or(0);
-                Some(PinnedSummary { fingerprint: pinned.fingerprint.clone(), pinned_at_ms })
-            }
+            Some(pinned) => Some(self.pinned_summary(hop, pinned)?),
         };
+        owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in SSHelter.", hop.alias));
         let question = HostKeyQuestion {
             alias: hop.alias.clone(),
             hostname: hop.hostname.clone(),
@@ -275,6 +286,7 @@ mod tests {
 
     use super::*;
     use crate::session::auth::Reply;
+    use crate::session::directory::PinnedKey;
     use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner, PINNED_AT_MS, TEST_PASSPHRASE};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods};
     use crate::ssh::russh_engine::toy_server::{ToyBehavior, ToyLogin, ToyServer};
@@ -324,7 +336,12 @@ mod tests {
 
         /// The same, with another person at the terminal than the scripted one.
         fn connect_as(&self, query: &HostQuery, owner: &dyn Owner) -> Result<Connected, ConnectFailure> {
-            let connector = Connector { engine: &self.engine, directory: &self.directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer };
+            self.connect_through(&self.directory, query, owner)
+        }
+
+        /// The same, with another directory than the world's.
+        fn connect_through(&self, directory: &dyn HostDirectory, query: &HostQuery, owner: &dyn Owner) -> Result<Connected, ConnectFailure> {
+            let connector = Connector { engine: &self.engine, directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer };
             connector.connect(query, owner, &self.cancel)
         }
 
@@ -404,6 +421,56 @@ mod tests {
         accepting.connect(&web()).expect("connects with the accepted key");
         assert_eq!(accepting.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(default_server_key()));
         assert_eq!(*locked(&accepting.owner.notices), [WAITING]);
+    }
+
+    /// A directory whose record of the pin is another one by the time the broker looks it up for the question: another connection
+    /// replaced or forgot the pin after this one resolved the host. `now` is what `pinned` answers from then on.
+    struct PinMovedOn {
+        inner: FakeDirectory,
+        now: Option<PinnedKey>,
+    }
+
+    impl HostDirectory for PinMovedOn {
+        fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+            self.inner.resolve(query)
+        }
+
+        fn pinned(&self, _host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
+            Ok(self.now.clone())
+        }
+
+        fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
+            self.inner.pin(host, key)
+        }
+
+        fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
+            self.inner.replace_pin(host, previous, key)
+        }
+
+        fn password_account(&self, host: &HostId) -> String {
+            self.inner.password_account(host)
+        }
+    }
+
+    /// The question about a changed key names the key that is pinned and when it was pinned, and the date belongs to that key. When the
+    /// directory does not hold the key the server's was compared with any more (another connection replaced or forgot the pin since this
+    /// one resolved the host), there is no date to show: not 1970, and not the date of some other key. Nor is it worth asking: replacing a
+    /// key that is not pinned is refused, after the person has decided. The connect ends and says so; connecting again starts from the
+    /// pin as it is now, with nothing to ask when another connection accepted the new key.
+    #[test]
+    fn a_changed_host_key_is_not_asked_about_when_the_directory_no_longer_has_the_pin_it_was_compared_with() {
+        let old = key(test_keys::ENC_PUBLIC);
+        let saved = || FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", old.clone());
+        let forgotten = PinMovedOn { inner: saved(), now: None };
+        let replaced = PinMovedOn { inner: saved(), now: Some(PinnedKey { key: key(test_keys::ECDSA_PUBLIC), pinned_at_ms: 42 }) };
+        let sentence = "SSHelter's record of web's host key changed while it was connecting. Connect again.";
+        for (what, directory) in [("forgotten", forgotten), ("replaced", replaced)] {
+            let world = world(FakeEngine::new(), FakeDirectory::new()).deciding(vec![Decision::Trust]);
+            assert_eq!(world.connect_through(&directory, &web(), &world.owner).err(), Some(failure(kinds::HOST, sentence)), "{what}");
+            assert!(world.confirmer.asked().is_empty(), "{what}: the window was not asked");
+            assert!(locked(&world.owner.notices).is_empty(), "{what}: nobody was told to wait for it either");
+            assert_eq!(directory.inner.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(old.clone()), "{what}: nothing was pinned over the old key");
+        }
     }
 
     /// Plan 1b R17: a pinned host whose server no longer has a key of the pinned type would fail with "no common algorithm", because the
