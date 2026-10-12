@@ -112,13 +112,28 @@ fn directory(app: &tauri::AppHandle) -> Result<SshConfigDirectory, AppError> {
     Ok(SshConfigDirectory::new(sources, pins))
 }
 
-/// Builds the broker and starts its listener; what happened is recorded in `AppState::session`, nothing stops the app.
+/// Builds the broker and starts its listener, unless it listens already: at the app's start (`setup`), and when a client found nobody
+/// listening and started SSHelter, which handed over to this instance (`on_second_launch`, which can come before `setup`'s start). What
+/// happened is recorded in `AppState::session`; nothing stops the app. The status stays locked from the look to the record, so two
+/// starts at once listen once, and the second does not record `OtherInstance` (a second listener would find the lock held by this very
+/// process). Locks: the status, then the broker (`listen`), never the other way.
 pub fn start(app: &tauri::AppHandle) {
-    let status = listen(app);
-    if let BrokerStatus::Failed(reason) = &status {
+    let state = app.state::<AppState>();
+    let mut status = state.session.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !needs_start(&status) {
+        return;
+    }
+    let now = listen(app);
+    if let BrokerStatus::Failed(reason) = &now {
         eprintln!("[session] the broker is not listening: {reason}");
     }
-    *app.state::<AppState>().session.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = status;
+    *status = now;
+}
+
+/// Whether `start` has a listener to start: not when the broker listens already, nor where it has no transport; after a failure, or
+/// while another SSHelter held the lock, it tries again.
+fn needs_start(status: &BrokerStatus) -> bool {
+    !matches!(status, BrokerStatus::Running | BrokerStatus::NotOnThisPlatform)
 }
 
 #[cfg(unix)]
@@ -156,14 +171,6 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
 #[cfg(windows)]
 fn listen(_app: &tauri::AppHandle) -> BrokerStatus {
     BrokerStatus::NotOnThisPlatform
-}
-
-/// A client found nobody listening and started SSHelter, which handed over to this instance: listen again unless it already does.
-pub fn ensure_listening(app: &tauri::AppHandle) {
-    let status = app.state::<AppState>().session.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-    if !matches!(status, BrokerStatus::Running | BrokerStatus::NotOnThisPlatform) {
-        start(app);
-    }
 }
 
 /// Whether any session is open.
@@ -221,6 +228,16 @@ mod tests {
         let started = Instant::now();
         assert_eq!(loaded_doc(&none, Duration::from_millis(200), || Err(AppError::Other("no config".into()))).err(), Some("no config".to_string()));
         assert!(started.elapsed() >= Duration::from_millis(200));
+    }
+
+    /// A start is a no-op for a broker that listens already, or that has no transport here; every other status is worth another try.
+    #[test]
+    fn only_a_broker_that_does_not_listen_is_started() {
+        assert!(!needs_start(&BrokerStatus::Running));
+        assert!(!needs_start(&BrokerStatus::NotOnThisPlatform));
+        for status in [BrokerStatus::NotStarted, BrokerStatus::OtherInstance, BrokerStatus::Failed("the socket path is too long".into())] {
+            assert!(needs_start(&status), "{status:?}");
+        }
     }
 
     #[test]
