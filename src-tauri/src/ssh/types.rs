@@ -239,6 +239,9 @@ pub enum Exit {
     Code(u32),
     /// Killed by this signal (name without the `SIG` prefix).
     Signal(String),
+    /// The server refused the terminal (PTY) or the shell request, and the channel was closed; the text says which ("the server refused
+    /// to allocate a terminal (PTY)", "the server refused to start a shell"). The connection is still up.
+    Refused(String),
     /// The channel ended without a status: the connection was lost, or the server closed the channel.
     Disconnected,
 }

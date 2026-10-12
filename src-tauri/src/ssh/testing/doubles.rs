@@ -95,6 +95,7 @@ pub struct VaultAuth {
     signs: Mutex<Vec<SignCall>>,
     password_asks: Mutex<Vec<HopRef>>,
     prompts: Mutex<Vec<Vec<Prompt>>>,
+    banners: Mutex<Vec<(HopRef, String)>>,
 }
 
 impl VaultAuth {
@@ -111,6 +112,7 @@ impl VaultAuth {
             signs: Mutex::new(Vec::new()),
             password_asks: Mutex::new(Vec::new()),
             prompts: Mutex::new(Vec::new()),
+            banners: Mutex::new(Vec::new()),
         }
     }
 
@@ -176,6 +178,11 @@ impl VaultAuth {
     pub fn prompts_seen(&self) -> Vec<Vec<Prompt>> {
         locked(&self.prompts).clone()
     }
+
+    /// The banners the engine handed over, with the hop that sent each.
+    pub fn banners(&self) -> Vec<(HopRef, String)> {
+        locked(&self.banners).clone()
+    }
 }
 
 impl Default for VaultAuth {
@@ -237,6 +244,10 @@ impl AuthSource for VaultAuth {
         }
         std::thread::sleep(self.answer_delay);
         self.answers.clone().map(|answers| answers.into_iter().map(Zeroizing::new).collect())
+    }
+
+    fn banner(&self, hop: &HopRef, text: &str) {
+        locked(&self.banners).push((hop.clone(), text.to_string()));
     }
 }
 

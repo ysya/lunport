@@ -25,8 +25,10 @@ pub enum ConnectError {
     NoCommonHostKeyAlgorithm { hop: HopRef, ours: Vec<String>, theirs: Vec<String> },
     /// Every method was refused or could not be tried. `tried` lists the methods that were attempted, possibly none (a key that is not in
     /// the vault, no password to give); `reason` explains what the method list alone does not (for example that the server accepts RSA
-    /// keys only with SHA-1); empty for a plain refusal.
-    AuthFailed { hop: HopRef, tried: Vec<AuthMethod>, reason: String },
+    /// keys only with SHA-1); empty for a plain refusal. `password_wanted`: the server still offers the password method and no password
+    /// was tried on this connection (the auth source had none, or the login did not reach the method): a password typed now could get in,
+    /// so the caller can ask for one and connect again with the password method first (spec §6.2 step 4).
+    AuthFailed { hop: HopRef, tried: Vec<AuthMethod>, reason: String, password_wanted: bool },
     /// Login stopped on our side (signer failure, cancelled or overdue prompt) and the connection was dropped.
     AuthAbandoned { hop: HopRef, reason: String },
     /// Any other protocol or I/O failure, as text.
@@ -56,7 +58,7 @@ impl fmt::Display for ConnectError {
                 }
                 Ok(())
             }
-            ConnectError::AuthFailed { hop, tried, reason } => {
+            ConnectError::AuthFailed { hop, tried, reason, .. } => {
                 if tried.is_empty() {
                     write!(f, "Authentication failed for {}@{} (no login method could be tried).", hop.user, hop.alias)?;
                 } else {
@@ -147,7 +149,12 @@ mod tests {
             (ConnectError::HostKeyMismatch { hop: hop(), key: key(), pinned: key() }, "The host key of web changed. Connection refused."),
             (ConnectError::HostKeyUnknown { hop: hop(), key: key() }, "The host key of web has not been confirmed yet."),
             (
-                ConnectError::AuthFailed { hop: hop(), tried: vec![AuthMethod::Key { key_id: "k1".into() }, AuthMethod::Password], reason: String::new() },
+                ConnectError::AuthFailed {
+                    hop: hop(),
+                    tried: vec![AuthMethod::Key { key_id: "k1".into() }, AuthMethod::Password],
+                    reason: String::new(),
+                    password_wanted: false,
+                },
                 "Authentication failed for deploy@web (tried: publickey, password).",
             ),
             (ConnectError::AuthAbandoned { hop: hop(), reason: "the prompt timed out".into() }, "Authentication for web was abandoned (the prompt timed out)."),
@@ -165,17 +172,26 @@ mod tests {
             hop: hop(),
             tried: vec![AuthMethod::Key { key_id: "k1".into() }],
             reason: "The server only accepts RSA keys signed with SHA-1, which SSHelter does not do.".into(),
+            password_wanted: false,
         };
         assert_eq!(
             error.to_string(),
             "Authentication failed for deploy@web (tried: publickey). The server only accepts RSA keys signed with SHA-1, which SSHelter does not do."
         );
 
-        let nothing_tried = ConnectError::AuthFailed { hop: hop(), tried: vec![], reason: "The key k1 is not available on this computer.".into() };
+        let nothing_tried =
+            ConnectError::AuthFailed { hop: hop(), tried: vec![], reason: "The key k1 is not available on this computer.".into(), password_wanted: false };
         assert_eq!(
             nothing_tried.to_string(),
             "Authentication failed for deploy@web (no login method could be tried). The key k1 is not available on this computer."
         );
+    }
+
+    /// Whether a password could still get in is for the broker, not for the user's sentence.
+    #[test]
+    fn a_wanted_password_does_not_change_the_sentence() {
+        let wanted = ConnectError::AuthFailed { hop: hop(), tried: vec![AuthMethod::Key { key_id: "k1".into() }], reason: String::new(), password_wanted: true };
+        assert_eq!(wanted.to_string(), "Authentication failed for deploy@web (tried: publickey).");
     }
 
     #[test]
