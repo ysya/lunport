@@ -249,12 +249,8 @@ impl Broker {
             let (broker, conn) = (Arc::clone(self), conn.clone());
             let pty = Pty { term: pty.term, cols: pty.cols, rows: pty.rows };
             std::thread::Builder::new().name("sshelter-session".to_string()).spawn(move || {
+                let _over = SessionOver { broker: &broker, conn: &conn };
                 broker.run_session(&conn, &host, pty);
-                // The session is over: it leaves the table, and the connection is closed, which ends the reader below and tells the client.
-                // `end_all` closes the connection of a client it told the app is quitting, after it has told it.
-                if broker.forget(conn.id) != Told::ByEndAll {
-                    hang_up(&conn.closer);
-                }
             })
         };
         let Ok(worker) = worker else {
@@ -356,6 +352,22 @@ impl Broker {
             return;
         }
         run_shell(connected, pty, conn.link.as_ref(), &conn.control, &conn.id.to_string());
+    }
+}
+
+/// What becomes of a session whichever way its thread ends, a panic included (the thread unwinds through this): it leaves the table, and
+/// its connection is closed, which ends the reader of `serve` and tells the client. `end_all` closes the connection of a client it told
+/// the app is quitting, after it has told it, so this leaves that one to it.
+struct SessionOver<'a> {
+    broker: &'a Broker,
+    conn: &'a Conn,
+}
+
+impl Drop for SessionOver<'_> {
+    fn drop(&mut self) {
+        if self.broker.forget(self.conn.id) != Told::ByEndAll {
+            hang_up(&self.conn.closer);
+        }
     }
 }
 
@@ -574,7 +586,7 @@ mod tests {
     use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, GatedEngine, WaitingConfirmer};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods, FakeShell};
     use crate::ipc::peer::ProcInfo;
-    use crate::ssh::{AuthMethod, Exit};
+    use crate::ssh::{AuthMethod, AuthSource, ConnectError, Exit, HostKeyPolicy, Session, Target};
     use crate::sync::testkit::MemKeychain;
 
     /// What the client received.
@@ -1257,5 +1269,28 @@ mod tests {
         world.gates.connect.release();
         crate::ssh::testing::eventually("the session to be forgotten", 10, || !world.broker.has_sessions());
         assert_eq!(world.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed], "connected, closed at once, and no shell opened");
+    }
+
+    /// An engine whose connect panics.
+    struct PanickingEngine;
+
+    impl SshEngine for PanickingEngine {
+        fn connect(&self, _target: &Target, _host_keys: &dyn HostKeyPolicy, _auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
+            panic!("the engine panicked (this panic is the test)");
+        }
+    }
+
+    /// Plan 1b-1 review, Task 11 Minor 6: a panic on the session's thread must not leave the session in the table, with its client
+    /// connected to nothing for ever.
+    #[test]
+    fn a_panic_on_the_sessions_thread_still_forgets_the_session_and_hangs_up() {
+        let broker = Broker::new(Arc::new(PanickingEngine), Arc::new(pinned_web()), Arc::new(FakeKeys::new()), Arc::new(saved_password()), Arc::new(FakeConfirmer::default()));
+        let dir = tempfile::Builder::new().prefix("sb").tempdir_in("/tmp").unwrap();
+        crate::ipc::server::listen_unix(&dir.path().join("ipc"), broker.handler()).unwrap();
+        let mut client = Client::connect(&dir.path().join("ipc").join("sock"));
+        client.stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        client.open("web");
+        assert!(client.next().is_none(), "the connection is closed");
+        crate::ssh::testing::eventually("the session to be forgotten", 5, || !broker.has_sessions());
     }
 }
