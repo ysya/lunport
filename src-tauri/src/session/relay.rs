@@ -36,14 +36,14 @@ fn signal_name(name: &str) -> String {
     if safe { name.to_string() } else { UNKNOWN_SIGNAL.to_string() }
 }
 
-/// Sends `message` to the client. Everything the relay says goes through here (the shell's own output, `ClientLink::send_data`, is the one
-/// exception), and this is where the text in it is made safe to print, as `ConnectFailure::new` does for a failure: some of it was written
-/// by a server (the `Display` of a protocol error can quote the bytes the peer sent, a signal has whatever name the server gave it), the
-/// rest comes from the person's configuration (aliases) or from the client's request, and none of it may reach a terminal with an escape
-/// sequence or a carriage return in it. A text that has no such character comes out as it went in. The `match` names every kind of
-/// message on purpose: a new one has to be put in one of the arms.
-pub fn tell(link: &dyn ClientLink, message: ServerMessage) -> std::io::Result<()> {
-    let message = match message {
+/// `message` as it is sent to the client. Everything the relay says goes through here (the shell's own output, `ClientLink::send_data`,
+/// is the one exception), and this is where the text in it is made safe to print, as `ConnectFailure::new` does for a failure: some of
+/// it was written by a server (the `Display` of a protocol error can quote the bytes the peer sent, a signal has whatever name the
+/// server gave it), the rest comes from the person's configuration (aliases) or from the client's request, and none of it may reach a
+/// terminal with an escape sequence or a carriage return in it. A text that has no such character comes out as it went in. The `match`
+/// names every kind of message on purpose: a new one has to be put in one of the arms.
+fn made_safe(message: ServerMessage) -> ServerMessage {
+    match message {
         ServerMessage::Event(Event::Error { kind, text }) => ServerMessage::Event(Event::Error { kind, text: printable(&text) }),
         ServerMessage::Event(Event::Disconnected { reason }) => ServerMessage::Event(Event::Disconnected { reason: printable(&reason) }),
         ServerMessage::Event(Event::Banner { text }) => ServerMessage::Event(Event::Banner { text: printable(&text) }),
@@ -51,13 +51,39 @@ pub fn tell(link: &dyn ClientLink, message: ServerMessage) -> std::io::Result<()
         // The relay asks no questions (the owner's text is made printable where it is built: `shown_prompt`), `Opened` carries the
         // broker's own number, and `Connected` carries nothing.
         message @ (ServerMessage::Opened { .. } | ServerMessage::Question(_) | ServerMessage::Event(Event::Connected)) => message,
-    };
-    link.send(&message)
+    }
+}
+
+/// Sends `message` to the client, made safe (`made_safe`).
+pub fn tell(link: &dyn ClientLink, message: ServerMessage) -> std::io::Result<()> {
+    tell_all(link, vec![message])
+}
+
+/// Sends `messages` to the client, each one made safe (`made_safe`), in order and as one piece (`ClientLink::send_all`): what ends a
+/// session is an explanation and then `exited`, and nothing else may be written between them.
+pub fn tell_all(link: &dyn ClientLink, messages: Vec<ServerMessage>) -> std::io::Result<()> {
+    let messages: Vec<ServerMessage> = messages.into_iter().map(made_safe).collect();
+    link.send_all(&messages)
 }
 
 /// The client end of a shell: where its output and messages go. A write that fails means the client is gone.
 pub trait ClientLink: Send + Sync {
     fn send(&self, message: &ServerMessage) -> std::io::Result<()>;
+
+    /// Sends `messages` one after the other with nothing else written in between: what ends a session (an explanation, then `exited`) is
+    /// said as one piece, or a frame of another thread could come between the two. A link that several threads write to holds its writer
+    /// for the whole sequence; this default, for a link only one thread writes to, tries every message and gives the first error.
+    fn send_all(&self, messages: &[ServerMessage]) -> std::io::Result<()> {
+        let mut result = Ok(());
+        for message in messages {
+            let sent = self.send(message);
+            if result.is_ok() {
+                result = sent;
+            }
+        }
+        result
+    }
+
     fn send_data(&self, bytes: &[u8]) -> std::io::Result<()>;
 }
 
@@ -319,18 +345,11 @@ fn no_shell(error: &SessionError, session: &dyn Session, target: &Target, alias:
     vec![ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }), no_status]
 }
 
-/// Tells the client `messages`, in order. A client that is gone does not take them, which is nothing to act on.
-fn tell_all(link: &dyn ClientLink, messages: Vec<ServerMessage>) {
-    for message in messages {
-        let _ = tell(link, message);
-    }
-}
-
 /// What the client is told when the session is over before it had a shell: nothing when it has gone away, the app's reason when the app
 /// ended the session.
 fn say_over(link: &dyn ClientLink, over: Over) {
     if let Over::Quit(reason) = over {
-        tell_all(link, vec![ServerMessage::Event(Event::Disconnected { reason }), ServerMessage::Exited { code: None, signal: None }]);
+        let _ = tell_all(link, vec![ServerMessage::Event(Event::Disconnected { reason }), ServerMessage::Exited { code: None, signal: None }]);
     }
 }
 
@@ -355,7 +374,9 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
         Err(error) => {
             match control.over() {
                 Some(over) => say_over(link, over),
-                None => tell_all(link, no_shell(&error, session.as_ref(), &target, &alias)),
+                None => {
+                    let _ = tell_all(link, no_shell(&error, session.as_ref(), &target, &alias));
+                }
             }
             session.close();
             return;
@@ -397,7 +418,7 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
         control.ended();
     });
     if !control.is_gone() {
-        tell_all(link, ending(shell.exited(), control.quit_reason(), session.as_ref(), &target, &alias));
+        let _ = tell_all(link, ending(shell.exited(), control.quit_reason(), session.as_ref(), &target, &alias));
     }
     session.close();
 }
@@ -416,6 +437,8 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         sent: Mutex<Vec<Sent>>,
+        /// How many messages each call of `send_all` was handed (`send` is called through it: one call, whatever the count).
+        calls: Mutex<Vec<usize>>,
         data_limit: Option<usize>,
         refuses_opened: bool,
     }
@@ -437,6 +460,10 @@ mod tests {
             }
             locked(&self.sent).push(Sent::Message(message.clone()));
             Ok(())
+        }
+        fn send_all(&self, messages: &[ServerMessage]) -> std::io::Result<()> {
+            locked(&self.calls).push(messages.len());
+            messages.iter().map(|message| self.send(message)).fold(Ok(()), |result, sent| result.and(sent))
         }
         fn send_data(&self, bytes: &[u8]) -> std::io::Result<()> {
             let mut sent = locked(&self.sent);
@@ -461,6 +488,11 @@ mod tests {
 
         fn sent(&self) -> Vec<Sent> {
             locked(&self.sent).clone()
+        }
+
+        /// How many messages each call of `send_all` was handed, in order.
+        fn calls(&self) -> Vec<usize> {
+            locked(&self.calls).clone()
         }
 
         fn was_told_opened(&self) -> bool {
@@ -756,6 +788,28 @@ mod tests {
             quitting.link.split().1[1],
             ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to ?[2J?]0;x? was closed.".into() })
         );
+    }
+
+    /// What ends a shell is an explanation and `exited`: the relay hands them to the link together, so that nothing another thread
+    /// writes comes between them.
+    #[test]
+    fn what_ends_a_shell_is_handed_to_the_link_as_one_piece() {
+        let mut lost = start(FakeEngine::new(), ShellControl::new());
+        lost.wait_for_shell().print(b"$ ");
+        let hop = target().hops[0].reference();
+        lost.engine.disconnect_now(DisconnectReason { hop, kind: DisconnectKind::ConnectionLost, detail: "connection reset by peer".into() });
+        lost.finish();
+        assert_eq!(lost.link.calls(), [1, 2], "`opened`, then the explanation and `exited` together");
+
+        let control = ShellControl::with_settle(Duration::from_millis(100));
+        control.end("SSHelter quit, so the connection to web was closed.");
+        let mut ended = start(FakeEngine::new(), control);
+        ended.finish();
+        assert_eq!(ended.link.calls(), [2], "the app ended the session before its shell opened");
+
+        let mut failing = start(FakeEngine::new().with_shell_error(SessionError::Channel("refused".into())), ShellControl::new());
+        failing.finish();
+        assert_eq!(failing.link.calls(), [2], "a shell that could not be opened");
     }
 
     /// The names SSH gives signals (RFC 4254 §6.10, and the real-time ones) are kept; anything else a server might send is `UNKNOWN`.

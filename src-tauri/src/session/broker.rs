@@ -18,7 +18,7 @@ use super::auth::{KeyStore, Owner, Reply};
 use super::connect::{CancelToken, ConnectFailure, Connector, HostKeyConfirmer, CANCELLED};
 use super::directory::HostDirectory;
 use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, FrameError, HostQuery, Question, QuestionKind, ServerMessage, PROTOCOL_VERSION};
-use super::relay::{run_shell, tell, ClientLink, ShellControl};
+use super::relay::{run_shell, tell, tell_all, ClientLink, ShellControl};
 use crate::ipc::peer::{self, ProcInfo};
 use crate::ipc::server::{Handler, Stream};
 use crate::ssh::{Hop, HostId, Pty, SshEngine};
@@ -222,7 +222,7 @@ impl Broker {
     /// Serves one client connection until it ends (the thread the IPC server gives it).
     pub fn serve(self: &Arc<Broker>, stream: Stream, pid: Option<u32>) {
         let Ok(writer) = stream.try_clone() else { return };
-        let link = Arc::new(FrameLink { writer: Mutex::new(writer) });
+        let link = Arc::new(FrameLink::new(writer));
         let mut reader = stream;
         let refuse = |kind: &str, text: &str| {
             let _ = tell(link.as_ref(), ServerMessage::Event(Event::Error { kind: kind.to_string(), text: text.to_string() }));
@@ -398,16 +398,16 @@ impl Drop for SessionOver<'_> {
     }
 }
 
-/// A session that could not be opened: the error, then `exited` without a status (spec §7.2).
+/// A session that could not be opened: the error, then `exited` without a status (spec §7.2), written as one piece.
 fn could_not_open(link: &dyn ClientLink, kind: &str, text: &str) {
-    let _ = tell(link, ServerMessage::Event(Event::Error { kind: kind.to_string(), text: text.to_string() }));
-    let _ = tell(link, ServerMessage::Exited { code: None, signal: None });
+    let error = ServerMessage::Event(Event::Error { kind: kind.to_string(), text: text.to_string() });
+    let _ = tell_all(link, vec![error, ServerMessage::Exited { code: None, signal: None }]);
 }
 
-/// Tells a client that the app quit under its session (spec §4).
+/// Tells a client that the app quit under its session (spec §4): the sentence and `exited`, written as one piece. Another thread of the
+/// session may be writing to the client at the same moment (a banner, a notice, a question), and none of it may come between them.
 fn say_quit(link: &dyn ClientLink, alias: &str) {
-    let _ = tell(link, ServerMessage::Event(Event::Disconnected { reason: quit_reason(alias) }));
-    let _ = tell(link, ServerMessage::Exited { code: None, signal: None });
+    let _ = tell_all(link, vec![ServerMessage::Event(Event::Disconnected { reason: quit_reason(alias) }), ServerMessage::Exited { code: None, signal: None }]);
 }
 
 /// What a connection said when the broker looked for one of its first two messages.
@@ -488,18 +488,67 @@ fn hang_up(stream: &Stream) {
 #[cfg(windows)]
 fn hang_up(_stream: &Stream) {}
 
-/// The client's connection, as the relay writes to it: whole frames under one lock.
+/// The client's connection, as the relay writes to it: whole frames under one lock. `exited` is the last thing a client is told: once it
+/// has been written, nothing else is. A thread that did not know the session was over, because it passed its check just before the
+/// session ended, would otherwise put a question or a banner after it.
 struct FrameLink {
-    writer: Mutex<Stream>,
+    writer: Mutex<Writer>,
+}
+
+struct Writer {
+    stream: Stream,
+    /// `exited` has been written.
+    finished: bool,
+}
+
+impl FrameLink {
+    fn new(stream: Stream) -> FrameLink {
+        FrameLink { writer: Mutex::new(Writer { stream, finished: false }) }
+    }
+}
+
+/// Why nothing is written to a client any more once it has been told the session is over.
+fn finished() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the client has been told that the session is over")
 }
 
 impl ClientLink for FrameLink {
     fn send(&self, message: &ServerMessage) -> std::io::Result<()> {
-        write_control(&mut *locked(&self.writer), message)
+        self.send_all(std::slice::from_ref(message))
+    }
+
+    /// All the messages under one hold of the writer. A message too large for a frame is not written at all and leaves the stream in
+    /// step, so the ones after it are written still (`exited` must reach the client); the caller is told. Any other error means the
+    /// client is gone.
+    fn send_all(&self, messages: &[ServerMessage]) -> std::io::Result<()> {
+        let mut writer = locked(&self.writer);
+        if writer.finished {
+            return Err(finished());
+        }
+        let mut unwritten = Ok(());
+        for message in messages {
+            match write_control(&mut writer.stream, message) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    if unwritten.is_ok() {
+                        unwritten = Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+            if matches!(message, ServerMessage::Exited { .. }) {
+                writer.finished = true;
+            }
+        }
+        unwritten
     }
 
     fn send_data(&self, bytes: &[u8]) -> std::io::Result<()> {
-        write_data(&mut *locked(&self.writer), bytes)
+        let mut writer = locked(&self.writer);
+        if writer.finished {
+            return Err(finished());
+        }
+        write_data(&mut writer.stream, bytes)
     }
 }
 
@@ -564,6 +613,10 @@ impl ConnectionOwner {
         questions.gone = true;
         questions.waiting.clear();
     }
+
+    fn is_gone(&self) -> bool {
+        locked(&self.questions).gone
+    }
 }
 
 impl Owner for ConnectionOwner {
@@ -603,12 +656,20 @@ impl Owner for ConnectionOwner {
         }
     }
 
+    /// Nothing is shown to a client that is gone, or is being told the session is over: it would come after the sentence that ends it, or
+    /// in the middle of it.
     fn host_key_notice(&self, text: &str) {
+        if self.is_gone() {
+            return;
+        }
         let question = Question { question_id: self.question_id(), kind: QuestionKind::HostKeyNotice, text: text.to_string(), echo: false, deadline_ms: None };
         let _ = tell(self.link.as_ref(), ServerMessage::Question(question));
     }
 
     fn banner(&self, text: &str) {
+        if self.is_gone() {
+            return;
+        }
         let _ = tell(self.link.as_ref(), ServerMessage::Event(Event::Banner { text: text.to_string() }));
     }
 }
@@ -1045,7 +1106,7 @@ mod tests {
     #[test]
     fn an_oversized_question_is_gone_writes_nothing_and_leaves_the_stream_usable() {
         let (mut ours, theirs) = UnixStream::pair().unwrap();
-        let owner = ConnectionOwner::new(Arc::new(FrameLink { writer: Mutex::new(theirs) }));
+        let owner = ConnectionOwner::new(Arc::new(FrameLink::new(theirs)));
         let started = Instant::now();
         let reply = owner.ask(QuestionKind::Interactive, &"x".repeat(MAX_FRAME), false, Some(Instant::now() + Duration::from_secs(30)));
         assert!(matches!(reply, Reply::Gone), "{reply:?}");
@@ -1223,7 +1284,7 @@ mod tests {
     /// A `Conn` on a socket pair, for the tests of the table: the client's end is returned too.
     fn conn_on_a_socket_pair(id: u64) -> (Conn, UnixStream) {
         let (ours, theirs) = UnixStream::pair().unwrap();
-        let link = Arc::new(FrameLink { writer: Mutex::new(theirs.try_clone().unwrap()) });
+        let link = Arc::new(FrameLink::new(theirs.try_clone().unwrap()));
         let conn = Conn {
             id,
             link: Arc::clone(&link),
@@ -1275,22 +1336,149 @@ mod tests {
     /// (the client may have sent `close` and not hung up yet).
     #[test]
     fn a_question_asked_after_the_client_is_gone_is_neither_written_nor_waited_for() {
-        let (mut ours, theirs) = UnixStream::pair().unwrap();
-        let owner = ConnectionOwner::new(Arc::new(FrameLink { writer: Mutex::new(theirs) }));
+        let (mut ours, theirs) = client_and_broker_ends();
+        let owner = ConnectionOwner::new(Arc::new(FrameLink::new(theirs)));
         owner.gone();
         let started = Instant::now();
         let reply = owner.ask(QuestionKind::Password, "p", false, Some(Instant::now() + Duration::from_secs(3)));
         assert!(matches!(reply, Reply::Gone), "{reply:?}");
         assert!(started.elapsed() < Duration::from_secs(1), "it did not wait for its deadline: {:?}", started.elapsed());
-        owner.host_key_notice("after");
+        // Nothing was written: with the owner dropped the stream ends, and that is the first thing the client reads.
+        drop(owner);
+        assert!(matches!(read_frame(&mut ours), Ok(None)), "no question was written");
+    }
+
+    /// The two ends of a connection for a test of the broker's side of it: the client's end has a read timeout, so that a test which
+    /// waits for something that was not written fails instead of hanging. (It is set now: macOS refuses to set it on a socket whose
+    /// peer is gone.)
+    fn client_and_broker_ends() -> (UnixStream, UnixStream) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
         ours.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        match read_frame(&mut ours).unwrap() {
-            Some(Frame::Control(payload)) => match decode::<ServerMessage>(&payload).unwrap() {
-                ServerMessage::Question(question) => assert_eq!((question.kind, question.text.as_str()), (QuestionKind::HostKeyNotice, "after"), "no question was written"),
-                other => panic!("{other:?}"),
-            },
-            other => panic!("{other:?}"),
+        (ours, theirs)
+    }
+
+    /// Everything that was written to the client, until its stream ends: the owner (and with it the link) has to be dropped first.
+    fn written_to(ours: &mut UnixStream) -> Vec<ServerMessage> {
+        let mut told = Vec::new();
+        while let Some(frame) = read_frame(ours).unwrap() {
+            match frame {
+                Frame::Control(payload) => told.push(decode::<ServerMessage>(&payload).unwrap()),
+                Frame::Data(bytes) => panic!("unexpected output: {:?}", bytes.to_vec()),
+            }
         }
+        told
+    }
+
+    /// A banner or a notice for a client that is gone is not written: it would come after the sentence that ends the session, or in the
+    /// middle of it.
+    #[test]
+    fn a_banner_or_a_notice_for_a_client_that_is_gone_is_not_written() {
+        let (mut ours, theirs) = client_and_broker_ends();
+        let owner = ConnectionOwner::new(Arc::new(FrameLink::new(theirs)));
+        owner.banner("early");
+        owner.gone();
+        owner.banner("late");
+        owner.host_key_notice("late");
+        drop(owner);
+        assert_eq!(written_to(&mut ours), [ServerMessage::Event(Event::Banner { text: "early".into() })], "only what came before the client was gone");
+    }
+
+    /// `exited` is the last thing a client is told: a thread that did not know the session was over (it passed its check just before
+    /// `end_all` ended it) says what it had to say after it, and it is not written.
+    #[test]
+    fn nothing_is_written_to_a_client_after_exited() {
+        let (mut ours, theirs) = client_and_broker_ends();
+        let link = Arc::new(FrameLink::new(theirs));
+        let owner = ConnectionOwner::new(Arc::clone(&link));
+        say_quit(link.as_ref(), "web");
+        owner.banner("late");
+        owner.host_key_notice("late");
+        let reply = owner.ask(QuestionKind::Password, "p", false, Some(Instant::now() + Duration::from_secs(3)));
+        assert!(matches!(reply, Reply::Gone), "a question that cannot be written is not waited for: {reply:?}");
+        assert!(link.send_data(b"late").is_err(), "no output either");
+        drop(owner);
+        drop(link);
+        assert_eq!(written_to(&mut ours), [quit_sentence(), no_status()]);
+    }
+
+    /// A client link that records how it was handed its messages: each call, with the messages of it.
+    #[derive(Default)]
+    struct CallRecorder {
+        calls: Mutex<Vec<Vec<ServerMessage>>>,
+    }
+
+    impl ClientLink for CallRecorder {
+        fn send(&self, message: &ServerMessage) -> std::io::Result<()> {
+            locked(&self.calls).push(vec![message.clone()]);
+            Ok(())
+        }
+        fn send_all(&self, messages: &[ServerMessage]) -> std::io::Result<()> {
+            locked(&self.calls).push(messages.to_vec());
+            Ok(())
+        }
+        fn send_data(&self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// What ends a session is an explanation and `exited`; they are handed to the link together, so that nothing is written between them.
+    #[test]
+    fn what_ends_a_session_is_handed_to_the_link_as_one_piece() {
+        let link = CallRecorder::default();
+        say_quit(&link, "web");
+        could_not_open(&link, kinds::CONNECT, "SSHelter could not start the session.");
+        assert_eq!(
+            *locked(&link.calls),
+            [vec![quit_sentence(), no_status()], vec![ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]]
+        );
+    }
+
+    /// The messages of one `send_all` follow each other on the wire, however many threads write meanwhile.
+    #[test]
+    fn the_messages_of_one_send_all_are_written_with_nothing_between_them() {
+        let (mut ours, theirs) = client_and_broker_ends();
+        let link = Arc::new(FrameLink::new(theirs));
+        let banner = |text: &str| ServerMessage::Event(Event::Banner { text: text.to_string() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let others: Vec<_> = (0..4)
+            .map(|_| {
+                let (link, stop) = (Arc::clone(&link), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        let _ = link.send(&banner("other"));
+                    }
+                })
+            })
+            .collect();
+        let reader = std::thread::spawn(move || written_to(&mut ours));
+        for _ in 0..500 {
+            link.send_all(&[banner("first"), banner("second")]).unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        for other in others {
+            other.join().unwrap();
+        }
+        drop(link);
+        let texts: Vec<String> = reader.join().unwrap().into_iter().map(|message| if let ServerMessage::Event(Event::Banner { text }) = message { text } else { panic!("{message:?}") }).collect();
+        assert_eq!(texts.iter().filter(|text| *text == "first").count(), 500);
+        for (at, text) in texts.iter().enumerate() {
+            if text == "first" {
+                assert_eq!(texts.get(at + 1).map(String::as_str), Some("second"), "something was written between the two messages, at {at}");
+            }
+        }
+    }
+
+    /// A message too large for a frame is not written at all and leaves the stream in step: the ones after it are still written (the
+    /// `exited` that ends the session must reach the client), and the caller is told.
+    #[test]
+    fn a_message_too_large_for_a_frame_does_not_keep_the_ones_after_it_from_being_written() {
+        let (mut ours, theirs) = client_and_broker_ends();
+        let link = FrameLink::new(theirs);
+        let huge = ServerMessage::Event(Event::Banner { text: "x".repeat(MAX_FRAME) });
+        let error = link.send_all(&[huge, no_status()]).expect_err("the first message does not fit");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        drop(link);
+        assert_eq!(written_to(&mut ours), [no_status()]);
     }
 
     /// An answer is used by the question it names while that waits; to an unknown or an overdue question it is dropped, and an answer
@@ -1298,7 +1486,7 @@ mod tests {
     #[test]
     fn an_answer_reaches_the_question_it_names_and_a_late_or_unknown_one_is_dropped() {
         let (_ours, theirs) = UnixStream::pair().unwrap();
-        let owner = Arc::new(ConnectionOwner::new(Arc::new(FrameLink { writer: Mutex::new(theirs) })));
+        let owner = Arc::new(ConnectionOwner::new(Arc::new(FrameLink::new(theirs))));
         let typed = |text: &str| Some(Zeroizing::new(text.to_string()));
         let ask = |owner: &Arc<ConnectionOwner>, wait: Duration| {
             let owner = Arc::clone(owner);
@@ -1428,7 +1616,7 @@ mod tests {
     fn a_session_that_could_not_be_started_is_an_error_and_an_exit_without_a_status() {
         let (mut ours, theirs) = UnixStream::pair().unwrap();
         ours.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        could_not_open(&FrameLink { writer: Mutex::new(theirs) }, kinds::CONNECT, "SSHelter could not start the session.");
+        could_not_open(&FrameLink::new(theirs), kinds::CONNECT, "SSHelter could not start the session.");
         let mut told = Vec::new();
         while let Some(Frame::Control(payload)) = read_frame(&mut ours).unwrap() {
             told.push(decode::<ServerMessage>(&payload).unwrap());
