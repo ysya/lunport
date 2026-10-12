@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 use super::auth::{KeyStore, Owner, Reply};
 use super::connect::{CancelToken, Connector, HostKeyConfirmer, CANCELLED};
 use super::directory::HostDirectory;
-use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, HostQuery, Question, QuestionKind, ServerMessage, PROTOCOL_VERSION};
+use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, FrameError, HostQuery, Question, QuestionKind, ServerMessage, PROTOCOL_VERSION};
 use super::relay::{run_shell, tell, ClientLink, ShellControl};
 use crate::ipc::peer::{self, ProcInfo};
 use crate::ipc::server::{Handler, Stream};
@@ -195,25 +195,19 @@ impl Broker {
         };
         // `hello` first, within a short time; from then on no read timeout (an idle shell is not a dead client).
         let _ = set_read_timeout(&reader, Some(HELLO_WAIT));
-        match next_message(&mut reader) {
-            Some(ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, .. }) => {}
-            Some(ClientMessage::Hello { client: ClientKind::Mcp, .. }) => return refuse(kinds::UNSUPPORTED, "The MCP adapter cannot use SSHelter's sessions yet."),
-            Some(ClientMessage::Hello { version, .. }) => {
-                return refuse(
-                    kinds::PROTOCOL,
-                    &format!("This sshelter speaks protocol {version} and the SSHelter that is running speaks {PROTOCOL_VERSION}. Quit SSHelter and open it again."),
-                )
-            }
-            Some(_) => return refuse(kinds::PROTOCOL, "The first message must be hello."),
-            None => return,
+        if !greet(&mut reader, link.as_ref()) {
+            return;
         }
         let _ = set_read_timeout(&reader, None);
         let requested_by = requester_of(pid);
-        let (host, pty) = match next_message(&mut reader) {
-            Some(ClientMessage::OpenShell { host, pty }) => (host, pty),
-            Some(ClientMessage::Exec {}) => return refuse(kinds::UNSUPPORTED, "Running a command through SSHelter's sessions is not supported yet."),
-            Some(_) => return refuse(kinds::PROTOCOL, "SSHelter expected open_shell."),
-            None => return,
+        let (host, pty) = match first_frame(&mut reader) {
+            First::Silent => return,
+            First::Control(payload) => match decode::<ClientMessage>(&payload) {
+                Ok(ClientMessage::OpenShell { host, pty }) => (host, pty),
+                Ok(ClientMessage::Exec {}) => return refuse(kinds::UNSUPPORTED, "Running a command through SSHelter's sessions is not supported yet."),
+                Ok(_) | Err(_) => return refuse(kinds::PROTOCOL, "SSHelter expected open_shell."),
+            },
+            First::Data | First::Broken => return refuse(kinds::PROTOCOL, "SSHelter expected open_shell."),
         };
         let owner = Arc::new(ConnectionOwner::new(Arc::clone(&link)));
         let control = Arc::new(ShellControl::new());
@@ -352,11 +346,60 @@ fn say_quit(link: &dyn ClientLink, alias: &str) {
     let _ = tell(link, ServerMessage::Exited { code: None, signal: None });
 }
 
-/// `read_frame` and `decode` for the first messages; `None` for the end of the stream or anything that is not a control message.
-fn next_message(reader: &mut Stream) -> Option<ClientMessage> {
+/// What a connection said when the broker looked for one of its first two messages.
+enum First {
+    Control(Zeroizing<Vec<u8>>),
+    /// Keystrokes.
+    Data,
+    /// A frame that cannot be read, so the stream is out of step: the client can still be told so.
+    Broken,
+    /// The client closed the connection, or nothing could be read from it (it said nothing for too long): nobody is there to be told.
+    Silent,
+}
+
+fn first_frame(reader: &mut Stream) -> First {
     match read_frame(reader) {
-        Ok(Some(Frame::Control(payload))) => decode(&payload).ok(),
-        _ => None,
+        Ok(Some(Frame::Control(payload))) => First::Control(payload),
+        Ok(Some(Frame::Data(_))) => First::Data,
+        Ok(None) | Err(FrameError::Io(_)) => First::Silent,
+        Err(_) => First::Broken,
+    }
+}
+
+/// The protocol version a `hello` names, whatever else it says.
+fn hello_version(payload: &[u8]) -> Option<u64> {
+    let message: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    if message.get("type")?.as_str()? != "hello" {
+        return None;
+    }
+    message.get("version")?.as_u64()
+}
+
+/// Reads the first message of a connection, which has to be the `hello` of `sshelter connect` in this protocol version. Anything else is
+/// refused by name with an `error` event (spec §7.2), and `false` comes back: the connection is closed, and nothing was started. The
+/// version is looked at first: a client of another version may say hello in ways this version cannot read, and what helps its user then
+/// is to be told to quit SSHelter and open it again, whoever the client says it is.
+fn greet(reader: &mut Stream, link: &dyn ClientLink) -> bool {
+    let refuse = |kind: &str, text: String| {
+        let _ = tell(link, ServerMessage::Event(Event::Error { kind: kind.to_string(), text }));
+        false
+    };
+    match first_frame(reader) {
+        First::Silent => false,
+        First::Broken => refuse(kinds::PROTOCOL, "SSHelter could not read the first message.".to_string()),
+        First::Data => refuse(kinds::PROTOCOL, "The first message must be hello.".to_string()),
+        First::Control(payload) => {
+            if let Some(version) = hello_version(&payload).filter(|version| *version != u64::from(PROTOCOL_VERSION)) {
+                let text = format!("This sshelter speaks protocol {version} and the SSHelter that is running speaks {PROTOCOL_VERSION}. Quit SSHelter and open it again.");
+                return refuse(kinds::PROTOCOL, text);
+            }
+            match decode::<ClientMessage>(&payload) {
+                Ok(ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, .. }) => true,
+                Ok(ClientMessage::Hello { client: ClientKind::Mcp, .. }) => refuse(kinds::UNSUPPORTED, "The MCP adapter cannot use SSHelter's sessions yet.".to_string()),
+                Ok(ClientMessage::Hello { .. }) | Err(_) => refuse(kinds::PROTOCOL, "SSHelter could not read the first message.".to_string()),
+                Ok(_) => refuse(kinds::PROTOCOL, "The first message must be hello.".to_string()),
+            }
+        }
     }
 }
 
@@ -502,7 +545,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::session::protocol::{read_frame, write_control, write_data, Frame, PtyRequest, QuestionKind, MAX_FRAME};
+    use crate::session::protocol::{read_frame, write_control, write_data, write_frame, Frame, PtyRequest, QuestionKind, CONTROL, DATA, MAX_FRAME};
     use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, GatedEngine, WaitingConfirmer};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods, FakeShell};
     use crate::ipc::peer::ProcInfo;
@@ -1097,5 +1140,38 @@ mod tests {
         assert!(matches!(asking.join().unwrap(), Reply::TimedOut));
         owner.answer("q3", typed("too late"), false);
         assert_eq!(waiting(&owner), 0, "the question that ran out is forgotten, and a late answer to it is dropped");
+    }
+
+    /// Plan 1b-1 review, Task 11 Minor 3: whatever a client says first that the broker cannot use, it is told so before the connection
+    /// is closed. The version comes first: a client of another protocol version may say hello in ways this version cannot read.
+    #[test]
+    fn a_first_message_the_broker_cannot_use_is_answered_before_the_connection_closes() {
+        let world = world(FakeEngine::new());
+        let error = |kind: &str, text: &str| vec![ServerMessage::Event(Event::Error { kind: kind.into(), text: text.into() })];
+        let other_version = error(kinds::PROTOCOL, "This sshelter speaks protocol 2 and the SSHelter that is running speaks 1. Quit SSHelter and open it again.");
+        let unreadable = error(kinds::PROTOCOL, "SSHelter could not read the first message.");
+        let not_hello = error(kinds::PROTOCOL, "The first message must be hello.");
+        let not_open_shell = error(kinds::PROTOCOL, "SSHelter expected open_shell.");
+        let hello = br#"{"type":"hello","client":"connect","version":1}"#;
+        // What the client writes, as frames (type, payload), and what it must be told.
+        let cases: Vec<(&str, Vec<(u8, &[u8])>, Vec<ServerMessage>)> = vec![
+            ("a client kind this version does not know, of another version", vec![(CONTROL, br#"{"type":"hello","client":"agent","version":2}"#)], other_version.clone()),
+            ("an mcp client of another version: the version is what to tell", vec![(CONTROL, br#"{"type":"hello","client":"mcp","version":2}"#)], other_version.clone()),
+            ("a hello without a version", vec![(CONTROL, br#"{"type":"hello","client":"connect"}"#)], unreadable.clone()),
+            ("text that is not JSON", vec![(CONTROL, b"hello?")], unreadable.clone()),
+            ("a frame of a type there is not", vec![(3, b"x")], unreadable.clone()),
+            ("keystrokes before anything else", vec![(DATA, b"typed ahead")], not_hello.clone()),
+            ("a message that is not hello", vec![(CONTROL, br#"{"type":"close"}"#)], not_hello.clone()),
+            ("keystrokes where open_shell was due", vec![(CONTROL, hello), (DATA, b"typed ahead")], not_open_shell.clone()),
+            ("an open_shell that cannot be read", vec![(CONTROL, hello), (CONTROL, br#"{"type":"open_shell"}"#)], not_open_shell.clone()),
+        ];
+        for (what, frames, told) in cases {
+            let mut client = Client::connect(&world.sock);
+            for (kind, payload) in frames {
+                write_frame(&mut client.stream, kind, payload).unwrap();
+            }
+            assert_eq!(client.rest().1, told, "{what}");
+        }
+        assert!(world.engine.events().is_empty(), "nothing was connected");
     }
 }
