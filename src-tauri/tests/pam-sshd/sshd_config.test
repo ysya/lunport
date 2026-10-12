@@ -1,0 +1,8 @@
+# Dropped into /etc/ssh/sshd_config.d/ of the test image. sshd keeps the FIRST value of a keyword and the distribution's sshd_config
+# reads this directory before its own lines, so these win over its defaults (Ubuntu ships `KbdInteractiveAuthentication no`).
+UsePAM yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+PubkeyAuthentication yes
+PermitRootLogin no
+LogLevel VERBOSE
