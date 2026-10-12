@@ -215,7 +215,7 @@ impl Broker {
             Some(_) => return refuse(kinds::PROTOCOL, "SSHelter expected open_shell."),
             None => return,
         };
-        let owner = Arc::new(ConnectionOwner { link: Arc::clone(&link), questions: Mutex::new(HashMap::new()), next_question: AtomicU64::new(0) });
+        let owner = Arc::new(ConnectionOwner::new(Arc::clone(&link)));
         let control = Arc::new(ShellControl::new());
         let cancel = CancelToken::default();
         control.resize(pty.cols, pty.rows);
@@ -396,22 +396,34 @@ impl ClientLink for FrameLink {
     }
 }
 
+/// The questions an owner has asked.
+#[derive(Default)]
+struct Questions {
+    /// The client is gone (`ConnectionOwner::gone`): a question asked from now on is `Gone` at once.
+    gone: bool,
+    /// The questions waiting for an answer, by id. Emptied when the client is gone, which wakes every waiting `ask` with `Gone`.
+    waiting: HashMap<String, SyncSender<Reply>>,
+}
+
 /// The owner of a session: its client. A question goes out as a `question` frame; the connection's reader delivers the answer.
 struct ConnectionOwner {
     link: Arc<FrameLink>,
-    /// The questions waiting for an answer, by id. Emptied when the client is gone, which wakes every waiting `ask` with `Gone`.
-    questions: Mutex<HashMap<String, SyncSender<Reply>>>,
+    questions: Mutex<Questions>,
     next_question: AtomicU64,
 }
 
 impl ConnectionOwner {
+    fn new(link: Arc<FrameLink>) -> ConnectionOwner {
+        ConnectionOwner { link, questions: Mutex::new(Questions::default()), next_question: AtomicU64::new(0) }
+    }
+
     fn question_id(&self) -> String {
         format!("q{}", self.next_question.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
     /// The client's answer to `question_id` (a late or unknown one is dropped).
     fn answer(&self, question_id: &str, value: Option<String>, cancel: bool) {
-        let Some(waiting) = locked(&self.questions).remove(question_id) else { return };
+        let Some(waiting) = locked(&self.questions).waiting.remove(question_id) else { return };
         let reply = match value {
             Some(value) if !cancel => Reply::Answer(Zeroizing::new(value)),
             _ => Reply::Cancelled,
@@ -419,8 +431,11 @@ impl ConnectionOwner {
         let _ = waiting.try_send(reply);
     }
 
+    /// The client is gone: whatever waits for an answer is given up on, and nothing is asked any more.
     fn gone(&self) {
-        locked(&self.questions).clear();
+        let mut questions = locked(&self.questions);
+        questions.gone = true;
+        questions.waiting.clear();
     }
 }
 
@@ -428,11 +443,18 @@ impl Owner for ConnectionOwner {
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
         let question_id = self.question_id();
         let (answer, answered) = mpsc::sync_channel(1);
-        locked(&self.questions).insert(question_id.clone(), answer);
+        {
+            // Checked and inserted under one lock: a question cannot be added after `gone` has emptied the table, and wait out its deadline.
+            let mut questions = locked(&self.questions);
+            if questions.gone {
+                return Reply::Gone;
+            }
+            questions.waiting.insert(question_id.clone(), answer);
+        }
         let deadline_ms = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()).as_millis() as u64);
         let question = Question { question_id: question_id.clone(), kind, text: text.to_string(), echo, deadline_ms };
-        if self.link.send(&ServerMessage::Question(question)).is_err() {
-            locked(&self.questions).remove(&question_id);
+        if tell(self.link.as_ref(), ServerMessage::Question(question)).is_err() {
+            locked(&self.questions).waiting.remove(&question_id);
             return Reply::Gone;
         }
         let reply = match deadline {
@@ -442,7 +464,7 @@ impl Owner for ConnectionOwner {
         match reply {
             Ok(reply) => reply,
             Err(RecvTimeoutError::Timeout) => {
-                locked(&self.questions).remove(&question_id);
+                locked(&self.questions).waiting.remove(&question_id);
                 Reply::TimedOut
             }
             Err(RecvTimeoutError::Disconnected) => Reply::Gone,
@@ -451,11 +473,11 @@ impl Owner for ConnectionOwner {
 
     fn host_key_notice(&self, text: &str) {
         let question = Question { question_id: self.question_id(), kind: QuestionKind::HostKeyNotice, text: text.to_string(), echo: false, deadline_ms: None };
-        let _ = self.link.send(&ServerMessage::Question(question));
+        let _ = tell(self.link.as_ref(), ServerMessage::Question(question));
     }
 
     fn banner(&self, text: &str) {
-        let _ = self.link.send(&ServerMessage::Event(Event::Banner { text: text.to_string() }));
+        let _ = tell(self.link.as_ref(), ServerMessage::Event(Event::Banner { text: text.to_string() }));
     }
 }
 
@@ -856,12 +878,12 @@ mod tests {
     #[test]
     fn an_oversized_question_is_gone_writes_nothing_and_leaves_the_stream_usable() {
         let (mut ours, theirs) = UnixStream::pair().unwrap();
-        let owner = ConnectionOwner { link: Arc::new(FrameLink { writer: Mutex::new(theirs) }), questions: Mutex::new(HashMap::new()), next_question: AtomicU64::new(0) };
+        let owner = ConnectionOwner::new(Arc::new(FrameLink { writer: Mutex::new(theirs) }));
         let started = Instant::now();
         let reply = owner.ask(QuestionKind::Interactive, &"x".repeat(MAX_FRAME), false, Some(Instant::now() + Duration::from_secs(30)));
         assert!(matches!(reply, Reply::Gone), "{reply:?}");
         assert!(started.elapsed() < Duration::from_secs(2), "it did not wait for its deadline: {:?}", started.elapsed());
-        assert!(locked(&owner.questions).is_empty(), "the question is forgotten");
+        assert!(locked(&owner.questions).waiting.is_empty(), "the question is forgotten");
         owner.host_key_notice("after");
         ours.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         match read_frame(&mut ours).unwrap() {
@@ -986,7 +1008,7 @@ mod tests {
             id,
             link: Arc::clone(&link),
             closer: Arc::new(theirs),
-            owner: Arc::new(ConnectionOwner { link, questions: Mutex::new(HashMap::new()), next_question: AtomicU64::new(0) }),
+            owner: Arc::new(ConnectionOwner::new(link)),
             control: Arc::new(ShellControl::new()),
             cancel: CancelToken::default(),
         };
@@ -1021,5 +1043,27 @@ mod tests {
         assert_eq!(told, [quit_sentence(), no_status()]);
         assert_eq!(world.broker.forget(2), Told::ByEndAll);
         assert!(!world.broker.enter(&conn_on_a_socket_pair(3).0, &query, None), "and no session is started once the app is quitting");
+    }
+
+    /// Plan 1b-1 review, Task 11 Minor 1: a question asked after the owner was told the client is gone is not written and not waited for
+    /// (the client may have sent `close` and not hung up yet).
+    #[test]
+    fn a_question_asked_after_the_client_is_gone_is_neither_written_nor_waited_for() {
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        let owner = ConnectionOwner::new(Arc::new(FrameLink { writer: Mutex::new(theirs) }));
+        owner.gone();
+        let started = Instant::now();
+        let reply = owner.ask(QuestionKind::Password, "p", false, Some(Instant::now() + Duration::from_secs(3)));
+        assert!(matches!(reply, Reply::Gone), "{reply:?}");
+        assert!(started.elapsed() < Duration::from_secs(1), "it did not wait for its deadline: {:?}", started.elapsed());
+        owner.host_key_notice("after");
+        ours.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        match read_frame(&mut ours).unwrap() {
+            Some(Frame::Control(payload)) => match decode::<ServerMessage>(&payload).unwrap() {
+                ServerMessage::Question(question) => assert_eq!((question.kind, question.text.as_str()), (QuestionKind::HostKeyNotice, "after"), "no question was written"),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
     }
 }
