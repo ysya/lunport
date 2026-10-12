@@ -127,6 +127,13 @@ fn failure_of(error: &ConnectError, target: &Target) -> ConnectFailure {
     }
 }
 
+/// The login of `hop` was abandoned because the person did not give the password (they cancelled the question, let it run out, or
+/// the client went away): spec §11's sentence, said through the jump host when `hop` is one. `BrokerAuth` remembers that a prompt of a
+/// hop ended unanswered but not how, so the reason is the same for all three.
+fn password_abandoned(hop: &HopRef, target: &Target) -> ConnectFailure {
+    failure_of(&ConnectError::AuthAbandoned { hop: hop.clone(), reason: "the password was not given".to_string() }, target)
+}
+
 fn directory_failure(error: DirectoryError) -> ConnectFailure {
     ConnectFailure::new(kinds::HOST, error.to_string())
 }
@@ -163,7 +170,13 @@ impl Connector<'_> {
                         restricted.pinned = None;
                     }
                 }
-                ConnectError::AuthFailed { ref hop, ref tried, password_wanted, .. } if !auth.cancelled(&hop.id) => {
+                // The person gave up the password the engine asked for before it connected (a hop that starts with the password method), and
+                // the login then ended for want of it, with "no login method could be tried" when the server offers nothing else. It was
+                // abandoned, not refused (spec §11); and when the client is the one that went away, nobody is told.
+                ConnectError::AuthFailed { ref hop, .. } if auth.cancelled(&hop.id) => {
+                    return Err(if cancel.is_cancelled() { ConnectFailure::cancelled() } else { password_abandoned(hop, &target) });
+                }
+                ConnectError::AuthFailed { ref hop, ref tried, password_wanted, .. } => {
                     // A password given and refused: a typed one is forgotten; a saved one stays saved, and what the person types is used instead.
                     let refused = tried.contains(&AuthMethod::Password) && auth.password_source(&hop.id).is_some();
                     let typed = passwords_typed.entry(hop.id.clone()).or_default();
@@ -187,9 +200,7 @@ impl Connector<'_> {
                                 target.hops[index].auth = AuthMethod::Password;
                             }
                         }
-                        Reply::Cancelled | Reply::TimedOut => {
-                            return Err(ConnectFailure::new(kinds::AUTH, ConnectError::AuthAbandoned { hop: hop.clone(), reason: "the password was not given".to_string() }.to_string()));
-                        }
+                        Reply::Cancelled | Reply::TimedOut => return Err(password_abandoned(hop, &target)),
                         Reply::Gone => return Err(ConnectFailure::cancelled()),
                     }
                 }
@@ -303,8 +314,13 @@ mod tests {
         }
 
         fn connect(&self, query: &HostQuery) -> Result<Connected, ConnectFailure> {
+            self.connect_as(query, &self.owner)
+        }
+
+        /// The same, with another person at the terminal than the scripted one.
+        fn connect_as(&self, query: &HostQuery, owner: &dyn Owner) -> Result<Connected, ConnectFailure> {
             let connector = Connector { engine: &self.engine, directory: &self.directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer };
-            connector.connect(query, &self.owner, &self.cancel)
+            connector.connect(query, owner, &self.cancel)
         }
 
         fn connects(&self) -> usize {
@@ -465,6 +481,67 @@ mod tests {
         let mut world = world(engine, FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key()));
         world.owner = FakeOwner::answering(vec![Reply::Cancelled]);
         assert_eq!(world.connect(&web()).err(), Some(failure(kinds::AUTH, "Authentication for web was abandoned (the password was not given).")));
+    }
+
+    /// The password a hop that starts with the password method is asked for before it connects was cancelled, let run out, or its client
+    /// went away, and the server offers nothing else: the engine ends the login with "no login method could be tried". The person did not
+    /// fail to log in, they declined to, so it reads as the abandonment it is (spec §11), and they are not asked again.
+    #[test]
+    fn a_password_prompt_that_ended_unanswered_reads_as_abandoned_and_not_as_a_failed_login() {
+        for reply in [Reply::Cancelled, Reply::TimedOut, Reply::Gone] {
+            let label = format!("{reply:?}");
+            let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+            let mut world = world(engine, FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key()));
+            world.owner = FakeOwner::answering(vec![reply]);
+            let abandoned = failure(kinds::AUTH, "Authentication for web was abandoned (the password was not given).");
+            assert_eq!(world.connect(&web()).err(), Some(abandoned), "{label}");
+            assert_eq!(world.owner.asked().len(), 1, "{label}: not asked again");
+        }
+    }
+
+    /// Spec §11: a failure on a jump host is said through it, an abandoned login too, whoever asked for the password: the engine, before
+    /// it connected (a hop that starts with the password method), or the broker, between two connects (a hop that starts with a key).
+    #[test]
+    fn an_abandoned_password_on_a_jump_host_is_said_through_it() {
+        let through_bastion = "Could not connect through bastion: Authentication for bastion was abandoned (the password was not given).";
+        for bastion in [AuthMethod::Password, AuthMethod::Key { key_id: "k-plain".into() }] {
+            let directory = FakeDirectory::new()
+                .with_host("bastion", bastion.clone())
+                .with_host_via("db", AuthMethod::Password, &["bastion"])
+                .with_pin("bastion", default_server_key())
+                .with_pin("db", default_server_key());
+            let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+            let mut world = world(engine, directory);
+            world.owner = FakeOwner::answering(vec![Reply::Cancelled]);
+            assert_eq!(world.connect(&HostQuery::Alias("db".into())).err(), Some(failure(kinds::AUTH, through_bastion)), "{bastion:?}");
+        }
+    }
+
+    /// The person at the terminal whose client goes away while a question waits: the connection's token is set first, and then the
+    /// question ends as `Gone` (as the broker's connection does it).
+    struct GoingOwner(CancelToken);
+
+    impl Owner for GoingOwner {
+        fn ask(&self, _kind: QuestionKind, _text: &str, _echo: bool, _deadline: Option<std::time::Instant>) -> Reply {
+            self.0.cancel();
+            Reply::Gone
+        }
+
+        fn host_key_notice(&self, _text: &str) {}
+
+        fn banner(&self, _text: &str) {}
+    }
+
+    /// A client that goes away is not an abandoned login that anybody is told about (`cancelled`), whichever of the two asked for the
+    /// password: the engine, before it connected, or the broker, between two connects.
+    #[test]
+    fn a_client_that_goes_away_while_a_password_is_asked_for_cancels_the_connect() {
+        for auth in [AuthMethod::Password, AuthMethod::Key { key_id: "k-plain".into() }] {
+            let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+            let world = world(engine, FakeDirectory::new().with_host("web", auth.clone()).with_pin("web", default_server_key()));
+            let failed = world.connect_as(&web(), &GoingOwner(world.cancel.clone())).err();
+            assert_eq!(failed, Some(failure(CANCELLED, "The connection was cancelled.")), "{auth:?}");
+        }
     }
 
     /// A first contact with a password-first host connects twice (the key is unknown the first time); the person types the password once.
