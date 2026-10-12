@@ -5,5 +5,6 @@
 pub mod directory;
 pub mod pins;
 pub mod protocol;
+pub mod ssh_config_directory;
 #[cfg(test)]
 pub mod testing;
