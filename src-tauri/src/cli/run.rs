@@ -1917,17 +1917,22 @@ mod tests {
             writer.show(Show::Output(chunk.to_vec()));
         }
         let length = output.len();
+        // The terminal reads slowly; it stops when nothing has come for a while (a writer that gave up), so that the test fails, not hangs.
+        theirs.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let reading = std::thread::spawn(move || {
             let (mut shown, mut buf) = (Vec::new(), [0u8; 8192]);
             while shown.len() < length {
                 std::thread::sleep(Duration::from_millis(1));
-                let count = theirs.read(&mut buf).unwrap();
-                shown.extend_from_slice(&buf[..count]);
+                match theirs.read(&mut buf) {
+                    Ok(count) if count > 0 => shown.extend_from_slice(&buf[..count]),
+                    _ => break,
+                }
             }
             shown
         });
         assert!(writer.written(Duration::from_secs(20)), "all of it written");
-        assert!(reading.join().unwrap() == output, "every byte, in order");
+        let shown = reading.join().unwrap();
+        assert!(shown == output, "{} of {} bytes shown, or not in order", shown.len(), output.len());
     }
 
     /// Sizes given while the broker does not read do not pile up: the latest takes the place of the one that waits.
