@@ -675,11 +675,14 @@ mod tests {
 
     #[test]
     fn a_shell_that_never_prints_is_closed_once_the_settle_time_has_passed() {
-        let mut running = start(FakeEngine::new(), ShellControl::with_settle(Duration::from_millis(600)));
+        let settle = Duration::from_millis(600);
+        let mut running = start(FakeEngine::new(), ShellControl::with_settle(settle));
         running.wait_for_shell();
-        let started = Instant::now();
+        // The settle time counts from the moment the shell opened, which the control wrote down: `owner_gone` does not return before it is
+        // over, however long the machine took to get this thread going meanwhile.
+        let opened_at = locked(&running.control.life).opened_at.expect("the shell is open");
         running.control.owner_gone();
-        assert!(started.elapsed() >= Duration::from_millis(400), "it waited for the settle time: {:?}", started.elapsed());
+        assert!(Instant::now() >= opened_at + settle, "it waited for the settle time");
         running.finish();
         assert!(running.engine.events().contains(&FakeEvent::ShellClosed));
     }
