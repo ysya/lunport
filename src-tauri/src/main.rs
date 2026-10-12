@@ -15,12 +15,13 @@ fn main() {
         sshelter_lib::starts_hidden(std::env::var_os(sshelter_lib::START_HIDDEN_ENV).as_deref());
     std::env::remove_var(sshelter_lib::START_HIDDEN_ENV);
 
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
+    // As `OsString`s: `std::env::args()` panics on an argument that is not UTF-8, whatever the mode.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    match args.get(1).map(std::ffi::OsString::as_os_str) {
         // `sshelter connect <alias>`: the terminal's end of a session in the app (own-ssh spec §7.3), nothing of Tauri.
-        Some("connect") => std::process::exit(sshelter_lib::cli::run_connect(&args[2..])),
-        Some("--mcp") => sshelter_lib::mcp::run_stdio(),
-        Some(flag) if sshelter_lib::host_start::is_host_flag(flag) => sshelter_lib::run_desktop(true, start_hidden),
+        Some(mode) if mode == "connect" => std::process::exit(sshelter_lib::cli::run_connect(&args[2..])),
+        Some(mode) if mode == "--mcp" => sshelter_lib::mcp::run_stdio(),
+        Some(mode) if mode.to_str().is_some_and(sshelter_lib::host_start::is_host_flag) => sshelter_lib::run_desktop(true, start_hidden),
         _ => sshelter_lib::run_desktop(false, start_hidden),
     }
 }

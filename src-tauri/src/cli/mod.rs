@@ -10,6 +10,7 @@ pub mod run;
 #[cfg(unix)]
 pub mod terminal;
 
+use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(unix)]
@@ -35,6 +36,12 @@ pub fn parse_args(args: &[String]) -> Result<HostQuery, String> {
     }
 }
 
+/// The arguments after `connect` as text. One that is not text (not UTF-8) cannot name a host either: the usage.
+#[cfg(any(unix, test))]
+fn texts(args: &[OsString]) -> Result<Vec<String>, String> {
+    args.iter().map(|arg| arg.clone().into_string().map_err(|_| USAGE.to_string())).collect()
+}
+
 /// The terminal type the shell is opened for: `$TERM`, or `xterm-256color` without one (spec §7.3).
 pub fn term_from(value: Option<std::ffi::OsString>) -> String {
     value.and_then(|value| value.into_string().ok()).filter(|term| !term.is_empty()).unwrap_or_else(|| "xterm-256color".to_string())
@@ -44,8 +51,8 @@ pub fn term_from(value: Option<std::ffi::OsString>) -> String {
 /// the arguments are looked at first (the usage, and 2), then the terminal (`sshelter connect needs a terminal.`, and 1), and only then is
 /// SSHelter reached, or started.
 #[cfg(unix)]
-pub fn run_connect(args: &[String]) -> i32 {
-    let host = match parse_args(args) {
+pub fn run_connect(args: &[OsString]) -> i32 {
+    let host = match texts(args).and_then(|args| parse_args(&args)) {
         Ok(host) => host,
         Err(usage) => {
             eprintln!("{usage}");
@@ -134,7 +141,7 @@ fn own_writer<W: std::io::Write + std::os::fd::AsFd + Send + 'static>(handle: W)
 
 /// Windows: the console work is phase 3 (spec §13, §16). A release build has no console, so the sentence shows only where one exists.
 #[cfg(windows)]
-pub fn run_connect(_args: &[String]) -> i32 {
+pub fn run_connect(_args: &[OsString]) -> i32 {
     not_supported(&mut std::io::stderr())
 }
 
@@ -150,6 +157,11 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    fn os_args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
     }
 
     #[test]
@@ -172,9 +184,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wrong_arguments_exit_2_before_anything_else() {
-        assert_eq!(run_connect(&args(&[])), 2);
-        assert_eq!(run_connect(&args(&["-oProxyCommand=x"])), 2);
-        assert_eq!(run_connect(&args(&["web", "db"])), 2);
+        assert_eq!(run_connect(&os_args(&[])), 2);
+        assert_eq!(run_connect(&os_args(&["-oProxyCommand=x"])), 2);
+        assert_eq!(run_connect(&os_args(&["web", "db"])), 2);
+    }
+
+    /// An argument that is not UTF-8 cannot name a host (aliases and host ids are text): the usage, and 2, like any other wrong one.
+    #[cfg(unix)]
+    #[test]
+    fn an_argument_that_is_not_text_gets_the_usage() {
+        use std::os::unix::ffi::OsStringExt;
+        let not_text = OsString::from_vec(b"w\xffb".to_vec());
+        assert_eq!(texts(&[not_text.clone()]), Err(USAGE.to_string()));
+        assert_eq!(texts(&[OsString::from("--id"), not_text.clone()]), Err(USAGE.to_string()));
+        assert_eq!(texts(&os_args(&["--id", "0123"])), Ok(args(&["--id", "0123"])));
+        assert_eq!(run_connect(&[not_text]), 2);
     }
 
     #[cfg(unix)]
