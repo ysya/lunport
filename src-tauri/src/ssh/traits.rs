@@ -46,6 +46,12 @@ pub trait Session: Send + Sync {
     fn exec(&self, command: &str, timeout: Duration, output_cap: usize) -> Result<ExecResult, SessionError>;
 
     /// Whether the connection (every hop of it) is still up, judged from the connection's own state and never from an error variant.
+    ///
+    /// The shells of a connection that ended are read to the end after this has turned false: when `ShellChannel::read` returns 0 for a
+    /// shell because its connection was cut or closed, `is_alive` is already false and `disconnect_reason` has the reason. A caller that
+    /// finds a shell ended without a status tells a lost connection from a channel the server closed (the connection lives) with one
+    /// look. The russh engine keeps this because the connection's task closes its receiver, which is what a hop's `is_closed` reads,
+    /// before it drops the channels whose readers end (russh 0.64.1, `client::Session::run`); the fake ends the session before its shells.
     fn is_alive(&self) -> bool;
 
     /// Why the connection ended, taken from the outermost hop that recorded a reason. `None` while it is alive. The first call after the
