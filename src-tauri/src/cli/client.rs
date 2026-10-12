@@ -4,13 +4,14 @@
 //! key goes to the shell; at the end the terminal is put back before anything is printed. Every text the broker wrote (a notice, a
 //! question, a banner, an error) goes through `printable` before it is printed: the CLI does not trust the broker it talks to.
 
+use std::fmt;
+
 use zeroize::{Zeroize, Zeroizing};
 
 use super::terminal::Mode;
 use crate::session::protocol::{kinds, ClientKind, ClientMessage, Event, HostQuery, PtyRequest, Question, QuestionKind, ServerMessage, DATA_CHUNK, PROTOCOL_VERSION};
 
 /// What happened.
-#[derive(Debug)]
 pub enum Input {
     /// A control message from the broker.
     Message(ServerMessage),
@@ -18,7 +19,7 @@ pub enum Input {
     Output(Vec<u8>),
     /// The broker closed the connection.
     Closed,
-    /// Bytes the person typed.
+    /// Bytes the person typed (a password, at a question).
     Stdin(Vec<u8>),
     /// Standard input ended (Ctrl-D on an empty line, at a question).
     StdinEnd,
@@ -30,16 +31,48 @@ pub enum Input {
     Stop(i32),
 }
 
+/// What was typed may be a password, so the debug form leaves it out (as `ClientMessage`'s does for an answer); the rest prints as a
+/// derived `Debug` would.
+impl fmt::Debug for Input {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Input::Message(message) => f.debug_tuple("Message").field(message).finish(),
+            Input::Output(bytes) => f.debug_tuple("Output").field(bytes).finish(),
+            Input::Closed => f.write_str("Closed"),
+            Input::Stdin(_) => f.write_str("Stdin(<hidden>)"),
+            Input::StdinEnd => f.write_str("StdinEnd"),
+            Input::Resize(cols, rows) => f.debug_tuple("Resize").field(cols).field(rows).finish(),
+            Input::Interrupt => f.write_str("Interrupt"),
+            Input::Stop(signal) => f.debug_tuple("Stop").field(signal).finish(),
+        }
+    }
+}
+
 /// What to do.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum Action {
+    /// A message for the broker. An `Answer` carries a password in a plain `String` (see `Client::answer`): whoever writes it wipes it.
     Send(ClientMessage),
+    /// Keystrokes for the shell: they can be a password too (typed at a prompt the shell shows), so the debug form leaves them out.
     SendData(Vec<u8>),
     Stdout(Vec<u8>),
     Stderr(String),
     /// Set the terminal's mode; `true` throws away what was typed ahead first.
     Mode(Mode, bool),
     Exit(i32),
+}
+
+impl fmt::Debug for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Send(message) => f.debug_tuple("Send").field(message).finish(),
+            Action::SendData(_) => f.write_str("SendData(<hidden>)"),
+            Action::Stdout(bytes) => f.debug_tuple("Stdout").field(bytes).finish(),
+            Action::Stderr(text) => f.debug_tuple("Stderr").field(text).finish(),
+            Action::Mode(mode, discard_input) => f.debug_tuple("Mode").field(mode).field(discard_input).finish(),
+            Action::Exit(code) => f.debug_tuple("Exit").field(code).finish(),
+        }
+    }
 }
 
 /// Text the broker wrote, made safe to print on a terminal: the same rule as the broker's own `session::auth::printable`, written out
@@ -66,6 +99,21 @@ fn cancel(question_id: String) -> Action {
 
 /// What the person typed before the shell opened is kept for it (as OpenSSH's typeahead reaches the shell), up to this many bytes.
 const TYPEAHEAD_LIMIT: usize = 64 * 1024;
+
+/// The buffer an answer is collected in is reserved this large when the question is asked. A `Vec` that grows frees its old allocation
+/// with what was typed in it, unwiped; no answer needs more (a longer one is moved by hand, see `keep`).
+const ANSWER_CAPACITY: usize = 1024;
+
+/// Adds what was typed to the answer being collected, in a buffer that does not move while a password is typed; one that outgrows its
+/// reserve moves to a bigger buffer by hand, and the old one is wiped as it is dropped.
+fn keep(line: &mut Zeroizing<Vec<u8>>, bytes: &[u8]) {
+    if line.capacity() - line.len() < bytes.len() {
+        let mut bigger = Zeroizing::new(Vec::with_capacity((line.len() + bytes.len()).next_power_of_two()));
+        bigger.extend_from_slice(&line[..]);
+        *line = bigger;
+    }
+    line.extend_from_slice(bytes);
+}
 
 enum Phase {
     Connecting,
@@ -108,7 +156,7 @@ fn signal_number(name: &str) -> Option<i32> {
 /// The client of one session.
 pub struct Client {
     phase: Phase,
-    /// Bytes typed before the shell opened.
+    /// Bytes typed before the shell opened. Reserved in full at the start, so that it does not move while it grows.
     typeahead: Zeroizing<Vec<u8>>,
     /// What to say when it ends: why the connection ended or failed.
     reason: Option<String>,
@@ -117,7 +165,7 @@ pub struct Client {
 impl Client {
     /// A client that opens a shell on `host` for a terminal of type `term` and size `size`; the actions say hello and ask for the shell.
     pub fn start(host: HostQuery, term: String, size: (u16, u16)) -> (Client, Vec<Action>) {
-        let client = Client { phase: Phase::Connecting, typeahead: Zeroizing::new(Vec::new()), reason: None };
+        let client = Client { phase: Phase::Connecting, typeahead: Zeroizing::new(Vec::with_capacity(TYPEAHEAD_LIMIT)), reason: None };
         let actions = vec![
             Action::Send(ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, client_info: None }),
             Action::Send(ClientMessage::OpenShell { host, pty: PtyRequest { cols: size.0, rows: size.1, term } }),
@@ -145,7 +193,11 @@ impl Client {
                 let reason = self.reason.take().unwrap_or_else(|| "The connection to SSHelter ended.".to_string());
                 self.finish(false, Some(reason), 255)
             }
-            Input::Stdin(bytes) => self.typed(&bytes),
+            Input::Stdin(mut bytes) => {
+                let actions = self.typed(&bytes);
+                bytes.zeroize();
+                actions
+            }
             Input::StdinEnd | Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => self.answer(None),
             Input::Interrupt => self.finish(true, None, 130),
             Input::StdinEnd => self.finish(true, None, 128 + libc::SIGHUP),
@@ -213,8 +265,8 @@ impl Client {
             actions.push(Action::Stderr("\n".to_string()));
             actions.push(cancel(superseded.clone()));
         }
-        self.typeahead.clear();
-        self.phase = Phase::Asking { question_id, echo, line: Zeroizing::new(Vec::new()), after };
+        self.typeahead.zeroize();
+        self.phase = Phase::Asking { question_id, echo, line: Zeroizing::new(Vec::with_capacity(ANSWER_CAPACITY)), after };
         actions.push(Action::Mode(Mode::Prompt { echo }, true));
         actions.push(Action::Stderr(printable(text)));
         actions
@@ -228,7 +280,7 @@ impl Client {
                 Vec::new()
             }
             Phase::Asking { line, .. } => {
-                line.extend_from_slice(bytes);
+                keep(line, bytes);
                 match line.iter().position(|byte| *byte == b'\n' || *byte == b'\r') {
                     Some(end) => {
                         let answer = Zeroizing::new(String::from_utf8_lossy(&line[..end]).into_owned());
@@ -243,6 +295,10 @@ impl Client {
     }
 
     /// Ends the question on the terminal: with the answer, or cancelled (`None`).
+    ///
+    /// The password reaches the broker as the plain `String` inside `ClientMessage::Answer` (the protocol's type), moved there out of the
+    /// `Zeroizing` buffer it was collected in so that no second copy is left behind. From here on that `String` is the caller's to wipe:
+    /// whoever writes the action out (`run.rs`) must `zeroize()` the value once the frame is written, and the frame's own buffer too.
     fn answer(&mut self, answer: Option<Zeroizing<String>>) -> Vec<Action> {
         let (question_id, echo, after) = match std::mem::replace(&mut self.phase, Phase::Connecting) {
             Phase::Asking { question_id, echo, after, .. } => (question_id, echo, after),
@@ -259,7 +315,7 @@ impl Client {
             actions.push(Action::Stderr("\n".to_string()));
         }
         let message = match answer {
-            Some(answer) => ClientMessage::Answer { question_id, value: Some(answer.to_string()), cancel: false },
+            Some(mut answer) => ClientMessage::Answer { question_id, value: Some(std::mem::take(&mut *answer)), cancel: false },
             None => ClientMessage::Answer { question_id, value: None, cancel: true },
         };
         actions.push(Action::Send(message));
@@ -676,6 +732,86 @@ mod tests {
         let mut client = started();
         assert!(client.answer(Some(Zeroizing::new("x".to_string()))).is_empty());
         assert!(matches!(client.phase, Phase::Connecting));
+    }
+
+    /// What was typed may be a password: the debug form of the input, and of the action that carries it on, leaves it out (as the debug
+    /// form of `ClientMessage` leaves out an answer), while what is not typed stays as readable as a derived `Debug` makes it.
+    #[test]
+    fn what_is_typed_is_not_printed_by_debug() {
+        assert_eq!(format!("{:?}", Input::Stdin(b"hunter2\n".to_vec())), "Stdin(<hidden>)");
+        assert_eq!(format!("{:?}", Action::SendData(b"hunter2\n".to_vec())), "SendData(<hidden>)");
+        let answer = Action::Send(ClientMessage::Answer { question_id: "q1".into(), value: Some("hunter2".into()), cancel: false });
+        assert!(!format!("{answer:?}").contains("hunter2"));
+
+        assert_eq!(format!("{:?}", Input::Output(vec![104, 105])), "Output([104, 105])");
+        assert_eq!(format!("{:?}", Input::Message(ServerMessage::Opened { session_id: "1".into() })), "Message(Opened { session_id: \"1\" })");
+        assert_eq!(format!("{:?}", [Input::Closed, Input::StdinEnd, Input::Interrupt]), "[Closed, StdinEnd, Interrupt]");
+        assert_eq!(format!("{:?}", [Input::Resize(100, 30), Input::Stop(15)]), "[Resize(100, 30), Stop(15)]");
+        assert_eq!(format!("{:?}", Action::Stdout(vec![104, 105])), "Stdout([104, 105])");
+        assert_eq!(format!("{:?}", Action::Stderr("pw: ".into())), "Stderr(\"pw: \")");
+        assert_eq!(format!("{:?}", [Action::Mode(Mode::Raw, true), Action::Exit(3)]), "[Mode(Raw, true), Exit(3)]");
+        assert_eq!(format!("{:?}", Action::Send(ClientMessage::Close)), "Send(Close)");
+    }
+
+    /// Whether the first `len` bytes of the allocation of `buffer` (they held what was typed, though `buffer` is empty now) are all zero.
+    fn wiped(buffer: &Zeroizing<Vec<u8>>, len: usize) -> bool {
+        assert!(buffer.capacity() >= len, "the buffer was moved away, not wiped");
+        // SAFETY: the allocation has at least `len` bytes (just checked), and they were written when they were typed, so they are
+        // initialised whatever `buffer.len()` says; this reads what a buffer that was only `clear`ed would still hold.
+        unsafe { std::slice::from_raw_parts(buffer.as_ptr(), len) }.iter().all(|byte| *byte == 0)
+    }
+
+    /// `clear` leaves what was typed in the buffer's memory; a question must not leave typeahead there, nor the shell opening.
+    #[test]
+    fn typeahead_is_wiped_from_memory_when_a_question_throws_it_away_and_when_the_shell_takes_it() {
+        let mut client = started();
+        client.handle(Input::Stdin(b"hunter2\n".to_vec()));
+        client.handle(question("q1", QuestionKind::Password, "pw: ", false));
+        assert!(wiped(&client.typeahead, 8), "thrown away by a question");
+
+        let mut client = started();
+        client.handle(Input::Stdin(b"uptime\n".to_vec()));
+        client.handle(opens());
+        assert!(wiped(&client.typeahead, 7), "sent to the shell");
+    }
+
+    fn line_of(client: &Client) -> &Zeroizing<Vec<u8>> {
+        match &client.phase {
+            Phase::Asking { line, .. } => line,
+            _ => panic!("no question is on the terminal"),
+        }
+    }
+
+    /// A `Vec` that grows frees its old allocation with what was typed in it, unwiped: typeahead and a password are typed into buffers that
+    /// are reserved before the first key, and do not move while the keys come.
+    #[test]
+    fn typeahead_and_an_answer_are_collected_in_buffers_that_do_not_move_while_they_grow() {
+        let mut client = started();
+        let typeahead = client.typeahead.as_ptr();
+        for _ in 0..70 {
+            client.handle(Input::Stdin(vec![b'x'; 1000]));
+        }
+        assert_eq!(client.typeahead.as_ptr(), typeahead, "reallocated: the freed copies keep what was typed");
+        assert_eq!(client.typeahead.len(), 64 * 1024);
+
+        client.handle(question("q1", QuestionKind::Password, "pw: ", false));
+        let line = line_of(&client).as_ptr();
+        assert!(line_of(&client).capacity() >= 1024);
+        client.handle(Input::Stdin(vec![b'p'; 1000]));
+        assert_eq!(line_of(&client).as_ptr(), line, "reallocated: the freed copy keeps the password");
+    }
+
+    /// An answer that outgrows its buffer moves to a bigger one (the old is wiped); it must still arrive whole.
+    #[test]
+    fn an_answer_longer_than_the_reserved_buffer_is_still_sent_whole() {
+        let mut client = started();
+        client.handle(question("q1", QuestionKind::Passphrase, "Enter the passphrase for the key laptop: ", false));
+        for piece in [vec![b'a'; 1500], vec![b'b'; 700], vec![b'c'; 2000]] {
+            assert!(client.handle(Input::Stdin(piece)).is_empty());
+        }
+        let actions = client.handle(Input::Stdin(b"\n".to_vec()));
+        let expected = format!("{}{}{}", "a".repeat(1500), "b".repeat(700), "c".repeat(2000));
+        assert_eq!(actions, [Action::Stderr("\n".into()), answered("q1", &expected), Action::Mode(Mode::Cooked, false)]);
     }
 
     /// The shell's own bytes are not the CLI's to change: that is what a terminal program is for.
