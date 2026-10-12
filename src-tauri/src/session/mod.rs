@@ -7,6 +7,7 @@ pub mod connect;
 pub mod directory;
 pub mod pins;
 pub mod protocol;
+pub mod relay;
 pub mod ssh_config_directory;
 pub mod ssh_g;
 #[cfg(test)]
