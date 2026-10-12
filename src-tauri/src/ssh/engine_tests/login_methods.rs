@@ -37,16 +37,32 @@ impl Subject {
     }
 }
 
+/// The login of a toy server: one user, one password, and keyboard-interactive in a single round that asks for the password.
+fn toy_login() -> ToyLogin {
+    ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None }
+}
+
 fn toy() -> Option<Subject> {
-    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string() };
+    let login = toy_login();
     let server = ToyServer::start(login.clone());
     Some(Subject { port: server.port, user: login.user, password: login.password, _toy: Some(server) })
 }
 
 /// A toy server that takes `verdict_delay` over the answers of a keyboard-interactive round.
 fn slow_toy(verdict_delay: Duration) -> Subject {
-    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string() };
+    let login = toy_login();
     let server = ToyServer::start_slow(login.clone(), verdict_delay);
+    Subject { port: server.port, user: login.user, password: login.password, _toy: Some(server) }
+}
+
+/// A toy server whose keyboard-interactive login has these rounds (each a list of prompt and wanted answer; an empty list asks nothing).
+fn toy_asking(rounds: Vec<Vec<(&str, &str)>>) -> Subject {
+    let rounds = rounds
+        .into_iter()
+        .map(|round| round.into_iter().map(|(prompt, answer)| (prompt.to_string(), answer.to_string())).collect())
+        .collect();
+    let login = ToyLogin { rounds: Some(rounds), ..toy_login() };
+    let server = ToyServer::start(login.clone());
     Subject { port: server.port, user: login.user, password: login.password, _toy: Some(server) }
 }
 
@@ -232,8 +248,9 @@ fn a_closed_session_after_a_login_says_so() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// Four more, for the toy server only: the first needs a server that asks exactly one question, the third one that refuses every key and
-// then takes a password, the fourth one that can be made slow.
+// More, for the toy server only. Some need a server that behaves as no real one is told to: it asks exactly one question (the wrong number
+// of answers), it refuses every key and then takes a password (the link cut at the password), its verdict can be made slow, or it asks in
+// several rounds. The others (no password to offer, a connect timeout no clock can hold) have nothing to gain from the PAM container.
 
 /// A round answered with the wrong number of answers abandons the login like a cancelled prompt does, and the connection is dropped. The
 /// toy server asks one question.
@@ -275,6 +292,65 @@ fn a_hop_with_an_absurd_connect_timeout_still_logs_in() {
     let auth = VaultAuth::new().with_answers(&[&subject.password]);
     let session = engine().connect(&Target { hops: vec![hop] }, &*TestPolicy::trusting(), &auth).expect("the size of the timeout does not matter");
     ok_output(session.as_ref());
+}
+
+/// The usual shape of a login with a second factor: PAM asks for the password and then for a code, and a push product has a round with no
+/// prompt at all while the person approves on a phone. The round without a prompt is answered by the engine itself (RFC 4256: an empty
+/// response), so the auth source is asked twice, not three times.
+#[test]
+fn a_keyboard_interactive_login_with_several_rounds_and_an_empty_one_succeeds() {
+    use std::sync::Mutex;
+
+    use zeroize::Zeroizing;
+
+    use crate::ssh::{AuthError, AuthSource, HopRef, Prompt, RsaHash, Secret, Signature};
+
+    /// Answers every prompt by its text, and writes down the prompts of each call.
+    struct ByPromptText {
+        answers: Vec<(&'static str, String)>,
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl AuthSource for ByPromptText {
+        fn public_key(&self, _key_id: &str) -> Option<String> {
+            None
+        }
+        fn sign(&self, _key_id: &str, _data: &[u8], _rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError> {
+            Err(AuthError::KeyUnavailable("this source has no keys".to_string()))
+        }
+        fn password(&self, _hop: &HopRef) -> Option<Secret> {
+            None
+        }
+        fn interactive(&self, _hop: &HopRef, prompts: &[Prompt], _deadline: Instant) -> Option<Vec<Secret>> {
+            self.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(prompts.iter().map(|prompt| prompt.text.clone()).collect());
+            prompts
+                .iter()
+                .map(|prompt| self.answers.iter().find(|(text, _)| *text == prompt.text).map(|(_, answer)| Zeroizing::new(answer.clone())))
+                .collect()
+        }
+    }
+
+    let password = "correct horse battery staple";
+    let subject = toy_asking(vec![vec![], vec![("Password: ", password)], vec![("Verification code: ", "123456")]]);
+    let source = |code: &str| ByPromptText {
+        answers: vec![("Password: ", password.to_string()), ("Verification code: ", code.to_string())],
+        calls: Mutex::new(Vec::new()),
+    };
+    let asked = |auth: &ByPromptText| auth.calls.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let both_rounds = vec![vec!["Password: ".to_string()], vec!["Verification code: ".to_string()]];
+    let target = subject.target_on(subject.port, AuthMethod::Interactive);
+    let engine = engine();
+
+    let auth = source("123456");
+    let session = engine.connect(&target, &*TestPolicy::trusting(), &auth).expect("the rounds are answered");
+    ok_output(session.as_ref());
+    assert_eq!(asked(&auth), both_rounds, "the auth source was asked for the two rounds that have prompts and not for the one that has none");
+
+    // A wrong code in the last round is a refusal like any other, after the rounds before it were answered.
+    let wrong = source("000000");
+    let error = engine.connect(&target, &*TestPolicy::trusting(), &wrong).err().expect("the code is wrong");
+    assert!(matches!(&error, ConnectError::AuthFailed { tried, .. } if *tried == [AuthMethod::Interactive]), "{error:?}");
+    assert_eq!(asked(&wrong), both_rounds);
 }
 
 /// The password request is treated like the key request when the server's answer names no method to go on with (`classify_empty_answer`):

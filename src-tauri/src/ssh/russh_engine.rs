@@ -1151,6 +1151,25 @@ pub(crate) mod toy_server {
         pub user: String,
         pub password: String,
         pub prompt: String,
+        /// The rounds of a keyboard-interactive login: each is a list of (prompt, the answer it wants), and an empty list is a request with
+        /// no prompt at all (a "wait" round). `None` is one round that asks `prompt` and wants `password`.
+        pub rounds: Option<Vec<Vec<(String, String)>>>,
+    }
+
+    impl ToyLogin {
+        /// The rounds of keyboard-interactive, as the `rounds` field says them, with the single round of a plain login filled in.
+        fn rounds_asked(&self) -> Vec<Vec<(String, String)>> {
+            self.rounds.clone().unwrap_or_else(|| vec![vec![(self.prompt.clone(), self.password.clone())]])
+        }
+    }
+
+    /// The request that puts the prompts of one round to the client (no echo).
+    fn ask(round: &[(String, String)]) -> Auth {
+        Auth::Partial {
+            name: Cow::Borrowed(""),
+            instructions: Cow::Borrowed(""),
+            prompts: Cow::Owned(round.iter().map(|(prompt, _)| (Cow::Owned(prompt.clone()), false)).collect()),
+        }
     }
 
     /// The server's side of one client.
@@ -1158,6 +1177,8 @@ pub(crate) mod toy_server {
         login: Arc<ToyLogin>,
         /// How long the server thinks about the answers of a keyboard-interactive round before it says whether they are right.
         verdict_delay: std::time::Duration,
+        /// The round of keyboard-interactive that the client is answering. A `Toy` is made for each client, so the count is that client's own.
+        round: usize,
     }
 
     impl server::Handler for Toy {
@@ -1167,21 +1188,28 @@ pub(crate) mod toy_server {
             Ok(if user == self.login.user && password == self.login.password { Auth::Accept } else { Auth::reject() })
         }
 
-        /// A single round: the prompt, then the answer is compared with the password.
+        /// The rounds of the login (one round that asks for the password, unless the `rounds` of `ToyLogin` say more): the first request puts the
+        /// prompts of round 0, the right answers to a round are followed by the prompts of the next one and, after the last, by acceptance.
+        /// A wrong answer, or the wrong number of them, rejects the login.
         async fn auth_keyboard_interactive<'a>(&'a mut self, user: &str, _submethods: &str, response: Option<Response<'a>>) -> Result<Auth, Self::Error> {
+            let rounds = self.login.rounds_asked();
             match response {
-                None => Ok(Auth::Partial {
-                    name: Cow::Borrowed(""),
-                    instructions: Cow::Borrowed(""),
-                    prompts: Cow::Owned(vec![(Cow::Owned(self.login.prompt.clone()), false)]),
-                }),
+                None => {
+                    self.round = 0;
+                    Ok(ask(&rounds[0]))
+                }
                 Some(mut response) => {
                     if !self.verdict_delay.is_zero() {
                         tokio::time::sleep(self.verdict_delay).await;
                     }
-                    let answer = response.next();
-                    let right = answer.is_some_and(|answer| answer[..] == *self.login.password.as_bytes());
-                    Ok(if user == self.login.user && right { Auth::Accept } else { Auth::reject() })
+                    let answered_right = rounds[self.round]
+                        .iter()
+                        .all(|(_, wanted)| response.next().is_some_and(|answer| answer[..] == *wanted.as_bytes()));
+                    if user != self.login.user || !answered_right || response.next().is_some() {
+                        return Ok(Auth::reject());
+                    }
+                    self.round += 1;
+                    Ok(rounds.get(self.round).map_or(Auth::Accept, |next| ask(next)))
                 }
             }
         }
@@ -1215,7 +1243,7 @@ pub(crate) mod toy_server {
         type Handler = Toy;
 
         fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Toy {
-            Toy { login: Arc::clone(&self.login), verdict_delay: self.verdict_delay }
+            Toy { login: Arc::clone(&self.login), verdict_delay: self.verdict_delay, round: 0 }
         }
     }
 
