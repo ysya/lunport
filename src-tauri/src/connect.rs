@@ -451,6 +451,39 @@ mod tests {
         assert_eq!(build_launch_command("wt", &argv, false).unwrap().args, argv);
     }
 
+    /// A new tab of iTerm2 runs the connect command too, in both branches of its script (a tab in the window there is, or a new window).
+    #[test]
+    fn a_new_tab_in_iterm2_runs_the_connect_command() {
+        let argv = if cfg!(windows) { vec!["ssh".to_string(), "web".to_string()] } else { connect_argv(&std::env::current_exe().unwrap(), "web") };
+        let command = applescript_escape(&shell_join(&argv));
+        let spec = launch_for("iterm2", "web", true).unwrap();
+        assert_eq!(spec.program, "osascript");
+        let script: Vec<&str> = spec.args.iter().skip(1).step_by(2).map(String::as_str).collect();
+        assert_eq!(
+            script,
+            [
+                "tell application \"iTerm2\"",
+                "activate",
+                "if (count of windows) > 0 then",
+                &format!("tell current window to create tab with default profile command \"{command}\""),
+                "else",
+                &format!("create window with default profile command \"{command}\""),
+                "end if",
+                "end tell",
+            ]
+        );
+        assert!(spec.args.iter().step_by(2).all(|flag| flag == "-e"), "{:?}", spec.args);
+    }
+
+    /// The executable's path can hold a quote (a home folder named o'neil): the shell gets it quoted (`'\''`), and AppleScript gets that
+    /// with its backslash escaped.
+    #[test]
+    fn a_path_with_a_quote_reaches_terminal_quoted_for_the_shell_and_escaped_for_applescript() {
+        let argv = connect_argv(std::path::Path::new("/Users/o'neil/Apps/SSHelter.app/Contents/MacOS/sshelter"), "web");
+        let spec = build_launch_command("terminal", &argv, false).unwrap();
+        assert_eq!(spec.args.last().unwrap(), r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/SSHelter.app/Contents/MacOS/sshelter' connect web""#);
+    }
+
     /// macOS and Linux connect through `sshelter connect`; Windows keeps `ssh <alias>` until phase 3.
     #[test]
     fn the_launch_runs_sshelter_connect_on_macos_and_linux_and_ssh_on_windows() {

@@ -421,7 +421,11 @@ mod tests {
         assert_eq!(client.handle(Input::Output(b"file\r\n".to_vec())), [Action::Stdout(b"file\r\n".to_vec())]);
         assert_eq!(client.handle(Input::Resize(100, 30)), [Action::Send(ClientMessage::WindowChange { cols: 100, rows: 30 })]);
         let pasted = vec![b'x'; DATA_CHUNK + 10];
-        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(pasted))).len(), 2, "a large paste goes out in data frames of at most DATA_CHUNK bytes");
+        assert_eq!(
+            data_frames(&client.handle(Input::Stdin(Zeroizing::new(pasted)))).iter().map(Vec::len).collect::<Vec<_>>(),
+            [DATA_CHUNK, 10],
+            "a large paste goes out in data frames of at most DATA_CHUNK bytes"
+        );
     }
 
     /// What was typed while connecting reaches the shell once it is open (OpenSSH behaves the same).

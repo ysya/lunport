@@ -345,9 +345,12 @@ mod tests {
         assert!(matches!(read_frame(&mut reader), Err(FrameError::TooLarge(length)) if length == MAX_FRAME + 1));
         assert_eq!(reader, [DATA], "the payload was not read");
 
-        let error = write_data(&mut Vec::new(), &vec![0; MAX_FRAME]).unwrap_err();
+        let mut sink = Vec::new();
+        let error = write_data(&mut sink, &vec![0; MAX_FRAME]).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(write_data(&mut Vec::new(), &vec![0; MAX_FRAME - 1]).is_ok(), "the type byte and MAX_FRAME - 1 bytes fit");
+        assert!(sink.is_empty(), "nothing of a frame that does not fit is written");
+        assert!(write_data(&mut sink, &vec![0; MAX_FRAME - 1]).is_ok(), "the type byte and MAX_FRAME - 1 bytes fit");
+        assert_eq!(sink.len(), MAX_FRAME + 4, "the length, the type byte and the payload");
     }
 
     #[test]
@@ -432,8 +435,79 @@ mod tests {
         let answer = ClientMessage::Answer { question_id: "q1".into(), value: Some("hunter2".into()), cancel: false };
         let shown = format!("{answer:?}");
         assert!(!shown.contains("hunter2") && shown.contains("q1"), "{shown}");
-        let error = decode::<ClientMessage>(br#"{"type":"answer","question_id":7,"value":"hunter2"}"#).unwrap_err();
+        // serde's own text for this one would quote the value it choked on: `invalid type: string "hunter2", expected a boolean`.
+        let error = decode::<ClientMessage>(br#"{"type":"answer","question_id":"q1","value":"hunter2","cancel":"hunter2"}"#).unwrap_err();
         assert!(!error.contains("hunter2"), "{error}");
         assert_eq!(error, "a control message SSHelter does not understand");
+    }
+
+    /// A frame's payload can be a password (an answer, or keystrokes): its debug form does not show it. `Frame` derives `Debug`, and the
+    /// payload is hidden by `Zeroizing`'s own (zeroize 1.9.1 prints no content): this keeps it so.
+    #[test]
+    fn a_frame_hides_its_payload_in_debug_output() {
+        for frame in [Frame::Control(Zeroizing::new(b"hunter2".to_vec())), Frame::Data(Zeroizing::new(b"hunter2".to_vec()))] {
+            let shown = format!("{frame:?}");
+            assert!(!shown.contains("hunter2") && !shown.contains("104, 117"), "{shown}");
+        }
+    }
+
+    /// A reader that gives one byte at a time, and is interrupted twice on the way (a signal): the frame comes back whole.
+    #[test]
+    fn a_frame_read_a_byte_at_a_time_with_interruptions_comes_back_whole() {
+        struct Trickle {
+            bytes: Vec<u8>,
+            at: usize,
+            interruptions: usize,
+        }
+        impl Read for Trickle {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.at == 2 && self.interruptions < 2 {
+                    self.interruptions += 1;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                let Some(byte) = self.bytes.get(self.at) else { return Ok(0) };
+                buf[0] = *byte;
+                self.at += 1;
+                Ok(1)
+            }
+        }
+        let mut stream = Vec::new();
+        write_control(&mut stream, &ClientMessage::Close).unwrap();
+        let mut reader = Trickle { bytes: stream, at: 0, interruptions: 0 };
+        assert_eq!(read_frame(&mut reader).unwrap(), Some(Frame::Control(Zeroizing::new(br#"{"type":"close"}"#.to_vec()))));
+        assert_eq!(reader.interruptions, 2);
+        assert_eq!(read_frame(&mut reader).unwrap(), None, "and then a clean end");
+    }
+
+    /// The ends of a frame: the stream ending after the length and before the type byte is a frame cut short; a frame of exactly
+    /// `MAX_FRAME` is read back whole; a reader that fails (not an interruption) is a failed connection.
+    #[test]
+    fn a_frame_cut_after_its_length_is_truncated_one_of_exactly_the_limit_is_read_and_a_failed_read_is_io() {
+        assert!(matches!(read_frame(&mut [0u8, 0, 0, 2].as_slice()), Err(FrameError::Truncated)), "between the length and the type byte");
+
+        let mut stream = Vec::new();
+        write_data(&mut stream, &vec![7; MAX_FRAME - 1]).unwrap();
+        match read_frame(&mut stream.as_slice()) {
+            Ok(Some(Frame::Data(payload))) => assert!(payload.len() == MAX_FRAME - 1 && payload.iter().all(|byte| *byte == 7)),
+            other => panic!("a frame of MAX_FRAME bytes: {:?}", other.map(|frame| frame.map(|_| "another frame"))),
+        }
+
+        struct Fails;
+        impl Read for Fails {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::ConnectionReset))
+            }
+        }
+        assert!(matches!(read_frame(&mut Fails), Err(FrameError::Io(error)) if error.kind() == io::ErrorKind::ConnectionReset));
+    }
+
+    /// JSON that is not a message of either side is an error, with the one sentence that quotes nothing.
+    #[test]
+    fn json_that_is_not_a_message_does_not_decode() {
+        for json in [&b"{}"[..], b"[]", br#""x""#, br#"{"type":1}"#] {
+            let shown = String::from_utf8_lossy(json);
+            assert_eq!(decode::<ClientMessage>(json), Err("a control message SSHelter does not understand".to_string()), "{shown}");
+            assert_eq!(decode::<ServerMessage>(json), Err("a control message SSHelter does not understand".to_string()), "{shown}");
+        }
     }
 }

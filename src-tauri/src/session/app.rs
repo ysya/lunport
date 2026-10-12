@@ -191,6 +191,7 @@ pub fn quit(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::slot_rules::{KeySlotPayload, SlotMode};
     use crate::sync::state_v2::LocalSlot;
 
     fn slot(file: &str, source: Option<SlotSource>) -> LocalSlot {
@@ -212,11 +213,28 @@ mod tests {
     fn a_vault_key_is_one_only_in_sshelter_named_by_its_slot() {
         let mut state = SyncStateV2::fresh("mac").unwrap();
         let vault = SlotSource::Vault { fingerprint: "SHA256:v".into(), public_key: "ssh-ed25519 AAAA".into(), has_passphrase: true };
-        state.key_slots.insert("a".repeat(32), slot("id_mac-aaaaaaaa", Some(vault)));
+        state.key_slots.insert("a".repeat(32), slot("id_mac-aaaaaaaa", Some(vault.clone())));
         state.key_slots.insert("b".repeat(32), slot("work-bbbbbbbb", Some(SlotSource::SyncedCopy { fingerprint: "SHA256:w".into() })));
         assert_eq!(vault_key_in(&state, &"a".repeat(32)), Some(VaultKey { name: "id_mac-aaaaaaaa".into(), public_key: "ssh-ed25519 AAAA".into() }));
         assert_eq!(vault_key_in(&state, &"b".repeat(32)), None, "a key in a file is not the vault's");
         assert_eq!(vault_key_in(&state, "missing"), None);
+
+        // The slot's name in the account names the key; a slot whose name there is empty is named by its file.
+        let named = |name: &str| KeySlotPayload {
+            schema: 1,
+            name: name.into(),
+            mode: SlotMode::Own,
+            origin_device_id: "d".repeat(32),
+            created_at_ms: 0,
+            public_key: None,
+            fingerprint: None,
+            key_type: None,
+            has_passphrase: None,
+        };
+        state.key_slots.insert("c".repeat(32), LocalSlot { payload: Some(named("work laptop")), ..slot("id_work-cccccccc", Some(vault.clone())) });
+        state.key_slots.insert("d".repeat(32), LocalSlot { payload: Some(named("")), ..slot("id_old-dddddddd", Some(vault)) });
+        assert_eq!(vault_key_in(&state, &"c".repeat(32)).map(|key| key.name), Some("work laptop".to_string()));
+        assert_eq!(vault_key_in(&state, &"d".repeat(32)).map(|key| key.name), Some("id_old-dddddddd".to_string()), "an empty name falls back to the file's");
     }
 
     #[test]

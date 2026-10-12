@@ -1356,6 +1356,7 @@ mod tests {
         assert_eq!(told, [quit_sentence(), no_status()]);
         crate::ssh::testing::eventually("the entry to leave once its client was told", 5, || !world.broker.has_sessions());
         assert!(!world.broker.claim(2), "a session whose client end_all told stays told, also when its entry is gone");
+        assert!(!world.broker.promote(2, &web), "nor is a session whose entry is gone made an open one");
         assert!(!world.broker.enter(&conn_on_a_socket_pair(3).0, &query, None), "and no session is started once the app is quitting");
     }
 
