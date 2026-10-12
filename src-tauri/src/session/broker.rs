@@ -599,10 +599,17 @@ mod tests {
         let world = world_with(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password), Arc::clone(&confirmer) as Arc<dyn HostKeyConfirmer>, MemKeychain::default());
         let mut client = Client::connect(&world.sock);
         client.open("web");
-        let ServerMessage::Question(_) = client.next_message() else { panic!("expected the password question") };
-        // The password is asked first (the hop starts with it); the host key comes next.
+        // The password is asked first (the hop starts with it); the host key comes next, and with it the notice that the window has it.
+        let ServerMessage::Question(question) = client.next_message() else { panic!("expected the password question") };
+        assert_eq!(question.kind, QuestionKind::Password);
+        client.answer(&question.question_id, Some("typed"));
+        let ServerMessage::Question(notice) = client.next_message() else { panic!("expected the notice about the window") };
+        assert_eq!(notice.kind, QuestionKind::HostKeyNotice);
+        crate::ssh::testing::eventually("the window to be asked", 5, || *locked(&confirmer.asked) == 1);
         drop(client);
-        crate::ssh::testing::eventually("the connect to give up", 10, || !world.broker.has_sessions() && *locked(&confirmer.asked) <= 1);
+        crate::ssh::testing::eventually("the window to be told its question is withdrawn", 5, || *locked(&confirmer.withdrawn));
+        assert_eq!(*locked(&confirmer.asked), 1, "asked once, and not again");
+        crate::ssh::testing::eventually("the connect to give up", 10, || !world.broker.has_sessions());
         assert!(world.engine.events().is_empty(), "nothing was connected");
     }
 
@@ -612,6 +619,8 @@ mod tests {
         let world = world(FakeEngine::new());
         let (mut ours, theirs) = UnixStream::pair().unwrap();
         theirs.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        // The read timeout is an option of the socket, shared by every handle of it: this one shows what the broker leaves it at.
+        let probe = theirs.try_clone().unwrap();
         let broker = Arc::clone(&world.broker);
         std::thread::spawn(move || broker.serve(theirs, None));
         write_control(&mut ours, &ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, client_info: None }).unwrap();
@@ -619,6 +628,7 @@ mod tests {
         let mut client = Client { stream: ours };
         client.stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
         assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        assert_eq!(probe.read_timeout().unwrap(), None, "the connection of an open session has no read timeout at all");
         std::thread::sleep(Duration::from_millis(800));
         client.stream.write_all(&[0, 0, 0, 3, crate::session::protocol::DATA, b'o', b'k']).unwrap();
         crate::ssh::testing::eventually("input after the idle time to reach the shell", 5, || world.engine.events().contains(&FakeEvent::ShellInput(b"ok".to_vec())));
