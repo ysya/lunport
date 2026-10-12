@@ -4,8 +4,14 @@
 //! (the SP3 slot rules), a password is the keychain's `host:<alias>`, and pins live in `host-pins.json` (`pins.rs`). A host id is its
 //! alias here. Never written: `~/.ssh` (spec §1). Never read: `~/.ssh/known_hosts`.
 //!
-//! What it cannot give the broker, and says so: a `ProxyCommand`, a jump host that is not a saved host, a key in a file instead of the
-//! vault (SSHelter's own client signs with vault keys only).
+//! What it cannot give the broker, and says so: a `ProxyCommand`, a key in a file instead of the vault (SSHelter's own client signs with
+//! vault keys only), and a `ProxyJump` that is anything but a chain of saved hosts, each one as it is saved:
+//!
+//! - a jump host that is not a saved host;
+//! - a jump with a port or user of its own, as in `ProxyJump admin@bastion:2200` for a `bastion` saved with port 22. OpenSSH lets such an
+//!   entry override the jump host's port and user, but a host id stands for one server (`HostDirectory`), and its pin, saved password and
+//!   typed answers belong to the id: the entry would be a second endpoint under the same id. An entry that only repeats the saved port
+//!   and user is the saved host and is fine.
 
 use std::path::Path;
 
@@ -23,7 +29,8 @@ const MAX_JUMPS: usize = 5;
 /// The `IdentityFile` values `ssh -G` lists when a host names none (OpenSSH 10.3p1): no key was chosen for the host.
 const DEFAULT_IDENTITY_FILES: &[&str] = &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss", "~/.ssh/id_dsa"];
 
-/// One element of a `ProxyJump` list: `[user@]host[:port]`, or `ssh://[user@]host[:port]`.
+/// One element of a `ProxyJump` list: `[user@]host[:port]`, or `ssh://[user@]host[:port]`. A port or user written here has to be the saved
+/// host's own (`check_jump_is_the_saved_host`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JumpSpec {
     pub user: Option<String>,
@@ -62,6 +69,24 @@ pub fn parse_proxy_jump(value: &str) -> Result<Vec<JumpSpec>, String> {
             Ok(JumpSpec { user, host: host.to_string(), port })
         })
         .collect()
+}
+
+/// A `ProxyJump` entry has to name the saved host `saved` as it is saved. OpenSSH lets an entry override the jump host's port and user
+/// (`ssh -J admin@bastion:2200`), but a host id stands for one server (`HostDirectory`), and the pin, the saved password and the typed
+/// answers belong to the id: with a port or user of its own the entry would be a second endpoint under the same id. An entry that only
+/// repeats the saved port and user, or names none, is the saved host. `alias` is the host whose `ProxyJump` the entry is.
+fn check_jump_is_the_saved_host(alias: &str, jump: &JumpSpec, saved: &Hop) -> Result<(), DirectoryError> {
+    let name = jump.host.as_str();
+    if let Some(port) = jump.port.filter(|port| *port != saved.port) {
+        return Err(DirectoryError::Unsupported(format!("{alias} jumps through {name} on port {port}, but {name} is saved with port {}.", saved.port)));
+    }
+    if let Some(user) = jump.user.as_deref().filter(|user| *user != saved.user) {
+        // `ssh -G` names the local user for a host that has no `User`, so a saved user is empty only when its answer lacks the line; the
+        // user written for the jump cannot then be shown to be the saved one.
+        let saved_user = if saved.user.is_empty() { "your local user name".to_string() } else { format!("user {}", saved.user) };
+        return Err(DirectoryError::Unsupported(format!("{alias} jumps through {name} as {user}, but {name} is saved with {saved_user}.")));
+    }
+    Ok(())
 }
 
 /// The first value of `keyword` in `ssh -G`'s output.
@@ -174,14 +199,10 @@ impl SshConfigDirectory {
             if self.check_saved(doc, &jump.host).is_err() {
                 return Err(DirectoryError::Unsupported(format!("{alias} jumps through {}, which is not a saved host.", jump.host)));
             }
-            let mut jump_hops = self.hops(doc, &jump.host, path)?;
-            if let Some(jump_hop) = jump_hops.last_mut() {
-                if let Some(user) = jump.user {
-                    jump_hop.user = user;
-                }
-                if let Some(port) = jump.port {
-                    jump_hop.port = port;
-                }
+            let jump_hops = self.hops(doc, &jump.host, path)?;
+            // The last of them is the jump host itself; the ones before it are its own jump hosts.
+            if let Some(saved) = jump_hops.last() {
+                check_jump_is_the_saved_host(alias, &jump, saved)?;
             }
             hops.extend(jump_hops);
         }
@@ -332,12 +353,19 @@ mod tests {
         SshConfigDirectory::new(sources, PinStore::with_clock(dir.path().join("host-pins.json"), || 1_700_000_000_000))
     }
 
-    const CONFIG: &str = "Host web\n  HostName web.example.com\nHost bastion\n  HostName gate.example.com\nHost db\n  ProxyJump admin@bastion:2200\nHost pc\n  ProxyCommand nc %h %p\nHost loop1\n  ProxyJump loop2\nHost loop2\n  ProxyJump loop1\nHost outside\n  ProxyJump gate.example.org\n";
+    /// A directory over canned `ssh -G` answers alone: each alias given is a saved host (a `Host` block with no settings of its own; the
+    /// adapter takes the settings from `ssh -G`).
+    fn directory_over(dir: &tempfile::TempDir, effective: &[(&str, &str)]) -> SshConfigDirectory {
+        let config: String = effective.iter().map(|(alias, _)| format!("Host {alias}\n")).collect();
+        directory(dir, &config, effective)
+    }
+
+    const CONFIG: &str = "Host web\n  HostName web.example.com\nHost bastion\n  HostName gate.example.com\n  Port 2200\n  User admin\nHost db\n  ProxyJump admin@bastion:2200\nHost pc\n  ProxyCommand nc %h %p\nHost loop1\n  ProxyJump loop2\nHost loop2\n  ProxyJump loop1\nHost outside\n  ProxyJump gate.example.org\n";
 
     fn effective() -> Vec<(&'static str, &'static str)> {
         vec![
             ("web", "hostname web.example.com\nport 22\nuser deploy\nidentityfile ~/.ssh/id_rsa\n"),
-            ("bastion", "hostname gate.example.com\nport 22\nuser ops\nidentityfile ~/.ssh/sshelter/keys/id_mac-aaaaaaaa\n"),
+            ("bastion", "hostname gate.example.com\nport 2200\nuser admin\nidentityfile ~/.ssh/sshelter/keys/id_mac-aaaaaaaa\n"),
             ("db", "hostname db\nport 22\nuser deploy\nproxyjump admin@bastion:2200\nidentityfile ~/.ssh/id_rsa\n"),
             ("pc", "hostname pc\nport 22\nuser deploy\nproxycommand nc %h %p\n"),
             ("loop1", "hostname loop1\nproxyjump loop2\n"),
@@ -347,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_host_resolves_with_its_jump_hosts_first_and_the_jump_users_and_ports_applied() {
+    fn a_saved_host_resolves_with_its_jump_hosts_first_and_a_jump_that_repeats_the_saved_port_and_user_is_fine() {
         let dir = tempfile::tempdir().unwrap();
         let directory = directory(&dir, CONFIG, &effective());
         let target = directory.resolve(&HostQuery::Alias("db".into())).unwrap();
@@ -356,6 +384,10 @@ mod tests {
         assert_eq!(target.hops[0].auth, AuthMethod::Key { key_id: "a".repeat(32) });
         assert_eq!(target.hops[1].auth, AuthMethod::Interactive);
         assert_eq!(directory.resolve(&HostQuery::Id("db".into())).unwrap(), target, "a host's id is its alias here");
+        // One id is one server: every hop of a chain is its host as saved, so resolving that host by its id gives the very same hop.
+        for hop in &target.hops {
+            assert_eq!(directory.resolve(&HostQuery::Id(hop.id.to_string())).unwrap().hops.last(), Some(hop), "{} in the chain is {} as saved", hop.alias, hop.alias);
+        }
         assert_eq!(directory.resolve(&HostQuery::Alias("web".into())).unwrap().hops[0].auth, AuthMethod::Password, "a saved password goes first");
         assert_eq!(directory.password_account(&HostId::from("web")), "host:web");
     }
@@ -372,6 +404,77 @@ mod tests {
         assert_eq!(refused("loop1"), "The jump hosts go round in a circle: loop1 → loop2 → loop1.");
     }
 
+    /// A jump is the saved host, not a variant of it. The pin, the saved password and what a person typed belong to the host id, and an id
+    /// stands for one server (`HostDirectory`): `ProxyJump bastion:22` for a `bastion` saved with port 2200 would be a second endpoint under
+    /// the same id, and the two would share one pin.
+    #[test]
+    fn a_jump_written_with_another_port_or_user_than_the_saved_host_has_is_refused_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(
+            &dir,
+            &[
+                ("bastion", "hostname gate.example.com\nport 2200\nuser admin\n"),
+                ("by-port", "hostname by-port\nport 22\nuser deploy\nproxyjump bastion:22\n"),
+                ("by-user", "hostname by-user\nport 22\nuser deploy\nproxyjump ops@bastion:2200\n"),
+                ("by-both", "hostname by-both\nport 22\nuser deploy\nproxyjump ops@bastion:22\n"),
+                ("anon", "hostname anon\nport 22\n"),
+                ("by-anon", "hostname by-anon\nport 22\nuser deploy\nproxyjump root@anon\n"),
+            ],
+        );
+        let refused = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into()));
+        let unsupported = |text: &str| Err(DirectoryError::Unsupported(text.to_string()));
+        assert_eq!(refused("by-port"), unsupported("by-port jumps through bastion on port 22, but bastion is saved with port 2200."));
+        assert_eq!(refused("by-user"), unsupported("by-user jumps through bastion as ops, but bastion is saved with user admin."));
+        assert_eq!(refused("by-both"), unsupported("by-both jumps through bastion on port 22, but bastion is saved with port 2200."), "the port is named first");
+        // `ssh -G` names the local user for a host with no `User`, so a saved user is empty only when the answer lacks the line; a user
+        // written for the jump cannot then be shown to be the saved one.
+        assert_eq!(refused("by-anon"), unsupported("by-anon jumps through anon as root, but anon is saved with your local user name."));
+    }
+
+    /// An entry that says nothing the saved host does not say already is the saved host, however it is written.
+    #[test]
+    fn a_jump_entry_that_only_repeats_the_saved_port_and_user_resolves_to_the_saved_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(
+            &dir,
+            &[
+                ("bastion", "hostname gate.example.com\nport 2200\nuser admin\n"),
+                ("by-name", "hostname by-name\nport 22\nuser deploy\nproxyjump bastion\n"),
+                ("by-user", "hostname by-user\nport 22\nuser deploy\nproxyjump admin@bastion\n"),
+                ("by-port", "hostname by-port\nport 22\nuser deploy\nproxyjump bastion:2200\n"),
+                ("by-both", "hostname by-both\nport 22\nuser deploy\nproxyjump admin@bastion:2200\n"),
+                ("by-uri", "hostname by-uri\nport 22\nuser deploy\nproxyjump ssh://admin@bastion:2200\n"),
+            ],
+        );
+        let saved = directory.resolve(&HostQuery::Alias("bastion".into())).unwrap().hops[0].clone();
+        assert_eq!((saved.hostname.as_str(), saved.port, saved.user.as_str()), ("gate.example.com", 2200, "admin"));
+        for alias in ["by-name", "by-user", "by-port", "by-both", "by-uri"] {
+            let target = directory.resolve(&HostQuery::Alias(alias.into())).unwrap();
+            assert_eq!(target.hops.len(), 2, "{alias}");
+            assert_eq!(target.hops[0], saved, "{alias}: the jump host is the saved one");
+            assert_eq!(target.hops[1].alias, alias);
+        }
+    }
+
+    /// The port and user of a jump entry are compared with the jump host itself: the last hop its own jump hosts lead up to.
+    #[test]
+    fn a_jump_entry_is_compared_with_the_jump_host_itself_and_not_with_the_jump_hosts_in_front_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(
+            &dir,
+            &[
+                ("edge", "hostname edge.example.com\nport 22\nuser ops\n"),
+                ("gate", "hostname gate.example.com\nport 2201\nuser root\nproxyjump edge\n"),
+                ("far", "hostname far\nport 22\nuser deploy\nproxyjump root@gate:2201\n"),
+                ("far-wrong", "hostname far-wrong\nport 22\nuser deploy\nproxyjump ops@gate:22\n"),
+            ],
+        );
+        let aliases = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.into_iter().map(|hop| hop.alias).collect::<Vec<_>>());
+        assert_eq!(aliases("far"), Ok(vec!["edge".to_string(), "gate".to_string(), "far".to_string()]));
+        let wrong = DirectoryError::Unsupported("far-wrong jumps through gate on port 22, but gate is saved with port 2201.".to_string());
+        assert_eq!(aliases("far-wrong"), Err(wrong), "22 and ops are edge's, not gate's");
+    }
+
     #[test]
     fn a_pin_from_the_pin_file_is_in_the_resolved_hop_and_an_unreadable_file_stops_the_connection() {
         let dir = tempfile::tempdir().unwrap();
@@ -382,21 +485,27 @@ mod tests {
         assert!(matches!(directory.resolve(&HostQuery::Alias("web".into())), Err(DirectoryError::Failed(text)) if text.contains("host-pins.json")));
     }
 
-    /// The adapter's reading of `ssh -G` against the real tool, on a config file of the test's own (`-F`; the user's `~/.ssh` is not read).
-    #[test]
-    fn the_real_ssh_g_output_resolves_into_the_same_hops() {
-        let Some(_tools) = crate::ssh::testing::harness::tools() else { return };
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("config");
-        std::fs::write(&config, "Host bastion\n  HostName gate.example.com\n  User ops\n  ServerAliveInterval 20\nHost db\n  HostName 10.0.0.5\n  Port 2222\n  User deploy\n  ProxyJump admin@bastion:2200\n  ConnectTimeout 7\n").unwrap();
-        let (doc_path, ssh_g_path) = (config.clone(), config.clone());
+    /// A directory over a config file of the test's own, with the real `ssh -G` (`-F`: the user's `~/.ssh` is not read).
+    fn real_ssh_directory(dir: &tempfile::TempDir, config: &Path) -> SshConfigDirectory {
+        let (doc_path, ssh_g_path) = (config.to_path_buf(), config.to_path_buf());
         let sources = Sources {
             doc: Box::new(move || crate::config::include::load_doc(&doc_path).map_err(|error| error.to_string())),
             effective: Box::new(move |alias| crate::config::intel::effective_config(alias, Some(&ssh_g_path)).map_err(|error| error.to_string())),
             vault_key: Box::new(|_| None),
             password_saved: Box::new(|_| false),
         };
-        let directory = SshConfigDirectory::new(sources, PinStore::new(dir.path().join("host-pins.json")));
+        SshConfigDirectory::new(sources, PinStore::new(dir.path().join("host-pins.json")))
+    }
+
+    /// The adapter's reading of `ssh -G` against the real tool, on a config file of the test's own (`-F`; the user's `~/.ssh` is not read).
+    /// `db`'s jump entry repeats the port and user that `bastion` is saved with, as an entry has to.
+    #[test]
+    fn the_real_ssh_g_output_resolves_into_the_same_hops() {
+        let Some(_tools) = crate::ssh::testing::harness::tools() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, "Host bastion\n  HostName gate.example.com\n  User admin\n  Port 2200\n  ServerAliveInterval 20\nHost db\n  HostName 10.0.0.5\n  Port 2222\n  User deploy\n  ProxyJump admin@bastion:2200\n  ConnectTimeout 7\n").unwrap();
+        let directory = real_ssh_directory(&dir, &config);
         let target = directory.resolve(&HostQuery::Alias("db".into())).unwrap();
         let hops: Vec<(&str, &str, u16, &str, Duration, Duration)> =
             target.hops.iter().map(|hop| (hop.alias.as_str(), hop.hostname.as_str(), hop.port, hop.user.as_str(), hop.connect_timeout, hop.keepalive_every)).collect();
@@ -408,5 +517,33 @@ mod tests {
             ]
         );
         assert!(target.hops.iter().all(|hop| hop.auth == AuthMethod::Interactive));
+    }
+
+    /// `ssh -G` names the local user for a host that has no `User` (the adapter does not look the name up itself), so a jump entry that
+    /// names the local user repeats the saved value, and one that names another user does not.
+    #[test]
+    fn a_jump_that_names_the_local_user_is_the_saved_host_when_the_host_has_no_user_of_its_own() {
+        let Some(_tools) = crate::ssh::testing::harness::tools() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, "Host plain\n  HostName plain.example.com\n").unwrap();
+        let answer = crate::config::intel::effective_config("plain", Some(&config)).unwrap();
+        let local = answer.iter().find(|(key, _)| key == "user").map(|(_, user)| user.clone()).expect("ssh -G names a user");
+        if !local.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+            return; // not a name that can be written into a ProxyJump line (a Windows account with a space, say)
+        }
+        std::fs::write(
+            &config,
+            format!("Host plain\n  HostName plain.example.com\nHost far\n  HostName far.example.com\n  ProxyJump {local}@plain\nHost wrong\n  HostName wrong.example.com\n  ProxyJump not-{local}@plain\n"),
+        )
+        .unwrap();
+        let directory = real_ssh_directory(&dir, &config);
+        let far = directory.resolve(&HostQuery::Alias("far".into())).unwrap();
+        let hops: Vec<(&str, &str)> = far.hops.iter().map(|hop| (hop.alias.as_str(), hop.user.as_str())).collect();
+        assert_eq!(hops, [("plain", local.as_str()), ("far", local.as_str())]);
+        assert_eq!(
+            directory.resolve(&HostQuery::Alias("wrong".into())),
+            Err(DirectoryError::Unsupported(format!("wrong jumps through plain as not-{local}, but plain is saved with user {local}.")))
+        );
     }
 }
