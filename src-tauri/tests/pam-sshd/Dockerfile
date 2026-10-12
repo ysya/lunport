@@ -22,7 +22,8 @@ RUN apt-get update \
  && mkdir -p /run/sshd \
  && useradd --create-home --shell /bin/bash "$TEST_USER" \
  && echo "$TEST_USER:$TEST_PASSWORD" | chpasswd \
- && sed -i 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@' /etc/pam.d/sshd
+ && sed -i 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@' /etc/pam.d/sshd \
+ && grep -q 'session optional pam_loginuid.so' /etc/pam.d/sshd
 COPY sshd_config.test /etc/ssh/sshd_config.d/00-sshelter-test.conf
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D", "-e"]
