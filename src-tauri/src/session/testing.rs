@@ -22,7 +22,8 @@ struct FakeHost {
 
 /// Saved hosts and pins in memory. A host added as `web` has the id `id-web`, the hostname `web.example.com`, port 22 and the user
 /// `deploy`; pins are dated `PINNED_AT_MS`. Chains are resolved as the ssh_config adapter will: a jump host's own jump hosts come in front
-/// of it, and a chain that loops (a host comes up twice) or names a host that is not saved is refused with the adapter's sentences.
+/// of it, and a chain that loops, names a host twice without looping (`bastion,bastion`, or a jump host that two hosts of the chain share)
+/// or names a host that is not saved is refused with the adapter's sentences.
 #[derive(Default)]
 pub struct FakeDirectory {
     hosts: Vec<FakeHost>,
@@ -98,16 +99,17 @@ impl FakeDirectory {
         Ok(Hop { pinned: self.readable_pins()?.get(&hop.id).map(|pin| pin.key.clone()), ..hop.clone() })
     }
 
-    /// The hops of `host` and of its jump hosts: each jump host behind its own jump hosts, then `host`. `reached` holds the hosts met so
-    /// far, in order; one that comes up again makes a loop.
-    fn hops_of<'a>(&'a self, host: &'a FakeHost, reached: &mut Vec<&'a Hop>) -> Result<Vec<Hop>, DirectoryError> {
-        let again = reached.iter().any(|hop| hop.id == host.hop.id);
-        reached.push(&host.hop);
-        if again {
-            let path: Vec<&str> = reached.iter().map(|hop| hop.alias.as_str()).collect();
+    /// The hops of `host` and of its jump hosts: each jump host behind its own jump hosts, then `host`. `above` holds the hosts above `host`
+    /// in the chain, the target first; `host` among them makes a loop. Two jump hosts of `host` whose chains share a host name it twice,
+    /// which is refused as well (a chain has one hop per host id) and is no loop.
+    fn hops_of<'a>(&'a self, host: &'a FakeHost, above: &mut Vec<&'a Hop>) -> Result<Vec<Hop>, DirectoryError> {
+        let loops = above.iter().any(|hop| hop.id == host.hop.id);
+        above.push(&host.hop);
+        if loops {
+            let path: Vec<&str> = above.iter().map(|hop| hop.alias.as_str()).collect();
             return Err(DirectoryError::Unsupported(format!("The jump hosts go round in a circle: {}.", path.join(" → "))));
         }
-        let mut hops = Vec::new();
+        let mut hops: Vec<Hop> = Vec::new();
         for jump in &host.jumps {
             let jump_host = match self.by_alias(jump) {
                 Err(DirectoryError::NotFound(_)) => {
@@ -115,9 +117,15 @@ impl FakeDirectory {
                 }
                 found => found?,
             };
-            hops.extend(self.hops_of(jump_host, reached)?);
+            let jump_hops = self.hops_of(jump_host, above)?;
+            // The host named is the last of this chain that an earlier jump host's chain has too: the one nearest the jump host written.
+            if let Some(twice) = jump_hops.iter().rev().find(|hop| hops.iter().any(|seen| seen.id == hop.id)) {
+                return Err(DirectoryError::Unsupported(format!("{}'s jump hosts name {} twice.", host.hop.alias, twice.alias)));
+            }
+            hops.extend(jump_hops);
         }
         hops.push(self.with_its_pin(&host.hop)?);
+        above.pop();
         Ok(hops)
     }
 }
@@ -236,22 +244,45 @@ mod tests {
         assert_eq!(aliases("web"), ["edge", "bastion", "web"], "a jump host that two hosts share is not a loop");
     }
 
-    /// The trait says a chain that loops is an error, and the pins are keyed by host id: a chain in which one host comes up twice is refused,
-    /// with the sentence the ssh_config adapter uses for a loop.
+    /// The trait says a chain that loops is an error: refused with the hosts round the circle, as the ssh_config adapter does it. A host met
+    /// on the way to the circle is not part of it.
     #[test]
-    fn a_chain_in_which_a_host_comes_up_twice_is_refused_as_a_loop() {
+    fn a_chain_that_goes_round_in_a_circle_is_refused_with_the_path_round_it() {
         let directory = FakeDirectory::new()
             .with_host_via("self", AuthMethod::Password, &["self"])
             .with_host_via("loop1", AuthMethod::Password, &["loop2"])
             .with_host_via("loop2", AuthMethod::Password, &["loop1"])
             .with_host("bastion", AuthMethod::Password)
-            .with_host_via("twice", AuthMethod::Password, &["bastion", "bastion"]);
+            .with_host_via("behind", AuthMethod::Password, &["bastion", "loop1"]);
         let refused = |query: HostQuery| directory.resolve(&query);
         let circle = |path: &str| Err(DirectoryError::Unsupported(format!("The jump hosts go round in a circle: {path}.")));
         assert_eq!(refused(HostQuery::Alias("self".into())), circle("self → self"));
         assert_eq!(refused(HostQuery::Alias("loop1".into())), circle("loop1 → loop2 → loop1"));
         assert_eq!(refused(HostQuery::Id("id-loop2".into())), circle("loop2 → loop1 → loop2"), "by id as well");
-        assert_eq!(refused(HostQuery::Alias("twice".into())), circle("twice → bastion → bastion"));
+        assert_eq!(refused(HostQuery::Alias("behind".into())), circle("behind → loop1 → loop2 → loop1"), "`bastion`, met on the way, is not on the circle");
+    }
+
+    /// Pins are keyed by host id and the broker keeps what it knows about a hop by it too, so a chain names each host once. A host that comes
+    /// up twice without a loop (`bastion,bastion`, or a jump host that two hosts of the chain share) is refused with a sentence of its own,
+    /// the same as the ssh_config adapter's; the host whose jump hosts name it twice is the one the sentence is about.
+    #[test]
+    fn a_host_that_a_chain_names_twice_is_refused_although_nothing_loops() {
+        let directory = FakeDirectory::new()
+            .with_host("bastion", AuthMethod::Password)
+            .with_host_via("edge", AuthMethod::Password, &["bastion"])
+            .with_host_via("twice", AuthMethod::Password, &["bastion", "bastion"])
+            .with_host_via("down", AuthMethod::Password, &["bastion", "edge"])
+            .with_host_via("left", AuthMethod::Password, &["bastion"])
+            .with_host_via("right", AuthMethod::Password, &["bastion"])
+            .with_host_via("top", AuthMethod::Password, &["left", "right"])
+            .with_host_via("deep", AuthMethod::Password, &["twice"]);
+        let refused = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into()));
+        let named_twice = |text: &str| Err(DirectoryError::Unsupported(text.to_string()));
+        assert_eq!(refused("twice"), named_twice("twice's jump hosts name bastion twice."));
+        assert_eq!(refused("down"), named_twice("down's jump hosts name bastion twice."), "`edge` jumps through the `bastion` that is in front of it already");
+        assert_eq!(refused("top"), named_twice("top's jump hosts name bastion twice."), "a jump host that two hosts share is no loop, and still two hops");
+        assert_eq!(refused("deep"), named_twice("twice's jump hosts name bastion twice."), "the host that names it twice, not the one asked for");
+        assert!(refused("edge").is_ok() && refused("left").is_ok(), "each of them is fine alone");
     }
 
     /// The sentence is the ssh_config adapter's, so a broker test sees what the app will say.

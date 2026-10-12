@@ -11,7 +11,12 @@
 //! - a jump with a port or user of its own, as in `ProxyJump admin@bastion:2200` for a `bastion` saved with port 22. OpenSSH lets such an
 //!   entry override the jump host's port and user, but a host id stands for one server (`HostDirectory`), and its pin, saved password and
 //!   typed answers belong to the id: the entry would be a second endpoint under the same id. An entry that only repeats the saved port
-//!   and user is the saved host and is fine.
+//!   and user is the saved host and is fine;
+//! - a loop, with the hosts round the circle in the sentence;
+//! - a chain that names a host twice without a loop: `ProxyJump bastion,bastion`, or a jump host that two jump hosts of one host share.
+//!   The broker keeps what it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain has one hop per id. The
+//!   sentence is about the host whose jump hosts name a host twice: `web's jump hosts name bastion twice.`;
+//! - jump hosts nested more than five deep.
 
 use std::path::Path;
 
@@ -179,7 +184,9 @@ impl SshConfigDirectory {
         crate::connect::validate_alias(doc, alias).map_err(|_| DirectoryError::NotFound(format!("No saved host is called {alias}.")))
     }
 
-    /// The hops of `alias` and of its jump hosts, jump hosts first. `path` holds the hosts being expanded, to find a loop.
+    /// The hops of `alias` and of its jump hosts, jump hosts first. `path` holds the hosts above `alias` in the chain, to find a loop. A host
+    /// that comes up twice without a loop, because the chains of two jump hosts of `alias` share it, is refused too (a chain has one hop
+    /// per host id; the test fake does the same).
     fn hops(&self, doc: &SshConfigDoc, alias: &str, path: &mut Vec<String>) -> Result<Vec<Hop>, DirectoryError> {
         if path.iter().any(|seen| seen == alias) {
             path.push(alias.to_string());
@@ -194,7 +201,7 @@ impl SshConfigDirectory {
             return Err(DirectoryError::Unsupported(format!("{alias} uses ProxyCommand, which SSHelter's own SSH client does not support.")));
         }
         let jumps = parse_proxy_jump(value(&pairs, "proxyjump").unwrap_or_default()).map_err(|error| DirectoryError::Unsupported(format!("{alias}: {error}.")))?;
-        let mut hops = Vec::new();
+        let mut hops: Vec<Hop> = Vec::new();
         for jump in jumps {
             if self.check_saved(doc, &jump.host).is_err() {
                 return Err(DirectoryError::Unsupported(format!("{alias} jumps through {}, which is not a saved host.", jump.host)));
@@ -203,6 +210,11 @@ impl SshConfigDirectory {
             // The last of them is the jump host itself; the ones before it are its own jump hosts.
             if let Some(saved) = jump_hops.last() {
                 check_jump_is_the_saved_host(alias, &jump, saved)?;
+            }
+            // A host that the chains of the earlier jump hosts have already: no loop (that is refused on the way down), but one id twice. The
+            // host named is the last of this chain that is in both, the one nearest the jump host that was written.
+            if let Some(twice) = jump_hops.iter().rev().find(|hop| hops.iter().any(|seen| seen.id == hop.id)) {
+                return Err(DirectoryError::Unsupported(format!("{alias}'s jump hosts name {} twice.", twice.alias)));
             }
             hops.extend(jump_hops);
         }
@@ -252,7 +264,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::session::testing::check_the_pin_contract;
+    use crate::session::testing::{check_the_pin_contract, FakeDirectory};
     use crate::sync::slot_rules::test_keys;
     use crate::sync::state_v2::LocalSlot;
 
@@ -473,6 +485,125 @@ mod tests {
         assert_eq!(aliases("far"), Ok(vec!["edge".to_string(), "gate".to_string(), "far".to_string()]));
         let wrong = DirectoryError::Unsupported("far-wrong jumps through gate on port 22, but gate is saved with port 2201.".to_string());
         assert_eq!(aliases("far-wrong"), Err(wrong), "22 and ops are edge's, not gate's");
+    }
+
+    /// The broker keeps what it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain names each host once. A
+    /// host that comes up twice without a loop (`bastion,bastion`, or a jump host that two hosts of the chain share) is refused with a
+    /// sentence of its own, and the host whose jump hosts name it twice is the one the sentence is about.
+    #[test]
+    fn a_host_that_a_chain_names_twice_is_refused_although_nothing_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(
+            &dir,
+            &[
+                ("bastion", "hostname gate.example.com\nport 22\nuser ops\n"),
+                ("edge", "hostname edge.example.com\nport 22\nuser ops\nproxyjump bastion\n"),
+                ("twice", "hostname twice\nport 22\nuser deploy\nproxyjump bastion,bastion\n"),
+                ("down", "hostname down\nport 22\nuser deploy\nproxyjump bastion,edge\n"),
+                ("left", "hostname left\nport 22\nuser deploy\nproxyjump bastion\n"),
+                ("right", "hostname right\nport 22\nuser deploy\nproxyjump bastion\n"),
+                ("top", "hostname top\nport 22\nuser deploy\nproxyjump left,right\n"),
+                ("deep", "hostname deep\nport 22\nuser deploy\nproxyjump twice\n"),
+            ],
+        );
+        let refused = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into()));
+        let named_twice = |text: &str| Err(DirectoryError::Unsupported(text.to_string()));
+        assert_eq!(refused("twice"), named_twice("twice's jump hosts name bastion twice."));
+        assert_eq!(refused("down"), named_twice("down's jump hosts name bastion twice."), "`edge` jumps through the `bastion` that is in front of it already");
+        assert_eq!(refused("top"), named_twice("top's jump hosts name bastion twice."), "a jump host that two hosts share is no loop, and still two hops");
+        assert_eq!(refused("deep"), named_twice("twice's jump hosts name bastion twice."), "the host that names it twice, not the one asked for");
+        assert!(refused("edge").is_ok() && refused("left").is_ok(), "each of them is fine alone");
+    }
+
+    /// A loop keeps its own sentence, with the hosts round the circle and not the ones met on the way to it.
+    #[test]
+    fn a_loop_is_refused_with_the_path_round_the_circle() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(
+            &dir,
+            &[
+                ("bastion", "hostname gate.example.com\nport 22\nuser ops\n"),
+                ("self", "hostname self\nport 22\nuser deploy\nproxyjump self\n"),
+                ("loop1", "hostname loop1\nport 22\nuser deploy\nproxyjump loop2\n"),
+                ("loop2", "hostname loop2\nport 22\nuser deploy\nproxyjump loop1\n"),
+                ("behind", "hostname behind\nport 22\nuser deploy\nproxyjump bastion,loop1\n"),
+            ],
+        );
+        let refused = |query: HostQuery| directory.resolve(&query);
+        let circle = |path: &str| Err(DirectoryError::Unsupported(format!("The jump hosts go round in a circle: {path}.")));
+        assert_eq!(refused(HostQuery::Alias("self".into())), circle("self → self"));
+        assert_eq!(refused(HostQuery::Alias("loop1".into())), circle("loop1 → loop2 → loop1"));
+        assert_eq!(refused(HostQuery::Id("loop2".into())), circle("loop2 → loop1 → loop2"), "by id as well");
+        assert_eq!(refused(HostQuery::Alias("behind".into())), circle("behind → loop1 → loop2 → loop1"), "`bastion`, met on the way, is not on the circle");
+    }
+
+    /// The sentences of the test fake and of the adapter are written twice; the same chains, given to both, are answered the same way (the
+    /// hops, or the error), one host after the other, so that nothing is left over from one chain to the next.
+    #[test]
+    fn the_adapter_and_the_test_fake_answer_the_same_chains_the_same_way() {
+        // Each saved host, and the saved hosts it jumps through, in order. `gate` is not saved.
+        let chains: &[(&str, &[&str])] = &[
+            ("edge", &[]),
+            ("bastion", &["edge"]),
+            ("db", &["bastion"]),
+            ("web", &["bastion"]),
+            ("self", &["self"]),
+            ("loop1", &["loop2"]),
+            ("loop2", &["loop1"]),
+            ("behind", &["bastion", "loop1"]),
+            ("twice", &["bastion", "bastion"]),
+            ("down", &["bastion", "web"]),
+            ("left", &["bastion"]),
+            ("right", &["bastion"]),
+            ("top", &["left", "right"]),
+            ("deep", &["twice"]),
+            ("lost", &["gate"]),
+            ("lost-down", &["bastion", "lost"]),
+        ];
+        let fake = chains.iter().fold(FakeDirectory::new(), |fake, (alias, jumps)| fake.with_host_via(alias, AuthMethod::Password, jumps));
+        let answers: Vec<(String, String)> = chains
+            .iter()
+            .map(|(alias, jumps)| {
+                let jump = if jumps.is_empty() { String::new() } else { format!("proxyjump {}\n", jumps.join(",")) };
+                (alias.to_string(), format!("hostname {alias}\nport 22\nuser deploy\n{jump}"))
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = directory_over(&dir, &answers.iter().map(|(alias, text)| (alias.as_str(), text.as_str())).collect::<Vec<_>>());
+        let aliases = |directory: &dyn HostDirectory, alias: &str| {
+            directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.into_iter().map(|hop| hop.alias).collect::<Vec<_>>())
+        };
+        for (alias, _) in chains {
+            assert_eq!(aliases(&adapter, alias), aliases(&fake, alias), "{alias}");
+        }
+        // The answers themselves, so that two matching refusals for another reason would not pass.
+        let chain = |names: &[&str]| Ok(names.iter().map(|name| name.to_string()).collect::<Vec<_>>());
+        assert_eq!(aliases(&adapter, "db"), chain(&["edge", "bastion", "db"]));
+        assert_eq!(aliases(&adapter, "web"), chain(&["edge", "bastion", "web"]), "a jump host that two hosts share is not a loop");
+        let refused = |alias: &str, sentence: &str| assert_eq!(aliases(&adapter, alias), Err(DirectoryError::Unsupported(sentence.to_string())), "{alias}");
+        refused("behind", "The jump hosts go round in a circle: behind → loop1 → loop2 → loop1.");
+        refused("twice", "twice's jump hosts name bastion twice.");
+        refused("down", "down's jump hosts name bastion twice.");
+        refused("top", "top's jump hosts name bastion twice.");
+        refused("deep", "twice's jump hosts name bastion twice.");
+        refused("lost-down", "lost jumps through gate, which is not a saved host.");
+    }
+
+    /// Five jump hosts one behind the other are fine, a sixth is not: the host that would need more than five is refused, by its own alias.
+    #[test]
+    fn jump_hosts_nested_more_than_five_deep_are_refused() {
+        // h0 jumps through h1, which jumps through h2, and so on up to h6.
+        let answers: Vec<(String, String)> = (0..=6)
+            .map(|n| {
+                let jump = if n < 6 { format!("proxyjump h{}\n", n + 1) } else { String::new() };
+                (format!("h{n}"), format!("hostname h{n}\nport 22\nuser ops\n{jump}"))
+            })
+            .collect();
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(&dir, &answers.iter().map(|(alias, text)| (alias.as_str(), text.as_str())).collect::<Vec<_>>());
+        let aliases = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.into_iter().map(|hop| hop.alias).collect::<Vec<_>>());
+        assert_eq!(aliases("h1"), Ok(["h6", "h5", "h4", "h3", "h2", "h1"].map(String::from).to_vec()));
+        assert_eq!(aliases("h0"), Err(DirectoryError::Unsupported("h0 needs more than 5 jump hosts.".to_string())));
     }
 
     #[test]
