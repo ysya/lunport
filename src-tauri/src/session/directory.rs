@@ -68,3 +68,71 @@ pub trait HostDirectory: Send + Sync {
     /// The keychain account of the saved password of `host` (spec §5.5: `host:<host id>`).
     fn password_account(&self, host: &HostId) -> String;
 }
+
+/// What a `pin` or a `replace_pin` has to do, given the key pinned now. The rules are the ones documented on those two methods. They are
+/// written down once, here, so that the pin file, the test fake and the later host records decide the same way (and say the same
+/// sentence); `check_the_pin_contract` (test builds) checks the outcome of any directory. The caller makes the decision while it holds
+/// its lock, between reading the pin and writing it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PinDecision {
+    /// The key asked for is the pinned one already: nothing is written and the call succeeds.
+    AlreadyPinned,
+    /// Write the key as the host's pin.
+    Write,
+    /// Nothing is written and the call fails with this sentence.
+    Refuse(String),
+}
+
+/// `pin(host, key)`, while `pinned` (the fingerprint of the key pinned now, if any) is pinned: pin when nothing is, accept the key that is,
+/// refuse another one.
+pub fn decide_pin(host: &HostId, pinned: Option<&str>, key: &HostKey) -> PinDecision {
+    match pinned {
+        Some(pinned) if pinned == key.fingerprint => PinDecision::AlreadyPinned,
+        Some(_) => PinDecision::Refuse(format!("SSHelter did not pin the key of {host}: another key was pinned for it in the meantime.")),
+        None => PinDecision::Write,
+    }
+}
+
+/// `replace_pin(host, previous, key)`, while `pinned` is pinned: accept the key that is pinned already, replace `previous`, refuse anything
+/// else (another key, or no pin at all).
+pub fn decide_replace(host: &HostId, pinned: Option<&str>, previous: &HostKey, key: &HostKey) -> PinDecision {
+    match pinned {
+        Some(pinned) if pinned == key.fingerprint => PinDecision::AlreadyPinned,
+        Some(pinned) if pinned == previous.fingerprint => PinDecision::Write,
+        _ => PinDecision::Refuse(format!("SSHelter did not replace the key of {host}: the pinned key is not the one you were shown.")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::slot_rules::test_keys;
+
+    fn key(line: &str) -> HostKey {
+        HostKey::from_openssh_line(line).expect("a test key")
+    }
+
+    #[test]
+    fn pinning_writes_when_nothing_is_pinned_accepts_the_pinned_key_and_refuses_another() {
+        let web = HostId::from("web");
+        let (first, second) = (key(test_keys::PLAIN_PUBLIC), key(test_keys::ECDSA_PUBLIC));
+        assert_eq!(decide_pin(&web, None, &first), PinDecision::Write);
+        assert_eq!(decide_pin(&web, Some(&first.fingerprint), &first), PinDecision::AlreadyPinned);
+        assert_eq!(
+            decide_pin(&web, Some(&first.fingerprint), &second),
+            PinDecision::Refuse("SSHelter did not pin the key of web: another key was pinned for it in the meantime.".to_string())
+        );
+    }
+
+    #[test]
+    fn replacing_writes_only_from_the_key_that_was_shown_as_pinned_and_a_key_that_is_pinned_already_is_fine() {
+        let web = HostId::from("web");
+        let (old, new, other) = (key(test_keys::PLAIN_PUBLIC), key(test_keys::ECDSA_PUBLIC), key(test_keys::RSA_PUBLIC));
+        let refused = PinDecision::Refuse("SSHelter did not replace the key of web: the pinned key is not the one you were shown.".to_string());
+        assert_eq!(decide_replace(&web, Some(&old.fingerprint), &old, &new), PinDecision::Write);
+        assert_eq!(decide_replace(&web, Some(&new.fingerprint), &old, &new), PinDecision::AlreadyPinned, "the replace was made already");
+        assert_eq!(decide_replace(&web, Some(&new.fingerprint), &other, &new), PinDecision::AlreadyPinned, "the key asked for wins over `previous`");
+        assert_eq!(decide_replace(&web, Some(&other.fingerprint), &old, &new), refused, "another key is pinned now");
+        assert_eq!(decide_replace(&web, None, &old, &new), refused, "nothing is pinned: there is nothing to replace");
+    }
+}
