@@ -41,9 +41,16 @@ impl fmt::Display for DirectoryError {
 impl std::error::Error for DirectoryError {}
 
 /// The saved hosts, as the broker needs them. Implementations are called from the broker's connection threads, never from async code.
+///
+/// A host id stands for exactly one server: one hostname and one port. Pins are keyed by host id (`pinned`, `pin`, `replace_pin`), so two
+/// endpoints that shared an id would share one pin; it would flip between their two keys, and each flip would reach the person as a
+/// changed key ("someone could be intercepting the connection"). An implementation must therefore never resolve two different endpoints
+/// to the same id. Where a request would do that it returns an error (`Unsupported`, with the reason) instead: a jump written as
+/// `bastion:2200` is not the saved host `bastion` when that one is saved with port 22.
 pub trait HostDirectory: Send + Sync {
     /// The saved host `query` names, with its jump hosts in front (each a saved host too), ready for the engine. The pin of each hop is in
-    /// `Hop::pinned`. A chain that loops or names a host that is not saved is an error here, before anything connects.
+    /// `Hop::pinned`. A chain that loops, names a host that is not saved, or would give two different endpoints one host id is an error
+    /// here, before anything connects.
     fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError>;
 
     /// The key pinned for `host`, if any. An error reading the pins is `Err`, never "nothing pinned": a host that was pinned must not
