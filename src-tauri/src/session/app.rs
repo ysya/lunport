@@ -10,7 +10,7 @@ use tauri::Manager;
 use zeroize::Zeroizing;
 
 use super::auth::{KeyStore, VaultKey};
-use super::broker::Broker;
+use super::broker::{Broker, QUIT_WAIT};
 use super::hostkey_window::{TauriHostKeySurface, WindowConfirmer, HOSTKEY_TIMEOUT};
 use super::pins::PinStore;
 use super::ssh_config_directory::{vault_slot_of, Sources, SshConfigDirectory};
@@ -35,8 +35,6 @@ pub enum BrokerStatus {
 
 /// How long a connect waits for the window to load the SSH config before reading it itself (as the MCP bridge waits).
 const DOC_WAIT: Duration = Duration::from_secs(5);
-/// How long quitting waits for the sessions to close.
-const QUIT_WAIT: Duration = Duration::from_secs(3);
 
 /// The vault key `key_id` as the sync state lists it: a key "Only in SSHelter", named as the agent names it (the slot's name, else its
 /// file name). `None` for a slot whose key is not in the vault.
@@ -173,7 +171,8 @@ pub fn has_sessions(app: &tauri::AppHandle) -> bool {
     broker.is_some_and(|broker| broker.has_sessions())
 }
 
-/// The app is quitting: every session ends, each client told why (spec §4).
+/// The app is quitting: every session ends, each client told why (spec §4). It waits the broker's `QUIT_WAIT`, not less: a shell that has
+/// not printed yet is closed, and its client told, only after `SETTLE`, and the app exits when this returns.
 pub fn quit(app: &tauri::AppHandle) {
     let broker = app.state::<AppState>().session.broker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     if let Some(broker) = broker {
