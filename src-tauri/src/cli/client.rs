@@ -59,6 +59,11 @@ fn is_deceptive_format(c: char) -> bool {
     matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
+/// The message that cancels a question (the person pressed Ctrl-C or Ctrl-D, or the question was replaced).
+fn cancel(question_id: String) -> Action {
+    Action::Send(ClientMessage::Answer { question_id, value: None, cancel: true })
+}
+
 /// What the person typed before the shell opened is kept for it (as OpenSSH's typeahead reaches the shell), up to this many bytes.
 const TYPEAHEAD_LIMIT: usize = 64 * 1024;
 
@@ -120,10 +125,11 @@ impl Client {
         (client, actions)
     }
 
-    fn mode(&self) -> Mode {
-        match self.phase {
+    /// The mode the terminal is in while no question is on it; while one is, the mode it goes back to when that question ends.
+    fn resting_mode(&self) -> Mode {
+        match &self.phase {
             Phase::Open => Mode::Raw,
-            Phase::Asking { echo, .. } => Mode::Prompt { echo },
+            Phase::Asking { after, .. } => *after,
             Phase::Connecting | Phase::Ended => Mode::Cooked,
         }
     }
@@ -162,21 +168,9 @@ impl Client {
 
     fn message(&mut self, message: ServerMessage) -> Vec<Action> {
         match message {
-            ServerMessage::Opened { .. } => {
-                self.phase = Phase::Open;
-                let mut actions = vec![Action::Mode(Mode::Raw, false)];
-                if !self.typeahead.is_empty() {
-                    actions.push(Action::SendData(std::mem::take(&mut *self.typeahead)));
-                }
-                actions
-            }
+            ServerMessage::Opened { .. } => self.opened(),
             ServerMessage::Question(Question { kind: QuestionKind::HostKeyNotice, text, .. }) => vec![Action::Stderr(format!("{}\n", printable(&text)))],
-            ServerMessage::Question(Question { question_id, text, echo, .. }) => {
-                let after = self.mode();
-                self.typeahead.clear();
-                self.phase = Phase::Asking { question_id, echo, line: Zeroizing::new(Vec::new()), after };
-                vec![Action::Mode(Mode::Prompt { echo }, true), Action::Stderr(printable(&text))]
-            }
+            ServerMessage::Question(Question { question_id, text, echo, .. }) => self.ask(question_id, &text, echo),
             ServerMessage::Event(Event::Banner { text }) => {
                 let text = printable(&text);
                 let text = if text.ends_with('\n') { text } else { format!("{text}\n") };
@@ -196,6 +190,44 @@ impl Client {
                 self.finish(reason, exit_code(code, signal.as_deref()))
             }
         }
+    }
+
+    /// The shell is open: the terminal goes raw, and what was typed while connecting goes to it.
+    fn opened(&mut self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        // A question still on the terminal is over (the broker does not open the shell under an unanswered question, but if it did):
+        // it is cancelled, and what was typed for it is thrown away with the terminal's pending input, so that it cannot become input
+        // of the shell.
+        let over_a_question = if let Phase::Asking { question_id, .. } = &self.phase {
+            actions.push(Action::Stderr("\n".to_string()));
+            actions.push(cancel(question_id.clone()));
+            true
+        } else {
+            false
+        };
+        self.phase = Phase::Open;
+        actions.push(Action::Mode(Mode::Raw, over_a_question));
+        if !self.typeahead.is_empty() {
+            actions.push(Action::SendData(std::mem::take(&mut *self.typeahead)));
+        }
+        actions
+    }
+
+    /// Puts a question on the terminal, in the prompt mode that fits it.
+    fn ask(&mut self, question_id: String, text: &str, echo: bool) -> Vec<Action> {
+        let mut actions = Vec::new();
+        // The terminal goes back to what it was before the first question, not to the mode of one that was cancelled on the way; the
+        // cancelled question's prompt is still on the line, so the new one starts on a line of its own.
+        let after = self.resting_mode();
+        if let Phase::Asking { question_id: superseded, .. } = &self.phase {
+            actions.push(Action::Stderr("\n".to_string()));
+            actions.push(cancel(superseded.clone()));
+        }
+        self.typeahead.clear();
+        self.phase = Phase::Asking { question_id, echo, line: Zeroizing::new(Vec::new()), after };
+        actions.push(Action::Mode(Mode::Prompt { echo }, true));
+        actions.push(Action::Stderr(printable(text)));
+        actions
     }
 
     fn typed(&mut self, bytes: &[u8]) -> Vec<Action> {
@@ -222,7 +254,14 @@ impl Client {
 
     /// Ends the question on the terminal: with the answer, or cancelled (`None`).
     fn answer(&mut self, answer: Option<Zeroizing<String>>) -> Vec<Action> {
-        let Phase::Asking { question_id, echo, after, .. } = std::mem::replace(&mut self.phase, Phase::Connecting) else { return Vec::new() };
+        let (question_id, echo, after) = match std::mem::replace(&mut self.phase, Phase::Connecting) {
+            Phase::Asking { question_id, echo, after, .. } => (question_id, echo, after),
+            other => {
+                // No question is on the terminal: there is nothing to answer, and nothing changes.
+                self.phase = other;
+                return Vec::new();
+            }
+        };
         self.phase = if after == Mode::Raw { Phase::Open } else { Phase::Connecting };
         let mut actions = Vec::new();
         if !echo || answer.is_none() {
@@ -240,11 +279,13 @@ impl Client {
 
     /// The end: the terminal is put back first, then the reason is printed on a line of its own, then the program exits.
     fn finish(&mut self, reason: Option<String>, code: i32) -> Vec<Action> {
-        let was_open = matches!(self.phase, Phase::Open) || matches!(self.phase, Phase::Asking { after: Mode::Raw, .. });
+        // The cursor is not at the start of a line while the shell is open (it can be anywhere in what the shell wrote), nor while a
+        // question's prompt is on it, whatever the terminal was before the question.
+        let mid_line = matches!(self.phase, Phase::Open | Phase::Asking { .. });
         self.phase = Phase::Ended;
         let mut actions = vec![Action::Mode(Mode::Cooked, false)];
         if let Some(reason) = reason {
-            actions.push(Action::Stderr(if was_open { format!("\n{reason}\n") } else { format!("{reason}\n") }));
+            actions.push(Action::Stderr(if mid_line { format!("\n{reason}\n") } else { format!("{reason}\n") }));
         }
         actions.push(Action::Exit(code));
         actions
@@ -412,6 +453,18 @@ mod tests {
         Input::Message(ServerMessage::Exited { code: None, signal: None })
     }
 
+    fn opens() -> Input {
+        Input::Message(ServerMessage::Opened { session_id: "1".into() })
+    }
+
+    fn answered(id: &str, value: &str) -> Action {
+        Action::Send(ClientMessage::Answer { question_id: id.into(), value: Some(value.into()), cancel: false })
+    }
+
+    fn cancelled(id: &str) -> Action {
+        Action::Send(ClientMessage::Answer { question_id: id.into(), value: None, cancel: true })
+    }
+
     /// What a hostile (or a broken, or an older) broker could send: an escape sequence (it clears the screen), a carriage return (it
     /// overwrites the line), the 8-bit CSI (a C1 control), a right-to-left override, and the tab and the line feed, which are fine.
     const HOSTILE: &str = "a\u{1b}[2Jb\rc\u{9b}d\u{202e}e\tf\ng";
@@ -520,6 +573,71 @@ mod tests {
             text.push_str("b\r\nc\rd\r\r\ne");
             assert_eq!(printable(&text), crate::session::auth::printable(&text), "U+{:04X}", c as u32);
         }
+    }
+
+    /// The prompt is still on the line when the session ends under it (the broker gave up waiting for the answer, or the app quit): the
+    /// reason must not be printed after the prompt, but on a line of its own.
+    #[test]
+    fn an_end_while_a_question_is_on_the_terminal_starts_on_a_line_of_its_own() {
+        for mut client in [started(), opened()] {
+            client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
+            client.handle(error(kinds::AUTH, "Authentication for web was abandoned (the password prompt timed out)."));
+            assert_eq!(
+                client.handle(exited()),
+                [Action::Mode(Mode::Cooked, false), Action::Stderr("\nAuthentication for web was abandoned (the password prompt timed out).\n".into()), Action::Exit(255)]
+            );
+        }
+        let mut client = started();
+        client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
+        assert_eq!(
+            client.handle(Input::Closed),
+            [Action::Mode(Mode::Cooked, false), Action::Stderr("\nThe connection to SSHelter ended.\n".into()), Action::Exit(255)]
+        );
+    }
+
+    /// Not something the broker does (it waits for each answer), but the terminal must not be left in the first question's mode, nor the
+    /// open shell lose its raw mode, if a second question arrives: the first is cancelled, and what comes after both is what came before.
+    #[test]
+    fn a_second_question_cancels_the_first_and_the_terminal_goes_back_to_what_it_was_before_both() {
+        let mut client = started();
+        client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
+        assert_eq!(
+            client.handle(question("q2", QuestionKind::Interactive, "Code: ", true)),
+            [Action::Stderr("\n".into()), cancelled("q1"), Action::Mode(Mode::Prompt { echo: true }, true), Action::Stderr("Code: ".into())]
+        );
+        assert_eq!(client.handle(Input::Stdin(b"123456\n".to_vec())), [answered("q2", "123456"), Action::Mode(Mode::Cooked, false)]);
+        assert!(client.handle(Input::Stdin(b"ls\n".to_vec())).is_empty(), "connecting again: what is typed is kept for the shell");
+        assert_eq!(client.handle(opens()), [Action::Mode(Mode::Raw, false), Action::SendData(b"ls\n".to_vec())]);
+
+        let mut client = opened();
+        client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
+        assert_eq!(
+            client.handle(question("q2", QuestionKind::Interactive, "Code: ", true)),
+            [Action::Stderr("\n".into()), cancelled("q1"), Action::Mode(Mode::Prompt { echo: true }, true), Action::Stderr("Code: ".into())]
+        );
+        assert_eq!(client.handle(Input::Stdin(b"123456\n".to_vec())), [answered("q2", "123456"), Action::Mode(Mode::Raw, false)]);
+        assert_eq!(client.handle(Input::Stdin(b"ls\r".to_vec())), [Action::SendData(b"ls\r".to_vec())], "the shell is open again");
+    }
+
+    /// Nor does the broker open the shell under an unanswered question; if it did, the question is over, and what was typed for it must
+    /// not become input of the shell (the terminal's pending input is thrown away).
+    #[test]
+    fn a_shell_that_opens_over_a_question_cancels_it_and_throws_away_what_was_typed_for_it() {
+        let mut client = started();
+        client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
+        assert!(client.handle(Input::Stdin(b"hun".to_vec())).is_empty());
+        assert_eq!(client.handle(opens()), [Action::Stderr("\n".into()), cancelled("q1"), Action::Mode(Mode::Raw, true)]);
+        assert_eq!(client.handle(Input::Stdin(b"ls\r".to_vec())), [Action::SendData(b"ls\r".to_vec())], "only what is typed from now on reaches the shell");
+    }
+
+    #[test]
+    fn an_answer_with_no_question_on_the_terminal_does_nothing() {
+        let mut client = opened();
+        assert!(client.answer(None).is_empty());
+        assert!(matches!(client.phase, Phase::Open), "the open shell stays open");
+        let mut client = started();
+        assert!(client.answer(Some(Zeroizing::new("x".to_string()))).is_empty());
+        assert!(matches!(client.phase, Phase::Connecting));
     }
 
     /// The shell's own bytes are not the CLI's to change: that is what a terminal program is for.
