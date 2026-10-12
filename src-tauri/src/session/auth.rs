@@ -402,6 +402,17 @@ mod tests {
         assert!(owner.asked().is_empty());
     }
 
+    /// The agent remembers a passphrase under its own `passphrase_account`, and `sync/slots.rs` forgets the one of a slot whose key was
+    /// replaced through that function: were the two formats to part, passphrases remembered on this computer would silently stop being
+    /// found here, and stale ones would stay. The first assertion pins the documented format; when plan 1c deletes `agent/`, the second goes.
+    #[test]
+    fn the_passphrase_account_is_the_one_the_agent_remembers_under() {
+        assert_eq!(passphrase_account("k-enc"), "vault:passphrase:k-enc");
+        for key_id in ["k-enc", "0123456789abcdef0123456789abcdef", ""] {
+            assert_eq!(passphrase_account(key_id), crate::agent::broker::passphrase_account(key_id), "key id {key_id:?}");
+        }
+    }
+
     /// Asked before anything connects, without echo, and again after a wrong one; a stale remembered passphrase is forgotten first.
     #[test]
     fn a_passphrase_is_asked_before_the_connection_and_again_after_a_wrong_one() {
