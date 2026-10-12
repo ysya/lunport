@@ -10,6 +10,8 @@ mod engine_tests;
 mod error;
 #[cfg(test)]
 pub mod fake;
+#[cfg(test)]
+mod parity_tests;
 pub mod russh_engine;
 #[cfg(test)]
 pub mod testing;
