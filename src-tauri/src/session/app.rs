@@ -42,9 +42,9 @@ const QUIT_WAIT: Duration = Duration::from_secs(3);
 /// file name). `None` for a slot whose key is not in the vault.
 pub fn vault_key_in(state: &SyncStateV2, key_id: &str) -> Option<VaultKey> {
     let local = state.key_slots.get(key_id)?;
-    let Some(SlotSource::Vault { public_key, has_passphrase, .. }) = &local.source else { return None };
+    let Some(SlotSource::Vault { public_key, .. }) = &local.source else { return None };
     let name = local.payload.as_ref().map(|payload| payload.name.clone()).filter(|name| !name.is_empty()).unwrap_or_else(|| local.file_name.clone());
-    Some(VaultKey { name, public_key: public_key.clone(), has_passphrase: *has_passphrase })
+    Some(VaultKey { name, public_key: public_key.clone() })
 }
 
 /// The SSH config the window loaded; when it has not loaded one within `wait` (an app started in the background by a client), the one
@@ -207,7 +207,7 @@ mod tests {
         let vault = SlotSource::Vault { fingerprint: "SHA256:v".into(), public_key: "ssh-ed25519 AAAA".into(), has_passphrase: true };
         state.key_slots.insert("a".repeat(32), slot("id_mac-aaaaaaaa", Some(vault)));
         state.key_slots.insert("b".repeat(32), slot("work-bbbbbbbb", Some(SlotSource::SyncedCopy { fingerprint: "SHA256:w".into() })));
-        assert_eq!(vault_key_in(&state, &"a".repeat(32)), Some(VaultKey { name: "id_mac-aaaaaaaa".into(), public_key: "ssh-ed25519 AAAA".into(), has_passphrase: true }));
+        assert_eq!(vault_key_in(&state, &"a".repeat(32)), Some(VaultKey { name: "id_mac-aaaaaaaa".into(), public_key: "ssh-ed25519 AAAA".into() }));
         assert_eq!(vault_key_in(&state, &"b".repeat(32)), None, "a key in a file is not the vault's");
         assert_eq!(vault_key_in(&state, "missing"), None);
     }
