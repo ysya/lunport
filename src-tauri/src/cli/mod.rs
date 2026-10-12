@@ -97,14 +97,14 @@ fn session(
     let terminal = tty.restorer();
     terminal::restore_on_panic(terminal.clone());
     let (inputs, queue) = run::queue();
-    let watchdog = match run::Watchdog::start(terminal, run::STOP_GRACE, |code| std::process::exit(code)) {
+    let watchdog = match run::Watchdog::start(terminal.clone(), run::STOP_GRACE, |code| std::process::exit(code)) {
         Ok(watchdog) => watchdog,
         Err(error) => {
             let _ = writeln!(stderr, "sshelter: cannot take over the terminal's signals: {error}");
             return 1;
         }
     };
-    if let Err(error) = run::signal_thread(inputs.clone(), watchdog.clone(), move || size.size()) {
+    if let Err(error) = run::signal_thread(inputs.clone(), terminal, watchdog.clone(), move || size.size()) {
         let _ = writeln!(stderr, "sshelter: cannot follow the terminal's size: {error}");
     }
     let hung_up = watchdog.clone();
