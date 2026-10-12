@@ -724,6 +724,28 @@ mod tests {
         assert_eq!(refusing.connect(&web()).err(), Some(failure(kinds::HOST_KEY, "The host key of web changed. Connection refused.")));
     }
 
+    /// Plan 1b R17 connects again without the pinned key type once for a host: when the server still has nothing in common with the
+    /// offer, the error stands. A host with no pin has no restriction to lift and is not tried again at all.
+    #[test]
+    fn the_connect_without_the_pinned_key_type_is_tried_once_for_a_host_and_only_for_a_pinned_one() {
+        let saved = || FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() });
+        let none_in_common = |directory: &FakeDirectory| {
+            let web = directory.resolve(&web()).unwrap().hops.remove(0).reference();
+            FakeEngine::new().failing_with(ConnectError::NoCommonHostKeyAlgorithm { hop: web, ours: vec!["ssh-ed25519".into()], theirs: vec!["ssh-dss".into()] })
+        };
+        let sentence = failure(kinds::CONNECT, "Could not agree on a host key algorithm with web: the server offers ssh-dss, SSHelter accepts ssh-ed25519.");
+
+        let pinned = saved().with_pin("web", default_server_key());
+        let pinned = world(none_in_common(&pinned), pinned);
+        assert_eq!(pinned.connect(&web()).err(), Some(sentence.clone()));
+        assert_eq!(pinned.engine.attempts(), 2, "once more without the restriction, and no more");
+
+        let unpinned = saved();
+        let unpinned = world(none_in_common(&unpinned), unpinned);
+        assert_eq!(unpinned.connect(&web()).err(), Some(sentence));
+        assert_eq!(unpinned.engine.attempts(), 1, "nothing was restricted, so there is nothing to try again without");
+    }
+
     fn world_refusing_algorithm_change(pinned: HostKey) -> World {
         world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", pinned)).with_saved_password().deciding(vec![Decision::Refuse])
     }
