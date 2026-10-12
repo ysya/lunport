@@ -140,11 +140,27 @@ struct HopShared {
     /// Set by `Handler::disconnected`, just before `ended` is written, when the connection ended because the server had no login method
     /// to offer (russh's `NoAuthMethod`).
     no_login_method: std::sync::atomic::AtomicBool,
+    /// Banners the server sent during the login, not yet handed to the auth source (`deliver_banners`).
+    banners: Mutex<Vec<String>>,
 }
 
 impl HopShared {
     fn new() -> Arc<HopShared> {
-        Arc::new(HopShared { observed: Mutex::new(None), ended: Mutex::new(None), no_login_method: std::sync::atomic::AtomicBool::new(false) })
+        Arc::new(HopShared {
+            observed: Mutex::new(None),
+            ended: Mutex::new(None),
+            no_login_method: std::sync::atomic::AtomicBool::new(false),
+            banners: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+/// Hands the banners the server has sent so far to the auth source, on the thread that called `connect` (the handler runs on russh's
+/// task, where the caller's `&dyn AuthSource` cannot go).
+fn deliver_banners(shared: &HopShared, auth: &dyn AuthSource, hop: &HopRef) {
+    let banners = std::mem::take(&mut *locked(&shared.banners));
+    for banner in banners {
+        auth.banner(hop, &banner);
     }
 }
 
@@ -185,6 +201,12 @@ impl Handler for EngineHandler {
         let trusted = verdict == HostKeyVerdict::Pinned;
         *locked(&self.shared.observed) = Some((host_key, verdict));
         Ok(trusted)
+    }
+
+    /// Keeps the banner for the connect thread, which hands it to the auth source (`deliver_banners`); nothing waits here.
+    async fn auth_banner(&mut self, banner: &str, _session: &mut client::Session) -> Result<(), Self::Error> {
+        locked(&self.shared.banners).push(banner.to_string());
+        Ok(())
     }
 
     async fn disconnected(&mut self, reason: RusshDisconnect<Self::Error>) -> Result<(), Self::Error> {
@@ -400,7 +422,9 @@ async fn connect_one(
     // unauthenticated connection waiting (the server's login grace time runs, and russh spins while it idles).
     let password = (hop.auth == AuthMethod::Password).then(|| auth.password(&reference));
     let (mut handle, shared) = connect_hop(hop, via, host_keys).await?;
-    authenticate(hop, &mut handle, &shared, auth, password, options).await?;
+    let login = authenticate(hop, &mut handle, &shared, auth, password, options).await;
+    deliver_banners(&shared, auth, &reference);
+    login?;
     Ok(Established { hop: reference, handle, shared })
 }
 
@@ -645,7 +669,7 @@ async fn classify_empty_answer(shared: &HopShared, closed: impl Fn() -> bool, wa
 /// The failure for a server with no login method to offer, with what the methods that were skipped had to say.
 fn no_login_method(hop: &HopRef, tried: Vec<AuthMethod>, mut reasons: Vec<String>) -> ConnectError {
     reasons.push("The server offers no login method.".to_string());
-    ConnectError::AuthFailed { hop: hop.clone(), tried, reason: reasons.join(" ") }
+    ConnectError::AuthFailed { hop: hop.clone(), tried, reason: reasons.join(" "), password_wanted: false }
 }
 
 /// The failure for a connection that went away while the login was under way.
@@ -693,6 +717,8 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
         if offered.as_ref().is_some_and(|offered| !offered.contains(&method_kind(&method))) {
             continue;
         }
+        // A banner arrives with the server's answer to a login request; it is shown before the next prompt.
+        deliver_banners(shared, auth, &reference);
         let step = match &method {
             AuthMethod::Key { key_id } => 'key: {
                 let Some(line) = auth.public_key(key_id) else {
@@ -766,6 +792,7 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
                             } else {
                                 let prompts: Vec<Prompt> = prompts.into_iter().map(|prompt| Prompt { text: prompt.prompt, echo: prompt.echo }).collect();
                                 let deadline = std::time::Instant::now() + prompt_wait.min(LONGEST_TIMEOUT);
+                                deliver_banners(shared, auth, &reference);
                                 let Some(answers) = auth.interactive(&reference, &prompts, deadline) else { return Err(abandoned("the prompt was cancelled")) };
                                 if std::time::Instant::now() > deadline {
                                     return Err(abandoned("the prompt was answered after its deadline"));
@@ -798,7 +825,10 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
             Step::Skipped => {}
         }
     }
-    Err(ConnectError::AuthFailed { hop: reference, tried, reason: reasons.join(" ") })
+    // The server still offers the password method and no password was tried: one typed now could get in (the broker asks and connects
+    // again with the password first, rather than have a person type while this connection waits).
+    let password_wanted = offered.as_ref().is_some_and(|offered| offered.contains(&MethodKind::Password)) && !tried.contains(&AuthMethod::Password);
+    Err(ConnectError::AuthFailed { hop: reference, tried, reason: reasons.join(" "), password_wanted })
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -1101,7 +1131,10 @@ impl Drop for RusshShellInput {
 /// output into the queue without ever waiting for the consumer, and when the channel ends it records how, then closes the queue, in
 /// that order, so a consumer that sees the end of the output finds the exit.
 async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWriteHalf<Msg>>, queue: Arc<ByteQueue>, exit: Arc<ExitCell>, mut closed_by_us: watch::Receiver<bool>) {
-    let (mut code, mut signal, mut refused) = (None, None, false);
+    let (mut code, mut signal, mut refused) = (None, None, None);
+    // The PTY request and the shell request both ask for a reply, and a server replies in the order of the requests: the first reply is
+    // the PTY's.
+    let mut replies = 0;
     loop {
         let message = tokio::select! {
             message = read_half.wait() => message,
@@ -1114,18 +1147,20 @@ async fn read_shell(mut read_half: ChannelReadHalf, write_half: Arc<ChannelWrite
             }
             ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
             ChannelMsg::ExitSignal { signal_name: name, .. } => signal = Some(signal_name(&name)),
+            ChannelMsg::Success => replies += 1,
             ChannelMsg::Failure => {
-                refused = true;
+                refused = Some(if replies == 0 { "the server refused to allocate a terminal (PTY)" } else { "the server refused to start a shell" });
                 let _ = sent(write_half.close()).await;
                 break;
             }
             _ => {}
         }
     }
-    exit.set(match (signal, code) {
-        (Some(signal), _) => Exit::Signal(signal),
-        (None, Some(code)) if !refused => Exit::Code(code),
-        _ => Exit::Disconnected,
+    exit.set(match (signal, code, refused) {
+        (Some(signal), _, _) => Exit::Signal(signal),
+        (None, _, Some(refused)) => Exit::Refused(refused.to_string()),
+        (None, Some(code), None) => Exit::Code(code),
+        (None, None, None) => Exit::Disconnected,
     });
     queue.close();
 }

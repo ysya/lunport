@@ -65,6 +65,7 @@ struct Script {
     shell_exit: Exit,
     shell_ends_at_once: bool,
     disconnect: Option<DisconnectReason>,
+    banner: Option<String>,
 }
 
 struct Shared {
@@ -105,6 +106,7 @@ impl FakeEngine {
             shell_exit: Exit::Code(0),
             shell_ends_at_once: false,
             disconnect: None,
+            banner: None,
         };
         FakeEngine { shared: Arc::new(Shared { script: Mutex::new(script), events: Mutex::new(Vec::new()) }) }
     }
@@ -169,6 +171,11 @@ impl FakeEngine {
         self.script(|script| script.disconnect = Some(reason))
     }
 
+    /// Every server sends this banner once its host key is accepted, before the login (`AuthSource::banner`).
+    pub fn with_banner(self, text: &str) -> FakeEngine {
+        self.script(|script| script.banner = Some(text.to_string()))
+    }
+
     /// Everything the code under test has done so far.
     pub fn events(&self) -> Vec<FakeEvent> {
         locked(&self.shared.events).clone()
@@ -191,9 +198,9 @@ fn check_chain(target: &Target) -> Result<(), ConnectError> {
 impl SshEngine for FakeEngine {
     fn connect(&self, target: &Target, host_keys: &dyn HostKeyPolicy, auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
         check_chain(target)?;
-        let (login_default, logins, key_default, keys, scripted_error) = {
+        let (login_default, logins, key_default, keys, scripted_error, banner) = {
             let script = locked(&self.shared.script);
-            (script.login.clone(), script.logins.clone(), script.host_key.clone(), script.host_keys.clone(), script.connect_error.clone())
+            (script.login.clone(), script.logins.clone(), script.host_key.clone(), script.host_keys.clone(), script.connect_error.clone(), script.banner.clone())
         };
         if let Some(error) = scripted_error {
             return Err(error);
@@ -208,6 +215,9 @@ impl SshEngine for FakeEngine {
                 HostKeyVerdict::Unknown => return Err(ConnectError::HostKeyUnknown { hop: reference, key }),
                 HostKeyVerdict::Mismatch { pinned } => return Err(ConnectError::HostKeyMismatch { hop: reference, key, pinned }),
             }
+            if let Some(banner) = &banner {
+                auth.banner(&reference, banner);
+            }
             fake_login(hop, logins.get(&hop.alias).unwrap_or(&login_default), auth, prefetched)?;
         }
         self.shared.record(FakeEvent::Connect { aliases: target.hops.iter().map(|hop| hop.alias.clone()).collect() });
@@ -219,19 +229,20 @@ impl SshEngine for FakeEngine {
 
 fn fake_login(hop: &Hop, login: &FakeLogin, auth: &dyn AuthSource, prefetched: Option<Option<Secret>>) -> Result<(), ConnectError> {
     let reference = hop.reference();
-    let refused = |tried: Vec<AuthMethod>| ConnectError::AuthFailed { hop: reference.clone(), tried, reason: String::new() };
+    // `password_wanted` as the real engine reports it: the server offers the password method and none was tried.
+    let refused = |tried: Vec<AuthMethod>, password_wanted: bool| ConnectError::AuthFailed { hop: reference.clone(), tried, reason: String::new(), password_wanted };
     let abandoned = |reason: &str| ConnectError::AuthAbandoned { hop: reference.clone(), reason: reason.to_string() };
     match login {
         FakeLogin::Accept => Ok(()),
-        FakeLogin::Refuse => Err(refused(hop.auth_sequence())),
+        FakeLogin::Refuse => Err(refused(hop.auth_sequence(), false)),
         FakeLogin::Signature => {
-            let AuthMethod::Key { key_id } = &hop.auth else { return Err(refused(vec![])) };
+            let AuthMethod::Key { key_id } = &hop.auth else { return Err(refused(vec![], false)) };
             auth.sign(key_id, b"fake-challenge", Some(RsaHash::Sha512)).map(|_| ()).map_err(|error| abandoned(&error.to_string()))
         }
         FakeLogin::Password(expected) => match prefetched.unwrap_or_else(|| auth.password(&reference)) {
-            None => Err(ConnectError::AuthFailed { hop: reference.clone(), tried: vec![], reason: "No password was given.".to_string() }),
+            None => Err(ConnectError::AuthFailed { hop: reference.clone(), tried: vec![], reason: "No password was given.".to_string(), password_wanted: true }),
             Some(given) if given.as_str() == expected => Ok(()),
-            Some(_) => Err(refused(vec![AuthMethod::Password])),
+            Some(_) => Err(refused(vec![AuthMethod::Password], false)),
         },
         FakeLogin::Interactive { prompts, answers } => {
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -239,7 +250,7 @@ fn fake_login(hop: &Hop, login: &FakeLogin, auth: &dyn AuthSource, prefetched: O
                 None => Err(abandoned("the prompt was cancelled")),
                 Some(given) if given.len() != prompts.len() => Err(abandoned("the answers do not match the prompts")),
                 Some(given) if given.iter().map(|answer| answer.as_str()).eq(answers.iter().map(String::as_str)) => Ok(()),
-                Some(_) => Err(refused(vec![AuthMethod::Interactive])),
+                Some(_) => Err(refused(vec![AuthMethod::Interactive], false)),
             }
         }
     }
@@ -431,6 +442,9 @@ mod tests {
             locked(&self.asked).push(format!("interactive {} {}", hop.alias, prompts.len()));
             self.answers.clone().map(|answers| answers.into_iter().map(Zeroizing::new).collect())
         }
+        fn banner(&self, hop: &HopRef, text: &str) {
+            locked(&self.asked).push(format!("banner {} {text}", hop.alias));
+        }
     }
 
     fn connect(engine: &FakeEngine, target: &Target, auth: &Auth) -> Result<Box<dyn Session>, ConnectError> {
@@ -525,7 +539,14 @@ mod tests {
         assert!(matches!(connect(&engine, &direct("web"), &wrong), Err(ConnectError::AuthFailed { tried, .. }) if tried == [AuthMethod::Password]));
 
         let none = Auth::default();
-        assert!(matches!(connect(&engine, &direct("web"), &none), Err(ConnectError::AuthFailed { tried, .. }) if tried.is_empty()), "no password: the method is skipped");
+        assert!(
+            matches!(connect(&engine, &direct("web"), &none), Err(ConnectError::AuthFailed { tried, password_wanted: true, .. }) if tried.is_empty()),
+            "no password: the method is skipped, and a typed one could get in"
+        );
+        assert!(
+            matches!(connect(&engine, &direct("web"), &wrong), Err(ConnectError::AuthFailed { password_wanted: false, .. })),
+            "a password was tried"
+        );
 
         let by_password = Target { hops: vec![Hop::new("id-pw", "pw", "pw.example.com", 22, "deploy", AuthMethod::Password)] };
         let unknown = Policy { accepted: None, pinned: None };
@@ -587,6 +608,14 @@ mod tests {
         assert_eq!(engine.events(), vec![FakeEvent::Connect { aliases: vec!["bastion".into(), "db".into()] }]);
         drop(session);
         assert_eq!(engine.events().last(), Some(&FakeEvent::Closed), "dropping a session closes it");
+    }
+
+    #[test]
+    fn a_scripted_banner_is_handed_to_the_auth_source_of_each_hop() {
+        let engine = FakeEngine::new().with_banner("Authorized use only.");
+        let auth = Auth::default();
+        connect(&engine, &Target { hops: vec![hop("bastion"), hop("db")] }, &auth).expect("connects");
+        assert_eq!(*locked(&auth.asked), vec!["banner bastion Authorized use only.".to_string(), "banner db Authorized use only.".to_string()]);
     }
 
     #[test]

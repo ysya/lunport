@@ -111,4 +111,9 @@ pub trait AuthSource: Send + Sync {
     /// The answers to one keyboard-interactive round, one per prompt, given before `deadline`; `None` abandons the login and the engine
     /// drops the connection. An answer that arrives after the deadline is not used either.
     fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>>;
+
+    /// The banner `hop`'s server sent during the login (SSH_MSG_USERAUTH_BANNER, sshd's `Banner`), as the server wrote it: the text comes
+    /// from the server, so whoever shows it removes control characters first. Handed over before the next prompt and at the end of the
+    /// login at the latest. Must be quick. The default drops it.
+    fn banner(&self, _hop: &HopRef, _text: &str) {}
 }
