@@ -28,7 +28,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// How long a new connection may take to say `hello`.
+/// How long a new connection may take for each of its first two messages, `hello` and `open_shell`.
 const HELLO_WAIT: Duration = Duration::from_secs(10);
 
 /// The sentence a client is told when the app quits under its session (spec §4).
@@ -105,6 +105,8 @@ pub struct Broker {
     keys: Arc<dyn KeyStore>,
     keychain: Arc<dyn Keychain>,
     confirmer: Arc<dyn HostKeyConfirmer>,
+    /// How long a new connection may take for each of `hello` and `open_shell`.
+    hello_wait: Duration,
     table: Mutex<Table>,
     /// Notified whenever a session leaves the table (`end_all` waits on it).
     changed: Condvar,
@@ -119,7 +121,29 @@ impl Broker {
         keychain: Arc<dyn Keychain>,
         confirmer: Arc<dyn HostKeyConfirmer>,
     ) -> Arc<Broker> {
-        Arc::new(Broker { engine, directory, keys, keychain, confirmer, table: Mutex::new(Table::default()), changed: Condvar::new(), next_id: AtomicU64::new(0) })
+        Broker::with_hello_wait(engine, directory, keys, keychain, confirmer, HELLO_WAIT)
+    }
+
+    /// The same, with another time for a new connection to say `hello` and `open_shell` (the tests do not wait ten seconds).
+    fn with_hello_wait(
+        engine: Arc<dyn SshEngine>,
+        directory: Arc<dyn HostDirectory>,
+        keys: Arc<dyn KeyStore>,
+        keychain: Arc<dyn Keychain>,
+        confirmer: Arc<dyn HostKeyConfirmer>,
+        hello_wait: Duration,
+    ) -> Arc<Broker> {
+        Arc::new(Broker {
+            engine,
+            directory,
+            keys,
+            keychain,
+            confirmer,
+            hello_wait,
+            table: Mutex::new(Table::default()),
+            changed: Condvar::new(),
+            next_id: AtomicU64::new(0),
+        })
     }
 
     /// The IPC server's handler: each connection is served on the thread the server gives it.
@@ -193,12 +217,12 @@ impl Broker {
         let refuse = |kind: &str, text: &str| {
             let _ = tell(link.as_ref(), ServerMessage::Event(Event::Error { kind: kind.to_string(), text: text.to_string() }));
         };
-        // `hello` first, within a short time; from then on no read timeout (an idle shell is not a dead client).
-        let _ = set_read_timeout(&reader, Some(HELLO_WAIT));
+        // `hello`, then `open_shell`, each within a short time (a connection is one of 64 and costs a thread); from then on no read timeout
+        // (an idle shell is not a dead client).
+        let _ = set_read_timeout(&reader, Some(self.hello_wait));
         if !greet(&mut reader, link.as_ref()) {
             return;
         }
-        let _ = set_read_timeout(&reader, None);
         let requested_by = requester_of(pid);
         let (host, pty) = match first_frame(&mut reader) {
             First::Silent => return,
@@ -209,6 +233,7 @@ impl Broker {
             },
             First::Data | First::Broken => return refuse(kinds::PROTOCOL, "SSHelter expected open_shell."),
         };
+        let _ = set_read_timeout(&reader, None);
         let owner = Arc::new(ConnectionOwner::new(Arc::clone(&link)));
         let control = Arc::new(ShellControl::new());
         let cancel = CancelToken::default();
@@ -649,6 +674,24 @@ mod tests {
             Arc::new(FakeKeys::new()),
             Arc::new(keychain),
             confirmer,
+        );
+        let dir = tempfile::Builder::new().prefix("sb").tempdir_in("/tmp").unwrap();
+        let ipc = dir.path().join("ipc");
+        assert_eq!(crate::ipc::server::listen_unix(&ipc, broker.handler()).unwrap(), crate::ipc::server::Started::Running);
+        World { broker, engine, gates, directory, sock: ipc.join("sock"), _dir: dir }
+    }
+
+    /// Like `world`, with a broker that gives a new connection `hello_wait` for each of `hello` and `open_shell`.
+    fn world_waiting(hello_wait: Duration) -> World {
+        let (engine, directory) = (Arc::new(FakeEngine::new()), Arc::new(pinned_web()));
+        let gates = Arc::new(GatedEngine::new(Arc::clone(&engine)));
+        let broker = Broker::with_hello_wait(
+            Arc::clone(&gates) as Arc<dyn SshEngine>,
+            Arc::clone(&directory) as Arc<dyn HostDirectory>,
+            Arc::new(FakeKeys::new()),
+            Arc::new(saved_password()),
+            Arc::new(FakeConfirmer::default()),
+            hello_wait,
         );
         let dir = tempfile::Builder::new().prefix("sb").tempdir_in("/tmp").unwrap();
         let ipc = dir.path().join("ipc");
@@ -1173,5 +1216,30 @@ mod tests {
             assert_eq!(client.rest().1, told, "{what}");
         }
         assert!(world.engine.events().is_empty(), "nothing was connected");
+    }
+
+    /// Plan 1b-1 review, Task 11 Minor 4: a connection is one of the 64 the server takes and costs a thread; one that says nothing, or
+    /// says hello and then nothing, is closed after the time `hello` and `open_shell` are given, not kept for ever.
+    #[test]
+    fn a_connection_that_does_not_say_hello_and_then_open_shell_in_time_is_closed() {
+        let world = world_waiting(Duration::from_millis(300));
+        let silent_from = |client: &mut Client| {
+            client.stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let started = Instant::now();
+            assert!(client.next().is_none(), "closed by the broker, not still open");
+            started.elapsed()
+        };
+        let mut nothing = Client::connect(&world.sock);
+        assert!(silent_from(&mut nothing) < Duration::from_secs(3));
+        let mut only_hello = Client::connect(&world.sock);
+        only_hello.hello();
+        assert!(silent_from(&mut only_hello) < Duration::from_secs(3));
+        // The bound is for the two first messages: a client that makes them is not on the clock any more.
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        std::thread::sleep(Duration::from_millis(900));
+        let control = Arc::clone(&locked(&world.broker.table).entries[&1].conn.control);
+        assert!(world.broker.has_sessions() && !control.is_gone(), "an idle session is not given up on after the time hello is given");
     }
 }
