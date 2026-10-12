@@ -344,7 +344,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::session::protocol::{read_frame, write_control, write_data, Frame, PtyRequest, QuestionKind};
+    use crate::session::protocol::{read_frame, write_control, write_data, Frame, PtyRequest, QuestionKind, MAX_FRAME};
     use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, WaitingConfirmer};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods, FakeShell};
     use crate::ipc::peer::ProcInfo;
@@ -697,5 +697,27 @@ mod tests {
         let kept = without_own_executable(chain, Some(own));
         assert_eq!(kept.iter().map(|process| process.pid).collect::<Vec<_>>(), [11, 12]);
         assert_eq!(without_own_executable(vec![process(10, "/usr/bin/ssh")], None).len(), 1, "nothing to leave out when the own path is unknown");
+    }
+
+    /// A question larger than a frame is not written (nothing of it reaches the stream), the owner answers `Gone` at once, and the stream
+    /// is still good for what comes next: the frame limit is the broker's own, not a sign that the client is gone.
+    #[test]
+    fn an_oversized_question_is_gone_writes_nothing_and_leaves_the_stream_usable() {
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        let owner = ConnectionOwner { link: Arc::new(FrameLink { writer: Mutex::new(theirs) }), questions: Mutex::new(HashMap::new()), next_question: AtomicU64::new(0) };
+        let started = Instant::now();
+        let reply = owner.ask(QuestionKind::Interactive, &"x".repeat(MAX_FRAME), false, Some(Instant::now() + Duration::from_secs(30)));
+        assert!(matches!(reply, Reply::Gone), "{reply:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "it did not wait for its deadline: {:?}", started.elapsed());
+        assert!(locked(&owner.questions).is_empty(), "the question is forgotten");
+        owner.host_key_notice("after");
+        ours.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        match read_frame(&mut ours).unwrap() {
+            Some(Frame::Control(payload)) => match decode::<ServerMessage>(&payload).unwrap() {
+                ServerMessage::Question(question) => assert_eq!((question.kind, question.text.as_str()), (QuestionKind::HostKeyNotice, "after"), "the first thing on the stream"),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
     }
 }
