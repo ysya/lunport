@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 use super::auth::{KeyStore, Owner, Reply};
-use super::connect::{CancelToken, Connector, HostKeyConfirmer, CANCELLED};
+use super::connect::{CancelToken, ConnectFailure, Connector, HostKeyConfirmer, CANCELLED};
 use super::directory::HostDirectory;
 use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, FrameError, HostQuery, Question, QuestionKind, ServerMessage, PROTOCOL_VERSION};
 use super::relay::{run_shell, tell, ClientLink, ShellControl};
@@ -341,6 +341,7 @@ impl Broker {
             Ok(connected) => connected,
             Err(failure) => {
                 if failure.kind != CANCELLED && !conn.control.is_gone() && self.claim(conn.id) {
+                    let failure = conn.owner.failure_told(failure);
                     could_not_open(conn.link.as_ref(), &failure.kind, &failure.text);
                 }
                 return;
@@ -490,11 +491,30 @@ struct ConnectionOwner {
     link: Arc<FrameLink>,
     questions: Mutex<Questions>,
     next_question: AtomicU64,
+    /// A question was too large to send (`ask`), although the client is there: see `failure_told`.
+    unshown: AtomicBool,
 }
+
+/// The end of the sentence about a login that ended because the owner gave no answer to a keyboard-interactive prompt, as the engine
+/// writes it, and as it reads when the question could not be shown to the owner.
+const PROMPT_CANCELLED: &str = "(the prompt was cancelled).";
+const PROMPT_NOT_SHOWN: &str = "(the prompt could not be shown).";
 
 impl ConnectionOwner {
     fn new(link: Arc<FrameLink>) -> ConnectionOwner {
-        ConnectionOwner { link, questions: Mutex::new(Questions::default()), next_question: AtomicU64::new(0) }
+        ConnectionOwner { link, questions: Mutex::new(Questions::default()), next_question: AtomicU64::new(0), unshown: AtomicBool::new(false) }
+    }
+
+    /// `failure` as the client is told it. A prompt too large for a frame (a server can write one) is not shown, which `ask` answers as
+    /// `Gone`, like a client that has left, and the engine, which is told only that nobody answered, calls the prompt cancelled. Nobody
+    /// cancelled it: the sentence says it could not be shown.
+    fn failure_told(&self, failure: ConnectFailure) -> ConnectFailure {
+        if self.unshown.load(Ordering::SeqCst) && failure.kind == kinds::AUTH {
+            if let Some(sentence) = failure.text.strip_suffix(PROMPT_CANCELLED) {
+                return ConnectFailure { text: format!("{sentence}{PROMPT_NOT_SHOWN}"), ..failure };
+            }
+        }
+        failure
     }
 
     fn question_id(&self) -> String {
@@ -534,8 +554,13 @@ impl Owner for ConnectionOwner {
         }
         let deadline_ms = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()).as_millis() as u64);
         let question = Question { question_id: question_id.clone(), kind, text: text.to_string(), echo, deadline_ms };
-        if tell(self.link.as_ref(), ServerMessage::Question(question)).is_err() {
+        if let Err(error) = tell(self.link.as_ref(), ServerMessage::Question(question)) {
             locked(&self.questions).waiting.remove(&question_id);
+            // A question that does not fit in a frame is not written at all (the stream is good, and the client may be there); any
+            // other failure means the client is gone.
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                self.unshown.store(true, Ordering::SeqCst);
+            }
             return Reply::Gone;
         }
         let reply = match deadline {
@@ -1310,5 +1335,41 @@ mod tests {
             }
         }
         assert_eq!(told, [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]);
+    }
+
+    /// Plan 1b-1 review, Task 11 Minor 8: a server's keyboard-interactive prompt too large for a frame cannot be shown, and nobody
+    /// cancelled it: the login ends, and the client is told what happened, and not that the prompt was cancelled.
+    #[test]
+    fn a_prompt_too_large_to_send_ends_the_login_as_one_that_could_not_be_shown() {
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Interactive).with_pin("web", default_server_key());
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::interactive(&"x".repeat(MAX_FRAME), "answer")));
+        let world = world_with(engine, directory, Arc::new(FakeConfirmer::default()), MemKeychain::default());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        assert_eq!(
+            client.rest().1,
+            [
+                ServerMessage::Event(Event::Error { kind: kinds::AUTH.into(), text: "Authentication for web was abandoned (the prompt could not be shown).".into() }),
+                no_status(),
+            ]
+        );
+        // A prompt that was cancelled, by the person, still reads so (spec §11).
+        let world = world_with(
+            FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::interactive("Password: ", "answer"))),
+            FakeDirectory::new().with_host("web", AuthMethod::Interactive).with_pin("web", default_server_key()),
+            Arc::new(FakeConfirmer::default()),
+            MemKeychain::default(),
+        );
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        let ServerMessage::Question(question) = client.next_message() else { panic!("expected the prompt") };
+        client.answer(&question.question_id, None);
+        assert_eq!(
+            client.rest().1,
+            [
+                ServerMessage::Event(Event::Error { kind: kinds::AUTH.into(), text: "Authentication for web was abandoned (the prompt was cancelled).".into() }),
+                no_status(),
+            ]
+        );
     }
 }
