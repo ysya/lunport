@@ -140,7 +140,7 @@ fn a_key_missing_from_the_vault_and_no_password_to_give_says_a_password_is_wante
 #[test]
 fn a_server_that_wants_a_key_and_then_a_password_needs_the_hops_own_method_order() {
     let Some(tools) = tools() else { return };
-    let server = Server::start(&tools, &["AuthenticationMethods publickey,password", "PasswordAuthentication yes", "PerSourcePenalties no"]);
+    let server = Server::start(&tools, &["AuthenticationMethods publickey,password", "PasswordAuthentication yes"]);
     let key = AuthMethod::Key { key_id: "k1".to_string() };
 
     let first = server.vault("k1");
