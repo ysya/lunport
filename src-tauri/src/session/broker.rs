@@ -1411,4 +1411,39 @@ mod tests {
         assert!(*locked(&confirmer.withdrawn), "the window was told its question is withdrawn");
         assert!(world.engine.events().is_empty(), "nothing was connected");
     }
+
+    /// The app quits under a real shell on a scratch OpenSSH: the shell is closed once it has printed its prompt, the client is told why
+    /// (it did not hear of a lost connection or an exit status), and the session is gone.
+    #[test]
+    fn quitting_ends_a_real_shell_on_a_scratch_sshd_and_tells_the_client_why() {
+        let Some(tools) = crate::ssh::testing::harness::tools() else { return };
+        let server = crate::ssh::testing::fixture::Server::start(&tools, &["ForceCommand if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then eval \"$SSH_ORIGINAL_COMMAND\"; else exec /bin/sh; fi"]);
+        let directory = Arc::new(FakeDirectory::new().with_hop(server.hop_with("lab", server.sshd.port, AuthMethod::Key { key_id: "k1".into() })));
+        let broker = Broker::new(
+            Arc::new(crate::ssh::russh_engine::RusshEngine::new()),
+            Arc::clone(&directory) as Arc<dyn HostDirectory>,
+            Arc::new(FakeKeys::new().with_key("k1", "lab key", &server.key.private_text)),
+            Arc::new(MemKeychain::default()),
+            Arc::new(FakeConfirmer::deciding(vec![Decision::Trust])),
+        );
+        let dir = tempfile::Builder::new().prefix("sb").tempdir_in("/tmp").unwrap();
+        crate::ipc::server::listen_unix(&dir.path().join("ipc"), broker.handler()).unwrap();
+        let mut client = Client::connect(&dir.path().join("ipc").join("sock"));
+        client.open("lab");
+        assert!(matches!(client.next_message(), ServerMessage::Question(Question { kind: QuestionKind::HostKeyNotice, .. })));
+        assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains("$ ") {
+            match client.next() {
+                Some(Got::Data(bytes)) => seen.extend(bytes),
+                other => panic!("waiting for the prompt, got {other:?} after {:?}", String::from_utf8_lossy(&seen)),
+            }
+        }
+        broker.end_all(Duration::from_secs(10));
+        assert_eq!(
+            client.rest().1,
+            [ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to lab was closed.".into() }), no_status()]
+        );
+        assert!(!broker.has_sessions());
+    }
 }
