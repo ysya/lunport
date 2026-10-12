@@ -189,12 +189,17 @@ impl ShellControl {
         self.gone.load(Ordering::SeqCst)
     }
 
+    /// The app's reason for ending the session, once `end` has left one.
+    pub(super) fn quit_reason(&self) -> Option<String> {
+        locked(&self.ended_by_app).clone()
+    }
+
     /// Why no shell is wanted any more, if it is not: a client that left is told nothing, so it wins over the app quitting.
     fn over(&self) -> Option<Over> {
         if self.is_gone() {
             return Some(Over::Gone);
         }
-        locked(&self.ended_by_app).clone().map(Over::Quit)
+        self.quit_reason().map(Over::Quit)
     }
 
     /// Closes the shell once it has printed something, or `settle` after it opened, or never when it has ended by itself. A shell that
@@ -392,8 +397,7 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
         control.ended();
     });
     if !control.is_gone() {
-        let quit = locked(&control.ended_by_app).clone();
-        tell_all(link, ending(shell.exited(), quit, session.as_ref(), &target, &alias));
+        tell_all(link, ending(shell.exited(), control.quit_reason(), session.as_ref(), &target, &alias));
     }
     session.close();
 }
