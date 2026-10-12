@@ -217,6 +217,7 @@ mod tests {
         assert!(is_host_flag("--mcp-host"));
         assert!(!is_host_flag("--mcp"));
         assert!(!is_host_flag("--host=1"));
+        assert!(!is_host_flag("--mcp-host=1"));
         assert!(!is_host_flag("connect"));
     }
 

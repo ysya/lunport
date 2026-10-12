@@ -932,6 +932,7 @@ mod tests {
                 assert!(world.confirmer.asked().is_empty(), "{label}: the window was not asked");
                 assert!(locked(&world.owner.notices).is_empty(), "{label}: nobody was told to wait for it");
                 assert_eq!(world.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), pin, "{label}: nothing was pinned or replaced");
+                assert_eq!(world.engine.attempts(), 1, "{label}: no reconnect (without the pinned type, or at all) for a connect the person gave up");
             }
         }
     }

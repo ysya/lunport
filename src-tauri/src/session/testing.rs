@@ -513,6 +513,8 @@ pub fn check_the_pin_contract(directory: &dyn HostDirectory, query: &HostQuery, 
     assert_eq!(directory.pinned(&hop.id).unwrap().map(|pin| pin.key), Some(first.clone()), "a refused replace writes nothing: the pin stays");
     directory.replace_pin(&hop.id, first, second).expect("the changed key replaces the pinned one");
     assert_eq!(directory.pinned(&hop.id).unwrap().map(|pin| pin.key), Some(second.clone()));
+    directory.replace_pin(&hop.id, third, second).expect("the key asked for is the pinned one already: nothing to write, and no refusal");
+    assert_eq!(directory.pinned(&hop.id).unwrap().map(|pin| pin.key), Some(second.clone()), "and the pin stays");
 }
 
 #[cfg(test)]
