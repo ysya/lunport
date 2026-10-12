@@ -358,7 +358,8 @@ pub fn build_launch_command(
 // ─── What the terminal runs ──────────────────────────────────────────────────
 
 /// `<SSHelter's executable> connect <alias>`: the command the terminal runs to connect through SSHelter's own SSH client (own-ssh spec
-/// §7.4). The alias must be validated first.
+/// §7.4). The alias must be validated first. Not on Windows, which still runs `ssh <alias>` (`launch_for`), but in its tests.
+#[cfg(any(unix, test))]
 pub fn connect_argv(exe: &std::path::Path, alias: &str) -> Vec<String> {
     vec![exe.to_string_lossy().into_owned(), "connect".to_string(), alias.to_string()]
 }
