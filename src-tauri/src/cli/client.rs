@@ -1,7 +1,8 @@
 //! The client's side of one session (own-ssh spec §7.3), with no I/O of its own: it is told what happened (`Input`) and answers with
 //! what to do (`Action`); `run.rs` does the reading and writing. Until the shell is open the terminal stays as it was, so Ctrl-C still
 //! stops the program; questions are asked with the terminal in its prompt mode; once the shell is open the terminal is raw and every
-//! key goes to the shell; at the end the terminal is put back before anything is printed.
+//! key goes to the shell; at the end the terminal is put back before anything is printed. Every text the broker wrote (a notice, a
+//! question, a banner, an error) goes through `printable` before it is printed: the CLI does not trust the broker it talks to.
 
 use zeroize::Zeroizing;
 
@@ -39,6 +40,23 @@ pub enum Action {
     /// Set the terminal's mode; `true` throws away what was typed ahead first.
     Mode(Mode, bool),
     Exit(i32),
+}
+
+/// Text the broker wrote, made safe to print on a terminal: the same rule as the broker's own `session::auth::printable`, written out
+/// again on purpose. The CLI on disk can be another version than the broker it talks to, and a path of the broker once missed the rule;
+/// the CLI should not owe what it prints to the broker having checked it. CRLF becomes LF, and every other control character (C0, DEL
+/// and C1: an escape sequence could rewrite the screen or erase the line in front of the text) becomes `?`. So do the bidirectional
+/// controls and the line and paragraph separators (`is_deceptive_format`), which are not control characters. Tabs and line feeds stay,
+/// and a line feed is the only line break left. The shell's own data is not text and never goes through here.
+pub fn printable(text: &str) -> String {
+    text.replace("\r\n", "\n").chars().map(|c| if (c.is_control() && c != '\n' && c != '\t') || is_deceptive_format(c) { '?' } else { c }).collect()
+}
+
+/// The characters `printable` replaces although they are not control characters: the bidirectional marks (U+061C, U+200E, U+200F),
+/// embeddings and overrides (U+202A to U+202E) and isolates (U+2066 to U+2069) make text read in another order than it is written (after
+/// U+202E the characters `drowssap` are shown as `password`), and some terminals may break the line at U+2028 and U+2029.
+fn is_deceptive_format(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// What the person typed before the shell opened is kept for it (as OpenSSH's typeahead reaches the shell), up to this many bytes.
@@ -152,22 +170,24 @@ impl Client {
                 }
                 actions
             }
-            ServerMessage::Question(Question { kind: QuestionKind::HostKeyNotice, text, .. }) => vec![Action::Stderr(format!("{text}\n"))],
+            ServerMessage::Question(Question { kind: QuestionKind::HostKeyNotice, text, .. }) => vec![Action::Stderr(format!("{}\n", printable(&text)))],
             ServerMessage::Question(Question { question_id, text, echo, .. }) => {
                 let after = self.mode();
                 self.typeahead.clear();
                 self.phase = Phase::Asking { question_id, echo, line: Zeroizing::new(Vec::new()), after };
-                vec![Action::Mode(Mode::Prompt { echo }, true), Action::Stderr(text)]
+                vec![Action::Mode(Mode::Prompt { echo }, true), Action::Stderr(printable(&text))]
             }
             ServerMessage::Event(Event::Banner { text }) => {
+                let text = printable(&text);
                 let text = if text.ends_with('\n') { text } else { format!("{text}\n") };
                 vec![Action::Stderr(text)]
             }
             ServerMessage::Event(Event::Error { kind, text }) if kind == kinds::INPUT && matches!(self.phase, Phase::Open) => {
-                vec![Action::Stderr(format!("\r\n[{text}]\r\n"))]
+                // The terminal is raw, so nothing turns a line feed into a line break: it has to be said.
+                vec![Action::Stderr(format!("\r\n[{}]\r\n", printable(&text).replace('\n', "\r\n")))]
             }
             ServerMessage::Event(Event::Error { text, .. }) | ServerMessage::Event(Event::Disconnected { reason: text }) => {
-                self.reason = Some(text);
+                self.reason = Some(printable(&text));
                 Vec::new()
             }
             ServerMessage::Event(Event::Connected) => Vec::new(),
@@ -378,6 +398,136 @@ mod tests {
         assert_eq!(client.handle(Input::Stop(libc::SIGTERM)), [Action::Send(ClientMessage::Close), Action::Mode(Mode::Cooked, false), Action::Exit(128 + libc::SIGTERM)]);
         let mut client = started();
         assert_eq!(client.handle(Input::Interrupt), [Action::Send(ClientMessage::Close), Action::Mode(Mode::Cooked, false), Action::Exit(130)], "Ctrl-C while connecting stops it");
+    }
+
+    fn event(event: Event) -> Input {
+        Input::Message(ServerMessage::Event(event))
+    }
+
+    fn error(kind: &str, text: &str) -> Input {
+        event(Event::Error { kind: kind.into(), text: text.into() })
+    }
+
+    fn exited() -> Input {
+        Input::Message(ServerMessage::Exited { code: None, signal: None })
+    }
+
+    /// What a hostile (or a broken, or an older) broker could send: an escape sequence (it clears the screen), a carriage return (it
+    /// overwrites the line), the 8-bit CSI (a C1 control), a right-to-left override, and the tab and the line feed, which are fine.
+    const HOSTILE: &str = "a\u{1b}[2Jb\rc\u{9b}d\u{202e}e\tf\ng";
+    /// `HOSTILE` as the CLI prints it.
+    const SAFE: &str = "a?[2Jb?c?d?e\tf\ng";
+
+    // Every text the broker sends is cleaned before the CLI prints it (a binding ruling: the CLI on disk can be another version than the
+    // running broker, and several paths of the broker once missed it): one test for each place a text is printed.
+
+    #[test]
+    fn the_host_key_notice_is_printed_without_control_characters() {
+        let mut client = started();
+        assert_eq!(client.handle(question("n1", QuestionKind::HostKeyNotice, HOSTILE, false)), [Action::Stderr(format!("{SAFE}\n"))]);
+    }
+
+    #[test]
+    fn a_question_is_asked_without_control_characters() {
+        let mut client = started();
+        assert_eq!(
+            client.handle(question("q1", QuestionKind::Interactive, HOSTILE, true)),
+            [Action::Mode(Mode::Prompt { echo: true }, true), Action::Stderr(SAFE.into())]
+        );
+    }
+
+    #[test]
+    fn a_banner_is_printed_without_control_characters() {
+        let mut client = started();
+        assert_eq!(client.handle(event(Event::Banner { text: HOSTILE.into() })), [Action::Stderr(format!("{SAFE}\n"))]);
+    }
+
+    /// The terminal is raw while the shell is open, so a line feed needs its carriage return or the next line starts where this one ended.
+    #[test]
+    fn the_inline_input_error_is_printed_without_control_characters_and_with_whole_line_breaks() {
+        let mut client = opened();
+        assert_eq!(client.handle(error(kinds::INPUT, HOSTILE)), [Action::Stderr("\r\n[a?[2Jb?c?d?e\tf\r\ng]\r\n".into())]);
+    }
+
+    #[test]
+    fn the_reason_at_the_end_is_cleaned_when_it_is_kept_and_printed_without_control_characters() {
+        for kept in [error(kinds::CONNECT, HOSTILE), event(Event::Disconnected { reason: HOSTILE.into() })] {
+            let mut client = opened();
+            assert!(client.handle(kept).is_empty());
+            assert_eq!(client.reason.as_deref(), Some(SAFE), "cleaned when it is kept");
+            assert_eq!(client.handle(exited()), [Action::Mode(Mode::Cooked, false), Action::Stderr(format!("\n{SAFE}\n")), Action::Exit(255)]);
+        }
+    }
+
+    /// A banner ends with a line feed of its own, and one that already ends with a line (feed or CRLF) gets no second.
+    #[test]
+    fn a_banner_ends_with_exactly_one_line_feed() {
+        for (banner, printed) in [("Authorized use only.", "Authorized use only.\n"), ("Authorized use only.\n", "Authorized use only.\n"), ("One.\r\nTwo.\r\n", "One.\nTwo.\n")] {
+            let mut client = started();
+            assert_eq!(client.handle(event(Event::Banner { text: banner.into() })), [Action::Stderr(printed.into())], "{banner:?}");
+        }
+    }
+
+    /// There is no shell to say "what you typed" about before it opens, and no raw terminal to print inline on: kept for the end like
+    /// any other error.
+    #[test]
+    fn an_input_error_before_the_shell_opens_is_kept_for_the_end_and_not_printed_inline() {
+        let mut client = started();
+        assert!(client.handle(error(kinds::INPUT, "What you typed did not reach web in time.")).is_empty());
+        assert_eq!(
+            client.handle(exited()),
+            [Action::Mode(Mode::Cooked, false), Action::Stderr("What you typed did not reach web in time.\n".into()), Action::Exit(255)]
+        );
+    }
+
+    /// The rule, character by character: what is replaced, what stays, and what a line break is.
+    #[test]
+    fn printable_replaces_controls_and_bidirectional_marks_and_keeps_text_in_every_script() {
+        let mut replaced: Vec<char> = ('\u{0}'..='\u{1f}').filter(|c| *c != '\n' && *c != '\t').collect();
+        replaced.push('\u{7f}');
+        replaced.extend('\u{80}'..='\u{9f}');
+        replaced.extend(['\u{061C}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}']);
+        replaced.extend('\u{202A}'..='\u{202E}');
+        replaced.extend('\u{2066}'..='\u{2069}');
+        for c in replaced {
+            assert_eq!(printable(&format!("a{c}b")), "a?b", "U+{:04X}", c as u32);
+        }
+        assert_eq!(printable("one\r\ntwo\rthree\n\r"), "one\ntwo?three\n?", "CRLF is a line break and a lone CR is a control character");
+        assert_eq!(printable("Password\u{202E}: \u{2066}ssap\u{2069}\u{200F}"), "Password?: ?ssap??");
+
+        let kept = [
+            "\u{0643}\u{0644}\u{0645}\u{0629}",                                 // Arabic letters
+            "\u{05E1}\u{05D9}\u{05E1}\u{05DE}\u{05D4}",                         // Hebrew letters
+            "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}", // Persian with a zero-width non-joiner
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",                      // an emoji family, joined by zero-width joiners
+            "\u{5BC6}\u{78BC} \u{e9} \u{fc}",                                   // Chinese and accented Latin letters
+            "a\tb\nc",                                                          // the tab and the line feed
+            "\u{2027}\u{202F}",                                                 // the characters just outside the replaced ranges
+        ];
+        for text in kept {
+            assert_eq!(printable(text), text);
+        }
+    }
+
+    /// The CLI's rule is the broker's, written out twice on purpose; this keeps the two the same, for every character there is.
+    #[test]
+    fn printable_is_the_same_rule_as_the_brokers() {
+        let mut text = String::new();
+        for c in '\0'..=char::MAX {
+            text.clear();
+            text.push('a');
+            text.push(c);
+            text.push_str("b\r\nc\rd\r\r\ne");
+            assert_eq!(printable(&text), crate::session::auth::printable(&text), "U+{:04X}", c as u32);
+        }
+    }
+
+    /// The shell's own bytes are not the CLI's to change: that is what a terminal program is for.
+    #[test]
+    fn the_shells_own_output_is_passed_through_untouched() {
+        let mut client = opened();
+        let output = b"\x1b[2J\r\n\xc2\x9b\xe2\x80\xae\x07\x00".to_vec();
+        assert_eq!(client.handle(Input::Output(output.clone())), [Action::Stdout(output)]);
     }
 
     /// Spec §7.3 / plan 1b R10: the shell's status, 128 + the signal's number for a signal (as a shell reports it), 255 for neither.
