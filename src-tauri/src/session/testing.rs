@@ -426,7 +426,6 @@ mod tests {
         );
     }
 
-
     /// A chain has at most five jump hosts, counted over the whole chain: the first jump host's own and the later ones together, however
     /// they are written or nested, as the ssh_config adapter counts them. The sentence names the host that was asked for.
     #[test]

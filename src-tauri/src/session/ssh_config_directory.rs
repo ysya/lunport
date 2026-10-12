@@ -53,22 +53,21 @@ pub(super) const MAX_JUMPS: usize = 5;
 /// The lists of `IdentityFile` values that `ssh -G` prints for a host that names none, by OpenSSH version. OpenSSH adds its default key
 /// files when a host names no `IdentityFile`, and only then: a host with `IdentityFile ~/.ssh/id_ed25519` gets exactly that one line, and
 /// `IdentityFile none` gets `none`. So whether a host names a key is decided by the whole list `ssh -G` prints, never by the names of
-/// the files in it (`named_key_file`). 10.3p1 prints the first list (measured on a machine with it); the others are what
-/// `fill_default_options` in readconf.c makes, read in the sources at the tags V_7_6_P1, V_7_9_P1, V_8_0_P1, V_8_2_P1, V_8_4_P1,
-/// V_8_8_P1, V_8_9_P1, V_9_6_P1, V_9_9_P2, V_10_0_P1, V_10_1_P1 and V_10_2_P1. (A build without ECDSA support lacks the two ecdsa
-/// files; no such build is known.)
+/// the files in it (`named_key_file`). The lists are what `fill_default_options` in readconf.c makes: 10.3p1 prints the first (measured on
+/// a machine with it), and each list was read in the sources at the tags named beside it; the versions between two tags are taken to
+/// print the list of the tag next to them. (A build without ECDSA support lacks the two ecdsa files; no such build is known.)
 const DEFAULT_IDENTITY_SEQUENCES: &[&[&str]] = &[
-    // 10.1 and later: no DSA and no XMSS any more.
+    // 10.1 and later, no DSA and no XMSS any more: V_10_1_P1, V_10_2_P1.
     &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk"],
-    // 9.8 to 10.0: XMSS is there, DSA only in a build that asks for it.
+    // 9.8 to 10.0, XMSS still there and DSA only in a build that asks for it: V_9_9_P2, V_10_0_P1.
     &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss"],
-    // 8.9 to 9.7, and a 9.8 to 10.0 built with DSA: DSA last.
+    // 8.9 to 9.7 (and a 9.8 to 10.0 built with DSA), DSA last: V_8_9_P1, V_9_6_P1.
     &["~/.ssh/id_rsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss", "~/.ssh/id_dsa"],
-    // 8.2 to 8.8: DSA second.
+    // 8.2 to 8.8, DSA second: V_8_2_P1, V_8_4_P1, V_8_8_P1.
     &["~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ecdsa_sk", "~/.ssh/id_ed25519", "~/.ssh/id_ed25519_sk", "~/.ssh/id_xmss"],
-    // 7.9 to 8.1: no security-key files yet.
+    // 7.9 to 8.1, no security-key files yet: V_7_9_P1, V_8_0_P1.
     &["~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519", "~/.ssh/id_xmss"],
-    // 7.4 to 7.8: no XMSS either.
+    // 7.4 to 7.8, no XMSS either: V_7_4_P1, V_7_6_P1.
     &["~/.ssh/id_rsa", "~/.ssh/id_dsa", "~/.ssh/id_ecdsa", "~/.ssh/id_ed25519"],
 ];
 
@@ -410,9 +409,9 @@ mod tests {
     }
 
     /// What `ssh -G` prints for the key files of a host that names none, by OpenSSH version: OpenSSH adds its default key files when a host
-    /// names no `IdentityFile`, and only then. These are the lists `fill_default_options` in readconf.c makes (read at the tags V_7_6_P1,
-    /// V_7_9_P1, V_8_0_P1, V_8_2_P1, V_8_4_P1, V_8_8_P1, V_8_9_P1, V_9_6_P1, V_9_9_P2, V_10_0_P1, V_10_1_P1 and V_10_2_P1); the first is
-    /// what the 10.3p1 of a development machine prints.
+    /// names no `IdentityFile`, and only then. These are the lists `fill_default_options` in readconf.c makes (see
+    /// `DEFAULT_IDENTITY_SEQUENCES` for the tags they were read at); the first is what the 10.3p1 of a development machine prints. They
+    /// are written out here again, so that a slip in the table of the code is not copied into the test.
     const DEFAULT_LISTS: &[(&str, &[&str])] = &[
         ("10.1 and later", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk"]),
         ("9.8 to 10.0 without DSA", &["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss"]),
