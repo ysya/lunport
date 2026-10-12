@@ -264,8 +264,7 @@ impl Broker {
             })
         };
         let Ok(worker) = worker else {
-            self.forget(id);
-            return could_not_open(link.as_ref(), kinds::CONNECT, "SSHelter could not start the session.");
+            return self.could_not_start(&conn);
         };
         // The client's messages, until it closes or goes away.
         loop {
@@ -285,6 +284,15 @@ impl Broker {
         owner.gone();
         control.owner_gone();
         let _ = worker.join();
+    }
+
+    /// The thread for the session could not be started: the session leaves the table, and its client is told so. Unless `end_all` marked
+    /// the entry in the meantime: it tells the client that the app is quitting, closes the connection and takes the entry out, and the
+    /// client is not told both.
+    fn could_not_start(&self, conn: &Conn) {
+        if self.forget(conn.id) != Told::ByEndAll {
+            could_not_open(conn.link.as_ref(), kinds::CONNECT, "SSHelter could not start the session.");
+        }
     }
 
     /// Puts the session in the table, still connecting; `false` when the app is quitting (`end_all` has started), and none is started.
@@ -1625,6 +1633,44 @@ mod tests {
             }
         }
         assert_eq!(told, [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]);
+    }
+
+    /// Plan 1b-1 review round 2, Task 11 Minor 2: the thread for a session cannot be made. Its client is told so, unless the app quit
+    /// meanwhile: `end_all` tells it that (and closes the connection), and a client is not told both.
+    #[test]
+    fn a_session_whose_thread_could_not_be_made_is_told_so_unless_the_app_is_quitting() {
+        let world = world(FakeEngine::new());
+        let query = HostQuery::Alias("web".into());
+
+        let (conn, mut client) = conn_on_a_socket_pair(1);
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert!(world.broker.enter(&conn, &query, None));
+        world.broker.could_not_start(&conn);
+        assert!(!world.broker.has_sessions());
+        drop(conn);
+        assert_eq!(
+            written_to(&mut client),
+            [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]
+        );
+
+        let (conn, mut client) = conn_on_a_socket_pair(2);
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert!(world.broker.enter(&conn, &query, None));
+        // The telling by `end_all` waits for the connection, which is busy: the entry is marked, and still there.
+        let busy = locked(&conn.link.writer);
+        world.broker.end_all(Duration::ZERO);
+        let starting = {
+            let (broker, conn) = (Arc::clone(&world.broker), conn.clone());
+            std::thread::spawn(move || broker.could_not_start(&conn))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(starting.is_finished(), "it tells the client nothing, so it has nothing to wait for");
+        assert!(world.broker.has_sessions(), "and the entry is left to the telling, which removes it");
+        drop(busy);
+        starting.join().unwrap();
+        crate::ssh::testing::eventually("the entry to leave once its client was told", 5, || !world.broker.has_sessions());
+        drop(conn);
+        assert_eq!(written_to(&mut client), [quit_sentence(), no_status()], "told that the app quit, and not that the session could not be started as well");
     }
 
     /// Plan 1b-1 review, Task 11 Minor 8: a server's keyboard-interactive prompt too large for a frame cannot be shown, and nobody
