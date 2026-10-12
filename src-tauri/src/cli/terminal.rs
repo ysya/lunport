@@ -36,6 +36,11 @@ pub fn attributes(original: &libc::termios, mode: Mode) -> libc::termios {
             // no output processing.
             termios.c_iflag |= libc::IGNPAR;
             termios.c_iflag &= !(libc::ISTRIP | libc::INLCR | libc::IGNCR | libc::ICRNL | libc::IXON | libc::IXANY | libc::IXOFF);
+            // OpenSSH clears IUCLC where the system has it (`#ifdef IUCLC`): Linux would turn typed capitals into lower case.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                termios.c_iflag &= !libc::IUCLC;
+            }
             termios.c_lflag &= !(libc::ISIG | libc::ICANON | libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL | libc::IEXTEN);
             termios.c_oflag &= !libc::OPOST;
             termios.c_cc[libc::VMIN] = 1;
@@ -172,6 +177,20 @@ impl TermiosApi for StdinTermios {
 pub(crate) mod fake {
     use super::*;
 
+    // The flags raw mode clears, as OpenSSH's enter_raw_mode lists them (`IGNPAR` is the one it sets). The fake terminal starts with every
+    // one of them on and every one of the `KEPT_*` flags, which raw mode must leave alone, on too, so that a test can compare whole
+    // structures: a flag raw mode forgets to clear, or clears without being asked to, shows.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub const RAW_CLEARS_IFLAG: libc::tcflag_t = libc::ISTRIP | libc::INLCR | libc::IGNCR | libc::ICRNL | libc::IXON | libc::IXANY | libc::IXOFF | libc::IUCLC;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    pub const RAW_CLEARS_IFLAG: libc::tcflag_t = libc::ISTRIP | libc::INLCR | libc::IGNCR | libc::ICRNL | libc::IXON | libc::IXANY | libc::IXOFF;
+    pub const RAW_CLEARS_OFLAG: libc::tcflag_t = libc::OPOST;
+    pub const RAW_CLEARS_LFLAG: libc::tcflag_t = libc::ISIG | libc::ICANON | libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL | libc::IEXTEN;
+    pub const KEPT_IFLAG: libc::tcflag_t = libc::BRKINT | libc::INPCK | libc::IMAXBEL;
+    pub const KEPT_OFLAG: libc::tcflag_t = libc::ONLCR;
+    pub const KEPT_CFLAG: libc::tcflag_t = libc::CS8 | libc::CREAD | libc::HUPCL;
+    pub const KEPT_LFLAG: libc::tcflag_t = libc::ECHOCTL | libc::ECHOKE | libc::NOFLSH | libc::TOSTOP;
+
     /// A terminal that records every change of attributes; its size can be changed by the test.
     pub struct FakeTermios {
         pub start: libc::termios,
@@ -181,12 +200,17 @@ pub(crate) mod fake {
 
     impl FakeTermios {
         pub fn new() -> Arc<FakeTermios> {
-            // SAFETY: an all-zero termios is valid plain data; the flags below make it look like a terminal in its usual mode.
-            let mut start: libc::termios = unsafe { std::mem::zeroed() };
-            start.c_iflag = libc::ICRNL | libc::IXON;
-            start.c_oflag = libc::OPOST;
-            start.c_lflag = libc::ICANON | libc::ISIG | libc::ECHO | libc::IEXTEN;
+            let mut start = bare();
+            start.c_iflag = RAW_CLEARS_IFLAG | KEPT_IFLAG;
+            start.c_oflag = RAW_CLEARS_OFLAG | KEPT_OFLAG;
+            start.c_cflag = KEPT_CFLAG;
+            start.c_lflag = RAW_CLEARS_LFLAG | KEPT_LFLAG;
+            // Raw mode sets these two; the keys are the usual ones, and nothing changes them.
             start.c_cc[libc::VMIN] = 4;
+            start.c_cc[libc::VTIME] = 7;
+            for (index, key) in [(libc::VINTR, 3), (libc::VQUIT, 28), (libc::VERASE, 127), (libc::VEOF, 4), (libc::VSTART, 17), (libc::VSTOP, 19)] {
+                start.c_cc[index] = key;
+            }
             Arc::new(FakeTermios { start, sets: Mutex::new(Vec::new()), size: Mutex::new(Some((80, 24))) })
         }
 
@@ -195,9 +219,22 @@ pub(crate) mod fake {
             self.sets.lock().unwrap().last().map(|(termios, _)| *termios).unwrap_or(self.start)
         }
 
+        /// Whether `termios` is the start in every attribute.
         pub fn is_start(&self, termios: &libc::termios) -> bool {
-            (termios.c_iflag, termios.c_oflag, termios.c_lflag, termios.c_cc[libc::VMIN]) == (self.start.c_iflag, self.start.c_oflag, self.start.c_lflag, self.start.c_cc[libc::VMIN])
+            describe(termios) == describe(&self.start)
         }
+    }
+
+    /// A terminal with every flag off and every key unset.
+    pub fn bare() -> libc::termios {
+        // SAFETY: an all-zero termios is valid plain data.
+        unsafe { std::mem::zeroed() }
+    }
+
+    /// All the attributes there are to compare, as text: libc's `termios` has no `PartialEq` or `Debug` (and its speeds and line
+    /// discipline are not on every system), and a failing comparison should show the flags in hex.
+    pub fn describe(termios: &libc::termios) -> String {
+        format!("iflag {:#x}, oflag {:#x}, cflag {:#x}, lflag {:#x}, cc {:?}", termios.c_iflag, termios.c_oflag, termios.c_cflag, termios.c_lflag, termios.c_cc)
     }
 
     impl TermiosApi for FakeTermios {
@@ -216,28 +253,59 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
-    use super::fake::FakeTermios;
+    use super::fake::{bare, describe, FakeTermios, KEPT_IFLAG, KEPT_LFLAG, KEPT_OFLAG, RAW_CLEARS_LFLAG};
     use super::*;
 
+    /// OpenSSH's enter_raw_mode (sshtty.c), applied to a terminal that has every flag it touches the other way round: input bytes
+    /// untouched (no stripping, no mapping of CR and NL, no flow control keys), no line editing, echo or keyboard signals, no output
+    /// processing, a read returns every byte at once. Whole structures are compared, so a flag raw mode forgets or invents shows.
     #[test]
-    fn raw_mode_is_openssh_s_raw_mode_and_cooked_is_the_start() {
+    fn raw_mode_is_openssh_s_raw_mode_flag_by_flag() {
         let api = FakeTermios::new();
         let raw = attributes(&api.start, Mode::Raw);
-        assert_eq!(raw.c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN), 0, "no line editing, echo or keyboard signals");
-        assert_eq!(raw.c_iflag & (libc::ICRNL | libc::IXON), 0, "Enter stays a carriage return and Ctrl-S goes to the shell");
-        assert_eq!(raw.c_oflag & libc::OPOST, 0, "output is passed through");
-        assert_eq!((raw.c_cc[libc::VMIN], raw.c_cc[libc::VTIME]), (1, 0), "a read returns every byte at once");
-        assert!(api.is_start(&attributes(&api.start, Mode::Cooked)));
+        let mut expected = api.start;
+        expected.c_iflag = KEPT_IFLAG | libc::IGNPAR;
+        expected.c_oflag = KEPT_OFLAG;
+        expected.c_lflag = KEPT_LFLAG;
+        expected.c_cc[libc::VMIN] = 1;
+        expected.c_cc[libc::VTIME] = 0;
+        assert_eq!(describe(&raw), describe(&expected));
+        assert_ne!(describe(&raw), describe(&api.start), "the start is not raw already");
     }
 
     #[test]
-    fn a_question_edits_lines_and_hides_a_password_but_shows_a_code() {
+    fn cooked_is_the_start_in_every_attribute() {
         let api = FakeTermios::new();
-        let secret = attributes(&api.start, Mode::Prompt { echo: false });
-        assert_eq!(secret.c_lflag & (libc::ICANON | libc::ISIG), libc::ICANON | libc::ISIG);
-        assert_eq!(secret.c_lflag & (libc::ECHO | libc::ECHONL), 0);
-        let shown = attributes(&api.start, Mode::Prompt { echo: true });
-        assert_eq!(shown.c_lflag & libc::ECHO, libc::ECHO);
+        assert_eq!(describe(&attributes(&api.start, Mode::Cooked)), describe(&api.start));
+        assert!(api.is_start(&attributes(&api.start, Mode::Cooked)));
+        assert!(!api.is_start(&attributes(&api.start, Mode::Raw)));
+    }
+
+    /// A password is typed with line editing and signals on and echo off, and a newline is not echoed either (`ECHONL`); everything else
+    /// stays as the terminal had it.
+    #[test]
+    fn a_password_question_edits_lines_and_hides_what_is_typed() {
+        let api = FakeTermios::new();
+        let mut expected = api.start;
+        expected.c_lflag = (RAW_CLEARS_LFLAG & !(libc::ECHO | libc::ECHONL)) | KEPT_LFLAG;
+        assert_eq!(describe(&attributes(&api.start, Mode::Prompt { echo: false })), describe(&expected));
+    }
+
+    #[test]
+    fn a_code_question_edits_lines_and_shows_what_is_typed() {
+        let api = FakeTermios::new();
+        assert_eq!(describe(&attributes(&api.start, Mode::Prompt { echo: true })), describe(&api.start), "a terminal at its start already does");
+    }
+
+    /// A question turns on what it needs whatever the terminal was when the program started (say, left raw by another program).
+    #[test]
+    fn a_question_turns_line_editing_and_signals_on_when_the_start_had_them_off() {
+        let start = bare();
+        let mut expected = start;
+        expected.c_lflag = libc::ICANON | libc::ISIG;
+        assert_eq!(describe(&attributes(&start, Mode::Prompt { echo: false })), describe(&expected));
+        expected.c_lflag |= libc::ECHO;
+        assert_eq!(describe(&attributes(&start, Mode::Prompt { echo: true })), describe(&expected));
     }
 
     #[test]
