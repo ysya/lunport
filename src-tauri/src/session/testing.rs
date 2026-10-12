@@ -25,6 +25,14 @@ pub struct FakeKeys {
 }
 
 impl FakeKeys {
+    /// The vault also holds `private_text` (an OpenSSH private key without a passphrase) as `key_id`, named `name`.
+    pub fn with_key(mut self, key_id: &str, name: &str, private_text: &str) -> FakeKeys {
+        let material = crate::vault::material::open(private_text, None).expect("the vault opens the key");
+        let public_key = ssh_key::PublicKey::new(material.key_data(), "").to_openssh().expect("an OpenSSH public key");
+        self.keys.insert(key_id.to_string(), (VaultKey { name: name.into(), public_key }, private_text.to_string()));
+        self
+    }
+
     pub fn new() -> FakeKeys {
         let mut keys = HashMap::new();
         keys.insert(
@@ -146,6 +154,12 @@ impl FakeDirectory {
     pub fn with_host_via(mut self, alias: &str, auth: AuthMethod, jumps: &[&str]) -> FakeDirectory {
         let hop = Hop::new(&format!("id-{alias}"), alias, &format!("{alias}.example.com"), 22, "deploy", auth);
         self.hosts.push(FakeHost { hop, jumps: jumps.iter().map(|jump| jump.to_string()).collect() });
+        self
+    }
+
+    /// A saved host exactly as `hop` says (a scratch server's address, port and user), reached directly.
+    pub fn with_hop(mut self, hop: Hop) -> FakeDirectory {
+        self.hosts.push(FakeHost { hop, jumps: Vec::new() });
         self
     }
 
@@ -334,6 +348,29 @@ impl HostKeyConfirmer for FakeConfirmer {
             Decision::TrustFingerprint(fingerprint) => Some(fingerprint),
             Decision::Refuse => None,
         }
+    }
+}
+
+/// A host key window nobody answers: it waits until the question is withdrawn (the client went away) or 10 s pass, and records
+/// whether it saw the withdrawal.
+#[derive(Default)]
+pub struct WaitingConfirmer {
+    pub asked: Mutex<usize>,
+    pub withdrawn: Mutex<bool>,
+}
+
+impl HostKeyConfirmer for WaitingConfirmer {
+    fn confirm(&self, _question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
+        *locked(&self.asked) += 1;
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if cancel.is_cancelled() {
+                *locked(&self.withdrawn) = true;
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
     }
 }
 

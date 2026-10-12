@@ -224,6 +224,7 @@ pub enum Exit { Code(u32), Signal(String), Refused(String), Disconnected } // Re
 ### 7.2 Broker 規則
 
 - 一個 session 一個擁有者(IPC 連線);連線斷掉就關 session;app 結束全部關。
+- (第 1b 期)一條 IPC 連線一個 session。`hello` 之後連線不受 IPC 伺服器的閒置逾時限制:閒置的 shell 照樣開著。開不成 session 時 broker 送 `event{error}` 再送 `exited{code: null, signal: null}`,然後關掉連線;`exec` 與 `hello{client: mcp}` 在第 1b 期回 `error{kind: unsupported}`。用戶端斷線時,broker 等 shell 第一次有輸出(或開啟滿 3 秒)才關 shell 與連線,免得 macOS 的 sshd 留下拿著 PTY 的程序。app 結束時每個 session 的用戶端都收到 `event{disconnected{reason}}`(`SSHelter quit, so the connection to {alias} was closed.`)與 `exited`。
 - 開 session 的核准:`client = connect`(終端機 CLI)不核准;`client = mcp` 依第 8 節。
 - 提示的去向(決策 7):擁有者是 `connect` → `question` 訊框送到 CLI,在終端機裡問;擁有者是 `mcp` 且模式 `ask` → app 視窗;`mcp` 且 `auto_log` → 回 `error{needs_interaction}`。主機金鑰的確認永遠在 app 視窗(決策 6),CLI 只收到 `host_key_notice`。
 - 每個 session 寫一筆 log(第 8.4 節的同一份 log,`client` 欄位區分 connect 與 mcp)。
