@@ -20,14 +20,11 @@ use crate::session::protocol::HostQuery;
 use crate::session::testing::{Decision, FakeConfirmer, FakeDirectory, FakeKeys};
 use crate::ssh::russh_engine::RusshEngine;
 use crate::ssh::testing::eventually;
-use crate::ssh::testing::fixture::Server;
+use crate::ssh::testing::fixture::{Server, SH_SHELL};
 use crate::ssh::testing::harness::tools;
 use crate::ssh::testing::proxy::{Mode, Proxy};
 use crate::ssh::{AuthMethod, HostId};
 use crate::sync::testkit::MemKeychain;
-
-/// A shell of `/bin/sh` for the scratch sshd (as the engine's own tests use), so the prompt does not depend on anyone's shell setup.
-const SHELL: &str = "ForceCommand if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then eval \"$SSH_ORIGINAL_COMMAND\"; else exec /bin/sh; fi";
 
 /// A `Write` the test reads while the run goes on.
 #[derive(Clone, Default)]
@@ -151,7 +148,7 @@ fn raw(termios: &FakeTermios) -> bool {
 #[test]
 fn sshelter_connect_confirms_the_host_key_runs_a_shell_and_exits_with_its_status() {
     let Some(tools) = tools() else { return };
-    let server = Server::start(&tools, &[SHELL]);
+    let server = Server::start(&tools, &[SH_SHELL]);
     let session = connect(&server, server.sshd.port, vec![Decision::Trust]);
     session.wait_for("the shell to open", 30, |session| raw(&session.termios));
     session.wait_for("a prompt", 20, |session| session.stdout.text().contains("$ "));
@@ -170,7 +167,7 @@ fn sshelter_connect_confirms_the_host_key_runs_a_shell_and_exits_with_its_status
 #[test]
 fn a_host_key_the_person_does_not_trust_ends_sshelter_connect() {
     let Some(tools) = tools() else { return };
-    let server = Server::start(&tools, &[SHELL]);
+    let server = Server::start(&tools, &[SH_SHELL]);
     let session = connect(&server, server.sshd.port, vec![Decision::Refuse]);
     let ended = session.finish();
     assert_eq!(ended.code, 255);
@@ -185,7 +182,7 @@ fn a_host_key_the_person_does_not_trust_ends_sshelter_connect() {
 #[test]
 fn a_connection_lost_in_the_middle_of_a_shell_is_said_and_the_status_is_255() {
     let Some(tools) = tools() else { return };
-    let server = Server::start(&tools, &[SHELL]);
+    let server = Server::start(&tools, &[SH_SHELL]);
     let proxy = Proxy::start(server.sshd.port);
     let session = connect(&server, proxy.port, vec![Decision::Trust]);
     session.wait_for("a prompt", 30, |session| session.stdout.text().contains("$ "));
