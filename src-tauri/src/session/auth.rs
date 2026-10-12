@@ -87,8 +87,10 @@ pub trait Owner: Send + Sync {
     fn banner(&self, text: &str);
 }
 
-/// The text of a banner that is safe to print on a terminal: CRLF becomes LF, and every other control character (an escape sequence
-/// from the server could rewrite the screen) becomes `?`. Tabs and line feeds stay.
+/// Text a server wrote, made safe to print on a terminal: CRLF becomes LF, and every other control character (an escape sequence from
+/// the server could rewrite the screen, or erase the line in front of the text) becomes `?`. Tabs and line feeds stay. Whatever a server
+/// wrote and the broker shows outside the shell's own data stream (a banner, a keyboard-interactive prompt, and so on) goes through
+/// here before it is framed.
 pub fn printable(text: &str) -> String {
     text.replace("\r\n", "\n").chars().map(|c| if c.is_control() && c != '\n' && c != '\t' { '?' } else { c }).collect()
 }
