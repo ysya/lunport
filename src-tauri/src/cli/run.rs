@@ -7,11 +7,12 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, Sender};
 
-use zeroize::Zeroize;
+use serde::Serialize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::client::{Action, Client, Input};
 use super::terminal::Tty;
-use crate::session::protocol::{decode, read_frame, write_control, write_data, Frame, HostQuery, ServerMessage};
+use crate::session::protocol::{decode, read_frame, write_control, write_data, write_frame, Frame, HostQuery, ServerMessage, CONTROL};
 
 /// Runs one session over `stream`, connected to the broker, until it ends; returns the program's exit code. `inputs` brings the keys,
 /// resizes and signals (`stdin_thread`, `signal_thread`); the broker's frames join it from a thread started here.
@@ -98,8 +99,14 @@ fn perform(actions: Vec<Action>, writer: &mut UnixStream, tty: &mut Tty, queue: 
             Action::Send(message) => {
                 let _ = write_control(writer, &message);
             }
-            Action::SendData(bytes) => {
+            Action::Answer { question_id, value } => {
+                // The password stays in `value`, which is wiped as it is dropped at the end of this arm; `write_answer` wipes the rest.
+                let _ = write_answer(writer, &question_id, &value);
+            }
+            Action::SendData(mut bytes) => {
                 let _ = write_data(writer, &bytes);
+                // Keystrokes can be a password too (typed at a prompt the shell shows).
+                bytes.zeroize();
             }
             Action::Stdout(bytes) => {
                 let _ = stdout.write_all(&bytes);
@@ -124,6 +131,38 @@ fn perform(actions: Vec<Action>, writer: &mut UnixStream, tty: &mut Tty, queue: 
         }
     }
     None
+}
+
+/// The protocol's answer message (`ClientMessage::Answer` with a value) written from borrowed strings, so that the password is not
+/// copied into a message that would have to be wiped; `an_answer_is_the_protocols_message_byte_for_byte_and_fits_the_buffer_it_is_built_in`
+/// keeps the two the same.
+#[derive(Serialize)]
+struct AnswerJson<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    question_id: &'a str,
+    value: &'a str,
+    cancel: bool,
+}
+
+/// How many bytes the JSON of an answer can take: a byte of either string takes six at most (`\u00XX`), the rest of the message 60.
+fn answer_room(question_id: &str, value: &str) -> usize {
+    64 + 6 * (question_id.len() + value.len())
+}
+
+/// The JSON of an answer. It is built in a buffer that has room for all of it from the start, because a `Vec` that grows frees its old
+/// allocation with a part of the password in it, and the buffer is wiped when it is dropped.
+fn answer_json(question_id: &str, value: &str) -> Zeroizing<Vec<u8>> {
+    let mut json = Zeroizing::new(Vec::with_capacity(answer_room(question_id, value)));
+    // Writing to a `Vec` cannot fail, and these strings serialize.
+    let _ = serde_json::to_writer(&mut *json, &AnswerJson { kind: "answer", question_id, value, cancel: false });
+    json
+}
+
+/// Writes the answer to a question as one control frame. The password is in three places for a moment (the caller's string, the JSON,
+/// the frame `write_frame` builds); the JSON and the frame are wiped here and there, the caller's string by whoever owns it.
+fn write_answer(writer: &mut impl Write, question_id: &str, value: &str) -> std::io::Result<()> {
+    write_frame(writer, CONTROL, &answer_json(question_id, value))
 }
 
 /// Reads the person's keys into the queue until standard input ends (or the program does).
@@ -581,5 +620,41 @@ mod tests {
         assert!(setup.termios.is_start(&setup.termios.now()), "the terminal is as it was");
         assert_eq!(setup.stderr.text(), "\nsshelter: an internal error stopped this session.\n");
         eventually("the session to be closed", 10, || setup.engine.events().contains(&FakeEvent::Closed));
+    }
+
+    /// What `Action::Answer` puts on the wire is the protocol's answer message, byte for byte (the CLI writes it from borrowed strings so
+    /// that the password is in no message it would have to wipe), and it is built in a buffer that has room for it from the start: a
+    /// `Vec` that grows frees its old allocation with a part of the password in it.
+    #[test]
+    fn an_answer_is_the_protocols_message_byte_for_byte_and_fits_the_buffer_it_is_built_in() {
+        use crate::session::protocol::ClientMessage;
+        let controls = "\u{1}".repeat(50);
+        for value in ["hunter2", "", "x".repeat(300).as_str(), "quote\" back\\slash tab\t \u{e9} \u{5bc6}\u{78bc} \u{1f511}", controls.as_str()] {
+            for question_id in ["q1", "", "0123456789abcdef0123456789abcdef0123"] {
+                let json = answer_json(question_id, value);
+                let protocol = serde_json::to_vec(&ClientMessage::Answer { question_id: question_id.into(), value: Some(value.into()), cancel: false }).unwrap();
+                assert_eq!(&json[..], &protocol[..], "{question_id:?} {value:?}");
+                assert!(json.len() <= answer_room(question_id, value), "{} bytes in a room of {}", json.len(), answer_room(question_id, value));
+                assert!(json.capacity() >= answer_room(question_id, value));
+            }
+        }
+        // The worst case is what the room is for: a control character takes six bytes in JSON, and the rest of the message at most 64.
+        let json = answer_json("", &controls);
+        assert_eq!(json.len(), 6 * controls.len() + 60);
+        assert!(answer_room("", &controls) >= json.len());
+    }
+
+    /// A long password with characters JSON has to escape gets to the broker whole.
+    #[test]
+    fn a_long_password_with_awkward_characters_gets_in_whole() {
+        let password = format!("p\"w\\ tab\t \u{5bc6}\u{78bc} {}", "x".repeat(300));
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let setup = connect(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password(&password))), directory, MemKeychain::default());
+        eventually("the question", 10, || setup.stderr.text() == "deploy@web's password: ");
+        setup.keys.send(Input::Stdin(format!("{password}\n").into_bytes())).unwrap();
+        eventually("the shell to open", 10, || raw(&setup.termios));
+        setup.engine.shells().remove(0).end(Exit::Code(0));
+        let (code, setup) = finish(setup);
+        assert_eq!((code, setup.stderr.text()), (0, "deploy@web's password: \n".to_string()));
     }
 }

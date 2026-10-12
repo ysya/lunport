@@ -55,8 +55,11 @@ impl fmt::Debug for Input {
 /// What to do.
 #[derive(PartialEq, Eq)]
 pub enum Action {
-    /// A message for the broker. An `Answer` carries a password in a plain `String` (see `Client::answer`): whoever writes it wipes it.
+    /// A message for the broker. Nothing in it is secret: the answer to a question is `Answer`.
     Send(ClientMessage),
+    /// The answer to a question, typed by the person (a password, a passphrase, a code), for the broker as the protocol's answer message.
+    /// The text stays in a `Zeroizing` string from the keys to here, and is wiped when the action is dropped, after it has been written.
+    Answer { question_id: String, value: Zeroizing<String> },
     /// Keystrokes for the shell: they can be a password too (typed at a prompt the shell shows), so the debug form leaves them out.
     SendData(Vec<u8>),
     Stdout(Vec<u8>),
@@ -70,6 +73,7 @@ impl fmt::Debug for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Action::Send(message) => f.debug_tuple("Send").field(message).finish(),
+            Action::Answer { question_id, .. } => f.debug_struct("Answer").field("question_id", question_id).field("value", &format_args!("<hidden>")).finish(),
             Action::SendData(_) => f.write_str("SendData(<hidden>)"),
             Action::Stdout(bytes) => f.debug_tuple("Stdout").field(bytes).finish(),
             Action::Stderr(text) => f.debug_tuple("Stderr").field(text).finish(),
@@ -304,10 +308,8 @@ impl Client {
 
     /// Ends the question on the terminal: with the answer, or cancelled (`None`).
     ///
-    /// The password reaches the broker as the plain `String` inside `ClientMessage::Answer` (the protocol's type), moved there out of the
-    /// `Zeroizing` buffer it was collected in so that no second copy is left behind. From here on that `String` is the caller's to wipe:
-    /// whoever writes the action out (`run.rs`) must `zeroize()` the value once the frame is written (`write_control` wipes the JSON it
-    /// builds, but not the message it is given).
+    /// The password goes on in the `Zeroizing` string it was collected in, inside `Action::Answer`; whoever writes the action out
+    /// (`run.rs`) writes it from there, and it is wiped when the action is dropped.
     fn answer(&mut self, answer: Option<Zeroizing<String>>) -> Vec<Action> {
         let (question_id, echo, after) = match std::mem::replace(&mut self.phase, Phase::Connecting) {
             Phase::Asking { question_id, echo, after, .. } => (question_id, echo, after),
@@ -323,11 +325,10 @@ impl Client {
             // The Enter of a hidden answer (or the Ctrl-C) did not move to the next line.
             actions.push(Action::Stderr("\n".to_string()));
         }
-        let message = match answer {
-            Some(mut answer) => ClientMessage::Answer { question_id, value: Some(std::mem::take(&mut *answer)), cancel: false },
-            None => ClientMessage::Answer { question_id, value: None, cancel: true },
-        };
-        actions.push(Action::Send(message));
+        actions.push(match answer {
+            Some(value) => Action::Answer { question_id, value },
+            None => cancel(question_id),
+        });
         actions.push(Action::Mode(after, false));
         actions
     }
@@ -449,7 +450,7 @@ mod tests {
             client.handle(Input::Stdin(b"er2\n".to_vec())),
             [
                 Action::Stderr("\n".into()),
-                Action::Send(ClientMessage::Answer { question_id: "q1".into(), value: Some("hunter2".into()), cancel: false }),
+                answered("q1", "hunter2"),
                 Action::Mode(Mode::Cooked, false),
             ]
         );
@@ -462,7 +463,7 @@ mod tests {
         assert_eq!(client.handle(question("q2", QuestionKind::Interactive, "(deploy@web) Code: ", true))[0], Action::Mode(Mode::Prompt { echo: true }, true));
         assert_eq!(
             client.handle(Input::Stdin(b"123456\r\n".to_vec())),
-            [Action::Send(ClientMessage::Answer { question_id: "q2".into(), value: Some("123456".into()), cancel: false }), Action::Mode(Mode::Raw, false)]
+            [answered("q2", "123456"), Action::Mode(Mode::Raw, false)]
         );
     }
 
@@ -580,7 +581,7 @@ mod tests {
     }
 
     fn answered(id: &str, value: &str) -> Action {
-        Action::Send(ClientMessage::Answer { question_id: id.into(), value: Some(value.into()), cancel: false })
+        Action::Answer { question_id: id.into(), value: Zeroizing::new(value.to_string()) }
     }
 
     fn cancelled(id: &str) -> Action {
@@ -768,8 +769,10 @@ mod tests {
     fn what_is_typed_is_not_printed_by_debug() {
         assert_eq!(format!("{:?}", Input::Stdin(b"hunter2\n".to_vec())), "Stdin(<hidden>)");
         assert_eq!(format!("{:?}", Action::SendData(b"hunter2\n".to_vec())), "SendData(<hidden>)");
-        let answer = Action::Send(ClientMessage::Answer { question_id: "q1".into(), value: Some("hunter2".into()), cancel: false });
-        assert!(!format!("{answer:?}").contains("hunter2"));
+        let answer = answered("q1", "hunter2");
+        assert_eq!(format!("{answer:?}"), "Answer { question_id: \"q1\", value: <hidden> }");
+        let sent = Action::Send(ClientMessage::Answer { question_id: "q1".into(), value: Some("hunter2".into()), cancel: false });
+        assert!(!format!("{sent:?}").contains("hunter2"), "the debug form of the protocol's own message hides it too");
 
         assert_eq!(format!("{:?}", Input::Output(vec![104, 105])), "Output([104, 105])");
         assert_eq!(format!("{:?}", Input::Message(ServerMessage::Opened { session_id: "1".into() })), "Message(Opened { session_id: \"1\" })");
