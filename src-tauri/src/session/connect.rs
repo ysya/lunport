@@ -166,6 +166,20 @@ impl Connector<'_> {
                 Err(error) => error,
             };
             match error {
+                // The person gave up the password of a hop (cancelled the question, let it run out, or their client went away). The engine
+                // asked it before it connected (a hop that starts with the password method) and went on without it, to a host key that was
+                // not known yet, or a pinned key type the server no longer has, or a login that ended for want of the password ("no login
+                // method could be tried" when the server offers nothing else). The attempt is over (spec §10, §11): the window is not opened
+                // for it and nothing is pinned or connected again; the sentence is the abandonment, and the person connects again. When the
+                // client is the one that went away, nobody is told: the failure is `cancelled`.
+                ConnectError::HostKeyUnknown { ref hop, .. }
+                | ConnectError::HostKeyMismatch { ref hop, .. }
+                | ConnectError::NoCommonHostKeyAlgorithm { ref hop, .. }
+                | ConnectError::AuthFailed { ref hop, .. }
+                    if auth.cancelled(&hop.id) =>
+                {
+                    return Err(if cancel.is_cancelled() { ConnectFailure::cancelled() } else { password_abandoned(hop, &target) });
+                }
                 ConnectError::HostKeyUnknown { hop, key } => self.confirm(&mut target, &policy, owner, cancel, &hop, &key, None)?,
                 ConnectError::HostKeyMismatch { hop, key, pinned } => self.confirm(&mut target, &policy, owner, cancel, &hop, &key, Some(pinned))?,
                 // Plan 1b R17: the handshake offered only the pinned key's type and the server has none of it any more. Once more without the
@@ -174,12 +188,6 @@ impl Connector<'_> {
                     if let Some(restricted) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
                         restricted.pinned = None;
                     }
-                }
-                // The person gave up the password the engine asked for before it connected (a hop that starts with the password method), and
-                // the login then ended for want of it, with "no login method could be tried" when the server offers nothing else. It was
-                // abandoned, not refused (spec §11); and when the client is the one that went away, nobody is told.
-                ConnectError::AuthFailed { ref hop, .. } if auth.cancelled(&hop.id) => {
-                    return Err(if cancel.is_cancelled() { ConnectFailure::cancelled() } else { password_abandoned(hop, &target) });
                 }
                 ConnectError::AuthFailed { ref hop, ref tried, password_wanted, .. } => {
                     // A password given and refused: a typed one is forgotten; a saved one stays saved, and what the person types is used instead.
@@ -332,6 +340,13 @@ mod tests {
             self
         }
 
+        /// The password of `web` is saved in the keychain, so that nobody is asked for it (the owner who has nothing to say would end the
+        /// connect at that question, which these tests are not about).
+        fn with_saved_password(self) -> World {
+            self.keychain.set("host:id-web", "saved").unwrap();
+            self
+        }
+
         fn connect(&self, query: &HostQuery) -> Result<Connected, ConnectFailure> {
             self.connect_as(query, &self.owner)
         }
@@ -394,7 +409,7 @@ mod tests {
 
     #[test]
     fn an_unknown_host_key_the_person_does_not_trust_ends_the_connect_and_pins_nothing() {
-        let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).deciding(vec![Decision::Refuse]);
+        let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).with_saved_password().deciding(vec![Decision::Refuse]);
         assert_eq!(world.connect(&web()).err(), Some(failure(kinds::HOST_KEY, "The host key of web has not been confirmed yet.")));
         assert!(world.directory.pins().is_empty());
     }
@@ -403,7 +418,7 @@ mod tests {
     /// "trust this key" works): a stale answer pins nothing.
     #[test]
     fn an_answer_for_another_fingerprint_pins_nothing() {
-        let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).deciding(vec![Decision::TrustFingerprint("SHA256:stale".into())]);
+        let world = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).with_saved_password().deciding(vec![Decision::TrustFingerprint("SHA256:stale".into())]);
         assert_eq!(world.connect(&web()).err(), Some(failure(kinds::HOST_KEY, "The host key of web has not been confirmed yet.")));
         assert!(world.directory.pins().is_empty());
     }
@@ -411,7 +426,7 @@ mod tests {
     #[test]
     fn a_changed_host_key_shows_the_pinned_one_and_replaces_it_only_when_accepted() {
         let old = key(test_keys::ENC_PUBLIC);
-        let refusing = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", old.clone())).deciding(vec![Decision::Refuse]);
+        let refusing = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", old.clone())).with_saved_password().deciding(vec![Decision::Refuse]);
         assert_eq!(refusing.connect(&web()).err(), Some(failure(kinds::HOST_KEY, "The host key of web changed. Connection refused.")));
         assert_eq!(refusing.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(old.clone()), "the old pin stays");
         let asked = refusing.confirmer.asked();
@@ -467,7 +482,7 @@ mod tests {
         let replaced = PinMovedOn { inner: saved(), now: Some(PinnedKey { key: key(test_keys::ECDSA_PUBLIC), pinned_at_ms: 42 }) };
         let sentence = "SSHelter's record of web's host key changed while it was connecting. Connect again.";
         for (what, directory) in [("forgotten", forgotten), ("replaced", replaced)] {
-            let world = world(FakeEngine::new(), FakeDirectory::new()).deciding(vec![Decision::Trust]);
+            let world = world(FakeEngine::new(), FakeDirectory::new()).with_saved_password().deciding(vec![Decision::Trust]);
             assert_eq!(world.connect_through(&directory, &web(), &world.owner).err(), Some(failure(kinds::HOST, sentence)), "{what}");
             assert!(world.confirmer.asked().is_empty(), "{what}: the window was not asked");
             assert!(locked(&world.owner.notices).is_empty(), "{what}: nobody was told to wait for it either");
@@ -495,7 +510,7 @@ mod tests {
     }
 
     fn world_refusing_algorithm_change(pinned: HostKey) -> World {
-        world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", pinned)).deciding(vec![Decision::Refuse])
+        world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", pinned)).with_saved_password().deciding(vec![Decision::Refuse])
     }
 
     /// The fallback password after a refused key is not typed while the connection waits (russh spins then): the engine reports that a
@@ -600,6 +615,50 @@ mod tests {
             assert_eq!(world.connect(&web()).err(), Some(abandoned), "{label}");
             assert_eq!(world.owner.asked().len(), 1, "{label}: not asked again");
         }
+    }
+
+    /// The person cancels the password question of a first contact with a password-first host, lets it run out, or their client goes away.
+    /// The engine asks it before it connects and goes on to the host key, which it has not seen yet, and the connect ends right there as
+    /// abandoned (spec §10, §11: a cancelled or overdue prompt ends the attempt, and the person connects again). The window is not opened
+    /// for a connect the person gave up, nobody is told to wait for it, nothing is pinned or replaced, and nothing connects again.
+    #[test]
+    fn a_cancelled_password_question_ends_the_connect_before_any_host_key_is_asked_about() {
+        let abandoned = failure(kinds::AUTH, "Authentication for web was abandoned (the password was not given).");
+        let cases = [
+            ("a key not seen before", None),
+            ("a changed key", Some(key(test_keys::ENC_PUBLIC))),
+            ("a pinned key of another type", Some(key(test_keys::ECDSA_PUBLIC))),
+        ];
+        for (what, pin) in cases {
+            for reply in [Reply::Cancelled, Reply::TimedOut, Reply::Gone] {
+                let label = format!("{what}, {reply:?}");
+                let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+                let directory = match &pin {
+                    Some(pin) => directory.with_pin("web", pin.clone()),
+                    None => directory,
+                };
+                let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+                let mut world = world(engine, directory).deciding(vec![Decision::Trust]);
+                world.owner = FakeOwner::answering(vec![reply]);
+                assert_eq!(world.connect(&web()).err(), Some(abandoned.clone()), "{label}");
+                assert_eq!(world.owner.asked().len(), 1, "{label}: the password was asked for once");
+                assert!(world.confirmer.asked().is_empty(), "{label}: the window was not asked");
+                assert!(locked(&world.owner.notices).is_empty(), "{label}: nobody was told to wait for it");
+                assert_eq!(world.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), pin, "{label}: nothing was pinned or replaced");
+            }
+        }
+    }
+
+    /// The same for a jump host that starts with the password method: the connect ends there, said through it (spec §11).
+    #[test]
+    fn a_cancelled_password_question_of_a_jump_host_ends_the_connect_before_its_host_key_is_asked_about() {
+        let directory = FakeDirectory::new().with_host("bastion", AuthMethod::Password).with_host_via("db", AuthMethod::Password, &["bastion"]);
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let mut world = world(engine, directory).deciding(vec![Decision::Trust; 2]);
+        world.owner = FakeOwner::answering(vec![Reply::Cancelled]);
+        let through_bastion = "Could not connect through bastion: Authentication for bastion was abandoned (the password was not given).";
+        assert_eq!(world.connect(&HostQuery::Alias("db".into())).err(), Some(failure(kinds::AUTH, through_bastion)));
+        assert!(world.confirmer.asked().is_empty() && locked(&world.owner.notices).is_empty() && world.directory.pins().is_empty());
     }
 
     /// Spec §11: a failure on a jump host is said through it, an abandoned login too, whoever asked for the password: the engine, before
