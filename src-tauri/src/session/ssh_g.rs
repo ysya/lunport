@@ -16,9 +16,11 @@
 //! `Match exec` command that `ssh` was waiting for. The killed `ssh` is reaped on a thread of its own: a process that sits in the kernel
 //! (a hung mount) dies only when the call returns, and the answer must not wait for that. The pipes are read on threads too, so that
 //! neither a full pipe nor a pipe that never ends can hold the answer up: a process that `Match exec` left in the background holds the
-//! pipes of an `ssh` that has ended, so they get `PIPE_GRACE` to end and then what was read is the answer. (That process is not killed:
-//! it is the person's own command, `ssh <alias>` leaves it behind as well, and a group is only safe to signal while its leader has not
-//! been reaped, because its id may be given to another process after that.) On Windows there is no group to kill: only `ssh` is.
+//! stderr of an `ssh` that has ended (OpenSSH gives a `Match exec` command `/dev/null` for stdin and stdout and lets it inherit stderr
+//! only), so stdout always ends with `ssh`, and a stdout that has not ended a second later is an answer read only in part, not one to
+//! use; stderr gets that second (`PIPE_GRACE`) to end and then what was read of it is used. (That process is not killed: it is the
+//! person's own command, `ssh <alias>` leaves it behind as well, and a group is only safe to signal while its leader has not been reaped,
+//! because its id may be given to another process after that.) On Windows there is no group to kill: only `ssh` is.
 
 use std::io::Read;
 use std::path::Path;
@@ -31,9 +33,14 @@ use std::time::{Duration, Instant};
 /// short enough that the person who waits for the connect is not left wondering.
 pub const EFFECTIVE_DEADLINE: Duration = Duration::from_secs(10);
 
-/// How long the pipes of an `ssh -G` that has ended get to reach end-of-file. Its output is in them already; a process that it started
-/// and that is still running holds them open, and the output read so far is then the answer.
+/// How long the pipes of an `ssh -G` that has ended get to reach end-of-file. Its output is in them already. A stdout that has not ended
+/// by then was read only in part (nothing but `ssh` holds it) and is an error; a stderr may be held open by a process that `Match exec`
+/// left running, and what was read of it by then is used.
 const PIPE_GRACE: Duration = Duration::from_secs(1);
+
+/// The most of one pipe's output that is kept (1 MiB): the answer is a few kilobytes, and a process that `Match exec` left behind may write
+/// to `ssh`'s stderr for as long as it lives. Past it the pipe is still read, and what it says is dropped.
+const PIPE_CAP: usize = 1 << 20;
 
 /// The longest pause between two looks at whether `ssh -G` has ended (a quick one is seen sooner: the pause starts at a millisecond).
 const LONGEST_POLL: Duration = Duration::from_millis(20);
@@ -41,7 +48,8 @@ const LONGEST_POLL: Duration = Duration::from_millis(20);
 /// `ssh -G <alias>` (with `-F <config_path>` when one is given): the effective settings of a host as (keyword in lower case, value)
 /// pairs, repeated keywords kept, like `config::intel::effective_config` but with a deadline. `alias` has to be a saved host (the adapter
 /// checks that before it asks): it becomes an argument of `ssh`. `Err` is a sentence for the person: `ssh` is not there, could not be
-/// started, did not finish within the deadline (and was killed with what it had started), or failed with the first line it complained about.
+/// started, did not finish within the deadline (and was killed with what it had started), failed with the first line it complained about,
+/// or gave an answer that could not be read whole.
 pub fn effective_within(alias: &str, config_path: Option<&Path>, deadline: Duration) -> Result<Vec<(String, String)>, String> {
     let mut command = crate::process::background_command("ssh");
     if let Some(path) = config_path {
@@ -159,7 +167,8 @@ fn end_with_its_group(child: &mut Child) {
 /// One pipe of the child, read on a thread of its own: a full pipe cannot stop the child, and a pipe that never ends cannot stop us.
 struct PipeReader {
     bytes: Arc<Mutex<Vec<u8>>>,
-    /// How the reading ended: at end-of-file, or with the error that stopped it.
+    /// How the reading ended: at end-of-file, with the error that stopped it, or (at end-of-file) with an `InvalidData` error when the
+    /// pipe delivered more than `PIPE_CAP` and only the first `PIPE_CAP` bytes were kept.
     ended: Receiver<std::io::Result<()>>,
 }
 
@@ -168,13 +177,20 @@ fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> std::io::Resu
     let (finished, ended) = mpsc::channel();
     let sink = Arc::clone(&bytes);
     std::thread::Builder::new().name("sshelter-ssh-g-pipe".to_string()).spawn(move || {
-        let mut result = Ok(());
+        let (mut result, mut cut) = (Ok(()), false);
         if let Some(mut pipe) = pipe {
             let mut chunk = [0u8; 4096];
             loop {
                 match pipe.read(&mut chunk) {
                     Ok(0) => break,
-                    Ok(count) => sink.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(&chunk[..count]),
+                    Ok(count) => {
+                        // Past the cap the pipe is still read, so that a live `ssh` is neither stopped by a full pipe nor killed by
+                        // SIGPIPE, and what it says is dropped.
+                        let mut kept = sink.lock().unwrap_or_else(PoisonError::into_inner);
+                        let room = PIPE_CAP.saturating_sub(kept.len());
+                        kept.extend_from_slice(&chunk[..count.min(room)]);
+                        cut |= count > room;
+                    }
                     // A signal that arrives during the read is no end of file: read again.
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(error) => {
@@ -184,17 +200,26 @@ fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> std::io::Resu
                 }
             }
         }
+        if cut && result.is_ok() {
+            result = Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "more than a mebibyte of output"));
+        }
         let _ = finished.send(result);
     })?;
     Ok(PipeReader { bytes, ended })
 }
 
 impl PipeReader {
-    /// What the pipe has delivered by `until` (or when it ends, if that comes first), and the error that ended the reading, if one did.
+    /// What the pipe delivered, and `Some(error)` when that is not all of it: the reading failed, or the pipe had not reached its end by
+    /// `until` (the output may be a part of the whole), or it delivered more than `PIPE_CAP` (only the first `PIPE_CAP` bytes are kept),
+    /// or the thread reading it is gone.
     fn collect(&self, until: Instant) -> (Vec<u8>, Option<std::io::Error>) {
         let error = match self.ended.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            Ok(Ok(())) => None,
             Ok(Err(error)) => Some(error),
-            _ => None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Some(std::io::Error::new(std::io::ErrorKind::TimedOut, "its output had not reached its end a second after it exited"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Some(std::io::Error::other("the thread reading its output ended without saying how")),
         };
         (self.bytes.lock().unwrap_or_else(PoisonError::into_inner).clone(), error)
     }
@@ -226,6 +251,76 @@ mod tests {
         assert_eq!((broken.0.as_slice(), broken.1.map(|error| error.to_string())), (&b"user x"[..], Some("the pipe broke".to_string())));
         let whole = read_in_background(Some(&b"user x"[..])).unwrap().collect(Instant::now() + Duration::from_secs(5));
         assert_eq!((whole.0.as_slice(), whole.1.is_none()), (&b"user x"[..], true));
+    }
+
+    /// stdout ends with `ssh` (nothing else holds it: see the module documentation), so one that has not ended by `until` is an answer
+    /// that may have been read only in part (the thread reading it has not caught up), and that is an error, with what was read so far.
+    #[test]
+    fn a_pipe_that_has_not_ended_by_the_grace_is_not_a_complete_answer() {
+        struct Stalls {
+            reads: u8,
+            says_stalled: mpsc::Sender<()>,
+            released: mpsc::Receiver<()>,
+        }
+        impl Read for Stalls {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads == 1 {
+                    buffer[..11].copy_from_slice(b"hostname x\n");
+                    return Ok(11);
+                }
+                // The first line is kept by now (the thread keeps it before it reads again); the rest is late.
+                let _ = self.says_stalled.send(());
+                let _ = self.released.recv();
+                Ok(0)
+            }
+        }
+        let ((says_stalled, stalled), (release, released)) = (mpsc::channel(), mpsc::channel::<()>());
+        let reader = read_in_background(Some(Stalls { reads: 0, says_stalled, released })).unwrap();
+        stalled.recv_timeout(Duration::from_secs(30)).expect("the pipe delivered its first line");
+        let (bytes, error) = reader.collect(Instant::now() + Duration::from_millis(200));
+        assert_eq!(bytes, b"hostname x\n");
+        assert!(error.is_some(), "a pipe that has not ended is not a complete answer");
+        drop(release);
+    }
+
+    /// A process can write without end (a `Match exec` leftover on `ssh`'s stderr): the pipe is read on, so that the writer is neither
+    /// stopped by a full pipe nor killed by SIGPIPE, but only its first `PIPE_CAP` bytes are kept, and output that was cut is not a
+    /// complete answer either, whether the pipe ends or not.
+    #[test]
+    fn a_pipe_that_writes_without_end_is_read_only_up_to_the_cap() {
+        struct Floods {
+            left: usize,
+            says_drained: mpsc::Sender<()>,
+            released: mpsc::Receiver<()>,
+        }
+        impl Read for Floods {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.left == 0 {
+                    // All of it was read; the pipe stays open, as one that a running process holds does.
+                    let _ = self.says_drained.send(());
+                    let _ = self.released.recv();
+                    return Ok(0);
+                }
+                let count = buffer.len().min(self.left);
+                buffer[..count].fill(b'x');
+                self.left -= count;
+                Ok(count)
+            }
+        }
+        let ((says_drained, drained), (release, released)) = (mpsc::channel(), mpsc::channel::<()>());
+        let reader = read_in_background(Some(Floods { left: 4 * PIPE_CAP, says_drained, released })).unwrap();
+        drained.recv_timeout(Duration::from_secs(30)).expect("the pipe is read on past the cap, to the end of what was written");
+        let (bytes, error) = reader.collect(Instant::now() + Duration::from_millis(300));
+        assert_eq!(bytes.len(), PIPE_CAP, "only the first mebibyte is kept");
+        assert!(error.is_some(), "output that was cut, of a pipe that has not ended, is not a complete answer");
+        drop(release);
+        let (bytes, error) = reader.collect(Instant::now() + Duration::from_secs(30));
+        assert_eq!(
+            (bytes.len(), error.map(|error| error.kind())),
+            (PIPE_CAP, Some(std::io::ErrorKind::InvalidData)),
+            "a pipe that ended after more than the cap is not a complete answer"
+        );
     }
 
     #[test]
@@ -362,8 +457,8 @@ mod tests {
             assert!(leftovers.is_empty(), "processes of the stalled ssh -G are left: {leftovers:?}");
         }
 
-        /// A process that `Match exec` leaves behind keeps `ssh`'s pipes open; once `ssh` is gone its answer is complete, and the pipe that
-        /// never ends does not hold it up.
+        /// A process that `Match exec` leaves behind keeps `ssh`'s stderr open (its stdout is `/dev/null`, so `ssh`'s stdout ends with
+        /// `ssh`); once `ssh` is gone its answer is complete, and the stderr that never ends does not hold it up.
         #[test]
         fn a_process_left_behind_by_match_exec_does_not_hold_the_answer_up() {
             let Some(_tools) = crate::ssh::testing::harness::tools() else { return };
