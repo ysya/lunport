@@ -248,7 +248,7 @@ impl Broker {
                 Ok(Some(Frame::Data(bytes))) => control.input(&bytes, link.as_ref()),
                 Ok(Some(Frame::Control(payload))) => match decode::<ClientMessage>(&payload) {
                     Ok(ClientMessage::WindowChange { cols, rows }) => control.resize(cols, rows),
-                    Ok(ClientMessage::Answer { question_id, value, cancel: cancelled }) => owner.answer(&question_id, value, cancelled),
+                    Ok(ClientMessage::Answer { question_id, value, cancel: cancelled }) => owner.answer(&question_id, value.map(Zeroizing::new), cancelled),
                     Ok(ClientMessage::Close) => break,
                     Ok(_) | Err(_) => refuse(kinds::PROTOCOL, "SSHelter did not expect that message."),
                 },
@@ -421,11 +421,12 @@ impl ConnectionOwner {
         format!("q{}", self.next_question.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
-    /// The client's answer to `question_id` (a late or unknown one is dropped).
-    fn answer(&self, question_id: &str, value: Option<String>, cancel: bool) {
+    /// The client's answer to `question_id` (a late or unknown one is dropped). The value can be a password: it arrives in a `Zeroizing`,
+    /// moved there where it was read, so that no way out of here, an early one included, leaves a plain copy of it behind.
+    fn answer(&self, question_id: &str, value: Option<Zeroizing<String>>, cancelled: bool) {
         let Some(waiting) = locked(&self.questions).waiting.remove(question_id) else { return };
         let reply = match value {
-            Some(value) if !cancel => Reply::Answer(Zeroizing::new(value)),
+            Some(value) if !cancelled => Reply::Answer(value),
             _ => Reply::Cancelled,
         };
         let _ = waiting.try_send(reply);
@@ -1065,5 +1066,36 @@ mod tests {
             },
             other => panic!("{other:?}"),
         }
+    }
+
+    /// An answer is used by the question it names while that waits; to an unknown or an overdue question it is dropped, and an answer
+    /// that is also marked as cancelled is a cancel.
+    #[test]
+    fn an_answer_reaches_the_question_it_names_and_a_late_or_unknown_one_is_dropped() {
+        let (_ours, theirs) = UnixStream::pair().unwrap();
+        let owner = Arc::new(ConnectionOwner::new(Arc::new(FrameLink { writer: Mutex::new(theirs) })));
+        let typed = |text: &str| Some(Zeroizing::new(text.to_string()));
+        let ask = |owner: &Arc<ConnectionOwner>, wait: Duration| {
+            let owner = Arc::clone(owner);
+            std::thread::spawn(move || owner.ask(QuestionKind::Password, "p", false, Some(Instant::now() + wait)))
+        };
+        let waiting = |owner: &ConnectionOwner| locked(&owner.questions).waiting.len();
+
+        let asking = ask(&owner, Duration::from_secs(10));
+        crate::ssh::testing::eventually("the question to wait", 5, || waiting(&owner) == 1);
+        owner.answer("q99", typed("nobody asked"), false);
+        assert_eq!(waiting(&owner), 1, "an answer to a question nobody asked is dropped");
+        owner.answer("q1", typed("right"), false);
+        assert!(matches!(asking.join().unwrap(), Reply::Answer(answer) if answer.as_str() == "right"));
+
+        let asking = ask(&owner, Duration::from_secs(10));
+        crate::ssh::testing::eventually("the question to wait", 5, || waiting(&owner) == 1);
+        owner.answer("q2", typed("typed, then Ctrl-C"), true);
+        assert!(matches!(asking.join().unwrap(), Reply::Cancelled));
+
+        let asking = ask(&owner, Duration::from_millis(100));
+        assert!(matches!(asking.join().unwrap(), Reply::TimedOut));
+        owner.answer("q3", typed("too late"), false);
+        assert_eq!(waiting(&owner), 0, "the question that ran out is forgotten, and a late answer to it is dropped");
     }
 }
