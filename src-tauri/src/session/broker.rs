@@ -78,8 +78,9 @@ struct Conn {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Told {
     No,
-    /// `end_all` told it that the app is quitting. It closes the connection too, once it has written that: the client reads it before it
-    /// reads the end of the stream.
+    /// `end_all` is telling it that the app is quitting. The telling thread closes the connection too, once it has written that (the
+    /// client reads it before it reads the end of the stream), and only then takes the session out of the table: `end_all` returns when
+    /// the table is empty, and every client it ended has to have been told by then. The session's own thread leaves the entry alone.
     ByEndAll,
     /// The session's thread told it why the connect failed.
     BySession,
@@ -163,11 +164,17 @@ impl Broker {
         !locked(&self.table).entries.is_empty()
     }
 
-    /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. A session that is still being
-    /// connected is cancelled and its client told at once (the engine's connect cannot be interrupted, and the app does not wait for it);
-    /// one that is open, or whose shell is being opened, is ended through the relay, which closes its shell and tells its client. Waits up
-    /// to `wait` for the table to empty (each session closes its own shell and connection on its own thread).
-    pub fn end_all(&self, wait: Duration) {
+    /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. Waits up to `wait` for the table to
+    /// empty, which is when every client has been told: the app exits when this returns, so a client that was not told by then hears
+    /// nothing (its terminal says "The connection to SSHelter ended.").
+    ///
+    /// A session that is still being connected is cancelled at once; its client is told, its connection closed, and then the session
+    /// leaves the table, on a thread of its own. Nothing waits for what the session's own thread is doing (a question, the host key
+    /// window, the engine's connect, which cannot be interrupted): that thread finishes by itself, closes what it connected, and opens
+    /// no shell. One that is open, or whose shell is being opened, is ended through the relay, which closes its shell once it has
+    /// printed something (or `SETTLE` after it opened) and then tells its client; it leaves the table when its thread is over, which is
+    /// after that.
+    pub fn end_all(self: &Arc<Broker>, wait: Duration) {
         let (connecting, open) = {
             let mut table = locked(&self.table);
             table.quitting = true;
@@ -187,12 +194,15 @@ impl Broker {
         };
         for (alias, conn) in connecting {
             // Whatever the session waits for gives up at once. Telling the client can block (a client that has stopped reading), so it is
-            // done on a thread of its own, which closes the connection when it has: the session's thread leaves that to it (`serve`).
+            // done on a thread of its own, which closes the connection when it has (the session's thread leaves that to it, `serve`) and
+            // only then takes the session out of the table: not before, or `end_all` would return with the client untold.
             conn.cancel.cancel();
             conn.owner.gone();
+            let broker = Arc::clone(self);
             std::thread::spawn(move || {
                 say_quit(conn.link.as_ref(), &alias);
                 hang_up(&conn.closer);
+                broker.told_quit(conn.id);
             });
         }
         for (alias, control) in open {
@@ -293,11 +303,25 @@ impl Broker {
         true
     }
 
-    /// The session is over: it leaves the table. Says whom the client of a session that was still being connected has been told by.
+    /// The session's thread is over: the session leaves the table. Says whom the client of a session that was still being connected has
+    /// been told by. The entry of a client `end_all` is telling stays, however the thread ended: the telling thread takes it out when it
+    /// has told the client (`told_quit`), because `end_all` must not return before.
     fn forget(&self, id: u64) -> Told {
-        let entry = locked(&self.table).entries.remove(&id);
+        let mut table = locked(&self.table);
+        let told = table.entries.get(&id).map_or(Told::No, |entry| entry.told);
+        if told != Told::ByEndAll {
+            table.entries.remove(&id);
+        }
+        drop(table);
         self.changed.notify_all();
-        entry.map_or(Told::No, |entry| entry.told)
+        told
+    }
+
+    /// `end_all` has told the client of a session that was still being connected that the app quit, and has closed its connection: the
+    /// session leaves the table, which lets `end_all` return.
+    fn told_quit(&self, id: u64) {
+        locked(&self.table).entries.remove(&id);
+        self.changed.notify_all();
     }
 
     /// Whether the caller may tell the client of a session that is still connecting how its connect ended; `false` when `end_all` has
@@ -309,7 +333,9 @@ impl Broker {
                 entry.told = Told::BySession;
                 true
             }
-            None => true,
+            // The session's thread takes its entry out itself, when it is over, which is after it has claimed. Only `end_all`, once it
+            // has told the client, takes one out from under a thread that is still running.
+            None => false,
         }
     }
 
@@ -684,6 +710,23 @@ mod tests {
         fn answer(&mut self, question_id: &str, value: Option<&str>) {
             self.send(&ClientMessage::Answer { question_id: question_id.into(), value: value.map(str::to_string), cancel: value.is_none() });
         }
+
+        /// What the broker has written that can be read now, without waiting for more, and whether it has closed the connection by now.
+        fn ready_now(&mut self) -> (Vec<Got>, bool) {
+            self.stream.set_nonblocking(true).unwrap();
+            let mut got = Vec::new();
+            let closed = loop {
+                match read_frame(&mut self.stream) {
+                    Ok(Some(Frame::Control(payload))) => got.push(Got::Message(decode::<ServerMessage>(&payload).expect("a server message"))),
+                    Ok(Some(Frame::Data(bytes))) => got.push(Got::Data(bytes.to_vec())),
+                    Ok(None) => break true,
+                    Err(FrameError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => break false,
+                    Err(error) => panic!("a frame, the end of the stream, or nothing yet: {error}"),
+                }
+            };
+            self.stream.set_nonblocking(false).unwrap();
+            (got, closed)
+        }
     }
 
     struct World {
@@ -1023,6 +1066,12 @@ mod tests {
         ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to web was closed.".into() })
     }
 
+    /// What a client has been told, and can read at once, when `end_all` is done with it: the quit sentence and `exited`, and the
+    /// connection is closed after them.
+    fn told_quit() -> (Vec<Got>, bool) {
+        (vec![Got::Message(quit_sentence()), Got::Message(no_status())], true)
+    }
+
     /// Plan 1b-1 review, Task 11 Important 2: a client that is being asked a question (here the password) has a session as much as one
     /// whose shell is open. The app does not quit under it without saying why, and the window it closes does not quit the app.
     #[test]
@@ -1046,9 +1095,10 @@ mod tests {
         assert!(world.engine.events().is_empty(), "nothing was connected");
     }
 
-    /// What the app tells a client it ends is read before the end of the connection, whichever of the two finishes first: here the
-    /// session's thread is done with its connect long before the telling gets to write (the client's connection is busy meanwhile), and
-    /// it must not close the connection under it.
+    /// What the app tells a client it ends is read before the end of the connection, and `end_all` does not return before the client
+    /// has been told: here the client's connection is busy, so the telling has to wait, while the session's own thread (woken by the
+    /// cancel) is done with its connect long before. That thread ending is not the telling: the app exits when `end_all` returns, so it
+    /// is not let go before, and the thread must not close the connection under the telling either.
     #[test]
     fn the_connection_of_a_client_the_app_told_it_is_quitting_is_closed_after_it_was_told() {
         let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
@@ -1058,11 +1108,54 @@ mod tests {
         let ServerMessage::Question(_) = client.next_message() else { panic!("expected the password question") };
         let link = Arc::clone(&locked(&world.broker.table).entries[&1].conn.link);
         let busy = locked(&link.writer);
-        world.broker.end_all(Duration::from_secs(5));
-        assert!(!world.broker.has_sessions(), "the session's own thread has ended");
+        let ending = {
+            let broker = Arc::clone(&world.broker);
+            std::thread::spawn(move || broker.end_all(Duration::from_secs(10)))
+        };
+        // Long enough for the session's thread to be over: the cancel wakes its question at once.
         std::thread::sleep(Duration::from_millis(300));
+        assert!(!ending.is_finished(), "end_all returned while its client had not been told");
+        assert!(world.broker.has_sessions(), "the session stays in the table until its client has been told");
         drop(busy);
-        assert_eq!(client.rest().1, [quit_sentence(), no_status()]);
+        ending.join().unwrap();
+        assert_eq!(client.ready_now(), told_quit(), "all of it can be read at the moment end_all returns, and the connection is closed after it");
+        assert!(!world.broker.has_sessions());
+    }
+
+    /// The app exits as soon as `end_all` returns, so every client it ended has been told by then, not a few microseconds later (the
+    /// session's thread, woken by the cancel, used to empty the table before the telling thread had written a byte).
+    #[test]
+    fn when_end_all_returns_the_clients_of_the_connecting_sessions_have_been_told_and_their_connections_closed() {
+        for run in 1..=30 {
+            let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+            let world = world_with(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right"))), directory, Arc::new(FakeConfirmer::default()), MemKeychain::default());
+            let mut client = Client::connect(&world.sock);
+            client.open("web");
+            let ServerMessage::Question(_) = client.next_message() else { panic!("expected the password question") };
+            world.broker.end_all(Duration::from_secs(5));
+            assert_eq!(client.ready_now(), told_quit(), "run {run}");
+            assert!(!world.broker.has_sessions(), "run {run}");
+        }
+    }
+
+    /// The engine's connect cannot be interrupted, and the app does not wait for it: the client is told, and the session leaves the
+    /// table, while the connect goes on. (The thread that runs it closes what it connects, when it gets through.)
+    #[test]
+    fn end_all_does_not_wait_for_an_engine_connect_that_cannot_be_interrupted() {
+        let world = world_gated(FakeEngine::new(), pinned_web(), Arc::new(FakeConfirmer::default()), saved_password(), |gated| gated.holding_connects());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        crate::ssh::testing::eventually("the connect to be going on", 5, || world.gates.connect.entered() == 1);
+        let control = Arc::clone(&locked(&world.broker.table).entries[&1].conn.control);
+        let started = Instant::now();
+        world.broker.end_all(Duration::from_secs(4));
+        assert!(started.elapsed() < Duration::from_secs(2), "end_all waited for the connect: {:?}", started.elapsed());
+        assert_eq!(client.ready_now(), told_quit());
+        assert!(!world.broker.has_sessions(), "the session is gone from the table while its connect goes on");
+        assert!(world.engine.events().is_empty(), "the connect has not finished");
+        world.gates.connect.release();
+        crate::ssh::testing::eventually("everything of the session to be over", 5, || Arc::strong_count(&control) == 1);
+        assert_eq!(world.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed], "connected, closed at once, and no shell opened");
     }
 
     /// The same while the shell is being opened, which can take seconds: the shell is closed once the engine has opened it, the client was
@@ -1099,6 +1192,7 @@ mod tests {
         client.stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         client.open("web");
         crate::ssh::testing::eventually("the connect to be going on", 5, || world.gates.connect.entered() == 1);
+        let control = Arc::clone(&locked(&world.broker.table).entries[&1].conn.control);
         let ending = {
             let broker = Arc::clone(&world.broker);
             std::thread::spawn(move || broker.end_all(Duration::from_secs(10)))
@@ -1109,6 +1203,8 @@ mod tests {
         world.gates.connect.release();
         ending.join().unwrap();
         assert_eq!(client.rest(), (Vec::new(), Vec::new()), "nothing more is said");
+        // `end_all` does not wait for the session's thread, so the connect that got through is closed in its own time.
+        crate::ssh::testing::eventually("everything of the session to be over", 5, || Arc::strong_count(&control) == 1);
         assert_eq!(world.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed], "connected, and closed at once: no shell");
         assert!(!world.broker.has_sessions());
     }
@@ -1156,16 +1252,22 @@ mod tests {
 
         let (quitting, mut client) = conn_on_a_socket_pair(2);
         assert!(world.broker.enter(&quitting, &query, None));
+        // The client's connection is busy, so the telling by `end_all` waits; the entry stays until it has told the client.
+        let busy = locked(&quitting.link.writer);
         world.broker.end_all(Duration::ZERO);
         assert!(!world.broker.claim(2), "end_all told it first");
         assert!(!world.broker.promote(2, &web), "a connect that finishes after end_all started does not make an open session");
+        assert_eq!(world.broker.forget(2), Told::ByEndAll, "the session's thread ending says who tells the client");
+        assert!(world.broker.has_sessions(), "and leaves the entry to the telling, which removes it once the client has been told");
+        drop(busy);
         client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut told = Vec::new();
         while let Some(Frame::Control(payload)) = read_frame(&mut client).unwrap() {
             told.push(decode::<ServerMessage>(&payload).unwrap());
         }
         assert_eq!(told, [quit_sentence(), no_status()]);
-        assert_eq!(world.broker.forget(2), Told::ByEndAll);
+        crate::ssh::testing::eventually("the entry to leave once its client was told", 5, || !world.broker.has_sessions());
+        assert!(!world.broker.claim(2), "a session whose client end_all told stays told, also when its entry is gone");
         assert!(!world.broker.enter(&conn_on_a_socket_pair(3).0, &query, None), "and no session is started once the app is quitting");
     }
 
@@ -1408,7 +1510,8 @@ mod tests {
         assert!(world.broker.has_sessions(), "a client waiting for the window has a session");
         world.broker.end_all(Duration::from_secs(5));
         assert_eq!(client.rest().1, [quit_sentence(), no_status()]);
-        assert!(*locked(&confirmer.withdrawn), "the window was told its question is withdrawn");
+        // The window is released by the session's own thread, which `end_all` does not wait for.
+        crate::ssh::testing::eventually("the window to be told its question is withdrawn", 5, || *locked(&confirmer.withdrawn));
         assert!(world.engine.events().is_empty(), "nothing was connected");
     }
 
