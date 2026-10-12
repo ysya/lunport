@@ -1372,4 +1372,23 @@ mod tests {
             ]
         );
     }
+
+    /// Plan 1b-1 review, Task 11 Minor 9: who asked for a session is worked out once, when the connection is accepted, from the pid of the
+    /// peer (spec §7.2): its process chain without SSHelter's own executable. A client of this test is this process.
+    #[test]
+    fn a_session_records_who_asked_for_it_from_the_pid_of_the_peer() {
+        let world = world(FakeEngine::new());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        let recorded = world.broker.sessions()[0].requested_by.clone();
+        assert_eq!(recorded, requester_of(Some(std::process::id())), "the chain of the pid the server saw on the other end, which is ours");
+        if let Some(chain) = recorded {
+            let own = std::env::current_exe().unwrap();
+            let own_name = own.file_name().unwrap().to_string_lossy().to_string();
+            assert!(!chain.is_empty() && chain.iter().all(|name| !own_name.starts_with(name.as_str()) && !name.starts_with(own_name.as_str())), "this test's own executable is not in {chain:?}");
+        }
+        assert_eq!(requester_of(None), None, "a peer whose pid is not known is not guessed");
+        assert_eq!(requester_of(Some(u32::MAX)), None, "nor one whose process cannot be read");
+    }
 }
