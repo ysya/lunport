@@ -1,4 +1,7 @@
 //! The engine's errors. Their `Display` text is the sentence the user sees (own-ssh spec §11); none of them carries a key or a password.
+//! A failure behind a jump host is reported on the hop where it happened (`Unreachable`'s `reason` names the jump host when the jump host
+//! could not reach the next one); spec §11's `Could not connect through {jump alias}: {reason}` is the broker's wording of it, as are the
+//! sentences that need the keepalive seconds or "while the command was running".
 
 use std::fmt;
 

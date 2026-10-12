@@ -52,8 +52,9 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct EngineOptions {
     /// Bytes of shell output kept between the channel reader and the thread that reads the shell (see `ByteQueue`).
     pub shell_queue_bytes: usize,
-    /// How long one keyboard-interactive round may take: the person's answer, and then the server's verdict on it. `None` = 4 × the hop's
-    /// connect timeout, at least 60 s (spec §6.2 step 4).
+    /// How long the person may take to answer one keyboard-interactive round and, separately, how long the server may then take over its
+    /// verdict on the answers (one round can take up to twice this). `None` = 4 × the hop's connect timeout, at least 60 s (spec §6.2
+    /// step 4).
     pub prompt_wait: Option<Duration>,
     /// Worker threads of the engine's runtime.
     pub worker_threads: usize,
@@ -252,8 +253,9 @@ fn host_key_algorithms(pinned: Option<&HostKey>) -> Vec<Algorithm> {
 /// elapsed timer until the next packet comes (client/mod.rs: the `keepalive_timer` branch of `run_inner` acts only on a logged-in
 /// connection, and the timer is reset only after received data or a sent keepalive). Measured: about 4.2 s of CPU in a 6 s stall with a 2 s
 /// interval. The defaults (15 s connect timeout, 30 s interval) never get there; a host record with a short interval or a long connect
-/// timeout would. Not covered: the TCP connect (the timer does not exist yet), and the waits for a person, which keep their own limits (a
-/// host key question or a signature parks russh's loop, and the loop re-arms the timer when it moves on).
+/// timeout would. Not covered: the TCP connect (the timer does not exist yet) and the waits for a person (see the module rules). The host
+/// key question and the signature are answered inside this limit, which is one more reason both must be quick; while they are asked,
+/// russh's loop is parked, and it re-arms the timer when it moves on.
 fn stall_limit(hop: &Hop) -> Duration {
     let budget = hop.connect_timeout.max(Duration::from_secs(1));
     if hop.keepalive_every.is_zero() {
@@ -856,9 +858,9 @@ fn watch_connection(runtime: &RuntimeOwner, connection: Arc<Connection>) {
 }
 
 impl Drop for RusshSession {
-    /// Sends the disconnects before it returns when it can, because this session may be the last thing keeping the runtime alive and a
-    /// task spawned now would die with it. Inside any tokio runtime context (a thread of the engine's runtime or of another one) blocking
-    /// is not allowed, so there a task does it, and the task keeps the engine's runtime alive until it is done.
+    /// Sends the disconnects. On a plain thread it waits for them (up to 3 s) before it returns, so that the server reads a disconnect
+    /// message and not a dropped socket. Inside any tokio runtime context (a thread of the engine's runtime or of another one) blocking
+    /// is not allowed, so a task does it, and the task owns the engine's runtime until it is done.
     fn drop(&mut self) {
         self.connection.closing.store(true, Ordering::SeqCst);
         let connection = Arc::clone(&self.connection);

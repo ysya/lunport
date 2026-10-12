@@ -2,9 +2,10 @@
 //! authorized_keys, and `sshd -D -e -f <config>` run as the current user (no root, no PAM). Nothing here reads or writes the real
 //! `~/.ssh`: the system `ssh` client used by `system_ssh` gets `-F /dev/null`.
 //!
-//! Ported from the phase-0 spike (`spike/russh/src/harness.rs`, checked on macOS with OpenSSH 10.3p1): `Port 0` is rejected ("Badly
-//! formatted port number"), so the port is picked first; sshd prints one harmless line `BSM audit: ... setaudit_addr failed:
-//! Operation not permitted`; password and keyboard-interactive login cannot work without PAM, so this sshd offers public keys only.
+//! Ported from the phase-0 spike's harness (the `spike/` crate that plan 1a deleted), checked on macOS with OpenSSH 10.3p1: `Port 0` is
+//! rejected ("Badly formatted port number"), so the port is picked first; sshd prints one harmless line `BSM audit: ... setaudit_addr
+//! failed: Operation not permitted`; password and keyboard-interactive login cannot work without PAM, so this sshd offers public keys
+//! only.
 //! Every test starts its own sshd. A test that needs one sshd for a long loop adds `PerSourcePenalties no` to its `extra_config`
 //! (OpenSSH 9.8 and later know the keyword, older ones refuse the config, so it cannot be a default).
 //!
@@ -12,13 +13,14 @@
 //! process: the listener keeps running and its temp directory stays. The harness cleans up after the fact. `Sshd::start` writes
 //! `owner.pid` (the test process's pid, then the sshd's) into the directory, and every `Sshd::start` begins by sweeping the
 //! `sshelter-sshd-*` directories of the temp dir whose owner no longer exists (`sweep_stale`). So such a listener and directory stay until
-//! the next `Sshd::start` of any test process. By hand: `pkill -f 'sshelter-sshd-.*/sshd_config'` and `rm -r "$TMPDIR"/sshelter-sshd-*`.
+//! the next `Sshd::start` of any test process. By hand: `pkill -f 'sshelter-sshd-.*/sshd_config'` and `rm -r "${TMPDIR:-/tmp}"/sshelter-sshd-*`.
 //!
 //! **`Drop` and the sweep end the sessions with the listener.** For every connection the sshd forks a process (`sshd-session`), and that
-//! one forks another for the login, which forks the shell or the command; each of them starts a session of its own, so no process group
-//! reaches them, and they outlive a listener that is only killed. A login with a shell on a PTY then held that PTY for ever, and enough
-//! of them used up the PTYs of the machine. The parent chain is what links them, and it is lost the moment the listener dies (the children
-//! go to init). So the listener is stopped first, its descendants are read from `ps`, and all of them are killed (`kill_family`).
+//! one forks another for the login, which forks the shell or the command; none of them stays in the listener's process group (the
+//! per-connection process starts a session of its own, and a shell another one), so killing the listener's group does not reach them, and
+//! they outlive a listener that is only killed. A login with a shell on a PTY then held that PTY for ever, and enough of them used up the
+//! PTYs of the machine. The parent chain is what links them, and it is lost the moment the listener dies (the children go to init). So the
+//! listener is stopped first, its descendants are read from `ps`, and all of them are killed (`kill_family`).
 //!
 //! That reaches what is still attached when the server is dropped (a connection or a login that a test left open). It cannot reach what
 //! was orphaned earlier. A test closes its client first, the session processes then exit, and a shell child that is stuck on the server
@@ -240,7 +242,7 @@ impl Default for SshdOptions {
 /// **The limit:** `Drop` does not run when a signal kills the test process (`kill -9`, a CI runner cancelling the job), and nothing else
 /// ties the sshd to that process. The listener then keeps running and its directory stays until the next `Sshd::start` (of any test
 /// process) sweeps them, see `sweep_stale` and `owner.pid`. By hand: `pkill -f 'sshelter-sshd-.*/sshd_config'` and
-/// `rm -r "$TMPDIR"/sshelter-sshd-*`.
+/// `rm -r "${TMPDIR:-/tmp}"/sshelter-sshd-*`.
 pub struct Sshd {
     pub port: u16,
     /// The account sshd authenticates: the user running the tests (without root, sshd can only log in that user).
@@ -828,8 +830,8 @@ K3AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBK5bQ2TTd8NDXcXp\n\
     }
 
     /// The case that used up the PTYs: a login with a command on a PTY (`ssh -tt`) that is still open when the server is dropped. The
-    /// chain is the listener, `sshd-session [priv]`, `sshd-session user@tty` and the command, and each of the three has a session of its
-    /// own, so a process group would not reach any of them.
+    /// chain is the listener, `sshd-session [priv]`, `sshd-session user@tty` and the command; none of the three stays in the listener's
+    /// process group (the first starts a session of its own, the command on its PTY another), so a process group would not reach them.
     #[cfg(unix)]
     #[test]
     fn dropping_the_scratch_sshd_also_ends_a_login_on_a_pty_that_is_still_open() {

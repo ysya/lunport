@@ -214,8 +214,8 @@ pub enum Ended {
     /// Its output reached the caller's cap and the engine asked for the channel to be closed, as for `TimedOut` (`ExecResult::truncated`
     /// is true). Its exit status is unknown, and the connection is still alive and usable: this is not a lost connection.
     Truncated,
-    /// The engine lost track of it: the channel ended without an exit status or a signal because the connection was lost.
-    /// Never read this as exit code 0.
+    /// The channel ended without an exit status or a signal: normally because the connection was lost (`Session::is_alive` tells), rarely
+    /// because the server closed the channel without reporting one. Never read this as exit code 0.
     Disconnected,
 }
 
@@ -258,7 +258,8 @@ pub enum DisconnectKind {
     ClosedByUs,
     /// The server sent a disconnect message.
     ClosedByPeer,
-    /// `keepalive_max_missed` + 1 keepalives went unanswered.
+    /// The server stayed silent for (`keepalive_max_missed` + 1) keepalive intervals: `keepalive_max_missed` keepalives went unanswered,
+    /// and the next silent interval ended the connection.
     KeepaliveTimeout,
     /// The link broke (reset, end of stream).
     ConnectionLost,
