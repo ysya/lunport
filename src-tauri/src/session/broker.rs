@@ -1391,4 +1391,24 @@ mod tests {
         assert_eq!(requester_of(None), None, "a peer whose pid is not known is not guessed");
         assert_eq!(requester_of(Some(u32::MAX)), None, "nor one whose process cannot be read");
     }
+
+    /// A client whose host key waits in the app's window when the app quits: the window is told its question is withdrawn, and the client
+    /// is told why, like one at a question of its own.
+    #[test]
+    fn a_client_waiting_for_the_host_key_window_is_told_why_and_the_window_is_released_when_the_app_quits() {
+        let confirmer = Arc::new(WaitingConfirmer::default());
+        let world = world_with(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password), Arc::clone(&confirmer) as Arc<dyn HostKeyConfirmer>, MemKeychain::default());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        let ServerMessage::Question(question) = client.next_message() else { panic!("expected the password question") };
+        client.answer(&question.question_id, Some("typed"));
+        let ServerMessage::Question(notice) = client.next_message() else { panic!("expected the notice about the window") };
+        assert_eq!(notice.kind, QuestionKind::HostKeyNotice);
+        crate::ssh::testing::eventually("the window to be asked", 5, || *locked(&confirmer.asked) == 1);
+        assert!(world.broker.has_sessions(), "a client waiting for the window has a session");
+        world.broker.end_all(Duration::from_secs(5));
+        assert_eq!(client.rest().1, [quit_sentence(), no_status()]);
+        assert!(*locked(&confirmer.withdrawn), "the window was told its question is withdrawn");
+        assert!(world.engine.events().is_empty(), "nothing was connected");
+    }
 }
