@@ -114,6 +114,8 @@ pub trait AuthSource: Send + Sync {
 
     /// The banner `hop`'s server sent during the login (SSH_MSG_USERAUTH_BANNER, sshd's `Banner`), as the server wrote it: the text comes
     /// from the server, so whoever shows it removes control characters first. Handed over before the next prompt and at the end of the
-    /// login at the latest. Must be quick. The default drops it.
+    /// login at the latest; the banners that arrived since the last call come as one text. A hop's banners are handed over up to 64 KiB
+    /// in all: when the server sent more, the text is cut between two characters and ends with one line that says the rest was dropped,
+    /// and nothing follows it. Must be quick. The default drops it.
     fn banner(&self, _hop: &HopRef, _text: &str) {}
 }

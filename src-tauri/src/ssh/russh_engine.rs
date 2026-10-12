@@ -140,8 +140,8 @@ struct HopShared {
     /// Set by `Handler::disconnected`, just before `ended` is written, when the connection ended because the server had no login method
     /// to offer (russh's `NoAuthMethod`).
     no_login_method: std::sync::atomic::AtomicBool,
-    /// Banners the server sent during the login, not yet handed to the auth source (`deliver_banners`).
-    banners: Mutex<Vec<String>>,
+    /// Banner text the server sent during the login, not yet handed to the auth source (`deliver_banners`); bounded, see `Banners`.
+    banners: Mutex<Banners>,
 }
 
 impl HopShared {
@@ -150,17 +150,77 @@ impl HopShared {
             observed: Mutex::new(None),
             ended: Mutex::new(None),
             no_login_method: std::sync::atomic::AtomicBool::new(false),
-            banners: Mutex::new(Vec::new()),
+            banners: Mutex::new(Banners::default()),
         })
     }
 }
 
-/// Hands the banners the server has sent so far to the auth source, on the thread that called `connect` (the handler runs on russh's
-/// task, where the caller's `&dyn AuthSource` cannot go).
+/// The most banner text kept for one hop's connection, in all, counting what was handed to the auth source already. A real banner is a
+/// few lines; a server whose host key was confirmed can send a banner per login request, each up to 256 KiB (with compression a packet of
+/// a few hundred bytes unpacks to that), for as long as the login lasts, and the broker and every session live in one process.
+pub(crate) const MAX_BANNER_BYTES: usize = 64 * 1024;
+
+/// The one line that ends the banner text when the server sent more than `MAX_BANNER_BYTES`.
+pub(crate) const BANNER_CUT_NOTICE: &str = "[SSHelter: the rest of the server's banner was dropped.]\n";
+
+/// The banner text of one hop's login: what has arrived and has not been handed to the auth source yet, within `MAX_BANNER_BYTES`. The
+/// banners that arrive between two deliveries are joined into one text, in the order they came, the way OpenSSH writes them one after the
+/// other, so that a server that sends many small banners costs one call to `AuthSource::banner` per delivery.
+#[derive(Default)]
+struct Banners {
+    /// Arrived and not delivered.
+    pending: String,
+    /// Bytes of the server's text accepted so far, delivered or not (the notice is not counted).
+    accepted: usize,
+    /// The accepted text ends in the middle of a line, so the notice needs a line break in front of it.
+    line_open: bool,
+    /// The cap was reached: the notice is in `pending` or was delivered, and everything that comes later is dropped.
+    capped: bool,
+}
+
+impl Banners {
+    /// Keeps `text`, up to the cap. The first banner that does not fit is cut on a character boundary, and `BANNER_CUT_NOTICE` follows it
+    /// (on a line of its own); from then on nothing is kept.
+    fn push(&mut self, text: &str) {
+        if self.capped {
+            return;
+        }
+        let room = MAX_BANNER_BYTES - self.accepted;
+        let kept = if text.len() <= room {
+            text
+        } else {
+            let mut end = room;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            &text[..end]
+        };
+        self.pending.push_str(kept);
+        self.accepted += kept.len();
+        if let Some(last) = kept.chars().next_back() {
+            self.line_open = last != '\n';
+        }
+        if kept.len() < text.len() {
+            if self.line_open {
+                self.pending.push('\n');
+            }
+            self.pending.push_str(BANNER_CUT_NOTICE);
+            self.capped = true;
+        }
+    }
+
+    /// What arrived since the last call, if anything.
+    fn take(&mut self) -> Option<String> {
+        (!self.pending.is_empty()).then(|| std::mem::take(&mut self.pending))
+    }
+}
+
+/// Hands the banner text the server has sent since the last delivery to the auth source, on the thread that called `connect` (the handler
+/// runs on russh's task, where the caller's `&dyn AuthSource` cannot go). The lock is not held across the call.
 fn deliver_banners(shared: &HopShared, auth: &dyn AuthSource, hop: &HopRef) {
-    let banners = std::mem::take(&mut *locked(&shared.banners));
-    for banner in banners {
-        auth.banner(hop, &banner);
+    let text = locked(&shared.banners).take();
+    if let Some(text) = text {
+        auth.banner(hop, &text);
     }
 }
 
@@ -205,7 +265,7 @@ impl Handler for EngineHandler {
 
     /// Keeps the banner for the connect thread, which hands it to the auth source (`deliver_banners`); nothing waits here.
     async fn auth_banner(&mut self, banner: &str, _session: &mut client::Session) -> Result<(), Self::Error> {
-        locked(&self.shared.banners).push(banner.to_string());
+        locked(&self.shared.banners).push(banner);
         Ok(())
     }
 
@@ -1393,6 +1453,93 @@ mod tests {
     use super::*;
     use crate::ssh::{AuthError, Signature};
     use crate::sync::slot_rules::test_keys;
+
+    /// `assert_eq!` for long texts: on a difference it says where and how long the texts are, not the texts (these tests compare hundreds of
+    /// KiB).
+    fn assert_same_text(actual: &str, expected: &str) {
+        if actual != expected {
+            let at = actual.bytes().zip(expected.bytes()).position(|(a, b)| a != b).unwrap_or(actual.len().min(expected.len()));
+            panic!("the texts differ at byte {at}: {} bytes, {} expected", actual.len(), expected.len());
+        }
+    }
+
+    /// A server can send banners for as long as the login lasts, each up to 256 KiB: the text that is kept is bounded, what comes before
+    /// the cap is exactly what the server sent, and one line says the rest was dropped.
+    #[test]
+    fn banner_text_is_kept_up_to_a_cap_and_one_line_says_the_rest_was_dropped() {
+        let sent: Vec<String> = (0..100).map(|index| format!("{index:03} {}\n", "x".repeat(8 * 1024))).collect();
+        let all = sent.concat();
+        assert!(all.len() > 10 * MAX_BANNER_BYTES, "the test sends far more than the cap");
+
+        let mut banners = Banners::default();
+        for banner in &sent {
+            banners.push(banner);
+        }
+        let kept = banners.take().expect("the text before the cap was kept");
+        assert_same_text(&kept, &format!("{}\n{BANNER_CUT_NOTICE}", &all[..MAX_BANNER_BYTES])); // the first 64 KiB as sent, a line break, the one line
+        assert_eq!(kept.matches(BANNER_CUT_NOTICE).count(), 1, "the notice appears once");
+
+        // Whatever comes after the cap is dropped without being kept.
+        banners.push(&"y".repeat(1 << 20));
+        banners.push("one more\n");
+        assert!(banners.take().is_none(), "nothing is kept after the notice");
+        assert_eq!(banners.pending.capacity(), 0, "and nothing was allocated for it");
+    }
+
+    /// The cut is between two characters: a character that would straddle the cap is left out whole.
+    #[test]
+    fn the_banner_cap_cuts_between_characters() {
+        // Three bytes each: the cap (65536 = 3 × 21845 + 1) falls inside the 21846th character.
+        let mut banners = Banners::default();
+        banners.push(&"€".repeat(30_000));
+        let kept = banners.take().expect("the text before the cap was kept");
+        let text = kept.strip_suffix(&format!("\n{BANNER_CUT_NOTICE}")).expect("the notice follows the cut text");
+        assert_same_text(text, &"€".repeat(21_845));
+        assert!(text.len() <= MAX_BANNER_BYTES);
+    }
+
+    /// A banner that ends exactly at the cap loses nothing and gets no notice; a cut at the end of a line needs no extra line break.
+    #[test]
+    fn a_banner_that_fits_the_cap_exactly_is_kept_whole_and_a_cut_at_a_line_end_adds_no_blank_line() {
+        let line = format!("{}\n", "z".repeat(1023));
+        let full = line.repeat(MAX_BANNER_BYTES / line.len());
+        assert_eq!(full.len(), MAX_BANNER_BYTES);
+
+        let mut banners = Banners::default();
+        banners.push(&full);
+        assert_same_text(&banners.take().expect("the banner"), &full); // exactly the cap: nothing was dropped, so nothing is said
+
+        banners.push("more\n");
+        assert_eq!(banners.take().as_deref(), Some(BANNER_CUT_NOTICE), "the first byte over the cap: the notice, on its own line");
+        banners.push("and more\n");
+        assert!(banners.take().is_none());
+
+        let mut banners = Banners::default();
+        banners.push(&format!("{full}more\n"));
+        assert_same_text(&banners.take().expect("the cut text"), &format!("{full}{BANNER_CUT_NOTICE}")); // cut where a line ended: no blank line before the notice
+    }
+
+    /// The cap is for the whole login of a hop: text that was handed to the auth source already counts, so a server cannot get more through
+    /// by sending a little before each delivery.
+    #[test]
+    fn text_that_was_handed_over_counts_against_the_cap() {
+        let block = format!("{}\n", "a".repeat(40 * 1024 - 1));
+        let mut banners = Banners::default();
+        banners.push("");
+        assert!(banners.take().is_none(), "an empty banner is nothing to hand over");
+
+        banners.push(&block);
+        let first = banners.take().expect("the first block");
+        assert_same_text(&first, &block);
+
+        banners.push(&block);
+        let second = banners.take().expect("the part of the second block that still fits");
+        let text = second.strip_suffix(&format!("\n{BANNER_CUT_NOTICE}")).expect("then the notice");
+        assert_eq!(first.len() + text.len(), MAX_BANNER_BYTES, "the 64 KiB are used up across the two deliveries");
+
+        banners.push(&block);
+        assert!(banners.take().is_none(), "later deliveries get nothing");
+    }
 
     #[test]
     fn io_errors_are_described_without_the_os_number_or_a_leading_capital() {
