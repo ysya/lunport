@@ -132,10 +132,10 @@ fn session(
 /// stdout a buffer) while it writes, and a writer stuck on a terminal that does not take its output would hold them; std's handle is
 /// used only when the descriptor cannot be had.
 #[cfg(unix)]
-fn own_writer<W: std::io::Write + std::os::fd::AsFd + Send + 'static>(handle: W) -> Box<dyn std::io::Write + Send> {
+fn own_writer<W: std::io::Write + std::os::fd::AsFd + std::os::fd::AsRawFd + Send + 'static>(handle: W) -> run::Output {
     match handle.as_fd().try_clone_to_owned() {
-        Ok(descriptor) => Box::new(std::fs::File::from(descriptor)),
-        Err(_) => Box::new(handle),
+        Ok(descriptor) => run::Output::of(std::fs::File::from(descriptor)),
+        Err(_) => run::Output::of(handle),
     }
 }
 
