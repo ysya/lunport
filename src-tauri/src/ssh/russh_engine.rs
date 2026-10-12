@@ -646,6 +646,28 @@ fn no_login_method(hop: &HopRef, tried: Vec<AuthMethod>, mut reasons: Vec<String
     ConnectError::AuthFailed { hop: hop.clone(), tried, reason: reasons.join(" ") }
 }
 
+/// The failure for a connection that went away while the login was under way.
+fn lost_during_login(hop: &HopRef) -> ConnectError {
+    ConnectError::Unreachable { hop: hop.clone(), reason: "the connection was lost during login".to_string() }
+}
+
+/// Settles a refusal that names no method to go on with (see `classify_empty_answer`): the (empty) list for a plain refusal; the failure
+/// when the server offers no login method (`tried` and `reasons` go into it) or the connection was lost while we waited.
+async fn after_empty_refusal(
+    shared: &HopShared,
+    handle: &Handle<EngineHandler>,
+    hop: &HopRef,
+    tried: &mut Vec<AuthMethod>,
+    reasons: &mut Vec<String>,
+    remaining: MethodSet,
+) -> Result<MethodSet, ConnectError> {
+    match classify_empty_answer(shared, || handle.is_closed(), LOGIN_END_WAIT).await {
+        EmptyAnswer::NoLoginMethod => Err(no_login_method(hop, std::mem::take(tried), std::mem::take(reasons))),
+        EmptyAnswer::Lost => Err(lost_during_login(hop)),
+        EmptyAnswer::Refusal => Ok(remaining),
+    }
+}
+
 /// Logs in to a freshly connected hop. The methods of `hop.auth_sequence()` are tried in order, each only if the server still offers
 /// it; a refusal moves to the next method on the same connection. A method that cannot be tried here is skipped, and then the server is
 /// asked once what it does offer (`none`), so later methods are not sent blindly. Anything that is our fault (the signer failed, a
@@ -657,7 +679,7 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
     let reference = hop.reference();
     let abandoned = |reason: &str| ConnectError::AuthAbandoned { hop: reference.clone(), reason: reason.to_string() };
     let timed_out = || ConnectError::Timeout { hop: reference.clone(), phase: Phase::Auth };
-    let lost = |_: russh::Error| ConnectError::Unreachable { hop: reference.clone(), reason: "the connection was lost during login".to_string() };
+    let lost = |_: russh::Error| lost_during_login(&reference);
     let call_limit = stall_limit(hop);
     let prompt_wait = options.prompt_wait_for(hop.connect_timeout);
     let user = hop.user.as_str();
@@ -700,11 +722,9 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
                     Ok(Err(SignerFailure::Sha1Refused)) => return Err(abandoned("an RSA signature with SHA-1 was asked for")),
                     Ok(Err(SignerFailure::Auth(error))) => return Err(abandoned(&error.to_string())),
                     Ok(Ok(AuthResult::Success)) => return Ok(()),
-                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) if remaining_methods.is_empty() => match classify_empty_answer(shared, || handle.is_closed(), LOGIN_END_WAIT).await {
-                        EmptyAnswer::NoLoginMethod => return Err(no_login_method(&reference, tried, reasons)),
-                        EmptyAnswer::Lost => return Err(lost(russh::Error::SendError)),
-                        EmptyAnswer::Refusal => Step::Refused(remaining_methods),
-                    },
+                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) if remaining_methods.is_empty() => {
+                        Step::Refused(after_empty_refusal(shared, handle, &reference, &mut tried, &mut reasons, remaining_methods).await?)
+                    }
                     Ok(Ok(AuthResult::Failure { remaining_methods, .. })) => Step::Refused(remaining_methods),
                 }
             }
@@ -722,11 +742,9 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
                     Err(_) => return Err(timed_out()),
                     Ok(Err(error)) => return Err(lost(error)),
                     Ok(Ok(AuthResult::Success)) => return Ok(()),
-                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) if remaining_methods.is_empty() => match classify_empty_answer(shared, || handle.is_closed(), LOGIN_END_WAIT).await {
-                        EmptyAnswer::NoLoginMethod => return Err(no_login_method(&reference, tried, reasons)),
-                        EmptyAnswer::Lost => return Err(lost(russh::Error::SendError)),
-                        EmptyAnswer::Refusal => Step::Refused(remaining_methods),
-                    },
+                    Ok(Ok(AuthResult::Failure { remaining_methods, .. })) if remaining_methods.is_empty() => {
+                        Step::Refused(after_empty_refusal(shared, handle, &reference, &mut tried, &mut reasons, remaining_methods).await?)
+                    }
                     Ok(Ok(AuthResult::Failure { remaining_methods, .. })) => Step::Refused(remaining_methods),
                 }
             }
@@ -769,11 +787,9 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
             Step::Skipped if offered.is_none() => {
                 match tokio::time::timeout(call_limit, handle.authenticate_none(user)).await.map_err(|_| timed_out())?.map_err(lost)? {
                     AuthResult::Success => return Ok(()),
-                    AuthResult::Failure { remaining_methods, .. } if remaining_methods.is_empty() => match classify_empty_answer(shared, || handle.is_closed(), LOGIN_END_WAIT).await {
-                        EmptyAnswer::NoLoginMethod => return Err(no_login_method(&reference, tried, reasons)),
-                        EmptyAnswer::Lost => return Err(lost(russh::Error::SendError)),
-                        EmptyAnswer::Refusal => offered = Some(remaining_methods),
-                    },
+                    AuthResult::Failure { remaining_methods, .. } if remaining_methods.is_empty() => {
+                        offered = Some(after_empty_refusal(shared, handle, &reference, &mut tried, &mut reasons, remaining_methods).await?);
+                    }
                     AuthResult::Failure { remaining_methods, .. } => offered = Some(remaining_methods),
                 }
             }
