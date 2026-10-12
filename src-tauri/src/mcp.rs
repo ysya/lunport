@@ -8,13 +8,12 @@
 //! process running as the same OS account.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,9 +27,6 @@ use crate::connect::validate_alias;
 use crate::error::AppError;
 use crate::fsutil;
 use crate::state::AppState;
-
-/// First argument that starts SSHelter as the MCP host (main.rs): the desktop app, in the background.
-pub const HOST_FLAG: &str = "--mcp-host";
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_BRIDGE_LINE: u64 = 1_048_576;
@@ -1266,18 +1262,15 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(430);
 /// file may belong to another program by now, and a ping must not hang on it while holding the
 /// spawn locks.
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long an adapter waits for the bridge of the SSHelter it started, and how often it looks.
-const START_WAIT: Duration = Duration::from_secs(12);
-const START_POLL: Duration = Duration::from_millis(120);
 /// Only one SSHelter runs: an open SSHelter whose bridge doesn't answer is not replaced.
 const NO_ANSWER: &str =
     "SSHelter didn't answer within 12 seconds. If it is open, quit it and open it again.";
 
-/// Serializes starting SSHelter between this adapter's tool calls, which run in parallel.
-static SPAWN_LOCK: Mutex<()> = Mutex::new(());
-
+/// The bridge of a running SSHelter, started in the background first if none answers
+/// (`host_start`, shared with `sshelter connect`).
 fn ensure_desktop_bridge() -> Result<RuntimeInfo, String> {
-    ensure_started(answering_bridge, take_spawn_locks, start_host, START_WAIT)
+    use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
+    ensure_started(answering_bridge, take_spawn_locks, start_host, START_WAIT, NO_ANSWER)
 }
 
 /// The bridge named in `mcp-runtime.json`, if it answers a ping.
@@ -1285,171 +1278,6 @@ fn answering_bridge() -> Option<RuntimeInfo> {
     read_runtime_info()
         .ok()
         .filter(|info| send_to_runtime(info, "ping", json!({}), PING_TIMEOUT).is_ok())
-}
-
-/// What a call got when it asked for the spawn locks.
-enum SpawnLocks<G> {
-    /// Start SSHelter while holding `G`.
-    Held(G),
-    /// Another adapter kept `mcp-spawn.lock` past the deadline: it may be stopped in the middle
-    /// of a start (its AI CLI suspended, for example).
-    Busy,
-}
-
-/// Return a bridge that answers. If none does, take the spawn locks and look again: a parallel
-/// call or another adapter may have started SSHelter meanwhile. Only if still none answers, start
-/// SSHelter once and wait for its bridge. Several near-simultaneous starts could each claim the
-/// single instance before the others see it (macOS), and leave two SSHelters running; so when
-/// another adapter keeps the locks too long, look once more instead of starting a second one.
-fn ensure_started<T, G>(
-    mut answering: impl FnMut() -> Option<T>,
-    lock: impl FnOnce() -> SpawnLocks<G>,
-    start: impl FnOnce() -> Result<(), String>,
-    wait: Duration,
-) -> Result<T, String> {
-    if let Some(found) = answering() {
-        return Ok(found);
-    }
-    let _locks = match lock() {
-        SpawnLocks::Held(locks) => locks,
-        SpawnLocks::Busy => return answering().ok_or_else(|| NO_ANSWER.to_string()),
-    };
-    if let Some(found) = answering() {
-        return Ok(found);
-    }
-    start()?;
-    let deadline = Instant::now() + wait;
-    while Instant::now() < deadline {
-        thread::sleep(START_POLL);
-        if let Some(found) = answering() {
-            return Ok(found);
-        }
-    }
-    Err(NO_ANSWER.to_string())
-}
-
-/// `SPAWN_LOCK`, and `mcp-spawn.lock` unless it can't be taken here.
-type SpawnGuards = (MutexGuard<'static, ()>, Option<File>);
-
-fn take_spawn_locks() -> SpawnLocks<SpawnGuards> {
-    // The deadline counts from before this call waits for the adapter's other calls, so a call
-    // never waits much longer than `START_WAIT` for the locks.
-    let deadline = Instant::now() + START_WAIT;
-    take_spawn_locks_at(spawn_lock_path().map_err(|e| e.to_string()), deadline)
-}
-
-/// Takes `SPAWN_LOCK` (this adapter's tool calls), then the exclusive file lock on `path`, by
-/// default `mcp-spawn.lock` in the app data directory (other adapters, that is other AI
-/// sessions), which the system releases when its holder exits. Dropping the guards releases both.
-/// A file lock that can't be taken here at all (no app data directory, a file system without
-/// locks) is skipped, as before there was one: only this adapter's calls wait for each other.
-fn take_spawn_locks_at(
-    path: Result<PathBuf, String>,
-    deadline: Instant,
-) -> SpawnLocks<SpawnGuards> {
-    let calls = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-    let file = match path {
-        Ok(path) => lock_file_until(&path, deadline),
-        Err(e) => FileLock::Unavailable(e),
-    };
-    match file {
-        FileLock::Held(file) => SpawnLocks::Held((calls, Some(file))),
-        FileLock::Busy => SpawnLocks::Busy,
-        FileLock::Unavailable(reason) => {
-            eprintln!("[mcp] starting SSHelter without mcp-spawn.lock: {reason}");
-            SpawnLocks::Held((calls, None))
-        }
-    }
-}
-
-fn spawn_lock_path() -> Result<PathBuf, AppError> {
-    Ok(crate::fsutil::app_data_root()?.join("mcp-spawn.lock"))
-}
-
-enum FileLock {
-    Held(File),
-    /// Someone else still held it at the deadline.
-    Busy,
-    /// It can't be opened or locked here.
-    Unavailable(String),
-}
-
-/// Open `path`, creating it and its directory, and take an exclusive lock on it, trying until
-/// `deadline`.
-fn lock_file_until(path: &Path, deadline: Instant) -> FileLock {
-    let opened = path
-        .parent()
-        .map_or(Ok(()), fsutil::ensure_dir_secure)
-        .map_err(|e| e.to_string())
-        .and_then(|()| {
-            OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(path)
-                .map_err(|e| e.to_string())
-        });
-    let file = match opened {
-        Ok(file) => file,
-        Err(e) => return FileLock::Unavailable(format!("cannot open {}: {e}", path.display())),
-    };
-    loop {
-        match file.try_lock() {
-            Ok(()) => return FileLock::Held(file),
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => thread::sleep(START_POLL),
-            Err(TryLockError::WouldBlock) => return FileLock::Busy,
-            Err(TryLockError::Error(e)) => {
-                return FileLock::Unavailable(format!("cannot lock {}: {e}", path.display()))
-            }
-        }
-    }
-}
-
-/// Start SSHelter in the background, or, when it already runs, hand over to it (single
-/// instance): the running SSHelter rewrites the runtime file with its bridge.
-fn start_host() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("cannot locate SSHelter: {e}"))?;
-    let mut host = crate::process::spawn(&mut host_command(&exe))
-        .map_err(|e| format!("cannot start SSHelter desktop: {e}"))?;
-    // A launch that hands over exits at once: reap it instead of leaving a zombie behind.
-    let _ = thread::Builder::new()
-        .name("sshelter-mcp-host-wait".to_string())
-        .spawn(move || {
-            let _ = host.wait();
-        });
-    Ok(())
-}
-
-/// `--mcp-host` decides the hand-over and keeps SSHelter running when its window closes;
-/// `SSHELTER_START_HIDDEN=1` keeps the window hidden at this start only (lib.rs `starts_hidden`).
-fn host_command(exe: &Path) -> Command {
-    let mut command = Command::new(exe);
-    command
-        .arg(HOST_FLAG)
-        .env(crate::START_HIDDEN_ENV, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    detach_from_adapter(&mut command);
-    command
-}
-
-/// Start the MCP host outside the adapter's process group: an AI tool that ends its session by
-/// killing its MCP server's process group must not take SSHelter down with it.
-fn detach_from_adapter(command: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
-        // Its own process group: the adapter's console Ctrl+C / Ctrl+Break does not reach it.
-        // No console: closing the console the AI tool runs in does not end it either.
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
-    }
 }
 
 fn bridge_call(method: &str, params: Value) -> Result<Value, String> {
@@ -1541,183 +1369,5 @@ mod tests {
             !remove_runtime_file_if_owned(&path, 4242).unwrap(),
             "a missing file is fine"
         );
-    }
-
-    #[test]
-    fn a_call_that_finds_a_bridge_once_it_holds_the_locks_starts_nothing() {
-        // Another call or adapter started SSHelter while this one waited for the locks.
-        let mut answers = [None, Some("bridge")].into_iter();
-        let found = ensure_started(
-            || answers.next().flatten(),
-            || SpawnLocks::Held(()),
-            || panic!("SSHelter already answers: starting it again could run two"),
-            Duration::ZERO,
-        );
-        assert_eq!(found, Ok("bridge"));
-    }
-
-    #[test]
-    fn parallel_calls_start_sshelter_once() {
-        let running = Arc::new(AtomicBool::new(false));
-        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let locks = Arc::new(Mutex::new(()));
-        let calls: Vec<_> = (0..4)
-            .map(|_| {
-                let (running, starts, locks) = (running.clone(), starts.clone(), locks.clone());
-                thread::spawn(move || {
-                    ensure_started(
-                        || running.load(Ordering::SeqCst).then_some(()),
-                        || SpawnLocks::Held(locks.lock().unwrap()),
-                        || {
-                            starts.fetch_add(1, Ordering::SeqCst);
-                            // Its bridge answers a little later, as a real start's does.
-                            let running = running.clone();
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_millis(50));
-                                running.store(true, Ordering::SeqCst);
-                            });
-                            Ok(())
-                        },
-                        Duration::from_secs(5),
-                    )
-                })
-            })
-            .collect();
-        for call in calls {
-            assert_eq!(call.join().unwrap(), Ok(()));
-        }
-        assert_eq!(starts.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn no_answer_after_the_start_says_what_to_do() {
-        let mut starts = 0;
-        let result: Result<(), String> = ensure_started(
-            || None,
-            || SpawnLocks::Held(()),
-            || {
-                starts += 1;
-                Ok(())
-            },
-            Duration::ZERO,
-        );
-        assert_eq!(result, Err(NO_ANSWER.to_string()));
-        assert_eq!(starts, 1);
-    }
-
-    #[test]
-    fn when_another_adapter_keeps_the_locks_one_more_look_decides() {
-        let no_start = || -> Result<(), String> { panic!("the other adapter may be starting it") };
-        let mut answers = [None, Some("bridge")].into_iter();
-        let found = ensure_started(
-            || answers.next().flatten(),
-            || SpawnLocks::<()>::Busy,
-            no_start,
-            Duration::ZERO,
-        );
-        assert_eq!(found, Ok("bridge"));
-
-        let found: Result<(), String> =
-            ensure_started(|| None, || SpawnLocks::<()>::Busy, no_start, Duration::ZERO);
-        assert_eq!(found, Err(NO_ANSWER.to_string()));
-    }
-
-    fn held(lock: FileLock) -> File {
-        match lock {
-            FileLock::Held(file) => file,
-            FileLock::Busy => panic!("busy"),
-            FileLock::Unavailable(e) => panic!("{e}"),
-        }
-    }
-
-    #[test]
-    fn the_spawn_lock_file_lets_one_adapter_in_at_a_time() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("app-data").join("mcp-spawn.lock");
-        let first = held(lock_file_until(&path, Instant::now()));
-        let second = lock_file_until(&path, Instant::now());
-        assert!(matches!(second, FileLock::Busy));
-        drop(first);
-        // Free again: taken, even if it takes a few tries.
-        let soon = Instant::now() + Duration::from_secs(5);
-        held(lock_file_until(&path, soon));
-    }
-
-    #[test]
-    fn a_spawn_lock_held_past_the_deadline_ends_the_call_after_one_more_ping() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcp-spawn.lock");
-        // Another adapter holds it, stopped in the middle of a start.
-        let _other = held(lock_file_until(&path, Instant::now()));
-        let mut pings = 0;
-        let began = Instant::now();
-        let result: Result<(), String> = ensure_started(
-            || {
-                pings += 1;
-                None
-            },
-            || take_spawn_locks_at(Ok(path.clone()), began + Duration::from_millis(300)),
-            || panic!("the other adapter may be starting it"),
-            Duration::from_secs(5),
-        );
-        assert_eq!(result, Err(NO_ANSWER.to_string()));
-        assert_eq!(pings, 2, "the first look, and one more at the deadline");
-        assert!(began.elapsed() >= Duration::from_millis(300));
-        assert!(began.elapsed() < Duration::from_secs(5));
-    }
-
-    #[test]
-    fn without_a_lock_file_the_call_still_starts_sshelter() {
-        let dir = tempfile::tempdir().unwrap();
-        let not_a_dir = dir.path().join("file");
-        std::fs::write(&not_a_dir, b"").unwrap();
-        let path = not_a_dir.join("mcp-spawn.lock");
-        assert!(matches!(
-            lock_file_until(&path, Instant::now()),
-            FileLock::Unavailable(_)
-        ));
-
-        let mut starts = 0;
-        let mut answers = [None, None, Some("bridge")].into_iter();
-        let found = ensure_started(
-            || answers.next().flatten(),
-            || take_spawn_locks_at(Ok(path.clone()), Instant::now()),
-            || {
-                starts += 1;
-                Ok(())
-            },
-            Duration::from_secs(5),
-        );
-        assert_eq!(found, Ok("bridge"));
-        assert_eq!(starts, 1);
-    }
-
-    #[test]
-    fn the_adapter_starts_the_mcp_host_with_its_window_hidden() {
-        use std::ffi::OsStr;
-        let command = host_command(Path::new("/usr/bin/sshelter"));
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args, [OsStr::new(HOST_FLAG)]);
-        let flag = command
-            .get_envs()
-            .find(|(key, _)| *key == OsStr::new(crate::START_HIDDEN_ENV))
-            .and_then(|(_, value)| value);
-        assert!(crate::starts_hidden(flag));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_host_starts_in_its_own_process_group() {
-        let mut command = Command::new("cat");
-        command.stdin(Stdio::piped()).stdout(Stdio::null());
-        detach_from_adapter(&mut command);
-        let mut child = crate::process::spawn(&mut command).unwrap();
-        let pid = child.id() as libc::pid_t;
-        let group = unsafe { libc::getpgid(pid) };
-        let ours = unsafe { libc::getpgid(0) };
-        drop(child.stdin.take()); // `cat` exits at end of input.
-        child.wait().unwrap();
-        assert_eq!(group, pid);
-        assert_ne!(group, ours);
     }
 }

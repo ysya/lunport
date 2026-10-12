@@ -7,6 +7,7 @@ mod deploy;
 mod discover;
 mod error;
 mod fsutil;
+pub mod host_start;
 mod ipc;
 mod keys;
 mod known_hosts;
@@ -75,21 +76,22 @@ pub fn run() {
 }
 
 /// The desktop app (main.rs).
-/// - `mcp_host`: started with `--mcp-host` by a stdio MCP adapter. Closing the window hides it
-///   instead of terminating active MCP access. (When SSHelter already runs, such a launch hands
-///   over without showing a window: `second_launch_shows_window`.)
-/// - `start_hidden`: see `starts_hidden`. The adapter's start runs in the background: no window
-///   until the user opens it or an MCP `run` request needs approval.
-pub fn run_desktop(mcp_host: bool, start_hidden: bool) {
-    run_app(mcp_host, start_hidden);
+/// - `host`: started with `--host` (or the older `--mcp-host`) by a client that needed it: the
+///   stdio MCP adapter or `sshelter connect` (`host_start`). Closing the window hides it instead
+///   of ending what the clients are using. (When SSHelter already runs, such a launch hands over
+///   without showing a window: `second_launch_shows_window`.)
+/// - `start_hidden`: see `starts_hidden`. A client's start runs in the background: no window
+///   until the user opens it or something needs the user (an MCP approval, a host key).
+pub fn run_desktop(host: bool, start_hidden: bool) {
+    run_app(host, start_hidden);
 }
 
-/// Set to `1` by the stdio MCP adapter on the SSHelter it starts (mcp.rs `host_command`).
+/// Set to `1` by a client on the SSHelter it starts (host_start.rs `host_command`).
 /// main.rs reads it, then removes it before anything else runs.
 pub const START_HIDDEN_ENV: &str = "SSHELTER_START_HIDDEN";
 
 /// Whether the main window starts hidden, from the value of `SSHELTER_START_HIDDEN`; nothing else
-/// decides it. A restart (an update's "Install & restart") reuses the arguments, `--mcp-host`
+/// decides it. A restart (an update's "Install & restart") reuses the arguments, the host flag
 /// included, but inherits an environment without the variable, so it comes back with its window.
 pub fn starts_hidden(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
@@ -105,12 +107,12 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
 }
 
 /// What a second launch does in the running SSHelter. `args` are the second process's
-/// arguments, executable path first, so its mode is `args[1]` (as in main.rs). An MCP host
-/// launch means an adapter could not reach the bridge: it needs the bridge, not a window.
-/// Any other launch is the user opening SSHelter again.
+/// arguments, executable path first, so its mode is `args[1]` (as in main.rs). A host launch
+/// means a client could not reach this instance: it needs the bridge or the socket, not a
+/// window. Any other launch is the user opening SSHelter again.
 #[cfg(desktop)]
 fn second_launch_shows_window(args: &[String]) -> bool {
-    args.get(1).map(String::as_str) != Some(mcp::HOST_FLAG)
+    !args.get(1).is_some_and(|mode| host_start::is_host_flag(mode))
 }
 
 /// The single-instance plugin stopped a second launch before it started anything and handed
@@ -124,7 +126,7 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
     }
 }
 
-fn run_app(mcp_host: bool, start_hidden: bool) {
+fn run_app(host: bool, start_hidden: bool) {
     let builder = tauri::Builder::default();
     // Only one SSHelter runs at a time: a second launch hands over to the running instance and
     // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
@@ -171,7 +173,7 @@ fn run_app(mcp_host: bool, start_hidden: bool) {
                     window.show()?;
                 }
             }
-            mcp::initialize(app.handle(), mcp_host)?;
+            mcp::initialize(app.handle(), host)?;
             sync::engine::initialize(app.handle())?;
             // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
             agent::start(app.handle());
@@ -332,9 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn a_second_mcp_host_launch_shows_no_window() {
+    fn a_second_host_launch_shows_no_window_with_the_new_flag_or_the_old_one() {
+        assert!(!shows(&[EXE, "--host"]));
         assert!(!shows(&[EXE, "--mcp-host"]));
-        assert!(!shows(&[r"C:\SSHelter\sshelter.exe", "--mcp-host"]));
+        assert!(!shows(&[r"C:\SSHelter\sshelter.exe", "--host"]));
     }
 
     #[test]
@@ -342,9 +345,10 @@ mod tests {
         assert!(shows(&[EXE]));
         assert!(shows(&[]));
         // Same rule as main.rs: only the first argument picks the mode.
-        assert!(shows(&[EXE, "--other", "--mcp-host"]));
+        assert!(shows(&[EXE, "--other", "--host"]));
         assert!(shows(&[EXE, "--mcp"]));
-        assert!(shows(&[EXE, "--mcp-host=1"]));
+        assert!(shows(&[EXE, "connect", "web"]));
+        assert!(shows(&[EXE, "--host=1"]));
     }
 
     #[test]
@@ -369,12 +373,12 @@ mod tests {
         let normal_launch = HashMap::new();
         assert!(!hidden(&normal_launch));
 
-        // mcp.rs `host_command` sets it; main.rs reads it and then removes it from the process.
+        // host_start.rs `host_command` sets it; main.rs reads it and then removes it from the process.
         let mut adapter_start = HashMap::from([(START_HIDDEN_ENV, "1")]);
         assert!(hidden(&adapter_start));
         adapter_start.remove(START_HIDDEN_ENV);
 
-        // tauri restarts with the same arguments (`--mcp-host`) and this process's environment.
+        // tauri restarts with the same arguments (`--host`) and this process's environment.
         let restart = adapter_start;
         assert!(!hidden(&restart));
     }

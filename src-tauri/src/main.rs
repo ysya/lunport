@@ -17,7 +17,7 @@ fn main() {
 
     match std::env::args().nth(1).as_deref() {
         Some("--mcp") => sshelter_lib::mcp::run_stdio(),
-        Some(sshelter_lib::mcp::HOST_FLAG) => sshelter_lib::run_desktop(true, start_hidden),
+        Some(flag) if sshelter_lib::host_start::is_host_flag(flag) => sshelter_lib::run_desktop(true, start_hidden),
         _ => sshelter_lib::run_desktop(false, start_hidden),
     }
 }
