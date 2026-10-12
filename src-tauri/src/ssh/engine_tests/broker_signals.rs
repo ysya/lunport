@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use super::login_methods::toy_login;
 use super::{engine, open_session, ShellProbe, SHELL_SERVER};
 use crate::ssh::russh_engine::toy_server::{Refusal, ToyBehavior, ToyLogin, ToyServer};
 use crate::ssh::russh_engine::{BANNER_CUT_NOTICE, MAX_BANNER_BYTES};
@@ -16,7 +17,7 @@ use crate::sync::slot_rules::test_keys;
 
 /// The in-process server: it refuses every key and offers password and keyboard-interactive.
 fn toy() -> (ToyServer, ToyLogin) {
-    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None };
+    let login = toy_login();
     (ToyServer::start(login.clone()), login)
 }
 
@@ -175,7 +176,7 @@ fn a_server_that_wants_a_key_and_then_a_password_needs_the_hops_own_method_order
 /// controls: the server does check the password, and keyboard-interactive is no way around the key either.
 #[test]
 fn a_server_that_wants_a_key_and_then_a_password_lets_the_hops_own_method_order_log_in_on_the_toy_server() {
-    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None };
+    let login = toy_login();
     // The key that gets in is not the server's own host key.
     let behavior = ToyBehavior { key_then_password: Some(test_keys::ECDSA_PUBLIC.to_string()), ..ToyBehavior::default() };
     let server = ToyServer::start_with(login.clone(), behavior);
@@ -227,7 +228,7 @@ fn a_server_that_wants_a_key_and_then_a_password_lets_the_hops_own_method_order_
 /// source, so that the person reads the server's notice before being asked for a password or a code.
 #[test]
 fn a_banner_sent_before_a_keyboard_interactive_prompt_is_handed_over_before_the_prompt() {
-    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None };
+    let login = toy_login();
     let server = ToyServer::start_with(login.clone(), ToyBehavior { banner: Some("Authorized use only.\n".to_string()), ..ToyBehavior::default() });
     let auth = VaultAuth::new().with_answers(&[&login.password]);
     let _session = engine().connect(&toy_target(&server, &login, AuthMethod::Interactive), &*TestPolicy::trusting(), &auth).expect("the login succeeds");
@@ -243,7 +244,7 @@ fn a_banner_sent_before_a_keyboard_interactive_prompt_is_handed_over_before_the_
 fn a_banner_longer_than_the_cap_reaches_the_auth_source_cut_short() {
     let banner = "a banner line that the server repeats\n".repeat(6_000);
     assert!(banner.len() > 3 * MAX_BANNER_BYTES);
-    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None };
+    let login = toy_login();
     let server = ToyServer::start_with(login.clone(), ToyBehavior { banner: Some(banner.clone()), ..ToyBehavior::default() });
     let auth = VaultAuth::new().with_password(&login.password);
     let _session = engine().connect(&toy_target(&server, &login, AuthMethod::Password), &*TestPolicy::trusting(), &auth).expect("the login succeeds");
@@ -258,7 +259,7 @@ fn a_banner_longer_than_the_cap_reaches_the_auth_source_cut_short() {
 
 /// Logs in to a toy server that turns down `refusal`, opens a shell and waits until it has ended.
 fn shell_refused_by_toy(refusal: Refusal) -> (ToyServer, Box<dyn Session>, ShellProbe) {
-    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None };
+    let login = toy_login();
     let server = ToyServer::start_with(login.clone(), ToyBehavior { refuses: Some(refusal), ..ToyBehavior::default() });
     let auth = VaultAuth::new().with_password(&login.password);
     let session = engine().connect(&toy_target(&server, &login, AuthMethod::Password), &*TestPolicy::trusting(), &auth).expect("the login succeeds");

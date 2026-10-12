@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use super::fake::{FakeEngine, FakeLogin, FakeMethods};
 use super::russh_engine::toy_server::{ToyLogin, ToyServer};
 use super::russh_engine::{EngineOptions, RusshEngine};
-use super::testing::fixture::Server;
+use super::testing::fixture::{Server, SH_SHELL};
 use super::testing::harness::tools;
 use super::testing::proxy::{Mode, Proxy};
 use super::{
@@ -323,7 +323,7 @@ impl SshEngine for SharedFake {
 
 fn real_shells() -> Option<ShellWorld> {
     let tools = tools()?;
-    let server = Server::start(&tools, &["ForceCommand if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then eval \"$SSH_ORIGINAL_COMMAND\"; else exec /bin/sh; fi"]);
+    let server = Server::start(&tools, &[SH_SHELL]);
     let proxy = Arc::new(Proxy::start(server.sshd.port));
     let target = Target { hops: vec![server.hop_with("shell", proxy.port, AuthMethod::Key { key_id: "k1".to_string() })] };
     let auth = Box::new(server.vault("k1"));

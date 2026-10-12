@@ -3,6 +3,12 @@
 use super::harness::{generate_key, KeyKind, Sshd, SshdOptions, TestKey, Tools};
 use crate::ssh::{AuthMethod, Hop, HostKey, Target};
 
+/// A `/bin/sh` for the scratch sshd's shells (a line of its `extra_config`), so that the prompt depends on nobody's shell setup: the
+/// interactive shell is the same POSIX sh on every machine, not the developer's zsh and its configuration. `ForceCommand` runs through
+/// the user's login shell with `-c` and replaces every command, so it hands a requested command on to `eval`, which keeps `exec` usable
+/// on the same server.
+pub const SH_SHELL: &str = "ForceCommand if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then eval \"$SSH_ORIGINAL_COMMAND\"; else exec /bin/sh; fi";
+
 pub struct Server {
     pub sshd: Sshd,
     /// The user key sshd accepts.

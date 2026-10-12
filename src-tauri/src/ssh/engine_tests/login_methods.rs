@@ -38,7 +38,7 @@ impl Subject {
 }
 
 /// The login of a toy server: one user, one password, and keyboard-interactive in a single round that asks for the password.
-fn toy_login() -> ToyLogin {
+pub(super) fn toy_login() -> ToyLogin {
     ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None }
 }
 

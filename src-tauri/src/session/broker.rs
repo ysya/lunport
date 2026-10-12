@@ -1081,7 +1081,7 @@ mod tests {
     #[test]
     fn a_real_shell_on_a_scratch_sshd_through_the_socket() {
         let Some(tools) = crate::ssh::testing::harness::tools() else { return };
-        let server = crate::ssh::testing::fixture::Server::start(&tools, &["ForceCommand if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then eval \"$SSH_ORIGINAL_COMMAND\"; else exec /bin/sh; fi"]);
+        let server = crate::ssh::testing::fixture::Server::start(&tools, &[crate::ssh::testing::fixture::SH_SHELL]);
         let directory = Arc::new(FakeDirectory::new().with_hop(server.hop_with("lab", server.sshd.port, AuthMethod::Key { key_id: "k1".into() })));
         let broker = Broker::new(
             Arc::new(crate::ssh::russh_engine::RusshEngine::new()),
@@ -1846,7 +1846,7 @@ mod tests {
     #[test]
     fn quitting_ends_a_real_shell_on_a_scratch_sshd_and_tells_the_client_why() {
         let Some(tools) = crate::ssh::testing::harness::tools() else { return };
-        let server = crate::ssh::testing::fixture::Server::start(&tools, &["ForceCommand if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then eval \"$SSH_ORIGINAL_COMMAND\"; else exec /bin/sh; fi"]);
+        let server = crate::ssh::testing::fixture::Server::start(&tools, &[crate::ssh::testing::fixture::SH_SHELL]);
         let directory = Arc::new(FakeDirectory::new().with_hop(server.hop_with("lab", server.sshd.port, AuthMethod::Key { key_id: "k1".into() })));
         let broker = Broker::new(
             Arc::new(crate::ssh::russh_engine::RusshEngine::new()),

@@ -15,13 +15,11 @@ use std::time::{Duration, Instant};
 
 use super::russh_engine::{EngineOptions, RusshEngine};
 use super::testing::doubles::{TestPolicy, VaultAuth};
-use super::testing::fixture::Server;
+use super::testing::fixture::{Server, SH_SHELL};
 use super::{Session, ShellChannel, SshEngine, Target};
 
-/// The scratch sshd starts `/bin/sh` for a shell, so the interactive shell is the same POSIX sh on every machine and its prompt does not
-/// depend on the developer's zsh configuration. (`ForceCommand` runs through the user's login shell with `-c`, and it replaces every
-/// command, so it hands a requested command on to `eval` to keep `exec` usable on the same server.)
-const SHELL_SERVER: &[&str] = &["ForceCommand if [ -n \"$SSH_ORIGINAL_COMMAND\" ]; then eval \"$SSH_ORIGINAL_COMMAND\"; else exec /bin/sh; fi"];
+/// The scratch sshd starts `/bin/sh` for a shell (`SH_SHELL`), so the interactive shell is the same POSIX sh on every machine.
+const SHELL_SERVER: &[&str] = &[SH_SHELL];
 
 /// An engine with a small runtime, one per test.
 fn engine() -> RusshEngine {
