@@ -2,6 +2,7 @@
 //! version, the MCP adapter in phase 2 — asks the client (or the app's window, for host keys) what a login needs, and relays the
 //! terminal. Every SSH call it makes blocks, so it runs on plain threads, never in async code and never on the UI thread.
 
+pub mod auth;
 pub mod directory;
 pub mod pins;
 pub mod protocol;
