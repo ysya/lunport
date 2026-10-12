@@ -20,8 +20,9 @@ pub enum ConnectError {
     HostKeyMismatch { hop: HopRef, key: HostKey, pinned: HostKey },
     /// The two sides share no host key algorithm. `ours` and `theirs` are the lists.
     NoCommonHostKeyAlgorithm { hop: HopRef, ours: Vec<String>, theirs: Vec<String> },
-    /// Every method was refused or could not be tried. `tried` lists the methods that were attempted; `reason` explains what the
-    /// method list alone does not (for example that the server accepts RSA keys only with SHA-1); empty for a plain refusal.
+    /// Every method was refused or could not be tried. `tried` lists the methods that were attempted, possibly none (a key that is not in
+    /// the vault, no password to give); `reason` explains what the method list alone does not (for example that the server accepts RSA
+    /// keys only with SHA-1); empty for a plain refusal.
     AuthFailed { hop: HopRef, tried: Vec<AuthMethod>, reason: String },
     /// Login stopped on our side (signer failure, cancelled or overdue prompt) and the connection was dropped.
     AuthAbandoned { hop: HopRef, reason: String },
@@ -53,8 +54,12 @@ impl fmt::Display for ConnectError {
                 Ok(())
             }
             ConnectError::AuthFailed { hop, tried, reason } => {
-                let names: Vec<&str> = tried.iter().map(AuthMethod::name).collect();
-                write!(f, "Authentication failed for {}@{} (tried: {}).", hop.user, hop.alias, names.join(", "))?;
+                if tried.is_empty() {
+                    write!(f, "Authentication failed for {}@{} (no login method could be tried).", hop.user, hop.alias)?;
+                } else {
+                    let names: Vec<&str> = tried.iter().map(AuthMethod::name).collect();
+                    write!(f, "Authentication failed for {}@{} (tried: {}).", hop.user, hop.alias, names.join(", "))?;
+                }
                 if !reason.is_empty() {
                     write!(f, " {reason}")?;
                 }
@@ -161,6 +166,12 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Authentication failed for deploy@web (tried: publickey). The server only accepts RSA keys signed with SHA-1, which SSHelter does not do."
+        );
+
+        let nothing_tried = ConnectError::AuthFailed { hop: hop(), tried: vec![], reason: "The key k1 is not available on this computer.".into() };
+        assert_eq!(
+            nothing_tried.to_string(),
+            "Authentication failed for deploy@web (no login method could be tried). The key k1 is not available on this computer."
         );
     }
 

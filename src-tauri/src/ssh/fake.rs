@@ -227,7 +227,7 @@ fn fake_login(hop: &Hop, login: &FakeLogin, auth: &dyn AuthSource, prefetched: O
             auth.sign(key_id, b"fake-challenge", Some(RsaHash::Sha512)).map(|_| ()).map_err(|error| abandoned(&error.to_string()))
         }
         FakeLogin::Password(expected) => match prefetched.unwrap_or_else(|| auth.password(&reference)) {
-            None => Err(refused(vec![])),
+            None => Err(ConnectError::AuthFailed { hop: reference.clone(), tried: vec![], reason: "No password was given.".to_string() }),
             Some(given) if given.as_str() == expected => Ok(()),
             Some(_) => Err(refused(vec![AuthMethod::Password])),
         },

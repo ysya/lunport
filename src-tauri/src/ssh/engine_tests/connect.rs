@@ -313,6 +313,25 @@ fn a_key_that_is_not_in_the_vault_is_skipped_and_the_failure_says_so() {
     }
 }
 
+/// A hop that starts with the password method and has nobody to give one (the person cancelled the dialog): nothing could be tried, and the
+/// sentence says so and says why, instead of listing no methods.
+#[test]
+fn a_password_first_hop_with_no_password_says_that_nothing_could_be_tried() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let hop = server.hop_with("web", server.sshd.port, AuthMethod::Password);
+
+    let error = engine().connect_chain(&Target { hops: vec![hop] }, &*trusting(), &VaultAuth::new()).err().expect("no password, no login");
+    match &error {
+        ConnectError::AuthFailed { tried, reason, .. } => {
+            assert!(tried.is_empty(), "nothing was tried: {tried:?}");
+            assert_eq!(reason, "No password was given.");
+        }
+        other => panic!("expected AuthFailed, got {other:?}"),
+    }
+    assert_eq!(error.to_string(), format!("Authentication failed for {}@web (no login method could be tried). No password was given.", server.sshd.user));
+}
+
 /// A hop that starts with the password method asks for the password before it opens the connection: a person typing must not leave an
 /// unauthenticated connection waiting (the server's grace time runs; russh's loop spins).
 #[test]

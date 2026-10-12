@@ -712,7 +712,10 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
                     Some(answer) => answer,
                     None => auth.password(&reference),
                 };
-                let Some(password) = password else { break 'password Step::Skipped };
+                let Some(password) = password else {
+                    reasons.push("No password was given.".to_string());
+                    break 'password Step::Skipped;
+                };
                 tried.push(method.clone());
                 match tokio::time::timeout(call_limit, handle.authenticate_password(user, password.as_str())).await {
                     Err(_) => return Err(timed_out()),
