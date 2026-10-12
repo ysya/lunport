@@ -18,14 +18,16 @@ use crate::sync::env::Keychain;
 /// `BrokerAuth::password` asks before it connects a host that starts with the password method is the first of them.
 pub const PASSWORD_PROMPTS: usize = 3;
 
-/// What one host can ask of a connect, in connects, when the person answers everything it asks: its host key confirmed (once, see
+/// What one host can ask of a connect, in connects, when the person answers everything it asks: the pin that another connection made
+/// meanwhile taken into the policy (once: the policy has a pin from then on), its host key confirmed (once, see
 /// `Done::asked_host_key`), the key type of a changed pin (once, plan 1b R17: `Done::unrestricted`) and its password typed
-/// `PASSWORD_PROMPTS` times. Each is paid for by one answer and followed by one more connect.
-const ROUNDS_PER_HOP: usize = 1 + 1 + PASSWORD_PROMPTS;
+/// `PASSWORD_PROMPTS` times. Each is followed by one more connect, and all but the first need one answer of the person.
+const ROUNDS_PER_HOP: usize = 1 + 1 + 1 + PASSWORD_PROMPTS;
 
 /// How many times a connect through `target` may go round: every host of the chain at the most it can ask (`ROUNDS_PER_HOP`), and the
-/// connect that gets through. Everything that makes the loop go round again is capped for each host (`Done`), so no server reaches
-/// this, whatever it does, and neither does a person who answers: it is a net under those caps, not a limit on what a chain may ask.
+/// connect that gets through. Everything that makes the loop go round again is capped for each host (`Done`, and the policy, which
+/// takes a pin from the directory only while it has none), so no server reaches this, whatever it does, and neither does a person who
+/// answers: it is a net under those caps, not a limit on what a chain may ask.
 fn round_limit(target: &Target) -> usize {
     target.hops.len() * ROUNDS_PER_HOP + 1
 }
@@ -298,6 +300,19 @@ impl Connector<'_> {
         key: &HostKey,
         pinned: Option<HostKey>,
     ) -> Result<(), ConnectFailure> {
+        // The engine found a key that the policy has no pin for, and the directory holds one by now: another connection pinned a key since
+        // this one resolved the host. The window would say that SSHelter has not seen a key it has, and `pin` would turn the person's yes
+        // down. The policy takes that pin and the next round decides: the server shows the pinned key (nothing to ask) or another one (a
+        // changed key, with the pin and its date). From then on the policy has a pin for the host, so this happens once for each host.
+        if pinned.is_none() {
+            if let Some(record) = self.directory.pinned(&hop.id).map_err(directory_failure)? {
+                policy.pin(&hop.id, record.key.clone());
+                if let Some(refreshed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
+                    refreshed.pinned = Some(record.key);
+                }
+                return Ok(());
+            }
+        }
         // A host's key is asked about once in a connect. After the person trusted a key (or accepted the changed one) the server presents
         // that key; one that presents another still is a server whose key keeps changing, and asking again for each key it shows would
         // only teach clicking through. The sentence is about the server's key and blames nobody.
@@ -578,6 +593,57 @@ mod tests {
             assert!(locked(&world.owner.notices).is_empty(), "{what}: nobody was told to wait for it either");
             assert_eq!(directory.inner.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(old.clone()), "{what}: nothing was pinned over the old key");
         }
+    }
+
+    /// A directory in which another connection has pinned a key since this one resolved the host: `resolve` still answers with no pin in
+    /// the hops, while `pinned`, `pin` and `replace_pin` see the pin of the directory it wraps.
+    struct ResolvedBeforeThePin(FakeDirectory);
+
+    impl HostDirectory for ResolvedBeforeThePin {
+        fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+            let mut target = self.0.resolve(query)?;
+            target.hops.iter_mut().for_each(|hop| hop.pinned = None);
+            Ok(target)
+        }
+
+        fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
+            self.0.pinned(host)
+        }
+
+        fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
+            self.0.pin(host, key)
+        }
+
+        fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
+            self.0.replace_pin(host, previous, key)
+        }
+
+        fn password_account(&self, host: &HostId) -> String {
+            self.0.password_account(host)
+        }
+    }
+
+    /// The engine finds a key it has no pin for, but the directory has one by now (another connection pinned it while this one was
+    /// connecting). The window must not say that SSHelter has not seen the key before: the broker connects again with that pin in the
+    /// policy. If the server shows the pinned key, nothing is asked; if it shows another one, the person is asked about a changed key,
+    /// with the pin and its date, and accepting it replaces that pin (a pin of the unknown-key question would be refused).
+    #[test]
+    fn a_pin_made_meanwhile_by_another_connection_is_used_and_not_asked_about_as_a_key_never_seen() {
+        let pinned_since = |pin: HostKey| ResolvedBeforeThePin(FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", pin));
+        let same = pinned_since(default_server_key());
+        let world_same = world(FakeEngine::new(), FakeDirectory::new()).with_saved_password().deciding(vec![Decision::Trust]);
+        let connected = world_same.connect_through(&same, &web(), &world_same.owner).expect("the pinned key is the server's");
+        assert!(world_same.confirmer.asked().is_empty() && locked(&world_same.owner.notices).is_empty(), "nothing to ask: the server shows the pinned key");
+        assert_eq!((world_same.engine.attempts(), connected.target.hops[0].pinned.clone()), (2, Some(default_server_key())));
+
+        let other = pinned_since(key(test_keys::ENC_PUBLIC));
+        let world_other = world(FakeEngine::new(), FakeDirectory::new()).with_saved_password().deciding(vec![Decision::Trust]);
+        world_other.connect_through(&other, &web(), &world_other.owner).expect("the changed key is accepted");
+        let asked = world_other.confirmer.asked();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].changed, Some(PinnedSummary { fingerprint: test_keys::ENC_FINGERPRINT.into(), pinned_at_ms: PINNED_AT_MS }), "a changed key, not a key never seen");
+        assert_eq!(other.0.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(default_server_key()), "the pin was replaced");
+        assert_eq!(world_other.engine.attempts(), 3, "the connect that found the key, the one that found it changed, the one that got in");
     }
 
     /// A directory that cannot write a pin (`pin` and `replace_pin` fail with `reason`) and answers everything else as the one it wraps.
@@ -1174,13 +1240,13 @@ mod tests {
         assert_eq!(through.confirmer.asked().len(), 1);
     }
 
-    /// The bound grows with the chain: every host at the most it can ask (its key, the key type of a changed pin, `PASSWORD_PROMPTS`
-    /// passwords), and the connect that gets through.
+    /// The bound grows with the chain: every host at the most it can ask (a pin made meanwhile, its key, the key type of a changed pin,
+    /// `PASSWORD_PROMPTS` passwords), and the connect that gets through.
     #[test]
     fn the_bound_on_the_rounds_is_derived_from_the_chain() {
         let chain = |hops: usize| Target { hops: (0..hops).map(|n| Hop::new(&format!("id-{n}"), &format!("h{n}"), "h.example.com", 22, "deploy", AuthMethod::Password)).collect() };
         for hops in 1..=6 {
-            assert_eq!(round_limit(&chain(hops)), hops * (1 + 1 + PASSWORD_PROMPTS) + 1, "{hops} hosts");
+            assert_eq!(round_limit(&chain(hops)), hops * (1 + 1 + 1 + PASSWORD_PROMPTS) + 1, "{hops} hosts");
         }
     }
 
