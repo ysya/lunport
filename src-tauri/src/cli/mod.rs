@@ -53,7 +53,8 @@ pub fn run_connect(args: &[String]) -> i32 {
         }
     };
     let term = term_from(std::env::var_os("TERM"));
-    session(host, term, Arc::new(terminal::StdinTermios), reach_broker, &mut std::io::stderr())
+    let signals = |inputs, terminal, watchdog, size: Arc<dyn terminal::TermiosApi>| run::signal_thread(inputs, terminal, watchdog, move || size.size());
+    session(host, term, Arc::new(terminal::StdinTermios), reach_broker, signals, &mut std::io::stderr())
 }
 
 /// The connection to the broker, at `<app data>/ipc/sock` (found without the app): if nothing answers there SSHelter is started, hidden,
@@ -69,14 +70,16 @@ fn reach_broker() -> Result<UnixStream, String> {
     ensure_started(|| UnixStream::connect(&socket).ok(), take_spawn_locks, start_host, START_WAIT, NOT_STARTED)
 }
 
-/// One session on the terminal `api`; `reach` finds the broker, starting SSHelter if it must. The terminal comes first: a program that
-/// has none must not start the app just to say so. Writes what the CLI says to `stderr` (the terminal's).
+/// One session on the terminal `api`; `reach` finds the broker, starting SSHelter if it must, and `signals` takes over the signals
+/// (`run::signal_thread`). The terminal comes first: a program that has none must not start the app just to say so. Writes what the CLI
+/// says before the session to `stderr` (the terminal's).
 #[cfg(unix)]
 fn session(
     host: HostQuery,
     term: String,
     api: Arc<dyn terminal::TermiosApi>,
     reach: impl FnOnce() -> Result<UnixStream, String>,
+    signals: impl FnOnce(run::Inputs, terminal::Restorer, run::Watchdog, Arc<dyn terminal::TermiosApi>) -> std::io::Result<()>,
     stderr: &mut dyn std::io::Write,
 ) -> i32 {
     let size = Arc::clone(&api);
@@ -97,6 +100,8 @@ fn session(
     let terminal = tty.restorer();
     terminal::restore_on_panic(terminal.clone());
     let (inputs, queue) = run::queue();
+    // Without its handlers the program could not keep its terminal: Ctrl-C or Ctrl-backslash at a hidden password would end it with
+    // echo off, and Ctrl-Z would stop it raw. So it does not start, and it says so before the terminal has been changed.
     let watchdog = match run::Watchdog::start(terminal.clone(), run::STOP_GRACE, |code| std::process::exit(code)) {
         Ok(watchdog) => watchdog,
         Err(error) => {
@@ -104,8 +109,10 @@ fn session(
             return 1;
         }
     };
-    if let Err(error) = run::signal_thread(inputs.clone(), terminal, watchdog.clone(), move || size.size()) {
-        let _ = writeln!(stderr, "sshelter: cannot follow the terminal's size: {error}");
+    if let Err(error) = signals(inputs.clone(), terminal, watchdog.clone(), size) {
+        watchdog.stand_down();
+        let _ = writeln!(stderr, "sshelter: cannot take over the terminal's signals: {error}");
+        return 1;
     }
     let hung_up = watchdog.clone();
     run::stdin_thread(inputs.clone(), move || hung_up.arm(128 + libc::SIGHUP));
@@ -194,9 +201,32 @@ mod tests {
         }
 
         fn session_on(api: Arc<dyn TermiosApi>, reach: impl FnOnce() -> Result<UnixStream, String>) -> (i32, String) {
+            let signals = |_, _, _, _| -> io::Result<()> { panic!("the signals are not taken over before SSHelter answers") };
+            session_with(api, reach, signals)
+        }
+
+        fn session_with(
+            api: Arc<dyn TermiosApi>,
+            reach: impl FnOnce() -> Result<UnixStream, String>,
+            signals: impl FnOnce(run::Inputs, terminal::Restorer, run::Watchdog, Arc<dyn TermiosApi>) -> io::Result<()>,
+        ) -> (i32, String) {
             let mut said = Vec::new();
-            let code = super::super::session(HostQuery::Alias("web".into()), "xterm-256color".into(), api, reach, &mut said);
+            let code = super::super::session(HostQuery::Alias("web".into()), "xterm-256color".into(), api, reach, signals, &mut said);
             (code, String::from_utf8(said).unwrap())
+        }
+
+        /// Without its signal handlers the program could not keep the terminal (Ctrl-C or Ctrl-backslash at a hidden password would end
+        /// it with echo off, Ctrl-Z would stop it raw): it says so and ends with 1, before the terminal was changed at all.
+        #[test]
+        fn signals_that_cannot_be_taken_over_end_the_cli_before_the_terminal_is_changed() {
+            let terminal = FakeTermios::new();
+            let (ours, theirs) = UnixStream::pair().unwrap();
+            let failing = |_, _, _, _| -> io::Result<()> { Err(io::Error::other("no handlers")) };
+            assert_eq!(session_with(terminal.clone(), move || Ok(ours), failing), (1, "sshelter: cannot take over the terminal's signals: no handlers\n".to_string()));
+            assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
+            theirs.set_nonblocking(true).unwrap();
+            let read = std::io::Read::read(&mut &theirs, &mut [0u8; 64]);
+            assert!(!matches!(read, Ok(count) if count > 0), "nothing was asked of SSHelter: {read:?}");
         }
 
         /// Without a terminal on standard input the CLI says so and ends with 1 (spec §7.3), and it does so before it reaches SSHelter, let
