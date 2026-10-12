@@ -242,11 +242,11 @@ pub enum Exit { Code(u32), Signal(String), Refused(String), Disconnected } // Re
 - Unix:raw mode 用 termios(`nix`),`SIGWINCH` 用 tokio 的 `SignalKind::window_change`。
 - Windows:release 版沒有 console,先 `AttachConsole(ATTACH_PARENT_PROCESS)`;`SetConsoleMode` 開 VT input/output;視窗大小變更用 `ReadConsoleInput` 的事件;在 Windows Terminal 與傳統 console 都要測。
 - 任何結束路徑(含 panic)都還原終端機模式。
-- (第 1b 期)實作的細節:收到 `opened` 才進 raw mode(之前終端機維持原狀,Ctrl-C 照常中止;連線中打的字等 shell 開了再送,同 OpenSSH);raw mode 照 OpenSSH 的 `enter_raw_mode` 設;`question` 用終端機的行編輯問,`echo: false` 時不顯示,問之前丟掉先打的字(不讓它變成密碼),Ctrl-C 或 Ctrl-D 取消;termios 用 app 已有的 `libc`(Cargo.lock 不多套件),信號用 tokio 的 `signal`(`SIGWINCH`、`SIGINT`、`SIGTERM`、`SIGHUP`);結束碼:shell 的結束碼,被訊號殺掉為 128 + 訊號編號(同 shell),連線中斷或開不成為 255(同 ssh),參數錯誤為 2;Windows 在第 1b 期印 `sshelter connect is not supported on Windows yet.` 並以 1 結束(release 版沒有 console,看不到這句;console 的工作在第 3 期)。
+- (第 1b 期)實作的細節:收到 `opened` 才進 raw mode(之前終端機維持原狀,Ctrl-C 照常中止;連線中打的字等 shell 開了再送,同 OpenSSH);raw mode 照 OpenSSH 的 `enter_raw_mode` 設;`question` 用終端機的行編輯問,`echo: false` 時不顯示,問之前丟掉先打的字(不讓它變成密碼),Ctrl-C 或 Ctrl-D 取消;termios 用 app 已有的 `libc`(Cargo.lock 不多套件),信號用 tokio 的 `signal`(`SIGWINCH`、`SIGINT`、`SIGTERM`、`SIGHUP`、`SIGQUIT`、`SIGTSTP`、`SIGCONT`),接不到這些信號就不開始;問題或連線中按 Ctrl-Z(raw mode 時 Ctrl-Z 是送給遠端的字元)先還原終端機再真的停下,`fg` 之後重設模式、重問還沒答的問題(同 OpenSSH 的 `readpassphrase`);寫終端機與寫 broker 各用一條執行緒,等著寫到終端機的輸出有上限(終端機慢時經 broker 與 SSH 的 window 推回遠端),按鍵與信號不排在輸出後面;要結束時迴圈若沒在 2 秒內結束,由 watchdog 還原終端機並結束;結束碼:shell 的結束碼,被訊號殺掉為 128 + 訊號編號(同 shell),連線中斷或開不成為 255(同 ssh),參數錯誤為 2,沒有終端機、SSHelter 沒啟動或接不到信號為 1;Windows 在第 1b 期印 `sshelter connect is not supported on Windows yet.` 並以 1 結束(release 版沒有 console,看不到這句;console 的工作在第 3 期)。
 
 ### 7.4 從 app 啟動終端機
 
-Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `detect_terminals`、`build_launch_command`、`launch`,只是 argv 從 `ssh <alias>` 變成 `<SSHelter 執行檔> connect <alias>`。密碼自動填入與一次性通道刪除。(第 1b 期)Windows 在第 3 期之前照舊開 `ssh <alias>`(一次性通道與自動填入在各平台都已刪除,Windows 上「只在 SSHelter」的金鑰改經 agent 的核准視窗)。
+Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `detect_terminals`、`build_launch_command`、`launch`,只是 argv 從 `ssh <alias>` 變成 `<SSHelter 執行檔> connect <alias>`。密碼自動填入與一次性通道刪除。(第 1b 期)Windows 在第 3 期之前照舊開 `ssh <alias>`。一次性通道與自動填入在各平台都已刪除,所以 Windows 的 Connect 少了這些:存著的密碼不再自動填入(ssh 自己問);「只在 SSHelter」的金鑰不再走預先核准的一次性通道,改經 `~/.ssh/config` 那行 `Include` 設的 `IdentityAgent` 與 agent 的核准視窗(沒有那行 `Include`,或 agent 沒在跑時,Connect 用不到這把金鑰);開終端機之前「這台電腦上沒有這把金鑰」的提示沒了(改成 ssh 在終端機裡失敗);一次性通道逾時後的「Connect to {alias} again」提示也沒了。
 
 ## 8. MCP
 
