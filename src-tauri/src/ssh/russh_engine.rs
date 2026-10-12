@@ -1235,7 +1235,7 @@ pub(crate) mod toy_server {
     use std::borrow::Cow;
     use std::sync::Arc;
 
-    use russh::keys::PrivateKey;
+    use russh::keys::{PrivateKey, PublicKey};
     use russh::server::{self, Auth, Config, Msg, Response, Server as _, Session};
     use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
     use tokio::net::TcpListener;
@@ -1270,6 +1270,12 @@ pub(crate) mod toy_server {
         pub banner: Option<String>,
         /// The request on a session channel that the server answers with a failure instead of a success.
         pub refuses: Option<Refusal>,
+        /// The OpenSSH line of the one public key the server lets in, and with it the server wants that key first and then the password:
+        /// OpenSSH's `AuthenticationMethods publickey,password`. The key is checked before anything else and answered with "partial success,
+        /// the password next"; a password that comes before the key is refused with the key as the method to go on with, a wrong one after
+        /// it with the password again (the key stays through); keyboard-interactive is no part of the chain and is refused. Without this the
+        /// server takes the password or keyboard-interactive and refuses every key.
+        pub key_then_password: Option<String>,
     }
 
     /// A request on a session channel that a toy server turns down.
@@ -1296,19 +1302,48 @@ pub(crate) mod toy_server {
         behavior: Arc<ToyBehavior>,
         /// The round of keyboard-interactive that the client is answering. A `Toy` is made for each client, so the count is that client's own.
         round: usize,
+        /// The key of `ToyBehavior::key_then_password`, parsed.
+        required_key: Option<PublicKey>,
+        /// The key of `required_key` has been through on this connection, so the password is what the server waits for.
+        key_passed: bool,
+    }
+
+    impl Toy {
+        /// Whether `key` is the key `key_then_password` asks for, offered by the user it asks for.
+        fn is_the_required_key(&self, user: &str, key: &PublicKey) -> bool {
+            user == self.login.user && self.required_key.as_ref().is_some_and(|required| required.key_data() == key.key_data())
+        }
+
+        /// The method that a server that wants a key and then a password lets the client go on with: the one it waits for.
+        fn next_in_chain(&self) -> MethodSet {
+            MethodSet::from(&[if self.key_passed { MethodKind::Password } else { MethodKind::PublicKey }][..])
+        }
     }
 
     impl server::Handler for Toy {
         type Error = russh::Error;
 
         async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-            Ok(if user == self.login.user && password == self.login.password { Auth::Accept } else { Auth::reject() })
+            let right = user == self.login.user && password == self.login.password;
+            if self.behavior.key_then_password.is_none() {
+                return Ok(if right { Auth::Accept } else { Auth::reject() });
+            }
+            if self.key_passed && right {
+                return Ok(Auth::Accept);
+            }
+            // No key before it: the key is still what the server waits for. A wrong password after it: the key stays through, as in OpenSSH,
+            // and the server waits for the password again.
+            Ok(Auth::Reject { proceed_with_methods: Some(self.next_in_chain()), partial_success: false })
         }
 
         /// The rounds of the login (one round that asks for the password, unless the `rounds` of `ToyLogin` say more): the first request puts the
         /// prompts of round 0, the right answers to a round are followed by the prompts of the next one and, after the last, by acceptance.
         /// A wrong answer, or the wrong number of them, rejects the login.
         async fn auth_keyboard_interactive<'a>(&'a mut self, user: &str, _submethods: &str, response: Option<Response<'a>>) -> Result<Auth, Self::Error> {
+            if self.behavior.key_then_password.is_some() {
+                // No part of the chain of key and password: refused, whatever the answers.
+                return Ok(Auth::Reject { proceed_with_methods: Some(self.next_in_chain()), partial_success: false });
+            }
             let rounds = self.login.rounds_asked();
             match response {
                 None => {
@@ -1331,8 +1366,19 @@ pub(crate) mod toy_server {
             }
         }
 
-        async fn auth_publickey_offered(&mut self, _user: &str, _key: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
-            Ok(Auth::reject())
+        /// Every key is refused, except the one `key_then_password` names.
+        async fn auth_publickey_offered(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+            Ok(if self.is_the_required_key(user, key) { Auth::Accept } else { Auth::reject() })
+        }
+
+        /// Called once russh has checked the signature of a key that `auth_publickey_offered` let through. The key of `key_then_password`
+        /// is through, and the password is next (partial success).
+        async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+            if !self.is_the_required_key(user, key) {
+                return Ok(Auth::reject());
+            }
+            self.key_passed = true;
+            Ok(Auth::Reject { proceed_with_methods: Some(self.next_in_chain()), partial_success: true })
         }
 
         /// The banner of `ToyBehavior`, if it has one: russh asks once per client, when the client requests the login service.
@@ -1390,13 +1436,20 @@ pub(crate) mod toy_server {
     struct Factory {
         login: Arc<ToyLogin>,
         behavior: Arc<ToyBehavior>,
+        required_key: Option<PublicKey>,
     }
 
     impl server::Server for Factory {
         type Handler = Toy;
 
         fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Toy {
-            Toy { login: Arc::clone(&self.login), behavior: Arc::clone(&self.behavior), round: 0 }
+            Toy {
+                login: Arc::clone(&self.login),
+                behavior: Arc::clone(&self.behavior),
+                round: 0,
+                required_key: self.required_key.clone(),
+                key_passed: false,
+            }
         }
     }
 
@@ -1423,14 +1476,24 @@ pub(crate) mod toy_server {
             let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0))).expect("bind the toy server");
             let port = listener.local_addr().expect("the toy server's address").port();
             let host_key = PrivateKey::from_openssh(&test_keys::plain()).expect("the test key is an OpenSSH private key");
+            let required_key = behavior
+                .key_then_password
+                .as_deref()
+                .map(|line| PublicKey::from_openssh(line).expect("`key_then_password` is an OpenSSH public key line"));
+            // What the server lists before the client has tried anything: with a chain of key and password, the key alone.
+            let methods = if required_key.is_some() {
+                MethodSet::from(&[MethodKind::PublicKey][..])
+            } else {
+                MethodSet::from(&[MethodKind::PublicKey, MethodKind::Password, MethodKind::KeyboardInteractive][..])
+            };
             let config = Config {
-                methods: MethodSet::from(&[MethodKind::PublicKey, MethodKind::Password, MethodKind::KeyboardInteractive][..]),
+                methods,
                 auth_rejection_time: std::time::Duration::from_millis(10),
                 auth_rejection_time_initial: Some(std::time::Duration::ZERO),
                 keys: vec![host_key],
                 ..Config::default()
             };
-            let mut factory = Factory { login: Arc::new(login), behavior: Arc::new(behavior) };
+            let mut factory = Factory { login: Arc::new(login), behavior: Arc::new(behavior), required_key };
             runtime.spawn(async move {
                 let _ = factory.run_on_socket(Arc::new(config), &listener).await;
             });

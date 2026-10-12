@@ -133,10 +133,12 @@ fn a_key_missing_from_the_vault_and_no_password_to_give_says_a_password_is_wante
     assert_eq!(auth.calls_in_order(), vec!["public_key", "password"], "the key is not there, the password is asked for, there is no prompt to answer");
 }
 
-/// A server that wants the key first and the password next (`AuthenticationMethods publickey,password`): the first connect reports the
-/// password as wanted, with the key already through; connecting again with the hop's own method order and the typed password at hand
-/// sends the key and then the password, without waiting for anybody. A hop connected again with the password method first never offers
-/// the key, so it cannot get in: that is why the order is not changed (the password the server finally refuses here is not a real one).
+/// The engine against a real sshd that wants the key first and the password next (`AuthenticationMethods publickey,password`): this pins
+/// the methods that go out and the order of the calls to the auth source. The first connect has no password to give: the key goes through
+/// (the server answers with partial success) and the failure says a password is wanted. Connecting again with the hop as it is and a
+/// password at hand sends the key and then the password, asked for after the key and answered from memory. A hop that starts with the
+/// password method sends the password alone and never signs. The scratch sshd has no PAM and turns every password down, so nothing here
+/// logs in: the next test shows the login, and the refusal of a password-first hop for want of the key, on the in-process server.
 #[test]
 fn a_server_that_wants_a_key_and_then_a_password_needs_the_hops_own_method_order() {
     let Some(tools) = tools() else { return };
@@ -160,9 +162,65 @@ fn a_server_that_wants_a_key_and_then_a_password_needs_the_hops_own_method_order
 
     let password_first = server.vault("k1").with_password("typed by the person");
     let hop = server.hop_with("server", server.sshd.port, AuthMethod::Password);
-    let error = engine().connect(&Target { hops: vec![hop] }, &*TestPolicy::trusting(), &password_first).err().expect("the server wants the key first");
+    let error = engine().connect(&Target { hops: vec![hop] }, &*TestPolicy::trusting(), &password_first).err().expect("sshd refuses every password");
     assert!(matches!(&error, ConnectError::AuthFailed { tried, .. } if *tried == [AuthMethod::Password]), "{error:?}");
     assert!(password_first.sign_calls().is_empty(), "the key is not part of a password-first sequence");
+}
+
+/// The login that the scratch sshd above cannot show, because it has no PAM and refuses every password: the in-process server wants a key
+/// and then the password (`ToyBehavior::key_then_password`, OpenSSH's `AuthenticationMethods publickey,password`) and knows the password.
+/// The first connect gets the key through and ends with the password wanted; connecting again with the hop's own method order and the
+/// typed password at hand logs in, without waiting for anybody; a hop that starts with the password method never offers the key, so it
+/// cannot get in, whatever its password: that is why the broker connects again with the hop as it is. The two last connects are the
+/// controls: the server does check the password, and keyboard-interactive is no way around the key either.
+#[test]
+fn a_server_that_wants_a_key_and_then_a_password_lets_the_hops_own_method_order_log_in_on_the_toy_server() {
+    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None };
+    // The key that gets in is not the server's own host key.
+    let behavior = ToyBehavior { key_then_password: Some(test_keys::ECDSA_PUBLIC.to_string()), ..ToyBehavior::default() };
+    let server = ToyServer::start_with(login.clone(), behavior);
+    let key = AuthMethod::Key { key_id: "k1".to_string() };
+    let vault = || VaultAuth::new().with_key("k1", &test_keys::ecdsa());
+    let connect = |first_method: AuthMethod, auth: &VaultAuth| engine().connect(&toy_target(&server, &login, first_method), &*TestPolicy::trusting(), auth);
+
+    // No password to give: the key goes through, and the failure says that a password could still get in.
+    let first = vault();
+    let error = connect(key.clone(), &first).err().expect("the password is missing");
+    assert!(
+        matches!(&error, ConnectError::AuthFailed { tried, password_wanted: true, .. } if *tried == [key.clone()]),
+        "the key went through and the password is wanted: {error:?}"
+    );
+    assert_eq!(first.calls_in_order(), vec!["public_key", "sign", "password"], "the key was signed for, then the source had no password to give");
+
+    // The same hop, the typed password at hand: the key and then the password, and the login succeeds.
+    let again = vault().with_password(&login.password);
+    let session = connect(key.clone(), &again).expect("the key and then the password log in");
+    assert_eq!(again.calls_in_order(), vec!["public_key", "sign", "password"], "the password is asked for after the key, and answered from memory");
+    let result = session.exec("true", Duration::from_secs(10), 1024).expect("a command runs on the connection");
+    assert_eq!((result.exit_code, result.stdout), (Some(0), b"ok\n".to_vec()), "the server ran the command");
+
+    // The password first: no key is offered, so the server turns the password down however right it is.
+    let password_first = vault().with_password(&login.password);
+    let error = connect(AuthMethod::Password, &password_first).err().expect("the server wants the key first");
+    assert!(
+        matches!(&error, ConnectError::AuthFailed { tried, password_wanted: false, .. } if *tried == [AuthMethod::Password]),
+        "only the password was sent: {error:?}"
+    );
+    assert!(password_first.sign_calls().is_empty(), "the key is not part of a password-first sequence");
+
+    // Control: the key and then a wrong password is refused, so the login above got in because the password was right.
+    let wrong = vault().with_password("not the password");
+    let error = connect(key.clone(), &wrong).err().expect("the server refuses the password");
+    assert!(
+        matches!(&error, ConnectError::AuthFailed { tried, password_wanted: false, .. } if *tried == [key.clone(), AuthMethod::Password]),
+        "the key and then the wrong password were sent: {error:?}"
+    );
+
+    // Control: the right answers to keyboard-interactive do not get in without the key either.
+    let interactive = vault().with_answers(&[&login.password]);
+    let error = connect(AuthMethod::Interactive, &interactive).err().expect("the server wants the key first");
+    assert!(matches!(&error, ConnectError::AuthFailed { tried, .. } if *tried == [AuthMethod::Interactive]), "{error:?}");
+    assert!(interactive.prompts_seen().is_empty(), "the server did not ask a question");
 }
 
 /// A server that sends its banner before the first question: the engine hands the banner over before it puts the question to the auth
