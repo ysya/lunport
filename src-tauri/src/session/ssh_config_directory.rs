@@ -10,17 +10,24 @@
 //! A host names a key file when an `IdentityFile` value that `ssh -G` prints is not a vault slot. It names no key when `ssh -G` prints
 //! `none` for it (`IdentityFile none`) or OpenSSH's whole default list, which `ssh -G` prints for a host that names no `IdentityFile`
 //! and for such a host only: a host that names `~/.ssh/id_ed25519` gets that one line, and it is a key file (`DEFAULT_IDENTITY_SEQUENCES`).
-//! The chain of jump hosts is refused when it has:
+//!
+//! A `ProxyJump` list is read as OpenSSH routes it. `ProxyJump a,b,c` makes ssh run `ssh -J a,b -W host c`, and for `c` that is
+//! `ssh -J a -W c b`, and for `b` `ssh -W b a`: only the first jump host, `a`, is reached the way it is saved, behind the jump hosts of
+//! its own, while `-J` takes the place of everything a later jump host says about how it is reached, its `ProxyJump` and its
+//! `ProxyCommand` alike. A later jump host is therefore just its own hop, behind the one before it; its own `ProxyJump` is not followed
+//! and its own `ProxyCommand` does not refuse the chain. (Checked with `ssh -vvv` on a config of its own.) Every jump host, first or later,
+//! is still a saved host with its own key. The chain of jump hosts is refused when it has:
 //!
 //! - a jump host that is not a saved host;
 //! - a jump with a port or user of its own, as in `ProxyJump admin@bastion:2200` for a `bastion` saved with port 22. OpenSSH lets such an
 //!   entry override the jump host's port and user, but a host id stands for one server (`HostDirectory`), and its pin, saved password and
 //!   typed answers belong to the id: the entry would be a second endpoint under the same id. An entry that only repeats the saved port
 //!   and user is the saved host and is fine;
-//! - a loop, with the hosts round the circle in the sentence;
-//! - a chain that names a host twice without a loop: `ProxyJump bastion,bastion`, or a jump host that two jump hosts of one host share.
-//!   The broker keeps what it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain has one hop per id. The
-//!   sentence is about the host whose jump hosts name a host twice: `web's jump hosts name bastion twice.`;
+//! - a loop, with the hosts round the circle in the sentence (found through the first jump hosts, the only ones followed into their own);
+//! - a chain that names a host twice without a loop: `ProxyJump bastion,bastion`, a later jump host that the first one's own jump hosts
+//!   have already (`ProxyJump edge,bastion` for an `edge` behind `bastion`), the host itself as a later jump host. The broker keeps what
+//!   it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain has one hop per id. The sentence is about the
+//!   host whose jump hosts name a host twice: `web's jump hosts name bastion twice.`;
 //! - jump hosts nested more than five deep.
 
 use std::path::Path;
@@ -219,9 +226,29 @@ impl SshConfigDirectory {
         crate::connect::validate_alias(doc, alias).map_err(|_| DirectoryError::NotFound(format!("No saved host is called {alias}.")))
     }
 
-    /// The hops of `alias` and of its jump hosts, jump hosts first. `path` holds the hosts above `alias` in the chain, to find a loop. A host
-    /// that comes up twice without a loop, because the chains of two jump hosts of `alias` share it, is refused too (a chain has one hop
-    /// per host id; the test fake does the same).
+    /// The settings of the saved host `alias`, from `ssh -G`.
+    fn settings(&self, alias: &str) -> Result<Vec<(String, String)>, DirectoryError> {
+        (self.sources.effective)(alias).map_err(|error| DirectoryError::Failed(format!("SSHelter cannot read the settings of {alias}: {error}")))
+    }
+
+    /// The hop of the saved host `alias` alone, jump hosts left out: its address and login from its `ssh -G` settings, its key (a vault
+    /// key, or no key; a key file is refused), the password the keychain holds for it and its pin.
+    fn hop_of(&self, alias: &str, pairs: &[(String, String)]) -> Result<Hop, DirectoryError> {
+        let identity_files: Vec<String> = pairs.iter().filter(|(key, _)| key == "identityfile").map(|(_, value)| value.clone()).collect();
+        let key_id = (self.sources.vault_key)(&identity_files);
+        let id = HostId::from(alias);
+        let mut hop = hop_from_effective(alias, pairs, key_id, (self.sources.password_saved)(&id))?;
+        hop.pinned = self.pinned(&hop.id)?.map(|pin| pin.key);
+        Ok(hop)
+    }
+
+    /// The hops of `alias` and of its jump hosts, jump hosts first, as OpenSSH routes them: for `ProxyJump a,b,c` ssh runs
+    /// `ssh -J a,b -W host c`, and for `c` that is `ssh -J a -W c b`, and for `b` `ssh -W b a`. So the first jump host `a` is reached the way
+    /// it is saved, through its own jump hosts, while `-J` takes the place of everything the later ones say about how they are reached
+    /// (their `ProxyJump` and their `ProxyCommand`): each of them is just its own hop, behind the one before it. (The test fake does the
+    /// same.) `path` holds the hosts above `alias` in the chain, to find a loop; only the first jump host is followed into its own jump
+    /// hosts, so a loop can only be found through it. A host that comes up twice without a loop (`bastion,bastion`, a later jump host that
+    /// the first one's own jump hosts have already, the host itself as a later jump host) is refused too: a chain has one hop per host id.
     fn hops(&self, doc: &SshConfigDoc, alias: &str, path: &mut Vec<String>) -> Result<Vec<Hop>, DirectoryError> {
         if path.iter().any(|seen| seen == alias) {
             path.push(alias.to_string());
@@ -231,33 +258,36 @@ impl SshConfigDirectory {
             return Err(DirectoryError::Unsupported(format!("{} needs more than {MAX_JUMPS} jump hosts.", path[0])));
         }
         path.push(alias.to_string());
-        let pairs = (self.sources.effective)(alias).map_err(|error| DirectoryError::Failed(format!("SSHelter cannot read the settings of {alias}: {error}")))?;
+        let pairs = self.settings(alias)?;
         if value(&pairs, "proxycommand").is_some_and(|command| !command.trim().is_empty() && !command.trim().eq_ignore_ascii_case("none")) {
             return Err(DirectoryError::Unsupported(format!("{alias} uses ProxyCommand, which SSHelter's own SSH client does not support.")));
         }
         let jumps = parse_proxy_jump(value(&pairs, "proxyjump").unwrap_or_default()).map_err(|error| DirectoryError::Unsupported(format!("{alias}: {error}.")))?;
         let mut hops: Vec<Hop> = Vec::new();
-        for jump in jumps {
+        for (index, jump) in jumps.iter().enumerate() {
             if self.check_saved(doc, &jump.host).is_err() {
                 return Err(DirectoryError::Unsupported(format!("{alias} jumps through {}, which is not a saved host.", jump.host)));
             }
-            let jump_hops = self.hops(doc, &jump.host, path)?;
+            let jump_hops = if index == 0 {
+                self.hops(doc, &jump.host, path)?
+            } else {
+                vec![self.hop_of(&jump.host, &self.settings(&jump.host)?)?]
+            };
             // The last of them is the jump host itself; the ones before it are its own jump hosts.
             if let Some(saved) = jump_hops.last() {
-                check_jump_is_the_saved_host(alias, &jump, saved)?;
+                check_jump_is_the_saved_host(alias, jump, saved)?;
             }
-            // A host that the chains of the earlier jump hosts have already: no loop (that is refused on the way down), but one id twice. The
-            // host named is the last of this chain that is in both, the one nearest the jump host that was written.
+            // A host that the hops so far have already: no loop (that is refused on the way down), but one id twice. The host named is the
+            // last of these hops that is in both, the one nearest the jump host that was written.
             if let Some(twice) = jump_hops.iter().rev().find(|hop| hops.iter().any(|seen| seen.id == hop.id)) {
                 return Err(DirectoryError::Unsupported(format!("{alias}'s jump hosts name {} twice.", twice.alias)));
             }
             hops.extend(jump_hops);
         }
-        let identity_files: Vec<String> = pairs.iter().filter(|(key, _)| key == "identityfile").map(|(_, value)| value.clone()).collect();
-        let key_id = (self.sources.vault_key)(&identity_files);
-        let id = HostId::from(alias);
-        let mut hop = hop_from_effective(alias, &pairs, key_id, (self.sources.password_saved)(&id))?;
-        hop.pinned = self.pinned(&hop.id)?.map(|pin| pin.key);
+        let hop = self.hop_of(alias, &pairs)?;
+        if hops.iter().any(|seen| seen.id == hop.id) {
+            return Err(DirectoryError::Unsupported(format!("{alias}'s jump hosts name {alias} twice.")));
+        }
         hops.push(hop);
         path.pop();
         Ok(hops)
@@ -628,8 +658,10 @@ mod tests {
     }
 
     /// The broker keeps what it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain names each host once. A
-    /// host that comes up twice without a loop (`bastion,bastion`, or a jump host that two hosts of the chain share) is refused with a
-    /// sentence of its own, and the host whose jump hosts name it twice is the one the sentence is about.
+    /// host that comes up twice without a loop is refused with a sentence of its own, and the host whose jump hosts name it twice is the
+    /// one the sentence is about. Only the first jump host of a list brings jump hosts of its own (see
+    /// `only_the_first_jump_host_of_a_list_is_reached_through_its_own_jump_hosts`), so a host comes up twice when the list names it twice,
+    /// when the chain of the first jump host has a later one of the list, or when a later one names the host that has the list.
     #[test]
     fn a_host_that_a_chain_names_twice_is_refused_although_nothing_loops() {
         let dir = tempfile::tempdir().unwrap();
@@ -639,23 +671,122 @@ mod tests {
                 ("bastion", "hostname gate.example.com\nport 22\nuser ops\n"),
                 ("edge", "hostname edge.example.com\nport 22\nuser ops\nproxyjump bastion\n"),
                 ("twice", "hostname twice\nport 22\nuser deploy\nproxyjump bastion,bastion\n"),
-                ("down", "hostname down\nport 22\nuser deploy\nproxyjump bastion,edge\n"),
-                ("left", "hostname left\nport 22\nuser deploy\nproxyjump bastion\n"),
-                ("right", "hostname right\nport 22\nuser deploy\nproxyjump bastion\n"),
-                ("top", "hostname top\nport 22\nuser deploy\nproxyjump left,right\n"),
+                ("via-edge", "hostname via-edge\nport 22\nuser deploy\nproxyjump edge,bastion\n"),
+                ("own", "hostname own\nport 22\nuser deploy\nproxyjump bastion,own\n"),
                 ("deep", "hostname deep\nport 22\nuser deploy\nproxyjump twice\n"),
+                ("down", "hostname down\nport 22\nuser deploy\nproxyjump bastion,edge\n"),
             ],
         );
         let refused = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into()));
         let named_twice = |text: &str| Err(DirectoryError::Unsupported(text.to_string()));
         assert_eq!(refused("twice"), named_twice("twice's jump hosts name bastion twice."));
-        assert_eq!(refused("down"), named_twice("down's jump hosts name bastion twice."), "`edge` jumps through the `bastion` that is in front of it already");
-        assert_eq!(refused("top"), named_twice("top's jump hosts name bastion twice."), "a jump host that two hosts share is no loop, and still two hops");
+        assert_eq!(refused("via-edge"), named_twice("via-edge's jump hosts name bastion twice."), "`edge` is reached through `bastion`, and `bastion` comes again");
+        assert_eq!(refused("own"), named_twice("own's jump hosts name own twice."), "a later jump host that is the host itself");
         assert_eq!(refused("deep"), named_twice("twice's jump hosts name bastion twice."), "the host that names it twice, not the one asked for");
-        assert!(refused("edge").is_ok() && refused("left").is_ok(), "each of them is fine alone");
+        assert!(refused("edge").is_ok() && refused("bastion").is_ok(), "each of them is fine alone");
+        // `edge` behind `bastion` is no repeat when the list names `bastion` and then `edge`: ssh goes bastion → edge → down.
+        let aliases = |alias: &str| refused(alias).map(|target| target.hops.into_iter().map(|hop| hop.alias).collect::<Vec<_>>());
+        assert_eq!(aliases("down"), Ok(["bastion", "edge", "down"].map(String::from).to_vec()));
     }
 
-    /// A loop keeps its own sentence, with the hosts round the circle and not the ones met on the way to it.
+    /// OpenSSH routes `ProxyJump a,b,c` as `ssh -J a,b -W target c`, and for `c` as `ssh -J a -W c b`, and for `b` as `ssh -W b a` (checked
+    /// with `ssh -vvv` on a config of its own): only `a`, the first, is reached the way it is saved, through its own jump hosts. `-J` takes
+    /// the place of everything a later jump host says about how it is reached, its `ProxyJump` and its `ProxyCommand` alike. Such a host is
+    /// just its own hop, behind the one before it.
+    #[test]
+    fn only_the_first_jump_host_of_a_list_is_reached_through_its_own_jump_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(
+            &dir,
+            &[
+                ("x", "hostname x\nport 22\nuser ops\n"),
+                ("a", "hostname a\nport 22\nuser ops\nproxyjump x\n"),
+                ("y", "hostname y\nport 22\nuser ops\n"),
+                ("b", "hostname b\nport 22\nuser ops\nproxyjump y\nidentityfile ~/.ssh/sshelter/keys/id_mac-aaaaaaaa\n"),
+                ("t", "hostname t\nport 22\nuser deploy\nproxyjump a,b\n"),
+                ("bastion", "hostname gate.example.com\nport 22\nuser ops\n"),
+                ("edge", "hostname edge.example.com\nport 22\nuser ops\nproxyjump bastion\n"),
+                ("down", "hostname down\nport 22\nuser deploy\nproxyjump bastion,edge\n"),
+                ("left", "hostname left\nport 22\nuser ops\nproxyjump bastion\n"),
+                ("right", "hostname right\nport 22\nuser ops\nproxyjump bastion\n"),
+                ("top", "hostname top\nport 22\nuser deploy\nproxyjump left,right\n"),
+            ],
+        );
+        let chain = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).unwrap();
+        let aliases = |alias: &str| chain(alias).hops.into_iter().map(|hop| hop.alias).collect::<Vec<_>>();
+        assert_eq!(aliases("t"), ["x", "a", "b", "t"], "a's own jump host x comes first; b's own jump host y is not visited");
+        assert_eq!(aliases("down"), ["bastion", "edge", "down"], "ssh goes bastion → edge → down, and `edge` is not behind a second `bastion`");
+        assert_eq!(aliases("top"), ["bastion", "left", "right", "top"], "`right` is reached through `left`, not through a `bastion` of its own");
+        // A later jump host is its own hop as saved, its key and password included: resolved alone, its last hop is the same.
+        let target = chain("t");
+        assert_eq!(target.hops[2].auth, AuthMethod::Key { key_id: "a".repeat(32) });
+        for hop in &target.hops {
+            assert_eq!(chain(hop.id.as_str()).hops.last(), Some(hop), "{} in the chain is {} as saved", hop.alias, hop.alias);
+        }
+    }
+
+    /// What keeps the first jump host from being reached and what does not follow the same rule: its own `ProxyCommand` and the jump hosts
+    /// of its own are used, and a later one has neither used, so that neither can refuse the chain.
+    #[test]
+    fn the_first_jump_hosts_own_proxy_command_and_jump_hosts_count_and_a_later_ones_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(
+            &dir,
+            &[
+                ("a", "hostname a\nport 22\nuser ops\n"),
+                ("c", "hostname c\nport 22\nuser ops\nproxycommand nc %h %p\n"),
+                ("lost", "hostname lost\nport 22\nuser ops\nproxyjump gate.example.org\n"),
+                ("loop1", "hostname loop1\nport 22\nuser ops\nproxyjump loop2\n"),
+                ("loop2", "hostname loop2\nport 22\nuser ops\nproxyjump loop1\n"),
+                ("later-c", "hostname later-c\nport 22\nuser deploy\nproxyjump a,c\n"),
+                ("first-c", "hostname first-c\nport 22\nuser deploy\nproxyjump c,a\n"),
+                ("later-lost", "hostname later-lost\nport 22\nuser deploy\nproxyjump a,lost\n"),
+                ("first-lost", "hostname first-lost\nport 22\nuser deploy\nproxyjump lost,a\n"),
+                ("later-loop", "hostname later-loop\nport 22\nuser deploy\nproxyjump a,loop1\n"),
+                ("first-loop", "hostname first-loop\nport 22\nuser deploy\nproxyjump loop1,a\n"),
+            ],
+        );
+        let aliases = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.into_iter().map(|hop| hop.alias).collect::<Vec<_>>());
+        let unsupported = |text: &str| Err(DirectoryError::Unsupported(text.to_string()));
+        // ssh runs `ssh -J a -W target c` for these: c's ProxyCommand and lost's ProxyJump are replaced, never used.
+        assert_eq!(aliases("later-c"), Ok(["a", "c", "later-c"].map(String::from).to_vec()));
+        assert_eq!(aliases("later-lost"), Ok(["a", "lost", "later-lost"].map(String::from).to_vec()));
+        assert_eq!(aliases("later-loop"), Ok(["a", "loop1", "later-loop"].map(String::from).to_vec()), "loop1's own loop is never followed");
+        // As the first jump host, each is reached the way it is saved.
+        assert_eq!(aliases("first-c"), unsupported("c uses ProxyCommand, which SSHelter's own SSH client does not support."));
+        assert_eq!(aliases("first-lost"), unsupported("lost jumps through gate.example.org, which is not a saved host."));
+        assert_eq!(aliases("first-loop"), unsupported("The jump hosts go round in a circle: first-loop → loop1 → loop2 → loop1."));
+    }
+
+    /// A later jump host is a saved host like any other: it has to be saved, a port or user written for it has to be its own, and a key
+    /// it logs in with has to be in the vault.
+    #[test]
+    fn a_later_jump_host_is_checked_as_a_saved_host_for_its_port_user_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = directory_over(
+            &dir,
+            &[
+                ("a", "hostname a\nport 22\nuser ops\n"),
+                ("b", "hostname b\nport 2200\nuser admin\n"),
+                ("old", "hostname old\nport 22\nuser ops\nidentityfile ~/.ssh/work_key\n"),
+                ("unknown", "hostname unknown\nport 22\nuser deploy\nproxyjump a,gate\n"),
+                ("by-port", "hostname by-port\nport 22\nuser deploy\nproxyjump a,b:22\n"),
+                ("by-user", "hostname by-user\nport 22\nuser deploy\nproxyjump a,ops@b:2200\n"),
+                ("by-key", "hostname by-key\nport 22\nuser deploy\nproxyjump a,old\n"),
+                ("same", "hostname same\nport 22\nuser deploy\nproxyjump a,admin@b:2200\n"),
+            ],
+        );
+        let resolved = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.len());
+        let unsupported = |text: &str| Err(DirectoryError::Unsupported(text.to_string()));
+        assert_eq!(resolved("unknown"), unsupported("unknown jumps through gate, which is not a saved host."));
+        assert_eq!(resolved("by-port"), unsupported("by-port jumps through b on port 22, but b is saved with port 2200."));
+        assert_eq!(resolved("by-user"), unsupported("by-user jumps through b as ops, but b is saved with user admin."));
+        assert_eq!(resolved("by-key"), Err(key_file_refusal("old", "~/.ssh/work_key")));
+        assert_eq!(resolved("same"), Ok(3), "an entry that only repeats the saved port and user is the saved host");
+    }
+
+    /// A loop keeps its own sentence, with the hosts from the one asked for round the circle. Only a first jump host is followed into its
+    /// own jump hosts, so it is only there that a loop can be found.
     #[test]
     fn a_loop_is_refused_with_the_path_round_the_circle() {
         let dir = tempfile::tempdir().unwrap();
@@ -666,7 +797,8 @@ mod tests {
                 ("self", "hostname self\nport 22\nuser deploy\nproxyjump self\n"),
                 ("loop1", "hostname loop1\nport 22\nuser deploy\nproxyjump loop2\n"),
                 ("loop2", "hostname loop2\nport 22\nuser deploy\nproxyjump loop1\n"),
-                ("behind", "hostname behind\nport 22\nuser deploy\nproxyjump bastion,loop1\n"),
+                ("behind", "hostname behind\nport 22\nuser deploy\nproxyjump loop1,bastion\n"),
+                ("after", "hostname after\nport 22\nuser deploy\nproxyjump bastion,loop1\n"),
             ],
         );
         let refused = |query: HostQuery| directory.resolve(&query);
@@ -674,7 +806,9 @@ mod tests {
         assert_eq!(refused(HostQuery::Alias("self".into())), circle("self → self"));
         assert_eq!(refused(HostQuery::Alias("loop1".into())), circle("loop1 → loop2 → loop1"));
         assert_eq!(refused(HostQuery::Id("loop2".into())), circle("loop2 → loop1 → loop2"), "by id as well");
-        assert_eq!(refused(HostQuery::Alias("behind".into())), circle("behind → loop1 → loop2 → loop1"), "`bastion`, met on the way, is not on the circle");
+        assert_eq!(refused(HostQuery::Alias("behind".into())), circle("behind → loop1 → loop2 → loop1"), "the first jump host is followed into its own");
+        let after = refused(HostQuery::Alias("after".into())).unwrap();
+        assert_eq!(after.hops.iter().map(|hop| hop.alias.as_str()).collect::<Vec<_>>(), ["bastion", "loop1", "after"], "a later one is not followed: no loop");
     }
 
     /// The sentences of the test fake and of the adapter are written twice; the same chains, given to both, are answered the same way (the
@@ -690,15 +824,20 @@ mod tests {
             ("self", &["self"]),
             ("loop1", &["loop2"]),
             ("loop2", &["loop1"]),
-            ("behind", &["bastion", "loop1"]),
+            ("behind", &["loop1", "bastion"]),
+            ("after", &["bastion", "loop1"]),
             ("twice", &["bastion", "bastion"]),
             ("down", &["bastion", "web"]),
+            ("via-web", &["web", "bastion"]),
+            ("own", &["bastion", "own"]),
             ("left", &["bastion"]),
             ("right", &["bastion"]),
             ("top", &["left", "right"]),
             ("deep", &["twice"]),
             ("lost", &["gate"]),
             ("lost-down", &["bastion", "lost"]),
+            ("lost-first", &["lost", "bastion"]),
+            ("gone", &["bastion", "gate"]),
         ];
         let fake = chains.iter().fold(FakeDirectory::new(), |fake, (alias, jumps)| fake.with_host_via(alias, AuthMethod::Password, jumps));
         let answers: Vec<(String, String)> = chains
@@ -720,13 +859,20 @@ mod tests {
         let chain = |names: &[&str]| Ok(names.iter().map(|name| name.to_string()).collect::<Vec<_>>());
         assert_eq!(aliases(&adapter, "db"), chain(&["edge", "bastion", "db"]));
         assert_eq!(aliases(&adapter, "web"), chain(&["edge", "bastion", "web"]), "a jump host that two hosts share is not a loop");
+        // ssh routes `ProxyJump a,b` as `ssh -J a -W target b`: only the first jump host has jump hosts of its own.
+        assert_eq!(aliases(&adapter, "down"), chain(&["edge", "bastion", "web", "down"]), "web's own jump host `bastion` is not visited again");
+        assert_eq!(aliases(&adapter, "top"), chain(&["edge", "bastion", "left", "right", "top"]), "right is reached through left, not through a bastion of its own");
+        assert_eq!(aliases(&adapter, "after"), chain(&["edge", "bastion", "loop1", "after"]), "loop1 comes later: its own loop is not followed");
+        assert_eq!(aliases(&adapter, "lost-down"), chain(&["edge", "bastion", "lost", "lost-down"]), "lost comes later: its own unsaved jump host is not used");
         let refused = |alias: &str, sentence: &str| assert_eq!(aliases(&adapter, alias), Err(DirectoryError::Unsupported(sentence.to_string())), "{alias}");
         refused("behind", "The jump hosts go round in a circle: behind → loop1 → loop2 → loop1.");
         refused("twice", "twice's jump hosts name bastion twice.");
-        refused("down", "down's jump hosts name bastion twice.");
-        refused("top", "top's jump hosts name bastion twice.");
+        refused("via-web", "via-web's jump hosts name bastion twice.");
+        refused("own", "own's jump hosts name own twice.");
         refused("deep", "twice's jump hosts name bastion twice.");
-        refused("lost-down", "lost jumps through gate, which is not a saved host.");
+        refused("lost", "lost jumps through gate, which is not a saved host.");
+        refused("lost-first", "lost jumps through gate, which is not a saved host.");
+        refused("gone", "gone jumps through gate, which is not a saved host.");
     }
 
     /// Five jump hosts one behind the other are fine, a sixth is not: the host that would need more than five is refused, by its own alias.
@@ -808,6 +954,32 @@ mod tests {
         assert_eq!(auth("plain"), Ok(AuthMethod::Interactive), "a host that names no key gets the default list");
         assert_eq!(auth("nothing"), Ok(AuthMethod::Interactive), "IdentityFile none");
         assert_eq!(auth("named"), Err(key_file_refusal("named", "~/.ssh/id_ed25519")), "one default-named file is a key file");
+    }
+
+    /// The routing of a jump list against the real tool. `ssh -J a -W target b` is what ssh runs for the later jump host `b` of
+    /// `ProxyJump a,b`, and `-J a` takes the place of the `ProxyJump` and the `ProxyCommand` that `b` has (`ssh -G -J a b` shows it, on a
+    /// config of the test's own with `-F`); the adapter reads the list from the real `ssh -G` output the same way.
+    #[test]
+    fn the_real_ssh_g_output_of_a_jump_list_resolves_the_way_openssh_routes_it() {
+        let Some(tools) = crate::ssh::testing::harness::tools() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let hosts = [("x", ""), ("a", "  ProxyJump x\n"), ("y", ""), ("b", "  ProxyJump y\n"), ("c", "  ProxyCommand nc %h %p\n"), ("t", "  ProxyJump a,b\n"), ("t2", "  ProxyJump a,c\n")];
+        let text: String = hosts.iter().map(|(alias, settings)| format!("Host {alias}\n  HostName {alias}.example.com\n{settings}")).collect();
+        std::fs::write(&config, text).unwrap();
+        let ssh_g = |jump: &str, host: &str| -> Vec<String> {
+            let output = crate::process::output(std::process::Command::new(&tools.ssh).arg("-F").arg(&config).args(["-G", "-J", jump, host])).unwrap();
+            assert!(output.status.success(), "ssh -G -J {jump} {host}");
+            String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect()
+        };
+        let (via_a_to_b, via_a_to_c) = (ssh_g("a", "b"), ssh_g("a", "c"));
+        assert!(via_a_to_b.contains(&"proxyjump a".to_string()) && !via_a_to_b.iter().any(|line| line.starts_with("proxyjump y")), "{via_a_to_b:?}");
+        assert!(via_a_to_c.contains(&"proxyjump a".to_string()) && !via_a_to_c.iter().any(|line| line.starts_with("proxycommand")), "{via_a_to_c:?}");
+        let directory = real_ssh_directory(&dir, &config);
+        let aliases = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).map(|target| target.hops.into_iter().map(|hop| hop.alias).collect::<Vec<_>>());
+        assert_eq!(aliases("t"), Ok(["x", "a", "b", "t"].map(String::from).to_vec()), "b's own jump host y is not visited");
+        assert_eq!(aliases("t2"), Ok(["x", "a", "c", "t2"].map(String::from).to_vec()), "c's own ProxyCommand is not used");
+        assert!(matches!(aliases("c"), Err(DirectoryError::Unsupported(text)) if text.contains("ProxyCommand")), "alone, c is reached through its ProxyCommand");
     }
 
     /// `ssh -G` names the local user for a host that has no `User` (the adapter does not look the name up itself), so a jump entry that
