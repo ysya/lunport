@@ -50,7 +50,9 @@ struct Session {
     keys: Inputs,
     stdout: Shared,
     stderr: Shared,
-    run: std::thread::JoinHandle<i32>,
+    /// The exit code, and whether the terminal was back as it was when `run` returned: looked at before the `Tty` is dropped, whose
+    /// `Drop` puts the terminal back as well and would hide a run that did not.
+    run: std::thread::JoinHandle<(i32, bool)>,
     directory: Arc<FakeDirectory>,
     _dir: tempfile::TempDir,
 }
@@ -60,10 +62,12 @@ impl Session {
         self.keys.send(Input::Stdin(zeroize::Zeroizing::new(text.as_bytes().to_vec()))).unwrap();
     }
 
-    fn finish(self) -> (i32, String, Arc<FakeTermios>, Arc<FakeDirectory>) {
+    /// The end: the exit code, whether the run put the terminal back itself, what the CLI said, and the host directory.
+    fn finish(self) -> (i32, bool, String, Arc<FakeDirectory>) {
         eventually("sshelter connect to end", 30, || self.run.is_finished());
         let stderr = self.stderr.text();
-        (self.run.join().unwrap(), stderr, self.termios, self.directory)
+        let (code, restored) = self.run.join().unwrap();
+        (code, restored, stderr, self.directory)
     }
 }
 
@@ -87,8 +91,9 @@ fn connect(server: &Server, port: u16, decisions: Vec<Decision>) -> Session {
     let run = {
         let (termios, inputs, stdout, stderr) = (Arc::clone(&termios), inputs.clone(), stdout.clone(), stderr.clone());
         std::thread::spawn(move || {
-            let mut tty = Tty::new(termios).unwrap();
-            run(stream, HostQuery::Alias("lab".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(stdout), Box::new(stderr))
+            let mut tty = Tty::new(termios.clone()).unwrap();
+            let code = run(stream, HostQuery::Alias("lab".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(stdout), Box::new(stderr));
+            (code, termios.is_start(&termios.now()))
         })
     };
     Session { termios, keys: inputs, stdout, stderr, run, directory, _dir: dir }
@@ -109,10 +114,10 @@ fn sshelter_connect_confirms_the_host_key_runs_a_shell_and_exits_with_its_status
     session.type_text("echo SSHELTER_$((6*7))\r");
     eventually("the command's output", 20, || session.stdout.text().contains("SSHELTER_42"));
     session.type_text("exit 7\r");
-    let (code, stderr, termios, directory) = session.finish();
+    let (code, restored, stderr, directory) = session.finish();
     assert_eq!(code, 7);
     assert_eq!(stderr, "Waiting for you to confirm lab's host key in SSHelter.\n");
-    assert!(termios.is_start(&termios.now()), "the terminal is as it was");
+    assert!(restored, "the terminal is as it was");
     assert_eq!(directory.pins().get(&HostId::from("host-lab")).map(|pin| pin.key.clone()), Some(server.host_key()));
 }
 
@@ -122,10 +127,10 @@ fn a_host_key_the_person_does_not_trust_ends_sshelter_connect() {
     let Some(tools) = tools() else { return };
     let server = Server::start(&tools, &[SHELL]);
     let session = connect(&server, server.sshd.port, vec![Decision::Refuse]);
-    let (code, stderr, termios, directory) = session.finish();
+    let (code, restored, stderr, directory) = session.finish();
     assert_eq!(code, 255);
     assert_eq!(stderr, "Waiting for you to confirm lab's host key in SSHelter.\nThe host key of lab has not been confirmed yet.\n");
-    assert!(termios.is_start(&termios.now()));
+    assert!(restored, "the terminal is as it was");
     assert!(directory.pins().is_empty());
 }
 
@@ -138,8 +143,8 @@ fn a_connection_lost_in_the_middle_of_a_shell_is_said_and_the_status_is_255() {
     let session = connect(&server, proxy.port, vec![Decision::Trust]);
     eventually("a prompt", 30, || session.stdout.text().contains("$ "));
     proxy.set(Mode::Cut);
-    let (code, stderr, termios, _) = session.finish();
+    let (code, restored, stderr, _) = session.finish();
     assert_eq!(code, 255);
     assert_eq!(stderr, "Waiting for you to confirm lab's host key in SSHelter.\n\nConnection to lab lost (early eof).\n");
-    assert!(termios.is_start(&termios.now()));
+    assert!(restored, "the terminal is as it was");
 }

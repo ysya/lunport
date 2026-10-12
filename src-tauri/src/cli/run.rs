@@ -1008,7 +1008,8 @@ mod tests {
         keys: Inputs,
         stdout: Shared,
         stderr: Shared,
-        run: std::thread::JoinHandle<i32>,
+        /// The run's exit code, and whether the terminal was back as it was when `run` returned (`restored_when_run_returns`).
+        run: std::thread::JoinHandle<(i32, bool)>,
     }
 
     /// A terminal that, when the CLI switches it to a question's prompt mode and throws the typeahead away, has a line arrive in the
@@ -1061,20 +1062,28 @@ mod tests {
             None => Arc::clone(&termios) as Arc<dyn TermiosApi>,
         };
         let run = {
-            let (inputs, stdout, stderr) = (inputs.clone(), stdout.clone(), stderr.clone());
+            let (inputs, stdout, stderr, termios) = (inputs.clone(), stdout.clone(), stderr.clone(), Arc::clone(&termios));
             std::thread::spawn(move || {
                 let mut tty = Tty::new(terminal).unwrap();
-                run(ours, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(stdout), Box::new(stderr))
+                let code = run(ours, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(stdout), Box::new(stderr));
+                (code, restored_when_run_returns(&termios))
             })
         };
         Setup { engine, termios, keys: inputs, stdout, stderr, run }
     }
 
-    fn finish(setup: Setup) -> (i32, Setup) {
+    /// Whether the terminal is as it was at the start, looked at as soon as `run` returns: before the `Tty` is dropped, whose `Drop` puts
+    /// the terminal back as well and would hide a run that did not.
+    fn restored_when_run_returns(termios: &FakeTermios) -> bool {
+        termios.is_start(&termios.now())
+    }
+
+    /// The run's end: its exit code, whether it put the terminal back itself, and the rest of the setup.
+    fn finish(setup: Setup) -> (i32, bool, Setup) {
         eventually("the run to end", 10, || setup.run.is_finished());
         let Setup { engine, termios, keys, stdout, stderr, run } = setup;
-        let code = run.join().unwrap();
-        (code, Setup { engine, termios, keys, stdout, stderr, run: std::thread::spawn(|| 0) })
+        let (code, restored) = run.join().unwrap();
+        (code, restored, Setup { engine, termios, keys, stdout, stderr, run: std::thread::spawn(|| (0, true)) })
     }
 
     fn raw(termios: &FakeTermios) -> bool {
@@ -1085,7 +1094,8 @@ mod tests {
     struct ByHand {
         termios: Arc<FakeTermios>,
         keys: Inputs,
-        run: std::thread::JoinHandle<i32>,
+        /// The run's exit code, and whether the terminal was back as it was when `run` returned.
+        run: std::thread::JoinHandle<(i32, bool)>,
         broker: UnixStream,
     }
 
@@ -1096,8 +1106,9 @@ mod tests {
         let run = {
             let (termios, inputs) = (Arc::clone(&termios), inputs.clone());
             std::thread::spawn(move || {
-                let mut tty = Tty::new(termios).unwrap();
-                run(ours, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (inputs, queue), stdout, stderr)
+                let mut tty = Tty::new(termios.clone()).unwrap();
+                let code = run(ours, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (inputs, queue), stdout, stderr);
+                (code, restored_when_run_returns(&termios))
             })
         };
         for expected in ["Hello", "OpenShell"] {
@@ -1132,12 +1143,12 @@ mod tests {
             eventually("the terminal to be raw", 10, || raw(&self.termios));
         }
 
-        /// The run's end, which must come within `within` of now.
-        fn ends_within(self, within: Duration) -> (i32, Arc<FakeTermios>) {
+        /// The run's end, which must come within `within` of now: its exit code, and whether it put the terminal back itself.
+        fn ends_within(self, within: Duration) -> (i32, bool) {
             let asked = Instant::now();
             eventually("the run to end", 10, || self.run.is_finished());
             assert!(asked.elapsed() < within, "the run took {:?} to end", asked.elapsed());
-            (self.run.join().unwrap(), self.termios)
+            self.run.join().unwrap()
         }
     }
 
@@ -1155,9 +1166,9 @@ mod tests {
         setup.keys.send(Input::Resize(100, 30)).unwrap();
         eventually("the resize to reach the shell", 10, || setup.engine.events().contains(&FakeEvent::WindowChange { cols: 100, rows: 30 }));
         remote.end(Exit::Code(3));
-        let (code, setup) = finish(setup);
+        let (code, restored, setup) = finish(setup);
         assert_eq!(code, 3);
-        assert!(setup.termios.is_start(&setup.termios.now()), "the terminal is as it was");
+        assert!(restored, "the terminal is as it was");
         assert_eq!(setup.stderr.text(), "");
     }
 
@@ -1172,14 +1183,14 @@ mod tests {
         setup.keys.send(Input::Stdin(Zeroizing::new(b"right\n".to_vec()))).unwrap();
         eventually("the shell to open", 10, || raw(&setup.termios));
         setup.engine.shells().remove(0).end(Exit::Code(0));
-        let (code, setup) = finish(setup);
+        let (code, _, setup) = finish(setup);
         assert_eq!((code, setup.stderr.text()), (0, "deploy@web's password: \n".to_string()));
     }
 
     #[test]
     fn a_host_that_cannot_be_reached_is_said_and_the_status_is_255() {
         let setup = connect(FakeEngine::new(), FakeDirectory::new(), MemKeychain::default());
-        let (code, setup) = finish(setup);
+        let (code, _, setup) = finish(setup);
         assert_eq!((code, setup.stderr.text()), (255, "No saved host is called web.\n".to_string()));
         assert_eq!(setup.termios.sets.lock().unwrap().iter().filter(|(termios, _)| !setup.termios.is_start(termios)).count(), 0, "the terminal was never changed");
     }
@@ -1194,9 +1205,9 @@ mod tests {
         eventually("the terminal to be raw", 10, || raw(&setup.termios));
         setup.engine.shells().remove(0).print(b"$ ");
         setup.keys.send(Input::Stop(libc::SIGHUP)).unwrap();
-        let (code, setup) = finish(setup);
+        let (code, restored, setup) = finish(setup);
         assert_eq!(code, 128 + libc::SIGHUP);
-        assert!(setup.termios.is_start(&setup.termios.now()));
+        assert!(restored, "the terminal is as it was");
         eventually("the session to be closed", 10, || setup.engine.events().contains(&FakeEvent::Closed));
     }
 
@@ -1403,7 +1414,7 @@ mod tests {
         setup.keys.send(Input::Stdin(Zeroizing::new(b"right\n".to_vec()))).unwrap();
         eventually("the shell to open", 10, || raw(&setup.termios));
         setup.engine.shells().remove(0).end(Exit::Code(0));
-        let (code, setup) = finish(setup);
+        let (code, _, setup) = finish(setup);
         assert_eq!((code, setup.stderr.text()), (0, "deploy@web's password: \n".to_string()));
     }
 
@@ -1645,9 +1656,9 @@ mod tests {
         setup.engine.shells().remove(0).print(b"$ ");
         let keyboard = Keyboard::new(|_: &mut [u8]| -> std::io::Result<usize> { panic!("the keyboard failed") });
         keys_thread(keyboard, setup.keys.clone(), || {});
-        let (code, setup) = finish(setup);
+        let (code, restored, setup) = finish(setup);
         assert_eq!(code, 255);
-        assert!(setup.termios.is_start(&setup.termios.now()), "the terminal is as it was");
+        assert!(restored, "the terminal is as it was");
         assert_eq!(setup.stderr.text(), "\nsshelter: an internal error stopped this session.\n");
         eventually("the session to be closed", 10, || setup.engine.events().contains(&FakeEvent::Closed));
     }
@@ -1664,9 +1675,9 @@ mod tests {
         }
         std::thread::sleep(Duration::from_millis(300));
         hand.keys.send(Input::Stop(libc::SIGTERM)).unwrap();
-        let (code, termios) = hand.ends_within(Duration::from_secs(3));
+        let (code, restored) = hand.ends_within(Duration::from_secs(3));
         assert_eq!(code, 143);
-        assert!(termios.is_start(&termios.now()), "the terminal is as it was");
+        assert!(restored, "the terminal is as it was");
     }
 
     /// A terminal that takes no output (a frozen window, a pipe nobody reads) holds up the writer of the terminal, not the loop: SIGTERM
@@ -1686,9 +1697,9 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(300));
         hand.keys.send(Input::Stop(libc::SIGTERM)).unwrap();
-        let (code, termios) = hand.ends_within(MODE_WAIT + END_WAIT + Duration::from_secs(1));
+        let (code, restored) = hand.ends_within(MODE_WAIT + END_WAIT + Duration::from_secs(1));
         assert_eq!(code, 143);
-        assert!(termios.is_start(&termios.now()), "the terminal is as it was");
+        assert!(restored, "the terminal is as it was");
         stdout.let_go();
         let _ = printing.join();
     }
@@ -1842,9 +1853,9 @@ mod tests {
             }
             write_control(&mut remote, &ServerMessage::Exited { code: Some(0), signal: None }).unwrap();
         });
-        let (code, termios) = hand.ends_within(2 * END_WAIT + Duration::from_secs(1));
+        let (code, restored) = hand.ends_within(2 * END_WAIT + Duration::from_secs(1));
         assert_eq!(code, 0);
-        assert!(termios.is_start(&termios.now()), "the terminal is as it was");
+        assert!(restored, "the terminal is as it was");
         stdout.let_go();
         printing.join().unwrap();
     }
@@ -2183,7 +2194,7 @@ mod tests {
         setup.keys.send(Input::Stdin(Zeroizing::new(format!("{password}\n").into_bytes()))).unwrap();
         eventually("the shell to open", 10, || raw(&setup.termios));
         setup.engine.shells().remove(0).end(Exit::Code(0));
-        let (code, setup) = finish(setup);
+        let (code, _, setup) = finish(setup);
         assert_eq!((code, setup.stderr.text()), (0, "deploy@web's password: \n".to_string()));
     }
 }
