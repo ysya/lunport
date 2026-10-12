@@ -271,20 +271,22 @@ mod tests {
 
     #[test]
     fn chunks_come_out_in_the_order_they_went_in_and_a_small_buffer_gets_part_of_a_chunk() {
-        let queue = ByteQueue::new(1024);
-        assert!(queue.push(b"hello world".to_vec()));
-        assert!(queue.push(b"!".to_vec()));
-        let mut buf = [0u8; 5];
-        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(5));
-        assert_eq!(&buf, b"hello");
-        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(5));
-        assert_eq!(&buf, b" worl");
-        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(1));
-        assert_eq!(&buf[..1], b"d");
-        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(1));
-        assert_eq!(&buf[..1], b"!");
-        assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Timeout);
-        assert_eq!(queue.read_until(&mut [], soon()), QueueRead::Bytes(0), "an empty buffer reads nothing and does not wait");
+        bounded(|| {
+            let queue = ByteQueue::new(1024);
+            assert!(queue.push(b"hello world".to_vec()));
+            assert!(queue.push(b"!".to_vec()));
+            let mut buf = [0u8; 5];
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(5));
+            assert_eq!(&buf, b"hello");
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(5));
+            assert_eq!(&buf, b" worl");
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(1));
+            assert_eq!(&buf[..1], b"d");
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(1));
+            assert_eq!(&buf[..1], b"!");
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Timeout);
+            assert_eq!(queue.read_until(&mut [], soon()), QueueRead::Bytes(0), "an empty buffer reads nothing and does not wait");
+        });
     }
 
     #[test]
@@ -371,6 +373,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100)); // let the reader reach its wait
         queue.push(b"hello".to_vec());
         assert_eq!(seen.recv_timeout(wait), Ok(QueueRead::Bytes(5)), "a chunk wakes a waiting reader (the queue is still open)");
+        std::thread::sleep(Duration::from_millis(100)); // the reader is back in its wait: only close()'s notify can wake it now
         queue.close();
         assert_eq!(seen.recv_timeout(wait), Ok(QueueRead::Closed), "closing wakes a waiting reader");
         reader.join().unwrap();

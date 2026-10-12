@@ -532,6 +532,11 @@ mod tests {
         let asked = Auth { password: Some("hunter2".into()), ..Auth::default() };
         assert!(matches!(engine.connect(&by_password, &unknown, &asked), Err(ConnectError::HostKeyUnknown { .. })));
         assert_eq!(*locked(&asked.asked), vec!["password pw".to_string()], "a hop that starts with the password method is asked before its host key is looked at");
+
+        // With the host key trusted the same hop logs in on the password it was asked for first, and is not asked again during the login.
+        let asked_once = Auth { password: Some("hunter2".into()), ..Auth::default() };
+        assert!(connect(&engine, &by_password, &asked_once).is_ok());
+        assert_eq!(*locked(&asked_once.asked), vec!["password pw".to_string()], "asked once, before the host key, and not again during the login");
     }
 
     #[test]
@@ -688,6 +693,9 @@ mod tests {
                 engine.events(),
                 vec![FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::ShellOpened { term: "dumb".into(), cols: 80, rows: 24 }, FakeEvent::Closed]
             );
+            drop(session);
+            let closed = engine.events().iter().filter(|event| **event == FakeEvent::Closed).count();
+            assert_eq!(closed, 1, "dropping a session that was closed already records no second close");
 
             // A shell opened while another thread closes the session is either refused or ended by that close; none is left open. Many scripted
             // chunks make a shell slow to build, which gives a close that is not synchronised with `shell` the time to slip in.

@@ -325,6 +325,14 @@ mod tests {
         assert_eq!(hop(AuthMethod::Interactive).auth_sequence(), vec![AuthMethod::Interactive]);
     }
 
+    /// Secrets end up in `{:?}` by accident (a derived `Debug` on a struct that holds one, a `dbg!`): the wrapper must not print the value.
+    /// zeroize 1.9 redacts it; 1.8 printed it, and `Cargo.toml` only asks for `1`.
+    #[test]
+    fn a_secret_does_not_show_its_value_in_debug_output() {
+        let secret: Secret = Zeroizing::new("hunter2".to_string());
+        assert!(!format!("{secret:?}").contains("hunter2"));
+    }
+
     #[test]
     fn auth_methods_carry_their_protocol_names() {
         assert_eq!(AuthMethod::Key { key_id: "k".into() }.name(), "publickey");
