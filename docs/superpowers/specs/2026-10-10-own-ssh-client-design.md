@@ -156,7 +156,7 @@ pub trait AuthSource: Send + Sync {
     fn public_key(&self, key_id: &str) -> Option<String>;                    // 該金鑰的 OpenSSH 公鑰行(公鑰登入要先送公鑰);None = 金鑰不存在
     fn password(&self, hop: &HopRef) -> Option<Secret>;                      // 已有的密碼(keychain 或剛問到的);None = 不試密碼
     fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>>; // 在 deadline 前回答;None = 放棄 → 引擎丟掉連線
-    fn banner(&self, hop: &HopRef, text: &str) {}                            // 伺服器登入時送的 banner(sshd 的 Banner);預設丟掉;顯示前去掉控制字元(第 1b 期)
+    fn banner(&self, hop: &HopRef, text: &str) {}                            // 伺服器登入時送的 banner(sshd 的 Banner);每跳最多 64 KiB;預設丟掉;顯示前去掉控制字元(第 1b 期)
 }
 
 pub struct Target { pub hops: Vec<Hop> }   // 依序經過,最後一個是目標;每一跳自帶設定
@@ -186,7 +186,7 @@ pub enum Exit { Code(u32), Signal(String), Refused(String), Disconnected } // Re
 
 `Target` 是 host 記錄解析後的結果(含跳板鏈)。`HostKeyPolicy` 與 `AuthSource` 由 broker 實作:它決定提示送給誰(決策 7)。引擎不碰保管庫、不碰 UI。
 
-(第 1b 期)`AuthFailed` 的 `password_wanted`:伺服器最後仍提供 `password` 方法,而這條連線沒有試過密碼(`AuthSource::password` 沒有給,或登入的順序沒走到密碼)——現在輸入的密碼有機會登入。broker 據此問人,再以密碼優先重連;不在連線開著時等人輸入密碼(那會讓 russh 空轉,§6.2 第 4 步)。`banner`:伺服器在登入途中送的 banner,引擎在連線的執行緒上、下一個提示之前(最晚在登入結束時)交給 `AuthSource`。
+(第 1b 期)`AuthFailed` 的 `password_wanted`:伺服器最後仍提供 `password` 方法,而這條連線沒有試過密碼(`AuthSource::password` 沒有給,或登入的順序沒走到密碼)——現在輸入的密碼有機會登入。broker 據此問人,再以密碼優先重連;不在連線開著時等人輸入密碼(那會讓 russh 空轉,§6.2 第 4 步)。`banner`:伺服器在登入途中送的 banner,引擎在連線的執行緒上、下一個提示之前(最晚在登入結束時)交給 `AuthSource`;兩次交付之間收到的 banner 接成一段、一次交出。伺服器在登入期間可以一直送 banner(單一封包最大 256 KiB,啟用壓縮時只要幾百位元組就送得出去),所以每一跳的 banner 合計最多保留 64 KiB(已交出去的也算在內):在字元邊界截斷,後面補一行說明伺服器其餘的 banner 被丟掉了,之後再來的一律丟掉,不再占記憶體。
 
 `sign` 的合約(第 0 期):russh 的 `Signer::auth_sign(&mut self, &AgentIdentity, Option<HashAlg>, Vec<u8>)` 把待簽緩衝區與**呼叫端選的** `hash_alg` 原樣交給簽章器,russh 自己不檢查;引擎把 `hash_alg` 轉成 `rsa_hash` 傳給 `sign`,RSA 金鑰而 `rsa_hash` 是 `None`(伺服器只接受 SHA-1)時引擎不呼叫 `sign`、直接回 `ConnectError::AuthFailed` 並說明原因。`sign`、`password`、`interactive` 都要**快**:russh 在等簽章與等 keyboard-interactive 的回答時把整條 session 停住、不讀 socket,等待期間伺服器的 `LoginGraceTime` 照跑,`disconnect()` 也變成 no-op(§6.2 第 4 步)。passphrase 的輸入、保管庫解鎖、核准等使用者互動都在呼叫引擎之前做完;keyboard-interactive 的提示本來就在認證途中回答,所以有逾時(§6.2 第 4 步)。
 

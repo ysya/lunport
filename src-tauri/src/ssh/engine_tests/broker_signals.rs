@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::{engine, open_session, ShellProbe, SHELL_SERVER};
 use crate::ssh::russh_engine::toy_server::{Refusal, ToyBehavior, ToyLogin, ToyServer};
+use crate::ssh::russh_engine::{BANNER_CUT_NOTICE, MAX_BANNER_BYTES};
 use crate::ssh::testing::doubles::{TestPolicy, VaultAuth};
 use crate::ssh::testing::eventually;
 use crate::ssh::testing::fixture::Server;
@@ -173,6 +174,26 @@ fn a_banner_sent_before_a_keyboard_interactive_prompt_is_handed_over_before_the_
     assert_eq!(auth.calls_in_order(), vec!["banner", "interactive"], "the banner comes first");
     let banners = auth.banners();
     assert_eq!((banners.len(), banners[0].0.alias.as_str(), banners[0].1.as_str()), (1, "toy", "Authorized use only.\n"), "{banners:?}");
+}
+
+/// A server that sends far more banner than the engine keeps (here 222 KiB in one packet, which is under the 256 KiB russh accepts): the
+/// auth source gets the first 64 KiB as the server wrote them and one line that says the rest was dropped, through the handler that takes
+/// the banner as it arrives.
+#[test]
+fn a_banner_longer_than_the_cap_reaches_the_auth_source_cut_short() {
+    let banner = "a banner line that the server repeats\n".repeat(6_000);
+    assert!(banner.len() > 3 * MAX_BANNER_BYTES);
+    let login = ToyLogin { user: "tester".to_string(), password: "correct horse battery staple".to_string(), prompt: "Password: ".to_string(), rounds: None };
+    let server = ToyServer::start_with(login.clone(), ToyBehavior { banner: Some(banner.clone()), ..ToyBehavior::default() });
+    let auth = VaultAuth::new().with_password(&login.password);
+    let _session = engine().connect(&toy_target(&server, &login, AuthMethod::Password), &*TestPolicy::trusting(), &auth).expect("the login succeeds");
+    let banners = auth.banners();
+    assert_eq!(banners.len(), 1, "one delivery, at the end of the login");
+    let text = &banners[0].1;
+    // The cap falls inside a line, so a line break and the notice follow the 64 KiB.
+    assert_eq!(text.len(), MAX_BANNER_BYTES + 1 + BANNER_CUT_NOTICE.len());
+    assert!(text.starts_with(&banner[..MAX_BANNER_BYTES]), "the text before the cap is what the server sent");
+    assert!(text.ends_with(&format!("\n{BANNER_CUT_NOTICE}")), "then the one line");
 }
 
 /// Logs in to a toy server that turns down `refusal`, opens a shell and waits until it has ended.
