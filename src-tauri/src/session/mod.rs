@@ -3,6 +3,7 @@
 //! terminal. Every SSH call it makes blocks, so it runs on plain threads, never in async code and never on the UI thread.
 
 pub mod auth;
+pub mod connect;
 pub mod directory;
 pub mod pins;
 pub mod protocol;

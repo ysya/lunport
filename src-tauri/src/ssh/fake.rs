@@ -335,6 +335,11 @@ impl SshEngine for FakeEngine {
                 return Err(error.clone());
             }
             let key = keys.get(&hop.alias).unwrap_or(&key_default).clone();
+            // A pinned hop offers only its pin's key type in the handshake, as in the real engine: a server whose key is of another type has
+            // nothing in common with it.
+            if let Some(pinned) = hop.pinned.as_ref().filter(|pinned| pinned.algorithm != key.algorithm) {
+                return Err(ConnectError::NoCommonHostKeyAlgorithm { hop: reference, ours: vec![pinned.algorithm.clone()], theirs: vec![key.algorithm] });
+            }
             match host_keys.check(&reference, &key) {
                 HostKeyVerdict::Pinned => {}
                 HostKeyVerdict::Unknown => return Err(ConnectError::HostKeyUnknown { hop: reference, key }),
@@ -782,6 +787,25 @@ mod tests {
             Err(ConnectError::HostKeyUnknown { hop, key }) => assert_eq!((hop.alias.as_str(), key), ("db", presented)),
             other => panic!("expected the db to present its own key, got {:?}", other.err()),
         }
+    }
+
+    /// A pinned hop offers only its pin's key type, as the real engine's handshake does: a server whose key is of another type has nothing
+    /// in common with it, and without the pin the same server presents its key as usual.
+    #[test]
+    fn a_pin_of_another_key_type_finds_no_common_algorithm() {
+        let engine = FakeEngine::new();
+        let ecdsa = HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap();
+        let mut pinned = hop("web");
+        pinned.pinned = Some(ecdsa.clone());
+        match connect(&engine, &Target { hops: vec![pinned] }, &Auth::default()) {
+            Err(ConnectError::NoCommonHostKeyAlgorithm { hop, ours, theirs }) => {
+                assert_eq!((hop.alias.as_str(), ours, theirs), ("web", vec!["ecdsa-sha2-nistp256".to_string()], vec!["ssh-ed25519".to_string()]));
+            }
+            other => panic!("expected NoCommonHostKeyAlgorithm, got {:?}", other.err()),
+        }
+        let mut same_type = hop("web");
+        same_type.pinned = Some(default_server_key());
+        assert!(connect(&engine, &Target { hops: vec![same_type] }, &Auth::default()).is_ok());
     }
 
     /// The real engine's sequence against a server that offers only passwords: the key goes first and is refused, then the password.
