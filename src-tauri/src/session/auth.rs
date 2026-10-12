@@ -107,8 +107,8 @@ fn is_deceptive_format(c: char) -> bool {
 
 /// A name from the person's configuration (`user`, `alias`) for the words that say who asks: `printable`, and on one line, so the line
 /// feed and the tab that `printable` keeps become `?` here. `user` is what `ssh -G` printed for the host and nothing checks it, and the
-/// alias should not owe its safety to being checked somewhere else.
-fn label(name: &str) -> String {
+/// alias should not owe its safety to being checked somewhere else. The connect loop names the same hops in its own questions and notice.
+pub(super) fn label(name: &str) -> String {
     printable(name).replace(['\n', '\t'], "?")
 }
 
