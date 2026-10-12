@@ -125,7 +125,7 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
         show_main_window(app);
     } else {
         mcp::republish_bridge(app);
-        session::app::ensure_listening(app);
+        session::app::start(app);
     }
 }
 
