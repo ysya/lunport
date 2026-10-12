@@ -83,16 +83,25 @@ pub trait Owner: Send + Sync {
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply;
     /// Shows that the host key waits for the person in SSHelter's window (spec §11); no answer.
     fn host_key_notice(&self, text: &str);
-    /// Shows the server's banner (control characters already replaced).
+    /// Shows the server's banner (already through `printable`).
     fn banner(&self, text: &str);
 }
 
 /// Text a server wrote, made safe to print on a terminal: CRLF becomes LF, and every other control character (an escape sequence from
-/// the server could rewrite the screen, or erase the line in front of the text) becomes `?`. Tabs and line feeds stay. Whatever a server
-/// wrote and the broker shows outside the shell's own data stream (a banner, a keyboard-interactive prompt, and so on) goes through
-/// here before it is framed.
+/// the server could rewrite the screen, or erase the line in front of the text) becomes `?`. The bidirectional controls and the line and
+/// paragraph separators (`is_deceptive_format`) are not control characters but become `?` too. Tabs and line feeds stay, and a line feed
+/// is the only line break left. Whatever a server wrote and the broker shows outside the shell's own data stream (a banner, a
+/// keyboard-interactive prompt, and so on) goes through here before it is framed.
 pub fn printable(text: &str) -> String {
-    text.replace("\r\n", "\n").chars().map(|c| if c.is_control() && c != '\n' && c != '\t' { '?' } else { c }).collect()
+    text.replace("\r\n", "\n").chars().map(|c| if (c.is_control() && c != '\n' && c != '\t') || is_deceptive_format(c) { '?' } else { c }).collect()
+}
+
+/// The characters `printable` replaces although they are not control characters. The bidirectional marks (U+061C, U+200E, U+200F),
+/// embeddings and overrides (U+202A to U+202E) and isolates (U+2066 to U+2069) make text read in another order than it is written (as in
+/// the "Trojan Source" attacks on source code: after U+202E the characters `drowssap` are shown as `password`). Some terminals may break
+/// the line at U+2028 and U+2029, the line and paragraph separators; only a line feed may end a line here.
+fn is_deceptive_format(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// The host key policy of one connect: the pins of its hops, plus the keys the person trusts while it runs.
@@ -672,6 +681,33 @@ mod tests {
             assert!(!text.chars().any(|c| c.is_control() && c != '\n' && c != '\t'), "no control character reaches the terminal: {text:?}");
         }
         assert_eq!(questions, ["(deploy@web) ??[2K(deploy@db) Password: ", "(deploy@web) Code:?2J\nsecond\tline\n", "(deploy@web) ????tail"]);
+    }
+
+    /// Bidirectional controls make text read in another order than it is written (`drowssap` shown as `password`), and the line and
+    /// paragraph separators may end a line on some terminals; none of them is a control character in the Unicode sense, so `printable` names
+    /// them. Text in right-to-left scripts, the joiners emoji and Persian need, and the characters next to the ranges stay. (The sample
+    /// text is written as escapes: right-to-left letters in a source file are displayed in an order of their own.)
+    #[test]
+    fn printable_replaces_the_bidirectional_controls_and_the_line_separators_and_keeps_text_in_every_script() {
+        let replaced = ['\u{061C}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}'].into_iter().chain('\u{202A}'..='\u{202E}').chain('\u{2066}'..='\u{2069}');
+        for c in replaced {
+            assert_eq!(printable(&format!("a{c}b")), "a?b", "U+{:04X}", c as u32);
+        }
+        assert_eq!(printable("Password\u{202E}: \u{2066}ssap\u{2069}\u{200F}"), "Password?: ?ssap??");
+        assert_eq!(printable("a\u{2028}b\u{2029}c\nd"), "a?b?c\nd", "only a line feed ends a line");
+
+        let kept = [
+            "\u{0643}\u{0644}\u{0645}\u{0629}",                                // Arabic letters
+            "\u{05E1}\u{05D9}\u{05E1}\u{05DE}\u{05D4}",                        // Hebrew letters
+            "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}", // Persian with a zero-width non-joiner
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",                     // an emoji family, joined by zero-width joiners
+            "\u{5BC6}\u{78BC} \u{e9} \u{fc}",                                   // Chinese and accented Latin letters
+            "a\tb\nc",                                                         // the tab and the line feed
+            "\u{2027}\u{202F}",                                                // the characters just outside the replaced ranges
+        ];
+        for text in kept {
+            assert_eq!(printable(text), text);
+        }
     }
 
     /// A server's banner can carry escape sequences that would rewrite the user's terminal: they are replaced before it is shown.
