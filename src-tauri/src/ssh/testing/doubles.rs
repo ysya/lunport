@@ -137,7 +137,6 @@ impl VaultAuth {
         self
     }
 
-
     /// `interactive` returns these answers. Without them it returns `None`, as a cancelled prompt does.
     pub fn with_answers(mut self, answers: &[&str]) -> VaultAuth {
         self.answers = Some(answers.iter().map(|answer| answer.to_string()).collect());

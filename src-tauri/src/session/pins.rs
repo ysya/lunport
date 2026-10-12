@@ -75,7 +75,6 @@ impl PinStore {
         PinStore { path, lock: Mutex::new(()), clock }
     }
 
-
     fn unreadable(&self, why: impl std::fmt::Display) -> String {
         format!("SSHelter cannot read its pinned host keys in {} ({why}).", self.path.display())
     }
