@@ -298,13 +298,14 @@ impl Broker {
         let _ = worker.join();
     }
 
-    /// The thread for the session could not be started: the session leaves the table, and its client is told so. Unless `end_all` marked
-    /// the entry in the meantime: it tells the client that the app is quitting, closes the connection and takes the entry out, and the
-    /// client is not told both.
+    /// The thread for the session could not be started: its client is told so, and then the session leaves the table and its connection
+    /// is closed (`forget`). Unless `end_all` marked the entry in the meantime: it tells the client that the app is quitting, closes the
+    /// connection and takes the entry out, and the client is not told both.
     fn could_not_start(&self, conn: &Conn) {
-        if self.forget(conn.id) != Told::ByEndAll {
+        if self.claim(conn.id) {
             could_not_open(conn.link.as_ref(), kinds::CONNECT, "SSHelter could not start the session.");
         }
+        self.forget(conn.id);
     }
 
     /// Puts the session in the table, still connecting; `false` when the app is quitting (`end_all` has started), and none is started.
@@ -323,14 +324,18 @@ impl Broker {
         true
     }
 
-    /// The session's thread is over: the session leaves the table. Says whom the client of a session that was still being connected has
-    /// been told by. The entry of a client `end_all` is telling stays, however the thread ended: the telling thread takes it out when it
-    /// has told the client (`told_quit`), because `end_all` must not return before.
+    /// The session's thread is over (or was never started: `could_not_start`): the session leaves the table. Says whom the client of a
+    /// session that was still being connected has been told by. The entry of a client `end_all` is telling stays, however the thread
+    /// ended: the telling thread takes it out when it has told the client (`told_quit`), because `end_all` must not return before. When
+    /// the entry is this thread's to take out, its connection is closed first (one `shutdown`, under the table's lock): `end_all` returns
+    /// as soon as the table is empty, and every client it ended must be able to read the end of its stream by then.
     fn forget(&self, id: u64) -> Told {
         let mut table = locked(&self.table);
         let told = table.entries.get(&id).map_or(Told::No, |entry| entry.told);
         if told != Told::ByEndAll {
-            table.entries.remove(&id);
+            if let Some(entry) = table.entries.remove(&id) {
+                hang_up(&entry.conn.closer);
+            }
         }
         drop(table);
         self.changed.notify_all();
@@ -402,9 +407,9 @@ impl Broker {
     }
 }
 
-/// What becomes of a session whichever way its thread ends, a panic included (the thread unwinds through this): it leaves the table, and
-/// its connection is closed, which ends the reader of `serve` and tells the client. `end_all` closes the connection of a client it told
-/// the app is quitting, after it has told it, so this leaves that one to it.
+/// What becomes of a session whichever way its thread ends, a panic included (the thread unwinds through this): it leaves the table, its
+/// connection closed first (`forget`), which ends the reader of `serve` and tells the client. `end_all` closes the connection of a client
+/// it told the app is quitting, after it has told it, so `forget` leaves that one to it.
 struct SessionOver<'a> {
     broker: &'a Broker,
     conn: &'a Conn,
@@ -412,9 +417,7 @@ struct SessionOver<'a> {
 
 impl Drop for SessionOver<'_> {
     fn drop(&mut self) {
-        if self.broker.forget(self.conn.id) != Told::ByEndAll {
-            hang_up(&self.conn.closer);
-        }
+        self.broker.forget(self.conn.id);
     }
 }
 
@@ -1325,12 +1328,15 @@ mod tests {
         let web = Hop::new("id-web", "web", "web.example.com", 22, "deploy", AuthMethod::Password);
         let query = HostQuery::Alias("web".into());
 
-        let (failing, _client) = conn_on_a_socket_pair(1);
+        let (failing, mut failing_client) = conn_on_a_socket_pair(1);
         assert!(world.broker.enter(&failing, &query, None));
         assert!(world.broker.claim(1), "the first to tell");
         assert!(!world.broker.claim(1), "and nobody after it");
         assert!(!world.broker.promote(1, &web), "a session whose client was told the connect failed is not opened");
         assert_eq!(world.broker.forget(1), Told::BySession);
+        // `failing` still holds the connection: only `forget` can have closed it.
+        failing_client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert!(matches!(read_frame(&mut failing_client), Ok(None)), "the connection is closed by the time its entry is out of the table");
 
         let (quitting, mut client) = conn_on_a_socket_pair(2);
         assert!(world.broker.enter(&quitting, &query, None));
