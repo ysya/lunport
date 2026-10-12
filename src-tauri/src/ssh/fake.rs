@@ -337,8 +337,8 @@ impl SshEngine for FakeEngine {
             let key = keys.get(&hop.alias).unwrap_or(&key_default).clone();
             // A pinned hop offers only its pin's key type in the handshake, as in the real engine: a server whose key is of another type has
             // nothing in common with it.
-            if let Some(pinned) = hop.pinned.as_ref().filter(|pinned| pinned.algorithm != key.algorithm) {
-                return Err(ConnectError::NoCommonHostKeyAlgorithm { hop: reference, ours: vec![pinned.algorithm.clone()], theirs: vec![key.algorithm] });
+            if let Some(ours) = hop.pinned.as_ref().filter(|pinned| pinned.algorithm != key.algorithm).and_then(|pinned| offered_for_pin(&pinned.algorithm)) {
+                return Err(ConnectError::NoCommonHostKeyAlgorithm { hop: reference, ours, theirs: vec![key.algorithm] });
             }
             match host_keys.check(&reference, &key) {
                 HostKeyVerdict::Pinned => {}
@@ -363,6 +363,18 @@ impl SshEngine for FakeEngine {
         let state = Arc::new(SessionState { destination, closed: Mutex::new(disconnect), shells: Mutex::new(Vec::new()) });
         locked(&self.shared.sessions).push(Arc::downgrade(&state));
         Ok(Box::new(FakeSession { shared: Arc::clone(&self.shared), state }))
+    }
+}
+
+/// The host key algorithms the real engine offers a server for a hop pinned to a key of type `pinned` (`russh_engine::host_key_algorithms`):
+/// the key's own family, which for an RSA key is the rsa-sha2 pair and never SHA-1 `ssh-rsa`. `None` for a type the engine cannot restrict
+/// the offer by: one it does not offer (DSA, security keys) or a name it cannot parse. The handshake then offers everything, and the pin is
+/// left to the host key policy.
+fn offered_for_pin(pinned: &str) -> Option<Vec<String>> {
+    match pinned {
+        "ssh-rsa" => Some(vec!["rsa-sha2-512".to_string(), "rsa-sha2-256".to_string()]),
+        "ssh-ed25519" | "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384" | "ecdsa-sha2-nistp521" => Some(vec![pinned.to_string()]),
+        _ => None,
     }
 }
 
@@ -806,6 +818,34 @@ mod tests {
         let mut same_type = hop("web");
         same_type.pinned = Some(default_server_key());
         assert!(connect(&engine, &Target { hops: vec![same_type] }, &Auth::default()).is_ok());
+    }
+
+    /// The offer as the real engine makes it (`russh_engine::host_key_algorithms`): an RSA pin is offered as the rsa-sha2 pair and never as
+    /// SHA-1 `ssh-rsa`, and a pin of a type the engine cannot restrict the offer by (DSA, a security key, a name it cannot parse)
+    /// restricts nothing: the server presents its key as usual, and the policy is what judges it.
+    #[test]
+    fn an_rsa_pin_is_offered_as_the_rsa_sha2_pair_and_a_pin_the_engine_cannot_restrict_by_restricts_nothing() {
+        let pinned_to = |key: HostKey| {
+            let mut pinned = hop("web");
+            pinned.pinned = Some(key);
+            Target { hops: vec![pinned] }
+        };
+        let rsa = HostKey::from_openssh_line(test_keys::RSA_PUBLIC).unwrap();
+        match connect(&FakeEngine::new(), &pinned_to(rsa.clone()), &Auth::default()) {
+            Err(ConnectError::NoCommonHostKeyAlgorithm { ours, theirs, .. }) => {
+                assert_eq!((ours, theirs), (vec!["rsa-sha2-512".to_string(), "rsa-sha2-256".to_string()], vec!["ssh-ed25519".to_string()]));
+            }
+            other => panic!("expected NoCommonHostKeyAlgorithm, got {:?}", other.err()),
+        }
+        // A server whose key is an RSA key has the pin's family in common.
+        let rsa_server = FakeEngine::new().with_host_key(rsa.clone());
+        let accepts_rsa = Policy { accepted: Some(rsa.fingerprint.clone()), pinned: None };
+        assert!(rsa_server.connect(&pinned_to(rsa), &accepts_rsa, &Auth::default()).is_ok());
+
+        for algorithm in ["ssh-dss", "sk-ssh-ed25519@openssh.com", "not-an-algorithm"] {
+            let odd = HostKey { algorithm: algorithm.into(), public_key: vec![1], fingerprint: "SHA256:odd".into() };
+            assert!(connect(&FakeEngine::new(), &pinned_to(odd), &Auth::default()).is_ok(), "a pin of {algorithm} restricts nothing");
+        }
     }
 
     /// The real engine's sequence against a server that offers only passwords: the key goes first and is refused, then the password.
