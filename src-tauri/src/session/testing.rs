@@ -21,11 +21,14 @@ struct FakeHost {
 }
 
 /// Saved hosts and pins in memory. A host added as `web` has the id `id-web`, the hostname `web.example.com`, port 22 and the user
-/// `deploy`; pins are dated `PINNED_AT_MS`.
+/// `deploy`; pins are dated `PINNED_AT_MS`. Chains are resolved as the ssh_config adapter will: a jump host's own jump hosts come in front
+/// of it, and a chain that loops (a host comes up twice) or names a host that is not saved is refused with the adapter's sentences.
 #[derive(Default)]
 pub struct FakeDirectory {
     hosts: Vec<FakeHost>,
     pins: Mutex<HashMap<HostId, PinnedKey>>,
+    /// Every call that reads the pins fails (`with_unreadable_pins`).
+    unreadable_pins: bool,
 }
 
 /// The time every pin of a `FakeDirectory` was made.
@@ -41,7 +44,8 @@ impl FakeDirectory {
         self.with_host_via(alias, auth, &[])
     }
 
-    /// A saved host reached through the saved hosts `jumps`, in this order.
+    /// A saved host reached through the saved hosts `jumps`, in this order. A jump host that has jump hosts of its own is reached through
+    /// them.
     pub fn with_host_via(mut self, alias: &str, auth: AuthMethod, jumps: &[&str]) -> FakeDirectory {
         let hop = Hop::new(&format!("id-{alias}"), alias, &format!("{alias}.example.com"), 22, "deploy", auth);
         self.hosts.push(FakeHost { hop, jumps: jumps.iter().map(|jump| jump.to_string()).collect() });
@@ -61,6 +65,13 @@ impl FakeDirectory {
         self
     }
 
+    /// The pins cannot be read, as when the pin file is damaged: `resolve`, `pinned`, `pin` and `replace_pin` fail with `Failed`, which
+    /// names `host-pins.json` as the real store's does, and write nothing. `pins()` still shows what was set with `with_pin`.
+    pub fn with_unreadable_pins(mut self) -> FakeDirectory {
+        self.unreadable_pins = true;
+        self
+    }
+
     /// What is pinned now, by host id.
     pub fn pins(&self) -> HashMap<HostId, PinnedKey> {
         locked(&self.pins).clone()
@@ -75,8 +86,39 @@ impl FakeDirectory {
         }
     }
 
-    fn with_its_pin(&self, hop: &Hop) -> Hop {
-        Hop { pinned: locked(&self.pins).get(&hop.id).map(|pin| pin.key.clone()), ..hop.clone() }
+    /// The pins, or the failure the real store gives when its file cannot be read.
+    fn readable_pins(&self) -> Result<MutexGuard<'_, HashMap<HostId, PinnedKey>>, DirectoryError> {
+        if self.unreadable_pins {
+            return Err(DirectoryError::Failed("SSHelter cannot read its pinned host keys in host-pins.json (the file is damaged).".to_string()));
+        }
+        Ok(locked(&self.pins))
+    }
+
+    fn with_its_pin(&self, hop: &Hop) -> Result<Hop, DirectoryError> {
+        Ok(Hop { pinned: self.readable_pins()?.get(&hop.id).map(|pin| pin.key.clone()), ..hop.clone() })
+    }
+
+    /// The hops of `host` and of its jump hosts: each jump host behind its own jump hosts, then `host`. `reached` holds the hosts met so
+    /// far, in order; one that comes up again makes a loop.
+    fn hops_of<'a>(&'a self, host: &'a FakeHost, reached: &mut Vec<&'a Hop>) -> Result<Vec<Hop>, DirectoryError> {
+        let again = reached.iter().any(|hop| hop.id == host.hop.id);
+        reached.push(&host.hop);
+        if again {
+            let path: Vec<&str> = reached.iter().map(|hop| hop.alias.as_str()).collect();
+            return Err(DirectoryError::Unsupported(format!("The jump hosts go round in a circle: {}.", path.join(" → "))));
+        }
+        let mut hops = Vec::new();
+        for jump in &host.jumps {
+            let jump_host = match self.by_alias(jump) {
+                Err(DirectoryError::NotFound(_)) => {
+                    return Err(DirectoryError::Unsupported(format!("{} jumps through {jump}, which is not a saved host.", host.hop.alias)));
+                }
+                found => found?,
+            };
+            hops.extend(self.hops_of(jump_host, reached)?);
+        }
+        hops.push(self.with_its_pin(&host.hop)?);
+        Ok(hops)
     }
 }
 
@@ -90,20 +132,15 @@ impl HostDirectory for FakeDirectory {
                 .find(|host| host.hop.id.as_str() == id)
                 .ok_or_else(|| DirectoryError::NotFound(format!("No saved host has the id {id}.")))?,
         };
-        let mut hops = Vec::new();
-        for jump in &host.jumps {
-            hops.push(self.with_its_pin(&self.by_alias(jump)?.hop));
-        }
-        hops.push(self.with_its_pin(&host.hop));
-        Ok(Target { hops })
+        Ok(Target { hops: self.hops_of(host, &mut Vec::new())? })
     }
 
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
-        Ok(locked(&self.pins).get(host).cloned())
+        Ok(self.readable_pins()?.get(host).cloned())
     }
 
     fn pin(&self, host: &HostId, key: &HostKey) -> Result<(), DirectoryError> {
-        let mut pins = locked(&self.pins);
+        let mut pins = self.readable_pins()?;
         match decide_pin(host, pins.get(host).map(|pinned| pinned.key.fingerprint.as_str()), key) {
             PinDecision::AlreadyPinned => Ok(()),
             PinDecision::Refuse(sentence) => Err(DirectoryError::Failed(sentence)),
@@ -115,7 +152,7 @@ impl HostDirectory for FakeDirectory {
     }
 
     fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
-        let mut pins = locked(&self.pins);
+        let mut pins = self.readable_pins()?;
         match decide_replace(host, pins.get(host).map(|pinned| pinned.key.fingerprint.as_str()), previous, key) {
             PinDecision::AlreadyPinned => Ok(()),
             PinDecision::Refuse(sentence) => Err(DirectoryError::Failed(sentence)),
@@ -183,5 +220,72 @@ mod tests {
         assert_eq!(directory.resolve(&HostQuery::Id("id-web-2".into())).unwrap().hops[0].hostname, "web-2.example.com");
         assert!(matches!(directory.resolve(&HostQuery::Alias("mail".into())), Err(DirectoryError::NotFound(_))));
         assert_eq!(directory.password_account(&HostId::from("id-db")), "host:id-db");
+    }
+
+    #[test]
+    fn a_jump_host_with_jump_hosts_of_its_own_has_them_in_front_of_it() {
+        let directory = FakeDirectory::new()
+            .with_host("edge", AuthMethod::Password)
+            .with_host_via("bastion", AuthMethod::Password, &["edge"])
+            .with_host_via("db", AuthMethod::Password, &["bastion"])
+            .with_host_via("web", AuthMethod::Password, &["bastion"]);
+        let aliases = |alias: &str| -> Vec<String> {
+            directory.resolve(&HostQuery::Alias(alias.into())).unwrap().hops.iter().map(|hop| hop.alias.clone()).collect()
+        };
+        assert_eq!(aliases("db"), ["edge", "bastion", "db"]);
+        assert_eq!(aliases("web"), ["edge", "bastion", "web"], "a jump host that two hosts share is not a loop");
+    }
+
+    /// The trait says a chain that loops is an error, and the pins are keyed by host id: a chain in which one host comes up twice is refused,
+    /// with the sentence the ssh_config adapter uses for a loop.
+    #[test]
+    fn a_chain_in_which_a_host_comes_up_twice_is_refused_as_a_loop() {
+        let directory = FakeDirectory::new()
+            .with_host_via("self", AuthMethod::Password, &["self"])
+            .with_host_via("loop1", AuthMethod::Password, &["loop2"])
+            .with_host_via("loop2", AuthMethod::Password, &["loop1"])
+            .with_host("bastion", AuthMethod::Password)
+            .with_host_via("twice", AuthMethod::Password, &["bastion", "bastion"]);
+        let refused = |query: HostQuery| directory.resolve(&query);
+        let circle = |path: &str| Err(DirectoryError::Unsupported(format!("The jump hosts go round in a circle: {path}.")));
+        assert_eq!(refused(HostQuery::Alias("self".into())), circle("self → self"));
+        assert_eq!(refused(HostQuery::Alias("loop1".into())), circle("loop1 → loop2 → loop1"));
+        assert_eq!(refused(HostQuery::Id("id-loop2".into())), circle("loop2 → loop1 → loop2"), "by id as well");
+        assert_eq!(refused(HostQuery::Alias("twice".into())), circle("twice → bastion → bastion"));
+    }
+
+    /// The sentence is the ssh_config adapter's, so a broker test sees what the app will say.
+    #[test]
+    fn a_jump_host_that_is_not_saved_is_worded_the_way_the_ssh_config_adapter_will_word_it() {
+        let directory = FakeDirectory::new()
+            .with_host_via("db", AuthMethod::Password, &["gate"])
+            .with_host_via("web", AuthMethod::Password, &["bastion"])
+            .with_host_via("bastion", AuthMethod::Password, &["gate"]);
+        let refused = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into()));
+        let not_saved = |alias: &str| Err(DirectoryError::Unsupported(format!("{alias} jumps through gate, which is not a saved host.")));
+        assert_eq!(refused("db"), not_saved("db"));
+        assert_eq!(refused("web"), not_saved("bastion"), "the host that names the jump host is the one the sentence is about");
+    }
+
+    /// Pins that cannot be read fail closed, as the real pin file does: an error from every call that reads them, never "nothing pinned",
+    /// and nothing is written.
+    #[test]
+    fn pins_that_cannot_be_read_fail_every_call_that_reads_them_and_write_nothing() {
+        let (pinned, other) = (key(test_keys::PLAIN_PUBLIC), key(test_keys::ECDSA_PUBLIC));
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", pinned.clone()).with_unreadable_pins();
+        let web = HostId::from("id-web");
+        let unreadable = |call: &str, result: Result<(), DirectoryError>| match result {
+            Err(DirectoryError::Failed(text)) => assert!(text.contains("host-pins.json"), "{call}: {text}"),
+            got => panic!("{call}: expected the failure of an unreadable pin file, got {got:?}"),
+        };
+        unreadable("resolve by alias", directory.resolve(&HostQuery::Alias("web".into())).map(|_| ()));
+        unreadable("resolve by id", directory.resolve(&HostQuery::Id("id-web".into())).map(|_| ()));
+        unreadable("pinned", directory.pinned(&web).map(|_| ()));
+        unreadable("pin the pinned key", directory.pin(&web, &pinned));
+        unreadable("pin a host that has none", directory.pin(&HostId::from("id-db"), &other));
+        unreadable("replace_pin", directory.replace_pin(&web, &pinned, &other));
+        assert_eq!(directory.pins().into_iter().map(|(host, pin)| (host, pin.key)).collect::<Vec<_>>(), [(web, pinned)], "nothing was written");
+        let unknown = directory.resolve(&HostQuery::Alias("mail".into()));
+        assert!(matches!(unknown, Err(DirectoryError::NotFound(_))), "a host that is not saved is still not found: {unknown:?}");
     }
 }
