@@ -1922,6 +1922,10 @@ mod tests {
             // The budget counts the output in frames of 32 KiB until the terminal has taken each, and `exited` until the run ends: once
             // the count is not a whole number of frames, `exited` is in the queue, and the signal comes after it.
             eventually("the end to be queued", 10, || *hand.keys.output.used() % (32 * 1024) != 0);
+            // The reader counts a frame against the budget just before it queues it, so the count alone could let the signal overtake
+            // `exited`. Waiting for the terminal to take its first two pieces too (a quarter of a second at this pace) leaves the reader,
+            // which has nothing else to do, that long to queue it.
+            eventually("the terminal to take the first of the output", 10, || stdout.shown.len() >= 8 * 1024);
             hand.keys.send(input).unwrap();
             assert_eq!(hand.ends_within(Duration::from_secs(1)), (status, true), "{what}: the signal's status, and the terminal put back");
             assert!(stdout.shown.len() < 6 * 32 * 1024, "{what}: the end did not wait for all of the output");
