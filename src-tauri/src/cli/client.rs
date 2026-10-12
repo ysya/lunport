@@ -357,8 +357,12 @@ impl Client {
         // The cursor is not at the start of a line while the shell is open (it can be anywhere in what the shell wrote), nor while a
         // question's prompt is on it, whatever the terminal was before the question.
         let mid_line = matches!(self.phase, Phase::Open | Phase::Asking { .. });
+        // What was typed for a question and not sent (a part of a password, or of a code) was meant for SSHelter: it is thrown away with
+        // what the terminal holds, as readpassphrase does, or the shell that gets the terminal next reads it, shows it on its line and
+        // keeps it in its history. Outside a question what is typed is the shell's, and stays.
+        let at_a_question = matches!(self.phase, Phase::Asking { .. });
         self.phase = Phase::Ended;
-        let mut actions = vec![Action::Mode(Mode::Cooked, false)];
+        let mut actions = vec![Action::Mode(Mode::Cooked, at_a_question)];
         if close {
             actions.push(Action::Send(ClientMessage::Close));
         }
@@ -724,15 +728,70 @@ mod tests {
             client.handle(error(kinds::AUTH, "Authentication for web was abandoned (the password prompt timed out)."));
             assert_eq!(
                 client.handle(exited()),
-                [Action::Mode(Mode::Cooked, false), Action::Stderr("\nAuthentication for web was abandoned (the password prompt timed out).\n".into()), Action::Exit(255)]
+                [Action::Mode(Mode::Cooked, true), Action::Stderr("\nAuthentication for web was abandoned (the password prompt timed out).\n".into()), Action::Exit(255)]
             );
         }
         let mut client = started();
         client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
         assert_eq!(
             client.handle(Input::Closed),
-            [Action::Mode(Mode::Cooked, false), Action::Stderr("\nThe connection to SSHelter ended.\n".into()), Action::Exit(255)]
+            [Action::Mode(Mode::Cooked, true), Action::Stderr("\nThe connection to SSHelter ended.\n".into()), Action::Exit(255)]
         );
+    }
+
+    /// The actions with which the session ends when `inputs` come while a question is on the terminal (`echo` or not; asked while connecting,
+    /// or in the open shell when `in_the_shell`), after a part of an answer was typed without Enter.
+    fn ending_under_a_question(echo: bool, in_the_shell: bool, inputs: Vec<Input>) -> Vec<Action> {
+        let mut client = if in_the_shell { opened() } else { started() };
+        client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", echo));
+        assert!(client.handle(Input::Stdin(Zeroizing::new(b"hun".to_vec()))).is_empty());
+        inputs.into_iter().map(|input| client.handle(input)).last().unwrap()
+    }
+
+    /// What was typed at a question and not sent yet (a part of a password: no Enter yet) was meant for SSHelter. However the session ends
+    /// under the question, the terminal is put back with what it holds thrown away, as readpassphrase does: otherwise the shell that gets
+    /// the terminal next reads it, shows it on its line and keeps it in its history (measured with bash 5 and zsh 5.9). One case for each
+    /// way the program ends; the questions that show what is typed, and those asked in the open shell, the same.
+    #[test]
+    fn an_end_under_a_question_throws_away_what_was_typed_for_it() {
+        const ABANDONED: &str = "Authentication for web was abandoned (the password prompt timed out).";
+        const LOST: &str = "Connection to web lost (early eof).";
+        let on_its_own_line = |text: &str| Action::Stderr(format!("\n{text}\n"));
+        type Case = (&'static str, fn() -> Vec<Input>, Vec<Action>);
+        let cases: Vec<Case> = vec![
+            ("SIGTERM", || vec![Input::Stop(libc::SIGTERM)], vec![Action::Send(ClientMessage::Close), Action::Exit(143)]),
+            ("SIGHUP, or the terminal went away", || vec![Input::Stop(libc::SIGHUP)], vec![Action::Send(ClientMessage::Close), Action::Exit(129)]),
+            ("SIGQUIT", || vec![Input::Stop(libc::SIGQUIT)], vec![Action::Send(ClientMessage::Close), Action::Exit(131)]),
+            ("a thread of the program failed", || vec![Input::Failed], vec![Action::Send(ClientMessage::Close), on_its_own_line(THREAD_FAILED), Action::Exit(255)]),
+            ("the broker went away", || vec![Input::Closed], vec![on_its_own_line("The connection to SSHelter ended."), Action::Exit(255)]),
+            ("the broker ended the session", || vec![exited()], vec![Action::Exit(255)]),
+            ("the broker's error, then the end", || vec![error(kinds::AUTH, ABANDONED), exited()], vec![on_its_own_line(ABANDONED), Action::Exit(255)]),
+            ("the connection was lost", || vec![event(Event::Disconnected { reason: LOST.into() }), exited()], vec![on_its_own_line(LOST), Action::Exit(255)]),
+        ];
+        for (how, inputs, rest) in &cases {
+            let mut expected = vec![Action::Mode(Mode::Cooked, true)];
+            expected.extend(rest.iter().map(|action| match action {
+                Action::Send(message) => Action::Send(message.clone()),
+                Action::Stderr(text) => Action::Stderr(text.clone()),
+                Action::Exit(code) => Action::Exit(*code),
+                other => panic!("not in an end: {other:?}"),
+            }));
+            for (echo, in_the_shell) in [(false, false), (true, false), (false, true)] {
+                assert_eq!(ending_under_a_question(echo, in_the_shell, inputs()), expected, "{how}; echo {echo}, in the shell {in_the_shell}");
+            }
+        }
+    }
+
+    /// Outside a question what is typed is the shell's (or kept for it while connecting): an end does not throw it away, as OpenSSH's
+    /// own end does not.
+    #[test]
+    fn an_end_outside_a_question_keeps_what_was_typed() {
+        assert_eq!(opened().handle(Input::Stop(libc::SIGTERM)), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(143)]);
+        assert_eq!(started().handle(exited()), [Action::Mode(Mode::Cooked, false), Action::Exit(255)]);
+        let mut client = started();
+        client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
+        client.handle(Input::Interrupt);
+        assert_eq!(client.handle(exited()), [Action::Mode(Mode::Cooked, false), Action::Exit(255)], "the question was cancelled before the end");
     }
 
     /// Not something the broker does (it waits for each answer), but the terminal must not be left in the first question's mode, nor the
