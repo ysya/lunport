@@ -76,7 +76,8 @@ pub enum Reply {
 
 /// The owner of a session: the person at the client's terminal, who is asked for what a login needs (spec §7.2).
 pub trait Owner: Send + Sync {
-    /// Asks and waits for the answer until `deadline` (`None`: for as long as the owner is there).
+    /// Asks and waits for the answer until `deadline` (`None`: for as long as the owner is there). Whatever a server wrote in `text` has
+    /// been through `printable` already, so the owner shows it as it is.
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply;
     /// Shows that the host key waits for the person in SSHelter's window (spec §11); no answer.
     fn host_key_notice(&self, text: &str);
@@ -298,14 +299,18 @@ impl AuthSource for BrokerAuth<'_> {
         }
     }
 
-    /// One question per prompt, in order, each showing which host asks (as OpenSSH does: `(user@host) Password:`), until `deadline`.
+    /// One question per prompt, in order, each showing which host asks (as OpenSSH does: `(user@host) Password:`), until `deadline`. The
+    /// prompt text is the server's, so it is shown without control characters (`printable`): a jump host must not be able to erase its own
+    /// `(user@host) ` and draw another hop's in front of a password prompt. Nothing else of the server's reaches this call: the engine does
+    /// not hand over a round's name and instructions.
     fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>> {
         if self.cancelled(&hop.id) {
             return None;
         }
         let mut answers = Vec::with_capacity(prompts.len());
         for prompt in prompts {
-            match self.owner.ask(QuestionKind::Interactive, &format!("({}@{}) {}", hop.user, hop.alias, prompt.text), prompt.echo, Some(deadline)) {
+            let text = format!("({}@{}) {}", hop.user, hop.alias, printable(&prompt.text));
+            match self.owner.ask(QuestionKind::Interactive, &text, prompt.echo, Some(deadline)) {
                 Reply::Answer(answer) => answers.push(answer),
                 Reply::Cancelled => {
                     self.cancel(&hop.id);
@@ -501,6 +506,28 @@ mod tests {
         let auth = world.auth(&cancelling);
         assert_eq!(auth.interactive(&web(), &prompts, deadline), None);
         assert!(auth.cancelled(&web().id));
+    }
+
+    /// The prompt text is the server's, and in a chain a jump host's: with a carriage return, a sequence that clears the line or a C1
+    /// control it could erase the `(user@alias)` in front of it and draw another hop's, to be given that hop's password. The owner gets
+    /// the text without control characters, behind its prefix; line feeds and tabs stay, so a prompt of several lines is still readable.
+    #[test]
+    fn a_keyboard_interactive_prompt_reaches_the_owner_without_control_characters_and_behind_its_prefix() {
+        let world = world();
+        let owner = FakeOwner::typing(&["one", "two", "three"]);
+        let auth = world.auth(&owner);
+        let prompts = [
+            Prompt { text: "\r\x1b[2K(deploy@db) Password: ".into(), echo: false },
+            Prompt { text: "Code:\u{9b}2J\r\nsecond\tline\n".into(), echo: true },
+            Prompt { text: "\0\x08\x7f\u{85}tail".into(), echo: false },
+        ];
+        auth.interactive(&web(), &prompts, Instant::now() + Duration::from_secs(60)).expect("answered");
+        let questions = owner.questions();
+        for text in &questions {
+            assert!(text.starts_with("(deploy@web) "), "the prefix stays in front: {text:?}");
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n' && c != '\t'), "no control character reaches the terminal: {text:?}");
+        }
+        assert_eq!(questions, ["(deploy@web) ??[2K(deploy@db) Password: ", "(deploy@web) Code:?2J\nsecond\tline\n", "(deploy@web) ????tail"]);
     }
 
     /// A server's banner can carry escape sequences that would rewrite the user's terminal: they are replaced before it is shown.
