@@ -1,6 +1,8 @@
 //! The pinned host keys of the temporary ssh_config directory (plan 1b): a small JSON file in the app's data directory,
-//! `host-pins.json`, keyed by host id. Plan 1c moves the pins into the host records (`host_key`, spec §5.1) and deletes this file's code.
-//! SSHelter's own client never reads or writes `~/.ssh/known_hosts` (spec §1, non-goals).
+//! `host-pins.json`, keyed by host id. A host id stands for exactly one server, one hostname and one port (see `HostDirectory`): the pin
+//! of an id is the one key that server may present. The store cannot tell two endpoints under one id apart, so the directory that owns
+//! it must never hand out one id for two. Plan 1c moves the pins into the host records (`host_key`, spec §5.1) and deletes this file's
+//! code. SSHelter's own client never reads or writes `~/.ssh/known_hosts` (spec §1, non-goals).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -53,6 +55,9 @@ fn now_ms() -> u64 {
 }
 
 /// The pin file. Every change is a read, a check and an atomic write under one lock, so two connections that pin at once cannot lose a pin.
+///
+/// There must be exactly one `PinStore` per file, shared by everything that pins. The lock belongs to the instance: two stores on one file
+/// do not exclude each other, so both can read the old file and the second write drops the pin the first one made.
 pub struct PinStore {
     path: PathBuf,
     lock: Mutex<()>,
@@ -60,7 +65,7 @@ pub struct PinStore {
 }
 
 impl PinStore {
-    /// The store at `path` (`<app data>/host-pins.json` in the app). Nothing is read or created until it is used.
+    /// The store at `path` (`<app data>/host-pins.json` in the app). Nothing is read or created until it is used. Make one per file.
     pub fn new(path: PathBuf) -> PinStore {
         PinStore::with_clock(path, now_ms)
     }
