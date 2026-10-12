@@ -1191,25 +1191,31 @@ mod tests {
         assert_eq!((world.confirmer.asked().len(), world.owner.asked().len(), world.engine.attempts()), (3, 9, 13));
     }
 
-    /// The most that one host can ask of a connect, on every host of a chain of three: its pinned key is of a type its server no longer
-    /// has (the handshake is repeated without the restriction, plan 1b R17), the key it has now is accepted as the changed key it is, and
-    /// the password is typed wrong twice before it is right. Five rounds a host, and the one that gets in.
+    /// The most that one host can ask of a connect, on every host of a chain of three, so that the bound is reached and not passed. The
+    /// directory has a pin that it did not have when the host was resolved (another connection pinned it meanwhile), and it is of a type
+    /// that the server no longer has: the pin is taken into the policy, the handshake is repeated without the restriction (plan 1b R17),
+    /// the key the server has now is accepted as the changed key it is, and the password is typed wrong twice before it is right. Six
+    /// rounds a host, and the one that gets in.
     #[test]
-    fn a_chain_of_three_hosts_that_each_need_every_kind_of_round_connects() {
+    fn a_chain_of_three_hosts_that_each_need_every_kind_of_round_connects_in_exactly_the_bound() {
         let key_hop = || AuthMethod::Key { key_id: "k-plain".into() };
         let ecdsa = || key(test_keys::ECDSA_PUBLIC);
-        let directory = FakeDirectory::new()
-            .with_host("j1", key_hop())
-            .with_host("j2", key_hop())
-            .with_host_via("db", key_hop(), &["j1", "j2"])
-            .with_pin("j1", ecdsa())
-            .with_pin("j2", ecdsa())
-            .with_pin("db", ecdsa());
+        let directory = ResolvedBeforeThePin(
+            FakeDirectory::new()
+                .with_host("j1", key_hop())
+                .with_host("j2", key_hop())
+                .with_host_via("db", key_hop(), &["j1", "j2"])
+                .with_pin("j1", ecdsa())
+                .with_pin("j2", ecdsa())
+                .with_pin("db", ecdsa()),
+        );
         let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
         let answers = ["x", "y", "right", "x", "y", "right", "x", "y", "right"];
-        let world = world(engine, directory).deciding(vec![Decision::Trust; 3]).typing(&answers);
-        let connected = world.connect(&HostQuery::Alias("db".into())).expect("every host got what it asked for");
-        assert_eq!((world.confirmer.asked().len(), world.owner.asked().len(), world.engine.attempts()), (3, 9, 16));
+        let world = world(engine, FakeDirectory::new()).deciding(vec![Decision::Trust; 3]).typing(&answers);
+        let connected = world.connect_through(&directory, &HostQuery::Alias("db".into()), &world.owner).expect("every host got what it asked for");
+        assert_eq!((world.confirmer.asked().len(), world.owner.asked().len()), (3, 9));
+        assert_eq!(world.engine.attempts(), 3 * 6 + 1);
+        assert_eq!(world.engine.attempts(), round_limit(&connected.target), "the most a chain can ask is what the bound allows");
         assert!(connected.target.hops.iter().all(|hop| hop.pinned == Some(default_server_key())), "every changed key was accepted");
     }
 
