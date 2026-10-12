@@ -178,7 +178,6 @@ impl KeyKind {
 
 /// A key pair made by ssh-keygen, in the OpenSSH private key format the vault reads.
 pub struct TestKey {
-    pub kind: KeyKind,
     pub private_path: PathBuf,
     pub private_text: String,
     /// `<type> <base64> sshelter-test`: the authorized_keys form.
@@ -208,7 +207,6 @@ pub fn generate_key(tools: &Tools, dir: &Path, name: &str, kind: KeyKind) -> Tes
         let private_text = std::fs::read_to_string(&private_path).expect("read the private key");
         if readable_by_the_vault(&private_text) {
             return TestKey {
-                kind,
                 private_text,
                 public_line: std::fs::read_to_string(&public_path).expect("read the public key").trim().to_string(),
                 private_path,

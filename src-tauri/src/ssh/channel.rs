@@ -167,6 +167,7 @@ impl ByteQueue {
     }
 
     /// How many bytes were discarded because the reader fell behind.
+    #[cfg(test)]
     pub fn dropped_bytes(&self) -> u64 {
         locked(&self.state).dropped
     }
@@ -223,7 +224,8 @@ impl QueuedShell {
         QueuedShell { input, output, exit }
     }
 
-    /// `ShellChannel::read` with a deadline instead of an open end: for tests and for callers that must also watch something else.
+    /// `ShellChannel::read` with a deadline instead of an open end (tests).
+    #[cfg(test)]
     pub fn read_until(&self, buf: &mut [u8], deadline: Instant) -> QueueRead {
         self.output.read_until(buf, Some(deadline))
     }

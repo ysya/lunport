@@ -87,7 +87,6 @@ pub struct VaultAuth {
     keys: HashMap<String, (Material, String)>,
     presented: HashMap<String, String>,
     password: Option<String>,
-    password_delay: Duration,
     answers: Option<Vec<String>>,
     answer_delay: Duration,
     overrun_deadline: bool,
@@ -105,7 +104,6 @@ impl VaultAuth {
             keys: HashMap::new(),
             presented: HashMap::new(),
             password: None,
-            password_delay: Duration::ZERO,
             answers: None,
             answer_delay: Duration::ZERO,
             overrun_deadline: false,
@@ -139,11 +137,6 @@ impl VaultAuth {
         self
     }
 
-    /// `password` takes this long to answer (the user is typing).
-    pub fn with_password_delay(mut self, delay: Duration) -> VaultAuth {
-        self.password_delay = delay;
-        self
-    }
 
     /// `interactive` returns these answers. Without them it returns `None`, as a cancelled prompt does.
     pub fn with_answers(mut self, answers: &[&str]) -> VaultAuth {
@@ -247,7 +240,6 @@ impl AuthSource for VaultAuth {
     fn password(&self, hop: &HopRef) -> Option<Secret> {
         self.called("password");
         locked(&self.password_asks).push(hop.clone());
-        std::thread::sleep(self.password_delay);
         self.password.clone().map(Zeroizing::new)
     }
 

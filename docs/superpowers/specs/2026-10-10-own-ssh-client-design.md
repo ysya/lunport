@@ -242,10 +242,11 @@ pub enum Exit { Code(u32), Signal(String), Refused(String), Disconnected } // Re
 - Unix:raw mode 用 termios(`nix`),`SIGWINCH` 用 tokio 的 `SignalKind::window_change`。
 - Windows:release 版沒有 console,先 `AttachConsole(ATTACH_PARENT_PROCESS)`;`SetConsoleMode` 開 VT input/output;視窗大小變更用 `ReadConsoleInput` 的事件;在 Windows Terminal 與傳統 console 都要測。
 - 任何結束路徑(含 panic)都還原終端機模式。
+- (第 1b 期)實作的細節:收到 `opened` 才進 raw mode(之前終端機維持原狀,Ctrl-C 照常中止;連線中打的字等 shell 開了再送,同 OpenSSH);raw mode 照 OpenSSH 的 `enter_raw_mode` 設;`question` 用終端機的行編輯問,`echo: false` 時不顯示,問之前丟掉先打的字(不讓它變成密碼),Ctrl-C 或 Ctrl-D 取消;termios 用 app 已有的 `libc`(Cargo.lock 不多套件),信號用 tokio 的 `signal`(`SIGWINCH`、`SIGINT`、`SIGTERM`、`SIGHUP`);結束碼:shell 的結束碼,被訊號殺掉為 128 + 訊號編號(同 shell),連線中斷或開不成為 255(同 ssh),參數錯誤為 2;Windows 在第 1b 期印 `sshelter connect is not supported on Windows yet.` 並以 1 結束(release 版沒有 console,看不到這句;console 的工作在第 3 期)。
 
 ### 7.4 從 app 啟動終端機
 
-Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `detect_terminals`、`build_launch_command`、`launch`,只是 argv 從 `ssh <alias>` 變成 `<SSHelter 執行檔> connect <alias>`。密碼自動填入與一次性通道刪除。
+Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `detect_terminals`、`build_launch_command`、`launch`,只是 argv 從 `ssh <alias>` 變成 `<SSHelter 執行檔> connect <alias>`。密碼自動填入與一次性通道刪除。(第 1b 期)Windows 在第 3 期之前照舊開 `ssh <alias>`(一次性通道與自動填入在各平台都已刪除,Windows 上「只在 SSHelter」的金鑰改經 agent 的核准視窗)。
 
 ## 8. MCP
 
@@ -292,7 +293,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 - **新視窗**:主機金鑰指紋確認(仿現有核准視窗);MCP `ask` 模式的提問視窗(passphrase、密碼、2FA)。主機明細顯示釘住的金鑰與「Forget pinned key」。
 - **進行中的 session**:設定或側欄一小區,可關閉。
 - **設定**:AI Access(允許清單用主機 id、核准模式單選加確認視窗、最近 10 筆含請求者);Advanced(再次匯入、清理);Sync 的檔案相關文字刪除。介面字串英文。
-- (第 0 期後的介面後果,細節在 1d 的計畫)主機金鑰確認:第一次連線會先失敗(引擎回 `HostKeyUnknown`,連線不留著等人),視窗問完、釘住後 broker 自動重連,使用者看到的是「確認 → 連上」,CLI 這段印 `Waiting for you to confirm {alias}'s host key in SSHelter.`;不符時同樣先失敗、警告視窗、接受才重連。認證提示(passphrase、密碼、2FA)有期限,逾時或取消後連線已丟掉,要再連一次(§11 的 `Authentication for {alias} was abandoned`),視窗要讓人看得出「這次作廢,請重連」。進行中的 session 清單與 AI Access 的最近 10 筆顯示結束方式(`ended`:正常結束碼、被訊號終止、逾時、連線中斷),不再把中斷顯示成 0。
+- (第 0 期後的介面後果;確認視窗在第 1b 期做,主機明細與「Forget pinned key」在 1d)主機金鑰確認:第一次連線會先失敗(引擎回 `HostKeyUnknown`,連線不留著等人),視窗問完、釘住後 broker 自動重連,使用者看到的是「確認 → 連上」,CLI 這段印 `Waiting for you to confirm {alias}'s host key in SSHelter.`;不符時同樣先失敗、警告視窗、接受才重連。認證提示(passphrase、密碼、2FA)有期限,逾時或取消後連線已丟掉,要再連一次(§11 的 `Authentication for {alias} was abandoned`),視窗要讓人看得出「這次作廢,請重連」。進行中的 session 清單與 AI Access 的最近 10 筆顯示結束方式(`ended`:正常結束碼、被訊號終止、逾時、連線中斷),不再把中斷顯示成 0。
 
 ## 11. 錯誤處理
 
