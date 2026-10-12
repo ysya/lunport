@@ -1,0 +1,363 @@
+//! SSHelter's host key window (own-ssh spec §10, §14, decision 6): the broker's `HostKeyConfirmer`. A host key is confirmed only here,
+//! never in a terminal: the broker's session thread asks (`HostKeyHub::ask` blocks it), a small always-on-top window labelled `hostkey`
+//! shows the oldest question, and the person's answer comes back through `hostkey_resolve`. Closing the window refuses every waiting
+//! question (`deny_all`, from lib.rs). The window and its hub are modelled on the SSH agent's approval window (`agent/prompt.rs`), copied
+//! rather than shared because plan 1c deletes `agent/`.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+
+use super::connect::{CancelToken, HostKeyConfirmer, HostKeyQuestion};
+use crate::error::AppError;
+
+pub const HOSTKEY_WINDOW: &str = "hostkey";
+pub const HOSTKEY_EVENT: &str = "hostkey://requests";
+/// How long a question waits for the person (the connection itself is not waiting: the engine failed fast, spec §6.2 step 3).
+pub const HOSTKEY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A host key question as the window shows it. The strings come from the user's host settings and the server: the window shows them
+/// through `revealHidden`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct HostKeyRequest {
+    pub id: String,
+    pub alias: String,
+    pub hostname: String,
+    pub port: u16,
+    pub algorithm: String,
+    pub fingerprint: String,
+    /// Set for a key that changed: the pinned one.
+    pub changed: Option<PinnedHostKey>,
+}
+
+/// The pinned key a changed key replaces.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct PinnedHostKey {
+    pub fingerprint: String,
+    /// When it was pinned (milliseconds since the Unix epoch). A number in the binding: it fits a JavaScript number until the year 287396.
+    #[cfg_attr(test, ts(type = "number"))]
+    pub pinned_at_ms: u64,
+}
+
+/// The window's answer: trust (Trust this key, Accept new key) or not (Cancel, Refuse), for the fingerprint the window showed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct HostKeyAnswer {
+    pub trust: bool,
+    pub fingerprint: String,
+}
+
+/// Told when the waiting questions change: opens, updates or closes the window. Called one at a time, each time with the latest list.
+pub trait HostKeySurface: Send + Sync {
+    fn changed(&self, pending: &[HostKeyRequest]);
+}
+
+struct Waiting {
+    request: HostKeyRequest,
+    answer: mpsc::SyncSender<HostKeyAnswer>,
+    answered: bool,
+}
+
+/// The questions waiting for the person, in the order they came.
+#[derive(Default)]
+pub struct HostKeyHub {
+    pending: Mutex<Vec<Waiting>>,
+    /// Orders the notifications to the surface: taking the list and telling the surface happen under it, so the surface is told last
+    /// what is pending last. Never held together with `pending` the other way round.
+    notify: Mutex<()>,
+    next_id: AtomicU64,
+}
+
+/// Takes the question off the list when `ask` leaves, however it leaves.
+struct Leaving<'a> {
+    hub: &'a HostKeyHub,
+    id: &'a str,
+}
+
+impl Drop for Leaving<'_> {
+    fn drop(&mut self) {
+        self.hub.forget(self.id);
+    }
+}
+
+impl HostKeyHub {
+    /// Asks and waits for the answer, at most `timeout`, and gives up early when `cancel` is set (the client went away). `None` when
+    /// nobody answered. Blocks, and the surface may create a window: call it from a worker thread (the broker's session thread).
+    pub fn ask(&self, surface: &dyn HostKeySurface, mut request: HostKeyRequest, timeout: Duration, cancel: &CancelToken) -> Option<HostKeyAnswer> {
+        let id = format!("hostkey-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+        request.id = id.clone();
+        let (answer, answered) = mpsc::sync_channel(1);
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner).push(Waiting { request, answer, answered: false });
+        let _leave = Leaving { hub: self, id: &id };
+        self.publish(surface);
+        let deadline = Instant::now() + timeout;
+        let mut reply = None;
+        while reply.is_none() && !cancel.is_cancelled() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match answered.recv_timeout(left.min(Duration::from_millis(100))) {
+                Ok(answer) => reply = Some(answer),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        // No longer waiting: off the list first (a later `resolve` finds nothing), then one more look, so an answer that `resolve` reported
+        // as taken still counts.
+        self.forget(&id);
+        if reply.is_none() {
+            reply = answered.try_recv().ok();
+        }
+        self.publish(surface);
+        reply
+    }
+
+    fn forget(&self, id: &str) {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner).retain(|waiting| waiting.request.id != id);
+    }
+
+    fn publish(&self, surface: &dyn HostKeySurface) {
+        let _order = self.notify.lock().unwrap_or_else(PoisonError::into_inner);
+        let snapshot = self.pending();
+        surface.changed(&snapshot);
+    }
+
+    /// Answers a waiting question. One that does not exist, was answered or gave up → NotFound.
+    pub fn resolve(&self, id: &str, answer: HostKeyAnswer) -> Result<(), AppError> {
+        let gone = || AppError::NotFound("that question was already answered or has expired".to_string());
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let waiting = pending.iter_mut().find(|waiting| waiting.request.id == id && !waiting.answered).ok_or_else(gone)?;
+        waiting.answered = true;
+        waiting.answer.try_send(answer).map_err(|_| gone())
+    }
+
+    /// The window was closed: every waiting question is refused.
+    pub fn deny_all(&self) {
+        for waiting in self.pending.lock().unwrap_or_else(PoisonError::into_inner).drain(..) {
+            let _ = waiting.answer.try_send(HostKeyAnswer::default());
+        }
+    }
+
+    /// The questions still waiting for an answer, oldest first.
+    pub fn pending(&self) -> Vec<HostKeyRequest> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|waiting| !waiting.answered).map(|waiting| waiting.request.clone()).collect()
+    }
+}
+
+/// The broker's `HostKeyConfirmer` over the hub and a surface.
+pub struct WindowConfirmer {
+    pub hub: Arc<HostKeyHub>,
+    pub surface: Arc<dyn HostKeySurface>,
+    pub timeout: Duration,
+}
+
+impl HostKeyConfirmer for WindowConfirmer {
+    fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
+        let request = HostKeyRequest {
+            id: String::new(),
+            alias: question.alias.clone(),
+            hostname: question.hostname.clone(),
+            port: question.port,
+            algorithm: question.algorithm.clone(),
+            fingerprint: question.fingerprint.clone(),
+            changed: question.changed.as_ref().map(|pinned| PinnedHostKey { fingerprint: pinned.fingerprint.clone(), pinned_at_ms: pinned.pinned_at_ms }),
+        };
+        let answer = self.hub.ask(self.surface.as_ref(), request, self.timeout, cancel)?;
+        answer.trust.then_some(answer.fingerprint)
+    }
+}
+
+/// The window last brought to the front for this head question (only one host key window exists).
+static SHOWN_HEAD: Mutex<Option<String>> = Mutex::new(None);
+
+/// Whether a new question is at the head (only then is the window brought to the front: another question timing out must not take the
+/// focus from what the person is doing).
+fn note_head(shown: &mut Option<String>, pending: &[HostKeyRequest]) -> bool {
+    let head = pending.first().map(|request| request.id.as_str());
+    let new_head = head.is_some() && shown.as_deref() != head;
+    *shown = head.map(str::to_string);
+    new_head
+}
+
+/// The app's surface: a small window that stays on top, shown even while SSHelter sits in the tray; destroyed when nothing is pending
+/// (`destroy` does not go through `CloseRequested`, so it is not taken for the person closing it).
+pub struct TauriHostKeySurface {
+    pub app: tauri::AppHandle,
+}
+
+impl HostKeySurface for TauriHostKeySurface {
+    fn changed(&self, pending: &[HostKeyRequest]) {
+        use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+        let new_head = note_head(&mut SHOWN_HEAD.lock().unwrap_or_else(PoisonError::into_inner), pending);
+        if pending.is_empty() {
+            if let Some(window) = self.app.get_webview_window(HOSTKEY_WINDOW) {
+                let _ = window.destroy();
+            }
+            return;
+        }
+        let (window, built) = match self.app.get_webview_window(HOSTKEY_WINDOW) {
+            Some(window) => (Some(window), false),
+            None => match WebviewWindowBuilder::new(&self.app, HOSTKEY_WINDOW, WebviewUrl::App("index.html".into()))
+                .title("SSHelter")
+                .inner_size(480.0, 320.0)
+                .resizable(false)
+                .always_on_top(true)
+                .center()
+                .build()
+            {
+                Ok(window) => (Some(window), true),
+                Err(error) => {
+                    eprintln!("[session] cannot open the host key window: {error}");
+                    (None, false)
+                }
+            },
+        };
+        if let Some(window) = window {
+            if built || new_head {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }
+        let _ = self.app.emit_to(HOSTKEY_WINDOW, HOSTKEY_EVENT, pending);
+    }
+}
+
+#[tauri::command]
+pub fn hostkey_pending(state: tauri::State<crate::state::AppState>) -> Vec<HostKeyRequest> {
+    state.session.host_keys.pending()
+}
+
+#[tauri::command]
+pub fn hostkey_resolve(state: tauri::State<crate::state::AppState>, request_id: String, answer: HostKeyAnswer) -> Result<(), AppError> {
+    state.session.host_keys.resolve(&request_id, answer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::connect::PinnedSummary;
+
+    #[derive(Default)]
+    struct Recorder {
+        seen: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl HostKeySurface for Recorder {
+        fn changed(&self, pending: &[HostKeyRequest]) {
+            self.seen.lock().unwrap().push(pending.iter().map(|request| request.id.clone()).collect());
+        }
+    }
+
+    fn question(alias: &str) -> HostKeyQuestion {
+        HostKeyQuestion { alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
+    }
+
+    fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// The broker asks; the window shows the question; the person trusts it: the fingerprint comes back.
+    #[test]
+    fn a_trusted_key_comes_back_as_its_fingerprint_and_the_window_is_told_both_times() {
+        let hub = Arc::new(HostKeyHub::default());
+        let surface = Arc::new(Recorder::default());
+        let confirmer = WindowConfirmer { hub: Arc::clone(&hub), surface: Arc::clone(&surface) as Arc<dyn HostKeySurface>, timeout: Duration::from_secs(5) };
+        let asking = std::thread::spawn(move || confirmer.confirm(&question("web"), &CancelToken::default()));
+        wait_until("the question to be shown", || !surface.seen.lock().unwrap().is_empty());
+        let shown = hub.pending();
+        assert_eq!((shown[0].alias.as_str(), shown[0].fingerprint.as_str(), shown[0].changed.clone()), ("web", "SHA256:new", None));
+        hub.resolve(&shown[0].id, HostKeyAnswer { trust: true, fingerprint: "SHA256:new".into() }).unwrap();
+        assert_eq!(asking.join().unwrap(), Some("SHA256:new".to_string()));
+        assert_eq!(*surface.seen.lock().unwrap(), vec![vec![shown[0].id.clone()], vec![]]);
+    }
+
+    #[test]
+    fn a_refusal_a_timeout_or_a_closed_window_is_no_trust() {
+        let hub = Arc::new(HostKeyHub::default());
+        let surface: Arc<dyn HostKeySurface> = Arc::new(Recorder::default());
+        let confirmer = |timeout| WindowConfirmer { hub: Arc::clone(&hub), surface: Arc::clone(&surface), timeout };
+        assert_eq!(confirmer(Duration::from_millis(20)).confirm(&question("web"), &CancelToken::default()), None, "nobody answered");
+
+        let refusing = confirmer(Duration::from_secs(5));
+        let asking = std::thread::spawn(move || refusing.confirm(&question("web"), &CancelToken::default()));
+        wait_until("the question", || !hub.pending().is_empty());
+        hub.resolve(&hub.pending()[0].id, HostKeyAnswer { trust: false, fingerprint: "SHA256:new".into() }).unwrap();
+        assert_eq!(asking.join().unwrap(), None);
+
+        let closed = confirmer(Duration::from_secs(5));
+        let asking = std::thread::spawn(move || closed.confirm(&question("web"), &CancelToken::default()));
+        wait_until("the question", || !hub.pending().is_empty());
+        hub.deny_all();
+        assert_eq!(asking.join().unwrap(), None);
+        assert!(hub.pending().is_empty());
+    }
+
+    /// The client went away while the window asked: the question leaves the window soon, and nothing is trusted.
+    #[test]
+    fn a_withdrawn_question_leaves_the_window() {
+        let hub = Arc::new(HostKeyHub::default());
+        let surface = Arc::new(Recorder::default());
+        let cancel = CancelToken::default();
+        let confirmer = WindowConfirmer { hub: Arc::clone(&hub), surface: Arc::clone(&surface) as Arc<dyn HostKeySurface>, timeout: Duration::from_secs(30) };
+        let withdrawn = cancel.clone();
+        let asking = std::thread::spawn(move || confirmer.confirm(&question("web"), &withdrawn));
+        wait_until("the question", || !hub.pending().is_empty());
+        let started = Instant::now();
+        cancel.cancel();
+        assert_eq!(asking.join().unwrap(), None);
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(hub.pending().is_empty());
+        assert_eq!(surface.seen.lock().unwrap().last(), Some(&vec![]), "the window is told nothing is pending");
+    }
+
+    #[test]
+    fn a_changed_key_carries_the_pinned_one_and_answers_go_to_the_right_question() {
+        let hub = Arc::new(HostKeyHub::default());
+        let surface: Arc<dyn HostKeySurface> = Arc::new(Recorder::default());
+        let mut changed = question("db");
+        changed.changed = Some(PinnedSummary { fingerprint: "SHA256:old".into(), pinned_at_ms: 1_700_000_000_000 });
+        let first = WindowConfirmer { hub: Arc::clone(&hub), surface: Arc::clone(&surface), timeout: Duration::from_secs(5) };
+        let second = WindowConfirmer { hub: Arc::clone(&hub), surface: Arc::clone(&surface), timeout: Duration::from_secs(5) };
+        let web = std::thread::spawn(move || first.confirm(&question("web"), &CancelToken::default()));
+        wait_until("web's question", || hub.pending().len() == 1);
+        let db = std::thread::spawn(move || second.confirm(&changed, &CancelToken::default()));
+        wait_until("db's question", || hub.pending().len() == 2);
+        let pending = hub.pending();
+        assert_eq!(pending.iter().map(|request| request.alias.as_str()).collect::<Vec<_>>(), ["web", "db"], "oldest first");
+        assert_eq!(pending[1].changed, Some(PinnedHostKey { fingerprint: "SHA256:old".into(), pinned_at_ms: 1_700_000_000_000 }));
+        assert_ne!(pending[0].id, pending[1].id);
+        hub.resolve(&pending[1].id, HostKeyAnswer { trust: true, fingerprint: "SHA256:new".into() }).unwrap();
+        assert_eq!(db.join().unwrap(), Some("SHA256:new".into()));
+        assert!(hub.resolve(&pending[1].id, HostKeyAnswer::default()).is_err(), "an answered question takes no second answer");
+        hub.resolve(&pending[0].id, HostKeyAnswer::default()).unwrap();
+        assert_eq!(web.join().unwrap(), None);
+    }
+
+    #[test]
+    fn the_window_comes_to_the_front_only_for_a_new_question_at_the_head() {
+        let list = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| HostKeyRequest { id: (*id).into(), alias: "web".into(), hostname: "web".into(), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:x".into(), changed: None })
+                .collect::<Vec<_>>()
+        };
+        let mut shown = None;
+        assert!(note_head(&mut shown, &list(&["hostkey-1"])));
+        assert!(!note_head(&mut shown, &list(&["hostkey-1", "hostkey-2"])));
+        assert!(note_head(&mut shown, &list(&["hostkey-2"])));
+        assert!(!note_head(&mut shown, &[]));
+        assert_eq!(shown, None);
+    }
+}

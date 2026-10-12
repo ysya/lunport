@@ -21,6 +21,8 @@ pub struct AppState {
     /// 同步執行期狀態:generation/狀態/帳戶金鑰同一把鎖(`SyncCore`)、lifecycle 互斥鎖、同步中旗標。
     pub sync: crate::sync::runtime::SyncRuntime,
     pub agent: crate::agent::AgentRuntime,
+    /// The session broker: its host key window, its sessions (own-ssh spec §4, §7).
+    pub session: crate::session::SessionRuntime,
 }
 
 impl Default for AppState {
@@ -34,6 +36,7 @@ impl Default for AppState {
             mcp: crate::mcp::McpRuntime::default(),
             sync: crate::sync::runtime::SyncRuntime::default(),
             agent: crate::agent::AgentRuntime::default(),
+            session: crate::session::SessionRuntime::default(),
         }
     }
 }

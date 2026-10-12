@@ -14,10 +14,18 @@ pub fn ipc_dir(app_data: &Path) -> PathBuf {
     app_data.join("ipc")
 }
 
+/// The broker's state in the app (`AppState::session`).
+#[derive(Default)]
+pub struct SessionRuntime {
+    /// The host key questions waiting for the window.
+    pub host_keys: std::sync::Arc<hostkey_window::HostKeyHub>,
+}
+
 pub mod auth;
 pub mod broker;
 pub mod connect;
 pub mod directory;
+pub mod hostkey_window;
 pub mod pins;
 pub mod protocol;
 pub mod relay;

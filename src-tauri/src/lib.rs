@@ -35,6 +35,7 @@ use deploy::{
 use keys::{keys_agent_status, keys_deploy, keys_git_ssh_hint, keys_list, keys_read_public};
 use known_hosts::{known_hosts_list, known_hosts_remove};
 use mcp::{mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
+use session::hostkey_window::{hostkey_pending, hostkey_resolve};
 use settings_io::{settings_export, settings_import};
 use sync::engine::{
     sync_approve, sync_cancel_sync_code_change, sync_change_sync_code, sync_check_relay,
@@ -189,6 +190,13 @@ fn run_app(host: bool, start_hidden: bool) {
                 }
                 return;
             }
+            // The host key window (own-ssh spec §10): closing it refuses every key it was asking about.
+            if window.label() == session::hostkey_window::HOSTKEY_WINDOW {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    window.app_handle().state::<state::AppState>().session.host_keys.deny_all();
+                }
+                return;
+            }
             // 視窗在前景時以一般間隔輪詢、回到前景立刻同步一輪(同步退避期間要等退避結束,spec §6.4);不在前景時省 relay 的配額(Sync v2)。
             if let tauri::WindowEvent::Focused(focused) = event {
                 sync::engine::window_focused(window.app_handle(), *focused);
@@ -309,6 +317,8 @@ fn run_app(host: bool, start_hidden: bool) {
             agent_resolve,
             agent_problem,
             agent_fix_include,
+            hostkey_pending,
+            hostkey_resolve,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
