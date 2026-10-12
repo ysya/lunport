@@ -117,7 +117,7 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         "open" => crate::show_main_window(app),
         other => {
             if let Some(alias) = other.strip_prefix("connect:") {
-                // Off the menu thread: a host on a vault key runs `ssh -G` first (key vault spec §5.6).
+                // Off the menu thread: starting the terminal spawns a process (osascript on macOS).
                 let (app, alias) = (app.clone(), alias.to_string());
                 std::thread::spawn(move || {
                     if let Err(e) = quick_connect(&app, &alias) {
@@ -129,7 +129,7 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
-/// Validate, then launch with the first detected terminal: a host on a vault key through a one-shot channel.
+/// Validate, then launch with the first detected terminal: `sshelter connect <alias>` (own-ssh spec §7.4; `ssh <alias>` on Windows).
 fn quick_connect(app: &tauri::AppHandle, alias: &str) -> Result<(), crate::error::AppError> {
     use crate::error::AppError;
 
@@ -147,22 +147,7 @@ fn quick_connect(app: &tauri::AppHandle, alias: &str) -> Result<(), crate::error
         .next()
         .ok_or_else(|| AppError::Other("no terminal found".to_string()))?;
 
-    // The channel closes itself unless it is kept: any `?` before `keep` below drops it, which cancels it.
-    let channel = crate::agent::oneshot::prepare(app, alias)?;
-    let spec = match &channel {
-        Some(channel) => crate::connect::build_launch_command(
-            &terminal.id,
-            &crate::connect::ssh_argv(&crate::agent::oneshot::ssh_options(channel), alias),
-            false,
-        )?,
-        None => crate::connect::build_launch(&terminal.id, alias, false)?,
-    };
-    crate::connect::launch(&spec)?;
-    // The terminal started: leave the channel to its ssh.
-    if let Some(channel) = channel {
-        channel.keep();
-    }
-    Ok(())
+    crate::connect::launch(&crate::connect::launch_for(&terminal.id, alias, false)?)
 }
 
 #[cfg(test)]

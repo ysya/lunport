@@ -1,7 +1,6 @@
 //! SSHelter 的 SSH agent(key roadmap 第 2 階段 spec §5)。
 pub mod approval;
 pub mod broker;
-pub mod oneshot;
 #[cfg(test)]
 mod openssh_tests;
 pub mod prompt;
