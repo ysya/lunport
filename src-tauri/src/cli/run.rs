@@ -1746,8 +1746,10 @@ mod tests {
         let mut key = [0u8; 8];
         assert_eq!(keys.read(&mut key).unwrap(), 1);
         typing.join().unwrap();
-        drop(controller);
-        assert!(keys.hung_up(), "the window was closed");
+        // A process that another test is starting has a copy of every descriptor until its program runs (close-on-exec or not): the
+        // window is closed once no start is under way, so that no copy of the controller outlives it.
+        crate::process::without_spawns(|| drop(controller));
+        eventually("the closed window to be seen", 5, || keys.hung_up());
     }
 
     /// A `TermiosApi` on a pty's device descriptor.
