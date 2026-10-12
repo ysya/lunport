@@ -1,7 +1,8 @@
 //! The engine against the OpenSSH server that the environment describes: on Windows, the runner's own server, which test-windows.yml
 //! starts and authorizes a throwaway key on (a scratch sshd cannot run there). The test is the same everywhere. Without
 //! `SSHELTER_TEST_SSH_PORT`, `SSHELTER_TEST_SSH_USER` and `SSHELTER_TEST_SSH_KEY` (a passphrase-less OpenSSH private key) it prints
-//! "skipped" and passes.
+//! "skipped" and passes, unless `SSHELTER_REQUIRE_TEST_SSH=1` (the Windows job of the CI, where a lost `GITHUB_ENV` line would otherwise
+//! turn the test into a silent pass) turns that into a failure.
 
 use std::time::Duration;
 
@@ -17,6 +18,8 @@ fn connect_log_in_and_exec_against_the_server_in_the_environment() {
         std::env::var("SSHELTER_TEST_SSH_USER"),
         std::env::var("SSHELTER_TEST_SSH_KEY"),
     ) else {
+        let required = std::env::var("SSHELTER_REQUIRE_TEST_SSH").is_ok_and(|value| value == "1");
+        assert!(!required, "SSHELTER_TEST_SSH_PORT, SSHELTER_TEST_SSH_USER and SSHELTER_TEST_SSH_KEY are required (SSHELTER_REQUIRE_TEST_SSH=1)");
         eprintln!("skipped: SSHELTER_TEST_SSH_PORT, SSHELTER_TEST_SSH_USER and SSHELTER_TEST_SSH_KEY are not all set");
         return;
     };
@@ -33,7 +36,7 @@ fn connect_log_in_and_exec_against_the_server_in_the_environment() {
     // The output is raw bytes: Windows OpenSSH ends a line with CRLF, a Unix sshd with LF.
     let hello = session.exec("echo sshelter-engine-ok", Duration::from_secs(60), 1 << 20).expect("exec");
     fact("environment.echo_stdout", format!("{:?}", String::from_utf8_lossy(&hello.stdout)));
-    assert!(String::from_utf8_lossy(&hello.stdout).contains("sshelter-engine-ok"), "stdout was {:?}", hello.stdout);
+    assert!(String::from_utf8_lossy(&hello.stdout).contains("sshelter-engine-ok"), "stdout was {:?}", String::from_utf8_lossy(&hello.stdout));
     assert_eq!((hello.ended, hello.exit_code), (Ended::Exited, Some(0)));
 
     let exit = session.exec("exit 3", Duration::from_secs(60), 1 << 20).expect("exec");
