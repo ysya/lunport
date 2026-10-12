@@ -143,17 +143,16 @@ fn answer_room(question_id: &str, value: &str) -> usize {
 
 /// The JSON of an answer. It is built in a buffer that has room for all of it from the start, because a `Vec` that grows frees its old
 /// allocation with a part of the password in it, and the buffer is wiped when it is dropped.
-fn answer_json(question_id: &str, value: &str) -> Zeroizing<Vec<u8>> {
+fn answer_json(question_id: &str, value: &str) -> std::io::Result<Zeroizing<Vec<u8>>> {
     let mut json = Zeroizing::new(Vec::with_capacity(answer_room(question_id, value)));
-    // Writing to a `Vec` cannot fail, and these strings serialize.
-    let _ = serde_json::to_writer(&mut *json, &AnswerJson { kind: "answer", question_id, value, cancel: false });
-    json
+    serde_json::to_writer(&mut *json, &AnswerJson { kind: "answer", question_id, value, cancel: false })?;
+    Ok(json)
 }
 
-/// Writes the answer to a question as one control frame. The password is in three places for a moment (the caller's string, the JSON,
-/// the frame `write_frame` builds); the JSON and the frame are wiped here and there, the caller's string by whoever owns it.
+/// Writes the answer to a question as one control frame. The password is in three places for a moment: the caller's string (wiped by
+/// whoever owns it), the JSON (wiped here) and the frame `write_frame` builds from it (wiped there).
 fn write_answer(writer: &mut impl Write, question_id: &str, value: &str) -> std::io::Result<()> {
-    write_frame(writer, CONTROL, &answer_json(question_id, value))
+    write_frame(writer, CONTROL, &answer_json(question_id, value)?)
 }
 
 /// Reads the person's keys into the queue until standard input ends (or the program does).
@@ -623,7 +622,7 @@ mod tests {
         let controls = "\u{1}".repeat(50);
         for value in ["hunter2", "", "x".repeat(300).as_str(), "quote\" back\\slash tab\t \u{e9} \u{5bc6}\u{78bc} \u{1f511}", controls.as_str()] {
             for question_id in ["q1", "", "0123456789abcdef0123456789abcdef0123"] {
-                let json = answer_json(question_id, value);
+                let json = answer_json(question_id, value).unwrap();
                 let protocol = serde_json::to_vec(&ClientMessage::Answer { question_id: question_id.into(), value: Some(value.into()), cancel: false }).unwrap();
                 assert_eq!(&json[..], &protocol[..], "{question_id:?} {value:?}");
                 assert!(json.len() <= answer_room(question_id, value), "{} bytes in a room of {}", json.len(), answer_room(question_id, value));
@@ -631,7 +630,7 @@ mod tests {
             }
         }
         // The worst case is what the room is for: a control character takes six bytes in JSON, and the rest of the message at most 64.
-        let json = answer_json("", &controls);
+        let json = answer_json("", &controls).unwrap();
         assert_eq!(json.len(), 6 * controls.len() + 60);
         assert!(answer_room("", &controls) >= json.len());
     }
