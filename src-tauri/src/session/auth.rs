@@ -446,6 +446,45 @@ mod tests {
         assert_eq!(wrong.asked().len(), PASSPHRASE_ATTEMPTS);
     }
 
+    /// The passphrase prompt ran out, or the client went away: the connect ends with the sentence for it, nothing more is asked (no empty
+    /// passphrase is tried in the person's place) and the key stays closed.
+    #[test]
+    fn a_passphrase_prompt_that_runs_out_or_finds_nobody_abandons_the_connect_and_leaves_the_key_closed() {
+        let world = world();
+        for (reply, sentence) in [
+            (Reply::TimedOut, "Authentication for web was abandoned (the passphrase prompt timed out)."),
+            (Reply::Gone, "Authentication for web was abandoned (the passphrase was not given)."),
+        ] {
+            let owner = FakeOwner::answering(vec![reply]);
+            let auth = world.auth(&owner);
+            assert_eq!(auth.unlock(&target(AuthMethod::Key { key_id: "k-enc".into() })), Err(sentence.to_string()));
+            assert_eq!(owner.asked().len(), 1, "{sentence} Nothing is asked after it.");
+            assert_eq!(auth.public_key("k-enc"), None);
+            assert!(matches!(auth.sign("k-enc", b"challenge", None), Err(AuthError::KeyUnavailable(_))), "the key stays closed");
+        }
+    }
+
+    /// Two hops of a chain use the same vault key: it is opened, and asked about, once; and again when the next connect of the session
+    /// (after the host key was confirmed) unlocks the same target.
+    #[test]
+    fn a_key_that_two_hops_share_is_opened_and_asked_about_once() {
+        let world = world();
+        let owner = FakeOwner::typing(&[TEST_PASSPHRASE]);
+        let auth = world.auth(&owner);
+        let shared = AuthMethod::Key { key_id: "k-enc".into() };
+        let chain = Target {
+            hops: vec![
+                Hop::new("id-bastion", "bastion", "bastion.example.com", 22, "jump", shared.clone()),
+                Hop::new("id-web", "web", "web.example.com", 22, "deploy", shared),
+            ],
+        };
+        auth.unlock(&chain).unwrap();
+        auth.unlock(&chain).unwrap();
+        assert_eq!(owner.questions(), ["Enter the passphrase for the key laptop: "]);
+        assert_eq!(auth.public_key("k-enc").as_deref(), Some(test_keys::ENC_PUBLIC));
+        assert!(auth.sign("k-enc", b"challenge", None).is_ok());
+    }
+
     #[test]
     fn a_saved_password_is_given_without_asking_anyone() {
         let world = world();
@@ -476,6 +515,35 @@ mod tests {
         assert_eq!(auth.password_source(&web().id), Some(PasswordSource::Typed));
     }
 
+    /// A person gets four connect timeouts to answer, and at least a minute (the engine gives keyboard-interactive the same): a hop with a
+    /// 30 s connect timeout waits two minutes, for a passphrase and for a password alike.
+    #[test]
+    fn a_prompt_is_waited_for_four_connect_timeouts_and_at_least_a_minute() {
+        let hop = |id: &str, alias: &str, secs: u64, auth: AuthMethod| {
+            Hop { connect_timeout: Duration::from_secs(secs), ..Hop::new(id, alias, "host.example.com", 22, "deploy", auth) }
+        };
+        for (secs, wait) in [(5, 60), (15, 60), (30, 120), (600, 2400)] {
+            assert_eq!(prompt_wait(&hop("id-web", "web", secs, AuthMethod::Password)), Duration::from_secs(wait), "a connect timeout of {secs} s");
+        }
+
+        // The questions carry it. Nobody answers here: the deadlines are what is looked at.
+        let chain = Target {
+            hops: vec![hop("id-bastion", "bastion", 30, AuthMethod::Key { key_id: "k-enc".into() }), hop("id-web", "web", 30, AuthMethod::Password)],
+        };
+        let world = world();
+        let owner = FakeOwner::default();
+        let auth = world.auth(&owner);
+        assert!(auth.unlock(&chain).is_err());
+        auth.prepare(&chain);
+        assert_eq!(auth.password(&chain.hops[1].reference()), None);
+        let asked = owner.asked();
+        assert_eq!(asked.iter().map(|asked| asked.kind).collect::<Vec<_>>(), [QuestionKind::Passphrase, QuestionKind::Password]);
+        for question in &asked {
+            let given = question.deadline.unwrap().saturating_duration_since(Instant::now());
+            assert!(given > Duration::from_secs(115) && given <= Duration::from_secs(120), "the {:?} question was given {given:?}", question.kind);
+        }
+    }
+
     /// After a refused key the engine asks during the login, while the connection waits: a person is never asked then.
     #[test]
     fn a_fallback_password_never_asks_a_person() {
@@ -487,6 +555,32 @@ mod tests {
         assert!(owner.asked().is_empty());
         auth.set_typed(&web().id, Zeroizing::new("asked by the broker".into()));
         assert_eq!(auth.password(&web()).as_deref().map(String::as_str), Some("asked by the broker"), "what the broker asked for is given");
+    }
+
+    /// What the person typed beats the saved password. When the server refuses it, `forget_typed` takes it back: the saved password is given
+    /// again (and is still saved), what was typed for another hop stays, and nobody is asked.
+    #[test]
+    fn a_typed_password_is_given_before_the_saved_one_until_it_is_forgotten() {
+        let world = world();
+        world.keychain.set("host:id-web", "saved secret").unwrap();
+        let owner = FakeOwner::default();
+        let auth = world.auth(&owner);
+        let db = HopRef { id: HostId::from("id-db"), alias: "db".into(), ..web() };
+        let given = |hop: &HopRef| auth.password(hop).map(|password| password.to_string());
+        auth.set_typed(&web().id, Zeroizing::new("typed for web".into()));
+        auth.set_typed(&db.id, Zeroizing::new("typed for db".into()));
+        assert_eq!(given(&web()).as_deref(), Some("typed for web"));
+        assert_eq!(auth.password_source(&web().id), Some(PasswordSource::Typed));
+
+        auth.forget_typed(&web().id);
+        assert_eq!(given(&web()).as_deref(), Some("saved secret"));
+        assert_eq!(auth.password_source(&web().id), Some(PasswordSource::Keychain));
+        assert_eq!(world.keychain.entry("host:id-web").as_deref(), Some("saved secret"), "the saved password is still saved");
+        assert_eq!(given(&db).as_deref(), Some("typed for db"), "what was typed for another hop stays");
+
+        auth.forget_typed(&db.id);
+        assert_eq!(given(&db), None, "nothing typed and nothing saved");
+        assert!(owner.asked().is_empty());
     }
 
     /// The person said no to the password: keyboard-interactive, which the server may offer next, does not ask again.
