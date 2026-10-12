@@ -2,9 +2,12 @@
 //! another, the signals (SIGWINCH, SIGINT, SIGTERM, SIGHUP, SIGQUIT) on a third with tokio's signal handling; everything meets in one
 //! queue, and the client (`client.rs`) says what to do with each.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, Sender};
+
+use zeroize::Zeroize;
 
 use super::client::{Action, Client, Input};
 use super::terminal::Tty;
@@ -35,21 +38,61 @@ pub fn run(stream: UnixStream, host: HostQuery, term: String, tty: &mut Tty, inp
         }
     });
     let (mut client, actions) = Client::start(host, term, size);
-    if let Some(code) = perform(actions, &mut writer, tty, stdout, stderr) {
+    let mut queue = Queue::new(receiver);
+    if let Some(code) = perform(actions, &mut writer, tty, &mut queue, stdout, stderr) {
         return code;
     }
-    while let Ok(input) = receiver.recv() {
+    while let Some(input) = queue.next() {
         let actions = client.handle(input);
-        if let Some(code) = perform(actions, &mut writer, tty, stdout, stderr) {
+        if let Some(code) = perform(actions, &mut writer, tty, &mut queue, stdout, stderr) {
             return code;
         }
     }
     255
 }
 
+/// What the loop reads from: the queue the three threads fill, and what the loop took out of it to look at and put back in front.
+struct Queue {
+    receiver: Receiver<Input>,
+    kept: VecDeque<Input>,
+}
+
+impl Queue {
+    fn new(receiver: Receiver<Input>) -> Queue {
+        Queue { receiver, kept: VecDeque::new() }
+    }
+
+    /// The next input, in the order it was queued; `None` once every thread that fills the queue is gone.
+    fn next(&mut self) -> Option<Input> {
+        self.kept.pop_front().or_else(|| self.receiver.recv().ok())
+    }
+
+    /// Throws away what the person typed and the stdin thread has already queued, and wipes it; everything else stays, in order. A
+    /// question switches the terminal with `TCSAFLUSH`, which throws away what the terminal has not delivered yet, but a line the stdin
+    /// thread had read before that is in the queue (behind the question), where the flush cannot reach it and the question would take
+    /// it as its answer. A line the thread has read but not queued yet at this moment is not caught: it arrives after, as typed text.
+    fn forget_typed(&mut self) {
+        while let Ok(input) = self.receiver.try_recv() {
+            self.kept.push_back(input);
+        }
+        self.kept.retain_mut(|input| !wipe_typed(input));
+    }
+}
+
+/// Wipes `input` when it is what the person typed (it can be a password); whether it was.
+fn wipe_typed(input: &mut Input) -> bool {
+    match input {
+        Input::Stdin(bytes) => {
+            bytes.zeroize();
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Does what the client said, in order; `Some(code)` when it is time to exit. A broker that no longer takes what is sent is a broker that
 /// went away: its end of the connection arrives as `Input::Closed` from the reader.
-fn perform(actions: Vec<Action>, writer: &mut UnixStream, tty: &mut Tty, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Option<i32> {
+fn perform(actions: Vec<Action>, writer: &mut UnixStream, tty: &mut Tty, queue: &mut Queue, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Option<i32> {
     for action in actions {
         match action {
             Action::Send(message) => {
@@ -69,6 +112,9 @@ fn perform(actions: Vec<Action>, writer: &mut UnixStream, tty: &mut Tty, stdout:
             Action::Mode(mode, discard_input) => {
                 if let Err(error) = tty.set_mode(mode, discard_input) {
                     let _ = writeln!(stderr, "sshelter: cannot set the terminal: {error}");
+                }
+                if discard_input {
+                    queue.forget_typed();
                 }
             }
             Action::Exit(code) => {
@@ -164,6 +210,7 @@ mod tests {
 
     use super::*;
     use crate::cli::terminal::fake::FakeTermios;
+    use crate::cli::terminal::TermiosApi;
     use crate::session::broker::Broker;
     use crate::session::connect::HostKeyConfirmer;
     use crate::session::directory::HostDirectory;
@@ -203,8 +250,38 @@ mod tests {
         run: std::thread::JoinHandle<i32>,
     }
 
+    /// A terminal that, when the CLI switches it to a question's prompt mode and throws the typeahead away (`TCSAFLUSH`), has a line
+    /// arrive in the queue: one the stdin thread had read and queued just before the flush, behind the question.
+    struct FeedsAtFlush {
+        inner: Arc<FakeTermios>,
+        queue: Sender<Input>,
+        line: Mutex<Option<Vec<u8>>>,
+    }
+
+    impl TermiosApi for FeedsAtFlush {
+        fn get(&self) -> std::io::Result<libc::termios> {
+            self.inner.get()
+        }
+        fn set(&self, termios: &libc::termios, discard_input: bool) -> std::io::Result<()> {
+            if discard_input {
+                if let Some(line) = self.line.lock().unwrap().take() {
+                    self.queue.send(Input::Stdin(line)).unwrap();
+                }
+            }
+            self.inner.set(termios, discard_input)
+        }
+        fn size(&self) -> Option<(u16, u16)> {
+            self.inner.size()
+        }
+    }
+
     /// `sshelter connect web` against a broker over `engine` and `directory`, on the other end of a socket pair, with a fake terminal.
     fn connect(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain) -> Setup {
+        connect_typing_ahead(engine, directory, keychain, None)
+    }
+
+    /// `connect`, and `typed_ahead` arrives in the queue as the terminal is flushed for the first question.
+    fn connect_typing_ahead(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain, typed_ahead: Option<&[u8]>) -> Setup {
         let engine = Arc::new(engine);
         let broker = Broker::new(
             Arc::clone(&engine) as Arc<dyn SshEngine>,
@@ -218,10 +295,14 @@ mod tests {
         let termios = FakeTermios::new();
         let (sender, receiver) = std::sync::mpsc::channel();
         let (stdout, stderr) = (Shared::default(), Shared::default());
+        let terminal: Arc<dyn TermiosApi> = match typed_ahead {
+            Some(line) => Arc::new(FeedsAtFlush { inner: Arc::clone(&termios), queue: sender.clone(), line: Mutex::new(Some(line.to_vec())) }),
+            None => Arc::clone(&termios) as Arc<dyn TermiosApi>,
+        };
         let run = {
-            let (termios, sender, mut stdout, mut stderr) = (Arc::clone(&termios), sender.clone(), stdout.clone(), stderr.clone());
+            let (sender, mut stdout, mut stderr) = (sender.clone(), stdout.clone(), stderr.clone());
             std::thread::spawn(move || {
-                let mut tty = Tty::new(termios).unwrap();
+                let mut tty = Tty::new(terminal).unwrap();
                 run(ours, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (sender, receiver), &mut stdout, &mut stderr)
             })
         };
@@ -335,5 +416,61 @@ mod tests {
         assert!(matches!(next(libc::SIGTERM), Input::Stop(libc::SIGTERM)));
         assert!(matches!(next(libc::SIGHUP), Input::Stop(libc::SIGHUP)));
         assert!(matches!(next(libc::SIGQUIT), Input::Stop(libc::SIGQUIT)));
+    }
+
+    /// The stdin thread read a line and queued it behind the question before the terminal was flushed for it: the flush cannot reach a
+    /// line that is already in the queue, so the loop drops it, and it is not taken as the answer.
+    #[test]
+    fn a_line_queued_just_before_a_question_is_not_taken_as_its_answer() {
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let setup = connect_typing_ahead(engine, directory, MemKeychain::default(), Some(b"hunter2\n"));
+        eventually("the question", 10, || setup.stderr.text().starts_with("deploy@web's password: "));
+        // The queue is in order: once this output has been printed, whatever was queued before it has been looked at.
+        setup.keys.send(Input::Output(b"marker".to_vec())).unwrap();
+        eventually("the marker", 10, || setup.stdout.text() == "marker");
+        assert_eq!(setup.stderr.text(), "deploy@web's password: ", "the question still waits for its answer");
+        let prompt = setup.termios.now();
+        assert_eq!((prompt.c_lflag & libc::ECHO, prompt.c_lflag & libc::ICANON), (0, libc::ICANON), "still the prompt mode");
+        setup.keys.send(Input::Stdin(b"right\n".to_vec())).unwrap();
+        eventually("the shell to open", 10, || raw(&setup.termios));
+        setup.engine.shells().remove(0).end(Exit::Code(0));
+        let (code, setup) = finish(setup);
+        assert_eq!((code, setup.stderr.text()), (0, "deploy@web's password: \n".to_string()));
+    }
+
+    /// What was typed and queued is dropped when a question flushes the terminal; every other input stays, in the order it came, and
+    /// what is typed after the flush is the question's.
+    #[test]
+    fn forgetting_the_typed_keeps_every_other_input_in_order() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut queue = Queue::new(receiver);
+        sender.send(Input::Output(b"a".to_vec())).unwrap();
+        sender.send(Input::Stdin(b"hunter2\n".to_vec())).unwrap();
+        sender.send(Input::Resize(100, 30)).unwrap();
+        sender.send(Input::Stdin(b"more".to_vec())).unwrap();
+        sender.send(Input::StdinEnd).unwrap();
+        queue.forget_typed();
+        sender.send(Input::Stdin(b"after".to_vec())).unwrap();
+        drop(sender);
+        let rest: Vec<Input> = std::iter::from_fn(|| queue.next()).collect();
+        assert_eq!(format!("{rest:?}"), "[Output([97]), Resize(100, 30), StdinEnd, Stdin(<hidden>)]");
+        assert!(matches!(&rest[3], Input::Stdin(bytes) if bytes == b"after"), "typed after the flush: the question's own");
+    }
+
+    /// What is thrown away may be a password: it is wiped, not just dropped.
+    #[test]
+    fn typed_input_is_wiped_when_it_is_thrown_away() {
+        let mut typed = Input::Stdin(b"hunter2\n".to_vec());
+        let Input::Stdin(bytes) = &typed else { unreachable!() };
+        let (start, capacity) = (bytes.as_ptr(), bytes.capacity());
+        assert!(capacity >= 8);
+        assert!(wipe_typed(&mut typed));
+        // SAFETY: `typed` still owns the allocation (wiping clears the vector but keeps its memory), and its first 8 bytes were
+        // written when the vector was made, so they are initialised, and they must be zero now.
+        assert!(unsafe { std::slice::from_raw_parts(start, 8) }.iter().all(|byte| *byte == 0));
+        for mut other in [Input::Closed, Input::StdinEnd, Input::Interrupt, Input::Resize(1, 1), Input::Output(b"x".to_vec())] {
+            assert!(!wipe_typed(&mut other));
+        }
     }
 }
