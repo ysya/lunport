@@ -64,7 +64,8 @@ pub trait HostKeyConfirmer: Send + Sync {
     fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String>;
 }
 
-/// A session that is open, and the target it reached (with what the connect learned: pins, the password-first hops).
+/// A session that is open, and the target it reached (with what the connect learned: the pins the person confirmed, and a hop that starts
+/// with keyboard-interactive and went password first for a typed password).
 pub struct Connected {
     pub session: Box<dyn Session>,
     pub target: Target,
@@ -177,7 +178,14 @@ impl Connector<'_> {
                     match owner.ask(QuestionKind::Password, &question, false, deadline) {
                         Reply::Answer(password) => {
                             auth.set_typed(&hop.id, password);
-                            target.hops[index].auth = AuthMethod::Password;
+                            // Amended R8: the hop is connected again as it is. A server that takes a key and then wants the password
+                            // (`AuthenticationMethods publickey,password`) still gets the key first, which a password-first reconnect
+                            // would drop, and `BrokerAuth::password` answers the typed password from memory at once, so nobody waits while
+                            // the connection is open. Only a hop with no password method in its sequence (it starts with
+                            // keyboard-interactive) can use the password just by going password first.
+                            if !target.hops[index].auth_sequence().contains(&AuthMethod::Password) {
+                                target.hops[index].auth = AuthMethod::Password;
+                            }
                         }
                         Reply::Cancelled | Reply::TimedOut => {
                             return Err(ConnectFailure::new(kinds::AUTH, ConnectError::AuthAbandoned { hop: hop.clone(), reason: "the password was not given".to_string() }.to_string()));
@@ -247,10 +255,14 @@ impl Connector<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::session::auth::Reply;
     use crate::session::testing::{locked, Decision, FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner, PINNED_AT_MS, TEST_PASSPHRASE};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods};
+    use crate::ssh::russh_engine::toy_server::{ToyBehavior, ToyLogin, ToyServer};
+    use crate::ssh::russh_engine::{EngineOptions, RusshEngine};
     use crate::ssh::{AuthMethod, HostKey};
     use crate::sync::slot_rules::test_keys;
     use crate::sync::testkit::MemKeychain;
@@ -397,11 +409,25 @@ mod tests {
     }
 
     /// The fallback password after a refused key is not typed while the connection waits (russh spins then): the engine reports that a
-    /// password is wanted, the broker asks, and connects again with the password first.
+    /// password is wanted, the broker asks, and connects again with the hop as it is (amended R8): the key stays first, as OpenSSH does
+    /// it, and the engine gets the typed password from memory. The fake engine does not model a server that takes the key and then wants
+    /// the password, so it cannot tell this order from the password first in a login; the tests on the in-process server below can.
     #[test]
-    fn a_password_wanted_after_a_refused_key_is_asked_for_and_the_broker_connects_again_with_the_password_first() {
+    fn a_password_wanted_after_a_refused_key_is_asked_for_and_the_broker_connects_again_with_the_hops_own_method_order() {
         let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
         let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let world = world(engine, directory).typing(&["right"]);
+        let connected = world.connect(&web()).expect("the typed password gets in");
+        assert_eq!(world.owner.questions(), ["deploy@web's password: "]);
+        assert_eq!(connected.target.hops[0].auth, AuthMethod::Key { key_id: "k-plain".into() }, "the hop keeps its own method order");
+    }
+
+    /// A hop with no password method in its sequence (it starts with keyboard-interactive) can use a typed password only when it goes
+    /// password first: it is the one hop whose method changes.
+    #[test]
+    fn a_keyboard_interactive_only_hop_is_connected_again_with_the_password_first() {
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Interactive).with_pin("web", default_server_key());
         let world = world(engine, directory).typing(&["right"]);
         let connected = world.connect(&web()).expect("the typed password gets in");
         assert_eq!(world.owner.questions(), ["deploy@web's password: "]);
@@ -418,7 +444,7 @@ mod tests {
         assert_eq!(third_time.owner.questions(), ["deploy@web's password: ", again, again]);
 
         let never = world(engine(), directory()).typing(&["one", "two", "three", "right"]);
-        assert_eq!(never.connect(&web()).err(), Some(failure(kinds::AUTH, "Authentication failed for deploy@web (tried: password).")));
+        assert_eq!(never.connect(&web()).err(), Some(failure(kinds::AUTH, "Authentication failed for deploy@web (tried: publickey, password).")));
         assert_eq!(never.owner.asked().len(), PASSWORD_PROMPTS);
     }
 
@@ -494,5 +520,125 @@ mod tests {
         world.cancel.cancel();
         assert_eq!(world.connect(&web()).err().map(|failure| failure.kind), Some(CANCELLED.to_string()));
         assert!(world.engine.events().is_empty());
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------
+    // The connect loop with the REAL engine, against the in-process server of the engine's tests (a port on 127.0.0.1: no OpenSSH, no
+    // network beyond the machine). The fake engine does not model a server that takes a key and then wants the password (partial success),
+    // so a test on the fake cannot tell a reconnect with the hop's own method order from one with the password first; these can.
+
+    const TOY_PASSWORD: &str = "correct horse battery staple";
+
+    fn toy_login() -> ToyLogin {
+        ToyLogin { user: "deploy".to_string(), password: TOY_PASSWORD.to_string(), prompt: "Password: ".to_string(), rounds: None }
+    }
+
+    /// A server that wants the key of the vault key `k-plain` first and the password next (OpenSSH's `AuthenticationMethods
+    /// publickey,password`). The test key is also the server's own host key, the one every fake server presents: the two roles are
+    /// independent.
+    fn toy_that_wants_a_key_and_then_the_password() -> ToyServer {
+        ToyServer::start_with(toy_login(), ToyBehavior { key_then_password: Some(test_keys::PLAIN_PUBLIC.to_string()), ..ToyBehavior::default() })
+    }
+
+    /// The saved host `web` at `127.0.0.1:port`, starting its login with `auth`, with the server's host key pinned (or not).
+    fn web_at(port: u16, auth: AuthMethod, pinned: bool) -> FakeDirectory {
+        let directory = FakeDirectory::new().with_host("web", auth).with_address("web", "127.0.0.1", port);
+        if pinned {
+            directory.with_pin("web", default_server_key())
+        } else {
+            directory
+        }
+    }
+
+    /// The real engine, with the fake window, vault, keychain and person around it.
+    struct RealWorld {
+        engine: RusshEngine,
+        directory: FakeDirectory,
+        keys: FakeKeys,
+        keychain: MemKeychain,
+        confirmer: FakeConfirmer,
+        owner: FakeOwner,
+    }
+
+    fn real_world(directory: FakeDirectory, typing: &[&str]) -> RealWorld {
+        RealWorld {
+            engine: RusshEngine::with_options(EngineOptions { worker_threads: 2, ..EngineOptions::default() }),
+            directory,
+            keys: FakeKeys::new(),
+            keychain: MemKeychain::default(),
+            confirmer: FakeConfirmer::default(),
+            owner: FakeOwner::typing(typing),
+        }
+    }
+
+    impl RealWorld {
+        fn connect(&self) -> Result<Connected, ConnectFailure> {
+            let connector = Connector { engine: &self.engine, directory: &self.directory, keys: &self.keys, keychain: &self.keychain, confirmer: &self.confirmer };
+            connector.connect(&web(), &self.owner, &CancelToken::default())
+        }
+
+        /// The connected session, or a panic that says what the person was asked on the way.
+        fn connects(&self) -> Connected {
+            self.connect().unwrap_or_else(|failure| panic!("the connect failed with {failure:?} after the questions {:?}", self.owner.questions()))
+        }
+    }
+
+    /// The host is saved with a vault key and no password; the server wants the key and then the password. The first connect gets the key
+    /// through and ends with the password wanted; the person types it, and the broker connects again with the hop as it is: the key, then
+    /// the typed password from memory. With the password first the server would turn the password down for want of the key, and nobody
+    /// could ever log in.
+    #[test]
+    fn a_typed_password_logs_in_to_a_server_that_wants_a_key_and_then_the_password() {
+        let server = toy_that_wants_a_key_and_then_the_password();
+        let world = real_world(web_at(server.port, AuthMethod::Key { key_id: "k-plain".into() }, true), &[TOY_PASSWORD]);
+        let connected = world.connects();
+        assert_eq!(world.owner.questions(), ["deploy@web's password: "], "the person typed the password once");
+        assert_eq!(connected.target.hops[0].auth, AuthMethod::Key { key_id: "k-plain".into() }, "the hop kept its own method order");
+        let result = connected.session.exec("true", Duration::from_secs(10), 1024).expect("a command runs on the connection");
+        assert_eq!((result.exit_code, result.stdout), (Some(0), b"ok\n".to_vec()), "the server ran the command");
+        assert_eq!(world.keychain.entry("host:id-web"), None, "what the person types is not saved");
+    }
+
+    /// A typed password the server turns down is asked for again, in the same order (the key goes through again, the password is the new
+    /// one), and the limit of three still holds.
+    #[test]
+    fn a_typed_password_the_server_refuses_is_asked_for_again_up_to_three_times_in_the_hops_own_order() {
+        let server = toy_that_wants_a_key_and_then_the_password();
+        let key = || AuthMethod::Key { key_id: "k-plain".into() };
+
+        let second_time = real_world(web_at(server.port, key(), true), &["not the password", TOY_PASSWORD]);
+        second_time.connects();
+        assert_eq!(second_time.owner.questions(), ["deploy@web's password: ", "That password didn't work. deploy@web's password: "]);
+
+        let never = real_world(web_at(server.port, key(), true), &["one", "two", "three", TOY_PASSWORD]);
+        assert_eq!(never.connect().err(), Some(failure(kinds::AUTH, "Authentication failed for deploy@web (tried: publickey, password).")));
+        assert_eq!(never.owner.asked().len(), PASSWORD_PROMPTS, "the fourth answer was never asked for");
+    }
+
+    /// A first contact: the host key is confirmed in the window and pinned, the person types the password once, and the broker connects
+    /// the third time.
+    #[test]
+    fn the_first_contact_with_a_server_that_wants_a_key_and_then_the_password_confirms_the_key_and_asks_for_the_password_once() {
+        let server = toy_that_wants_a_key_and_then_the_password();
+        let world = RealWorld {
+            confirmer: FakeConfirmer::deciding(vec![Decision::Trust]),
+            ..real_world(web_at(server.port, AuthMethod::Key { key_id: "k-plain".into() }, false), &[TOY_PASSWORD])
+        };
+        world.connects();
+        assert_eq!(world.confirmer.asked().len(), 1);
+        assert_eq!(world.owner.questions(), ["deploy@web's password: "]);
+        assert_eq!(world.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(default_server_key()));
+    }
+
+    /// The one hop that does change its method: it starts with keyboard-interactive, so its sequence has no password method, and a typed
+    /// password can only be used when the hop goes password first. (The server is the plain one: it takes the password and asks for it as
+    /// a keyboard-interactive prompt too, and the first answer is wrong.)
+    #[test]
+    fn a_keyboard_interactive_only_hop_goes_password_first_on_the_in_process_server() {
+        let server = ToyServer::start(toy_login());
+        let world = real_world(web_at(server.port, AuthMethod::Interactive, true), &["not it", TOY_PASSWORD]);
+        let connected = world.connects();
+        assert_eq!(world.owner.questions(), ["(deploy@web) Password: ", "deploy@web's password: "]);
+        assert_eq!(connected.target.hops[0].auth, AuthMethod::Password);
     }
 }

@@ -156,6 +156,15 @@ impl FakeDirectory {
         self
     }
 
+    /// Where the host with this alias is reached (by default `<alias>.example.com` on port 22), for the tests that connect to a server in
+    /// process. The host keeps its id, its user and its pin.
+    pub fn with_address(mut self, alias: &str, hostname: &str, port: u16) -> FakeDirectory {
+        let host = self.hosts.iter_mut().find(|host| host.hop.alias == alias).expect("a saved host with this alias");
+        host.hop.hostname = hostname.to_string();
+        host.hop.port = port;
+        self
+    }
+
     /// The key pinned for the host with this alias.
     pub fn with_pin(self, alias: &str, key: HostKey) -> FakeDirectory {
         locked(&self.pins).insert(HostId::from(format!("id-{alias}")), PinnedKey { key, pinned_at_ms: PINNED_AT_MS });
@@ -361,6 +370,14 @@ mod tests {
     fn the_fake_directory_keeps_the_pin_contract() {
         let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
         check_the_pin_contract(&directory, &HostQuery::Alias("web".into()), &key(test_keys::PLAIN_PUBLIC), &key(test_keys::ECDSA_PUBLIC), &key(test_keys::RSA_PUBLIC));
+    }
+
+    #[test]
+    fn a_host_can_be_moved_to_the_address_of_a_server_in_process_and_keeps_its_id_user_and_pin() {
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", key(test_keys::PLAIN_PUBLIC)).with_address("web", "127.0.0.1", 2222);
+        let hop = directory.resolve(&HostQuery::Alias("web".into())).unwrap().hops.remove(0);
+        assert_eq!((hop.id.as_str(), hop.hostname.as_str(), hop.port, hop.user.as_str()), ("id-web", "127.0.0.1", 2222, "deploy"));
+        assert_eq!(hop.pinned, Some(key(test_keys::PLAIN_PUBLIC)));
     }
 
     #[test]
