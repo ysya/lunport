@@ -140,7 +140,7 @@ pub struct BrokerAuth<'a> {
     opened: Mutex<HashMap<String, (Material, String)>>,
     /// Passwords the person typed, by hop: given again on the reconnects of this connect.
     typed: Mutex<HashMap<HostId, Secret>>,
-    /// Hops whose prompt the person cancelled or let run out: they are not asked again in this connect.
+    /// Hops whose prompt the person cancelled or let run out, or whose client went away: they are not asked again in this connect.
     cancelled: Mutex<HashSet<HostId>>,
     /// Where the last password given for each hop came from.
     gave: Mutex<HashMap<HostId, PasswordSource>>,
@@ -235,12 +235,12 @@ impl<'a> BrokerAuth<'a> {
         locked(&self.typed).remove(hop);
     }
 
-    /// The person cancelled a prompt for `hop` (or let it run out) during this connect.
+    /// The person cancelled a prompt for `hop` or let it run out, or the client went away, during this connect: `hop` is not asked again.
     pub fn cancelled(&self, hop: &HostId) -> bool {
         locked(&self.cancelled).contains(hop)
     }
 
-    /// Marks `hop` as cancelled: no more questions for it in this connect.
+    /// Marks `hop` as not to be asked again in this connect.
     pub fn cancel(&self, hop: &HostId) {
         locked(&self.cancelled).insert(hop.clone());
     }
@@ -291,11 +291,11 @@ impl AuthSource for BrokerAuth<'_> {
                 locked(&self.gave).insert(hop.id.clone(), PasswordSource::Typed);
                 Some(password)
             }
-            Reply::Cancelled | Reply::TimedOut => {
+            // The person said no, let it run out or went away: this hop is not asked again in this connect.
+            Reply::Cancelled | Reply::TimedOut | Reply::Gone => {
                 self.cancel(&hop.id);
                 None
             }
-            Reply::Gone => None,
         }
     }
 
@@ -312,11 +312,11 @@ impl AuthSource for BrokerAuth<'_> {
             let text = format!("({}@{}) {}", hop.user, hop.alias, printable(&prompt.text));
             match self.owner.ask(QuestionKind::Interactive, &text, prompt.echo, Some(deadline)) {
                 Reply::Answer(answer) => answers.push(answer),
-                Reply::Cancelled => {
+                // As in `password`: remembered however the prompt ended; the answers given so far are dropped with the round.
+                Reply::Cancelled | Reply::TimedOut | Reply::Gone => {
                     self.cancel(&hop.id);
                     return None;
                 }
-                Reply::TimedOut | Reply::Gone => return None,
             }
         }
         Some(answers)
@@ -490,6 +490,23 @@ mod tests {
         assert_eq!(owner.asked().len(), 1);
     }
 
+    /// A prompt that ran out, or that nobody was there to answer (the client went away), is remembered like a cancelled one: neither the
+    /// retry nor the keyboard-interactive round the server may offer next asks again.
+    #[test]
+    fn a_password_prompt_that_runs_out_or_finds_nobody_is_not_asked_again_either() {
+        let world = world();
+        for (reply, what) in [(Reply::TimedOut, "ran out"), (Reply::Gone, "found nobody")] {
+            let owner = FakeOwner::answering(vec![reply]);
+            let auth = world.auth(&owner);
+            auth.prepare(&target(AuthMethod::Password));
+            assert_eq!(auth.password(&web()), None, "the prompt {what}");
+            assert!(auth.cancelled(&web().id), "the prompt {what}: it is not asked again in this connect");
+            assert_eq!(auth.password(&web()), None);
+            assert_eq!(auth.interactive(&web(), &[Prompt { text: "Password: ".into(), echo: false }], Instant::now() + Duration::from_secs(60)), None);
+            assert_eq!(owner.asked().len(), 1, "the prompt {what}: neither the retry nor keyboard-interactive asked again");
+        }
+    }
+
     #[test]
     fn keyboard_interactive_prompts_are_asked_one_by_one_with_their_echo_and_the_engines_deadline() {
         let world = world();
@@ -506,6 +523,24 @@ mod tests {
         let auth = world.auth(&cancelling);
         assert_eq!(auth.interactive(&web(), &prompts, deadline), None);
         assert!(auth.cancelled(&web().id));
+    }
+
+    /// A prompt that ran out, or that nobody was there to answer, ends the round (the prompts after it are not asked, and the answers given
+    /// so far are not returned) and is remembered like a cancelled one: the round the server may offer next does not ask.
+    #[test]
+    fn a_keyboard_interactive_prompt_that_runs_out_or_finds_nobody_ends_the_round_and_is_not_asked_again() {
+        let world = world();
+        let prompts = [Prompt { text: "Password: ".into(), echo: false }, Prompt { text: "Code: ".into(), echo: true }, Prompt { text: "Again: ".into(), echo: true }];
+        let deadline = Instant::now() + Duration::from_secs(60);
+        for (reply, what) in [(Reply::TimedOut, "ran out"), (Reply::Gone, "found nobody")] {
+            let owner = FakeOwner::answering(vec![Reply::Answer(Zeroizing::new("secret".into())), reply]);
+            let auth = world.auth(&owner);
+            assert_eq!(auth.interactive(&web(), &prompts, deadline), None, "the second prompt {what}");
+            assert_eq!(owner.asked().len(), 2, "the third prompt is not asked");
+            assert!(auth.cancelled(&web().id), "the second prompt {what}: it is not asked again in this connect");
+            assert_eq!(auth.interactive(&web(), &prompts, deadline), None);
+            assert_eq!(owner.asked().len(), 2, "the next round is not asked at all");
+        }
     }
 
     /// The prompt text is the server's, and in a chain a jump host's: with a carriage return, a sequence that clears the line or a C1
