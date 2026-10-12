@@ -54,7 +54,6 @@ pub struct VaultKey {
     pub name: String,
     /// Its OpenSSH public key line.
     pub public_key: String,
-    pub has_passphrase: bool,
 }
 
 /// The vault, for the broker: the keys it holds and their private halves. The app's implementation reads the sync state and the vault
