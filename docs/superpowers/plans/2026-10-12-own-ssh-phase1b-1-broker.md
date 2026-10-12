@@ -41,6 +41,10 @@ The input classes and failure modes the spec implies that no happy path exercise
 4. **What arrives on the socket is malformed or comes from the wrong client**: a frame over 1 MiB, an unknown type, a stream cut inside a frame, another protocol version, `exec`, an MCP client: the other side expects a refusal it can show and the connection closed, never a hang, a crash, or a password in an error text or a log. Pinned in Task 4: `a_frame_over_the_limit_is_refused_from_its_header_and_never_written`, `a_stream_that_ends_inside_a_frame_is_truncated_and_odd_frames_are_errors` and `an_answer_keeps_its_value_out_of_debug_output_and_error_text`; in Task 11: `another_protocol_version_exec_and_the_mcp_client_are_refused_by_name`.
 5. **A server that sends its output in tiny pieces, or a terminal that fell behind and a program that then goes quiet**: the user expects the memory the queue uses to follow the bytes it holds, not the number of pieces (R19), and the notice about dropped output to appear as soon as the terminal has caught up, not with the next output that may never come (R20). Pinned in Task 1: `small_chunks_are_merged_so_their_count_follows_the_bytes_and_not_the_pushes` and `a_reader_that_catches_up_after_a_gap_is_told_about_it_at_once`.
 
+## Amendments made during execution
+
+- **R8 amended (Task 2 review).** On `AuthFailed { password_wanted: true }` the broker asks the person and reconnects with the hop's ORIGINAL method order, answering `AuthSource::password` from memory at once; only a keyboard-interactive-only hop switches to password first (`AuthenticationMethods publickey,password` can never log in after a password-first reconnect). Task 2's patches below (its `error.rs`, `traits.rs` and spec §6.1 texts) and Task 9's connect loop still show the old "password first" contract; the branch follows the amendment: Task 2's fix round (39a42e5 banner cap of 64 KiB per hop, 20f4549 the contract texts, tests 1aaf67e and 6ae98f6) and Task 9's amendment. See the design brief's "R8 AMENDED" paragraph.
+
 ## File Structure
 
 All paths under `src-tauri/src/` unless a path says otherwise.
