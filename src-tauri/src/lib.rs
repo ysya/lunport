@@ -13,6 +13,7 @@ mod known_hosts;
 pub mod mcp;
 mod process;
 mod secrets;
+pub mod session;
 mod settings_io;
 pub mod ssh;
 mod state;

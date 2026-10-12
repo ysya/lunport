@@ -218,6 +218,7 @@ pub enum Exit { Code(u32), Signal(String), Refused(String), Disconnected } // Re
 - 用戶端 → app:`hello{client: "connect" | "mcp", client_info?}`、`open_shell{host, pty{cols, rows, term}}`、`exec{host, command, timeout_secs}`、`data`(stdin)、`window_change{cols, rows}`、`answer{question_id, value | cancel}`、`close`。
 - app → 用戶端:`opened{session_id}`、`data`(stdout/stderr 合併,因為是 PTY)、`exec_result{ended: exited | signaled | timed_out | truncated | disconnected, exit_code (可空), signal (可空), stdout, stderr, truncated: bool}`(第 0 期:被訊號殺掉的指令沒有結束碼,連線中斷也沒有;輸出到上限時 `truncated`,連線仍可用;不能回 0)、`question{question_id, kind: host_key_notice | passphrase | password | interactive, text, echo: bool, deadline_ms}`(逾時視同取消:連線丟掉,§6.2 第 4 步)、`event{connected | disconnected{reason} | error{kind, text}}`、`exited{code (可空), signal (可空)}`;跳板的 `disconnected{reason}` 取自出事那一跳自己的紀錄(§6.2 第 2 步)。
 - `host` 可以是 alias 或 host id;alias 在多個 space 重複時回錯誤要求用 id。
+- (第 1b 期)訊框的長度是 big-endian、包含型別那一個位元組;型別 `1` = 控制(一則 JSON,以 `type` 欄位分辨)、`2` = 資料;一個訊框最多 1 MiB,超過、型別不明或在訊框中間斷掉都結束連線。`hello` 另帶 `version`(協定版本,目前 `1`):app 更新後磁碟上的 CLI 可能和執行中的 app 不同版,版本不合時 broker 回錯誤,請使用者重開 SSHelter。`host` 寫成 `{"alias": …}` 或 `{"id": …}`,`--id` 明確指 id、不和 alias 混淆。`question` 的 `deadline_ms` 是從送出起還等多少毫秒,`host_key_notice` 為 `null`(只顯示,不回答);`answer` 帶 `value` 或 `cancel: true`。`event` 另有 `banner{text}`:伺服器在登入時送的 banner,控制字元已換掉。
 
 ### 7.2 Broker 規則
 
