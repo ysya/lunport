@@ -79,7 +79,8 @@ pub enum Reply {
 /// The owner of a session: the person at the client's terminal, who is asked for what a login needs (spec §7.2).
 pub trait Owner: Send + Sync {
     /// Asks and waits for the answer until `deadline` (`None`: for as long as the owner is there). Whatever a server wrote in `text` has
-    /// been through `printable` already, so the owner shows it as it is.
+    /// been through `printable` already, and the real `(user@alias) ` is in front of every line of a server's prompt, so the owner shows
+    /// it as it is.
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply;
     /// Shows that the host key waits for the person in SSHelter's window (spec §11); no answer.
     fn host_key_notice(&self, text: &str);
@@ -102,6 +103,28 @@ pub fn printable(text: &str) -> String {
 /// the line at U+2028 and U+2029, the line and paragraph separators; only a line feed may end a line here.
 fn is_deceptive_format(c: char) -> bool {
     matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A name from the person's configuration (`user`, `alias`) for the words that say who asks: `printable`, and on one line, so the line
+/// feed and the tab that `printable` keeps become `?` here. `user` is what `ssh -G` printed for the host and nothing checks it, and the
+/// alias should not owe its safety to being checked somewhere else.
+fn label(name: &str) -> String {
+    printable(name).replace(['\n', '\t'], "?")
+}
+
+/// A server's prompt as the person is shown it: `printable` text with the real `(user@alias) ` in front of EVERY line, not only the
+/// first. The prompt of a jump host could otherwise end with a line feed and `(deploy@db) Password: `, and the line the person types on
+/// would name another hop; with the real prefix in front of each line, a forged one is only text behind it. A line feed that ends the
+/// prompt leaves the cursor on a line of its own, where nothing of the server's is shown: that line has no prefix.
+fn shown_prompt(hop: &HopRef, text: &str) -> String {
+    let prefix = format!("({}@{}) ", label(&hop.user), label(&hop.alias));
+    let text = printable(text);
+    let body = text.strip_suffix('\n').unwrap_or(&text);
+    let mut shown = body.split('\n').map(|line| format!("{prefix}{line}")).collect::<Vec<_>>().join("\n");
+    if text.ends_with('\n') {
+        shown.push('\n');
+    }
+    shown
 }
 
 /// The host key policy of one connect: the pins of its hops, plus the keys the person trusts while it runs.
@@ -298,7 +321,7 @@ impl AuthSource for BrokerAuth<'_> {
         }
         let wait = locked(&self.password_first).get(&hop.id).copied();
         let wait = wait.filter(|_| !self.cancelled(&hop.id))?;
-        match self.owner.ask(QuestionKind::Password, &format!("{}@{}'s password: ", hop.user, hop.alias), false, Some(deadline_after(wait))) {
+        match self.owner.ask(QuestionKind::Password, &format!("{}@{}'s password: ", label(&hop.user), label(&hop.alias)), false, Some(deadline_after(wait))) {
             Reply::Answer(password) => {
                 locked(&self.typed).insert(hop.id.clone(), password.clone());
                 locked(&self.gave).insert(hop.id.clone(), PasswordSource::Typed);
@@ -313,16 +336,17 @@ impl AuthSource for BrokerAuth<'_> {
     }
 
     /// One question per prompt, in order, each showing which host asks (as OpenSSH does: `(user@host) Password:`), until `deadline`. The
-    /// prompt text is the server's, so it is shown without control characters (`printable`): a jump host must not be able to erase its own
-    /// `(user@host) ` and draw another hop's in front of a password prompt. Nothing else of the server's reaches this call: the engine does
-    /// not hand over a round's name and instructions.
+    /// prompt text is the server's, so it is shown without control characters (`printable`), and the real `(user@host) ` is in front of
+    /// every line of it (`shown_prompt`): a jump host must not be able to erase its own prefix and draw another hop's in front of a
+    /// password prompt, nor start a later line with one. Nothing else of the server's reaches this call: the engine does not hand over a
+    /// round's name and instructions.
     fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>> {
         if self.cancelled(&hop.id) {
             return None;
         }
         let mut answers = Vec::with_capacity(prompts.len());
         for prompt in prompts {
-            let text = format!("({}@{}) {}", hop.user, hop.alias, printable(&prompt.text));
+            let text = shown_prompt(hop, &prompt.text);
             match self.owner.ask(QuestionKind::Interactive, &text, prompt.echo, Some(deadline)) {
                 Reply::Answer(answer) => answers.push(answer),
                 // As in `password`: remembered however the prompt ended; the answers given so far are dropped with the round.
@@ -663,7 +687,8 @@ mod tests {
 
     /// The prompt text is the server's, and in a chain a jump host's: with a carriage return, a sequence that clears the line or a C1
     /// control it could erase the `(user@alias)` in front of it and draw another hop's, to be given that hop's password. The owner gets
-    /// the text without control characters, behind its prefix; line feeds and tabs stay, so a prompt of several lines is still readable.
+    /// the text without control characters, behind its prefix; line feeds and tabs stay, so a prompt of several lines is still readable
+    /// (and every line has the prefix: `every_line_of_a_keyboard_interactive_prompt_starts_with_the_real_prefix`).
     #[test]
     fn a_keyboard_interactive_prompt_reaches_the_owner_without_control_characters_and_behind_its_prefix() {
         let world = world();
@@ -680,7 +705,56 @@ mod tests {
             assert!(text.starts_with("(deploy@web) "), "the prefix stays in front: {text:?}");
             assert!(!text.chars().any(|c| c.is_control() && c != '\n' && c != '\t'), "no control character reaches the terminal: {text:?}");
         }
-        assert_eq!(questions, ["(deploy@web) ??[2K(deploy@db) Password: ", "(deploy@web) Code:?2J\nsecond\tline\n", "(deploy@web) ????tail"]);
+        assert_eq!(questions, ["(deploy@web) ??[2K(deploy@db) Password: ", "(deploy@web) Code:?2J\n(deploy@web) second\tline\n", "(deploy@web) ????tail"]);
+    }
+
+    /// A jump host's prompt can end with a line feed and `(deploy@db) Password: `, and the line the person types on would name another hop.
+    /// The real `(user@alias) ` is in front of every line; a line feed at the very end leaves the cursor on a line of its own, where
+    /// nothing of the server's is shown; and no other line break is left for a server to start a line with (a lone carriage return, a
+    /// vertical tab, a form feed, NEL, the line and the paragraph separator are replaced).
+    #[test]
+    fn every_line_of_a_keyboard_interactive_prompt_starts_with_the_real_prefix() {
+        let world = world();
+        let bastion = HopRef { id: HostId::from("id-bastion"), alias: "bastion".into(), hostname: "bastion.example.com".into(), user: "jump".into(), ..web() };
+        let cases = [
+            ("Verification code:\n(deploy@db) Password: ", "(jump@bastion) Verification code:\n(jump@bastion) (deploy@db) Password: "),
+            ("Code: \n\n\n(deploy@web) Password: ", "(jump@bastion) Code: \n(jump@bastion) \n(jump@bastion) \n(jump@bastion) (deploy@web) Password: "),
+            ("one\r\ntwo\r\n", "(jump@bastion) one\n(jump@bastion) two\n"),
+            ("first\n\nthird\n", "(jump@bastion) first\n(jump@bastion) \n(jump@bastion) third\n"),
+            ("Password:\n", "(jump@bastion) Password:\n"),
+            ("\n", "(jump@bastion) \n"),
+            ("", "(jump@bastion) "),
+            ("a\rb\x0bc\x0cd\u{85}e\u{2028}f\u{2029}g", "(jump@bastion) a?b?c?d?e?f?g"),
+            ("admin\u{202E} :drowssaP\u{2069}", "(jump@bastion) admin? :drowssaP?"),
+        ];
+        let owner = FakeOwner::typing(&vec!["answer"; cases.len()]);
+        let prompts: Vec<Prompt> = cases.iter().map(|(text, _)| Prompt { text: text.to_string(), echo: false }).collect();
+        world.auth(&owner).interactive(&bastion, &prompts, Instant::now() + Duration::from_secs(60)).expect("answered");
+        let questions = owner.questions();
+        assert_eq!(questions.len(), cases.len());
+        for ((prompt, expected), shown) in cases.iter().zip(&questions) {
+            assert_eq!(shown, expected, "the prompt {prompt:?}");
+            // Cut at every line break a terminal might honour: each line, an empty one too, starts with the real prefix.
+            for line in shown.split_terminator(['\n', '\r', '\x0b', '\x0c', '\u{85}', '\u{2028}', '\u{2029}']) {
+                assert!(line.starts_with("(jump@bastion) "), "the line {line:?} of {shown:?} (prompt {prompt:?})");
+            }
+        }
+    }
+
+    /// The `(user@alias) ` is the broker's own, but nothing checks what it is made of: `user` is what `ssh -G` printed for the host. It is
+    /// built from `printable` text on a single line, so that it can neither clear the line nor break it in two; the password question
+    /// names the host the same way.
+    #[test]
+    fn the_name_in_front_of_a_question_is_printable_and_on_one_line() {
+        let world = world();
+        let owner = FakeOwner::typing(&["one", "two"]);
+        let auth = world.auth(&owner);
+        let odd = HopRef { user: "de\x1b[2K\rploy\n(root@db)\t".into(), alias: "we\u{202e}b".into(), ..web() };
+        auth.prepare(&target(AuthMethod::Password));
+        assert_eq!(auth.password(&odd).as_deref().map(String::as_str), Some("one"));
+        auth.interactive(&odd, &[Prompt { text: "Code:\nagain: ".into(), echo: true }], Instant::now() + Duration::from_secs(60)).expect("answered");
+        let name = "de?[2K?ploy?(root@db)?@we?b";
+        assert_eq!(owner.questions(), [format!("{name}'s password: "), format!("({name}) Code:\n({name}) again: ")]);
     }
 
     /// Bidirectional controls make text read in another order than it is written (`drowssap` shown as `password`), and the line and
