@@ -407,10 +407,13 @@ mod tests {
     use crate::ssh::fake::{FakeEngine, FakeEvent};
     use crate::ssh::{AuthMethod, DisconnectKind, DisconnectReason, Hop, SessionError, SshEngine};
 
-    /// The client side, recorded.
+    /// The client side, recorded. It can be made to go away part of the way through, as a client does: output frames after the first
+    /// `data_limit` of them, and `Opened`, are then refused (and not recorded).
     #[derive(Default)]
     struct Recorder {
         sent: Mutex<Vec<Sent>>,
+        data_limit: Option<usize>,
+        refuses_opened: bool,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,20 +422,45 @@ mod tests {
         Data(Vec<u8>),
     }
 
+    fn broken_pipe() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the client is gone")
+    }
+
     impl ClientLink for Recorder {
         fn send(&self, message: &ServerMessage) -> std::io::Result<()> {
+            if self.refuses_opened && matches!(message, ServerMessage::Opened { .. }) {
+                return Err(broken_pipe());
+            }
             locked(&self.sent).push(Sent::Message(message.clone()));
             Ok(())
         }
         fn send_data(&self, bytes: &[u8]) -> std::io::Result<()> {
-            locked(&self.sent).push(Sent::Data(bytes.to_vec()));
+            let mut sent = locked(&self.sent);
+            if self.data_limit.is_some_and(|limit| sent.iter().filter(|each| matches!(each, Sent::Data(_))).count() >= limit) {
+                return Err(broken_pipe());
+            }
+            sent.push(Sent::Data(bytes.to_vec()));
             Ok(())
         }
     }
 
     impl Recorder {
+        /// A client that takes this many output frames and then goes away.
+        fn leaving_after(data_frames: usize) -> Recorder {
+            Recorder { data_limit: Some(data_frames), ..Recorder::default() }
+        }
+
+        /// A client that is gone before it is told the shell opened.
+        fn gone_before_opened() -> Recorder {
+            Recorder { refuses_opened: true, ..Recorder::default() }
+        }
+
         fn sent(&self) -> Vec<Sent> {
             locked(&self.sent).clone()
+        }
+
+        fn was_told_opened(&self) -> bool {
+            self.sent().iter().any(|each| matches!(each, Sent::Message(ServerMessage::Opened { .. })))
         }
 
         /// The output, joined, and the control messages, in order.
@@ -466,14 +494,19 @@ mod tests {
     }
 
     fn start(engine: FakeEngine, control: ShellControl) -> Running {
-        let engine = Arc::new(engine);
-        start_on(Arc::clone(&engine), engine.as_ref(), control)
+        start_to(engine, control, Recorder::default())
     }
 
-    /// Like `start`, with the session opened by `engine`, which wraps `fake` (so that the tests can see what `fake` was asked).
-    fn start_on(fake: Arc<FakeEngine>, engine: &dyn SshEngine, control: ShellControl) -> Running {
+    /// Like `start`, for a client that is `link`.
+    fn start_to(engine: FakeEngine, control: ShellControl, link: Recorder) -> Running {
+        let engine = Arc::new(engine);
+        start_on(Arc::clone(&engine), engine.as_ref(), control, link)
+    }
+
+    /// Like `start_to`, with the session opened by `engine`, which wraps `fake` (so that the tests can see what `fake` was asked).
+    fn start_on(fake: Arc<FakeEngine>, engine: &dyn SshEngine, control: ShellControl, link: Recorder) -> Running {
         let session = engine.connect(&target(), &*crate::ssh::testing::doubles::TestPolicy::trusting(), &crate::ssh::testing::doubles::VaultAuth::new()).unwrap();
-        let (link, control) = (Arc::new(Recorder::default()), Arc::new(control));
+        let (link, control) = (Arc::new(link), Arc::new(control));
         let pump = {
             let (link, control) = (Arc::clone(&link), Arc::clone(&control));
             std::thread::spawn(move || run_shell(Connected { session, target: target() }, pty(), link.as_ref(), &control, "7"))
@@ -486,12 +519,15 @@ mod tests {
         let fake = Arc::new(fake);
         let gated = GatedEngine::new(Arc::clone(&fake)).holding_shells();
         let gate = Arc::clone(&gated.shell);
-        (start_on(fake, &gated, control), gate)
+        (start_on(fake, &gated, control, Recorder::default()), gate)
     }
 
     impl Running {
+        /// The server's side of the shell, once it is open and the relay has it (the fake lists a shell a moment before `run_shell`
+        /// has it, and a call to `end` or `owner_gone` in between would find none to close): the client has been told it opened.
         fn wait_for_shell(&self) -> crate::ssh::fake::FakeShell {
             crate::ssh::testing::eventually("the shell to open", 5, || !self.engine.shells().is_empty());
+            crate::ssh::testing::eventually("the client to be told it opened", 5, || self.link.was_told_opened());
             self.engine.shells().remove(0)
         }
 
@@ -635,11 +671,11 @@ mod tests {
 
     #[test]
     fn a_shell_that_never_prints_is_closed_once_the_settle_time_has_passed() {
-        let mut running = start(FakeEngine::new(), ShellControl::with_settle(Duration::from_millis(300)));
+        let mut running = start(FakeEngine::new(), ShellControl::with_settle(Duration::from_millis(600)));
         running.wait_for_shell();
         let started = Instant::now();
         running.control.owner_gone();
-        assert!(started.elapsed() >= Duration::from_millis(250), "it waited for the settle time: {:?}", started.elapsed());
+        assert!(started.elapsed() >= Duration::from_millis(400), "it waited for the settle time: {:?}", started.elapsed());
         running.finish();
         assert!(running.engine.events().contains(&FakeEvent::ShellClosed));
     }
@@ -903,5 +939,62 @@ mod tests {
                 ServerMessage::Exited { code: None, signal: None },
             ]
         );
+    }
+
+    /// Plan 1b-1 review, Task 10 Minor 5: a shell the server closed without an exit status while the connection lives.
+    #[test]
+    fn a_shell_the_server_ended_without_a_status_while_the_connection_lives_says_so() {
+        let mut running = start(FakeEngine::new(), ShellControl::new());
+        running.wait_for_shell().end(Exit::Disconnected);
+        running.finish();
+        assert_eq!(
+            &running.link.split().1[1..],
+            [
+                ServerMessage::Event(Event::Disconnected { reason: "The shell on web ended without an exit status.".into() }),
+                ServerMessage::Exited { code: None, signal: None },
+            ]
+        );
+    }
+
+    /// The client goes away in the middle of the shell's output: what was sent stays sent, the shell is closed once, nothing more is
+    /// told (nobody is there), and the session is closed.
+    #[test]
+    fn a_client_whose_link_fails_in_the_middle_of_the_output_loses_its_shell() {
+        let mut running = start_to(FakeEngine::new(), ShellControl::new(), Recorder::leaving_after(1));
+        let remote = running.wait_for_shell();
+        remote.print(b"one");
+        crate::ssh::testing::eventually("the first output to reach the client", 5, || running.link.split().0 == b"one");
+        remote.print(b"two");
+        running.finish();
+        let (output, messages) = running.link.split();
+        assert_eq!((output.as_slice(), messages.as_slice()), (b"one".as_slice(), [ServerMessage::Opened { session_id: "7".into() }].as_slice()));
+        assert!(running.control.is_gone());
+        let events = running.engine.events();
+        assert_eq!(events.iter().filter(|event| **event == FakeEvent::ShellClosed).count(), 1, "{events:?}");
+        assert_eq!(events.last(), Some(&FakeEvent::Closed));
+    }
+
+    /// The client is gone before it is told the shell opened: nothing is sent to it, and its shell is closed once it has printed.
+    #[test]
+    fn a_client_that_cannot_be_told_the_shell_opened_loses_its_shell() {
+        let mut running = start_to(FakeEngine::new().with_shell_output(b"$ "), ShellControl::new(), Recorder::gone_before_opened());
+        running.finish();
+        assert_eq!(running.link.split(), (Vec::new(), Vec::new()), "not told, and the prompt was not passed on either");
+        assert!(running.control.is_gone());
+        let events = running.engine.events();
+        assert_eq!(&events[2..], [FakeEvent::ShellClosed, FakeEvent::Closed], "{events:?}");
+    }
+
+    /// A jump host's keepalive is its own: the seconds in the sentence are those of the hop that went silent, not the destination's.
+    #[test]
+    fn a_jump_hosts_keepalive_gives_the_seconds_of_its_own_link() {
+        let mut jump = Hop::new("id-jump", "jump", "jump.example.com", 22, "deploy", AuthMethod::Password);
+        jump.keepalive_every = Duration::from_secs(15);
+        jump.keepalive_max_missed = 1;
+        let web = Hop::new("id-web", "web", "web.example.com", 22, "deploy", AuthMethod::Password);
+        let through_jump = Target { hops: vec![jump.clone(), web.clone()] };
+        let silent = |hop: &Hop| DisconnectReason { hop: hop.reference(), kind: DisconnectKind::KeepaliveTimeout, detail: "silent".into() };
+        assert_eq!(lost_sentence(&silent(&jump), &through_jump), "Connection to jump lost (no response for 30 seconds).");
+        assert_eq!(lost_sentence(&silent(&web), &through_jump), "Connection to web lost (no response for 120 seconds).");
     }
 }
