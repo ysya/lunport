@@ -18,7 +18,7 @@ use super::auth::{KeyStore, Owner, Reply};
 use super::connect::{CancelToken, ConnectFailure, Connector, HostKeyConfirmer, CANCELLED};
 use super::directory::HostDirectory;
 use super::protocol::{decode, kinds, read_frame, write_control, write_data, ClientKind, ClientMessage, Event, Frame, FrameError, HostQuery, Question, QuestionKind, ServerMessage, PROTOCOL_VERSION};
-use super::relay::{run_shell, tell, tell_all, ClientLink, ShellControl};
+use super::relay::{run_shell, tell, tell_all, ClientLink, ShellControl, SETTLE};
 use crate::ipc::peer::{self, ProcInfo};
 use crate::ipc::server::{Handler, Stream};
 use crate::ssh::{Hop, HostId, Pty, SshEngine};
@@ -30,6 +30,13 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// How long a new connection may take for each of its first two messages, `hello` and `open_shell`.
 const HELLO_WAIT: Duration = Duration::from_secs(10);
+
+/// How long the app waits in `end_all` when it quits, so that a shell that has not printed anything yet is still told why its session
+/// ended. Such a shell is closed, and only then its client told, once it has printed something or `SETTLE` has passed since it opened (a
+/// channel closed before its prompt can strand a process on a macOS sshd): a wait of `SETTLE` itself can run out just before the client
+/// is told, so this is `SETTLE` and two seconds more, for closing the shell and the connection and telling the client. A shell that is
+/// still being opened when the app quits may need longer than this (`end_all` says what becomes of its client).
+pub const QUIT_WAIT: Duration = SETTLE.saturating_add(Duration::from_secs(2));
 
 /// The sentence a client is told when the app quits under its session (spec §4).
 pub fn quit_reason(alias: &str) -> String {
@@ -166,7 +173,7 @@ impl Broker {
 
     /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. Waits up to `wait` for the table to
     /// empty, which is when every client has been told: the app exits when this returns, so a client that was not told by then hears
-    /// nothing (its terminal says "The connection to SSHelter ended.").
+    /// nothing (its terminal says "The connection to SSHelter ended."). The app gives it `QUIT_WAIT`.
     ///
     /// A session that is still being connected is cancelled at once; its client is told, its connection closed, and then the session
     /// leaves the table, on a thread of its own. Nothing waits for what the session's own thread is doing (a question, the host key
@@ -174,6 +181,11 @@ impl Broker {
     /// no shell. One that is open, or whose shell is being opened, is ended through the relay, which closes its shell once it has
     /// printed something (or `SETTLE` after it opened) and then tells its client; it leaves the table when its thread is over, which is
     /// after that.
+    ///
+    /// A shell that is still being opened when the app quits cannot be hurried: `Session::shell` is a blocking engine call as well, and
+    /// the shell is closed, and its client told, once the engine is through with it. If that takes longer than `wait` (it may take
+    /// longer than `QUIT_WAIT`), `end_all` returns first, the app exits, and the connection of that client ends without a word: its
+    /// terminal says "The connection to SSHelter ended." instead of why.
     pub fn end_all(self: &Arc<Broker>, wait: Duration) {
         let (connecting, open) = {
             let mut table = locked(&self.table);
@@ -1663,6 +1675,41 @@ mod tests {
             assert!(text.ends_with("xxx…") && text.chars().count() == 513, "{what}: {} characters, ending in {:?}", text.chars().count(), &text[text.len().saturating_sub(8)..]);
             assert_eq!(messages[1], no_status(), "{what}");
         }
+    }
+
+    /// The app waits `QUIT_WAIT` in `end_all` when it quits: a shell that has not printed yet is closed (and its client told why) only
+    /// once the settle time since it opened is over, so the wait has to be longer than that, with room for what comes after it.
+    #[test]
+    fn the_quit_wait_outlasts_the_settle_time_of_a_shell_that_has_not_printed() {
+        assert_eq!(QUIT_WAIT, SETTLE + Duration::from_secs(2));
+        let world = world(FakeEngine::new());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        let started = Instant::now();
+        world.broker.end_all(QUIT_WAIT);
+        assert!(started.elapsed() < QUIT_WAIT, "everything was over before the wait: {:?}", started.elapsed());
+        assert!(started.elapsed() > Duration::from_secs(2), "(the shell had printed nothing, so it was kept open for the settle time: {:?})", started.elapsed());
+        assert_eq!(client.ready_now(), told_quit(), "told by the time end_all returned");
+        assert_eq!(world.engine.events().last(), Some(&FakeEvent::Closed));
+    }
+
+    /// A shell that is still being opened when the app quits cannot be hurried: the engine's call cannot be interrupted. `end_all` gives
+    /// up when its time is over, and the client has not been told by then (the app exits, and its terminal says the connection ended).
+    /// Were the process to go on, the client would hear why once the engine is through.
+    #[test]
+    fn end_all_gives_up_on_a_shell_that_is_still_being_opened_when_its_time_is_over() {
+        let world = world_gated(FakeEngine::new().with_shell_output(b"$ "), pinned_web(), Arc::new(FakeConfirmer::default()), saved_password(), |gated| gated.holding_shells());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        crate::ssh::testing::eventually("the shell to be being opened", 5, || world.gates.shell.entered() == 1);
+        let started = Instant::now();
+        world.broker.end_all(Duration::from_millis(300));
+        assert!(started.elapsed() >= Duration::from_millis(300) && started.elapsed() < Duration::from_secs(3), "gave up when its time was over: {:?}", started.elapsed());
+        assert!(world.broker.has_sessions(), "the session is still there");
+        assert_eq!(client.ready_now(), (Vec::new(), false), "and its client has been told nothing");
+        world.gates.shell.release();
+        assert_eq!(client.rest(), (Vec::new(), vec![quit_sentence(), no_status()]));
     }
 
     /// Plan 1b-1 review round 2, Task 11 Minor 2: the thread for a session cannot be made. Its client is told so, unless the app quit
