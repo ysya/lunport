@@ -3,6 +3,8 @@
 
 #[cfg(unix)]
 pub mod client;
+#[cfg(all(test, unix))]
+mod e2e_tests;
 #[cfg(unix)]
 pub mod run;
 #[cfg(unix)]
