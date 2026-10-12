@@ -58,7 +58,7 @@ struct Session {
 
 impl Session {
     fn type_text(&self, text: &str) {
-        self.keys.send(Input::Stdin(text.as_bytes().to_vec())).unwrap();
+        self.keys.send(Input::Stdin(zeroize::Zeroizing::new(text.as_bytes().to_vec()))).unwrap();
     }
 
     fn finish(self) -> (i32, String, Arc<FakeTermios>, Arc<FakeDirectory>) {
