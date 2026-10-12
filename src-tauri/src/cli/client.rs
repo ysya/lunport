@@ -298,7 +298,8 @@ impl Client {
     ///
     /// The password reaches the broker as the plain `String` inside `ClientMessage::Answer` (the protocol's type), moved there out of the
     /// `Zeroizing` buffer it was collected in so that no second copy is left behind. From here on that `String` is the caller's to wipe:
-    /// whoever writes the action out (`run.rs`) must `zeroize()` the value once the frame is written, and the frame's own buffer too.
+    /// whoever writes the action out (`run.rs`) must `zeroize()` the value once the frame is written (`write_control` wipes the JSON it
+    /// builds, but not the message it is given).
     fn answer(&mut self, answer: Option<Zeroizing<String>>) -> Vec<Action> {
         let (question_id, echo, after) = match std::mem::replace(&mut self.phase, Phase::Connecting) {
             Phase::Asking { question_id, echo, after, .. } => (question_id, echo, after),
@@ -814,12 +815,37 @@ mod tests {
         assert_eq!(actions, [Action::Stderr("\n".into()), answered("q1", &expected), Action::Mode(Mode::Cooked, false)]);
     }
 
-    /// The shell's own bytes are not the CLI's to change: that is what a terminal program is for.
+    /// The shell's own bytes are not the CLI's to change: that is what a terminal program is for, and they need not be text at all.
     #[test]
     fn the_shells_own_output_is_passed_through_untouched() {
         let mut client = opened();
-        let output = b"\x1b[2J\r\n\xc2\x9b\xe2\x80\xae\x07\x00".to_vec();
+        let output = b"\x1b[2J\r\n\xc2\x9b\xe2\x80\xae\x07\x00\x9b\xff".to_vec();
         assert_eq!(client.handle(Input::Output(output.clone())), [Action::Stdout(output)]);
+    }
+
+    /// A terminal that does not turn Enter into a line feed (ICRNL off) delivers a carriage return.
+    #[test]
+    fn an_answer_ends_at_a_bare_carriage_return_as_well() {
+        let mut client = started();
+        client.handle(question("q1", QuestionKind::Interactive, "(deploy@web) Code: ", true));
+        assert_eq!(client.handle(Input::Stdin(b"123456\r".to_vec())), [answered("q1", "123456"), Action::Mode(Mode::Cooked, false)]);
+    }
+
+    /// What was typed at a question that shows it is still on the line, so the cancelled question ends its line too.
+    #[test]
+    fn cancelling_a_question_that_shows_what_is_typed_ends_its_line_too() {
+        let mut client = started();
+        client.handle(question("q1", QuestionKind::Interactive, "(deploy@web) Code: ", true));
+        assert!(client.handle(Input::Stdin(b"12".to_vec())).is_empty());
+        assert_eq!(client.handle(Input::Interrupt), [Action::Stderr("\n".into()), cancelled("q1"), Action::Mode(Mode::Cooked, false)]);
+    }
+
+    #[test]
+    fn the_connected_event_changes_nothing_for_the_terminal() {
+        let mut client = started();
+        assert!(client.handle(event(Event::Connected)).is_empty());
+        assert!(client.handle(Input::Stdin(b"ls\n".to_vec())).is_empty(), "still connecting: what is typed is kept for the shell");
+        assert_eq!(client.handle(opens()), [Action::Mode(Mode::Raw, false), Action::SendData(b"ls\n".to_vec())]);
     }
 
     /// Spec §7.3 / plan 1b R10: the shell's status, 128 + the signal's number for a signal (as a shell reports it), 255 for neither.
