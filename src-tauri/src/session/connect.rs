@@ -306,6 +306,10 @@ impl Connector<'_> {
             None => None,
             Some(pinned) => Some(self.pinned_summary(hop, pinned)?),
         };
+        // The client may have gone away while the engine was connecting: nobody is left to be told that the window waits, or to wait for it.
+        if cancel.is_cancelled() {
+            return Err(ConnectFailure::cancelled());
+        }
         owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in SSHelter.", label(&hop.alias)));
         let question = HostKeyQuestion {
             alias: hop.alias.clone(),
@@ -815,6 +819,57 @@ mod tests {
         for (what, world) in [("a passphrase", passphrase), ("a keyboard-interactive prompt", interactive)] {
             let failed = world.connect_as(&web(), &GoingOwner(world.cancel.clone())).err();
             assert_eq!(failed, Some(failure(CANCELLED, "The connection was cancelled.")), "{what}");
+        }
+    }
+
+    /// An engine that takes so long that the client goes away meanwhile, and then comes to the host key of the first host.
+    struct LeavingEngine {
+        cancel: CancelToken,
+        /// The key on record when the key it presents is a changed one.
+        pinned: Option<HostKey>,
+    }
+
+    impl SshEngine for LeavingEngine {
+        fn connect(&self, target: &Target, _host_keys: &dyn HostKeyPolicy, _auth: &dyn AuthSource) -> Result<Box<dyn Session>, ConnectError> {
+            self.cancel.cancel();
+            let (hop, key) = (target.hops[0].reference(), default_server_key());
+            Err(match &self.pinned {
+                None => ConnectError::HostKeyUnknown { hop, key },
+                Some(pinned) => ConnectError::HostKeyMismatch { hop, key, pinned: pinned.clone() },
+            })
+        }
+    }
+
+    /// A window whose answer comes after the client went away, and says yes.
+    struct AnsweringAfterTheClientLeft;
+
+    impl HostKeyConfirmer for AnsweringAfterTheClientLeft {
+        fn confirm(&self, question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
+            cancel.cancel();
+            Some(question.fingerprint.clone())
+        }
+    }
+
+    /// A client that went away while the engine connected is not waited for: nobody is told to look at the window, the window is not
+    /// opened, and nothing is pinned. A window that was open when the client left, and then answers yes, pins nothing either.
+    #[test]
+    fn a_host_key_is_not_asked_about_for_a_client_that_went_away_and_a_late_yes_pins_nothing() {
+        let old = key(test_keys::ENC_PUBLIC);
+        for (what, pinned) in [("a key not seen before", None), ("a changed key", Some(old.clone()))] {
+            let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+            let world = world(FakeEngine::new(), if pinned.is_some() { directory.with_pin("web", old.clone()) } else { directory }).deciding(vec![Decision::Trust]);
+            let engine = LeavingEngine { cancel: world.cancel.clone(), pinned: pinned.clone() };
+            let connector = Connector { engine: &engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer };
+            assert_eq!(connector.connect(&web(), &world.owner, &world.cancel).err(), Some(failure(CANCELLED, "The connection was cancelled.")), "{what}");
+            assert!(world.confirmer.asked().is_empty(), "{what}: the window was not asked");
+            assert!(locked(&world.owner.notices).is_empty(), "{what}: nobody was told to wait for it");
+            assert_eq!(world.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), pinned, "{what}: nothing was pinned");
+
+            // The window was open when the client left, and its answer is yes.
+            let world = self::world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).with_saved_password();
+            let connector = Connector { engine: &world.engine, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &AnsweringAfterTheClientLeft };
+            assert_eq!(connector.connect(&web(), &world.owner, &world.cancel).err(), Some(failure(CANCELLED, "The connection was cancelled.")), "{what}, late yes");
+            assert!(world.directory.pins().is_empty(), "{what}: a late yes pins nothing");
         }
     }
 
