@@ -155,8 +155,8 @@ pub trait AuthSource: Send + Sync {
     fn sign(&self, key_id: &str, data: &[u8], rsa_hash: Option<RsaHash>) -> Result<Signature, AuthError>;
     fn public_key(&self, key_id: &str) -> Option<String>;                    // 該金鑰的 OpenSSH 公鑰行(公鑰登入要先送公鑰);None = 金鑰不存在
     fn password(&self, hop: &HopRef) -> Option<Secret>;                      // 已有的密碼(keychain 或剛問到的);None = 不試密碼
-    fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>>; // 在 deadline 前回答;None = 放棄 → 引擎丟掉連線
-    fn banner(&self, hop: &HopRef, text: &str) {}                            // 伺服器登入時送的 banner(sshd 的 Banner);每跳最多 64 KiB;預設丟掉;顯示前去掉控制字元(第 1b 期)
+    fn interactive(&self, hop: &HopRef, prompts: &[Prompt], deadline: Instant) -> Option<Vec<Secret>>; // 在 deadline 前回答;None = 放棄 → 引擎丟掉連線;提示文字是伺服器寫的,顯示前先清理(同 banner),每一行前面加真正的 (user@alias)(第 1b 期,§7.1)
+    fn banner(&self, hop: &HopRef, text: &str) {}                            // 伺服器登入時送的 banner(sshd 的 Banner);每跳最多 64 KiB;預設丟掉;顯示前先清理:控制字元與雙向文字控制字元換成 ?(第 1b 期,§7.1)
 }
 
 pub struct Target { pub hops: Vec<Hop> }   // 依序經過,最後一個是目標;每一跳自帶設定
@@ -218,7 +218,8 @@ pub enum Exit { Code(u32), Signal(String), Refused(String), Disconnected } // Re
 - 用戶端 → app:`hello{client: "connect" | "mcp", client_info?}`、`open_shell{host, pty{cols, rows, term}}`、`exec{host, command, timeout_secs}`、`data`(stdin)、`window_change{cols, rows}`、`answer{question_id, value | cancel}`、`close`。
 - app → 用戶端:`opened{session_id}`、`data`(stdout/stderr 合併,因為是 PTY)、`exec_result{ended: exited | signaled | timed_out | truncated | disconnected, exit_code (可空), signal (可空), stdout, stderr, truncated: bool}`(第 0 期:被訊號殺掉的指令沒有結束碼,連線中斷也沒有;輸出到上限時 `truncated`,連線仍可用;不能回 0)、`question{question_id, kind: host_key_notice | passphrase | password | interactive, text, echo: bool, deadline_ms}`(逾時視同取消:連線丟掉,§6.2 第 4 步)、`event{connected | disconnected{reason} | error{kind, text}}`、`exited{code (可空), signal (可空)}`;跳板的 `disconnected{reason}` 取自出事那一跳自己的紀錄(§6.2 第 2 步)。
 - `host` 可以是 alias 或 host id;alias 在多個 space 重複時回錯誤要求用 id。
-- (第 1b 期)訊框的長度是 big-endian、包含型別那一個位元組;型別 `1` = 控制(一則 JSON,以 `type` 欄位分辨)、`2` = 資料;一個訊框最多 1 MiB,超過、型別不明或在訊框中間斷掉都結束連線。`hello` 另帶 `version`(協定版本,目前 `1`):app 更新後磁碟上的 CLI 可能和執行中的 app 不同版,版本不合時 broker 回錯誤,請使用者重開 SSHelter。`host` 寫成 `{"alias": …}` 或 `{"id": …}`,`--id` 明確指 id、不和 alias 混淆。`question` 的 `deadline_ms` 是從送出起還等多少毫秒,`host_key_notice` 為 `null`(只顯示,不回答);`answer` 帶 `value` 或 `cancel: true`。`event` 另有 `banner{text}`:伺服器在登入時送的 banner,控制字元已換掉。
+- (第 1b 期)訊框的長度是 big-endian、包含型別那一個位元組;型別 `1` = 控制(一則 JSON,以 `type` 欄位分辨)、`2` = 資料;一個訊框最多 1 MiB,超過、型別不明或在訊框中間斷掉都結束連線。`hello` 另帶 `version`(協定版本,目前 `1`):app 更新後磁碟上的 CLI 可能和執行中的 app 不同版,版本不合時 broker 回錯誤,請使用者重開 SSHelter。`host` 寫成 `{"alias": …}` 或 `{"id": …}`,`--id` 明確指 id、不和 alias 混淆。`question` 的 `deadline_ms` 是從送出起還等多少毫秒,`host_key_notice` 為 `null`(只顯示,不回答);`answer` 帶 `value` 或 `cancel: true`。`event` 另有 `banner{text}`:伺服器在登入時送的 banner,已清理(見下一條)。
+- (第 1b 期)伺服器寫的文字,顯示給人看之前一律先清理:banner,以及 keyboard-interactive 的提示(也就是 `question.text` 裡伺服器寫的部分,和 banner 同一套規則)。CRLF 換成 LF;其他控制字元(含 C1)換成 `?`;不是控制字元、卻能騙人的格式字元也換成 `?`:雙向文字控制字元(U+061C、U+200E、U+200F、U+202A 至 U+202E、U+2066 至 U+2069,它們能讓文字以不同於書寫的順序顯示)與行/段分隔字元(U+2028、U+2029,有些終端機可能在這裡斷行);只留 Tab 與 LF,LF 是唯一的換行。keyboard-interactive 的提示另外在**每一行**前面都加上 broker 自己的 `(user@alias) `,不只第一行:跳板可以用換行接上 `(deploy@db) Password: ` 假冒另一跳,讓輸入密碼的那一行看起來是另一台在問;每一行都有真正的前綴,那一行就仍然標著真正在問的那一跳。`user` 來自 ssh_config(`ssh -G` 照抄、沒有驗證),所以前綴裡的 `user` 與 `alias` 也先清理,並壓成一行(Tab、LF 也換成 `?`)。提示以 LF 結尾時,結尾的 LF 保留,游標落在新的一行;那一行沒有伺服器的文字,不加前綴。
 
 ### 7.2 Broker 規則
 
