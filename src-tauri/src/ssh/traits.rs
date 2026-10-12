@@ -30,8 +30,10 @@ pub trait Session: Send + Sync {
     fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError>;
 
     /// Runs `command` without a PTY and collects its output, for at most `timeout`. Output beyond `output_cap` bytes (stdout and stderr
-    /// together) is not read: the engine asks for the channel to be closed, sets `truncated` and ends the result as `Ended::Truncated`. A command that ends without a
-    /// status, a timeout and the cap are results, not errors, and the connection survives all three.
+    /// together) is not read: the engine asks for the channel to be closed, sets `truncated` and ends the result as `Ended::Truncated`.
+    /// The command's standard input is empty: it reads end-of-file at once, as with `ssh host command < /dev/null`. A timeout, the cap and
+    /// a command that ends without a status are results, not errors. After a timeout or the cap the connection is still usable; a command
+    /// that ends without a status (`Ended::Disconnected`) normally means that the connection was lost, which `is_alive` tells.
     ///
     /// `timeout` bounds the wait for the command's output. The engine bounds the other waits of the call on their own (opening the channel,
     /// handing a request to the connection), so on a connection that has stopped answering the call can outlast a short `timeout`; it

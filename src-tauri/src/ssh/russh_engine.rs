@@ -953,7 +953,7 @@ impl Session for RusshSession {
 ///
 /// `timeout` runs from the start of the call and bounds the wait for the command's output. The other waits have bounds of their own: the
 /// channel is given `CHANNEL_SETUP_LIMIT` to open however short `timeout` is, so on a connection that does not answer a call can last that
-/// long before it reports anything, and the requests that start and end the command are given `SEND_LIMIT` each.
+/// long before it reports anything, and the requests that start the command, end its input and close the channel are given `SEND_LIMIT` each.
 ///
 /// A command that has exited can still end as `TimedOut`, with the status it reported: a background job it started may hold its output,
 /// and the channel stays open for as long as that lasts.
@@ -972,6 +972,9 @@ async fn exec_on(destination: &Established, command: &str, timeout: Duration, ou
         }
         Err(error) => return Err(error),
     }
+    // The command's standard input is empty, as with `ssh host command < /dev/null`: one that reads it sees the end at once instead of
+    // waiting for the timeout. On a connection that does not take the request in time the command reads on, and the timeout ends it.
+    let _ = sent(channel.eof()).await;
     let mut result = ExecResult { ended: Ended::Disconnected, exit_code: None, signal: None, stdout: Vec::new(), stderr: Vec::new(), truncated: false };
     loop {
         let message = match tokio::time::timeout_at(deadline, channel.wait()).await {

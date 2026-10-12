@@ -38,6 +38,20 @@ fn a_command_has_no_pty_and_its_output_is_not_reshaped() {
     assert!(text.ends_with("a\r\nb\r\n"), "line endings are kept as the command wrote them: {text:?}");
 }
 
+/// The command's standard input is empty, as `ssh host command < /dev/null` gives it: a command that reads it sees the end at once
+/// instead of waiting until the timeout.
+#[test]
+fn a_command_that_reads_its_input_sees_the_end_at_once() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[]);
+    let session = open_session(&engine(), &server);
+
+    let started = Instant::now();
+    let result = session.exec("cat; read line; echo after:$?", Duration::from_secs(20), MIB).unwrap();
+    assert_eq!((result.ended, result.exit_code, result.stdout.as_slice()), (Ended::Exited, Some(0), b"after:1\n".as_slice()));
+    assert!(started.elapsed() < Duration::from_secs(5), "the command waited for input: {:?}", started.elapsed());
+}
+
 /// Review focus: a command that ends without an exit status must not look like a success.
 #[test]
 fn a_command_killed_by_a_signal_has_no_exit_code_and_names_the_signal() {
