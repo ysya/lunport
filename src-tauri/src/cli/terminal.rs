@@ -230,37 +230,56 @@ pub struct StdinTermios;
 #[cfg(unix)]
 impl TermiosApi for StdinTermios {
     fn get(&self) -> io::Result<libc::termios> {
-        // SAFETY: `termios` is plain data that tcgetattr fills in completely on success.
-        unsafe {
-            let mut termios: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut termios) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(termios)
-        }
+        read_attributes(libc::STDIN_FILENO)
     }
 
     fn set(&self, termios: &libc::termios, discard_input: bool) -> io::Result<()> {
-        // Not `TCSAFLUSH`: it first waits until the terminal has taken all the output written to it, and a terminal that does not take it
-        // (a frozen window) would keep a question from being asked, or the watchdog from putting the terminal back and ending the
-        // program. What was typed is thrown away at once (`tcflush`), and the attributes are set at once.
-        // SAFETY: a valid descriptor; `tcflush` only discards what the terminal holds.
-        if discard_input && unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a valid termios for a valid descriptor.
-        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, termios) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        write_attributes(libc::STDIN_FILENO, termios, discard_input)
     }
 
     fn size(&self) -> Option<(u16, u16)> {
-        // SAFETY: TIOCGWINSZ fills a winsize.
-        unsafe {
-            let mut size: libc::winsize = std::mem::zeroed();
-            (libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut size) == 0 && size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
+        read_size(libc::STDIN_FILENO)
+    }
+}
+
+/// The attributes of the terminal on `descriptor`.
+#[cfg(unix)]
+pub(super) fn read_attributes(descriptor: std::os::fd::RawFd) -> io::Result<libc::termios> {
+    // SAFETY: `termios` is plain data that tcgetattr fills in completely on success.
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(descriptor, &mut termios) != 0 {
+            return Err(io::Error::last_os_error());
         }
+        Ok(termios)
+    }
+}
+
+/// Sets the attributes of the terminal on `descriptor`, at once; with `discard_input`, what was typed and not read yet is thrown away
+/// first. Not with `TCSAFLUSH`: it first waits until the terminal has taken all the output written to it, and a terminal that does not
+/// take it (a frozen window) would keep a question from being asked, or the watchdog from putting the terminal back and ending the
+/// program. What was typed is thrown away at once (`tcflush`), when the terminal can: one that hung up may not, and its attributes are
+/// set all the same (the end of the program must not stop at that).
+#[cfg(unix)]
+pub(super) fn write_attributes(descriptor: std::os::fd::RawFd, termios: &libc::termios, discard_input: bool) -> io::Result<()> {
+    if discard_input {
+        // SAFETY: a valid descriptor; `tcflush` only discards what the terminal holds. Its error is not one to stop at (above).
+        unsafe { libc::tcflush(descriptor, libc::TCIFLUSH) };
+    }
+    // SAFETY: a valid termios for a valid descriptor.
+    if unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, termios) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The columns and rows of the terminal on `descriptor`; `None` when they cannot be read.
+#[cfg(unix)]
+pub(super) fn read_size(descriptor: std::os::fd::RawFd) -> Option<(u16, u16)> {
+    // SAFETY: TIOCGWINSZ fills a winsize.
+    unsafe {
+        let mut size: libc::winsize = std::mem::zeroed();
+        (libc::ioctl(descriptor, libc::TIOCGWINSZ, &mut size) == 0 && size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
     }
 }
 

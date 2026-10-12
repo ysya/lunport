@@ -821,7 +821,7 @@ mod tests {
 
     use super::*;
     use crate::cli::terminal::fake::{describe, FakeTermios};
-    use crate::cli::terminal::{attributes, Mode, TermiosApi};
+    use crate::cli::terminal::{self, attributes, Mode, TermiosApi};
     use crate::session::broker::Broker;
     use crate::session::connect::HostKeyConfirmer;
     use crate::session::directory::HostDirectory;
@@ -1709,14 +1709,12 @@ mod tests {
         drop(full);
     }
 
-    /// The real terminal's keys: a closed window is seen as hung up (a pty whose other end was closed), and a descriptor left non-blocking
-    /// is waited on until a key arrives.
-    #[test]
-    fn the_terminal_says_when_it_hung_up_and_is_waited_on_until_a_key_arrives() {
+    /// A pty: its controller (the terminal emulator's end, where keys are typed) and its device (the program's terminal).
+    fn pty() -> (std::fs::File, std::fs::File) {
         use std::os::fd::FromRawFd;
         // `openpty` does not open its descriptors close-on-exec: while they are opened and marked, no other test may start a process,
         // which would keep the controller open (and the terminal from hanging up) for as long as it runs.
-        let (controller, device) = crate::process::without_spawns(|| {
+        crate::process::without_spawns(|| {
             let (mut controller, mut device): (libc::c_int, libc::c_int) = (-1, -1);
             // SAFETY: openpty fills in the two descriptors; the name, attributes and size are optional.
             assert_eq!(unsafe { libc::openpty(&mut controller, &mut device, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) }, 0);
@@ -1726,7 +1724,101 @@ mod tests {
             }
             // SAFETY: both descriptors were just opened, and are owned here.
             unsafe { (std::fs::File::from_raw_fd(controller), std::fs::File::from_raw_fd(device)) }
+        })
+    }
+
+    /// What a terminal holds for whoever reads it next (the shell, after the program): read with line editing off, as a shell's line
+    /// editor reads, without waiting. A partial line becomes readable then.
+    fn left_in(device: &std::fs::File) -> Vec<u8> {
+        let descriptor = device.as_raw_fd();
+        let mut raw = terminal::read_attributes(descriptor).unwrap();
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        raw.c_cc[libc::VMIN] = 0;
+        raw.c_cc[libc::VTIME] = 0;
+        terminal::write_attributes(descriptor, &raw, false).unwrap();
+        let mut buf = [0u8; 64];
+        let count = (&*device).read(&mut buf).unwrap_or(0);
+        buf[..count].to_vec()
+    }
+
+    /// What was typed at a question and not sent (`hunt`: a part of a password, no Enter yet) was meant for SSHelter. When the session
+    /// ends under the question (here the broker ends it, as when the question's deadline passes), the terminal is put back with what it
+    /// holds thrown away, as readpassphrase does: the shell that gets the terminal next would read it, show it on its line and keep it in
+    /// its history (measured with bash 5 and zsh 5.9). The real terminal calls, on a pty.
+    #[test]
+    fn what_was_typed_at_a_question_does_not_reach_the_shell_when_the_session_ends_under_it() {
+        use crate::session::protocol::{kinds, Question, QuestionKind};
+        let (mut controller, device) = pty();
+        let descriptor = device.as_raw_fd();
+        let (ours, mut broker) = UnixStream::pair().unwrap();
+        let (inputs, queue) = queue();
+        let run = std::thread::spawn(move || {
+            let mut tty = Tty::new(Arc::new(DeviceTermios(descriptor))).unwrap();
+            run(ours, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(Shared::default()), Box::new(Shared::default()))
         });
+        for expected in ["Hello", "OpenShell"] {
+            assert!(format!("{:?}", next_message(&mut broker)).starts_with(expected));
+        }
+        let question = Question { question_id: "q1".into(), kind: QuestionKind::Password, text: "deploy@web's password: ".into(), echo: false, deadline_ms: Some(60_000) };
+        write_control(&mut broker, &ServerMessage::Question(question)).unwrap();
+        eventually("the question's mode, echo off", 10, || terminal::read_attributes(descriptor).unwrap().c_lflag & libc::ECHO == 0);
+        controller.write_all(b"hunt").unwrap();
+        let abandoned = Event::Error { kind: kinds::AUTH.into(), text: "Authentication for web was abandoned (the password prompt timed out).".into() };
+        write_control(&mut broker, &ServerMessage::Event(abandoned)).unwrap();
+        write_control(&mut broker, &ServerMessage::Exited { code: None, signal: None }).unwrap();
+        eventually("the run to end", 10, || run.is_finished());
+        assert_eq!(run.join().unwrap(), 255);
+        assert_eq!(String::from_utf8_lossy(&left_in(&device)), "", "what was typed for the question is gone");
+    }
+
+    /// A terminal that went away (its window closed) at a question: setting it, the flush of what it holds included, fails. The end does
+    /// not stop at that: the program ends with its status all the same.
+    #[test]
+    fn an_end_at_a_question_on_a_terminal_that_went_away_still_ends_with_its_status() {
+        struct WentAway(Arc<FakeTermios>, AtomicBool);
+        impl TermiosApi for WentAway {
+            fn get(&self) -> std::io::Result<libc::termios> {
+                self.0.get()
+            }
+            fn set(&self, termios: &libc::termios, discard_input: bool) -> std::io::Result<()> {
+                if self.1.load(Ordering::SeqCst) {
+                    return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                }
+                self.0.set(termios, discard_input)
+            }
+            fn size(&self) -> Option<(u16, u16)> {
+                None
+            }
+        }
+        use crate::session::protocol::{Question, QuestionKind};
+        let fake = FakeTermios::new();
+        let terminal = Arc::new(WentAway(Arc::clone(&fake), AtomicBool::new(false)));
+        let (ours, mut broker) = UnixStream::pair().unwrap();
+        let (inputs, queue) = queue();
+        let run = {
+            let (terminal, inputs) = (Arc::clone(&terminal), inputs.clone());
+            std::thread::spawn(move || {
+                let mut tty = Tty::new(terminal).unwrap();
+                run(ours, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(Shared::default()), Box::new(Shared::default()))
+            })
+        };
+        for _ in ["Hello", "OpenShell"] {
+            next_message(&mut broker);
+        }
+        let question = Question { question_id: "q1".into(), kind: QuestionKind::Password, text: "pw: ".into(), echo: false, deadline_ms: Some(60_000) };
+        write_control(&mut broker, &ServerMessage::Question(question)).unwrap();
+        eventually("the question's mode", 10, || fake.now().c_lflag & libc::ECHO == 0);
+        terminal.1.store(true, Ordering::SeqCst);
+        inputs.send(Input::Stop(libc::SIGHUP)).unwrap();
+        eventually("the run to end", 10, || run.is_finished());
+        assert_eq!(run.join().unwrap(), 129);
+    }
+
+    /// The real terminal's keys: a closed window is seen as hung up (a pty whose other end was closed), and a descriptor left non-blocking
+    /// is waited on until a key arrives.
+    #[test]
+    fn the_terminal_says_when_it_hung_up_and_is_waited_on_until_a_key_arrives() {
+        let (controller, device) = pty();
         let mut raw_mode = Tty::new(Arc::new(DeviceTermios(device.as_raw_fd()))).unwrap();
         raw_mode.set_mode(Mode::Raw, false).unwrap();
         let descriptor = device.as_raw_fd();
@@ -1752,29 +1844,18 @@ mod tests {
         eventually("the closed window to be seen", 5, || keys.hung_up());
     }
 
-    /// A `TermiosApi` on a pty's device descriptor.
+    /// A pty's device as the program's terminal, through the same calls as the terminal on standard input.
     struct DeviceTermios(RawFd);
 
     impl TermiosApi for DeviceTermios {
         fn get(&self) -> std::io::Result<libc::termios> {
-            // SAFETY: plain data that tcgetattr fills in.
-            unsafe {
-                let mut termios: libc::termios = std::mem::zeroed();
-                if libc::tcgetattr(self.0, &mut termios) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(termios)
-            }
+            terminal::read_attributes(self.0)
         }
-        fn set(&self, termios: &libc::termios, _: bool) -> std::io::Result<()> {
-            // SAFETY: a valid termios for a valid descriptor.
-            if unsafe { libc::tcsetattr(self.0, libc::TCSANOW, termios) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
+        fn set(&self, termios: &libc::termios, discard_input: bool) -> std::io::Result<()> {
+            terminal::write_attributes(self.0, termios, discard_input)
         }
         fn size(&self) -> Option<(u16, u16)> {
-            None
+            terminal::read_size(self.0)
         }
     }
 
