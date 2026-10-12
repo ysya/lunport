@@ -422,6 +422,8 @@ fn sweep_directory(dir: &Path) {
     };
     let directory_fate = match std::fs::remove_dir_all(dir) {
         Ok(()) => "directory removed".to_string(),
+        // The loser of two sweeps that run at the same time finds the directory gone: that is the result it wanted, not an error.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "directory already removed".to_string(),
         Err(error) => format!("directory not removed: {error}"),
     };
     eprintln!("swept {}: its test process (pid {owner}) is gone; {sshd_fate}; {directory_fate}", dir.display());
