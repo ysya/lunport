@@ -5,13 +5,15 @@
 //! for as long as a shell does not take what was typed), holds up its own writer and nothing else: keys reach the broker while output
 //! waits for the terminal, and a signal is handled at once.
 //!
-//! What waits for the terminal is bounded: a frame from the broker counts against a budget until the terminal has taken it, and the
-//! thread that reads the frames waits while the budget is spent; the broker, and SSH's window behind it, then push back on the remote,
-//! as OpenSSH's window does. A size that waits for the broker gives way to a newer one.
+//! Nothing piles up without a bound. A frame from the broker counts against a budget until the terminal has taken it, and the thread
+//! that reads the frames waits while the budget is spent: the broker, and SSH's window behind it, then push back on the remote, as
+//! OpenSSH's window does. What was typed counts against another budget until the broker has taken it, and the keys stay in the
+//! terminal meanwhile. A size that waits for the broker gives way to a newer one. And a watchdog ends the program when its loop does
+//! not (`Watchdog`).
 
 use std::collections::VecDeque;
-use std::io::{Read, Write};
-use std::os::fd::AsFd;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -21,15 +23,23 @@ use serde::Serialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::client::{Action, Client, Input};
-use super::terminal::Tty;
+use super::terminal::{Restorer, Tty};
 use crate::session::protocol::{decode, read_frame, write_control, write_data, write_frame, ClientMessage, Frame, HostQuery, ServerMessage, CONTROL};
 
 /// How much of the broker's output may be on its way to the terminal at a time (read from the broker, not written to the terminal yet).
 const OUTPUT_IN_FLIGHT: usize = 256 * 1024;
+/// How much of what was typed may be on its way to the broker at a time.
+const KEYS_IN_FLIGHT: usize = 64 * 1024;
 /// How long a change of the terminal's mode waits for what was written before it to reach the terminal.
 const MODE_WAIT: Duration = Duration::from_secs(1);
 /// How long the end waits, in all, for the last output, what the CLI says at the end, and `close` to be written.
 const END_WAIT: Duration = Duration::from_millis(1500);
+/// How long the watchdog gives the loop to end the program after a signal that ends it, or after the terminal went away.
+pub const STOP_GRACE: Duration = Duration::from_secs(2);
+/// How long the watchdog waits for a change of the terminal in progress before it puts the terminal back all the same.
+const WATCHDOG_TERMINAL_WAIT: Duration = Duration::from_millis(200);
+/// How often the keys thread looks whether the terminal went away while it waits for the broker to take what was typed.
+const HANGUP_CHECK: Duration = Duration::from_millis(250);
 
 /// Runs one session over `stream`, connected to the broker, until it ends; returns the program's exit code. `inputs` brings the keys,
 /// resizes and signals (`stdin_thread`, `signal_thread`); the broker's frames join it from a thread started here. What is written to
@@ -68,30 +78,34 @@ struct Loop<'a> {
 
 impl Loop<'_> {
     /// Does what the client said, in order; `Some(code)` when it is time to exit. Nothing here waits on the broker, and the terminal is
-    /// waited for only before its mode changes and at the end, each time for a bounded time. `credit` is what the frame from the broker
-    /// that led to `actions` counts against the output's budget: it is given back once what the actions showed has been written to the
-    /// terminal, or at once if they showed nothing. A broker that no longer takes what is written is a broker that went away: its end of
-    /// the connection arrives as `Input::Closed` from the reader.
+    /// waited for only before its mode changes and at the end, each time for a bounded time. `credit` is what the input that led to
+    /// `actions` counts against its budget: it is given back once what the input brought has been written where it goes (the broker's
+    /// output to the terminal, what was typed to the broker), or at once if it went nowhere. A broker that no longer takes what is
+    /// written is a broker that went away: its end of the connection arrives as `Input::Closed` from the reader.
     fn perform(&mut self, actions: Vec<Action>, credit: Option<Credit>) -> Option<i32> {
         // The end (its last action exits) waits for its writes for END_WAIT in all.
         let end = matches!(actions.last(), Some(Action::Exit(_))).then(|| Instant::now() + END_WAIT);
         let wait = |most: Duration| end.map_or(most, |end| end.saturating_duration_since(Instant::now()).min(most));
-        let mut shown = false;
+        let (mut shown, mut posted) = (false, false);
         for action in actions {
             match action {
                 Action::Send(ClientMessage::WindowChange { cols, rows }) => {
                     self.broker.size(cols, rows);
+                    posted = true;
                 }
                 Action::Send(message) => {
                     self.broker.post(Post::Message(message));
+                    posted = true;
                 }
                 Action::Answer { question_id, value } => {
                     // The password stays in `value`, which is wiped when the writer drops it, after writing it; `write_answer` wipes the rest.
                     self.broker.post(Post::Answer { question_id, value });
+                    posted = true;
                 }
                 Action::SendData(bytes) => {
                     // Keystrokes can be a password too (typed at a prompt the shell shows): wiped when the writer drops them.
                     self.broker.post(Post::Data(Zeroizing::new(bytes)));
+                    posted = true;
                 }
                 Action::Stdout(bytes) => {
                     self.terminal.show(Show::Output(bytes));
@@ -122,25 +136,37 @@ impl Loop<'_> {
                 }
             }
         }
-        if let Some(credit) = credit.filter(|_| shown) {
-            self.terminal.show(Show::Release(credit));
+        match credit {
+            Some(credit) if credit.toward() == Toward::Terminal && shown => self.terminal.show(Show::Release(credit)),
+            Some(credit) if credit.toward() == Toward::Broker && posted => self.broker.post(Post::Release(credit)),
+            _ => {}
         }
         None
     }
 }
 
-/// The broker's output on its way to the terminal: counted when it is read, given back when it has been written to the terminal, or
-/// dropped (`Credit`). The thread that reads it waits while the budget is spent, so that what the terminal cannot take yet stays in the
-/// broker, and in SSH's window behind it.
+/// Where what a budget counts is written out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Toward {
+    /// The broker's output, to the terminal.
+    Terminal,
+    /// What was typed, to the broker.
+    Broker,
+}
+
+/// Bytes of one kind on their way through the program: counted when they are read, given back when they have been written where they
+/// go, or dropped (`Credit`). The thread that reads them waits while the budget is spent, so that what cannot be written yet stays where
+/// it came from.
 struct Budget {
     limit: usize,
+    toward: Toward,
     used: Mutex<usize>,
     freed: Condvar,
 }
 
 impl Budget {
-    fn new(limit: usize) -> Arc<Budget> {
-        Arc::new(Budget { limit, used: Mutex::new(0), freed: Condvar::new() })
+    fn new(limit: usize, toward: Toward) -> Arc<Budget> {
+        Arc::new(Budget { limit, toward, used: Mutex::new(0), freed: Condvar::new() })
     }
 
     fn used(&self) -> MutexGuard<'_, usize> {
@@ -157,12 +183,42 @@ impl Budget {
         *used += bytes;
         Credit { budget: Arc::clone(self), bytes }
     }
+
+    /// Waits until the budget is not spent. `still_wanted` is asked every `every` meanwhile; `false` from it stops the wait, and is
+    /// returned.
+    fn wait_room(&self, every: Duration, mut still_wanted: impl FnMut() -> bool) -> bool {
+        let mut used = self.used();
+        while *used >= self.limit {
+            let (now, waited) = self.freed.wait_timeout(used, every).unwrap_or_else(PoisonError::into_inner);
+            used = now;
+            if waited.timed_out() && *used >= self.limit {
+                drop(used);
+                if !still_wanted() {
+                    return false;
+                }
+                used = self.used();
+            }
+        }
+        true
+    }
+
+    /// Counts `bytes` without waiting (the reader waited for room before it read them).
+    fn charge(self: &Arc<Self>, bytes: usize) -> Credit {
+        *self.used() += bytes;
+        Credit { budget: Arc::clone(self), bytes }
+    }
 }
 
 /// Bytes counted against a budget until this is dropped.
 struct Credit {
     budget: Arc<Budget>,
     bytes: usize,
+}
+
+impl Credit {
+    fn toward(&self) -> Toward {
+        self.budget.toward
+    }
 }
 
 impl Drop for Credit {
@@ -185,6 +241,7 @@ pub struct Queued {
 pub struct Inputs {
     sender: Sender<Queued>,
     output: Arc<Budget>,
+    keys: Arc<Budget>,
 }
 
 /// The loop is gone: nothing takes inputs any more.
@@ -207,6 +264,12 @@ impl Inputs {
         let credit = self.output.take(bytes);
         self.queue(input, Some(credit))
     }
+
+    /// What was typed. The keys thread waited for room in the budget before it read it.
+    fn typed(&self, bytes: Zeroizing<Vec<u8>>) -> Result<(), LoopGone> {
+        let credit = self.keys.charge(bytes.len());
+        self.queue(Input::Stdin(bytes), Some(credit))
+    }
 }
 
 /// The loop's end of the queue: what the threads put in it, and what the loop took out to look at and put back in front.
@@ -218,7 +281,7 @@ pub struct Queue {
 /// A new queue: its `Inputs` for the threads that fill it, its `Queue` for the loop.
 pub fn queue() -> (Inputs, Queue) {
     let (sender, receiver) = std::sync::mpsc::channel();
-    let inputs = Inputs { sender, output: Budget::new(OUTPUT_IN_FLIGHT) };
+    let inputs = Inputs { sender, output: Budget::new(OUTPUT_IN_FLIGHT, Toward::Terminal), keys: Budget::new(KEYS_IN_FLIGHT, Toward::Broker) };
     (inputs, Queue { receiver, kept: VecDeque::new() })
 }
 
@@ -305,6 +368,8 @@ enum Post {
     Data(Zeroizing<Vec<u8>>),
     /// The terminal's size: the latest one given (`BrokerWriter::size`), as it is when this is reached.
     Size,
+    /// Given back once everything given before it has been written.
+    Release(Credit),
     /// Told once everything given before it has been written.
     Mark(SyncSender<()>),
 }
@@ -327,6 +392,10 @@ impl BrokerWriter {
             let mut gone = false;
             for job in given {
                 let written = match job {
+                    Post::Release(credit) => {
+                        drop(credit);
+                        continue;
+                    }
                     Post::Mark(reached) => {
                         let _ = reached.send(());
                         continue;
@@ -419,44 +488,129 @@ fn write_answer(writer: &mut impl Write, question_id: &str, value: &str) -> std:
     write_frame(writer, CONTROL, &answer_json(question_id, value)?)
 }
 
-/// Reads the person's keys into the queue until standard input ends (or the program does).
-pub fn stdin_thread(inputs: Inputs) {
+/// Where the keys come from: the terminal on standard input (`TerminalKeys`), or a fake one in tests.
+trait Keys: Read {
+    /// Waits until something can be read. Called when a read found nothing on a terminal that does not wait for keys (another program
+    /// left the descriptor non-blocking: the descriptor is shared, so the CLI does not change it back).
+    fn wait_readable(&mut self) -> io::Result<()>;
+    /// Whether the terminal went away (its window was closed), looked at without waiting.
+    fn hung_up(&mut self) -> bool;
+}
+
+/// The terminal on standard input, read through `source`; `descriptor` is where `source` reads.
+struct TerminalKeys<R> {
+    source: R,
+    descriptor: RawFd,
+}
+
+impl<R: Read> Read for TerminalKeys<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.source.read(buf)
+    }
+}
+
+impl<R: Read> Keys for TerminalKeys<R> {
+    fn wait_readable(&mut self) -> io::Result<()> {
+        poll_input(self.descriptor, -1).map(|_| ())
+    }
+
+    fn hung_up(&mut self) -> bool {
+        poll_input(self.descriptor, 0).is_ok_and(|events| events & libc::POLLHUP != 0)
+    }
+}
+
+/// `poll` for input on `descriptor`, for up to `timeout_ms` milliseconds (-1: as long as it takes); the events it saw (none: 0).
+fn poll_input(descriptor: RawFd, timeout_ms: i32) -> io::Result<libc::c_short> {
+    let mut entry = libc::pollfd { fd: descriptor, events: libc::POLLIN, revents: 0 };
+    loop {
+        // SAFETY: one valid `pollfd`, and its count.
+        let ready = unsafe { libc::poll(&mut entry, 1, timeout_ms) };
+        if ready >= 0 {
+            return Ok(if ready == 0 { 0 } else { entry.revents });
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// Reads the person's keys into the queue until the terminal goes away, or the program ends. A terminal that went away ends the session
+/// as SIGHUP does (`Input::Stop`), and `hung_up` is called then (the program arms its watchdog).
+pub fn stdin_thread(inputs: Inputs, hung_up: impl FnOnce() + Send + 'static) {
     // Not through `std::io::stdin()`: its buffer keeps a copy of what is read through it, for as long as the program runs, unless the
     // read is at least as large as that buffer (8 KiB; measured: a read of 8191 bytes leaves what was typed in it, one of 8192 does
     // not), and what is typed can be a password. A duplicate of the descriptor is read directly, with no buffer of std's in between.
     match std::io::stdin().as_fd().try_clone_to_owned() {
-        Ok(descriptor) => keys_thread(std::fs::File::from(descriptor), inputs),
-        Err(_) => keys_thread(std::io::stdin(), inputs),
+        Ok(descriptor) => {
+            let raw = descriptor.as_raw_fd();
+            keys_thread(TerminalKeys { source: std::fs::File::from(descriptor), descriptor: raw }, inputs, hung_up);
+        }
+        Err(_) => keys_thread(TerminalKeys { source: std::io::stdin(), descriptor: libc::STDIN_FILENO }, inputs, hung_up),
     }
 }
 
-/// `read_keys` on a thread of its own.
-fn keys_thread(source: impl Read + Send + 'static, inputs: Inputs) {
-    spawn_worker("sshelter-keys", inputs, move |inputs| read_keys(source, &inputs));
+/// `read_keys` on a thread of its own; a terminal that went away is told to the queue as SIGHUP would be.
+fn keys_thread(mut source: impl Keys + Send + 'static, inputs: Inputs, hung_up: impl FnOnce() + Send + 'static) {
+    spawn_worker("sshelter-keys", inputs, move |inputs| {
+        if read_keys(&mut source, &inputs) == KeysEnd::HungUp && inputs.send(Input::Stop(libc::SIGHUP)).is_ok() {
+            hung_up();
+        }
+    });
 }
 
-/// Queues what `source` (the terminal) delivers, as typed text; a read of nothing is the end of input (Ctrl-D), and a failed one is
-/// the end of the terminal. Returns when the terminal failed or the loop is gone.
-fn read_keys(mut source: impl Read, inputs: &Inputs) {
+/// Why `read_keys` returned.
+#[derive(Debug, PartialEq, Eq)]
+enum KeysEnd {
+    /// The loop is gone.
+    LoopGone,
+    /// The terminal failed (the end of input was told).
+    Failed,
+    /// The terminal went away.
+    HungUp,
+}
+
+/// Queues what `source` (the terminal) delivers, as typed text. A read of nothing is the end of input (Ctrl-D at a question); a second
+/// one in a row, or one on a terminal that says it hung up, is the terminal gone (a closed window reads as nothing on macOS, again and
+/// again, and as EIO on Linux), and so is a hang-up seen while the keys wait for the broker. A failed read is the end of the terminal.
+fn read_keys(source: &mut impl Keys, inputs: &Inputs) -> KeysEnd {
     let mut buf = [0u8; 4096];
+    let mut nothing_before = false;
     loop {
-        let input = match source.read(&mut buf) {
-            // A question ends on Ctrl-D; the next question reads again.
-            Ok(0) => Input::StdinEnd,
+        // While what was typed before waits for the broker, the keys stay in the terminal; it is looked at for a hang-up meanwhile.
+        if !inputs.keys.wait_room(HANGUP_CHECK, || !source.hung_up()) {
+            return KeysEnd::HungUp;
+        }
+        match source.read(&mut buf) {
+            Ok(0) if nothing_before || source.hung_up() => return KeysEnd::HungUp,
+            Ok(0) => {
+                // A question ends on Ctrl-D; the next question reads again.
+                nothing_before = true;
+                if inputs.send(Input::StdinEnd).is_err() {
+                    return KeysEnd::LoopGone;
+                }
+            }
             Ok(count) => {
-                let typed = Input::Stdin(Zeroizing::new(buf[..count].to_vec()));
+                nothing_before = false;
+                let typed = Zeroizing::new(buf[..count].to_vec());
                 // What was typed may be a password: the copy that stays on this stack is wiped as well.
                 buf[..count].zeroize();
-                typed
+                if inputs.typed(typed).is_err() {
+                    return KeysEnd::LoopGone;
+                }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if source.wait_readable().is_err() {
+                    let _ = inputs.send(Input::StdinEnd);
+                    return KeysEnd::Failed;
+                }
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => return KeysEnd::HungUp,
             Err(_) => {
                 let _ = inputs.send(Input::StdinEnd);
-                return;
+                return KeysEnd::Failed;
             }
-        };
-        if inputs.send(input).is_err() {
-            return;
         }
     }
 }
@@ -500,8 +654,8 @@ fn input_for(signal: i32) -> Input {
 /// terminal or a request to stop (SIGHUP, SIGTERM). A question keeps `ISIG` on (Ctrl-C cancels it), so Ctrl-backslash at a hidden
 /// password would deliver SIGQUIT too, and its default action ends the program with echo still off: neither the panic hook nor `Drop`
 /// run on a signal. With handlers in place none of them ends the program on its own: the client decides, and the terminal is put back
-/// first.
-pub fn signal_thread(inputs: Inputs, size: impl Fn() -> Option<(u16, u16)> + Send + 'static) -> std::io::Result<()> {
+/// first. A signal that ends the program arms `watchdog`, which ends it if the loop does not.
+pub fn signal_thread(inputs: Inputs, watchdog: Watchdog, size: impl Fn() -> Option<(u16, u16)> + Send + 'static) -> std::io::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     // The handlers are installed here, before the thread runs: a signal that comes right after this returns finds them in place.
@@ -515,19 +669,25 @@ pub fn signal_thread(inputs: Inputs, size: impl Fn() -> Option<(u16, u16)> + Sen
         ))
     })?;
     spawn_worker("sshelter-signals", inputs, move |inputs| {
-        runtime.block_on(async move {
+        let sized = |inputs: &Inputs| match size() {
+            Some((cols, rows)) => inputs.send(Input::Resize(cols, rows)),
+            None => Ok(()),
+        };
+        let ends = |inputs: &Inputs, signal: i32| {
+            inputs.send(input_for(signal))?;
+            watchdog.arm(128 + signal);
+            Ok(())
+        };
+        runtime.block_on(async {
             loop {
-                let input = tokio::select! {
-                    _ = resize.recv() => match size() {
-                        Some((cols, rows)) => Input::Resize(cols, rows),
-                        None => continue,
-                    },
-                    _ = interrupt.recv() => input_for(libc::SIGINT),
-                    _ = terminate.recv() => input_for(libc::SIGTERM),
-                    _ = hangup.recv() => input_for(libc::SIGHUP),
-                    _ = quit.recv() => input_for(libc::SIGQUIT),
+                let told: Result<(), LoopGone> = tokio::select! {
+                    _ = resize.recv() => sized(&inputs),
+                    _ = interrupt.recv() => inputs.send(input_for(libc::SIGINT)),
+                    _ = terminate.recv() => ends(&inputs, libc::SIGTERM),
+                    _ = hangup.recv() => ends(&inputs, libc::SIGHUP),
+                    _ = quit.recv() => ends(&inputs, libc::SIGQUIT),
                 };
-                if inputs.send(input).is_err() {
+                if told.is_err() {
                     return;
                 }
             }
@@ -536,9 +696,89 @@ pub fn signal_thread(inputs: Inputs, size: impl Fn() -> Option<(u16, u16)> + Sen
     Ok(())
 }
 
+/// Ends the program when its loop does not. Once armed (a signal that ends the program, or the terminal gone), it gives the loop a
+/// grace time to end the program; after that it puts the terminal back and ends the program itself, with the status the loop would have
+/// given (128 + the signal's number). The loop waits on nothing for long, but a terminal that blocks a change of its mode, or a mistake,
+/// must not leave a program that ignores SIGTERM with the terminal raw.
+#[derive(Clone)]
+pub struct Watchdog {
+    alarm: Arc<Alarm>,
+    grace: Duration,
+}
+
+#[derive(Default)]
+struct Alarm {
+    state: Mutex<AlarmState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct AlarmState {
+    /// When to end the program, and with what status.
+    set: Option<(Instant, i32)>,
+    /// The run is over: the program exits on its own.
+    off: bool,
+}
+
+impl Watchdog {
+    /// Starts the thread that waits for the alarm: `terminal` is put back, and `exit` ends the program, `grace` after the alarm was set
+    /// (`arm`) unless the run is over by then (`stand_down`).
+    pub fn start(terminal: Restorer, grace: Duration, exit: impl FnOnce(i32) + Send + 'static) -> std::io::Result<Watchdog> {
+        let alarm = Arc::new(Alarm::default());
+        let watching = Arc::clone(&alarm);
+        std::thread::Builder::new().name("sshelter-watchdog".to_string()).spawn(move || {
+            if let Some(code) = watching.wait_for_its_time() {
+                // The terminal stays put back until the program has ended: the loop cannot set its mode again meanwhile.
+                let _held = terminal.hold_restored(WATCHDOG_TERMINAL_WAIT);
+                exit(code);
+            }
+        })?;
+        Ok(Watchdog { alarm, grace })
+    }
+
+    /// The program is to end with `code`; unless the run is over within the grace time, the watchdog ends it. Only the first alarm
+    /// counts.
+    pub fn arm(&self, code: i32) {
+        let mut state = self.alarm.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.set.is_none() {
+            state.set = Some((Instant::now() + self.grace, code));
+        }
+        drop(state);
+        self.alarm.changed.notify_all();
+    }
+
+    /// The run is over: the program exits on its own, and the watchdog has nothing more to do.
+    pub fn stand_down(&self) {
+        self.alarm.state.lock().unwrap_or_else(PoisonError::into_inner).off = true;
+        self.alarm.changed.notify_all();
+    }
+}
+
+impl Alarm {
+    /// Waits until the alarm's time has come (its status), or the run is over (`None`).
+    fn wait_for_its_time(&self) -> Option<i32> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if state.off {
+                return None;
+            }
+            state = match state.set {
+                None => self.changed.wait(state).unwrap_or_else(PoisonError::into_inner),
+                Some((at, code)) => {
+                    let now = Instant::now();
+                    if now >= at {
+                        return Some(code);
+                    }
+                    self.changed.wait_timeout(state, at - now).unwrap_or_else(PoisonError::into_inner).0
+                }
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -818,6 +1058,24 @@ mod tests {
         }
     }
 
+    /// What the signal thread of a test is given: a terminal of its own in `mode`, and a watchdog that records the status it would end the
+    /// program with.
+    struct SignalSetup {
+        termios: Arc<FakeTermios>,
+        tty: Tty,
+        watchdog: Watchdog,
+        exits: std::sync::mpsc::Receiver<i32>,
+    }
+
+    fn signal_setup(mode: Mode) -> SignalSetup {
+        let termios = FakeTermios::new();
+        let mut tty = Tty::new(termios.clone()).unwrap();
+        tty.set_mode(mode, false).unwrap();
+        let (exit, exits) = std::sync::mpsc::channel();
+        let watchdog = Watchdog::start(tty.restorer(), STOP_GRACE, move |code| exit.send(code).unwrap()).unwrap();
+        SignalSetup { termios, tty, watchdog, exits }
+    }
+
     /// The next input the queue holds, within ten seconds.
     fn next_input(queue: &Queue) -> Input {
         queue.receiver.recv_timeout(Duration::from_secs(10)).expect("an input within 10 s").input
@@ -833,8 +1091,9 @@ mod tests {
             rerun_alone(NAME);
             return;
         }
+        let setup = signal_setup(Mode::Raw);
         let (inputs, queue) = queue();
-        signal_thread(inputs, || Some((100, 30))).expect("the handlers are installed");
+        signal_thread(inputs, setup.watchdog.clone(), || Some((100, 30))).expect("the handlers are installed");
         let next = |signal: i32| {
             // SAFETY: `raise` only sends the signal to this thread, and every signal raised here has a handler by now.
             assert_eq!(unsafe { libc::raise(signal) }, 0);
@@ -842,14 +1101,50 @@ mod tests {
         };
         assert!(matches!(next(libc::SIGWINCH), Input::Resize(100, 30)));
         assert!(matches!(next(libc::SIGINT), Input::Interrupt));
+
+        // The signals that end the program arm the watchdog, which ends it (here: says it would) if the loop does not.
+        let armed = Instant::now();
         assert!(matches!(next(libc::SIGTERM), Input::Stop(libc::SIGTERM)));
         assert!(matches!(next(libc::SIGHUP), Input::Stop(libc::SIGHUP)));
         assert!(matches!(next(libc::SIGQUIT), Input::Stop(libc::SIGQUIT)));
+        assert_eq!(setup.exits.recv_timeout(Duration::from_secs(10)), Ok(128 + libc::SIGTERM), "the first one counts");
+        assert!(armed.elapsed() >= STOP_GRACE);
+        assert!(setup.termios.is_start(&setup.termios.now()), "the watchdog put the terminal back");
+
         // A panic on the signal thread (here: in the callback that reads the size) is told to the queue as well.
+        let other = signal_setup(Mode::Cooked);
         let (failing, told) = super::queue();
-        signal_thread(failing, || panic!("the size failed")).expect("a second set of handlers");
+        signal_thread(failing, other.watchdog.clone(), || panic!("the size failed")).expect("a second set of handlers");
         assert!(matches!(next(libc::SIGWINCH), Input::Resize(100, 30)));
         assert!(matches!(next_input(&told), Input::Failed));
+    }
+
+    /// The watchdog ends the program (here: says it would) a grace time after it was armed, with the terminal put back and what was typed
+    /// thrown away, unless the run was over by then.
+    #[test]
+    fn the_watchdog_ends_a_program_whose_loop_does_not_end_it() {
+        let setup = signal_setup(Mode::Raw);
+        let (exit, exits) = std::sync::mpsc::channel();
+        let watchdog = Watchdog::start(setup.tty.restorer(), Duration::from_millis(300), move |code| exit.send(code).unwrap()).unwrap();
+        let armed = Instant::now();
+        watchdog.arm(143);
+        watchdog.arm(129);
+        assert_eq!(exits.recv_timeout(Duration::from_secs(10)), Ok(143), "the first alarm counts");
+        assert!(armed.elapsed() >= Duration::from_millis(300));
+        let (last, discarded) = *setup.termios.sets.lock().unwrap().last().unwrap();
+        assert!(setup.termios.is_start(&last) && discarded, "put back, and what was typed thrown away");
+
+        let (exit, exits) = std::sync::mpsc::channel();
+        let watchdog = Watchdog::start(setup.tty.restorer(), Duration::from_millis(100), move |code| exit.send(code).unwrap()).unwrap();
+        watchdog.arm(143);
+        watchdog.stand_down();
+        assert!(exits.recv_timeout(Duration::from_millis(500)).is_err(), "the run was over: nothing to end");
+        let (exit, exits) = std::sync::mpsc::channel();
+        let watchdog = Watchdog::start(setup.tty.restorer(), Duration::from_millis(100), move |code| exit.send(code).unwrap()).unwrap();
+        watchdog.stand_down();
+        watchdog.arm(143);
+        assert!(exits.recv_timeout(Duration::from_millis(500)).is_err());
+        setup.watchdog.stand_down();
     }
 
     /// The keys thread read a line and queued it behind the question before the terminal was flushed for it: the flush cannot reach a
@@ -881,9 +1176,10 @@ mod tests {
         inputs.send(Input::Output(b"a".to_vec())).unwrap();
         inputs.send(Input::Stdin(Zeroizing::new(b"hunter2\n".to_vec()))).unwrap();
         inputs.send(Input::Resize(100, 30)).unwrap();
-        inputs.send(Input::Stdin(Zeroizing::new(b"more".to_vec()))).unwrap();
+        inputs.typed(Zeroizing::new(b"more".to_vec())).unwrap();
         inputs.send(Input::StdinEnd).unwrap();
         queue.forget_typed();
+        assert_eq!(*inputs.keys.used(), 0, "what the dropped keys counted is given back");
         inputs.send(Input::Stdin(Zeroizing::new(b"after".to_vec()))).unwrap();
         drop(inputs);
         let rest: Vec<Input> = std::iter::from_fn(|| queue.next().map(|queued| queued.input)).collect();
@@ -904,13 +1200,53 @@ mod tests {
         wiped_on_drop(&keys);
     }
 
-    /// A source of keys that is whatever the closure says each read is.
-    struct Keyboard<F>(F);
+    /// A source of keys whose reads are whatever the closure says; it can be told that the terminal hung up.
+    struct Keyboard<F> {
+        read: F,
+        hung_up: Arc<AtomicBool>,
+        waits: Arc<AtomicUsize>,
+    }
+
+    impl<F: FnMut(&mut [u8]) -> std::io::Result<usize>> Keyboard<F> {
+        fn new(read: F) -> Keyboard<F> {
+            Keyboard { read, hung_up: Arc::default(), waits: Arc::default() }
+        }
+    }
 
     impl<F: FnMut(&mut [u8]) -> std::io::Result<usize>> Read for Keyboard<F> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            (self.0)(buf)
+            (self.read)(buf)
         }
+    }
+
+    impl<F: FnMut(&mut [u8]) -> std::io::Result<usize>> Keys for Keyboard<F> {
+        fn wait_readable(&mut self) -> std::io::Result<()> {
+            self.waits.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn hung_up(&mut self) -> bool {
+            self.hung_up.load(Ordering::SeqCst)
+        }
+    }
+
+    /// A keyboard that plays `script`, one read at a time, then fails (the terminal went away).
+    fn scripted(script: Vec<std::io::Result<Vec<u8>>>) -> Keyboard<impl FnMut(&mut [u8]) -> std::io::Result<usize>> {
+        let mut script = VecDeque::from(script);
+        Keyboard::new(move |buf: &mut [u8]| match script.pop_front() {
+            Some(Ok(bytes)) => {
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+            Some(Err(error)) => Err(error),
+            None => Err(std::io::Error::other("the terminal went away")),
+        })
+    }
+
+    /// `work` on a thread of its own, which must end within `seconds`: a test of a loop that must stop fails instead of hanging.
+    fn ends_within<T: Send + 'static>(seconds: u64, what: &str, work: impl FnOnce() -> T + Send + 'static) -> T {
+        let thread = std::thread::spawn(work);
+        eventually(what, seconds, || thread.is_finished());
+        thread.join().unwrap()
     }
 
     /// Everything the queue holds now, in order.
@@ -921,33 +1257,107 @@ mod tests {
     #[test]
     fn the_keys_are_queued_as_typed_and_the_end_of_input_is_told_and_a_failing_terminal_ends_the_thread() {
         // One read at a time: what is typed, an interrupted read, the end of input (Ctrl-D: a read of 0 bytes), more, then a failure.
-        let mut script = std::collections::VecDeque::from([Ok(b"ls\r".to_vec()), Err(std::io::ErrorKind::Interrupted.into()), Ok(vec![]), Ok(b"x".to_vec())]);
-        let keyboard = Keyboard(move |buf: &mut [u8]| match script.pop_front() {
-            Some(Ok(bytes)) => {
-                buf[..bytes.len()].copy_from_slice(&bytes);
-                Ok(bytes.len())
-            }
-            Some(Err(error)) => Err(error),
-            None => Err(std::io::Error::other("the terminal went away")),
-        });
+        let mut keyboard = scripted(vec![Ok(b"ls\r".to_vec()), Err(std::io::ErrorKind::Interrupted.into()), Ok(vec![]), Ok(b"x".to_vec())]);
         let (inputs, queue) = queue();
-        read_keys(keyboard, &inputs);
+        assert_eq!(read_keys(&mut keyboard, &inputs), KeysEnd::Failed);
         let queued = queued(&queue);
         assert_eq!(format!("{queued:?}"), "[Stdin(<hidden>), StdinEnd, Stdin(<hidden>), StdinEnd]", "an interrupted read is read again; the failure is the end");
         assert!(matches!(&queued[0], Input::Stdin(bytes) if &bytes[..] == b"ls\r"));
         assert!(matches!(&queued[2], Input::Stdin(bytes) if &bytes[..] == b"x"));
     }
 
+    /// A terminal descriptor another program left non-blocking reads as "nothing yet" (EAGAIN) when nothing was typed: that is not the end
+    /// of input; the keys thread waits until there is something to read, and reads it.
+    #[test]
+    fn a_terminal_left_non_blocking_is_waited_for_not_taken_for_the_end_of_input() {
+        let mut keyboard = scripted(vec![Err(std::io::ErrorKind::WouldBlock.into()), Err(std::io::ErrorKind::WouldBlock.into()), Ok(b"ls\r".to_vec())]);
+        let waits = Arc::clone(&keyboard.waits);
+        let (inputs, queue) = queue();
+        assert_eq!(read_keys(&mut keyboard, &inputs), KeysEnd::Failed);
+        assert_eq!(waits.load(Ordering::SeqCst), 2, "waited for something to read, twice");
+        let queued = queued(&queue);
+        assert_eq!(format!("{queued:?}"), "[Stdin(<hidden>), StdinEnd]");
+        assert!(matches!(&queued[0], Input::Stdin(bytes) if &bytes[..] == b"ls\r"));
+    }
+
+    /// A closed window: on macOS the terminal reads as nothing, at once and for ever (measured), and on Linux as EIO. The keys thread
+    /// stops instead of telling the queue "the end of input" for ever: at the second read of nothing in a row, or at the first when the
+    /// terminal says it hung up, or at EIO.
+    #[test]
+    fn the_keys_thread_stops_when_the_terminal_hangs_up_instead_of_reading_nothing_for_ever() {
+        for says_so in [false, true] {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&reads);
+            let mut keyboard = Keyboard::new(move |_: &mut [u8]| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(0)
+            });
+            keyboard.hung_up.store(says_so, Ordering::SeqCst);
+            let (inputs, queue) = queue();
+            let end = ends_within(5, "the keys thread to stop", move || read_keys(&mut keyboard, &inputs));
+            assert_eq!(end, KeysEnd::HungUp);
+            let expected = if says_so { "[]" } else { "[StdinEnd]" };
+            assert_eq!(format!("{:?}", queued(&queue)), expected, "said hung up: {says_so}");
+            assert_eq!(reads.load(Ordering::SeqCst), if says_so { 1 } else { 2 });
+        }
+        let mut keyboard = scripted(vec![Ok(b"x".to_vec()), Err(std::io::Error::from_raw_os_error(libc::EIO))]);
+        let (inputs, queue) = queue();
+        assert_eq!(read_keys(&mut keyboard, &inputs), KeysEnd::HungUp);
+        assert_eq!(format!("{:?}", queued(&queue)), "[Stdin(<hidden>)]");
+    }
+
+    /// The terminal went away: the session ends as for SIGHUP (no SIGHUP may come: a terminal's session leader that does not pass it on),
+    /// and the program's watchdog is armed.
+    #[test]
+    fn a_terminal_that_went_away_ends_the_session_as_sighup_does() {
+        let keyboard = Keyboard::new(|_: &mut [u8]| Ok(0));
+        let (inputs, queue) = queue();
+        let (told, hung_up) = std::sync::mpsc::channel();
+        keys_thread(keyboard, inputs, move || told.send(()).unwrap());
+        assert!(hung_up.recv_timeout(Duration::from_secs(5)).is_ok(), "the watchdog is armed");
+        assert_eq!(format!("{:?}", queued(&queue)), "[StdinEnd, Stop(1)]");
+    }
+
+    /// While what was typed before waits for the broker (the budget is spent), nothing more is read: the keys stay in the terminal. The
+    /// terminal is still looked at meanwhile, and a hang-up ends the wait.
+    #[test]
+    fn the_keys_wait_in_the_terminal_while_the_broker_does_not_take_them_and_a_hang_up_still_ends_the_wait() {
+        let (inputs, queue) = queue();
+        let budget = Arc::clone(&inputs.keys);
+        let waiting = budget.charge(KEYS_IN_FLIGHT);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        let mut keyboard = Keyboard::new(move |buf: &mut [u8]| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            buf.fill(b'x');
+            Ok(buf.len())
+        });
+        let hung_up = Arc::clone(&keyboard.hung_up);
+        let thread = std::thread::spawn(move || read_keys(&mut keyboard, &inputs));
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(reads.load(Ordering::SeqCst), 0, "nothing is read while the budget is spent");
+        drop(waiting);
+        // What is read now stays in the queue (nobody takes it to the broker): it spends the budget again, and the reads stop.
+        eventually("the budget to be spent again", 5, || *budget.used() >= KEYS_IN_FLIGHT);
+        let reads_now = reads.load(Ordering::SeqCst);
+        assert_eq!(reads_now, KEYS_IN_FLIGHT / 4096, "read until the budget was spent, no more");
+        hung_up.store(true, Ordering::SeqCst);
+        eventually("the keys thread to stop", 5, || thread.is_finished());
+        assert_eq!(thread.join().unwrap(), KeysEnd::HungUp);
+        assert_eq!(reads.load(Ordering::SeqCst), reads_now, "nothing more was read");
+        drop(queue);
+    }
+
+    /// The loop is gone, the keyboard never stops: the thread has to be the one that stops (and the test fails, not hangs, if it does not).
     #[test]
     fn the_keys_thread_stops_when_the_loop_is_gone() {
         let (inputs, queue) = queue();
         drop(queue);
-        // A keyboard that never stops typing: the thread has to be the one that stops.
-        let keyboard = Keyboard(|buf: &mut [u8]| {
+        let mut keyboard = Keyboard::new(|buf: &mut [u8]| {
             buf[0] = b'x';
             Ok(1)
         });
-        read_keys(keyboard, &inputs);
+        assert_eq!(ends_within(5, "the keys thread to stop", move || read_keys(&mut keyboard, &inputs)), KeysEnd::LoopGone);
     }
 
     #[test]
@@ -970,8 +1380,8 @@ mod tests {
         let setup = connect(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key()), keychain);
         eventually("the terminal to be raw", 10, || raw(&setup.termios));
         setup.engine.shells().remove(0).print(b"$ ");
-        let keyboard = Keyboard(|_: &mut [u8]| -> std::io::Result<usize> { panic!("the keyboard failed") });
-        keys_thread(keyboard, setup.keys.clone());
+        let keyboard = Keyboard::new(|_: &mut [u8]| -> std::io::Result<usize> { panic!("the keyboard failed") });
+        keys_thread(keyboard, setup.keys.clone(), || {});
         let (code, setup) = finish(setup);
         assert_eq!(code, 255);
         assert!(setup.termios.is_start(&setup.termios.now()), "the terminal is as it was");
@@ -1153,7 +1563,7 @@ mod tests {
     /// nothing else is counted.
     #[test]
     fn a_budget_holds_back_what_does_not_fit_until_room_is_given_back() {
-        let budget = Budget::new(100);
+        let budget = Budget::new(100, Toward::Terminal);
         let first = budget.take(60);
         let second = {
             let budget = Arc::clone(&budget);
@@ -1165,14 +1575,83 @@ mod tests {
         eventually("room for the second", 5, || second.is_finished());
         drop(second.join().unwrap());
         assert_eq!(*budget.used(), 0);
-        let large = {
+        let large = ends_within(5, "a large item through an empty budget", {
             let budget = Arc::clone(&budget);
-            std::thread::spawn(move || budget.take(1000))
-        };
-        eventually("a large item through an empty budget", 5, || large.is_finished());
+            move || budget.take(1000)
+        });
         assert_eq!(*budget.used(), 1000);
-        drop(large.join().unwrap());
-        assert_eq!(*budget.used(), 0);
+        drop(large);
+        assert!(budget.wait_room(Duration::from_millis(10), || panic!("not asked: there is room")));
+        let full = budget.charge(100);
+        assert!(!budget.wait_room(Duration::from_millis(10), || false), "stopped waiting when told to");
+        drop(full);
+    }
+
+    /// The real terminal's keys: a closed window is seen as hung up (a pty whose other end was closed), and a descriptor left non-blocking
+    /// is waited on until a key arrives.
+    #[test]
+    fn the_terminal_says_when_it_hung_up_and_is_waited_on_until_a_key_arrives() {
+        use std::os::fd::FromRawFd;
+        // `openpty` does not open its descriptors close-on-exec: while they are opened and marked, no other test may start a process,
+        // which would keep the controller open (and the terminal from hanging up) for as long as it runs.
+        let (controller, device) = crate::process::without_spawns(|| {
+            let (mut controller, mut device): (libc::c_int, libc::c_int) = (-1, -1);
+            // SAFETY: openpty fills in the two descriptors; the name, attributes and size are optional.
+            assert_eq!(unsafe { libc::openpty(&mut controller, &mut device, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) }, 0);
+            for descriptor in [controller, device] {
+                // SAFETY: a descriptor just opened here; only FD_CLOEXEC is set.
+                assert_eq!(unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+            }
+            // SAFETY: both descriptors were just opened, and are owned here.
+            unsafe { (std::fs::File::from_raw_fd(controller), std::fs::File::from_raw_fd(device)) }
+        });
+        let mut raw_mode = Tty::new(Arc::new(DeviceTermios(device.as_raw_fd()))).unwrap();
+        raw_mode.set_mode(Mode::Raw, false).unwrap();
+        let descriptor = device.as_raw_fd();
+        // SAFETY: a valid descriptor; only O_NONBLOCK is added.
+        unsafe { libc::fcntl(descriptor, libc::F_SETFL, libc::fcntl(descriptor, libc::F_GETFL) | libc::O_NONBLOCK) };
+        let mut keys = TerminalKeys { source: &device, descriptor };
+        assert!(!keys.hung_up());
+        assert_eq!(keys.read(&mut [0u8; 8]).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        let typing = {
+            let mut controller = controller.try_clone().unwrap();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                controller.write_all(b"k").unwrap();
+            })
+        };
+        keys.wait_readable().unwrap();
+        let mut key = [0u8; 8];
+        assert_eq!(keys.read(&mut key).unwrap(), 1);
+        typing.join().unwrap();
+        drop(controller);
+        assert!(keys.hung_up(), "the window was closed");
+    }
+
+    /// A `TermiosApi` on a pty's device descriptor.
+    struct DeviceTermios(RawFd);
+
+    impl TermiosApi for DeviceTermios {
+        fn get(&self) -> std::io::Result<libc::termios> {
+            // SAFETY: plain data that tcgetattr fills in.
+            unsafe {
+                let mut termios: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(self.0, &mut termios) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(termios)
+            }
+        }
+        fn set(&self, termios: &libc::termios, _: bool) -> std::io::Result<()> {
+            // SAFETY: a valid termios for a valid descriptor.
+            if unsafe { libc::tcsetattr(self.0, libc::TCSANOW, termios) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        fn size(&self) -> Option<(u16, u16)> {
+            None
+        }
     }
 
     /// What `Action::Answer` puts on the wire is the protocol's answer message, byte for byte (the CLI writes it from borrowed strings so

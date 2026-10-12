@@ -1,10 +1,11 @@
 //! The terminal `sshelter connect` runs in (own-ssh spec §7.3): its modes and its size, through termios (`libc`, already a dependency
 //! on Unix). Raw while the shell runs, the way OpenSSH sets it; a prompt mode for questions (line editing on, echo off for a password);
-//! cooked otherwise. The mode the terminal had at the start comes back on every way out: the end of the program, a dropped `Tty`, and a
-//! panic (`restore_on_panic`).
+//! cooked otherwise. The mode the terminal had at the start comes back on every way out: the end of the program, a dropped `Tty`, a
+//! panic (`restore_on_panic`), and the watchdog that ends a program whose loop does not (`Restorer::hold_restored`).
 
 use std::io;
-use std::sync::{Arc, Mutex, Once, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError, TryLockError};
+use std::time::{Duration, Instant};
 
 /// What the terminal is set to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,7 +21,7 @@ pub enum Mode {
 /// Reading and setting the terminal's attributes (termios) and reading its size. The real one works on standard input; tests use a fake.
 pub trait TermiosApi: Send + Sync {
     fn get(&self) -> io::Result<libc::termios>;
-    /// Sets the attributes; with `discard_input`, what was typed and not read yet is thrown away first (`TCSAFLUSH`).
+    /// Sets the attributes, at once; with `discard_input`, what was typed and not read yet is thrown away first.
     fn set(&self, termios: &libc::termios, discard_input: bool) -> io::Result<()>;
     /// Columns and rows; `None` when it cannot be read.
     fn size(&self) -> Option<(u16, u16)>;
@@ -60,44 +61,59 @@ pub fn attributes(original: &libc::termios, mode: Mode) -> libc::termios {
 
 /// The terminal of this run. Dropping it puts the terminal back as it was.
 pub struct Tty {
+    terminal: Arc<Terminal>,
+}
+
+/// What a `Tty` and its `Restorer`s share: the terminal, its attributes of the start, and the mode it is in now. Every change of the
+/// terminal is made holding `mode`, so the program's threads change it one at a time and none undoes another's half way: the loop sets
+/// a mode (`Tty`), and the watchdog puts it back for good before it ends the program (`Restorer::hold_restored`).
+struct Terminal {
     api: Arc<dyn TermiosApi>,
     original: libc::termios,
-    mode: Mode,
+    mode: Mutex<Mode>,
+}
+
+impl Terminal {
+    fn mode(&self) -> MutexGuard<'_, Mode> {
+        self.mode.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Tty {
     /// Remembers the terminal's attributes as they are now: they are what `Mode::Cooked` and every restore go back to.
     pub fn new(api: Arc<dyn TermiosApi>) -> io::Result<Tty> {
         let original = api.get()?;
-        Ok(Tty { api, original, mode: Mode::Cooked })
+        Ok(Tty { terminal: Arc::new(Terminal { api, original, mode: Mutex::new(Mode::Cooked) }) })
     }
 
     pub fn mode(&self) -> Mode {
-        self.mode
+        *self.terminal.mode()
     }
 
     /// Sets `mode`; `discard_input` throws away what was typed ahead first (a question must not take typeahead as its answer).
     pub fn set_mode(&mut self, mode: Mode, discard_input: bool) -> io::Result<()> {
-        self.api.set(&attributes(&self.original, mode), discard_input)?;
-        self.mode = mode;
+        let mut current = self.terminal.mode();
+        self.terminal.api.set(&attributes(&self.terminal.original, mode), discard_input)?;
+        *current = mode;
         Ok(())
     }
 
     pub fn size(&self) -> Option<(u16, u16)> {
-        self.api.size()
+        self.terminal.api.size()
     }
 
     /// Back to the attributes of the start.
     pub fn restore(&mut self) {
-        if self.mode != Mode::Cooked {
-            let _ = self.api.set(&self.original, false);
-            self.mode = Mode::Cooked;
+        let mut current = self.terminal.mode();
+        if *current != Mode::Cooked {
+            let _ = self.terminal.api.set(&self.terminal.original, false);
+            *current = Mode::Cooked;
         }
     }
 
-    /// What a panic hook needs to put the terminal back.
+    /// What puts the terminal back from elsewhere: the panic hook, the watchdog.
     pub fn restorer(&self) -> Restorer {
-        Restorer { api: Arc::clone(&self.api), original: self.original }
+        Restorer { terminal: Arc::clone(&self.terminal) }
     }
 }
 
@@ -110,13 +126,49 @@ impl Drop for Tty {
 /// Puts a terminal back to its attributes of the start, from wherever the program is.
 #[derive(Clone)]
 pub struct Restorer {
-    api: Arc<dyn TermiosApi>,
-    original: libc::termios,
+    terminal: Arc<Terminal>,
 }
 
 impl Restorer {
+    /// Puts the terminal back. It does not wait for a change another thread is making: a panic can come while this very thread is
+    /// making one.
     pub fn restore(&self) {
-        let _ = self.api.set(&self.original, false);
+        match self.terminal.mode.try_lock() {
+            Ok(mut current) => self.put_back(&mut current, false),
+            Err(TryLockError::Poisoned(poisoned)) => self.put_back(&mut poisoned.into_inner(), false),
+            Err(TryLockError::WouldBlock) => {
+                let _ = self.terminal.api.set(&self.terminal.original, false);
+            }
+        }
+    }
+
+    /// Puts the terminal back for good: the program is about to end (the watchdog ends it when its loop does not). What was typed and not
+    /// read yet is thrown away: at a question it is a part of a password, which the shell would read after the program. No mode is set
+    /// while the returned hold lives. A change another thread is making is waited for up to `wait`; one that takes longer does not keep
+    /// the terminal from being put back, without the hold (`None`).
+    pub fn hold_restored(&self, wait: Duration) -> Option<MutexGuard<'_, Mode>> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let mut current = match self.terminal.mode.try_lock() {
+                Ok(current) => current,
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(TryLockError::WouldBlock) => {
+                    let _ = self.terminal.api.set(&self.terminal.original, true);
+                    return None;
+                }
+            };
+            self.put_back(&mut current, true);
+            return Some(current);
+        }
+    }
+
+    fn put_back(&self, current: &mut Mode, discard_input: bool) {
+        let _ = self.terminal.api.set(&self.terminal.original, discard_input);
+        *current = Mode::Cooked;
     }
 }
 
@@ -156,9 +208,15 @@ impl TermiosApi for StdinTermios {
     }
 
     fn set(&self, termios: &libc::termios, discard_input: bool) -> io::Result<()> {
-        let when = if discard_input { libc::TCSAFLUSH } else { libc::TCSANOW };
+        // Not `TCSAFLUSH`: it first waits until the terminal has taken all the output written to it, and a terminal that does not take it
+        // (a frozen window) would keep a question from being asked, or the watchdog from putting the terminal back and ending the
+        // program. What was typed is thrown away at once (`tcflush`), and the attributes are set at once.
+        // SAFETY: a valid descriptor; `tcflush` only discards what the terminal holds.
+        if discard_input && unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
         // SAFETY: a valid termios for a valid descriptor.
-        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, when, termios) } != 0 {
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, termios) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -327,6 +385,42 @@ mod tests {
         let count = api.sets.lock().unwrap().len();
         drop(tty);
         assert_eq!(api.sets.lock().unwrap().len(), count, "nothing more to put back");
+    }
+
+    /// The watchdog puts the terminal back for good: what was typed is thrown away, and no mode is set while it holds the terminal.
+    #[test]
+    fn the_watchdog_puts_the_terminal_back_and_holds_it() {
+        let api = FakeTermios::new();
+        let mut tty = Tty::new(api.clone()).unwrap();
+        tty.set_mode(Mode::Raw, false).unwrap();
+        let restorer = tty.restorer();
+        let hold = restorer.hold_restored(Duration::from_secs(1)).expect("nobody else holds it");
+        let (last, discarded) = *api.sets.lock().unwrap().last().unwrap();
+        assert!(api.is_start(&last) && discarded);
+        let the_loop = std::thread::spawn(move || {
+            tty.set_mode(Mode::Raw, false).unwrap();
+            tty
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(api.is_start(&api.now()), "the loop's change waits for the hold");
+        drop(hold);
+        drop(the_loop.join().unwrap());
+    }
+
+    /// A change that does not end (a terminal that does not answer) does not keep the watchdog from putting the terminal back.
+    #[test]
+    fn the_watchdog_does_not_wait_for_ever_for_a_change_in_progress() {
+        let api = FakeTermios::new();
+        let tty = Tty::new(api.clone()).unwrap();
+        let restorer = tty.restorer();
+        let held = tty.terminal.mode();
+        let started = Instant::now();
+        let other = std::thread::spawn(move || restorer.hold_restored(Duration::from_millis(100)).is_some());
+        assert!(!other.join().unwrap(), "no hold: another thread has the terminal");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        let (last, discarded) = *api.sets.lock().unwrap().last().unwrap();
+        assert!(api.is_start(&last) && discarded, "put back all the same");
+        drop(held);
     }
 
     /// Spec §7.3: every way out, a panic too, puts the terminal back, before the panic message is printed.

@@ -94,13 +94,24 @@ fn session(
             return 1;
         }
     };
-    terminal::restore_on_panic(tty.restorer());
+    let terminal = tty.restorer();
+    terminal::restore_on_panic(terminal.clone());
     let (inputs, queue) = run::queue();
-    run::stdin_thread(inputs.clone());
-    if let Err(error) = run::signal_thread(inputs.clone(), move || size.size()) {
+    let watchdog = match run::Watchdog::start(terminal, run::STOP_GRACE, |code| std::process::exit(code)) {
+        Ok(watchdog) => watchdog,
+        Err(error) => {
+            let _ = writeln!(stderr, "sshelter: cannot take over the terminal's signals: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = run::signal_thread(inputs.clone(), watchdog.clone(), move || size.size()) {
         let _ = writeln!(stderr, "sshelter: cannot follow the terminal's size: {error}");
     }
-    run::run(stream, host, term, &mut tty, (inputs, queue), own_writer(std::io::stdout()), own_writer(std::io::stderr()))
+    let hung_up = watchdog.clone();
+    run::stdin_thread(inputs.clone(), move || hung_up.arm(128 + libc::SIGHUP));
+    let code = run::run(stream, host, term, &mut tty, (inputs, queue), own_writer(std::io::stdout()), own_writer(std::io::stderr()));
+    watchdog.stand_down();
+    code
 }
 
 /// Standard output or error for the terminal's writer: a duplicate of its descriptor, written directly. Std's handle holds a lock (and
