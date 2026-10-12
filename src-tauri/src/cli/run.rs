@@ -23,7 +23,7 @@ pub fn run(stream: UnixStream, host: HostQuery, term: String, tty: &mut Tty, inp
         return 255;
     };
     let mut writer = stream;
-    std::thread::spawn(move || loop {
+    spawn_worker("sshelter-broker", sender, move |sender| loop {
         let input = match read_frame(&mut reader) {
             Ok(Some(Frame::Control(payload))) => match decode::<ServerMessage>(&payload) {
                 Ok(message) => Input::Message(message),
@@ -128,30 +128,63 @@ fn perform(actions: Vec<Action>, writer: &mut UnixStream, tty: &mut Tty, queue: 
 
 /// Reads the person's keys into the queue until standard input ends (or the program does).
 pub fn stdin_thread(sender: Sender<Input>) {
-    std::thread::spawn(move || {
-        let mut stdin = std::io::stdin().lock();
-        let mut buf = [0u8; 4096];
-        loop {
-            match stdin.read(&mut buf) {
-                Ok(0) => {
-                    // A question ends on Ctrl-D; the next question reads again.
-                    if sender.send(Input::StdinEnd).is_err() {
-                        return;
-                    }
-                }
-                Ok(count) => {
-                    if sender.send(Input::Stdin(buf[..count].to_vec())).is_err() {
-                        return;
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => {
-                    let _ = sender.send(Input::StdinEnd);
-                    return;
-                }
+    keys_thread(std::io::stdin(), sender);
+}
+
+/// `read_keys` on a thread of its own.
+fn keys_thread(source: impl Read + Send + 'static, sender: Sender<Input>) {
+    spawn_worker("sshelter-keys", sender, move |sender| read_keys(source, &sender));
+}
+
+/// Queues what `source` (the terminal) delivers, as typed text; a read of nothing is the end of input (Ctrl-D), and a failed one is
+/// the end of the terminal. Returns when the terminal failed or the loop is gone.
+fn read_keys(mut source: impl Read, sender: &Sender<Input>) {
+    let mut buf = [0u8; 4096];
+    loop {
+        let input = match source.read(&mut buf) {
+            // A question ends on Ctrl-D; the next question reads again.
+            Ok(0) => Input::StdinEnd,
+            Ok(count) => {
+                let typed = Input::Stdin(buf[..count].to_vec());
+                // What was typed may be a password: the copy that stays on this stack is wiped as well.
+                buf[..count].zeroize();
+                typed
             }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => {
+                let _ = sender.send(Input::StdinEnd);
+                return;
+            }
+        };
+        if sender.send(input).is_err() {
+            return;
         }
+    }
+}
+
+/// Starts `work` on a thread of its own. If that thread panics (the panic hook has put the terminal back by then), or cannot be started,
+/// the queue is told (`Input::Failed`) and the program ends: the loop would otherwise go on, in the mode the terminal was in, with nobody
+/// reading the keys or the signals or the broker.
+fn spawn_worker(name: &str, sender: Sender<Input>, work: impl FnOnce(Sender<Input>) + Send + 'static) {
+    let failed = sender.clone();
+    let started = std::thread::Builder::new().name(name.to_string()).spawn(move || {
+        let _watch = Watch(sender.clone());
+        work(sender);
     });
+    if started.is_err() {
+        let _ = failed.send(Input::Failed);
+    }
+}
+
+/// Dropped by a thread that is unwinding from a panic, it tells the queue.
+struct Watch(Sender<Input>);
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let _ = self.0.send(Input::Failed);
+        }
+    }
 }
 
 /// What the queue is told when `signal` stops the program or cancels a question: Ctrl-C cancels the question on the terminal (and ends
@@ -182,7 +215,7 @@ pub fn signal_thread(sender: Sender<Input>, size: impl Fn() -> Option<(u16, u16)
             signal(SignalKind::quit())?,
         ))
     })?;
-    std::thread::spawn(move || {
+    spawn_worker("sshelter-signals", sender, move |sender| {
         runtime.block_on(async move {
             loop {
                 let input = tokio::select! {
@@ -416,6 +449,11 @@ mod tests {
         assert!(matches!(next(libc::SIGTERM), Input::Stop(libc::SIGTERM)));
         assert!(matches!(next(libc::SIGHUP), Input::Stop(libc::SIGHUP)));
         assert!(matches!(next(libc::SIGQUIT), Input::Stop(libc::SIGQUIT)));
+        // A panic on the signal thread (here: in the callback that reads the size) is told to the queue as well.
+        let (failing, told) = std::sync::mpsc::channel();
+        signal_thread(failing, || panic!("the size failed")).expect("a second set of handlers");
+        assert!(matches!(next(libc::SIGWINCH), Input::Resize(100, 30)));
+        assert!(matches!(told.recv_timeout(std::time::Duration::from_secs(10)), Ok(Input::Failed)));
     }
 
     /// The stdin thread read a line and queued it behind the question before the terminal was flushed for it: the flush cannot reach a
@@ -472,5 +510,76 @@ mod tests {
         for mut other in [Input::Closed, Input::StdinEnd, Input::Interrupt, Input::Resize(1, 1), Input::Output(b"x".to_vec())] {
             assert!(!wipe_typed(&mut other));
         }
+    }
+
+    /// A source of keys that is whatever the closure says each read is.
+    struct Keyboard<F>(F);
+
+    impl<F: FnMut(&mut [u8]) -> std::io::Result<usize>> Read for Keyboard<F> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            (self.0)(buf)
+        }
+    }
+
+    #[test]
+    fn the_keys_are_queued_as_typed_and_the_end_of_input_is_told_and_a_failing_terminal_ends_the_thread() {
+        // One read at a time: what is typed, an interrupted read, the end of input (Ctrl-D: a read of 0 bytes), more, then a failure.
+        let mut script = std::collections::VecDeque::from([Ok(b"ls\r".to_vec()), Err(std::io::ErrorKind::Interrupted.into()), Ok(vec![]), Ok(b"x".to_vec())]);
+        let keyboard = Keyboard(move |buf: &mut [u8]| match script.pop_front() {
+            Some(Ok(bytes)) => {
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+            Some(Err(error)) => Err(error),
+            None => Err(std::io::Error::other("the terminal went away")),
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        read_keys(keyboard, &sender);
+        drop(sender);
+        let queued: Vec<Input> = receiver.iter().collect();
+        assert_eq!(format!("{queued:?}"), "[Stdin(<hidden>), StdinEnd, Stdin(<hidden>), StdinEnd]", "an interrupted read is read again; the failure is the end");
+        assert!(matches!(&queued[0], Input::Stdin(bytes) if bytes == b"ls\r"));
+        assert!(matches!(&queued[2], Input::Stdin(bytes) if bytes == b"x"));
+    }
+
+    #[test]
+    fn the_keys_thread_stops_when_the_loop_is_gone() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(receiver);
+        // A keyboard that never stops typing: the thread has to be the one that stops.
+        let keyboard = Keyboard(|buf: &mut [u8]| {
+            buf[0] = b'x';
+            Ok(1)
+        });
+        read_keys(keyboard, &sender);
+    }
+
+    #[test]
+    fn a_worker_that_panics_tells_the_queue_and_one_that_returns_does_not() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        spawn_worker("test-quiet", sender.clone(), |_| {});
+        spawn_worker("test-panics", sender.clone(), |_| panic!("the worker failed"));
+        drop(sender);
+        // The queue ends when both workers are gone.
+        let told: Vec<String> = receiver.iter().map(|input| format!("{input:?}")).collect();
+        assert_eq!(told, ["Failed"]);
+    }
+
+    /// A panic on the thread that reads the keys: the panic hook puts the terminal back, but the loop would go on reading from nobody. It
+    /// ends the program instead, with 255, the terminal as it was, and the broker told.
+    #[test]
+    fn a_panic_on_a_thread_of_the_program_ends_the_run_with_255_the_terminal_put_back_and_the_broker_told() {
+        let keychain = MemKeychain::default();
+        keychain.set("host:id-web", "saved").unwrap();
+        let setup = connect(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key()), keychain);
+        eventually("the terminal to be raw", 10, || raw(&setup.termios));
+        setup.engine.shells().remove(0).print(b"$ ");
+        let keyboard = Keyboard(|_: &mut [u8]| -> std::io::Result<usize> { panic!("the keyboard failed") });
+        keys_thread(keyboard, setup.keys.clone());
+        let (code, setup) = finish(setup);
+        assert_eq!(code, 255);
+        assert!(setup.termios.is_start(&setup.termios.now()), "the terminal is as it was");
+        assert_eq!(setup.stderr.text(), "\nsshelter: an internal error stopped this session.\n");
+        eventually("the session to be closed", 10, || setup.engine.events().contains(&FakeEvent::Closed));
     }
 }

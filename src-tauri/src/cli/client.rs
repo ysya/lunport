@@ -27,8 +27,11 @@ pub enum Input {
     Resize(u16, u16),
     /// Ctrl-C while the terminal was not raw (SIGINT).
     Interrupt,
-    /// The program was told to stop, or its terminal went away (SIGTERM, SIGHUP): the signal's number.
+    /// The program was told to stop, or its terminal went away (SIGTERM, SIGHUP, SIGQUIT): the signal's number.
     Stop(i32),
+    /// A thread of the program itself (the keys, the signals, the broker's frames) panicked or could not start: nothing would read from
+    /// it any more, so the program ends. The panic hook has put the terminal back by then.
+    Failed,
 }
 
 /// What was typed may be a password, so the debug form leaves it out (as `ClientMessage`'s does for an answer); the rest prints as a
@@ -44,6 +47,7 @@ impl fmt::Debug for Input {
             Input::Resize(cols, rows) => f.debug_tuple("Resize").field(cols).field(rows).finish(),
             Input::Interrupt => f.write_str("Interrupt"),
             Input::Stop(signal) => f.debug_tuple("Stop").field(signal).finish(),
+            Input::Failed => f.write_str("Failed"),
         }
     }
 }
@@ -96,6 +100,9 @@ fn is_deceptive_format(c: char) -> bool {
 fn cancel(question_id: String) -> Action {
     Action::Send(ClientMessage::Answer { question_id, value: None, cancel: true })
 }
+
+/// What is said when a thread of the program panicked (the panic itself was reported by the hook, which put the terminal back first).
+const THREAD_FAILED: &str = "sshelter: an internal error stopped this session.";
 
 /// What the person typed before the shell opened is kept for it (as OpenSSH's typeahead reaches the shell), up to this many bytes.
 const TYPEAHEAD_LIMIT: usize = 64 * 1024;
@@ -203,6 +210,7 @@ impl Client {
             Input::StdinEnd => self.finish(true, None, 128 + libc::SIGHUP),
             Input::Resize(cols, rows) => vec![Action::Send(ClientMessage::WindowChange { cols, rows })],
             Input::Stop(signal) => self.finish(true, None, 128 + signal),
+            Input::Failed => self.finish(true, Some(THREAD_FAILED.to_string()), 255),
         }
     }
 
@@ -536,6 +544,25 @@ mod tests {
         assert_eq!(opened().handle(Input::Stop(libc::SIGHUP)), hangup);
     }
 
+    /// A thread of the program itself panicked (the panic hook has put the terminal back by then, and nothing would read from that
+    /// thread any more): the program ends with 255, as for a lost connection, the terminal put back first and the broker told.
+    #[test]
+    fn a_failed_thread_ends_the_program_with_255_the_terminal_put_back_and_the_broker_told() {
+        let reason = "sshelter: an internal error stopped this session.";
+        assert_eq!(
+            opened().handle(Input::Failed),
+            [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Stderr(format!("\n{reason}\n")), Action::Exit(255)],
+            "the cursor is somewhere in what the shell wrote"
+        );
+        assert_eq!(
+            started().handle(Input::Failed),
+            [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Stderr(format!("{reason}\n")), Action::Exit(255)]
+        );
+        let mut client = opened();
+        client.handle(Input::Failed);
+        assert!(client.handle(Input::Output(b"late".to_vec())).is_empty(), "nothing after the end");
+    }
+
     fn event(event: Event) -> Input {
         Input::Message(ServerMessage::Event(event))
     }
@@ -746,7 +773,7 @@ mod tests {
 
         assert_eq!(format!("{:?}", Input::Output(vec![104, 105])), "Output([104, 105])");
         assert_eq!(format!("{:?}", Input::Message(ServerMessage::Opened { session_id: "1".into() })), "Message(Opened { session_id: \"1\" })");
-        assert_eq!(format!("{:?}", [Input::Closed, Input::StdinEnd, Input::Interrupt]), "[Closed, StdinEnd, Interrupt]");
+        assert_eq!(format!("{:?}", [Input::Closed, Input::StdinEnd, Input::Interrupt, Input::Failed]), "[Closed, StdinEnd, Interrupt, Failed]");
         assert_eq!(format!("{:?}", [Input::Resize(100, 30), Input::Stop(15)]), "[Resize(100, 30), Stop(15)]");
         assert_eq!(format!("{:?}", Action::Stdout(vec![104, 105])), "Stdout([104, 105])");
         assert_eq!(format!("{:?}", Action::Stderr("pw: ".into())), "Stderr(\"pw: \")");
