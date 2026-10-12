@@ -89,8 +89,12 @@ impl Drop for Leaving<'_> {
 
 impl HostKeyHub {
     /// Asks and waits for the answer, at most `timeout`, and gives up early when `cancel` is set (the client went away). `None` when
-    /// nobody answered. Blocks, and the surface may create a window: call it from a worker thread (the broker's session thread).
+    /// nobody answered. A question withdrawn before it is asked is not asked: the window does not open for it. Blocks, and the surface may
+    /// create a window: call it from a worker thread (the broker's session thread).
     pub fn ask(&self, surface: &dyn HostKeySurface, mut request: HostKeyRequest, timeout: Duration, cancel: &CancelToken) -> Option<HostKeyAnswer> {
+        if cancel.is_cancelled() {
+            return None;
+        }
         let id = format!("hostkey-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         request.id = id.clone();
         let (answer, answered) = mpsc::sync_channel(1);
@@ -305,6 +309,19 @@ mod tests {
         assert!(hub.pending().is_empty());
     }
 
+    /// A question withdrawn before it is asked (the client went away between the connect's own look at the token and `ask`) opens no
+    /// window: it is not put on the list, and the surface is told nothing.
+    #[test]
+    fn a_question_withdrawn_before_it_is_asked_opens_no_window() {
+        let hub = HostKeyHub::default();
+        let surface = Recorder::default();
+        let cancel = CancelToken::default();
+        cancel.cancel();
+        assert_eq!(hub.ask(&surface, request("web"), Duration::from_secs(5), &cancel), None);
+        assert!(surface.seen.lock().unwrap().is_empty(), "the window was told of a question nobody waits for: {:?}", surface.seen.lock().unwrap());
+        assert!(hub.pending().is_empty());
+    }
+
     /// The client went away while the window asked: the question leaves the window soon, and nothing is trusted.
     #[test]
     fn a_withdrawn_question_leaves_the_window() {
@@ -341,9 +358,91 @@ mod tests {
         assert_ne!(pending[0].id, pending[1].id);
         hub.resolve(&pending[1].id, HostKeyAnswer { trust: true, fingerprint: "SHA256:new".into() }).unwrap();
         assert_eq!(db.join().unwrap(), Some("SHA256:new".into()));
-        assert!(hub.resolve(&pending[1].id, HostKeyAnswer::default()).is_err(), "an answered question takes no second answer");
+        assert!(hub.resolve(&pending[1].id, HostKeyAnswer::default()).is_err(), "a question that was answered and has left the list cannot be answered again");
         hub.resolve(&pending[0].id, HostKeyAnswer::default()).unwrap();
         assert_eq!(web.join().unwrap(), None);
+    }
+
+    fn request(alias: &str) -> HostKeyRequest {
+        HostKeyRequest { id: String::new(), alias: alias.into(), hostname: format!("{alias}.example.com"), port: 22, algorithm: "ssh-ed25519".into(), fingerprint: "SHA256:new".into(), changed: None }
+    }
+
+    /// An answered question whose `ask` has not woken up yet is no longer listed: it would be announced again, as the head, meanwhile.
+    #[test]
+    fn an_answered_question_is_not_listed_before_its_ask_wakes_up() {
+        let hub = HostKeyHub::default();
+        // Two waiting questions: nobody reads the channel of the first (its `ask` has not woken up), the second still waits.
+        let (first, _first_reader) = mpsc::sync_channel(1);
+        let (second, _second_reader) = mpsc::sync_channel(1);
+        {
+            let mut pending = hub.pending.lock().unwrap();
+            pending.push(Waiting { request: HostKeyRequest { id: "hostkey-1".into(), ..request("web") }, answer: first, answered: false });
+            pending.push(Waiting { request: HostKeyRequest { id: "hostkey-2".into(), ..request("db") }, answer: second, answered: false });
+        }
+        hub.resolve("hostkey-1", HostKeyAnswer { trust: true, fingerprint: "SHA256:new".into() }).unwrap();
+        assert_eq!(hub.pending().into_iter().map(|request| request.id).collect::<Vec<_>>(), ["hostkey-2"], "the answered question is not listed");
+        let surface = Recorder::default();
+        hub.publish(&surface);
+        assert_eq!(*surface.seen.lock().unwrap(), vec![vec!["hostkey-2".to_string()]], "and not announced again");
+    }
+
+    /// An answer that `resolve` took as the wait ran out counts: `resolve` reported success.
+    #[test]
+    fn an_answer_that_arrives_as_the_wait_times_out_is_not_lost() {
+        let hub = Arc::new(HostKeyHub::default());
+        let surface = Arc::new(Recorder::default());
+        let (asking_hub, asking_surface) = (Arc::clone(&hub), Arc::clone(&surface));
+        let asking = std::thread::spawn(move || asking_hub.ask(asking_surface.as_ref(), request("web"), Duration::from_secs(1), &CancelToken::default()));
+        // `ask` has told the surface (and let go of `notify`), and waits for the answer.
+        wait_until("ask to wait", || !surface.seen.lock().unwrap().is_empty() && hub.notify.try_lock().is_ok());
+        let id = hub.pending()[0].id.clone();
+        // While this lock is held, `ask` runs out of time and stops at taking the question off the list. What `resolve` does under the
+        // lock (mark it answered, send the answer) comes before that.
+        let mut pending = hub.pending.lock().unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let waiting = pending.iter_mut().find(|waiting| waiting.request.id == id).expect("the question stays listed while the lock is held");
+        waiting.answered = true;
+        waiting.answer.try_send(HostKeyAnswer { trust: true, fingerprint: "SHA256:new".into() }).unwrap();
+        drop(pending);
+        assert_eq!(asking.join().unwrap().map(|answer| answer.trust), Some(true), "resolve had reported success, so the answer counts");
+        assert!(hub.pending().is_empty());
+    }
+
+    /// Closing the window refuses every waiting question at once, and none of them is listed again.
+    #[test]
+    fn closing_the_window_refuses_every_waiting_question_at_once() {
+        let hub = Arc::new(HostKeyHub::default());
+        let mut asking = Vec::new();
+        for alias in ["web", "db"] {
+            let asking_hub = Arc::clone(&hub);
+            asking.push(std::thread::spawn(move || asking_hub.ask(&Recorder::default(), request(alias), Duration::from_secs(5), &CancelToken::default())));
+            wait_until("the question to wait", || hub.pending().iter().any(|request| request.alias == alias));
+        }
+        hub.deny_all();
+        assert!(hub.pending().is_empty(), "a refused question is gone at once, so no later notification lists it again");
+        for asking in asking {
+            let answer = asking.join().unwrap().expect("a refusal, not a timeout");
+            assert!(!answer.trust);
+        }
+        assert!(hub.pending().is_empty());
+    }
+
+    /// A surface that panics leaves no question behind, and the questions after it are shown as usual.
+    #[test]
+    fn a_surface_that_panics_does_not_stop_later_notifications() {
+        struct Panics;
+        impl HostKeySurface for Panics {
+            fn changed(&self, _: &[HostKeyRequest]) {
+                panic!("the window failed");
+            }
+        }
+        let hub = HostKeyHub::default();
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hub.ask(&Panics, request("web"), Duration::from_millis(20), &CancelToken::default())));
+        assert!(crashed.is_err());
+        assert!(hub.pending().is_empty(), "the failed call leaves no question behind");
+        let surface = Recorder::default();
+        assert_eq!(hub.ask(&surface, request("db"), Duration::from_millis(20), &CancelToken::default()), None);
+        assert_eq!(*surface.seen.lock().unwrap(), vec![vec!["hostkey-2".to_string()], vec![]], "a question after the failure is shown on its own, then gone");
     }
 
     #[test]

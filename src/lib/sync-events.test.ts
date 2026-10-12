@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { SyncNotice } from "@/bindings/SyncNotice";
 import { syncApprovalsKey, syncOverviewKey } from "@/lib/sync";
 import { useUiStore } from "@/stores/ui";
+import { stubEventBus } from "./event-bus-fixture";
 import { SPOOFED_NAME, SPOOFED_NAME_SHOWN } from "./sync-fixtures";
 import { conflictMessage, noticeMessage, subscribeSyncEvents, upgradeExplanation, upgradeNotice } from "./sync-events";
 
@@ -126,48 +127,6 @@ describe("notices that name a space or a computer another computer chose the nam
     );
   });
 });
-
-/**
- * A fake Tauri event bus: `listen()` registers its handler through `transformCallback` and the
- * `plugin:event|listen` command, so both are captured here and `emit` calls the handler the way
- * the webview would. Any other command is recorded — the events must never start a sync round.
- * `failListen` makes the backend refuse to register a listener; `failUnlisten` makes releasing one fail.
- */
-function stubEventBus({ failListen = false, failUnlisten = false }: { failListen?: boolean; failUnlisten?: boolean } = {}) {
-  const callbacks = new Map<number, (event: unknown) => void>();
-  const handlers = new Map<string, (event: unknown) => void>();
-  const commands: string[] = [];
-  let nextId = 1;
-  vi.stubGlobal("window", {
-    __TAURI_INTERNALS__: {
-      transformCallback: (callback: (event: unknown) => void) => {
-        const id = nextId++;
-        callbacks.set(id, callback);
-        return id;
-      },
-      invoke: async (cmd: string, args: { event?: string; handler?: number }) => {
-        commands.push(cmd);
-        if (cmd === "plugin:event|listen" && args.event && args.handler) {
-          if (failListen) throw new Error("the event plugin refused the listener");
-          handlers.set(args.event, callbacks.get(args.handler)!);
-          return nextId++;
-        }
-        return undefined;
-      },
-    },
-    __TAURI_EVENT_PLUGIN_INTERNALS__: {
-      unregisterListener: () => {
-        if (failUnlisten) throw new Error("the listener is already gone");
-      },
-    },
-  });
-  const emit = (event: string, payload: unknown) => {
-    const handler = handlers.get(event);
-    if (!handler) throw new Error(`nobody listens to ${event}`);
-    handler({ event, id: 0, payload });
-  };
-  return { emit, handlers, commands };
-}
 
 /** The unhandled rejections Node reports while `action` runs and during the next macrotask. */
 async function unhandledRejectionsDuring(action: () => void | Promise<void>): Promise<unknown[]> {

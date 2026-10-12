@@ -5,6 +5,8 @@ import {
   answerRejectedMessage,
   armAfterDelay,
   buildHostKeyAnswer,
+  followPending,
+  HOSTKEY_EVENT,
   hostKeyBody,
   hostKeyButtons,
   hostKeyTitle,
@@ -12,6 +14,7 @@ import {
   pinnedOn,
   TRUST_ARM_DELAY_MS,
 } from "@/lib/hostkey";
+import { stubEventBus } from "./event-bus-fixture";
 
 function request(over: Partial<HostKeyRequest> = {}): HostKeyRequest {
   return {
@@ -83,5 +86,24 @@ describe("arming and the pending list", () => {
     feed.fromEvent([request()]);
     feed.fromFetch([]);
     expect(lists).toEqual([[request()]]);
+  });
+});
+
+describe("following the pending list", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  // A change emitted between the fetch's answer and the listener's registration would be lost, and the window would show a list
+  // that is no longer pending: the listener is registered first, and the fetch comes after it.
+  it("registers the listener before it fetches", async () => {
+    const bus = stubEventBus({ answer: (cmd) => (cmd === "hostkey_pending" ? [request()] : undefined) });
+    const lists: HostKeyRequest[][] = [];
+    const stop = followPending((list) => lists.push(list));
+    await vi.waitFor(() => expect(lists).toEqual([[request()]]));
+    expect(bus.commands).toEqual(["plugin:event|listen", "hostkey_pending"]);
+    bus.emit(HOSTKEY_EVENT, []);
+    expect(lists).toEqual([[request()], []]);
+    stop();
+    bus.emit(HOSTKEY_EVENT, [request()]);
+    expect(lists, "nothing after it stopped").toEqual([[request()], []]);
   });
 });
