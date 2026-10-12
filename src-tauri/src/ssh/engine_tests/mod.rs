@@ -2,6 +2,7 @@
 //! returns early, printing "skipped", where the OpenSSH tools are missing (`SSHELTER_REQUIRE_OPENSSH=1` turns that into a failure).
 
 mod connect;
+mod environment;
 mod exec;
 mod jump;
 mod liveness;
