@@ -432,7 +432,15 @@ mod tests {
     }
 
     fn world(engine: FakeEngine, directory: FakeDirectory) -> World {
-        World { engine: Counting::new(engine), directory, keys: FakeKeys::new(), keychain: MemKeychain::default(), confirmer: FakeConfirmer::default(), owner: FakeOwner::default(), cancel: CancelToken::default() }
+        World {
+            engine: Counting::new(engine),
+            directory,
+            keys: FakeKeys::new(),
+            keychain: MemKeychain::default(),
+            confirmer: FakeConfirmer::default(),
+            owner: FakeOwner::default(),
+            cancel: CancelToken::default(),
+        }
     }
 
     impl World {
@@ -1244,26 +1252,29 @@ mod tests {
     /// jump host when it is the jump host's key).
     #[test]
     fn a_server_whose_host_key_changes_after_it_was_trusted_is_asked_about_once() {
-        let server = || KeysInTurn { keys: vec![key(test_keys::PLAIN_PUBLIC), key(test_keys::ENC_PUBLIC), key(test_keys::ECDSA_PUBLIC), key(test_keys::RSA_PUBLIC)], connects: AtomicUsize::new(0) };
+        let keys = || vec![key(test_keys::PLAIN_PUBLIC), key(test_keys::ENC_PUBLIC), key(test_keys::ECDSA_PUBLIC), key(test_keys::RSA_PUBLIC)];
+        let server = || KeysInTurn { keys: keys(), connects: AtomicUsize::new(0) };
         let refused = |text: &str| Some(failure(kinds::HOST_KEY, text));
+        let kept_changing = "The host key of web kept changing while SSHelter was connecting. Connection refused.";
         let connect = |world: &World, server: &KeysInTurn, query: &str| {
             let connector = Connector { engine: server, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer };
             connector.connect(&HostQuery::Alias(query.into()), &world.owner, &world.cancel).err()
         };
 
         let unknown = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password)).deciding(vec![Decision::Trust; 4]);
-        let (first, rest) = (server(), "The host key of web kept changing while SSHelter was connecting. Connection refused.");
-        assert_eq!(connect(&unknown, &first, "web"), refused(rest));
+        let first = server();
+        assert_eq!(connect(&unknown, &first, "web"), refused(kept_changing));
         assert_eq!((unknown.confirmer.asked().len(), first.connects.load(Ordering::SeqCst)), (1, 2), "one question, and the connect that showed the other key");
         assert_eq!(unknown.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(key(test_keys::PLAIN_PUBLIC)), "the key the person trusted stays pinned");
 
         // A key that was pinned and changed: the person accepts the new one, and the server shows yet another.
         let changed = world(FakeEngine::new(), FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", key(test_keys::RSA_PUBLIC))).deciding(vec![Decision::Trust; 4]);
-        assert_eq!(connect(&changed, &server(), "web"), refused(rest));
+        assert_eq!(connect(&changed, &server(), "web"), refused(kept_changing));
         assert_eq!(changed.confirmer.asked().len(), 1);
         assert_eq!(changed.directory.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(key(test_keys::PLAIN_PUBLIC)));
 
-        let through = world(FakeEngine::new(), FakeDirectory::new().with_host("bastion", AuthMethod::Password).with_host_via("db", AuthMethod::Password, &["bastion"])).deciding(vec![Decision::Trust; 4]);
+        let chain = FakeDirectory::new().with_host("bastion", AuthMethod::Password).with_host_via("db", AuthMethod::Password, &["bastion"]);
+        let through = world(FakeEngine::new(), chain).deciding(vec![Decision::Trust; 4]);
         let sentence = "Could not connect through bastion: The host key of bastion kept changing while SSHelter was connecting. Connection refused.";
         assert_eq!(connect(&through, &server(), "db"), refused(sentence));
         assert_eq!(through.confirmer.asked().len(), 1);
