@@ -214,10 +214,11 @@ fn classify_end(error: &russh::Error) -> (DisconnectKind, String) {
     }
 }
 
-/// An I/O error as a short lowercase phrase: no OS error number, no leading capital.
+/// An I/O error as a short lowercase phrase: no OS error number, no leading capital, no final period (Windows' messages have one; the
+/// sentences that contain the phrase bring their own).
 fn describe_io(error: &std::io::Error) -> String {
     let text = error.to_string();
-    let text = text.split(" (os error").next().unwrap_or(&text);
+    let text = text.split(" (os error").next().unwrap_or(&text).trim_end_matches('.');
     let mut chars = text.chars();
     match (chars.next(), chars.next()) {
         (Some(first), Some(second)) if first.is_ascii_uppercase() && second.is_ascii_lowercase() => format!("{}{}", first.to_ascii_lowercase(), &text[1..]),
@@ -1259,6 +1260,8 @@ mod tests {
         assert_eq!(describe_io(&dns), "DNS lookup failed", "an acronym keeps its capitals");
         let plain = std::io::Error::new(std::io::ErrorKind::Other, "failed to lookup address information");
         assert_eq!(describe_io(&plain), "failed to lookup address information");
+        let windows = std::io::Error::new(std::io::ErrorKind::Other, "No connection could be made because the target machine actively refused it. (os error 10061)");
+        assert_eq!(describe_io(&windows), "no connection could be made because the target machine actively refused it", "Windows ends its messages with a period");
     }
 
     #[test]
