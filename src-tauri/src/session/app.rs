@@ -99,7 +99,8 @@ fn directory(app: &tauri::AppHandle) -> Result<SshConfigDirectory, AppError> {
             let state = for_doc.state::<AppState>();
             loaded_doc(&state.doc, DOC_WAIT, || crate::config::include::load_doc(&crate::keys::ssh_dir()?.join("config")))
         }),
-        effective: Box::new(|alias| crate::config::intel::effective_config(alias, None).map_err(|error| error.to_string())),
+        // With a deadline: a `Match exec` in the user's config can keep `ssh -G` from ever answering, and the connect would hang with it.
+        effective: Box::new(|alias| crate::session::ssh_g::effective_within(alias, None, crate::session::ssh_g::EFFECTIVE_DEADLINE)),
         vault_key: Box::new(move |identity_files| {
             let home = crate::keys::ssh_dir().ok()?.parent()?.to_path_buf();
             let state = for_keys.state::<AppState>();
