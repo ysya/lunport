@@ -907,6 +907,18 @@ mod tests {
         assert!(world.confirmer.asked().is_empty() && locked(&world.owner.notices).is_empty() && world.directory.pins().is_empty());
     }
 
+    /// The engine's own abandonment keeps its own reason: when the host key is known and the server also offers keyboard-interactive, the
+    /// engine goes on to that prompt after the password was given up, and ends the login itself ("the prompt was cancelled"). The broker
+    /// does not rewrite that sentence.
+    #[test]
+    fn the_engines_own_abandonment_after_a_cancelled_password_keeps_its_own_reason() {
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right").and_interactive("Password: ", "right")));
+        let mut world = world(engine, FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key()));
+        world.owner = FakeOwner::answering(vec![Reply::Cancelled]);
+        assert_eq!(world.connect(&web()).err(), Some(failure(kinds::AUTH, "Authentication for web was abandoned (the prompt was cancelled).")));
+        assert_eq!(world.owner.asked().len(), 1, "the prompt was not shown after the password was given up");
+    }
+
     /// Spec §11: a failure on a jump host is said through it, an abandoned login too, whoever asked for the password: the engine, before
     /// it connected (a hop that starts with the password method), or the broker, between two connects (a hop that starts with a key).
     #[test]
