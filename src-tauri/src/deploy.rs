@@ -465,24 +465,6 @@ fn require_default_config_root(state: &tauri::State<crate::state::AppState>) -> 
     Ok(())
 }
 
-/// `require_default_config_root` 的布林版，給「不該報錯、只該安靜退回」的呼叫端
-/// （connect 的密碼自動填入）。理由同上：終端機跑的是 `ssh <alias>`（無 `-F`），
-/// 對非預設 config 的推理可能與 ssh 實際讀到的設定無關。
-pub(crate) fn is_default_config_root(state: &tauri::State<crate::state::AppState>) -> bool {
-    let Some(loaded) = ({
-        let doc_lock = state.doc.lock().unwrap();
-        doc_lock
-            .as_ref()
-            .and_then(|d| d.files.first().map(|f| f.path.clone()))
-    }) else {
-        return false;
-    };
-    let Ok(default) = crate::config::commands::default_config_path() else {
-        return false;
-    };
-    loaded.canonicalize().ok() == default.canonicalize().ok() || loaded == default
-}
-
 /// `ssh -V` 的輸出（版本寫在 stderr；順手併上 stdout 以防未來變動）。
 pub(crate) fn local_ssh_version() -> String {
     crate::process::output(crate::process::background_command("ssh").arg("-V"))
@@ -616,23 +598,6 @@ fn run_ssh_deploy(
 pub fn openssh_supports_askpass_require(version_line: &str) -> bool {
     match parse_openssh_version(version_line) {
         Some((major, minor, true)) => (major, minor) >= (8, 1),
-        Some((major, minor, false)) => (major, minor) >= (8, 5),
-        None => true,
-    }
-}
-
-/// Connect 自動填入用的閘門：在「有 tty 的終端機裡」強制 askpass。
-///
-/// 與 `openssh_supports_askpass_require`（部署用，子程序無 console）只差 Windows
-/// 門檻：8.1 走 askpass 的前提是「開不到 console」，終端機裡必然有 console，所以
-/// 8.1 在這個情境等於不支援；8.6（Win11 內建）起 `SSH_ASKPASS_REQUIRE=force` 直接
-/// 蓋過 tty（v8.6.0.0 readpass.c，並經 Win32-OpenSSH#2115 實測證實）。
-///
-/// 認不出版本 → 放行：多注入的環境變數在不支援的 ssh 上是無害的 no-op（終端機照樣
-/// 出現一般密碼提示），少注入則是功能無聲失效。
-pub fn openssh_supports_forced_askpass_in_terminal(version_line: &str) -> bool {
-    match parse_openssh_version(version_line) {
-        Some((major, minor, true)) => (major, minor) >= (8, 6),
         Some((major, minor, false)) => (major, minor) >= (8, 5),
         None => true,
     }
@@ -1426,29 +1391,6 @@ mod tests {
         assert!(!openssh_supports_askpass_require(
             "OpenSSH_for_Windows_7.7p1, LibreSSL 2.6.5"
         ));
-    }
-
-    #[test]
-    fn terminal_askpass_gate_needs_8_5_or_windows_8_6() {
-        // Connect 的自動填入是在「有 tty 的終端機裡」跑 ssh：
-        // - 非 Windows 沿用 8.5 門檻（force 蓋過 tty）。
-        // - Windows 8.1 只有在「開不到 console」時才走 askpass，終端機裡必然有
-        //   console，所以 Windows 門檻是 8.6（第一個支援 REQUIRE=force 的內建版）。
-        assert!(openssh_supports_forced_askpass_in_terminal("OpenSSH_9.6p1, LibreSSL 3.3.6"));
-        assert!(openssh_supports_forced_askpass_in_terminal("OpenSSH_8.5p1, OpenSSL 1.1.1"));
-        assert!(!openssh_supports_forced_askpass_in_terminal("OpenSSH_8.4p1, OpenSSL 1.1.1"));
-        assert!(openssh_supports_forced_askpass_in_terminal(
-            "OpenSSH_for_Windows_8.6p1, LibreSSL 3.4.3"
-        ));
-        assert!(openssh_supports_forced_askpass_in_terminal(
-            "OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2"
-        ));
-        assert!(!openssh_supports_forced_askpass_in_terminal(
-            "OpenSSH_for_Windows_8.1p1, LibreSSL 3.0.2"
-        ));
-        // 認不出版本 → 放行：多注入的環境變數在不支援的 ssh 上是無害的 no-op
-        //（終端機照樣出現一般密碼提示），少注入則是功能無聲失效。
-        assert!(openssh_supports_forced_askpass_in_terminal("something unparseable"));
     }
 
     #[test]

@@ -10,8 +10,6 @@ import {
   approvalTitle,
   armAfterDelay,
   buildAnswer,
-  CONNECT_EXPIRED_EVENT,
-  connectExpiredMessage,
   destination,
   isAnswering,
   pendingFeed,
@@ -243,24 +241,5 @@ describe("the agent problem line", () => {
   it("says why hosts on vault keys can't connect", () => {
     expect(agentProblemText({ kind: "not_running", reason: "path too long" })).toBe("SSHelter's agent isn't running: path too long");
     expect(agentProblemText({ kind: "include_missing" })).toBe("Hosts that use keys in SSHelter can't reach its agent.");
-  });
-});
-
-describe("the key channel that ssh asked too late", () => {
-  it("listens on the event the backend emits", () => {
-    expect(CONNECT_EXPIRED_EVENT).toBe("agent://connect-expired");
-  });
-
-  it("names the host and says what happened", () => {
-    expect(connectExpiredMessage("web")).toEqual({
-      title: "Connect to web again",
-      description:
-        "SSHelter offers the key for one minute after Connect, and ssh asked for it later (a new host's fingerprint question may have been open).",
-    });
-  });
-
-  it("shows hidden characters in the host's name instead of rendering them", () => {
-    expect(connectExpiredMessage("we\u202Eb").title).toBe("Connect to we⟨U+202E⟩b again");
-    expect(connectExpiredMessage("we\u0007b").title).toContain("⟨U+0007⟩");
   });
 });

@@ -7,7 +7,6 @@ import type { ApprovalNotice } from "@/bindings/ApprovalNotice";
 import type { SyncConflict } from "@/bindings/SyncConflict";
 import type { SyncNotice } from "@/bindings/SyncNotice";
 import type { SyncOverview } from "@/bindings/SyncOverview";
-import { CONNECT_EXPIRED_EVENT, connectExpiredMessage } from "@/lib/agent";
 import { listNames } from "@/lib/format";
 import { syncApprovalsKey, syncOverviewKey } from "@/lib/sync";
 import { approvalMessage, revealHidden } from "@/lib/sync-approvals";
@@ -119,8 +118,7 @@ export function openSyncSettings(): void {
  * Sync engine → UI. Status pushes refresh every overview reader without polling;
  * applied remote changes refresh the config views (a newly synced host can shadow
  * a local one) and the approval list; conflicts, hosts held for approval and
- * notices surface as toasts, and so does a Connect whose ssh asked its one-shot key
- * channel for the key after the one-minute window (`agent://connect-expired`, key vault spec §11).
+ * notices surface as toasts.
  * The backend starts a round itself when the window regains focus, so nothing
  * here asks for one — a second round would double the relay usage.
  * Returns the unsubscribe function.
@@ -179,11 +177,6 @@ export function subscribeSyncEvents(queryClient: QueryClient): () => void {
       description: message.description,
       action: { label: "Open", onClick: () => openSyncSettings() },
     });
-  });
-
-  on<string>(CONNECT_EXPIRED_EVENT, (alias) => {
-    const m = connectExpiredMessage(alias);
-    toast.warning(m.title, { description: m.description });
   });
 
   return () => {

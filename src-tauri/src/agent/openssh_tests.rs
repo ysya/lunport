@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use ssh_key::public::KeyData;
 use zeroize::Zeroizing;
 
-use crate::agent::broker::{AgentHost, Broker, Connection, Grant, VaultKey};
+use crate::agent::broker::{AgentHost, Broker, Connection, VaultKey};
 use crate::agent::prompt::{AgentApprovalAnswer, AgentApprovalRequest};
-use crate::agent::{oneshot, session};
+use crate::agent::session;
 use crate::error::AppError;
 use crate::ipc::peer;
 use crate::ipc::server::{Handler, Stream};
@@ -153,7 +153,6 @@ struct Running {
     /// `SSH_AUTH_SOCK` 的值。
     endpoint: String,
     host: Arc<TestHost>,
-    broker: Arc<Broker>,
 }
 
 /// 在暫存目錄開一個 agent(Windows 用這個測試自己的 pipe 名稱)。
@@ -162,7 +161,7 @@ fn start() -> Running {
     let host = Arc::new(TestHost::new());
     let broker = Arc::new(Broker::default());
     let handler: Handler = {
-        let (host, broker) = (Arc::clone(&host), Arc::clone(&broker));
+        let host = Arc::clone(&host);
         Arc::new(move |mut stream: Stream, pid: Option<u32>| {
             let program = pid.and_then(|pid| peer::identify(&peer::process_chain(pid)));
             let connection = Connection { broker: &broker, host: host.as_ref(), program, grant: None };
@@ -183,7 +182,7 @@ fn start() -> Running {
         crate::ipc::pipe_windows::listen(&agent_dir, &name, handler).unwrap();
         format!(r"\\.\pipe\{name}")
     };
-    Running { dir, endpoint, host, broker }
+    Running { dir, endpoint, host }
 }
 
 fn stderr(out: &std::process::Output) -> String {
@@ -240,44 +239,6 @@ fn ssh_keygen_signs_through_the_agent_and_the_signature_verifies() {
     let asked = agent.host.asked.lock().unwrap();
     assert_eq!(asked.len(), 3, "each signature was approved");
     assert!(asked.iter().all(|r| r.host.is_none() && !r.rememberable), "an SSHSIG request has no host and is never remembered");
-}
-
-#[test]
-fn a_one_shot_channel_lists_only_its_key_and_only_once() {
-    if !have("ssh-add") {
-        return;
-    }
-    let agent = start();
-    let serve: Box<dyn FnOnce(Stream, Option<u32>) + Send> = {
-        let (host, broker) = (Arc::clone(&agent.host), Arc::clone(&agent.broker));
-        Box::new(move |mut stream, _pid| {
-            let grant = Some(Grant { slot_id: IDS[1].into() });
-            let connection = Connection { broker: &broker, host: host.as_ref(), program: None, grant };
-            let _ = session::serve(&mut stream, &connection);
-        })
-    };
-    // `late` 不會被呼叫(10 秒內就連上了);`channel` 要留到兩次 ssh-add 都跑完:沒有 `keep` 就丟掉會取消通道。
-    let channel =
-        oneshot::open(&agent.dir.path().join("run"), serve, Box::new(|| {}), Duration::from_secs(10), Duration::from_secs(10)).unwrap();
-    #[cfg(unix)]
-    let endpoint = channel.path.display().to_string();
-    #[cfg(windows)]
-    let endpoint = format!(r"\\.\pipe\{}", channel.name);
-    let out = run(Command::new(tool("ssh-add")).arg("-L").env("SSH_AUTH_SOCK", &endpoint));
-    assert!(out.status.success(), "{}", stderr(&out));
-    let listed = String::from_utf8_lossy(&out.stdout);
-    assert!(listed.contains(test_keys::ECDSA_PUBLIC), "{listed}");
-    assert!(!listed.contains(test_keys::PLAIN_PUBLIC), "only the granted key: {listed}");
-    assert_eq!(listed.lines().count(), 1, "exactly one key is listed: {listed}");
-    // 第二次要的是「連不上」:ssh-add 連不到 agent 時結束碼是 2,連上了但 agent 沒有金鑰時是 1(只是「沒列出東西」不夠)。
-    let again = run(Command::new(tool("ssh-add")).arg("-L").env("SSH_AUTH_SOCK", &endpoint));
-    assert_eq!(
-        again.status.code(),
-        Some(2),
-        "the channel is gone after its first connection: ssh-add must fail to reach it (exit 2; exit 1 = it connected): stderr: {}, stdout: {}",
-        stderr(&again),
-        String::from_utf8_lossy(&again.stdout)
-    );
 }
 
 /// 立刻結束的命令:`run` 回傳它的輸出。命令用測試程式自己(兩個平台都有),它只列出這個測試的名稱就結束。

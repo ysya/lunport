@@ -201,14 +201,13 @@ describe("subscribeSyncEvents", () => {
     const bus = stubEventBus();
     const queryClient = new QueryClient();
     const stop = subscribeSyncEvents(queryClient);
-    await vi.waitFor(() => expect(bus.handlers.size).toBe(6));
+    await vi.waitFor(() => expect(bus.handlers.size).toBe(5));
     return { ...bus, queryClient, stop };
   }
 
   it("listens to the engine's events and never asks for a sync round itself", async () => {
     const { handlers, commands, emit, stop } = await subscribed();
     expect([...handlers.keys()].sort()).toEqual([
-      "agent://connect-expired",
       "sync://applied",
       "sync://approval",
       "sync://conflict",
@@ -221,7 +220,6 @@ describe("subscribeSyncEvents", () => {
     emit("sync://approval", [{ space_id: "a", space_name: "Work", aliases: ["web"] }]);
     emit("sync://conflict", [{ space_id: "a", space_name: "Work", aliases: ["web"] }]);
     emit("sync://notice", { kind: "space_deleted", name: "Work", by_device: "MacBook-A" });
-    emit("agent://connect-expired", "web");
     stop();
     expect(commands.filter((c) => c.startsWith("sync_"))).toEqual([]);
   });
@@ -275,27 +273,6 @@ describe("subscribeSyncEvents", () => {
     expect(useUiStore.getState()).toEqual(expect.objectContaining({ settingsOpen: true, settingsCategory: "sync" }));
   });
 
-  it("toasts a Connect whose ssh asked for the key after the channel's one-minute window, naming the host", async () => {
-    const { emit } = await subscribed();
-    emit("agent://connect-expired", "web");
-    expect(toast.getToasts()).toEqual([
-      expect.objectContaining({
-        type: "warning",
-        title: "Connect to web again",
-        description:
-          "SSHelter offers the key for one minute after Connect, and ssh asked for it later (a new host's fingerprint question may have been open).",
-      }),
-    ]);
-  });
-
-  it("shows the hidden characters of the host's name in that toast", async () => {
-    const { emit } = await subscribed();
-    emit("agent://connect-expired", SPOOFED_NAME);
-    const [shown] = toast.getToasts();
-    expect(shown).toEqual(expect.objectContaining({ title: `Connect to ${SPOOFED_NAME_SHOWN} again` }));
-    expect(JSON.stringify(shown)).not.toMatch(/[\u202E\u200B]/);
-  });
-
   it("leaves the keys notice to its dialog", async () => {
     const { emit } = await subscribed();
     emit("sync://notice", { kind: "keys_needed", names: ["id_mac"] });
@@ -316,7 +293,6 @@ describe("subscribeSyncEvents", () => {
     bus.emit("sync://applied", 2);
     bus.emit("sync://conflict", [{ space_id: "a", space_name: "Work", aliases: ["web"] }]);
     bus.emit("sync://notice", { kind: "space_deleted", name: "Work", by_device: "MacBook-A" });
-    bus.emit("agent://connect-expired", "web");
     expect(queryClient.getQueryData(syncOverviewKey)).toBeUndefined();
     expect(queryClient.getQueryState(["config", "hosts"])?.isInvalidated).toBe(false);
     expect(queryClient.getQueryState(syncApprovalsKey)?.isInvalidated).toBe(false);
