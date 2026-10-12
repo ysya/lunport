@@ -292,6 +292,13 @@ impl Inputs {
         let credit = self.keys.charge(bytes.len());
         self.queue(Input::Stdin(bytes), Some(credit))
     }
+
+    /// The end of input (Ctrl-D at a question). It counts as a byte of the keys' budget: a terminal that read as nothing again and again
+    /// without saying it hung up could not fill the queue with them.
+    fn input_ended(&self) -> Result<(), LoopGone> {
+        let credit = self.keys.charge(1);
+        self.queue(Input::StdinEnd, Some(credit))
+    }
 }
 
 /// The loop's end of the queue: what the threads put in it, and what the loop took out to look at and put back in front.
@@ -682,28 +689,26 @@ enum KeysEnd {
     HungUp,
 }
 
-/// Queues what `source` (the terminal) delivers, as typed text. A read of nothing is the end of input (Ctrl-D at a question); a second
-/// one in a row, or one on a terminal that says it hung up, is the terminal gone (a closed window reads as nothing on macOS, again and
-/// again, and as EIO on Linux), and so is a hang-up seen while the keys wait for the broker. A failed read is the end of the terminal.
+/// Queues what `source` (the terminal) delivers, as typed text. A read of nothing is the end of input (Ctrl-D at a question, once at
+/// each), unless the terminal says it hung up (POLLHUP): a closed window reads as nothing, again and again, and says so (measured on
+/// macOS; Linux reads it as EIO, or as nothing with POLLHUP once the terminal is hung up). A hang-up seen while the keys wait for the
+/// broker ends the thread too. A failed read is the end of the terminal.
 fn read_keys(source: &mut impl Keys, inputs: &Inputs) -> KeysEnd {
     let mut buf = [0u8; 4096];
-    let mut nothing_before = false;
     loop {
         // While what was typed before waits for the broker, the keys stay in the terminal; it is looked at for a hang-up meanwhile.
         if !inputs.keys.wait_room(HANGUP_CHECK, || !source.hung_up()) {
             return KeysEnd::HungUp;
         }
         match source.read(&mut buf) {
-            Ok(0) if nothing_before || source.hung_up() => return KeysEnd::HungUp,
+            Ok(0) if source.hung_up() => return KeysEnd::HungUp,
             Ok(0) => {
                 // A question ends on Ctrl-D; the next question reads again.
-                nothing_before = true;
-                if inputs.send(Input::StdinEnd).is_err() {
+                if inputs.input_ended().is_err() {
                     return KeysEnd::LoopGone;
                 }
             }
             Ok(count) => {
-                nothing_before = false;
                 let typed = Zeroizing::new(buf[..count].to_vec());
                 // What was typed may be a password: the copy that stays on this stack is wiped as well.
                 buf[..count].zeroize();
@@ -1514,30 +1519,53 @@ mod tests {
         assert!(matches!(&queued[0], Input::Stdin(bytes) if &bytes[..] == b"ls\r"));
     }
 
-    /// A closed window: on macOS the terminal reads as nothing, at once and for ever (measured), and on Linux as EIO. The keys thread
-    /// stops instead of telling the queue "the end of input" for ever: at the second read of nothing in a row, or at the first when the
-    /// terminal says it hung up, or at EIO.
+    /// A closed window: on macOS the terminal reads as nothing, at once and for ever, and says it hung up (POLLHUP; measured); on Linux
+    /// it reads as EIO. The keys thread stops there, and tells nothing more.
     #[test]
     fn the_keys_thread_stops_when_the_terminal_hangs_up_instead_of_reading_nothing_for_ever() {
-        for says_so in [false, true] {
-            let reads = Arc::new(AtomicUsize::new(0));
-            let counted = Arc::clone(&reads);
-            let mut keyboard = Keyboard::new(move |_: &mut [u8]| {
-                counted.fetch_add(1, Ordering::SeqCst);
-                Ok(0)
-            });
-            keyboard.hung_up.store(says_so, Ordering::SeqCst);
-            let (inputs, queue) = queue();
-            let end = ends_within(5, "the keys thread to stop", move || read_keys(&mut keyboard, &inputs));
-            assert_eq!(end, KeysEnd::HungUp);
-            let expected = if says_so { "[]" } else { "[StdinEnd]" };
-            assert_eq!(format!("{:?}", queued(&queue)), expected, "said hung up: {says_so}");
-            assert_eq!(reads.load(Ordering::SeqCst), if says_so { 1 } else { 2 });
-        }
-        let mut keyboard = scripted(vec![Ok(b"x".to_vec()), Err(std::io::Error::from_raw_os_error(libc::EIO))]);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        let mut keyboard = Keyboard::new(move |_: &mut [u8]| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(0)
+        });
+        keyboard.hung_up.store(true, Ordering::SeqCst);
         let (inputs, queue) = queue();
+        assert_eq!(ends_within(5, "the keys thread to stop", move || read_keys(&mut keyboard, &inputs)), KeysEnd::HungUp);
+        assert_eq!(format!("{:?}", queued(&queue)), "[]");
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        let mut keyboard = scripted(vec![Ok(b"x".to_vec()), Err(std::io::Error::from_raw_os_error(libc::EIO))]);
+        let (inputs, queue) = super::queue();
         assert_eq!(read_keys(&mut keyboard, &inputs), KeysEnd::HungUp);
         assert_eq!(format!("{:?}", queued(&queue)), "[Stdin(<hidden>)]");
+    }
+
+    /// Reads of nothing that the terminal does not call a hang-up are ends of input, however many come in a row (Ctrl-D at one question
+    /// after another). Were a closed terminal ever to read as nothing for ever without saying so, they could not pile up: each counts
+    /// against the keys' budget, so at most so many wait in the queue, and the thread waits for room, looking for a hang-up meanwhile.
+    #[test]
+    fn ends_of_input_in_a_row_are_not_a_hang_up_and_do_not_pile_up_without_bound() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        let mut keyboard = Keyboard::new(move |_: &mut [u8]| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(0)
+        });
+        let hung_up = Arc::clone(&keyboard.hung_up);
+        let (inputs, queue) = queue();
+        let budget = Arc::clone(&inputs.keys);
+        let thread = std::thread::spawn(move || read_keys(&mut keyboard, &inputs));
+        eventually("the keys' budget to be spent", 10, || *budget.used() >= KEYS_IN_FLIGHT);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!thread.is_finished(), "not a hang-up");
+        assert_eq!(reads.load(Ordering::SeqCst), KEYS_IN_FLIGHT, "an end of input for each byte of the budget, then a wait for room");
+        // Two taken out (not all: each one taken out makes room for another).
+        for _ in 0..2 {
+            assert!(matches!(queue.receiver.try_recv().map(|queued| queued.input), Ok(Input::StdinEnd)));
+        }
+        hung_up.store(true, Ordering::SeqCst);
+        eventually("the keys thread to stop", 5, || thread.is_finished());
+        assert_eq!(thread.join().unwrap(), KeysEnd::HungUp);
     }
 
     /// The terminal went away: the session ends as for SIGHUP (no SIGHUP may come: a terminal's session leader that does not pass it on),
@@ -1545,11 +1573,12 @@ mod tests {
     #[test]
     fn a_terminal_that_went_away_ends_the_session_as_sighup_does() {
         let keyboard = Keyboard::new(|_: &mut [u8]| Ok(0));
+        keyboard.hung_up.store(true, Ordering::SeqCst);
         let (inputs, queue) = queue();
         let (told, hung_up) = std::sync::mpsc::channel();
         keys_thread(keyboard, inputs, move || told.send(()).unwrap());
         assert!(hung_up.recv_timeout(Duration::from_secs(5)).is_ok(), "the watchdog is armed");
-        assert_eq!(format!("{:?}", queued(&queue)), "[StdinEnd, Stop(1)]");
+        assert_eq!(format!("{:?}", queued(&queue)), "[Stop(1)]");
     }
 
     /// While what was typed before waits for the broker (the budget is spent), nothing more is read: the keys stay in the terminal. The
@@ -1994,6 +2023,45 @@ mod tests {
         eventually("the run to end", 10, || run.is_finished());
         assert_eq!(run.join().unwrap(), 255);
         assert_eq!(String::from_utf8_lossy(&left_in(&device)), "", "what was typed for the question is gone");
+    }
+
+    /// Ctrl-D at a question is the end of input, once at each question: two in a row at two questions are two cancels, not a closed
+    /// terminal, and the broker decides what comes after. A closed window (the pty's controller closed) still ends the session as SIGHUP
+    /// does. The program's own calls: the keys read from a pty's device, which is the terminal of the run too.
+    #[test]
+    fn ctrl_d_at_two_questions_cancels_both_and_a_closed_window_still_ends_the_session_with_129() {
+        use crate::session::protocol::{Question, QuestionKind};
+        let (mut controller, device) = pty();
+        // Kept open until the end: the run's terminal is this descriptor, which the keys thread's own would close when it ends.
+        let kept = device.try_clone().unwrap();
+        let descriptor = kept.as_raw_fd();
+        let (ours, mut broker) = UnixStream::pair().unwrap();
+        let (inputs, queue) = queue();
+        let stderr = Shared::default();
+        let run = {
+            let (inputs, stderr) = (inputs.clone(), stderr.clone());
+            std::thread::spawn(move || {
+                let mut tty = Tty::new(Arc::new(DeviceTermios(descriptor))).unwrap();
+                run(ours, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(Shared::default()), Box::new(stderr))
+            })
+        };
+        keys_thread(TerminalKeys { source: device, descriptor }, inputs, || {});
+        for _ in ["Hello", "OpenShell"] {
+            next_message(&mut broker);
+        }
+        for (id, prompt) in [("q1", "deploy@web's password: "), ("q2", "deploy@web's password again: ")] {
+            let question = Question { question_id: id.into(), kind: QuestionKind::Password, text: prompt.into(), echo: false, deadline_ms: Some(60_000) };
+            write_control(&mut broker, &ServerMessage::Question(question)).unwrap();
+            eventually("the question on the terminal", 10, || stderr.text().ends_with(prompt));
+            controller.write_all(b"\x04").unwrap();
+            let cancel = next_message(&mut broker);
+            assert!(matches!(&cancel, ClientMessage::Answer { question_id, value: None, cancel: true } if question_id == id), "{id}: {cancel:?}");
+        }
+        crate::process::without_spawns(|| drop(controller));
+        eventually("the run to end", 10, || run.is_finished());
+        assert_eq!(run.join().unwrap(), 128 + libc::SIGHUP);
+        assert!(matches!(next_message(&mut broker), ClientMessage::Close));
+        drop(kept);
     }
 
     /// A terminal that went away (its window closed) at a question: setting it, the flush of what it holds included, fails. The end does
