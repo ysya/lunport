@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::auth::{printable, prompt_wait, BrokerAuth, KeyStore, Owner, PinPolicy, Reply};
+use super::auth::{printable, prompt_wait, BrokerAuth, KeyStore, Owner, PasswordSource, PinPolicy, Reply};
 use super::directory::{DirectoryError, HostDirectory};
 use super::protocol::{kinds, HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, ConnectError, HopRef, HostId, HostKey, Session, SshEngine, Target};
@@ -184,7 +184,9 @@ impl Connector<'_> {
                 ConnectError::AuthFailed { ref hop, ref tried, password_wanted, .. } => {
                     // A password given and refused: a typed one is forgotten; a saved one stays saved, and what the person types is used instead.
                     let refused = tried.contains(&AuthMethod::Password) && auth.password_source(&hop.id).is_some();
-                    let typed = passwords_typed.entry(hop.id.clone()).or_default();
+                    // The first time a hop is counted, a password the person typed is already there when `BrokerAuth::password` asked for it
+                    // before the connect (a hop that starts with the password method): that was their first of `PASSWORD_PROMPTS`.
+                    let typed = passwords_typed.entry(hop.id.clone()).or_insert_with(|| usize::from(auth.password_source(&hop.id) == Some(PasswordSource::Typed)));
                     if !(password_wanted || refused) || *typed >= PASSWORD_PROMPTS {
                         return Err(failure_of(&error, &target));
                     }
@@ -534,6 +536,35 @@ mod tests {
         let never = world(engine(), directory()).typing(&["one", "two", "three", "right"]);
         assert_eq!(never.connect(&web()).err(), Some(failure(kinds::AUTH, "Authentication failed for deploy@web (tried: publickey, password).")));
         assert_eq!(never.owner.asked().len(), PASSWORD_PROMPTS);
+    }
+
+    /// The password a hop that starts with the password method is asked for before it connects (`BrokerAuth::password`) is the first
+    /// password the person types for that hop, and the limit of three counts it: with nothing saved and every answer wrong, the person is
+    /// asked three times, not four. A saved password that is refused is not one the person typed, so it is not counted.
+    #[test]
+    fn a_password_first_host_asks_for_its_password_three_times_at_most_the_one_before_the_connect_included() {
+        let engine = || FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let directory = || FakeDirectory::new().with_host("web", AuthMethod::Password);
+        let wrong = ["one", "two", "three", "four", "five"];
+        let failed = failure(kinds::AUTH, "Authentication failed for deploy@web (tried: password).");
+        let again = "That password didn't work. deploy@web's password: ";
+
+        let never = world(engine(), directory().with_pin("web", default_server_key())).typing(&wrong);
+        assert_eq!(never.connect(&web()).err(), Some(failed.clone()));
+        assert_eq!(never.owner.questions(), ["deploy@web's password: ", again, again]);
+
+        let first_contact = world(engine(), directory()).deciding(vec![Decision::Trust]).typing(&wrong);
+        assert_eq!(first_contact.connect(&web()).err(), Some(failed.clone()));
+        assert_eq!(first_contact.owner.questions(), ["deploy@web's password: ", again, again], "the host key window in between changes nothing");
+
+        let saved = world(engine(), directory().with_pin("web", default_server_key())).typing(&wrong);
+        saved.keychain.set("host:id-web", "old").unwrap();
+        assert_eq!(saved.connect(&web()).err(), Some(failed));
+        assert_eq!(saved.owner.questions(), [again; PASSWORD_PROMPTS], "the saved password was not typed by the person: three questions are theirs");
+
+        let third_time = world(engine(), directory().with_pin("web", default_server_key())).typing(&["one", "two", "right"]);
+        third_time.connect(&web()).expect("the third password is right");
+        assert_eq!(third_time.owner.asked().len(), PASSWORD_PROMPTS);
     }
 
     /// A saved password that the server refuses: the person is asked, and what they type is used instead of the saved one.
