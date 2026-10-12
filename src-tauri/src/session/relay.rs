@@ -298,10 +298,20 @@ fn ending(exit: Option<Exit>, quit: Option<String>, session: &dyn Session, targe
     }
 }
 
-/// What the client is told when the engine could not open the shell.
-fn no_shell(error: &SessionError, alias: &str) -> Vec<ServerMessage> {
-    let text = format!("SSHelter could not open a shell on {alias}: {}.", error.to_string().trim_end_matches('.'));
-    vec![ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }), ServerMessage::Exited { code: None, signal: None }]
+/// What the client is told when the engine could not open the shell. A connection that is gone is told as it is everywhere
+/// (`connection_lost`); otherwise the reason is a clause of the sentence, so it does not start with a capital.
+fn no_shell(error: &SessionError, session: &dyn Session, target: &Target, alias: &str) -> Vec<ServerMessage> {
+    let no_status = ServerMessage::Exited { code: None, signal: None };
+    if !session.is_alive() {
+        return vec![ServerMessage::Event(Event::Disconnected { reason: connection_lost(session, target, alias) }), no_status];
+    }
+    let why = match error {
+        SessionError::Closed => "the connection is closed".to_string(),
+        SessionError::Timeout => "the connection did not take the request in time".to_string(),
+        SessionError::Channel(text) => format!("SSH error: {text}"),
+    };
+    let text = format!("SSHelter could not open a shell on {alias}: {}.", why.trim_end_matches('.'));
+    vec![ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }), no_status]
 }
 
 /// Tells the client `messages`, in order. A client that is gone does not take them, which is nothing to act on.
@@ -340,7 +350,7 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
         Err(error) => {
             match control.over() {
                 Some(over) => say_over(link, over),
-                None => tell_all(link, no_shell(&error, &alias)),
+                None => tell_all(link, no_shell(&error, session.as_ref(), &target, &alias)),
             }
             session.close();
             return;
@@ -863,5 +873,35 @@ mod tests {
         pump.join().unwrap();
         resizing.join().unwrap();
         assert_eq!(*locked(&sizes), [(100, 30), (120, 40)], "the size set last is the size sent last");
+    }
+
+    /// Plan 1b-1 review, Task 10 Minor 6: the connection was gone when the shell was to be opened. That is a lost connection, said as one
+    /// (spec §11), and not "could not open a shell … The connection is closed."; and a reason that is only a clause of a sentence does
+    /// not begin with a capital.
+    #[test]
+    fn a_shell_that_cannot_be_opened_on_a_lost_connection_says_how_it_was_lost() {
+        let hop = target().hops[0].reference();
+        let lost = DisconnectReason { hop, kind: DisconnectKind::ConnectionLost, detail: "connection reset by peer".into() };
+        let mut dead = start(FakeEngine::new().disconnecting_with(lost), ShellControl::new());
+        dead.finish();
+        assert_eq!(
+            dead.link.split().1,
+            [
+                ServerMessage::Event(Event::Disconnected { reason: "Connection to web lost (connection reset by peer).".into() }),
+                ServerMessage::Exited { code: None, signal: None },
+            ]
+        );
+        assert_eq!(dead.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }], "no shell was opened on the dead connection");
+
+        // A link that did not take the request in time is not a lost connection: the sentence names the reason in lower case.
+        let mut slow = start(FakeEngine::new().with_shell_error(SessionError::Timeout), ShellControl::new());
+        slow.finish();
+        assert_eq!(
+            slow.link.split().1,
+            [
+                ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "SSHelter could not open a shell on web: the connection did not take the request in time.".into() }),
+                ServerMessage::Exited { code: None, signal: None },
+            ]
+        );
     }
 }
