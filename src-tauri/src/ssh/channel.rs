@@ -37,14 +37,19 @@ struct QueueState {
     unannounced: u64,
 }
 
+/// Chunks are merged into the last queued chunk while it stays within this many bytes. A writer that sends one byte at a time (a slow
+/// program, or a server doing it on purpose) would otherwise cost a whole `Vec` per byte, about 40 times the bytes it sends.
+pub const MERGE_LIMIT: usize = 16 * 1024;
+
 /// A byte queue with a size limit. The producer (the engine's channel reader) must never wait: russh stalls the whole connection behind a
 /// channel nobody reads. So when the reader is slower than the server (a paused terminal) and the queue is full, new chunks are
-/// discarded and counted instead, and the connection keeps going. The stream says so: the next chunk that is kept is preceded by a
-/// one-line notice that tells how many bytes are missing.
+/// discarded and counted instead, and the connection keeps going. The stream says so with a one-line notice that tells how many bytes
+/// are missing: in front of the next chunk that is kept, or as soon as the reader has caught up, whichever comes first.
 ///
 /// While the queue is open it holds at most `capacity` bytes plus one notice (a notice is 72 bytes plus the digits of the count), and
 /// `close` can add a second one. The exception is an empty queue, which accepts a chunk of any size, so a chunk larger than `capacity` is
-/// taken whole and progress is always possible. The queue has one reading thread: `push` wakes a single waiting reader.
+/// taken whole and progress is always possible. Small chunks are merged (`MERGE_LIMIT`), so the memory the queue uses follows the bytes
+/// it holds, not the number of pushes. The queue has one reading thread: `push` wakes a single waiting reader.
 pub struct ByteQueue {
     state: Mutex<QueueState>,
     ready: Condvar,
@@ -64,9 +69,23 @@ impl ByteQueue {
         format!("\r\n[SSHelter dropped {bytes} bytes of output because the terminal fell behind]\r\n").into_bytes()
     }
 
+    /// Queues `chunk` after the others: merged into the last chunk while that stays within `MERGE_LIMIT`, else as a chunk of its own.
+    /// Merging only ever grows the end of a chunk, so the read position in the first chunk stays valid.
     fn append(state: &mut QueueState, chunk: Vec<u8>) {
         state.bytes += chunk.len();
-        state.chunks.push_back(chunk);
+        match state.chunks.back_mut() {
+            Some(back) if back.len() + chunk.len() <= MERGE_LIMIT => back.extend_from_slice(&chunk),
+            _ => state.chunks.push_back(chunk),
+        }
+    }
+
+    /// Announces a gap the stream has not mentioned yet; the reader has caught up, so there is room for the notice now.
+    fn announce_gap(state: &mut QueueState) {
+        if state.unannounced > 0 {
+            let notice = ByteQueue::notice(state.unannounced);
+            state.unannounced = 0;
+            ByteQueue::append(state, notice);
+        }
     }
 
     /// Appends `chunk` unless the queue is closed or the chunk would grow the queued bytes past `capacity`. The bound is `capacity` plus one
@@ -88,11 +107,7 @@ impl ByteQueue {
             state.unannounced += chunk.len() as u64;
             return false;
         }
-        if state.unannounced > 0 {
-            let notice = ByteQueue::notice(state.unannounced);
-            state.unannounced = 0;
-            ByteQueue::append(&mut state, notice);
-        }
+        ByteQueue::announce_gap(&mut state);
         ByteQueue::append(&mut state, chunk);
         self.ready.notify_one();
         true
@@ -104,11 +119,7 @@ impl ByteQueue {
         if state.closed {
             return;
         }
-        if state.unannounced > 0 {
-            let notice = ByteQueue::notice(state.unannounced);
-            state.unannounced = 0;
-            ByteQueue::append(&mut state, notice);
-        }
+        ByteQueue::announce_gap(&mut state);
         state.closed = true;
         self.ready.notify_all();
     }
@@ -121,6 +132,11 @@ impl ByteQueue {
         }
         let mut state = locked(&self.state);
         loop {
+            // Bytes were dropped and the reader has read everything else: the notice goes out now, not with the next output, which may
+            // never come.
+            if state.chunks.is_empty() {
+                ByteQueue::announce_gap(&mut state);
+            }
             if let Some(front) = state.chunks.front() {
                 let taken = (front.len() - state.front_read).min(buf.len());
                 buf[..taken].copy_from_slice(&front[state.front_read..state.front_read + taken]);
@@ -153,6 +169,12 @@ impl ByteQueue {
     /// How many bytes were discarded because the reader fell behind.
     pub fn dropped_bytes(&self) -> u64 {
         locked(&self.state).dropped
+    }
+
+    /// How many chunks the queue holds (tests of the merging).
+    #[cfg(test)]
+    fn chunk_count(&self) -> usize {
+        locked(&self.state).chunks.len()
     }
 }
 
@@ -280,12 +302,60 @@ mod tests {
             assert_eq!(&buf, b"hello");
             assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(5));
             assert_eq!(&buf, b" worl");
-            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(1));
-            assert_eq!(&buf[..1], b"d");
-            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(1));
-            assert_eq!(&buf[..1], b"!");
+            // The two pushes were merged into one chunk (see `MERGE_LIMIT`), so the last read gets the end of both.
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(2));
+            assert_eq!(&buf[..2], b"d!");
             assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Timeout);
             assert_eq!(queue.read_until(&mut [], soon()), QueueRead::Bytes(0), "an empty buffer reads nothing and does not wait");
+        });
+    }
+
+    /// A writer that sends one byte at a time (a slow program, or a server doing it on purpose) must not cost a `Vec` per byte: small
+    /// chunks are merged into the last one while it stays within `MERGE_LIMIT`, so the number of chunks follows the bytes, not the pushes.
+    #[test]
+    fn small_chunks_are_merged_so_their_count_follows_the_bytes_and_not_the_pushes() {
+        let queue = ByteQueue::new(64 * 1024);
+        for index in 0..20_000u32 {
+            assert!(queue.push(vec![(index % 251) as u8]));
+        }
+        assert_eq!(queue.chunk_count(), 2, "16 KiB in the first chunk, the rest in a second");
+        let all = read_all(&queue);
+        assert_eq!(all.len(), 20_000);
+        assert!(all.iter().enumerate().all(|(index, byte)| *byte == (index as u32 % 251) as u8), "the bytes come out in the order they went in");
+    }
+
+    #[test]
+    fn a_chunk_is_not_merged_into_one_it_would_grow_past_the_merge_limit_and_a_big_chunk_stays_whole() {
+        let queue = ByteQueue::new(1024 * 1024);
+        assert!(queue.push(vec![1; MERGE_LIMIT]));
+        assert!(queue.push(vec![2; 1]));
+        assert_eq!(queue.chunk_count(), 2, "the full chunk takes nothing more");
+        assert!(queue.push(vec![3; MERGE_LIMIT + 4000]));
+        assert_eq!(queue.chunk_count(), 3, "a chunk bigger than the limit is queued as it is, not split");
+        let all = read_all(&queue);
+        assert_eq!(all.len(), 2 * MERGE_LIMIT + 4001);
+        assert_eq!((all[MERGE_LIMIT - 1], all[MERGE_LIMIT], all[MERGE_LIMIT + 1]), (1, 2, 3));
+    }
+
+    /// A gap is announced as soon as the reader has caught up, not only when more output arrives: a program that went quiet after the
+    /// terminal fell behind must not leave the user looking at output with a hole in it and no word about it.
+    #[test]
+    fn a_reader_that_catches_up_after_a_gap_is_told_about_it_at_once() {
+        bounded(|| {
+            let queue = ByteQueue::new(8);
+            assert!(queue.push(b"AAAAAA".to_vec()));
+            assert!(!queue.push(b"BBBBBB".to_vec()), "the terminal fell behind");
+            let mut buf = [0u8; 128];
+            assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(6), "the reader catches up");
+            match queue.read_until(&mut buf, soon()) {
+                QueueRead::Bytes(count) => assert_eq!(
+                    std::str::from_utf8(&buf[..count]).unwrap(),
+                    "\r\n[SSHelter dropped 6 bytes of output because the terminal fell behind]\r\n"
+                ),
+                other => panic!("the gap must be announced without waiting for more output, got {other:?}"),
+            }
+            assert!(queue.push(b"C".to_vec()));
+            assert_eq!(read_all(&queue), b"C", "the gap is announced once");
         });
     }
 
