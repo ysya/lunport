@@ -255,7 +255,7 @@ impl Broker {
         };
         let Ok(worker) = worker else {
             self.forget(id);
-            return refuse(kinds::CONNECT, "SSHelter could not start the session.");
+            return could_not_open(link.as_ref(), kinds::CONNECT, "SSHelter could not start the session.");
         };
         // The client's messages, until it closes or goes away.
         loop {
@@ -1292,5 +1292,23 @@ mod tests {
         client.open("web");
         assert!(client.next().is_none(), "the connection is closed");
         crate::ssh::testing::eventually("the session to be forgotten", 5, || !broker.has_sessions());
+    }
+
+    /// Plan 1b-1 review, Task 11 Minor 7: a session that could not be started, as when the thread for it cannot be made, is an error and
+    /// an exit without a status, like every other session that could not be opened (spec §7.2). A client that is told only the error
+    /// waits for the exit.
+    #[test]
+    fn a_session_that_could_not_be_started_is_an_error_and_an_exit_without_a_status() {
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        could_not_open(&FrameLink { writer: Mutex::new(theirs) }, kinds::CONNECT, "SSHelter could not start the session.");
+        let mut told = Vec::new();
+        while let Some(Frame::Control(payload)) = read_frame(&mut ours).unwrap() {
+            told.push(decode::<ServerMessage>(&payload).unwrap());
+            if told.len() == 2 {
+                break;
+            }
+        }
+        assert_eq!(told, [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]);
     }
 }
