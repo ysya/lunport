@@ -105,7 +105,8 @@ pub trait AuthSource: Send + Sync {
 
     /// The password for `hop`, or `None` when there is none: the password method is then skipped. When a hop starts with the password
     /// method the engine calls this before it opens the connection, so asking the user here is fine; as a fallback after a refused key
-    /// it is called during the login and must be quick.
+    /// it is called during the login and must be quick. After `ConnectError::AuthFailed { password_wanted: true, .. }` the caller asks
+    /// the person, connects again, and returns what was typed from here at once.
     fn password(&self, hop: &HopRef) -> Option<Secret>;
 
     /// The answers to one keyboard-interactive round, one per prompt, given before `deadline`; `None` abandons the login and the engine

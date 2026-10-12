@@ -25,7 +25,8 @@ fn toy_target(server: &ToyServer, login: &ToyLogin, auth: AuthMethod) -> Target 
 }
 
 /// The key is refused and the auth source has no password, but the server offers the password method: a password the person types
-/// now could get in, and the failure says so (the broker asks and connects again with the password first).
+/// now could get in, and the failure says so (the broker asks, then connects again with the same method order and the typed password
+/// ready for `AuthSource::password`).
 #[test]
 fn a_refused_key_with_no_password_to_give_says_a_password_is_wanted() {
     let (server, login) = toy();

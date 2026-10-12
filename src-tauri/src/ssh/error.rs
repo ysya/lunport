@@ -25,9 +25,12 @@ pub enum ConnectError {
     NoCommonHostKeyAlgorithm { hop: HopRef, ours: Vec<String>, theirs: Vec<String> },
     /// Every method was refused or could not be tried. `tried` lists the methods that were attempted, possibly none (a key that is not in
     /// the vault, no password to give); `reason` explains what the method list alone does not (for example that the server accepts RSA
-    /// keys only with SHA-1); empty for a plain refusal. `password_wanted`: the server still offers the password method and no password
-    /// was tried on this connection (the auth source had none, or the login did not reach the method): a password typed now could get in,
-    /// so the caller can ask for one and connect again with the password method first (spec §6.2 step 4).
+    /// keys only with SHA-1); empty for a plain refusal. `password_wanted`: the server's last list of login methods still has the password
+    /// method and no password was tried on this connection (the auth source had none, or the login did not get to the method): a password
+    /// typed now could get in. The caller can ask the person and connect again with the hop as it is: the methods go in the same order, and
+    /// `AuthSource::password` returns the typed password from memory at once, because nobody may wait for a person while a connection is
+    /// open (spec §6.2 step 4). Putting the password first would drop the key from a server that wants `publickey,password`; only a hop
+    /// with no password method in its sequence (one that starts with keyboard-interactive) is connected again with the password first.
     AuthFailed { hop: HopRef, tried: Vec<AuthMethod>, reason: String, password_wanted: bool },
     /// Login stopped on our side (signer failure, cancelled or overdue prompt) and the connection was dropped.
     AuthAbandoned { hop: HopRef, reason: String },
