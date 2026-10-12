@@ -5,8 +5,11 @@
 //!
 //! The engine's rules (spec §6.1): passphrases and vault unlocking happen before `connect` (`BrokerAuth::unlock`); `sign` and a password
 //! asked during the login must be quick, so a person is asked for a password only before the connection is opened, for a hop that
-//! starts with the password method. A password wanted later, after a refused key, comes back as `AuthFailed { password_wanted }`, and the
-//! broker asks and connects again with the password first.
+//! starts with the password method (`BrokerAuth::prepare` records which). A password wanted later, after a refused key, comes back as
+//! `AuthFailed { password_wanted }`: the broker asks the person between two connects, keeps the answer (`BrokerAuth::set_typed`) and connects
+//! again with the hop's original method order, so a `publickey,password` server still gets the key first; `password` then answers the typed
+//! password from memory at once, so nobody waits while a connection is open. Only a hop whose method sequence has no password method (it
+//! starts with keyboard-interactive) is connected again with the password first.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
