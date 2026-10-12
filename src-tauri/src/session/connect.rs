@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::auth::{printable, prompt_wait, BrokerAuth, KeyStore, Owner, PasswordSource, PinPolicy, Reply};
+use super::auth::{label, printable, prompt_wait, BrokerAuth, KeyStore, Owner, PasswordSource, PinPolicy, Reply};
 use super::directory::{DirectoryError, HostDirectory};
 use super::protocol::{kinds, HostQuery, QuestionKind};
 use crate::ssh::{AuthMethod, ConnectError, HopRef, HostId, HostKey, Session, SshEngine, Target};
@@ -199,7 +199,8 @@ impl Connector<'_> {
                         return Err(failure_of(&error, &target));
                     }
                     auth.forget_typed(&hop.id);
-                    let question = if refused { format!("That password didn't work. {}@{}'s password: ", hop.user, hop.alias) } else { format!("{}@{}'s password: ", hop.user, hop.alias) };
+                    let asks = format!("{}@{}'s password: ", label(&hop.user), label(&hop.alias));
+                    let question = if refused { format!("That password didn't work. {asks}") } else { asks };
                     let Some(index) = target.hops.iter().position(|candidate| candidate.id == hop.id) else { return Err(failure_of(&error, &target)) };
                     let deadline = std::time::Instant::now().checked_add(prompt_wait(&target.hops[index]));
                     *typed += 1;
@@ -257,7 +258,7 @@ impl Connector<'_> {
             None => None,
             Some(pinned) => Some(self.pinned_summary(hop, pinned)?),
         };
-        owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in SSHelter.", hop.alias));
+        owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in SSHelter.", label(&hop.alias)));
         let question = HostKeyQuestion {
             alias: hop.alias.clone(),
             hostname: hop.hostname.clone(),
@@ -301,7 +302,7 @@ mod tests {
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods};
     use crate::ssh::russh_engine::toy_server::{ToyBehavior, ToyLogin, ToyServer};
     use crate::ssh::russh_engine::{EngineOptions, RusshEngine};
-    use crate::ssh::{AuthMethod, HostKey};
+    use crate::ssh::{AuthMethod, Hop, HostKey};
     use crate::sync::slot_rules::test_keys;
     use crate::sync::testkit::MemKeychain;
 
@@ -741,6 +742,33 @@ mod tests {
             let failed = world.connect_as(&web(), &GoingOwner(world.cancel.clone())).err();
             assert_eq!(failed, Some(failure(CANCELLED, "The connection was cancelled.")), "{auth:?}");
         }
+    }
+
+    /// The words the loop writes itself name the host and the user, and both come from the person's configuration (`ssh -G` copies the
+    /// user unchecked): they are `printable` and on one line (spec §7.1), as in the questions `BrokerAuth` writes for the same hop. This
+    /// is what reaches the terminal, in the password questions and in the notice that the window waits.
+    #[test]
+    fn the_names_in_the_loops_own_questions_and_notice_carry_no_control_character() {
+        let alias = "we\u{1b}[2Jb";
+        let query = HostQuery::Alias(alias.into());
+        let hostile = |auth: AuthMethod| FakeDirectory::new().with_hop(Hop::new(&format!("id-{alias}"), alias, "web.example.com", 22, "de\u{1b}[2Jpl\noy", auth));
+        let asks = "de?[2Jpl?oy@we?[2Jb's password: ";
+        let engine = || FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+
+        // The broker asks between two connects, for a hop that starts with a key: first, and again after a wrong password.
+        let between = world(engine(), hostile(AuthMethod::Key { key_id: "k-plain".into() }).with_pin(alias, default_server_key())).typing(&["wrong", "right"]);
+        between.connect(&query).expect("the second password is right");
+        assert_eq!(between.owner.questions(), [asks.to_string(), format!("That password didn't work. {asks}")]);
+
+        // `BrokerAuth` asks before the connect, for a hop that starts with the password method: the same words.
+        let before = world(engine(), hostile(AuthMethod::Password).with_pin(alias, default_server_key())).typing(&["right"]);
+        before.connect(&query).expect("the password is right");
+        assert_eq!(before.owner.questions(), [asks]);
+
+        // The notice that the host key waits in SSHelter's window.
+        let noticed = world(FakeEngine::new(), hostile(AuthMethod::Key { key_id: "k-plain".into() })).deciding(vec![Decision::Trust]);
+        noticed.connect(&query).expect("connects once the key is trusted");
+        assert_eq!(*locked(&noticed.owner.notices), ["Waiting for you to confirm we?[2Jb's host key in SSHelter."]);
     }
 
     /// A first contact with a password-first host connects twice (the key is unknown the first time); the person types the password once.
