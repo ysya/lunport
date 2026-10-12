@@ -37,7 +37,7 @@ pub fn parse_args(args: &[String]) -> Result<HostQuery, String> {
 }
 
 /// The arguments after `connect` as text. One that is not text (not UTF-8) cannot name a host either: the usage.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn texts(args: &[OsString]) -> Result<Vec<String>, String> {
     args.iter().map(|arg| arg.clone().into_string().map_err(|_| USAGE.to_string())).collect()
 }
