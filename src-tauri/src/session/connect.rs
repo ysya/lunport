@@ -271,12 +271,16 @@ impl Connector<'_> {
     /// fingerprint, and when the directory pinned it. The date is the one of the directory's record of that very key. A directory that no
     /// longer holds it (another connection replaced or forgot the pin since this connect resolved the host) has no date to give, and a key
     /// that is not pinned any more cannot be replaced either (`replace_pin` refuses it, after the person has decided), so the connect
-    /// ends here with a directory failure and connecting again starts from the pin as it is now. The refusal is the safest answer: the
-    /// question has no place for a missing date, and a date that is made up (1970) or belongs to another key is worse than none.
-    fn pinned_summary(&self, hop: &HopRef, pinned: &HostKey) -> Result<PinnedSummary, ConnectFailure> {
+    /// ends here with a failure of kind `host` (said through the jump host when `hop` is one) and connecting again starts from the pin as
+    /// it is now. The refusal is the safest answer: the question has no place for a missing date, and a date that is made up (1970) or
+    /// belongs to another key is worse than none.
+    fn pinned_summary(&self, target: &Target, hop: &HopRef, pinned: &HostKey) -> Result<PinnedSummary, ConnectFailure> {
         match self.directory.pinned(&hop.id).map_err(directory_failure)? {
             Some(record) if record.key.fingerprint == pinned.fingerprint => Ok(PinnedSummary { fingerprint: pinned.fingerprint.clone(), pinned_at_ms: record.pinned_at_ms }),
-            _ => Err(directory_failure(DirectoryError::Failed(format!("SSHelter's record of {}'s host key changed while it was connecting. Connect again.", hop.alias)))),
+            _ => {
+                let sentence = format!("SSHelter's record of {}'s host key changed while it was connecting. Connect again.", hop.alias);
+                Err(failure_at(Some(hop), target, kinds::HOST, sentence))
+            }
         }
     }
 
@@ -304,7 +308,7 @@ impl Connector<'_> {
         // The summary first: when there is none to give, nobody is asked, and nobody is told to wait for a window that stays closed.
         let changed = match &pinned {
             None => None,
-            Some(pinned) => Some(self.pinned_summary(hop, pinned)?),
+            Some(pinned) => Some(self.pinned_summary(target, hop, pinned)?),
         };
         // The client may have gone away while the engine was connecting: nobody is left to be told that the window waits, or to wait for it.
         if cancel.is_cancelled() {
@@ -328,13 +332,13 @@ impl Connector<'_> {
                 None => ConnectError::HostKeyUnknown { hop: hop.clone(), key: key.clone() },
                 Some(pinned) => ConnectError::HostKeyMismatch { hop: hop.clone(), key: key.clone(), pinned },
             };
-            return Err(ConnectFailure::new(kinds::HOST_KEY, refused.to_string()));
+            return Err(failure_of(&refused, target));
         }
         match &pinned {
             None => self.directory.pin(&hop.id, key),
             Some(pinned) => self.directory.replace_pin(&hop.id, pinned, key),
         }
-        .map_err(|error| ConnectFailure::new(kinds::HOST_KEY, error.to_string()))?;
+        .map_err(|error| failure_at(Some(hop), target, kinds::HOST_KEY, error))?;
         policy.pin(&hop.id, key.clone());
         if let Some(confirmed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
             confirmed.pinned = Some(key.clone());
@@ -574,6 +578,65 @@ mod tests {
             assert!(locked(&world.owner.notices).is_empty(), "{what}: nobody was told to wait for it either");
             assert_eq!(directory.inner.pins().get(&HostId::from("id-web")).map(|pin| pin.key.clone()), Some(old.clone()), "{what}: nothing was pinned over the old key");
         }
+    }
+
+    /// A directory that cannot write a pin (`pin` and `replace_pin` fail with `reason`) and answers everything else as the one it wraps.
+    struct PinsCannotBeWritten {
+        inner: FakeDirectory,
+        reason: &'static str,
+    }
+
+    impl HostDirectory for PinsCannotBeWritten {
+        fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+            self.inner.resolve(query)
+        }
+
+        fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
+            self.inner.pinned(host)
+        }
+
+        fn pin(&self, _host: &HostId, _key: &HostKey) -> Result<(), DirectoryError> {
+            Err(DirectoryError::Failed(self.reason.to_string()))
+        }
+
+        fn replace_pin(&self, _host: &HostId, _previous: &HostKey, _key: &HostKey) -> Result<(), DirectoryError> {
+            Err(DirectoryError::Failed(self.reason.to_string()))
+        }
+
+        fn password_account(&self, host: &HostId) -> String {
+            self.inner.password_account(host)
+        }
+    }
+
+    /// Spec §11: a failure on a jump host is said through it, and so is every way a jump host's key can end the connect: the person does not
+    /// trust it, trusts it and the pin cannot be written, or the directory's record of the pin moved on meanwhile.
+    #[test]
+    fn a_host_key_problem_of_a_jump_host_is_said_through_it() {
+        let key_hop = || AuthMethod::Key { key_id: "k-plain".into() };
+        let chain = || FakeDirectory::new().with_host("bastion", key_hop()).with_host_via("db", key_hop(), &["bastion"]);
+        let db = HostQuery::Alias("db".into());
+        let through = |kind: &str, text: &str| Some(failure(kind, &format!("Could not connect through bastion: {text}")));
+
+        let unknown = world(FakeEngine::new(), chain()).deciding(vec![Decision::Refuse]);
+        assert_eq!(unknown.connect(&db).err(), through(kinds::HOST_KEY, "The host key of bastion has not been confirmed yet."));
+
+        let changed = world(FakeEngine::new(), chain().with_pin("bastion", key(test_keys::ENC_PUBLIC))).deciding(vec![Decision::Refuse]);
+        assert_eq!(changed.connect(&db).err(), through(kinds::HOST_KEY, "The host key of bastion changed. Connection refused."));
+
+        let unwritable = PinsCannotBeWritten { inner: chain(), reason: "SSHelter cannot write its pinned host keys in host-pins.json." };
+        let trusting = world(FakeEngine::new(), FakeDirectory::new()).deciding(vec![Decision::Trust]);
+        assert_eq!(
+            trusting.connect_through(&unwritable, &db, &trusting.owner).err(),
+            through(kinds::HOST_KEY, "SSHelter cannot write its pinned host keys in host-pins.json.")
+        );
+
+        let forgotten = PinMovedOn { inner: chain().with_pin("bastion", key(test_keys::ENC_PUBLIC)), now: None };
+        let trusting = world(FakeEngine::new(), FakeDirectory::new()).deciding(vec![Decision::Trust]);
+        assert_eq!(
+            trusting.connect_through(&forgotten, &db, &trusting.owner).err(),
+            through(kinds::HOST, "SSHelter's record of bastion's host key changed while it was connecting. Connect again.")
+        );
+        assert!(trusting.confirmer.asked().is_empty());
     }
 
     /// Plan 1b R17: a pinned host whose server no longer has a key of the pinned type would fail with "no common algorithm", because the
