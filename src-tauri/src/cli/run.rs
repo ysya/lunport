@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,8 @@ const OUTPUT_IN_FLIGHT: usize = 256 * 1024;
 const KEYS_IN_FLIGHT: usize = 64 * 1024;
 /// How long a change of the terminal's mode waits for what was written before it to reach the terminal.
 const MODE_WAIT: Duration = Duration::from_secs(1);
-/// How long the end waits, in all, for the last output, what the CLI says at the end, and `close` to be written.
+/// How long an end the program decides waits, in all, for the last output, what the CLI says at the end, and `close` to be written; and
+/// how long an end the session came to waits for a terminal that takes nothing.
 const END_WAIT: Duration = Duration::from_millis(1500);
 /// How long the watchdog gives the loop to end the program after a signal that ends it, or after the terminal went away.
 pub const STOP_GRACE: Duration = Duration::from_secs(2);
@@ -42,6 +43,11 @@ const WATCHDOG_TERMINAL_WAIT: Duration = Duration::from_millis(200);
 const HANGUP_CHECK: Duration = Duration::from_millis(250);
 /// How long, at most, the terminal writer waits at a time for a terminal that would not take more (its descriptor non-blocking).
 const WRITABLE_WAIT_MS: i32 = 100;
+/// How much the terminal writer writes at a time: it notes that it got on after each piece, so that a slow terminal is told from one that
+/// takes nothing.
+const PIECE: usize = 4096;
+/// How often a wait for the terminal writer looks whether the writer still gets on.
+const MOVING_CHECK: Duration = Duration::from_millis(100);
 
 /// Runs one session over `stream`, connected to the broker, until it ends; returns the program's exit code. `inputs` brings the keys,
 /// resizes and signals (`stdin_thread`, `signal_thread`); the broker's frames join it from a thread started here. What is written to
@@ -86,9 +92,22 @@ impl Loop<'_> {
     /// output to the terminal, what was typed to the broker), or at once if it went nowhere. A broker that no longer takes what is
     /// written is a broker that went away: its end of the connection arrives as `Input::Closed` from the reader.
     fn perform(&mut self, actions: Vec<Action>, credit: Option<Credit>) -> Option<i32> {
-        // The end (its last action exits) waits for its writes for END_WAIT in all.
-        let end = matches!(actions.last(), Some(Action::Exit(_))).then(|| Instant::now() + END_WAIT);
-        let wait = |most: Duration| end.map_or(most, |end| end.saturating_duration_since(Instant::now()).min(most));
+        // An end (its last action exits) that the program decides tells the broker `close` (a signal, the terminal gone, a failure of its
+        // own): its writes wait END_WAIT in all. An end the session came to (the shell exited; the broker ended the session, or went
+        // away) waits for the terminal to take what the shell printed last for as long as the terminal goes on taking it, as OpenSSH
+        // writes all of it before it exits; it gives up only when the terminal takes nothing for END_WAIT. What waits for the terminal
+        // is at most the output's budget, so that wait ends too.
+        let ends = matches!(actions.last(), Some(Action::Exit(_)));
+        let leaving = actions.iter().any(|action| matches!(action, Action::Send(ClientMessage::Close)));
+        let deadline = (ends && leaving).then(|| Instant::now() + END_WAIT);
+        let wait = |most: Duration| deadline.map_or(most, |deadline| deadline.saturating_duration_since(Instant::now()).min(most));
+        let shown_out = |terminal: &TerminalWriter, most: Duration| {
+            if ends && !leaving {
+                terminal.written_while_moving(END_WAIT)
+            } else {
+                terminal.written(wait(most))
+            }
+        };
         let (mut shown, mut posted) = (false, false);
         for action in actions {
             match action {
@@ -121,7 +140,7 @@ impl Loop<'_> {
                 Action::Mode(mode, discard_input) => {
                     // What was written before the change belongs to the mode it was written in (a banner before raw mode, the shell's
                     // output before the end), unless the terminal does not take it in time: that does not keep the mode from changing.
-                    self.terminal.written(wait(MODE_WAIT));
+                    shown_out(&self.terminal, MODE_WAIT);
                     if let Err(error) = self.tty.set_mode(mode, discard_input) {
                         self.terminal.show(Show::Said(format!("sshelter: cannot set the terminal: {error}\n")));
                         shown = true;
@@ -132,7 +151,7 @@ impl Loop<'_> {
                 }
                 Action::Exit(code) => {
                     // The last output, what the CLI says at the end and `close` are written first, unless they cannot be in time.
-                    self.terminal.written(wait(END_WAIT));
+                    shown_out(&self.terminal, END_WAIT);
                     self.broker.written(wait(END_WAIT));
                     self.tty.restore();
                     return Some(code);
@@ -388,20 +407,34 @@ impl<W: Write + Send + 'static> From<W> for Output {
 /// The writer of the terminal: standard output and standard error, in the order they were given, on a thread of its own.
 struct TerminalWriter {
     jobs: Sender<Show>,
+    /// When the writer last got on: took a job, or wrote a piece of one.
+    moved: Arc<Mutex<Instant>>,
 }
 
 impl TerminalWriter {
     fn start(stdout: impl Into<Output>, stderr: impl Into<Output>, inputs: &Inputs) -> TerminalWriter {
         let (mut stdout, mut stderr) = (stdout.into(), stderr.into());
         let (jobs, given) = std::sync::mpsc::channel::<Show>();
+        let moved = Arc::new(Mutex::new(Instant::now()));
+        let moving = Arc::clone(&moved);
         spawn_worker("sshelter-terminal", inputs.clone(), move |_| {
+            let got_on = || *moving.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+            // What a job brings is written a piece at a time, and each piece written counts as getting on.
+            let write = |output: &mut Output, bytes: &[u8]| -> io::Result<()> {
+                for piece in bytes.chunks(PIECE) {
+                    output.write_whole(piece)?;
+                    got_on();
+                }
+                Ok(())
+            };
             // A stream that failed (a pipe nobody reads any more, a terminal that went away) is not written to again; what is given for it
             // is dropped, so that nothing waits for it. A write that would block is not a failure (`Output::write_whole`).
             let (mut stdout_works, mut stderr_works) = (true, true);
             for job in given {
+                got_on();
                 match job {
-                    Show::Output(bytes) => stdout_works = stdout_works && stdout.write_whole(&bytes).is_ok(),
-                    Show::Said(text) => stderr_works = stderr_works && stderr.write_whole(text.as_bytes()).is_ok(),
+                    Show::Output(bytes) => stdout_works = stdout_works && write(&mut stdout, &bytes).is_ok(),
+                    Show::Said(text) => stderr_works = stderr_works && write(&mut stderr, text.as_bytes()).is_ok(),
                     Show::Release(credit) => drop(credit),
                     Show::Mark(reached) => {
                         let _ = reached.send(());
@@ -409,7 +442,7 @@ impl TerminalWriter {
                 }
             }
         });
-        TerminalWriter { jobs }
+        TerminalWriter { jobs, moved }
     }
 
     fn show(&self, job: Show) {
@@ -419,6 +452,22 @@ impl TerminalWriter {
     /// Waits until everything given so far has been written, or `wait` has passed; whether it has.
     fn written(&self, wait: Duration) -> bool {
         wait_for_mark(|mark| self.jobs.send(Show::Mark(mark)).is_ok(), wait)
+    }
+
+    /// Waits until everything given so far has been written, for as long as the writer gets on: a slow terminal is waited for, one that
+    /// has taken nothing for `stall` is not. Whether everything was written.
+    fn written_while_moving(&self, stall: Duration) -> bool {
+        let (mark, reached) = std::sync::mpsc::sync_channel(1);
+        if self.jobs.send(Show::Mark(mark)).is_err() {
+            return false;
+        }
+        loop {
+            match reached.recv_timeout(MOVING_CHECK) {
+                Ok(()) => return true,
+                Err(RecvTimeoutError::Timeout) if self.moved.lock().unwrap_or_else(PoisonError::into_inner).elapsed() < stall => {}
+                Err(_) => return false,
+            }
+        }
     }
 }
 
@@ -1709,21 +1758,66 @@ mod tests {
         }
     }
 
-    /// The end waits for what was written before it, the terminal's mode put back in between: the last output of the shell, and then
-    /// why the session ended, are all on the terminal when the program exits, even on a terminal that is slow to take them.
+    /// A terminal that takes `rate` bytes a second: each write takes its share of the time.
+    #[derive(Clone)]
+    struct Paced {
+        shown: Shared,
+        rate: f64,
+    }
+
+    impl Write for Paced {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_secs_f64(bytes.len() as f64 / self.rate));
+            self.shown.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A session that ends at the broker's (here the connection was lost) waits, before the program exits, for the terminal to take what
+    /// the shell printed last, for as long as it goes on taking it (OpenSSH writes all of it before it exits), and then for why the
+    /// session ended. Here the terminal takes 100 KiB a second, so what waits for it when the end comes (up to the output's budget,
+    /// 256 KiB) takes longer than the end's wait for an end the program decides (END_WAIT).
     #[test]
-    fn the_last_output_and_the_reason_reach_the_terminal_before_the_program_exits() {
-        let (stdout, stderr) = (Shared::default(), Slow::default());
+    fn the_last_output_and_the_reason_reach_a_slow_terminal_before_the_program_exits() {
+        let (stdout, stderr) = (Paced { shown: Shared::default(), rate: 100.0 * 1024.0 }, Slow::default());
         let mut hand = by_hand(FakeTermios::new(), Box::new(stdout.clone()), Box::new(stderr.clone()));
         hand.open();
-        for _ in 0..32 {
-            write_data(&mut hand.broker, &[b'x'; 32 * 1024]).unwrap();
-        }
-        hand.tell(ServerMessage::Event(Event::Disconnected { reason: "Connection to web lost.".into() }));
-        hand.tell(ServerMessage::Exited { code: None, signal: None });
-        assert_eq!(hand.ends_within(Duration::from_secs(5)).0, 255);
-        assert_eq!(stdout.len(), 1024 * 1024);
+        let mut remote = hand.broker.try_clone().unwrap();
+        // On a thread of its own: the CLI takes the output as fast as the terminal does, and this waits with it.
+        let printing = std::thread::spawn(move || {
+            for _ in 0..10 {
+                write_data(&mut remote, &[b'x'; 32 * 1024]).unwrap();
+            }
+            write_control(&mut remote, &ServerMessage::Event(Event::Disconnected { reason: "Connection to web lost.".into() })).unwrap();
+            write_control(&mut remote, &ServerMessage::Exited { code: None, signal: None }).unwrap();
+        });
+        assert_eq!(hand.ends_within(Duration::from_secs(10)).0, 255);
+        printing.join().unwrap();
+        assert_eq!(stdout.shown.len(), 320 * 1024, "all of the shell's last output");
         assert_eq!(stderr.0.text(), "\nConnection to web lost.\n");
+    }
+
+    /// A terminal that takes nothing does not keep a session that ended from ending: the end waits for the terminal only while it takes
+    /// something, and goes on after END_WAIT without.
+    #[test]
+    fn a_terminal_that_takes_nothing_does_not_keep_a_session_that_ended_from_ending() {
+        let stdout = Stalled::default();
+        let mut hand = by_hand(FakeTermios::new(), Box::new(stdout.clone()), Box::new(Shared::default()));
+        hand.open();
+        let mut remote = hand.broker.try_clone().unwrap();
+        let printing = std::thread::spawn(move || {
+            for _ in 0..4 {
+                write_data(&mut remote, &[b'x'; 32 * 1024]).unwrap();
+            }
+            write_control(&mut remote, &ServerMessage::Exited { code: Some(0), signal: None }).unwrap();
+        });
+        let (code, termios) = hand.ends_within(2 * END_WAIT + Duration::from_secs(1));
+        assert_eq!(code, 0);
+        assert!(termios.is_start(&termios.now()), "the terminal is as it was");
+        stdout.let_go();
+        printing.join().unwrap();
     }
 
     /// A terminal whose descriptor another program left non-blocking: a write that would block says so (`WouldBlock`) instead of waiting,
