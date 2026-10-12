@@ -98,6 +98,8 @@ jobs:
           echo "SSHELTER_PAM_PASSWORD=$password" >> "$GITHUB_ENV"
       # The pam tests are skipped here: the next step runs them against the container.
       - name: Engine and vault tests against a scratch sshd
+        # Runs even when the container did not start, so that a first run shows both results.
+        if: ${{ !cancelled() }}
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
