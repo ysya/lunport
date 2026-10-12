@@ -68,7 +68,7 @@ impl Default for EngineOptions {
 impl EngineOptions {
     /// The time a person gets to answer one keyboard-interactive round.
     fn prompt_wait_for(&self, connect_timeout: Duration) -> Duration {
-        self.prompt_wait.unwrap_or_else(|| (connect_timeout * 4).max(Duration::from_secs(60)))
+        self.prompt_wait.unwrap_or_else(|| connect_timeout.saturating_mul(4).max(Duration::from_secs(60)))
     }
 }
 
@@ -744,7 +744,7 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
                                 Vec::new()
                             } else {
                                 let prompts: Vec<Prompt> = prompts.into_iter().map(|prompt| Prompt { text: prompt.prompt, echo: prompt.echo }).collect();
-                                let deadline = std::time::Instant::now() + prompt_wait;
+                                let deadline = std::time::Instant::now() + prompt_wait.min(LONGEST_TIMEOUT);
                                 let Some(answers) = auth.interactive(&reference, &prompts, deadline) else { return Err(abandoned("the prompt was cancelled")) };
                                 if std::time::Instant::now() > deadline {
                                     return Err(abandoned("the prompt was answered after its deadline"));
@@ -1465,6 +1465,7 @@ mod tests {
         assert_eq!(options.prompt_wait_for(Duration::from_secs(5)), Duration::from_secs(60));
         let short = EngineOptions { prompt_wait: Some(Duration::from_secs(2)), ..EngineOptions::default() };
         assert_eq!(short.prompt_wait_for(Duration::from_secs(15)), Duration::from_secs(2));
+        assert_eq!(options.prompt_wait_for(Duration::MAX), Duration::MAX, "an absurd connect timeout saturates instead of panicking");
     }
 
     /// Counts the calls to `sign` and the hash each one got.

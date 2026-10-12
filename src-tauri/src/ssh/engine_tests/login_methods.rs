@@ -265,6 +265,18 @@ fn a_hop_with_no_password_to_offer_goes_on_to_keyboard_interactive() {
     assert_eq!(auth.prompts_seen().len(), 1, "keyboard-interactive took over");
 }
 
+/// A host record can hold any connect timeout (the importer of ssh_config reads `ConnectTimeout` into it), and the wait for the answer to
+/// a keyboard-interactive round is derived from it: the login must go through, not panic inside the engine on a time the clock cannot hold.
+#[test]
+fn a_hop_with_an_absurd_connect_timeout_still_logs_in() {
+    let Some(subject) = toy() else { return };
+    let mut hop = subject.hop_on(subject.port, AuthMethod::Interactive);
+    hop.connect_timeout = Duration::MAX;
+    let auth = VaultAuth::new().with_answers(&[&subject.password]);
+    let session = engine().connect(&Target { hops: vec![hop] }, &*TestPolicy::trusting(), &auth).expect("the size of the timeout does not matter");
+    ok_output(session.as_ref());
+}
+
 /// The password request is treated like the key request when the server's answer names no method to go on with (`classify_empty_answer`):
 /// the key is refused, the password is asked for while the connection is open, and the link is cut while the engine waits for the verdict
 /// on it. The user is told that the link was lost, not that a password was refused.
