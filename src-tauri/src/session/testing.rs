@@ -412,7 +412,8 @@ impl Gate {
         self.entered.load(Ordering::SeqCst)
     }
 
-    fn pass(&self) {
+    /// Waits here until the gate is released (or `GATE_LIMIT` has passed).
+    pub fn pass(&self) {
         self.entered.fetch_add(1, Ordering::SeqCst);
         let deadline = Instant::now() + GATE_LIMIT;
         let mut open = locked(&self.open);

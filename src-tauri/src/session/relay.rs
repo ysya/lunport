@@ -86,6 +86,8 @@ struct Life {
 pub struct ShellControl {
     shell: Mutex<Option<Arc<dyn ShellChannel>>>,
     alias: Mutex<String>,
+    /// The last size the client sent. It is held while a size is sent to the shell (`resize`, `send_size`), so that two sizes reach the
+    /// shell in the order they were set, and the last one sent is the last one set.
     size: Mutex<Option<(u16, u16)>>,
     gone: AtomicBool,
     /// The shell was asked to close (once is enough).
@@ -124,15 +126,29 @@ impl ShellControl {
         }
     }
 
-    /// The client's terminal has this size: remembered, and sent to the shell when it is open (spec §7.2).
+    /// The client's terminal has this size: remembered, and sent to the shell when it is open (spec §7.2). Sent under the lock of the
+    /// remembered size, so that a size cannot overtake a newer one on its way to the shell (`send_size` does the same).
     pub fn resize(&self, cols: u16, rows: u16) {
-        *locked(&self.size) = Some((cols, rows));
+        let mut size = locked(&self.size);
+        *size = Some((cols, rows));
         let shell = locked(&self.shell).clone();
         if let Some(shell) = shell {
             if let Err(error) = shell.window_change(cols, rows) {
                 eprintln!("[session] a window size did not reach the shell: {error}");
             }
         }
+        drop(size);
+    }
+
+    /// Sends the shell the size the client sent last, or `opened_with` when it sent none: once the PTY exists, because a resize sent
+    /// before that is ignored by the server (spec §7.2).
+    fn send_size(&self, shell: &dyn ShellChannel, opened_with: (u16, u16)) {
+        let size = locked(&self.size);
+        let (cols, rows) = size.unwrap_or(opened_with);
+        if let Err(error) = shell.window_change(cols, rows) {
+            eprintln!("[session] the window size did not reach the new shell: {error}");
+        }
+        drop(size);
     }
 
     /// Keystrokes from the client. Before the shell is open there is nowhere for them to go (the CLI sends none then). A write the link
@@ -341,10 +357,7 @@ pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control:
     if forwarding {
         // The size the client sent while the shell was being opened, or the one it was opened with: sent once more now that the PTY exists
         // (spec §7.2: a resize before the shell is ready is ignored by the server).
-        let (cols, rows) = locked(&control.size).unwrap_or((cols, rows));
-        if let Err(error) = shell.window_change(cols, rows) {
-            eprintln!("[session] the window size did not reach the new shell: {error}");
-        }
+        control.send_size(shell.as_ref(), (cols, rows));
     }
     std::thread::scope(|scope| {
         if !forwarding {
@@ -776,5 +789,79 @@ mod tests {
         running.finish();
         assert_eq!(running.link.split(), (Vec::new(), Vec::new()));
         assert_eq!(running.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed]);
+    }
+
+    /// A session whose only shell is the one it was given.
+    struct OneShell(Mutex<Option<Box<dyn ShellChannel>>>);
+
+    impl Session for OneShell {
+        fn shell(&self, _pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError> {
+            locked(&self.0).take().ok_or(SessionError::Closed)
+        }
+        fn exec(&self, _command: &str, _timeout: Duration, _output_cap: usize) -> Result<crate::ssh::ExecResult, SessionError> {
+            Err(SessionError::Closed)
+        }
+        fn is_alive(&self) -> bool {
+            true
+        }
+        fn disconnect_reason(&self) -> Option<DisconnectReason> {
+            None
+        }
+        fn close(&self) {}
+    }
+
+    /// A shell that ends at once and keeps the sizes sent to it, in the order they arrived; the first size sent waits at a gate before it
+    /// is kept (a link that is slow to take it).
+    struct SizeShell {
+        sizes: Arc<Mutex<Vec<(u16, u16)>>>,
+        calls: std::sync::atomic::AtomicUsize,
+        slow_first: Arc<Gate>,
+    }
+
+    impl ShellChannel for SizeShell {
+        fn write(&self, _data: &[u8]) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn read(&self, _buf: &mut [u8]) -> Result<usize, SessionError> {
+            Ok(0)
+        }
+        fn window_change(&self, cols: u16, rows: u16) -> Result<(), SessionError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.slow_first.pass();
+            }
+            locked(&self.sizes).push((cols, rows));
+            Ok(())
+        }
+        fn exited(&self) -> Option<Exit> {
+            Some(Exit::Code(0))
+        }
+        fn close(&self) {}
+    }
+
+    /// Plan 1b-1 review, Task 10 Minor 4: the size sent again once the shell is open and a resize that comes meanwhile are sent one after
+    /// the other, in the order the sizes were set: the shell must not be left with the older one.
+    #[test]
+    fn a_resize_that_comes_while_the_size_is_sent_again_is_not_overtaken_by_it() {
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let slow_first = Gate::closed();
+        let shell = SizeShell { sizes: Arc::clone(&sizes), calls: std::sync::atomic::AtomicUsize::new(0), slow_first: Arc::clone(&slow_first) };
+        let control = Arc::new(ShellControl::new());
+        control.resize(100, 30);
+        let link = Arc::new(Recorder::default());
+        let pump = {
+            let (control, link) = (Arc::clone(&control), Arc::clone(&link));
+            let connected = Connected { session: Box::new(OneShell(Mutex::new(Some(Box::new(shell))))), target: target() };
+            std::thread::spawn(move || run_shell(connected, pty(), link.as_ref(), &control, "7"))
+        };
+        crate::ssh::testing::eventually("the size to be being sent again", 5, || slow_first.entered() == 1);
+        let resizing = {
+            let control = Arc::clone(&control);
+            std::thread::spawn(move || control.resize(120, 40))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        slow_first.release();
+        pump.join().unwrap();
+        resizing.join().unwrap();
+        assert_eq!(*locked(&sizes), [(100, 30), (120, 40)], "the size set last is the size sent last");
     }
 }
