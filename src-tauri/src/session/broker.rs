@@ -1242,4 +1242,20 @@ mod tests {
         let control = Arc::clone(&locked(&world.broker.table).entries[&1].conn.control);
         assert!(world.broker.has_sessions() && !control.is_gone(), "an idle session is not given up on after the time hello is given");
     }
+
+    /// Plan 1b-1 review, Task 11 Minor 5: the client leaves while the engine is still connecting, which cannot be interrupted. When the
+    /// connect gets through, its session is closed, and no shell is opened on the server for nobody.
+    #[test]
+    fn a_client_that_leaves_while_the_engine_connects_gets_no_shell_opened_for_it() {
+        let world = world_gated(FakeEngine::new(), pinned_web(), Arc::new(FakeConfirmer::default()), saved_password(), |gated| gated.holding_connects());
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        crate::ssh::testing::eventually("the connect to be going on", 5, || world.gates.connect.entered() == 1);
+        let cancel = locked(&world.broker.table).entries[&1].conn.cancel.clone();
+        drop(client);
+        crate::ssh::testing::eventually("the broker to see that the client has gone", 5, || cancel.is_cancelled());
+        world.gates.connect.release();
+        crate::ssh::testing::eventually("the session to be forgotten", 10, || !world.broker.has_sessions());
+        assert_eq!(world.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed], "connected, closed at once, and no shell opened");
+    }
 }
