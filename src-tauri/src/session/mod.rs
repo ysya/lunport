@@ -2,6 +2,10 @@
 //! version, the MCP adapter in phase 2 — asks the client (or the app's window, for host keys) what a login needs, and relays the
 //! terminal. Every SSH call it makes blocks, so it runs on plain threads, never in async code and never on the UI thread.
 
+// Windows has no broker in this version (plan 1b R4; its transport and the console are phase 3): the app starts it on macOS and Linux
+// only, so on Windows most of this module is compiled, and tested, but never called.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
+
 use std::path::{Path, PathBuf};
 
 /// The broker's socket in the app's data directory (spec §4): `<app data>/ipc/sock`. The CLI finds it the same way, without the app.
