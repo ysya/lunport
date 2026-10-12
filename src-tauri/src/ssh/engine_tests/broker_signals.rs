@@ -117,8 +117,8 @@ fn a_refused_keyboard_interactive_login_says_a_password_is_wanted_when_the_serve
 #[test]
 fn a_key_missing_from_the_vault_and_no_password_to_give_says_a_password_is_wanted() {
     let Some(tools) = tools() else { return };
-    // The scratch sshd offers publickey only, unless it is told otherwise; it cannot log anybody in by password (no PAM), which is not needed
-    // here: nothing is sent to it.
+    // The scratch sshd offers publickey only (the harness turns the other methods off); here it is told to list the password method too.
+    // No password is ever sent to it.
     let server = Server::start(&tools, &["PasswordAuthentication yes"]);
     let auth = VaultAuth::new();
     let error = engine().connect(&server.target("k1"), &*TestPolicy::trusting(), &auth).err().expect("nothing could be tried");
@@ -141,18 +141,19 @@ fn a_key_missing_from_the_vault_and_no_password_to_give_says_a_password_is_wante
 fn a_server_that_wants_a_key_and_then_a_password_needs_the_hops_own_method_order() {
     let Some(tools) = tools() else { return };
     let server = Server::start(&tools, &["AuthenticationMethods publickey,password", "PasswordAuthentication yes", "PerSourcePenalties no"]);
+    let key = AuthMethod::Key { key_id: "k1".to_string() };
 
     let first = server.vault("k1");
     let error = engine().connect(&server.target("k1"), &*TestPolicy::trusting(), &first).err().expect("the password is missing");
     assert!(
-        matches!(&error, ConnectError::AuthFailed { tried, password_wanted: true, .. } if *tried == [AuthMethod::Key { key_id: "k1".to_string() }]),
+        matches!(&error, ConnectError::AuthFailed { tried, password_wanted: true, .. } if *tried == [key.clone()]),
         "the key went through and the password is wanted: {error:?}"
     );
 
     let again = server.vault("k1").with_password("typed by the person");
     let error = engine().connect(&server.target("k1"), &*TestPolicy::trusting(), &again).err().expect("the server refuses the password");
     assert!(
-        matches!(&error, ConnectError::AuthFailed { tried, password_wanted: false, .. } if *tried == [AuthMethod::Key { key_id: "k1".to_string() }, AuthMethod::Password]),
+        matches!(&error, ConnectError::AuthFailed { tried, password_wanted: false, .. } if *tried == [key.clone(), AuthMethod::Password]),
         "the key and then the password were sent: {error:?}"
     );
     assert_eq!(again.calls_in_order(), vec!["public_key", "sign", "password"], "the password is asked for after the key, and answered from memory");
