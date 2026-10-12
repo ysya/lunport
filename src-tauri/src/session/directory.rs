@@ -83,8 +83,8 @@ pub enum PinDecision {
     Refuse(String),
 }
 
-/// `pin(host, key)`, while `pinned` (the fingerprint of the key pinned now, if any) is pinned: pin when nothing is, accept the key that is,
-/// refuse another one.
+/// `pin(host, key)` when `pinned` is the fingerprint of the key pinned now (`None`: nothing is): write the key when nothing is pinned,
+/// accept it when it is the pinned one, refuse it when another key is.
 pub fn decide_pin(host: &HostId, pinned: Option<&str>, key: &HostKey) -> PinDecision {
     match pinned {
         Some(pinned) if pinned == key.fingerprint => PinDecision::AlreadyPinned,
@@ -93,8 +93,8 @@ pub fn decide_pin(host: &HostId, pinned: Option<&str>, key: &HostKey) -> PinDeci
     }
 }
 
-/// `replace_pin(host, previous, key)`, while `pinned` is pinned: accept the key that is pinned already, replace `previous`, refuse anything
-/// else (another key, or no pin at all).
+/// `replace_pin(host, previous, key)` when `pinned` is the fingerprint of the key pinned now (`None`: nothing is): accept `key` when it is
+/// the pinned one, write it when `previous` is the pinned one, refuse anything else (another key, or no pin at all).
 pub fn decide_replace(host: &HostId, pinned: Option<&str>, previous: &HostKey, key: &HostKey) -> PinDecision {
     match pinned {
         Some(pinned) if pinned == key.fingerprint => PinDecision::AlreadyPinned,
