@@ -24,7 +24,7 @@ use serde::Serialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::client::{Action, Client, Input};
-use super::terminal::{Restorer, Tty};
+use super::terminal::{Mode, Restorer, Tty};
 use crate::session::protocol::{decode, read_frame, write_control, write_data, write_frame, ClientMessage, Frame, HostQuery, ServerMessage, CONTROL};
 
 /// How much of the broker's output may be on its way to the terminal at a time (read from the broker, not written to the terminal yet).
@@ -47,7 +47,8 @@ const WRITABLE_WAIT_MS: i32 = 100;
 /// How much the terminal writer writes at a time: it notes that it got on after each piece, so that a slow terminal is told from one that
 /// takes nothing.
 const PIECE: usize = 4096;
-/// How often a wait for the terminal writer looks whether the writer still gets on.
+/// How often a wait for the terminal writer looks whether the writer still gets on, and whether a signal ends the wait
+/// (`TerminalWriter::written_while_moving`).
 const MOVING_CHECK: Duration = Duration::from_millis(100);
 
 /// Runs one session over `stream`, connected to the broker, until it ends; returns the program's exit code. `inputs` brings the keys,
@@ -97,16 +98,20 @@ impl Loop<'_> {
         // own): its writes wait END_WAIT in all. An end the session came to (the shell exited; the broker ended the session, or went
         // away) waits for the terminal to take what the shell printed last for as long as the terminal goes on taking it, as OpenSSH
         // writes all of it before it exits; it gives up only when the terminal takes nothing for END_WAIT. What waits for the terminal
-        // is at most the output's budget, so that wait ends too.
+        // is at most the output's budget, so that wait ends too. A signal that ends or interrupts the program (SIGINT, SIGTERM, SIGHUP,
+        // SIGQUIT, or the terminal gone) ends it at once, as it ends OpenSSH's: the terminal is put back and the program exits with
+        // 128 + the signal's number, without what was still to be written (`Queue::signalled`). `Some(status)` from `shown_out` is that.
         let ends = matches!(actions.last(), Some(Action::Exit(_)));
         let leaving = actions.iter().any(|action| matches!(action, Action::Send(ClientMessage::Close)));
         let deadline = (ends && leaving).then(|| Instant::now() + END_WAIT);
         let wait = |most: Duration| deadline.map_or(most, |deadline| deadline.saturating_duration_since(Instant::now()).min(most));
-        let shown_out = |terminal: &TerminalWriter, most: Duration| {
+        let shown_out = |this: &mut Self, most: Duration| -> Option<i32> {
             if ends && !leaving {
-                terminal.written_while_moving(END_WAIT)
+                let queue = &mut this.queue;
+                this.terminal.written_while_moving(END_WAIT, || queue.signalled())
             } else {
-                terminal.written(wait(most))
+                this.terminal.written(wait(most));
+                None
             }
         };
         let (mut shown, mut posted) = (false, false);
@@ -141,7 +146,9 @@ impl Loop<'_> {
                 Action::Mode(mode, discard_input) => {
                     // What was written before the change belongs to the mode it was written in (a banner before raw mode, the shell's
                     // output before the end), unless the terminal does not take it in time: that does not keep the mode from changing.
-                    shown_out(&self.terminal, MODE_WAIT);
+                    if let Some(status) = shown_out(self, MODE_WAIT) {
+                        return self.cut_short(discard_input, status);
+                    }
                     if let Err(error) = self.tty.set_mode(mode, discard_input) {
                         self.terminal.show(Show::Said(format!("sshelter: cannot set the terminal: {error}\n")));
                         shown = true;
@@ -152,7 +159,9 @@ impl Loop<'_> {
                 }
                 Action::Exit(code) => {
                     // The last output, what the CLI says at the end and `close` are written first, unless they cannot be in time.
-                    shown_out(&self.terminal, END_WAIT);
+                    if let Some(status) = shown_out(self, END_WAIT) {
+                        return self.cut_short(false, status);
+                    }
                     self.broker.written(wait(END_WAIT));
                     self.tty.restore();
                     return Some(code);
@@ -165,6 +174,16 @@ impl Loop<'_> {
             _ => {}
         }
         None
+    }
+
+    /// A signal ended an end's wait for the terminal (`perform`): the terminal is put back at once, throwing away what was typed when the
+    /// end does (an end under a question), and the program exits with `status`. What was still to be written is not waited for.
+    fn cut_short(&mut self, discard_input: bool, status: i32) -> Option<i32> {
+        if discard_input {
+            let _ = self.tty.set_mode(Mode::Cooked, true);
+        }
+        self.tty.restore();
+        Some(status)
     }
 }
 
@@ -321,6 +340,20 @@ impl Queue {
         self.kept.pop_front().or_else(|| self.receiver.recv().ok())
     }
 
+    /// The status (128 + the signal's number) of a signal that ends or interrupts the program, when one is queued (`Input::Stop`,
+    /// `Input::Interrupt`; the terminal gone is a SIGHUP). Everything the threads queued stays, in order: an end that waits for the
+    /// terminal looks here (`perform`), and nothing else is taken out meanwhile.
+    fn signalled(&mut self) -> Option<i32> {
+        while let Ok(queued) = self.receiver.try_recv() {
+            self.kept.push_back(queued);
+        }
+        self.kept.iter().find_map(|queued| match queued.input {
+            Input::Stop(signal) => Some(128 + signal),
+            Input::Interrupt => Some(128 + libc::SIGINT),
+            _ => None,
+        })
+    }
+
     /// Throws away what the person typed and the keys thread has already queued; everything else stays, in order. (What is thrown away
     /// is wiped as it is dropped, see `Input::Stdin`.) A question switches the terminal throwing away what the terminal has not delivered
     /// yet, but a line the keys thread had read before that is in the queue (behind the question), where the terminal cannot reach it and
@@ -463,17 +496,21 @@ impl TerminalWriter {
     }
 
     /// Waits until everything given so far has been written, for as long as the writer gets on: a slow terminal is waited for, one that
-    /// has taken nothing for `stall` is not. Whether everything was written.
-    fn written_while_moving(&self, stall: Duration) -> bool {
+    /// has taken nothing for `stall` is not. `signalled` is asked before each look at the writer (every `MOVING_CHECK`), and what it
+    /// returns ends the wait at once and is returned; `None` once everything was written, or the writer stopped getting on.
+    fn written_while_moving(&self, stall: Duration, mut signalled: impl FnMut() -> Option<i32>) -> Option<i32> {
         let (mark, reached) = std::sync::mpsc::sync_channel(1);
         if self.jobs.send(Show::Mark(mark)).is_err() {
-            return false;
+            return None;
         }
         loop {
+            if let Some(status) = signalled() {
+                return Some(status);
+            }
             match reached.recv_timeout(MOVING_CHECK) {
-                Ok(()) => return true,
+                Ok(()) => return None,
                 Err(RecvTimeoutError::Timeout) if self.moved.lock().unwrap_or_else(PoisonError::into_inner).elapsed() < stall => {}
-                Err(_) => return false,
+                Err(_) => return None,
             }
         }
     }
@@ -1861,6 +1898,32 @@ mod tests {
         assert!(restored, "the terminal is as it was");
         stdout.let_go();
         printing.join().unwrap();
+    }
+
+    /// An end the session came to waits for a slow terminal to take the shell's last output (as OpenSSH does), but a signal that ends or
+    /// interrupts the program ends that wait at once, as it ends OpenSSH's: the terminal is put back, and the status is the signal's
+    /// (128 + its number), not the shell's. Here the wait would last six seconds; SIGINT reaches the program from outside only (the
+    /// terminal is raw, Ctrl-C is a byte).
+    #[test]
+    fn a_signal_ends_the_wait_for_a_slow_terminal_at_the_end_of_the_session_at_once() {
+        for (input, status) in [(Input::Stop(libc::SIGTERM), 143), (Input::Interrupt, 130)] {
+            let what = format!("{input:?}");
+            let stdout = Paced { shown: Shared::default(), rate: 32.0 * 1024.0 };
+            let mut hand = by_hand(FakeTermios::new(), Box::new(stdout.clone()), Box::new(Shared::default()));
+            hand.open();
+            // Six frames of output (six seconds of this terminal, far more than END_WAIT), then the shell's exit. All of it fits in the
+            // output's budget, so the CLI reads it at once, and the end waits for the terminal.
+            for _ in 0..6 {
+                write_data(&mut hand.broker, &[b'x'; 32 * 1024]).unwrap();
+            }
+            write_control(&mut hand.broker, &ServerMessage::Exited { code: Some(0), signal: None }).unwrap();
+            // The budget counts the output in frames of 32 KiB until the terminal has taken each, and `exited` until the run ends: once
+            // the count is not a whole number of frames, `exited` is in the queue, and the signal comes after it.
+            eventually("the end to be queued", 10, || *hand.keys.output.used() % (32 * 1024) != 0);
+            hand.keys.send(input).unwrap();
+            assert_eq!(hand.ends_within(Duration::from_secs(1)), (status, true), "{what}: the signal's status, and the terminal put back");
+            assert!(stdout.shown.len() < 6 * 32 * 1024, "{what}: the end did not wait for all of the output");
+        }
     }
 
     /// A control message the CLI cannot read ends the session at once, with a sentence and the terminal put back. (It used to be
