@@ -216,12 +216,14 @@ fn an_unreachable_password_first_hop_was_asked_for_its_password_first() {
 }
 
 /// A hop pinned to a key of another type: the handshake offers only that type, and the server has none (the broker then reconnects
-/// without the restriction to show the changed-key warning, plan 1b R17).
-fn pinned_type_missing(engine: &dyn SshEngine, target: &Target, auth: &dyn AuthSource) {
-    match engine.connect(target, &*super::testing::doubles::TestPolicy::trusting(), auth).err().expect("nothing in common") {
+/// without the restriction to show the changed-key warning, plan 1b R17). `offered` is the offer, as the engine names its algorithms.
+fn pinned_type_missing(world: &ShellWorld, pin: &HostKey, offered: &[&str]) {
+    let mut target = world.target.clone();
+    target.hops[0].pinned = Some(pin.clone());
+    match world.engine.connect(&target, &*super::testing::doubles::TestPolicy::trusting(), &*world.auth).err().expect("nothing in common") {
         ConnectError::NoCommonHostKeyAlgorithm { hop, ours, theirs } => {
             assert_eq!(hop.alias, "shell");
-            assert_eq!(ours, ["ecdsa-sha2-nistp256"]);
+            assert_eq!(ours, offered, "{}", pin.algorithm);
             assert_eq!(theirs, ["ssh-ed25519"]);
         }
         other => panic!("expected NoCommonHostKeyAlgorithm, got {other:?}"),
@@ -231,12 +233,34 @@ fn pinned_type_missing(engine: &dyn SshEngine, target: &Target, auth: &dyn AuthS
 #[test]
 fn a_pin_of_another_key_type_finds_no_common_algorithm() {
     let ecdsa = HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap();
-    let mut fake = fake_shells();
-    fake.target.hops[0].pinned = Some(ecdsa.clone());
-    pinned_type_missing(&*fake.engine, &fake.target, &*fake.auth);
-    if let Some(mut real) = real_shells() {
-        real.target.hops[0].pinned = Some(ecdsa);
-        pinned_type_missing(&*real.engine, &real.target, &*real.auth);
+    pinned_type_missing(&fake_shells(), &ecdsa, &["ecdsa-sha2-nistp256"]);
+    if let Some(real) = real_shells() {
+        pinned_type_missing(&real, &ecdsa, &["ecdsa-sha2-nistp256"]);
+    }
+}
+
+/// An RSA pin is offered as the rsa-sha2 pair and never as SHA-1 `ssh-rsa`; a pin of a type the engine cannot restrict the offer by (DSA,
+/// a security key, a name it cannot parse) restricts nothing, so the handshake is as it is without a pin and the policy judges the key.
+fn pinned_type_unrestricted(world: &ShellWorld, pin: HostKey) {
+    let mut target = world.target.clone();
+    target.hops[0].pinned = Some(pin.clone());
+    let connected = world.engine.connect(&target, &*super::testing::doubles::TestPolicy::trusting(), &*world.auth);
+    assert!(connected.is_ok(), "a pin of {} restricts nothing: {:?}", pin.algorithm, connected.err());
+}
+
+#[test]
+fn an_rsa_pin_is_offered_as_the_rsa_sha2_pair_and_a_pin_the_engine_cannot_restrict_by_restricts_nothing() {
+    let rsa = HostKey::from_openssh_line(test_keys::RSA_PUBLIC).unwrap();
+    let odd = |algorithm: &str| HostKey { algorithm: algorithm.to_string(), public_key: vec![1], fingerprint: "SHA256:odd".to_string() };
+    let scenario = |world: &ShellWorld| {
+        pinned_type_missing(world, &rsa, &["rsa-sha2-512", "rsa-sha2-256"]);
+        for algorithm in ["ssh-dss", "sk-ssh-ed25519@openssh.com", "not-an-algorithm"] {
+            pinned_type_unrestricted(world, odd(algorithm));
+        }
+    };
+    scenario(&fake_shells());
+    if let Some(real) = real_shells() {
+        scenario(&real);
     }
 }
 
