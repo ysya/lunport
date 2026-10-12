@@ -9,22 +9,25 @@ mod channel;
 mod engine_tests;
 mod error;
 #[cfg(test)]
-pub mod fake;
+pub(crate) mod fake;
 #[cfg(test)]
 mod parity_tests;
-pub mod russh_engine;
+pub(crate) mod russh_engine;
 #[cfg(test)]
-pub mod testing;
+pub(crate) mod testing;
 mod traits;
 mod types;
 
-pub use channel::{ByteQueue, ExitCell, QueueRead, QueuedShell, ShellInput};
-pub use error::{AuthError, ConnectError, SessionError};
-pub use traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
-pub use types::{
-    AuthMethod, DisconnectKind, DisconnectReason, Ended, ExecResult, Exit, Hop, HopRef, HostId, HostKey, HostKeyVerdict, Phase, Prompt,
-    Pty, RsaHash, Secret, Signature, Target, DEFAULT_CONNECT_TIMEOUT, DEFAULT_KEEPALIVE_EVERY, DEFAULT_KEEPALIVE_MAX_MISSED,
+// What the rest of the app uses (plan 1b R21: the module is private to the crate; the broker is its user).
+pub(crate) use error::{AuthError, ConnectError, SessionError};
+pub(crate) use traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
+pub(crate) use types::{
+    AuthMethod, DisconnectKind, DisconnectReason, Exit, Hop, HopRef, HostId, HostKey, HostKeyVerdict, Prompt, Pty, RsaHash, Secret, Signature, Target,
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_KEEPALIVE_EVERY,
 };
+// What only the tests name through `crate::ssh`.
+#[cfg(test)]
+pub(crate) use types::{Ended, ExecResult, Phase};
 
 #[cfg(test)]
 mod tests {

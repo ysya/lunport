@@ -382,6 +382,7 @@ impl Connection {
         Connection { hops: Vec::new(), closing: AtomicBool::new(false), ended: Mutex::new(None) }
     }
 
+    #[cfg(test)]
     pub fn hop_count(&self) -> usize {
         self.hops.len()
     }

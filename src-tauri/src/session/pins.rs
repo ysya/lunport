@@ -5,7 +5,7 @@
 //! code. SSHelter's own client never reads or writes `~/.ssh/known_hosts` (spec §1, non-goals).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -75,9 +75,6 @@ impl PinStore {
         PinStore { path, lock: Mutex::new(()), clock }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
 
     fn unreadable(&self, why: impl std::fmt::Display) -> String {
         format!("SSHelter cannot read its pinned host keys in {} ({why}).", self.path.display())
