@@ -40,15 +40,18 @@ pub const STOP_GRACE: Duration = Duration::from_secs(2);
 const WATCHDOG_TERMINAL_WAIT: Duration = Duration::from_millis(200);
 /// How often the keys thread looks whether the terminal went away while it waits for the broker to take what was typed.
 const HANGUP_CHECK: Duration = Duration::from_millis(250);
+/// How long, at most, the terminal writer waits at a time for a terminal that would not take more (its descriptor non-blocking).
+const WRITABLE_WAIT_MS: i32 = 100;
 
 /// Runs one session over `stream`, connected to the broker, until it ends; returns the program's exit code. `inputs` brings the keys,
 /// resizes and signals (`stdin_thread`, `signal_thread`); the broker's frames join it from a thread started here. What is written to
 /// `stdout` and `stderr` (the terminal) is written by a thread of its own, and so is what is written to the broker.
-pub fn run(stream: UnixStream, host: HostQuery, term: String, tty: &mut Tty, inputs: (Inputs, Queue), stdout: Box<dyn Write + Send>, mut stderr: Box<dyn Write + Send>) -> i32 {
+pub fn run(stream: UnixStream, host: HostQuery, term: String, tty: &mut Tty, inputs: (Inputs, Queue), stdout: impl Into<Output>, stderr: impl Into<Output>) -> i32 {
     let (inputs, queue) = inputs;
+    let (stdout, mut stderr) = (stdout.into(), stderr.into());
     let size = tty.size().unwrap_or((80, 24));
     let Ok(reader) = stream.try_clone() else {
-        let _ = writeln!(stderr, "The connection to SSHelter failed.");
+        let _ = stderr.write_whole(b"The connection to SSHelter failed.\n");
         return 255;
     };
     let terminal = TerminalWriter::start(stdout, stderr, &inputs);
@@ -323,22 +326,82 @@ enum Show {
     Mark(SyncSender<()>),
 }
 
+/// One of the terminal's streams (standard output, standard error) as the terminal writer writes it, with its descriptor when it has
+/// one. Another program may have left the terminal's descriptor non-blocking (it is shared, so the CLI does not change it back): a write
+/// that would block then says so instead of waiting, and the writer waits on the descriptor until the terminal takes more, as a
+/// blocking write would have.
+pub struct Output {
+    writer: Box<dyn Write + Send>,
+    descriptor: Option<RawFd>,
+}
+
+impl Output {
+    /// A stream with a descriptor to wait on.
+    pub fn of<W: Write + AsRawFd + Send + 'static>(writer: W) -> Output {
+        let descriptor = Some(writer.as_raw_fd());
+        Output { writer: Box::new(writer), descriptor }
+    }
+
+    /// Writes all of `bytes`, waiting out the writes that would block. An error of any other kind is the end of the stream (a pipe nobody
+    /// reads any more, a terminal that went away).
+    fn write_whole(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            match self.writer.write(rest) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(count) => rest = &rest[count..],
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.wait_writable()?,
+                Err(error) => return Err(error),
+            }
+        }
+        loop {
+            match self.writer.flush() {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => self.wait_writable()?,
+                flushed => return flushed,
+            }
+        }
+    }
+
+    /// Waits, for a while at most, until the stream takes more. A stream whose other end went away is the end of it.
+    fn wait_writable(&mut self) -> io::Result<()> {
+        let Some(descriptor) = self.descriptor else {
+            // Nothing to wait on (a stream of a test): a moment.
+            std::thread::sleep(Duration::from_millis(1));
+            return Ok(());
+        };
+        if poll_for(descriptor, libc::POLLOUT, WRITABLE_WAIT_MS)? & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the terminal went away"));
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write + Send + 'static> From<W> for Output {
+    /// A stream without a descriptor (a test's).
+    fn from(writer: W) -> Output {
+        Output { writer: Box::new(writer), descriptor: None }
+    }
+}
+
 /// The writer of the terminal: standard output and standard error, in the order they were given, on a thread of its own.
 struct TerminalWriter {
     jobs: Sender<Show>,
 }
 
 impl TerminalWriter {
-    fn start(mut stdout: Box<dyn Write + Send>, mut stderr: Box<dyn Write + Send>, inputs: &Inputs) -> TerminalWriter {
+    fn start(stdout: impl Into<Output>, stderr: impl Into<Output>, inputs: &Inputs) -> TerminalWriter {
+        let (mut stdout, mut stderr) = (stdout.into(), stderr.into());
         let (jobs, given) = std::sync::mpsc::channel::<Show>();
         spawn_worker("sshelter-terminal", inputs.clone(), move |_| {
-            // An output that failed (a pipe nobody reads any more) is not written to again; what is given for it is dropped, so that nothing
-            // waits for it.
+            // A stream that failed (a pipe nobody reads any more, a terminal that went away) is not written to again; what is given for it
+            // is dropped, so that nothing waits for it. A write that would block is not a failure (`Output::write_whole`).
             let (mut stdout_works, mut stderr_works) = (true, true);
             for job in given {
                 match job {
-                    Show::Output(bytes) => stdout_works = stdout_works && stdout.write_all(&bytes).and_then(|()| stdout.flush()).is_ok(),
-                    Show::Said(text) => stderr_works = stderr_works && stderr.write_all(text.as_bytes()).and_then(|()| stderr.flush()).is_ok(),
+                    Show::Output(bytes) => stdout_works = stdout_works && stdout.write_whole(&bytes).is_ok(),
+                    Show::Said(text) => stderr_works = stderr_works && stderr.write_whole(text.as_bytes()).is_ok(),
                     Show::Release(credit) => drop(credit),
                     Show::Mark(reached) => {
                         let _ = reached.send(());
@@ -511,17 +574,17 @@ impl<R: Read> Read for TerminalKeys<R> {
 
 impl<R: Read> Keys for TerminalKeys<R> {
     fn wait_readable(&mut self) -> io::Result<()> {
-        poll_input(self.descriptor, -1).map(|_| ())
+        poll_for(self.descriptor, libc::POLLIN, -1).map(|_| ())
     }
 
     fn hung_up(&mut self) -> bool {
-        poll_input(self.descriptor, 0).is_ok_and(|events| events & libc::POLLHUP != 0)
+        poll_for(self.descriptor, libc::POLLIN, 0).is_ok_and(|events| events & libc::POLLHUP != 0)
     }
 }
 
-/// `poll` for input on `descriptor`, for up to `timeout_ms` milliseconds (-1: as long as it takes); the events it saw (none: 0).
-fn poll_input(descriptor: RawFd, timeout_ms: i32) -> io::Result<libc::c_short> {
-    let mut entry = libc::pollfd { fd: descriptor, events: libc::POLLIN, revents: 0 };
+/// `poll` for `events` on `descriptor`, for up to `timeout_ms` milliseconds (-1: as long as it takes); the events it saw (none: 0).
+fn poll_for(descriptor: RawFd, events: libc::c_short, timeout_ms: i32) -> io::Result<libc::c_short> {
+    let mut entry = libc::pollfd { fd: descriptor, events, revents: 0 };
     loop {
         // SAFETY: one valid `pollfd`, and its count.
         let ready = unsafe { libc::poll(&mut entry, 1, timeout_ms) };
@@ -1661,6 +1724,74 @@ mod tests {
         assert_eq!(hand.ends_within(Duration::from_secs(5)).0, 255);
         assert_eq!(stdout.len(), 1024 * 1024);
         assert_eq!(stderr.0.text(), "\nConnection to web lost.\n");
+    }
+
+    /// A terminal whose descriptor another program left non-blocking: a write that would block says so (`WouldBlock`) instead of waiting,
+    /// here three times before each write it takes, and it takes at most a kilobyte at a time (a pty takes about that much).
+    struct LeftNonBlocking {
+        shown: Shared,
+        refusals: usize,
+    }
+
+    impl Write for LeftNonBlocking {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.refusals < 3 {
+                self.refusals += 1;
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            self.refusals = 0;
+            self.shown.write(&bytes[..bytes.len().min(1024)])
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A write that would block is not a terminal that failed: the writer waits and writes on, and every byte is shown, in order, on
+    /// standard output and on standard error. (It used to stop writing for good: a kilobyte shown, and nothing more while the session
+    /// lived.)
+    #[test]
+    fn a_terminal_left_non_blocking_is_shown_every_byte_in_order() {
+        let (stdout, stderr) = (Shared::default(), Shared::default());
+        let (inputs, _queue) = queue();
+        let writer = TerminalWriter::start(
+            Box::new(LeftNonBlocking { shown: stdout.clone(), refusals: 0 }),
+            Box::new(LeftNonBlocking { shown: stderr.clone(), refusals: 0 }),
+            &inputs,
+        );
+        let output: Vec<u8> = (0..96 * 1024u32).map(|i| (i % 251) as u8).collect();
+        for chunk in output.chunks(32 * 1024) {
+            writer.show(Show::Output(chunk.to_vec()));
+        }
+        writer.show(Show::Said("sshelter: said after the output\n".into()));
+        assert!(writer.written(Duration::from_secs(10)), "all of it written");
+        assert!(*stdout.0.lock().unwrap() == output, "{} of {} bytes shown, or not in order", stdout.len(), output.len());
+        assert_eq!(stderr.text(), "sshelter: said after the output\n");
+    }
+
+    /// A real descriptor left non-blocking, taken from slowly: the writer waits on it (POLLOUT) until it takes more, and nothing is lost.
+    #[test]
+    fn a_non_blocking_descriptor_is_waited_on_until_it_takes_more() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let (inputs, _queue) = queue();
+        let writer = TerminalWriter::start(Output::of(ours), Box::new(Shared::default()), &inputs);
+        let output: Vec<u8> = (0..1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+        for chunk in output.chunks(32 * 1024) {
+            writer.show(Show::Output(chunk.to_vec()));
+        }
+        let length = output.len();
+        let reading = std::thread::spawn(move || {
+            let (mut shown, mut buf) = (Vec::new(), [0u8; 8192]);
+            while shown.len() < length {
+                std::thread::sleep(Duration::from_millis(1));
+                let count = theirs.read(&mut buf).unwrap();
+                shown.extend_from_slice(&buf[..count]);
+            }
+            shown
+        });
+        assert!(writer.written(Duration::from_secs(20)), "all of it written");
+        assert!(reading.join().unwrap() == output, "every byte, in order");
     }
 
     /// Sizes given while the broker does not read do not pile up: the latest takes the place of the one that waits.
