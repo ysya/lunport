@@ -1,6 +1,7 @@
-# Runs the tests of the SSH engine (src-tauri/src/ssh/) where they can run for real: against a scratch OpenSSH server on macOS and on
-# Linux, and on Linux also against a real OpenSSH with PAM in a container (the logins by password and by keyboard-interactive, which a
-# scratch sshd cannot check). The Windows leg lives in test-windows.yml.
+# Runs the tests of the SSH engine (src-tauri/src/ssh/) and of the session broker that uses it (src-tauri/src/session/, and starting
+# the app for its clients: host_start) where they can run for real: against a scratch OpenSSH server on macOS and on Linux, and on Linux
+# also against a real OpenSSH with PAM in a container (the logins by password and by keyboard-interactive, which a scratch sshd cannot
+# check). The Windows leg lives in test-windows.yml.
 #
 # aws-lc-sys (russh's crypto, the same crate rustls already pulls in for the updater) is built by its build script with the runner's C
 # compiler: clang on macOS, gcc on ubuntu-24.04. The release workflow already builds it on both through rustls, so nothing is installed
@@ -49,11 +50,11 @@ jobs:
           ls -l /usr/sbin/sshd
           ssh -V
       # SSHELTER_REQUIRE_OPENSSH=1: a missing sshd is a failure here, not a skipped test.
-      - name: Engine and vault tests
+      - name: Engine, broker and vault tests
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- ssh:: vault::"
+        run: "cargo test --locked --lib -- ssh:: session:: host_start:: vault::"
 
   linux:
     # Not ubuntu-latest: the PAM image is ubuntu:24.04, and the package names below were checked against 24.04.
@@ -97,13 +98,13 @@ jobs:
           ssh-keyscan -T 2 -p 2222 127.0.0.1 > /dev/null
           echo "SSHELTER_PAM_PASSWORD=$password" >> "$GITHUB_ENV"
       # The pam tests are skipped here: the next step runs them against the container.
-      - name: Engine and vault tests against a scratch sshd
+      - name: Engine, broker and vault tests against a scratch sshd
         # Runs even when the container did not start, so that a first run shows both results.
         if: ${{ !cancelled() }}
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- ssh:: vault:: --skip ssh::engine_tests::login_methods::pam"
+        run: "cargo test --locked --lib -- ssh:: session:: host_start:: vault:: --skip ssh::engine_tests::login_methods::pam"
       # Runs whatever the scratch sshd step came to, so that a first run shows both results.
       - name: Password and keyboard-interactive tests against the container
         if: ${{ !cancelled() }}
