@@ -2,7 +2,9 @@
 //! it is ready, pump its output to the client, take the client's keystrokes and resizes, and say how it ended (`exited`, after an
 //! `event` that explains a lost connection or a refused shell; a lost connection is never exit status 0). When the client goes away the
 //! shell and the session are closed from a plain thread, after the shell's first output or a few seconds (plan 1b R22: a shell closed
-//! before its prompt can strand a process on a macOS sshd).
+//! before its prompt can strand a process on a macOS sshd). The app ends a session when it quits, and that can happen at any step, the
+//! opening of the shell included: `ShellControl::end` leaves the reason, and the step the session is at looks for it, as it does for a
+//! client that has gone away.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -59,6 +61,26 @@ pub trait ClientLink: Send + Sync {
     fn send_data(&self, bytes: &[u8]) -> std::io::Result<()>;
 }
 
+/// Why a shell is not wanted (any more), as `ShellControl::over` says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Over {
+    /// The client went away: it is told nothing.
+    Gone,
+    /// The app ends the session (it is quitting): the client is told this sentence.
+    Quit(String),
+}
+
+/// Where a shell is in its life, for the wait that comes before closing it (`ShellControl::close_settled`).
+#[derive(Default)]
+struct Life {
+    /// When the shell opened; the settle time counts from then.
+    opened_at: Option<Instant>,
+    /// It has printed something.
+    printed: bool,
+    /// It has ended and its output was read to the end: there is nothing left to close.
+    ended: bool,
+}
+
 /// What the client's side (the thread that reads its connection) and the shell's side (the thread that pumps output) share for one
 /// shell: the shell once it is open, the last size the client sent, whether the client is gone, and why the app ends the session.
 pub struct ShellControl {
@@ -70,9 +92,9 @@ pub struct ShellControl {
     closed: AtomicBool,
     /// Set when the app ends the session (it is quitting): the sentence the client is told.
     ended_by_app: Mutex<Option<String>>,
-    /// When the shell opened, and whether it has printed anything yet (for `settle`).
-    printed: Mutex<(Option<Instant>, bool)>,
-    first_output: Condvar,
+    life: Mutex<Life>,
+    /// Notified when `life` changes: the shell printed something, or ended.
+    life_changed: Condvar,
     settle: Duration,
 }
 
@@ -96,8 +118,8 @@ impl ShellControl {
             gone: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             ended_by_app: Mutex::new(None),
-            printed: Mutex::new((None, false)),
-            first_output: Condvar::new(),
+            life: Mutex::new(Life::default()),
+            life_changed: Condvar::new(),
             settle,
         }
     }
@@ -131,13 +153,17 @@ impl ShellControl {
 
     /// The client went away (its connection ended, or it sent `close`): the shell is closed once it has printed something or `settle`
     /// has passed since it opened, so that a shell closed right after it opened does not strand a process on the server. Blocks for at
-    /// most that long; call it from a plain thread.
+    /// most that long; call it from a plain thread. A shell that is not open yet is not opened (`run_shell` looks before it opens it),
+    /// and one that is being opened is closed when the engine has opened it.
     pub fn owner_gone(&self) {
         self.gone.store(true, Ordering::SeqCst);
         self.close_settled();
     }
 
-    /// The app ends the session (it is quitting): the client is told `reason`, then the shell is closed as for `owner_gone`.
+    /// The app ends the session (it is quitting), whatever it is doing: the client is told `reason`, then the shell is closed as for
+    /// `owner_gone`. Before the shell is open the reason is left for `run_shell`, which opens none, or closes the one the engine was
+    /// still opening. A shell that ended by itself before it was closed reports its own end, not this reason. Blocks for at most the
+    /// settle time; call it from a plain thread.
     pub fn end(&self, reason: &str) {
         *locked(&self.ended_by_app) = Some(reason.to_string());
         self.close_settled();
@@ -147,23 +173,36 @@ impl ShellControl {
         self.gone.load(Ordering::SeqCst)
     }
 
+    /// Why no shell is wanted any more, if it is not: a client that left is told nothing, so it wins over the app quitting.
+    fn over(&self) -> Option<Over> {
+        if self.is_gone() {
+            return Some(Over::Gone);
+        }
+        locked(&self.ended_by_app).clone().map(Over::Quit)
+    }
+
+    /// Closes the shell once it has printed something, or `settle` after it opened, or never when it has ended by itself. A shell that
+    /// is not open yet is left alone: `run_shell` looks at `over` once it is.
     fn close_settled(&self) {
         let shell = locked(&self.shell).clone();
         let Some(shell) = shell else { return };
         if shell.exited().is_some() || self.closed.load(Ordering::SeqCst) {
             return;
         }
-        let mut printed = locked(&self.printed);
-        while !printed.1 {
-            let Some(opened) = printed.0 else { break };
+        let mut life = locked(&self.life);
+        while !life.printed && !life.ended {
+            let Some(opened) = life.opened_at else { break };
             let left = (opened + self.settle).saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
-            printed = self.first_output.wait_timeout(printed, left).unwrap_or_else(PoisonError::into_inner).0;
+            life = self.life_changed.wait_timeout(life, left).unwrap_or_else(PoisonError::into_inner).0;
         }
-        drop(printed);
-        self.close_now();
+        let ended = life.ended;
+        drop(life);
+        if !ended {
+            self.close_now();
+        }
     }
 
     /// Closes the shell, once.
@@ -177,21 +216,28 @@ impl ShellControl {
     }
 
     fn opened(&self, shell: Arc<dyn ShellChannel>) {
-        *locked(&self.printed) = (Some(Instant::now()), false);
+        locked(&self.life).opened_at = Some(Instant::now());
         *locked(&self.shell) = Some(shell);
     }
 
     fn printed(&self) {
-        let mut printed = locked(&self.printed);
-        if !printed.1 {
-            printed.1 = true;
-            self.first_output.notify_all();
+        let mut life = locked(&self.life);
+        if !life.printed {
+            life.printed = true;
+            self.life_changed.notify_all();
         }
+    }
+
+    /// The shell's output was read to the end: a wait to close it need not go on.
+    fn ended(&self) {
+        locked(&self.life).ended = true;
+        self.life_changed.notify_all();
     }
 }
 
 /// The sentence for a connection that ended (spec §11), about the hop that recorded the end; a dead keepalive says how many seconds went
-/// without an answer: (`keepalive_max_missed` + 1) × `keepalive_secs` of that hop.
+/// without an answer: (`keepalive_max_missed` + 1) × `keepalive_secs` of that hop. The detail is the engine's text, which can quote what
+/// a server sent: it is made printable when it is sent (`tell`).
 pub fn lost_sentence(reason: &DisconnectReason, target: &Target) -> String {
     let alias = &reason.hop.alias;
     match reason.kind {
@@ -207,82 +253,124 @@ pub fn lost_sentence(reason: &DisconnectReason, target: &Target) -> String {
     }
 }
 
-/// What the client is told when its shell has ended: an event that explains an end without a status, then `exited`.
-fn ending(exit: Option<Exit>, session: &dyn Session, target: &Target, alias: &str) -> (Option<Event>, ServerMessage) {
+/// How the end of a connection is told: spec §11's sentence for the hop that recorded it.
+fn connection_lost(session: &dyn Session, target: &Target, alias: &str) -> String {
+    match session.disconnect_reason() {
+        Some(reason) => lost_sentence(&reason, target),
+        None => format!("Connection to {alias} lost."),
+    }
+}
+
+/// What the client is told when its shell has ended: an event that explains an end without a status, then `exited`. `quit` is the app's
+/// reason when it ended the session: it explains a shell that ended because it was closed, but a shell that ended on its own before it
+/// was closed (its exit code, its signal, a refused terminal) reports that.
+fn ending(exit: Option<Exit>, quit: Option<String>, session: &dyn Session, target: &Target, alias: &str) -> Vec<ServerMessage> {
     let no_status = ServerMessage::Exited { code: None, signal: None };
+    let explained = |event: Event| vec![ServerMessage::Event(event), no_status.clone()];
     match exit {
-        Some(Exit::Code(code)) => (None, ServerMessage::Exited { code: Some(code), signal: None }),
-        Some(Exit::Signal(signal)) => (None, ServerMessage::Exited { code: None, signal: Some(signal) }),
-        Some(Exit::Refused(why)) => {
-            (Some(Event::Error { kind: kinds::SHELL.to_string(), text: format!("SSHelter could not open a shell on {alias}: {why}.") }), no_status)
-        }
+        Some(Exit::Code(code)) => vec![ServerMessage::Exited { code: Some(code), signal: None }],
+        Some(Exit::Signal(signal)) => vec![ServerMessage::Exited { code: None, signal: Some(signal) }],
+        Some(Exit::Refused(why)) => explained(Event::Error { kind: kinds::SHELL.to_string(), text: format!("SSHelter could not open a shell on {alias}: {why}.") }),
         Some(Exit::Disconnected) | None => {
-            let reason = if session.is_alive() {
-                format!("The shell on {alias} ended without an exit status.")
-            } else {
-                match session.disconnect_reason() {
-                    Some(reason) => lost_sentence(&reason, target),
-                    None => format!("Connection to {alias} lost."),
-                }
+            let reason = match quit {
+                Some(reason) => reason,
+                None if session.is_alive() => format!("The shell on {alias} ended without an exit status."),
+                None => connection_lost(session, target, alias),
             };
-            (Some(Event::Disconnected { reason }), no_status)
+            explained(Event::Disconnected { reason })
         }
+    }
+}
+
+/// What the client is told when the engine could not open the shell.
+fn no_shell(error: &SessionError, alias: &str) -> Vec<ServerMessage> {
+    let text = format!("SSHelter could not open a shell on {alias}: {}.", error.to_string().trim_end_matches('.'));
+    vec![ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }), ServerMessage::Exited { code: None, signal: None }]
+}
+
+/// Tells the client `messages`, in order. A client that is gone does not take them, which is nothing to act on.
+fn tell_all(link: &dyn ClientLink, messages: Vec<ServerMessage>) {
+    for message in messages {
+        let _ = tell(link, message);
+    }
+}
+
+/// What the client is told when the session is over before it had a shell: nothing when it has gone away, the app's reason when the app
+/// ended the session.
+fn say_over(link: &dyn ClientLink, over: Over) {
+    if let Over::Quit(reason) = over {
+        tell_all(link, vec![ServerMessage::Event(Event::Disconnected { reason }), ServerMessage::Exited { code: None, signal: None }]);
     }
 }
 
 /// Runs the client's shell on the session `connected` holds, then closes the session; returns when both are done. Call it from a plain
 /// thread: the engine's calls block. `pty` is what the client asked for; the size is the last one it sent, if it sent one since.
+///
+/// The client may leave, or the app may end the session, at any step. Before the shell is opened that is looked at, and then no shell is
+/// opened. While the engine opens it, nothing can be done but wait for it, and a shell that opens for nobody is not announced to the
+/// client and is closed after its first output, like one the client leaves behind.
 pub fn run_shell(connected: Connected, pty: Pty, link: &dyn ClientLink, control: &ShellControl, session_id: &str) {
     let Connected { session, target } = connected;
     let alias = target.hops.last().map(|hop| hop.alias.clone()).unwrap_or_default();
     *locked(&control.alias) = alias.clone();
+    if let Some(over) = control.over() {
+        say_over(link, over);
+        session.close();
+        return;
+    }
     let (cols, rows) = locked(&control.size).unwrap_or((pty.cols, pty.rows));
     let shell: Arc<dyn ShellChannel> = match session.shell(Pty { cols, rows, ..pty }) {
         Ok(shell) => Arc::from(shell),
         Err(error) => {
-            let text = format!("SSHelter could not open a shell on {alias}: {}.", error.to_string().trim_end_matches('.'));
-            let _ = tell(link, ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }));
-            let _ = tell(link, ServerMessage::Exited { code: None, signal: None });
+            match control.over() {
+                Some(over) => say_over(link, over),
+                None => tell_all(link, no_shell(&error, &alias)),
+            }
             session.close();
             return;
         }
     };
     control.opened(Arc::clone(&shell));
-    if tell(link, ServerMessage::Opened { session_id: session_id.to_string() }).is_err() {
+    // Looked at only now that the shell is there for `owner_gone` and `end` to see: one that came earlier found nothing to close and left
+    // it to this thread, and one that comes later closes the shell itself.
+    let mut forwarding = control.over().is_none();
+    if forwarding && tell(link, ServerMessage::Opened { session_id: session_id.to_string() }).is_err() {
         control.gone.store(true, Ordering::SeqCst);
+        forwarding = false;
     }
-    // The size the client sent while the shell was being opened, or the one it was opened with: sent once more now that the PTY exists
-    // (spec §7.2: a resize before the shell is ready is ignored by the server).
-    let (cols, rows) = locked(&control.size).unwrap_or((cols, rows));
-    if let Err(error) = shell.window_change(cols, rows) {
-        eprintln!("[session] the window size did not reach the new shell: {error}");
-    }
-    if control.is_gone() {
-        control.close_settled();
-    }
-    let mut buf = vec![0u8; DATA_CHUNK];
-    loop {
-        let count = match shell.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(count) => count,
-        };
-        control.printed();
-        if !control.is_gone() && link.send_data(&buf[..count]).is_err() {
-            // The client is gone (its terminal has printed, so the shell is settled): close it, and drain it until it ends.
-            control.gone.store(true, Ordering::SeqCst);
-            control.close_now();
+    if forwarding {
+        // The size the client sent while the shell was being opened, or the one it was opened with: sent once more now that the PTY exists
+        // (spec §7.2: a resize before the shell is ready is ignored by the server).
+        let (cols, rows) = locked(&control.size).unwrap_or((cols, rows));
+        if let Err(error) = shell.window_change(cols, rows) {
+            eprintln!("[session] the window size did not reach the new shell: {error}");
         }
     }
+    std::thread::scope(|scope| {
+        if !forwarding {
+            // Nobody is waiting for this shell. It is closed once it has printed something (or the settle time has passed), by a thread
+            // of its own: this one reads what the shell prints, which is how the wait learns that it has.
+            scope.spawn(|| control.close_settled());
+        }
+        let mut buf = vec![0u8; DATA_CHUNK];
+        loop {
+            let count = match shell.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => count,
+            };
+            control.printed();
+            if forwarding && !control.is_gone() && link.send_data(&buf[..count]).is_err() {
+                // The client is gone (its terminal has printed, so the shell is settled): close it, and drain it until it ends.
+                control.gone.store(true, Ordering::SeqCst);
+                forwarding = false;
+                control.close_now();
+            }
+        }
+        control.ended();
+    });
     if !control.is_gone() {
-        let ended_by_app = locked(&control.ended_by_app).clone();
-        let (event, exited) = match ended_by_app {
-            Some(reason) => (Some(Event::Disconnected { reason }), ServerMessage::Exited { code: None, signal: None }),
-            None => ending(shell.exited(), session.as_ref(), &target, &alias),
-        };
-        if let Some(event) = event {
-            let _ = tell(link, ServerMessage::Event(event));
-        }
-        let _ = tell(link, exited);
+        let quit = locked(&control.ended_by_app).clone();
+        tell_all(link, ending(shell.exited(), quit, session.as_ref(), &target, &alias));
     }
     session.close();
 }
@@ -292,7 +380,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::session::testing::locked;
+    use crate::session::testing::{locked, Gate, GatedEngine};
     use crate::ssh::fake::{FakeEngine, FakeEvent};
     use crate::ssh::{AuthMethod, DisconnectKind, DisconnectReason, Hop, SessionError, SshEngine};
 
@@ -356,13 +444,26 @@ mod tests {
 
     fn start(engine: FakeEngine, control: ShellControl) -> Running {
         let engine = Arc::new(engine);
+        start_on(Arc::clone(&engine), engine.as_ref(), control)
+    }
+
+    /// Like `start`, with the session opened by `engine`, which wraps `fake` (so that the tests can see what `fake` was asked).
+    fn start_on(fake: Arc<FakeEngine>, engine: &dyn SshEngine, control: ShellControl) -> Running {
         let session = engine.connect(&target(), &*crate::ssh::testing::doubles::TestPolicy::trusting(), &crate::ssh::testing::doubles::VaultAuth::new()).unwrap();
         let (link, control) = (Arc::new(Recorder::default()), Arc::new(control));
         let pump = {
             let (link, control) = (Arc::clone(&link), Arc::clone(&control));
             std::thread::spawn(move || run_shell(Connected { session, target: target() }, pty(), link.as_ref(), &control, "7"))
         };
-        Running { engine, link, control, pump: Some(pump) }
+        Running { engine: fake, link, control, pump: Some(pump) }
+    }
+
+    /// A shell that is slow to open: `Session::shell` waits at the gate that comes back with it, until the test releases it.
+    fn start_holding_the_shell(fake: FakeEngine, control: ShellControl) -> (Running, Arc<Gate>) {
+        let fake = Arc::new(fake);
+        let gated = GatedEngine::new(Arc::clone(&fake)).holding_shells();
+        let gate = Arc::clone(&gated.shell);
+        (start_on(fake, &gated, control), gate)
     }
 
     impl Running {
@@ -602,5 +703,78 @@ mod tests {
             assert_eq!(signal_name(name), "UNKNOWN", "{name:?}");
         }
         assert_eq!(signal_name(&"A".repeat(SIGNAL_NAME_MAX)), "A".repeat(SIGNAL_NAME_MAX), "up to the limit it passes");
+    }
+
+    const QUIT: &str = "SSHelter quit, so the connection to web was closed.";
+
+    fn quit_messages() -> [ServerMessage; 2] {
+        [ServerMessage::Event(Event::Disconnected { reason: QUIT.into() }), ServerMessage::Exited { code: None, signal: None }]
+    }
+
+    /// Plan 1b-1 review, Task 10 Important 2: the app ends the session before the shell is open. No shell is opened for it, the client
+    /// is told why, and the session is closed.
+    #[test]
+    fn a_session_the_app_ended_before_its_shell_opened_gets_no_shell_and_the_client_is_told_why() {
+        let control = ShellControl::with_settle(Duration::from_millis(100));
+        control.end(QUIT);
+        let mut running = start(FakeEngine::new(), control);
+        running.finish();
+        assert_eq!(running.link.split().1, quit_messages(), "no `Opened`: the client never had a shell");
+        assert_eq!(running.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed], "no shell was opened on the server");
+    }
+
+    /// The same while `Session::shell` is still going on, which can take seconds: the shell it opens is closed as soon as it has printed
+    /// something, the client is told why (and was never told the shell opened), and its output is not passed on.
+    #[test]
+    fn the_app_ending_a_session_while_its_shell_opens_closes_the_shell_and_tells_the_client() {
+        let (mut running, opening) = start_holding_the_shell(FakeEngine::new().with_shell_output(b"$ "), ShellControl::with_settle(Duration::from_secs(5)));
+        crate::ssh::testing::eventually("the shell to be being opened", 5, || opening.entered() == 1);
+        running.control.end(QUIT);
+        opening.release();
+        running.finish();
+        let (output, messages) = running.link.split();
+        assert_eq!(messages, quit_messages());
+        assert_eq!(output, b"", "what the shell printed was not passed on");
+        let events = running.engine.events();
+        assert_eq!(&events[1..], [FakeEvent::ShellOpened { term: "xterm-256color".into(), cols: 80, rows: 24 }, FakeEvent::ShellClosed, FakeEvent::Closed], "{events:?}");
+    }
+
+    /// A shell that ended on its own before the app closed it reports how it ended: its exit status is not a quit.
+    #[test]
+    fn a_shell_that_ended_by_itself_while_the_app_ended_the_session_reports_its_own_status() {
+        let ending = FakeEngine::new().with_shell_exit(Exit::Code(0)).with_shell_ending_at_once();
+        let (mut running, opening) = start_holding_the_shell(ending, ShellControl::new());
+        crate::ssh::testing::eventually("the shell to be being opened", 5, || opening.entered() == 1);
+        running.control.end(QUIT);
+        opening.release();
+        running.finish();
+        assert_eq!(running.link.split().1, [ServerMessage::Exited { code: Some(0), signal: None }]);
+    }
+
+    /// Plan 1b-1 review, Task 10 Minor 1: the client leaves while the shell is being opened. It is not told the shell opened, and the
+    /// shell is closed once it has printed (not after the whole settle time, with the thread that reads its output waiting for it).
+    #[test]
+    fn a_client_that_leaves_while_the_shell_opens_is_not_told_it_opened_and_the_shell_is_closed_after_its_first_output() {
+        let (mut running, opening) = start_holding_the_shell(FakeEngine::new().with_shell_output(b"$ "), ShellControl::with_settle(Duration::from_secs(5)));
+        crate::ssh::testing::eventually("the shell to be being opened", 5, || opening.entered() == 1);
+        running.control.owner_gone();
+        let released = Instant::now();
+        opening.release();
+        running.finish();
+        assert!(released.elapsed() < Duration::from_secs(3), "closed after the first output, not after the settle time: {:?}", released.elapsed());
+        assert_eq!(running.link.split(), (Vec::new(), Vec::new()), "the client is gone: nothing is sent to it");
+        let events = running.engine.events();
+        assert_eq!(&events[2..], [FakeEvent::ShellClosed, FakeEvent::Closed], "{events:?}");
+    }
+
+    /// The client left before the shell was opened at all: none is.
+    #[test]
+    fn a_client_that_left_before_the_shell_opened_gets_no_shell() {
+        let control = ShellControl::with_settle(Duration::from_millis(100));
+        control.owner_gone();
+        let mut running = start(FakeEngine::new(), control);
+        running.finish();
+        assert_eq!(running.link.split(), (Vec::new(), Vec::new()));
+        assert_eq!(running.engine.events(), [FakeEvent::Connect { aliases: vec!["web".into()] }, FakeEvent::Closed]);
     }
 }
