@@ -3,9 +3,10 @@
 # the result: each installer holds sshelter-cli.exe next to sshelter.exe, the helper needs no VC++ runtime, and the two run `sshelter
 # connect` together, through pipes (the usage and its exit code 2 come back through the helper) and in a console of their own, as a
 # terminal runs them (the GUI sshelter.exe reaches the console through AttachConsole and the handles it inherits: the usage on the
-# console's screen, and the refusal of a session pipe another owner made). Run by hand before a beta (own-ssh plan 1b-3). It publishes
-# nothing: no release and no updater artifacts, so no signing key. Not copied from beta.yml: the version stamp (this build keeps the
-# version in the repository) and the sync relay check (the relay URL does not change the bundle).
+# console's screen, and the refusal of a session pipe another owner made), where the helper also puts back the console a killed program
+# left changed. Run by hand before a beta (own-ssh plan 1b-3). It publishes nothing: no release and no updater artifacts, so no signing
+# key. Not copied from beta.yml: the version stamp (this build keeps the version in the repository) and the sync relay check (the relay
+# URL does not change the bundle).
 # It also runs on a push to next/own-ssh that changes this file: GitHub dispatches a workflow only from the default branch or once it has
 # run, and until next/own-ssh is merged this file exists only there. That first run is the check; later dispatches work after it.
 name: windows bundle check
@@ -155,8 +156,9 @@ jobs:
       # started with that console's own buffers as its standard handles, as a shell in the console starts a program, and the GUI
       # sshelter.exe attaching to the helper's console and reading it through the handles it inherits (no step through pipes reaches that).
       # The console's screen shows the usage (2), and the refusal of a session pipe another owner made (1; the runner is elevated, so the
-      # Administrators group can own the squatter's pipe; the pipe was opened, no SSHelter started). A test of the app
-      # (cli::real_console_tests), built here; test-windows.yml runs it on the debug pair.
+      # Administrators group can own the squatter's pipe; the pipe was opened, no SSHelter started). And each installer's helper puts the
+      # console's four settings back after a stand-in sshelter.exe that changed them and was killed, as the NSIS installer kills a
+      # session's sshelter.exe. A test of the app (cli::real_console_tests), built here; test-windows.yml runs it on the debug pair.
       - name: The installers' two programs in a console of their own
         shell: pwsh
         working-directory: src-tauri
