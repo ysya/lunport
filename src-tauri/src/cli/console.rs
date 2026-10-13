@@ -361,8 +361,11 @@ impl Console {
             return Err(error);
         }
         if let Err(error) = self.api.set(Setting::OutputCodePage, CP_UTF8) {
-            let _ = self.api.set(Setting::OutputMode, self.start.output_mode);
-            self.changed.store(false, Ordering::SeqCst);
+            // The console is as it was only once the output's mode is back: one that refuses that too stays changed, and the next way
+            // out tries again.
+            if self.api.set(Setting::OutputMode, self.start.output_mode).is_ok() {
+                self.changed.store(false, Ordering::SeqCst);
+            }
             return Err(error);
         }
         Ok(())
@@ -1097,6 +1100,18 @@ mod tests {
         let mut tty = Tty::new(console.clone()).unwrap();
         console.fail(|call| matches!(call, Call::Set(Setting::OutputMode, _)));
         assert_eq!(tty.take_over().unwrap_err().kind(), io::ErrorKind::Other);
+
+        // Final wave (F5): a put-back of the output's mode that fails too (a console that stopped answering) leaves the console changed, so
+        // a later way out tries again: here the dropped `Tty` puts all four settings back.
+        let console = FakeConsole::new();
+        let mut tty = Tty::new(console.clone()).unwrap();
+        console.fail(|call| matches!(call, Call::Set(Setting::OutputCodePage, CP_UTF8) | Call::Set(Setting::OutputMode, USUAL_OUTPUT)));
+        assert_eq!(tty.take_over().unwrap_err().kind(), io::ErrorKind::Other);
+        let start = console.start;
+        assert_eq!(console.now(), Settings { output_mode: COOKED_OUTPUT, ..start }, "the output's mode could not be put back");
+        let before = console.changes().len();
+        drop(tty);
+        assert_eq!(console.changes()[before..], put_back(start), "the way out tries again");
     }
 
     /// A console that takes virtual terminal sequences but refuses xterm's line endings (an older Windows 10 refuses
