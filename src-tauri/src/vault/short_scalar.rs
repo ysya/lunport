@@ -60,7 +60,7 @@ struct Container {
 }
 
 /// The private key text taken apart into its container: the base64 between the begin and end lines, then each field of the format. A
-/// malformed one (several keys, text after the end line…) gives None.
+/// malformed one (several keys, text after the end line, a private section that is not a whole number of the cipher's blocks…) gives None.
 fn container(private_key: &str) -> Option<Container> {
     let mut lines = private_key.lines().map(str::trim).filter(|line| !line.is_empty());
     if lines.next()? != BEGIN {
@@ -100,6 +100,11 @@ fn container(private_key: &str) -> Option<Container> {
     }
     let public = Vec::<u8>::decode(&mut reader).ok()?;
     let private = Zeroizing::new(Vec::<u8>::decode(&mut reader).ok()?);
+    // `ssh-key` refuses a private section that is not a whole number of blocks (an encrypted one already when it parses the key, before
+    // any passphrase is tried).
+    if private.len() % cipher.block_size() != 0 {
+        return None;
+    }
     let tag = if cipher.has_tag() {
         let mut tag = [0u8; 16];
         reader.read(&mut tag).ok()?;
@@ -113,8 +118,8 @@ fn container(private_key: &str) -> Option<Container> {
 /// The plaintext of a private section (`checkint ×2, string algorithm, string curve, string point, mpint scalar, string comment,
 /// padding`) whose ECDSA scalar is shorter than the curve's size: a new section, the scalar padded with zeros and the padding recomputed
 /// for an unencrypted container (a multiple of 8). Not ECDSA, a scalar of normal length (one `ssh-key` reads itself, or one really too
-/// long) or a malformed section all give None. `block_size` is the original container's: the padding has to be `1, 2, 3…` and shorter
-/// than one block (the checks `ssh-key` makes on it).
+/// long), a negative one or a malformed section all give None. `block_size` is the original container's: the padding has to be
+/// `1, 2, 3…` and shorter than one block (the checks `ssh-key` makes on it).
 fn repadded(section: &[u8], block_size: usize) -> Option<Zeroizing<Vec<u8>>> {
     let mut reader = section;
     let checkint1 = u32::decode(&mut reader).ok()?;
@@ -126,7 +131,9 @@ fn repadded(section: &[u8], block_size: usize) -> Option<Zeroizing<Vec<u8>>> {
     let scalar = Zeroizing::new(Vec::<u8>::decode(&mut reader).ok()?);
     let comment = String::decode(&mut reader).ok()?;
     let padding_is_valid = reader.len() < block_size && reader.iter().zip(1u8..).all(|(byte, expected)| *byte == expected);
-    if !padding_is_valid || scalar.len() >= size {
+    // An mpint whose first byte has its top bit set is negative: OpenSSH refuses to read one, and writes a 0x00 in front of such a scalar.
+    let negative = scalar.first().is_some_and(|byte| byte & 0x80 != 0);
+    if !padding_is_valid || negative || scalar.len() >= size {
         return None;
     }
 
@@ -166,7 +173,8 @@ fn read_unencrypted(public: &[u8], section: &[u8]) -> Option<PrivateKey> {
 /// else (an encrypted key, not ECDSA, a scalar of normal length, a malformed key) gives None, so that the caller keeps its own error.
 pub fn parse(private_key: &str) -> Option<PrivateKey> {
     let container = container(private_key)?;
-    if container.cipher.is_some() {
+    // An unencrypted key that names a KDF is one `ssh-key` refuses.
+    if container.cipher.is_some() || container.kdf.is_some() {
         return None;
     }
     let section = repadded(&container.private, Cipher::None.block_size())?;
@@ -194,7 +202,7 @@ pub fn decrypt(private_key: &str, passphrase: &str) -> Option<PrivateKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::slot_rules::test_keys;
+    use crate::sync::slot_rules::test_keys::{self, EcdsaSection};
 
     /// The length of the scalar as the key's text has it (a test key's scalar has to be short there, or the test is not about this).
     fn scalar_len(private_key: &str) -> usize {
@@ -253,5 +261,34 @@ mod tests {
         assert!(decrypt(&text, "wrong").is_none());
         assert!(decrypt(&test_keys::ecdsa_short_p256(), "test-passphrase").is_none(), "not encrypted");
         assert!(decrypt(&test_keys::encrypted(), "test-passphrase").is_none(), "not ECDSA");
+    }
+
+    /// What `ssh-key` refuses in a container whose scalar has its full length is refused with a short one too: an unencrypted key that
+    /// names a KDF, a private section that is not a whole number of blocks, and a negative scalar (OpenSSH refuses an mpint whose top bit
+    /// is set).
+    #[test]
+    fn a_short_scalar_does_not_make_a_container_ssh_key_refuses_readable() {
+        let bcrypt = test_keys::one_round_bcrypt();
+
+        let (public, section) = EcdsaSection::of(test_keys::ECDSA_SHORT_P256_BODY);
+        let full = section.with_full_scalar(32);
+        assert_eq!(PrivateKey::from_openssh(test_keys::openssh_key(Cipher::None, &bcrypt, &public, &full.padded(8), "")).err(), Some(ssh_key::Error::Crypto), "setup: ssh-key refuses an unencrypted key that names a KDF");
+        assert!(parse(&test_keys::openssh_key(Cipher::None, &Kdf::None, &public, &section.padded(8), "")).is_some(), "setup: without the KDF the key is read");
+        assert!(parse(&test_keys::openssh_key(Cipher::None, &bcrypt, &public, &section.padded(8), "")).is_none(), "an unencrypted key that names a KDF");
+
+        let mut negative = section.clone();
+        negative.scalar[0] |= 0x80;
+        assert!(parse(&test_keys::openssh_key(Cipher::None, &Kdf::None, &public, &negative.padded(8), "")).is_none(), "a negative scalar");
+
+        // P-521's private section comes to 262 bytes without its padding.
+        let (public, section) = EcdsaSection::of(test_keys::ECDSA_SHORT_P521_BODY);
+        let full = section.with_full_scalar(66);
+        assert_ne!(full.with_padding(&[]).len() % 8, 0, "setup");
+        assert_eq!(PrivateKey::from_openssh(test_keys::openssh_key(Cipher::None, &Kdf::None, &public, &full.with_padding(&[]), "")).err(), Some(ssh_key::Error::Encoding(ssh_encoding::Error::Length)), "setup: ssh-key refuses a section that is not a whole number of blocks");
+        assert!(parse(&test_keys::openssh_key(Cipher::None, &Kdf::None, &public, &section.with_padding(&[]), "")).is_none(), "an unencrypted section that is not a whole number of blocks");
+        let encrypted = test_keys::openssh_key(Cipher::Aes256Ctr, &bcrypt, &public, &section.with_padding(&[]), "pass");
+        assert_eq!(PrivateKey::from_openssh(&encrypted).err(), Some(ssh_key::Error::Crypto), "setup: ssh-key refuses such a ciphertext before any passphrase");
+        assert!(decrypt(&encrypted, "pass").is_none(), "a ciphertext that is not a whole number of blocks");
+        assert!(decrypt(&test_keys::openssh_key(Cipher::Aes256Ctr, &bcrypt, &public, &section.padded(16), "pass"), "pass").is_some(), "setup: padded, it opens");
     }
 }
