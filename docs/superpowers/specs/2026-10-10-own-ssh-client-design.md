@@ -76,6 +76,8 @@ SSHelter 原本是「`~/.ssh/config` 的編輯器,加上同步與金鑰保管庫
 
 **app 沒在跑時**:用戶端沿用現在 MCP 的做法,背景啟動 `--mcp-host`(改名為 `--host`)並等待,啟動用 `SPAWN_LOCK` 加鎖檔序列化;單一實例外掛照舊;交接後 socket 路徑不變,用戶端只要重試連線。
 
+(Windows,第 1 期)broker 在 Windows 用 named pipe `\\.\pipe\sshelter-session-<使用者 SID 字串的 SHA-256 前 16 個十六進位>`,做法同 agent 的 pipe:DACL 只給目前使用者、拒絕遠端連線、第一個 instance 帶 `FILE_FLAG_FIRST_PIPE_INSTANCE`;鎖檔照舊是 `<app data>/ipc/lock`。pipe 沒有 `shutdown`,所以 broker「掛斷」一條連線是先記下已掛斷(之後的讀一律讀到結尾、寫一律失敗),再用 `CancelIoEx` 讓卡在讀寫的執行緒回來;不用 `DisconnectNamedPipe`,它會丟掉用戶端還沒讀的訊框(例如最後的 `exited`)。新連線 10 秒內要送 `hello`、`open_shell` 的上限(§7.2)也這樣做,pipe 沒有讀取逾時。用戶端開 pipe 時遇到所有 instance 都忙就等(`WaitNamedPipeW`),找不到 pipe 就照第 4 節背景啟動 SSHelter。
+
 **生命週期**:用戶端斷線就關掉它的 session;app 結束全部中斷;螢幕鎖定不中斷(認證完成後不再用到金鑰);app 裡的「進行中的 session」清單可以手動關。
 
 ## 5. 資料模型與同步
@@ -240,13 +242,13 @@ pub enum Exit { Code(u32), Signal(String), Refused(String), Disconnected } // Re
 - app 沒跑:背景啟動並等待(第 4 節),等不到就印 `SSHelter did not start within 12 seconds.` 結束碼 1。
 - 連上 broker 後送 `hello`、`open_shell`(`term` 取 `$TERM`,預設 `xterm-256color`),進 raw mode;stdin → `data`;`data` → stdout;視窗大小變更 → `window_change`;`question` → 暫時離開 raw mode、在終端機問、送 `answer`、回到 raw mode;`exited{code}` → 還原終端機、以該 code 結束。
 - Unix:raw mode 用 termios(第 1b 期用 app 已有的 `libc`,沒有加 `nix`),`SIGWINCH` 用 tokio 的 `SignalKind::window_change`。
-- Windows:release 版沒有 console,先 `AttachConsole(ATTACH_PARENT_PROCESS)`;`SetConsoleMode` 開 VT input/output;視窗大小變更用 `ReadConsoleInput` 的事件;在 Windows Terminal 與傳統 console 都要測。
+- Windows(第 1 期;原本排在第 3 期,2026-10-13 使用者決定 1.0 的 beta 之前做好):release 版的 `sshelter.exe` 是 GUI 程式(`windows_subsystem = "windows"`),Windows 的 shell 不等 GUI 程式結束、Windows Terminal 的分頁也不給它 console,所以另附一個 console 程式 `sshelter-cli.exe`,放在 `sshelter.exe` 旁邊:它只用 std,用同樣的參數啟動旁邊的 `sshelter.exe`(標準輸入輸出照原樣交給它)、等它結束、以它的結束碼結束,自己不理會 Ctrl-C 與 Ctrl-Break(交給 `sshelter.exe` 處理)。`sshelter.exe connect` 沒有 console 時先 `AttachConsole(ATTACH_PARENT_PROCESS)` 接上 `sshelter-cli.exe` 的 console(debug 版本來就是 console 程式,不用接);標準輸入不是 console 就印 `sshelter connect needs a terminal.`、結束碼 1(同 Unix)。console 的設定:一開始存下輸入與輸出的模式和兩個 code page,任何結束路徑(含 panic)都還原;輸出開 `ENABLE_VIRTUAL_TERMINAL_PROCESSING` 與 `DISABLE_NEWLINE_AUTO_RETURN`(換行照 xterm),輸出的 code page 設成 UTF-8,寫進 console 時不把一個 UTF-8 字元切成兩次寫;收到 `opened` 才把輸入改成 raw:關掉 `ENABLE_LINE_INPUT`、`ENABLE_ECHO_INPUT`、`ENABLE_PROCESSED_INPUT`,開 `ENABLE_VIRTUAL_TERMINAL_INPUT`(按鍵成為 VT 序列,Ctrl-C 是送給遠端的字元);`question` 用 console 自己的行編輯問(`ENABLE_LINE_INPUT`、`ENABLE_PROCESSED_INPUT`,`echo` 決定有沒有 `ENABLE_ECHO_INPUT`),問之前 `FlushConsoleInputBuffer`;按鍵用 `ReadConsoleW` 讀(UTF-16 轉 UTF-8,一個代理對分在兩次讀取時要接起來);視窗大小每 250 毫秒用 `GetConsoleScreenBufferInfo` 的 `srWindow` 看一次,變了才送 `window_change`(不用原本寫的 `ReadConsoleInput` 事件:那要自己把按鍵記錄轉回位元組);信號用 `SetConsoleCtrlHandler`:Ctrl-C(只有不是 raw 時才是信號)與 Ctrl-Break 同 `SIGINT`,關掉 console 視窗同 `SIGHUP`(Windows 只給幾秒,所以同 Unix 由 watchdog 保證還原與結束),登出與關機同 `SIGTERM`;結束碼與 Unix 相同(130、129、143 等);Windows 沒有 Ctrl-Z 停止與 `SIGQUIT`。Windows Terminal 與傳統 console 都要手動測。
 - 任何結束路徑(含 panic)都還原終端機模式。
-- (第 1b 期)實作的細節:收到 `opened` 才進 raw mode(之前終端機維持原狀,Ctrl-C 照常中止;連線中打的字等 shell 開了再送,同 OpenSSH);raw mode 照 OpenSSH 的 `enter_raw_mode` 設;`question` 用終端機的行編輯問,`echo: false` 時不顯示,問之前丟掉先打的字(不讓它變成密碼),Ctrl-C 或 Ctrl-D 取消;termios 用 app 已有的 `libc`(Cargo.lock 不多套件),信號用 tokio 的 `signal`(`SIGWINCH`、`SIGINT`、`SIGTERM`、`SIGHUP`、`SIGQUIT`、`SIGTSTP`、`SIGCONT`),接不到這些信號就不開始;問題或連線中按 Ctrl-Z(raw mode 時 Ctrl-Z 是送給遠端的字元)先還原終端機再真的停下,`fg` 之後重設模式、重問還沒答的問題(同 OpenSSH 的 `readpassphrase`);寫終端機與寫 broker 各用一條執行緒,等著寫到終端機的輸出有上限(終端機慢時 CLI 先停止讀 broker 的訊框,broker 的轉送跟著停下;引擎的佇列照 §6.3 不等人,滿了之後多出的輸出被丟掉,串流裡用一行字說少了多少位元組;SSH 的 window 不受影響),按鍵與信號不排在輸出後面;只有 session 自己結束時(shell 結束、broker 結束 session 或離開),CLI 會等終端機把最後的輸出收完才離開(同 OpenSSH;終端機一直在收就一直等,等著寫的最多是 CLI 的輸出上限 256 KiB),這段時間收到 `SIGINT`、`SIGTERM`、`SIGHUP` 或 `SIGQUIT` 就不再等,還原終端機並結束;收到 `SIGTERM`、`SIGHUP`、`SIGQUIT` 或終端機關掉之後,迴圈若沒在 2 秒內結束,由 watchdog 還原終端機並結束;結束碼:shell 的結束碼(遠端被訊號殺掉為 128 + 訊號編號,同 shell);CLI 自己收到的訊號也是 128 + 訊號編號(連線中按 Ctrl-C 為 130,`SIGHUP` 或終端機關掉為 129,`SIGQUIT` 為 131,`SIGTERM` 為 143);連線中斷、開不成或 SSHelter 離開為 255(同 ssh),執行緒 panic 也是 255;參數錯誤為 2;沒有終端機、SSHelter 沒啟動或接不到信號為 1;Windows 在第 1b 期印 `sshelter connect is not supported on Windows yet.` 並以 1 結束(release 版沒有 console,看不到這句;console 的工作在第 3 期)。
+- (第 1b 期)實作的細節:收到 `opened` 才進 raw mode(之前終端機維持原狀,Ctrl-C 照常中止;連線中打的字等 shell 開了再送,同 OpenSSH);raw mode 照 OpenSSH 的 `enter_raw_mode` 設;`question` 用終端機的行編輯問,`echo: false` 時不顯示,問之前丟掉先打的字(不讓它變成密碼),Ctrl-C 或 Ctrl-D 取消;termios 用 app 已有的 `libc`(Cargo.lock 不多套件),信號用 tokio 的 `signal`(`SIGWINCH`、`SIGINT`、`SIGTERM`、`SIGHUP`、`SIGQUIT`、`SIGTSTP`、`SIGCONT`),接不到這些信號就不開始;問題或連線中按 Ctrl-Z(raw mode 時 Ctrl-Z 是送給遠端的字元)先還原終端機再真的停下,`fg` 之後重設模式、重問還沒答的問題(同 OpenSSH 的 `readpassphrase`);寫終端機與寫 broker 各用一條執行緒,等著寫到終端機的輸出有上限(終端機慢時 CLI 先停止讀 broker 的訊框,broker 的轉送跟著停下;引擎的佇列照 §6.3 不等人,滿了之後多出的輸出被丟掉,串流裡用一行字說少了多少位元組;SSH 的 window 不受影響),按鍵與信號不排在輸出後面;只有 session 自己結束時(shell 結束、broker 結束 session 或離開),CLI 會等終端機把最後的輸出收完才離開(同 OpenSSH;終端機一直在收就一直等,等著寫的最多是 CLI 的輸出上限 256 KiB),這段時間收到 `SIGINT`、`SIGTERM`、`SIGHUP` 或 `SIGQUIT` 就不再等,還原終端機並結束;收到 `SIGTERM`、`SIGHUP`、`SIGQUIT` 或終端機關掉之後,迴圈若沒在 2 秒內結束,由 watchdog 還原終端機並結束;結束碼:shell 的結束碼(遠端被訊號殺掉為 128 + 訊號編號,同 shell);CLI 自己收到的訊號也是 128 + 訊號編號(連線中按 Ctrl-C 為 130,`SIGHUP` 或終端機關掉為 129,`SIGQUIT` 為 131,`SIGTERM` 為 143);連線中斷、開不成或 SSHelter 離開為 255(同 ssh),執行緒 panic 也是 255;參數錯誤為 2;沒有終端機、SSHelter 沒啟動或接不到信號為 1;Windows 在第 1b 期印 `sshelter connect is not supported on Windows yet.` 並以 1 結束;這句在 Windows 版做好之後拿掉(見上面的 Windows 一條)。
 
 ### 7.4 從 app 啟動終端機
 
-Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `detect_terminals`、`build_launch_command`、`launch`,只是 argv 從 `ssh <alias>` 變成 `<SSHelter 執行檔> connect <alias>`。密碼自動填入與一次性通道刪除。(第 1b 期)Windows 在第 3 期之前照舊開 `ssh <alias>`。一次性通道與自動填入在各平台都已刪除,所以 Windows 的 Connect 少了這些:存著的密碼不再自動填入(ssh 自己問);「只在 SSHelter」的金鑰不再走預先核准的一次性通道,改經 `~/.ssh/config` 那行 `Include` 設的 `IdentityAgent` 與 agent 的核准視窗(沒有那行 `Include`,或 agent 沒在跑時,Connect 用不到這把金鑰);開終端機之前「這台電腦上沒有這把金鑰」的提示沒了(改成 ssh 在終端機裡失敗);一次性通道逾時後的「Connect to {alias} again」提示也沒了。
+Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `detect_terminals`、`build_launch_command`、`launch`,只是 argv 從 `ssh <alias>` 變成 `<SSHelter 執行檔> connect <alias>`。密碼自動填入與一次性通道刪除。(第 1 期,Windows 版做好之後)Windows 的 Connect 開 `sshelter-cli.exe connect <alias>`:Windows Terminal 直接執行這個 argv,cmd 用 `cmd /c start "" cmd /k <argv>` 開新視窗、結束後視窗留著(同現在);找不到 `sshelter-cli.exe` 時(debug 版)用 `sshelter.exe` 本身,debug 版是 console 程式。下面第 1b 期列的 Windows 損失由此補回:存著的密碼由 broker 從系統的認證儲存取用(或在終端機問),「只在 SSHelter」的金鑰由保管庫直接簽章。(第 1b 期)Windows 在第 3 期之前照舊開 `ssh <alias>`。一次性通道與自動填入在各平台都已刪除,所以 Windows 的 Connect 少了這些:存著的密碼不再自動填入(ssh 自己問);「只在 SSHelter」的金鑰不再走預先核准的一次性通道,改經 `~/.ssh/config` 那行 `Include` 設的 `IdentityAgent` 與 agent 的核准視窗(沒有那行 `Include`,或 agent 沒在跑時,Connect 用不到這把金鑰);開終端機之前「這台電腦上沒有這把金鑰」的提示沒了(改成 ssh 在終端機裡失敗);一次性通道逾時後的「Connect to {alias} again」提示也沒了。
 
 ## 8. MCP
 
@@ -317,7 +319,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 - 單元測試照舊(inline);引擎在介面後面,所以 broker、MCP、CLI 的測試用假引擎(`FakeEngine`:可編排主機金鑰結果、認證結果、輸出、斷線)。
 - 整合測試:真引擎對本機臨時 `sshd`。第 0 期已建好這套架構(`spike/russh/src/harness.rs`:臨時目錄、先綁 socket 取得空閒埠、測試用主機金鑰與 authorized_keys、以一般使用者執行 `sshd -D -e -f <設定>`、`PermitUserRC no`、工具不在 PATH 上就略過、不碰使用者的 `~/.ssh`),第 1 期搬進 app 的測試支援程式碼(改用 `crate::process`,順便讓逾時殺掉子行程後的等待有上限),每個測試自己起一個 sshd、不共用;非共用不可的長迴圈設 `PerSourcePenalties no`(OpenSSH ≥ 9.8 才認得,不能放進預設設定)。涵蓋公鑰(從保管庫簽章)、密碼、keyboard-interactive、PTY 與 window change、exec、兩層跳板、主機金鑰的三種結果、keepalive 斷線;第 0 期之後必加:拒絕 SHA-1 RSA 簽章的檢查(§6.3 b);`sign` 回錯誤之後 `authenticate_none` 與 `disconnect()` 的行為(session 卡死的量測);被放棄的 keyboard-interactive;經過跳板的大量輸出(流量控制);未認證且閒置超過 `keepalive_interval` 時 CPU 不空轉(讀原始碼懷疑的點)。密碼與 keyboard-interactive 的**成功**路徑臨時 sshd 沒有 PAM 走不到,要用有 PAM 的 sshd 容器(CI 的 Linux 工作)。CI:macOS、Linux(新增;`vault::` 在 `zeroize` 1.9.1 下)都跑;Windows 的 `test-windows.yml` 加上引擎的整合測試(對 runner 的 OpenSSH server;第 0 期的 `spike-windows.yml` 已證明做法),並在加了 russh 的 `src-tauri/Cargo.lock` 下建置整個 app(第 0 期只建了試驗 crate)。
 - 兩台電腦的同步測試在記錄層用 `FakeRelay`(不再需要檔案);搬遷測試用固定的 ssh_config 樣本。
-- CLI 測試:協定編解碼、raw mode 的進出與還原(假的 termios);Windows console 的部分列入手動清單。
+- CLI 測試:協定編解碼、raw mode 的進出與還原(假的 termios);Windows console 的部分列入手動清單。(第 1 期,Windows)`test-windows.yml` 也在 `next/own-ssh` 的每次 push 跑:broker 經真的 named pipe 的測試(假引擎;掛斷、`hello` 的上限、用戶端讀到 `exited` 之後才讀到結尾)、CLI 的 Windows 部分(假的 console:模式的計算與還原、UTF-16 轉 UTF-8、ctrl 事件、視窗大小)、`sshelter-cli.exe` 的轉交(參數與結束碼);console 的實際行為(Windows Terminal、傳統 console、輸入法、改變視窗大小、關掉視窗)列入手動清單。release 與 beta 的 Windows 建置先編 `sshelter-cli.exe`(獨立的小 crate,只用 std),再用 `tauri build --config` 加上 `bundle.externalBin` 打包進安裝檔;平常的 `cargo build`、`cargo test` 用不到它。
 - 安全:`cargo audit` 進 CI;russh 的公告每月看一次;私鑰只在 app 行程;IPC 只接受同使用者;MCP `auto_log` 絕不接受主機金鑰、絕不代答提示。
 
 ## 13. 分期與發布
@@ -325,9 +327,9 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 | 期 | 內容 | 產出 |
 |---|---|---|
 | 0 試驗(完成 2026-10-11) | russh 與 ssh-key 0.6.7 並存;對本機 sshd 連線、exec、shell;Windows 實機;`Signer` 接 `Material::sign`;IPC 搬成 `ipc/` | 判定 GO;報告 `2026-10-10-own-ssh-spike-report.md`;本文件依它修訂(標「(第 0 期)」處);`ipc/` 已搬、隨 beta 0.17.0-9 出貨 |
-| 1 核心 | 資料模型與 schema 3、匯入、引擎、broker、IPC、`sshelter connect`、Connect 按鈕、最小主機編輯器、主機金鑰釘住 | 使用者日常可以用它連線 |
+| 1 核心 | 資料模型與 schema 3、匯入、引擎、broker、IPC、`sshelter connect`、Connect 按鈕、最小主機編輯器、主機金鑰釘住;Windows 版的 `sshelter connect`(console 小程式 `sshelter-cli.exe`、named pipe;2026-10-13 從第 3 期移來) | 使用者日常可以用它連線 |
 | 2 MCP | `ssh_exec`、核准模式、log、請求者辨識、AI Access 頁 | AI 可以用 |
-| 3 收尾 | Keychain 清理、session 清單、Windows 終端機、搬遷清理、文件、手動檢查清單、`cargo audit` | 1.0.0-1 beta |
+| 3 收尾 | Keychain 清理、session 清單、搬遷清理、文件、手動檢查清單、`cargo audit` | 1.0.0-1 beta |
 | 之後 | 連接埠轉送、SFTP、憑證;換成自製引擎 | |
 
 每一期一份計畫(writing-plans),沿用 subagent-driven 執行。
@@ -357,7 +359,7 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 
 ## 16. 待試驗與未決
 
-- Windows:`AttachConsole` + VT 模式在 Windows Terminal 與傳統 console 的行為(第 3 期);PTY/ConPTY 與視窗大小沒量過。
+- Windows:`sshelter-cli.exe` 加 `AttachConsole` 與 VT 模式在 Windows Terminal 與傳統 console 的實際行為只有 CI(假 console)與手動檢查看得到;ConPTY 下輪詢視窗大小、輸入法、貼上大量文字都沒量過。
 - 第 0 期沒量到、第 1 期要補(§12):密碼與 keyboard-interactive 的成功路徑(PAM);`sign` 出錯與被放棄的 keyboard-interactive 之後的 session;內層跳板自己先結束、外層還活著時的 `disconnected`;Linux 與其他版本的 sshd(所有計時只在 macOS OpenSSH 10.3p1 量過);長時間連線與 rekey;沒有 `server-sig-algs` 的老伺服器;app 加上 russh 後的 Windows build;`cargo audit` 對兩代 RustCrypto 的結果。
 - 試驗 crate `spike/` 的壽命:已結束。它的 lock 記了 app 的整個相依圖,`src-tauri/Cargo.toml` 一變,它的 `--locked` Windows 工作就壞,所以第 1a 期在 harness 搬進 app(`src-tauri/src/ssh/testing/`)之後刪掉了 `spike/` 與 `spike-windows.yml`。報告 `2026-10-10-own-ssh-spike-report.md` 留著;它引用的 `spike/russh/...` 檔案只剩 git 歷史(刪除那個 commit 之前)裡看得到。
 - 同一個 alias 在不同 space 重複時 CLI 的選法(本文件:回錯誤要求用 id;UI 可以禁止同名)。
