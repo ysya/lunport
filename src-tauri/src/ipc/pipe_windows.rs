@@ -142,12 +142,21 @@ pub fn pipe_name_for(role: &str) -> io::Result<String> {
 
 /// The bytes of a SID; `None` for a null or malformed one. Two SIDs are equal exactly when their bytes are (the fields `EqualSid`
 /// compares, in a canonical layout).
+///
+/// # Safety
+/// `sid` is null, or points to memory that holds a SID for the whole call.
 unsafe fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
-    if sid.is_null() || IsValidSid(sid) == 0 {
+    if sid.is_null() {
         return None;
     }
-    let length = GetLengthSid(sid) as usize;
-    Some(std::slice::from_raw_parts(sid as *const u8, length).to_vec())
+    // SAFETY: the caller's promise; IsValidSid only reads the SID, and GetLengthSid gives the length of a valid one.
+    unsafe {
+        if IsValidSid(sid) == 0 {
+            return None;
+        }
+        let length = GetLengthSid(sid) as usize;
+        Some(std::slice::from_raw_parts(sid as *const u8, length).to_vec())
+    }
 }
 
 /// The current user's SID, as bytes.
