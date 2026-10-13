@@ -1049,11 +1049,22 @@ mod tests {
     #[test]
     fn v2_errors_and_debug_output_never_contain_the_token() {
         let (a, t) = (hex('a'), hex('7'));
-        let client = RelayClient::new("http://127.0.0.1:9").unwrap();
+        // Own the endpoint and disconnect before any HTTP response. A fixed closed port can
+        // be intercepted by a system proxy, or occupied by another local process.
+        let (url, server) = half_answer("", false);
+        let client = RelayClient {
+            base_url: url,
+            http: reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+        };
         let started = std::time::Instant::now();
         let err = client.pull(&a, &t, 0).unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(10), "connect timeout");
-        assert!(matches!(err, RelayError::Unreachable(_)));
+        server.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "transport timeout");
+        assert!(matches!(err, RelayError::Unreachable(_)), "unexpected relay error: {err:?}");
         assert!(!err.to_string().contains(&t));
         assert!(!format!("{:?}", batch_item(&a, &t, 0)).contains(&t));
         // 轉成 AppError:404 仍是 NotFound(呼叫端據此分辨「chain 不在了」)。
