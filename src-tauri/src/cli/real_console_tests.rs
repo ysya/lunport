@@ -412,7 +412,7 @@ fn case(name: &str) {
             assert_eq!(settings(), start, "the console is back at its start");
         }
         // Spec §7.3: a panic puts the console back (the hook `restore_on_panic` installs), all four settings, after the console was taken
-        // over and set raw.
+        // over and set raw; the panic is then reported as usual (the parent looks for its message).
         "a_panic_puts_the_real_console_back" => {
             let start = settings();
             let mut tty = Tty::new(Arc::new(StdConsole::opened().unwrap())).unwrap();
@@ -487,9 +487,16 @@ fn a_real_console_works_as_the_keys_reader_needs() {
                     command.creation_flags(CREATE_NEW_CONSOLE).env(CASE, name);
                 })
             });
-            let panic = ran.err()?;
-            let why = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|text| text.to_string()));
-            Some(format!("{name}: {}", why.unwrap_or_default()))
+            let said = match ran {
+                Ok(said) => said,
+                Err(panic) => {
+                    let why = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|text| text.to_string()));
+                    return Some(format!("{name}: {}", why.unwrap_or_default()));
+                }
+            };
+            // The hook `restore_on_panic` installs hands the panic on to the hook before it, which reports it as usual.
+            let reported = name != "a_panic_puts_the_real_console_back" || said.contains("a thread of the program failed");
+            (!reported).then(|| format!("{name}: the panic was not reported:\n{said}"))
         })
         .collect();
     assert!(failed.is_empty(), "{} of {} cases failed ({:?}):\n{}", failed.len(), cases.len(), started.elapsed(), failed.join("\n"));
