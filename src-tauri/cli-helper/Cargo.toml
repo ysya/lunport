@@ -1,0 +1,18 @@
+# sshelter-cli.exe: the console program Windows terminals run to reach SSHelter (own-ssh spec §7.3, §7.4). Std only, no dependencies.
+# A workspace of its own: the app's `cargo build` and `cargo test` (src-tauri) never build it. The Windows release builds compile it
+# first and bundle it next to sshelter.exe (`tauri build --config` with `bundle.externalBin`; see .github/workflows/beta.yml).
+[package]
+name = "sshelter-cli"
+# Not the app's version; nothing shows it.
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[workspace]
+
+# The relay test is also the program it relays to (tests/relay.rs), so it has a main of its own: the test harness would read that
+# program's arguments as test filters and options.
+[[test]]
+name = "relay"
+harness = false
