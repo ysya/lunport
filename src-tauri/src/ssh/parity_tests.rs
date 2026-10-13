@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 use super::fake::{FakeEngine, FakeLogin, FakeMethods};
 use super::russh_engine::toy_server::{ToyLogin, ToyServer};
 use super::russh_engine::{EngineOptions, RusshEngine};
+use super::testing::closed_port;
 use super::testing::fixture::{Server, SH_SHELL};
 use super::testing::harness::tools;
 use super::testing::proxy::{Mode, Proxy};
@@ -208,10 +209,10 @@ fn unreachable_after_the_password(engine: &dyn SshEngine, port: u16) {
 
 #[test]
 fn an_unreachable_password_first_hop_was_asked_for_its_password_first() {
-    let closed_port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
-    let refused = ConnectError::Unreachable { hop: login_target(closed_port, AuthMethod::Password).hops[0].reference(), reason: "connection refused".to_string() };
-    unreachable_after_the_password(&fake_logins().failing_with(refused), closed_port);
-    unreachable_after_the_password(&real_engine(), closed_port);
+    let port = closed_port();
+    let refused = ConnectError::Unreachable { hop: login_target(port, AuthMethod::Password).hops[0].reference(), reason: "connection refused".to_string() };
+    unreachable_after_the_password(&fake_logins().failing_with(refused), port);
+    unreachable_after_the_password(&real_engine(), port);
 }
 
 /// A hop pinned to a key of another type: the handshake offers only that type, and the server has none (the broker then reconnects
