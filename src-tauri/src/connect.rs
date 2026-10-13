@@ -369,24 +369,28 @@ pub fn connect_argv(program: &std::path::Path, alias: &str) -> Vec<String> {
 #[cfg(any(windows, test))]
 const CONSOLE_HELPER: &str = "sshelter-cli.exe";
 
-/// What a Windows terminal runs to connect (own-ssh spec §7.4): the console helper when it is next to SSHelter's executable `exe` (an
-/// installed SSHelter), `exe` itself otherwise (a debug build, which is a console program).
+/// What a Windows terminal runs to connect (own-ssh spec §7.4): the console helper next to SSHelter's executable `exe` (an installed
+/// SSHelter). Without it a debug build (`debug_build`; a console program) runs `exe` itself, and a release build fails with a sentence
+/// that names the missing helper: its `exe` is a GUI program, which a terminal neither waits for nor gives a console (§7.3).
 #[cfg(any(windows, test))]
-fn connect_program(exe: &std::path::Path) -> std::path::PathBuf {
+fn connect_program(exe: &std::path::Path, debug_build: bool) -> Result<std::path::PathBuf, AppError> {
     let helper = exe.with_file_name(CONSOLE_HELPER);
     if helper.is_file() {
-        helper
+        Ok(helper)
+    } else if debug_build {
+        Ok(exe.to_path_buf())
     } else {
-        exe.to_path_buf()
+        let dir = exe.parent().unwrap_or(exe);
+        Err(AppError::Other(format!("{CONSOLE_HELPER} is missing from {}. Reinstall SSHelter.", dir.display())))
     }
 }
 
-/// The launch for connecting to `alias` in `terminal_id`: `sshelter connect <alias>`, on Windows through the console helper when it is
-/// there (`connect_program`). Windows Terminal runs that argv directly and cmd in a new console that stays open (`build_launch_command`).
+/// The launch for connecting to `alias` in `terminal_id`: `sshelter connect <alias>`, on Windows through the console helper
+/// (`connect_program`). Windows Terminal runs that argv directly and cmd in a new console that stays open (`build_launch_command`).
 pub fn launch_for(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
     let exe = std::env::current_exe().map_err(|e| AppError::Other(format!("cannot locate SSHelter: {e}")))?;
     #[cfg(windows)]
-    let exe = connect_program(&exe);
+    let exe = connect_program(&exe, cfg!(debug_assertions))?;
     build_launch_command(terminal_id, &connect_argv(&exe, alias), new_tab)
 }
 
@@ -498,22 +502,24 @@ mod tests {
         assert_eq!(spec.args.last().unwrap(), r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/SSHelter.app/Contents/MacOS/sshelter' connect web""#);
     }
 
-    /// Every platform connects through `sshelter connect`. On Windows the test binary has no console helper beside it, so the terminal runs
-    /// the executable itself, as it does for a debug build.
+    /// Every platform connects through `sshelter connect`. On Windows the test binary has no console helper beside it, so a debug test build
+    /// runs the executable itself, as a debug build of the app does; a release test build says the helper is missing.
     #[test]
     fn the_launch_runs_sshelter_connect_on_every_platform() {
         let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
-        if cfg!(windows) {
+        if cfg!(windows) && cfg!(debug_assertions) {
             assert_eq!(launch_for("cmd", "web", false).unwrap().args, ["/c", "start", "", "cmd", "/k", exe.as_str(), "connect", "web"]);
             assert_eq!(launch_for("wt", "web", true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "web"]);
+        } else if cfg!(windows) {
+            assert!(launch_for("cmd", "web", false).unwrap_err().to_string().starts_with("sshelter-cli.exe is missing from "));
         } else {
             assert_eq!(launch_for("kitty", "web", false).unwrap().args, [exe.as_str(), "connect", "web"]);
         }
     }
 
-    /// On Windows the terminal runs the console helper when it is next to SSHelter's executable (an installed SSHelter): Windows Terminal
-    /// runs it directly, in a new window or in a new tab of the last one, and cmd starts it in a new console that stays open after it; the
-    /// path with a space in it stays one argument.
+    /// On Windows the terminal runs the console helper when it is next to SSHelter's executable (an installed SSHelter), in a release and a
+    /// debug build alike: Windows Terminal runs it directly, in a new window or in a new tab of the last one, and cmd starts it in a new
+    /// console that stays open after it; the path with a space in it stays one argument.
     #[test]
     fn windows_terminals_run_the_console_helper_next_to_sshelter() {
         let dir = tempfile::tempdir().unwrap();
@@ -522,14 +528,16 @@ mod tests {
         let exe = installed.join("sshelter.exe");
         std::fs::write(&exe, b"").unwrap();
         std::fs::write(installed.join("sshelter-cli.exe"), b"").unwrap();
-        let argv = connect_argv(&connect_program(&exe), "web");
-        assert_eq!(argv, [installed.join("sshelter-cli.exe").to_string_lossy().as_ref(), "connect", "web"]);
-        assert_the_windows_launches_run(&argv);
+        for debug_build in [false, true] {
+            let argv = connect_argv(&connect_program(&exe, debug_build).unwrap(), "web");
+            assert_eq!(argv, [installed.join("sshelter-cli.exe").to_string_lossy().as_ref(), "connect", "web"], "debug: {debug_build}");
+            assert_the_windows_launches_run(&argv);
+        }
     }
 
-    /// Without the console helper next to it (a debug build, which is a console program itself), the terminal runs SSHelter's executable.
+    /// Without the console helper next to it, a debug build (a console program itself) has the terminal run SSHelter's executable.
     #[test]
-    fn without_the_console_helper_windows_terminals_run_sshelter_itself() {
+    fn without_the_console_helper_a_debug_build_runs_sshelter_itself() {
         let dir = tempfile::tempdir().unwrap();
         let built = dir.path().join("my builds").join("debug");
         std::fs::create_dir_all(&built).unwrap();
@@ -537,9 +545,22 @@ mod tests {
         std::fs::write(&exe, b"").unwrap();
         // A directory by the helper's name is not the helper.
         std::fs::create_dir(built.join("sshelter-cli.exe")).unwrap();
-        let argv = connect_argv(&connect_program(&exe), "web");
+        let argv = connect_argv(&connect_program(&exe, true).unwrap(), "web");
         assert_eq!(argv, [exe.to_string_lossy().as_ref(), "connect", "web"]);
         assert_the_windows_launches_run(&argv);
+    }
+
+    /// A release build without the console helper does not hand its sshelter.exe, a GUI program, to a terminal, which would neither wait for
+    /// it nor give it a console (spec §7.3): Connect fails with a sentence that names the missing file and where it should be.
+    #[test]
+    fn without_the_console_helper_a_release_build_says_it_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("Program Files").join("SSHelter");
+        std::fs::create_dir_all(&installed).unwrap();
+        let exe = installed.join("sshelter.exe");
+        std::fs::write(&exe, b"").unwrap();
+        let error = connect_program(&exe, false).unwrap_err();
+        assert_eq!(error.to_string(), format!("sshelter-cli.exe is missing from {}. Reinstall SSHelter.", installed.display()));
     }
 
     /// Both Windows terminals run `argv` as it is: `wt.exe <argv>`, `wt.exe -w 0 nt <argv>` for a new tab, and `cmd /c start "" cmd /k
@@ -835,16 +856,18 @@ mod tests {
         );
     }
 
+    /// The terminals that open a new tab: iTerm2 on macOS and Windows Terminal on Windows. Terminal.app (no GUI scripting), cmd, $TERMINAL
+    /// and every Linux emulator open a new window. Holds whichever terminals the machine has (a Windows runner may have no wt.exe).
     #[test]
     fn detect_terminals_supports_new_tab_flags() {
         let terminals = detect_terminals();
         for t in &terminals {
-            if t.id == "iterm2" {
-                assert!(t.supports_new_tab, "iTerm2 must support new tabs");
-            } else {
-                // Terminal.app (no GUI-scripting), $TERMINAL, and all Linux emulators: false.
-                assert!(!t.supports_new_tab, "{} must not claim new-tab support", t.id);
-            }
+            let tabs = (cfg!(target_os = "macos") && t.id == "iterm2") || (cfg!(windows) && t.id == "wt");
+            assert_eq!(t.supports_new_tab, tabs, "{} says supports_new_tab = {}", t.id, t.supports_new_tab);
+        }
+        if cfg!(windows) {
+            // cmd is always there, last.
+            assert_eq!(terminals.last().map(|t| t.id.as_str()), Some("cmd"), "{terminals:?}");
         }
     }
 
