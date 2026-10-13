@@ -60,11 +60,23 @@ pub fn rerun_alone(name: &str) -> String {
 
 /// `rerun_alone`, with `configure` applied to the child's command before it starts (on Windows, say, a console of its own).
 pub fn rerun_alone_with(name: &str, configure: impl FnOnce(&mut std::process::Command)) -> String {
+    rerun(name, std::process::Stdio::null(), configure)
+}
+
+/// `rerun_alone_with`, the child reading `stdin` as its standard input instead of nothing: on Windows, a console's input buffer that this
+/// process keeps a handle of too, as a shell and `sshelter-cli.exe` keep the one `sshelter connect` reads.
+#[cfg(windows)]
+pub fn rerun_alone_reading(name: &str, stdin: std::process::Stdio, configure: impl FnOnce(&mut std::process::Command)) -> String {
+    rerun(name, stdin, configure)
+}
+
+fn rerun(name: &str, stdin: std::process::Stdio, configure: impl FnOnce(&mut std::process::Command)) -> String {
     let executable = std::env::current_exe().expect("the path of this test binary");
     let mut command = std::process::Command::new(executable);
     command.args(["--exact", name, "--nocapture", "--test-threads=1"]).env(CHILD_VARIABLE, "1");
     configure(&mut command);
-    let output = harness::run_within(&mut command, std::time::Duration::from_secs(120)).unwrap_or_else(|message| panic!("{message}"));
+    let output =
+        harness::run_within_reading(&mut command, stdin, std::time::Duration::from_secs(120)).unwrap_or_else(|message| panic!("{message}"));
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(output.status.success(), "the child process failed:\n{stderr}");
     stderr
