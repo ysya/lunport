@@ -50,7 +50,9 @@ jobs:
           - platform: ubuntu-22.04-arm # Linux arm64 (free on public repos)
             args: ""
           - platform: windows-latest # Windows x86_64 (NSIS installer)
-            # Bundles sshelter-cli.exe (step "Build the console helper") next to sshelter.exe.
+            # Bundles sshelter-cli.exe (step "Build the console helper") next to sshelter.exe. The JSON reaches tauri whole only because it
+            # has no backslash and no cmd metacharacter: tauri-action runs pnpm.cmd, that is cmd /d /s /c after cross-spawn's escaping, so
+            # it must never get a Windows path or any of % & ^ | < > ( ).
             args: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}'
     runs-on: ${{ matrix.platform }}
     steps:
