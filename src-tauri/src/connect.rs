@@ -359,7 +359,7 @@ pub fn build_launch_command(
 
 /// `<program> connect [--pause-on-error] <alias>`: the command the terminal runs to connect through SSHelter's own SSH client (own-ssh
 /// spec §7.3, §7.4). `program` is SSHelter's executable, or on Windows the console helper next to it (`connect_program`); `pause_on_error`
-/// keeps the reason of a connection that fails before the shell opens on the terminal until Enter (`closes_with_its_program`). The alias
+/// keeps the reason of a connection that fails before the shell opens on the terminal until Enter (`closes_after_a_failure`). The alias
 /// must be validated first.
 pub fn connect_argv(program: &std::path::Path, alias: &str, pause_on_error: bool) -> Vec<String> {
     let mut argv = vec![program.to_string_lossy().into_owned(), "connect".to_string()];
@@ -370,12 +370,14 @@ pub fn connect_argv(program: &std::path::Path, alias: &str, pause_on_error: bool
     argv
 }
 
-/// Whether the terminal `terminal_id` runs the command as its window's program, so that the window, and what the program said in it,
-/// goes when the program ends (or may: Windows Terminal keeps a pane whose program ended with an error, as its settings say). Every
-/// terminal SSHelter knows does, but Terminal, whose `do script` runs the command in the shell of a new window, and cmd, whose `cmd /k`
-/// stays after the command: there the reason of a failed connect stays without a pause.
-fn closes_with_its_program(terminal_id: &str) -> bool {
-    !matches!(terminal_id, "terminal" | "cmd")
+/// Whether the terminal `terminal_id` closes the window, and the reason of a failed connect with it, when the command ends with an error:
+/// the terminals that run the command as the window's program and close it then (iTerm2, as 0.17.0-10 showed; the Linux emulators and an
+/// unknown `$TERMINAL`, which are taken to). Not Terminal, whose `do script` runs the command in the shell of a new window; not cmd, whose
+/// `cmd /k` stays after the command; and not Windows Terminal, whose `closeOnExit` default (`automatic`, which is `graceful` for a
+/// program started in Terminal itself) keeps the pane of a program that ended with an error, with its own notice. There the reason stays
+/// without a pause.
+fn closes_after_a_failure(terminal_id: &str) -> bool {
+    !matches!(terminal_id, "terminal" | "cmd" | "wt")
 }
 
 /// The console helper installed next to `sshelter.exe` on Windows (own-ssh spec §7.3; src-tauri/cli-helper). Release `sshelter.exe` is a
@@ -401,13 +403,13 @@ fn connect_program(exe: &std::path::Path, debug_build: bool) -> Result<std::path
 }
 
 /// The launch for connecting to `alias` in `terminal_id`: `sshelter connect <alias>`, on Windows through the console helper
-/// (`connect_program`), with `--pause-on-error` where the window goes with the program (`closes_with_its_program`). Windows Terminal runs
+/// (`connect_program`), with `--pause-on-error` where a failure would close the window (`closes_after_a_failure`). Windows Terminal runs
 /// that argv directly and cmd in a new console that stays open (`build_launch_command`).
 pub fn launch_for(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
     let exe = std::env::current_exe().map_err(|e| AppError::Other(format!("cannot locate SSHelter: {e}")))?;
     #[cfg(windows)]
     let exe = connect_program(&exe, cfg!(debug_assertions))?;
-    build_launch_command(terminal_id, &connect_argv(&exe, alias, closes_with_its_program(terminal_id)), new_tab)
+    build_launch_command(terminal_id, &connect_argv(&exe, alias, closes_after_a_failure(terminal_id)), new_tab)
 }
 
 /// Spawn the launch spec detached, inheriting the environment. Not unit-tested (side effect).
@@ -519,15 +521,15 @@ mod tests {
         assert_eq!(spec.args.last().unwrap(), r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/SSHelter.app/Contents/MacOS/sshelter' connect web""#);
     }
 
-    /// Every platform connects through `sshelter connect`, with `--pause-on-error` where the window goes with the program (`cmd /k` stays).
-    /// On Windows the test binary has no console helper beside it, so a debug test build runs the executable itself, as a debug build of
-    /// the app does; a release test build says the helper is missing.
+    /// Every platform connects through `sshelter connect`, with `--pause-on-error` where a failure would close the window (not in cmd or
+    /// Windows Terminal). On Windows the test binary has no console helper beside it, so a debug test build runs the executable itself,
+    /// as a debug build of the app does; a release test build says the helper is missing.
     #[test]
     fn the_launch_runs_sshelter_connect_on_every_platform() {
         let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
         if cfg!(windows) && cfg!(debug_assertions) {
             assert_eq!(launch_for("cmd", "web", false).unwrap().args, ["/c", "start", "", "cmd", "/k", exe.as_str(), "connect", "web"]);
-            assert_eq!(launch_for("wt", "web", true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "--pause-on-error", "web"]);
+            assert_eq!(launch_for("wt", "web", true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "web"]);
         } else if cfg!(windows) {
             assert!(launch_for("cmd", "web", false).unwrap_err().to_string().starts_with("sshelter-cli.exe is missing from "));
         } else {
@@ -535,16 +537,17 @@ mod tests {
         }
     }
 
-    /// Spec §7.4: Connect gives `--pause-on-error` to every terminal that runs the command as its window's program (the reason of a connect
-    /// that fails before the shell opens would go with the window), and not to Terminal (`do script` runs it in a shell that stays) or cmd
-    /// (`cmd /k`). An unknown terminal (`$TERMINAL`) is taken to close.
+    /// Spec §7.4: Connect gives `--pause-on-error` to the terminals that close the window when the command ends with an error (the reason
+    /// of a connect that fails before the shell opens would go with it), and not to Terminal (`do script` runs it in a shell that stays),
+    /// cmd (`cmd /k`) or Windows Terminal (its default keeps a pane whose program failed). An unknown terminal (`$TERMINAL`) is taken to
+    /// close.
     #[test]
-    fn connect_pauses_on_an_error_where_the_window_goes_with_the_program() {
-        for id in ["iterm2", "wt", "ptyxis", "gnome-terminal", "konsole", "kitty", "alacritty", "wezterm", "foot", "xfce4-terminal", "xterm", "env"] {
-            assert!(closes_with_its_program(id), "{id}");
+    fn connect_pauses_on_an_error_where_a_failure_closes_the_window() {
+        for id in ["iterm2", "ptyxis", "gnome-terminal", "konsole", "kitty", "alacritty", "wezterm", "foot", "xfce4-terminal", "xterm", "env"] {
+            assert!(closes_after_a_failure(id), "{id}");
         }
-        for id in ["terminal", "cmd"] {
-            assert!(!closes_with_its_program(id), "{id}");
+        for id in ["terminal", "cmd", "wt"] {
+            assert!(!closes_after_a_failure(id), "{id}");
         }
         let program = std::path::Path::new("/Applications/SSHelter.app/Contents/MacOS/sshelter");
         assert_eq!(connect_argv(program, "web", true), [program.to_str().unwrap(), "connect", "--pause-on-error", "web"]);
