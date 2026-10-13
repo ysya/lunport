@@ -220,7 +220,7 @@ fn linux_args(id: &str, argv: &[String]) -> Option<Vec<String>> {
 }
 
 /// Build the platform/terminal-specific argv to open `ssh <alias>` in a NEW terminal window —
-/// or, when `new_tab` is true and the terminal supports it (only iTerm2), a new TAB of the
+/// or, when `new_tab` is true and the terminal supports it (iTerm2, Windows Terminal), a new TAB of the
 /// current window (falling back to a new window when none exists).
 /// PURE function. The alias is assumed pre-validated; thin wrapper over `build_launch_command`.
 /// Only the tests use it: every platform connects through `sshelter connect` (`launch_for`).
@@ -335,8 +335,8 @@ pub fn build_launch_command(
         }
         "cmd" => {
             // `start` opens a fresh console; the inner `cmd /k` keeps it open
-            // after ssh exits, matching the mac/linux terminal behavior. The
-            // empty "" is start's window-title slot.
+            // after the command exits, matching the mac/linux terminal behavior.
+            // The empty "" is start's window-title slot.
             let mut args: Vec<String> =
                 vec!["/c".into(), "start".into(), String::new(), "cmd".into(), "/k".into()];
             args.extend(argv.iter().cloned());

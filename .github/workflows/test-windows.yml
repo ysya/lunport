@@ -5,11 +5,15 @@
 # It also builds the whole app with russh (cargo build --locked) and runs the SSH engine (src/ssh/): the tests that need no sshd,
 # and the engine against the runner's own OpenSSH server, which this job starts. A scratch sshd cannot run on Windows (Win32-OpenSSH's
 # sshd must run as a service), so the engine tests that start one print "skipped" here.
-# And the console helper sshelter-cli.exe (src-tauri/cli-helper, a crate of its own): its tests, and the helper next to the debug
-# sshelter.exe running `sshelter connect`.
+# And sshelter connect on Windows (own-ssh spec §4, §7.3, §7.4; plan 1b-3): the session broker served on a real named pipe (a fake
+# engine; hang-ups, the hello and open_shell bounds, and a pipe another owner made, which the client refuses), the CLI's console layer
+# (against a fake console, and against real consoles: child processes the tests start with a console of their own), run() over a
+# real pipe against the real broker, the terminal launch (Windows Terminal and cmd run the console helper), and the console helper
+# sshelter-cli.exe (src-tauri/cli-helper, a crate of its own): its tests, and the helper next to the debug sshelter.exe running
+# `sshelter connect`.
 # aws-lc-sys (russh's crypto) needs nothing installed: it is the same crate rustls already builds for the updater in the release
 # job on this runner image, and that job installs nothing for it.
-# macOS can only type-check the Windows code; the permission behavior has to be seen on Windows.
+# macOS can only type-check the Windows code; what the permissions and a real console do has to be seen on Windows.
 name: windows key slots
 
 on:
@@ -56,12 +60,14 @@ jobs:
           Get-Command ssh, ssh-add, ssh-keygen -All -ErrorAction SilentlyContinue | Format-Table Name, Source -AutoSize
           ssh -V
       # The platform-dependent tests: identity path parsing (slot_rules), the slot files, links and DACL (slot_files,
-      # slot_files_windows), the key vault (vault::), the local IPC transport (ipc:: covers the named pipe and program identification),
-      # the SSH agent (agent:: covers the real ssh-add / ssh-keygen against the agent), the SSH engine (`ssh::`: the tests that need
-      # no sshd of their own; the scratch-sshd ones print "skipped" on Windows) and the platform-neutral parts of the session broker
-      # (`session::`; its socket tests are Unix only) and of sshelter connect (`cli::`: its arguments; the rest is Unix only), and the
-      # terminal launch (`connect::`: Windows Terminal and cmd run the console helper, or a debug build itself). The rest of the suite runs
-      # on macOS; parts of it use the system keychain.
+      # slot_files_windows), the key vault (vault::), the local IPC transport (ipc:: covers the named pipes: hang-ups and deadlines, the
+      # owner check, and program identification), the SSH agent (agent:: covers the real ssh-add / ssh-keygen against the agent), the SSH
+      # engine (`ssh::`: the tests that need no sshd of their own; the scratch-sshd ones print "skipped" on Windows), the session broker
+      # (`session::`: its platform-neutral parts and the broker on a named pipe; its socket tests are Unix only), sshelter connect
+      # (`cli::`: the arguments, the console layer against a fake console and against real ones, the keys, control events and window
+      # size, and run() over a pipe against the broker; the Unix terminal's tests are Unix only), and the terminal launch (`connect::`:
+      # Windows Terminal and cmd run the console helper, or a debug build itself). The rest of the suite runs on macOS; parts of it use
+      # the system keychain.
       - name: Key slot, vault, agent, engine and broker tests
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
