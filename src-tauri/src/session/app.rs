@@ -1,7 +1,8 @@
-//! The broker in the app (own-ssh spec §4): built in `setup` from the app's state and listening on `<app data>/ipc/sock` (macOS and
-//! Linux; the Windows transport is not part of plan 1b). Its sessions keep the app running when the window is closed, quitting the app
-//! ends them, and a second launch with the host flag (a client that found nobody listening) starts the listener again if it is down.
-//! A restart of the app (an update) ends every session; the clients say so and exit.
+//! The broker in the app (own-ssh spec §4): built in `setup` from the app's state, the same way on every platform, and listening on
+//! `<app data>/ipc/sock` on macOS and Linux and on the user's named pipe on Windows (`session::pipe_name`), its lock in `<app data>/ipc`
+//! either way. Its sessions keep the app running when the window is closed, quitting the app ends them, and a second launch with the host
+//! flag (a client that found nobody listening) starts the listener again if it is down. A restart of the app (an update) ends every
+//! session; the clients say so and exit.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -29,8 +30,6 @@ pub enum BrokerStatus {
     /// Another SSHelter holds the broker's lock (a debug build next to the installed app).
     OtherInstance,
     Failed(String),
-    /// The broker has no transport on this platform in this version (Windows).
-    NotOnThisPlatform,
 }
 
 /// How long a connect waits for the window to load the SSH config before reading it itself (as the MCP bridge waits).
@@ -130,13 +129,12 @@ pub fn start(app: &tauri::AppHandle) {
     *status = now;
 }
 
-/// Whether `start` has a listener to start: not when the broker listens already, nor where it has no transport; after a failure, or
-/// while another SSHelter held the lock, it tries again.
+/// Whether `start` has a listener to start: not when the broker listens already; after a failure, or while another SSHelter held the
+/// lock, it tries again.
 fn needs_start(status: &BrokerStatus) -> bool {
-    !matches!(status, BrokerStatus::Running | BrokerStatus::NotOnThisPlatform)
+    !matches!(status, BrokerStatus::Running)
 }
 
-#[cfg(unix)]
 fn listen(app: &tauri::AppHandle) -> BrokerStatus {
     let broker = {
         let state = app.state::<AppState>();
@@ -161,16 +159,23 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
         Ok(root) => super::ipc_dir(&root),
         Err(error) => return BrokerStatus::Failed(error.to_string()),
     };
-    match crate::ipc::server::listen_unix(&dir, broker.handler()) {
+    match listen_on(&dir, broker.handler()) {
         Ok(crate::ipc::server::Started::Running) => BrokerStatus::Running,
         Ok(crate::ipc::server::Started::OtherInstance) => BrokerStatus::OtherInstance,
         Err(error) => BrokerStatus::Failed(error.to_string()),
     }
 }
 
+/// The broker's endpoint (spec §4): the socket `<dir>/sock` on macOS and Linux.
+#[cfg(unix)]
+fn listen_on(dir: &std::path::Path, handler: crate::ipc::server::Handler) -> Result<crate::ipc::server::Started, AppError> {
+    crate::ipc::server::listen_unix(dir, handler)
+}
+
+/// The broker's endpoint (spec §4): the user's named pipe on Windows, with the lock in `dir` as on the other platforms.
 #[cfg(windows)]
-fn listen(_app: &tauri::AppHandle) -> BrokerStatus {
-    BrokerStatus::NotOnThisPlatform
+fn listen_on(dir: &std::path::Path, handler: crate::ipc::server::Handler) -> Result<crate::ipc::server::Started, AppError> {
+    crate::ipc::pipe_windows::listen(dir, &super::pipe_name()?, "sshelter-session", handler)
 }
 
 /// Whether any session is open.
@@ -248,11 +253,10 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(200));
     }
 
-    /// A start is a no-op for a broker that listens already, or that has no transport here; every other status is worth another try.
+    /// A start is a no-op for a broker that listens already; every other status is worth another try.
     #[test]
     fn only_a_broker_that_does_not_listen_is_started() {
         assert!(!needs_start(&BrokerStatus::Running));
-        assert!(!needs_start(&BrokerStatus::NotOnThisPlatform));
         for status in [BrokerStatus::NotStarted, BrokerStatus::OtherInstance, BrokerStatus::Failed("the socket path is too long".into())] {
             assert!(needs_start(&status), "{status:?}");
         }
