@@ -7,7 +7,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
 use windows_sys::core::BOOL;
-use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE};
+use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE};
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows_sys::Win32::System::Console::{
     FlushConsoleInputBuffer, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleW,
@@ -126,12 +126,21 @@ impl ConsoleApi for StdConsole {
         window_size(window.Left, window.Top, window.Right, window.Bottom)
     }
 
+    /// A read that Ctrl-C ended gives nothing: ReadConsoleW succeeds with no characters (ERROR_OPERATION_ABORTED left as the last error,
+    /// as a cancelled read does: measured, `real_console_tests`). A failure with that error, and a count past the buffer (CPython's
+    /// console reader guards against both) give nothing too: neither is the console gone.
     fn read(&self, buf: &mut [u16]) -> io::Result<usize> {
         let length = u32::try_from(buf.len()).unwrap_or(u32::MAX);
         let mut read = 0u32;
         // SAFETY: `buf` holds `length` UTF-16 units, at most what ReadConsoleW writes; `read` is a u32 it writes; no read control.
-        done(unsafe { ReadConsoleW(self.input(), buf.as_mut_ptr().cast(), length, &mut read, ptr::null()) })?;
-        Ok((read as usize).min(buf.len()))
+        if let Err(error) = done(unsafe { ReadConsoleW(self.input(), buf.as_mut_ptr().cast(), length, &mut read, ptr::null()) }) {
+            if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) {
+                return Ok(0);
+            }
+            return Err(error);
+        }
+        let read = read as usize;
+        Ok(if read > buf.len() { 0 } else { read })
     }
 
     /// The Enter key pressed (a key-down record, as a keyboard's is first), which ends a line read and a raw one.

@@ -357,6 +357,20 @@ fn case(name: &str) {
                 assert_eq!(next.recv_timeout(DONE).expect("the next read").unwrap(), next_typed.1, "{label}: nothing of the wake is left");
             }
         }
+        // A read through the console (`StdConsole::read`) that ends without a character, as Ctrl-C ends a line read and as a cancel ends any
+        // read, gives nothing: it is not the console gone.
+        "an_aborted_read_through_the_console_gives_nothing" => {
+            let std_console = Arc::new(StdConsole::opened().unwrap());
+            for (label, mode) in [("line", console.hidden), ("raw", console.raw)] {
+                set_mode(control, mode).unwrap();
+                flush(control).unwrap();
+                let read = read_through(&std_console);
+                std::thread::sleep(SETTLE);
+                // SAFETY: cancels this process's I/O on the console's input handle, which `std_console` keeps open.
+                assert_ne!(unsafe { CancelIoEx(std_console.input(), ptr::null()) }, 0, "{label}");
+                assert_eq!(read.recv_timeout(DONE).expect("the read returned").unwrap(), "", "{label}");
+            }
+        }
         // `GenerateConsoleCtrlEvent` reaches the handler and does not end a line read: a change of mode after it must end the read.
         "a_generated_ctrl_c_does_not_end_a_line_read" => {
             // SAFETY: a handler of the right signature, for the rest of this process.
@@ -470,6 +484,7 @@ fn a_real_console_works_as_the_keys_reader_needs() {
         "a_line_read_spans_a_change_of_mode",
         "a_cancelled_read_takes_the_next_key",
         "a_woken_read_ends_and_the_next_read_takes_the_next_key",
+        "an_aborted_read_through_the_console_gives_nothing",
         "a_generated_ctrl_c_does_not_end_a_line_read",
         "a_hidden_line_is_not_in_the_history",
         "the_keys_reader_on_a_real_console",
