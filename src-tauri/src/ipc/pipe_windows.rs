@@ -43,6 +43,11 @@ use windows_sys::Win32::System::Threading::{
     CancelWaitableTimer, CreateEventW, CreateWaitableTimerW, SetEvent, SetWaitableTimer, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+#[cfg(test)]
+use {
+    windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT},
+    windows_sys::Win32::Security::{GetLengthSid, IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID},
+};
 
 use crate::error::AppError;
 use crate::ipc::server::{dispatch, take_lock, Handler, Started};
@@ -128,6 +133,47 @@ fn user_sid() -> io::Result<String> {
 pub fn pipe_name_for(role: &str) -> io::Result<String> {
     let digest = Sha256::digest(user_sid()?.as_bytes());
     Ok(format!("sshelter-{role}-{}", digest.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>()))
+}
+
+/// The bytes of a SID; `None` for a null or malformed one. Two SIDs are equal exactly when their bytes are (the fields `EqualSid`
+/// compares, in a canonical layout).
+#[cfg(test)]
+unsafe fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
+    if sid.is_null() || IsValidSid(sid) == 0 {
+        return None;
+    }
+    let length = GetLengthSid(sid) as usize;
+    Some(std::slice::from_raw_parts(sid as *const u8, length).to_vec())
+}
+
+/// The current user's SID, as bytes.
+#[cfg(test)]
+fn user_sid_bytes() -> io::Result<Vec<u8>> {
+    let token = current_user_token()?;
+    // SAFETY: as in `OwnerOnly::new`: `token` holds a TOKEN_USER whose SID points into `token`, which lives through the copy.
+    let sid = unsafe { sid_bytes((*(token.as_ptr() as *const TOKEN_USER)).User.Sid) };
+    sid.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the user's SID is not valid"))
+}
+
+/// The owner of the pipe that `pipe` is an end of, as bytes; `None` when it cannot be read. Reading it takes READ_CONTROL, which a
+/// client that opened the pipe with GENERIC_READ holds: a pipe's FILE_GENERIC_READ includes reading its security descriptor.
+#[cfg(test)]
+fn pipe_owner(pipe: &OwnedHandle) -> Option<Vec<u8>> {
+    let mut owner: PSID = ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: a valid handle; on success the system allocates `descriptor` (freed below with LocalFree) and points `owner` into it.
+    let status = unsafe {
+        GetSecurityInfo(raw(pipe), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &mut owner, ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), &mut descriptor)
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    // SAFETY: `owner` points into `descriptor`, which is freed once, after the copy.
+    unsafe {
+        let owner = sid_bytes(owner);
+        LocalFree(descriptor);
+        owner
+    }
 }
 
 fn wide_pipe_path(name: &str) -> Vec<u16> {
@@ -625,8 +671,13 @@ mod tests {
             on_a_thread(move || (&server).read(&mut [0u8; 16]))
         };
         assert!(reading.recv_timeout(Duration::from_millis(300)).is_err(), "the read waits: the client has sent nothing");
-        // Written while that read waits (the pipe carries both ways at once), just before the hang-up.
-        (&server).write_all(b"last words").unwrap();
+        // Written while that read waits (the pipe carries both ways at once), just before the hang-up. On a thread of its own: were the
+        // handle synchronous again, the write would wait behind the read, and the test must fail then, not hang.
+        let writing = {
+            let server = server.try_clone().unwrap();
+            on_a_thread(move || (&server).write_all(b"last words"))
+        };
+        writing.recv_timeout(Duration::from_secs(5)).expect("the write did not wait behind the read").unwrap();
         server.hang_up();
         let woken = reading.recv_timeout(Duration::from_secs(5)).expect("the hang-up woke the read");
         assert_eq!(woken.unwrap(), 0, "and it read the end of the stream");
@@ -719,5 +770,60 @@ mod tests {
         let client = waiting.recv_timeout(Duration::from_secs(5)).expect("connect returned").expect("connected");
         let second = accepting.recv_timeout(Duration::from_secs(5)).expect("the instance was connected").unwrap();
         drop((first, client, only, second));
+    }
+
+    /// Makes the first instance of `name` as another owner would: owned by the Administrators group, with a null DACL (anyone may connect:
+    /// a squatter that wants the user's client lets it in). `None` when this process cannot make that group an owner; it can when it runs
+    /// elevated, where the group is in its token with `SE_GROUP_OWNER` (`TOKEN_OWNER`; the CI runner is elevated).
+    fn squat_as_administrators(name: &str) -> Option<OwnedHandle> {
+        use windows_sys::Win32::Foundation::ERROR_INVALID_OWNER;
+        use windows_sys::Win32::Security::{CreateWellKnownSid, SetSecurityDescriptorOwner, WinBuiltinAdministratorsSid, SECURITY_MAX_SID_SIZE};
+        let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut size = SECURITY_MAX_SID_SIZE;
+        // SAFETY: `sid` has room for any SID, and `size` says so.
+        assert_ne!(unsafe { CreateWellKnownSid(WinBuiltinAdministratorsSid, ptr::null_mut(), sid.as_mut_ptr() as PSID, &mut size) }, 0);
+        // SAFETY: plain old data, initialized below.
+        let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        let pointer = &mut descriptor as *mut SECURITY_DESCRIPTOR as *mut c_void;
+        // SAFETY: `pointer` is the descriptor above; its owner points into `sid`, and both outlive the CreateNamedPipeW below.
+        unsafe {
+            assert_ne!(InitializeSecurityDescriptor(pointer, SECURITY_DESCRIPTOR_REVISION), 0);
+            assert_ne!(SetSecurityDescriptorDacl(pointer, 1, ptr::null(), 0), 0);
+            assert_ne!(SetSecurityDescriptorOwner(pointer, sid.as_mut_ptr() as PSID, 0), 0);
+        }
+        let attributes = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: pointer, bInheritHandle: 0 };
+        let path = wide_pipe_path(name);
+        let open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE;
+        // SAFETY: `path` is NUL-terminated; the security attributes outlive the call.
+        let handle = unsafe { CreateNamedPipeW(path.as_ptr(), open_mode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0, &attributes) };
+        if handle == INVALID_HANDLE_VALUE {
+            let error = io::Error::last_os_error();
+            assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_OWNER as i32), "the squatter's pipe could not be made: {error}");
+            return None;
+        }
+        // SAFETY: a fresh handle that nothing else owns.
+        Some(unsafe { OwnedHandle::from_raw_handle(handle as _) })
+    }
+
+    /// Fix round 1 (security): the pipe's name comes from the user's SID, which is no secret, and any local program can make a pipe of
+    /// that name while SSHelter does not serve it. `connect` takes a pipe only if the user owns it, and says why it refuses one.
+    #[test]
+    fn connect_refuses_a_pipe_another_owner_made() {
+        let name = fresh_name("session-squat");
+        let Some(_squatter) = squat_as_administrators(&name) else {
+            eprintln!("skipped: this process cannot make the Administrators group the owner of a pipe (it is not elevated)");
+            return;
+        };
+        let error = connect(&name, Duration::from_secs(5)).expect_err("a pipe the user does not own is not SSHelter's");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(error.to_string().contains("Another program is using SSHelter's session pipe"), "{error}");
+    }
+
+    /// Fix round 1: the pipes a listener makes are the user's, also when SSHelter runs elevated, where its objects would otherwise be
+    /// owned by the Administrators group (an elevated administrator's default owner), and `connect` would refuse SSHelter's own pipe.
+    #[test]
+    fn a_listener_makes_its_pipes_the_users_own() {
+        let (client, _server, _dir) = connected();
+        assert_eq!(pipe_owner(&client.shared.pipe), Some(user_sid_bytes().unwrap()));
     }
 }

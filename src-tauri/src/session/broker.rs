@@ -2048,7 +2048,8 @@ mod windows_tests {
 
     /// Plan 1b-3 Task 1: a pipe has no read timeout. A connection that does not say hello, or says hello and then nothing, is hung up when
     /// the time for its first messages is over (300 ms here, 10 s in the app), and its client reads the end of the pipe; one that sent
-    /// both in time is off the clock.
+    /// both in time is off the clock. Fix round 1: the time is for each of the two messages (spec §7.2), so `open_shell` has all of it
+    /// again from the `hello`, however late that came.
     #[test]
     fn a_client_that_says_nothing_is_hung_up_after_the_deadline() {
         let world = world_from(FakeEngine::new(), pinned_web(), saved_password(), Duration::from_millis(300));
@@ -2070,6 +2071,13 @@ mod windows_tests {
         assert!(world.broker.has_sessions(), "an idle session is not hung up when the time for the first messages is over");
         client.type_text("ok");
         crate::ssh::testing::eventually("input after that time to reach the shell", 5, || world.engine.events().contains(&FakeEvent::ShellInput(b"ok".to_vec())));
+        // A hello 300 ms into a time of 1 s: the end comes 1 s after the hello, not 1 s after the connect (700 ms after the hello).
+        let world = world_from(FakeEngine::new(), pinned_web(), saved_password(), Duration::from_secs(1));
+        let mut late_hello = Client::connect(&world.pipe);
+        std::thread::sleep(Duration::from_millis(300));
+        late_hello.hello();
+        let after_hello = ended_after(&mut late_hello);
+        assert!(after_hello >= Duration::from_millis(850) && after_hello < Duration::from_secs(4), "ended {after_hello:?} after the hello");
     }
 
     /// Plan 1b-3 Task 1: the app quits under an open session. Its client reads why and `exited`, and then the end of the pipe.
