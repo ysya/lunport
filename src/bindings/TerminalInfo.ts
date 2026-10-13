@@ -6,8 +6,8 @@
 export type TerminalInfo = { id: string, label: string, 
 /**
  * Whether this terminal supports opening the connection in a NEW TAB of an existing window.
- * Only iTerm2 qualifies: Terminal.app's only new-tab path is System Events GUI scripting,
- * which requires the user to grant Accessibility permission — explicitly NOT doing that.
- * All Linux emulators are launched as new windows, so they are `false` as well.
+ * iTerm2 (macOS) and Windows Terminal (`wt -w 0 nt`) qualify; Terminal.app's only new-tab path
+ * is System Events GUI scripting (Accessibility permission: not done), cmd has no tabs, and
+ * every Linux emulator opens a window.
  */
 supports_new_tab: boolean, };
