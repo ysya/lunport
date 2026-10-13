@@ -180,6 +180,19 @@ impl Loop<'_> {
                         self.queue.forget_typed();
                     }
                 }
+                Action::EndQuestionLine => {
+                    // The question's prompt is still the last line unless the terminal ended it: the Windows console does when a line
+                    // read of the question ends, which the change of mode just made says (`Tty::question_line_ended`); a Unix terminal
+                    // never does.
+                    #[cfg(windows)]
+                    let ended = self.tty.question_line_ended();
+                    #[cfg(unix)]
+                    let ended = false;
+                    if !ended {
+                        self.terminal.show(Show::Said("\n".to_string()));
+                        shown = true;
+                    }
+                }
                 Action::Exit(code) => {
                     // The last output, what the CLI says at the end and `close` are written first, unless they cannot be in time.
                     if let Some(status) = shown_out(self, END_WAIT) {
