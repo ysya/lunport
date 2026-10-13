@@ -25,6 +25,12 @@ pub use super::console::{
 /// The Enter key's virtual-key code (winuser.h, `VK_RETURN`).
 const VK_RETURN: u16 = 0x0D;
 
+/// Whether the console moves to the next line when a question's line read ends, whatever the read shows. It does: for the Enter of a
+/// hidden answer too (measured, `real_console_tests`), and for the Enter with which the console layer ends a question's read when the
+/// session ends under the question (`Tty::set_mode` throwing what was typed away), so the client does not start the next line itself
+/// (`client.rs`). A Unix terminal does not (`terminal.rs`).
+pub const QUESTION_READ_ENDS_ITS_LINE: bool = true;
+
 /// The console of this process: its input buffer and its active screen buffer.
 ///
 /// The input is standard input. A pipe or a file there is not a console, and `Tty::new` refuses it (`sshelter connect needs a
@@ -126,9 +132,11 @@ impl ConsoleApi for StdConsole {
         window_size(window.Left, window.Top, window.Right, window.Bottom)
     }
 
-    /// A read that Ctrl-C ended gives nothing: ReadConsoleW succeeds with no characters (ERROR_OPERATION_ABORTED left as the last error,
-    /// as a cancelled read does: measured, `real_console_tests`). A failure with that error, and a count past the buffer (CPython's
-    /// console reader guards against both) give nothing too: neither is the console gone.
+    /// A read that gives no character gives nothing, not the end: ReadConsoleW succeeds with no characters, ERROR_OPERATION_ABORTED left
+    /// as the last error, when a read is cancelled (measured, `real_console_tests`), and so, CPython's console reader expects, when Ctrl-C
+    /// pressed on the keyboard ends a line read (not measured: a Ctrl-C written into the input buffer is a character; the manual
+    /// checklist has the keyboard's). A failure with that error, and a count past the buffer (CPython's reader guards against both),
+    /// give nothing too: neither is the console gone.
     fn read(&self, buf: &mut [u16]) -> io::Result<usize> {
         let length = u32::try_from(buf.len()).unwrap_or(u32::MAX);
         let mut read = 0u32;
