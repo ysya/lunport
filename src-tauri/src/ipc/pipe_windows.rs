@@ -25,10 +25,12 @@ use windows_sys::Win32::Foundation::{
     ERROR_SEM_TIMEOUT, ERROR_SUCCESS, FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, SetEntriesInAclW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    ConvertSidToStringSidW, GetSecurityInfo, SetEntriesInAclW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, SE_KERNEL_OBJECT,
+    TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, ACL, NO_INHERITANCE, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_USER,
+    GetLengthSid, InitializeSecurityDescriptor, IsValidSid, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, ACL, NO_INHERITANCE,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_ALL_ACCESS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
@@ -43,25 +45,24 @@ use windows_sys::Win32::System::Threading::{
     CancelWaitableTimer, CreateEventW, CreateWaitableTimerW, SetEvent, SetWaitableTimer, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-#[cfg(test)]
-use {
-    windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT},
-    windows_sys::Win32::Security::{GetLengthSid, IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID},
-};
 
 use crate::error::AppError;
 use crate::ipc::server::{dispatch, take_lock, Handler, Started};
 use crate::sync::slot_files_windows::current_user_token;
 
-/// 每個 pipe instance 共用的 SECURITY_ATTRIBUTES:DACL 只有一條「目前使用者:完全控制」。`SetEntriesInAclW` 把 SID 複製進 ACE,所以讀 SID 用的
-/// `TOKEN_USER` 緩衝區只在 `new` 裡用到,不必跟著留下。
+/// The SECURITY_ATTRIBUTES every pipe instance shares: owned by the current user, with a DACL of one ACE, "the current user: full
+/// control". The owner is named explicitly: an elevated administrator's objects are otherwise owned by the Administrators group (the
+/// token's default owner), and `connect` takes only a pipe the user owns. `SetEntriesInAclW` copies the SID into the ACE, but the
+/// descriptor only points to its owner, so the `TOKEN_USER` that holds the SID stays with it.
 struct OwnerOnly {
     acl: *mut ACL,
     _descriptor: Box<SECURITY_DESCRIPTOR>,
+    /// The `TOKEN_USER` whose SID is the descriptor's owner.
+    _user: Vec<u64>,
     attributes: SECURITY_ATTRIBUTES,
 }
 
-// 指標只指向這個結構自己擁有的記憶體(LocalAlloc 的 ACL、Box 的描述元);整個結構一起搬到 listener 的執行緒,只在那裡使用。
+// 指標只指向這個結構自己擁有的記憶體(LocalAlloc 的 ACL、Box 的描述元、`_user` 裡的 SID);整個結構一起搬到 listener 的執行緒,只在那裡使用。
 unsafe impl Send for OwnerOnly {}
 
 impl Drop for OwnerOnly {
@@ -74,7 +75,8 @@ impl Drop for OwnerOnly {
 impl OwnerOnly {
     fn new() -> io::Result<Self> {
         let token = current_user_token()?;
-        // SAFETY: `token` holds an 8-byte aligned TOKEN_USER whose SID points into `token`, which lives to the end of this function; SetEntriesInAclW copies the SID into the ACE.
+        // SAFETY: `token` holds an 8-byte aligned TOKEN_USER whose SID points into `token`'s heap buffer, which the result keeps (moving
+        // the Vec does not move the buffer); SetEntriesInAclW copies the SID into the ACE, the descriptor's owner points to it.
         unsafe {
             let user = &*(token.as_ptr() as *const TOKEN_USER);
             let access = EXPLICIT_ACCESS_W {
@@ -96,7 +98,10 @@ impl OwnerOnly {
             }
             let mut descriptor: Box<SECURITY_DESCRIPTOR> = Box::new(std::mem::zeroed());
             let pointer = &mut *descriptor as *mut SECURITY_DESCRIPTOR as *mut c_void;
-            if InitializeSecurityDescriptor(pointer, SECURITY_DESCRIPTOR_REVISION) == 0 || SetSecurityDescriptorDacl(pointer, 1, acl, 0) == 0 {
+            if InitializeSecurityDescriptor(pointer, SECURITY_DESCRIPTOR_REVISION) == 0
+                || SetSecurityDescriptorDacl(pointer, 1, acl, 0) == 0
+                || SetSecurityDescriptorOwner(pointer, user.User.Sid, 0) == 0
+            {
                 let error = io::Error::last_os_error();
                 LocalFree(acl as *mut c_void);
                 return Err(error);
@@ -106,7 +111,7 @@ impl OwnerOnly {
                 lpSecurityDescriptor: pointer,
                 bInheritHandle: 0,
             };
-            Ok(Self { acl, _descriptor: descriptor, attributes })
+            Ok(Self { acl, _descriptor: descriptor, _user: token, attributes })
         }
     }
 }
@@ -137,7 +142,6 @@ pub fn pipe_name_for(role: &str) -> io::Result<String> {
 
 /// The bytes of a SID; `None` for a null or malformed one. Two SIDs are equal exactly when their bytes are (the fields `EqualSid`
 /// compares, in a canonical layout).
-#[cfg(test)]
 unsafe fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
     if sid.is_null() || IsValidSid(sid) == 0 {
         return None;
@@ -147,7 +151,6 @@ unsafe fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
 }
 
 /// The current user's SID, as bytes.
-#[cfg(test)]
 fn user_sid_bytes() -> io::Result<Vec<u8>> {
     let token = current_user_token()?;
     // SAFETY: as in `OwnerOnly::new`: `token` holds a TOKEN_USER whose SID points into `token`, which lives through the copy.
@@ -157,7 +160,6 @@ fn user_sid_bytes() -> io::Result<Vec<u8>> {
 
 /// The owner of the pipe that `pipe` is an end of, as bytes; `None` when it cannot be read. Reading it takes READ_CONTROL, which a
 /// client that opened the pipe with GENERIC_READ holds: a pipe's FILE_GENERIC_READ includes reading its security descriptor.
-#[cfg(test)]
 fn pipe_owner(pipe: &OwnedHandle) -> Option<Vec<u8>> {
     let mut owner: PSID = ptr::null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
@@ -174,6 +176,25 @@ fn pipe_owner(pipe: &OwnedHandle) -> Option<Vec<u8>> {
         LocalFree(descriptor);
         owner
     }
+}
+
+/// Whether the user owns a pipe whose owner `connect` read (`None`: it could not be read). Only such a pipe is SSHelter's: `OwnerOnly`
+/// makes the user the owner of SSHelter's pipes, and no other program can make the user the owner of its own (that takes the user's
+/// token, or a privilege that already rules the computer).
+fn served_by_user(owner: Option<&[u8]>, user: &[u8]) -> bool {
+    owner == Some(user)
+}
+
+/// The role a pipe or listener name stands for, which names the pipe in messages: `agent` in `sshelter-agent` and
+/// `sshelter-agent-<hex>`, `session` in `sshelter-session-<hex>`.
+fn role_in(name: &str) -> &str {
+    let rest = name.strip_prefix("sshelter-").unwrap_or(name);
+    rest.split('-').next().unwrap_or(rest)
+}
+
+/// Why `connect` refused the pipe `name`: another program made it.
+fn not_sshelters(name: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, format!(r"Another program is using SSHelter's {} pipe (\\.\pipe\{name})", role_in(name)))
 }
 
 fn wide_pipe_path(name: &str) -> Vec<u16> {
@@ -428,7 +449,8 @@ impl std::fmt::Debug for PipeStream {
 
 /// Connects to `\\.\pipe\<name>` as a client. No pipe of that name: `NotFound`, at once (nobody serves it). Every instance busy (each one
 /// serves a client, and the server has not made the next one yet): waits for one with `WaitNamedPipeW`, `busy_wait` in all, and then
-/// `TimedOut`. The server is given the client's identity only, not a token it could act as.
+/// `TimedOut`. A pipe the user does not own is not SSHelter's: `PermissionDenied` ("Another program is using SSHelter's … pipe"), and
+/// nothing was written to it. The server is given the client's identity only, not a token it could act as.
 // `sshelter connect` uses this from plan 1b-3 Task 3 on; until then only the tests do.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn connect(name: &str, busy_wait: Duration) -> io::Result<PipeStream> {
@@ -450,7 +472,13 @@ pub fn connect(name: &str, busy_wait: Duration) -> io::Result<PipeStream> {
         };
         if handle != INVALID_HANDLE_VALUE {
             // SAFETY: a fresh handle that nothing else owns.
-            return PipeStream::new(unsafe { OwnedHandle::from_raw_handle(handle as _) });
+            let pipe = unsafe { OwnedHandle::from_raw_handle(handle as _) };
+            // The name comes from the user's SID, which is no secret: any local program can make a pipe of that name while SSHelter does
+            // not serve it (unlike the socket, which lives in a directory only the user can enter). Refused, it is closed unused.
+            if !served_by_user(pipe_owner(&pipe).as_deref(), &user_sid_bytes()?) {
+                return Err(not_sshelters(name));
+            }
+            return PipeStream::new(pipe);
         }
         let error = io::Error::last_os_error();
         if error.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) {
@@ -534,7 +562,7 @@ pub(crate) fn accept(pipe: &OwnedHandle) -> io::Result<Option<u32>> {
 /// `OtherInstance`; the name is held by another program (or the pipe cannot be made) → an error.
 pub fn listen(dir: &Path, name: &str, thread: &str, handle: Handler) -> Result<Started, AppError> {
     // What the messages call this pipe: `agent`, `session`.
-    let what = thread.strip_prefix("sshelter-").unwrap_or(thread).to_string();
+    let what = role_in(thread).to_string();
     let Some(lock) = take_lock(dir)? else { return Ok(Started::OtherInstance) };
     let security = OwnerOnly::new()?;
     let path = wide_pipe_path(name);
@@ -803,6 +831,23 @@ mod tests {
         }
         // SAFETY: a fresh handle that nothing else owns.
         Some(unsafe { OwnedHandle::from_raw_handle(handle as _) })
+    }
+
+    /// Fix round 1 (security): only a pipe the user owns is SSHelter's; one of another owner, or one whose owner cannot be read, is not,
+    /// and the refusal says which pipe another program is using.
+    #[test]
+    fn only_a_pipe_the_user_owns_is_sshelters() {
+        let user = user_sid_bytes().unwrap();
+        assert!(served_by_user(Some(user.as_slice()), &user), "the user's own pipe");
+        let mut other = user.clone();
+        *other.last_mut().unwrap() ^= 1;
+        assert!(!served_by_user(Some(other.as_slice()), &user), "another owner (another last sub-authority)");
+        assert!(!served_by_user(Some(&user[..user.len() - 4]), &user), "another owner (a shorter SID)");
+        assert!(!served_by_user(None, &user), "an owner that could not be read");
+        let refused = not_sshelters("sshelter-session-0123456789abcdef");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(refused.to_string(), r"Another program is using SSHelter's session pipe (\\.\pipe\sshelter-session-0123456789abcdef)");
+        assert_eq!((role_in("sshelter-agent"), role_in("sshelter-agent-0123456789abcdef")), ("agent", "agent"));
     }
 
     /// Fix round 1 (security): the pipe's name comes from the user's SID, which is no secret, and any local program can make a pipe of
