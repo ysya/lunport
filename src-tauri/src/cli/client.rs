@@ -141,8 +141,10 @@ impl From<HostQuery> for Request {
 /// program, not to the window: Windows Terminal, among others, may keep a window whose program ended with an error.
 pub const PAUSE_PROMPT: &str = "Press Enter to exit.";
 
-/// The terminal's mode while `PAUSE_PROMPT` waits for Enter (`Client::pause_prompt`).
-const PAUSE_MODE: Mode = Mode::Prompt { echo: true };
+/// The terminal's mode while `PAUSE_PROMPT` waits for Enter (`Client::pause_prompt`): a question's, so that the keys are read (the Windows
+/// console reads nothing while it is cooked), with what is typed hidden. Enter is all the pause needs, and after a failed login a password
+/// typed again by habit must not be shown.
+const PAUSE_MODE: Mode = Mode::Prompt { echo: false };
 
 /// What is said when a thread of the program panicked (the panic itself was reported by the hook, which put the terminal back first).
 const THREAD_FAILED: &str = "sshelter: an internal error stopped this session.";
@@ -198,6 +200,9 @@ pub struct Client {
     reason: Option<String>,
     /// `Request::pause_on_error`.
     pause_on_error: bool,
+    /// The person cancelled the question that was on the terminal (Ctrl-C, or the end of input) and no question was asked since: the
+    /// broker gives the connect up after it, and that end is the person's, so it does not pause.
+    cancelled: bool,
 }
 
 impl Client {
@@ -205,7 +210,8 @@ impl Client {
     /// for the shell.
     pub fn start(request: impl Into<Request>, term: String, size: (u16, u16)) -> (Client, Vec<Action>) {
         let Request { host, pause_on_error } = request.into();
-        let client = Client { phase: Phase::Connecting, typeahead: Zeroizing::new(Vec::with_capacity(TYPEAHEAD_LIMIT)), reason: None, pause_on_error };
+        let typeahead = Zeroizing::new(Vec::with_capacity(TYPEAHEAD_LIMIT));
+        let client = Client { phase: Phase::Connecting, typeahead, reason: None, pause_on_error, cancelled: false };
         let actions = vec![
             Action::Send(ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, client_info: None }),
             Action::Send(ClientMessage::OpenShell { host, pty: PtyRequest { cols: size.0, rows: size.1, term } }),
@@ -240,8 +246,14 @@ impl Client {
             Input::Stdin(bytes) => self.typed(&bytes),
             // The end of input at a question is a line of its own on Windows (Ctrl-Z and Enter: the console ended the line), Ctrl-D on
             // Unix (the terminal did not); Ctrl-C does not end the line.
-            Input::StdinEnd if matches!(self.phase, Phase::Asking { .. }) => self.answer(None, QUESTION_READ_ENDS_ITS_LINE),
-            Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => self.answer(None, false),
+            Input::StdinEnd if matches!(self.phase, Phase::Asking { .. }) => {
+                self.cancelled = true;
+                self.answer(None, QUESTION_READ_ENDS_ITS_LINE)
+            }
+            Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => {
+                self.cancelled = true;
+                self.answer(None, false)
+            }
             Input::Interrupt => self.finish(true, None, 130),
             Input::StdinEnd => self.finish(true, None, 128 + signal::HUP),
             Input::Resize(cols, rows) => vec![Action::Send(ClientMessage::WindowChange { cols, rows })],
@@ -311,6 +323,7 @@ impl Client {
             actions.push(cancel(superseded.clone()));
         }
         self.typeahead.zeroize();
+        self.cancelled = false;
         let prompt = printable(text);
         actions.push(Action::Mode(Mode::Prompt { echo }, true));
         actions.push(Action::Stderr(prompt.clone()));
@@ -385,10 +398,10 @@ impl Client {
 
     /// The end: the terminal is put back first, so that nothing after it can leave it raw (a broker that stopped reading blocks the write
     /// that tells it); then the broker is told when it is the program that leaves (`close`), the reason is printed on a line of its own,
-    /// and the program exits. With `--pause-on-error`, an end the program did not choose (the broker ended the session or went away, or
-    /// sent what the CLI cannot read) that comes before the shell opened does not exit yet: the broker is told `close` at once (nothing
-    /// more is said to it, and its connection is not kept for as long as the pause lasts), and `PAUSE_PROMPT` follows the reason
-    /// (`Phase::Pausing`).
+    /// and the program exits. With `--pause-on-error`, an end with a reason that neither the program nor the person chose (the broker
+    /// ended the session or went away, or sent what the CLI cannot read; not the end that follows a question the person cancelled) and
+    /// that comes before the shell opened does not exit yet: the broker is told `close` at once (nothing more is said to it, and its
+    /// connection is not kept for as long as the pause lasts), and `PAUSE_PROMPT` follows the reason (`Phase::Pausing`).
     fn finish(&mut self, close: bool, reason: Option<String>, code: i32) -> Vec<Action> {
         // The cursor is not at the start of a line while the shell is open (it can be anywhere in what the shell wrote), nor while a
         // question's prompt is on it, whatever the terminal was before the question: unless the terminal ends the question's line when its
@@ -404,8 +417,9 @@ impl Client {
         // what the terminal holds, as readpassphrase does, or the shell that gets the terminal next reads it, shows it on its line and
         // keeps it in its history. Outside a question what is typed is the shell's, and stays.
         let at_a_question = matches!(self.phase, Phase::Asking { .. });
-        // The shell has opened when the terminal rests raw: in the open shell, and at a question asked there.
-        let pause = self.pause_on_error && !close && self.resting_mode() != Mode::Raw;
+        // The shell has opened when the terminal rests raw: in the open shell, and at a question asked there. Without a reason there is
+        // nothing to keep on the screen (the app quit while the shell was being opened, and the remote's end came first).
+        let pause = self.pause_on_error && !close && !self.cancelled && reason.is_some() && self.resting_mode() != Mode::Raw;
         self.phase = if pause { Phase::Pausing { code } } else { Phase::Ended };
         let mut actions = vec![Action::Mode(Mode::Cooked, at_a_question)];
         if close || pause {
@@ -425,24 +439,26 @@ impl Client {
         actions
     }
 
-    /// The pause's prompt, in the mode a question with what is typed shown has: the terminal edits the line and shows it, and the keys
-    /// are read (the Windows console reads nothing while it is cooked), from a line of its own, what was typed before thrown away (a line
-    /// typed while connecting must not end the pause before its prompt was seen).
+    /// The pause's prompt, in a question's mode with what is typed hidden (`PAUSE_MODE`), what was typed before thrown away: a line typed
+    /// while connecting must not end the pause before its prompt was seen.
     fn pause_prompt() -> [Action; 2] {
         [Action::Mode(PAUSE_MODE, true), Action::Stderr(PAUSE_PROMPT.to_string())]
     }
 
     /// `--pause-on-error`, with the reason and `PAUSE_PROMPT` on the terminal (`Phase::Pausing`): Enter ends the program with the failure's
     /// status `code`. The other ways out end it at once, with the status they give anywhere else (Ctrl-C 130, a stop signal or the terminal
-    /// gone 128 + the signal, Ctrl-D 128 + SIGHUP, a thread that failed 255), on a line of their own below the prompt; SIGCONT (after
-    /// Ctrl-Z) puts the prompt up again, as it does a question's. Nothing else changes anything: the broker was told `close`, and its last
-    /// frames, its end and a resize are not waited for. The terminal is put back at the exit (`run.rs`).
+    /// gone 128 + the signal, Ctrl-D 128 + SIGHUP, a thread that failed 255). The program's last words start a line of their own below the
+    /// prompt, unless the terminal moved there itself: the Windows console does when a line read ends, on Enter or on a line that starts
+    /// with Ctrl-Z (`QUESTION_READ_ENDS_ITS_LINE`); the hidden Enter on a Unix terminal does not. SIGCONT (after Ctrl-Z) puts the prompt up
+    /// again, as it does a question's. Nothing else changes anything: the broker was told `close`, and its last frames, its end and a
+    /// resize are not waited for. The terminal is put back at the exit (`run.rs`).
     fn paused(&mut self, input: Input, code: i32) -> Vec<Action> {
+        let line = |ended: bool| (!ended).then(|| "\n".to_string());
         let (said, status) = match input {
-            Input::Stdin(bytes) if bytes.iter().any(|byte| *byte == b'\n' || *byte == b'\r') => (None, code),
-            Input::Interrupt => (Some("\n".to_string()), 130),
-            Input::Stop(signal) => (Some("\n".to_string()), 128 + signal),
-            Input::StdinEnd => (Some("\n".to_string()), 128 + signal::HUP),
+            Input::Stdin(bytes) if bytes.iter().any(|byte| *byte == b'\n' || *byte == b'\r') => (line(QUESTION_READ_ENDS_ITS_LINE), code),
+            Input::Interrupt => (line(false), 130),
+            Input::Stop(signal) => (line(false), 128 + signal),
+            Input::StdinEnd => (line(QUESTION_READ_ENDS_ITS_LINE), 128 + signal::HUP),
             Input::Failed => (Some(format!("\n{THREAD_FAILED}\n")), 255),
             Input::Continue => return Self::pause_prompt().into(),
             Input::Stdin(_) | Input::Message(_) | Input::Output(_) | Input::Closed | Input::Unreadable | Input::Resize(..) => return Vec::new(),
@@ -693,10 +709,19 @@ mod tests {
         Input::Stdin(Zeroizing::new(text.as_bytes().to_vec()))
     }
 
+    /// The pause ended by Enter, with `code`: the hidden Enter does not move a Unix terminal to the next line, so the CLI does; the
+    /// Windows console moves there itself when the line read ends (`QUESTION_READ_ENDS_ITS_LINE`).
+    fn entered(code: i32) -> Vec<Action> {
+        let mut actions = if QUESTION_READ_ENDS_ITS_LINE { vec![] } else { vec![Action::Stderr("\n".into())] };
+        actions.push(Action::Exit(code));
+        actions
+    }
+
     /// Spec §7.3, `--pause-on-error`: a connection that fails before the shell opens leaves its reason on the terminal, the broker is told
-    /// `close` at once (nothing more is said to it), and the prompt asks for Enter in the mode of a question that shows what is typed (the
-    /// Windows console reads nothing while it is cooked), what was typed before thrown away; the program exits with the failure's status
-    /// only once Enter is pressed. What comes meanwhile (the broker's end, a resize, a line not ended yet) changes nothing.
+    /// `close` at once (nothing more is said to it), and the prompt asks for Enter in the mode of a question that hides what is typed (the
+    /// Windows console reads nothing while it is cooked; a password typed again by habit is not shown), what was typed before thrown
+    /// away; the program exits with the failure's status only once Enter is pressed. What comes meanwhile (the broker's end, a resize, a
+    /// line not ended yet) changes nothing.
     #[test]
     fn with_pause_on_error_a_failure_before_the_shell_opens_waits_for_enter() {
         assert_eq!(PAUSE_PROMPT, "Press Enter to exit.");
@@ -708,7 +733,7 @@ mod tests {
                 Action::Mode(Mode::Cooked, false),
                 Action::Send(ClientMessage::Close),
                 Action::Stderr("No saved host is called web.\n".into()),
-                Action::Mode(Mode::Prompt { echo: true }, true),
+                Action::Mode(Mode::Prompt { echo: false }, true),
                 Action::Stderr(PAUSE_PROMPT.into()),
             ]
         );
@@ -716,7 +741,7 @@ mod tests {
             let said = format!("{meanwhile:?}");
             assert!(client.handle(meanwhile).is_empty(), "{said} changes nothing at the pause");
         }
-        assert_eq!(client.handle(typed("tial\n")), [Action::Exit(255)], "the line typed meanwhile ends with Enter");
+        assert_eq!(client.handle(typed("tial\n")), entered(255), "the line typed meanwhile ends with Enter");
         assert!(client.handle(typed("\n")).is_empty(), "nothing after the end");
     }
 
@@ -731,11 +756,11 @@ mod tests {
                 Action::Mode(Mode::Cooked, false),
                 Action::Send(ClientMessage::Close),
                 Action::Stderr("The connection to SSHelter ended.\n".into()),
-                Action::Mode(Mode::Prompt { echo: true }, true),
+                Action::Mode(Mode::Prompt { echo: false }, true),
                 Action::Stderr(PAUSE_PROMPT.into()),
             ]
         );
-        assert_eq!(client.handle(typed("\r\n")), [Action::Exit(255)]);
+        assert_eq!(client.handle(typed("\r\n")), entered(255));
         let mut client = pausing();
         assert_eq!(
             client.handle(Input::Unreadable),
@@ -743,11 +768,11 @@ mod tests {
                 Action::Mode(Mode::Cooked, false),
                 Action::Send(ClientMessage::Close),
                 Action::Stderr(format!("{UNREADABLE}\n")),
-                Action::Mode(Mode::Prompt { echo: true }, true),
+                Action::Mode(Mode::Prompt { echo: false }, true),
                 Action::Stderr(PAUSE_PROMPT.into()),
             ]
         );
-        assert_eq!(client.handle(typed("\r")), [Action::Exit(255)]);
+        assert_eq!(client.handle(typed("\r")), entered(255));
     }
 
     /// A failure under a question (the broker gave up on it) ends the question as any end under one does (what was typed for it is thrown
@@ -763,10 +788,10 @@ mod tests {
             joined(vec![
                 vec![Action::Mode(Mode::Cooked, true), Action::Send(ClientMessage::Close)],
                 under_a_question("Authentication for web was abandoned (no answer in time)."),
-                vec![Action::Mode(Mode::Prompt { echo: true }, true), Action::Stderr(PAUSE_PROMPT.into())],
+                vec![Action::Mode(Mode::Prompt { echo: false }, true), Action::Stderr(PAUSE_PROMPT.into())],
             ])
         );
-        assert_eq!(client.handle(typed("\n")), [Action::Exit(255)]);
+        assert_eq!(client.handle(typed("\n")), entered(255));
     }
 
     /// The pause is for a failure the person did not choose, before the shell opened: Ctrl-C, Ctrl-D, a stop signal and a thread that failed
@@ -797,17 +822,49 @@ mod tests {
     }
 
     /// At the pause, Ctrl-C, Ctrl-D, a stop signal (the window closed, SIGTERM) and a thread that failed end the program at once, with the
-    /// status they give anywhere else, on a line of its own (the prompt is the last line); SIGCONT puts the prompt up again.
+    /// status they give anywhere else, on a line of its own (the prompt is the last line; the Windows console moves to the next one itself
+    /// when a line that starts with Ctrl-Z ends its read); SIGCONT puts the prompt up again.
     #[test]
     fn at_the_pause_other_ends_end_the_program_at_once_on_a_line_of_their_own() {
-        for (input, code) in [(Input::Interrupt, 130), (Input::StdinEnd, 129), (Input::Stop(signal::HUP), 129), (Input::Stop(signal::TERM), 128 + signal::TERM)] {
+        for (input, code) in [(Input::Interrupt, 130), (Input::Stop(signal::HUP), 129), (Input::Stop(signal::TERM), 128 + signal::TERM)] {
             let said = format!("{input:?}");
             assert_eq!(paused().handle(input), [Action::Stderr("\n".into()), Action::Exit(code)], "{said}");
         }
+        let ended_by_its_line = if QUESTION_READ_ENDS_ITS_LINE { vec![] } else { vec![Action::Stderr("\n".into())] };
+        assert_eq!(paused().handle(Input::StdinEnd), joined(vec![ended_by_its_line, vec![Action::Exit(129)]]));
         assert_eq!(paused().handle(Input::Failed), [Action::Stderr(format!("\n{THREAD_FAILED}\n")), Action::Exit(255)]);
         let mut client = paused();
-        assert_eq!(client.handle(Input::Continue), [Action::Mode(Mode::Prompt { echo: true }, true), Action::Stderr(PAUSE_PROMPT.into())]);
-        assert_eq!(client.handle(typed("\n")), [Action::Exit(255)]);
+        assert_eq!(client.handle(Input::Continue), [Action::Mode(Mode::Prompt { echo: false }, true), Action::Stderr(PAUSE_PROMPT.into())]);
+        assert_eq!(client.handle(typed("\n")), entered(255));
+    }
+
+    /// A question the person cancelled (Ctrl-C, or the end of input) makes the broker give the connect up: that end is the person's and
+    /// does not pause, as Ctrl-C while connecting does not. A question asked after it makes a later failure the broker's again.
+    #[test]
+    fn the_end_after_a_question_the_person_cancelled_does_not_pause() {
+        let abandoned = "Authentication for web was abandoned (the password was not given).";
+        for cancel in [Input::Interrupt, Input::StdinEnd] {
+            let mut client = pausing();
+            client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
+            client.handle(cancel);
+            client.handle(error(kinds::AUTH, abandoned));
+            assert_eq!(client.handle(exited()), [Action::Mode(Mode::Cooked, false), Action::Stderr(format!("{abandoned}\n")), Action::Exit(255)]);
+        }
+        let mut client = pausing();
+        client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
+        client.handle(Input::Interrupt);
+        client.handle(question("q2", QuestionKind::Interactive, "(deploy@web) Code: ", true));
+        client.handle(error(kinds::AUTH, "Authentication failed for deploy@web (tried: keyboard-interactive)."));
+        let actions = client.handle(exited());
+        assert_eq!(actions.last(), Some(&Action::Stderr(PAUSE_PROMPT.into())), "{actions:?}");
+    }
+
+    /// An end with no reason (the app quit while the shell was being opened, and the remote's own end came first) has nothing to keep on
+    /// the screen: it does not pause.
+    #[test]
+    fn an_end_without_a_reason_does_not_pause() {
+        let mut client = pausing();
+        assert_eq!(client.handle(Input::Message(ServerMessage::Exited { code: Some(3), signal: None })), [Action::Mode(Mode::Cooked, false), Action::Exit(3)]);
     }
 
     fn event(event: Event) -> Input {

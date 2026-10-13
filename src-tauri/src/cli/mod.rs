@@ -60,10 +60,13 @@ pub fn parse_args(args: &[String]) -> Result<Request, String> {
     Ok(Request { host, pause_on_error })
 }
 
-/// `--pause-on-error` before the session: waits for Enter on `input` (standard input, the terminal as it was: its own line editing,
-/// echo on), a line's end. The end of input and a failed read end the wait too (a terminal that went away; no standard input). No signal
-/// is taken over yet: Ctrl-C and a closed window end the program the default way.
-fn wait_for_enter(mut input: impl std::io::Read) {
+/// `--pause-on-error` before the session: throws away what was typed while the CLI waited for SSHelter (`discard`: a line typed then must
+/// not end the wait before its prompt was seen), then waits for Enter on `input` (standard input, the terminal as it was: its own line
+/// editing, echo on), a line's end. The end of input and a failed read end the wait too (a terminal that went away; no standard input;
+/// a standard input another program left non-blocking, which Connect's new window never has). No signal is taken over yet: Ctrl-C and a
+/// closed window end the program the default way.
+fn wait_for_enter(discard: impl FnOnce(), mut input: impl std::io::Read) {
+    discard();
     let mut byte = [0u8; 1];
     loop {
         match input.read(&mut byte) {
@@ -111,7 +114,12 @@ pub fn run_connect(args: &[OsString]) -> i32 {
     };
     let term = term_from(std::env::var_os("TERM"));
     let signals = |inputs, terminal, watchdog, size: Arc<dyn terminal::TermiosApi>| run::signal_thread(inputs, terminal, watchdog, move || size.size());
-    let wait = || wait_for_enter(std::io::stdin());
+    // What was typed is thrown away by setting the terminal's attributes as they are, with `discard_input`.
+    let discard = || {
+        use terminal::TermiosApi;
+        let _ = terminal::StdinTermios.get().and_then(|attributes| terminal::StdinTermios.set(&attributes, true));
+    };
+    let wait = || wait_for_enter(discard, std::io::stdin());
     session(request, term, Arc::new(terminal::StdinTermios), reach_broker, signals, wait, &mut std::io::stderr())
 }
 
@@ -216,9 +224,14 @@ pub fn run_connect(args: &[OsString]) -> i32 {
             (inputs_windows::own_output(STD_OUTPUT_HANDLE, &console), inputs_windows::own_output(STD_ERROR_HANDLE, &console))
         }
     };
-    // Before the session the console is as it was (its line editing, echo on), and std reads it through the standard input `StdConsole`
-    // found.
-    let wait = || wait_for_enter(std::io::stdin());
+    // Before the session the console is as it was (its line editing, echo on): what was typed is thrown away from the input `StdConsole`
+    // found, and std reads standard input. (A console `StdConsole` opened as `CONIN$`, for a program started without a standard input,
+    // reads as empty there, so there is no pause; the helper and Windows Terminal always give one.)
+    let input = Arc::clone(&console);
+    let discard = move || {
+        let _ = terminal::ConsoleApi::flush_input(&*input);
+    };
+    let wait = move || wait_for_enter(discard, std::io::stdin());
     session(request, term, console, reach_broker, inputs_windows::take_over_control_events, outputs, wait, &mut std::io::stderr())
 }
 
@@ -366,7 +379,7 @@ mod tests {
     fn the_wait_for_enter_ends_at_a_line_end_the_end_of_input_or_a_failed_read() {
         for (typed, left) in [(&b"\n"[..], &b""[..]), (&b"abc\ndef"[..], &b"def"[..]), (&b"abc\rdef"[..], &b"def"[..]), (&b"abc"[..], &b""[..])] {
             let mut input = typed;
-            wait_for_enter(&mut input);
+            wait_for_enter(|| {}, &mut input);
             assert_eq!(input, left, "{typed:?}");
         }
         struct Failing;
@@ -375,7 +388,38 @@ mod tests {
                 Err(std::io::Error::other("gone"))
             }
         }
-        wait_for_enter(Failing);
+        wait_for_enter(|| {}, Failing);
+    }
+
+    /// What was typed while the CLI waited for SSHelter is thrown away before the wait reads: a line typed then ("is it stuck?") does not
+    /// end the wait the moment its prompt appears; the Enter typed after it does.
+    #[test]
+    fn the_wait_for_enter_throws_away_what_was_typed_before_it() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        /// A terminal's input: what was typed before the prompt, then what is typed after it.
+        struct Typed {
+            before: Rc<RefCell<Vec<u8>>>,
+            after: Vec<u8>,
+        }
+        impl std::io::Read for Typed {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let mut before = self.before.borrow_mut();
+                let from = if before.is_empty() { &mut self.after } else { &mut *before };
+                let count = buf.len().min(from.len());
+                buf[..count].copy_from_slice(&from[..count]);
+                from.drain(..count);
+                Ok(count)
+            }
+        }
+        let before = Rc::new(RefCell::new(b"x\n".to_vec()));
+        let mut input = Typed { before: Rc::clone(&before), after: b"\n".to_vec() };
+        wait_for_enter(|| before.borrow_mut().clear(), &mut input);
+        assert!(input.after.is_empty(), "the Enter typed after the prompt ended the wait");
+        let before = Rc::new(RefCell::new(b"x\n".to_vec()));
+        let mut input = Typed { before: Rc::clone(&before), after: b"\n".to_vec() };
+        wait_for_enter(|| {}, &mut input);
+        assert_eq!(input.after, b"\n", "without the discard the line typed before ends it: the test can tell");
     }
 
     #[test]
@@ -502,6 +546,20 @@ mod tests {
             let wait = || panic!("nothing to wait on without a terminal");
             assert_eq!(session_asked(request, Arc::new(NotATerminal), reach, signals, wait), (1, "sshelter connect needs a terminal.\n".to_string()));
         }
+
+        /// The CLI's own setup failing (its signals cannot be taken over) is said and ends with 1 at once, `--pause-on-error` or not:
+        /// the pause is for SSHelter's answer, and the terminal was not changed.
+        #[test]
+        fn with_pause_on_error_the_clis_own_setup_failing_does_not_wait() {
+            let terminal = FakeTermios::new();
+            let (ours, _theirs) = UnixStream::pair().unwrap();
+            let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
+            let failing = |_, _, _, _| -> io::Result<()> { Err(io::Error::other("no handlers")) };
+            let wait = || panic!("the CLI's own failure does not wait for Enter");
+            let said = session_asked(request, terminal.clone(), move || Ok(ours), failing, wait);
+            assert_eq!(said, (1, "sshelter: cannot take over the terminal's signals: no handlers\n".to_string()));
+            assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
+        }
     }
 
     #[cfg(windows)]
@@ -581,6 +639,26 @@ mod tests {
             assert_eq!(said, (1, "SSHelter did not start within 12 seconds.\nPress Enter to exit.".to_string()));
             assert_eq!(waits, 1);
             assert!(console.changes().is_empty(), "the console was not changed");
+        }
+
+        /// The CLI's own setup failing (the control events cannot be taken over; a console without virtual terminal sequences) is said and
+        /// ends with 1 at once, `--pause-on-error` or not: the pause is for SSHelter's answer.
+        #[test]
+        fn with_pause_on_error_the_clis_own_setup_failing_does_not_wait() {
+            let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
+            let console = FakeConsole::new();
+            let (stream, _dir) = a_pipe();
+            let failing = |_| -> io::Result<()> { Err(io::Error::other("no handler")) };
+            let wait = || panic!("the CLI's own failure does not wait for Enter");
+            let said = session_asked(request.clone(), console, move || Ok(stream), failing, wait);
+            assert_eq!(said, (1, "sshelter: cannot take over the console's control keys: no handler\n".to_string()));
+            let console = FakeConsole::new();
+            console.refuse(|call| matches!(call, Call::Set(Setting::OutputMode, _)));
+            let (stream, _dir) = a_pipe();
+            let events = |_| -> io::Result<()> { Ok(()) };
+            let (code, said) = session_asked(request, console, move || Ok(stream), events, || panic!("the CLI's own failure does not wait for Enter"));
+            assert_eq!(code, 1);
+            assert!(said.starts_with("sshelter: the console does not support virtual terminal sequences ("), "{said}");
         }
 
         /// Without its control handler the program could not keep the console (Ctrl-C at a hidden password, or the window closed, would end
