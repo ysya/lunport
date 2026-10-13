@@ -59,7 +59,9 @@ fn container(private_key: &str) -> Option<Container> {
     if lines.next()? != BEGIN {
         return None;
     }
-    let mut body = String::new();
+    // For a key without a passphrase this base64 is the whole private key: it is wiped when dropped, and it has room for all of the text
+    // from the start, so it never moves (a String that grows leaves the block it moved out of behind, unwiped).
+    let mut body = Zeroizing::new(String::with_capacity(private_key.len()));
     let mut ended = false;
     for line in lines {
         if ended {
@@ -74,7 +76,10 @@ fn container(private_key: &str) -> Option<Container> {
     if !ended {
         return None;
     }
-    let bytes = Zeroizing::new(STANDARD.decode(body).ok()?);
+    // Decoded into a buffer of our own, which is wiped also when the base64 turns out bad halfway through.
+    let mut bytes = Zeroizing::new(vec![0u8; base64::decoded_len_estimate(body.len())]);
+    let len = STANDARD.decode_slice(body.as_bytes(), &mut bytes[..]).ok()?;
+    bytes.truncate(len);
     let mut reader = &bytes[..];
     let mut magic = [0u8; MAGIC.len()];
     reader.read(&mut magic).ok()?;
@@ -120,7 +125,9 @@ fn repadded(section: &[u8], block_size: usize) -> Option<Zeroizing<Vec<u8>>> {
 
     let mut padded = Zeroizing::new(vec![0u8; size]);
     padded[size - scalar.len()..].copy_from_slice(&scalar);
-    let mut out = Zeroizing::new(Vec::new());
+    // Room for the whole new section from the start (the old one, the scalar at most `size` bytes longer, under 8 bytes of padding): a Vec
+    // that grows leaves the block it moved out of behind, unwiped, and the scalar would be in it.
+    let mut out = Zeroizing::new(Vec::with_capacity(section.len() + size + 8));
     checkint1.encode(&mut *out).ok()?;
     checkint2.encode(&mut *out).ok()?;
     algorithm.encode(&mut *out).ok()?;
