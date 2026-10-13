@@ -68,7 +68,8 @@ fn the_exit_code_comes_back() {
 }
 
 /// The built `sshelter-cli.exe` in a directory with a space in its name, next to a `sshelter.exe` (a copy of this program): it runs it
-/// with its own arguments and leaves with its exit code. Without the `sshelter.exe` it says where it looked, and 1.
+/// with its own arguments and leaves with its exit code, an NTSTATUS-sized one (STATUS_CONTROL_C_EXIT) too. Without the `sshelter.exe`
+/// it says where it looked, and 1.
 #[cfg(windows)]
 fn the_built_helper_runs_the_sshelter_exe_beside_it() {
     let scratch = Scratch::new("installed");
@@ -79,9 +80,12 @@ fn the_built_helper_runs_the_sshelter_exe_beside_it() {
     std::fs::copy(this_program(), dir.join("sshelter.exe")).unwrap();
     let record = scratch.0.join("record");
     let args = awkward_arguments();
-    let run = std::process::Command::new(&helper).args(&args).env(RECORD, &record).env(EXIT, "2").output().unwrap();
-    assert_eq!(run.status.code(), Some(2), "{run:?}");
-    assert_eq!(std::fs::read_to_string(&record).unwrap(), format!("{args:?}"));
+    for code in [2, 0xC000_013A_u32 as i32] {
+        let _ = std::fs::remove_file(&record);
+        let run = std::process::Command::new(&helper).args(&args).env(RECORD, &record).env(EXIT, code.to_string()).output().unwrap();
+        assert_eq!(run.status.code(), Some(code), "{run:?}");
+        assert_eq!(std::fs::read_to_string(&record).unwrap(), format!("{args:?}"));
+    }
 
     std::fs::remove_file(dir.join("sshelter.exe")).unwrap();
     let run = std::process::Command::new(&helper).arg("connect").output().unwrap();
