@@ -55,6 +55,14 @@ unsafe extern "system" fn on_control_event(event: u32) -> BOOL {
 /// of a piece), written as UTF-16 (`WriteConsoleW`), so that the console's output code page plays no part in what is shown.
 pub struct ConsoleText(OwnedHandle);
 
+impl ConsoleText {
+    /// The console's screen buffer `handle` as a test opened it.
+    #[cfg(test)]
+    pub(crate) fn new(handle: OwnedHandle) -> ConsoleText {
+        ConsoleText(handle)
+    }
+}
+
 impl Write for ConsoleText {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let text: Vec<u16> = String::from_utf8_lossy(bytes).encode_utf16().collect();

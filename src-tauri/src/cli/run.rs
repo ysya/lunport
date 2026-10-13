@@ -476,6 +476,17 @@ impl Output {
         }
     }
 
+    /// A test's write through the stream as the terminal writer makes it (`write_whole`), and its end (`end`).
+    #[cfg(all(test, windows))]
+    pub(crate) fn write_as_the_writer(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write_whole(bytes)
+    }
+
+    #[cfg(all(test, windows))]
+    pub(crate) fn end_as_the_writer(&mut self) -> io::Result<()> {
+        self.end()
+    }
+
     fn write_all_of(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut rest = bytes;
         while !rest.is_empty() {
