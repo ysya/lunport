@@ -20,7 +20,8 @@
 //! read gives is thrown away; the next read waits for the new mode. A read is ended with an Enter of the program's own in the input
 //! buffer (`ConsoleApi::wake`), and what the console holds after it is thrown away (an Enter the read did not take must not reach the next
 //! mode): a cancelled read (`CancelIoEx`) returns, but lives on in the console and takes the next key, or the next line, typed for the
-//! read after it (measured too). The one change that leaves the read in progress is to cooked mode keeping what was typed (`Reads::pause`).
+//! read after it (measured too). The one change that leaves the read in progress is to cooked mode keeping what was typed, from a raw read
+//! (`Reads::pause`).
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -153,18 +154,20 @@ impl Reads {
     }
 
     /// Before the mode changes to `next`: no read starts until `resume`, and the read in progress, if any, belongs to the mode before.
-    /// That read is ended (`wake`) and waited for, `READ_END_WAIT` at most, when the new mode reads (raw, a question's), and when the change
-    /// throws away what was typed (`discard_input`: a question, or the end of a session under one, whose line read still holds a part
-    /// of a password, and would show what is typed next once the console of the start echoes it). A change to cooked mode that keeps what
-    /// was typed does not end it: cooked mode reads nothing, and what comes after it is the end of the program (the read ends with it) or
-    /// another change, which ends it then. Whether a read was ended: its Enter may still be in the console (the read ended on a key typed
-    /// at that moment), and the caller throws away what the console holds.
+    /// That read is ended (`wake`) and waited for, `READ_END_WAIT` at most, when the new mode reads (raw, a question's), when the change
+    /// throws away what was typed (`discard_input`: a question, or the end of a session under one), and whenever it is a question's line
+    /// read (another program's Ctrl-C cancels a question without ending its read): a question's line read still holds what was typed for
+    /// it, a part of a password, and would show what is typed next once the console of the start echoes it. A change to cooked mode that
+    /// keeps what was typed does not end a raw read: cooked mode reads nothing, and what comes after it is the end of the program (the read
+    /// ends with it) or another change, which ends it then. Whether a read was ended: its Enter may still be in the console (the read ended
+    /// on a key typed at that moment), and the caller throws away what the console holds.
     fn pause(&self, next: Mode, discard_input: bool, wake: impl FnOnce()) -> bool {
         let mut state = self.state();
         state.generation += 1;
         state.mode = None;
         state.line_read = false;
-        if (next == Mode::Cooked && !discard_input) || state.reading.is_none() {
+        let leaves_a_raw_read = next == Mode::Cooked && !discard_input && state.reading == Some(Mode::Raw);
+        if state.reading.is_none() || leaves_a_raw_read {
             return false;
         }
         wake();
@@ -1433,10 +1436,10 @@ mod tests {
     }
 
     /// Cooked mode reads nothing, and what comes after a change to it that keeps what was typed is the end of the program or another
-    /// change: such a change does not end the read in progress. Whatever that read gives later belongs to the mode before, and is thrown
-    /// away.
+    /// change: such a change does not end a raw read in progress. Whatever that read gives later belongs to the mode before, and is
+    /// thrown away.
     #[test]
-    fn a_change_to_cooked_mode_does_not_end_the_read_in_progress() {
+    fn a_change_to_cooked_mode_does_not_end_the_raw_read_in_progress() {
         let (console, mut tty) = raw_console();
         let read = reading(tty.keys());
         in_the_read(&console);
@@ -1444,6 +1447,27 @@ mod tests {
         assert!(!console.changes().contains(&Call::Wake));
         console.type_text("x");
         assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None));
+    }
+
+    /// Final wave (F11): a question's line read is ended by a change to cooked mode that keeps what was typed, too, while the console still
+    /// hides what is typed: another program's Ctrl-C (`GenerateConsoleCtrlEvent`) cancels a question without ending its read (measured),
+    /// and left in progress into the echoing mode of the start, the hidden read would show what is typed next and take it.
+    #[test]
+    fn a_change_to_cooked_mode_ends_a_questions_read_in_progress() {
+        let console = FakeConsole::new();
+        let mut tty = Tty::new(console.clone()).unwrap();
+        tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
+        let read = reading(tty.keys());
+        in_the_read(&console);
+        let before = console.changes().len();
+        tty.set_mode(Mode::Cooked, false).unwrap();
+        let start = console.start;
+        assert_eq!(
+            console.changes()[before..],
+            [Call::Wake, Call::FlushInput, Call::Set(Setting::InputMode, start.input_mode), Call::Set(Setting::OutputMode, COOKED_OUTPUT)],
+            "the read is ended before the mode of the start (which echoes) is set"
+        );
+        assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None), "what the question's read held is thrown away");
     }
 
     /// Fix round 1: the end of a session under a question (`Mode::Cooked` throwing what was typed away) ends the question's line read first,
