@@ -11,18 +11,16 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows_sys::core::BOOL;
-use windows_sys::Win32::Foundation::{
-    DuplicateHandle, GetLastError, SetLastError, DUPLICATE_SAME_ACCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE,
-};
+use windows_sys::Win32::Foundation::{GetLastError, SetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE};
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows_sys::Win32::System::Console::{
     FlushConsoleInputBuffer, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleMode, GetConsoleScreenBufferInfo,
     GetNumberOfConsoleInputEvents, ReadConsoleOutputCharacterW, ReadConsoleW, SetConsoleCtrlHandler, SetConsoleMode, WriteConsoleInputW,
-    WriteConsoleW, CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_C_EVENT, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
-    LEFT_CTRL_PRESSED,
+    WriteConsoleW, CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_C_EVENT, FOCUS_EVENT, FOCUS_EVENT_RECORD, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD,
+    KEY_EVENT_RECORD_0, LEFT_CTRL_PRESSED,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, WaitForSingleObject};
-use windows_sys::Win32::System::IO::{CancelIoEx, CancelSynchronousIo};
+use windows_sys::Win32::System::Threading::WaitForSingleObject;
+use windows_sys::Win32::System::IO::CancelIoEx;
 
 use crate::cli::console::{input_mode, Mode};
 use crate::ssh::testing::{fact, is_child, rerun_alone_with};
@@ -52,15 +50,6 @@ fn open(name: &str) -> H {
     };
     assert_ne!(handle, INVALID_HANDLE_VALUE, "{name}: {}", std::io::Error::last_os_error());
     H(handle as usize)
-}
-
-/// Another handle on the same file object as `handle`.
-fn duplicate(handle: H) -> H {
-    let mut copy: HANDLE = ptr::null_mut();
-    // SAFETY: duplicates a valid handle of this process into this process, with the same access.
-    let done = unsafe { DuplicateHandle(GetCurrentProcess(), handle.raw(), GetCurrentProcess(), &mut copy, 0, 0, DUPLICATE_SAME_ACCESS) };
-    assert_ne!(done, 0, "DuplicateHandle: {}", std::io::Error::last_os_error());
-    H(copy as usize)
 }
 
 fn last_error() -> u32 {
@@ -242,264 +231,271 @@ const SETTLE: Duration = Duration::from_millis(300);
 const BLOCKED: Duration = Duration::from_millis(1000);
 const DONE: Duration = Duration::from_millis(3000);
 
-/// The measurement itself, in the child.
-fn measure() {
-    let control = open("CONIN$");
-    let out = open("CONOUT$");
-    let start = mode_of(control).expect("the child's console input");
-    let raw = input_mode(start, Mode::Raw);
-    let hidden = input_mode(start, Mode::Prompt { echo: false });
-    let shown = input_mode(start, Mode::Prompt { echo: true });
-    fact("start_input_mode", format!("{start:#06x}"));
-    fact("set_raw_mode", format!("{:?}", set_mode(control, raw)));
-    fact("start_output_mode", format!("{:?}", mode_of(out).map(|mode| format!("{mode:#06x}"))));
+/// The console of a child: its input buffer through a handle that never reads (`control`), its screen buffer, and its modes.
+struct Console {
+    control: H,
+    out: H,
+    raw: u32,
+    hidden: u32,
+    shown: u32,
+}
 
-    // A raw read waits on a fresh handle `h` of its own; the mode was set and the buffer emptied through `control`.
-    let pending_raw = |label: &str| {
-        set_mode(control, raw).unwrap();
-        flush(control).unwrap();
-        new_line(out, label);
+impl Console {
+    fn new() -> Console {
+        let control = open("CONIN$");
+        let out = open("CONOUT$");
+        let start = mode_of(control).expect("the child's console input");
+        fact("start_input_mode", format!("{start:#06x}"));
+        Console {
+            control,
+            out,
+            raw: input_mode(start, Mode::Raw),
+            hidden: input_mode(start, Mode::Prompt { echo: false }),
+            shown: input_mode(start, Mode::Prompt { echo: true }),
+        }
+    }
+
+    /// A read of `mode` waiting on a handle of its own, the input buffer empty when it started.
+    fn pending(&self, mode: u32, label: &str) -> (H, mpsc::Receiver<Read>, std::thread::JoinHandle<()>) {
+        set_mode(self.control, mode).unwrap();
+        flush(self.control).unwrap();
+        new_line(self.out, label);
         let h = open("CONIN$");
         let (read, thread) = read_on_a_thread(h, 64);
         std::thread::sleep(SETTLE);
-        let pending = read.try_recv().is_err();
-        (h, read, thread, pending)
-    };
+        assert!(read.try_recv().is_err(), "{label}: the read waits");
+        (h, read, thread)
+    }
 
-    // (i) Calls on the handle a read waits on, on a duplicate of it (the same file object), and on another handle (another file object).
-    type Call = fn(H) -> String;
-    let calls: [(&str, Call); 5] = [
-        ("GetConsoleMode", |h| format!("{:?}", mode_of(h))),
-        ("SetConsoleMode", |h| format!("{:?}", mode_of(h).and_then(|mode| set_mode(h, mode)))),
-        ("FlushConsoleInputBuffer", |h| format!("{:?}", flush(h))),
-        ("GetNumberOfConsoleInputEvents", |h| format!("{:?}", events(h))),
-        ("WaitForSingleObject0", |h| {
-            // SAFETY: a wait of zero only looks at the handle's state.
-            format!("{}", unsafe { WaitForSingleObject(h.raw(), 0) })
-        }),
-    ];
-    for (name, call) in calls {
-        for kind in ["same", "duplicate", "other"] {
-            let (h, read, _thread, pending) = pending_raw(&format!("i {name} {kind}"));
-            let target = match kind {
-                "same" => h,
-                "duplicate" => duplicate(h),
-                _ => open("CONIN$"),
-            };
-            let result = timed(move || call(target));
-            let first = outcome(&result, BLOCKED);
-            type_text(control, "k");
-            let read_result = read_outcome(&read, DONE);
-            let after = if first.starts_with("still") { outcome(&result, DONE) } else { "-".to_string() };
-            fact(&format!("i_{name}_{kind}"), format!("read pending first: {pending}; call: {first}; read after a key: {read_result}; call after the key: {after}"));
-            if read_result.starts_with("still") {
-                // SAFETY: cancels this process's I/O on a valid handle, so that the stuck read does not take the next measurement's keys.
-                unsafe { CancelIoEx(h.raw(), ptr::null()) };
-                fact(&format!("i_{name}_{kind}_cancelled"), read_outcome(&read, DONE));
-            }
-            let _ = flush(control);
+    /// The row the cursor is on.
+    fn row(&self) -> String {
+        row(self.out, cursor(self.out).1)
+    }
+}
+
+/// One measurement, in a child with a console of its own (`scenario` names it).
+fn measure(scenario: &str) {
+    let console = Console::new();
+    let (control, out) = (console.control, console.out);
+    match scenario {
+        // (i) The console's calls through the handle a line read waits on (a raw read was measured in round 1: none waited).
+        "same_handle_under_a_line_read" => {
+            let (h, read, _thread) = console.pending(console.shown, "same handle");
+            let mode = timed(move || mode_of(h));
+            fact("line_read_GetConsoleMode_same", outcome(&mode, BLOCKED));
+            let hidden = console.hidden;
+            let set = timed(move || set_mode(h, hidden));
+            fact("line_read_SetConsoleMode_same", outcome(&set, BLOCKED));
+            let flushed = timed(move || flush(h));
+            fact("line_read_Flush_same", outcome(&flushed, BLOCKED));
+            type_text(control, "ok\r");
+            fact("line_read_then", read_outcome(&read, DONE));
         }
-    }
-    // WriteConsoleInputW through the handle a raw read waits on.
-    {
-        let (h, read, _thread, pending) = pending_raw("i WriteConsoleInputW same");
-        let result = timed(move || type_records(h, &keys_of("w")));
-        let first = outcome(&result, BLOCKED);
-        let read_result = read_outcome(&read, DONE);
-        fact("i_WriteConsoleInputW_same", format!("read pending first: {pending}; call: {first}; read: {read_result}"));
-        if read_result.starts_with("still") {
-            type_text(control, "k");
-            fact("i_WriteConsoleInputW_same_after_key", format!("read: {}; call: {}", read_outcome(&read, DONE), outcome(&result, DONE)));
-        }
-    }
-    // The output while a read waits on the input.
-    {
-        let (_h, read, _thread, _pending) = pending_raw("i output");
-        let info = timed(move || cursor(out));
-        fact("i_output_GetConsoleScreenBufferInfo", outcome(&info, BLOCKED));
-        let write = timed(move || new_line(out, "written while a read waits"));
-        fact("i_output_WriteConsoleW", outcome(&write, BLOCKED));
-        type_text(control, "k");
-        let _ = read_outcome(&read, DONE);
-    }
-
-    // (ii-a) A raw read in progress, then a switch to a question's mode without echo: is the read still raw?
-    {
-        let (_h, read, _thread, pending) = pending_raw("ii-a");
-        set_mode(control, hidden).unwrap();
-        flush(control).unwrap();
-        let (x0, y0) = cursor(out);
-        type_text(control, "x");
-        let first = read_outcome(&read, Duration::from_millis(700));
-        let (x1, y1) = cursor(out);
-        fact("ii_a_raw_read_then_hidden_prompt", format!("pending first: {pending}; after 'x': {first}; cursor {x0},{y0} -> {x1},{y1}; row {:?}", row(out, y1)));
-        if first.starts_with("still") {
-            type_text(control, "y\r");
-            let second = read_outcome(&read, DONE);
-            let (x2, y2) = cursor(out);
-            fact("ii_a_after_enter", format!("{second}; cursor -> {x2},{y2}; row {:?}", row(out, y0)));
-        }
-    }
-
-    // (ii-b) A line read with echo in progress, "hunt" typed into its line; then a question's mode without echo, and the buffer flushed;
-    // then "er2" and Enter. What is shown, and what the read returns.
-    {
-        set_mode(control, shown).unwrap();
-        flush(control).unwrap();
-        new_line(out, "ii-b");
-        let h = open("CONIN$");
-        let (read, _thread) = read_on_a_thread(h, 64);
-        std::thread::sleep(SETTLE);
-        let (_, y0) = cursor(out);
-        type_text(control, "hunt");
-        std::thread::sleep(SETTLE);
-        let typed_shown = row(out, y0);
-        set_mode(control, hidden).unwrap();
-        let flushed = flush(control);
-        type_text(control, "er2\r");
-        let result = read_outcome(&read, DONE);
-        fact("ii_b_echo_line_then_hidden_and_flush", format!("row after 'hunt': {typed_shown:?}; flush {flushed:?}; read: {result}; row after 'er2' Enter: {:?}", row(out, y0)));
-    }
-
-    // Cancelling a read in progress: CancelIoEx on its handle, and CancelSynchronousIo on its thread; a raw read, and a line read with
-    // "hunt" typed into its line (does the line go back to the buffer, or is it gone?).
-    for how in ["CancelIoEx", "CancelSynchronousIo"] {
-        for line in [false, true] {
-            set_mode(control, if line { shown } else { raw }).unwrap();
+        // (ii) A raw read in progress when the mode changes to a question's without echo: what the next key does.
+        "raw_read_spans_a_switch" => {
+            let (_h, read, _thread) = console.pending(console.raw, "raw spans");
+            set_mode(control, console.hidden).unwrap();
             flush(control).unwrap();
-            new_line(out, &format!("cancel {how} line={line}"));
-            let h = open("CONIN$");
-            let (read, thread) = read_on_a_thread(h, 64);
+            let (x0, y0) = cursor(out);
+            type_text(control, "x");
+            let first = read_outcome(&read, Duration::from_millis(700));
+            fact("raw_read_spans_a_switch", format!("after 'x': {first}; cursor {x0},{y0} -> {:?}; row {:?}", cursor(out), console.row()));
+        }
+        // (ii) A line read with echo in progress, "hunt" in its line; the mode changes to a question's without echo and the input is flushed;
+        // then "er2" and Enter.
+        "line_read_spans_a_switch" => {
+            let (_h, read, _thread) = console.pending(console.shown, "line spans");
+            type_text(control, "hunt");
             std::thread::sleep(SETTLE);
+            let shown_before = console.row();
+            set_mode(control, console.hidden).unwrap();
+            let flushed = flush(control);
+            type_text(control, "er2\r");
+            let result = read_outcome(&read, DONE);
+            fact("line_read_spans_a_switch", format!("row after 'hunt': {shown_before:?}; flush {flushed:?}; read: {result}; row after: {:?}", row(out, cursor(out).1 - 1)));
+        }
+        // Cancelling a read, and the read after it: does the cancelled read still take keys?
+        "cancel_raw_then_read" | "cancel_line_then_read" => {
+            let line = scenario == "cancel_line_then_read";
+            let mode = if line { console.shown } else { console.raw };
+            let (h, read, _thread) = console.pending(mode, scenario);
             if line {
                 type_text(control, "hunt");
                 std::thread::sleep(SETTLE);
             }
-            let cancelled = match how {
-                // SAFETY: cancels this process's I/O on a valid handle.
-                "CancelIoEx" => (unsafe { CancelIoEx(h.raw(), ptr::null()) }, last_error()),
-                _ => {
-                    use std::os::windows::io::AsRawHandle;
-                    // SAFETY: cancels the synchronous I/O of a thread this test started, which is still running.
-                    (unsafe { CancelSynchronousIo(thread.as_raw_handle() as HANDLE) }, last_error())
-                }
-            };
-            let result = read_outcome(&read, DONE);
-            let left = events(control);
-            let mut again = "-".to_string();
-            if line {
-                let (read2, _t2) = read_on_a_thread(open("CONIN$"), 64);
-                std::thread::sleep(SETTLE);
-                type_text(control, "\r");
-                again = read_outcome(&read2, DONE);
-            }
-            fact(&format!("cancel_{how}_line_{line}"), format!("call: {cancelled:?}; read: {result}; events left: {left:?}; next line read after Enter: {again}"));
-            if result.starts_with("still") {
-                type_text(control, "k\r");
-                fact(&format!("cancel_{how}_line_{line}_after_key"), read_outcome(&read, DONE));
+            // SAFETY: cancels this process's I/O on a valid handle.
+            let cancelled = unsafe { CancelIoEx(h.raw(), ptr::null()) };
+            fact("cancelled_read", format!("CancelIoEx {cancelled}; read: {}; events left {:?}", read_outcome(&read, DONE), events(control)));
+            let (_h2, next, _thread2) = console.pending(mode, "next");
+            type_text(control, if line { "a\r" } else { "a" });
+            let first = read_outcome(&next, BLOCKED);
+            fact("next_read_after_a_key", format!("{first}; events left {:?}", events(control)));
+            if first.starts_with("still") {
+                type_text(control, if line { "b\r" } else { "b" });
+                fact("next_read_after_a_second_key", read_outcome(&next, DONE));
             }
         }
-    }
-
-    // Ctrl-C at a line read with processed input (a question): the key typed, then the event generated.
-    // SAFETY: a handler with the right signature, for the rest of the process.
-    fact("ctrl_handler_installed", unsafe { SetConsoleCtrlHandler(Some(record_event), TRUE) });
-    {
-        set_mode(control, hidden).unwrap();
-        flush(control).unwrap();
-        new_line(out, "ctrl-c line");
-        let h = open("CONIN$");
-        let (read, _thread) = read_on_a_thread(h, 64);
-        std::thread::sleep(SETTLE);
-        type_records(control, &key(VK_C, 0x03, LEFT_CTRL_PRESSED)).unwrap();
-        let first = read_outcome(&read, BLOCKED);
-        std::thread::sleep(SETTLE);
-        fact("ctrl_c_key_at_line_read", format!("read: {first}; events: {:?}; events left in the buffer: {:?}", events_seen(), events(control)));
-        if first.starts_with("still") {
+        // Waking a read with a key of the program's own: Enter for a line read ("hunt" typed into it), a key for a raw read; then the next
+        // read takes the next key.
+        "wake_line_with_enter" | "wake_raw_with_a_key" => {
+            let line = scenario == "wake_line_with_enter";
+            let mode = if line { console.shown } else { console.raw };
+            let (_h, read, _thread) = console.pending(mode, scenario);
+            if line {
+                type_text(control, "hunt");
+                std::thread::sleep(SETTLE);
+            }
+            let (_, y0) = cursor(out);
+            type_records(control, &keys_of(if line { "\r" } else { "x" })).unwrap();
+            fact("woken_read", format!("{}; rows {:?} / {:?}; cursor {:?}", read_outcome(&read, DONE), row(out, y0), row(out, y0 + 1), cursor(out)));
+            let (_h2, next, _thread2) = console.pending(mode, "next");
+            type_text(control, if line { "a\r" } else { "a" });
+            fact("next_read", format!("{}; events left {:?}", read_outcome(&next, DONE), events(control)));
+            // The same with echo off.
+            if line {
+                let (_h3, read, _thread3) = console.pending(console.hidden, "hidden wake");
+                type_text(control, "pw");
+                std::thread::sleep(SETTLE);
+                let (x0, y0) = cursor(out);
+                type_text(control, "\r");
+                fact("woken_hidden_read", format!("{}; cursor {x0},{y0} -> {:?}; row {:?}", read_outcome(&read, DONE), cursor(out), row(out, y0)));
+            }
+        }
+        // Ctrl-C at a line read with processed input (a question): typed, then generated.
+        "ctrl_c_at_a_line_read" => {
+            // SAFETY: a handler with the right signature, for the rest of the process.
+            unsafe { SetConsoleCtrlHandler(Some(record_event), TRUE) };
+            let (_h, read, _thread) = console.pending(console.hidden, "ctrl-c typed");
+            type_records(control, &key(VK_C, 0x03, LEFT_CTRL_PRESSED)).unwrap();
+            let first = read_outcome(&read, BLOCKED);
+            std::thread::sleep(SETTLE);
+            fact("ctrl_c_typed_at_a_line_read", format!("read: {first}; events: {:?}; events left {:?}", events_seen(), events(control)));
+            if first.starts_with("still") {
+                type_text(control, "\r");
+                fact("ctrl_c_typed_then_enter", read_outcome(&read, DONE));
+            }
+            let (_h, read, _thread) = console.pending(console.hidden, "ctrl-c generated");
             // SAFETY: CTRL_C_EVENT to every process on this console: this one, which has a handler.
             let generated = unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) };
             let second = read_outcome(&read, DONE);
             std::thread::sleep(SETTLE);
-            fact("ctrl_c_generated_at_line_read", format!("generated {generated}; read: {second}; events: {:?}", events_seen()));
+            fact("ctrl_c_generated_at_a_line_read", format!("generated {generated}; read: {second}; events: {:?}", events_seen()));
             if second.starts_with("still") {
                 type_text(control, "\r");
-                fact("ctrl_c_line_read_after_enter", read_outcome(&read, DONE));
+                fact("ctrl_c_generated_then_enter", read_outcome(&read, DONE));
+            } else {
+                let (_h, next, _thread) = console.pending(console.hidden, "after ctrl-c");
+                type_text(control, "a\r");
+                fact("read_after_ctrl_c", read_outcome(&next, DONE));
+            }
+            let (_h, read, _thread) = console.pending(console.raw, "ctrl-c raw");
+            type_records(control, &key(VK_C, 0x03, LEFT_CTRL_PRESSED)).unwrap();
+            let third = read_outcome(&read, DONE);
+            std::thread::sleep(SETTLE);
+            fact("ctrl_c_typed_at_a_raw_read", format!("read: {third}; events: {:?}", events_seen()));
+        }
+        // The console's history: is a line read without echo (a password) offered again by the up arrow at the next line read?
+        "history" => {
+            for (label, first_mode, first_text) in [("hidden", console.hidden, "secret1\r"), ("shown", console.shown, "visible1\r")] {
+                let (_h, read, _thread) = console.pending(first_mode, label);
+                type_text(control, first_text);
+                let typed = read_outcome(&read, DONE);
+                let (_h, recall, _thread) = console.pending(console.shown, "recalled");
+                let mut records = key(VK_UP, 0, 0).to_vec();
+                records.extend(keys_of("\r"));
+                type_records(control, &records).unwrap();
+                fact(&format!("history_{label}"), format!("line: {typed}; up arrow and Enter at the next line read: {}", read_outcome(&recall, DONE)));
             }
         }
-    }
-    {
-        let (_h, read, _thread, _pending) = pending_raw("ctrl-c raw");
-        type_records(control, &key(VK_C, 0x03, LEFT_CTRL_PRESSED)).unwrap();
-        let first = read_outcome(&read, DONE);
-        std::thread::sleep(SETTLE);
-        fact("ctrl_c_key_at_raw_read", format!("read: {first}; events: {:?}", events_seen()));
-    }
-
-    // The console's history: is a line read without echo (a password) offered again by the up arrow at the next line read?
-    for (label, first_mode, first_text) in [("hidden", hidden, "secret1\r"), ("shown", shown, "visible1\r")] {
-        set_mode(control, first_mode).unwrap();
-        flush(control).unwrap();
-        new_line(out, &format!("history {label}"));
-        let (read, _t) = read_on_a_thread(open("CONIN$"), 64);
-        std::thread::sleep(SETTLE);
-        type_text(control, first_text);
-        let typed = read_outcome(&read, DONE);
-        set_mode(control, shown).unwrap();
-        new_line(out, &format!("history {label} recalled"));
-        let (recall, _t) = read_on_a_thread(open("CONIN$"), 64);
-        std::thread::sleep(SETTLE);
-        let mut records = key(VK_UP, 0, 0).to_vec();
-        records.extend(keys_of("\r"));
-        type_records(control, &records).unwrap();
-        fact(&format!("history_{label}"), format!("line: {typed}; up arrow and Enter at the next line read: {}", read_outcome(&recall, DONE)));
-    }
-
-    // The input handle is signalled while the buffer holds input.
-    {
-        set_mode(control, raw).unwrap();
-        flush(control).unwrap();
-        // SAFETY: a wait of zero only looks at the handle's state.
-        let empty = unsafe { WaitForSingleObject(control.raw(), 0) };
-        type_text(control, "z");
-        // SAFETY: as above.
-        let holding = unsafe { WaitForSingleObject(control.raw(), 0) };
-        fact("wait_on_input", format!("empty buffer: {empty}; after a key: {holding}"));
-        flush(control).unwrap();
-    }
-
-    // An arrow key in raw mode with virtual terminal input.
-    {
-        let (_h, read, _thread, _pending) = pending_raw("vt arrow");
-        type_records(control, &key(VK_UP, 0, 0)).unwrap();
-        fact("raw_vt_up_arrow", read_outcome(&read, DONE));
-    }
-
-    // Last: the console goes away (FreeConsole) under a raw read, then a read on the same handle.
-    {
-        let (h, read, _thread, _pending) = pending_raw("free");
-        // SAFETY: detaches this process from its console; nothing of the console is used after this but `h`, to see how it fails.
-        let freed = timed(|| unsafe { FreeConsole() });
-        let freed = outcome(&freed, DONE);
-        let first = read_outcome(&read, DONE);
-        let (again, _t) = read_on_a_thread(h, 64);
-        fact("free_console_under_a_read", format!("FreeConsole: {freed}; the read: {first}; a read after: {}", read_outcome(&again, DONE)));
+        // The input handle is signalled while the buffer holds input; a record that is not a key signals it too.
+        "wait_on_input" => {
+            set_mode(control, console.raw).unwrap();
+            flush(control).unwrap();
+            // SAFETY: waits of zero only look at the handle's state.
+            let state = || unsafe { WaitForSingleObject(control.raw(), 0) };
+            let empty = state();
+            type_text(control, "z");
+            let holding = state();
+            flush(control).unwrap();
+            let flushed = state();
+            let mut focus = INPUT_RECORD { EventType: FOCUS_EVENT as u16, ..Default::default() };
+            focus.Event.FocusEvent = FOCUS_EVENT_RECORD { bSetFocus: TRUE };
+            type_records(control, &[focus]).unwrap();
+            let focused = state();
+            let (read, _thread) = read_on_a_thread(open("CONIN$"), 64);
+            let read_focus = read_outcome(&read, BLOCKED);
+            fact("wait_on_input", format!("empty {empty}; after a key {holding}; flushed {flushed}; after a focus record {focused}; a raw read then: {read_focus}; events left {:?}", events(control)));
+        }
+        // Keys in raw mode with virtual terminal input: an arrow, Ctrl-Z, and a character outside the basic plane typed as its two halves.
+        "raw_keys" => {
+            let (_h, read, _thread) = console.pending(console.raw, "arrow");
+            type_records(control, &key(VK_UP, 0, 0)).unwrap();
+            fact("raw_up_arrow", read_outcome(&read, DONE));
+            let (_h, read, _thread) = console.pending(console.raw, "pair");
+            let mut halves = key(0, 0xD83D, 0).to_vec();
+            halves.extend(key(0, 0xDD11, 0));
+            type_records(control, &halves).unwrap();
+            fact("raw_surrogate_pair", read_outcome(&read, DONE));
+            let (_h, read, _thread) = console.pending(console.hidden, "ctrl-z line");
+            let mut line = key(0x5A, 0x1A, LEFT_CTRL_PRESSED).to_vec();
+            line.extend(keys_of("\r"));
+            type_records(control, &line).unwrap();
+            fact("line_ctrl_z_enter", read_outcome(&read, DONE));
+        }
+        // The console goes away (FreeConsole) under a raw read, then a read on the same handle.
+        "free_console" => {
+            let (h, read, _thread) = console.pending(console.raw, "free");
+            // SAFETY: detaches this process from its console; nothing of the console is used after this but `h`, to see how it fails.
+            let freed = timed(|| unsafe { FreeConsole() });
+            let freed = outcome(&freed, DONE);
+            let first = read_outcome(&read, DONE);
+            let (again, _t) = read_on_a_thread(h, 64);
+            fact("free_console_under_a_read", format!("FreeConsole: {freed}; the read: {first}; a read after: {}", read_outcome(&again, DONE)));
+        }
+        other => panic!("no scenario {other}"),
     }
 }
 
-/// PROBE: the measurement's facts, shown by failing.
+/// The variable that names the measurement a child makes.
+const SCENARIO: &str = "SSHELTER_TEST_CONSOLE_SCENARIO";
+
+/// PROBE: the measurement's facts, shown by failing. Each scenario runs in a child of its own, with a console of its own: a read one
+/// scenario leaves waiting cannot take the keys of the next.
 #[test]
 fn a_read_in_progress_and_the_consoles_other_calls() {
     const NAME: &str = "cli::real_console_tests::a_read_in_progress_and_the_consoles_other_calls";
     if is_child() {
-        measure();
+        measure(&std::env::var(SCENARIO).expect("the scenario"));
         return;
     }
     // winbase.h: a console of its own for the child.
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    let said = rerun_alone_with(NAME, |command| {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NEW_CONSOLE);
-    });
-    let facts: Vec<&str> = said.lines().filter(|line| line.starts_with("FACT ")).collect();
+    let scenarios = [
+        "same_handle_under_a_line_read",
+        "raw_read_spans_a_switch",
+        "line_read_spans_a_switch",
+        "cancel_raw_then_read",
+        "cancel_line_then_read",
+        "wake_line_with_enter",
+        "wake_raw_with_a_key",
+        "ctrl_c_at_a_line_read",
+        "history",
+        "wait_on_input",
+        "raw_keys",
+        "free_console",
+    ];
+    let mut facts = Vec::new();
+    for scenario in scenarios {
+        let said = std::panic::catch_unwind(|| {
+            rerun_alone_with(NAME, |command| {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(CREATE_NEW_CONSOLE).env(SCENARIO, scenario);
+            })
+        });
+        match said {
+            Ok(said) => facts.extend(said.lines().filter(|line| line.starts_with("FACT ")).map(|line| format!("[{scenario}] {line}"))),
+            Err(panic) => facts.push(format!("[{scenario}] FAILED: {:?}", panic.downcast_ref::<String>().map(String::as_str).or(panic.downcast_ref::<&str>().copied()))),
+        }
+    }
     panic!("PROBE, the facts:\n{}", facts.join("\n"));
 }
