@@ -245,6 +245,9 @@ impl Broker {
         if !greet(&mut reader, link.as_ref()) {
             return;
         }
+        // The time is for each message (spec §7.2): `open_shell` has all of it again. (A socket's read timeout is per read already; a
+        // pipe's bound is one deadline, which this sets again.)
+        let _ = set_read_timeout(&reader, Some(self.hello_wait));
         let requested_by = requester_of(pid);
         let (host, pty) = match first_frame(&mut reader) {
             First::Silent => return,
