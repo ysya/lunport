@@ -357,10 +357,25 @@ pub fn build_launch_command(
 
 // ─── What the terminal runs ──────────────────────────────────────────────────
 
-/// `<program> connect <alias>`: the command the terminal runs to connect through SSHelter's own SSH client (own-ssh spec §7.3, §7.4).
-/// `program` is SSHelter's executable, or on Windows the console helper next to it (`connect_program`). The alias must be validated first.
-pub fn connect_argv(program: &std::path::Path, alias: &str) -> Vec<String> {
-    vec![program.to_string_lossy().into_owned(), "connect".to_string(), alias.to_string()]
+/// `<program> connect [--pause-on-error] <alias>`: the command the terminal runs to connect through SSHelter's own SSH client (own-ssh
+/// spec §7.3, §7.4). `program` is SSHelter's executable, or on Windows the console helper next to it (`connect_program`); `pause_on_error`
+/// keeps the reason of a connection that fails before the shell opens on the terminal until Enter (`closes_with_its_program`). The alias
+/// must be validated first.
+pub fn connect_argv(program: &std::path::Path, alias: &str, pause_on_error: bool) -> Vec<String> {
+    let mut argv = vec![program.to_string_lossy().into_owned(), "connect".to_string()];
+    if pause_on_error {
+        argv.push(crate::cli::PAUSE_ON_ERROR.to_string());
+    }
+    argv.push(alias.to_string());
+    argv
+}
+
+/// Whether the terminal `terminal_id` runs the command as its window's program, so that the window, and what the program said in it,
+/// goes when the program ends (or may: Windows Terminal keeps a pane whose program ended with an error, as its settings say). Every
+/// terminal SSHelter knows does, but Terminal, whose `do script` runs the command in the shell of a new window, and cmd, whose `cmd /k`
+/// stays after the command: there the reason of a failed connect stays without a pause.
+fn closes_with_its_program(terminal_id: &str) -> bool {
+    !matches!(terminal_id, "terminal" | "cmd")
 }
 
 /// The console helper installed next to `sshelter.exe` on Windows (own-ssh spec §7.3; src-tauri/cli-helper). Release `sshelter.exe` is a
@@ -386,12 +401,13 @@ fn connect_program(exe: &std::path::Path, debug_build: bool) -> Result<std::path
 }
 
 /// The launch for connecting to `alias` in `terminal_id`: `sshelter connect <alias>`, on Windows through the console helper
-/// (`connect_program`). Windows Terminal runs that argv directly and cmd in a new console that stays open (`build_launch_command`).
+/// (`connect_program`), with `--pause-on-error` where the window goes with the program (`closes_with_its_program`). Windows Terminal runs
+/// that argv directly and cmd in a new console that stays open (`build_launch_command`).
 pub fn launch_for(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
     let exe = std::env::current_exe().map_err(|e| AppError::Other(format!("cannot locate SSHelter: {e}")))?;
     #[cfg(windows)]
     let exe = connect_program(&exe, cfg!(debug_assertions))?;
-    build_launch_command(terminal_id, &connect_argv(&exe, alias), new_tab)
+    build_launch_command(terminal_id, &connect_argv(&exe, alias, closes_with_its_program(terminal_id)), new_tab)
 }
 
 /// Spawn the launch spec detached, inheriting the environment. Not unit-tested (side effect).
@@ -449,7 +465,7 @@ mod tests {
     /// wt, cmd) get the argv untouched.
     #[test]
     fn the_connect_command_reaches_every_terminal() {
-        let argv = connect_argv(std::path::Path::new("/Users/me/My Apps/SSHelter.app/Contents/MacOS/sshelter"), "web");
+        let argv = connect_argv(std::path::Path::new("/Users/me/My Apps/SSHelter.app/Contents/MacOS/sshelter"), "web", false);
         assert_eq!(argv, vec!["/Users/me/My Apps/SSHelter.app/Contents/MacOS/sshelter", "connect", "web"]);
         let quoted = "'/Users/me/My Apps/SSHelter.app/Contents/MacOS/sshelter' connect web";
         for new_tab in [false, true] {
@@ -471,8 +487,9 @@ mod tests {
     /// A new tab of iTerm2 runs the connect command too, in both branches of its script (a tab in the window there is, or a new window).
     #[test]
     fn a_new_tab_in_iterm2_runs_the_connect_command() {
-        // On Windows too: the test binary has no console helper beside it, so the command names the executable itself.
-        let argv = connect_argv(&std::env::current_exe().unwrap(), "web");
+        // On Windows too: the test binary has no console helper beside it, so the command names the executable itself. iTerm2 ends the
+        // window with the command: the command pauses on an error.
+        let argv = connect_argv(&std::env::current_exe().unwrap(), "web", true);
         let command = applescript_escape(&shell_join(&argv));
         let spec = launch_for("iterm2", "web", true).unwrap();
         assert_eq!(spec.program, "osascript");
@@ -497,23 +514,48 @@ mod tests {
     /// with its backslash escaped.
     #[test]
     fn a_path_with_a_quote_reaches_terminal_quoted_for_the_shell_and_escaped_for_applescript() {
-        let argv = connect_argv(std::path::Path::new("/Users/o'neil/Apps/SSHelter.app/Contents/MacOS/sshelter"), "web");
+        let argv = connect_argv(std::path::Path::new("/Users/o'neil/Apps/SSHelter.app/Contents/MacOS/sshelter"), "web", false);
         let spec = build_launch_command("terminal", &argv, false).unwrap();
         assert_eq!(spec.args.last().unwrap(), r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/SSHelter.app/Contents/MacOS/sshelter' connect web""#);
     }
 
-    /// Every platform connects through `sshelter connect`. On Windows the test binary has no console helper beside it, so a debug test build
-    /// runs the executable itself, as a debug build of the app does; a release test build says the helper is missing.
+    /// Every platform connects through `sshelter connect`, with `--pause-on-error` where the window goes with the program (`cmd /k` stays).
+    /// On Windows the test binary has no console helper beside it, so a debug test build runs the executable itself, as a debug build of
+    /// the app does; a release test build says the helper is missing.
     #[test]
     fn the_launch_runs_sshelter_connect_on_every_platform() {
         let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
         if cfg!(windows) && cfg!(debug_assertions) {
             assert_eq!(launch_for("cmd", "web", false).unwrap().args, ["/c", "start", "", "cmd", "/k", exe.as_str(), "connect", "web"]);
-            assert_eq!(launch_for("wt", "web", true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "web"]);
+            assert_eq!(launch_for("wt", "web", true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "--pause-on-error", "web"]);
         } else if cfg!(windows) {
             assert!(launch_for("cmd", "web", false).unwrap_err().to_string().starts_with("sshelter-cli.exe is missing from "));
         } else {
-            assert_eq!(launch_for("kitty", "web", false).unwrap().args, [exe.as_str(), "connect", "web"]);
+            assert_eq!(launch_for("kitty", "web", false).unwrap().args, [exe.as_str(), "connect", "--pause-on-error", "web"]);
+        }
+    }
+
+    /// Spec §7.4: Connect gives `--pause-on-error` to every terminal that runs the command as its window's program (the reason of a connect
+    /// that fails before the shell opens would go with the window), and not to Terminal (`do script` runs it in a shell that stays) or cmd
+    /// (`cmd /k`). An unknown terminal (`$TERMINAL`) is taken to close.
+    #[test]
+    fn connect_pauses_on_an_error_where_the_window_goes_with_the_program() {
+        for id in ["iterm2", "wt", "ptyxis", "gnome-terminal", "konsole", "kitty", "alacritty", "wezterm", "foot", "xfce4-terminal", "xterm", "env"] {
+            assert!(closes_with_its_program(id), "{id}");
+        }
+        for id in ["terminal", "cmd"] {
+            assert!(!closes_with_its_program(id), "{id}");
+        }
+        let program = std::path::Path::new("/Applications/SSHelter.app/Contents/MacOS/sshelter");
+        assert_eq!(connect_argv(program, "web", true), [program.to_str().unwrap(), "connect", "--pause-on-error", "web"]);
+        assert_eq!(connect_argv(program, "web", false), [program.to_str().unwrap(), "connect", "web"]);
+        if !cfg!(windows) {
+            let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+            let terminal = launch_for("terminal", "web", false).unwrap();
+            assert_eq!(terminal.args.last().unwrap(), &format!("tell application \"Terminal\" to do script \"{}\"", applescript_escape(&shell_join(&[exe.clone(), "connect".into(), "web".into()]))));
+            let iterm = launch_for("iterm2", "web", false).unwrap();
+            let paused = applescript_escape(&shell_join(&[exe, "connect".into(), "--pause-on-error".into(), "web".into()]));
+            assert!(iterm.args.last().unwrap().ends_with(&format!("command \"{paused}\"")), "{:?}", iterm.args);
         }
     }
 
@@ -529,7 +571,7 @@ mod tests {
         std::fs::write(&exe, b"").unwrap();
         std::fs::write(installed.join("sshelter-cli.exe"), b"").unwrap();
         for debug_build in [false, true] {
-            let argv = connect_argv(&connect_program(&exe, debug_build).unwrap(), "web");
+            let argv = connect_argv(&connect_program(&exe, debug_build).unwrap(), "web", false);
             assert_eq!(argv, [installed.join("sshelter-cli.exe").to_string_lossy().as_ref(), "connect", "web"], "debug: {debug_build}");
             assert_the_windows_launches_run(&argv);
         }
@@ -545,7 +587,7 @@ mod tests {
         std::fs::write(&exe, b"").unwrap();
         // A directory by the helper's name is not the helper.
         std::fs::create_dir(built.join("sshelter-cli.exe")).unwrap();
-        let argv = connect_argv(&connect_program(&exe, true).unwrap(), "web");
+        let argv = connect_argv(&connect_program(&exe, true).unwrap(), "web", false);
         assert_eq!(argv, [exe.to_string_lossy().as_ref(), "connect", "web"]);
         assert_the_windows_launches_run(&argv);
     }

@@ -32,11 +32,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use zeroize::{Zeroize, Zeroizing};
 
-use super::client::{Action, Client, Input};
+use super::client::{Action, Client, Input, Request};
 use super::signal;
 use super::terminal::{Mode, Restorer, Tty};
 use crate::ipc::server::Stream;
-use crate::session::protocol::{decode, read_frame, write_control, write_data, write_frame, ClientMessage, Frame, HostQuery, ServerMessage, CONTROL};
+use crate::session::protocol::{decode, read_frame, write_control, write_data, write_frame, ClientMessage, Frame, ServerMessage, CONTROL};
 
 /// How much of the broker's output may be on its way to the terminal at a time (read from the broker, not written to the terminal yet).
 const OUTPUT_IN_FLIGHT: usize = 256 * 1024;
@@ -74,10 +74,11 @@ const STOP_WAIT: Duration = Duration::from_millis(200);
 #[cfg(any(windows, test))]
 pub const SIZE_CHECK: Duration = Duration::from_millis(250);
 
-/// Runs one session over `stream`, connected to the broker, until it ends; returns the program's exit code. `inputs` brings the keys,
-/// resizes and signals (`stdin_thread`, `signal_thread`); the broker's frames join it from a thread started here. What is written to
-/// `stdout` and `stderr` (the terminal) is written by a thread of its own, and so is what is written to the broker.
-pub fn run(stream: Stream, host: HostQuery, term: String, tty: &mut Tty, inputs: (Inputs, Queue), stdout: impl Into<Output>, stderr: impl Into<Output>) -> i32 {
+/// Runs one session over `stream`, connected to the broker, until it ends; returns the program's exit code. `request` names the host
+/// (a `HostQuery` alone asks for no pause, `Request::pause_on_error`). `inputs` brings the keys, resizes and signals (`stdin_thread`,
+/// `signal_thread`); the broker's frames join it from a thread started here. What is written to `stdout` and `stderr` (the terminal) is
+/// written by a thread of its own, and so is what is written to the broker.
+pub fn run(stream: Stream, request: impl Into<Request>, term: String, tty: &mut Tty, inputs: (Inputs, Queue), stdout: impl Into<Output>, stderr: impl Into<Output>) -> i32 {
     let (inputs, queue) = inputs;
     let (stdout, mut stderr) = (stdout.into(), stderr.into());
     let size = tty.size().unwrap_or((80, 24));
@@ -89,7 +90,7 @@ pub fn run(stream: Stream, host: HostQuery, term: String, tty: &mut Tty, inputs:
     let broker = BrokerWriter::start(stream, &inputs);
     spawn_worker("sshelter-broker", inputs, move |inputs| read_broker(reader, &inputs));
     let mut the_loop = Loop { tty, queue, terminal, broker };
-    let (mut client, actions) = Client::start(host, term, size);
+    let (mut client, actions) = Client::start(request, term, size);
     if let Some(code) = the_loop.perform(actions, None) {
         return code;
     }
@@ -1541,7 +1542,7 @@ mod tests {
     use crate::session::broker::Broker;
     use crate::session::connect::HostKeyConfirmer;
     use crate::session::directory::HostDirectory;
-    use crate::session::protocol::Event;
+    use crate::session::protocol::{Event, HostQuery};
     use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys};
     use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods};
     use crate::ssh::testing::eventually;
