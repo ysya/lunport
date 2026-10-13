@@ -1,23 +1,29 @@
 //! The console `sshelter connect` runs in on Windows (own-ssh spec §7.3, the Windows bullet), served as `cli::terminal`: the modes, the
-//! `Tty` and its `Restorer` are the platform-neutral part's (`console.rs`, tested on every platform), and this file adds the console of
-//! this process (`StdConsole`), through windows-sys.
+//! `Tty` and its `Restorer`, and the keys read without spanning a change of mode, are the platform-neutral part's (`console.rs`, tested on
+//! every platform), and this file adds the console of this process (`StdConsole`), through windows-sys.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
 use windows_sys::core::BOOL;
-use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE};
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows_sys::Win32::System::Console::{
-    FlushConsoleInputBuffer, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle, SetConsoleCP,
-    SetConsoleMode, SetConsoleOutputCP, CONSOLE_SCREEN_BUFFER_INFO, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    FlushConsoleInputBuffer, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleW,
+    SetConsoleCP, SetConsoleMode, SetConsoleOutputCP, WriteConsoleInputW, CONSOLE_SCREEN_BUFFER_INFO, INPUT_RECORD, KEY_EVENT,
+    KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 
 use super::console::window_size;
 #[cfg(test)]
 pub(crate) use super::console::fake;
-pub use super::console::{input_mode, output_mode, restore_on_panic, ConsoleApi, Mode, Restorer, Setting, Settings, Tty};
+pub use super::console::{
+    input_mode, output_mode, restore_on_panic, ConsoleApi, ConsoleKeys, KeysRead, Mode, Restorer, Setting, Settings, Tty,
+};
+
+/// The Enter key's virtual-key code (winuser.h, `VK_RETURN`).
+const VK_RETURN: u16 = 0x0D;
 
 /// The console of this process: its input buffer and its active screen buffer.
 ///
@@ -72,6 +78,13 @@ impl StdConsole {
     pub fn output(&self) -> HANDLE {
         self.output.handle()
     }
+
+    /// The console of this process through its buffers opened by name (`CONIN$`, `CONOUT$`), whatever the standard handles are: a test
+    /// in a process with a console of its own, whose standard handles are the pipes of the process that started it.
+    #[cfg(test)]
+    pub(crate) fn opened() -> io::Result<StdConsole> {
+        Ok(StdConsole { input: Buffer::Opened(open("CONIN$")?), output: Buffer::Opened(open("CONOUT$")?) })
+    }
 }
 
 impl ConsoleApi for StdConsole {
@@ -111,6 +124,30 @@ impl ConsoleApi for StdConsole {
         }
         let window = info.srWindow;
         window_size(window.Left, window.Top, window.Right, window.Bottom)
+    }
+
+    fn read(&self, buf: &mut [u16]) -> io::Result<usize> {
+        let length = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let mut read = 0u32;
+        // SAFETY: `buf` holds `length` UTF-16 units, at most what ReadConsoleW writes; `read` is a u32 it writes; no read control.
+        done(unsafe { ReadConsoleW(self.input(), buf.as_mut_ptr().cast(), length, &mut read, ptr::null()) })?;
+        Ok((read as usize).min(buf.len()))
+    }
+
+    /// The Enter key pressed (a key-down record, as a keyboard's is first), which ends a line read and a raw one.
+    fn wake(&self) -> io::Result<()> {
+        let mut enter = INPUT_RECORD { EventType: KEY_EVENT as u16, ..Default::default() };
+        enter.Event.KeyEvent = KEY_EVENT_RECORD {
+            bKeyDown: TRUE,
+            wRepeatCount: 1,
+            wVirtualKeyCode: VK_RETURN,
+            wVirtualScanCode: 0,
+            uChar: KEY_EVENT_RECORD_0 { UnicodeChar: u16::from(b'\r') },
+            dwControlKeyState: 0,
+        };
+        let mut written = 0u32;
+        // SAFETY: one record, valid for the call; `written` is a u32 the call writes.
+        done(unsafe { WriteConsoleInputW(self.input(), &enter, 1, &mut written) })
     }
 }
 

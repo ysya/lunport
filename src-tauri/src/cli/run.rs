@@ -15,9 +15,12 @@
 //! that waits for the broker gives way to a newer one. And a watchdog ends the program when its loop does not (`Watchdog`).
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, RawFd};
-use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -26,7 +29,9 @@ use serde::Serialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::client::{Action, Client, Input};
+use super::signal;
 use super::terminal::{Mode, Restorer, Tty};
+use crate::ipc::server::Stream;
 use crate::session::protocol::{decode, read_frame, write_control, write_data, write_frame, ClientMessage, Frame, HostQuery, ServerMessage, CONTROL};
 
 /// How much of the broker's output may be on its way to the terminal at a time (read from the broker, not written to the terminal yet).
@@ -42,9 +47,14 @@ const END_WAIT: Duration = Duration::from_millis(1500);
 pub const STOP_GRACE: Duration = Duration::from_secs(2);
 /// How long the watchdog waits for a change of the terminal in progress before it puts the terminal back all the same.
 const WATCHDOG_TERMINAL_WAIT: Duration = Duration::from_millis(200);
-/// How often the keys thread looks whether the terminal went away while it waits for the broker to take what was typed.
+/// How often the keys thread looks whether the terminal went away (or, on Windows, the console was put back for good) while it waits for
+/// the broker to take what was typed.
 const HANGUP_CHECK: Duration = Duration::from_millis(250);
+/// How many UTF-16 units a read of the console's keys takes at most (Windows).
+#[cfg(any(windows, test))]
+const CONSOLE_READ: usize = 4096;
 /// How long, at most, the terminal writer waits at a time for a terminal that would not take more (its descriptor non-blocking).
+#[cfg(unix)]
 const WRITABLE_WAIT_MS: i32 = 100;
 /// How much the terminal writer writes at a time: it notes that it got on after each piece, so that a slow terminal is told from one that
 /// takes nothing.
@@ -52,11 +62,18 @@ const PIECE: usize = 4096;
 /// How often a wait for the terminal writer looks whether the writer still gets on, and whether a signal ends the wait
 /// (`TerminalWriter::written_while_moving`).
 const MOVING_CHECK: Duration = Duration::from_millis(100);
+/// Windows, at the end: how long the terminal writer is given to finish what it was given before the console is put back, and then how
+/// long a piece it is writing is waited for (`TerminalWriter::stop`).
+#[cfg(any(windows, test))]
+const STOP_WAIT: Duration = Duration::from_millis(200);
+/// How often the console window's size is looked at (Windows has no SIGWINCH; spec §7.3).
+#[cfg(any(windows, test))]
+pub const SIZE_CHECK: Duration = Duration::from_millis(250);
 
 /// Runs one session over `stream`, connected to the broker, until it ends; returns the program's exit code. `inputs` brings the keys,
 /// resizes and signals (`stdin_thread`, `signal_thread`); the broker's frames join it from a thread started here. What is written to
 /// `stdout` and `stderr` (the terminal) is written by a thread of its own, and so is what is written to the broker.
-pub fn run(stream: UnixStream, host: HostQuery, term: String, tty: &mut Tty, inputs: (Inputs, Queue), stdout: impl Into<Output>, stderr: impl Into<Output>) -> i32 {
+pub fn run(stream: Stream, host: HostQuery, term: String, tty: &mut Tty, inputs: (Inputs, Queue), stdout: impl Into<Output>, stderr: impl Into<Output>) -> i32 {
     let (inputs, queue) = inputs;
     let (stdout, mut stderr) = (stdout.into(), stderr.into());
     let size = tty.size().unwrap_or((80, 24));
@@ -165,6 +182,9 @@ impl Loop<'_> {
                         return self.cut_short(false, status);
                     }
                     self.broker.written(wait(END_WAIT));
+                    // Windows: the console's restore turns virtual terminal sequences and UTF-8 off, so nothing may reach it after that.
+                    #[cfg(windows)]
+                    let _ = self.terminal.stop(STOP_WAIT);
                     self.tty.restore();
                     return Some(code);
                 }
@@ -181,6 +201,9 @@ impl Loop<'_> {
     /// A signal ended an end's wait for the terminal (`perform`): the terminal is put back at once, throwing away what was typed when the
     /// end does (an end under a question), and the program exits with `status`. What was still to be written is not waited for.
     fn cut_short(&mut self, discard_input: bool, status: i32) -> Option<i32> {
+        // Windows: what is still to be written is not, and nothing reaches the console once it is put back (`Action::Exit`).
+        #[cfg(windows)]
+        let _ = self.terminal.stop(Duration::ZERO);
         if discard_input {
             let _ = self.tty.set_mode(Mode::Cooked, true);
         }
@@ -351,9 +374,18 @@ impl Queue {
         }
         self.kept.iter().find_map(|queued| match queued.input {
             Input::Stop(signal) => Some(128 + signal),
-            Input::Interrupt => Some(128 + libc::SIGINT),
+            Input::Interrupt => Some(128 + signal::INT),
             _ => None,
         })
+    }
+
+    /// The next input, within `within` (a test's look at the queue from outside the loop).
+    #[cfg(all(test, windows))]
+    pub(crate) fn next_within(&mut self, within: Duration) -> Option<Input> {
+        match self.kept.pop_front() {
+            Some(queued) => Some(queued.input),
+            None => self.receiver.recv_timeout(within).ok().map(|queued| queued.input),
+        }
     }
 
     /// Throws away what the person typed and the keys thread has already queued; everything else stays, in order. (What is thrown away
@@ -386,6 +418,10 @@ enum Show {
     Release(Credit),
     /// Told once everything given before it has been written.
     Mark(SyncSender<()>),
+    /// The end of the run (Windows, before the console is put back): what a stream holds back is written as it is (unless the writer
+    /// was stopped), nothing given after this is written, and the sender is told.
+    #[cfg(any(windows, test))]
+    End(SyncSender<()>),
 }
 
 /// One of the terminal's streams (standard output, standard error) as the terminal writer writes it, with its descriptor when it has
@@ -394,19 +430,49 @@ enum Show {
 /// blocking write would have.
 pub struct Output {
     writer: Box<dyn Write + Send>,
+    #[cfg(unix)]
     descriptor: Option<RawFd>,
+    /// The console (Windows): no write gives it a part of a character (spec §7.3). A character cut at the end of what is written waits
+    /// for the rest; at the end of the run it is written as it is (`Output::end`).
+    #[cfg(any(windows, test))]
+    pieces: Option<super::console_inputs::Utf8Pieces>,
 }
 
 impl Output {
     /// A stream with a descriptor to wait on.
+    #[cfg(unix)]
     pub fn of<W: Write + AsRawFd + Send + 'static>(writer: W) -> Output {
         let descriptor = Some(writer.as_raw_fd());
-        Output { writer: Box::new(writer), descriptor }
+        Output { descriptor, ..Output::from(writer) }
     }
 
-    /// Writes all of `bytes`, waiting out the writes that would block. An error of any other kind is the end of the stream (a pipe nobody
-    /// reads any more, a terminal that went away).
+    /// The console's screen buffer (Windows), which is given whole characters only.
+    #[cfg(any(windows, test))]
+    pub fn console<W: Write + Send + 'static>(writer: W) -> Output {
+        Output { pieces: Some(super::console_inputs::Utf8Pieces::default()), ..Output::from(writer) }
+    }
+
+    /// Writes all of `bytes` (to the console: up to the last whole character, after what the last write held back), waiting out the writes
+    /// that would block. An error of any other kind is the end of the stream (a pipe nobody reads any more, a terminal that went away).
     fn write_whole(&mut self, bytes: &[u8]) -> io::Result<()> {
+        #[cfg(any(windows, test))]
+        if let Some(pieces) = self.pieces.as_mut() {
+            let whole = pieces.next(bytes);
+            return self.write_all_of(&whole);
+        }
+        self.write_all_of(bytes)
+    }
+
+    /// The end of the run: what the console's stream held back (the start of a character) is written as it is.
+    #[cfg(any(windows, test))]
+    fn end(&mut self) -> io::Result<()> {
+        match self.pieces.as_mut().map(super::console_inputs::Utf8Pieces::end) {
+            Some(rest) if !rest.is_empty() => self.write_all_of(&rest),
+            _ => Ok(()),
+        }
+    }
+
+    fn write_all_of(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut rest = bytes;
         while !rest.is_empty() {
             match self.writer.write(rest) {
@@ -428,22 +494,29 @@ impl Output {
 
     /// Waits, for a while at most, until the stream takes more. A stream whose other end went away is the end of it.
     fn wait_writable(&mut self) -> io::Result<()> {
-        let Some(descriptor) = self.descriptor else {
-            // Nothing to wait on (a stream of a test): a moment.
-            std::thread::sleep(Duration::from_millis(1));
+        #[cfg(unix)]
+        if let Some(descriptor) = self.descriptor {
+            if poll_for(descriptor, libc::POLLOUT, WRITABLE_WAIT_MS)? & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the terminal went away"));
+            }
             return Ok(());
-        };
-        if poll_for(descriptor, libc::POLLOUT, WRITABLE_WAIT_MS)? & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the terminal went away"));
         }
+        // Nothing to wait on (a stream of a test; a Windows handle, whose writes wait for themselves): a moment.
+        std::thread::sleep(Duration::from_millis(1));
         Ok(())
     }
 }
 
 impl<W: Write + Send + 'static> From<W> for Output {
-    /// A stream without a descriptor (a test's).
+    /// A stream without a descriptor (a test's; on Windows every one).
     fn from(writer: W) -> Output {
-        Output { writer: Box::new(writer), descriptor: None }
+        Output {
+            writer: Box::new(writer),
+            #[cfg(unix)]
+            descriptor: None,
+            #[cfg(any(windows, test))]
+            pieces: None,
+        }
     }
 }
 
@@ -452,6 +525,12 @@ struct TerminalWriter {
     jobs: Sender<Show>,
     /// When the writer last got on: took a job, or wrote a piece of one.
     moved: Arc<Mutex<Instant>>,
+    /// The writer writes nothing more (Windows, at the end: `stop`). Looked at before each piece, holding `writing`.
+    #[cfg(any(windows, test))]
+    stopped: Arc<AtomicBool>,
+    /// Held by the writer while it writes a piece.
+    #[cfg(any(windows, test))]
+    writing: Arc<Mutex<()>>,
 }
 
 impl TerminalWriter {
@@ -460,11 +539,18 @@ impl TerminalWriter {
         let (jobs, given) = std::sync::mpsc::channel::<Show>();
         let moved = Arc::new(Mutex::new(Instant::now()));
         let moving = Arc::clone(&moved);
+        let (stopped, writing) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(())));
+        let (stop, piece_lock) = (Arc::clone(&stopped), Arc::clone(&writing));
         spawn_worker("sshelter-terminal", inputs.clone(), move |_| {
             let got_on = || *moving.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
-            // What a job brings is written a piece at a time, and each piece written counts as getting on.
+            // What a job brings is written a piece at a time, and each piece written counts as getting on. Once the writer is stopped
+            // the rest is not written (which is not a failure of the stream).
             let write = |output: &mut Output, bytes: &[u8]| -> io::Result<()> {
                 for piece in bytes.chunks(PIECE) {
+                    let _writing = piece_lock.lock().unwrap_or_else(PoisonError::into_inner);
+                    if stop.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
                     output.write_whole(piece)?;
                     got_on();
                 }
@@ -482,10 +568,29 @@ impl TerminalWriter {
                     Show::Mark(reached) => {
                         let _ = reached.send(());
                     }
+                    #[cfg(any(windows, test))]
+                    Show::End(reached) => {
+                        if !stop.swap(true, Ordering::SeqCst) {
+                            let _writing = piece_lock.lock().unwrap_or_else(PoisonError::into_inner);
+                            for (output, works) in [(&mut stdout, stdout_works), (&mut stderr, stderr_works)] {
+                                if works {
+                                    let _ = output.end();
+                                }
+                            }
+                        }
+                        let _ = reached.send(());
+                    }
                 }
             }
         });
-        TerminalWriter { jobs, moved }
+        TerminalWriter {
+            jobs,
+            moved,
+            #[cfg(any(windows, test))]
+            stopped,
+            #[cfg(any(windows, test))]
+            writing,
+        }
     }
 
     fn show(&self, job: Show) {
@@ -495,6 +600,25 @@ impl TerminalWriter {
     /// Waits until everything given so far has been written, or `wait` has passed; whether it has.
     fn written(&self, wait: Duration) -> bool {
         wait_for_mark(|mark| self.jobs.send(Show::Mark(mark)).is_ok(), wait)
+    }
+
+    /// Windows, at the end of the run, before the console is put back: its restore turns virtual terminal sequences and UTF-8 off, and
+    /// what reached it after that would show as raw escape sequences. The writer is given `wait` to write what it was given and what a
+    /// stream held back; after that it writes nothing more, and a piece it is writing then is waited for `STOP_WAIT` at most (a console
+    /// that takes nothing keeps the program from putting it back no longer than that). Whether the writer finished.
+    #[cfg(any(windows, test))]
+    fn stop(&self, wait: Duration) -> bool {
+        let (mark, reached) = std::sync::mpsc::sync_channel(1);
+        if self.jobs.send(Show::End(mark)).is_ok() && reached.recv_timeout(wait).is_ok() {
+            return true;
+        }
+        self.stopped.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + STOP_WAIT;
+        // The writer's own lock: free (or poisoned: the writer is gone) once no piece is being written, and no piece starts after this.
+        while matches!(self.writing.try_lock(), Err(std::sync::TryLockError::WouldBlock)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
     }
 
     /// Waits until everything given so far has been written, for as long as the writer gets on: a slow terminal is waited for, one that
@@ -542,7 +666,7 @@ struct BrokerWriter {
 }
 
 impl BrokerWriter {
-    fn start(mut stream: UnixStream, inputs: &Inputs) -> BrokerWriter {
+    fn start(mut stream: Stream, inputs: &Inputs) -> BrokerWriter {
         let (jobs, given) = std::sync::mpsc::channel::<Post>();
         let size = Arc::new(Mutex::new(None));
         let latest = Arc::clone(&size);
@@ -596,7 +720,7 @@ impl BrokerWriter {
 /// Reads the broker's frames into the queue until the connection ends, a control message cannot be read (the session ends then:
 /// `Input::Unreadable`), or the loop is gone. A frame counts against the output budget until the terminal has taken what it brought;
 /// while the budget is spent, nothing more is read.
-fn read_broker(mut reader: UnixStream, inputs: &Inputs) {
+fn read_broker(mut reader: Stream, inputs: &Inputs) {
     loop {
         let (input, bytes) = match read_frame(&mut reader) {
             Ok(Some(Frame::Control(payload))) => match decode::<ServerMessage>(&payload) {
@@ -649,6 +773,7 @@ fn write_answer(writer: &mut impl Write, question_id: &str, value: &str) -> std:
 }
 
 /// Where the keys come from: the terminal on standard input (`TerminalKeys`), or a fake one in tests.
+#[cfg(unix)]
 trait Keys: Read {
     /// Waits until something can be read. Called when a read found nothing on a terminal that does not wait for keys (another program
     /// left the descriptor non-blocking: the descriptor is shared, so the CLI does not change it back).
@@ -658,17 +783,20 @@ trait Keys: Read {
 }
 
 /// The terminal on standard input, read through `source`; `descriptor` is where `source` reads.
+#[cfg(unix)]
 struct TerminalKeys<R> {
     source: R,
     descriptor: RawFd,
 }
 
+#[cfg(unix)]
 impl<R: Read> Read for TerminalKeys<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.source.read(buf)
     }
 }
 
+#[cfg(unix)]
 impl<R: Read> Keys for TerminalKeys<R> {
     fn wait_readable(&mut self) -> io::Result<()> {
         poll_for(self.descriptor, libc::POLLIN, -1).map(|_| ())
@@ -680,6 +808,7 @@ impl<R: Read> Keys for TerminalKeys<R> {
 }
 
 /// `poll` for `events` on `descriptor`, for up to `timeout_ms` milliseconds (-1: as long as it takes); the events it saw (none: 0).
+#[cfg(unix)]
 fn poll_for(descriptor: RawFd, events: libc::c_short, timeout_ms: i32) -> io::Result<libc::c_short> {
     let mut entry = libc::pollfd { fd: descriptor, events, revents: 0 };
     loop {
@@ -697,6 +826,7 @@ fn poll_for(descriptor: RawFd, events: libc::c_short, timeout_ms: i32) -> io::Re
 
 /// Reads the person's keys into the queue until the terminal goes away, or the program ends. A terminal that went away ends the session
 /// as SIGHUP does (`Input::Stop`), and `hung_up` is called then (the program arms its watchdog).
+#[cfg(unix)]
 pub fn stdin_thread(inputs: Inputs, hung_up: impl FnOnce() + Send + 'static) {
     // Not through `std::io::stdin()`: its buffer keeps a copy of what is read through it, for as long as the program runs, unless the
     // read is at least as large as that buffer (8 KiB; measured: a read of 8191 bytes leaves what was typed in it, one of 8192 does
@@ -711,15 +841,17 @@ pub fn stdin_thread(inputs: Inputs, hung_up: impl FnOnce() + Send + 'static) {
 }
 
 /// `read_keys` on a thread of its own; a terminal that went away is told to the queue as SIGHUP would be.
+#[cfg(unix)]
 fn keys_thread(mut source: impl Keys + Send + 'static, inputs: Inputs, hung_up: impl FnOnce() + Send + 'static) {
     spawn_worker("sshelter-keys", inputs, move |inputs| {
-        if read_keys(&mut source, &inputs) == KeysEnd::HungUp && inputs.send(Input::Stop(libc::SIGHUP)).is_ok() {
+        if read_keys(&mut source, &inputs) == KeysEnd::HungUp && inputs.send(Input::Stop(signal::HUP)).is_ok() {
             hung_up();
         }
     });
 }
 
 /// Why `read_keys` returned.
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 enum KeysEnd {
     /// The loop is gone.
@@ -734,6 +866,7 @@ enum KeysEnd {
 /// each), unless the terminal says it hung up (POLLHUP): a closed window reads as nothing, again and again, and says so (measured on
 /// macOS; Linux reads it as EIO, or as nothing with POLLHUP once the terminal is hung up). A hang-up seen while the keys wait for the
 /// broker ends the thread too. A failed read is the end of the terminal.
+#[cfg(unix)]
 fn read_keys(source: &mut impl Keys, inputs: &Inputs) -> KeysEnd {
     let mut buf = [0u8; 4096];
     loop {
@@ -773,6 +906,66 @@ fn read_keys(source: &mut impl Keys, inputs: &Inputs) -> KeysEnd {
     }
 }
 
+/// Windows: the keys, read from the console (`ConsoleKeys`) into the queue until the console goes away, the `Tty` is gone, or the loop is
+/// gone. A console that went away ends the session as SIGHUP does (`Input::Stop`), and `gone` is called then (the program arms its
+/// watchdog).
+#[cfg(any(windows, test))]
+pub fn console_keys_thread(inputs: Inputs, keys: super::console::ConsoleKeys, gone: impl FnOnce() + Send + 'static) {
+    spawn_worker("sshelter-keys", inputs, move |inputs| {
+        if read_console(&keys, &inputs) == ConsoleKeysEnd::Gone && inputs.send(Input::Stop(signal::HUP)).is_ok() {
+            gone();
+        }
+    });
+}
+
+/// Why `read_console` returned.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum ConsoleKeysEnd {
+    /// The loop is gone.
+    LoopGone,
+    /// A read failed: the console went away.
+    Gone,
+    /// The `Tty` is gone.
+    Closed,
+}
+
+/// Queues what the console's reads give (`ReadConsoleW`: UTF-16) as typed text, in UTF-8: a surrogate pair split between two reads is
+/// joined, a half without the other is U+FFFD (`Utf16Decoder`), and a read the mode changed under gives nothing (`KeysRead::Stale`; a
+/// half it left is forgotten). A read of nothing (Ctrl-C at a question; the control handler tells the loop) is not the end. At a question
+/// a line that starts with Ctrl-Z, Windows' end of input, is the end of input (`Input::StdinEnd`), as Ctrl-D is on Unix: it cancels the
+/// question.
+#[cfg(any(windows, test))]
+fn read_console(keys: &super::console::ConsoleKeys, inputs: &Inputs) -> ConsoleKeysEnd {
+    use super::console::{KeysRead, Mode as ConsoleMode};
+    let mut buf = [0u16; CONSOLE_READ];
+    let mut decoder = super::console_inputs::Utf16Decoder::default();
+    loop {
+        // While what was typed before waits for the broker, the keys stay in the console.
+        if !inputs.keys.wait_room(HANGUP_CHECK, || !keys.closed()) {
+            return ConsoleKeysEnd::Closed;
+        }
+        let mut queued = Ok(());
+        let outcome = keys.read(&mut buf, |units, mode| {
+            let text = decoder.decode(units);
+            queued = match text.first() {
+                Some(0x1a) if matches!(mode, ConsoleMode::Prompt { .. }) => inputs.input_ended(),
+                Some(_) => inputs.typed(text),
+                None => Ok(()),
+            };
+        });
+        // What was typed may be a password: the copy that stays here is wiped as well.
+        buf.zeroize();
+        match outcome {
+            KeysRead::Read if queued.is_err() => return ConsoleKeysEnd::LoopGone,
+            KeysRead::Read | KeysRead::Nothing => {}
+            KeysRead::Stale => decoder.reset(),
+            KeysRead::Gone => return ConsoleKeysEnd::Gone,
+            KeysRead::Closed => return ConsoleKeysEnd::Closed,
+        }
+    }
+}
+
 /// Starts `work` on a thread of its own. If that thread panics (the panic hook has put the terminal back by then), or cannot be started,
 /// the queue is told (`Input::Failed`) and the program ends: the loop would otherwise go on, in the mode the terminal was in, with nobody
 /// reading the keys or the signals or the broker, or writing to the terminal or the broker.
@@ -798,13 +991,53 @@ impl Drop for Watch {
     }
 }
 
+/// Windows: the window's size, looked at every `every` (Windows has no SIGWINCH; spec §7.3): a size that differs from the last one is
+/// queued as a resize, which is what SIGWINCH queues on Unix, and a size that stays the same is not. The watch ends when the returned
+/// `SizeWatch` is dropped, or the loop is gone.
+#[cfg(any(windows, test))]
+pub fn watch_size(inputs: Inputs, every: Duration, size: impl Fn() -> Option<(u16, u16)> + Send + 'static) -> SizeWatch {
+    let over = Arc::new(AtomicBool::new(false));
+    let watching = Arc::clone(&over);
+    spawn_worker("sshelter-size", inputs, move |inputs| {
+        let mut last = size();
+        loop {
+            std::thread::sleep(every);
+            if watching.load(Ordering::SeqCst) {
+                return;
+            }
+            let now = size();
+            if now != last {
+                if let Some((cols, rows)) = now {
+                    if inputs.send(Input::Resize(cols, rows)).is_err() {
+                        return;
+                    }
+                }
+                last = now;
+            }
+        }
+    });
+    SizeWatch(over)
+}
+
+/// Ends the watch of the window's size when dropped (`watch_size`).
+#[cfg(any(windows, test))]
+pub struct SizeWatch(Arc<AtomicBool>);
+
+#[cfg(any(windows, test))]
+impl Drop for SizeWatch {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// What the queue is told when `signal` stops the program or cancels a question: Ctrl-C cancels the question on the terminal (and ends
 /// the program when there is none); every other signal ends it, with the number its exit status (128 + n) is made of.
-fn input_for(signal: i32) -> Input {
-    if signal == libc::SIGINT {
+#[cfg(unix)]
+fn input_for(number: i32) -> Input {
+    if number == signal::INT {
         Input::Interrupt
     } else {
-        Input::Stop(signal)
+        Input::Stop(number)
     }
 }
 
@@ -817,11 +1050,13 @@ fn input_for(signal: i32) -> Input {
 /// Ctrl-Z (SIGTSTP, at a question or while connecting; `kill -TSTP` too) stops the program as OpenSSH does, with the terminal put back
 /// (`terminal`) for the shell; SIGCONT sets the program's mode again, since the shell does not, and the client asks a question on the
 /// terminal again (`Input::Continue`) and sends the size, which may have changed while the program was stopped.
+#[cfg(unix)]
 pub fn signal_thread(inputs: Inputs, terminal: Restorer, watchdog: Watchdog, size: impl Fn() -> Option<(u16, u16)> + Send + 'static) -> std::io::Result<()> {
     signals(inputs, terminal, watchdog, size, stop_for_real)
 }
 
 /// `signal_thread`, stopping the program with `stop` (tests stop it in other ways).
+#[cfg(unix)]
 fn signals(inputs: Inputs, terminal: Restorer, watchdog: Watchdog, size: impl Fn() -> Option<(u16, u16)> + Send + 'static, stop: impl Fn() + Send + 'static) -> std::io::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -876,6 +1111,7 @@ fn signals(inputs: Inputs, terminal: Restorer, watchdog: Watchdog, size: impl Fn
 /// Stops the program the way SIGTSTP does without a handler, as OpenSSH's readpassphrase does: the default action is put back for a
 /// moment and the signal sent again. The program stops before `kill` returns, and goes on from there when it is continued (SIGCONT). In
 /// a process group no shell looks after (an orphaned one) the system discards the stop, as it would without the handler.
+#[cfg(unix)]
 fn stop_for_real() {
     // SAFETY: `sigaction` with structures that are wholly initialised (zeroed, then the default action and an empty mask); the handler
     // that was in place (tokio's) is put back as it was.
@@ -889,6 +1125,60 @@ fn stop_for_real() {
         }
         libc::kill(libc::getpid(), libc::SIGTSTP);
         libc::sigaction(libc::SIGTSTP, &handler, std::ptr::null_mut());
+    }
+}
+
+/// The end of a run, for those who wait for it: set once the run is over and the terminal is back as it was.
+#[cfg(any(windows, test))]
+#[derive(Clone, Default)]
+pub struct Over(Arc<(Mutex<bool>, Condvar)>);
+
+#[cfg(any(windows, test))]
+impl Over {
+    pub fn set(&self) {
+        *self.0 .0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.0 .1.notify_all();
+    }
+
+    /// Waits until the run is over, `at_most`; whether it is.
+    pub fn wait(&self, at_most: Duration) -> bool {
+        let over = self.0 .0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (over, _) = self.0 .1.wait_timeout_while(over, at_most, |over| !*over).unwrap_or_else(PoisonError::into_inner);
+        *over
+    }
+}
+
+/// Windows: what the console's control events (`SetConsoleCtrlHandler`) do, as the signal thread does with signals on Unix (spec §7.3).
+/// Ctrl-C (a signal only while the input is not raw: in raw mode it is a key for the shell) and Ctrl-Break are SIGINT: a question is
+/// cancelled, and without one the program ends. The console closed is SIGHUP, log-off and shut-down SIGTERM (only services get those
+/// two; they are handled all the same): they end the program, and arm the watchdog. Windows ends the process when the handler returns
+/// from one of those three, so it returns only once the run is over and the console back as it was (`Over`), or the watchdog's grace has
+/// passed (it has ended the process by then).
+#[cfg(any(windows, test))]
+pub struct ControlEvents {
+    inputs: Inputs,
+    watchdog: Watchdog,
+    over: Over,
+}
+
+#[cfg(any(windows, test))]
+impl ControlEvents {
+    pub fn new(inputs: Inputs, watchdog: Watchdog, over: Over) -> ControlEvents {
+        ControlEvents { inputs, watchdog, over }
+    }
+
+    /// The control event `event` (a `CTRL_*_EVENT`); whether it was handled. One that is not is left to the next handler.
+    pub fn handle(&self, event: u32) -> bool {
+        let Some(control) = super::console_inputs::control(event) else {
+            return false;
+        };
+        let _ = self.inputs.send(control.input());
+        if control.ends {
+            self.watchdog.arm(128 + control.signal);
+            // The watchdog ends the process `grace` after it was armed, once it has put the console back for a moment at most.
+            self.over.wait(self.watchdog.grace + WATCHDOG_TERMINAL_WAIT + Duration::from_secs(1));
+        }
+        true
     }
 }
 
@@ -972,8 +1262,245 @@ impl Alarm {
     }
 }
 
+/// The parts of the loop every platform has, tested on every platform (the Unix ones are in `tests`).
 #[cfg(test)]
+mod shared_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::ssh::testing::eventually;
+
+    /// A stream that keeps each write apart, and can be held: a write waits while it is.
+    #[derive(Clone, Default)]
+    struct Writes {
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+        held: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Writes {
+        fn hold(&self, held: bool) {
+            *self.held.0.lock().unwrap() = held;
+            self.held.1.notify_all();
+        }
+
+        fn all(&self) -> Vec<u8> {
+            self.writes.lock().unwrap().concat()
+        }
+    }
+
+    impl Write for Writes {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let mut held = self.held.0.lock().unwrap();
+            while *held {
+                held = self.held.1.wait(held).unwrap();
+            }
+            drop(held);
+            self.writes.lock().unwrap().push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Spec §7.3: the console is never given a part of a character, whether the character is cut between two of the broker's frames or
+    /// between two of the writer's pieces; at the end of the run what waits for the rest of its character is written as it is.
+    #[test]
+    fn the_console_is_given_whole_characters_and_at_the_end_what_waits() {
+        let (console, said) = (Writes::default(), Writes::default());
+        let (inputs, _queue) = queue();
+        let writer = TerminalWriter::start(Output::console(console.clone()), Output::console(said.clone()), &inputs);
+        // A text of characters of one to four bytes, longer than a piece, cut between frames at every third byte, and once in the middle
+        // of the last character (the end of the run comes before the rest of it).
+        let text = "a\u{e9}\u{5bc6}\u{1f511}".repeat(PIECE / 5);
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.extend_from_slice(&"\u{1f511}".as_bytes()[..2]);
+        for frame in bytes.chunks(PIECE / 3 * 2 + 1) {
+            writer.show(Show::Output(frame.to_vec()));
+        }
+        writer.show(Show::Said("sshelter: \u{5bc6}\n".into()));
+        assert!(writer.written(Duration::from_secs(10)));
+        for write in console.writes.lock().unwrap().iter() {
+            assert!(std::str::from_utf8(write).is_ok(), "a write of {} bytes is whole characters", write.len());
+        }
+        assert_eq!(console.all(), text.as_bytes(), "all but the cut character, which waits");
+        assert!(writer.stop(Duration::from_secs(10)), "the writer finished");
+        assert_eq!(console.all(), bytes, "at the end the cut character is written as it is");
+        assert_eq!(said.all(), "sshelter: \u{5bc6}\n".as_bytes());
+    }
+
+    /// Windows' end of a run: the writer writes what it was given, and nothing given after the stop; the console is put back after that.
+    #[test]
+    fn a_stopped_writer_writes_what_it_was_given_and_nothing_after() {
+        let (console, said) = (Writes::default(), Writes::default());
+        let (inputs, _queue) = queue();
+        let writer = TerminalWriter::start(Output::console(console.clone()), said.clone(), &inputs);
+        writer.show(Show::Output(b"the last output".to_vec()));
+        assert!(writer.stop(Duration::from_secs(10)));
+        writer.show(Show::Output(b" and more".to_vec()));
+        writer.show(Show::Said("said after the end\n".into()));
+        assert!(writer.written(Duration::from_secs(10)), "the writer still takes its jobs");
+        assert_eq!((console.all(), said.all()), (b"the last output".to_vec(), Vec::new()));
+    }
+
+    /// A console that takes nothing (a selection in the window holds its output) keeps the end of a run for a moment at most: the writer
+    /// is stopped, the piece it is writing is waited for `STOP_WAIT`, and once the console takes output again that piece is all it gets.
+    #[test]
+    fn a_writer_that_cannot_write_is_stopped_within_its_bound() {
+        let console = Writes::default();
+        console.hold(true);
+        let (inputs, _queue) = queue();
+        let writer = TerminalWriter::start(Output::console(console.clone()), Writes::default(), &inputs);
+        writer.show(Show::Output(vec![b'x'; 8 * PIECE]));
+        std::thread::sleep(Duration::from_millis(100));
+        let asked = Instant::now();
+        assert!(!writer.stop(Duration::ZERO), "the writer could not finish");
+        let took = asked.elapsed();
+        assert!(took >= STOP_WAIT && took < STOP_WAIT + Duration::from_secs(1), "{took:?}");
+        console.hold(false);
+        assert!(writer.written(Duration::from_secs(10)));
+        assert_eq!(console.all().len(), PIECE, "the piece that was being written, and nothing after it");
+    }
+
+    /// The next input the queue holds, within ten seconds.
+    fn next_input(queue: &Queue) -> Input {
+        queue.receiver.recv_timeout(Duration::from_secs(10)).expect("an input within 10 s").input
+    }
+
+    /// A terminal of the platform's kind, for a watchdog to put back.
+    fn a_tty() -> Tty {
+        #[cfg(unix)]
+        let api = crate::cli::terminal::fake::FakeTermios::new();
+        #[cfg(windows)]
+        let api = crate::cli::terminal::fake::FakeConsole::new();
+        Tty::new(api).unwrap()
+    }
+
+    /// Spec §7.3, Windows: the console's keys reach the shell as UTF-8, a character typed as a surrogate pair that two reads split
+    /// included; at a question Ctrl-Z at the start of the line (Windows' end of input) cancels it as Ctrl-D does on Unix; the read a change
+    /// of mode ended gives nothing; and a console that went away ends the session as SIGHUP does, with the watchdog armed.
+    #[test]
+    fn the_consoles_keys_reach_the_queue_as_utf_8() {
+        use crate::cli::console::{fake::FakeConsole, Mode as ConsoleMode, Tty as ConsoleTty};
+        let typed = |input: Input| match input {
+            Input::Stdin(bytes) => String::from_utf8(bytes.to_vec()).unwrap(),
+            other => panic!("not typed text: {other:?}"),
+        };
+        let console = FakeConsole::new();
+        let mut tty = ConsoleTty::new(console.clone()).unwrap();
+        tty.set_mode(ConsoleMode::Raw, false).unwrap();
+        let (inputs, queue) = queue();
+        let (told, gone) = std::sync::mpsc::channel();
+        console_keys_thread(inputs.clone(), tty.keys(), move || told.send(()).unwrap());
+        console.type_text("ls -l \u{5bc6}\r");
+        assert_eq!(typed(next_input(&queue)), "ls -l \u{5bc6}\r");
+        let pair: Vec<u16> = "\u{1f511}".encode_utf16().collect();
+        console.type_units(&[u16::from(b'a'), pair[0]]);
+        console.type_units(&[pair[1]]);
+        assert_eq!(typed(next_input(&queue)), "a");
+        assert_eq!(typed(next_input(&queue)), "\u{1f511}", "the pair joined");
+        // A question: the raw read in progress is ended, and its Enter is not typed text.
+        std::thread::sleep(Duration::from_millis(200));
+        tty.set_mode(ConsoleMode::Prompt { echo: false }, true).unwrap();
+        console.type_text("\u{1a}\r\n");
+        assert!(matches!(next_input(&queue), Input::StdinEnd), "Ctrl-Z ends the input");
+        tty.set_mode(ConsoleMode::Prompt { echo: false }, true).unwrap();
+        console.type_text("pw\r\n");
+        assert_eq!(typed(next_input(&queue)), "pw\r\n");
+        tty.set_mode(ConsoleMode::Raw, false).unwrap();
+        console.go_away();
+        assert!(matches!(next_input(&queue), Input::Stop(1)));
+        assert!(gone.recv_timeout(Duration::from_secs(10)).is_ok(), "the watchdog is armed");
+        assert!(queue.receiver.try_recv().is_err(), "nothing else");
+    }
+
+    /// Ctrl-C and Ctrl-Break are SIGINT: the loop is told, the watchdog is not armed (a question is cancelled; the client decides), and
+    /// the handler returns at once. An event the program does not know is left to the next handler.
+    #[test]
+    fn ctrl_c_and_ctrl_break_interrupt_and_the_handler_returns_at_once() {
+        use crate::cli::console_inputs::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+        let tty = a_tty();
+        let (exit, exits) = std::sync::mpsc::channel();
+        let watchdog = Watchdog::start(tty.restorer(), Duration::from_millis(300), move |code| exit.send(code).unwrap()).unwrap();
+        let (inputs, queue) = queue();
+        let events = ControlEvents::new(inputs, watchdog.clone(), Over::default());
+        for event in [CTRL_C_EVENT, CTRL_BREAK_EVENT] {
+            let asked = Instant::now();
+            assert!(events.handle(event));
+            assert!(asked.elapsed() < Duration::from_secs(1), "{:?}", asked.elapsed());
+            assert!(matches!(next_input(&queue), Input::Interrupt), "event {event}");
+        }
+        assert!(!events.handle(3), "left to the next handler");
+        assert!(exits.recv_timeout(Duration::from_millis(600)).is_err(), "the watchdog was not armed");
+        watchdog.stand_down();
+    }
+
+    /// The console closed is SIGHUP, log-off and shut-down SIGTERM: the loop is told, the watchdog armed, and the handler does not return
+    /// (Windows ends the process when it does) before the run is over, or the watchdog has ended the program.
+    #[test]
+    fn the_console_closed_ends_the_run_and_the_handler_waits_for_its_end() {
+        use crate::cli::console_inputs::{CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT};
+        let tty = a_tty();
+        let (exit, exits) = std::sync::mpsc::channel();
+        let watchdog = Watchdog::start(tty.restorer(), Duration::from_secs(30), move |code| exit.send(code).unwrap()).unwrap();
+        let (inputs, queue) = queue();
+        let over = Over::default();
+        let events = Arc::new(ControlEvents::new(inputs, watchdog.clone(), over.clone()));
+        let handling = std::thread::spawn({
+            let events = Arc::clone(&events);
+            move || events.handle(CTRL_CLOSE_EVENT)
+        });
+        assert!(matches!(next_input(&queue), Input::Stop(1)));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!handling.is_finished(), "the handler waits for the run's end");
+        over.set();
+        eventually("the handler to return", 10, || handling.is_finished());
+        assert!(handling.join().unwrap());
+        watchdog.stand_down();
+        assert!(exits.recv_timeout(Duration::from_millis(300)).is_err(), "the run ended in time");
+
+        // The run does not end: the watchdog ends the program after its grace, with 128 + SIGTERM's number.
+        let (exit, exits) = std::sync::mpsc::channel();
+        let watchdog = Watchdog::start(tty.restorer(), Duration::from_millis(300), move |code| exit.send(code).unwrap()).unwrap();
+        let (inputs, queue) = super::queue();
+        let events = ControlEvents::new(inputs, watchdog, Over::default());
+        let handling = std::thread::spawn(move || events.handle(CTRL_LOGOFF_EVENT));
+        assert!(matches!(next_input(&queue), Input::Stop(15)));
+        assert_eq!(exits.recv_timeout(Duration::from_secs(10)), Ok(143));
+        eventually("the handler to give up waiting", 10, || handling.is_finished());
+    }
+
+    /// Windows has no SIGWINCH (spec §7.3): the window's size is looked at every so often, and a resize is queued when it changed, never
+    /// when it stayed the same; a size that cannot be read is no resize. The watch ends with its `SizeWatch`.
+    #[test]
+    fn the_window_size_is_queued_when_it_changes_and_only_then() {
+        let size = Arc::new(Mutex::new(Some((80u16, 24u16))));
+        let (inputs, mut queue) = queue();
+        let watch = {
+            let size = Arc::clone(&size);
+            watch_size(inputs.clone(), Duration::from_millis(20), move || *size.lock().unwrap())
+        };
+        let next = |queue: &Queue, within: Duration| queue.receiver.recv_timeout(within).map(|queued| format!("{:?}", queued.input));
+        assert!(next(&queue, Duration::from_millis(200)).is_err(), "the size has not changed");
+        *size.lock().unwrap() = Some((100, 30));
+        assert_eq!(next(&queue, Duration::from_secs(10)).unwrap(), "Resize(100, 30)");
+        assert!(next(&queue, Duration::from_millis(200)).is_err(), "once");
+        *size.lock().unwrap() = None;
+        assert!(next(&queue, Duration::from_millis(200)).is_err(), "a size that cannot be read is no resize");
+        *size.lock().unwrap() = Some((120, 40));
+        assert_eq!(next(&queue, Duration::from_secs(10)).unwrap(), "Resize(120, 40)");
+        drop(watch);
+        drop(inputs);
+        // The queue ends once every thread that fills it is gone: the watch's too.
+        let ended = std::thread::spawn(move || queue.next().is_none());
+        eventually("the watch to end", 10, || ended.is_finished());
+        assert!(ended.join().unwrap());
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 

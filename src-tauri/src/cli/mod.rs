@@ -1,16 +1,22 @@
-//! `sshelter connect` (own-ssh spec §7.3): the terminal's end of a session in the app. macOS and Linux in this version; on Windows it
-//! says so (plan 1b; the Windows console is phase 3).
+//! `sshelter connect` (own-ssh spec §7.3): the terminal's end of a session in the app, on macOS and Linux (a terminal, termios and
+//! signals) and on Windows (a console, its modes and its control events; plan 1b-3).
 
-#[cfg(unix)]
 pub mod client;
 // The Windows console without the Windows calls (`terminal_windows.rs` adds them): built on Windows, and in every platform's tests.
 #[cfg(any(windows, test))]
 pub mod console;
+// What the Windows console reads and is given, and its control events, without the Windows calls (`inputs_windows.rs` makes them):
+// built on Windows, and in every platform's tests.
+#[cfg(any(windows, test))]
+pub mod console_inputs;
 #[cfg(all(test, unix))]
 mod e2e_tests;
+#[cfg(windows)]
+mod inputs_windows;
+#[cfg(all(test, windows))]
+mod pipe_tests;
 #[cfg(all(test, windows))]
 mod real_console_tests;
-#[cfg(unix)]
 pub mod run;
 pub mod signal;
 #[cfg(unix)]
@@ -22,7 +28,6 @@ pub mod terminal;
 use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-#[cfg(unix)]
 use std::sync::Arc;
 
 use crate::session::protocol::HostQuery;
@@ -45,8 +50,7 @@ pub fn parse_args(args: &[String]) -> Result<HostQuery, String> {
     }
 }
 
-/// The arguments after `connect` as text. One that is not text (not UTF-8) cannot name a host either: the usage.
-#[cfg(unix)]
+/// The arguments after `connect` as text. One that is not text (not UTF-8; on Windows, not UTF-16) cannot name a host either: the usage.
 fn texts(args: &[OsString]) -> Result<Vec<String>, String> {
     args.iter().map(|arg| arg.clone().into_string().map_err(|_| USAGE.to_string())).collect()
 }
@@ -148,16 +152,127 @@ fn own_writer<W: std::io::Write + std::os::fd::AsFd + std::os::fd::AsRawFd + Sen
     }
 }
 
-/// Windows: the console work is phase 3 (spec §13, §16). A release build has no console, so the sentence shows only where one exists.
+/// `sshelter connect <arguments>` on Windows: returns the exit code (main.rs exits with it). The order is Unix's, with the console's
+/// steps in it: the arguments first (the usage, and 2); then the console of the process that started this one is attached when this
+/// one has none (a release build is a GUI program; attaching sets the process's control handlers aside, so none is installed before),
+/// and only then are the console's buffers looked up (`StdConsole::new`: a GUI program's standard handles are usually not valid before
+/// the attach); then the console check (`sshelter connect needs a terminal.`, and 1), and SSHelter reached, or started. The console is
+/// changed only once every way out can put it back (`session`).
 #[cfg(windows)]
-pub fn run_connect(_args: &[OsString]) -> i32 {
-    not_supported(&mut std::io::stderr())
+pub fn run_connect(args: &[OsString]) -> i32 {
+    let host = match texts(args).and_then(|args| parse_args(&args)) {
+        Ok(host) => host,
+        Err(usage) => {
+            // The console first, only so that the usage reaches it (a release build has none of its own); nothing else is done.
+            inputs_windows::attach_console();
+            eprintln!("{usage}");
+            return 2;
+        }
+    };
+    inputs_windows::attach_console();
+    let console = Arc::new(terminal::StdConsole::new());
+    let term = term_from(std::env::var_os("TERM"));
+    let outputs = {
+        let console = Arc::clone(&console);
+        move || {
+            use windows_sys::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+            (inputs_windows::own_output(STD_OUTPUT_HANDLE, &console), inputs_windows::own_output(STD_ERROR_HANDLE, &console))
+        }
+    };
+    session(host, term, console, reach_broker, inputs_windows::take_over_control_events, outputs, &mut std::io::stderr())
 }
 
+/// How long a connect waits while every instance of the broker's pipe serves another client (the broker makes the next one at once).
+#[cfg(windows)]
+const PIPE_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The connection to the broker, on its named pipe (found without the app, spec §4): if nobody serves it SSHelter is started, hidden,
+/// under the same locks as the MCP adapter's start, and waited for, as on Unix. A pipe of that name that is not the user's own is not
+/// SSHelter's (another program made it): it is said so, and SSHelter is not started for it, nor is anything said to it.
+#[cfg(windows)]
+fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, String> {
+    use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
+    let name = crate::session::pipe_name().map_err(|error| format!("sshelter: {error}"))?;
+    let answering = || match crate::ipc::pipe_windows::connect(&name, PIPE_BUSY_WAIT) {
+        Ok(stream) => Some(Ok(stream)),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Some(Err(refused(&error))),
+        // Nobody serves the pipe, or every instance stayed busy: SSHelter is started (one that runs already takes over the start).
+        Err(_) => None,
+    };
+    ensure_started(answering, take_spawn_locks, start_host, START_WAIT, NOT_STARTED)?
+}
+
+/// What is said when the broker's pipe cannot be used: the sentence `connect` gives a pipe another program made, and otherwise the
+/// system's reason (an SSHelter that runs elevated makes a pipe a program that does not cannot open).
 #[cfg(any(windows, test))]
-fn not_supported(stderr: &mut dyn std::io::Write) -> i32 {
-    let _ = writeln!(stderr, "sshelter connect is not supported on Windows yet.");
-    1
+fn refused(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        None => error.to_string(),
+        Some(_) => format!("sshelter: cannot connect to SSHelter ({error})"),
+    }
+}
+
+/// One session on the console `api`; `reach` finds the broker, starting SSHelter if it must, `control_events` takes the console's control
+/// events over (`inputs_windows::take_over_control_events`), and `outputs` gives the terminal's standard output and error. The console
+/// comes first: a program that has none must not start the app just to say so. Then every way out of the program is put in place (the
+/// panic hook's restore, the watchdog, the control events) before the console is changed at all (`Tty::take_over`): until then a Ctrl-C
+/// ends the program the default way, and the console is as it was. Writes what the CLI says before the session to `stderr`.
+#[cfg(windows)]
+fn session(
+    host: HostQuery,
+    term: String,
+    api: Arc<dyn terminal::ConsoleApi>,
+    reach: impl FnOnce() -> Result<crate::ipc::pipe_windows::PipeStream, String>,
+    control_events: impl FnOnce(run::ControlEvents) -> std::io::Result<()>,
+    outputs: impl FnOnce() -> (run::Output, run::Output),
+    stderr: &mut dyn std::io::Write,
+) -> i32 {
+    let mut tty = match terminal::Tty::new(Arc::clone(&api)) {
+        Ok(tty) => tty,
+        Err(_) => {
+            let _ = writeln!(stderr, "{NEEDS_TERMINAL}");
+            return 1;
+        }
+    };
+    let stream = match reach() {
+        Ok(stream) => stream,
+        Err(text) => {
+            let _ = writeln!(stderr, "{text}");
+            return 1;
+        }
+    };
+    let terminal = tty.restorer();
+    terminal::restore_on_panic(terminal.clone());
+    let (inputs, queue) = run::queue();
+    let watchdog = match run::Watchdog::start(terminal, run::STOP_GRACE, |code| std::process::exit(code)) {
+        Ok(watchdog) => watchdog,
+        Err(error) => {
+            let _ = writeln!(stderr, "sshelter: cannot take over the console's control keys: {error}");
+            return 1;
+        }
+    };
+    // Without its handler a Ctrl-C at a hidden password, or the window closed, would end the program with the console as it set it.
+    let over = run::Over::default();
+    if let Err(error) = control_events(run::ControlEvents::new(inputs.clone(), watchdog.clone(), over.clone())) {
+        watchdog.stand_down();
+        let _ = writeln!(stderr, "sshelter: cannot take over the console's control keys: {error}");
+        return 1;
+    }
+    // Every way out can put the console back now. A console without virtual terminal sequences cannot be taken over, and says so.
+    if let Err(error) = tty.take_over() {
+        watchdog.stand_down();
+        let _ = writeln!(stderr, "sshelter: {error}");
+        return 1;
+    }
+    let gone = watchdog.clone();
+    run::console_keys_thread(inputs.clone(), tty.keys(), move || gone.arm(128 + signal::HUP));
+    let size = Arc::clone(&api);
+    let _size = run::watch_size(inputs.clone(), run::SIZE_CHECK, move || size.size());
+    let (stdout, stderr_output) = outputs();
+    let code = run::run(stream, host, term, &mut tty, (inputs, queue), stdout, stderr_output);
+    over.set();
+    watchdog.stand_down();
+    code
 }
 
 #[cfg(test)]
@@ -279,12 +394,14 @@ mod tests {
         }
     }
 
-    /// Windows (plan 1b R4): the sentence, and a failing status.
+    /// Windows: a broker's pipe another program made is refused with `connect`'s own sentence; one the system refuses (an SSHelter that
+    /// runs elevated makes a pipe a program that does not cannot open) with the system's reason.
     #[test]
-    fn on_windows_the_cli_says_it_is_not_supported_yet_and_fails() {
-        let mut said = Vec::new();
-        assert_eq!(not_supported(&mut said), 1);
-        assert_eq!(String::from_utf8(said).unwrap(), "sshelter connect is not supported on Windows yet.\n");
+    fn a_pipe_that_cannot_be_used_is_said_why() {
+        let squatted = std::io::Error::new(std::io::ErrorKind::PermissionDenied, r"Another program is using SSHelter's session pipe (\\.\pipe\x)");
+        assert_eq!(refused(&squatted), r"Another program is using SSHelter's session pipe (\\.\pipe\x)");
+        let denied = std::io::Error::from_raw_os_error(5);
+        assert!(refused(&denied).starts_with("sshelter: cannot connect to SSHelter ("), "{}", refused(&denied));
     }
 
     /// Spec §11: the sentence, exactly, when the app does not answer.
