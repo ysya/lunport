@@ -28,23 +28,24 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
    - `chcp` prints the same code page;
    - type `echo hi` slowly: each letter shows as you type and Backspace erases; after Enter, Up brings the command back;
    - Ctrl-C at an empty prompt gives a new prompt;
-   - PowerShell only: `Write-Host "one`ntwo"` prints `two` at the left edge;
+   - PowerShell only: ``Write-Host "one`ntwo"`` prints `two` at the left edge;
    - mouse selection works as it did before (classic console with Quick Edit).
 
 ## Install and start
 
 4. **The helper is installed next to SSHelter and needs no VC++ runtime.** `Get-ChildItem "$env:LOCALAPPDATA\SSHelter" -Filter *.exe`
    lists `sshelter.exe` and `sshelter-cli.exe`. On a Windows without "Microsoft Visual C++ 2015-2022 Redistributable" in Settings →
-   Apps (a fresh VM), run `& <helper> connect`: it prints the usage (`usage: sshelter connect <alias>`, then
-   `       sshelter connect --id <host id>`), `$LASTEXITCODE` is 2, and no "VCRUNTIME140.dll was not found" dialog appears. The first
-   Connect after installing (item 8) works on that computer too.
+   Apps (a fresh VM), run `& <helper> connect`: it prints the usage (`usage: sshelter connect <alias>`, and below it, indented,
+   `sshelter connect --id <host id>`), `$LASTEXITCODE` is 2, and no "VCRUNTIME140.dll was not found" dialog appears. The first Connect
+   after installing (item 8) works on that computer too.
 5. **The broker listens.** Run the debug build from a console (`pnpm tauri dev`, which shows what SSHelter writes to standard error):
    once the window is open there is no line starting with `[session]` (`[session] the broker is not listening: …`). With the installed
    build: quit SSHelter, run `Start-Process "$env:LOCALAPPDATA\SSHelter\sshelter.exe" -RedirectStandardError "$env:TEMP\sshelter-err.txt"`,
    and once its window is open `Select-String -Path "$env:TEMP\sshelter-err.txt" -Pattern '^\[session\]'` prints nothing.
 6. **The background start.** Quit SSHelter (tray icon → Quit). In a Windows Terminal tab run `& <helper> connect web`. SSHelter starts
-   without its window (its tray icon appears), answers within 12 seconds, and the remote prompt shows in this tab. `exit` the remote shell: the
-   PowerShell prompt is back, `$LASTEXITCODE` is 0, check C passes, and SSHelter keeps running. Close the tab: SSHelter still runs.
+   without its window (its tray icon appears), answers within 12 seconds, and the remote prompt shows in this tab. `exit` the remote
+   shell: the PowerShell prompt is back, `$LASTEXITCODE` is 0, check C passes, and SSHelter keeps running. Close the tab: SSHelter
+   still runs.
    Then quit SSHelter again, run the same command, and press Ctrl-C at once, while SSHelter is still starting: the command ends at once
    with `$LASTEXITCODE` -1073741510 (STATUS_CONTROL_C_EXIT: the program ended the default way, before it changed anything), check C
    passes, and SSHelter still finishes starting. Pressed a little later, once SSHelter answered and while it connects, Ctrl-C ends the
@@ -81,7 +82,7 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
 14. **Text and keys.** In a `web` session, in Windows Terminal and in the classic console: `echo 密碼 🔑` prints `密碼 🔑`; arrows,
     Home and End, Tab completion and the shell's history work; Ctrl-C at the remote prompt goes to the remote (`^C`, a new remote
     prompt, the session goes on); `sleep 30` and Ctrl-C stops the `sleep`.
-15. **Pasting a long text.** `Set-Clipboard ((1..2000 | ForEach-Object { "line $_ " + ('x' * 40) }) -join "`n")`. In the session run
+15. **Pasting a long text.** ``Set-Clipboard ((1..2000 | ForEach-Object { "line $_ " + ('x' * 40) }) -join "`n")``. In the session run
     `cat > /tmp/paste.txt`, paste (accept Windows Terminal's multi-line paste warning), press Enter and then Ctrl-D:
     `wc -l /tmp/paste.txt` says 2000, `head -1` and `tail -1` show `line 1 x…` and `line 2000 x…`, nothing garbled. Remove the file.
 16. **An input method.** With a Chinese (or Japanese) IME, compose at the remote prompt (`echo 你好`): the composition shows while you
@@ -129,7 +130,8 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
 ## Consoles
 
 28. **The legacy console.** In a classic console window open Properties (title bar menu), Options, check "Use legacy console", and open
-    a new Command Prompt window (Windows Console Host as the default terminal application, setup 2). Run `"%LOCALAPPDATA%\SSHelter\sshelter-cli.exe" connect web`: it prints
+    a new Command Prompt window (Windows Console Host as the default terminal application, setup 2). Run
+    `"%LOCALAPPDATA%\SSHelter\sshelter-cli.exe" connect web`: it prints
     `sshelter: the console does not support virtual terminal sequences (…)` (the parentheses hold Windows' reason), `echo %ERRORLEVEL%`
     prints 1, and check C passes. Uncheck "Use legacy console".
 29. **An elevated SSHelter next to a normal `sshelter connect` (the owner check).** Quit SSHelter and start it with "Run as
