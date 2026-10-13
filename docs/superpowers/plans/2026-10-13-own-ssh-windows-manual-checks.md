@@ -104,8 +104,8 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
 ## Questions
 
 21. **A password question.** Connect `pw`. The terminal shows the server's question: `(<user>@pw) Password: ` (keyboard-interactive) or
-    `<user>@pw's password: `. What you type does not show; Enter answers it and the shell opens. Record the one blank line after the
-    question (spec §16, known).
+    `<user>@pw's password: `. What you type does not show; Enter answers it and the shell opens. No blank line follows the
+    question: what comes next starts on the line after it (spec §7.3: the console ends the line on Enter).
 22. **Ctrl-C, Ctrl-Break and Ctrl-Z at a question.** At `pw`'s question, type a few letters and press Ctrl-C: the question ends, the
     terminal prints `Authentication for pw was abandoned (…)`, the program ends (255), check C passes, and the letters typed at the
     question do not appear at the next prompt. The same with Ctrl-Break. Then Ctrl-Z as the first key of the answer and Enter: the

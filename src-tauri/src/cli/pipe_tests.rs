@@ -125,11 +125,12 @@ fn raw(console: &FakeConsole) -> bool {
 }
 
 /// The run's end, which the run came to itself (not the watchdog): its exit code, whether it put the console back itself, and the rest
-/// of the setup.
+/// of the setup. The fake console goes away after it, so that the keys thread, which waits in its read, ends too.
 fn finish(setup: Setup) -> (i32, bool, Setup) {
     eventually("the run to end", 10, || setup.run.is_finished());
     let Setup { engine, console, stdout, stderr, events, fired, run, _dir } = setup;
     let (code, restored) = run.join().unwrap();
+    console.go_away();
     assert!(!fired.load(Ordering::SeqCst), "the run ended without the watchdog");
     (code, restored, Setup { engine, console, stdout, stderr, events, fired, run: std::thread::spawn(|| (0, true)), _dir })
 }
@@ -171,7 +172,8 @@ fn a_question_is_asked_on_the_console_and_the_answer_gets_in() {
     eventually("the shell to open", 10, || raw(&setup.console));
     setup.engine.shells().remove(0).end(Exit::Code(0));
     let (code, restored, setup) = finish(setup);
-    assert_eq!((code, setup.stderr.text()), (0, "deploy@web's password: \n".to_string()));
+    // No line break of the CLI's own after the hidden answer: the console moved to the next line on Enter (`QUESTION_READ_ENDS_ITS_LINE`).
+    assert_eq!((code, setup.stderr.text()), (0, "deploy@web's password: ".to_string()));
     assert!(restored, "the console is as it was");
 }
 

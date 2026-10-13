@@ -9,7 +9,7 @@ use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::signal;
-use super::terminal::Mode;
+use super::terminal::{Mode, QUESTION_READ_ENDS_ITS_LINE};
 use crate::session::protocol::{kinds, ClientKind, ClientMessage, Event, HostQuery, PtyRequest, Question, QuestionKind, ServerMessage, DATA_CHUNK, PROTOCOL_VERSION};
 
 /// What happened.
@@ -328,8 +328,9 @@ impl Client {
         };
         self.phase = if after == Mode::Raw { Phase::Open } else { Phase::Connecting };
         let mut actions = Vec::new();
-        if !echo || answer.is_none() {
-            // The Enter of a hidden answer (or the Ctrl-C) did not move to the next line.
+        if (!echo && !QUESTION_READ_ENDS_ITS_LINE) || answer.is_none() {
+            // The Enter of a hidden answer did not move to the next line (on a Unix terminal; the Windows console moves there itself), nor
+            // did the Ctrl-C.
             actions.push(Action::Stderr("\n".to_string()));
         }
         actions.push(match answer {
@@ -345,8 +346,13 @@ impl Client {
     /// and the program exits.
     fn finish(&mut self, close: bool, reason: Option<String>, code: i32) -> Vec<Action> {
         // The cursor is not at the start of a line while the shell is open (it can be anywhere in what the shell wrote), nor while a
-        // question's prompt is on it, whatever the terminal was before the question.
-        let mid_line = matches!(self.phase, Phase::Open | Phase::Asking { .. });
+        // question's prompt is on it, whatever the terminal was before the question: unless the terminal ends the question's line when its
+        // read ends, as the Windows console does when this end throws what was typed away (`QUESTION_READ_ENDS_ITS_LINE`).
+        let mid_line = match self.phase {
+            Phase::Open => true,
+            Phase::Asking { .. } => !QUESTION_READ_ENDS_ITS_LINE,
+            Phase::Connecting | Phase::Ended => false,
+        };
         // What was typed for a question and not sent (a part of a password, or of a code) was meant for SSHelter: it is thrown away with
         // what the terminal holds, as readpassphrase does, or the shell that gets the terminal next reads it, shows it on its line and
         // keeps it in its history. Outside a question what is typed is the shell's, and stays.
@@ -461,14 +467,7 @@ mod tests {
             [Action::Mode(Mode::Prompt { echo: false }, true), Action::Stderr("deploy@web's password: ".into())]
         );
         assert!(client.handle(Input::Stdin(Zeroizing::new(b"hunt".to_vec()))).is_empty(), "the answer is collected until Enter");
-        assert_eq!(
-            client.handle(Input::Stdin(Zeroizing::new(b"er2\n".to_vec()))),
-            [
-                Action::Stderr("\n".into()),
-                answered("q1", "hunter2"),
-                Action::Mode(Mode::Cooked, false),
-            ]
-        );
+        assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"er2\n".to_vec()))), hidden_answer("q1", "hunter2", Mode::Cooked));
         assert_eq!(client.handle(Input::Message(ServerMessage::Opened { session_id: "1".into() })), [Action::Mode(Mode::Raw, false)], "the typeahead from before the question is gone");
     }
 
@@ -613,6 +612,20 @@ mod tests {
         Action::Answer { question_id: id.into(), value: Zeroizing::new(value.to_string()) }
     }
 
+    /// The hidden answer `value` to `id` sent: after a line break of the CLI's own when the terminal did not end the line on Enter (a Unix
+    /// terminal; the Windows console does: `QUESTION_READ_ENDS_ITS_LINE`), then the mode the question goes back to, `after`.
+    fn hidden_answer(id: &str, value: &str, after: Mode) -> Vec<Action> {
+        let mut actions = if QUESTION_READ_ENDS_ITS_LINE { vec![] } else { vec![Action::Stderr("\n".into())] };
+        actions.extend([answered(id, value), Action::Mode(after, false)]);
+        actions
+    }
+
+    /// What the CLI says at an end that comes under a question: on a line of its own, which it starts itself unless the terminal ended
+    /// the question's line (the Windows console does, when the end ends the question's read: `QUESTION_READ_ENDS_ITS_LINE`).
+    fn under_a_question(text: &str) -> Action {
+        Action::Stderr(if QUESTION_READ_ENDS_ITS_LINE { format!("{text}\n") } else { format!("\n{text}\n") })
+    }
+
     fn cancelled(id: &str) -> Action {
         Action::Send(ClientMessage::Answer { question_id: id.into(), value: None, cancel: true })
     }
@@ -736,15 +749,12 @@ mod tests {
             client.handle(error(kinds::AUTH, "Authentication for web was abandoned (the password prompt timed out)."));
             assert_eq!(
                 client.handle(exited()),
-                [Action::Mode(Mode::Cooked, true), Action::Stderr("\nAuthentication for web was abandoned (the password prompt timed out).\n".into()), Action::Exit(255)]
+                [Action::Mode(Mode::Cooked, true), under_a_question("Authentication for web was abandoned (the password prompt timed out)."), Action::Exit(255)]
             );
         }
         let mut client = started();
         client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
-        assert_eq!(
-            client.handle(Input::Closed),
-            [Action::Mode(Mode::Cooked, true), Action::Stderr("\nThe connection to SSHelter ended.\n".into()), Action::Exit(255)]
-        );
+        assert_eq!(client.handle(Input::Closed), [Action::Mode(Mode::Cooked, true), under_a_question("The connection to SSHelter ended."), Action::Exit(255)]);
     }
 
     /// The actions with which the session ends when `inputs` come while a question is on the terminal (`echo` or not; asked while connecting,
@@ -764,7 +774,7 @@ mod tests {
     fn an_end_under_a_question_throws_away_what_was_typed_for_it() {
         const ABANDONED: &str = "Authentication for web was abandoned (the password prompt timed out).";
         const LOST: &str = "Connection to web lost (early eof).";
-        let on_its_own_line = |text: &str| Action::Stderr(format!("\n{text}\n"));
+        let on_its_own_line = under_a_question;
         type Case = (&'static str, fn() -> Vec<Input>, Vec<Action>);
         let cases: Vec<Case> = vec![
             ("SIGTERM", || vec![Input::Stop(signal::TERM)], vec![Action::Send(ClientMessage::Close), Action::Exit(143)]),
@@ -929,7 +939,7 @@ mod tests {
         }
         let actions = client.handle(Input::Stdin(Zeroizing::new(b"\n".to_vec())));
         let expected = format!("{}{}{}", "a".repeat(1500), "b".repeat(700), "c".repeat(2000));
-        assert_eq!(actions, [Action::Stderr("\n".into()), answered("q1", &expected), Action::Mode(Mode::Cooked, false)]);
+        assert_eq!(actions, hidden_answer("q1", &expected, Mode::Cooked));
     }
 
     /// The shell's own bytes are not the CLI's to change: that is what a terminal program is for, and they need not be text at all.
@@ -980,9 +990,7 @@ mod tests {
                 "echo {echo}: asked again, the prompt as it was printed the first time"
             );
             assert!(line_of(&client).is_empty(), "what was collected before the stop is gone");
-            let ends = if echo { vec![] } else { vec![Action::Stderr("\n".into())] };
-            let mut expected = ends;
-            expected.extend([answered("q1", "ter2"), Action::Mode(after, false)]);
+            let expected = if echo { vec![answered("q1", "ter2"), Action::Mode(after, false)] } else { hidden_answer("q1", "ter2", after) };
             assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"ter2\n".to_vec()))), expected, "only what is typed after the stop");
         }
     }

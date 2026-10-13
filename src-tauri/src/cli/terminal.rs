@@ -8,6 +8,11 @@ use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
+/// Whether the terminal moves to the next line when a question's line read ends, whatever the read shows. A Unix terminal does not for a
+/// hidden answer (its Enter is not echoed: `ECHO` and `ECHONL` are off), and nothing but the person ends a question's read, so the
+/// client starts the next line itself (`client.rs`). The Windows console does (`terminal_windows.rs`).
+pub const QUESTION_READ_ENDS_ITS_LINE: bool = false;
+
 /// What the terminal is set to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
