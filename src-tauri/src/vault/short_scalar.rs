@@ -1,12 +1,21 @@
-//! 補回 OpenSSH 省掉的 ECDSA 私鑰純量前導零。OpenSSH 把 ECDSA 私鑰的純量(private scalar)寫成 mpint,前面的零位元組會省掉;`ssh-key` 0.6.7 的
-//! `EcdsaPrivateKey::decode` 只接受剛好 32/48/66 位元組(或多一個 0x00 的符號位),短了就回 `length invalid`,`material::open` 跟著回 `Unreadable`。
-//! `ssh-keygen -t ecdsa` 產生的 P-256、P-384 金鑰大約每 256 把有 1 把這樣,P-521 每 4 把有 1 把(521 位元的最高位元組只有 1 個位元,2^519 以下的
-//! 純量都短一個位元組)。這裡在 `ssh-key` 讀不懂時自己拆開 `openssh-key-v1` 容器,把純量補回固定長度、重算 padding,再包回沒有加密的容器交給
-//! `ssh-key` 讀 —— checkint、公私鑰相符、comment、padding 的檢查都還是它做。加密的金鑰要先解開才看得到純量,所以 `decrypt` 用 `ssh-key` 公開的
-//! `Kdf`、`Cipher` 自己解密,其餘相同。
+//! Puts back the leading zero bytes OpenSSH leaves out of an ECDSA private scalar. OpenSSH writes the scalar as an mpint, in its shortest
+//! form: leading zero bytes are dropped, and a 0x00 goes in front when the first byte left has its top bit set. `ssh-key` 0.6.7's
+//! `EcdsaPrivateKey::decode` takes exactly 32/48/66 bytes (or one more, when that first byte is 0x00), so a scalar that comes out shorter
+//! fails with `length invalid`, and `material::open` answered `Unreadable`. A scalar comes out shorter when its first byte is zero and the
+//! next one has its top bit clear (with that bit set, the 0x00 in front makes up the length again): about 1 key in 512 that
+//! `ssh-keygen -t ecdsa` makes for P-256 and P-384 (1/256 × 1/2), and 1 in 4 for P-521 (1/2 × 1/2: the first of its 66 bytes holds only
+//! the top one of the 521 bits, so it is zero for half the keys; every scalar below 2^519 comes out short).
 //!
-//! ssh-key 0.7.0-rc.11 的 `EcdsaPrivateKey::decode` 會補零,但有 32 位元組的下限,P-256 短一個位元組的仍然解不開;0.7 也還是預覽版(ssh-encoding 0.3、
-//! rsa 0.10 rc),整個 app 的公鑰、指紋都靠 ssh-key,所以不升級,在這裡補。
+//! When `ssh-key` cannot read a key, this module takes the `openssh-key-v1` container apart, pads the scalar to the curve's size,
+//! recomputes the padding and hands an unencrypted container back to `ssh-key`, which still checks the checkints, that the public key
+//! outside matches the point stored in the private section, the comment and the padding. Nothing checks that the scalar belongs to that
+//! point (`ssh-key` does not for the keys it reads itself either): a key whose scalar is damaged opens, and its signatures do not verify.
+//! An encrypted key has to be decrypted before its scalar can be seen, so `decrypt` decrypts it itself with `ssh-key`'s public `Kdf` and
+//! `Cipher`, and goes on the same way.
+//!
+//! ssh-key 0.7.0-rc.11's `EcdsaPrivateKey::decode` pads the scalar, but not below 32 bytes, so a P-256 scalar one byte short still fails;
+//! 0.7 is a pre-release too (ssh-encoding 0.3, rsa 0.10 rc), and the whole app relies on ssh-key for public keys and fingerprints, so it is
+//! not upgraded: the scalar is padded here.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -16,11 +25,12 @@ use ssh_key::{Cipher, Kdf, PrivateKey};
 use zeroize::Zeroizing;
 
 const MAGIC: &[u8] = b"openssh-key-v1\0";
-/// 標頭與結尾(拆開來寫,同 `test_keys`:免得掃描私鑰的工具把原始碼當成一把金鑰)。
+/// The begin and end lines (written in pieces, as in `test_keys`, so that a tool that scans for private keys does not take the source
+/// for one).
 const BEGIN: &str = concat!("-----BEGIN ", "OPENSSH", " PRIVATE KEY-----");
 const END: &str = concat!("-----END ", "OPENSSH", " PRIVATE KEY-----");
 
-/// 各曲線純量的固定長度(`ssh-key` 的 `EcdsaPrivateKey<SIZE>`)。
+/// The fixed length of each curve's scalar (`ssh-key`'s `EcdsaPrivateKey<SIZE>`).
 fn scalar_size(algorithm: &str, curve: &str) -> Option<usize> {
     match (algorithm, curve) {
         ("ecdsa-sha2-nistp256", "nistp256") => Some(32),
@@ -30,19 +40,20 @@ fn scalar_size(algorithm: &str, curve: &str) -> Option<usize> {
     }
 }
 
-/// 拆開的 `openssh-key-v1` 容器(一把金鑰)。
+/// An `openssh-key-v1` container taken apart (one key).
 struct Container {
     cipher: Cipher,
     kdf: Kdf,
-    /// 公鑰段的內容。
+    /// The contents of the public key section.
     public: Vec<u8>,
-    /// 私鑰段的內容:沒加密的是明文,加密的是密文。
+    /// The contents of the private section: plaintext when the key is not encrypted, ciphertext when it is.
     private: Zeroizing<Vec<u8>>,
-    /// AEAD 加密方式(`*-gcm@openssh.com`、chacha20-poly1305)接在密文後面的 tag。
+    /// The tag an AEAD cipher (`*-gcm@openssh.com`, chacha20-poly1305) puts after the ciphertext.
     tag: Option<[u8; 16]>,
 }
 
-/// 私鑰原文拆成容器:標頭與結尾之間的 base64,再照格式讀出每個欄位。格式不對(多把金鑰、結尾後面還有東西……)回 None。
+/// The private key text taken apart into its container: the base64 between the begin and end lines, then each field of the format. A
+/// malformed one (several keys, text after the end line…) gives None.
 fn container(private_key: &str) -> Option<Container> {
     let mut lines = private_key.lines().map(str::trim).filter(|line| !line.is_empty());
     if lines.next()? != BEGIN {
@@ -87,9 +98,11 @@ fn container(private_key: &str) -> Option<Container> {
     reader.is_finished().then_some(Container { cipher, kdf, public, private, tag })
 }
 
-/// 私鑰段明文(`checkint ×2, string 演算法, string 曲線, string 公鑰點, mpint 純量, string comment, padding`)裡的 ECDSA 純量比曲線的固定長度短,
-/// 就補零、重算 padding(沒有加密的容器:8 的倍數),回傳新的私鑰段。不是 ECDSA、純量長度正常(`ssh-key` 自己讀得懂,或是真的太長)、格式不對都回 None。
-/// `block_size` 是原本容器的 block 大小:padding 要少於一個 block(同 `ssh-key` 的檢查)。
+/// The plaintext of a private section (`checkint ×2, string algorithm, string curve, string point, mpint scalar, string comment,
+/// padding`) whose ECDSA scalar is shorter than the curve's size: a new section, the scalar padded with zeros and the padding recomputed
+/// for an unencrypted container (a multiple of 8). Not ECDSA, a scalar of normal length (one `ssh-key` reads itself, or one really too
+/// long) or a malformed section all give None. `block_size` is the original container's: the padding has to be `1, 2, 3…` and shorter
+/// than one block (the checks `ssh-key` makes on it).
 fn repadded(section: &[u8], block_size: usize) -> Option<Zeroizing<Vec<u8>>> {
     let mut reader = section;
     let checkint1 = u32::decode(&mut reader).ok()?;
@@ -123,7 +136,8 @@ fn repadded(section: &[u8], block_size: usize) -> Option<Zeroizing<Vec<u8>>> {
     Some(out)
 }
 
-/// 把補好的私鑰段與原本的公鑰段包回沒有加密的 `openssh-key-v1` 容器,交給 `ssh-key` 讀。
+/// Puts the padded private section and the original public section back into an unencrypted `openssh-key-v1` container, and has
+/// `ssh-key` read it.
 fn read_unencrypted(public: &[u8], section: &[u8]) -> Option<PrivateKey> {
     let mut bytes = Zeroizing::new(MAGIC.to_vec());
     Cipher::None.encode(&mut *bytes).ok()?;
@@ -134,8 +148,8 @@ fn read_unencrypted(public: &[u8], section: &[u8]) -> Option<PrivateKey> {
     PrivateKey::from_bytes(&bytes).ok()
 }
 
-/// `ssh-key` 讀不懂的私鑰原文:沒有加密的 ECDSA 金鑰、純量短了,就補零後再讀一次。其他情況(加密的、不是 ECDSA 的、純量長度正常、格式不對)回 None,
-/// 讓呼叫端維持原本的錯誤。
+/// Private key text `ssh-key` cannot read: an unencrypted ECDSA key whose scalar is short is read again with the scalar padded. Anything
+/// else (an encrypted key, not ECDSA, a scalar of normal length, a malformed key) gives None, so that the caller keeps its own error.
 pub fn parse(private_key: &str) -> Option<PrivateKey> {
     let container = container(private_key)?;
     if container.cipher.is_some() {
@@ -145,8 +159,9 @@ pub fn parse(private_key: &str) -> Option<PrivateKey> {
     read_unencrypted(&container.public, &section)
 }
 
-/// `ssh-key` 用這個 passphrase 解不開的加密私鑰:是 ECDSA 的就自己解密(`ssh-key` 公開的 `Kdf`、`Cipher`),純量短了就補零後再讀。passphrase 不對
-/// (解出來的不是私鑰段)、沒有加密、不是 ECDSA(先看公鑰段,省下一次 bcrypt)、純量長度正常都回 None。
+/// An encrypted private key that `ssh-key` could not decrypt with this passphrase: an ECDSA key is decrypted here, with `ssh-key`'s public
+/// `Kdf` and `Cipher`, and read again with the scalar padded. A wrong passphrase (what comes out is not a private section), a key that is
+/// not encrypted, not ECDSA (seen in the public section, before any bcrypt) or whose scalar has its normal length all give None.
 pub fn decrypt(private_key: &str, passphrase: &str) -> Option<PrivateKey> {
     let container = container(private_key)?;
     if container.cipher.is_none() || !KeyData::decode(&mut &container.public[..]).is_ok_and(|key| key.is_ecdsa()) {
@@ -164,7 +179,7 @@ mod tests {
     use super::*;
     use crate::sync::slot_rules::test_keys;
 
-    /// 測試金鑰的純量在原文裡真的短了(不然測的不是這個問題)。
+    /// The length of the scalar as the key's text has it (a test key's scalar has to be short there, or the test is not about this).
     fn scalar_len(private_key: &str) -> usize {
         let container = container(private_key).unwrap();
         let mut reader = &container.private[..];
