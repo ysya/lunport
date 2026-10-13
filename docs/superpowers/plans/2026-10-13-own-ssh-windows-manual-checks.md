@@ -64,9 +64,10 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
 7. **The first host key.** Connect `fresh` from its row. The terminal prints `Waiting for you to confirm fresh's host key in SSHelter.`
    and SSHelter's window "Is this fresh?" shows the server's key. "Trust this key": the remote prompt shows. `exit`, then Connect
    `fresh` again: no question. Connect `fresh2` and press "Cancel": the terminal prints `The host key of fresh2 has not been confirmed
-   yet.` and, under it, `Press Enter to exit.` (from 0.17.0-11; Connect gives Windows Terminal `--pause-on-error`): the tab stays until
-   Enter, then the program ends (255); check C. In Command Prompt (item 9) the sentence comes without `Press Enter to exit.`: `cmd /k`
-   keeps the window. Also from Windows Terminal: Ctrl-C at `Press Enter to exit.` ends the program at once (130).
+   yet.` and the program ends (255); check C. Windows Terminal keeps the tab, with the sentence above its own notice (`[process exited
+   with code 255 …]`: its `closeOnExit` default keeps a pane whose program failed), so Connect gives it no `--pause-on-error`. Also run
+   `& <helper> connect --pause-on-error fresh3` in a Windows Terminal tab and press "Cancel": the sentence, then `Press Enter to exit.`
+   (typed letters are not shown); Enter ends it (255) and check C passes; again with Ctrl-C at the prompt (130).
 8. **Every way to Connect, in Windows Terminal.** With Windows Terminal as the default terminal, each of these opens Windows Terminal
    with `web`'s remote prompt: the row's Connect button, the editor's Connect button, the palette (Ctrl+K, type `web`, Enter), and the
    tray icon's quick connect (it always uses the first terminal SSHelter finds, Windows Terminal when it is installed). With "Open
