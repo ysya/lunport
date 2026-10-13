@@ -1187,7 +1187,7 @@ mod tests {
         /// The run's end, which must come within `within` of now: its exit code, and whether it put the terminal back itself.
         fn ends_within(self, within: Duration) -> (i32, bool) {
             let asked = Instant::now();
-            eventually("the run to end", 10, || self.run.is_finished());
+            eventually("the run to end", within.as_secs().max(10), || self.run.is_finished());
             assert!(asked.elapsed() < within, "the run took {:?} to end", asked.elapsed());
             self.run.join().unwrap()
         }
@@ -1875,7 +1875,9 @@ mod tests {
             write_control(&mut remote, &ServerMessage::Event(Event::Disconnected { reason: "Connection to web lost.".into() })).unwrap();
             write_control(&mut remote, &ServerMessage::Exited { code: None, signal: None }).unwrap();
         });
-        assert_eq!(hand.ends_within(Duration::from_secs(10)).0, 255);
+        // A guard against a hang, not a measure of speed: the paced terminal's sleeps stretch on a loaded machine (3.2 s of output here
+        // took 10 s on a macOS CI runner).
+        assert_eq!(hand.ends_within(Duration::from_secs(60)).0, 255);
         printing.join().unwrap();
         assert_eq!(stdout.shown.len(), 320 * 1024, "all of the shell's last output");
         assert_eq!(stderr.0.text(), "\nConnection to web lost.\n");
