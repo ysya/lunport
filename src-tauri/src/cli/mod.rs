@@ -31,9 +31,14 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
 use crate::session::protocol::HostQuery;
+use client::{Request, PAUSE_PROMPT};
 
 /// What `sshelter connect` prints when the app does not answer after it was started (spec §7.3, §11).
 pub const NOT_STARTED: &str = "SSHelter did not start within 12 seconds.";
+
+/// The flag of `Request::pause_on_error`, before the host: SSHelter's Connect gives it to a terminal that closes its window with the
+/// program (spec §7.4). It is not in the usage, which is for people.
+pub const PAUSE_ON_ERROR: &str = "--pause-on-error";
 
 /// What `sshelter connect` prints when standard input is not a terminal (spec §7.3).
 pub const NEEDS_TERMINAL: &str = "sshelter connect needs a terminal.";
@@ -41,13 +46,45 @@ pub const NEEDS_TERMINAL: &str = "sshelter connect needs a terminal.";
 /// How `sshelter connect` is used.
 pub const USAGE: &str = "usage: sshelter connect <alias>\n       sshelter connect --id <host id>";
 
-/// The host the arguments after `connect` name: an alias, or `--id` and a host id.
-pub fn parse_args(args: &[String]) -> Result<HostQuery, String> {
-    match args {
-        [flag, id] if flag == "--id" && !id.is_empty() && !id.starts_with('-') => Ok(HostQuery::Id(id.clone())),
-        [alias] if !alias.is_empty() && !alias.starts_with('-') => Ok(HostQuery::Alias(alias.clone())),
-        _ => Err(USAGE.to_string()),
+/// What the arguments after `connect` ask for: the host, an alias or `--id` and a host id, after `--pause-on-error` when it is given.
+pub fn parse_args(args: &[String]) -> Result<Request, String> {
+    let (pause_on_error, args) = match args {
+        [flag, rest @ ..] if flag == PAUSE_ON_ERROR => (true, rest),
+        _ => (false, args),
+    };
+    let host = match args {
+        [flag, id] if flag == "--id" && !id.is_empty() && !id.starts_with('-') => HostQuery::Id(id.clone()),
+        [alias] if !alias.is_empty() && !alias.starts_with('-') => HostQuery::Alias(alias.clone()),
+        _ => return Err(USAGE.to_string()),
+    };
+    Ok(Request { host, pause_on_error })
+}
+
+/// `--pause-on-error` before the session: waits for Enter on `input` (standard input, the terminal as it was: its own line editing,
+/// echo on), a line's end. The end of input and a failed read end the wait too (a terminal that went away; no standard input). No signal
+/// is taken over yet: Ctrl-C and a closed window end the program the default way.
+fn wait_for_enter(mut input: impl std::io::Read) {
+    let mut byte = [0u8; 1];
+    loop {
+        match input.read(&mut byte) {
+            Ok(1) if byte[0] == b'\n' || byte[0] == b'\r' => return,
+            Ok(1) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Ok(_) | Err(_) => return,
+        }
     }
+}
+
+/// What the CLI says when it ends before the session (`text`, on `stderr`), and, with `--pause-on-error`, `PAUSE_PROMPT` under it and the
+/// wait for Enter (`wait`). The exit code, 1.
+fn ended_before_the_session(text: &str, request: &Request, wait: impl FnOnce(), stderr: &mut dyn std::io::Write) -> i32 {
+    let _ = writeln!(stderr, "{text}");
+    if request.pause_on_error {
+        let _ = write!(stderr, "{PAUSE_PROMPT}");
+        let _ = stderr.flush();
+        wait();
+    }
+    1
 }
 
 /// The arguments after `connect` as text. One that is not text (not UTF-8; on Windows, not UTF-16) cannot name a host either: the usage.
@@ -65,8 +102,8 @@ pub fn term_from(value: Option<std::ffi::OsString>) -> String {
 /// SSHelter reached, or started.
 #[cfg(unix)]
 pub fn run_connect(args: &[OsString]) -> i32 {
-    let host = match texts(args).and_then(|args| parse_args(&args)) {
-        Ok(host) => host,
+    let request = match texts(args).and_then(|args| parse_args(&args)) {
+        Ok(request) => request,
         Err(usage) => {
             eprintln!("{usage}");
             return 2;
@@ -74,7 +111,8 @@ pub fn run_connect(args: &[OsString]) -> i32 {
     };
     let term = term_from(std::env::var_os("TERM"));
     let signals = |inputs, terminal, watchdog, size: Arc<dyn terminal::TermiosApi>| run::signal_thread(inputs, terminal, watchdog, move || size.size());
-    session(host, term, Arc::new(terminal::StdinTermios), reach_broker, signals, &mut std::io::stderr())
+    let wait = || wait_for_enter(std::io::stdin());
+    session(request, term, Arc::new(terminal::StdinTermios), reach_broker, signals, wait, &mut std::io::stderr())
 }
 
 /// The connection to the broker, at `<app data>/ipc/sock` (found without the app): if nothing answers there SSHelter is started, hidden,
@@ -92,14 +130,16 @@ fn reach_broker() -> Result<UnixStream, String> {
 
 /// One session on the terminal `api`; `reach` finds the broker, starting SSHelter if it must, and `signals` takes over the signals
 /// (`run::signal_thread`). The terminal comes first: a program that has none must not start the app just to say so. Writes what the CLI
-/// says before the session to `stderr` (the terminal's).
+/// says before the session to `stderr` (the terminal's); with `--pause-on-error`, SSHelter that cannot be reached is said and then
+/// `wait` waits for Enter (`wait_for_enter`).
 #[cfg(unix)]
 fn session(
-    host: HostQuery,
+    request: Request,
     term: String,
     api: Arc<dyn terminal::TermiosApi>,
     reach: impl FnOnce() -> Result<UnixStream, String>,
     signals: impl FnOnce(run::Inputs, terminal::Restorer, run::Watchdog, Arc<dyn terminal::TermiosApi>) -> std::io::Result<()>,
+    wait: impl FnOnce(),
     stderr: &mut dyn std::io::Write,
 ) -> i32 {
     let size = Arc::clone(&api);
@@ -112,10 +152,7 @@ fn session(
     };
     let stream = match reach() {
         Ok(stream) => stream,
-        Err(text) => {
-            let _ = writeln!(stderr, "{text}");
-            return 1;
-        }
+        Err(text) => return ended_before_the_session(&text, &request, wait, stderr),
     };
     let terminal = tty.restorer();
     terminal::restore_on_panic(terminal.clone());
@@ -136,7 +173,7 @@ fn session(
     }
     let hung_up = watchdog.clone();
     run::stdin_thread(inputs.clone(), move || hung_up.arm(128 + signal::HUP));
-    let code = run::run(stream, host, term, &mut tty, (inputs, queue), own_writer(std::io::stdout()), own_writer(std::io::stderr()));
+    let code = run::run(stream, request, term, &mut tty, (inputs, queue), own_writer(std::io::stdout()), own_writer(std::io::stderr()));
     watchdog.stand_down();
     code
 }
@@ -160,8 +197,8 @@ fn own_writer<W: std::io::Write + std::os::fd::AsFd + std::os::fd::AsRawFd + Sen
 /// changed only once every way out can put it back (`session`).
 #[cfg(windows)]
 pub fn run_connect(args: &[OsString]) -> i32 {
-    let host = match texts(args).and_then(|args| parse_args(&args)) {
-        Ok(host) => host,
+    let request = match texts(args).and_then(|args| parse_args(&args)) {
+        Ok(request) => request,
         Err(usage) => {
             // The console first, only so that the usage reaches it (a release build has none of its own); nothing else is done.
             inputs_windows::attach_console();
@@ -179,7 +216,10 @@ pub fn run_connect(args: &[OsString]) -> i32 {
             (inputs_windows::own_output(STD_OUTPUT_HANDLE, &console), inputs_windows::own_output(STD_ERROR_HANDLE, &console))
         }
     };
-    session(host, term, console, reach_broker, inputs_windows::take_over_control_events, outputs, &mut std::io::stderr())
+    // Before the session the console is as it was (its line editing, echo on), and std reads it through the standard input `StdConsole`
+    // found.
+    let wait = || wait_for_enter(std::io::stdin());
+    session(request, term, console, reach_broker, inputs_windows::take_over_control_events, outputs, wait, &mut std::io::stderr())
 }
 
 /// How long a connect waits while every instance of the broker's pipe serves another client (the broker makes the next one at once).
@@ -216,15 +256,18 @@ fn refused(error: &std::io::Error) -> String {
 /// events over (`inputs_windows::take_over_control_events`), and `outputs` gives the terminal's standard output and error. The console
 /// comes first: a program that has none must not start the app just to say so. Then every way out of the program is put in place (the
 /// panic hook's restore, the watchdog, the control events) before the console is changed at all (`Tty::take_over`): until then a Ctrl-C
-/// ends the program the default way, and the console is as it was. Writes what the CLI says before the session to `stderr`.
+/// ends the program the default way, and the console is as it was. Writes what the CLI says before the session to `stderr`; with
+/// `--pause-on-error`, SSHelter that cannot be reached is said and then `wait` waits for Enter (`wait_for_enter`), the console as it was.
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 fn session(
-    host: HostQuery,
+    request: Request,
     term: String,
     api: Arc<dyn terminal::ConsoleApi>,
     reach: impl FnOnce() -> Result<crate::ipc::pipe_windows::PipeStream, String>,
     control_events: impl FnOnce(run::ControlEvents) -> std::io::Result<()>,
     outputs: impl FnOnce() -> (run::Output, run::Output),
+    wait: impl FnOnce(),
     stderr: &mut dyn std::io::Write,
 ) -> i32 {
     let mut tty = match terminal::Tty::new(Arc::clone(&api)) {
@@ -236,10 +279,7 @@ fn session(
     };
     let stream = match reach() {
         Ok(stream) => stream,
-        Err(text) => {
-            let _ = writeln!(stderr, "{text}");
-            return 1;
-        }
+        Err(text) => return ended_before_the_session(&text, &request, wait, stderr),
     };
     let terminal = tty.restorer();
     terminal::restore_on_panic(terminal.clone());
@@ -269,7 +309,7 @@ fn session(
     let size = Arc::clone(&api);
     let _size = run::watch_size(inputs.clone(), run::SIZE_CHECK, move || size.size());
     let (stdout, stderr_output) = outputs();
-    let code = run::run(stream, host, term, &mut tty, (inputs, queue), stdout, stderr_output);
+    let code = run::run(stream, request, term, &mut tty, (inputs, queue), stdout, stderr_output);
     // The run put the console back on every way it ends; a control handler that waits returns once it is (`run::ControlEvents`).
     tty.restore();
     over.set();
@@ -292,11 +332,50 @@ mod tests {
 
     #[test]
     fn an_alias_or_an_id_names_the_host_and_anything_else_shows_the_usage() {
-        assert_eq!(parse_args(&args(&["web"])), Ok(HostQuery::Alias("web".into())));
-        assert_eq!(parse_args(&args(&["--id", "0123456789abcdef"])), Ok(HostQuery::Id("0123456789abcdef".into())));
-        for wrong in [&[][..], &["--id"], &["web", "db"], &["-oProxyCommand=x"], &["--id", "-x"], &[""], &["--new-tab", "web"]] {
+        assert_eq!(parse_args(&args(&["web"])), Ok(HostQuery::Alias("web".into()).into()));
+        assert_eq!(parse_args(&args(&["--id", "0123456789abcdef"])), Ok(HostQuery::Id("0123456789abcdef".into()).into()));
+        let wrong: [&[&str]; 11] = [
+            &[],
+            &["--id"],
+            &["web", "db"],
+            &["-oProxyCommand=x"],
+            &["--id", "-x"],
+            &[""],
+            &["--new-tab", "web"],
+            &["--pause-on-error"],
+            &["web", "--pause-on-error"],
+            &["--pause-on-error", "--pause-on-error", "web"],
+            &["--id", "--pause-on-error", "web"],
+        ];
+        for wrong in wrong {
             assert_eq!(parse_args(&args(wrong)), Err(USAGE.to_string()), "{wrong:?}");
         }
+    }
+
+    /// SSHelter's Connect puts `--pause-on-error` before the host (spec §7.4); the usage, which is for people, does not show it.
+    #[test]
+    fn pause_on_error_comes_before_the_host() {
+        assert_eq!(parse_args(&args(&["--pause-on-error", "web"])), Ok(Request { host: HostQuery::Alias("web".into()), pause_on_error: true }));
+        assert_eq!(parse_args(&args(&["--pause-on-error", "--id", "0123"])), Ok(Request { host: HostQuery::Id("0123".into()), pause_on_error: true }));
+        assert!(!USAGE.contains("pause"), "{USAGE}");
+    }
+
+    /// The wait for Enter before the session ends at a line's end (LF, or CR as some terminals send it), at the end of input, and on a
+    /// failed read, and reads no further than the Enter.
+    #[test]
+    fn the_wait_for_enter_ends_at_a_line_end_the_end_of_input_or_a_failed_read() {
+        for (typed, left) in [(&b"\n"[..], &b""[..]), (&b"abc\ndef"[..], &b"def"[..]), (&b"abc\rdef"[..], &b"def"[..]), (&b"abc"[..], &b""[..])] {
+            let mut input = typed;
+            wait_for_enter(&mut input);
+            assert_eq!(input, left, "{typed:?}");
+        }
+        struct Failing;
+        impl std::io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("gone"))
+            }
+        }
+        wait_for_enter(Failing);
     }
 
     #[test]
@@ -360,8 +439,19 @@ mod tests {
             reach: impl FnOnce() -> Result<UnixStream, String>,
             signals: impl FnOnce(run::Inputs, terminal::Restorer, run::Watchdog, Arc<dyn TermiosApi>) -> io::Result<()>,
         ) -> (i32, String) {
+            let wait = || panic!("nothing waits for Enter without --pause-on-error");
+            session_asked(HostQuery::Alias("web".into()).into(), api, reach, signals, wait)
+        }
+
+        fn session_asked(
+            request: Request,
+            api: Arc<dyn TermiosApi>,
+            reach: impl FnOnce() -> Result<UnixStream, String>,
+            signals: impl FnOnce(run::Inputs, terminal::Restorer, run::Watchdog, Arc<dyn TermiosApi>) -> io::Result<()>,
+            wait: impl FnOnce(),
+        ) -> (i32, String) {
             let mut said = Vec::new();
-            let code = super::super::session(HostQuery::Alias("web".into()), "xterm-256color".into(), api, reach, signals, &mut said);
+            let code = super::super::session(request, "xterm-256color".into(), api, reach, signals, wait, &mut said);
             (code, String::from_utf8(said).unwrap())
         }
 
@@ -394,6 +484,24 @@ mod tests {
             assert_eq!(session_on(terminal.clone(), || Err(NOT_STARTED.to_string())), (1, "SSHelter did not start within 12 seconds.\n".to_string()));
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
         }
+
+        /// Spec §7.3, `--pause-on-error`: SSHelter that cannot be reached is said, the prompt follows, and the program waits for Enter
+        /// (once) before it ends with 1; the terminal is left as it was, with its own line editing for that Enter. Without a terminal there
+        /// is nothing to wait on: the sentence, and 1.
+        #[test]
+        fn with_pause_on_error_sshelter_that_cannot_be_reached_is_said_and_waits_for_enter() {
+            let terminal = FakeTermios::new();
+            let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
+            let signals = |_, _, _, _| -> io::Result<()> { panic!("the signals are not taken over before SSHelter answers") };
+            let mut waits = 0;
+            let said = session_asked(request.clone(), terminal.clone(), || Err(NOT_STARTED.to_string()), signals, || waits += 1);
+            assert_eq!(said, (1, "SSHelter did not start within 12 seconds.\nPress Enter to exit.".to_string()));
+            assert_eq!(waits, 1);
+            assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
+            let reach = || -> Result<UnixStream, String> { panic!("SSHelter must not be reached, let alone started, without a terminal") };
+            let wait = || panic!("nothing to wait on without a terminal");
+            assert_eq!(session_asked(request, Arc::new(NotATerminal), reach, signals, wait), (1, "sshelter connect needs a terminal.\n".to_string()));
+        }
     }
 
     #[cfg(windows)]
@@ -425,9 +533,20 @@ mod tests {
             reach: impl FnOnce() -> Result<PipeStream, String>,
             control_events: impl FnOnce(run::ControlEvents) -> io::Result<()>,
         ) -> (i32, String) {
+            let wait = || panic!("nothing waits for Enter without --pause-on-error");
+            session_asked(HostQuery::Alias("web".into()).into(), console, reach, control_events, wait)
+        }
+
+        fn session_asked(
+            request: Request,
+            console: Arc<FakeConsole>,
+            reach: impl FnOnce() -> Result<PipeStream, String>,
+            control_events: impl FnOnce(run::ControlEvents) -> io::Result<()>,
+            wait: impl FnOnce(),
+        ) -> (i32, String) {
             let mut said = Vec::new();
             let outputs = || -> (run::Output, run::Output) { panic!("these sessions end before the run") };
-            let code = super::super::session(HostQuery::Alias("web".into()), "xterm-256color".into(), console, reach, control_events, outputs, &mut said);
+            let code = super::super::session(request, "xterm-256color".into(), console, reach, control_events, outputs, wait, &mut said);
             (code, String::from_utf8(said).unwrap())
         }
 
@@ -447,6 +566,20 @@ mod tests {
             let console = FakeConsole::new();
             let events = |_| -> io::Result<()> { panic!("nothing is taken over before SSHelter answers") };
             assert_eq!(session_with(console.clone(), || Err(NOT_STARTED.to_string()), events), (1, "SSHelter did not start within 12 seconds.\n".to_string()));
+            assert!(console.changes().is_empty(), "the console was not changed");
+        }
+
+        /// Spec §7.3, `--pause-on-error`: SSHelter that cannot be reached is said, the prompt follows, and the program waits for Enter
+        /// (once), the console as it was (its own line editing), before it ends with 1.
+        #[test]
+        fn with_pause_on_error_sshelter_that_cannot_be_reached_is_said_and_waits_for_enter() {
+            let console = FakeConsole::new();
+            let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
+            let events = |_| -> io::Result<()> { panic!("nothing is taken over before SSHelter answers") };
+            let mut waits = 0;
+            let said = session_asked(request, console.clone(), || Err(NOT_STARTED.to_string()), events, || waits += 1);
+            assert_eq!(said, (1, "SSHelter did not start within 12 seconds.\nPress Enter to exit.".to_string()));
+            assert_eq!(waits, 1);
             assert!(console.changes().is_empty(), "the console was not changed");
         }
 
