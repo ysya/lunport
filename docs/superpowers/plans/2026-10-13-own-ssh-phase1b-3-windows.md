@@ -20,6 +20,24 @@ through `tauri build --config`), GitHub Actions `windows-latest`.
 **Spec:** `docs/superpowers/specs/2026-10-10-own-ssh-client-design.md` — §4's Windows paragraph, §7.2, §7.3 (the Windows bullet and the
 1b note), §7.4, §12, §13, §16. The user approved this design in chat on 2026-10-13 and asked for it before any beta.
 
+## Amendments made during execution
+
+The tasks below were written before the code; review rounds changed the design in these places (commit ranges on `next/own-ssh`; the final
+review's list, `2026-10-14-own-ssh-phase1b-3-final-review-fixlist.md`, has the last word):
+
+- Task 1: the pipe's handles are OVERLAPPED (a synchronous handle serializes a pending read and every write); `connect` uses the session
+  pipe only when the current user owns it (a squatter's pipe is refused with its own sentence), and SSHelter names the user as the owner
+  of its pipes (an elevated process would give them to Administrators); `hello` and `open_shell` each get 10 s (4d6fa45..dc8b976).
+- Task 2: `Tty::new` only reads the console; `Tty::take_over()` changes it once the control handler, the panic hook and the watchdog are in
+  place; `DISABLE_NEWLINE_AUTO_RETURN` in raw mode only, with a fallback; a legacy console is refused with its own sentence (6c74337..44e07fc).
+- Task 3: measured on a real console first — a pending `ReadConsoleW` survives mode changes and flushes and cannot be cancelled — so a read
+  gate ends a pending read with the program's own Enter before every switch and drops what it gave; a read left pending when the process
+  ends goes with it (measured on the inherited standard input); output through `WriteConsoleW` (40767b8..aa23b36, a2da0f8, dce1659).
+- Task 4: the helper is built with `+crt-static`; a release build without it says so instead of running the GUI program; the bundle check
+  builds NSIS and MSI, and runs the release pair in a console of its own (a887d86..2eb97cd, 5e0ceb6, a296fc9).
+- After the final review: the helper saves the console's four settings and puts them back after its child ends (the installer kills every
+  `sshelter.exe`, a session's included) (fa2a128, ad93116); a race-free closed port for four engine tests (8b0507b).
+
 ## Global Constraints
 
 - **Where.** Repository `/Users/ysya/project/sideproj/sshelter`, branch `next/own-ssh`, which tracks `origin/next/own-ssh`. Every task ends
