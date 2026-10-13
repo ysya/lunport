@@ -8,6 +8,7 @@ use std::fmt;
 
 use zeroize::{Zeroize, Zeroizing};
 
+use super::signal;
 use super::terminal::Mode;
 use crate::session::protocol::{kinds, ClientKind, ClientMessage, Event, HostQuery, PtyRequest, Question, QuestionKind, ServerMessage, DATA_CHUNK, PROTOCOL_VERSION};
 
@@ -152,29 +153,9 @@ enum Phase {
 pub fn exit_code(code: Option<u32>, signal: Option<&str>) -> i32 {
     match (code, signal) {
         (Some(code), _) => code.min(255) as i32,
-        (None, Some(signal)) => signal_number(signal).map(|number| 128 + number).unwrap_or(255),
+        (None, Some(name)) => signal::number(name).map(|number| 128 + number).unwrap_or(255),
         (None, None) => 255,
     }
-}
-
-/// The local number of a signal named as SSH names it (RFC 4254 §6.10, without `SIG`).
-fn signal_number(name: &str) -> Option<i32> {
-    Some(match name {
-        "ABRT" => libc::SIGABRT,
-        "ALRM" => libc::SIGALRM,
-        "FPE" => libc::SIGFPE,
-        "HUP" => libc::SIGHUP,
-        "ILL" => libc::SIGILL,
-        "INT" => libc::SIGINT,
-        "KILL" => libc::SIGKILL,
-        "PIPE" => libc::SIGPIPE,
-        "QUIT" => libc::SIGQUIT,
-        "SEGV" => libc::SIGSEGV,
-        "TERM" => libc::SIGTERM,
-        "USR1" => libc::SIGUSR1,
-        "USR2" => libc::SIGUSR2,
-        _ => return None,
-    })
 }
 
 /// The client of one session.
@@ -222,7 +203,7 @@ impl Client {
             Input::Stdin(bytes) => self.typed(&bytes),
             Input::StdinEnd | Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => self.answer(None),
             Input::Interrupt => self.finish(true, None, 130),
-            Input::StdinEnd => self.finish(true, None, 128 + libc::SIGHUP),
+            Input::StdinEnd => self.finish(true, None, 128 + signal::HUP),
             Input::Resize(cols, rows) => vec![Action::Send(ClientMessage::WindowChange { cols, rows })],
             Input::Stop(signal) => self.finish(true, None, 128 + signal),
             Input::Failed => self.finish(true, Some(THREAD_FAILED.to_string()), 255),
@@ -564,7 +545,7 @@ mod tests {
         let mut client = opened();
         assert_eq!(client.handle(Input::Closed), [Action::Mode(Mode::Cooked, false), Action::Stderr("\nThe connection to SSHelter ended.\n".into()), Action::Exit(255)]);
         let mut client = opened();
-        assert_eq!(client.handle(Input::Stop(libc::SIGTERM)), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(128 + libc::SIGTERM)]);
+        assert_eq!(client.handle(Input::Stop(signal::TERM)), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(128 + signal::TERM)]);
         let mut client = started();
         assert_eq!(client.handle(Input::Interrupt), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(130)], "Ctrl-C while connecting stops it");
     }
@@ -576,7 +557,7 @@ mod tests {
         let hangup = [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(129)]; // 128 + SIGHUP
         assert_eq!(started().handle(Input::StdinEnd), hangup);
         assert_eq!(opened().handle(Input::StdinEnd), hangup);
-        assert_eq!(opened().handle(Input::Stop(libc::SIGHUP)), hangup);
+        assert_eq!(opened().handle(Input::Stop(signal::HUP)), hangup);
     }
 
     /// A thread of the program itself panicked (the panic hook has put the terminal back by then, and nothing would read from that
@@ -786,9 +767,9 @@ mod tests {
         let on_its_own_line = |text: &str| Action::Stderr(format!("\n{text}\n"));
         type Case = (&'static str, fn() -> Vec<Input>, Vec<Action>);
         let cases: Vec<Case> = vec![
-            ("SIGTERM", || vec![Input::Stop(libc::SIGTERM)], vec![Action::Send(ClientMessage::Close), Action::Exit(143)]),
-            ("SIGHUP, or the terminal went away", || vec![Input::Stop(libc::SIGHUP)], vec![Action::Send(ClientMessage::Close), Action::Exit(129)]),
-            ("SIGQUIT", || vec![Input::Stop(libc::SIGQUIT)], vec![Action::Send(ClientMessage::Close), Action::Exit(131)]),
+            ("SIGTERM", || vec![Input::Stop(signal::TERM)], vec![Action::Send(ClientMessage::Close), Action::Exit(143)]),
+            ("SIGHUP, or the terminal went away", || vec![Input::Stop(signal::HUP)], vec![Action::Send(ClientMessage::Close), Action::Exit(129)]),
+            ("SIGQUIT", || vec![Input::Stop(signal::QUIT)], vec![Action::Send(ClientMessage::Close), Action::Exit(131)]),
             ("a thread of the program failed", || vec![Input::Failed], vec![Action::Send(ClientMessage::Close), on_its_own_line(THREAD_FAILED), Action::Exit(255)]),
             ("the broker went away", || vec![Input::Closed], vec![on_its_own_line("The connection to SSHelter ended."), Action::Exit(255)]),
             ("the broker ended the session", || vec![exited()], vec![Action::Exit(255)]),
@@ -813,7 +794,7 @@ mod tests {
     /// own end does not.
     #[test]
     fn an_end_outside_a_question_keeps_what_was_typed() {
-        assert_eq!(opened().handle(Input::Stop(libc::SIGTERM)), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(143)]);
+        assert_eq!(opened().handle(Input::Stop(signal::TERM)), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(143)]);
         assert_eq!(started().handle(exited()), [Action::Mode(Mode::Cooked, false), Action::Exit(255)]);
         let mut client = started();
         client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
@@ -1014,7 +995,7 @@ mod tests {
         let mut client = opened();
         assert!(client.handle(Input::Continue).is_empty());
         assert_eq!(client.handle(Input::Stdin(Zeroizing::new(b"ls\r".to_vec()))), [Action::SendData(b"ls\r".to_vec())], "the shell is still open");
-        client.handle(Input::Stop(libc::SIGTERM));
+        client.handle(Input::Stop(signal::TERM));
         assert!(client.handle(Input::Continue).is_empty(), "nothing after the end");
     }
 
