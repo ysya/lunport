@@ -164,6 +164,7 @@ fn done(succeeded: BOOL) -> io::Result<()> {
 mod tests {
     use std::sync::Arc;
 
+    use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
     use windows_sys::Win32::System::Console as win32;
 
     use super::super::console;
@@ -194,10 +195,18 @@ mod tests {
         }
     }
 
+    /// A console refuses a mode flag it does not know with ERROR_INVALID_PARAMETER (Microsoft's sign of an older console), and std
+    /// reads that as `InvalidInput`: the take-over's `Unsupported` (no virtual terminal sequences) and raw mode's fallback without
+    /// xterm's line endings go by it.
+    #[test]
+    fn a_refused_mode_flag_reads_as_invalid_input() {
+        assert_eq!(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32).kind(), io::ErrorKind::InvalidInput);
+    }
+
     /// Spec §7.3: standard input that is not a console is refused at the start (the CLI then says `sshelter connect needs a
     /// terminal.`), with a clear error, before anything about the console is changed. First a pipe of the test's own as the input,
-    /// whatever this process's standard input is; then this process's own console, when its standard input is not a console either
-    /// (a CI job's is a pipe).
+    /// whatever this process's standard input is; then this process's own console, when its standard input is not a console either.
+    /// On CI (a job's standard input is a pipe) that second half must run.
     #[test]
     fn a_real_console_handle_is_refused_when_input_is_a_pipe() {
         let (reader, _writer) = std::io::pipe().unwrap();
@@ -209,6 +218,9 @@ mod tests {
             Some(input) if console_mode(input).is_err() => {
                 let refused = Tty::new(Arc::new(StdConsole::new())).err().expect("this process's standard input is not a console");
                 assert!(refused.to_string().starts_with("standard input is not a console ("), "{refused}");
+            }
+            input if std::env::var_os("CI").is_some() => {
+                panic!("on CI standard input is a pipe, and here it is {}", if input.is_some() { "a console" } else { "missing" })
             }
             // A run by hand in a console window, or a process without a standard input: nothing there to refuse.
             _ => eprintln!("this process's standard input is a console, or missing: only the test's own pipe was refused"),
