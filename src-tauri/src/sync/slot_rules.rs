@@ -421,6 +421,59 @@ pub(crate) mod test_keys {
     pub const RSA_PUBLIC: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDYs3QlS3e6UuGHCQc/0uqQzC0EbIHm0EIcfz1Nbzm1Q3DjIoUQ7XwN5Avgs6kJRyrucX/Iy/xgDeNkyvgSwoq72bB6bdJ3jWEMs78fC6e05eRLa+xiui2rj5LPbS74bxCdB6SnORBbtTE8u9k4qpTTEfrsORaEb7mtHFLbAVWtn14bgLMOktsGpMtdIDKTyG/v8BxdDJeztKALF/mN2VQqH2Q/hm52/85DK2SmaVi5o4gqZNjqWNZtgtxxUPyeNoCKBNz6MhcBmhWYsrTE3ibJc1WbIHlUYL/N0m8ikhVH7Ggx5m6TswErMM0Y+lsZq/ixGXOzO6O96T2ersrk/a+r";
     pub const RSA_FINGERPRINT: &str = "SHA256:uPzZ3UuFWT885udlYuahqchYLpT+ZyjhQqBnoICqfcU";
 
+    /// ecdsa-sha2-nistp256,沒有 passphrase,comment `scratch-short-256`,指紋 `SHA256:l5qa6yJt/SkXhs3E4fSbqg5QPNHt8yaU/ljE8Yk2vys`。
+    /// 純量在原文裡只有 31 位元組(OpenSSH 省掉 mpint 的前導零),`ssh-key` 0.6.7 讀不懂;`ssh-keygen -t ecdsa -b 256` 試到第 254 把才出現。
+    pub const ECDSA_SHORT_P256_BODY: &[&str] = &[
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS",
+        "1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQQm1ctFbiQYmUGa05TGTbxVb1qvyEOx",
+        "GhK1MrmufSrgcjorT7ZWphkbsg9XrQ3g9aXInyWD5ySbtV7WLM310WRdAAAAqJ9cWdqfXF",
+        "naAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCbVy0VuJBiZQZrT",
+        "lMZNvFVvWq/IQ7EaErUyua59KuByOitPtlamGRuyD1etDeD1pcifJYPnJJu1XtYszfXRZF",
+        "0AAAAfP4gSw/N8F9xgVFhsqmRyBdW/UjqtUaUWfpmkB7LcUAAAABFzY3JhdGNoLXNob3J0",
+        "LTI1Ng==",
+    ];
+    pub const ECDSA_SHORT_P256_PUBLIC: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCbVy0VuJBiZQZrTlMZNvFVvWq/IQ7EaErUyua59KuByOitPtlamGRuyD1etDeD1pcifJYPnJJu1XtYszfXRZF0=";
+
+    /// 同一把 `ECDSA_SHORT_P256_BODY`,`ssh-keygen -p` 加上 passphrase `test-passphrase`(aes256-ctr / bcrypt)。
+    pub const ECDSA_SHORT_P256_ENC_BODY: &[&str] = &[
+        "b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABD0Zh9ijA",
+        "UD6xP167x37oquAAAAGAAAAAEAAABoAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlz",
+        "dHAyNTYAAABBBCbVy0VuJBiZQZrTlMZNvFVvWq/IQ7EaErUyua59KuByOitPtlamGRuyD1",
+        "etDeD1pcifJYPnJJu1XtYszfXRZF0AAACwX2Ic15Xw8mdJRW3RYtRIn3w4ny8Q0caNul/Y",
+        "II9GR2boVFkVmOVGcMRD/Wajbev/XOtwF6Z/+x/4pvDzIUeYYN8T4Na/sMGGK0Dirwd2ld",
+        "tiP8tmcZb7bZ4ip9UFsOqFfTN2YZrNeU4L8j4Oi3xHbRGJEBfa6AYhsYnlHt97cGE7H72h",
+        "kKICsnX4+AQDwr34cmzoNhtDzapH/ljSM7wCeAcCnOaK1evxV8yuNGbRWUo=",
+    ];
+
+    /// ecdsa-sha2-nistp384,沒有 passphrase,comment `scratch-short-384`,指紋 `SHA256:4dl7GIsUn35ueQCUC7qE+1p+KfYjL6Iuc7wx1K6tBNQ`。純量 47 位元組(短 1)。
+    pub const ECDSA_SHORT_P384_BODY: &[&str] = &[
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAiAAAABNlY2RzYS",
+        "1zaGEyLW5pc3RwMzg0AAAACG5pc3RwMzg0AAAAYQRWg4a5IXvFeOIVSTPYXz0DHp8YkfCv",
+        "4K5f9JHnBLrNcoxd28bsf5kYbPjjk/mQhb9PxbDWxQO5ebtTuFoyhVI97/KcIYZEbk/9Qm",
+        "VlurkPb8ShnhlnDFR4nXmxEFRNC/oAAADYbObc2mzm3NoAAAATZWNkc2Etc2hhMi1uaXN0",
+        "cDM4NAAAAAhuaXN0cDM4NAAAAGEEVoOGuSF7xXjiFUkz2F89Ax6fGJHwr+CuX/SR5wS6zX",
+        "KMXdvG7H+ZGGz445P5kIW/T8Ww1sUDuXm7U7haMoVSPe/ynCGGRG5P/UJlZbq5D2/EoZ4Z",
+        "ZwxUeJ15sRBUTQv6AAAALyh7fPjzAXRZPJxNSqkIOdEueYrd0M4GhYkMSKjYysMN4Bdlhi",
+        "McKlDt9r/BjbHLAAAAEXNjcmF0Y2gtc2hvcnQtMzg0",
+    ];
+    pub const ECDSA_SHORT_P384_PUBLIC: &str = "ecdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBFaDhrkhe8V44hVJM9hfPQMenxiR8K/grl/0kecEus1yjF3bxux/mRhs+OOT+ZCFv0/FsNbFA7l5u1O4WjKFUj3v8pwhhkRuT/1CZWW6uQ9vxKGeGWcMVHidebEQVE0L+g==";
+
+    /// ecdsa-sha2-nistp521,沒有 passphrase,comment `scratch-1`,指紋 `SHA256:fwnJcQk/NdAKYdkl5nYkJkhTwJLX2ZMCU6Gv4eeRjeo`。純量 65 位元組(短 1):P-521 的純量在 2^519 以下
+    /// 就這樣,每 4 把有 1 把。
+    pub const ECDSA_SHORT_P521_BODY: &[&str] = &[
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAArAAAABNlY2RzYS",
+        "1zaGEyLW5pc3RwNTIxAAAACG5pc3RwNTIxAAAAhQQAzNxI1hBMZjeADvZM2I5c6WvZtxUj",
+        "BxL/Lx8s9vc3XGj/f+Wj7MTJTk9bQ0pckEM20AbM6frrV9N/QcnezkO3sugBeaYJt5IX3a",
+        "c0sekn+zORlh1sU2jnmSNUOy8cNgP2bw83ev/5in9VcX3aGaDzo6hVr0xJjrXEwArengSF",
+        "YxjYurQAAAEIdvdGu3b3RrsAAAATZWNkc2Etc2hhMi1uaXN0cDUyMQAAAAhuaXN0cDUyMQ",
+        "AAAIUEAMzcSNYQTGY3gA72TNiOXOlr2bcVIwcS/y8fLPb3N1xo/3/lo+zEyU5PW0NKXJBD",
+        "NtAGzOn661fTf0HJ3s5Dt7LoAXmmCbeSF92nNLHpJ/szkZYdbFNo55kjVDsvHDYD9m8PN3",
+        "r/+Yp/VXF92hmg86OoVa9MSY61xMAK3p4EhWMY2Lq0AAAAQTM9MGNKdZFikCGfpxAhAHMd",
+        "3jvznqwMJ1YaWo0aPU5zOzPiGJVBShDtqvQy2W5YM4RNlY1Ouz3aHIDxDZJqw8sLAAAACX",
+        "NjcmF0Y2gtMQEC",
+    ];
+    pub const ECDSA_SHORT_P521_PUBLIC: &str = "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBADM3EjWEExmN4AO9kzYjlzpa9m3FSMHEv8vHyz29zdcaP9/5aPsxMlOT1tDSlyQQzbQBszp+utX039Byd7OQ7ey6AF5pgm3khfdpzSx6Sf7M5GWHWxTaOeZI1Q7Lxw2A/ZvDzd6//mKf1VxfdoZoPOjqFWvTEmOtcTACt6eBIVjGNi6tA==";
+
     pub fn plain() -> String {
         armor(PLAIN_BODY)
     }
@@ -432,6 +485,18 @@ pub(crate) mod test_keys {
     }
     pub fn rsa() -> String {
         armor(RSA_BODY)
+    }
+    pub fn ecdsa_short_p256() -> String {
+        armor(ECDSA_SHORT_P256_BODY)
+    }
+    pub fn ecdsa_short_p256_encrypted() -> String {
+        armor(ECDSA_SHORT_P256_ENC_BODY)
+    }
+    pub fn ecdsa_short_p384() -> String {
+        armor(ECDSA_SHORT_P384_BODY)
+    }
+    pub fn ecdsa_short_p521() -> String {
+        armor(ECDSA_SHORT_P521_BODY)
     }
 
     /// 把一個 SSH string(`uint32` 長度 + 內容)接到 `out` 後面。

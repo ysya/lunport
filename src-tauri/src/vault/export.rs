@@ -10,6 +10,7 @@ use std::path::Path;
 use zeroize::Zeroizing;
 
 use crate::error::AppError;
+use crate::vault::material;
 
 /// 要存到 SSHelter 管理的資料夾裡:拒絕(那裡的檔案由 SSHelter 維護,會被改寫或移除)。
 pub const EXPORT_INSIDE_MESSAGE: &str = "Choose a folder outside ~/.ssh/sshelter: SSHelter manages that folder.";
@@ -24,7 +25,7 @@ pub fn export_text(private_key: &str, passphrase: Option<&str>) -> Result<Zeroiz
     let Some(passphrase) = passphrase.filter(|p| !p.is_empty()) else {
         return Ok(Zeroizing::new(private_key.to_string()));
     };
-    let key = ssh_key::PrivateKey::from_openssh(private_key).map_err(|_| AppError::Other("SSHelter can't read this key.".to_string()))?;
+    let key = material::parse(private_key).ok_or_else(|| AppError::Other("SSHelter can't read this key.".to_string()))?;
     if key.is_encrypted() {
         return Err(AppError::Other(ALREADY_PROTECTED_MESSAGE.to_string()));
     }
@@ -131,6 +132,17 @@ mod tests {
         let key = ssh_key::PrivateKey::from_openssh(out.as_str()).unwrap();
         assert!(key.decrypt("correct horse").is_ok());
         assert!(key.decrypt("wrong horse").is_err());
+    }
+
+    /// 純量短了的 ECDSA 金鑰(`ssh-key` 0.6.7 自己讀不懂)也能加 passphrase 匯出:走 `material::parse`,跟 agent 讀得懂的是同一批金鑰。寫出來的是 `ssh-key` 的
+    /// 固定長度編碼,OpenSSH 兩種都收。
+    #[test]
+    fn a_passphrase_can_be_added_to_an_ecdsa_key_whose_scalar_lost_its_leading_zero() {
+        let out = export_text(&test_keys::ecdsa_short_p256(), Some("correct horse")).unwrap();
+        let facts = crate::sync::slot_rules::inspect_private_key(out.as_str()).unwrap();
+        assert!(facts.has_passphrase);
+        let material = material::open(out.as_str(), Some("correct horse")).unwrap();
+        assert_eq!(material.key_data(), material::public_key_data(test_keys::ECDSA_SHORT_P256_PUBLIC).unwrap(), "the same key");
     }
 
     #[test]
