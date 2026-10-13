@@ -460,6 +460,30 @@ fn case(name: &str) {
             flush(control).unwrap();
             assert!(!signalled(), "flushed");
         }
+        // Fix round 1: a session that ends under a hidden question (`Mode::Cooked`, throwing what was typed away) leaves nothing behind:
+        // what was typed into the question's read is not shown and not given to the loop, and no read is left in progress (one would
+        // take what is typed next, and show it once the console echoes again).
+        "an_end_under_a_question_leaves_nothing_behind" => {
+            let mut tty = Tty::new(Arc::new(StdConsole::opened().unwrap())).unwrap();
+            tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
+            let (inputs, mut queue) = queue();
+            console_keys_thread(inputs, tty.keys(), || {});
+            new_line(console.out, "question");
+            let (_, y) = cursor(console.out);
+            std::thread::sleep(SETTLE);
+            type_text(control, "hun");
+            std::thread::sleep(SETTLE);
+            tty.set_mode(Mode::Cooked, true).unwrap();
+            type_text(control, "x");
+            std::thread::sleep(SETTLE);
+            assert!(queue.next_within(AT_ONCE).is_none(), "nothing typed at the question reached the loop");
+            assert_eq!(row(console.out, y), "[question]", "nothing typed was shown");
+            // A read of the test's own takes what was typed after the end: no read of the question is left to take it.
+            set_mode(control, console.raw).unwrap();
+            let (read, _thread) = read_on_a_thread(open("CONIN$"));
+            assert_eq!(gave(&read), "x");
+            drop(tty);
+        }
         other => panic!("no case {other}"),
     }
 }
@@ -491,6 +515,7 @@ fn a_real_console_works_as_the_keys_reader_needs() {
         "a_panic_puts_the_real_console_back",
         "a_freed_console_fails_its_reads",
         "the_input_is_signalled_while_it_holds_a_record",
+        "an_end_under_a_question_leaves_nothing_behind",
     ];
     let started = Instant::now();
     let failed: Vec<String> = cases

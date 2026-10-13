@@ -18,8 +18,9 @@
 //! key reaches it at once, Ctrl-C a character), and a line read keeps the line typed into it, which `FlushConsoleInputBuffer` does not
 //! reach (typed ahead of a password, it would become a part of it). So a change of mode first ends the read in progress, and what that
 //! read gives is thrown away; the next read waits for the new mode. A read is ended with an Enter of the program's own in the input
-//! buffer (`ConsoleApi::wake`): a cancelled read (`CancelIoEx`) returns, but lives on in the console and takes the next key, or the
-//! next line, typed for the read after it (measured too).
+//! buffer (`ConsoleApi::wake`), and what the console holds after it is thrown away (an Enter the read did not take must not reach the next
+//! mode): a cancelled read (`CancelIoEx`) returns, but lives on in the console and takes the next key, or the next line, typed for the
+//! read after it (measured too). The one change that leaves the read in progress is to cooked mode keeping what was typed (`Reads::pause`).
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,7 +111,7 @@ pub trait ConsoleApi: Send + Sync {
     /// Columns and rows of the window; `None` when they cannot be read.
     fn size(&self) -> Option<(u16, u16)>;
     /// Reads what was typed into `buf` (`ReadConsoleW`), as the input's mode has it: in raw mode what is there once a key was typed, in
-    /// a line mode a line once Enter ends it. The number of UTF-16 units read; 0 when the read gave nothing (Ctrl-C ends a line read so).
+    /// a line mode a line once Enter ends it. The number of UTF-16 units read; 0 when the read gave nothing (a cancel, and a Ctrl-C pressed at a line read).
     /// An error is the console gone.
     fn read(&self, buf: &mut [u16]) -> io::Result<usize>;
     /// Ends a read in progress, a line read or a raw one: an Enter of the program's own in the input buffer, which the read takes.
@@ -120,8 +121,8 @@ pub trait ConsoleApi: Send + Sync {
 /// How long a change of mode waits for the read it ended (`Reads::pause`): the read returns as soon as the console has the Enter.
 const READ_END_WAIT: Duration = Duration::from_millis(500);
 
-/// The reads of the keys, and the changes of mode they must not span (the module's doc): a change ends the read in progress and holds
-/// the next one back until the new mode is set. Nothing is read in cooked mode: what is typed while SSHelter connects stays in the
+/// The reads of the keys, and the changes of mode they must not span (the module's doc): a change ends the read in progress (`pause`)
+/// and holds the next one back until the new mode is set. Nothing is read in cooked mode: what is typed while SSHelter connects stays in the
 /// console, where the shell gets it once raw mode is set (OpenSSH's typeahead), and where a question's flush throws it away. At a
 /// question one line is read; once it was (or Ctrl-C ended it), the next read waits for the next mode, and the keys typed meanwhile wait
 /// in the console.
@@ -152,26 +153,30 @@ impl Reads {
     }
 
     /// Before the mode changes to `next`: no read starts until `resume`, and the read in progress, if any, belongs to the mode before.
-    /// When the new mode reads (raw, a question's), that read is ended (`wake`) and waited for, `READ_END_WAIT` at most. When it is
-    /// cooked, it is not: cooked mode reads nothing, and what comes after it is the end of the program (which ends the read with it) or
-    /// another change, which ends it then.
-    fn pause(&self, next: Mode, wake: impl FnOnce()) {
+    /// That read is ended (`wake`) and waited for, `READ_END_WAIT` at most, when the new mode reads (raw, a question's), and when the change
+    /// throws away what was typed (`discard_input`: a question, or the end of a session under one, whose line read still holds a part
+    /// of a password, and would show what is typed next once the console of the start echoes it). A change to cooked mode that keeps what
+    /// was typed does not end it: cooked mode reads nothing, and what comes after it is the end of the program (the read ends with it) or
+    /// another change, which ends it then. Whether a read was ended: its Enter may still be in the console (the read ended on a key typed
+    /// at that moment), and the caller throws away what the console holds.
+    fn pause(&self, next: Mode, discard_input: bool, wake: impl FnOnce()) -> bool {
         let mut state = self.state();
         state.generation += 1;
         state.mode = None;
         state.line_read = false;
-        if next == Mode::Cooked || state.reading.is_none() {
-            return;
+        if (next == Mode::Cooked && !discard_input) || state.reading.is_none() {
+            return false;
         }
         wake();
         let deadline = Instant::now() + READ_END_WAIT;
         while state.reading.is_some() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return;
+                break;
             }
             state = self.changed.wait_timeout(state, left).unwrap_or_else(PoisonError::into_inner).0;
         }
+        true
     }
 
     /// The mode is set: reads go on in it, when it is one that reads.
@@ -211,7 +216,7 @@ pub enum KeysRead {
     Read,
     /// The mode changed while the read was in progress: what it read belonged to the mode before, and was thrown away.
     Stale,
-    /// The read gave nothing: Ctrl-C ended a line read.
+    /// The read gave nothing: a Ctrl-C pressed at a line read (or a cancel) ended it.
     Nothing,
     /// The read failed: the console went away.
     Gone,
@@ -459,7 +464,7 @@ impl Tty {
         let console = &self.console;
         let mut now = console.now();
         // No read spans the change (the module's doc): the read in progress is ended first, and the next waits for the new mode.
-        console.reads.pause(mode, || {
+        let woke = console.reads.pause(mode, discard_input, || {
             let _ = console.api.wake();
         });
         let set = (|| -> io::Result<()> {
@@ -467,9 +472,10 @@ impl Tty {
                 console.take_over()?;
                 *now = Some(Mode::Cooked);
             }
-            if discard_input {
-                // What was typed is thrown away when the console can; one that went away may not, and the mode is set all the same (the
-                // end of the program must not stop at that).
+            if discard_input || woke {
+                // What was typed is thrown away when the console can (after a read was ended, the program's own Enter too, which no
+                // read of the new mode may take); one that went away may not, and the mode is set all the same (the end of the program
+                // must not stop at that).
                 let _ = console.api.flush_input();
             }
             console.api.set(Setting::InputMode, input_mode(console.start.input_mode, mode))?;
@@ -1390,8 +1396,9 @@ mod tests {
         assert_eq!(next.recv_timeout(SOON).unwrap(), read_as("x", Mode::Raw));
     }
 
-    /// Cooked mode reads nothing, and what comes after it is the end of the program or another change: a change to cooked mode does not
-    /// end the read in progress. Whatever that read gives later belongs to the mode before, and is thrown away.
+    /// Cooked mode reads nothing, and what comes after a change to it that keeps what was typed is the end of the program or another
+    /// change: such a change does not end the read in progress. Whatever that read gives later belongs to the mode before, and is thrown
+    /// away.
     #[test]
     fn a_change_to_cooked_mode_does_not_end_the_read_in_progress() {
         let (console, mut tty) = raw_console();
@@ -1400,6 +1407,54 @@ mod tests {
         tty.set_mode(Mode::Cooked, false).unwrap();
         assert!(!console.changes().contains(&Call::Wake));
         console.type_text("x");
+        assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None));
+    }
+
+    /// Fix round 1: the end of a session under a question (`Mode::Cooked` throwing what was typed away) ends the question's line read first,
+    /// while the console still hides what is typed: the line read keeps what was typed into it (a part of a password, which no flush
+    /// reaches: the module's doc), and left in progress into the echoing console of the start it would show what is typed next and take
+    /// it. What it read is thrown away.
+    #[test]
+    fn an_end_under_a_question_ends_the_questions_read_while_the_console_still_hides_it() {
+        let console = FakeConsole::new();
+        let mut tty = Tty::new(console.clone()).unwrap();
+        tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
+        let read = reading(tty.keys());
+        std::thread::sleep(INTO_THE_READ);
+        let before = console.changes().len();
+        tty.set_mode(Mode::Cooked, true).unwrap();
+        let start = console.start;
+        assert_eq!(
+            console.changes()[before..],
+            [Call::Wake, Call::FlushInput, Call::Set(Setting::InputMode, start.input_mode), Call::Set(Setting::OutputMode, COOKED_OUTPUT)],
+            "the read is ended before the mode of the start (which echoes) is set"
+        );
+        assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None), "what the question's read held is thrown away");
+    }
+
+    /// Fix round 1: an Enter of the program's own that the read in progress did not take (it ended on a key typed at that moment) must not
+    /// reach the first read of the next mode: every change that ends a read throws away what the console holds after it, also one that
+    /// keeps what was typed otherwise.
+    #[test]
+    fn what_the_console_holds_after_a_read_was_ended_is_thrown_away() {
+        let (console, mut tty) = raw_console();
+        let read = reading(tty.keys());
+        std::thread::sleep(INTO_THE_READ);
+        let before = console.changes().len();
+        tty.set_mode(Mode::Prompt { echo: true }, false).unwrap();
+        let shown = USUAL_INPUT;
+        assert_eq!(
+            console.changes()[before..],
+            [Call::Wake, Call::FlushInput, Call::Set(Setting::InputMode, shown), Call::Set(Setting::OutputMode, COOKED_OUTPUT)]
+        );
+        assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None));
+        // One flush, also when the change throws what was typed away anyway.
+        let read = reading(tty.keys());
+        std::thread::sleep(INTO_THE_READ);
+        let before = console.changes().len();
+        tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
+        assert_eq!(console.changes()[before..before + 2], [Call::Wake, Call::FlushInput]);
+        assert_eq!(console.changes().iter().skip(before).filter(|call| **call == Call::FlushInput).count(), 1);
         assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None));
     }
 
