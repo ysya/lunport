@@ -59,14 +59,15 @@ jobs:
       # slot_files_windows), the key vault (vault::), the local IPC transport (ipc:: covers the named pipe and program identification),
       # the SSH agent (agent:: covers the real ssh-add / ssh-keygen against the agent), the SSH engine (`ssh::`: the tests that need
       # no sshd of their own; the scratch-sshd ones print "skipped" on Windows) and the platform-neutral parts of the session broker
-      # (`session::`; its socket tests are Unix only) and of sshelter connect (`cli::`: its arguments; the rest is Unix only). The rest
-      # of the suite runs on macOS; parts of it use the system keychain.
+      # (`session::`; its socket tests are Unix only) and of sshelter connect (`cli::`: its arguments; the rest is Unix only), and the
+      # terminal launch (`connect::`: Windows Terminal and cmd run the console helper, or a debug build itself). The rest of the suite runs
+      # on macOS; parts of it use the system keychain.
       - name: Key slot, vault, agent, engine and broker tests
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `vault:: ipc:: agent::` is read as a YAML mapping and the workflow would not load.
         # --locked: the committed Cargo.lock, with russh in it, is what is built.
-        run: "cargo test --locked --lib -- sync::slot_rules sync::slot_files vault:: ipc:: agent:: ssh:: session:: cli::"
+        run: "cargo test --locked --lib -- sync::slot_rules sync::slot_files vault:: ipc:: agent:: ssh:: session:: cli:: connect::"
       # The library and the binary in a debug build, with russh in the dependency graph (the release workflow builds the same graph).
       - name: Build the whole app
         run: cargo build --locked
