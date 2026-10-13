@@ -7,7 +7,8 @@ each item as pass / fail with a note.
 
 CI measured one console only: the classic console host (conhost) of the GitHub runner, through a test program that types into a console
 of its own (own-ssh spec §7.3, §16). CI also runs each installer's release pair in a console of its own, with the console's own buffers
-as the helper's standard handles: the usage, and the refusal of a session pipe another owner made, show on that console's screen
+as the helper's standard handles: the usage, and the refusal of a session pipe another owner made, show on that console's screen, and
+the helper puts the console's four settings back after a stand-in `sshelter.exe` that changed them and was killed
 (`windows-bundle-check.yml`). What a keyboard, Windows Terminal, an input method and a closed window do is what these items check.
 
 **Items 4 and 8 first: they are the gate on the beta.** Only a real computer shows the release build's console path end to end: the
@@ -158,11 +159,11 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
 
 ## A hard kill, redirected output, a non-ASCII answer
 
-31. **A hard kill.** With a `web` session open in a classic console window, end `sshelter.exe` (the one with `connect` on its command
-    line; add the Command line column to Task Manager's Details tab to see it) from Task Manager. The helper exits with the kill's code,
-    and the console is expected to be left raw (no echo, no line editing): SSHelter puts the console back on every way out it has, a
-    kill gives it none, and the helper does not put it back. Record what the window does and whether `chcp` still says 65001; close
-    that window afterwards.
+31. **A hard kill.** With a `web` session open in a classic console window (Connect with Command Prompt, item 9), end `sshelter.exe`
+    (the one with `connect` on its command line; add the Command line column to Task Manager's Details tab to see it) from Task Manager.
+    The session ends with no sentence of the CLI's own (a kill gives `sshelter.exe` no way out), and the helper ends with the kill's
+    exit code: record `echo %ERRORLEVEL%`. The helper puts the console back as it was (spec §7.3), so check C passes: `chcp` prints the
+    code page from before (not 65001), and what you type shows and can be edited.
 32. **Output redirected.** `& <helper> connect web > "$env:TEMP\out.txt"`, and in the session run `echo hi; exit`. The keys still come
     from the console (what you type reaches the remote), and `Get-Content "$env:TEMP\out.txt"` holds the shell's output (`hi`). Remove
     the file.
@@ -178,15 +179,28 @@ Do not have the MSI and the NSIS install at the same time: the broker's lock mak
     `sshelter-cli.exe` are there. Connect `web` opens the session with Windows Terminal and with Command Prompt, and
     `& "C:\Program Files\SSHelter\sshelter-cli.exe" connect` prints the usage and `$LASTEXITCODE` is 2. Uninstall it from Settings →
     Apps: both programs are gone and the folder is removed.
+
+The NSIS installer and uninstaller end every `sshelter.exe` of yours before they change a file, a session's `sshelter.exe connect`
+too. The helper has another name (`sshelter-cli.exe`) and is not ended: it puts the console back once its `sshelter.exe` has ended
+(spec §7.3). In the items below, open the session with `& <helper> connect web` in a Windows Terminal tab, so that the PowerShell
+prompt comes back for check C and `$LASTEXITCODE`.
+
 35. **The in-app update from 0.17.0-9.** Install 0.17.0-9 with its NSIS installer, choose the Beta channel in Settings → General, and
     check for updates: the beta installs and the app restarts; `Get-ChildItem "$env:LOCALAPPDATA\SSHelter" -Filter *.exe` shows both
-    programs with the beta's dates and sizes, and no dialog about a file in use appeared. Then the same with a `web` session open: the
-    terminal prints `The connection to SSHelter ended.` (or `SSHelter quit, so the connection to web was closed.`), the program ends
-    with 255 and check C passes, the update completes, and both programs are the beta's.
-36. **The installer over an installed beta with a session open.** Run the beta's `-setup.exe` again while a `web` session is open: the
-    same as item 35 (the session ends with its sentence and 255, check C passes, no dialog about a file in use, both programs are the
-    beta's).
-37. **Uninstall (NSIS).** Uninstall SSHelter from Settings → Apps: both programs are gone.
+    programs with the beta's dates and sizes, and no dialog about a file in use appeared. Then the same with a `web` session open. That
+    needs an update from a build that has `sshelter connect` on Windows (0.17.0-9 has not), so do it once the Beta channel offers a build
+    newer than the installed beta. The update ends SSHelter at once (it tells no session why) and runs the installer passively, with no
+    dialog, and the installer ends the session's `sshelter.exe`. So the session ends one of two ways, and either is a pass: through the
+    end of SSHelter's pipe, first (the terminal prints `The connection to SSHelter ended.`, 255), or through the installer's kill (no
+    sentence, the kill's exit code). Record which, and `$LASTEXITCODE`. Either way check C passes, no dialog about a file in use
+    appears, the update completes, and both programs are the newer build's.
+36. **The installer over an installed beta with a session open.** Run the beta's `-setup.exe` again while a `web` session is open. The
+    installer says `SSHelter is running!` and `Click OK to kill it`; press OK. The session ends with no sentence of the CLI's own (or
+    with `The connection to SSHelter ended.`, when the CLI saw SSHelter end first): record `$LASTEXITCODE`. Check C passes, no dialog
+    about a file in use appears, and both programs are the beta's.
+37. **Uninstall (NSIS), with a session open.** With a `web` session open, uninstall SSHelter from Settings → Apps. The uninstaller says
+    `SSHelter is running!` and `Click OK to kill it`; press OK. The session ends as in item 36: record `$LASTEXITCODE`, and check C
+    passes. Both programs are gone.
 
 ## Clean up
 
