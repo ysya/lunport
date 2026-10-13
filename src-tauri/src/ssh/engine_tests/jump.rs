@@ -7,7 +7,7 @@ use crate::ssh::testing::doubles::{TestPolicy, VaultAuth};
 use crate::ssh::testing::fixture::Server;
 use crate::ssh::testing::harness::{tools, Tools};
 use crate::ssh::testing::proxy::{Mode, Proxy};
-use crate::ssh::testing::{eventually, fact};
+use crate::ssh::testing::{closed_port, eventually, fact};
 use crate::ssh::{AuthMethod, ConnectError, DisconnectKind, Ended, Pty, Session, SshEngine, Target};
 
 const MIB: usize = 1024 * 1024;
@@ -96,9 +96,8 @@ fn an_unknown_key_on_the_second_hop_stops_the_chain_and_closes_the_first_hop() {
 fn a_jump_to_a_closed_port_fails_cleanly_and_names_the_jump_host() {
     let Some(tools) = tools() else { return };
     let pair = pair(&tools, &[], &[]);
-    let closed_port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
     let proxy_a = Proxy::start(pair.a.sshd.port);
-    let target = chain(&pair, proxy_a.port, closed_port);
+    let target = chain(&pair, proxy_a.port, closed_port());
 
     let engine = engine(); // held until the proxy has been looked at, as in the test above
     let started = Instant::now();

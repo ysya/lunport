@@ -7,7 +7,7 @@ use crate::ssh::testing::doubles::{SignCall, TestPolicy, VaultAuth};
 use crate::ssh::testing::fixture::Server;
 use crate::ssh::testing::harness::{generate_key, tools, KeyKind};
 use crate::ssh::testing::proxy::{Mode, Proxy};
-use crate::ssh::testing::{eventually, fact};
+use crate::ssh::testing::{closed_port, eventually, fact, CLOSED_PORT};
 use crate::ssh::{AuthError, AuthMethod, ConnectError, Hop, HostKey, Phase, RsaHash, Target};
 use crate::sync::slot_rules::test_keys;
 
@@ -375,13 +375,9 @@ fn a_password_is_asked_for_before_the_connection_is_opened() {
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Failures to connect, and the login that is abandoned.
 
-fn a_port_nobody_listens_on() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
-}
-
 #[test]
 fn a_port_with_nothing_behind_it_is_unreachable_and_says_connection_refused() {
-    let hop = Hop::new("h1", "gone", "127.0.0.1", a_port_nobody_listens_on(), "tester", AuthMethod::Password);
+    let hop = Hop::new("h1", "gone", "127.0.0.1", closed_port(), "tester", AuthMethod::Password);
     let error = engine().connect_chain(&Target { hops: vec![hop.clone()] }, &*trusting(), &VaultAuth::new()).err().expect("nothing listens there");
     assert!(matches!(&error, ConnectError::Unreachable { reason, .. } if reason.contains("refused")), "{error:?}");
     let text = error.to_string();
@@ -554,7 +550,8 @@ fn a_signer_that_fails_abandons_the_login_and_drops_the_connection() {
 #[test]
 fn an_empty_chain_and_a_chain_that_lists_a_host_twice_are_refused_before_anything_connects() {
     let engine = engine();
-    let hop = Hop::new("h1", "web", "127.0.0.1", a_port_nobody_listens_on(), "tester", AuthMethod::Password);
+    // Nothing connects, and nothing could be reached there if it did.
+    let hop = Hop::new("h1", "web", "127.0.0.1", CLOSED_PORT, "tester", AuthMethod::Password);
     let empty = engine.connect_chain(&Target { hops: vec![] }, &*trusting(), &VaultAuth::new());
     assert!(matches!(empty, Err(ConnectError::BadJumpChain { .. })));
     let loop_ = engine.connect_chain(&Target { hops: vec![hop.clone(), hop] }, &*trusting(), &VaultAuth::new());

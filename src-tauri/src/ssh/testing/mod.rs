@@ -28,6 +28,29 @@ pub fn eventually(what: &str, seconds: u64, mut condition: impl FnMut() -> bool)
     panic!("timed out after {seconds} s waiting for: {what}");
 }
 
+/// A port on 127.0.0.1 that nothing listens on, so a connect to it is refused at once: 1 (TCP port service multiplexer, which nothing
+/// runs). It is below every ephemeral range (macOS and Windows 49152–65535, Linux 32768–60999 by default), so no `bind(0)` of the suite
+/// (a scratch sshd's port, a proxy's, a test's own listener) is ever given it. A port a test bound and let go is not closed for long:
+/// another test running at the same time can be given it and listen there before the connect. Tests that count on the refusal take it
+/// from `closed_port`.
+pub const CLOSED_PORT: u16 = 1;
+
+/// `CLOSED_PORT`, once a connect to it was refused: a test that counts on the refusal fails here, saying why, when something listens
+/// there after all (or a firewall drops the connect), and not on what the engine made of it. On Windows the refusal comes after the
+/// stack's retries, within the 5 s given.
+pub fn closed_port() -> u16 {
+    refused(CLOSED_PORT)
+}
+
+/// `port`, once a connect to it on 127.0.0.1 was refused; panics otherwise.
+fn refused(port: u16) -> u16 {
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    match std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(5)) {
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => port,
+        outcome => panic!("something listens on 127.0.0.1:{port}: a connect to it was not refused ({outcome:?})"),
+    }
+}
+
 /// CPU time (user plus system) this whole process has used so far, in milliseconds. Unix only.
 #[cfg(unix)]
 pub fn cpu_time_ms() -> u128 {
@@ -87,4 +110,22 @@ fn rerun(name: &str, stdin: std::process::Stdio, configure: impl FnOnce(&mut std
 pub fn fact_in(output: &str, key: &str) -> Option<String> {
     let prefix = format!("FACT {key} = ");
     output.lines().find_map(|line| line.strip_prefix(&prefix)).map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The precondition of `closed_port` is not taken for granted: a port something listens on is not handed to a test as closed.
+    #[test]
+    #[should_panic(expected = "something listens on 127.0.0.1:")]
+    fn a_port_something_listens_on_is_not_taken_for_a_closed_one() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("a listener on a free port");
+        refused(listener.local_addr().expect("its address").port());
+    }
+
+    #[test]
+    fn nothing_listens_on_the_closed_port() {
+        assert_eq!(closed_port(), CLOSED_PORT);
+    }
 }
