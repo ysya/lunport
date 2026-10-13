@@ -196,33 +196,27 @@ fn readable_by_the_vault(private_text: &str) -> bool {
     crate::vault::material::agent_can_read(private_text)
 }
 
-/// Makes a key pair with ssh-keygen. A key the vault's parser cannot read is thrown away and another is made: `ssh-key` 0.6.7 cannot
-/// read an ECDSA private key whose secret number starts with a zero byte (OpenSSH then writes the number in its shortest form and the
-/// parser insists on the full length). Measured with ssh-keygen from OpenSSH 10.3p1: 5 of 1500 P-256 keys, 3 of 600 P-384 keys and 77
-/// of 300 P-521 keys. A test that signs with such a key through the vault would fail one run in 256 for a reason that has nothing to do
-/// with the engine. (Reported with the plan as a gap in the vault: `Material::open` answers `Unreadable` for these keys.)
+/// Makes a key pair with ssh-keygen, one the vault reads. `ssh-key` 0.6.7 alone cannot read an ECDSA private key whose secret number
+/// starts with a zero byte (OpenSSH then writes the number in its shortest form and the parser insists on the full length; measured with
+/// ssh-keygen from OpenSSH 10.3p1: 5 of 1500 P-256 keys, 3 of 600 P-384 keys and 77 of 300 P-521 keys); the vault pads the number first
+/// (`vault::short_scalar`), so every key ssh-keygen makes is one it reads, and one it cannot read is a fault of the vault, not of the
+/// engine under test.
 pub fn generate_key(tools: &Tools, dir: &Path, name: &str, kind: KeyKind) -> TestKey {
     let private_path = dir.join(name);
     let mut public_path = private_path.clone().into_os_string();
     public_path.push(".pub");
-    for attempt in 1..=20 {
-        let out = run_bounded(
-            Command::new(&tools.ssh_keygen).args(["-q", "-N", "", "-C", "sshelter-test"]).args(kind.keygen_args()).arg("-f").arg(&private_path),
-        );
-        assert!(out.status.success(), "ssh-keygen failed: {}", String::from_utf8_lossy(&out.stderr));
-        let private_text = std::fs::read_to_string(&private_path).expect("read the private key");
-        if readable_by_the_vault(&private_text) {
-            return TestKey {
-                private_text,
-                public_line: std::fs::read_to_string(&public_path).expect("read the public key").trim().to_string(),
-                private_path,
-            };
-        }
-        eprintln!("ssh-keygen made a {kind:?} key that the vault's parser cannot read (attempt {attempt}); making another");
-        let _ = std::fs::remove_file(&private_path);
-        let _ = std::fs::remove_file(&public_path);
+    let out = run_bounded(
+        Command::new(&tools.ssh_keygen).args(["-q", "-N", "", "-C", "sshelter-test"]).args(kind.keygen_args()).arg("-f").arg(&private_path),
+    );
+    assert!(out.status.success(), "ssh-keygen failed: {}", String::from_utf8_lossy(&out.stderr));
+    let private_text = std::fs::read_to_string(&private_path).expect("read the private key");
+    // A throwaway test key: printed whole, so that a key the vault cannot read can be reproduced.
+    assert!(readable_by_the_vault(&private_text), "the vault cannot read a {kind:?} key ssh-keygen made:\n{private_text}");
+    TestKey {
+        private_text,
+        public_line: std::fs::read_to_string(&public_path).expect("read the public key").trim().to_string(),
+        private_path,
     }
-    panic!("20 {kind:?} keys in a row could not be read by the vault's parser");
 }
 
 pub struct SshdOptions {
@@ -726,9 +720,9 @@ mod tests {
         assert!(out.stdout.is_empty());
     }
 
-    /// `ssh-key` 0.6.7 cannot read an ECDSA key whose secret number starts with a zero byte; this P-256 key, made by ssh-keygen, is one of
-    /// them (`Material::open` says `Unreadable` for it). It has no use anywhere else.
-    const KEY_THE_VAULT_CANNOT_READ: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+    /// A P-256 key made by ssh-keygen whose secret number starts with a zero byte: `ssh-key` 0.6.7 alone refuses it for its length, and the
+    /// vault pads the number (`vault::short_scalar`) and reads it. It has no use anywhere else.
+    const KEY_WITH_A_SHORT_SCALAR: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS\n\
 1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQSuW0Nk03fDQ13F6fng1wB9jKTOZRrA\n\
 gvYrf2SP7Kb9Vme+68pkttmFg6RPsQzG79ZoRUz41uJ+GWc4IrB7xjCNAAAAoEqbIrdKmy\n\
@@ -738,17 +732,18 @@ K3AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBK5bQ2TTd8NDXcXp\n\
 -----END OPENSSH PRIVATE KEY-----\n";
 
     #[test]
-    fn a_key_the_vaults_parser_cannot_read_is_told_apart_from_one_it_can() {
-        let error = ssh_key::PrivateKey::from_openssh(KEY_THE_VAULT_CANNOT_READ).err().expect("the parser refuses this key");
+    fn a_key_with_a_short_ecdsa_scalar_is_read_by_the_vault_though_ssh_key_alone_refuses_it() {
+        let error = ssh_key::PrivateKey::from_openssh(KEY_WITH_A_SHORT_SCALAR).err().expect("ssh-key 0.6.7 alone refuses this key");
         assert!(error.to_string().contains("length"), "refused for its length, not for some other reason: {error}");
-        assert!(!readable_by_the_vault(KEY_THE_VAULT_CANNOT_READ));
+        assert!(readable_by_the_vault(KEY_WITH_A_SHORT_SCALAR), "the vault pads the secret number and reads the key");
         let Some(tools) = tools() else { return };
         let keys = tempfile::tempdir().unwrap();
         let key = generate_key(&tools, keys.path(), "good", KeyKind::Ed25519);
         assert!(readable_by_the_vault(&key.private_text));
     }
 
-    /// About one P-256 key in 256 is one the vault cannot read: of 150 keys the harness hands out, none may be.
+    /// About one P-256 key in 256 has a secret number that starts with a zero byte, which `ssh-key` alone cannot read and the vault can: of
+    /// 150 keys ssh-keygen makes, the vault reads every one.
     #[test]
     fn the_keys_the_harness_hands_out_can_all_be_read_by_the_vault() {
         let Some(tools) = tools() else { return };
