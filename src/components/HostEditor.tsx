@@ -1281,7 +1281,7 @@ function HostPasswordSection({ alias }: { alias: string }) {
   return (
     <Section
       title="Password"
-      description="Stored in your operating system's keychain — never written to ~/.ssh/config. sshelter connect logs in with it (on Windows, ssh still asks for it)."
+      description="Stored in your operating system's keychain — never written to ~/.ssh/config. sshelter connect logs in with it."
     >
       <SettingsGroup>
         <div className="flex items-center gap-1.5 px-3 py-2">
