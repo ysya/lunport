@@ -53,9 +53,15 @@ pub fn is_child() -> bool {
 /// that process wrote to stderr. The process-wide CPU time is only meaningful when no other test is running, and `cargo test` runs many at
 /// once; a child with `--test-threads=1` is the only thing running. Panics when the child fails or takes more than two minutes.
 pub fn rerun_alone(name: &str) -> String {
+    rerun_alone_with(name, |_| {})
+}
+
+/// `rerun_alone`, with `configure` applied to the child's command before it starts (on Windows, say, a console of its own).
+pub fn rerun_alone_with(name: &str, configure: impl FnOnce(&mut std::process::Command)) -> String {
     let executable = std::env::current_exe().expect("the path of this test binary");
     let mut command = std::process::Command::new(executable);
     command.args(["--exact", name, "--nocapture", "--test-threads=1"]).env(CHILD_VARIABLE, "1");
+    configure(&mut command);
     let output = harness::run_within(&mut command, std::time::Duration::from_secs(120)).unwrap_or_else(|message| panic!("{message}"));
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(output.status.success(), "the child process failed:\n{stderr}");

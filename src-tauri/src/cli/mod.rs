@@ -8,6 +8,8 @@ pub mod client;
 pub mod console;
 #[cfg(all(test, unix))]
 mod e2e_tests;
+#[cfg(all(test, windows))]
+mod real_console_tests;
 #[cfg(unix)]
 pub mod run;
 #[cfg(unix)]
