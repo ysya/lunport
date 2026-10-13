@@ -345,8 +345,8 @@ fn a_shell_whose_session_was_closed_answers_closed_to_every_call() {
 ///
 /// The test assumes that the loopback connection and the proxy buffer less than the 15 MiB that the eight writers send: the engine takes
 /// all of it from the writers and then cannot flush it to the silent link, and that is what fills the queue. This is what macOS does
-/// (measured: all 960 chunks of 16 KiB are taken, and 20 of the 30 window changes find no room). A platform that buffers more does not
-/// wedge, and then the test fails with a message that says so instead of passing.
+/// (measured: all 960 chunks of 16 KiB are taken, and the window changes wait for room, and some of them time out). A platform that
+/// buffers more does not wedge, and then the test fails with a message that says so instead of passing.
 #[test]
 fn requests_to_a_peer_that_stopped_reading_come_back_in_time_and_the_cut_releases_the_rest() {
     const BOUND: Duration = Duration::from_secs(20);
@@ -436,7 +436,10 @@ fn requests_to_a_peer_that_stopped_reading_come_back_in_time_and_the_cut_release
     fact("shell.wedged_peer.window_changes_back", format!("{} of {RESIZERS}, {timed_out} as Timeout, slowest {slowest} ms", resizes_back.len()));
     fact("shell.wedged_peer.exec", format!("{exec_back:?}"));
     assert_eq!(resizes_back.len(), usize::from(RESIZERS), "every window change came back within {BOUND:?}: {resizes_back:?}");
-    assert!(timed_out > 0, "the link did not wedge, so this test has shown nothing: {resizes_back:?}");
+    // A window change that finds room in the queue returns in microseconds; one that waited a second or more found the queue full,
+    // so the link wedged. Whether such a request then ends as Timeout or gets in when a slot frees (the command's close at its deadline,
+    // another bounded send giving up) is a race between two bounds of SEND_LIMIT, measured both ways on the CI runner: not asserted.
+    assert!(slowest >= 1_000, "no window change waited for room: the link did not wedge, so this test has shown nothing: {resizes_back:?}");
     assert!(resizes_back.iter().all(|(result, _)| matches!(result, Ok(()) | Err(SessionError::Timeout))), "{resizes_back:?}");
     let (ended, waited) = exec_back.expect("the command came back within the bound");
     assert_eq!(ended, Ok(Ended::TimedOut), "the close behind a command that ran out of time must not keep it from returning");
