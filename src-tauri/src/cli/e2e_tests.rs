@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use super::client::{Input, Request, PAUSE_PROMPT};
 use super::run::{queue, run, Inputs};
 use super::terminal::fake::{describe, FakeTermios};
+use super::terminal::{attributes, Mode as TerminalMode};
 use super::terminal::Tty;
 use crate::session::broker::Broker;
 use crate::session::connect::HostKeyConfirmer;
@@ -184,9 +185,9 @@ fn a_host_key_the_person_does_not_trust_ends_sshelter_connect() {
     ended.forgotten();
 }
 
-/// `--pause-on-error` (spec §7.3): the refused key's reason stays on the terminal with the prompt under it, and the CLI waits, the line
-/// edited and shown, until Enter; then it ends with 255, the terminal put back. The broker forgets the session meanwhile: a paused CLI
-/// holds none.
+/// `--pause-on-error` (spec §7.3): the refused key's reason stays on the terminal with the prompt under it, and the CLI waits until Enter
+/// in a question's mode with what is typed hidden, what was typed before thrown away; then it starts the next line (the hidden Enter did
+/// not) and ends with 255, the terminal put back. The broker forgets the session meanwhile: a paused CLI holds none.
 #[test]
 fn with_pause_on_error_a_refused_host_key_waits_for_enter_before_sshelter_connect_ends() {
     let Some(tools) = tools() else { return };
@@ -196,12 +197,13 @@ fn with_pause_on_error_a_refused_host_key_waits_for_enter_before_sshelter_connec
     eventually("the broker to forget the session", 10, || !session.broker.has_sessions());
     std::thread::sleep(Duration::from_millis(500));
     assert!(!session.run.is_finished(), "it waits for Enter; {}", session.said());
-    let now = session.termios.now();
-    assert!(now.c_lflag & libc::ICANON != 0 && now.c_lflag & libc::ECHO != 0, "the line is edited and shown while it waits: {}", describe(&now));
+    let last = session.termios.sets.lock().unwrap().last().copied();
+    let hidden = attributes(&session.termios.start, TerminalMode::Prompt { echo: false });
+    assert!(last.is_some_and(|(set, discard)| describe(&set) == describe(&hidden) && discard), "the pause's mode, input thrown away: {:?}", last.map(|(set, discard)| (describe(&set), discard)));
     session.type_text("\n");
     let ended = session.finish();
     assert_eq!(ended.code, 255);
-    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\nThe host key of lab has not been confirmed yet.\nPress Enter to exit.");
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\nThe host key of lab has not been confirmed yet.\nPress Enter to exit.\n");
     assert_eq!(ended.stdout, "");
     assert!(ended.restored, "the terminal is as it was");
 }

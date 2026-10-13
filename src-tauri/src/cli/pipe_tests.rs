@@ -212,16 +212,16 @@ fn an_end_under_a_question_starts_the_reason_on_a_line_of_its_own_when_the_conso
 }
 
 /// `--pause-on-error` on Windows (spec §7.3): a connect that fails before the shell opens leaves its reason and the prompt on the console,
-/// and the Enter that ends the pause is read in a line read that shows what is typed (the console reads nothing while it is cooked); the
-/// line typed while connecting was thrown away first, so it does not end the pause. Then the program ends with 255, the console back at
-/// its start.
+/// and the Enter that ends the pause is read in a line read that hides what is typed (the console reads nothing while it is cooked); the
+/// line typed while connecting was thrown away first, so it does not end the pause. The console ends the line on Enter itself (no line
+/// break of the CLI's own), and the program ends with 255, the console back at its start.
 #[test]
 fn with_pause_on_error_a_failed_connect_waits_on_the_console_for_enter() {
     let setup = connect_pausing(FakeEngine::new(), FakeDirectory::new(), MemKeychain::default(), "ls\r\n", true);
     eventually("the prompt", 10, || setup.stderr.text().ends_with(PAUSE_PROMPT));
     eventually("the line read", 10, || setup.console.reads_in_progress() == 1);
-    let shown = input_mode(setup.console.start.input_mode, Mode::Prompt { echo: true });
-    assert_eq!(setup.console.now().input_mode, shown, "line editing, echo on");
+    let hidden = input_mode(setup.console.start.input_mode, Mode::Prompt { echo: false });
+    assert_eq!(setup.console.now().input_mode, hidden, "line editing, no echo");
     assert!(setup.console.all_read(), "what was typed while connecting was thrown away");
     std::thread::sleep(Duration::from_millis(300));
     assert!(!setup.run.is_finished(), "it waits for Enter");
