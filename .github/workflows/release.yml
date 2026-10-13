@@ -50,7 +50,8 @@ jobs:
           - platform: ubuntu-22.04-arm # Linux arm64 (free on public repos)
             args: ""
           - platform: windows-latest # Windows x86_64 (NSIS installer)
-            args: ""
+            # Bundles sshelter-cli.exe (step "Build the console helper") next to sshelter.exe.
+            args: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}'
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -82,6 +83,21 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+
+      # sshelter-cli.exe (src-tauri/cli-helper, std only): the console program a Windows terminal runs for Connect, which runs
+      # sshelter.exe (a GUI program) and waits for it (own-ssh spec §7.3). The Windows leg's --config adds it to bundle.externalBin:
+      # tauri build takes it from src-tauri/binaries under the target triple's name and installs it next to sshelter.exe. Plain cargo
+      # builds never look for it. The C runtime is linked in (+crt-static), as tauri build does for sshelter.exe (STATIC_VCRUNTIME): the
+      # installer carries no VC++ runtime.
+      - name: Build the console helper (Windows)
+        if: startsWith(matrix.platform, 'windows')
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --locked --manifest-path src-tauri/cli-helper/Cargo.toml
+          mkdir -p src-tauri/binaries
+          cp src-tauri/cli-helper/target/release/sshelter-cli.exe src-tauri/binaries/sshelter-cli-x86_64-pc-windows-msvc.exe
 
       - name: Install frontend dependencies
         run: pnpm install
