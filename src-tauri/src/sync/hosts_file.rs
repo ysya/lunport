@@ -417,8 +417,12 @@ fn is_invisible(c: char) -> bool {
 /// 不加 crate:`char::escape_debug` 會把 Grapheme_Extend 的字元(所有的 Mn 與 Me,加上少數 Mc)跳脫成 `\u{…}`,其他可印的字元原樣吐出一個字元 —— 借它認出
 /// 會疊上去的記號(對 Unicode 17 的 `\p{M}` 逐一核對過:2059 個 Mn 與 13 個 Me 全部認得出來,Mc 認得 66 個,其餘 405 個 Mc 是占自己寬度、畫得出來的
 /// 間距記號,`has_stray_character` 不擋)。
+/// 例外是半形片假名的濁音符 U+FF9E 與半濁音符 U+FF9F:Lm、Alphabetic,也是 Grapheme_Extend(Other_Grapheme_Extend),Rust 1.98 照樣跳脫;Rust 1.99 起
+/// `escape_debug` 特地不跳脫這兩個(core 的 `char::escape_debug_ext` 把它們併進 ASCII 的快速路徑,理由是終端機把它們畫成自己的一格,見
+/// microsoft/terminal#18087),Unicode 表沒有變(兩版都是 17.0.0)。所以明列出來,新舊 Rust 一樣擋。對 1.98 與 1.99 逐一比對過每一個碼位的
+/// `is_alphanumeric` 與 `escape_debug().count()`,只有這兩個不同。
 fn is_base_letter_or_digit(c: char) -> bool {
-    c.is_alphanumeric() && c.escape_debug().count() == 1
+    c.is_alphanumeric() && c.escape_debug().count() == 1 && !matches!(c, '\u{ff9e}' | '\u{ff9f}')
 }
 
 /// OpenSSH 把 keyword 之後的整段文字原樣拿去用、不切註解的 keyword:對 OpenSSH 10.3p1 認得的每一個 keyword 以 `ssh -G`
@@ -1634,8 +1638,9 @@ mod tests {
     #[test]
     fn marks_that_std_counts_as_letters_are_refused_without_a_base_too() {
         // 都是組合記號(Mn),std 卻都說它們是字母:希臘文的 U+0345、希伯來文的 U+05B0、阿拉伯文的 U+064B 與 U+0670、天城文的 U+0941、泰文的 U+0E31 與
-        // U+0E34,還有半形片假名的濁音符 U+FF9E(Lm,Grapheme_Extend)。
-        for mark in ['\u{345}', '\u{5b0}', '\u{64b}', '\u{670}', '\u{941}', '\u{e31}', '\u{e34}', '\u{ff9e}'] {
+        // U+0E34,還有半形片假名的濁音符 U+FF9E 與半濁音符 U+FF9F(Lm,Grapheme_Extend;Rust 1.99 起 `escape_debug` 不跳脫它們,`is_base_letter_or_digit`
+        // 明列擋下)。
+        for mark in ['\u{345}', '\u{5b0}', '\u{64b}', '\u{670}', '\u{941}', '\u{e31}', '\u{e34}', '\u{ff9e}', '\u{ff9f}'] {
             assert!(mark.is_alphanumeric(), "U+{:04X} is the kind of mark that `is_alphanumeric` lets through", mark as u32);
             for text in [
                 format!("Host web\n  ProxyCommand nc %h %p;{mark}#$(echo X)\n"),
@@ -1648,12 +1653,13 @@ mod tests {
     }
 
     /// `is_base_letter_or_digit` 靠 `char::escape_debug` 認出組合記號(std 沒有公開 General_Category):這裡把它釘住 —— 日後 Rust 改了跳脫的規則,
-    /// 測試會在這裡明白地失敗,而不是悄悄放行記號。
+    /// 測試會在這裡明白地失敗,而不是悄悄放行記號(Rust 1.99 不再跳脫 U+FF9E 與 U+FF9F,就是在這裡失敗、才明列出來的)。
     #[test]
     fn letters_and_digits_are_told_apart_from_combining_marks() {
         // Mn、Me、Mc 的組合記號(含 std 說是字母的),沒有一個算「畫得出自己位置」;符號與標點也不算。
         for mark in [
-            '\u{301}', '\u{345}', '\u{5b0}', '\u{64b}', '\u{670}', '\u{93c}', '\u{941}', '\u{e31}', '\u{e34}', '\u{20dd}', '\u{ff9e}', '\u{1d165}', '\u{2713}', '\u{2026}',
+            '\u{301}', '\u{345}', '\u{5b0}', '\u{64b}', '\u{670}', '\u{93c}', '\u{941}', '\u{e31}', '\u{e34}', '\u{20dd}', '\u{ff9e}', '\u{ff9f}', '\u{1d165}', '\u{2713}',
+            '\u{2026}',
         ] {
             assert!(!is_base_letter_or_digit(mark), "U+{:04X}", mark as u32);
         }
