@@ -169,6 +169,7 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
 pub enum KeyKind {
     Ed25519,
     EcdsaP256,
+    EcdsaP521,
     Rsa3072,
 }
 
@@ -177,6 +178,7 @@ impl KeyKind {
         match self {
             KeyKind::Ed25519 => &["-t", "ed25519"],
             KeyKind::EcdsaP256 => &["-t", "ecdsa", "-b", "256"],
+            KeyKind::EcdsaP521 => &["-t", "ecdsa", "-b", "521"],
             KeyKind::Rsa3072 => &["-t", "rsa", "-b", "3072"],
         }
     }
@@ -753,6 +755,36 @@ K3AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBK5bQ2TTd8NDXcXp\n\
         for index in 0..150 {
             let key = generate_key(&tools, keys.path(), &format!("p256-{index}"), KeyKind::EcdsaP256);
             assert!(readable_by_the_vault(&key.private_text), "key {index} cannot be read");
+        }
+    }
+
+    /// A short secret number in keys ssh-keygen encrypted itself, with every cipher the vault opens: OpenSSH's own output for the AEAD
+    /// ciphers' tag and for chacha20-poly1305's block of 8, where the vault's tests otherwise build the keys themselves. About one P-521 key
+    /// in 4 has a short number, so ssh-keygen makes keys until one does (40 at most: all 40 fail with a chance of 0.75^40, about 1 in
+    /// 100 000), and `-p` encrypts it with one bcrypt round, fast in a debug build.
+    #[test]
+    fn a_p521_key_with_a_short_secret_number_opens_whatever_cipher_ssh_keygen_encrypted_it_with() {
+        use crate::vault::material::{self, OpenError};
+        let Some(tools) = tools() else { return };
+        let keys = tempfile::tempdir().unwrap();
+        let short = (0..40)
+            .map(|index| generate_key(&tools, keys.path(), &format!("p521-{index}"), KeyKind::EcdsaP521))
+            .find(|key| ssh_key::PrivateKey::from_openssh(&key.private_text).is_err_and(|error| error.to_string().contains("length")))
+            .expect("about one P-521 key in 4 has a short secret number, and none of 40 had one");
+        let public = material::public_key_data(&short.public_line).expect("the public key parses");
+        for (index, cipher) in material::SUPPORTED_CIPHERS.iter().enumerate() {
+            let path = keys.path().join(format!("encrypted-{index}"));
+            std::fs::copy(&short.private_path, &path).expect("copy the private key");
+            let out = run_bounded(
+                Command::new(&tools.ssh_keygen).args(["-q", "-p", "-P", "", "-N", "pass", "-a", "1", "-Z", cipher]).arg("-f").arg(&path),
+            );
+            assert!(out.status.success(), "{cipher}: ssh-keygen -p failed: {}", String::from_utf8_lossy(&out.stderr));
+            let text = std::fs::read_to_string(&path).expect("read the encrypted key");
+            let refused = ssh_key::PrivateKey::from_openssh(&text).expect("ssh-key parses the encrypted key").decrypt("pass").err();
+            assert_eq!(refused, Some(ssh_key::Error::Encoding(ssh_encoding::Error::Length)), "{cipher}: setup: still short, ssh-key alone can't decrypt it");
+            let opened = material::open(&text, Some("pass")).unwrap_or_else(|error| panic!("{cipher}: {error:?}\n{text}"));
+            assert_eq!(opened.key_data(), public, "{cipher}");
+            assert_eq!(material::open(&text, Some("wrong")).err(), Some(OpenError::WrongPassphrase), "{cipher}");
         }
     }
 
