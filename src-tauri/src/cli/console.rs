@@ -181,8 +181,8 @@ impl Reads {
         self.changed.notify_all();
     }
 
-    /// The console is put back: no read starts, and the read in progress is over. Without waiting for the lock (a panic can come while
-    /// this very thread holds it): a read that starts after all reads in the mode of the start, and the program ends.
+    /// The console is put back: no read starts any more, and what the read in progress gives is thrown away. That read is not ended (the
+    /// program ends, and the read with it), and the lock is not waited for (a panic can come while this very thread holds it).
     fn halt(&self) {
         let mut state = match self.state.try_lock() {
             Ok(state) => state,
