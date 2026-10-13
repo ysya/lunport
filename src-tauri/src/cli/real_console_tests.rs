@@ -27,6 +27,12 @@
 //!   process leaves in progress when it ends ends with it: neither a raw read nor a hidden line read with "hun" typed into it takes the
 //!   key or the line typed next, and "hun" never shows; so `sshelter connect`'s own end, which leaves its keys thread in a read, leaves
 //!   the next key to the shell.
+//! - (Final wave, measured the same way.) So does a read on the console input the process was given as its standard input
+//!   (`StdConsole::new`'s standard handle: `sshelter connect` reads the input its shell and `sshelter-cli.exe` hand it), an input that
+//!   stays open when the process ends (the process that started it keeps a handle of the same input, and reads it next): a raw read and a
+//!   hidden line read with "hun" typed into it, left by a process that returns or that the watchdog ends from another thread, take
+//!   nothing of what is typed next. A cancelled read on that same input does live on and take the next key, so the check sees one that
+//!   lives on.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
