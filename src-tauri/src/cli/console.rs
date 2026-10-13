@@ -646,6 +646,8 @@ pub(crate) mod fake {
         /// What was typed and not read yet, a read's worth at a time; a read waits for it.
         typed: Mutex<std::collections::VecDeque<Typed>>,
         typing: Condvar,
+        /// How many reads are in progress (`read` was entered, and has not returned).
+        reading: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeConsole {
@@ -665,6 +667,7 @@ pub(crate) mod fake {
                 failing: Mutex::new((|_| false, io::ErrorKind::Other)),
                 typed: Mutex::new(std::collections::VecDeque::new()),
                 typing: Condvar::new(),
+                reading: std::sync::atomic::AtomicUsize::new(0),
             })
         }
 
@@ -692,6 +695,11 @@ pub(crate) mod fake {
         /// Whether what was typed has all been read.
         pub fn all_read(&self) -> bool {
             self.typed.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
+        }
+
+        /// How many reads are in progress: a thread that reads the keys is inside `read` (waiting there for what is typed).
+        pub fn reads_in_progress(&self) -> usize {
+            self.reading.load(Ordering::SeqCst)
         }
 
         /// From now on the calls `fails` says yes to fail (a console going away, say), and change nothing; they are recorded all the
@@ -762,6 +770,15 @@ pub(crate) mod fake {
 
         /// Waits until something was typed; a failure stays, for every read after it.
         fn read(&self, buf: &mut [u16]) -> io::Result<usize> {
+            /// Counts the read in progress until it returns.
+            struct InProgress<'a>(&'a std::sync::atomic::AtomicUsize);
+            impl Drop for InProgress<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            self.reading.fetch_add(1, Ordering::SeqCst);
+            let _in_progress = InProgress(&self.reading);
             let mut typed = self.typed.lock().unwrap_or_else(PoisonError::into_inner);
             loop {
                 match typed.pop_front() {
@@ -1336,8 +1353,12 @@ mod tests {
         rx
     }
 
-    /// Time for a reading thread to be in its read (the fake's read waits there for what is typed).
-    const INTO_THE_READ: Duration = Duration::from_millis(200);
+    /// Waits until the thread `reading` started is in the console's read (the fake's read waits there for what is typed): a change of mode
+    /// then finds a read in progress.
+    fn in_the_read(console: &FakeConsole) {
+        crate::ssh::testing::eventually("a thread to be in the console's read", 10, || console.reads_in_progress() == 1);
+    }
+
     const SOON: Duration = Duration::from_secs(5);
 
     fn read_as(text: &str, mode: Mode) -> (KeysRead, Option<(String, Mode)>) {
@@ -1366,7 +1387,7 @@ mod tests {
     fn a_change_of_mode_ends_the_read_in_progress_first_and_throws_away_what_it_read() {
         let (console, mut tty) = raw_console();
         let read = reading(tty.keys());
-        std::thread::sleep(INTO_THE_READ);
+        in_the_read(&console);
         let before = console.changes().len();
         tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
         let hidden = USUAL_INPUT & !ENABLE_ECHO_INPUT;
@@ -1418,7 +1439,7 @@ mod tests {
     fn a_change_to_cooked_mode_does_not_end_the_read_in_progress() {
         let (console, mut tty) = raw_console();
         let read = reading(tty.keys());
-        std::thread::sleep(INTO_THE_READ);
+        in_the_read(&console);
         tty.set_mode(Mode::Cooked, false).unwrap();
         assert!(!console.changes().contains(&Call::Wake));
         console.type_text("x");
@@ -1435,7 +1456,7 @@ mod tests {
         let mut tty = Tty::new(console.clone()).unwrap();
         tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
         let read = reading(tty.keys());
-        std::thread::sleep(INTO_THE_READ);
+        in_the_read(&console);
         let before = console.changes().len();
         tty.set_mode(Mode::Cooked, true).unwrap();
         let start = console.start;
@@ -1454,7 +1475,7 @@ mod tests {
     fn what_the_console_holds_after_a_read_was_ended_is_thrown_away() {
         let (console, mut tty) = raw_console();
         let read = reading(tty.keys());
-        std::thread::sleep(INTO_THE_READ);
+        in_the_read(&console);
         let before = console.changes().len();
         tty.set_mode(Mode::Prompt { echo: true }, false).unwrap();
         let shown = USUAL_INPUT;
@@ -1465,7 +1486,7 @@ mod tests {
         assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None));
         // One flush, also when the change throws what was typed away anyway.
         let read = reading(tty.keys());
-        std::thread::sleep(INTO_THE_READ);
+        in_the_read(&console);
         let before = console.changes().len();
         tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
         assert_eq!(console.changes()[before..before + 2], [Call::Wake, Call::FlushInput]);
