@@ -12,6 +12,9 @@ mod e2e_tests;
 pub mod run;
 #[cfg(unix)]
 pub mod terminal;
+#[cfg(windows)]
+#[path = "terminal_windows.rs"]
+pub mod terminal;
 
 use std::ffi::OsString;
 #[cfg(unix)]
