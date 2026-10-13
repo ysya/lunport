@@ -30,6 +30,7 @@
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -832,4 +833,192 @@ fn a_real_console_works_as_the_keys_reader_needs() {
         })
         .collect();
     assert!(failed.is_empty(), "{} of {} cases failed ({:?}):\n{}", failed.len(), cases.len(), started.elapsed(), failed.join("\n"));
+}
+
+/// The variable that names the directory of the pair `the_pair_in_a_console_of_its_own` runs: `sshelter-cli.exe` and the `sshelter.exe`
+/// beside it (on CI the debug build's, in test-windows.yml, and each installer's release build, in windows-bundle-check.yml).
+const PAIR: &str = "SSHELTER_TEST_PAIR";
+
+/// The full name of `the_pair_in_a_console_of_its_own`, which its children run again.
+const PAIR_TEST: &str = "cli::real_console_tests::the_pair_in_a_console_of_its_own";
+
+/// Final wave (F10): `sshelter connect`'s way into a console as a terminal gives it, which no other test takes: the console helper
+/// started in a console of its own with that console's own buffers as its standard input, output and error (not a test's pipes), as a
+/// shell in the console starts a program, and `sshelter.exe` on the console handles it inherits through the helper (`StdConsole::new`'s
+/// standard handles; a release build is a GUI program, which attaches to the helper's console first). Each case runs in a child with a
+/// console of its own, which reads what the console's screen shows once the pair has ended:
+/// - `sshelter-cli.exe connect`: the usage on the console, and 2;
+/// - `sshelter-cli.exe connect web` while SSHelter's session pipe exists and another owner made it (the Administrators group: the CI
+///   runner is elevated): the refusal on the console, and 1. On the way the pair attached to the console, read its standard handles as a
+///   console (`Tty::new`) and refused the pipe in the broker's connect (it did open that very pipe), and it started no SSHelter.
+///
+/// A CI step runs it (`--ignored`) with `SSHELTER_TEST_PAIR` naming the pair's directory.
+#[test]
+#[ignore = "runs the console pair in the directory SSHELTER_TEST_PAIR names (a CI step)"]
+fn the_pair_in_a_console_of_its_own() {
+    if is_child() {
+        pair_case(&std::env::var(CASE).expect("the case"));
+        return;
+    }
+    let dir = PathBuf::from(std::env::var_os(PAIR).expect("SSHELTER_TEST_PAIR names the directory of sshelter-cli.exe and sshelter.exe"));
+    for program in ["sshelter-cli.exe", "sshelter.exe"] {
+        assert!(dir.join(program).is_file(), "{program} is not in {}", dir.display());
+    }
+    // winbase.h: a console of its own for the child.
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    for case in ["the_usage_on_the_console", "a_pipe_another_owner_made_is_refused_on_the_console"] {
+        let said = rerun_alone_with(PAIR_TEST, |command| {
+            use std::os::windows::process::CommandExt;
+            command.arg("--include-ignored").creation_flags(CREATE_NEW_CONSOLE).env(CASE, case);
+        });
+        eprintln!("{case} ({}):\n{said}", dir.display());
+    }
+}
+
+/// One case of `the_pair_in_a_console_of_its_own`, in a child with a console of its own.
+fn pair_case(name: &str) {
+    let dir = PathBuf::from(std::env::var_os(PAIR).expect("the pair's directory"));
+    match name {
+        "the_usage_on_the_console" => {
+            let (code, screen) = run_the_pair(&dir, &["connect"]);
+            eprintln!("sshelter-cli.exe connect ended with {code}; the console shows:\n{screen}");
+            assert!(screen.contains("usage: sshelter connect <alias>"), "the usage is not on the console:\n{screen}");
+            assert!(screen.contains("sshelter connect --id <host id>"), "the usage is not on the console:\n{screen}");
+            assert_eq!(code, 2);
+        }
+        "a_pipe_another_owner_made_is_refused_on_the_console" => {
+            let name = crate::session::pipe_name().expect("the session pipe's name");
+            let squatter = crate::ipc::pipe_windows::testing::squat_as_administrators(&name)
+                .expect("the Administrators group can own the pipe: the runner is elevated");
+            let (code, screen) = run_the_pair(&dir, &["connect", "web"]);
+            eprintln!("sshelter-cli.exe connect web ended with {code}; the console shows:\n{screen}");
+            let started = sshelters_left();
+            assert!(started.is_empty(), "an SSHelter was started (process ids {started:?}), and is stopped now");
+            assert!(a_client_came(&squatter), r"sshelter.exe did not open \\.\pipe\{name}");
+            let refused = format!(r"Another program is using SSHelter's session pipe (\\.\pipe\{name})");
+            assert!(screen.contains(&refused), "the refusal is not on the console:\n{screen}");
+            assert_eq!(code, 1);
+        }
+        other => panic!("no case {other}"),
+    }
+}
+
+/// Runs `sshelter-cli.exe` of `dir` with `args` in this process's console, as a shell there runs a program: its standard input, output
+/// and error are the console's own buffers (this process's are the test's pipes). Its exit code, and what the console's screen shows
+/// once it has ended.
+fn run_the_pair(dir: &Path, args: &[&str]) -> (i32, String) {
+    let output = owned("CONOUT$");
+    let mut command = std::process::Command::new(dir.join("sshelter-cli.exe"));
+    command
+        .args(args)
+        .stdin(Stdio::from(owned("CONIN$")))
+        .stdout(Stdio::from(output.try_clone().expect("another handle of the screen buffer")))
+        .stderr(Stdio::from(output));
+    let mut pair = crate::process::spawn(&mut command).expect("sshelter-cli.exe starts");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        match pair.try_wait().expect("the pair's status") {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = pair.kill();
+                panic!("sshelter-cli.exe did not end within a minute; the console shows:\n{}", screen());
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    (status.code().expect("the pair's exit code"), screen())
+}
+
+/// What the screen buffer of this process's console shows, from its first row to the cursor's: rows joined by line breaks, except where a
+/// line fills a row to its last column and goes on in the next.
+fn screen() -> String {
+    let out = owned("CONOUT$");
+    let handle = out.as_raw_handle() as HANDLE;
+    let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+    // SAFETY: plain data the call fills in.
+    assert_ne!(unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }, 0, "{}", io::Error::last_os_error());
+    let width = usize::try_from(info.dwSize.X).unwrap_or(0).max(1);
+    let mut text = String::new();
+    for y in 0..=info.dwCursorPosition.Y {
+        let mut cells = vec![0u16; width];
+        let mut read = 0u32;
+        // SAFETY: `cells` holds `width` characters.
+        unsafe { ReadConsoleOutputCharacterW(handle, cells.as_mut_ptr(), width as u32, COORD { X: 0, Y: y }, &mut read) };
+        let row = String::from_utf16_lossy(&cells[..(read as usize).min(width)]);
+        let filled = read as usize == width && !row.ends_with(' ');
+        text.push_str(row.trim_end());
+        if !filled {
+            text.push('\n');
+        }
+    }
+    text
+}
+
+/// Whether a client opened `pipe`, the squatter's first instance (in overlapped mode, and never connected by the squatter): a
+/// `ConnectNamedPipe` now finds a client there, or one that came and went (the pipe is closing), or none yet (it would wait; it is
+/// cancelled).
+fn a_client_came(pipe: &OwnedHandle) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, FALSE};
+    use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+    use windows_sys::Win32::System::Threading::CreateEventW;
+    use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+    let handle = pipe.as_raw_handle() as HANDLE;
+    // SAFETY: a manual-reset event without a name or security attributes; owned below.
+    let event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
+    assert!(!event.is_null(), "{}", io::Error::last_os_error());
+    // SAFETY: the event just made, which nothing else owns.
+    let event = unsafe { OwnedHandle::from_raw_handle(event as _) };
+    let mut overlapped = OVERLAPPED { hEvent: event.as_raw_handle() as HANDLE, ..Default::default() };
+    // Only through this pointer from here on, as in `ipc::pipe_windows::accept`.
+    let overlapped: *mut OVERLAPPED = &mut overlapped;
+    // SAFETY: an instance in overlapped mode; `overlapped` and its event live until the connect is over (waited for below if it waits).
+    if unsafe { ConnectNamedPipe(handle, overlapped) } != 0 {
+        return true;
+    }
+    match last_error() {
+        ERROR_PIPE_CONNECTED | ERROR_NO_DATA => true,
+        ERROR_IO_PENDING => {
+            let mut transferred = 0u32;
+            // SAFETY: cancels the connect started above, then waits for it to be over, so that `overlapped` is not used after this.
+            unsafe {
+                CancelIoEx(handle, overlapped);
+                // A client that came at that very moment connected it all the same.
+                GetOverlappedResult(handle, overlapped, &mut transferred, TRUE) != 0
+            }
+        }
+        error => panic!("ConnectNamedPipe: {}", io::Error::from_raw_os_error(error as i32)),
+    }
+}
+
+/// The processes called `sshelter.exe` that are running (their ids). Once the pair has ended, any is an SSHelter it started: each is
+/// stopped, so that it does not outlive the test.
+fn sshelters_left() -> Vec<u32> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    let mut found = Vec::new();
+    // SAFETY: Toolhelp's iteration of the processes, `dwSize` set before the first call; the snapshot and every process handle are closed.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        assert_ne!(snapshot, INVALID_HANDLE_VALUE, "{}", io::Error::last_os_error());
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+        while more {
+            let length = entry.szExeFile.iter().position(|&unit| unit == 0).unwrap_or(entry.szExeFile.len());
+            if String::from_utf16_lossy(&entry.szExeFile[..length]).eq_ignore_ascii_case("sshelter.exe") {
+                found.push(entry.th32ProcessID);
+            }
+            more = Process32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        for &id in &found {
+            let process = OpenProcess(PROCESS_TERMINATE, 0, id);
+            if !process.is_null() {
+                TerminateProcess(process, 1);
+                CloseHandle(process);
+            }
+        }
+    }
+    found
 }
