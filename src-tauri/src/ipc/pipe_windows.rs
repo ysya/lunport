@@ -604,8 +604,48 @@ pub fn listen(dir: &Path, name: &str, thread: &str, handle: Handler) -> Result<S
     Ok(Started::Running)
 }
 
+/// What the tests of other modules need of this one.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// Makes the first instance of `name` as another owner would: owned by the Administrators group, with a null DACL (anyone may connect:
+    /// a squatter that wants the user's client lets it in). `None` when this process cannot make that group an owner; it can when it runs
+    /// elevated, where the group is in its token with `SE_GROUP_OWNER` (`TOKEN_OWNER`; the CI runner is elevated).
+    pub(crate) fn squat_as_administrators(name: &str) -> Option<OwnedHandle> {
+        use windows_sys::Win32::Foundation::ERROR_INVALID_OWNER;
+        use windows_sys::Win32::Security::{CreateWellKnownSid, SetSecurityDescriptorOwner, WinBuiltinAdministratorsSid, SECURITY_MAX_SID_SIZE};
+        let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut size = SECURITY_MAX_SID_SIZE;
+        // SAFETY: `sid` has room for any SID, and `size` says so.
+        assert_ne!(unsafe { CreateWellKnownSid(WinBuiltinAdministratorsSid, ptr::null_mut(), sid.as_mut_ptr() as PSID, &mut size) }, 0);
+        // SAFETY: plain old data, initialized below.
+        let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        let pointer = &mut descriptor as *mut SECURITY_DESCRIPTOR as *mut c_void;
+        // SAFETY: `pointer` is the descriptor above; its owner points into `sid`, and both outlive the CreateNamedPipeW below.
+        unsafe {
+            assert_ne!(InitializeSecurityDescriptor(pointer, SECURITY_DESCRIPTOR_REVISION), 0);
+            assert_ne!(SetSecurityDescriptorDacl(pointer, 1, ptr::null(), 0), 0);
+            assert_ne!(SetSecurityDescriptorOwner(pointer, sid.as_mut_ptr() as PSID, 0), 0);
+        }
+        let attributes = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: pointer, bInheritHandle: 0 };
+        let path = wide_pipe_path(name);
+        let open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE;
+        // SAFETY: `path` is NUL-terminated; the security attributes outlive the call.
+        let handle = unsafe { CreateNamedPipeW(path.as_ptr(), open_mode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0, &attributes) };
+        if handle == INVALID_HANDLE_VALUE {
+            let error = io::Error::last_os_error();
+            assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_OWNER as i32), "the squatter's pipe could not be made: {error}");
+            return None;
+        }
+        // SAFETY: a fresh handle that nothing else owns.
+        Some(unsafe { OwnedHandle::from_raw_handle(handle as _) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testing::squat_as_administrators;
     use super::*;
     use crate::ipc::server::testing::{echoing, ping, PONG};
     use std::sync::{mpsc, Mutex};
@@ -805,39 +845,6 @@ mod tests {
         let client = waiting.recv_timeout(Duration::from_secs(5)).expect("connect returned").expect("connected");
         let second = accepting.recv_timeout(Duration::from_secs(5)).expect("the instance was connected").unwrap();
         drop((first, client, only, second));
-    }
-
-    /// Makes the first instance of `name` as another owner would: owned by the Administrators group, with a null DACL (anyone may connect:
-    /// a squatter that wants the user's client lets it in). `None` when this process cannot make that group an owner; it can when it runs
-    /// elevated, where the group is in its token with `SE_GROUP_OWNER` (`TOKEN_OWNER`; the CI runner is elevated).
-    fn squat_as_administrators(name: &str) -> Option<OwnedHandle> {
-        use windows_sys::Win32::Foundation::ERROR_INVALID_OWNER;
-        use windows_sys::Win32::Security::{CreateWellKnownSid, SetSecurityDescriptorOwner, WinBuiltinAdministratorsSid, SECURITY_MAX_SID_SIZE};
-        let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
-        let mut size = SECURITY_MAX_SID_SIZE;
-        // SAFETY: `sid` has room for any SID, and `size` says so.
-        assert_ne!(unsafe { CreateWellKnownSid(WinBuiltinAdministratorsSid, ptr::null_mut(), sid.as_mut_ptr() as PSID, &mut size) }, 0);
-        // SAFETY: plain old data, initialized below.
-        let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
-        let pointer = &mut descriptor as *mut SECURITY_DESCRIPTOR as *mut c_void;
-        // SAFETY: `pointer` is the descriptor above; its owner points into `sid`, and both outlive the CreateNamedPipeW below.
-        unsafe {
-            assert_ne!(InitializeSecurityDescriptor(pointer, SECURITY_DESCRIPTOR_REVISION), 0);
-            assert_ne!(SetSecurityDescriptorDacl(pointer, 1, ptr::null(), 0), 0);
-            assert_ne!(SetSecurityDescriptorOwner(pointer, sid.as_mut_ptr() as PSID, 0), 0);
-        }
-        let attributes = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: pointer, bInheritHandle: 0 };
-        let path = wide_pipe_path(name);
-        let open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE;
-        // SAFETY: `path` is NUL-terminated; the security attributes outlive the call.
-        let handle = unsafe { CreateNamedPipeW(path.as_ptr(), open_mode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0, &attributes) };
-        if handle == INVALID_HANDLE_VALUE {
-            let error = io::Error::last_os_error();
-            assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_OWNER as i32), "the squatter's pipe could not be made: {error}");
-            return None;
-        }
-        // SAFETY: a fresh handle that nothing else owns.
-        Some(unsafe { OwnedHandle::from_raw_handle(handle as _) })
     }
 
     /// Fix round 1 (security): only a pipe the user owns is SSHelter's; one of another owner, or one whose owner cannot be read, is not,
