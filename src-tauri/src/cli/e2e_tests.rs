@@ -9,9 +9,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::client::Input;
+use super::client::{Input, Request, PAUSE_PROMPT};
 use super::run::{queue, run, Inputs};
-use super::terminal::fake::FakeTermios;
+use super::terminal::fake::{describe, FakeTermios};
 use super::terminal::Tty;
 use crate::session::broker::Broker;
 use crate::session::connect::HostKeyConfirmer;
@@ -114,6 +114,11 @@ impl Ended {
 
 /// `sshelter connect lab`, where `lab` is a scratch sshd reached on `port` (its own, or a proxy's) with its user key in the vault.
 fn connect(server: &Server, port: u16, decisions: Vec<Decision>) -> Session {
+    connect_pausing(server, port, decisions, false)
+}
+
+/// `connect`, and with `pause_on_error` as `sshelter connect --pause-on-error lab`.
+fn connect_pausing(server: &Server, port: u16, decisions: Vec<Decision>, pause_on_error: bool) -> Session {
     let directory = Arc::new(FakeDirectory::new().with_hop(server.hop_with("lab", port, AuthMethod::Key { key_id: "k1".into() })));
     let broker = Broker::new(
         Arc::new(RusshEngine::new()),
@@ -133,7 +138,8 @@ fn connect(server: &Server, port: u16, decisions: Vec<Decision>) -> Session {
         let (termios, inputs, stdout, stderr) = (Arc::clone(&termios), inputs.clone(), stdout.clone(), stderr.clone());
         std::thread::spawn(move || {
             let mut tty = Tty::new(termios.clone()).unwrap();
-            let code = run(stream, HostQuery::Alias("lab".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(stdout), Box::new(stderr));
+            let request = Request { host: HostQuery::Alias("lab".into()), pause_on_error };
+            let code = run(stream, request, "xterm-256color".into(), &mut tty, (inputs, queue), Box::new(stdout), Box::new(stderr));
             (code, termios.is_start(&termios.now()))
         })
     };
@@ -176,6 +182,28 @@ fn a_host_key_the_person_does_not_trust_ends_sshelter_connect() {
     assert!(ended.restored, "the terminal is as it was");
     assert!(ended.directory.pins().is_empty());
     ended.forgotten();
+}
+
+/// `--pause-on-error` (spec §7.3): the refused key's reason stays on the terminal with the prompt under it, and the CLI waits, the line
+/// edited and shown, until Enter; then it ends with 255, the terminal put back. The broker forgets the session meanwhile: a paused CLI
+/// holds none.
+#[test]
+fn with_pause_on_error_a_refused_host_key_waits_for_enter_before_sshelter_connect_ends() {
+    let Some(tools) = tools() else { return };
+    let server = Server::start(&tools, &[SH_SHELL]);
+    let session = connect_pausing(&server, server.sshd.port, vec![Decision::Refuse], true);
+    session.wait_for("the prompt", 30, |session| session.stderr.text().ends_with(PAUSE_PROMPT));
+    eventually("the broker to forget the session", 10, || !session.broker.has_sessions());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!session.run.is_finished(), "it waits for Enter; {}", session.said());
+    let now = session.termios.now();
+    assert!(now.c_lflag & libc::ICANON != 0 && now.c_lflag & libc::ECHO != 0, "the line is edited and shown while it waits: {}", describe(&now));
+    session.type_text("\n");
+    let ended = session.finish();
+    assert_eq!(ended.code, 255);
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\nThe host key of lab has not been confirmed yet.\nPress Enter to exit.");
+    assert_eq!(ended.stdout, "");
+    assert!(ended.restored, "the terminal is as it was");
 }
 
 /// The link is cut while the shell runs: the CLI puts the terminal back, says the connection was lost, and exits 255 — never 0.
