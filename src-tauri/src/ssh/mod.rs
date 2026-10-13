@@ -4,10 +4,6 @@
 //! russh is imported by exactly one file, `russh_engine.rs`; a test below keeps it that way. Swapping the engine later means replacing
 //! that file.
 
-// On Windows nothing calls the engine in this version: its only user is the broker, which runs on macOS and Linux only (plan 1b R4;
-// phase 3). It is still compiled and tested there.
-#![cfg_attr(windows, allow(dead_code, unused_imports))]
-
 mod channel;
 #[cfg(test)]
 mod engine_tests;
