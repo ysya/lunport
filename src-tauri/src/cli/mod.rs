@@ -202,8 +202,8 @@ fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, String> {
     ensure_started(answering, take_spawn_locks, start_host, START_WAIT, NOT_STARTED)?
 }
 
-/// What is said when the broker's pipe cannot be used: the sentence `connect` gives a pipe another program made, and otherwise the
-/// system's reason (an SSHelter that runs elevated makes a pipe a program that does not cannot open).
+/// What is said when the broker's pipe cannot be used: the sentence `connect` gives a pipe another program made, and otherwise (the system
+/// refused to open the pipe) the system's reason.
 #[cfg(any(windows, test))]
 fn refused(error: &std::io::Error) -> String {
     match error.raw_os_error() {
@@ -270,6 +270,8 @@ fn session(
     let _size = run::watch_size(inputs.clone(), run::SIZE_CHECK, move || size.size());
     let (stdout, stderr_output) = outputs();
     let code = run::run(stream, host, term, &mut tty, (inputs, queue), stdout, stderr_output);
+    // The run put the console back on every way it ends; a control handler that waits returns once it is (`run::ControlEvents`).
+    tty.restore();
     over.set();
     watchdog.stand_down();
     code
