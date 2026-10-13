@@ -15,6 +15,9 @@ edition = "2021"
 name = "sshelter_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+development-profile = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

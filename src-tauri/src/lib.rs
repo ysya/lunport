@@ -1,3 +1,4 @@
+pub mod app_profile;
 mod agent;
 pub mod askpass;
 pub mod cli;
