@@ -6,7 +6,14 @@ checkout on that computer). Use a test server you can log in to by key and by pa
 each item as pass / fail with a note.
 
 CI measured one console only: the classic console host (conhost) of the GitHub runner, through a test program that types into a console
-of its own (own-ssh spec §7.3, §16). What a keyboard, Windows Terminal, an input method and a closed window do is what these items check.
+of its own (own-ssh spec §7.3, §16). CI also runs each installer's release pair in a console of its own, with the console's own buffers
+as the helper's standard handles: the usage, and the refusal of a session pipe another owner made, show on that console's screen
+(`windows-bundle-check.yml`). What a keyboard, Windows Terminal, an input method and a closed window do is what these items check.
+
+**Items 4 and 8 first: they are the gate on the beta.** Only a real computer shows the release build's console path end to end: the
+usage printed by the installed pair (item 4), and a session opened from the row in Windows Terminal (item 8). If either fails, the
+beta cannot connect and must not be announced.
+
 Commands are for PowerShell unless an item says cmd. `<helper>` is `"$env:LOCALAPPDATA\SSHelter\sshelter-cli.exe"`; in PowerShell run it
 as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
 
@@ -69,8 +76,8 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
     `sshelter.exe` is a console program and runs itself).
 11. **A release build whose helper is missing.** Quit SSHelter, rename `sshelter-cli.exe` in the install folder to
     `sshelter-cli.exe.bak`, start SSHelter. Connect `web` from its row: no terminal opens, and the toast "Could not connect" says
-    `sshelter-cli.exe is missing from <the install folder>. Reinstall SSHelter.` The tray's quick connect opens nothing either (it only
-    logs). Rename the file back.
+    `sshelter-cli.exe is missing from <the install folder>. Reinstall SSHelter.` The tray's quick connect opens nothing either (it
+    writes the failure only to its standard error, which a release build shows nowhere). Rename the file back.
 12. **Spaces in the install folder.** If your profile folder name has a space, or the installer lets you choose a folder such as
     `C:\SSHelter test`: Connect `web` works with Windows Terminal and with Command Prompt.
 13. **The cmd limit (spec §16).** With a helper path that holds `&` or parentheses (a Windows account named like `R&D` or `Jo (test)`,
@@ -108,17 +115,21 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
     question: what comes next starts on the line after it (spec §7.3: the console ends the line on Enter).
 22. **Ctrl-C, Ctrl-Break and Ctrl-Z at a question.** At `pw`'s question, type a few letters and press Ctrl-C: the question ends, the
     terminal prints `Authentication for pw was abandoned (…)`, the program ends (255), check C passes, and the letters typed at the
-    question do not appear at the next prompt. The same with Ctrl-Break. Then Ctrl-Z as the first key of the answer and Enter: the
-    question is cancelled as with Ctrl-C (Windows' end of input). Ctrl-D is part of the answer (on Unix it cancels the question): type
-    Ctrl-D, the password and Enter, and the server does not accept it (it asks again, or the login fails).
+    question do not appear at the next prompt. The same with Ctrl-Break. Do Ctrl-C at the hidden question in Windows Terminal and in
+    the classic console, and record how many line breaks follow the question: the cancel prints one of the CLI's own, and whether the
+    console moved to the next line on a keyboard Ctrl-C was not measured (a blank line after the question means it did). Then Ctrl-Z as
+    the first key of the answer and Enter: the question is cancelled as with Ctrl-C (Windows' end of input), with no blank line after
+    it (that line's Enter ended it). Ctrl-D is part of the answer (on Unix it cancels the question): type Ctrl-D, the password and
+    Enter, and the server does not accept it (it asks again, or the login fails).
 23. **Typeahead does not become the answer.** Connect `pw` and type `secret` and Enter while it connects: the question still waits for
     an answer (the typed line was thrown away before it was asked).
 
 ## Endings
 
 24. **Closing the window.** During a `web` session: close the Windows Terminal tab; close a Windows Terminal window that holds only that
-    tab; close a classic console window. Then the same at `pw`'s question. Each time the remote login ends (on the server, `who` no
-    longer lists it) and SSHelter keeps running. A new console window behaves normally (check C in it).
+    tab; close a classic console window. Then the same at `pw`'s question. Each time the remote login ends (on the server, the login
+    that `who` listed while the session was open is gone) and SSHelter keeps running. A new console window behaves normally (check C in
+    it).
 25. **Quitting SSHelter.** During a `web` session, quit SSHelter (tray → Quit): the terminal prints
     `SSHelter quit, so the connection to web was closed.`, the program ends (255), check C passes. The same at `pw`'s question, with a
     few letters typed into the answer first: the sentence names `pw`, and the letters do not appear at the next prompt.
@@ -137,13 +148,47 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
 29. **An elevated SSHelter next to a normal `sshelter connect` (the owner check).** Quit SSHelter and start it with "Run as
     administrator". In a normal Windows Terminal tab run `& <helper> connect web`. It must not print
     `Another program is using SSHelter's session pipe (…)`: SSHelter names you as the owner of its pipes even when it runs elevated.
-    Record whether the session opens, or what it prints instead. Quit the elevated SSHelter and start it normally.
+    The expectation to record is that the session opens (a pipe a high-integrity process makes gets a medium label by default);
+    `Another program is using …` or `sshelter: cannot connect to SSHelter (Access is denied …)` would be a finding. Quit the elevated
+    SSHelter and start it normally.
 30. **(Optional, a known limit) A client at a lower integrity level.** Copy the install folder to `$env:TEMP\sshelter-low`, run
     `icacls "$env:TEMP\sshelter-low\sshelter-cli.exe" /setintegritylevel low` and the same for `sshelter.exe` there, then run
     `& "$env:TEMP\sshelter-low\sshelter-cli.exe" connect web` from a normal console. Record what it prints and whether check C passes
     (spec §16: a console that refuses `WriteConsoleInputW` cannot end a pending read at a change of mode). Delete the copy.
 
+## A hard kill, redirected output, a non-ASCII answer
+
+31. **A hard kill.** With a `web` session open in a classic console window, end `sshelter.exe` (the one with `connect` on its command
+    line; add the Command line column to Task Manager's Details tab to see it) from Task Manager. The helper exits with the kill's code,
+    and the console is expected to be left raw (no echo, no line editing): SSHelter puts the console back on every way out it has, a
+    kill gives it none, and the helper does not put it back. Record what the window does and whether `chcp` still says 65001; close
+    that window afterwards.
+32. **Output redirected.** `& <helper> connect web > "$env:TEMP\out.txt"`, and in the session run `echo hi; exit`. The keys still come
+    from the console (what you type reaches the remote), and `Get-Content "$env:TEMP\out.txt"` holds the shell's output (`hi`). Remove
+    the file.
+33. **A non-ASCII hidden answer.** On the test server set a password with a non-ASCII character in it (`密碼abc`) for the user `pw` logs in
+    as. Connect `pw` and type that password at its question with an input method (or paste it): the login succeeds. The keys are read
+    as UTF-16 and sent as UTF-8, whatever the console's input code page is. Set the user's password back afterwards.
+
+## Install, update and uninstall
+
+Do not have the MSI and the NSIS install at the same time: the broker's lock makes the second app say that another instance runs.
+
+34. **The MSI.** Install the beta's `.msi` (per machine, into `C:\Program Files\SSHelter`; it asks for elevation): `sshelter.exe` and
+    `sshelter-cli.exe` are there. Connect `web` opens the session with Windows Terminal and with Command Prompt, and
+    `& "C:\Program Files\SSHelter\sshelter-cli.exe" connect` prints the usage and `$LASTEXITCODE` is 2. Uninstall it from Settings →
+    Apps: both programs are gone and the folder is removed.
+35. **The in-app update from 0.17.0-9.** Install 0.17.0-9 with its NSIS installer, choose the Beta channel in Settings → General, and
+    check for updates: the beta installs and the app restarts; `Get-ChildItem "$env:LOCALAPPDATA\SSHelter" -Filter *.exe` shows both
+    programs with the beta's dates and sizes, and no dialog about a file in use appeared. Then the same with a `web` session open: the
+    terminal prints `The connection to SSHelter ended.` (or `SSHelter quit, so the connection to web was closed.`), the program ends
+    with 255 and check C passes, the update completes, and both programs are the beta's.
+36. **The installer over an installed beta with a session open.** Run the beta's `-setup.exe` again while a `web` session is open: the
+    same as item 35 (the session ends with its sentence and 255, check C passes, no dialog about a file in use, both programs are the
+    beta's).
+37. **Uninstall (NSIS).** Uninstall SSHelter from Settings → Apps: both programs are gone.
+
 ## Clean up
 
-31. Set the default terminal application and SSHelter's terminal settings back, uncheck "Use legacy console" if it is still checked,
+38. Set the default terminal application and SSHelter's terminal settings back, uncheck "Use legacy console" if it is still checked,
     remove `fresh`, `fresh2` and `pw` (and their pinned keys) and `$env:TEMP\sshelter-err.txt`.
