@@ -396,6 +396,95 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    mod before_the_session_on_windows {
+        use std::io;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        use super::*;
+        use crate::cli::terminal::fake::{Call, FakeConsole};
+        use crate::cli::terminal::Setting;
+        use crate::ipc::pipe_windows::{self, PipeStream};
+        use crate::ipc::server::{Handler, Started};
+
+        /// A connection to a pipe of the test's own, whose server end is kept open (in SSHelter's place: nothing is said to it here).
+        fn a_pipe() -> (PipeStream, tempfile::TempDir) {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let dir = tempfile::tempdir().unwrap();
+            let name = format!("sshelter-cli-session-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
+            let kept = Arc::new(Mutex::new(Vec::new()));
+            let handler: Handler = Arc::new(move |stream, _pid| kept.lock().unwrap().push(stream));
+            assert_eq!(pipe_windows::listen(&dir.path().join("ipc"), &name, "sshelter-test", handler).unwrap(), Started::Running);
+            (pipe_windows::connect(&name, Duration::from_secs(5)).unwrap(), dir)
+        }
+
+        fn session_with(
+            console: Arc<FakeConsole>,
+            reach: impl FnOnce() -> Result<PipeStream, String>,
+            control_events: impl FnOnce(run::ControlEvents) -> io::Result<()>,
+        ) -> (i32, String) {
+            let mut said = Vec::new();
+            let outputs = || -> (run::Output, run::Output) { panic!("these sessions end before the run") };
+            let code = super::super::session(HostQuery::Alias("web".into()), "xterm-256color".into(), console, reach, control_events, outputs, &mut said);
+            (code, String::from_utf8(said).unwrap())
+        }
+
+        /// Spec §7.3: input that is not a console is said, with 1, before SSHelter is reached, let alone started.
+        #[test]
+        fn without_a_console_the_cli_says_so_before_it_reaches_or_starts_sshelter() {
+            let console = FakeConsole::new();
+            console.fail(|call| *call == Call::Get(Setting::InputMode));
+            let reach = || -> Result<PipeStream, String> { panic!("SSHelter must not be reached, let alone started, without a console") };
+            let events = |_| -> io::Result<()> { panic!("nothing is taken over without a console") };
+            assert_eq!(session_with(console, reach, events), (1, "sshelter connect needs a terminal.\n".to_string()));
+        }
+
+        /// Spec §11: when nothing answers after SSHelter was started, the sentence and 1; the console was never changed.
+        #[test]
+        fn when_nothing_answers_the_cli_says_sshelter_did_not_start_and_leaves_the_console_alone() {
+            let console = FakeConsole::new();
+            let events = |_| -> io::Result<()> { panic!("nothing is taken over before SSHelter answers") };
+            assert_eq!(session_with(console.clone(), || Err(NOT_STARTED.to_string()), events), (1, "SSHelter did not start within 12 seconds.\n".to_string()));
+            assert!(console.changes().is_empty(), "the console was not changed");
+        }
+
+        /// Without its control handler the program could not keep the console (Ctrl-C at a hidden password, or the window closed, would end
+        /// it with the console as it set it): it says so and ends with 1, before the console was changed at all.
+        #[test]
+        fn control_events_that_cannot_be_taken_over_end_the_cli_before_the_console_is_changed() {
+            let console = FakeConsole::new();
+            let (stream, _dir) = a_pipe();
+            let failing = |_| -> io::Result<()> { Err(io::Error::other("no handler")) };
+            let said = session_with(console.clone(), move || Ok(stream), failing);
+            assert_eq!(said, (1, "sshelter: cannot take over the console's control keys: no handler\n".to_string()));
+            assert!(console.changes().is_empty(), "the console was not changed");
+        }
+
+        /// Every way out is in place before the console is changed: when the control events are taken over (the last of them) the console
+        /// is as it was. A console without virtual terminal sequences cannot be taken over: it says so, ends with 1, and is left as it was.
+        #[test]
+        fn every_way_out_is_in_place_before_the_console_is_changed_and_a_legacy_console_is_said() {
+            let console = FakeConsole::new();
+            console.refuse(|call| matches!(call, Call::Set(Setting::OutputMode, _)));
+            let (stream, _dir) = a_pipe();
+            let unchanged = Arc::new(Mutex::new(None));
+            let events = {
+                let (console, unchanged) = (Arc::clone(&console), Arc::clone(&unchanged));
+                move |_| -> io::Result<()> {
+                    *unchanged.lock().unwrap() = Some(console.changes().is_empty());
+                    Ok(())
+                }
+            };
+            let (code, said) = session_with(console.clone(), move || Ok(stream), events);
+            assert_eq!(*unchanged.lock().unwrap(), Some(true), "the control events were taken over before any change");
+            assert_eq!(code, 1);
+            assert!(said.starts_with("sshelter: the console does not support virtual terminal sequences ("), "{said}");
+            assert_eq!(console.now(), console.start, "left as it was");
+        }
+    }
+
     /// Windows: a broker's pipe another program made is refused with `connect`'s own sentence; one the system refuses (an SSHelter that
     /// runs elevated makes a pipe a program that does not cannot open) with the system's reason.
     #[test]
