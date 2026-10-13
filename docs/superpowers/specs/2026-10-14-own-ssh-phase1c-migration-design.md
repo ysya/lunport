@@ -2,8 +2,8 @@
 
 日期：2026-10-14。基準：next/own-ssh 9476f10，與 main 81e4e7c 的檔案樹相同。
 
-狀態：供使用者審閱的設計提案。尚未實作，尚未執行任何真實資料遷移。
-本文件補充 2026-10-10-own-ssh-client-design.md 的 §5、§9、§10、§12、§13；下列分期調整需審閱後才成為實作依據。
+狀態：使用者已確認書面設計，並於 2026-10-14 授權持續實作、依業界做法自行決策。尚未執行任何真實資料遷移。
+本文件補充 2026-10-10-own-ssh-client-design.md 的 §5、§9、§10、§12、§13；下列分期調整為實作依據；後續決策與驗證結果記錄於進度表。
 調查證據：docs/superpowers/plans/2026-10-14-own-ssh-phase1c-scout.md。該報告記錄既有程式行為，不是實作指令。
 
 ## 1. 目標與成功條件
@@ -12,7 +12,25 @@
 已完成的引擎、broker、CLI、Windows helper 留用。匯入金鑰只複製，不刪除原檔。
 開發在 next/own-ssh 進行；main 繼續維護 0.17。1.0 的正式資料切換與 beta 發布是後續獨立操作。
 
-本次設計的可驗收結果：
+### 1.1 產品方向：Brave-style 同步鏈
+
+使用者補充：最終目標是參考 Brave Sync，以 chain 同步的 Termius 類 SSH 工具。
+依使用者授權，本設計採用的邊界如下；這是信任模型與產品體驗，並非複製 Chromium 的同步協定：
+
+- 各台電腦保有自己的主機記錄與本機 vault，離線仍可使用本機可用的主機與金鑰。
+- 用隨機產生的同步碼／QR code 加入自己的裝置群組；沒有必要為此建立登入帳號。
+- 主機設定與使用者選擇同步的金鑰，在本機加密成記錄，再送進 chain；不整包上傳 vault.json。
+- relay 保存密文與必要的同步中繼資料，不持有 chain 的解密金鑰、本機 vault 的解密金鑰或私鑰明文。
+- 私鑰預設留在本機，只有明確選擇同步的金鑰才產生密封 key 記錄；連線密碼與 passphrase 第一版仍留在該裝置。
+- 「不用伺服器存 vault」在此代表不由伺服器管理、解密 vault；選擇同步的私鑰密文仍會儲存在 relay。
+
+[Brave 官方 Sync v2 設計](https://github.com/brave/brave-browser/wiki/Brave-Sync-v2) 說明同步鏈採客戶端加密與同步伺服器；
+[官方 FAQ](https://support.brave.app/hc/en-us/articles/360047642371-Sync-FAQ) 也說明同步資料會送到 Brave 的伺服器。
+SSHelter 已有對應的骨架：sync/crypto.rs 的同步碼與用途分離金鑰、sync/reconcile.rs 的記錄加密、relay/src/index.ts 的密文儲存。
+以既有 chain 與密碼學實作為基礎；1c／1d 的工作是將 SSH 記錄、vault 與 UI 接上它。
+
+### 1.2 本次設計的可驗收結果
+
 
 - 開發版、其 CLI 與背景 host 共用同一個開發 profile，與已安裝版的檔案、Keychain、IPC、啟動鎖分離。
 - 未確認的匯入只產生預覽；沒有啟動即搬遷、修改真實 ~/.ssh 或升級真實 relay 帳戶的路徑。
