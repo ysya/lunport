@@ -34,15 +34,16 @@ use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE
 use windows_sys::Win32::System::Console::{
     FlushConsoleInputBuffer, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP,
     GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents, ReadConsoleOutputCharacterW, ReadConsoleW, SetConsoleCtrlHandler,
-    SetConsoleMode, WriteConsoleInputW, WriteConsoleW, CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_C_EVENT, INPUT_RECORD, KEY_EVENT,
-    KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
+    SetConsoleMode, WriteConsoleInputW, WriteConsoleW, CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_BREAK_EVENT, CTRL_C_EVENT, INPUT_RECORD,
+    KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
 };
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 use windows_sys::Win32::System::IO::CancelIoEx;
 
 use super::client::Input;
 use super::console::{input_mode, ConsoleApi, Mode};
-use super::run::{console_keys_thread, queue};
+use super::inputs_windows::{take_over_control_events, ConsoleText};
+use super::run::{console_keys_thread, queue, ControlEvents, Output, Over, Watchdog, STOP_GRACE};
 use super::terminal::{restore_on_panic, StdConsole, Tty};
 use crate::ssh::testing::{is_child, rerun_alone_with};
 
@@ -77,6 +78,13 @@ fn open(name: &str) -> H {
     };
     assert_ne!(handle, INVALID_HANDLE_VALUE, "{name}: {}", std::io::Error::last_os_error());
     H(handle as usize)
+}
+
+/// `open`, as a handle that is closed when it is dropped.
+fn owned(name: &str) -> std::os::windows::io::OwnedHandle {
+    use std::os::windows::io::FromRawHandle;
+    // SAFETY: a handle `open` has just opened, which nothing else owns.
+    unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(open(name).raw() as _) }
 }
 
 fn last_error() -> u32 {
@@ -484,6 +492,140 @@ fn case(name: &str) {
             assert_eq!(gave(&read), "x");
             drop(tty);
         }
+        // Fix round 1, measured: a read another process left in progress when it ended, in the console this one shares with it (the
+        // shell's console, after `sshelter connect` ended), takes nothing of what is typed next: neither a raw read, nor a hidden line read
+        // with a part of a password typed into it. The process that leaves them is this test binary again, run without a console of its
+        // own, so that it shares this one.
+        "a_read_an_ended_process_left_takes_nothing" => {
+            let leave = |grandchild: &str| {
+                rerun_alone_with(NAME, |command| {
+                    command.env(CASE, grandchild);
+                })
+            };
+            set_mode(control, console.raw).unwrap();
+            flush(control).unwrap();
+            leave("leave_a_raw_read");
+            let (read, _thread) = read_on_a_thread(open("CONIN$"));
+            type_text(control, "a");
+            let first = read.recv_timeout(AT_ONCE);
+            let later = if first.is_err() {
+                type_text(control, "b");
+                format!("; after a second key: {:?}", read.recv_timeout(DONE))
+            } else {
+                String::new()
+            };
+            assert!(matches!(&first, Ok(read) if read.text == "a"), "the raw read's first key: {first:?}{later}");
+            set_mode(control, console.hidden).unwrap();
+            flush(control).unwrap();
+            new_line(console.out, "after the hidden read");
+            let (_, y) = cursor(console.out);
+            leave("leave_a_hidden_line_read");
+            set_mode(control, console.shown).unwrap();
+            let (read, _thread) = read_on_a_thread(open("CONIN$"));
+            type_text(control, "x\r");
+            let line = read.recv_timeout(AT_ONCE);
+            assert!(matches!(&line, Ok(read) if read.text == "x\r\n"), "the line read after it: {line:?}");
+            assert!(!row(console.out, y).contains("hun"), "the part typed into the ended read is not shown: {:?}", row(console.out, y));
+        }
+        // The process that `a_read_an_ended_process_left_takes_nothing` runs: it ends with a raw read in progress.
+        "leave_a_raw_read" => {
+            let (read, _thread) = read_on_a_thread(open("CONIN$"));
+            std::thread::sleep(SETTLE);
+            assert!(read.try_recv().is_err(), "the raw read waits");
+        }
+        // The same, with a hidden line read in progress, "hun" typed into it.
+        "leave_a_hidden_line_read" => {
+            let (read, _thread) = read_on_a_thread(open("CONIN$"));
+            std::thread::sleep(SETTLE);
+            type_text(control, "hun");
+            std::thread::sleep(SETTLE);
+            assert!(read.try_recv().is_err(), "the line read waits, \"hun\" in its line");
+        }
+        // Fix round 1: what is typed after `sshelter connect` ended is the shell's, whole: the program's own end (its run puts the console
+        // back, then its `Tty` goes) leaves no read of its own in the console it shares with the shell, also when it ended under a hidden
+        // question with a part of the answer typed.
+        "the_keys_after_the_cli_ended_are_the_shells" => {
+            let end = |grandchild: &str| {
+                rerun_alone_with(NAME, |command| {
+                    command.env(CASE, grandchild);
+                })
+            };
+            end("end_in_the_shell");
+            set_mode(control, console.raw).unwrap();
+            let (read, _thread) = read_on_a_thread(open("CONIN$"));
+            type_text(control, "a");
+            assert_eq!(read.recv_timeout(AT_ONCE).map(|read| read.text), Ok("a".to_string()), "the first key after the end");
+            new_line(console.out, "after the question");
+            let (_, y) = cursor(console.out);
+            end("end_under_a_question");
+            set_mode(control, console.shown).unwrap();
+            let (read, _thread) = read_on_a_thread(open("CONIN$"));
+            type_text(control, "x\r");
+            assert_eq!(read.recv_timeout(AT_ONCE).map(|read| read.text), Ok("x\r\n".to_string()), "the first line after the end");
+            assert!(!row(console.out, y).contains("hun"), "{:?}", row(console.out, y));
+        }
+        // The process that `the_keys_after_the_cli_ended_are_the_shells` runs: `sshelter connect`'s console, keys and end, in raw mode.
+        "end_in_the_shell" => {
+            let mut tty = Tty::new(Arc::new(StdConsole::opened().unwrap())).unwrap();
+            tty.take_over().unwrap();
+            tty.set_mode(Mode::Raw, false).unwrap();
+            let (inputs, _queue) = queue();
+            console_keys_thread(inputs, tty.keys(), || {});
+            std::thread::sleep(SETTLE);
+            // As the run's end and then the session's: the console put back, and the `Tty` gone.
+            tty.restore();
+            drop(tty);
+        }
+        // The same, at a hidden question with "hun" typed into its answer, ended as the client ends a session under a question.
+        "end_under_a_question" => {
+            let mut tty = Tty::new(Arc::new(StdConsole::opened().unwrap())).unwrap();
+            tty.take_over().unwrap();
+            tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
+            let (inputs, _queue) = queue();
+            console_keys_thread(inputs, tty.keys(), || {});
+            std::thread::sleep(SETTLE);
+            type_text(control, "hun");
+            std::thread::sleep(SETTLE);
+            tty.set_mode(Mode::Cooked, true).unwrap();
+            tty.restore();
+            drop(tty);
+        }
+        // Spec §7.3: the console is given whole characters: what the terminal writer writes to it (`Output::console` over `ConsoleText`,
+        // `WriteConsoleW`) shows a character whole when it was cut between two writes, here é (two bytes) and € (three). Written as they
+        // come, each write on its own, the cut characters show as U+FFFD: so a cut one would show here.
+        "a_character_cut_between_two_writes_reaches_the_console_whole" => {
+            let text = "\u{e9} \u{20ac} x".as_bytes();
+            let pieces = [&text[..1], &text[1..4], &text[4..]];
+            new_line(console.out, "whole");
+            let (_, y) = cursor(console.out);
+            let mut output = Output::console(ConsoleText::new(owned("CONOUT$")));
+            for piece in pieces {
+                output.write_as_the_writer(piece).unwrap();
+            }
+            output.end_as_the_writer().unwrap();
+            assert_eq!(row(console.out, y), "[whole] \u{e9} \u{20ac} x");
+            new_line(console.out, "cut");
+            let (_, y) = cursor(console.out);
+            let mut cut = ConsoleText::new(owned("CONOUT$"));
+            for piece in pieces {
+                std::io::Write::write_all(&mut cut, piece).unwrap();
+            }
+            assert!(row(console.out, y).contains('\u{fffd}'), "{:?}", row(console.out, y));
+        }
+        // The real control handler (`inputs_windows::take_over_control_events`): the console's Ctrl-C and Ctrl-Break reach the loop as an
+        // interrupt, and the program goes on.
+        "the_control_handler_takes_ctrl_c_and_ctrl_break" => {
+            let tty = Tty::new(Arc::new(StdConsole::opened().unwrap())).unwrap();
+            let (inputs, mut queue) = queue();
+            let watchdog = Watchdog::start(tty.restorer(), STOP_GRACE, |code| panic!("the watchdog was armed ({code})")).unwrap();
+            take_over_control_events(ControlEvents::new(inputs, watchdog.clone(), Over::default())).unwrap();
+            for event in [CTRL_C_EVENT, CTRL_BREAK_EVENT] {
+                // SAFETY: the event to every process on this console: this one only, which has the handler.
+                assert_ne!(unsafe { GenerateConsoleCtrlEvent(event, 0) }, 0);
+                assert!(matches!(queue.next_within(DONE), Some(Input::Interrupt)), "event {event}");
+            }
+            watchdog.stand_down();
+        }
         other => panic!("no case {other}"),
     }
 }
@@ -493,9 +635,11 @@ const CASE: &str = "SSHELTER_TEST_CONSOLE_CASE";
 
 /// The cases, each in a child with a console of its own: a read one case leaves waiting cannot take the keys of the next. Every case
 /// runs, and the test fails with all that failed.
+/// The test's full name, which a child runs again (and a case of its own, again, for a process that shares its console).
+const NAME: &str = "cli::real_console_tests::a_real_console_works_as_the_keys_reader_needs";
+
 #[test]
 fn a_real_console_works_as_the_keys_reader_needs() {
-    const NAME: &str = "cli::real_console_tests::a_real_console_works_as_the_keys_reader_needs";
     if is_child() {
         case(&std::env::var(CASE).expect("the case"));
         return;
@@ -516,6 +660,10 @@ fn a_real_console_works_as_the_keys_reader_needs() {
         "a_freed_console_fails_its_reads",
         "the_input_is_signalled_while_it_holds_a_record",
         "an_end_under_a_question_leaves_nothing_behind",
+        "a_read_an_ended_process_left_takes_nothing",
+        "the_keys_after_the_cli_ended_are_the_shells",
+        "a_character_cut_between_two_writes_reaches_the_console_whole",
+        "the_control_handler_takes_ctrl_c_and_ctrl_break",
     ];
     let started = Instant::now();
     let failed: Vec<String> = cases
