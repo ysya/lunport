@@ -4,10 +4,12 @@
 //! either. Compiled on Windows and in the tests of every platform: the logic is tested against a fake console on macOS and Linux too.
 //!
 //! A console has four settings the program changes: the input's mode, the output's mode, and the input's and the output's code page.
-//! All four are saved at the start. The output is set once, for a terminal: virtual terminal sequences, line endings as xterm has
-//! them, UTF-8. The input's mode is set for each `Mode`, always from the input's mode of the start. Every way out puts the four back
-//! as they were: the end of the program, a dropped `Tty`, a panic (`restore_on_panic`), and the watchdog that ends a program whose
-//! loop does not (`Restorer::hold_restored`). Windows has no Ctrl-Z stop, so nothing is suspended and resumed as on Unix.
+//! All four are saved at the start, when the output is set to take virtual terminal sequences and UTF-8. Each `Mode` then sets the
+//! input's mode and the output's, always from the modes of the start: raw mode gives the output xterm's line endings (a line feed that
+//! does not return the carriage), as OpenSSH's raw mode turns a Unix terminal's `OPOST` off; the other modes keep the line endings of
+//! the start, so the CLI's own lines start at the left margin, as `ONLCR` makes them on Unix. Every way out puts the four back as they
+//! were: the end of the program, a dropped `Tty`, a panic (`restore_on_panic`), and the watchdog that ends a program whose loop does
+//! not (`Restorer::hold_restored`). Windows has no Ctrl-Z stop, so nothing is suspended and resumed as on Unix.
 
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError, TryLockError};
@@ -28,17 +30,19 @@ pub const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 pub const ENABLE_PROCESSED_OUTPUT: u32 = 0x0001;
 /// Output: virtual terminal sequences are acted on (colours, cursor moves, the alternate screen).
 pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-/// Output: line endings as xterm has them (spec §7.3): a character in a line's last column waits there for the next one.
+/// Output: line endings as xterm has them (spec §7.3): a line feed does not return the carriage, as the flag's name says, and a
+/// character in a line's last column waits there for the next one, as its documentation says. Raw mode only.
 pub const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
 /// The UTF-8 code page.
 pub const CP_UTF8: u32 = 65001;
 
-/// What the console's input is set to (the output is set once, for the whole run).
+/// What the console is set to: the input's mode, and the output's line endings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// As it was when the program started.
+    /// The input as it was when the program started, and the output's line endings too.
     Cooked,
-    /// Every key goes to the shell as it is pressed, as virtual terminal sequences: no line editing, no echo, and Ctrl-C is a key.
+    /// Every key goes to the shell as it is pressed, as virtual terminal sequences: no line editing, no echo, and Ctrl-C is a key. The
+    /// shell's output has xterm's line endings.
     Raw,
     /// A question: the console edits the line and Ctrl-C is a signal; what is typed is shown only when `echo`.
     Prompt { echo: bool },
@@ -116,10 +120,15 @@ pub fn input_mode(original: u32, mode: Mode) -> u32 {
     }
 }
 
-/// The output's mode while the program has the console, from the output's mode of the start: virtual terminal sequences (with the
-/// processing they need) and xterm's line endings, everything else as it was. Set once, at the start.
-pub fn output_mode(original: u32) -> u32 {
-    original | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN
+/// The output's mode for `mode`, from the output's mode the console had at the start (`original`), never from the mode it has now:
+/// virtual terminal sequences (with the processing they need) in every mode, and xterm's line endings in raw mode. Every other flag as
+/// at the start, the line endings of the start too outside raw mode.
+pub fn output_mode(original: u32, mode: Mode) -> u32 {
+    let terminal = original | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    match mode {
+        Mode::Raw => terminal | DISABLE_NEWLINE_AUTO_RETURN,
+        Mode::Cooked | Mode::Prompt { .. } => terminal,
+    }
 }
 
 /// The columns and rows of a console window whose edges, in cells of its screen buffer, are `left`, `top`, `right` and `bottom`, both
@@ -135,13 +144,13 @@ pub struct Tty {
     console: Arc<Console>,
 }
 
-/// What a `Tty` and its `Restorer`s share: the console, its settings of the start, and the input's mode now. Every change of the
+/// What a `Tty` and its `Restorer`s share: the console, its settings of the start, and the mode it is in now. Every change of the
 /// console is made holding `now`, so the program's threads change it one at a time and none undoes another's half way: the loop sets
 /// a mode (`Tty`); the watchdog puts the console back for good before it ends the program (`Restorer::hold_restored`).
 struct Console {
     api: Arc<dyn ConsoleApi>,
     start: Settings,
-    /// The input's mode while the console is set for the program (its output for a terminal); `None` once the four settings are back
+    /// The mode while the console is set for the program (its output for a terminal, UTF-8); `None` once the four settings are back
     /// as they were at the start.
     now: Mutex<Option<Mode>>,
 }
@@ -151,12 +160,12 @@ impl Console {
         self.now.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Sets the output for a terminal: virtual terminal sequences and xterm's line endings, and UTF-8 (the console turns the bytes
-    /// written to it into characters with the output's code page). When it cannot be done, what was set is put back.
-    fn take_over(&self) -> io::Result<()> {
+    /// Sets the output for a terminal in `mode`: virtual terminal sequences and `mode`'s line endings, and UTF-8 (the console turns the
+    /// bytes written to it into characters with the output's code page). When it cannot be done, what was set is put back.
+    fn take_over(&self, mode: Mode) -> io::Result<()> {
         let set = self
             .api
-            .set(Setting::OutputMode, output_mode(self.start.output_mode))
+            .set(Setting::OutputMode, output_mode(self.start.output_mode, mode))
             .and_then(|()| self.api.set(Setting::OutputCodePage, CP_UTF8));
         if set.is_err() {
             self.put_back_all(false);
@@ -182,9 +191,9 @@ impl Console {
 }
 
 impl Tty {
-    /// Saves the console's four settings as they are now (what `Mode::Cooked` and every restore go back to) and sets the output for a
-    /// terminal. Fails when the input is not a console, without changing anything; and when the output cannot be set for a terminal (a
-    /// console without virtual terminal sequences), with what it set put back.
+    /// Saves the console's four settings as they are now (what every mode is made from and every restore goes back to) and sets the
+    /// output for a terminal, in cooked mode. Fails when the input is not a console, without changing anything; and when the output
+    /// cannot be set for a terminal (a console without virtual terminal sequences), with what it set put back.
     pub fn new(api: Arc<dyn ConsoleApi>) -> io::Result<Tty> {
         // The input first: one that is not a console is refused before anything else is asked.
         let start = Settings {
@@ -194,7 +203,7 @@ impl Tty {
             output_code_page: api.get(Setting::OutputCodePage)?,
         };
         let console = Console { api, start, now: Mutex::new(None) };
-        console.take_over()?;
+        console.take_over(Mode::Cooked)?;
         *console.now() = Some(Mode::Cooked);
         Ok(Tty { console: Arc::new(console) })
     }
@@ -203,23 +212,26 @@ impl Tty {
         self.console.now().unwrap_or(Mode::Cooked)
     }
 
-    /// Sets `mode`; `discard_input` throws away what was typed ahead first (a question must not take typeahead as its answer). A console
-    /// that was put back meanwhile (`restore`, a panic on another thread) has its output set for a terminal again first.
+    /// Sets `mode`: the input's mode, then the output's. `discard_input` throws away what was typed ahead first (a question must not
+    /// take typeahead as its answer). An output's mode that cannot be set does not undo the input's, which is what keeps a password
+    /// from being shown: the mode is set, and the error returned. A console that was put back meanwhile (`restore`, a panic on another
+    /// thread) is taken over again, UTF-8 too, or left as it was at the start when that fails.
     pub fn set_mode(&mut self, mode: Mode, discard_input: bool) -> io::Result<()> {
         let console = &self.console;
         let mut now = console.now();
-        if now.is_none() {
-            console.take_over()?;
-            *now = Some(Mode::Cooked);
-        }
         if discard_input {
             // What was typed is thrown away when the console can; one that went away may not, and the mode is set all the same (the end
             // of the program must not stop at that).
             let _ = console.api.flush_input();
         }
         console.api.set(Setting::InputMode, input_mode(console.start.input_mode, mode))?;
+        if now.is_none() {
+            console.take_over(mode)?;
+            *now = Some(mode);
+            return Ok(());
+        }
         *now = Some(mode);
-        Ok(())
+        console.api.set(Setting::OutputMode, output_mode(console.start.output_mode, mode))
     }
 
     pub fn size(&self) -> Option<(u16, u16)> {
@@ -350,11 +362,13 @@ pub(crate) mod fake {
         FlushInput,
     }
 
-    /// A console that records every call made to it and keeps the values set; a test can change its size and make calls fail.
+    /// A console that records every call made to it and keeps the values set; a test can change its size and make calls fail. Its
+    /// locks are taken whether or not they are poisoned: a test whose assertion fails still drops its `Tty`, which puts the console
+    /// back, and a second panic there would abort every test in the process.
     pub struct FakeConsole {
         pub start: Settings,
         now: Mutex<Settings>,
-        pub calls: Mutex<Vec<Call>>,
+        calls: Mutex<Vec<Call>>,
         pub size: Mutex<Option<(u16, u16)>>,
         failing: Mutex<fn(&Call) -> bool>,
     }
@@ -379,22 +393,27 @@ pub(crate) mod fake {
 
         /// From now on the calls `fails` says yes to fail, and change nothing (they are recorded all the same).
         pub fn fail(&self, fails: fn(&Call) -> bool) {
-            *self.failing.lock().unwrap() = fails;
+            *self.failing.lock().unwrap_or_else(PoisonError::into_inner) = fails;
         }
 
         /// The four settings as they are now.
         pub fn now(&self) -> Settings {
-            *self.now.lock().unwrap()
+            *self.now.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        /// Every call made so far, in order.
+        pub fn calls(&self) -> Vec<Call> {
+            self.calls.lock().unwrap_or_else(PoisonError::into_inner).clone()
         }
 
         /// The calls that change the console, in order: the settings set (or tried) and the input thrown away.
         pub fn changes(&self) -> Vec<Call> {
-            self.calls.lock().unwrap().iter().copied().filter(|call| !matches!(call, Call::Get(_))).collect()
+            self.calls().into_iter().filter(|call| !matches!(call, Call::Get(_))).collect()
         }
 
         fn call(&self, call: Call) -> io::Result<()> {
-            self.calls.lock().unwrap().push(call);
-            let fails = *self.failing.lock().unwrap();
+            self.calls.lock().unwrap_or_else(PoisonError::into_inner).push(call);
+            let fails = *self.failing.lock().unwrap_or_else(PoisonError::into_inner);
             if fails(&call) {
                 return Err(io::Error::other(format!("{call:?} failed")));
             }
@@ -410,7 +429,7 @@ pub(crate) mod fake {
 
         fn set(&self, setting: Setting, value: u32) -> io::Result<()> {
             self.call(Call::Set(setting, value))?;
-            let mut now = self.now.lock().unwrap();
+            let mut now = self.now.lock().unwrap_or_else(PoisonError::into_inner);
             match setting {
                 Setting::InputMode => now.input_mode = value,
                 Setting::OutputMode => now.output_mode = value,
@@ -425,7 +444,7 @@ pub(crate) mod fake {
         }
 
         fn size(&self) -> Option<(u16, u16)> {
-            *self.size.lock().unwrap()
+            *self.size.lock().unwrap_or_else(PoisonError::into_inner)
         }
     }
 }
@@ -442,8 +461,11 @@ mod tests {
         format!("{mode:#06x}")
     }
 
-    /// The output's mode the program sets on a console with the usual one.
-    const TERMINAL_OUTPUT: u32 = USUAL_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
+    /// The output's mode in raw mode on a console with the usual one: virtual terminal sequences, and xterm's line endings.
+    const RAW_OUTPUT: u32 = USUAL_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
+    /// The output's mode at a question and in cooked mode on a console with the usual one: virtual terminal sequences, and a line feed
+    /// that returns the carriage, as at the start.
+    const COOKED_OUTPUT: u32 = USUAL_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     /// Raw mode on a console with the usual input mode.
     const USUAL_RAW: u32 = ENABLE_MOUSE_INPUT
         | ENABLE_INSERT_MODE
@@ -462,12 +484,12 @@ mod tests {
         ]
     }
 
-    /// A console the program has, its input raw.
+    /// A console the program has, in raw mode.
     fn raw_console() -> (Arc<FakeConsole>, Tty) {
         let console = FakeConsole::new();
         let mut tty = Tty::new(console.clone()).unwrap();
         tty.set_mode(Mode::Raw, false).unwrap();
-        assert_eq!(console.now().input_mode, USUAL_RAW);
+        assert_eq!(console.now(), Settings { input_mode: USUAL_RAW, output_mode: RAW_OUTPUT, output_code_page: CP_UTF8, ..console.start });
         (console, tty)
     }
 
@@ -520,48 +542,61 @@ mod tests {
         }
     }
 
-    /// Spec §7.3: the output takes virtual terminal sequences, with the processing they need, and ends lines as xterm does; every
-    /// other flag as at the start.
+    /// Spec §7.3, the way OpenSSH's raw mode turns `OPOST` off and the other modes keep the start's `ONLCR`: the output takes virtual
+    /// terminal sequences (with the processing they need) in every mode, and xterm's line endings in raw mode only (a line feed that
+    /// does not return the carriage, for the shell's output). At a question and in cooked mode a line feed returns the carriage as it did
+    /// at the start, so the CLI's own lines start at the left margin. Every other flag as at the start; whole modes are compared.
     #[test]
-    fn the_output_takes_virtual_terminal_sequences_and_xterm_s_line_endings() {
-        let terminal = ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
-        let grid = ENABLE_LVB_GRID_WORLDWIDE;
-        let cases = [(USUAL_OUTPUT, TERMINAL_OUTPUT), (0, terminal), (grid, grid | terminal), (u32::MAX, u32::MAX)];
-        for (start, expected) in cases {
-            assert_eq!(hex(output_mode(start)), hex(expected), "from {}", hex(start));
+    fn the_output_ends_lines_as_xterm_does_in_raw_mode_only() {
+        let terminal = ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        let (xterm, grid) = (DISABLE_NEWLINE_AUTO_RETURN, ENABLE_LVB_GRID_WORLDWIDE);
+        // The output's mode of the start, then raw mode's, then the other modes'.
+        let cases = [
+            (USUAL_OUTPUT, RAW_OUTPUT, COOKED_OUTPUT),
+            (0, terminal | xterm, terminal),
+            (grid, grid | terminal | xterm, grid | terminal),
+            // A console another program left with xterm's line endings keeps them outside raw mode too, as Unix keeps the start's OPOST.
+            (USUAL_OUTPUT | xterm, RAW_OUTPUT, RAW_OUTPUT),
+            (u32::MAX, u32::MAX, u32::MAX),
+        ];
+        for (start, raw, other) in cases {
+            assert_eq!(hex(output_mode(start, Mode::Raw)), hex(raw), "raw from {}", hex(start));
+            for mode in [Mode::Prompt { echo: false }, Mode::Prompt { echo: true }, Mode::Cooked] {
+                assert_eq!(hex(output_mode(start, mode)), hex(other), "{mode:?} from {}", hex(start));
+            }
         }
     }
 
-    /// Spec §7.3: the four settings are read at the start, and the output is set for a terminal then, once (virtual terminal sequences,
-    /// UTF-8); the input stays as it was. Raw mode and questions change the input only.
+    /// Spec §7.3: the four settings are read at the start, and the console is set for a terminal then: the output takes virtual
+    /// terminal sequences (a line feed still returning the carriage: the mode is cooked) and UTF-8; the input stays as it was. From then
+    /// on a mode sets the input's mode and the output's, and the code page stays.
     #[test]
-    fn the_start_is_saved_and_the_output_is_set_for_a_terminal_once() {
+    fn the_start_is_saved_and_the_console_is_set_for_a_terminal() {
         let console = FakeConsole::new();
         let mut tty = Tty::new(console.clone()).unwrap();
         let start = console.start;
         assert_eq!(
-            *console.calls.lock().unwrap(),
+            console.calls(),
             [
                 Call::Get(Setting::InputMode),
                 Call::Get(Setting::OutputMode),
                 Call::Get(Setting::InputCodePage),
                 Call::Get(Setting::OutputCodePage),
-                Call::Set(Setting::OutputMode, TERMINAL_OUTPUT),
+                Call::Set(Setting::OutputMode, COOKED_OUTPUT),
                 Call::Set(Setting::OutputCodePage, CP_UTF8),
             ]
         );
-        assert_eq!(console.now(), Settings { output_mode: TERMINAL_OUTPUT, output_code_page: CP_UTF8, ..start });
+        assert_eq!(console.now(), Settings { output_mode: COOKED_OUTPUT, output_code_page: CP_UTF8, ..start });
         assert_eq!(tty.mode(), Mode::Cooked);
-        for mode in [Mode::Raw, Mode::Prompt { echo: false }, Mode::Prompt { echo: true }, Mode::Cooked] {
-            tty.set_mode(mode, false).unwrap();
-        }
-        let changes = console.changes();
-        assert!(changes[2..].iter().all(|call| matches!(call, Call::Set(Setting::InputMode, _))), "{changes:?}");
+        let before = console.changes().len();
+        tty.set_mode(Mode::Raw, false).unwrap();
+        assert_eq!(console.changes()[before..], [Call::Set(Setting::InputMode, USUAL_RAW), Call::Set(Setting::OutputMode, RAW_OUTPUT)]);
+        assert_eq!(console.now(), Settings { input_mode: USUAL_RAW, output_mode: RAW_OUTPUT, output_code_page: CP_UTF8, ..start });
     }
 
-    /// Every mode comes from the input's mode of the start, never from the mode before it: a mode is the same value whatever came
-    /// before (raw, a question, raw again: raw's value again), and cooked is the start exactly. The start here has virtual terminal
-    /// input on, so that all four modes differ.
+    /// Every mode comes from the modes of the start, never from the mode before it: a mode is the same values whatever came before (raw,
+    /// a question, raw again: raw's values again), and cooked is the input's mode of the start exactly. The input's mode of the start has
+    /// virtual terminal input on here, so that all four input modes differ.
     #[test]
     fn every_mode_comes_from_the_start_never_from_the_mode_before() {
         let others = ENABLE_MOUSE_INPUT | ENABLE_QUICK_EDIT_MODE | ENABLE_EXTENDED_FLAGS;
@@ -571,19 +606,21 @@ mod tests {
         let mut tty = Tty::new(console.clone()).unwrap();
         let (raw, hidden, shown) = (others | ENABLE_VIRTUAL_TERMINAL_INPUT, line | others, line | ENABLE_ECHO_INPUT | others);
         let sequence = [
-            (Mode::Raw, raw),
-            (Mode::Prompt { echo: false }, hidden),
-            (Mode::Raw, raw),
-            (Mode::Prompt { echo: true }, shown),
-            (Mode::Cooked, start),
-            (Mode::Prompt { echo: false }, hidden),
-            (Mode::Raw, raw),
-            (Mode::Cooked, start),
+            (Mode::Raw, raw, RAW_OUTPUT),
+            (Mode::Prompt { echo: false }, hidden, COOKED_OUTPUT),
+            (Mode::Raw, raw, RAW_OUTPUT),
+            (Mode::Prompt { echo: true }, shown, COOKED_OUTPUT),
+            (Mode::Cooked, start, COOKED_OUTPUT),
+            (Mode::Prompt { echo: false }, hidden, COOKED_OUTPUT),
+            (Mode::Raw, raw, RAW_OUTPUT),
+            (Mode::Cooked, start, COOKED_OUTPUT),
         ];
-        for (mode, expected) in sequence {
+        for (mode, input, output) in sequence {
             tty.set_mode(mode, false).unwrap();
             assert_eq!(tty.mode(), mode);
-            assert_eq!(console.changes().last(), Some(&Call::Set(Setting::InputMode, expected)), "{mode:?}: {}", hex(expected));
+            let changes = console.changes();
+            let expected = [Call::Set(Setting::InputMode, input), Call::Set(Setting::OutputMode, output)];
+            assert_eq!(changes[changes.len() - 2..], expected, "{mode:?}: input {}, output {}", hex(input), hex(output));
         }
     }
 
@@ -594,9 +631,11 @@ mod tests {
         let (console, mut tty) = raw_console();
         let before = console.changes().len();
         tty.set_mode(Mode::Prompt { echo: false }, true).unwrap();
-        assert_eq!(console.changes()[before..], [Call::FlushInput, Call::Set(Setting::InputMode, USUAL_INPUT & !ENABLE_ECHO_INPUT)]);
+        let hidden = USUAL_INPUT & !ENABLE_ECHO_INPUT;
+        let question = [Call::FlushInput, Call::Set(Setting::InputMode, hidden), Call::Set(Setting::OutputMode, COOKED_OUTPUT)];
+        assert_eq!(console.changes()[before..], question);
         tty.set_mode(Mode::Raw, false).unwrap();
-        assert_eq!(console.changes()[before + 2..], [Call::Set(Setting::InputMode, USUAL_RAW)]);
+        assert_eq!(console.changes()[before + 3..], [Call::Set(Setting::InputMode, USUAL_RAW), Call::Set(Setting::OutputMode, RAW_OUTPUT)]);
     }
 
     /// Input that cannot be thrown away (a console going away) does not keep the mode from being set: the end of the program must not
@@ -606,7 +645,20 @@ mod tests {
         let (console, mut tty) = raw_console();
         console.fail(|call| *call == Call::FlushInput);
         tty.set_mode(Mode::Cooked, true).unwrap();
-        assert_eq!(console.changes().last(), Some(&Call::Set(Setting::InputMode, USUAL_INPUT)));
+        assert_eq!(console.now(), Settings { output_mode: COOKED_OUTPUT, output_code_page: CP_UTF8, ..console.start });
+    }
+
+    /// An output's mode that cannot be set does not undo the input's mode, which is what keeps a password from being shown: the error
+    /// is returned, the mode is the one asked for, and the console is put back all the same at the end.
+    #[test]
+    fn an_output_that_cannot_be_set_leaves_the_input_in_its_mode() {
+        let (console, mut tty) = raw_console();
+        console.fail(|call| matches!(call, Call::Set(Setting::OutputMode, COOKED_OUTPUT)));
+        assert!(tty.set_mode(Mode::Prompt { echo: false }, true).is_err());
+        assert_eq!(tty.mode(), Mode::Prompt { echo: false });
+        assert_eq!(console.now().input_mode, USUAL_INPUT & !ENABLE_ECHO_INPUT);
+        drop(tty);
+        assert_eq!(console.now(), console.start);
     }
 
     /// Spec §7.3: input that is not a console (a pipe, a file) is refused at the start, and nothing about the console is changed.
@@ -615,7 +667,7 @@ mod tests {
         let console = FakeConsole::new();
         console.fail(|call| *call == Call::Get(Setting::InputMode));
         assert!(Tty::new(console.clone()).is_err());
-        assert_eq!(*console.calls.lock().unwrap(), [Call::Get(Setting::InputMode)], "nothing else read, nothing set");
+        assert_eq!(console.calls(), [Call::Get(Setting::InputMode)], "nothing else read, nothing set");
     }
 
     /// A console that cannot be set for a terminal (one without virtual terminal sequences, or UTF-8) is refused, with what was set
@@ -623,7 +675,7 @@ mod tests {
     #[test]
     fn a_console_that_cannot_be_set_for_a_terminal_is_put_back_and_refused() {
         for fails in [
-            (|call: &Call| matches!(call, Call::Set(Setting::OutputMode, TERMINAL_OUTPUT))) as fn(&Call) -> bool,
+            (|call: &Call| matches!(call, Call::Set(Setting::OutputMode, COOKED_OUTPUT))) as fn(&Call) -> bool,
             |call| matches!(call, Call::Set(Setting::OutputCodePage, CP_UTF8)),
         ] {
             let console = FakeConsole::new();
@@ -751,22 +803,21 @@ mod tests {
         }
     }
 
-    /// After the console was put back (a panic on another thread, say), a mode set takes the console over again: the output for a
-    /// terminal first, then the input's mode; and it is put back again at the end.
+    /// After the console was put back (a panic on another thread, say), a mode set takes the console over again: the input's mode,
+    /// the output's mode and UTF-8; and it is put back again at the end.
     #[test]
     fn a_mode_set_after_the_console_was_put_back_takes_it_over_again() {
         let (console, mut tty) = raw_console();
         tty.restorer().restore();
         assert_eq!(console.now(), console.start);
         let before = console.changes().len();
-        tty.set_mode(Mode::Cooked, true).unwrap();
+        tty.set_mode(Mode::Raw, false).unwrap();
         assert_eq!(
             console.changes()[before..],
             [
-                Call::Set(Setting::OutputMode, TERMINAL_OUTPUT),
+                Call::Set(Setting::InputMode, USUAL_RAW),
+                Call::Set(Setting::OutputMode, RAW_OUTPUT),
                 Call::Set(Setting::OutputCodePage, CP_UTF8),
-                Call::FlushInput,
-                Call::Set(Setting::InputMode, USUAL_INPUT),
             ]
         );
         drop(tty);
