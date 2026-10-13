@@ -197,10 +197,11 @@ fn readable_by_the_vault(private_text: &str) -> bool {
 }
 
 /// Makes a key pair with ssh-keygen, one the vault reads. `ssh-key` 0.6.7 alone cannot read an ECDSA private key whose secret number
-/// starts with a zero byte (OpenSSH then writes the number in its shortest form and the parser insists on the full length; measured with
-/// ssh-keygen from OpenSSH 10.3p1: 5 of 1500 P-256 keys, 3 of 600 P-384 keys and 77 of 300 P-521 keys); the vault pads the number first
-/// (`vault::short_scalar`), so every key ssh-keygen makes is one it reads, and one it cannot read is a fault of the vault, not of the
-/// engine under test.
+/// OpenSSH wrote shorter than the curve's size: it writes the number in its shortest form, without its leading zero bytes, and the parser
+/// insists on the full length. That is a number whose first byte is zero and whose second byte has its top bit clear (with that bit set, a
+/// sign byte makes up the length again): about 1 P-256 or P-384 key in 512 and 1 P-521 key in 4 (measured with ssh-keygen from OpenSSH
+/// 10.3p1: 5 of 1500 P-256 keys, 3 of 600 P-384 keys and 77 of 300 P-521 keys). The vault pads the number first (`vault::short_scalar`),
+/// so every key ssh-keygen makes is one it reads, and one it cannot read is a fault of the vault, not of the engine under test.
 pub fn generate_key(tools: &Tools, dir: &Path, name: &str, kind: KeyKind) -> TestKey {
     let private_path = dir.join(name);
     let mut public_path = private_path.clone().into_os_string();
@@ -720,8 +721,9 @@ mod tests {
         assert!(out.stdout.is_empty());
     }
 
-    /// A P-256 key made by ssh-keygen whose secret number starts with a zero byte: `ssh-key` 0.6.7 alone refuses it for its length, and the
-    /// vault pads the number (`vault::short_scalar`) and reads it. It has no use anywhere else.
+    /// A P-256 key made by ssh-keygen whose secret number OpenSSH wrote in 31 bytes (it starts with a zero byte, and the next byte's top bit
+    /// is clear): `ssh-key` 0.6.7 alone refuses it for its length, and the vault pads the number (`vault::short_scalar`) and reads it. It has
+    /// no use anywhere else.
     const KEY_WITH_A_SHORT_SCALAR: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS\n\
 1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQSuW0Nk03fDQ13F6fng1wB9jKTOZRrA\n\
@@ -742,8 +744,8 @@ K3AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBK5bQ2TTd8NDXcXp\n\
         assert!(readable_by_the_vault(&key.private_text));
     }
 
-    /// About one P-256 key in 256 has a secret number that starts with a zero byte, which `ssh-key` alone cannot read and the vault can: of
-    /// 150 keys ssh-keygen makes, the vault reads every one.
+    /// About one P-256 key in 512 has a secret number that OpenSSH writes shorter than 32 bytes, which `ssh-key` alone cannot read and the
+    /// vault can: of 150 keys ssh-keygen makes, the vault reads every one.
     #[test]
     fn the_keys_the_harness_hands_out_can_all_be_read_by_the_vault() {
         let Some(tools) = tools() else { return };
