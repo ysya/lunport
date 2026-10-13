@@ -5,6 +5,8 @@
 # It also builds the whole app with russh (cargo build --locked) and runs the SSH engine (src/ssh/): the tests that need no sshd,
 # and the engine against the runner's own OpenSSH server, which this job starts. A scratch sshd cannot run on Windows (Win32-OpenSSH's
 # sshd must run as a service), so the engine tests that start one print "skipped" here.
+# And the console helper sshelter-cli.exe (src-tauri/cli-helper, a crate of its own): its tests, and the helper next to the debug
+# sshelter.exe running `sshelter connect`.
 # aws-lc-sys (russh's crypto) needs nothing installed: it is the same crate rustls already builds for the updater in the release
 # job on this runner image, and that job installs nothing for it.
 # macOS can only type-check the Windows code; the permission behavior has to be seen on Windows.
@@ -68,6 +70,28 @@ jobs:
       # The library and the binary in a debug build, with russh in the dependency graph (the release workflow builds the same graph).
       - name: Build the whole app
         run: cargo build --locked
+
+      # sshelter-cli.exe, the console program a Windows terminal runs for Connect (cli-helper/; the app's builds above never build it):
+      # its tests (the relay of arguments and exit codes against a test program, and the built helper next to a stand-in sshelter.exe).
+      - name: The console helper's tests
+        run: cargo test --locked --manifest-path cli-helper/Cargo.toml
+      # Then the real pair: the helper next to the debug sshelter.exe built above runs `sshelter.exe connect` (no alias), and what that
+      # says (the usage) and its exit code (2) come back through the helper as when sshelter.exe runs alone.
+      - name: The console helper runs sshelter connect
+        shell: pwsh
+        run: |
+          cargo build --locked --manifest-path cli-helper/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "the console helper did not build (exit $LASTEXITCODE)" }
+          Copy-Item -Force cli-helper/target/debug/sshelter-cli.exe target/debug/sshelter-cli.exe
+          # Each line a program wrote, as text (2>&1 hands stderr's lines over as error records).
+          $alone = (& .\target\debug\sshelter.exe connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
+          $aloneCode = $LASTEXITCODE
+          $relayed = (& .\target\debug\sshelter-cli.exe connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
+          $relayedCode = $LASTEXITCODE
+          Write-Output "sshelter.exe connect exited with $aloneCode and said:" $alone "sshelter-cli.exe connect exited with $relayedCode and said:" $relayed
+          if ($relayedCode -ne $aloneCode -or $relayed -ne $alone) { throw 'the helper did not bring back what sshelter.exe said, or its exit code' }
+          if ($relayedCode -ne 2 -or $relayed -notmatch 'usage: sshelter connect <alias>') { throw 'expected the usage of sshelter connect and exit code 2' }
+          exit 0
 
       # The runner image ships the OpenSSH client; the server is a Feature on Demand. If that capability cannot be added, the Chocolatey
       # package (Win32-OpenSSH) is the fallback. The service creates its host keys the first time it starts.
