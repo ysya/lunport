@@ -43,7 +43,7 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
    build: quit SSHelter, run `Start-Process "$env:LOCALAPPDATA\SSHelter\sshelter.exe" -RedirectStandardError "$env:TEMP\sshelter-err.txt"`,
    and once its window is open `Select-String -Path "$env:TEMP\sshelter-err.txt" -Pattern '^\[session\]'` prints nothing.
 6. **The background start.** Quit SSHelter (tray icon → Quit). In a Windows Terminal tab run `& <helper> connect web`. SSHelter starts
-   without its window (its tray icon appears) and within 12 seconds the remote prompt shows in this tab. `exit` the remote shell: the
+   without its window (its tray icon appears), answers within 12 seconds, and the remote prompt shows in this tab. `exit` the remote shell: the
    PowerShell prompt is back, `$LASTEXITCODE` is 0, check C passes, and SSHelter keeps running. Close the tab: SSHelter still runs.
    Then quit SSHelter again, run the same command, and press Ctrl-C at once, while SSHelter is still starting: the command ends at once
    with `$LASTEXITCODE` -1073741510 (STATUS_CONTROL_C_EXIT: the program ended the default way, before it changed anything), check C
@@ -119,8 +119,8 @@ as `& <helper> connect web` and read its exit code with `$LASTEXITCODE`.
     tab; close a classic console window. Then the same at `pw`'s question. Each time the remote login ends (on the server, `who` no
     longer lists it) and SSHelter keeps running. A new console window behaves normally (check C in it).
 25. **Quitting SSHelter.** During a `web` session, quit SSHelter (tray → Quit): the terminal prints
-    `SSHelter quit, so the connection to web was closed.`, the program ends (255), check C passes. The same at `pw`'s question (the
-    sentence names `pw`).
+    `SSHelter quit, so the connection to web was closed.`, the program ends (255), check C passes. The same at `pw`'s question, with a
+    few letters typed into the answer first: the sentence names `pw`, and the letters do not appear at the next prompt.
 26. **The shell's exit code.** `& <helper> connect web`, then `exit 3` in the remote shell: `$LASTEXITCODE` is 3, check C passes.
 27. **The first key after the end is not lost.** In a Windows Terminal tab and in a classic console window: `& <helper> connect web`,
     end the session, and at once type `echo after` and Enter: PowerShell runs `echo after` whole (its first letter is not swallowed).
