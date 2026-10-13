@@ -13,6 +13,10 @@
 //! dropped, and the stream says in a line how many bytes are missing. SSH's window is not involved, and the remote is not slowed down.
 //! What was typed counts against another budget until the broker has taken it, and the keys stay in the terminal meanwhile. A size
 //! that waits for the broker gives way to a newer one. And a watchdog ends the program when its loop does not (`Watchdog`).
+//!
+//! On Windows the same loop runs on a console: its keys are read without a read spanning a change of mode (`console_keys_thread`), its
+//! window's size is looked at every so often (`watch_size`), its control events take the place of the signals (`ControlEvents`), it is
+//! given whole characters only (`Output::console`), and nothing reaches it once it is put back (`TerminalWriter::stop`).
 
 use std::collections::VecDeque;
 #[cfg(unix)]
