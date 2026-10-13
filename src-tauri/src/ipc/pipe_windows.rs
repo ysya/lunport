@@ -460,8 +460,6 @@ impl std::fmt::Debug for PipeStream {
 /// serves a client, and the server has not made the next one yet): waits for one with `WaitNamedPipeW`, `busy_wait` in all, and then
 /// `TimedOut`. A pipe the user does not own is not SSHelter's: `PermissionDenied` ("Another program is using SSHelter's … pipe"), and
 /// nothing was written to it. The server is given the client's identity only, not a token it could act as.
-// `sshelter connect` uses this from plan 1b-3 Task 3 on; until then only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn connect(name: &str, busy_wait: Duration) -> io::Result<PipeStream> {
     let path = wide_pipe_path(name);
     let deadline = Instant::now().checked_add(busy_wait);
