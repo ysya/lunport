@@ -89,8 +89,11 @@ pub fn parse(private_key: &str) -> Option<PrivateKey> {
     PrivateKey::from_openssh(private_key).ok().or_else(|| short_scalar::parse(private_key))
 }
 
-/// 解析私鑰原文;有 passphrase 的用 `passphrase` 解開。`ssh-key` 用對的 passphrase 也解不開純量短了的 ECDSA 金鑰,所以解不開時再讓 `short_scalar` 試一次,
-/// 它也不行才是 `WrongPassphrase`。
+/// Parses the private key text; one with a passphrase is decrypted with `passphrase`. `ssh-key` cannot decrypt an ECDSA key whose scalar
+/// is short even with the right passphrase: it refuses the scalar for its length (`Error::Encoding(Length)`), and only then does
+/// `short_scalar` decrypt the key once more (a second bcrypt) and pad the scalar; if that fails too, it is `WrongPassphrase`. Any other
+/// failure is `WrongPassphrase` at once: a wrong passphrase is `ssh-key`'s `Error::Crypto` (the checkints differ, or an AEAD tag does not
+/// match), and trying it again would only double the wait for the answer.
 pub fn open(private_key: &str, passphrase: Option<&str>) -> Result<Material, OpenError> {
     let key = parse(private_key).ok_or(OpenError::Unreadable)?;
     if let Some(cipher) = unsupported_cipher_of(&key) {
@@ -100,11 +103,13 @@ pub fn open(private_key: &str, passphrase: Option<&str>) -> Result<Material, Ope
         return Ok(Material { key });
     }
     let Some(passphrase) = passphrase else { return Err(OpenError::NeedsPassphrase) };
-    key.decrypt(passphrase)
-        .ok()
-        .or_else(|| short_scalar::decrypt(private_key, passphrase))
-        .map(|key| Material { key })
-        .ok_or(OpenError::WrongPassphrase)
+    match key.decrypt(passphrase) {
+        Ok(key) => Ok(Material { key }),
+        Err(ssh_key::Error::Encoding(ssh_encoding::Error::Length)) => {
+            short_scalar::decrypt(private_key, passphrase).map(|key| Material { key }).ok_or(OpenError::WrongPassphrase)
+        }
+        Err(_) => Err(OpenError::WrongPassphrase),
+    }
 }
 
 fn signing_failed(e: impl std::fmt::Display) -> AppError {
@@ -233,6 +238,26 @@ mod tests {
         assert_eq!(material.key_data(), public_key_data(test_keys::ECDSA_SHORT_P256_PUBLIC).unwrap());
         verify(test_keys::ECDSA_SHORT_P256_PUBLIC, b"x", &material.sign(b"x", 0).unwrap());
         assert!(agent_can_read(&text));
+    }
+
+    /// `ssh-key` refuses a short scalar for its length even with the right passphrase, and only that error is worth a second try, which
+    /// costs a second bcrypt. A wrong passphrase is `ssh-key`'s `Crypto` (the checkints differ, or an AEAD tag does not match) and costs
+    /// one: `short_scalar` derives no key for it.
+    #[test]
+    fn only_a_length_error_has_short_scalar_decrypt_the_key_again() {
+        let derivations = || short_scalar::KEY_DERIVATIONS.with(std::cell::Cell::get);
+        let (public, section) = test_keys::EcdsaSection::of(test_keys::ECDSA_SHORT_P256_BODY);
+        for cipher in [ssh_key::Cipher::Aes256Ctr, ssh_key::Cipher::Aes256Cbc, ssh_key::Cipher::Aes256Gcm, ssh_key::Cipher::ChaCha20Poly1305] {
+            let text = test_keys::openssh_key(cipher, &test_keys::one_round_bcrypt(), &public, &section.padded(cipher.block_size()), "pass");
+            let key = PrivateKey::from_openssh(&text).unwrap();
+            assert_eq!(key.decrypt("wrong").err(), Some(ssh_key::Error::Crypto), "{cipher}: setup: ssh-key's answer to a wrong passphrase");
+            assert_eq!(key.decrypt("pass").err(), Some(ssh_key::Error::Encoding(ssh_encoding::Error::Length)), "{cipher}: setup: and to the right one");
+            let before = derivations();
+            assert_eq!(open(&text, Some("wrong")).err(), Some(OpenError::WrongPassphrase), "{cipher}");
+            assert_eq!(derivations(), before, "{cipher}: a wrong passphrase is not tried a second time");
+            open(&text, Some("pass")).unwrap_or_else(|e| panic!("{cipher}: {e:?}"));
+            assert_eq!(derivations(), before + 1, "{cipher}: the right one is, once, after ssh-key refused the scalar's length");
+        }
     }
 
     #[test]

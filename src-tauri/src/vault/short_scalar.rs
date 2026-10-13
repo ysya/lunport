@@ -30,6 +30,13 @@ const MAGIC: &[u8] = b"openssh-key-v1\0";
 const BEGIN: &str = concat!("-----BEGIN ", "OPENSSH", " PRIVATE KEY-----");
 const END: &str = concat!("-----END ", "OPENSSH", " PRIVATE KEY-----");
 
+// Test seam (test builds only, and only for the current thread): how many times `decrypt` derived a key from a passphrase, that is, ran
+// bcrypt. A test counts with it that `material::open` does not try a wrong passphrase twice.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static KEY_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The fixed length of each curve's scalar (`ssh-key`'s `EcdsaPrivateKey<SIZE>`).
 fn scalar_size(algorithm: &str, curve: &str) -> Option<usize> {
     match (algorithm, curve) {
@@ -166,14 +173,17 @@ pub fn parse(private_key: &str) -> Option<PrivateKey> {
     read_unencrypted(&container.public, &section)
 }
 
-/// An encrypted private key that `ssh-key` could not decrypt with this passphrase: an ECDSA key is decrypted here, with `ssh-key`'s public
-/// `Kdf` and `Cipher`, and read again with the scalar padded. A wrong passphrase (what comes out is not a private section), a key that is
-/// not encrypted, not ECDSA (seen in the public section, before any bcrypt) or whose scalar has its normal length all give None.
+/// An encrypted private key that `ssh-key` refused with this passphrase for the length of a field, which is what it does with the right
+/// passphrase and a short scalar (`material::open` comes here only then): an ECDSA key is decrypted here, with `ssh-key`'s public `Kdf`
+/// and `Cipher`, and read again with the scalar padded. A wrong passphrase (what comes out is not a private section), a key that is not
+/// encrypted, not ECDSA (seen in the public section, before any bcrypt) or whose scalar has its normal length all give None.
 pub fn decrypt(private_key: &str, passphrase: &str) -> Option<PrivateKey> {
     let container = container(private_key)?;
     if container.cipher.is_none() || !KeyData::decode(&mut &container.public[..]).is_ok_and(|key| key.is_ecdsa()) {
         return None;
     }
+    #[cfg(test)]
+    KEY_DERIVATIONS.with(|count| count.set(count.get() + 1));
     let (key, iv) = container.kdf.derive_key_and_iv(container.cipher, passphrase).ok()?;
     let mut plaintext = container.private;
     container.cipher.decrypt(&key, &iv, &mut plaintext, container.tag).ok()?;
