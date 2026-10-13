@@ -51,7 +51,9 @@ pub fn is_child() -> bool {
 
 /// Runs the test `name` (its full path, as `cargo test -- --list` prints it) alone in a fresh process of this test binary and returns what
 /// that process wrote to stderr. The process-wide CPU time is only meaningful when no other test is running, and `cargo test` runs many at
-/// once; a child with `--test-threads=1` is the only thing running. Panics when the child fails or takes more than two minutes.
+/// once; a child with `--test-threads=1` is the only thing running. Panics when the child fails or takes more than two minutes. Unix
+/// only, as its users are (the CPU-time measurements and the CLI's signal test); Windows tests call `rerun_alone_with`.
+#[cfg(unix)]
 pub fn rerun_alone(name: &str) -> String {
     rerun_alone_with(name, |_| {})
 }
@@ -68,7 +70,8 @@ pub fn rerun_alone_with(name: &str, configure: impl FnOnce(&mut std::process::Co
     stderr
 }
 
-/// The value of the line `FACT <key> = <value>` in `output`.
+/// The value of the line `FACT <key> = <value>` in `output`. Unix only, as `rerun_alone` is.
+#[cfg(unix)]
 pub fn fact_in(output: &str, key: &str) -> Option<String> {
     let prefix = format!("FACT {key} = ");
     output.lines().find_map(|line| line.strip_prefix(&prefix)).map(str::to_string)

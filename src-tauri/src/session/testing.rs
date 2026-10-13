@@ -27,7 +27,9 @@ pub struct FakeKeys {
 }
 
 impl FakeKeys {
-    /// The vault also holds `private_text` (an OpenSSH private key without a passphrase) as `key_id`, named `name`.
+    /// The vault also holds `private_text` (an OpenSSH private key without a passphrase) as `key_id`, named `name`. For the tests against
+    /// a scratch sshd, which run on Unix only.
+    #[cfg(unix)]
     pub fn with_key(mut self, key_id: &str, name: &str, private_text: &str) -> FakeKeys {
         let material = crate::vault::material::open(private_text, None).expect("the vault opens the key");
         let public_key = ssh_key::PublicKey::new(material.key_data(), "").to_openssh().expect("an OpenSSH public key");
@@ -360,13 +362,15 @@ impl HostKeyConfirmer for FakeConfirmer {
 }
 
 /// A host key window nobody answers: it waits until the question is withdrawn (the client went away) or 10 s pass, and records
-/// whether it saw the withdrawal.
+/// whether it saw the withdrawal. For the broker's socket tests (Unix).
+#[cfg(unix)]
 #[derive(Default)]
 pub struct WaitingConfirmer {
     pub asked: Mutex<usize>,
     pub withdrawn: Mutex<bool>,
 }
 
+#[cfg(unix)]
 impl HostKeyConfirmer for WaitingConfirmer {
     fn confirm(&self, _question: &HostKeyQuestion, cancel: &CancelToken) -> Option<String> {
         *locked(&self.asked) += 1;
@@ -446,7 +450,8 @@ impl GatedEngine {
         GatedEngine { inner, connect: Gate::open(), shell: Gate::open() }
     }
 
-    /// `connect` waits at a closed gate (`self.connect`) before it connects.
+    /// `connect` waits at a closed gate (`self.connect`) before it connects. For the broker's socket tests (Unix).
+    #[cfg(unix)]
     pub fn holding_connects(mut self) -> GatedEngine {
         self.connect = Gate::closed();
         self
