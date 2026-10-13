@@ -1290,6 +1290,8 @@ mod shared_tests {
     struct Writes {
         writes: Arc<Mutex<Vec<Vec<u8>>>>,
         held: Arc<(Mutex<bool>, Condvar)>,
+        /// A write has waited because the stream was held.
+        waited: Arc<AtomicBool>,
     }
 
     impl Writes {
@@ -1307,6 +1309,7 @@ mod shared_tests {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             let mut held = self.held.0.lock().unwrap();
             while *held {
+                self.waited.store(true, Ordering::SeqCst);
                 held = self.held.1.wait(held).unwrap();
             }
             drop(held);
@@ -1367,7 +1370,7 @@ mod shared_tests {
         let (inputs, _queue) = queue();
         let writer = TerminalWriter::start(Output::console(console.clone()), Writes::default(), &inputs);
         writer.show(Show::Output(vec![b'x'; 8 * PIECE]));
-        std::thread::sleep(Duration::from_millis(100));
+        eventually("the writer to wait in a write", 10, || console.waited.load(Ordering::SeqCst));
         let asked = Instant::now();
         assert!(!writer.stop(Duration::ZERO), "the writer could not finish");
         let took = asked.elapsed();
@@ -1415,7 +1418,7 @@ mod shared_tests {
         assert_eq!(typed(next_input(&queue)), "a");
         assert_eq!(typed(next_input(&queue)), "\u{1f511}", "the pair joined");
         // A question: the raw read in progress is ended, and its Enter is not typed text.
-        std::thread::sleep(Duration::from_millis(200));
+        eventually("the keys thread to be in the console's read", 10, || console.reads_in_progress() == 1);
         tty.set_mode(ConsoleMode::Prompt { echo: false }, true).unwrap();
         console.type_text("\u{1a}\r\n");
         assert!(matches!(next_input(&queue), Input::StdinEnd), "Ctrl-Z ends the input");
