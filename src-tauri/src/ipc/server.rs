@@ -15,8 +15,10 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// 一條連線的串流。
 #[cfg(unix)]
 pub type Stream = std::os::unix::net::UnixStream;
+/// On Windows, one end of a named pipe connection. A pipe has no `shutdown` and no read timeout: the stream has a hang-up and a deadline
+/// instead (`PipeStream::hang_up`, `PipeStream::hang_up_after`).
 #[cfg(windows)]
-pub type Stream = std::fs::File;
+pub type Stream = crate::ipc::pipe_windows::PipeStream;
 
 /// 處理一條連線(在連線自己的執行緒裡):串流與對方的 PID(拿不到 → None)。
 pub type Handler = Arc<dyn Fn(Stream, Option<u32>) + Send + Sync>;
@@ -65,7 +67,7 @@ pub(crate) fn dispatch(stream: Stream, pid: Option<u32>, active: &Arc<AtomicUsiz
 const SUN_PATH_MAX: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
 
 /// 一條連線兩則訊息之間最多閒置多久(等核准視窗時沒有在讀,不算):ssh 認證完就關掉它的 agent 連線,閒置的連線不該一直佔著
-/// `MAX_CONNECTIONS` 的名額。Windows 的 pipe(`File`)沒有讀取逾時,不設。
+/// `MAX_CONNECTIONS` 的名額。Windows 的 pipe(`PipeStream`)沒有讀取逾時,不設。
 #[cfg(unix)]
 pub(crate) const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 

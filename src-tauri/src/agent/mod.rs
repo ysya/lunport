@@ -36,7 +36,7 @@ pub fn agent_dir(home: &Path) -> PathBuf {
 pub fn identity_agent_value() -> Result<String, AppError> {
     #[cfg(windows)]
     {
-        Ok(format!("//./pipe/{}", pipe_windows::pipe_name()?))
+        Ok(format!("//./pipe/{}", pipe_windows::pipe_name_for("agent")?))
     }
     #[cfg(not(windows))]
     {
@@ -188,7 +188,7 @@ fn listen(app: &tauri::AppHandle) -> Result<server::Started, AppError> {
     }
     #[cfg(windows)]
     {
-        pipe_windows::listen(&dir, &pipe_windows::pipe_name()?, handle)
+        pipe_windows::listen(&dir, &pipe_windows::pipe_name_for("agent")?, "sshelter-agent", handle)
     }
 }
 

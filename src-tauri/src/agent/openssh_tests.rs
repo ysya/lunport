@@ -179,7 +179,7 @@ fn start() -> Running {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let name = format!("sshelter-ossh-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
-        crate::ipc::pipe_windows::listen(&agent_dir, &name, handler).unwrap();
+        crate::ipc::pipe_windows::listen(&agent_dir, &name, "sshelter-agent", handler).unwrap();
         format!(r"\\.\pipe\{name}")
     };
     Running { dir, endpoint, host }

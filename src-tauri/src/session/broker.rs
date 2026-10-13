@@ -495,10 +495,11 @@ fn set_read_timeout(stream: &Stream, timeout: Option<Duration>) -> std::io::Resu
     stream.set_read_timeout(timeout)
 }
 
-/// A Windows pipe has no read timeout.
+/// A Windows pipe has no read timeout: the connection is hung up instead when the time is over without the bound being cleared
+/// (`PipeStream::hang_up_after`), and what waits on it reads the end of the stream (spec §4).
 #[cfg(windows)]
-fn set_read_timeout(_stream: &Stream, _timeout: Option<Duration>) -> std::io::Result<()> {
-    Ok(())
+fn set_read_timeout(stream: &Stream, timeout: Option<Duration>) -> std::io::Result<()> {
+    stream.hang_up_after(timeout)
 }
 
 /// Closes the connection both ways: the client reads its end, and a read blocked on it returns.
@@ -507,9 +508,12 @@ fn hang_up(stream: &Stream) {
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-/// The broker does not serve Windows clients in this version (plan 1b: `sshelter connect` is macOS and Linux); nothing to close.
+/// A pipe has no `shutdown`: the connection is hung up for good (spec §4), so that a read or a write blocked on it returns and every
+/// one after it fails. The client reads what was written before, and the end of the pipe once the broker's last handle on it is closed.
 #[cfg(windows)]
-fn hang_up(_stream: &Stream) {}
+fn hang_up(stream: &Stream) {
+    stream.hang_up();
+}
 
 /// The client's connection, as the relay writes to it: whole frames under one lock. `exited` is the last thing a client is told: once it
 /// has been written, nothing else is. A thread that did not know the session was over, because it passed its check just before the
@@ -1874,5 +1878,240 @@ mod tests {
             [ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to lab was closed.".into() }), no_status()]
         );
         assert!(!broker.has_sessions());
+    }
+}
+
+/// The broker on a named pipe (plan 1b-3 Task 1): what the socket tests above show on macOS and Linux, through `ipc::pipe_windows`. A pipe
+/// has no `shutdown`: a hang-up is a flag and a cancel, and the client reads the end of the pipe once the broker's last handle on it is
+/// closed, after everything that was written before.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use super::*;
+    use crate::ipc::pipe_windows::{self, PipeStream};
+    use crate::ipc::server::Started;
+    use crate::session::protocol::PtyRequest;
+    use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys};
+    use crate::ssh::fake::{default_server_key, FakeEngine, FakeEvent, FakeLogin, FakeMethods, FakeShell};
+    use crate::ssh::{AuthMethod, Exit};
+    use crate::sync::testkit::MemKeychain;
+
+    /// How long a client waits for the broker to say something before the test fails, instead of hanging.
+    const GUARD: Duration = Duration::from_secs(15);
+
+    /// What the client received.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Got {
+        Message(ServerMessage),
+        Data(Vec<u8>),
+    }
+
+    /// A client of the broker, speaking the protocol over the pipe as `sshelter connect` does.
+    struct Client {
+        stream: PipeStream,
+    }
+
+    impl Client {
+        fn connect(pipe: &str) -> Client {
+            Client { stream: pipe_windows::connect(pipe, Duration::from_secs(5)).expect("the broker listens") }
+        }
+
+        fn send(&mut self, message: &ClientMessage) {
+            write_control(&mut self.stream, message).expect("the broker reads");
+        }
+
+        fn hello(&mut self) {
+            self.send(&ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, client_info: None });
+        }
+
+        fn open(&mut self, alias: &str) {
+            self.hello();
+            self.send(&ClientMessage::OpenShell { host: HostQuery::Alias(alias.into()), pty: PtyRequest { cols: 80, rows: 24, term: "xterm-256color".into() } });
+        }
+
+        fn type_text(&mut self, text: &str) {
+            write_data(&mut self.stream, text.as_bytes()).unwrap();
+        }
+
+        /// The next thing the broker sent; `None` at the end of the pipe. The client's own stream is hung up when the broker says nothing
+        /// for `GUARD`: that is a failure, not the end.
+        fn next(&mut self) -> Option<Got> {
+            self.stream.hang_up_after(Some(GUARD)).unwrap();
+            let frame = read_frame(&mut self.stream);
+            assert!(!self.stream.is_hung_up(), "the broker said nothing for {GUARD:?}");
+            self.stream.hang_up_after(None).unwrap();
+            match frame.expect("a frame or the end") {
+                None => None,
+                Some(Frame::Control(payload)) => Some(Got::Message(decode::<ServerMessage>(&payload).expect("a server message"))),
+                Some(Frame::Data(bytes)) => Some(Got::Data(bytes.to_vec())),
+            }
+        }
+
+        fn next_message(&mut self) -> ServerMessage {
+            loop {
+                match self.next() {
+                    Some(Got::Message(message)) => return message,
+                    Some(Got::Data(_)) => continue,
+                    None => panic!("the broker ended the pipe"),
+                }
+            }
+        }
+
+        /// Everything until the end of the pipe: the output, and the messages.
+        fn rest(&mut self) -> (Vec<u8>, Vec<ServerMessage>) {
+            let (mut output, mut messages) = (Vec::new(), Vec::new());
+            while let Some(got) = self.next() {
+                match got {
+                    Got::Data(bytes) => output.extend(bytes),
+                    Got::Message(message) => messages.push(message),
+                }
+            }
+            (output, messages)
+        }
+    }
+
+    struct World {
+        broker: Arc<Broker>,
+        engine: Arc<FakeEngine>,
+        pipe: String,
+        /// Holds the listener's lock.
+        _dir: tempfile::TempDir,
+    }
+
+    /// A broker over `engine`, `directory` and `keychain`, listening on a pipe of its own (the tests run at once, in one process), that
+    /// gives a new connection `hello_wait` for its first two messages.
+    fn world_from(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain, hello_wait: Duration) -> World {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let engine = Arc::new(engine);
+        let broker = Broker::with_hello_wait(
+            Arc::clone(&engine) as Arc<dyn SshEngine>,
+            Arc::new(directory),
+            Arc::new(FakeKeys::new()),
+            Arc::new(keychain),
+            Arc::new(FakeConfirmer::default()),
+            hello_wait,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = format!("sshelter-broker-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst));
+        assert_eq!(pipe_windows::listen(&dir.path().join("ipc"), &pipe, "sshelter-session", broker.handler()).unwrap(), Started::Running);
+        World { broker, engine, pipe, _dir: dir }
+    }
+
+    /// `web` is pinned and its password is saved: it connects without a question.
+    fn world(engine: FakeEngine) -> World {
+        world_from(engine, pinned_web(), saved_password(), HELLO_WAIT)
+    }
+
+    fn pinned_web() -> FakeDirectory {
+        FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", default_server_key())
+    }
+
+    fn saved_password() -> MemKeychain {
+        let keychain = MemKeychain::default();
+        keychain.set("host:id-web", "saved").unwrap();
+        keychain
+    }
+
+    fn remote(world: &World) -> FakeShell {
+        crate::ssh::testing::eventually("the shell to open", 10, || !world.engine.shells().is_empty());
+        world.engine.shells().remove(0)
+    }
+
+    fn no_status() -> ServerMessage {
+        ServerMessage::Exited { code: None, signal: None }
+    }
+
+    fn quit_sentence() -> ServerMessage {
+        ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to web was closed.".into() })
+    }
+
+    /// Plan 1b-3 Task 1: a whole session over the pipe. The broker reads its client on one thread while the session writes to it from
+    /// another, and the last frame, `exited`, is read before the end of the pipe.
+    #[test]
+    fn a_session_served_on_a_pipe_ends_with_exited_then_the_end_of_the_pipe() {
+        let world = world(FakeEngine::new());
+        let mut client = Client::connect(&world.pipe);
+        client.open("web");
+        assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        client.type_text("ls\r");
+        let shell = remote(&world);
+        shell.print(b"file.txt\r\n");
+        crate::ssh::testing::eventually("the input to reach the shell", 5, || world.engine.events().contains(&FakeEvent::ShellInput(b"ls\r".to_vec())));
+        shell.end(Exit::Code(5));
+        let (output, messages) = client.rest();
+        assert_eq!(output, b"file.txt\r\n");
+        assert_eq!(messages, [ServerMessage::Exited { code: Some(5), signal: None }], "exited, and then the end of the pipe");
+        crate::ssh::testing::eventually("the session to be closed and forgotten", 5, || world.broker.sessions().is_empty());
+        assert_eq!(world.engine.events().last(), Some(&FakeEvent::Closed));
+    }
+
+    /// Plan 1b-3 Task 1: a pipe has no read timeout. A connection that does not say hello, or says hello and then nothing, is hung up when
+    /// the time for its first messages is over (300 ms here, 10 s in the app), and its client reads the end of the pipe; one that sent
+    /// both in time is off the clock.
+    #[test]
+    fn a_client_that_says_nothing_is_hung_up_after_the_deadline() {
+        let world = world_from(FakeEngine::new(), pinned_web(), saved_password(), Duration::from_millis(300));
+        let ended_after = |client: &mut Client| {
+            let started = Instant::now();
+            assert_eq!(client.next(), None, "the broker ended the pipe");
+            started.elapsed()
+        };
+        let mut nothing = Client::connect(&world.pipe);
+        let waited = ended_after(&mut nothing);
+        assert!(waited >= Duration::from_millis(200) && waited < Duration::from_secs(3), "{waited:?}");
+        let mut only_hello = Client::connect(&world.pipe);
+        only_hello.hello();
+        assert!(ended_after(&mut only_hello) < Duration::from_secs(3));
+        let mut client = Client::connect(&world.pipe);
+        client.open("web");
+        assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(world.broker.has_sessions(), "an idle session is not hung up when the time for the first messages is over");
+        client.type_text("ok");
+        crate::ssh::testing::eventually("input after that time to reach the shell", 5, || world.engine.events().contains(&FakeEvent::ShellInput(b"ok".to_vec())));
+    }
+
+    /// Plan 1b-3 Task 1: the app quits under an open session. Its client reads why and `exited`, and then the end of the pipe.
+    #[test]
+    fn quitting_tells_a_connected_client_and_ends_its_pipe() {
+        let world = world(FakeEngine::new());
+        let mut client = Client::connect(&world.pipe);
+        client.open("web");
+        assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        remote(&world).print(b"$ ");
+        world.broker.end_all(Duration::from_secs(10));
+        assert!(!world.broker.has_sessions());
+        assert_eq!(client.rest().1, [quit_sentence(), no_status()], "why, and exited, and then the end of the pipe");
+    }
+
+    /// The same for a client at a question (here the password): `end_all` tells it on a thread of its own and hangs it up, which wakes the
+    /// broker's read of it; its pipe ends once the session's threads are through.
+    #[test]
+    fn quitting_tells_a_client_at_a_question_and_ends_its_pipe() {
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let world = world_from(engine, directory, MemKeychain::default(), HELLO_WAIT);
+        let mut client = Client::connect(&world.pipe);
+        client.open("web");
+        let ServerMessage::Question(question) = client.next_message() else { panic!("expected the password question") };
+        assert_eq!(question.kind, QuestionKind::Password);
+        world.broker.end_all(Duration::from_secs(5));
+        assert_eq!(client.rest().1, [quit_sentence(), no_status()]);
+        crate::ssh::testing::eventually("the session to be forgotten", 5, || !world.broker.has_sessions());
+        assert!(world.engine.events().is_empty(), "nothing was connected");
+    }
+
+    /// The terminal was closed: the broker reads the end of the pipe and closes the session (spec §7.2).
+    #[test]
+    fn when_the_client_goes_away_its_session_is_closed() {
+        let world = world(FakeEngine::new());
+        let mut client = Client::connect(&world.pipe);
+        client.open("web");
+        assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+        remote(&world).print(b"$ ");
+        drop(client);
+        crate::ssh::testing::eventually("the session to be closed", 10, || world.engine.events().contains(&FakeEvent::Closed));
+        crate::ssh::testing::eventually("and forgotten", 5, || !world.broker.has_sessions());
     }
 }
