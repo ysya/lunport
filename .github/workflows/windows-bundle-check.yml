@@ -1,9 +1,9 @@
-# Builds the Windows NSIS installer the way the Windows leg of beta.yml does — the console helper sshelter-cli.exe (src-tauri/cli-helper)
-# built first and bundled through `tauri build --config` (bundle.externalBin) — and checks the result: the installer holds
-# sshelter-cli.exe next to sshelter.exe, the helper needs no VC++ runtime, and the two run `sshelter connect` together (the usage and its
-# exit code 2 come back through the helper). Run by hand before a beta (own-ssh plan 1b-3). It publishes nothing: no release and no
-# updater artifacts, so no signing key. Not copied from beta.yml: the version stamp (this build keeps the version in the repository) and
-# the sync relay check (the relay URL does not change the bundle).
+# Builds the Windows installers (NSIS and MSI) the way the Windows leg of beta.yml does — every target of tauri.conf.json, the console
+# helper sshelter-cli.exe (src-tauri/cli-helper) built first and bundled through `tauri build --config` (bundle.externalBin) — and checks
+# the result: each installer holds sshelter-cli.exe next to sshelter.exe, the helper needs no VC++ runtime, and the two run `sshelter
+# connect` together (the usage and its exit code 2 come back through the helper). Run by hand before a beta (own-ssh plan 1b-3). It
+# publishes nothing: no release and no updater artifacts, so no signing key. Not copied from beta.yml: the version stamp (this build keeps
+# the version in the repository) and the sync relay check (the relay URL does not change the bundle).
 # It also runs on a push to next/own-ssh that changes this file: GitHub dispatches a workflow only from the default branch or once it has
 # run, and until next/own-ssh is merged this file exists only there. That first run is the check; later dispatches work after it.
 name: windows bundle check
@@ -18,7 +18,9 @@ permissions:
   contents: read
 
 jobs:
+  # The job keeps its first id (its Rust cache is keyed by it); it builds and checks both installers now.
   nsis:
+    name: installers
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -56,17 +58,18 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      # The Windows leg's args of beta.yml, the NSIS installer only, and no updater artifacts (they need the signing key). No tagName:
-      # tauri-action builds and uploads nothing. The JSON values reach tauri whole only because they have no backslash and no cmd
-      # metacharacter: tauri-action runs pnpm.cmd, that is cmd /d /s /c after cross-spawn's escaping, so they must never get a Windows path
-      # or any of % & ^ | < > ( ).
-      - name: Build the NSIS installer
+      # The Windows leg's args of beta.yml, and no updater artifacts (they need the signing key). Every target of tauri.conf.json
+      # (`bundle.targets: all`), as the leg builds them: the NSIS installer and the MSI (tauri downloads WiX 3.14 the first time, as the leg
+      # does). No tagName: tauri-action builds and uploads nothing. The JSON values reach tauri whole only because they have no backslash
+      # and no cmd metacharacter: tauri-action runs pnpm.cmd, that is cmd /d /s /c after cross-spawn's escaping, so they must never get a
+      # Windows path or any of % & ^ | < > ( ).
+      - name: Build the installers
         uses: tauri-apps/tauri-action@v0
         with:
-          args: --bundles nsis --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          args: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       # 7-Zip (on the runner image) reads NSIS installers: every file the installer writes, by the directory it writes it to.
-      - name: The installer holds sshelter-cli.exe next to sshelter.exe
+      - name: The NSIS installer holds sshelter-cli.exe next to sshelter.exe
         shell: pwsh
         run: |
           $installers = @(Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter '*-setup.exe')
@@ -92,10 +95,36 @@ jobs:
           Write-Output 'sshelter-cli.exe is next to sshelter.exe.'
           exit 0
 
-      # The two programs as the installer has them, side by side: the helper must start on a Windows without the VC++ runtime (the
-      # runner has one, so the helper's imports are read rather than trusting a start here), and `sshelter-cli.exe connect` (no alias) has
-      # to bring back the usage of the GUI sshelter.exe and its exit code 2.
-      - name: The installer's two programs run sshelter connect
+      # An administrative install (msiexec /a) lays the MSI's files out under TARGETDIR as its Directory table has them, registering
+      # nothing: the helper has to land in the directory of sshelter.exe (where WiX puts external binaries is checked, not assumed).
+      - name: The MSI holds sshelter-cli.exe next to sshelter.exe
+        shell: pwsh
+        run: |
+          $msis = @(Get-ChildItem -Path src-tauri/target/release/bundle/msi -Filter '*.msi')
+          if ($msis.Count -ne 1) { throw "expected one MSI, found $($msis.Count): $($msis.Name -join ', ')" }
+          $msi = $msis[0].FullName
+          $image = Join-Path $env:RUNNER_TEMP 'msi image'
+          $log = Join-Path $env:RUNNER_TEMP 'msi.log'
+          $run = Start-Process -FilePath msiexec.exe -ArgumentList @('/a', "`"$msi`"", '/qn', "TARGETDIR=`"$image`"", '/l*v', "`"$log`"") -Wait -PassThru
+          if ($run.ExitCode -ne 0) { Get-Content $log | Select-Object -Last 60; throw "msiexec /a failed with $($run.ExitCode)" }
+          $files = @(Get-ChildItem -Path $image -Recurse -File)
+          Write-Output "$msi lays out:"
+          $files | ForEach-Object { Write-Output "  $($_.FullName.Substring($image.Length + 1))" }
+          $app = @($files | Where-Object Name -eq 'sshelter.exe' | ForEach-Object DirectoryName)
+          $helper = @($files | Where-Object Name -eq 'sshelter-cli.exe' | ForEach-Object DirectoryName)
+          if ($app.Count -eq 0) { throw 'the MSI has no sshelter.exe' }
+          if ($helper.Count -eq 0) { throw 'the MSI has no sshelter-cli.exe' }
+          if (@($helper | Where-Object { $app -contains $_ }).Count -eq 0) {
+            throw "sshelter-cli.exe ($($helper -join ', ')) is not in the directory of sshelter.exe ($($app -join ', '))"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_MSI_DIR=$($app[0])"
+          Write-Output 'sshelter-cli.exe is next to sshelter.exe in the MSI.'
+          exit 0
+
+      # The two programs as each installer has them, side by side: the helper must start on a Windows without the VC++ runtime (the
+      # runner has one, so the helper's imports are read rather than trusting a start here; both installers hold the same helper), and
+      # `sshelter-cli.exe connect` (no alias) has to bring back the usage of the GUI sshelter.exe and its exit code 2, from each installer.
+      - name: The installers' two programs run sshelter connect
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'installed SSHelter'
@@ -109,9 +138,12 @@ jobs:
           Write-Output $imports
           if ($LASTEXITCODE -ne 0) { throw "dumpbin could not read $helper (exit $LASTEXITCODE)" }
           if ($imports -match '(?i)vcruntime|msvcp') { throw 'sshelter-cli.exe needs the VC++ runtime: it was not built with +crt-static' }
-          # Each line the programs wrote, as text (2>&1 hands stderr's lines over as error records).
-          $said = (& $helper connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
-          $code = $LASTEXITCODE
-          Write-Output "sshelter-cli.exe connect exited with $code and said:" $said
-          if ($code -ne 2 -or $said -notmatch 'usage: sshelter connect <alias>') { throw 'expected the usage of sshelter connect and exit code 2' }
+          foreach ($image in @($dir, $env:SSHELTER_MSI_DIR)) {
+            $helper = Join-Path $image 'sshelter-cli.exe'
+            # Each line the programs wrote, as text (2>&1 hands stderr's lines over as error records).
+            $said = (& $helper connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
+            $code = $LASTEXITCODE
+            Write-Output "$helper connect exited with $code and said:" $said
+            if ($code -ne 2 -or $said -notmatch 'usage: sshelter connect <alias>') { throw "expected the usage of sshelter connect and exit code 2 from $image" }
+          }
           exit 0
