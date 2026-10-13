@@ -499,6 +499,101 @@ pub(crate) mod test_keys {
         armor(ECDSA_SHORT_P521_BODY)
     }
 
+    /// The fields of an ECDSA key's private section (`checkint ×2, string algorithm, string curve, string point, mpint scalar,
+    /// string comment`, then the padding), the scalar as long as OpenSSH wrote it.
+    #[derive(Clone)]
+    pub struct EcdsaSection {
+        pub checkint: u32,
+        pub algorithm: String,
+        pub curve: String,
+        pub point: Vec<u8>,
+        pub scalar: Vec<u8>,
+        pub comment: String,
+    }
+
+    impl EcdsaSection {
+        /// The public section and the private section of the unencrypted ECDSA key `body`.
+        pub fn of(body: &[&str]) -> (Vec<u8>, EcdsaSection) {
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            use ssh_encoding::Decode;
+            let bytes = STANDARD.decode(body.concat()).unwrap();
+            let mut reader = &bytes[b"openssh-key-v1\0".len()..];
+            assert_eq!(String::decode(&mut reader).unwrap(), "none", "an unencrypted key is expected");
+            Vec::<u8>::decode(&mut reader).unwrap(); // kdf name
+            Vec::<u8>::decode(&mut reader).unwrap(); // kdf options
+            assert_eq!(u32::decode(&mut reader).unwrap(), 1, "one key");
+            let public = Vec::<u8>::decode(&mut reader).unwrap();
+            let private = Vec::<u8>::decode(&mut reader).unwrap();
+            let mut reader = &private[..];
+            let checkint = u32::decode(&mut reader).unwrap();
+            assert_eq!(u32::decode(&mut reader).unwrap(), checkint);
+            let section = EcdsaSection {
+                checkint,
+                algorithm: String::decode(&mut reader).unwrap(),
+                curve: String::decode(&mut reader).unwrap(),
+                point: Vec::<u8>::decode(&mut reader).unwrap(),
+                scalar: Vec::<u8>::decode(&mut reader).unwrap(),
+                comment: String::decode(&mut reader).unwrap(),
+            };
+            (public, section)
+        }
+
+        /// The fields one after the other, then `padding` as it is given.
+        pub fn with_padding(&self, padding: &[u8]) -> Vec<u8> {
+            use ssh_encoding::Encode;
+            let mut out = Vec::new();
+            self.checkint.encode(&mut out).unwrap();
+            self.checkint.encode(&mut out).unwrap();
+            self.algorithm.encode(&mut out).unwrap();
+            self.curve.encode(&mut out).unwrap();
+            self.point.encode(&mut out).unwrap();
+            self.scalar.encode(&mut out).unwrap();
+            self.comment.encode(&mut out).unwrap();
+            out.extend_from_slice(padding);
+            out
+        }
+
+        /// How many bytes of padding take the fields to a multiple of `block_size`.
+        pub fn padding_len(&self, block_size: usize) -> usize {
+            (block_size - self.with_padding(&[]).len() % block_size) % block_size
+        }
+
+        /// The fields padded the way OpenSSH pads them: `1, 2, 3…` up to a multiple of `block_size`.
+        pub fn padded(&self, block_size: usize) -> Vec<u8> {
+            let padding: Vec<u8> = (1..).take(self.padding_len(block_size)).collect();
+            self.with_padding(&padding)
+        }
+    }
+
+    /// bcrypt with a fixed salt and a single round: an encrypted test key that opens fast in a debug build.
+    pub fn one_round_bcrypt() -> ssh_key::Kdf {
+        ssh_key::Kdf::Bcrypt { salt: vec![7; 16], rounds: 1 }
+    }
+
+    /// The text of an `openssh-key-v1` container around the public section `public` and the private section `plaintext`, its padding as
+    /// it is given. With `cipher` none the plaintext is written as it is and `kdf` is only named; any other cipher encrypts it with
+    /// `passphrase` through `kdf`, as OpenSSH does, and an AEAD cipher's tag follows it.
+    pub fn openssh_key(cipher: ssh_key::Cipher, kdf: &ssh_key::Kdf, public: &[u8], plaintext: &[u8], passphrase: &str) -> String {
+        use ssh_encoding::Encode;
+        let mut private = plaintext.to_vec();
+        let tag = if cipher.is_none() {
+            None
+        } else {
+            let (key, iv) = kdf.derive_key_and_iv(cipher, passphrase).unwrap();
+            cipher.encrypt(&key, &iv, &mut private).unwrap()
+        };
+        let mut body = b"openssh-key-v1\0".to_vec();
+        cipher.encode(&mut body).unwrap();
+        kdf.encode(&mut body).unwrap();
+        1u32.encode(&mut body).unwrap();
+        public.encode(&mut body).unwrap();
+        private.encode(&mut body).unwrap();
+        if let Some(tag) = tag {
+            body.extend_from_slice(&tag);
+        }
+        armor_bytes(&body)
+    }
+
     /// 把一個 SSH string(`uint32` 長度 + 內容)接到 `out` 後面。
     fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
         out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
