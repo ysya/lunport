@@ -23,6 +23,10 @@
 //! - The input handle is signalled while the buffer holds any record (a focus event too, which a raw read then waits past).
 //! - Raw mode with virtual terminal input gives an arrow as `ESC [ A`; a surrogate pair typed as two records comes in one read.
 //! - Once the console is freed, a read in progress fails (ERROR_ACCESS_DENIED), and so does every read after it (ERROR_INVALID_HANDLE).
+//! - (Fix round 1, measured in a console shared with another process, as the shell shares its console with `sshelter connect`.) A read a
+//!   process leaves in progress when it ends ends with it: neither a raw read nor a hidden line read with "hun" typed into it takes the
+//!   key or the line typed next, and "hun" never shows; so `sshelter connect`'s own end, which leaves its keys thread in a read, leaves
+//!   the next key to the shell.
 
 use std::ptr;
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
