@@ -496,7 +496,10 @@ Each with where it goes and why it is not fixed now.
 1. **macOS, real app:** Connect from the row button, the editor header, the command palette and the tray opens Terminal.app and iTerm2
    (window and tab) running `sshelter connect <alias>`; a first contact shows the host key window on top of a full-screen terminal,
    focused, with the trust button disabled for ~0.7 s; the red close button refuses; two first contacts from two terminals list both
-   questions, oldest first; Trust pins (`host-pins.json`, mode 0600) and the shell opens without a second question.
+   questions, oldest first; Trust pins (`host-pins.json`, mode 0600) and the shell opens without a second question. (From 0.17.0-11) a
+   Connect that fails before the shell opens (a host whose `IdentityFile` is a key file in `~/.ssh`; Cancel at the host key window) keeps
+   its reason in the iTerm2 window under `Press Enter to exit.` until Enter (0.17.0-10 showed only iTerm2's "A session ended very soon
+   after starting"); in Terminal.app the reason stays above the shell's prompt, with no pause.
 2. **Hide-on-close and quit:** close the main window with a session open → hidden, the session lives; tray Quit, Cmd+Q and an update's
    "Install & restart" each print `SSHelter quit, so the connection to <alias> was closed.` in every terminal and exit 255, within 5 s;
    a shell that had not printed yet (connect, then quit at once) is told after up to ~3 s.

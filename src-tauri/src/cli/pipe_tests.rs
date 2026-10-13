@@ -12,6 +12,7 @@ use std::time::Duration;
 use super::console::fake::Call;
 use super::console::{input_mode, ENABLE_LINE_INPUT};
 use super::console_inputs::CTRL_CLOSE_EVENT;
+use super::client::{Request, PAUSE_PROMPT};
 use super::run::{console_keys_thread, queue, run, watch_size, ControlEvents, Output, Over, Watchdog, STOP_GRACE};
 use super::terminal::fake::FakeConsole;
 use super::terminal::{Mode, Tty};
@@ -69,6 +70,11 @@ struct Setup {
 /// `sshelter connect web` against a broker over `engine`, `directory` and `keychain`, served on a pipe of its own, with a fake console on
 /// which `typed_ahead` was typed before the run began.
 fn connect(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain, typed_ahead: &str) -> Setup {
+    connect_pausing(engine, directory, keychain, typed_ahead, false)
+}
+
+/// `connect`, and with `pause_on_error` as `sshelter connect --pause-on-error web`.
+fn connect_pausing(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain, typed_ahead: &str, pause_on_error: bool) -> Setup {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let engine = Arc::new(engine);
     let broker = Broker::new(
@@ -102,7 +108,8 @@ fn connect(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain, 
         std::thread::spawn(move || {
             let size = Arc::clone(&console);
             let _size = watch_size(inputs.clone(), Duration::from_millis(50), move || *size.size.lock().unwrap());
-            let code = run(stream, HostQuery::Alias("web".into()), "xterm-256color".into(), &mut tty, (inputs, queue), Output::console(stdout), Output::console(stderr));
+            let request = Request { host: HostQuery::Alias("web".into()), pause_on_error };
+            let code = run(stream, request, "xterm-256color".into(), &mut tty, (inputs, queue), Output::console(stdout), Output::console(stderr));
             let restored = console.now() == console.start;
             over.set();
             watchdog.stand_down();
@@ -202,6 +209,26 @@ fn an_end_under_a_question_starts_the_reason_on_a_line_of_its_own_when_the_conso
         assert_eq!((code, setup.stderr.text()), (255, said), "the console refused the Enter: {refused}");
         assert!(restored, "the console is as it was");
     }
+}
+
+/// `--pause-on-error` on Windows (spec §7.3): a connect that fails before the shell opens leaves its reason and the prompt on the console,
+/// and the Enter that ends the pause is read in a line read that shows what is typed (the console reads nothing while it is cooked); the
+/// line typed while connecting was thrown away first, so it does not end the pause. Then the program ends with 255, the console back at
+/// its start.
+#[test]
+fn with_pause_on_error_a_failed_connect_waits_on_the_console_for_enter() {
+    let setup = connect_pausing(FakeEngine::new(), FakeDirectory::new(), MemKeychain::default(), "ls\r\n", true);
+    eventually("the prompt", 10, || setup.stderr.text().ends_with(PAUSE_PROMPT));
+    eventually("the line read", 10, || setup.console.reads_in_progress() == 1);
+    let shown = input_mode(setup.console.start.input_mode, Mode::Prompt { echo: true });
+    assert_eq!(setup.console.now().input_mode, shown, "line editing, echo on");
+    assert!(setup.console.all_read(), "what was typed while connecting was thrown away");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!setup.run.is_finished(), "it waits for Enter");
+    setup.console.type_text("\r\n");
+    let (code, restored, setup) = finish(setup);
+    assert_eq!((code, setup.stderr.text()), (255, format!("No saved host is called web.\n{PAUSE_PROMPT}")));
+    assert!(restored, "the console is as it was");
 }
 
 /// The console closed (`CTRL_CLOSE_EVENT`) during the shell: the session ends as SIGHUP ends it (129), the broker is told, the console is
