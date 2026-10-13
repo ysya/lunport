@@ -563,6 +563,13 @@ pub(crate) mod test_keys {
             let padding: Vec<u8> = (1..).take(self.padding_len(block_size)).collect();
             self.with_padding(&padding)
         }
+
+        /// The same section with the scalar padded with zeros to `size` bytes, as `short_scalar` hands it to `ssh-key`.
+        pub fn with_full_scalar(&self, size: usize) -> EcdsaSection {
+            let mut scalar = vec![0; size - self.scalar.len()];
+            scalar.extend_from_slice(&self.scalar);
+            EcdsaSection { scalar, ..self.clone() }
+        }
     }
 
     /// bcrypt with a fixed salt and a single round: an encrypted test key that opens fast in a debug build.
