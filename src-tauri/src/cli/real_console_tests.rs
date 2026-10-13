@@ -58,7 +58,7 @@ use windows_sys::Win32::System::IO::CancelIoEx;
 use super::client::Input;
 use super::console::{input_mode, ConsoleApi, Mode, Setting};
 use super::inputs_windows::{take_over_control_events, ConsoleText};
-use super::run::{console_keys_thread, queue, ControlEvents, Output, Over, Watchdog, STOP_GRACE};
+use super::run::{console_keys_thread, queue, ControlEvents, Output, Over, Watchdog};
 use super::terminal::{restore_on_panic, StdConsole, Tty};
 use crate::ssh::testing::{is_child, rerun_alone_reading, rerun_alone_with};
 
@@ -505,6 +505,8 @@ fn case(name: &str) {
             type_text(control, "pw\r");
             assert_eq!(typed(&mut queue), "pw\r\n", "the answer, and nothing of the raw read the change ended");
             assert_eq!(row(console.out, y), "[password]", "the answer was not shown ({x},{y})");
+            // The client leaves the line break after a hidden answer to the console (`QUESTION_READ_ENDS_ITS_LINE`): its Enter ended the line.
+            assert_eq!(cursor(console.out), (0, y + 1), "the hidden answer's Enter ended its line");
             tty.set_mode(Mode::Raw, false).unwrap();
             type_text(control, "q");
             assert_eq!(typed(&mut queue), "q");
@@ -560,6 +562,10 @@ fn case(name: &str) {
             type_text(control, "hun");
             std::thread::sleep(SETTLE);
             tty.set_mode(Mode::Cooked, true).unwrap();
+            // The client prints the reason of such an end without a line break of its own when the console ended the question's line
+            // (`QUESTION_READ_ENDS_ITS_LINE`): the Enter that ended the read did, and the console layer says so.
+            assert_eq!(cursor(console.out), (0, y + 1), "the Enter that ended the question's read ended its line");
+            assert!(tty.question_line_ended(), "the console layer says that the question's line was ended");
             type_text(control, "x");
             std::thread::sleep(SETTLE);
             assert!(queue.next_within(AT_ONCE).is_none(), "nothing typed at the question reached the loop");
@@ -767,13 +773,20 @@ fn case(name: &str) {
         "the_control_handler_takes_ctrl_c_and_ctrl_break" => {
             let tty = Tty::new(Arc::new(StdConsole::opened().unwrap())).unwrap();
             let (inputs, mut queue) = queue();
-            let watchdog = Watchdog::start(tty.restorer(), STOP_GRACE, |code| panic!("the watchdog was armed ({code})")).unwrap();
+            // Armed, the watchdog would end the program `grace` after (once it held the console put back, 200 ms at most): it says so
+            // here instead, and the test waits past that.
+            let (alarm, alarms) = mpsc::channel();
+            let watchdog = Watchdog::start(tty.restorer(), Duration::from_millis(300), move |code| {
+                let _ = alarm.send(code);
+            })
+            .unwrap();
             take_over_control_events(ControlEvents::new(inputs, watchdog.clone(), Over::default())).unwrap();
             for event in [CTRL_C_EVENT, CTRL_BREAK_EVENT] {
                 // SAFETY: the event to every process on this console: this one only, which has the handler.
                 assert_ne!(unsafe { GenerateConsoleCtrlEvent(event, 0) }, 0);
                 assert!(matches!(queue.next_within(DONE), Some(Input::Interrupt)), "event {event}");
             }
+            assert_eq!(alarms.recv_timeout(Duration::from_secs(1)), Err(mpsc::RecvTimeoutError::Timeout), "the watchdog was armed");
             watchdog.stand_down();
         }
         other => panic!("no case {other}"),
