@@ -223,8 +223,8 @@ fn linux_args(id: &str, argv: &[String]) -> Option<Vec<String>> {
 /// or, when `new_tab` is true and the terminal supports it (only iTerm2), a new TAB of the
 /// current window (falling back to a new window when none exists).
 /// PURE function. The alias is assumed pre-validated; thin wrapper over `build_launch_command`.
-/// Windows still connects with the system `ssh` (`launch_for`, until phase 3); elsewhere only the tests use it.
-#[cfg(any(windows, test))]
+/// Only the tests use it: every platform connects through `sshelter connect` (`launch_for`).
+#[cfg(test)]
 pub fn build_launch(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
     build_launch_command(terminal_id, &["ssh".to_string(), alias.to_string()], new_tab)
 }
@@ -357,25 +357,37 @@ pub fn build_launch_command(
 
 // ─── What the terminal runs ──────────────────────────────────────────────────
 
-/// `<SSHelter's executable> connect <alias>`: the command the terminal runs to connect through SSHelter's own SSH client (own-ssh spec
-/// §7.4). The alias must be validated first. Not on Windows, which still runs `ssh <alias>` (`launch_for`), but in its tests.
-#[cfg(any(unix, test))]
-pub fn connect_argv(exe: &std::path::Path, alias: &str) -> Vec<String> {
-    vec![exe.to_string_lossy().into_owned(), "connect".to_string(), alias.to_string()]
+/// `<program> connect <alias>`: the command the terminal runs to connect through SSHelter's own SSH client (own-ssh spec §7.3, §7.4).
+/// `program` is SSHelter's executable, or on Windows the console helper next to it (`connect_program`). The alias must be validated first.
+pub fn connect_argv(program: &std::path::Path, alias: &str) -> Vec<String> {
+    vec![program.to_string_lossy().into_owned(), "connect".to_string(), alias.to_string()]
 }
 
-/// The launch for connecting to `alias` in `terminal_id`: `sshelter connect <alias>` on macOS and Linux; on Windows still `ssh <alias>`,
-/// because `sshelter connect` needs a console there, which is phase 3 (spec §13, §16).
+/// The console helper installed next to `sshelter.exe` on Windows (own-ssh spec §7.3; src-tauri/cli-helper). Release `sshelter.exe` is a
+/// GUI program, which a shell does not wait for and a Windows Terminal tab gives no console; the helper is a console program that runs it
+/// with the same arguments and waits for it.
+#[cfg(any(windows, test))]
+const CONSOLE_HELPER: &str = "sshelter-cli.exe";
+
+/// What a Windows terminal runs to connect (own-ssh spec §7.4): the console helper when it is next to SSHelter's executable `exe` (an
+/// installed SSHelter), `exe` itself otherwise (a debug build, which is a console program).
+#[cfg(any(windows, test))]
+fn connect_program(exe: &std::path::Path) -> std::path::PathBuf {
+    let helper = exe.with_file_name(CONSOLE_HELPER);
+    if helper.is_file() {
+        helper
+    } else {
+        exe.to_path_buf()
+    }
+}
+
+/// The launch for connecting to `alias` in `terminal_id`: `sshelter connect <alias>`, on Windows through the console helper when it is
+/// there (`connect_program`). Windows Terminal runs that argv directly and cmd in a new console that stays open (`build_launch_command`).
 pub fn launch_for(terminal_id: &str, alias: &str, new_tab: bool) -> Result<LaunchSpec, AppError> {
-    #[cfg(unix)]
-    {
-        let exe = std::env::current_exe().map_err(|e| AppError::Other(format!("cannot locate SSHelter: {e}")))?;
-        build_launch_command(terminal_id, &connect_argv(&exe, alias), new_tab)
-    }
+    let exe = std::env::current_exe().map_err(|e| AppError::Other(format!("cannot locate SSHelter: {e}")))?;
     #[cfg(windows)]
-    {
-        build_launch(terminal_id, alias, new_tab)
-    }
+    let exe = connect_program(&exe);
+    build_launch_command(terminal_id, &connect_argv(&exe, alias), new_tab)
 }
 
 /// Spawn the launch spec detached, inheriting the environment. Not unit-tested (side effect).
@@ -455,7 +467,8 @@ mod tests {
     /// A new tab of iTerm2 runs the connect command too, in both branches of its script (a tab in the window there is, or a new window).
     #[test]
     fn a_new_tab_in_iterm2_runs_the_connect_command() {
-        let argv = if cfg!(windows) { vec!["ssh".to_string(), "web".to_string()] } else { connect_argv(&std::env::current_exe().unwrap(), "web") };
+        // On Windows too: the test binary has no console helper beside it, so the command names the executable itself.
+        let argv = connect_argv(&std::env::current_exe().unwrap(), "web");
         let command = applescript_escape(&shell_join(&argv));
         let spec = launch_for("iterm2", "web", true).unwrap();
         assert_eq!(spec.program, "osascript");
@@ -485,16 +498,59 @@ mod tests {
         assert_eq!(spec.args.last().unwrap(), r#"tell application "Terminal" to do script "'/Users/o'\\''neil/Apps/SSHelter.app/Contents/MacOS/sshelter' connect web""#);
     }
 
-    /// macOS and Linux connect through `sshelter connect`; Windows keeps `ssh <alias>` until phase 3.
+    /// Every platform connects through `sshelter connect`. On Windows the test binary has no console helper beside it, so the terminal runs
+    /// the executable itself, as it does for a debug build.
     #[test]
-    fn the_launch_runs_sshelter_connect_on_macos_and_linux_and_ssh_on_windows() {
-        let id = if cfg!(windows) { "cmd" } else { "kitty" };
-        let spec = launch_for(id, "web", false).unwrap();
+    fn the_launch_runs_sshelter_connect_on_every_platform() {
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
         if cfg!(windows) {
-            assert_eq!(spec.args, vec!["/c", "start", "", "cmd", "/k", "ssh", "web"]);
+            assert_eq!(launch_for("cmd", "web", false).unwrap().args, ["/c", "start", "", "cmd", "/k", exe.as_str(), "connect", "web"]);
+            assert_eq!(launch_for("wt", "web", true).unwrap().args, ["-w", "0", "nt", exe.as_str(), "connect", "web"]);
         } else {
-            let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
-            assert_eq!(spec.args, vec![exe, "connect".to_string(), "web".to_string()]);
+            assert_eq!(launch_for("kitty", "web", false).unwrap().args, [exe.as_str(), "connect", "web"]);
+        }
+    }
+
+    /// On Windows the terminal runs the console helper when it is next to SSHelter's executable (an installed SSHelter): Windows Terminal
+    /// runs it directly, in a new window or in a new tab of the last one, and cmd starts it in a new console that stays open after it; the
+    /// path with a space in it stays one argument.
+    #[test]
+    fn windows_terminals_run_the_console_helper_next_to_sshelter() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("Program Files").join("SSHelter");
+        std::fs::create_dir_all(&installed).unwrap();
+        let exe = installed.join("sshelter.exe");
+        std::fs::write(&exe, b"").unwrap();
+        std::fs::write(installed.join("sshelter-cli.exe"), b"").unwrap();
+        let argv = connect_argv(&connect_program(&exe), "web");
+        assert_eq!(argv, [installed.join("sshelter-cli.exe").to_string_lossy().as_ref(), "connect", "web"]);
+        assert_the_windows_launches_run(&argv);
+    }
+
+    /// Without the console helper next to it (a debug build, which is a console program itself), the terminal runs SSHelter's executable.
+    #[test]
+    fn without_the_console_helper_windows_terminals_run_sshelter_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let built = dir.path().join("my builds").join("debug");
+        std::fs::create_dir_all(&built).unwrap();
+        let exe = built.join("sshelter.exe");
+        std::fs::write(&exe, b"").unwrap();
+        // A directory by the helper's name is not the helper.
+        std::fs::create_dir(built.join("sshelter-cli.exe")).unwrap();
+        let argv = connect_argv(&connect_program(&exe), "web");
+        assert_eq!(argv, [exe.to_string_lossy().as_ref(), "connect", "web"]);
+        assert_the_windows_launches_run(&argv);
+    }
+
+    /// Both Windows terminals run `argv` as it is: `wt.exe <argv>`, `wt.exe -w 0 nt <argv>` for a new tab, and `cmd /c start "" cmd /k
+    /// <argv>` (cmd has no tabs).
+    fn assert_the_windows_launches_run(argv: &[String]) {
+        let with = |prefix: &[&str]| -> Vec<String> { prefix.iter().map(|s| s.to_string()).chain(argv.iter().cloned()).collect() };
+        assert_eq!(build_launch_command("wt", argv, false).unwrap(), LaunchSpec { program: "wt.exe".into(), args: argv.to_vec() });
+        assert_eq!(build_launch_command("wt", argv, true).unwrap(), LaunchSpec { program: "wt.exe".into(), args: with(&["-w", "0", "nt"]) });
+        let cmd = LaunchSpec { program: "cmd".into(), args: with(&["/c", "start", "", "cmd", "/k"]) };
+        for new_tab in [false, true] {
+            assert_eq!(build_launch_command("cmd", argv, new_tab).unwrap(), cmd, "new_tab: {new_tab}");
         }
     }
 
