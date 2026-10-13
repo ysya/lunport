@@ -144,8 +144,21 @@ struct ReadState {
     reading: Option<Mode>,
     /// The question's line was read (or Ctrl-C ended it): nothing more is read until the next mode.
     line_read: bool,
+    /// The console has ended the line of the question in progress: a line read of it gave the line's end, or a change of mode ended its
+    /// read (a line read that ends moves the console to the next line, without echo too: measured). Not yet, from the moment a question's
+    /// mode is set.
+    question_line_ended: bool,
     /// The `Tty` is gone: no read is made any more.
     closed: bool,
+}
+
+/// What a change of mode's `Reads::pause` did.
+struct Paused {
+    /// A read in progress was ended: its Enter may still be in the console (the read ended on a key typed at that moment), and the caller
+    /// throws away what the console holds.
+    woke: bool,
+    /// The change leaves a question whose line the console has ended (`Tty::question_line_ended`).
+    question_line_ended: bool,
 }
 
 impl Reads {
@@ -159,33 +172,41 @@ impl Reads {
     /// read (another program's Ctrl-C cancels a question without ending its read): a question's line read still holds what was typed for
     /// it, a part of a password, and would show what is typed next once the console of the start echoes it. A change to cooked mode that
     /// keeps what was typed does not end a raw read: cooked mode reads nothing, and what comes after it is the end of the program (the read
-    /// ends with it) or another change, which ends it then. Whether a read was ended: its Enter may still be in the console (the read ended
-    /// on a key typed at that moment), and the caller throws away what the console holds.
-    fn pause(&self, next: Mode, discard_input: bool, wake: impl FnOnce()) -> bool {
+    /// ends with it) or another change, which ends it then. A question's line read that ends moves the console to the next line, and the
+    /// change says whether the question it leaves has its line ended (it has not when no line read of it ended: none was in progress, or
+    /// the console did not take the Enter).
+    fn pause(&self, next: Mode, discard_input: bool, wake: impl FnOnce()) -> Paused {
         let mut state = self.state();
+        let leaves_a_question = matches!(state.mode, Some(Mode::Prompt { .. }));
         state.generation += 1;
         state.mode = None;
         state.line_read = false;
-        let leaves_a_raw_read = next == Mode::Cooked && !discard_input && state.reading == Some(Mode::Raw);
-        if state.reading.is_none() || leaves_a_raw_read {
-            return false;
-        }
-        wake();
-        let deadline = Instant::now() + READ_END_WAIT;
-        while state.reading.is_some() {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
+        let in_progress = state.reading;
+        let woke = in_progress.is_some() && !(next == Mode::Cooked && !discard_input && in_progress == Some(Mode::Raw));
+        if woke {
+            wake();
+            let deadline = Instant::now() + READ_END_WAIT;
+            while state.reading.is_some() {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                state = self.changed.wait_timeout(state, left).unwrap_or_else(PoisonError::into_inner).0;
             }
-            state = self.changed.wait_timeout(state, left).unwrap_or_else(PoisonError::into_inner).0;
+            if matches!(in_progress, Some(Mode::Prompt { .. })) && state.reading.is_none() {
+                state.question_line_ended = true;
+            }
         }
-        true
+        Paused { woke, question_line_ended: leaves_a_question && state.question_line_ended }
     }
 
-    /// The mode is set: reads go on in it, when it is one that reads.
+    /// The mode is set: reads go on in it, when it is one that reads. A question's line is not ended yet.
     fn resume(&self, mode: Mode) {
         let mut state = self.state();
         state.mode = (mode != Mode::Cooked && !state.closed).then_some(mode);
+        if matches!(mode, Mode::Prompt { .. }) {
+            state.question_line_ended = false;
+        }
         self.changed.notify_all();
     }
 
@@ -275,6 +296,7 @@ impl ConsoleKeys {
                 let units = &buf[..count.min(buf.len())];
                 // A line read gives the line with its end (CR LF); a line longer than `buf` comes in more reads.
                 state.line_read = question && units.last() == Some(&u16::from(b'\n'));
+                state.question_line_ended |= state.line_read;
                 deliver(units, mode);
                 KeysRead::Read
             }
@@ -341,6 +363,8 @@ struct Console {
     changed: AtomicBool,
     /// The console refused xterm's line endings once: raw mode's output goes without them from then on.
     plain_line_endings: AtomicBool,
+    /// The last change of mode left a question whose line the console had ended (`Tty::question_line_ended`).
+    question_line_ended: AtomicBool,
     /// The reads of the keys (`ConsoleKeys`), which no change of mode lets span it.
     reads: Reads,
 }
@@ -439,6 +463,7 @@ impl Tty {
             now: Mutex::new(None),
             changed: AtomicBool::new(false),
             plain_line_endings: AtomicBool::new(false),
+            question_line_ended: AtomicBool::new(false),
             reads: Reads::default(),
         };
         Ok(Tty { console: Arc::new(console) })
@@ -470,15 +495,16 @@ impl Tty {
         let console = &self.console;
         let mut now = console.now();
         // No read spans the change (the module's doc): the read in progress is ended first, and the next waits for the new mode.
-        let woke = console.reads.pause(mode, discard_input, || {
+        let paused = console.reads.pause(mode, discard_input, || {
             let _ = console.api.wake();
         });
+        console.question_line_ended.store(paused.question_line_ended, Ordering::SeqCst);
         let set = (|| -> io::Result<()> {
             if now.is_none() {
                 console.take_over()?;
                 *now = Some(Mode::Cooked);
             }
-            if discard_input || woke {
+            if discard_input || paused.woke {
                 // What was typed is thrown away when the console can (after a read was ended, the program's own Enter too, which no
                 // read of the new mode may take); one that went away may not, and the mode is set all the same (the end of the program
                 // must not stop at that).
@@ -496,6 +522,15 @@ impl Tty {
 
     pub fn size(&self) -> Option<(u16, u16)> {
         self.console.api.size()
+    }
+
+    /// Whether the last change of mode left a question whose line the console had ended (`QUESTION_READ_ENDS_ITS_LINE`): a line read of
+    /// that question ended, on the Enter typed for it, or on the one with which the change ended the read. Not when the question's prompt is
+    /// still the last line: no line read of it ended (none was in progress: the keys thread is gone; or the console did not take the
+    /// Enter), and not when the last change did not leave a question. The client starts the line of what it says next when the console has
+    /// not (`Action::EndQuestionLine`).
+    pub fn question_line_ended(&self) -> bool {
+        self.console.question_line_ended.load(Ordering::SeqCst)
     }
 
     /// Back to the four settings of the start, if the console was taken over.
@@ -1490,6 +1525,46 @@ mod tests {
             "the read is ended before the mode of the start (which echoes) is set"
         );
         assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None), "what the question's read held is thrown away");
+    }
+
+    /// Final wave (F11): a change that leaves a question says whether the console has ended the question's line. It has when a line read of
+    /// the question ended: on the Enter typed for it (the answer was read), or on the one with which the change ended the read. It has not
+    /// when no line read of it ended (none was in progress: the keys thread is gone; or the console refused the Enter), and a change that
+    /// leaves no question says no.
+    #[test]
+    fn a_change_that_leaves_a_question_says_whether_the_console_ended_its_line() {
+        let hidden = Mode::Prompt { echo: false };
+        let console = FakeConsole::new();
+        let mut tty = Tty::new(console.clone()).unwrap();
+        tty.set_mode(hidden, true).unwrap();
+        let read = reading(tty.keys());
+        in_the_read(&console);
+        tty.set_mode(Mode::Cooked, true).unwrap();
+        assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None));
+        assert!(tty.question_line_ended(), "the change ended the question's read");
+
+        tty.set_mode(hidden, true).unwrap();
+        console.type_text("pw\r\n");
+        assert_eq!(reading(tty.keys()).recv_timeout(SOON).unwrap(), read_as("pw\r\n", hidden));
+        tty.set_mode(Mode::Cooked, true).unwrap();
+        assert!(tty.question_line_ended(), "the answer's Enter");
+
+        tty.set_mode(hidden, true).unwrap();
+        tty.set_mode(Mode::Cooked, true).unwrap();
+        assert!(!tty.question_line_ended(), "no read was in progress: the prompt is still the last line");
+
+        tty.set_mode(hidden, true).unwrap();
+        let read = reading(tty.keys());
+        in_the_read(&console);
+        console.fail(|call| *call == Call::Wake);
+        tty.set_mode(Mode::Cooked, true).unwrap();
+        assert!(!tty.question_line_ended(), "the console refused the Enter: the read went on");
+        console.type_text("x");
+        assert_eq!(read.recv_timeout(SOON).unwrap(), (KeysRead::Stale, None));
+
+        let (_, mut tty) = raw_console();
+        tty.set_mode(Mode::Cooked, false).unwrap();
+        assert!(!tty.question_line_ended(), "no question was left");
     }
 
     /// Fix round 1: an Enter of the program's own that the read in progress did not take (it ended on a key typed at that moment) must not

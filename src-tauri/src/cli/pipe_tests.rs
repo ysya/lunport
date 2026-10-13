@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::console::fake::Call;
 use super::console::{input_mode, ENABLE_LINE_INPUT};
 use super::console_inputs::CTRL_CLOSE_EVENT;
 use super::run::{console_keys_thread, queue, run, watch_size, ControlEvents, Output, Over, Watchdog, STOP_GRACE};
@@ -49,6 +50,8 @@ impl Shared {
 
 struct Setup {
     engine: Arc<FakeEngine>,
+    /// The broker the run talks to (`end_all`: SSHelter quits).
+    broker: Arc<Broker>,
     console: Arc<FakeConsole>,
     stdout: Shared,
     stderr: Shared,
@@ -106,7 +109,7 @@ fn connect(engine: FakeEngine, directory: FakeDirectory, keychain: MemKeychain, 
             (code, restored)
         })
     };
-    Setup { engine, console, stdout, stderr, events, fired, run, _dir: dir }
+    Setup { engine, broker, console, stdout, stderr, events, fired, run, _dir: dir }
 }
 
 /// `web` is pinned and its password is saved: it connects without a question.
@@ -128,11 +131,11 @@ fn raw(console: &FakeConsole) -> bool {
 /// of the setup. The fake console goes away after it, so that the keys thread, which waits in its read, ends too.
 fn finish(setup: Setup) -> (i32, bool, Setup) {
     eventually("the run to end", 10, || setup.run.is_finished());
-    let Setup { engine, console, stdout, stderr, events, fired, run, _dir } = setup;
+    let Setup { engine, broker, console, stdout, stderr, events, fired, run, _dir } = setup;
     let (code, restored) = run.join().unwrap();
     console.go_away();
     assert!(!fired.load(Ordering::SeqCst), "the run ended without the watchdog");
-    (code, restored, Setup { engine, console, stdout, stderr, events, fired, run: std::thread::spawn(|| (0, true)), _dir })
+    (code, restored, Setup { engine, broker, console, stdout, stderr, events, fired, run: std::thread::spawn(|| (0, true)), _dir })
 }
 
 /// Spec §7.3 on Windows: over the pipe a shell opens, the console goes raw, what is typed on it (and what was typed before the shell
@@ -175,6 +178,30 @@ fn a_question_is_asked_on_the_console_and_the_answer_gets_in() {
     // No line break of the CLI's own after the hidden answer: the console moved to the next line on Enter (`QUESTION_READ_ENDS_ITS_LINE`).
     assert_eq!((code, setup.stderr.text()), (0, "deploy@web's password: ".to_string()));
     assert!(restored, "the console is as it was");
+}
+
+/// Final wave (F11): SSHelter quits while a hidden question waits for its answer. The console layer ends the question's line read with an
+/// Enter of its own, on which a real console moves to the next line (`QUESTION_READ_ENDS_ITS_LINE`): the reason follows the prompt with no
+/// line break of the CLI's own (this fake console has no cursor). A console that refuses that Enter leaves the question's line read going,
+/// and its prompt the last line: the CLI starts the next line itself before the reason.
+#[test]
+fn an_end_under_a_question_starts_the_reason_on_a_line_of_its_own_when_the_console_did_not() {
+    for refused in [false, true] {
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let engine = FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right")));
+        let setup = connect(engine, directory, MemKeychain::default(), "");
+        eventually("the question", 10, || setup.stderr.text() == "deploy@web's password: ");
+        eventually("the question's line read", 10, || setup.console.reads_in_progress() == 1);
+        if refused {
+            setup.console.fail(|call| *call == Call::Wake);
+        }
+        setup.broker.end_all(Duration::from_secs(5));
+        let (code, restored, setup) = finish(setup);
+        let line_break = if refused { "\n" } else { "" };
+        let said = format!("deploy@web's password: {line_break}SSHelter quit, so the connection to web was closed.\n");
+        assert_eq!((code, setup.stderr.text()), (255, said), "the console refused the Enter: {refused}");
+        assert!(restored, "the console is as it was");
+    }
 }
 
 /// The console closed (`CTRL_CLOSE_EVENT`) during the shell: the session ends as SIGHUP ends it (129), the broker is told, the console is

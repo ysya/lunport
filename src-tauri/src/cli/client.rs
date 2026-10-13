@@ -77,6 +77,10 @@ pub enum Action {
     Stderr(String),
     /// Set the terminal's mode; `true` throws away what was typed ahead first.
     Mode(Mode, bool),
+    /// After a change of mode that left a question: a line break of the CLI's own, unless the terminal ended the question's line itself,
+    /// which only the change of mode can tell (the Windows console ends it when a line read of the question ends:
+    /// `QUESTION_READ_ENDS_ITS_LINE`, `Tty::question_line_ended`). Only where the terminal can end the line itself.
+    EndQuestionLine,
     Exit(i32),
 }
 
@@ -89,6 +93,7 @@ impl fmt::Debug for Action {
             Action::Stdout(bytes) => f.debug_tuple("Stdout").field(bytes).finish(),
             Action::Stderr(text) => f.debug_tuple("Stderr").field(text).finish(),
             Action::Mode(mode, discard_input) => f.debug_tuple("Mode").field(mode).field(discard_input).finish(),
+            Action::EndQuestionLine => f.write_str("EndQuestionLine"),
             Action::Exit(code) => f.debug_tuple("Exit").field(code).finish(),
         }
     }
@@ -201,7 +206,10 @@ impl Client {
             // The broker sees the stream end when the program exits: no `close` is needed.
             Input::Unreadable => self.finish(false, Some(UNREADABLE.to_string()), 255),
             Input::Stdin(bytes) => self.typed(&bytes),
-            Input::StdinEnd | Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => self.answer(None),
+            // The end of input at a question is a line of its own on Windows (Ctrl-Z and Enter: the console ended the line), Ctrl-D on
+            // Unix (the terminal did not); Ctrl-C does not end the line.
+            Input::StdinEnd if matches!(self.phase, Phase::Asking { .. }) => self.answer(None, QUESTION_READ_ENDS_ITS_LINE),
+            Input::Interrupt if matches!(self.phase, Phase::Asking { .. }) => self.answer(None, false),
             Input::Interrupt => self.finish(true, None, 130),
             Input::StdinEnd => self.finish(true, None, 128 + signal::HUP),
             Input::Resize(cols, rows) => vec![Action::Send(ClientMessage::WindowChange { cols, rows })],
@@ -298,12 +306,15 @@ impl Client {
                 self.typeahead.extend_from_slice(&bytes[..bytes.len().min(room)]);
                 Vec::new()
             }
-            Phase::Asking { line, .. } => {
+            Phase::Asking { line, echo, .. } => {
+                let echo = *echo;
                 keep(line, bytes);
                 match line.iter().position(|byte| *byte == b'\n' || *byte == b'\r') {
                     Some(end) => {
                         let answer = Zeroizing::new(String::from_utf8_lossy(&line[..end]).into_owned());
-                        self.answer(Some(answer))
+                        // The Enter moved the terminal to the next line where it shows the answer, and where the terminal ends a
+                        // question's line whatever it shows (the Windows console); a Unix terminal that hides the answer did not move.
+                        self.answer(Some(answer), echo || QUESTION_READ_ENDS_ITS_LINE)
                     }
                     None => Vec::new(),
                 }
@@ -313,13 +324,14 @@ impl Client {
         }
     }
 
-    /// Ends the question on the terminal: with the answer, or cancelled (`None`).
+    /// Ends the question on the terminal: with the answer, or cancelled (`None`). `line_ended`: what ended it moved the terminal to the
+    /// next line; otherwise the CLI starts the next line itself.
     ///
     /// The password goes on in the `Zeroizing` string it was collected in, inside `Action::Answer`; whoever writes the action out
     /// (`run.rs`) writes it from there, and it is wiped when the action is dropped.
-    fn answer(&mut self, answer: Option<Zeroizing<String>>) -> Vec<Action> {
-        let (question_id, echo, after) = match std::mem::replace(&mut self.phase, Phase::Connecting) {
-            Phase::Asking { question_id, echo, after, .. } => (question_id, echo, after),
+    fn answer(&mut self, answer: Option<Zeroizing<String>>, line_ended: bool) -> Vec<Action> {
+        let (question_id, after) = match std::mem::replace(&mut self.phase, Phase::Connecting) {
+            Phase::Asking { question_id, after, .. } => (question_id, after),
             other => {
                 // No question is on the terminal: there is nothing to answer, and nothing changes.
                 self.phase = other;
@@ -328,9 +340,7 @@ impl Client {
         };
         self.phase = if after == Mode::Raw { Phase::Open } else { Phase::Connecting };
         let mut actions = Vec::new();
-        if (!echo && !QUESTION_READ_ENDS_ITS_LINE) || answer.is_none() {
-            // The Enter of a hidden answer did not move to the next line (on a Unix terminal; the Windows console moves there itself), nor
-            // did the Ctrl-C.
+        if !line_ended {
             actions.push(Action::Stderr("\n".to_string()));
         }
         actions.push(match answer {
@@ -347,7 +357,9 @@ impl Client {
     fn finish(&mut self, close: bool, reason: Option<String>, code: i32) -> Vec<Action> {
         // The cursor is not at the start of a line while the shell is open (it can be anywhere in what the shell wrote), nor while a
         // question's prompt is on it, whatever the terminal was before the question: unless the terminal ends the question's line when its
-        // read ends, as the Windows console does when this end throws what was typed away (`QUESTION_READ_ENDS_ITS_LINE`).
+        // read ends, as the Windows console does when this end throws what was typed away (`QUESTION_READ_ENDS_ITS_LINE`). Whether it did
+        // is known only once the mode was changed (no line read of the question may have been in progress), so there the loop starts the
+        // line when the console has not (`Action::EndQuestionLine`).
         let mid_line = match self.phase {
             Phase::Open => true,
             Phase::Asking { .. } => !QUESTION_READ_ENDS_ITS_LINE,
@@ -363,6 +375,9 @@ impl Client {
             actions.push(Action::Send(ClientMessage::Close));
         }
         if let Some(reason) = reason {
+            if at_a_question && QUESTION_READ_ENDS_ITS_LINE {
+                actions.push(Action::EndQuestionLine);
+            }
             actions.push(Action::Stderr(if mid_line { format!("\n{reason}\n") } else { format!("{reason}\n") }));
         }
         actions.push(Action::Exit(code));
@@ -481,15 +496,17 @@ mod tests {
         );
     }
 
+    /// Ctrl-C at a question, and the end of input (Ctrl-D on Unix, a line that starts with Ctrl-Z on Windows), cancel it. The CLI ends the
+    /// question's line itself after Ctrl-C, and after Ctrl-D (the terminal did not); not after Ctrl-Z, whose Enter ended the line already
+    /// (the Windows console ends a question's line when its line read ends: `QUESTION_READ_ENDS_ITS_LINE`).
     #[test]
     fn ctrl_c_or_ctrl_d_at_a_question_cancels_it() {
-        for input in [Input::Interrupt, Input::StdinEnd] {
+        for (input, line_ended) in [(Input::Interrupt, false), (Input::StdinEnd, QUESTION_READ_ENDS_ITS_LINE)] {
             let mut client = started();
             client.handle(question("q1", QuestionKind::Passphrase, "Enter the passphrase for the key laptop: ", false));
-            assert_eq!(
-                client.handle(input),
-                [Action::Stderr("\n".into()), Action::Send(ClientMessage::Answer { question_id: "q1".into(), value: None, cancel: true }), Action::Mode(Mode::Cooked, false)]
-            );
+            let mut expected = if line_ended { vec![] } else { vec![Action::Stderr("\n".into())] };
+            expected.extend([cancelled("q1"), Action::Mode(Mode::Cooked, false)]);
+            assert_eq!(client.handle(input), expected);
         }
     }
 
@@ -620,10 +637,20 @@ mod tests {
         actions
     }
 
-    /// What the CLI says at an end that comes under a question: on a line of its own, which it starts itself unless the terminal ended
-    /// the question's line (the Windows console does, when the end ends the question's read: `QUESTION_READ_ENDS_ITS_LINE`).
-    fn under_a_question(text: &str) -> Action {
-        Action::Stderr(if QUESTION_READ_ENDS_ITS_LINE { format!("{text}\n") } else { format!("\n{text}\n") })
+    /// What the CLI says at an end that comes under a question: on a line of its own, which it starts itself; on a terminal that ends the
+    /// question's line when a line read of it ends (the Windows console: `QUESTION_READ_ENDS_ITS_LINE`), only if no line read ended, which
+    /// only the change of mode tells (`Action::EndQuestionLine`).
+    fn under_a_question(text: &str) -> Vec<Action> {
+        if QUESTION_READ_ENDS_ITS_LINE {
+            vec![Action::EndQuestionLine, Action::Stderr(format!("{text}\n"))]
+        } else {
+            vec![Action::Stderr(format!("\n{text}\n"))]
+        }
+    }
+
+    /// `parts`, one after the other.
+    fn joined(parts: Vec<Vec<Action>>) -> Vec<Action> {
+        parts.into_iter().flatten().collect()
     }
 
     fn cancelled(id: &str) -> Action {
@@ -749,12 +776,19 @@ mod tests {
             client.handle(error(kinds::AUTH, "Authentication for web was abandoned (the password prompt timed out)."));
             assert_eq!(
                 client.handle(exited()),
-                [Action::Mode(Mode::Cooked, true), under_a_question("Authentication for web was abandoned (the password prompt timed out)."), Action::Exit(255)]
+                joined(vec![
+                    vec![Action::Mode(Mode::Cooked, true)],
+                    under_a_question("Authentication for web was abandoned (the password prompt timed out)."),
+                    vec![Action::Exit(255)],
+                ])
             );
         }
         let mut client = started();
         client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
-        assert_eq!(client.handle(Input::Closed), [Action::Mode(Mode::Cooked, true), under_a_question("The connection to SSHelter ended."), Action::Exit(255)]);
+        assert_eq!(
+            client.handle(Input::Closed),
+            joined(vec![vec![Action::Mode(Mode::Cooked, true)], under_a_question("The connection to SSHelter ended."), vec![Action::Exit(255)]])
+        );
     }
 
     /// The actions with which the session ends when `inputs` come while a question is on the terminal (`echo` or not; asked while connecting,
@@ -780,17 +814,18 @@ mod tests {
             ("SIGTERM", || vec![Input::Stop(signal::TERM)], vec![Action::Send(ClientMessage::Close), Action::Exit(143)]),
             ("SIGHUP, or the terminal went away", || vec![Input::Stop(signal::HUP)], vec![Action::Send(ClientMessage::Close), Action::Exit(129)]),
             ("SIGQUIT", || vec![Input::Stop(signal::QUIT)], vec![Action::Send(ClientMessage::Close), Action::Exit(131)]),
-            ("a thread of the program failed", || vec![Input::Failed], vec![Action::Send(ClientMessage::Close), on_its_own_line(THREAD_FAILED), Action::Exit(255)]),
-            ("the broker went away", || vec![Input::Closed], vec![on_its_own_line("The connection to SSHelter ended."), Action::Exit(255)]),
+            ("a thread of the program failed", || vec![Input::Failed], joined(vec![vec![Action::Send(ClientMessage::Close)], on_its_own_line(THREAD_FAILED), vec![Action::Exit(255)]])),
+            ("the broker went away", || vec![Input::Closed], joined(vec![on_its_own_line("The connection to SSHelter ended."), vec![Action::Exit(255)]])),
             ("the broker ended the session", || vec![exited()], vec![Action::Exit(255)]),
-            ("the broker's error, then the end", || vec![error(kinds::AUTH, ABANDONED), exited()], vec![on_its_own_line(ABANDONED), Action::Exit(255)]),
-            ("the connection was lost", || vec![event(Event::Disconnected { reason: LOST.into() }), exited()], vec![on_its_own_line(LOST), Action::Exit(255)]),
+            ("the broker's error, then the end", || vec![error(kinds::AUTH, ABANDONED), exited()], joined(vec![on_its_own_line(ABANDONED), vec![Action::Exit(255)]])),
+            ("the connection was lost", || vec![event(Event::Disconnected { reason: LOST.into() }), exited()], joined(vec![on_its_own_line(LOST), vec![Action::Exit(255)]])),
         ];
         for (how, inputs, rest) in &cases {
             let mut expected = vec![Action::Mode(Mode::Cooked, true)];
             expected.extend(rest.iter().map(|action| match action {
                 Action::Send(message) => Action::Send(message.clone()),
                 Action::Stderr(text) => Action::Stderr(text.clone()),
+                Action::EndQuestionLine => Action::EndQuestionLine,
                 Action::Exit(code) => Action::Exit(*code),
                 other => panic!("not in an end: {other:?}"),
             }));
@@ -850,10 +885,10 @@ mod tests {
     #[test]
     fn an_answer_with_no_question_on_the_terminal_does_nothing() {
         let mut client = opened();
-        assert!(client.answer(None).is_empty());
+        assert!(client.answer(None, false).is_empty());
         assert!(matches!(client.phase, Phase::Open), "the open shell stays open");
         let mut client = started();
-        assert!(client.answer(Some(Zeroizing::new("x".to_string()))).is_empty());
+        assert!(client.answer(Some(Zeroizing::new("x".to_string())), true).is_empty());
         assert!(matches!(client.phase, Phase::Connecting));
     }
 
