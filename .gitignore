@@ -14,6 +14,8 @@ target/
 **/*.rs.bk
 # Tauri build-generated capability/ACL schemas (regenerated on build)
 src-tauri/gen/
+# The console helper sshelter-cli.exe, copied here by the Windows release builds for bundle.externalBin
+src-tauri/binaries/
 
 # Tauri / signing keys — NEVER commit
 *.local

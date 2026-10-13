@@ -32,6 +32,10 @@ permissions:
 jobs:
   build:
     runs-on: ${{ inputs.platform }}
+    env:
+      # Added to the args of a Windows build that has the console helper, as the Windows leg of release.yml has it: bundles sshelter-cli.exe
+      # (step "Build the console helper") next to sshelter.exe.
+      WINDOWS_HELPER_ARGS: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}'
     steps:
       # Betas have a dash in their tag (vX.Y.Z-N). This workflow builds the tag's commit without
       # the beta version stamp (scripts/set-app-version.mjs, applied by beta.yml only), so its
@@ -79,6 +83,19 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      # The console helper sshelter-cli.exe, as in release.yml (its comment says why it is built this way). A tag from before the helper
+      # has no src-tauri/cli-helper: its Windows installers are built as they were then.
+      - name: Build the console helper (Windows)
+        id: helper
+        if: inputs.platform == 'windows-latest' && hashFiles('src-tauri/cli-helper/Cargo.toml') != ''
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --locked --manifest-path src-tauri/cli-helper/Cargo.toml
+          mkdir -p src-tauri/binaries
+          cp src-tauri/cli-helper/target/release/sshelter-cli.exe src-tauri/binaries/sshelter-cli-x86_64-pc-windows-msvc.exe
+
       - name: Install frontend dependencies
         run: pnpm install
 
@@ -92,4 +109,4 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ inputs.tag }}
-          args: ${{ inputs.args }}
+          args: ${{ inputs.args }} ${{ steps.helper.outcome == 'success' && env.WINDOWS_HELPER_ARGS || '' }}

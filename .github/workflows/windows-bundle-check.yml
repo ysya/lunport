@@ -1,0 +1,110 @@
+# Builds the Windows NSIS installer the way the Windows leg of beta.yml does — the console helper sshelter-cli.exe (src-tauri/cli-helper)
+# built first and bundled through `tauri build --config` (bundle.externalBin) — and checks the result: the installer holds
+# sshelter-cli.exe next to sshelter.exe, the helper needs no VC++ runtime, and the two run `sshelter connect` together (the usage and its
+# exit code 2 come back through the helper). Run by hand before a beta (own-ssh plan 1b-3). It publishes nothing: no release and no
+# updater artifacts, so no signing key. Not copied from beta.yml: the version stamp (this build keeps the version in the repository) and
+# the sync relay check (the relay URL does not change the bundle).
+name: windows bundle check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nsis:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # As in beta.yml (its comment says why it is built this way).
+      - name: Build the console helper (Windows)
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --locked --manifest-path src-tauri/cli-helper/Cargo.toml
+          mkdir -p src-tauri/binaries
+          cp src-tauri/cli-helper/target/release/sshelter-cli.exe src-tauri/binaries/sshelter-cli-x86_64-pc-windows-msvc.exe
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # The Windows leg's args of beta.yml, the NSIS installer only, and no updater artifacts (they need the signing key). No tagName:
+      # tauri-action builds and uploads nothing.
+      - name: Build the NSIS installer
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: --bundles nsis --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      # 7-Zip (on the runner image) reads NSIS installers: every file the installer writes, by the directory it writes it to.
+      - name: The installer holds sshelter-cli.exe next to sshelter.exe
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { throw "expected one NSIS installer, found $($installers.Count): $($installers.Name -join ', ')" }
+          $installer = $installers[0].FullName
+          $listing = & 7z l -slt $installer
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip could not list $installer (exit $LASTEXITCODE)" }
+          $files = @($listing | Where-Object { $_.StartsWith('Path = ') -and $_ -ne "Path = $installer" } | ForEach-Object {
+            $path = $_.Substring('Path = '.Length)
+            $cut = $path.LastIndexOfAny([char[]]'\/')
+            [pscustomobject]@{ Directory = $(if ($cut -lt 0) { '' } else { $path.Substring(0, $cut) }); Name = $path.Substring($cut + 1); Path = $path }
+          })
+          Write-Output "$installer holds:"
+          $files | ForEach-Object { Write-Output "  $($_.Path)" }
+          $helper = @($files | Where-Object Name -eq 'sshelter-cli.exe' | ForEach-Object Directory)
+          $app = @($files | Where-Object Name -eq 'sshelter.exe' | ForEach-Object Directory)
+          if ($helper.Count -eq 0) { throw 'the installer has no sshelter-cli.exe' }
+          if ($app.Count -eq 0) { throw 'the installer has no sshelter.exe' }
+          if (@($helper | Where-Object { $app -contains $_ }).Count -eq 0) {
+            throw "sshelter-cli.exe ($($helper -join ', ')) is not in the directory of sshelter.exe ($($app -join ', '))"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_INSTALLER=$installer"
+          Write-Output 'sshelter-cli.exe is next to sshelter.exe.'
+          exit 0
+
+      # The two programs as the installer has them, side by side: the helper must start on a Windows without the VC++ runtime (the
+      # runner has one, so the helper's imports are read rather than trusting a start here), and `sshelter-cli.exe connect` (no alias) has
+      # to bring back the usage of the GUI sshelter.exe and its exit code 2.
+      - name: The installer's two programs run sshelter connect
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'installed SSHelter'
+          & 7z e $env:SSHELTER_INSTALLER "-o$dir" sshelter.exe sshelter-cli.exe -r -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7-Zip could not extract the two programs (exit $LASTEXITCODE)" }
+          $helper = Join-Path $dir 'sshelter-cli.exe'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $dumpbin = @(& $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe')[0]
+          if (-not $dumpbin) { throw 'dumpbin.exe not found (vswhere)' }
+          $imports = & $dumpbin /nologo /dependents $helper | Out-String
+          Write-Output $imports
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin could not read $helper (exit $LASTEXITCODE)" }
+          if ($imports -match '(?i)vcruntime|msvcp') { throw 'sshelter-cli.exe needs the VC++ runtime: it was not built with +crt-static' }
+          # Each line the programs wrote, as text (2>&1 hands stderr's lines over as error records).
+          $said = (& $helper connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
+          $code = $LASTEXITCODE
+          Write-Output "sshelter-cli.exe connect exited with $code and said:" $said
+          if ($code -ne 2 -or $said -notmatch 'usage: sshelter connect <alias>') { throw 'expected the usage of sshelter connect and exit code 2' }
+          exit 0
