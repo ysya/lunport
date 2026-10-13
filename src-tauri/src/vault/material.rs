@@ -1,5 +1,6 @@
 //! 私鑰的解析、解密與簽章(金鑰保管庫 spec §5.2、§5.5、§15)。只收 OpenSSH 格式。`ssh-key` 0.6.7 的 RSA 簽章有錯(組私鑰時把 `p` 傳了兩次),
-//! RSA 改用 `rsa` 套件從 n、e、d、p、q 組私鑰;Ed25519 與 ECDSA 用 `ssh-key` 自己的簽章。解開的私鑰只在記憶體,`ssh-key` 的私密欄位 drop 時清掉。
+//! RSA 改用 `rsa` 套件從 n、e、d、p、q 組私鑰;Ed25519 與 ECDSA 用 `ssh-key` 自己的簽章。`ssh-key` 0.6.7 也讀不懂純量短了的 ECDSA 金鑰(OpenSSH 省掉 mpint 的
+//! 前導零),`parse` 與 `open` 的解密在它讀不懂時交給 `short_scalar` 補零再讀。解開的私鑰只在記憶體,`ssh-key` 的私密欄位 drop 時清掉。
 
 use rsa::signature::{RandomizedSigner, SignatureEncoding};
 use ssh_encoding::Encode;
@@ -8,6 +9,7 @@ use ssh_key::public::KeyData;
 use ssh_key::{Algorithm, PrivateKey, PublicKey};
 
 use crate::error::AppError;
+use crate::vault::short_scalar;
 
 pub const SSH_AGENT_RSA_SHA2_256: u32 = 0x02;
 pub const SSH_AGENT_RSA_SHA2_512: u32 = 0x04;
@@ -81,9 +83,16 @@ pub fn unsupported_cipher(private_key: &str) -> Option<String> {
     PrivateKey::from_openssh(private_key).ok().and_then(|key| unsupported_cipher_of(&key))
 }
 
-/// 解析私鑰原文;有 passphrase 的用 `passphrase` 解開。
+/// 解析私鑰原文,不解密(加密的金鑰解析得了,私鑰段還是密文)。`ssh-key` 讀不懂、但只是沒有加密的 ECDSA 金鑰純量短了的,由 `short_scalar` 補零再讀;
+/// 其他讀不懂的回 None。保管庫裡讀私鑰的地方(`open`、`export::export_text`)都走這裡,免得一把金鑰 agent 簽得了、匯出卻說讀不懂。
+pub fn parse(private_key: &str) -> Option<PrivateKey> {
+    PrivateKey::from_openssh(private_key).ok().or_else(|| short_scalar::parse(private_key))
+}
+
+/// 解析私鑰原文;有 passphrase 的用 `passphrase` 解開。`ssh-key` 用對的 passphrase 也解不開純量短了的 ECDSA 金鑰,所以解不開時再讓 `short_scalar` 試一次,
+/// 它也不行才是 `WrongPassphrase`。
 pub fn open(private_key: &str, passphrase: Option<&str>) -> Result<Material, OpenError> {
-    let key = PrivateKey::from_openssh(private_key).map_err(|_| OpenError::Unreadable)?;
+    let key = parse(private_key).ok_or(OpenError::Unreadable)?;
     if let Some(cipher) = unsupported_cipher_of(&key) {
         return Err(OpenError::UnsupportedCipher(cipher));
     }
@@ -91,7 +100,11 @@ pub fn open(private_key: &str, passphrase: Option<&str>) -> Result<Material, Ope
         return Ok(Material { key });
     }
     let Some(passphrase) = passphrase else { return Err(OpenError::NeedsPassphrase) };
-    key.decrypt(passphrase).map(|key| Material { key }).map_err(|_| OpenError::WrongPassphrase)
+    key.decrypt(passphrase)
+        .ok()
+        .or_else(|| short_scalar::decrypt(private_key, passphrase))
+        .map(|key| Material { key })
+        .ok_or(OpenError::WrongPassphrase)
 }
 
 fn signing_failed(e: impl std::fmt::Display) -> AppError {
@@ -186,6 +199,38 @@ mod tests {
             let blob = material.sign(b"hello", 0).unwrap();
             verify(public, b"hello", &blob);
         }
+    }
+
+    /// OpenSSH 把 ECDSA 純量寫成 mpint,前導零省掉後比曲線短的金鑰(`ssh-keygen` 產生的 P-256、P-384 每 256 把有 1 把,P-521 每 4 把有 1 把)
+    /// `ssh-key` 0.6.7 讀不懂(`length invalid`),agent 以前跟著說讀不懂;`short_scalar` 補零。簽章驗得過,表示補回去的純量就是原本那個。
+    #[test]
+    fn an_ecdsa_key_whose_scalar_lost_its_leading_zero_opens_and_signs() {
+        for (what, private, public) in [
+            ("p256", test_keys::ecdsa_short_p256(), test_keys::ECDSA_SHORT_P256_PUBLIC),
+            ("p384", test_keys::ecdsa_short_p384(), test_keys::ECDSA_SHORT_P384_PUBLIC),
+            ("p521", test_keys::ecdsa_short_p521(), test_keys::ECDSA_SHORT_P521_PUBLIC),
+        ] {
+            assert!(PrivateKey::from_openssh(&private).is_err(), "{what}: setup: ssh-key 0.6.7 alone can't read it");
+            let material = open(&private, None).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            assert_eq!(material.key_data(), public_key_data(public).unwrap(), "{what}");
+            verify(public, b"hello", &material.sign(b"hello", 0).unwrap());
+            assert!(agent_can_read(&private), "{what}");
+            assert!(!is_encrypted(&private), "{what}");
+        }
+    }
+
+    /// 加密的也一樣:`ssh-key` 用對的 passphrase 解不開純量短了的金鑰,不能當成 passphrase 不對。
+    #[test]
+    fn an_encrypted_ecdsa_key_with_a_short_scalar_still_needs_the_right_passphrase() {
+        let text = test_keys::ecdsa_short_p256_encrypted();
+        assert!(is_encrypted(&text));
+        assert_eq!(unsupported_cipher(&text), None);
+        assert_eq!(open(&text, None).err(), Some(OpenError::NeedsPassphrase));
+        assert_eq!(open(&text, Some("wrong")).err(), Some(OpenError::WrongPassphrase));
+        let material = open(&text, Some("test-passphrase")).unwrap();
+        assert_eq!(material.key_data(), public_key_data(test_keys::ECDSA_SHORT_P256_PUBLIC).unwrap());
+        verify(test_keys::ECDSA_SHORT_P256_PUBLIC, b"x", &material.sign(b"x", 0).unwrap());
+        assert!(agent_can_read(&text));
     }
 
     #[test]
