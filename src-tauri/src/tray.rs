@@ -129,7 +129,8 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
-/// Validate, then launch with the first detected terminal: `sshelter connect <alias>` (own-ssh spec §7.4; `ssh <alias>` on Windows).
+/// Validate, then launch with the first detected terminal: `sshelter connect <alias>` (own-ssh spec §7.4; on Windows through the console
+/// helper `sshelter-cli.exe` when it is next to `sshelter.exe`, `connect::launch_for`).
 fn quick_connect(app: &tauri::AppHandle, alias: &str) -> Result<(), crate::error::AppError> {
     use crate::error::AppError;
 
