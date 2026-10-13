@@ -48,11 +48,11 @@ use windows_sys::Win32::Foundation::{GetLastError, SetLastError, GENERIC_READ, G
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows_sys::Win32::System::Console::{
     FlushConsoleInputBuffer, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP,
-    GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents, GetStdHandle, ReadConsoleOutputCharacterW, ReadConsoleW,
-    SetConsoleCtrlHandler, SetConsoleMode, WriteConsoleInputW, WriteConsoleW, CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_BREAK_EVENT,
-    CTRL_C_EVENT, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, STD_INPUT_HANDLE,
+    GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents, GetStdHandle, ReadConsoleOutputCharacterW, ReadConsoleW, SetConsoleCP,
+    SetConsoleCtrlHandler, SetConsoleMode, SetConsoleOutputCP, WriteConsoleInputW, WriteConsoleW, CONSOLE_SCREEN_BUFFER_INFO, COORD,
+    CTRL_BREAK_EVENT, CTRL_C_EVENT, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
-use windows_sys::Win32::System::Threading::WaitForSingleObject;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess, WaitForSingleObject};
 use windows_sys::Win32::System::IO::CancelIoEx;
 
 use super::client::Input;
@@ -869,7 +869,10 @@ const PAIR_TEST: &str = "cli::real_console_tests::the_pair_in_a_console_of_its_o
 /// - `sshelter-cli.exe connect`: the usage on the console, and 2;
 /// - `sshelter-cli.exe connect web` while SSHelter's session pipe exists and another owner made it (the Administrators group: the CI
 ///   runner is elevated): the refusal on the console, and 1. On the way the pair attached to the console, read its standard handles as a
-///   console (`Tty::new`) and refused the pipe in the broker's connect (it did open that very pipe), and it started no SSHelter.
+///   console (`Tty::new`) and refused the pipe in the broker's connect (it did open that very pipe), and it started no SSHelter;
+/// - the pair's helper next to a stand-in `sshelter.exe` (this test binary) that changes the console and is ended from outside, as the NSIS
+///   installer ends every `sshelter.exe` at an install, an update and an uninstall: once it has ended the helper puts the console's four
+///   settings back, which the program alone leaves changed, and leaves with its exit code.
 ///
 /// A CI step runs it (`--ignored`) with `SSHELTER_TEST_PAIR` naming the pair's directory.
 #[test]
@@ -885,7 +888,11 @@ fn the_pair_in_a_console_of_its_own() {
     }
     // winbase.h: a console of its own for the child.
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    for case in ["the_usage_on_the_console", "a_pipe_another_owner_made_is_refused_on_the_console"] {
+    for case in [
+        "the_usage_on_the_console",
+        "a_pipe_another_owner_made_is_refused_on_the_console",
+        "the_helper_puts_back_the_console_a_killed_program_changed",
+    ] {
         let said = rerun_alone_with(PAIR_TEST, |command| {
             use std::os::windows::process::CommandExt;
             command.arg("--include-ignored").creation_flags(CREATE_NEW_CONSOLE).env(CASE, case);
@@ -918,34 +925,114 @@ fn pair_case(name: &str) {
             assert!(screen.contains(&refused), "the refusal is not on the console:\n{screen}");
             assert_eq!(code, 1);
         }
+        // Residual R2 (own-ssh spec §7.3): a `sshelter.exe` ended from outside puts nothing back; its helper does, once it has ended.
+        // The pair's helper is copied next to a stand-in `sshelter.exe` (`KILLED_PROGRAM`). First the stand-in alone: the console's four
+        // settings are left changed, so the check sees a console that was not put back. Then through the helper, as a terminal runs it.
+        "the_helper_puts_back_the_console_a_killed_program_changed" => {
+            let before = settings();
+            let scratch = tempfile::tempdir().expect("a scratch directory");
+            let helper = scratch.path().join("sshelter-cli.exe");
+            let program = scratch.path().join("sshelter.exe");
+            std::fs::copy(dir.join("sshelter-cli.exe"), &helper).expect("a copy of the pair's helper");
+            std::fs::copy(std::env::current_exe().expect("this test binary"), &program).expect("this test binary as sshelter.exe");
+            let killed = |path: &Path| {
+                let mut command = std::process::Command::new(path);
+                command.args(["--exact", PAIR_TEST, "--nocapture", "--test-threads=1", "--include-ignored"]).env(CASE, KILLED_PROGRAM);
+                run_in_this_console(&mut command)
+            };
+
+            let (code, screen) = killed(&program);
+            let left = settings();
+            eprintln!("sshelter.exe alone ended with {code}; the console's settings were {before:?}, and are {left:?}");
+            assert_eq!(code, KILLED as i32, "the stand-in did not end as it should; the console shows:\n{screen}");
+            let changed = [before.0 != left.0, before.1 != left.1, before.2 != left.2, before.3 != left.3];
+            assert_eq!(changed, [true; 4], "the stand-in did not change every setting: {before:?}, then {left:?}");
+            put_back(before);
+            assert_eq!(settings(), before, "this process put the console back itself");
+
+            let (code, screen) = killed(&helper);
+            let after = settings();
+            eprintln!("sshelter-cli.exe ended with {code}; the console's settings were {before:?}, and are {after:?}");
+            assert_eq!(code, KILLED as i32, "the helper did not leave with its program's exit code; the console shows:\n{screen}");
+            assert_eq!(after, before, "the helper did not put the console back once its program had ended");
+        }
+        // The stand-in `sshelter.exe`, run alone and by the helper. As `sshelter connect`, it takes over the console of the standard
+        // handles it was given (`StdConsole::new`) and sets raw mode (the input's mode and the output's); it changes both code pages too,
+        // each to another than the console started with (`sshelter connect` sets the output's to UTF-8 and leaves the input's; the helper
+        // keeps all four). Then it is ended from outside, as the NSIS installer ends it (`TerminateProcess`): no way out of it runs, so
+        // nothing of its own puts the console back.
+        KILLED_PROGRAM => {
+            // SAFETY: GetStdHandle only reads this process's standard handles; GetConsoleCP and GetConsoleOutputCP read its console.
+            let (input, output, input_cp, output_cp) =
+                unsafe { (GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE), GetConsoleCP(), GetConsoleOutputCP()) };
+            let console = Arc::new(StdConsole::new());
+            assert_eq!((console.input(), console.output()), (input, output), "the console is that of the standard handles given");
+            let mut tty = Tty::new(console).expect("the standard input is the console's");
+            tty.take_over().expect("the console takes virtual terminal sequences");
+            tty.set_mode(Mode::Raw, false).expect("raw mode");
+            let other = |code_page: u32| if code_page == 437 { 850 } else { 437 };
+            // SAFETY: plain values for this process's console.
+            unsafe {
+                assert_ne!(SetConsoleCP(other(input_cp)), 0, "{}", io::Error::last_os_error());
+                assert_ne!(SetConsoleOutputCP(other(output_cp)), 0, "{}", io::Error::last_os_error());
+            }
+            std::mem::forget(tty);
+            // SAFETY: ends this process, as another process's TerminateProcess would.
+            unsafe { TerminateProcess(GetCurrentProcess(), KILLED) };
+            std::thread::sleep(DONE);
+            panic!("TerminateProcess did not end this process");
+        }
         other => panic!("no case {other}"),
     }
 }
 
-/// Runs `sshelter-cli.exe` of `dir` with `args` in this process's console, as a shell there runs a program: its standard input, output
-/// and error are the console's own buffers (this process's are the test's pipes). Its exit code, and what the console's screen shows
-/// once it has ended.
+/// The program `the_helper_puts_back_the_console_a_killed_program_changed` runs as `sshelter.exe` (a case of `pair_case` that this test
+/// binary runs as that program, not one of the test's own).
+const KILLED_PROGRAM: &str = "a_program_that_changes_the_console_and_is_killed";
+
+/// The exit code `KILLED_PROGRAM` is ended with: one of its own, which neither the helper (1) nor a failed test (101) leaves with.
+const KILLED: u32 = 77;
+
+/// Puts this process's console back to `settings` (as `settings()` reads them).
+fn put_back((input_mode, output_mode, input_cp, output_cp): (u32, u32, u32, u32)) {
+    set_mode(open("CONIN$"), input_mode).expect("the input's mode");
+    set_mode(open("CONOUT$"), output_mode).expect("the output's mode");
+    // SAFETY: plain values for this process's console.
+    unsafe {
+        assert_ne!(SetConsoleCP(input_cp), 0, "{}", io::Error::last_os_error());
+        assert_ne!(SetConsoleOutputCP(output_cp), 0, "{}", io::Error::last_os_error());
+    }
+}
+
+/// Runs `sshelter-cli.exe` of `dir` with `args` in this process's console (`run_in_this_console`).
 fn run_the_pair(dir: &Path, args: &[&str]) -> (i32, String) {
-    let output = owned("CONOUT$");
     let mut command = std::process::Command::new(dir.join("sshelter-cli.exe"));
+    command.args(args);
+    run_in_this_console(&mut command)
+}
+
+/// Runs `command` in this process's console, as a shell there runs a program: its standard input, output and error are the console's own
+/// buffers (this process's are the test's pipes). Its exit code, and what the console's screen shows once it has ended.
+fn run_in_this_console(command: &mut std::process::Command) -> (i32, String) {
+    let output = owned("CONOUT$");
     command
-        .args(args)
         .stdin(Stdio::from(owned("CONIN$")))
         .stdout(Stdio::from(output.try_clone().expect("another handle of the screen buffer")))
         .stderr(Stdio::from(output));
-    let mut pair = crate::process::spawn(&mut command).expect("sshelter-cli.exe starts");
+    let name = Path::new(command.get_program()).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut program = crate::process::spawn(command).unwrap_or_else(|error| panic!("{name} does not start: {error}"));
     let deadline = Instant::now() + Duration::from_secs(60);
     let status = loop {
-        match pair.try_wait().expect("the pair's status") {
+        match program.try_wait().expect("the program's status") {
             Some(status) => break status,
             None if Instant::now() >= deadline => {
-                let _ = pair.kill();
-                panic!("sshelter-cli.exe did not end within a minute; the console shows:\n{}", screen());
+                let _ = program.kill();
+                panic!("{name} did not end within a minute; the console shows:\n{}", screen());
             }
             None => std::thread::sleep(Duration::from_millis(20)),
         }
     };
-    (status.code().expect("the pair's exit code"), screen())
+    (status.code().expect("the program's exit code"), screen())
 }
 
 /// What the screen buffer of this process's console shows, from its first row to the cursor's: rows joined by line breaks, except where a

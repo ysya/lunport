@@ -10,7 +10,7 @@
 # (against a fake console, and against real consoles: child processes the tests start with a console of their own), run() over a
 # real pipe against the real broker, the terminal launch (Windows Terminal and cmd run the console helper), and the console helper
 # sshelter-cli.exe (src-tauri/cli-helper, a crate of its own): its tests, and the helper next to the debug sshelter.exe running
-# `sshelter connect`, through pipes and in a console of its own.
+# `sshelter connect`, through pipes and in a console of its own, where it also puts back the console a killed program left changed.
 # aws-lc-sys (russh's crypto) needs nothing installed: it is the same crate rustls already builds for the updater in the release
 # job on this runner image, and that job installs nothing for it.
 # macOS can only type-check the Windows code; what the permissions and a real console do has to be seen on Windows.
@@ -79,7 +79,8 @@ jobs:
         run: cargo build --locked
 
       # sshelter-cli.exe, the console program a Windows terminal runs for Connect (cli-helper/; the app's builds above never build it):
-      # its tests (the relay of arguments and exit codes against a test program, and the built helper next to a stand-in sshelter.exe).
+      # its tests (the relay of arguments and exit codes against a test program, the built helper next to a stand-in sshelter.exe, and
+      # the console's four settings kept across the relay, against a fake console).
       - name: The console helper's tests
         run: cargo test --locked --manifest-path cli-helper/Cargo.toml
       # Then the real pair: the helper next to the debug sshelter.exe built above runs `sshelter.exe connect` (no alias), and what that
@@ -103,8 +104,10 @@ jobs:
       # The same pair in a console of its own, as a terminal runs it (own-ssh spec §7.3), which the steps above, through pipes, do not
       # reach: the helper started with that console's own buffers as its standard handles, as a shell in the console starts a program, and
       # sshelter.exe reading the console through the handles it inherits. The console's screen shows the usage (2), and the refusal of a
-      # session pipe another owner made (1; the pipe was opened, no SSHelter started). windows-bundle-check.yml runs the same test on each
-      # installer's release pair, whose GUI sshelter.exe attaches to the helper's console first.
+      # session pipe another owner made (1; the pipe was opened, no SSHelter started). And the helper puts the console's four settings
+      # back after a stand-in sshelter.exe that changed them and was killed, as the NSIS installer kills a session's sshelter.exe (alone,
+      # the stand-in leaves them changed). windows-bundle-check.yml runs the same test on each installer's release pair, whose GUI
+      # sshelter.exe attaches to the helper's console first.
       - name: The console helper and sshelter.exe in a console of their own
         shell: pwsh
         run: |
