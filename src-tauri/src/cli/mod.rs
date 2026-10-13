@@ -12,6 +12,7 @@ mod e2e_tests;
 mod real_console_tests;
 #[cfg(unix)]
 pub mod run;
+pub mod signal;
 #[cfg(unix)]
 pub mod terminal;
 #[cfg(windows)]
@@ -130,7 +131,7 @@ fn session(
         return 1;
     }
     let hung_up = watchdog.clone();
-    run::stdin_thread(inputs.clone(), move || hung_up.arm(128 + libc::SIGHUP));
+    run::stdin_thread(inputs.clone(), move || hung_up.arm(128 + signal::HUP));
     let code = run::run(stream, host, term, &mut tty, (inputs, queue), own_writer(std::io::stdout()), own_writer(std::io::stderr()));
     watchdog.stand_down();
     code
