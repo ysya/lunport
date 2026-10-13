@@ -4,10 +4,15 @@
 # exit code 2 come back through the helper). Run by hand before a beta (own-ssh plan 1b-3). It publishes nothing: no release and no
 # updater artifacts, so no signing key. Not copied from beta.yml: the version stamp (this build keeps the version in the repository) and
 # the sync relay check (the relay URL does not change the bundle).
+# It also runs on a push to next/own-ssh that changes this file: GitHub dispatches a workflow only from the default branch or once it has
+# run, and until next/own-ssh is merged this file exists only there. That first run is the check; later dispatches work after it.
 name: windows bundle check
 
 on:
   workflow_dispatch:
+  push:
+    branches: [next/own-ssh]
+    paths: [".github/workflows/windows-bundle-check.yml"]
 
 permissions:
   contents: read
@@ -52,7 +57,9 @@ jobs:
         run: pnpm install
 
       # The Windows leg's args of beta.yml, the NSIS installer only, and no updater artifacts (they need the signing key). No tagName:
-      # tauri-action builds and uploads nothing.
+      # tauri-action builds and uploads nothing. The JSON values reach tauri whole only because they have no backslash and no cmd
+      # metacharacter: tauri-action runs pnpm.cmd, that is cmd /d /s /c after cross-spawn's escaping, so they must never get a Windows path
+      # or any of % & ^ | < > ( ).
       - name: Build the NSIS installer
         uses: tauri-apps/tauri-action@v0
         with:
