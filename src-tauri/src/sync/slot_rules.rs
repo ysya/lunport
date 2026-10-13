@@ -474,6 +474,19 @@ pub(crate) mod test_keys {
     ];
     pub const ECDSA_SHORT_P521_PUBLIC: &str = "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBADM3EjWEExmN4AO9kzYjlzpa9m3FSMHEv8vHyz29zdcaP9/5aPsxMlOT1tDSlyQQzbQBszp+utX039Byd7OQ7ey6AF5pgm3khfdpzSx6Sf7M5GWHWxTaOeZI1Q7Lxw2A/ZvDzd6//mKf1VxfdoZoPOjqFWvTEmOtcTACt6eBIVjGNi6tA==";
 
+    /// ecdsa-sha2-nistp256, no passphrase, comment `scratch-full-256`, fingerprint `SHA256:W98auiCBnzDiU5Fs6sj5cPD67lc8SsPugUxYo2kpflA`.
+    /// Its scalar is exactly 32 bytes in the text (it starts with 0x39: no zero byte left out, no 0x00 sign byte in front), the boundary
+    /// that `ssh-key` reads itself and `short_scalar` leaves alone.
+    pub const ECDSA_FULL_P256_BODY: &[&str] = &[
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAaAAAABNlY2RzYS",
+        "1zaGEyLW5pc3RwMjU2AAAACG5pc3RwMjU2AAAAQQToaFWS0vL1Ckl++5j4Nr9f4k8IaPqb",
+        "jPHtHvuNby88rmi/BeHX6zmbOSliA7qR79RrxOy/qztZd9WMDF+WewP0AAAAqG5ZJ45uWS",
+        "eOAAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOhoVZLS8vUKSX77",
+        "mPg2v1/iTwho+puM8e0e+41vLzyuaL8F4dfrOZs5KWIDupHv1GvE7L+rO1l31YwMX5Z7A/",
+        "QAAAAgOXUjwYyQrxUAmAgsR1WnI8xdqVvXveUN3wWV1NYcGTsAAAAQc2NyYXRjaC1mdWxs",
+        "LTI1Ng==",
+    ];
+
     pub fn plain() -> String {
         armor(PLAIN_BODY)
     }
@@ -497,6 +510,9 @@ pub(crate) mod test_keys {
     }
     pub fn ecdsa_short_p521() -> String {
         armor(ECDSA_SHORT_P521_BODY)
+    }
+    pub fn ecdsa_full_p256() -> String {
+        armor(ECDSA_FULL_P256_BODY)
     }
 
     /// The fields of an ECDSA key's private section (`checkint ×2, string algorithm, string curve, string point, mpint scalar,
