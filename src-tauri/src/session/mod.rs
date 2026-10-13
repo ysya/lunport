@@ -3,13 +3,11 @@
 //! window, for host keys) what a login needs, and relays the terminal. Every SSH call it makes blocks, so it runs on plain threads, never
 //! in async code and never on the UI thread.
 
-// The broker serves Windows as well since plan 1b-3 (on its named pipe). This allowance stays until a Windows build shows it is not
-// needed any more (plan 1b-3 Task 5).
-#![cfg_attr(windows, allow(dead_code, unused_imports))]
-
 use std::path::{Path, PathBuf};
 
 /// The broker's socket in the app's data directory (spec §4): `<app data>/ipc/sock`. The CLI finds it the same way, without the app.
+/// Windows has the named pipe instead (`pipe_name`).
+#[cfg(unix)]
 pub fn socket_path(app_data: &Path) -> PathBuf {
     ipc_dir(app_data).join("sock")
 }
