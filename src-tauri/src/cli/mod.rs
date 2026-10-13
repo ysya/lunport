@@ -3,6 +3,9 @@
 
 #[cfg(unix)]
 pub mod client;
+// The Windows console without the Windows calls (`terminal_windows.rs` adds them): built on Windows, and in every platform's tests.
+#[cfg(any(windows, test))]
+pub mod console;
 #[cfg(all(test, unix))]
 mod e2e_tests;
 #[cfg(unix)]
