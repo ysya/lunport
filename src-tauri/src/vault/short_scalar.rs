@@ -242,7 +242,11 @@ mod tests {
 
     #[test]
     fn keys_ssh_key_reads_or_rejects_for_other_reasons_are_left_alone() {
-        assert!(parse(&test_keys::ecdsa()).is_none(), "a full-length scalar is ssh-key's to read");
+        assert!(parse(&test_keys::ecdsa()).is_none(), "a full-length scalar (33 bytes with its 0x00 sign byte) is ssh-key's to read");
+        let exactly = test_keys::ecdsa_full_p256();
+        assert_eq!(scalar_len(&exactly), 32, "setup: a scalar of exactly the curve's size, no sign byte");
+        assert!(PrivateKey::from_openssh(&exactly).is_ok(), "setup: ssh-key reads it");
+        assert!(parse(&exactly).is_none(), "a scalar of exactly 32 bytes is ssh-key's to read");
         assert!(parse(&test_keys::plain()).is_none(), "not ECDSA");
         assert!(parse(&test_keys::rsa()).is_none(), "not ECDSA");
         assert!(parse(&test_keys::ecdsa_short_p256_encrypted()).is_none(), "encrypted: `decrypt` is the way in");
@@ -261,6 +265,51 @@ mod tests {
         assert!(decrypt(&text, "wrong").is_none());
         assert!(decrypt(&test_keys::ecdsa_short_p256(), "test-passphrase").is_none(), "not encrypted");
         assert!(decrypt(&test_keys::encrypted(), "test-passphrase").is_none(), "not ECDSA");
+    }
+
+    /// Whatever padding the original section had (comments of 0 to 15 bytes give every length from 0 to 15 under a block of 16, and 0 to 7
+    /// under one of 8), the section handed to `ssh-key` is padded for an unencrypted container: to 8, and `ssh-key` refuses 8 bytes or more
+    /// of padding there, which padding to 16 would leave for some lengths.
+    #[test]
+    fn a_short_scalar_section_is_padded_for_an_unencrypted_container_whatever_its_padding_was() {
+        for body in [test_keys::ECDSA_SHORT_P256_BODY, test_keys::ECDSA_SHORT_P384_BODY, test_keys::ECDSA_SHORT_P521_BODY] {
+            let (public, section) = EcdsaSection::of(body);
+            for block_size in [8, 16] {
+                for comment_len in 0..16 {
+                    let section = EcdsaSection { comment: "c".repeat(comment_len), ..section.clone() };
+                    let what = format!("{}, a block of {block_size}, a comment of {comment_len} bytes", section.curve);
+                    let out = repadded(&section.padded(block_size), block_size).unwrap_or_else(|| panic!("{what}"));
+                    let key = read_unencrypted(&public, &out).unwrap_or_else(|| panic!("{what}: ssh-key reads the new section"));
+                    assert_eq!(key.comment(), section.comment, "{what}");
+                }
+            }
+        }
+    }
+
+    /// The padding of the original section is checked as `ssh-key` checks it (`1, 2, 3…`, shorter than one block) before it is replaced: a
+    /// short scalar does not make a key with bad padding readable, encrypted or not.
+    #[test]
+    fn a_short_scalar_in_a_section_with_bad_padding_is_refused() {
+        let (public, section) = EcdsaSection::of(test_keys::ECDSA_SHORT_P256_BODY);
+        let section = EcdsaSection { comment: String::new(), ..section };
+        for (cipher, kdf) in [(Cipher::None, Kdf::None), (Cipher::Aes256Ctr, test_keys::one_round_bcrypt())] {
+            let read = |padding: &[u8]| {
+                let text = test_keys::openssh_key(cipher, &kdf, &public, &section.with_padding(padding), "pass");
+                if cipher.is_none() {
+                    parse(&text)
+                } else {
+                    decrypt(&text, "pass")
+                }
+            };
+            let right: Vec<u8> = (1..).take(section.padding_len(cipher.block_size())).collect();
+            assert!(!right.is_empty(), "{cipher}: setup: the section needs padding");
+            let mut wrong_byte = right.clone();
+            *wrong_byte.last_mut().unwrap() += 1;
+            let a_block_more: Vec<u8> = (1..).take(right.len() + cipher.block_size()).collect();
+            assert!(read(&right).is_some(), "{cipher}: setup: with its padding right the key is read");
+            assert!(read(&wrong_byte).is_none(), "{cipher}: padding that is not 1, 2, 3…");
+            assert!(read(&a_block_more).is_none(), "{cipher}: a whole block of padding more than needed");
+        }
     }
 
     /// What `ssh-key` refuses in a container whose scalar has its full length is refused with a short one too: an unencrypted key that
