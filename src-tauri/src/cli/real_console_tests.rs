@@ -28,7 +28,11 @@
 //!   key or the line typed next, and "hun" never shows; so `sshelter connect`'s own end, which leaves its keys thread in a read, leaves
 //!   the next key to the shell.
 
+use std::io;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::process::Stdio;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -37,19 +41,19 @@ use windows_sys::Win32::Foundation::{GetLastError, SetLastError, GENERIC_READ, G
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows_sys::Win32::System::Console::{
     FlushConsoleInputBuffer, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP,
-    GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents, ReadConsoleOutputCharacterW, ReadConsoleW, SetConsoleCtrlHandler,
-    SetConsoleMode, WriteConsoleInputW, WriteConsoleW, CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_BREAK_EVENT, CTRL_C_EVENT, INPUT_RECORD,
-    KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
+    GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents, GetStdHandle, ReadConsoleOutputCharacterW, ReadConsoleW,
+    SetConsoleCtrlHandler, SetConsoleMode, WriteConsoleInputW, WriteConsoleW, CONSOLE_SCREEN_BUFFER_INFO, COORD, CTRL_BREAK_EVENT,
+    CTRL_C_EVENT, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, STD_INPUT_HANDLE,
 };
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 use windows_sys::Win32::System::IO::CancelIoEx;
 
 use super::client::Input;
-use super::console::{input_mode, ConsoleApi, Mode};
+use super::console::{input_mode, ConsoleApi, Mode, Setting};
 use super::inputs_windows::{take_over_control_events, ConsoleText};
 use super::run::{console_keys_thread, queue, ControlEvents, Output, Over, Watchdog, STOP_GRACE};
 use super::terminal::{restore_on_panic, StdConsole, Tty};
-use crate::ssh::testing::{is_child, rerun_alone_with};
+use crate::ssh::testing::{is_child, rerun_alone_reading, rerun_alone_with};
 
 /// The virtual-key codes the tests type (winuser.h): Enter, and the up arrow.
 const VK_RETURN: u16 = 0x0D;
@@ -85,10 +89,9 @@ fn open(name: &str) -> H {
 }
 
 /// `open`, as a handle that is closed when it is dropped.
-fn owned(name: &str) -> std::os::windows::io::OwnedHandle {
-    use std::os::windows::io::FromRawHandle;
+fn owned(name: &str) -> OwnedHandle {
     // SAFETY: a handle `open` has just opened, which nothing else owns.
-    unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(open(name).raw() as _) }
+    unsafe { OwnedHandle::from_raw_handle(open(name).raw() as _) }
 }
 
 fn last_error() -> u32 {
@@ -294,6 +297,70 @@ fn read_through(console: &Arc<StdConsole>) -> mpsc::Receiver<std::io::Result<Str
         let _ = tx.send(reader.read(&mut buf).map(|count| String::from_utf16_lossy(&buf[..count])));
     });
     rx
+}
+
+/// The console of this process as `sshelter connect` takes it (`StdConsole::new`), saying when the keys thread starts a read.
+struct Watched {
+    console: StdConsole,
+    reading: AtomicBool,
+}
+
+impl ConsoleApi for Watched {
+    fn get(&self, setting: Setting) -> io::Result<u32> {
+        self.console.get(setting)
+    }
+
+    fn set(&self, setting: Setting, value: u32) -> io::Result<()> {
+        self.console.set(setting, value)
+    }
+
+    fn flush_input(&self) -> io::Result<()> {
+        self.console.flush_input()
+    }
+
+    fn size(&self) -> Option<(u16, u16)> {
+        self.console.size()
+    }
+
+    fn read(&self, buf: &mut [u16]) -> io::Result<usize> {
+        self.reading.store(true, Ordering::SeqCst);
+        self.console.read(buf)
+    }
+
+    fn wake(&self) -> io::Result<()> {
+        self.console.wake()
+    }
+}
+
+/// A program the case `a_read_left_on_the_given_input_takes_nothing` runs, ending as `sshelter connect` ends with its keys thread in a
+/// read: the console of the standard input this process was given (`StdConsole::new`, a handle of an input the process that started it
+/// keeps), taken over and set to `mode` through the real gate, its keys thread reading, `typed` typed into that read (through `control`,
+/// a handle that never reads); then the process ends with the read in progress, by returning once the console was put back and the
+/// `Tty` dropped (the end of `session`), or by the watchdog's exit from a thread of its own (`by_the_watchdog`: the console put back for
+/// good, then `process::exit`, while this thread waits).
+fn end_with_a_read(control: H, mode: Mode, typed: &str, by_the_watchdog: bool) {
+    // SAFETY: GetStdHandle only reads this process's standard input handle.
+    let given = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let watched = Arc::new(Watched { console: StdConsole::new(), reading: AtomicBool::new(false) });
+    assert_eq!(watched.console.input(), given, "the keys are read from the standard input this process was given");
+    let mut tty = Tty::new(watched.clone()).expect("the given input is the console's");
+    tty.take_over().unwrap();
+    tty.set_mode(mode, true).unwrap();
+    let (inputs, _queue) = queue();
+    console_keys_thread(inputs, tty.keys(), || {});
+    crate::ssh::testing::eventually("the keys thread to read", 10, || watched.reading.load(Ordering::SeqCst));
+    // The read itself under way (the flag is set just before it), then what is typed into it.
+    std::thread::sleep(SETTLE);
+    type_text(control, typed);
+    std::thread::sleep(SETTLE);
+    if by_the_watchdog {
+        let watchdog = Watchdog::start(tty.restorer(), Duration::ZERO, |_| std::process::exit(0)).unwrap();
+        watchdog.arm(129);
+        std::thread::sleep(DONE * 4);
+        panic!("the watchdog did not end the process");
+    }
+    tty.restore();
+    drop(tty);
 }
 
 /// One case, in a child with a console of its own.
@@ -594,6 +661,78 @@ fn case(name: &str) {
             tty.restore();
             drop(tty);
         }
+        // Final wave (F9): the same on the input the ending process was GIVEN as its standard input, the way `sshelter connect`
+        // reads the console input its shell and `sshelter-cli.exe` hand it (`StdConsole::new`, the standard handle). That input stays
+        // open when the process ends (this process, its "shell", keeps a handle of the same input and reads it next), so a read left in
+        // progress could live on with the input rather than end with the process. First the check is shown to see a read that lives on (a
+        // cancelled one, on this input); then the program ends with its keys thread in a read: raw, and a hidden line read with "hun"
+        // typed into it, each by returning once its console was put back and by the watchdog's exit from another thread. Each time the
+        // next raw read on this input gets the next key, the next line read the next line, and "hun" is not shown.
+        "a_read_left_on_the_given_input_takes_nothing" => {
+            let original = mode_of(control).unwrap();
+            let given = owned("CONIN$");
+            let shells = H(given.as_raw_handle() as usize);
+            // A read that lives on takes the key typed next: so a cancelled one does, on this input.
+            set_mode(control, console.raw).unwrap();
+            flush(control).unwrap();
+            let (cancelled, _thread) = read_on_a_thread(shells);
+            std::thread::sleep(SETTLE);
+            // SAFETY: cancels this process's I/O on a handle it keeps open.
+            assert_ne!(unsafe { CancelIoEx(shells.raw(), ptr::null()) }, 0);
+            cancelled.recv_timeout(DONE).expect("the cancelled read returned");
+            let (next, _thread) = read_on_a_thread(shells);
+            type_text(control, "a");
+            assert!(next.recv_timeout(AT_ONCE).is_err(), "the cancelled read took the key");
+            type_text(control, "b");
+            assert_eq!(gave(&next), "b");
+            let end = |program: &str| {
+                set_mode(control, original).unwrap();
+                flush(control).unwrap();
+                let stdin = Stdio::from(given.try_clone().expect("another handle of the same input"));
+                rerun_alone_reading(NAME, stdin, |command| {
+                    command.env(CASE, program);
+                });
+            };
+            let mut failed = Vec::new();
+            for program in ["a_raw_read_at_the_end", "a_raw_read_at_the_watchdogs_exit"] {
+                new_line(console.out, program);
+                end(program);
+                set_mode(control, console.raw).unwrap();
+                let (read, _thread) = read_on_a_thread(shells);
+                type_text(control, "a");
+                match read.recv_timeout(AT_ONCE) {
+                    Ok(read) if read.text == "a" => {}
+                    first => {
+                        type_text(control, "b");
+                        failed.push(format!("{program}: the next raw read got {first:?}; after another key, {:?}", read.recv_timeout(DONE)));
+                    }
+                }
+            }
+            for program in ["a_hidden_line_read_at_the_end", "a_hidden_line_read_at_the_watchdogs_exit"] {
+                new_line(console.out, program);
+                let (_, y) = cursor(console.out);
+                end(program);
+                set_mode(control, console.shown).unwrap();
+                let (read, _thread) = read_on_a_thread(shells);
+                type_text(control, "x\r");
+                match read.recv_timeout(AT_ONCE) {
+                    Ok(read) if read.text == "x\r\n" => {}
+                    first => {
+                        type_text(control, "y\r");
+                        failed.push(format!("{program}: the next line read got {first:?}; after another line, {:?}", read.recv_timeout(DONE)));
+                    }
+                }
+                if row(console.out, y).contains("hun") {
+                    failed.push(format!("{program}: what was typed into the ended read was shown: {:?}", row(console.out, y)));
+                }
+            }
+            assert!(failed.is_empty(), "a read the program left took what was typed after it:\n{}", failed.join("\n"));
+        }
+        // The programs `a_read_left_on_the_given_input_takes_nothing` runs.
+        "a_raw_read_at_the_end" => end_with_a_read(control, Mode::Raw, "", false),
+        "a_raw_read_at_the_watchdogs_exit" => end_with_a_read(control, Mode::Raw, "", true),
+        "a_hidden_line_read_at_the_end" => end_with_a_read(control, Mode::Prompt { echo: false }, "hun", false),
+        "a_hidden_line_read_at_the_watchdogs_exit" => end_with_a_read(control, Mode::Prompt { echo: false }, "hun", true),
         // Spec §7.3: the console is given whole characters: what the terminal writer writes to it (`Output::console` over `ConsoleText`,
         // `WriteConsoleW`) shows a character whole when it was cut between two writes, here é (two bytes) and € (three). Written as they
         // come, each write on its own, the cut characters show as U+FFFD: so a cut one would show here.
@@ -666,6 +805,7 @@ fn a_real_console_works_as_the_keys_reader_needs() {
         "an_end_under_a_question_leaves_nothing_behind",
         "a_read_an_ended_process_left_takes_nothing",
         "the_keys_after_the_cli_ended_are_the_shells",
+        "a_read_left_on_the_given_input_takes_nothing",
         "a_character_cut_between_two_writes_reaches_the_console_whole",
         "the_control_handler_takes_ctrl_c_and_ctrl_break",
     ];

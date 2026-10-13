@@ -97,7 +97,12 @@ impl PipeReader {
 /// readers are waited for one after the other: up to `2 * PIPE_GRACE` after a tool that ended by itself, `PIPE_GRACE` after a kill (only
 /// stderr is waited for then).
 pub(super) fn run_within(command: &mut Command, timeout: Duration) -> Result<Output, String> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    run_within_reading(command, Stdio::null(), timeout)
+}
+
+/// `run_within`, with `stdin` as the tool's standard input instead of nothing.
+pub(super) fn run_within_reading(command: &mut Command, stdin: Stdio, timeout: Duration) -> Result<Output, String> {
+    command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = crate::process::spawn(command).map_err(|error| format!("cannot run {command:?}: {error}"))?;
     let (stdout, stderr) = (read_in_background(child.stdout.take()), read_in_background(child.stderr.take()));
     let deadline = Instant::now() + timeout;
