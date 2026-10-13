@@ -55,10 +55,11 @@ pub fn agent_can_sign(data: &KeyData) -> bool {
     matches!(data.algorithm(), Algorithm::Ed25519 | Algorithm::Ecdsa { .. } | Algorithm::Rsa { .. })
 }
 
-/// 這把私鑰有沒有加密。目前只有測試用到,所以只在測試編譯。
+/// Whether this private key is encrypted, as the vault reads it (`parse`, so a short ECDSA scalar too). Only tests use it, so it is only
+/// compiled for them.
 #[cfg(test)]
 pub fn is_encrypted(private_key: &str) -> bool {
-    PrivateKey::from_openssh(private_key).is_ok_and(|key| key.is_encrypted())
+    parse(private_key).is_some_and(|key| key.is_encrypted())
 }
 
 /// agent 讀得懂這把私鑰嗎(`open` 不回 `Unreadable`)?`inspect_private_key`(同步讀標頭用的)只看標頭與公鑰段,`ssh-key` 另外會挑剔其他欄位
@@ -238,6 +239,33 @@ mod tests {
         assert_eq!(material.key_data(), public_key_data(test_keys::ECDSA_SHORT_P256_PUBLIC).unwrap());
         verify(test_keys::ECDSA_SHORT_P256_PUBLIC, b"x", &material.sign(b"x", 0).unwrap());
         assert!(agent_can_read(&text));
+    }
+
+    /// A short scalar under every cipher the vault opens (P-256), and P-384 and P-521 under CBC, GCM and chacha20-poly1305: the AEAD ciphers
+    /// carry a tag, chacha20-poly1305 pads to 8 and the others to 16. Every padding length is `short_scalar`'s own test; one bcrypt round
+    /// keeps this one fast.
+    #[test]
+    fn an_encrypted_ecdsa_key_with_a_short_scalar_opens_whatever_its_cipher() {
+        let kdf = test_keys::one_round_bcrypt();
+        let some = ["aes256-cbc", "aes256-gcm@openssh.com", "chacha20-poly1305@openssh.com"];
+        for (curve, body, public, ciphers) in [
+            ("p256", test_keys::ECDSA_SHORT_P256_BODY, test_keys::ECDSA_SHORT_P256_PUBLIC, SUPPORTED_CIPHERS),
+            ("p384", test_keys::ECDSA_SHORT_P384_BODY, test_keys::ECDSA_SHORT_P384_PUBLIC, &some[..]),
+            ("p521", test_keys::ECDSA_SHORT_P521_BODY, test_keys::ECDSA_SHORT_P521_PUBLIC, &some[..]),
+        ] {
+            let (public_section, section) = test_keys::EcdsaSection::of(body);
+            for name in ciphers {
+                let cipher = ssh_key::Cipher::new(name).unwrap();
+                let text = test_keys::openssh_key(cipher, &kdf, &public_section, &section.padded(cipher.block_size()), "pass");
+                let what = format!("{curve}, {name}");
+                let refused = PrivateKey::from_openssh(&text).unwrap().decrypt("pass").err();
+                assert_eq!(refused, Some(ssh_key::Error::Encoding(ssh_encoding::Error::Length)), "{what}: setup: ssh-key alone can't decrypt it");
+                let material = open(&text, Some("pass")).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                assert_eq!(material.key_data(), public_key_data(public).unwrap(), "{what}");
+                verify(public, b"x", &material.sign(b"x", 0).unwrap());
+                assert_eq!(open(&text, Some("wrong")).err(), Some(OpenError::WrongPassphrase), "{what}");
+            }
+        }
     }
 
     /// `ssh-key` refuses a short scalar for its length even with the right passphrase, and only that error is worth a second try, which
