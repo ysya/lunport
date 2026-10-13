@@ -870,6 +870,10 @@ mod tests {
     fn connect_refuses_a_pipe_another_owner_made() {
         let name = fresh_name("session-squat");
         let Some(_squatter) = squat_as_administrators(&name) else {
+            // A security regression test that skips unnoticed on CI would show nothing.
+            if std::env::var_os("CI").is_some() {
+                panic!("on CI the runner is elevated: the squatter's pipe must be makeable, and this test must run");
+            }
             eprintln!("skipped: this process cannot make the Administrators group the owner of a pipe (it is not elevated)");
             return;
         };
