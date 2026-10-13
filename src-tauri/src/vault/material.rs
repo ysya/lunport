@@ -201,8 +201,10 @@ mod tests {
         }
     }
 
-    /// OpenSSH 把 ECDSA 純量寫成 mpint,前導零省掉後比曲線短的金鑰(`ssh-keygen` 產生的 P-256、P-384 每 256 把有 1 把,P-521 每 4 把有 1 把)
-    /// `ssh-key` 0.6.7 讀不懂(`length invalid`),agent 以前跟著說讀不懂;`short_scalar` 補零。簽章驗得過,表示補回去的純量就是原本那個。
+    /// OpenSSH writes the ECDSA scalar as an mpint and leaves out its leading zero bytes: when the first byte is zero and the next one's top
+    /// bit is clear, the scalar comes out shorter than the curve (about 1 key in 512 that `ssh-keygen` makes for P-256 and P-384, 1 in 4
+    /// for P-521). `ssh-key` 0.6.7 refuses such a key (`length invalid`), and the agent used to say it could not read it; `short_scalar`
+    /// pads the scalar. A signature that verifies shows that the scalar put back is the original one.
     #[test]
     fn an_ecdsa_key_whose_scalar_lost_its_leading_zero_opens_and_signs() {
         for (what, private, public) in [
