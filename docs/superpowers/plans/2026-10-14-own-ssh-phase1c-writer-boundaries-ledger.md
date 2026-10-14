@@ -24,3 +24,15 @@ Integration: parent session/auth fixture constant typo temporarily blocked four 
 Ruling: Parent owns the full library/Windows integration verification — this agent ran every affected owned module plus scoped boundary fixtures — remaining whole-branch risk is reported for parent validation.
 Final review: owned diff reviewed; no additional owned findings. Parent performs the independent integrated review. git diff --check clean.
 Task 1/2/3: complete; exact-path commit follows under the shared index lock.
+
+Review fix pass: findings 3 and 5 assigned to this worker; root owns other wiring sections and compat owns caller sites in slots.rs.
+Review finding 3 plan: add blocked Fix regression for save_blocked, future local state and newer account; run RED; share the refresh eligibility gate under doc → core lock before restore_include; rerun wiring tests.
+Review finding 5 plan: extract the existing retirement name-selection phase unchanged; add planning denial and stable execution collision tests; run RED; validate both private/public retirement destinations in the plan before caller vault/Keychain changes; recheck during execution without choosing a different name. Compat adds the full caller-side regression.
+Ruling: RetirementPlan preserves the existing private-file suffix selection contract; execution refuses a later private-destination collision instead of re-picking after vault changes — avoids overwriting another copy — caller may need to retry after a concurrent file creation.
+
+Review finding 3 RED: blocked_fix_checks_write_eligibility failed because save_blocked Fix wrote the agent Include into main config before refresh rejected it (/private/tmp/sshelter-review-fix3-red.log).
+Review finding 5 RED: retirement_plan_rejects_outside_public_destination and retirement_execution_preserves_a_destination_occupied_after_planning failed; suffix/read-only planning regression passed (/private/tmp/sshelter-review-fix5-red.log).
+Ruling: Shared check_writes_allowed runs after acquiring doc and briefly acquires core; it releases core before persist hooks reacquire it — protects the same eligibility conditions as refresh without deadlocking the existing lock order — requires lifecycle writers to retain the documented doc-before-core order.
+
+Review fix pass GREEN: all 30 agent::wiring tests passed (/private/tmp/sshelter-review-wiring-green.log), including blocked save/future/newer cases and parent endpoint quoting regression. All 10 sync::slot_files tests passed (/private/tmp/sshelter-review-fix5-green.log), including original suffix collisions and 3 new retirement plan/execution cases.
+Review finding 3 wiring remains unstaged for parent combined render+guard commit to preserve section ownership. Finding 5 pure planner/executor and this ledger are committed as exact paths under shared index lock; compat owns the full caller regression and pre-vault call sites. No new review pass requested.
