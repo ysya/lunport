@@ -1171,7 +1171,7 @@ mod tests {
         let found = key_candidates(&a.env()).unwrap();
         assert_eq!(found.keys.len(), 1, "{found:?}");
         let candidate = &found.keys[0];
-        assert_eq!(candidate.path, key.display().to_string());
+        assert_eq!(Path::new(&candidate.path), key);
         assert_eq!(candidate.default_name, "id_mac");
         assert_eq!(candidate.fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT));
         assert_eq!(candidate.has_passphrase, Some(false));
@@ -1206,7 +1206,11 @@ mod tests {
             format!("Host web\n  HostName 10.0.0.1\n  IdentityFile ~/.ssh/sshelter/keys/{file}\nHost db\n  identityfile = ~/.ssh/sshelter/keys/{file}   # spelled out\n")
         );
         let local = &a.state().key_slots[id];
-        assert_eq!(local.source, Some(SlotSource::Linked { path: key.display().to_string(), link: local_link_kind(), fingerprint: Some(test_keys::PLAIN_FINGERPRINT.into()), origin: true }));
+        let Some(SlotSource::Linked { path, link, fingerprint, origin }) = &local.source else {
+            panic!("the slot must stay linked: {local:?}");
+        };
+        assert_eq!(Path::new(path), key);
+        assert_eq!((*link, fingerprint.as_deref(), *origin), (local_link_kind(), Some(test_keys::PLAIN_FINGERPRINT), true));
         assert_eq!(std::fs::read_to_string(home(&a).join(SLOT_DIR).join(&file)).unwrap(), test_keys::plain());
         assert!(key_candidates(&a.env()).unwrap().keys.is_empty(), "nothing left to set up");
         // 一輪之後,改寫的主機已上傳。
@@ -1662,7 +1666,7 @@ mod tests {
         // `id_mac` 還沒有插槽;`id_work` 又多了一台主機,候選帶著它自己的插槽。
         a.save_in_app(&space, &format!("{}Host db\n  IdentityFile ~/.ssh/id_work\n", a.read(&space)));
         let found = key_candidates(&a.env()).unwrap();
-        let slot_of = |key: &Path| found.keys.iter().find(|k| k.path == key.display().to_string()).map(|k| k.existing_slot.clone());
+        let slot_of = |key: &Path| found.keys.iter().find(|k| Path::new(&k.path) == key).map(|k| k.existing_slot.clone());
         assert_eq!((slot_of(&mac), slot_of(&work)), (Some(None), Some(Some(work_slot.clone()))));
         // 另一個(帳戶裡別台發佈的)插槽。
         let published = new_slot_id().unwrap();
@@ -1692,7 +1696,11 @@ mod tests {
         std::fs::remove_file(&key).unwrap();
         a.save_in_app(&space, &format!("{}Host db\n  IdentityFile ~/.ssh/id_mac_copy\n", a.read(&space)));
         assert_eq!(key_candidates(&a.env()).unwrap().keys[0].existing_slot.as_deref(), Some(id.as_str()));
-        refused(&a, &source_gone_message(&key.display().to_string()), || setup_keys(&a.env(), true, vec![reuse(&copy, &id)]).map(|_| ()));
+        let Some(SlotSource::Linked { path: recorded_source, .. }) = &held.source else {
+            panic!("the held slot must have a linked source: {held:?}");
+        };
+        assert_eq!(Path::new(recorded_source), key);
+        refused(&a, &source_gone_message(recorded_source), || setup_keys(&a.env(), true, vec![reuse(&copy, &id)]).map(|_| ()));
 
         // 原檔回來了,但帳戶裡的插槽改了名:記錄說的是舊路徑,新路徑上什麼都沒有。
         std::fs::write(&key, test_keys::plain()).unwrap();
@@ -1987,7 +1995,7 @@ mod tests {
         let found = k.offered();
         assert_eq!(found.keys.len(), 1, "{found:?}");
         let candidate = &found.keys[0];
-        assert_eq!(candidate.path, k.key().display().to_string());
+        assert_eq!(Path::new(&candidate.path), k.key());
         assert_eq!(
             candidate.kept_slot,
             Some(KeptSlot { id: k.id.clone(), file_name: k.file.clone(), synced_copy: false, in_vault: false, local_only: false })
@@ -2215,7 +2223,7 @@ mod tests {
         assert_eq!(k.d.read(&k.space()), before.replace(&k.value(), &slot_value(&file)), "web now uses the new account's slot");
         let path = home(&k.d).join(SLOT_DIR).join(&file);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), test_keys::plain());
-        assert!(matches!(&k.d.state().key_slots[&theirs].source, Some(SlotSource::Linked { path, .. }) if *path == k.key().display().to_string()));
+        assert!(matches!(&k.d.state().key_slots[&theirs].source, Some(SlotSource::Linked { path, .. }) if Path::new(path) == k.key()));
         settle(&k.d);
         assert!(!k.d.state().key_slots.contains_key(&k.id), "the old slot no host uses is put away");
         assert!(!slot_files::occupied(&k.slot_path(&k.d)));
@@ -2642,11 +2650,19 @@ mod tests {
         let k = kept_after_a_move(false, true);
         let space = k.space();
         let moved = k.d.read(&space);
+        // Model an already parked link before a user's file arrives. A Windows hard link that
+        // is still active cannot distinguish a replacement file from its own copy.
+        slot_files::remove_slot(&k.slot_path(&k.d)).unwrap();
+        mutate(&k.d.env(), |s| {
+            s.key_slots.get_mut(&k.id).unwrap().parked = true;
+            Ok(())
+        })
+        .unwrap();
         k.d.save_in_app(&space, &format!("Host db\n  IdentityFile ~/.ssh/id_mac\n{moved}"));
-        std::fs::remove_file(k.slot_path(&k.d)).unwrap();
         std::fs::write(k.slot_path(&k.d), "mine").unwrap();
+        std::fs::write(public_path(&k.slot_path(&k.d)), "mine public\n").unwrap();
         settle(&k.d);
-        assert!(k.d.state().key_slots[&k.id].parked, "setup: the user's file is in the way, so the link is put away");
+        assert!(k.d.state().key_slots[&k.id].parked, "setup: the user's file keeps the old link parked");
 
         let found = k.offered();
         assert_eq!(found.keys.len(), 1, "{found:?}");
@@ -2657,6 +2673,7 @@ mod tests {
         assert!(made.len() == 1 && made[0] != k.id, "a new slot: {made:?}");
         assert!(k.d.read(&space).starts_with(&format!("Host db\n  IdentityFile {}\n", slot_value(&slot_file_name("id_mac", &made[0])))));
         assert_eq!(std::fs::read_to_string(k.slot_path(&k.d)).unwrap(), "mine", "the user's file is not touched");
+        assert_eq!(std::fs::read_to_string(public_path(&k.slot_path(&k.d))).unwrap(), "mine public\n", "the user's .pub is not touched either");
     }
 
     // ── 保管庫裡的金鑰:只在這台的,或之前的帳戶留下、搬進保管庫的(候選的路徑是插槽路徑,資料從記錄來,沒有私鑰檔)──────────────────
