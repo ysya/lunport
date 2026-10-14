@@ -198,6 +198,7 @@ pub type Hook = Box<dyn FnOnce() + Send>;
 #[derive(Default)]
 pub struct Hooks {
     pub before_create: Option<Hook>,
+    pub before_pull: Option<Hook>,
     pub before_delete: Option<Hook>,
     pub after_push: Option<Hook>,
     pub after_batch: Option<Hook>,
@@ -255,6 +256,7 @@ impl RelayApi for HookedRelay {
         self.inner.freeze_chain(chain_id, token)
     }
     fn pull(&self, chain_id: &str, token: &str, since: u64) -> Result<PullResponse, RelayError> {
+        self.run(|h| h.before_pull.take());
         self.inner.pull(chain_id, token, since)
     }
     fn pull_batch(&self, items: &[BatchPullItem]) -> Result<Vec<BatchPullEntry>, RelayError> {

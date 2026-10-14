@@ -26,10 +26,19 @@ pub struct RecordSources {
             + Sync,
     >,
 }
+type ConfirmedPin = dyn Fn(
+        &HopRef,
+        Option<&HostKey>,
+        &HostKey,
+        &super::connect::CancelToken,
+        &(dyn Fn() -> Result<(), DirectoryError> + Sync),
+    ) -> Result<(), DirectoryError>
+    + Send
+    + Sync;
 pub struct RecordDirectory {
     sources: RecordSources,
+    confirmed_pin: Option<Box<ConfirmedPin>>,
 }
-
 fn repository_error(error: RepositoryError) -> DirectoryError {
     match error {
         RepositoryError::Validation(RecordValidationError::HostNotFound(id)) => {
@@ -47,7 +56,7 @@ fn endpoint(host: &HostView) -> HostEndpoint {
         port: host.effective_payload.port,
     }
 }
-fn stored(key: &HostKey) -> StoredHostKey {
+pub(super) fn stored(key: &HostKey) -> StoredHostKey {
     StoredHostKey {
         algorithm: key.algorithm.clone(),
         public_key: B64.encode(&key.public_key),
@@ -56,7 +65,7 @@ fn stored(key: &HostKey) -> StoredHostKey {
         pinned_by_device_id: String::new(),
     }
 }
-fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryError> {
+pub(super) fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryError> {
     let line = format!("{} {}", pin.algorithm, pin.public_key);
     let key = HostKey::from_openssh_line(&line)
         .filter(|key| key.fingerprint == pin.fingerprint)
@@ -68,7 +77,14 @@ fn pinned_key(pin: &StoredHostKey) -> Result<PinnedKey, DirectoryError> {
 }
 impl RecordDirectory {
     pub fn new(sources: RecordSources) -> Self {
-        Self { sources }
+        Self {
+            sources,
+            confirmed_pin: None,
+        }
+    }
+    pub(crate) fn with_confirmed_pin(mut self, pin: Box<ConfirmedPin>) -> Self {
+        self.confirmed_pin = Some(pin);
+        self
     }
     fn host(&self, id: &HostId) -> Result<HostView, DirectoryError> {
         repo::get_host(&(self.sources.snapshot)()?, id.as_str()).map_err(repository_error)
@@ -238,6 +254,25 @@ impl HostDirectory for RecordDirectory {
         key: &HostKey,
     ) -> Result<(), DirectoryError> {
         self.write_pin(self.checked_host(hop)?, Some(previous), key)
+    }
+    fn pin_confirmed(
+        &self,
+        hop: &HopRef,
+        previous: Option<&HostKey>,
+        key: &HostKey,
+        cancel: &super::connect::CancelToken,
+        guard: &(dyn Fn() -> Result<(), DirectoryError> + Sync),
+    ) -> Result<(), DirectoryError> {
+        if let Some(pin) = &self.confirmed_pin {
+            return pin(hop, previous, key, cancel, guard);
+        }
+        guard()?;
+        if cancel.is_cancelled() {
+            return Err(DirectoryError::Failed(
+                "The connection was cancelled.".into(),
+            ));
+        }
+        self.write_pin(self.checked_host(hop)?, previous, key)
     }
     fn password_account(&self, host: &HostId) -> String {
         format!("host:{}", host.as_str())

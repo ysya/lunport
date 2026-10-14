@@ -134,7 +134,19 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
             crate::sync::record_runtime::mutate_records(env,|s|crate::sync::record_repository::pin_host_key(s,id.as_str(),endpoint,previous,candidate.clone(),now).map_err(|e|AppError::Other(e.to_string())))?;
             env.events.wake();Ok::<_,AppError>(())
         }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))),
-    };super::record_directory::RecordDirectory::new(sources)
+    };
+    let app = app.clone();
+    super::record_directory::RecordDirectory::new(sources).with_confirmed_pin(Box::new(
+        move |hop, previous, key, cancel, guard| {
+            // Native host-key trust authorizes this one credential read, without lifting the
+            // background gate or changing Auto-log's no-pin policy.
+            crate::sync::engine::with_env(&app, |env| {
+                super::record_pin::confirm(env, hop, previous, key, &OsKeychain, cancel, guard)
+            })
+            .map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))?
+            .map_err(|e| super::directory::DirectoryError::Failed(e.to_string()))
+        },
+    ))
 }
 
 /// The temporary directory over the app's ssh_config, sync state and keychain (`ssh_config_directory.rs`).

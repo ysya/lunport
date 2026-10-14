@@ -2,6 +2,7 @@
 use super::{
     auth::{printable, Owner, Reply},
     connect::CancelToken,
+    deadline::InteractionDeadline,
     protocol::QuestionKind,
 };
 use crate::error::AppError;
@@ -54,7 +55,7 @@ pub trait AuthSurface: Send + Sync {
 }
 struct Waiting {
     request: AuthRequest,
-    deadline: Instant,
+    deadline: InteractionDeadline,
     answer: mpsc::SyncSender<Reply>,
 }
 #[derive(Default)]
@@ -71,10 +72,7 @@ impl AuthHub {
             .iter()
             .map(|w| {
                 let mut request = w.request.clone();
-                request.remaining_ms = w
-                    .deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_millis() as u64;
+                request.remaining_ms = w.deadline.remaining().as_millis() as u64;
                 request
             })
             .collect()
@@ -97,7 +95,14 @@ impl AuthHub {
             .iter()
             .position(|w| w.request.id == id)
             .ok_or_else(|| AppError::NotFound("Authentication question expired.".into()))?;
-        p.remove(i)
+        let waiting = p.remove(i);
+        if waiting.deadline.expired() {
+            let _ = waiting.answer.try_send(Reply::TimedOut);
+            return Err(AppError::NotFound(
+                "Authentication question expired.".into(),
+            ));
+        }
+        waiting
             .answer
             .try_send(value.map(Reply::Answer).unwrap_or(Reply::Cancelled))
             .map_err(|_| AppError::Other("Authentication request ended.".into()))
@@ -125,7 +130,8 @@ impl NativeOwner {
         let deadline = deadline
             .unwrap_or_else(|| Instant::now() + Duration::from_secs(120))
             .min(Instant::now() + Duration::from_secs(120));
-        if deadline <= Instant::now() {
+        let deadline = InteractionDeadline::from_instant(deadline);
+        if deadline.expired() {
             return Reply::TimedOut;
         }
         let id = format!("auth-{}", self.hub.next.fetch_add(1, Ordering::Relaxed));
@@ -143,9 +149,7 @@ impl NativeOwner {
             .into(),
             text: printable(text).chars().take(4096).collect(),
             echo,
-            remaining_ms: deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis() as u64,
+            remaining_ms: deadline.remaining().as_millis() as u64,
         };
         {
             let mut p = self.hub.pending.lock().unwrap();
@@ -159,20 +163,9 @@ impl NativeOwner {
             });
         }
         self.hub.publish(self.surface.as_ref());
-        let answer = loop {
-            if self.cancel.is_cancelled() {
-                break Reply::Gone;
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break Reply::TimedOut;
-            }
-            match rx.recv_timeout(left.min(Duration::from_millis(50))) {
-                Ok(answer) => break answer,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break Reply::Gone,
-                Err(_) => {}
-            }
-        };
+        let answer = receive_answer(&rx, &self.cancel, deadline, &|| {
+            (Instant::now(), std::time::SystemTime::now())
+        });
         self.hub
             .pending
             .lock()
@@ -181,10 +174,41 @@ impl NativeOwner {
         self.hub.publish(self.surface.as_ref());
         if self.cancel.is_cancelled() {
             Reply::Gone
-        } else if Instant::now() >= deadline {
+        } else if deadline.expired() {
             Reply::TimedOut
         } else {
             answer
+        }
+    }
+}
+fn receive_answer(
+    rx: &mpsc::Receiver<Reply>,
+    cancel: &CancelToken,
+    deadline: InteractionDeadline,
+    now: &dyn Fn() -> (Instant, std::time::SystemTime),
+) -> Reply {
+    loop {
+        if cancel.is_cancelled() {
+            return Reply::Gone;
+        }
+        let (monotonic, utc) = now();
+        let left = deadline.remaining_at(monotonic, utc);
+        if left.is_zero() {
+            return Reply::TimedOut;
+        }
+        match rx.recv_timeout(left.min(Duration::from_millis(50))) {
+            Ok(answer) => {
+                let (monotonic, utc) = now();
+                return if deadline.remaining_at(monotonic, utc).is_zero() {
+                    Reply::TimedOut
+                } else if cancel.is_cancelled() {
+                    Reply::Gone
+                } else {
+                    answer
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Reply::Gone,
+            Err(_) => {}
         }
     }
 }
@@ -389,5 +413,99 @@ mod attribution_tests {
         );
         hub.resolve(&question.id, None).unwrap();
         assert!(matches!(worker.join().unwrap(), Reply::Cancelled));
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+    #[test]
+    fn expired_auth_deadline_rejects_answer_before_reporting_success() {
+        let hub = AuthHub::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        hub.pending.lock().unwrap().push(Waiting {
+            request: AuthRequest {
+                id: "expired".into(),
+                request_id: "request".into(),
+                hop: None,
+                kind: "password".into(),
+                text: "Password".into(),
+                echo: false,
+                remaining_ms: 0,
+            },
+            deadline: InteractionDeadline::from_instant(Instant::now() - Duration::from_secs(1)),
+            answer: tx,
+        });
+        assert!(hub
+            .resolve(
+                "expired",
+                Some(Zeroizing::new("EXPIRED_SECRET_SENTINEL".into()))
+            )
+            .is_err());
+        assert!(!matches!(rx.try_recv(), Ok(Reply::Answer(_))));
+        assert!(hub.pending().is_empty());
+    }
+    fn wall_expired_question() -> (AuthHub, mpsc::Receiver<Reply>) {
+        let hub = AuthHub::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        hub.pending.lock().unwrap().push(Waiting {
+            request: AuthRequest {
+                id: "wall-expired".into(),
+                request_id: "request".into(),
+                hop: None,
+                kind: "password".into(),
+                text: "Password".into(),
+                echo: false,
+                remaining_ms: 120000,
+            },
+            deadline: InteractionDeadline {
+                monotonic: Instant::now() + Duration::from_secs(120),
+                utc: std::time::SystemTime::now() - Duration::from_secs(1),
+            },
+            answer: tx,
+        });
+        (hub, rx)
+    }
+    #[test]
+    fn wall_expiry_rejects_secret_with_live_monotonic_deadline() {
+        let (hub, rx) = wall_expired_question();
+        assert!(hub
+            .resolve(
+                "wall-expired",
+                Some(Zeroizing::new("EXPIRED_SECRET_SENTINEL".into()))
+            )
+            .is_err());
+        assert!(!matches!(rx.try_recv(), Ok(Reply::Answer(_))));
+    }
+    #[test]
+    fn wall_expiry_reports_zero_remaining_with_live_monotonic_deadline() {
+        let (hub, _rx) = wall_expired_question();
+        assert_eq!(hub.pending()[0].remaining_ms, 0);
+    }
+    #[test]
+    fn wall_expiry_discards_queued_secret_after_clock_advances() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Reply::Answer(Zeroizing::new(
+            "EXPIRED_SECRET_SENTINEL".into(),
+        )))
+        .unwrap();
+        let now = Instant::now();
+        let utc = std::time::SystemTime::now();
+        let calls = AtomicU64::new(0);
+        let deadline = InteractionDeadline {
+            monotonic: now + Duration::from_secs(120),
+            utc: utc + Duration::from_secs(120),
+        };
+        let answer = receive_answer(&rx, &CancelToken::default(), deadline, &|| {
+            (
+                now,
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    utc
+                } else {
+                    utc + Duration::from_secs(121)
+                },
+            )
+        });
+        assert!(matches!(answer, Reply::TimedOut));
     }
 }
