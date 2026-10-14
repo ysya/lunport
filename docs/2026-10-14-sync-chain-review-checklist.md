@@ -1,6 +1,6 @@
 # SSHelter sync chain 檢視清單
 
-本輪完成範圍：own SSH phase 1c 的 active records runtime，以及可操作的最小切換介面。工作保留在 `codex/own-ssh-phase1c`，原專案的 `next/own-ssh` 未合併。
+本輪完成範圍：own SSH phase 1c 的 active records runtime，以及可操作的最小切換介面。功能分支 `codex/own-ssh-phase1c` 已依使用者 2026-10-14 的指示合併至 `next/own-ssh`，準備發布 `v1.0.0-1` beta。
 
 ## 設計方向
 
@@ -44,8 +44,8 @@
 
 ## 尚未執行與功能邊界
 
-- GitHub push、draft PR 與跨平台 CI：自動核准審查拒絕 push，需明確授權將完成的分支傳至 `github.com/ysya/sshelter` 才能繼續。
-- 合併共享分支、正式發版、真實帳戶遷移及正式 relay 部署尚未執行。
+- 使用者已明確授權直接合併與發布 beta；跨平台 CI 與安裝包發布正在進行，採既有 publish beta workflow。
+- 已合併到 `next/own-ssh`；Stable 正式發版、真實帳戶遷移及正式 relay 部署尚未執行。
 - Windows／Linux 執行行為仍需 CI 與裝置驗收。release profile 檢查使用降低最佳化的設定，不能當作正式最佳化安裝包驗收。
 - Records 模式的 MCP 遠端執行與 key deployment 留在 phase 2；目前入口明確回報不可用。Legacy 原有功能依模式保留。
 - 本輪是同步與切換基礎完成，不代表 Termius 所有功能已具備。
@@ -58,3 +58,5 @@
 4. 金鑰預設留在 Local；遷移保留來源及舊密碼項目；換碼保留凍結舊鏈的歷史讀取語意。
 
 詳細實作與測試紀錄：[active integration ledger](superpowers/plans/2026-10-14-own-ssh-phase1c-active-integration-ledger.md)、[final review fix ledger](superpowers/plans/2026-10-14-own-ssh-phase1c-final-review-fixes-ledger.md)。
+
+Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0.0-1.md)。
