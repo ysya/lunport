@@ -390,10 +390,13 @@ function App() {
           />
         )}
         records={() => (
-          <RecordsWorkspace
-            overview={status.data!.overview!}
-            reload={() => void status.refetch()}
-          />
+          <>
+            <RecordsWorkspace
+              overview={status.data!.overview!}
+              reload={() => void status.refetch()}
+            />
+            <McpApprovalDialog />
+          </>
         )}
       />
       {pauseOpen && (

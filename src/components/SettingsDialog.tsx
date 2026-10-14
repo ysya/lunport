@@ -51,6 +51,7 @@ import {
   useMcpStatus,
   useSetMcpEnabled,
   useSetMcpHostAllowed,
+  useSetMcpApprovalMode,
 } from "@/lib/mcp";
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -78,6 +79,9 @@ import {
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 import { SyncPane } from "@/components/SyncPane";
 import { revealHidden } from "@/lib/sync-approvals";
+import { chooseMcpMode } from "@/lib/mcp-flow";
+import { McpAttribution } from "@/components/McpAttribution";
+import { groupPath } from "@/components/records/group-tree";
 import type { RecordOverview } from "@/lib/records";
 
 export function SettingsCategoryPane({
@@ -114,8 +118,10 @@ export function SettingsCategoryPane({
         hosts={recordOverview.hosts.map((host) => ({
           id: host.id,
           alias: revealHidden(host.payload.alias),
-          hostname: revealHidden(host.payload.hostname),
-          user: revealHidden(host.payload.user),
+          hostname: revealHidden(host.effective_payload.hostname),
+          user: revealHidden(host.effective_payload.user),
+          port: host.effective_payload.port,
+          groupPath: revealHidden(groupPath(recordOverview, host.payload.group_id, host.scope)),
         }))}
       />
     ) : (
@@ -141,8 +147,7 @@ export function SettingsCategoryPane({
         description="This workspace uses SSHelter's built-in SSH engine. Hosts and keys stay local unless you explicitly share them into a sync chain."
       >
         <p className="text-sm text-muted-foreground">
-          MCP supports selected host metadata. Remote command execution and key
-          deployment are not available in this records workspace.
+          MCP can inspect individually allowed hosts and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Group defaults never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.
         </p>
       </Section>
     );
@@ -762,14 +767,24 @@ function LegacyMcpPane() {
   return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
 }
 
-function McpPane({ hosts, records = false }: {
-  hosts: Array<{id: string; alias: string; hostname: string | null; user: string | null}>;
+export function McpPane({ hosts, records = false }: {
+  hosts: Array<{id: string; alias: string; hostname: string | null; user: string | null; port?: number; groupPath?: string}>;
   records?: boolean;
 }) {
   const status = useMcpStatus(2_000);
   const platform = usePlatform();
   const setEnabled = useSetMcpEnabled();
   const setHostAllowed = useSetMcpHostAllowed();
+  const setMode = useSetMcpApprovalMode();
+  const [riskOpen, setRiskOpen] = useState(false);
+  const [riskAcknowledged, setRiskAcknowledged] = useState(false);
+  const applyMode = (approvalMode: "ask" | "auto_log", riskAcknowledged: boolean) =>
+    setMode.mutate({ approvalMode, riskAcknowledged }, {
+      onSuccess: () => {
+        setRiskOpen(false);
+        setRiskAcknowledged(false);
+      },
+    });
   const allowed = new Set(status.data?.allowed_hosts ?? []);
   const setupCommand = status.data
     ? `codex mcp add sshelter -- ${shellQuoted(status.data.executable, platform.data)} --mcp`
@@ -788,7 +803,7 @@ function McpPane({ hosts, records = false }: {
     <>
       <Section
         title="MCP access"
-        description={records ? "Let local AI clients list selected hosts and inspect connection metadata. Remote command execution is not available in this records workspace." : "Let local AI clients request SSH actions through SSHelter. Remote commands always require an Allow once decision here."}
+        description={records ? "Let local AI clients inspect and execute commands on individually allowed hosts through SSHelter." : "Let local AI clients request SSH actions through SSHelter. Remote commands require an Allow once decision here."}
       >
         <SettingsGroup>
           <SettingsRow
@@ -799,12 +814,12 @@ function McpPane({ hosts, records = false }: {
             <Switch
               id="set-mcp-enabled"
               checked={status.data?.enabled === true}
-              disabled={status.isLoading || setEnabled.isPending}
+              disabled={!status.data || status.isError || setEnabled.isPending}
               onCheckedChange={(enabled) => setEnabled.mutate(enabled)}
             />
           </SettingsRow>
           <SettingsRow
-            label="Local approval bridge"
+            label={records ? "Local MCP broker" : "Local approval bridge"}
             description={
               status.data?.last_client_at_ms
                 ? `Last MCP activity ${new Date(status.data.last_client_at_ms).toLocaleString()}`
@@ -817,6 +832,78 @@ function McpPane({ hosts, records = false }: {
           </SettingsRow>
         </SettingsGroup>
       </Section>
+
+      {records ? (
+        <Section
+          title="Command approval"
+          description="Ask reviews each complete command before execution. Switching mode cancels active requests."
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant={status.data?.approval_mode === "ask" ? "secondary" : "outline"}
+              disabled={!status.data || setMode.isPending}
+              onClick={() => {
+                setRiskOpen(false);
+                setRiskAcknowledged(false);
+                chooseMcpMode("ask", false, applyMode);
+              }}
+            >Ask</Button>
+            <Button
+              variant={status.data?.approval_mode === "auto_log" ? "secondary" : "outline"}
+              disabled={!status.data || setMode.isPending || status.data.approval_mode === "auto_log"}
+              onClick={() => {
+                setRiskAcknowledged(false);
+                if (chooseMcpMode("auto_log", false, applyMode)) setRiskOpen(true);
+              }}
+            >Auto-log</Button>
+          </div>
+          <p className="mt-2 break-words text-xs text-muted-foreground">
+            {status.data?.noninteractive_credentials_notice}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Auto-log never opens authentication or host-key trust windows. Missing credentials, 2FA, or an untrusted server require switching to Ask.
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            If background sync remains unavailable after a hidden launch, open SSHelter from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
+          </p>
+        </Section>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Legacy uses Ask: each command requires Allow once. Auto-log is available in Records workspaces.
+        </p>
+      )}
+      <AlertDialog
+        open={riskOpen}
+        onOpenChange={open => {
+          setRiskOpen(open);
+          if (!open) setRiskAcknowledged(false);
+        }}
+      >
+        <AlertDialogContent onEscapeKeyDown={event => { if (setMode.isPending) event.preventDefault(); }}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Allow commands without review?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Auto-log lets local MCP clients execute arbitrary shell commands on every individually allowed host without asking you first. Commands can delete files, change services or send data elsewhere. The audit records public metadata, not command output; logging cannot undo an action.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={riskAcknowledged}
+              disabled={setMode.isPending}
+              onChange={event => setRiskAcknowledged(event.target.checked)}
+            />
+            I understand that allowed hosts can be changed or lose data without a per-command review.
+          </label>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={setMode.isPending}>Cancel</AlertDialogCancel>
+            <Button
+              disabled={!riskAcknowledged || setMode.isPending}
+              onClick={() => chooseMcpMode("auto_log", riskAcknowledged, applyMode)}
+            >{setMode.isPending ? "Applying…" : "Enable Auto-log"}</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Section
         title="Connect Codex"
@@ -842,9 +929,9 @@ function McpPane({ hosts, records = false }: {
 
       <Section
         title="Allowed hosts"
-        description={records ? "Select individual host IDs. Legacy alias permissions do not grant access to this workspace." : "Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."}
+        description={records ? "Select individual host IDs. Groups and inherited settings never grant access; Legacy alias permissions do not apply." : "Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."}
       >
-        <SettingsGroup>
+        <div className="[&_label]:break-all [&_p]:break-all"><SettingsGroup>
           {hosts.length === 0 ? (
             <p className="px-3 py-3 text-sm text-muted-foreground">No SSH hosts loaded.</p>
           ) : (
@@ -853,17 +940,13 @@ function McpPane({ hosts, records = false }: {
                 key={host.id}
                 id={`mcp-host-${host.id}`}
                 label={host.alias}
-                description={
-                  host.hostname
-                    ? `${host.user ? `${host.user}@` : ""}${host.hostname}`
-                    : "Uses the alias as its destination."
-                }
+                description={`${host.hostname ? `${host.user ? `${host.user}@` : ""}${host.hostname}${host.port ? `:${host.port}` : ""}` : "Uses the alias as its destination."}${records ? ` · ID: ${host.id} · Group: ${host.groupPath || "Ungrouped"}` : ""}`}
                 mono
               >
                 <Switch
                   id={`mcp-host-${host.id}`}
                   checked={allowed.has(host.id)}
-                  disabled={setHostAllowed.isPending}
+                  disabled={!status.data || setHostAllowed.isPending}
                   onCheckedChange={(value) =>
                     setHostAllowed.mutate({ alias: host.id, allowed: value })
                   }
@@ -871,13 +954,15 @@ function McpPane({ hosts, records = false }: {
               </SettingsRow>
             ))
           )}
-        </SettingsGroup>
+        </SettingsGroup></div>
       </Section>
 
       <Section
-        title="Recent decisions"
-        description="This session-only log records the decision and exit status, not SSH credentials."
+        title="Recent activity"
+        description="Latest 10 public audit entries, retained across restarts. Authorization does not mean command success. Output and authentication answers are never logged."
       >
+        {status.data?.audit_error && <p role="alert" className="mb-2 break-words text-xs text-destructive">Audit persistence error: {status.data.audit_error}. Completed commands are not retried.</p>}
+        {status.isError && <p role="alert" className="mb-2 text-xs text-destructive">AI access status is unavailable. Retry after the app reconnects.</p>}
         <SettingsGroup>
           {(status.data?.recent.length ?? 0) === 0 ? (
             <p className="px-3 py-3 text-sm text-muted-foreground">No AI commands yet.</p>
@@ -885,19 +970,11 @@ function McpPane({ hosts, records = false }: {
             status.data?.recent.slice(0, 10).map((entry) => (
               <div key={entry.id} className="space-y-1 px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="font-mono text-xs">{entry.alias}</span>
-                  <Badge
-                    variant={entry.outcome === "allowed" ? "secondary" : "outline"}
-                    className={cn(
-                      entry.outcome === "allowed" &&
-                        "text-emerald-700 dark:text-emerald-300",
-                      entry.outcome !== "allowed" && "text-amber-700 dark:text-amber-300",
-                    )}
-                  >
-                    {entry.outcome.split("_").join(" ")}
-                    {entry.exit_code !== null ? ` · ${entry.exit_code}` : ""}
-                  </Badge>
+                  <span className="min-w-0 break-all font-mono text-xs">{revealHidden(entry.alias)}</span>
+                  <span className="break-words text-xs">{entry.client} · {entry.mode} · {entry.outcome.split("_").join(" ")}</span>
                 </div>
+                <p className="break-all text-xs text-muted-foreground">ID: {entry.host_id ?? "Unknown"} · Ended: {entry.ended ?? "unknown"} · Exit: {entry.exit_code ?? "unknown"} · Signal: {entry.signal ?? "none reported"}</p>
+                <McpAttribution requestedBy={entry.requested_by} requesterId={entry.requester_id} clientInfo={entry.client_info} />
                 <p className="truncate font-mono text-xs text-muted-foreground" title={entry.command}>
                   {entry.command}
                 </p>
