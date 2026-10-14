@@ -242,7 +242,10 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
 /// 之後的任何存檔都會把新狀態寫到原路徑,不搬就會蓋掉它。回傳新檔名;搬不動回傳 I/O 錯誤。
 fn set_aside_unreadable_state(path: &Path, timestamp_ms: u64) -> std::io::Result<String> {
     let name = format!("sync-state.unreadable-{timestamp_ms}.json");
-    std::fs::rename(path, path.with_file_name(&name))?;
+    let destination = path.with_file_name(&name);
+    fsutil::check_write_io(path)?;
+    fsutil::check_write_io(&destination)?;
+    std::fs::rename(path, destination)?;
     Ok(name)
 }
 
@@ -356,6 +359,8 @@ fn acquire_engine_lock(dir: &Path) -> Result<File, String> {
 
 /// `acquire_engine_lock` 的本體:最多試 `attempts` 次,兩次之間呼叫 `pause`(測試注入,不必真的等)。
 fn acquire_engine_lock_with(dir: &Path, attempts: u32, mut pause: impl FnMut()) -> Result<File, String> {
+    fsutil::check_write(dir).map_err(|e| engine_lock_error(&e))?;
+    fsutil::check_write(&dir.join(ENGINE_LOCK_FILE)).map_err(|e| engine_lock_error(&e))?;
     fsutil::ensure_dir_secure(dir).map_err(|e| engine_lock_error(&e))?;
     let file = OpenOptions::new()
         .read(true)
@@ -993,7 +998,33 @@ mod tests {
         assert!(wait_for_round(&rx, &wait).is_err(), "the sender is gone: the worker stops");
     }
 
+    #[test]
+    fn boundary_unreadable_state_cannot_be_moved_outside_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dev");
+        let path = dir.path().join("production-state.json");
+        std::fs::write(&path, b"keep").unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert_eq!(set_aside_unreadable_state(&path, 123).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        });
+        assert_eq!(std::fs::read(path).unwrap(), b"keep");
+        assert!(!dir.path().join("sync-state.unreadable-123.json").exists());
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn boundary_engine_lock_cannot_follow_a_link_to_another_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dev");
+        std::fs::create_dir(&root).unwrap();
+        let outside = dir.path().join("production-lock");
+        std::fs::write(&outside, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(ENGINE_LOCK_FILE)).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: root.clone() }, || {
+            assert!(acquire_engine_lock_with(&root, 1, || {}).is_err());
+        });
+        assert_eq!(std::fs::read(outside).unwrap(), b"keep");
+    }
 
     #[test]
     fn future_local_state_is_preserved_and_startup_never_reads_the_keychain() {

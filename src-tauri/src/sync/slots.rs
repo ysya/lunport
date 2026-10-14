@@ -465,6 +465,7 @@ pub fn local_key_fingerprint(path: &Path) -> Option<String> {
 /// 是別的插槽(或別人)放在這個位置的。插槽目錄要已經建好(`slot_files::ensure_keys_dir`)。建立插槽(Task 5)與挑選金鑰(Task 6)
 /// 也用它。
 pub fn write_linked_public(slot: &Path, source: &Path) -> Result<(), AppError> {
+    crate::fsutil::check_write(&public_path(slot))?;
     match local_key_public(source) {
         Some((public_key, _)) => slot_files::write_public(slot, &public_key),
         None => Ok(remove_if_present(&public_path(slot))?),
@@ -1444,6 +1445,7 @@ pub(crate) fn learned_now(s: &SyncStateV2, chain_id: &str) -> Option<String> {
 
 /// 快照:(狀態、帳戶金鑰、家目錄)。要帳戶的動作用(挑金鑰、改用同步的金鑰、改成同步或停止同步)。
 fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError> {
+    crate::sync::account::check_local_write_paths(env)?;
     let core = env.runtime.core.lock().unwrap();
     let state = core.state.clone().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
     crate::sync::account::format_writes_allowed(&state)?;
@@ -1460,6 +1462,7 @@ fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError
 /// 提交被拒的話,跑引擎的那個行程還記著原本的連結,檔案與保管庫卻已經動過了,沒有帳戶可以對照著修回來(同步嘗試只補回有主機用到的連結,
 /// `maintain_local`)。(有帳戶金鑰的 `snapshot` 不必:這種行程從來推導不出帳戶金鑰,那些動作本來就先失敗。)
 pub(crate) fn local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
+    crate::sync::account::check_local_write_paths(env)?;
     let (state, home) = read_local_snapshot(env)?;
     crate::sync::account::format_writes_allowed(&state)?;
     Ok((state, home))
@@ -1605,6 +1608,8 @@ fn into_vault(
     origin: EntryOrigin,
 ) -> Result<IntoVault, AppError> {
     let slot_path = keys_dir.join(file);
+    crate::fsutil::check_write(&slot_path)?;
+    crate::fsutil::check_write(&public_path(&slot_path))?;
     if let Some(message) = agent_refusal(text, facts) {
         return Ok(IntoVault::AsFile(message.to_string()));
     }
@@ -1855,6 +1860,8 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     }
     let local = state.key_slots.get(slot_id).ok_or_else(not_found)?;
     let path = home.join(SLOT_DIR).join(&local.file_name);
+    crate::fsutil::check_write(&path)?;
+    crate::fsutil::check_write(&public_path(&path))?;
     let in_use = config_slot_uses(env).ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
     if slot_hosts(&state).contains_key(&local.file_name) || in_use.contains_key(&local.file_name) {
         return Err(AppError::Other(IN_USE_MESSAGE.to_string()));
@@ -1967,6 +1974,8 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
     let local = state.key_slots.get(slot_id).cloned().ok_or_else(not_found)?;
     let keys_dir = home.join(SLOT_DIR);
     let slot_path = keys_dir.join(&local.file_name);
+    crate::fsutil::check_write(&slot_path)?;
+    crate::fsutil::check_write(&public_path(&slot_path))?;
     let vault_file = vault_path(&env.state_path);
     let now = env.now();
     if vault {
@@ -7664,8 +7673,67 @@ pub(crate) mod tests {
         assert!(overview_row(&d, &id).is_none(), "and the row");
     }
 
+    /// 跑不了同步引擎的行程(`save_blocked`:例如第二個 SSHelter;沒有帳戶時它不再因為沒有帳戶金鑰而先失敗):「Move」與「Delete copy」在動任何東西之前就以
+    /// `mutate` 的理由拒絕 —— 連結還在、保管庫沒變、記錄沒變。不然檔案與保管庫先動了、記錄卻寫不進去:跑引擎的那個行程還記著連結,沒有帳戶可以對照著修回來
+    /// (沒有帳戶時同步嘗試只補回有主機用到的連結)。
+    #[test]
+    fn boundary_linked_public_key_cleanup_checks_its_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dev");
+        let slot = dir.path().join("production-key");
+        let public = public_path(&slot);
+        std::fs::write(&public, b"keep").unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(write_linked_public(&slot, &dir.path().join("missing-source")).is_err());
+        });
+        assert_eq!(std::fs::read(public).unwrap(), b"keep");
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn boundary_delete_copy_checks_public_path_before_removing_vault_material() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let (id, file) = local_key_on(&a, &test_keys::plain(), "local");
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("production.pub");
+        std::fs::write(&target, b"keep").unwrap();
+        let public = public_path(&home(&a).join(SLOT_DIR).join(&file));
+        std::fs::remove_file(&public).unwrap();
+        std::os::unix::fs::symlink(&target, &public).unwrap();
+        let before = a.state();
+        let vault_before = std::fs::read(vault_path(&a.env().state_path)).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: home(&a) }, || {
+            assert!(delete_copy(&a.env(), &id).is_err());
+        });
+        assert_eq!(a.state(), before);
+        assert_eq!(std::fs::read(vault_path(&a.env().state_path)).unwrap(), vault_before);
+        assert!(std::fs::symlink_metadata(&public).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn boundary_set_delivery_checks_public_path_before_changing_the_vault() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "linked");
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("production.pub");
+        std::fs::write(&target, b"keep").unwrap();
+        let public = public_path(&home(&a).join(SLOT_DIR).join(&file));
+        if public.exists() { std::fs::remove_file(&public).unwrap(); }
+        std::os::unix::fs::symlink(&target, &public).unwrap();
+        let before = a.state();
+        assert!(vault_entry(&a, &id).is_none());
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: home(&a) }, || {
+            crate::config::include::with_test_home(&home(&a), || {
+                assert!(set_delivery(&a.env(), &id, true).is_err());
+            });
+        });
+        assert!(vault_entry(&a, &id).is_none(), "denial must happen before the vault receives material");
+        assert_eq!(a.state(), before);
+        assert!(std::fs::symlink_metadata(&public).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+    }
 
     #[test]
     fn newer_format_accounts_refuse_local_slot_writes_but_allow_exports() {

@@ -561,6 +561,10 @@ fn rewrite_in(
 /// 主機沒改寫成(撞到 `Conflict`)就不放:插槽留著連結,下一次掃描建議沿用它,之後由「Move」搬。金鑰在保管庫裡的候選沿用帳戶的插槽時,帳戶的金鑰本來就落進保管庫
 /// (`land_reused_slot`):主機是從一個保管庫裡的插槽換到另一個,核准照舊。
 pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Result<Vec<String>, AppError> {
+    crate::sync::account::check_local_write_paths(env)?;
+    if !choices.is_empty() {
+        if let Some(doc) = env.doc.lock().unwrap().as_ref() { crate::sync::account::check_doc_write_paths(doc)?; }
+    }
     refuse_while_sync_inactive(active, env.runtime)?;
     let account_keys = {
         let core = env.runtime.core.lock().unwrap();

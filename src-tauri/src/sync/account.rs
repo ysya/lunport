@@ -72,6 +72,8 @@ pub fn saves_allowed(env: &SyncEnv) -> Result<(), AppError> {
         format_writes_allowed(state)?;
     }
     drop(core);
+    check_local_write_paths(env)?;
+    if let Some(doc) = env.doc.lock().unwrap().as_ref() { check_doc_write_paths(doc)?; }
     Ok(())
 }
 
@@ -92,7 +94,20 @@ fn config_loaded(env: &SyncEnv) -> Result<(), AppError> {
     }
 }
 
+/// Validate the complete local write set before external side effects.
+pub(crate) fn check_local_write_paths(env: &SyncEnv) -> Result<(), AppError> {
+    crate::fsutil::check_write(&env.state_path)?;
+    crate::fsutil::check_write(&crate::vault::store::vault_path(&env.state_path))?;
+    let doc_lock = env.doc.lock().unwrap();
+    if let Some(doc) = doc_lock.as_ref() { crate::config::include::validate_doc_write_boundaries(doc)?; }
+    Ok(())
+}
 
+pub(crate) fn check_doc_write_paths(doc: &SshConfigDoc) -> Result<(), AppError> {
+    crate::config::include::validate_doc_write_boundaries(doc)?;
+    for file in &doc.files { crate::fsutil::check_backup_write(&file.path)?; }
+    Ok(())
+}
 
 /// Refuse every legacy write once the account's newer format is known.
 pub(crate) fn format_writes_allowed(state: &SyncStateV2) -> Result<(), AppError> {
@@ -266,6 +281,7 @@ pub fn create_account(env: &SyncEnv, device_name: &str) -> Result<String, AppErr
 /// 勾選的 space 檔:先建好檔案、再更新 Include 清單(spec §4.3),然後重載 doc。呼叫端持有 doc 鎖、不持有 core 鎖。
 pub fn add_selected_file(env: &SyncEnv, doc_lock: &mut Option<SshConfigDoc>, file_name: &str) -> Result<(), AppError> {
     let Some(doc) = doc_lock.as_mut() else { return Ok(()) };
+    check_doc_write_paths(doc)?;
     let tokens = {
         let core = env.runtime.core.lock().unwrap();
         let s = core.state.as_ref().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
@@ -349,6 +365,8 @@ pub(crate) fn keep_files_local(env: &SyncEnv, doc_lock: &mut Option<SshConfigDoc
         *doc_lock = Some(env.load_doc(&main)?);
     }
     let doc = doc_lock.as_mut().expect("loaded above");
+    check_doc_write_paths(doc)?;
+    for file in files { crate::fsutil::check_write(file)?; }
     let mut backed_up = env.backed_up.lock().unwrap();
     let retention = env.retention();
     let result = space_files::keep_files_local(&env.ssh_dir, files, |kept| {
@@ -418,6 +436,10 @@ fn stale_v1_file(ssh_dir: &Path, items: &[Item]) -> Option<PathBuf> {
 /// 備份之後移除一個 ssh 不讀、也沒有人需要的舊檔(`stale_v1_file`)。備份不了就留著不動(同升級:沒有備份絕不移除);移除失敗只留下一個沒有 Include 讀它的檔案,
 /// 不影響離開 —— 兩種都只記到 stderr。
 fn drop_stale_file(path: &Path) {
+    if let Err(e) = crate::fsutil::check_write(path) {
+        eprintln!("[sync] a stale v1 file was left in place: {e}");
+        return;
+    }
     if let Err(e) = crate::sync::upgrade::back_up_first(path) {
         eprintln!("[sync] a stale v1 file was left in place: {e}");
         return;
@@ -594,7 +616,15 @@ pub fn leave_account(env: &SyncEnv, delete_remote: bool) -> Result<(), AppError>
             core.account_keys.clone(),
         )
     };
+    check_local_write_paths(env)?;
+    if let Some(doc) = env.doc.lock().unwrap().as_ref() { check_doc_write_paths(doc)?; }
     if let Some(state) = initial.as_ref() {
+        crate::fsutil::check_write(&space_files::local_dir(&env.ssh_dir))?;
+        for space in state.spaces.values().filter(|space| space.selected) {
+            let source = space_files::space_file_path(&env.ssh_dir, &space.file_name)?;
+            crate::fsutil::check_write(&source)?;
+            crate::fsutil::check_write(&space_files::local_dir(&env.ssh_dir).join(&space.file_name))?;
+        }
         format_writes_allowed(state)?;
         // Authenticated deletion must verify the remote gate before canceling rotation or moving files.
         if delete_remote && state.joined() && state.frozen().is_none() {
@@ -983,6 +1013,26 @@ mod tests {
         assert!(a.keychain.entry(MNEMONIC_ACCOUNT).is_none(), "nothing reached the keychain");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn boundary_account_creation_checks_state_path_before_relay_or_keychain() {
+        let (relay, clock) = (FakeRelay::new(), TestClock::new());
+        let a = TestDevice::new("fresh", &relay, &clock);
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("production-state.json");
+        std::fs::write(&target, b"keep").unwrap();
+        let state_path = a.env().state_path;
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &state_path).unwrap();
+        let before = a.state();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: a.ssh_dir().parent().unwrap().to_path_buf() }, || {
+            assert!(create_account(&a.env(), "Fresh").is_err());
+        });
+        assert_eq!(a.state(), before);
+        assert!(a.keychain.entry(MNEMONIC_ACCOUNT).is_none());
+        assert!(relay.calls().is_empty());
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+    }
 
     #[test]
     fn leaving_a_newer_format_account_preserves_files_keychain_and_chains() {
