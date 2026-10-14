@@ -36,7 +36,7 @@ use deploy::{
 };
 use keys::{keys_agent_status, keys_deploy, keys_git_ssh_hint, keys_list, keys_read_public};
 use known_hosts::{known_hosts_list, known_hosts_remove};
-use mcp::{mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
+use mcp::{mcp_set_approval_mode, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
 use session::hostkey_window::{hostkey_pending, hostkey_resolve};
 use settings_io::{settings_export, settings_import};
 use sync::engine::{
@@ -120,6 +120,12 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Only native user activation clears the hidden-host credential gate.
+pub(crate) fn show_main_window_by_user(app: &tauri::AppHandle) {
+    app.state::<state::AppState>().background_credentials_only.store(false, std::sync::atomic::Ordering::SeqCst);
+    show_main_window(app);
+}
+
 /// What a second launch does in the running SSHelter. `args` are the second process's
 /// arguments, executable path first, so its mode is `args[1]` (as in main.rs). A host launch
 /// means a client could not reach this instance: it needs the bridge or the socket, not a
@@ -134,7 +140,7 @@ fn second_launch_shows_window(args: &[String]) -> bool {
 #[cfg(desktop)]
 fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
     if second_launch_shows_window(&args) {
-        show_main_window(app);
+        show_main_window_by_user(app);
     } else {
         mcp::republish_bridge(app);
         session::app::start(app);
@@ -185,6 +191,7 @@ fn run_app(host: bool, start_hidden: bool) {
                     window.show()?;
                 }
             }
+            app.state::<state::AppState>().background_credentials_only.store(host && start_hidden,std::sync::atomic::Ordering::SeqCst);
             sync::engine::initialize(app.handle())?;
             mcp::initialize(app.handle(), host)?;
             // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
@@ -203,6 +210,10 @@ fn run_app(host: bool, start_hidden: bool) {
                 return;
             }
             // The host key window (own-ssh spec §10): closing it refuses every key it was asking about.
+            if window.label() == session::auth_window::AUTH_WINDOW {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {window.app_handle().state::<state::AppState>().session.auth_questions.deny_all();}
+                return;
+            }
             if window.label() == session::hostkey_window::HOSTKEY_WINDOW {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
                     window.app_handle().state::<state::AppState>().session.host_keys.deny_all();
@@ -316,6 +327,9 @@ fn run_app(host: bool, start_hidden: bool) {
             settings_export,
             settings_import,
             mcp_status,
+            mcp_set_approval_mode,
+            session::auth_window::auth_pending,
+            session::auth_window::auth_resolve,
             mcp_set_enabled,
             mcp_set_host_allowed,
             mcp_resolve_request,
@@ -373,7 +387,7 @@ fn run_app(host: bool, start_hidden: bool) {
             // macOS: clicking SSHelter in the Dock or opening it from Finder while it runs starts
             // no second process; it sends Reopen. Bring back the window, even a hidden one.
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => show_main_window(app),
+            tauri::RunEvent::Reopen { .. } => show_main_window_by_user(app),
             tauri::RunEvent::Exit => {
                 mcp::forget_bridge(app);
                 // Quitting ends every session; each terminal is told why (own-ssh spec §4).

@@ -248,7 +248,7 @@ impl Connector<'_> {
                     let Some(index) = target.hops.iter().position(|candidate| candidate.id == hop.id) else { return Err(failure_of(&error, &target)) };
                     let deadline = std::time::Instant::now().checked_add(prompt_wait(&target.hops[index]));
                     *typed += 1;
-                    match owner.ask(QuestionKind::Password, &question, false, deadline) {
+                    match owner.ask_at(hop, QuestionKind::Password, &question, false, deadline) {
                         Reply::Answer(password) => {
                             auth.set_typed(&hop.id, password);
                             // Amended R8: the hop is connected again as it is. A server that takes a key and then wants the password

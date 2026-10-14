@@ -60,6 +60,8 @@ pub trait HostDirectory: Send + Sync {
     /// jump host): the broker keeps what it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain has one hop
     /// per id.
     fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError>;
+    /// Public resolution for approval and noninteractive connections. Implementations must not read private material here.
+    fn resolve_public(&self, query:&HostQuery)->Result<Target,DirectoryError>{self.resolve(query)}
 
     /// The key pinned for `host`, if any. An error reading the pins is `Err`, never "nothing pinned": a host that was pinned must not
     /// look new because a file could not be read.

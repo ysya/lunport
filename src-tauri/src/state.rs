@@ -8,6 +8,8 @@ use crate::config::model::SshConfigDoc;
 /// Tauri-managed app state: the loaded multi-file config document and which files have already
 /// been backed up this session (so we back up each live file only once before the first write).
 pub struct AppState {
+    /// A hidden client-started host must not unlock credentials before a human opens its UI.
+    pub background_credentials_only: AtomicBool,
     pub doc: Mutex<Option<SshConfigDoc>>,
     pub backed_up: Mutex<HashSet<PathBuf>>,
     /// How many `.bak` snapshots to keep per managed file. `None` = unlimited (no pruning).
@@ -28,6 +30,7 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            background_credentials_only: AtomicBool::new(false),
             doc: Mutex::new(None),
             backed_up: Mutex::new(HashSet::new()),
             backup_retention: Mutex::new(None),

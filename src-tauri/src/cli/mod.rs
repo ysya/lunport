@@ -126,7 +126,7 @@ pub fn run_connect(args: &[OsString]) -> i32 {
 /// The connection to the broker, at `<app data>/ipc/sock` (found without the app): if nothing answers there SSHelter is started, hidden,
 /// under the same locks as the MCP adapter's start, and waited for.
 #[cfg(unix)]
-fn reach_broker() -> Result<UnixStream, String> {
+pub(crate) fn reach_broker() -> Result<UnixStream, String> {
     use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
 
     let socket = match crate::fsutil::app_data_root() {
@@ -243,7 +243,7 @@ const PIPE_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// under the same locks as the MCP adapter's start, and waited for, as on Unix. A pipe of that name that is not the user's own is not
 /// SSHelter's (another program made it): it is said so, and SSHelter is not started for it, nor is anything said to it.
 #[cfg(windows)]
-fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, String> {
+pub(crate) fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, String> {
     use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
     let name = crate::session::pipe_name().map_err(|error| format!("sshelter: {error}"))?;
     let answering = || match crate::ipc::pipe_windows::connect(&name, PIPE_BUSY_WAIT) {

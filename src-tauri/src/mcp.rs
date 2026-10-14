@@ -1,11 +1,8 @@
-//! MCP stdio adapter and the authenticated loopback bridge to SSHelter's desktop UI.
+//! MCP stdio adapter backed by the OS-authenticated session IPC broker.
 //!
-//! The `--mcp` process never owns credentials and never executes SSH. It speaks
-//! newline-delimited MCP JSON-RPC over stdin/stdout and forwards tool calls to the
-//! running desktop app. The app owns host policy, native approval, execution, and
-//! the audit trail. A random token in a mode-0600 runtime file authenticates the
-//! loopback bridge; this protects against unrelated local users, not a malicious
-//! process running as the same OS account.
+//! The adapter owns no credentials and executes no SSH. Records tools use protocol 2
+//! on the session socket or named pipe. The token-authenticated loopback transport
+//! is retained only after the broker explicitly confirms Legacy workspace mode.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -28,18 +25,40 @@ use crate::error::AppError;
 use crate::fsutil;
 use crate::state::AppState;
 
+pub(crate) mod records;
+mod adapter;
+pub use records::RequestContext;
+
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_BRIDGE_LINE: u64 = 1_048_576;
 const MAX_COMMAND_BYTES: usize = 16_384;
 const MAX_STREAM_BYTES: usize = 65_536;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_RECENT_AUDIT: usize = 100;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct McpPolicy {
     enabled: bool,
     #[serde(default)]
     allowed_hosts: BTreeSet<String>,
+    #[serde(default)]
+    approval_mode: ApprovalMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub enum ApprovalMode { #[default] Ask, AutoLog }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct McpClientInfo { pub name: Option<String>, pub title: Option<String>, pub version: Option<String> }
+impl McpClientInfo {
+    pub fn sanitize(value: Option<&Value>) -> Self {
+        let field = |key| value.and_then(|v|v.get(key)).and_then(Value::as_str).map(|s| s.chars().filter(|c|!c.is_control() && !crate::session::auth::is_deceptive_format(*c)).take(100).collect());
+        Self { name:field("name"), title:field("title"), version:field("version") }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,10 +68,15 @@ struct RuntimeInfo {
     pid: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct McpPendingRequest {
+    #[serde(default)] pub host_id: Option<String>,
+    #[serde(default)] pub route: Vec<String>,
+    #[serde(default)] pub requested_by: Vec<String>,
+    #[serde(default)] pub requester_id: Option<String>,
+    #[serde(default)] pub client_info: McpClientInfo,
     pub id: String,
     pub alias: String,
     pub command: String,
@@ -63,15 +87,27 @@ pub struct McpPendingRequest {
     pub requested_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct McpAuditEntry {
+    #[serde(default)] pub client: String,
+    #[serde(default)] pub host_id: Option<String>,
+    #[serde(default)] pub ended: Option<String>,
+    #[serde(default)] pub signal: Option<String>,
+    #[serde(default)] pub mode: ApprovalMode,
+    #[serde(default)] pub requested_by: Vec<String>,
+    #[serde(default)] pub requester_id: Option<String>,
+    #[serde(default)] pub client_info: McpClientInfo,
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "number"))]
+    pub at_ms: u64,
     pub id: String,
     pub alias: String,
     pub command: String,
     pub outcome: String,
-    pub exit_code: Option<i32>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub exit_code: Option<i64>,
     pub detail: Option<String>,
     #[cfg_attr(test, ts(type = "number"))]
     pub completed_at_ms: u64,
@@ -81,6 +117,10 @@ pub struct McpAuditEntry {
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct McpStatus {
+    pub noninteractive_credentials_supported: bool,
+    pub noninteractive_credentials_notice: String,
+    pub approval_mode: ApprovalMode,
+    pub audit_error: Option<String>,
     pub enabled: bool,
     pub bridge_active: bool,
     pub allowed_hosts: Vec<String>,
@@ -101,6 +141,7 @@ enum ApprovalDecision {
     Allow,
     Deny,
     Cancel,
+    TimedOut,
 }
 
 #[derive(Default)]
@@ -112,11 +153,14 @@ struct CancellationState {
 /// Runtime state shared by Tauri commands and loopback bridge workers.
 pub struct McpRuntime {
     policy: Mutex<McpPolicy>,
+    audit: Mutex<records::AuditLog>,
+    records_active:Mutex<HashMap<String,(String,crate::session::connect::CancelToken)>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     recent: Mutex<VecDeque<McpAuditEntry>>,
     cancellations: Mutex<CancellationState>,
     /// This instance's bridge (port, token, pid): what it wrote to `mcp-runtime.json`.
     bridge: Mutex<Option<RuntimeInfo>>,
+    bridge_start: Mutex<()>,
     bridge_active: AtomicBool,
     pub keep_alive: AtomicBool,
     next_request_id: AtomicU64,
@@ -127,10 +171,13 @@ impl Default for McpRuntime {
     fn default() -> Self {
         Self {
             policy: Mutex::new(McpPolicy::default()),
+            audit: Mutex::new(records::AuditLog::default()),
+            records_active:Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
             cancellations: Mutex::new(CancellationState::default()),
             bridge: Mutex::new(None),
+            bridge_start: Mutex::new(()),
             bridge_active: AtomicBool::new(false),
             keep_alive: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
@@ -150,9 +197,13 @@ impl McpRuntime {
             .map(|p| p.request.clone())
             .collect();
         pending.sort_by_key(|p| p.requested_at_ms);
-        let recent = self.recent.lock().unwrap().iter().cloned().collect();
+        let recent = self.recent.lock().unwrap().iter().take(10).cloned().collect();
         let last = self.last_client_at_ms.load(Ordering::Relaxed);
         McpStatus {
+            noninteractive_credentials_supported: cfg!(windows),
+            noninteractive_credentials_notice: if cfg!(windows) { "Windows stored credentials support noninteractive Auto-log reads. Missing or locked credentials still require Ask." } else { "This platform cannot guarantee noninteractive credential reads. Credential-dependent requests require Ask." }.into(),
+            approval_mode: policy.approval_mode,
+            audit_error: self.audit.lock().unwrap().error.clone(),
             enabled: policy.enabled,
             bridge_active: self.bridge_active.load(Ordering::Relaxed),
             allowed_hosts: policy.allowed_hosts.into_iter().collect(),
@@ -165,12 +216,33 @@ impl McpRuntime {
         }
     }
 
-    fn record(&self, entry: McpAuditEntry) {
-        let mut recent = self.recent.lock().unwrap();
-        recent.push_front(entry);
-        recent.truncate(MAX_RECENT_AUDIT);
+    pub(crate) fn record(&self, mut entry: McpAuditEntry) {
+        entry.detail=None; // Legacy failures can contain remote text; no audit surface retains it.
+        if entry.at_ms==0 {entry.at_ms=entry.completed_at_ms;} if entry.client.is_empty(){entry.client="mcp".into();}
+        let mut audit=self.audit.lock().unwrap();
+        let mut recent=self.recent.lock().unwrap();recent.push_front(entry);recent.truncate(1000);
+        if let Some(path)=&audit.path {
+            let result=(||{let mut bytes=Vec::new();for item in recent.iter().rev(){let mut item=item.clone();item.detail=None;serde_json::to_writer(&mut bytes,&item).map_err(|_|"Cannot encode session log".to_string())?;bytes.push(b'\n');}fsutil::atomic_write(path,&bytes,0o600).map_err(|_|"Session log could not be saved; completed execution was not retried.".to_string())})();
+            if let Err(error)=result {audit.error=Some(error);}
+        }
+    }
+    fn load_audit(&self,path:PathBuf) {
+        let mut audit=self.audit.lock().unwrap();audit.path=Some(path.clone());
+        match std::fs::read(&path) {
+            Ok(bytes) if bytes.len()<=32*1024*1024=>{
+                let mut entries=VecDeque::new();let lines=bytes.split(|b|*b==b'\n').collect::<Vec<_>>();
+                for (i,line) in lines.iter().enumerate(){if line.is_empty(){continue;}match serde_json::from_slice::<McpAuditEntry>(line){Ok(mut entry)=>{entry.detail=None;entries.push_front(entry);entries.truncate(1000);},Err(_)=>{audit.error=Some(if i==lines.len()-1 && !bytes.ends_with(b"\n"){"Partial trailing session-log entry was ignored."}else{"Session log contains a corrupt entry; valid entries were retained."}.into());}}}
+                *self.recent.lock().unwrap()=entries;
+            }
+            Ok(_)=>audit.error=Some("Session log exceeds the 32 MiB read limit.".into()),
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
+            Err(_)=>audit.error=Some("Session log could not be read.".into()),
+        }
     }
 
+    fn cancel_records(&self,host:Option<&str>){
+        for (id,cancel) in self.records_active.lock().unwrap().values(){if host.is_none_or(|h|h==id){cancel.cancel();}}
+    }
     fn deny_all_pending(&self) {
         let pending: Vec<_> = self
             .pending
@@ -273,8 +345,9 @@ pub fn initialize(app: &AppHandle, keep_alive: bool) -> Result<(), AppError> {
     let state = app.state::<AppState>();
     // A corrupt policy must fail closed without preventing SSHelter from opening.
     *state.mcp.policy.lock().unwrap() = load_policy().unwrap_or_default();
+    state.mcp.load_audit(fsutil::app_data_root()?.join("session-log.jsonl"));
     state.mcp.keep_alive.store(keep_alive, Ordering::Relaxed);
-    start_bridge(app.clone())
+    Ok(())
 }
 
 fn random_token() -> Result<String, AppError> {
@@ -282,6 +355,12 @@ fn random_token() -> Result<String, AppError> {
     getrandom::fill(&mut bytes)
         .map_err(|e| AppError::Other(format!("cannot create MCP bridge token: {e}")))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+pub(super) fn ensure_legacy_bridge(app:&AppHandle)->Result<(),String>{
+    let state=app.state::<AppState>();let _start=state.mcp.bridge_start.lock().unwrap();
+    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
+    if !state.mcp.bridge_active.load(Ordering::Relaxed){start_bridge(app.clone()).map_err(|e|e.to_string())?;}Ok(())
 }
 
 fn start_bridge(app: AppHandle) -> Result<(), AppError> {
@@ -502,6 +581,8 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
         .last_client_at_ms
         .store(unix_ms(), Ordering::Relaxed);
 
+    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
+
     if envelope.method == "ping" {
         return Ok(json!({ "status": "ok" }));
     }
@@ -518,11 +599,6 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
     match envelope.method.as_str() {
         "list_hosts" => {
             let _lifecycle=state.sync.lifecycle.lock().unwrap();
-            let records={let core=state.sync.core.lock().unwrap();core.records.clone()};
-            if let Some(records)=records {
-                let hosts=crate::sync::record_repository::list_hosts(&records).map_err(|e|e.to_string())?.into_iter().filter(|h|ensure_record_allowed(&policy,&h.host).is_ok()).map(|h|record_host_metadata(&h.host)).collect::<Vec<_>>();
-                return Ok(json!({"hosts":hosts}));
-            }
             crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
             let doc = wait_for_loaded_doc(&state)?;
             let hosts: Vec<_> = host_summaries(&doc)
@@ -533,15 +609,6 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
         }
         "get_effective_config" => {
             let _lifecycle=state.sync.lifecycle.lock().unwrap();
-            let records={let core=state.sync.core.lock().unwrap();core.records.clone()};
-            if let Some(records)=records {
-                let alias=string_param(&envelope.params,"alias")?;
-                let host=crate::sync::record_repository::get_host(&records,alias)
-                    .or_else(|_|crate::sync::record_repository::find_by_alias(&records,alias))
-                    .map_err(|e|e.to_string())?;
-                ensure_record_allowed(&policy,&host.host)?;
-                return Ok(record_host_metadata(&host.host));
-            }
             crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
             let alias = string_param(&envelope.params, "alias")?;
             ensure_allowed(&policy, alias)?;
@@ -568,6 +635,7 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
 }
 
 /// MCP sees endpoint and routing metadata, never notes or arbitrary imported directive values.
+#[cfg(test)]
 fn record_host_metadata(host: &crate::sync::records_v3::HostRecord) -> Value {
     json!({
         "id": host.id,
@@ -610,6 +678,7 @@ fn ensure_allowed(policy: &McpPolicy, alias: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn ensure_record_allowed(policy: &McpPolicy, host: &crate::sync::records_v3::HostRecord) -> Result<(), String> {
     ensure_allowed(policy, &host.id)
 }
@@ -634,7 +703,7 @@ fn change_host_permission(
 fn display_safe_command(command: &str) -> bool {
     !command.is_empty()
         && command.len() <= MAX_COMMAND_BYTES
-        && !command.contains('\0')
+        && !command.chars().any(|c|(c.is_control() && c != '\n' && c != '\t') || crate::session::auth::is_deceptive_format(c))
         && !command.chars().any(|c| {
             matches!(
                 c,
@@ -663,6 +732,7 @@ fn run_approved(
     }
     crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
     crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
+    drop(_lifecycle);
     let alias = string_param(params, "alias")?.to_string();
     let command = string_param(params, "command")?.to_string();
     if !display_safe_command(&command) {
@@ -728,6 +798,7 @@ fn run_approved(
         user: identity.1,
         port: identity.2,
         requested_at_ms: unix_ms(),
+        ..Default::default()
     };
     let (tx, rx) = mpsc::sync_channel(1);
     state.mcp.pending.lock().unwrap().insert(
@@ -762,10 +833,11 @@ fn run_approved(
                 exit_code: None,
                 detail: Some("MCP client canceled or disconnected".to_string()),
                 completed_at_ms: unix_ms(),
+                ..Default::default()
             });
             return Err("MCP request was canceled".to_string());
         }
-        Err(_) => {
+        Ok(ApprovalDecision::TimedOut) | Err(_) => {
             state.mcp.pending.lock().unwrap().remove(&id);
             state.mcp.record(McpAuditEntry {
                 id: id.clone(),
@@ -775,6 +847,7 @@ fn run_approved(
                 exit_code: None,
                 detail: Some("No decision within 120 seconds".to_string()),
                 completed_at_ms: unix_ms(),
+                ..Default::default()
             });
             return Err("SSHelter approval timed out".to_string());
         }
@@ -789,10 +862,14 @@ fn run_approved(
             exit_code: None,
             detail: None,
             completed_at_ms: unix_ms(),
+            ..Default::default()
         });
         return Err("Denied in SSHelter".to_string());
     }
 
+    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
+    let current=state.mcp.policy.lock().unwrap().clone();
+    if !current.enabled{return Err("MCP access was disabled".into());}ensure_allowed(&current,&alias)?;
     match execute_ssh(
         &alias,
         &command,
@@ -807,9 +884,10 @@ fn run_approved(
                     alias,
                     command,
                     outcome: "canceled".to_string(),
-                    exit_code: output.exit_code,
+                    exit_code: output.exit_code.map(i64::from),
                     detail: Some("MCP client canceled or disconnected".to_string()),
                     completed_at_ms: unix_ms(),
+                ..Default::default()
                 });
                 return Err("MCP request was canceled".to_string());
             }
@@ -818,11 +896,12 @@ fn run_approved(
                 alias,
                 command,
                 outcome: "allowed".to_string(),
-                exit_code: output.exit_code,
+                exit_code: output.exit_code.map(i64::from),
                 detail: output
                     .timed_out
                     .then(|| "SSH command timed out".to_string()),
                 completed_at_ms: unix_ms(),
+                ..Default::default()
             });
             serde_json::to_value(output).map_err(|e| e.to_string())
         }
@@ -835,6 +914,7 @@ fn run_approved(
                 exit_code: None,
                 detail: Some(error.clone()),
                 completed_at_ms: unix_ms(),
+                ..Default::default()
             });
             Err(error)
         }
@@ -961,7 +1041,23 @@ fn execute_ssh(
 
 #[tauri::command]
 pub fn mcp_status(state: tauri::State<AppState>) -> McpStatus {
-    state.mcp.status()
+    status_for(&state)
+}
+fn status_for(state:&AppState)->McpStatus{
+    let mut status=state.mcp.status();
+    if state.sync.core.lock().unwrap().format==crate::sync::record_runtime::RuntimeFormat::Records {status.bridge_active=matches!(*state.session.status.lock().unwrap(),crate::session::app::BrokerStatus::Running);}
+    status
+}
+
+fn change_approval_mode(policy:&Mutex<McpPolicy>,mode:ApprovalMode,acknowledged:bool,persist:impl FnOnce(&McpPolicy)->Result<(),AppError>)->Result<(),AppError>{
+    let mut current=policy.lock().unwrap();
+    if mode==ApprovalMode::AutoLog && current.approval_mode!=mode && !acknowledged{return Err(AppError::Other("Confirm the risk of allowing AI commands without per-command approval.".into()));}
+    let mut next=current.clone();next.approval_mode=mode;persist(&next)?;*current=next;Ok(())
+}
+#[tauri::command]
+pub fn mcp_set_approval_mode(state:tauri::State<AppState>,approval_mode:ApprovalMode,risk_acknowledged:bool)->Result<McpStatus,AppError>{
+    change_approval_mode(&state.mcp.policy,approval_mode,risk_acknowledged,save_policy)?;
+    state.mcp.cancel_records(None);state.mcp.deny_all_pending();Ok(status_for(&state))
 }
 
 #[tauri::command]
@@ -978,9 +1074,10 @@ pub fn mcp_set_enabled(
         next
     };
     if !snapshot.enabled {
+        state.mcp.cancel_records(None);
         state.mcp.deny_all_pending();
     }
-    Ok(state.mcp.status())
+    Ok(status_for(&state))
 }
 
 #[tauri::command]
@@ -1006,6 +1103,7 @@ pub fn mcp_set_host_allowed(
         Ok(())
     }, save_policy)?;
     if !allowed {
+        state.mcp.cancel_records(Some(&alias));
         let denied: Vec<_> = {
             let mut pending = state.mcp.pending.lock().unwrap();
             let ids: Vec<_> = pending
@@ -1021,7 +1119,7 @@ pub fn mcp_set_host_allowed(
             let _ = request.decision.send(ApprovalDecision::Deny);
         }
     }
-    Ok(state.mcp.status())
+    Ok(status_for(&state))
 }
 
 #[tauri::command]
@@ -1051,80 +1149,35 @@ pub fn mcp_resolve_request(
 
 /// Run the headless MCP stdio adapter. Only JSON-RPC is written to stdout.
 pub fn run_stdio() {
-    let active_calls = Arc::new(Mutex::new(HashMap::<String, String>::new()));
-    let next_call_id = AtomicU64::new(1);
-    let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(line) if !line.trim().is_empty() => line,
-            Ok(_) => continue,
-            Err(_) => break,
-        };
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message)
-                if message.get("method").and_then(Value::as_str) == Some("tools/call")
-                    && message.get("id").is_some() =>
-            {
-                let id = message.get("id").cloned().unwrap_or(Value::Null);
-                let key = rpc_id_key(&id);
-                let internal_id = format!(
-                    "mcp-adapter-{}-{}",
-                    std::process::id(),
-                    next_call_id.fetch_add(1, Ordering::Relaxed)
-                );
-                active_calls
-                    .lock()
-                    .unwrap()
-                    .insert(key.clone(), internal_id.clone());
-                let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-                let calls = active_calls.clone();
-                let _ = thread::Builder::new()
-                    .name("sshelter-mcp-tool-call".to_string())
-                    .spawn(move || {
-                        let result = call_tool(&params, Some(&internal_id));
-                        let response = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-                        let _ = write_mcp_response(&response);
-                        calls.lock().unwrap().remove(&key);
-                    });
-                None
-            }
-            Ok(message)
-                if message.get("method").and_then(Value::as_str)
-                    == Some("notifications/cancelled") =>
-            {
-                if let Some(request_id) = message
-                    .pointer("/params/requestId")
-                    .map(rpc_id_key)
-                    .and_then(|key| active_calls.lock().unwrap().get(&key).cloned())
-                {
-                    let _ = thread::Builder::new()
-                        .name("sshelter-mcp-cancel".to_string())
-                        .spawn(move || {
-                            let _ = bridge_call("cancel", json!({ "request_id": request_id }));
-                        });
-                }
-                None
-            }
-            Ok(message) => handle_mcp_message(message),
-            Err(e) => Some(jsonrpc_error(
-                Value::Null,
-                -32700,
-                format!("Parse error: {e}"),
-            )),
-        };
-        if let Some(response) = response {
-            if !write_mcp_response(&response) {
-                break;
-            }
+    let active=Arc::new(Mutex::new(HashMap::<String,(String,Arc<adapter::Call>)>::new()));
+    let next=AtomicU64::new(1);let mut info=McpClientInfo::default();let mut workers:Vec<thread::JoinHandle<()>>=Vec::new();
+    let stdin=std::io::stdin();let mut input=stdin.lock();
+    loop {
+        let mut i=0;while i<workers.len(){if workers[i].is_finished(){let _=workers.swap_remove(i).join();}else{i+=1;}}
+        let mut line=String::new();match input.by_ref().take(MAX_BRIDGE_LINE+1).read_line(&mut line){Ok(0)|Err(_)=>break,Ok(n) if n as u64>MAX_BRIDGE_LINE=>break,_=>{}}
+        if line.trim().is_empty(){continue;}
+        let message=match serde_json::from_str::<Value>(&line){Ok(v)=>v,Err(_)=>{if !write_mcp_response(&jsonrpc_error(Value::Null,-32700,"Parse error".into())){break;}continue;}};
+        let method=message.get("method").and_then(Value::as_str).unwrap_or_default();
+        if method=="initialize"{info=McpClientInfo::sanitize(message.pointer("/params/clientInfo"));}
+        if method=="notifications/cancelled" {
+            let found=message.pointer("/params/requestId").and_then(|id|active.lock().unwrap().get(&rpc_id_key(id)).cloned());
+            if let Some((id,call))=found{call.cancel(&id);}continue;
         }
+        if method=="tools/call" && message.get("id").is_some() {
+            let rpc=message["id"].clone();let key=rpc_id_key(&rpc);let id=format!("adapter-{}-{}",std::process::id(),next.fetch_add(1,Ordering::Relaxed));
+            let call=match adapter::insert(&active,key.clone(),id.clone()){Ok(c)=>c,Err(e)=>{let _=write_mcp_response(&jsonrpc_error(rpc,-32600,e));continue;}};
+            let params=message.get("params").cloned().unwrap_or_else(||json!({}));let active=active.clone();let info=info.clone();
+            let worker=thread::spawn(move||{let result=adapter::tool(&params,&id,&info,&call);let renamed=result.pointer("/content/0/text").and_then(Value::as_str)==Some("run was renamed to ssh_exec");let response=if renamed{jsonrpc_error(rpc,-32601,"run was renamed to ssh_exec".into())}else{json!({"jsonrpc":"2.0","id":rpc,"result":result})};if !write_mcp_response(&response){call.cancel(&id);}active.lock().unwrap().remove(&key);});
+            workers.retain(|w:&thread::JoinHandle<()>|!w.is_finished());workers.push(worker);continue;
+        }
+        if method=="tools/list" && message.get("id").is_some(){
+            let mode=adapter::ipc_call("mode",json!({}),&info,&adapter::Call::default());
+            let response=match mode {Ok(v)=>{let mut tools=tool_definitions();if v["mode"]=="records" {tools[1]["name"]=json!("get_host");tools[2]["name"]=json!("ssh_exec");tools[2]["description"]=json!("Run a remote command under the current SSHelter Ask or Auto-log policy.");}json!({"jsonrpc":"2.0","id":message["id"],"result":{"tools":tools}})},Err(e)=>jsonrpc_error(message["id"].clone(),-32000,e)};
+            if !write_mcp_response(&response){break;}continue;
+        }
+        if let Some(response)=handle_mcp_message(message){if !write_mcp_response(&response){break;}}
     }
-
-    // EOF normally means the MCP client is shutting down. Best-effort cancel
-    // every request before this adapter process exits.
-    let pending: Vec<_> = active_calls.lock().unwrap().values().cloned().collect();
-    for request_id in pending {
-        let _ = bridge_call("cancel", json!({ "request_id": request_id }));
-    }
+    let calls:Vec<_>=active.lock().unwrap().values().cloned().collect();for(id,call)in calls{call.cancel(&id);}for worker in workers{let _=worker.join();}
 }
 
 fn write_mcp_response(response: &Value) -> bool {
@@ -1154,7 +1207,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "sshelter", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "SSHelter exposes only hosts explicitly allowed in its AI Access settings. Every run request requires an Allow once decision in the SSHelter desktop UI. Never ask for or send passwords, passphrases, private keys, or secrets in command arguments."
+                "instructions": "SSHelter exposes only hosts explicitly allowed in its AI Access settings. Records commands follow the Ask or Auto-log policy configured by the user. Never ask for or send passwords, passphrases, private keys, or secrets in command arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -1351,10 +1404,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auto_log_requires_explicit_risk_acknowledgement_and_persistence_before_replacement(){
+        let policy=Mutex::new(McpPolicy::default());
+        assert!(change_approval_mode(&policy,ApprovalMode::AutoLog,false,|_|panic!("unacknowledged mode never persists")).is_err());
+        assert_eq!(policy.lock().unwrap().approval_mode,ApprovalMode::Ask);
+        assert!(change_approval_mode(&policy,ApprovalMode::AutoLog,true,|_|Err(AppError::Other("disk full".into()))).is_err());
+        assert_eq!(policy.lock().unwrap().approval_mode,ApprovalMode::Ask);
+        change_approval_mode(&policy,ApprovalMode::AutoLog,true,|_|Ok(())).unwrap();
+        change_approval_mode(&policy,ApprovalMode::Ask,false,|_|Ok(())).unwrap();
+        assert_eq!(policy.lock().unwrap().approval_mode,ApprovalMode::Ask);
+    }
+
+    #[test]
+    fn records_policy_defaults_to_ask_and_rejects_control_commands() {
+        let policy: McpPolicy = serde_json::from_str(r#"{"enabled":true,"allowed_hosts":["id-web"]}"#).unwrap();
+        assert_eq!(serde_json::to_value(policy).unwrap()["approval_mode"], "ask");
+        assert!(!display_safe_command("echo hello\rhidden"));
+        assert!(!display_safe_command("echo \u{200f}hidden"));
+    }
+
+    #[test]
     fn revoking_a_host_does_not_wait_for_an_active_run_lifecycle_lock() {
         let lifecycle = Mutex::new(());
         let _active_run = lifecycle.lock().unwrap();
-        let policy = Mutex::new(McpPolicy { enabled: true, allowed_hosts: BTreeSet::from(["web".into()]) });
+        let policy = Mutex::new(McpPolicy { enabled: true, allowed_hosts: BTreeSet::from(["web".into()]), approval_mode: ApprovalMode::Ask });
         change_host_permission(&policy, "web", false, || {
             let _guard = lifecycle.try_lock().map_err(|_| AppError::Other("an active run owns lifecycle".into()))?;
             Ok(())
