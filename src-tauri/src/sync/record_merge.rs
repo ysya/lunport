@@ -407,19 +407,28 @@ pub(crate) fn legacy_own_slot_revision(
     }) {
         return Err(failure());
     }
-    let old: crate::sync::slot_rules::KeySlotPayload =
-        serde_json::from_value(opened.0.payload.clone()).map_err(|_| failure())?;
+    // Borrow the strict legacy shape. Unsupported values are never cloned out of the
+    // zeroizing opened envelope, including unexpected private strings in public fields.
     if opened.0.kind != RecordKind::KeySlot
         || opened.0.id != id
         || opened.0.deleted
-        || old.schema != 1
-        || old.mode != crate::sync::slot_rules::SlotMode::Own
-        || !crate::sync::slot_rules::valid_slot_name(&old.name)
-        || !is_slot_id(&old.origin_device_id)
-        || old.public_key.is_some()
-        || old.fingerprint.is_some()
-        || old.key_type.is_some()
-        || old.has_passphrase.is_some()
+        || fields.get("schema").and_then(Value::as_u64) != Some(1)
+        || fields.get("mode").and_then(Value::as_str) != Some("own")
+        || !fields
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(crate::sync::slot_rules::valid_slot_name)
+        || !fields
+            .get("origin_device_id")
+            .and_then(Value::as_str)
+            .is_some_and(is_slot_id)
+        || fields
+            .get("created_at_ms")
+            .and_then(Value::as_u64)
+            .is_none()
+        || ["public_key", "fingerprint", "key_type", "has_passphrase"]
+            .iter()
+            .any(|key| fields.get(*key).is_some_and(|value| !value.is_null()))
     {
         return Err(failure());
     }
