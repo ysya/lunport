@@ -341,6 +341,40 @@ pub fn key_secret(
     Ok(Some(Zeroizing::new(text.to_string())))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretRevision {
+    pub version: u64,
+    pub updated_at_ms: u64,
+    pub device_id: String,
+    pub deleted: bool,
+}
+/// Revision headers are public; decrypted secret payloads never leave this helper.
+pub fn secret_revision(
+    section: &AccountState,
+    keys: &ChainKeys,
+    kind: RecordKind,
+    id: &str,
+) -> Result<Option<SecretRevision>, AppError> {
+    if section.chain_id != keys.chain_id || !matches!(kind, RecordKind::Key | RecordKind::SpaceKey)
+    {
+        return Err(failure());
+    }
+    let key = sealed_key(kind.as_str(), &crypto::id_hash(keys, kind.as_str(), id));
+    let Some(sealed) = section.sealed.get(&key) else {
+        return Ok(None);
+    };
+    let opened = open_record(keys, &sealed.envelope).map_err(|_| failure())?;
+    if opened.0.kind != kind || opened.0.id != id || !valid_secret(&opened.0) {
+        return Err(failure());
+    }
+    Ok(Some(SecretRevision {
+        version: opened.0.version,
+        updated_at_ms: opened.0.updated_at_ms,
+        device_id: opened.0.device_id.clone(),
+        deleted: opened.0.deleted,
+    }))
+}
+
 fn result<S: Clone>(
     section: &S,
     gate: AccountGate,
