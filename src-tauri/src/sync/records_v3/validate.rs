@@ -24,7 +24,8 @@ fn schema(kind: &'static str, found: u32, expected: u32) -> Result<(), RecordVal
         Err(RecordValidationError::UnsupportedSchema { kind, found })
     }
 }
-pub fn validate_host(host: &HostRecord) -> Result<(), RecordValidationError> {
+/// Disk and relay admission validate record shape. Relationship conflicts remain visible to the repository.
+pub fn validate_host_shape(host: &HostRecord) -> Result<(), RecordValidationError> {
     schema("host", host.payload.schema, HOST_SCHEMA)?;
     if !is_host_id(&host.id) {
         return Err(invalid(
@@ -85,23 +86,10 @@ pub fn validate_host(host: &HostRecord) -> Result<(), RecordValidationError> {
             ));
         }
     }
-    let mut seen = BTreeSet::new();
     for id in &p.jump {
         if !is_host_id(id) {
             return Err(invalid("jump", &host.id, "expected host ids"));
         }
-        if id == &host.id {
-            return Err(RecordValidationError::JumpCycle(host.id.clone()));
-        }
-        if !seen.insert(id) {
-            return Err(RecordValidationError::RepeatedJump {
-                host_id: host.id.clone(),
-                jump_id: id.clone(),
-            });
-        }
-    }
-    if p.jump.len() > MAX_JUMPS {
-        return Err(RecordValidationError::JumpDepth(host.id.clone()));
     }
     if let Some(pin) = &p.host_key {
         if !is_slot_id(&pin.pinned_by_device_id) {
@@ -120,6 +108,27 @@ pub fn validate_host(host: &HostRecord) -> Result<(), RecordValidationError> {
     }
     Ok(())
 }
+/// Strict creation/import/connect preflight; persistence uses validate_host_shape instead.
+pub fn validate_host(host: &HostRecord) -> Result<(), RecordValidationError> {
+    validate_host_shape(host)?;
+    let mut seen = BTreeSet::new();
+    for id in &host.payload.jump {
+        if id == &host.id {
+            return Err(RecordValidationError::JumpCycle(host.id.clone()));
+        }
+        if !seen.insert(id) {
+            return Err(RecordValidationError::RepeatedJump {
+                host_id: host.id.clone(),
+                jump_id: id.clone(),
+            });
+        }
+    }
+    if host.payload.jump.len() > MAX_JUMPS {
+        return Err(RecordValidationError::JumpDepth(host.id.clone()));
+    }
+    Ok(())
+}
+
 fn parse_public(line: &str, id: &str) -> Result<ssh_key::PublicKey, RecordValidationError> {
     ssh_key::PublicKey::from_openssh(line.trim())
         .map_err(|_| invalid("public_key", id, "not a complete OpenSSH public key"))
@@ -305,7 +314,7 @@ pub fn decode_host(
         scope,
         payload,
     };
-    validate_host(&host)?;
+    validate_host_shape(&host)?;
     Ok(TypedRecord::Live(host))
 }
 pub fn decode_keyslot(

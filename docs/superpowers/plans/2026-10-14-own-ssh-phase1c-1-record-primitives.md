@@ -111,3 +111,6 @@ The next runtime plan should make SyncCore the sole owner of either legacy or re
 
 - Runtime integration and the safe broad suite are delegated to root; this subtask reports only focused records tests.
 - Schema timers use u32 persisted bounds and a nonzero connect timeout; no narrower arbitrary product limit is invented.
+
+- Shared-state ruling: disk validation checks individual record shape and cache/sealed invariants, while strict validate_host/validate_hosts is reserved for creation/import/connect preflight. Valid remote deletions, concurrent cycles, and partial moves can remain persisted as relationship conflicts; repository snapshots must expose NeedsReview/Conflict and refuse connection.
+- Shared-key ruling: valid authoritative account metadata and same-ID local material may coexist even when fingerprints differ. The key resolver must report Conflict and must never sign or fall back to local identity; account tombstones remain authoritative. Cost: visible conflict UI and explicit reassign/new-ID recovery are mandatory.
