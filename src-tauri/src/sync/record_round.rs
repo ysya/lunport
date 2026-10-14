@@ -1,0 +1,508 @@
+//! Typed records transport only: no SSH files, slot maintenance, agent wiring or vault access.
+use crate::error::AppError;
+use crate::sync::crypto::ChainKeys;
+use crate::sync::env::SyncEnv;
+use crate::sync::record_merge::AccountGate;
+
+#[derive(Clone, Debug)]
+pub struct FreshAccountProof {
+    pub keys: ChainKeys,
+    pub relay_url: String,
+    pub gate: AccountGate,
+    pub observed_schema: Option<u32>,
+}
+impl FreshAccountProof {
+    pub fn ensure_compatible(&self) -> Result<(), AppError> {
+        if self.gate == AccountGate::Compatible {
+            Ok(())
+        } else {
+            Err(AppError::Other("record account is not writable".into()))
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct RecordRoundReport {
+    pub gate: Option<AccountGate>,
+    pub spaces_pulled: usize,
+    pub pushed: usize,
+    pub conflicts: usize,
+    pub review_required: bool,
+}
+fn error(message: &str) -> AppError {
+    AppError::Other(message.into())
+}
+fn gate_message(gate: &AccountGate) -> &'static str {
+    match gate {
+        AccountGate::Compatible => "",
+        AccountGate::NeedsMigration { .. } => "this account needs an explicit record migration",
+        AccountGate::NeedsUpdate { .. } => "this account uses a newer format; update SSHelter",
+        AccountGate::MigrationPending(_) => "account migration is still being published",
+        AccountGate::InvalidMigration => "the account migration marker is invalid or unavailable",
+        AccountGate::InvalidPull => "the relay returned inconsistent record transport metadata",
+    }
+}
+/// Check the only write boundary in this transport before credential/network callbacks.
+/// No SSH config, agent or vault path is touched by active record transport.
+pub(crate) fn preflight(env: &SyncEnv) -> Result<(), AppError> {
+    crate::fsutil::check_write(&env.state_path)?;
+    match std::fs::symlink_metadata(&env.state_path) {
+        Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+            return Err(error("record state must be a regular file"))
+        }
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    let mut core = env.runtime.core.lock().unwrap();
+    if let Some(reason) = &core.save_blocked {
+        return Err(error(reason));
+    }
+    crate::sync::record_runtime::active_state(&core)?;
+    if core.generation == u64::MAX {
+        return Err(error("record state generation exhausted"));
+    }
+    if core.unsaved {
+        crate::sync::runtime::save_core(&mut core, &env.state_path)?;
+    }
+    Ok(())
+}
+fn same_account(state: &crate::sync::records_v3::SyncStateV3, chain: &str, url: &str) -> bool {
+    state.relay_url == url && state.account.as_ref().is_some_and(|a| a.chain_id == chain)
+}
+fn read_keys(
+    env: &SyncEnv,
+    state: &crate::sync::records_v3::SyncStateV3,
+) -> Result<ChainKeys, AppError> {
+    let account = state
+        .account
+        .as_ref()
+        .ok_or_else(|| error("join or create a record account first"))?;
+    let phrase = zeroize::Zeroizing::new(
+        env.keychain
+            .get(crate::sync::state::MNEMONIC_ACCOUNT)
+            .map_err(|_| error("the sync code could not be read"))?
+            .ok_or_else(|| error("the sync code is unavailable on this device"))?,
+    );
+    let keys = crate::sync::crypto::derive_account(&phrase)
+        .map_err(|_| error("the sync code is invalid"))?;
+    if keys.chain_id != account.chain_id {
+        return Err(error("the sync code belongs to a different account"));
+    }
+    Ok(keys)
+}
+fn publish_gate(
+    state: &mut crate::sync::records_v3::SyncStateV3,
+    gate: &AccountGate,
+    schema: Option<u32>,
+) {
+    state.shared_writes_blocked = *gate != AccountGate::Compatible;
+    state.migration_gate = match gate {
+        AccountGate::MigrationPending(marker) => Some(marker.clone()),
+        _ => None,
+    };
+    if let (Some(account), Some(schema)) = (
+        &mut state.account,
+        schema.filter(|v| *v > crate::sync::records_v3::ACCOUNT_SCHEMA),
+    ) {
+        account.remote_schema_version =
+            Some(account.remote_schema_version.unwrap_or(0).max(schema));
+    }
+    state.last_error = (*gate != AccountGate::Compatible).then(|| gate_message(gate).into());
+}
+fn fail_closed(env: &SyncEnv, chain: &str, url: &str, gate: &AccountGate, schema: Option<u32>) {
+    let mut core = env.runtime.core.lock().unwrap();
+    if let Some(state) = core
+        .records
+        .as_mut()
+        .filter(|state| same_account(state, chain, url))
+    {
+        publish_gate(state, gate, schema);
+        core.save_blocked = Some(
+            "an authenticated account gate could not be saved; restart after fixing record storage"
+                .into(),
+        );
+    }
+}
+/// Always authenticates account metadata from a full account pull. It intentionally does not own
+/// lifecycle; shared command callers own lifecycle across this proof and their subsequent mutation.
+/// Publication owns publication -> core only, and never waits for vault/doc while holding it.
+pub fn fresh_account_gate(env: &SyncEnv) -> Result<FreshAccountProof, AppError> {
+    preflight(env)?;
+    let (snapshot, _) = crate::sync::record_runtime::snapshot(env)?;
+    let keys = read_keys(env, &snapshot)?;
+    let relay = env.relay(&snapshot.relay_url)?;
+    let pulled = relay.pull(&keys.chain_id, &keys.auth_token, 0)?;
+    let mut observed = None;
+    let mut gate = AccountGate::InvalidPull;
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    let result = crate::sync::record_runtime::mutate_records(env, |latest| {
+        if !same_account(latest, &keys.chain_id, &snapshot.relay_url) {
+            return Err(crate::sync::runtime::superseded());
+        }
+        let section = latest.account.as_ref().unwrap();
+        let merged = crate::sync::record_merge::merge_account(section, &keys, &pulled, 0);
+        gate = merged.gate;
+        observed = merged.observed_schema;
+        if latest.rotation.is_some() || section.frozen.is_some() {
+            gate = AccountGate::InvalidMigration;
+        }
+        let mut next = latest.clone();
+        if gate == AccountGate::Compatible {
+            next.account = Some(merged.section);
+            // Discovery is passive. New spaces are unselected; deleted spaces retain every cache.
+            for row in next
+                .account
+                .as_ref()
+                .unwrap()
+                .records
+                .values()
+                .filter(|r| r.record.kind == crate::sync::record::RecordKind::Space)
+            {
+                if row.record.deleted {
+                    if let Some(space) = next.spaces.get_mut(&row.record.id) {
+                        space.missing = true;
+                    }
+                } else {
+                    next.spaces.entry(row.record.id.clone()).or_default();
+                }
+            }
+        }
+        publish_gate(&mut next, &gate, observed);
+        Ok(next)
+    });
+    if let Err(e) = result {
+        if gate != AccountGate::Compatible && !crate::sync::runtime::is_superseded(&e) {
+            fail_closed(env, &keys.chain_id, &snapshot.relay_url, &gate, observed);
+        }
+        return Err(e);
+    }
+    let mut core = env.runtime.core.lock().unwrap();
+    if core
+        .records
+        .as_ref()
+        .is_some_and(|state| same_account(state, &keys.chain_id, &snapshot.relay_url))
+    {
+        core.account_keys = Some(keys.clone());
+    }
+    Ok(FreshAccountProof {
+        keys,
+        relay_url: snapshot.relay_url,
+        gate,
+        observed_schema: observed,
+    })
+}
+fn section_commit(
+    env: &SyncEnv,
+    proof: &FreshAccountProof,
+    transform: impl FnOnce(
+        &crate::sync::records_v3::SyncStateV3,
+    ) -> Result<crate::sync::records_v3::SyncStateV3, AppError>,
+) -> Result<(), AppError> {
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    crate::sync::record_runtime::mutate_records(env, |latest| {
+        if !same_account(latest, &proof.keys.chain_id, &proof.relay_url) {
+            return Err(crate::sync::runtime::superseded());
+        }
+        if crate::sync::records_v3::account_writes_blocked(latest) {
+            return Err(error("record account shared writes are blocked"));
+        }
+        transform(latest)
+    })
+    .map(|_| ())
+}
+/// Remote acceptance already happened. Retain exact receipts in current memory on disk failure;
+/// core.unsaved makes the next round retry persistence before any credential/network callback.
+pub(crate) fn receipt_commit(
+    env: &SyncEnv,
+    proof: &FreshAccountProof,
+    space_id: Option<&str>,
+    sent: &[crate::sync::record_merge::TypedOutgoing],
+    pushed: &crate::sync::merge::Pushed,
+) -> Result<(), AppError> {
+    let mut core = env.runtime.core.lock().unwrap();
+    if let Some(reason) = &core.save_blocked {
+        return Err(error(reason));
+    }
+    let latest = crate::sync::record_runtime::active_state(&core)?;
+    if !same_account(latest, &proof.keys.chain_id, &proof.relay_url) {
+        return Err(crate::sync::runtime::superseded());
+    }
+    let mut next = latest.clone();
+    if let Some(id) = space_id {
+        let section = next
+            .spaces
+            .get_mut(id)
+            .ok_or_else(crate::sync::runtime::superseded)?;
+        *section = crate::sync::record_merge::apply_space_receipts(section, sent, pushed);
+    } else {
+        let account = next.account.as_mut().unwrap();
+        *account = crate::sync::record_merge::apply_account_receipts(account, sent, pushed);
+    }
+    crate::sync::records_v3::validate_state(&next)
+        .map_err(|_| error("cannot retain invalid typed receipts"))?;
+    let generation = core
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| error("record state generation exhausted"))?;
+    core.records = Some(next);
+    core.generation = generation;
+    crate::sync::runtime::save_core(&mut core, &env.state_path)
+}
+fn push_section(
+    env: &SyncEnv,
+    proof: &FreshAccountProof,
+    space_id: Option<&str>,
+    keys: &ChainKeys,
+    sent: &[crate::sync::record_merge::TypedOutgoing],
+    report: &mut RecordRoundReport,
+) -> Result<bool, AppError> {
+    if sent.is_empty() {
+        return Ok(true);
+    }
+    let fresh = fresh_account_gate(env)?;
+    report.gate = Some(fresh.gate.clone());
+    if fresh.ensure_compatible().is_err() {
+        return Ok(false);
+    }
+    preflight(env)?;
+    let (latest, _) = crate::sync::record_runtime::snapshot(env)?;
+    if !same_account(&latest, &proof.keys.chain_id, &proof.relay_url) {
+        return Err(crate::sync::runtime::superseded());
+    }
+    if crate::sync::records_v3::account_writes_blocked(&latest) {
+        return Err(error("record account shared writes are blocked"));
+    }
+    let relay = env.relay(&proof.relay_url)?;
+    let outgoing: Vec<_> = sent.iter().map(|row| row.outgoing.clone()).collect();
+    let mut pushed =
+        crate::sync::merge::push_outgoing(&*relay, &keys.chain_id, &keys.auth_token, &outgoing);
+    if pushed
+        .accepted
+        .iter()
+        .any(|(_, seq)| *seq == 0 || *seq > 9_007_199_254_740_991)
+    {
+        pushed
+            .accepted
+            .retain(|(_, seq)| *seq > 0 && *seq <= 9_007_199_254_740_991);
+        pushed.error = Some(crate::sync::relay::RelayError::BadResponse(
+            "invalid accepted record sequence".into(),
+        ));
+    }
+    receipt_commit(env, proof, space_id, sent, &pushed)?;
+    report.pushed += pushed.accepted.len();
+    report.conflicts += pushed.conflicts;
+    if pushed.frozen {
+        mark_frozen(env, proof)?;
+        return Ok(false);
+    }
+    if let Some(e) = pushed.error {
+        return Err(e.into());
+    }
+    Ok(true)
+}
+pub(crate) fn mark_frozen(env: &SyncEnv, proof: &FreshAccountProof) -> Result<(), AppError> {
+    let now = env.now();
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    let info = crate::sync::state_v2::FreezeInfo {
+        detected_at_ms: now,
+        markers: Vec::new(),
+    };
+    let result = crate::sync::record_runtime::mutate_records(env, |latest| {
+        if !same_account(latest, &proof.keys.chain_id, &proof.relay_url) {
+            return Err(crate::sync::runtime::superseded());
+        }
+        let mut next = latest.clone();
+        next.shared_writes_blocked = true;
+        next.account.as_mut().unwrap().frozen = Some(info.clone());
+        next.last_error = Some("the record chain is frozen; shared publication stopped".into());
+        Ok(next)
+    });
+    if let Err(e) = result {
+        if !crate::sync::runtime::is_superseded(&e) {
+            fail_closed(
+                env,
+                &proof.keys.chain_id,
+                &proof.relay_url,
+                &AccountGate::InvalidMigration,
+                None,
+            );
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
+    preflight(env)?;
+    let (snapshot, _) = crate::sync::record_runtime::snapshot(env)?;
+    let mut report = RecordRoundReport {
+        gate: None,
+        spaces_pulled: 0,
+        pushed: 0,
+        conflicts: 0,
+        review_required: false,
+    };
+    if snapshot.account.is_none() || snapshot.pending_account.is_some() {
+        return Ok(report);
+    }
+    let proof = fresh_account_gate(env)?;
+    report.gate = Some(proof.gate.clone());
+    if proof.ensure_compatible().is_err() {
+        return Ok(report);
+    }
+    let (current, _) = crate::sync::record_runtime::snapshot(env)?;
+    let outgoing = crate::sync::record_merge::account_outgoing(
+        current.account.as_ref().unwrap(),
+        &proof.keys,
+    )?;
+    if !push_section(env, &proof, None, &proof.keys, &outgoing, &mut report)? {
+        return Ok(report);
+    }
+    let (current, _) = crate::sync::record_runtime::snapshot(env)?;
+    let selected: Vec<_> = current
+        .spaces
+        .iter()
+        .filter(|(_, s)| s.selected && !s.missing)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in selected {
+        let (current, _) = crate::sync::record_runtime::snapshot(env)?;
+        let account = current.account.as_ref().unwrap();
+        let Some(keys) = crate::sync::record_merge::space_keys(account, &proof.keys, &id)? else {
+            continue;
+        };
+        let section = &current.spaces[&id];
+        let since = if section.baseline_established {
+            section.cursor_seq
+        } else {
+            0
+        };
+        let relay = env.relay(&proof.relay_url)?;
+        let pulled = match relay.pull(&keys.chain_id, &keys.auth_token, since) {
+            Err(crate::sync::relay::RelayError::NotFound) => {
+                section_commit(env, &proof, |latest| {
+                    let mut next = latest.clone();
+                    let section = next
+                        .spaces
+                        .get_mut(&id)
+                        .ok_or_else(crate::sync::runtime::superseded)?;
+                    section.missing = true;
+                    section.last_error =
+                        Some("the selected record space is missing from the relay".into());
+                    Ok(next)
+                })?;
+                continue;
+            }
+            result => result?,
+        };
+        let mut review = false;
+        let mut gate = AccountGate::Compatible;
+        section_commit(env, &proof, |latest| {
+            let Some(section) = latest.spaces.get(&id).filter(|s| s.selected && !s.missing) else {
+                return Err(crate::sync::runtime::superseded());
+            };
+            let merged = crate::sync::record_merge::merge_space(
+                section,
+                &keys,
+                &pulled,
+                since,
+                &AccountGate::Compatible,
+            );
+            review = merged.review_required;
+            gate = merged.gate;
+            let mut next = latest.clone();
+            next.spaces.insert(id.clone(), merged.section);
+            if gate != AccountGate::Compatible {
+                publish_gate(&mut next, &gate, None);
+            }
+            Ok(next)
+        })?;
+        report.spaces_pulled += 1;
+        report.review_required |= review;
+        if gate != AccountGate::Compatible {
+            report.gate = Some(gate);
+            return Ok(report);
+        }
+        if review {
+            continue;
+        }
+        let (current, _) = crate::sync::record_runtime::snapshot(env)?;
+        let outgoing = crate::sync::record_merge::space_outgoing(
+            &current.spaces[&id],
+            &keys,
+            &AccountGate::Compatible,
+        )?;
+        if !push_section(env, &proof, Some(&id), &keys, &outgoing, &mut report)? {
+            return Ok(report);
+        }
+    }
+    let now = env.now();
+    section_commit(env, &proof, |latest| {
+        let mut next = latest.clone();
+        next.last_sync_ms = Some(now);
+        if !report.review_required {
+            next.last_error = None;
+        }
+        Ok(next)
+    })?;
+    Ok(report)
+}
+fn note_failure(env: &SyncEnv) {
+    let mut core = env.runtime.core.lock().unwrap();
+    core.failed_rounds = core.failed_rounds.saturating_add(1);
+    if core.save_blocked.is_some() {
+        return;
+    }
+    let Ok(latest) = crate::sync::record_runtime::active_state(&core) else {
+        return;
+    };
+    if crate::sync::records_v3::account_writes_blocked(latest) {
+        return;
+    }
+    let mut next = latest.clone();
+    next.last_error=Some("Sync could not complete. Check record storage, relay access, and the sync code, then retry.".into());
+    core.records = Some(next);
+    // Safe fixed diagnostic only. Existing accepted receipts remain in this exact latest core;
+    // save failure marks unsaved so the next attempt stops before any network callback.
+    let _ = crate::sync::runtime::save_core(&mut core, &env.state_path);
+}
+
+pub fn sync_once(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
+    use std::sync::atomic::Ordering;
+    if env
+        .runtime
+        .syncing
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Ok(RecordRoundReport {
+            gate: None,
+            spaces_pulled: 0,
+            pushed: 0,
+            conflicts: 0,
+            review_required: false,
+        });
+    }
+    struct Running<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for Running<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let running = Running(&env.runtime.syncing);
+    let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    let result = run(env);
+    if let Err(e) = &result {
+        if !crate::sync::runtime::is_superseded(e) {
+            note_failure(env);
+        }
+    } else {
+        env.runtime.core.lock().unwrap().failed_rounds = 0;
+    }
+    drop(lifecycle);
+    drop(running);
+    env.events.status();
+    result
+}
+#[cfg(test)]
+#[path = "record_round_tests.rs"]
+mod tests;

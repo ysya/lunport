@@ -929,3 +929,49 @@ fn receipt_sequence_outside_relay_safe_integer_does_not_poison_local_state() {
     };
     assert_eq!(apply_account_receipts(&state, &sent, &pushed), state);
 }
+
+#[test]
+fn secret_revision_returns_live_and_tombstone_headers_without_plaintext_payloads() {
+    let keys = ChainKeys::generate().unwrap();
+    let mut state = account(&keys);
+    let mut secret = record(
+        RecordKind::Key,
+        KEY,
+        json!({"schema":1,"private_key":"HEADER_SECRET_SENTINEL"}),
+        4_000_000_000_000,
+    );
+    secret.version = 7;
+    let env = envelope(&keys, &secret, 2);
+    let key = sealed_key(&env.kind, &env.id_hash);
+    state.sealed.insert(
+        key.clone(),
+        SealedRecord {
+            envelope: env,
+            dirty: false,
+        },
+    );
+    let revision = secret_revision(&state, &keys, RecordKind::Key, KEY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision.version, 7);
+    assert_eq!(revision.updated_at_ms, 4_000_000_000_000);
+    assert!(!revision.deleted);
+    assert!(!format!("{revision:?}").contains("HEADER_SECRET_SENTINEL"));
+    secret.deleted = true;
+    secret.payload = Value::Null;
+    secret.version = 8;
+    state.sealed.get_mut(&key).unwrap().envelope = envelope(&keys, &secret, 3);
+    assert!(
+        secret_revision(&state, &keys, RecordKind::Key, KEY)
+            .unwrap()
+            .unwrap()
+            .deleted
+    );
+    assert!(secret_revision(
+        &state,
+        &ChainKeys::generate().unwrap(),
+        RecordKind::Key,
+        KEY
+    )
+    .is_err());
+}
