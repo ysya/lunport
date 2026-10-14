@@ -6,7 +6,7 @@
 use std::fmt;
 
 use super::protocol::HostQuery;
-use crate::ssh::{HostId, HostKey, Target};
+use crate::ssh::{HostId, HostKey, HopRef, Target};
 
 /// A pinned host key and when it was pinned (milliseconds since the Unix epoch).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +72,18 @@ pub trait HostDirectory: Send + Sync {
     /// Replaces the pin of `host` with `key`: the person accepted a changed key. Only while `previous` is still the pinned key (or `key`
     /// already is); otherwise nothing is written and the call fails.
     fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError>;
+
+    /// Record IDs survive endpoint edits; pin reads and writes must use the endpoint that connected.
+    /// Legacy adapters encode endpoint identity in their IDs and keep their existing contract.
+    fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.pinned(&hop.id)
+    }
+    fn pin_for(&self, hop: &HopRef, key: &HostKey) -> Result<(), DirectoryError> {
+        self.pin(&hop.id, key)
+    }
+    fn replace_pin_for(&self, hop: &HopRef, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
+        self.replace_pin(&hop.id, previous, key)
+    }
 
     /// The keychain account of the saved password of `host` (spec §5.5: `host:<host id>`).
     fn password_account(&self, host: &HostId) -> String;

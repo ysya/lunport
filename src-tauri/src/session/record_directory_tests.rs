@@ -1,0 +1,359 @@
+use super::*;
+use crate::sync::record::{record_key, RecordKind};
+use crate::sync::record_repository as repo;
+use crate::sync::records_v3::*;
+use crate::sync::slot_rules::test_keys;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
+const WEB: &str = "0000000000000001";
+const GATE: &str = "0000000000000002";
+const KEY: &str = "11111111111111111111111111111111";
+fn payload(alias: &str) -> HostPayload {
+    HostPayload {
+        schema: 2,
+        alias: alias.into(),
+        hostname: format!("{alias}.example.com"),
+        port: 22,
+        user: "deploy".into(),
+        auth: AuthKind::Password,
+        key_id: None,
+        jump: vec![],
+        keepalive_secs: 30,
+        keepalive_max_missed: 3,
+        connect_timeout_secs: 15,
+        host_key: None,
+        tags: vec![],
+        notes: String::new(),
+        imported: None,
+    }
+}
+fn state() -> SyncStateV3 {
+    SyncStateV3 {
+        version: 3,
+        device_id: "a".repeat(32),
+        device_name: "fixture".into(),
+        relay_url: "http://127.0.0.1:8787".into(),
+        account: None,
+        spaces: Default::default(),
+        local: Default::default(),
+        rotation: None,
+        relay_features: None,
+        legacy_v1_backup: None,
+        phrase_cleanup_pending: false,
+        notices: vec![],
+        last_sync_ms: None,
+        last_error: None,
+    }
+}
+fn add(s: &SyncStateV3, id: &str, payload: HostPayload) -> SyncStateV3 {
+    repo::create_host(s, id, HostScope::Local, payload, 1).unwrap()
+}
+fn key() -> HostKey {
+    HostKey::from_openssh_line(test_keys::PLAIN_PUBLIC).unwrap()
+}
+fn fixture(
+    s: SyncStateV3,
+    material: bool,
+    save: bool,
+) -> (RecordDirectory, Arc<Mutex<SyncStateV3>>, Arc<AtomicUsize>) {
+    let state = Arc::new(Mutex::new(s));
+    let count = Arc::new(AtomicUsize::new(0));
+    let (read, write, times) = (state.clone(), state.clone(), count.clone());
+    let sources = RecordSources {
+        snapshot: Box::new(move || {
+            times.fetch_add(1, Ordering::SeqCst);
+            Ok(read.lock().unwrap().clone())
+        }),
+        material: Box::new(move |_| Ok(material)),
+        username: Box::new(|| Ok("os-user".into())),
+        pin: Box::new(move |id, endpoint, previous, candidate| {
+            let mut s = write.lock().unwrap();
+            let next =
+                repo::pin_host_key(&s, id.as_str(), endpoint, previous, candidate.clone(), 99)
+                    .map_err(|e| DirectoryError::Failed(e.to_string()))?;
+            if !save {
+                return Err(DirectoryError::Failed("save failed".into()));
+            }
+            *s = next;
+            Ok(())
+        }),
+    };
+    (RecordDirectory::new(sources), state, count)
+}
+#[test]
+fn resolves_a_jump_chain_from_one_snapshot_and_maps_explicit_settings() {
+    let mut gate = payload("gate");
+    gate.port = 2222;
+    gate.user.clear();
+    gate.keepalive_secs = 0;
+    let s = add(&state(), GATE, gate);
+    let mut web = payload("web");
+    web.jump = vec![GATE.into()];
+    web.connect_timeout_secs = 7;
+    let (d, _, count) = fixture(add(&s, WEB, web), false, true);
+    let t = d.resolve(&HostQuery::Id(WEB.into())).unwrap();
+    assert_eq!(
+        t.hops.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        vec![GATE, WEB]
+    );
+    assert_eq!(t.hops[0].user, "os-user");
+    assert_eq!(t.hops[0].port, 2222);
+    assert!(t.hops[0].keepalive_every.is_zero());
+    assert_eq!(t.hops[1].connect_timeout.as_secs(), 7);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(d.password_account(&t.hops[1].id), format!("host:{WEB}"));
+}
+#[test]
+fn a_missing_material_on_a_jump_refuses_the_whole_target() {
+    let mut gate = payload("gate");
+    gate.auth = AuthKind::Key;
+    gate.key_id = Some(KEY.into());
+    let mut s = add(&state(), GATE, gate);
+    let pubkey = ssh_key::PublicKey::from_openssh(test_keys::PLAIN_PUBLIC).unwrap();
+    s.local.keys.insert(
+        KEY.into(),
+        LocalKeyMetadata {
+            vault_id: KEY.into(),
+            public: KeySlotPayload {
+                schema: 2,
+                name: "key".into(),
+                public_key: test_keys::PLAIN_PUBLIC.into(),
+                fingerprint: pubkey.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+                key_type: pubkey.algorithm().to_string(),
+                has_passphrase: false,
+                created_at_ms: 1,
+                origin_device_id: "a".repeat(32),
+            },
+        },
+    );
+    let mut web = payload("web");
+    web.jump = vec![GATE.into()];
+    let s = add(&s, WEB, web);
+    let (d, _, _) = fixture(s.clone(), false, true);
+    assert!(matches!(
+        d.resolve(&HostQuery::Id(WEB.into())),
+        Err(DirectoryError::Unsupported(_))
+    ));
+    let (d, _, _) = fixture(s, true, true);
+    assert!(d.resolve(&HostQuery::Id(WEB.into())).is_ok());
+}
+#[test]
+fn imported_review_and_a_missing_jump_refuse_without_reading_material() {
+    let mut web = payload("web");
+    web.imported = Some(ImportedSettings {
+        source: "fixture".into(),
+        at_ms: 1,
+        unsupported: vec![UnsupportedSetting {
+            keyword: "proxycommand".into(),
+            value: "nc".into(),
+            requires_review: true,
+        }],
+    });
+    web.jump = vec![GATE.into()];
+    let (d, _, _) = fixture(add(&state(), WEB, web), true, true);
+    assert!(matches!(
+        d.resolve(&HostQuery::Id(WEB.into())),
+        Err(DirectoryError::Unsupported(_))
+    ));
+}
+#[test]
+fn pinning_and_replacing_obey_the_existing_contract_and_stamp_server_time() {
+    let (d, s, _) = fixture(add(&state(), WEB, payload("web")), true, true);
+    let t = d.resolve(&HostQuery::Alias("web".into())).unwrap();
+    let h = t.hops[0].reference();
+    let k = key();
+    d.pin_for(&h, &k).unwrap();
+    d.pin_for(&h, &k).unwrap();
+    let pin = d.pinned_for(&h).unwrap().unwrap();
+    assert_eq!(pin.key, k);
+    assert_eq!(pin.pinned_at_ms, 99);
+    let other = HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC).unwrap();
+    assert!(d.pin_for(&h, &other).is_err());
+    d.replace_pin_for(&h, &k, &other).unwrap();
+    assert_eq!(d.pinned(&h.id).unwrap().unwrap().key, other);
+    assert_eq!(
+        repo::get_host(&s.lock().unwrap(), WEB)
+            .unwrap()
+            .host
+            .payload
+            .host_key
+            .unwrap()
+            .pinned_by_device_id,
+        "a".repeat(32)
+    );
+}
+#[test]
+fn a_changed_endpoint_after_resolve_cannot_receive_the_old_servers_pin() {
+    let (d, s, _) = fixture(add(&state(), WEB, payload("web")), true, true);
+    let hop = d.resolve(&HostQuery::Id(WEB.into())).unwrap().hops[0].reference();
+    {
+        let mut s = s.lock().unwrap();
+        let view = repo::get_host(&s, WEB).unwrap();
+        let mut p = view.host.payload;
+        p.hostname = "changed.example.com".into();
+        *s = repo::update_host(&s, WEB, &view.revision, p, 2).unwrap();
+    }
+    assert!(d.pin_for(&hop, &key()).is_err());
+    assert!(d.pinned_for(&hop).is_err());
+    assert!(repo::get_host(&s.lock().unwrap(), WEB)
+        .unwrap()
+        .host
+        .payload
+        .host_key
+        .is_none());
+}
+#[test]
+fn failed_pin_save_keeps_memory_and_record_revision_unchanged() {
+    let original = add(&state(), WEB, payload("web"));
+    let (d, s, _) = fixture(original.clone(), true, false);
+    let h = d.resolve(&HostQuery::Id(WEB.into())).unwrap().hops[0].reference();
+    assert!(d.pin_for(&h, &key()).is_err());
+    assert_eq!(*s.lock().unwrap(), original);
+}
+#[test]
+fn duplicate_aliases_are_ambiguous_while_ids_remain_explicit() {
+    let mut s = add(&state(), WEB, payload("web"));
+    let mut host = s.local.hosts[&record_key(RecordKind::Host, WEB)].clone();
+    host.record.id = GATE.into();
+    s.local
+        .hosts
+        .insert(record_key(RecordKind::Host, GATE), host);
+    let (d, _, _) = fixture(s, false, true);
+    assert!(matches!(
+        d.resolve(&HostQuery::Alias("web".into())),
+        Err(DirectoryError::Ambiguous(_))
+    ));
+    assert!(matches!(
+        d.resolve(&HostQuery::Id(WEB.into())),
+        Err(DirectoryError::Unsupported(_))
+    ));
+}
+
+#[test]
+fn an_identical_pin_still_requires_a_durable_runtime_receipt() {
+    let initial = add(&state(), WEB, payload("web"));
+    let initial = repo::pin_host_key(
+        &initial,
+        WEB,
+        &HostEndpoint {
+            hostname: "web.example.com".into(),
+            port: 22,
+        },
+        None,
+        stored(&key()),
+        99,
+    )
+    .unwrap();
+    let (d, _, _) = fixture(initial, true, false);
+    let hop = d.resolve(&HostQuery::Id(WEB.into())).unwrap().hops[0].reference();
+    assert!(
+        d.pin_for(&hop, &key()).is_err(),
+        "an unsaved matching pin is not a durable confirmation"
+    );
+}
+
+#[test]
+fn records_connect_through_the_real_engine_and_persist_first_contact() {
+    use crate::session::connect::{CancelToken, Connector};
+    use crate::session::testing::{Decision, FakeConfirmer, FakeKeys, FakeOwner};
+    use crate::ssh::russh_engine::{
+        toy_server::{ToyLogin, ToyServer},
+        RusshEngine,
+    };
+    use crate::sync::testkit::MemKeychain;
+    let server = ToyServer::start(ToyLogin {
+        user: "deploy".into(),
+        password: "fixture-password".into(),
+        prompt: "Password: ".into(),
+        rounds: None,
+    });
+    let mut web = payload("web");
+    web.hostname = "127.0.0.1".into();
+    web.port = server.port;
+    let (directory, state, _) = fixture(add(&state(), WEB, web), false, true);
+    let (engine, keys, keychain, owner, confirmer) = (
+        RusshEngine::new(),
+        FakeKeys::new(),
+        MemKeychain::default(),
+        FakeOwner::typing(&["fixture-password"]),
+        FakeConfirmer::deciding(vec![Decision::Trust]),
+    );
+    let connector = Connector {
+        engine: &engine,
+        directory: &directory,
+        keys: &keys,
+        keychain: &keychain,
+        confirmer: &confirmer,
+    };
+    let connected = connector
+        .connect(&HostQuery::Id(WEB.into()), &owner, &CancelToken::default())
+        .unwrap();
+    assert!(connected.session.is_alive());
+    assert_eq!(confirmer.asked().len(), 1);
+    assert_eq!(owner.asked().len(), 1);
+    assert!(repo::get_host(&state.lock().unwrap(), WEB)
+        .unwrap()
+        .host
+        .payload
+        .host_key
+        .is_some());
+    connected.session.close();
+}
+#[test]
+fn editing_the_endpoint_in_the_confirmation_window_refuses_the_connect() {
+    use crate::session::connect::{CancelToken, Connector, HostKeyConfirmer, HostKeyQuestion};
+    use crate::session::testing::{FakeKeys, FakeOwner};
+    use crate::ssh::russh_engine::{
+        toy_server::{ToyLogin, ToyServer},
+        RusshEngine,
+    };
+    use crate::sync::testkit::MemKeychain;
+    struct Change(Arc<Mutex<SyncStateV3>>);
+    impl HostKeyConfirmer for Change {
+        fn confirm(&self, q: &HostKeyQuestion, _: &CancelToken) -> Option<String> {
+            let mut s = self.0.lock().unwrap();
+            let old = repo::get_host(&s, WEB).unwrap();
+            let mut p = old.host.payload;
+            p.hostname = "changed.example.com".into();
+            *s = repo::update_host(&s, WEB, &old.revision, p, 2).unwrap();
+            Some(q.fingerprint.clone())
+        }
+    }
+    let server = ToyServer::start(ToyLogin {
+        user: "deploy".into(),
+        password: "fixture-password".into(),
+        prompt: "Password: ".into(),
+        rounds: None,
+    });
+    let mut web = payload("web");
+    web.hostname = "127.0.0.1".into();
+    web.port = server.port;
+    let (directory, state, _) = fixture(add(&state(), WEB, web), false, true);
+    let (engine, keys, keychain, owner, confirmer) = (
+        RusshEngine::new(),
+        FakeKeys::new(),
+        MemKeychain::default(),
+        FakeOwner::typing(&["fixture-password"]),
+        Change(state.clone()),
+    );
+    let connector = Connector {
+        engine: &engine,
+        directory: &directory,
+        keys: &keys,
+        keychain: &keychain,
+        confirmer: &confirmer,
+    };
+    let error = connector
+        .connect(&HostQuery::Id(WEB.into()), &owner, &CancelToken::default())
+        .err()
+        .expect("endpoint changed while trust window was open");
+    assert!(error.text.contains("endpoint"));
+    assert!(repo::get_host(&state.lock().unwrap(), WEB)
+        .unwrap()
+        .host
+        .payload
+        .host_key
+        .is_none());
+}

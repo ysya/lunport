@@ -39,6 +39,8 @@ pub mod auth;
 pub mod broker;
 pub mod connect;
 pub mod directory;
+pub mod record_directory;
+pub(crate) mod os_identity;
 pub mod hostkey_window;
 pub mod pins;
 pub mod protocol;
