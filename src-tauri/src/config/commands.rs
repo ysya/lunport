@@ -493,13 +493,12 @@ pub fn list_backups(
 /// SECURITY-CRITICAL validation for backup restore. Given the loaded doc and a candidate
 /// `backup_path`, return the managed target file path to overwrite, or `ForbiddenPath`.
 ///
-/// The mirror layout (`fsutil::backup_dir_for`) is reversible, and every rule below is enforced on
-/// canonicalized paths:
+/// Mirror directories and managed targets are checked using canonicalized paths:
 /// 1. the backup's parent dir must canonicalize to somewhere STRICTLY INSIDE the canonicalized
 ///    backups root (created first so canonicalization can succeed);
 /// 2. the filename must strictly parse as `<name>.<digits u64>.bak`;
-/// 3. the implied target — `/` + (parent relative to the root) + `/<name>` — must canonicalize to
-///    EXACTLY one of the loaded managed `ConfigFile.path`s;
+/// 3. the filename and mirror directory must identify exactly one existing canonical target
+///    among the loaded managed `ConfigFile.path`s;
 /// 4. the backup itself must be a regular file per `symlink_metadata` (never a symlink).
 ///
 /// This prevents restoring from arbitrary paths and overwriting arbitrary targets. The legacy
@@ -532,7 +531,7 @@ pub fn resolve_restore_target(
     let parent = parent.canonicalize().map_err(|_| forbidden())?;
     let rel = parent.strip_prefix(&root).map_err(|_| forbidden())?;
     if rel.as_os_str().is_empty() {
-        // Directly in the root would imply a target of `/<name>`; strict prefix required.
+        // Root-level backup files are never accepted; strict prefix required.
         return Err(forbidden());
     }
 
@@ -543,18 +542,36 @@ pub fn resolve_restore_target(
         .ok_or_else(forbidden)?;
     let (target_name, _millis) = parse_backup_name(backup_name).ok_or_else(forbidden)?;
 
-    // Rule 3: the implied target must exist and canonically EXACTLY equal a managed file.
-    let implied = PathBuf::from("/").join(rel).join(&target_name);
-    let implied_canonical = implied.canonicalize().map_err(|_| forbidden())?;
+    // Rule 3: match managed targets forwards. The mirror layout drops Windows drive/UNC
+    // prefixes, so reconstructing a target from `/` loses its filesystem identity.
+    // Distinct managed targets can also share a mirror; never choose one by iteration order.
+    let mut resolved: Option<(PathBuf, PathBuf)> = None;
     for cf in &doc.files {
-        if let Ok(managed_canonical) = cf.path.canonicalize() {
-            if managed_canonical == implied_canonical {
-                return Ok(cf.path.clone());
+        if cf.path.file_name().and_then(|name| name.to_str()) != Some(target_name.as_str()) {
+            continue;
+        }
+        let Ok(mirror) = fsutil::backup_dir_for(&cf.path) else {
+            continue;
+        };
+        let Ok(mirror_canonical) = mirror.canonicalize() else {
+            continue;
+        };
+        if mirror_canonical != parent {
+            continue;
+        }
+        let Ok(managed_canonical) = cf.path.canonicalize() else {
+            continue;
+        };
+        if let Some((_, previous)) = &resolved {
+            if previous != &managed_canonical {
+                return Err(forbidden());
             }
+        } else {
+            resolved = Some((cf.path.clone(), managed_canonical));
         }
     }
 
-    Err(forbidden())
+    resolved.map(|(path, _)| path).ok_or_else(forbidden)
 }
 
 /// Legacy-layout cleanup: older SSHelter versions wrote `<file>.<millis>.bak` NEXT TO each config
@@ -2183,6 +2200,56 @@ mod tests {
             target2.canonicalize().unwrap(),
             config_path.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn resolve_restore_target_rejects_same_named_unmanaged_file() {
+        let managed = tempfile::tempdir().unwrap();
+        let config_path = write_config(&managed, "config", "Host managed\n");
+        let doc = load_doc(&config_path).unwrap();
+        let unmanaged = tempfile::tempdir().unwrap();
+        let unmanaged_path = write_config(&unmanaged, "config", "Host unmanaged\n");
+        let backup = fsutil::backup(&unmanaged_path).unwrap().unwrap();
+
+        let result = resolve_restore_target(&doc, &backup.to_string_lossy());
+        assert!(
+            matches!(result, Err(AppError::ForbiddenPath(_))),
+            "same filename in another mirror directory is not managed: {result:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), "Host managed\n");
+        assert_eq!(std::fs::read_to_string(&unmanaged_path).unwrap(), "Host unmanaged\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_restore_target_rejects_ambiguous_mirror_targets() {
+        let managed = tempfile::tempdir().unwrap();
+        let config_path = write_config(&managed, "config", "Host first\n");
+        let other = tempfile::tempdir().unwrap();
+        let other_path = write_config(&other, "config", "Host second\n");
+        std::fs::create_dir(other.path().join("nested")).unwrap();
+        std::os::unix::fs::symlink(other.path().join("nested"), managed.path().join("link"))
+            .unwrap();
+        let alias = managed.path().join("link/../config");
+        assert_eq!(
+            alias.canonicalize().unwrap(),
+            other_path.canonicalize().unwrap()
+        );
+        assert_eq!(
+            fsutil::backup_dir_for(&alias).unwrap(),
+            fsutil::backup_dir_for(&config_path).unwrap()
+        );
+        let mut doc = load_doc(&config_path).unwrap();
+        doc.files.extend(load_doc(&alias).unwrap().files);
+        let backup = fsutil::backup(&config_path).unwrap().unwrap();
+
+        let result = resolve_restore_target(&doc, &backup.to_string_lossy());
+        assert!(
+            matches!(result, Err(AppError::ForbiddenPath(_))),
+            "a mirror shared by distinct managed targets must be rejected: {result:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), "Host first\n");
+        assert_eq!(std::fs::read_to_string(&other_path).unwrap(), "Host second\n");
     }
 
     // ── Test 10: resolve_restore_target rejects everything outside backups_root ─

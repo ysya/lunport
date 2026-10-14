@@ -454,19 +454,20 @@ mod tests {
     #[test]
     fn with_test_home_restores_the_previous_home_even_when_the_closure_panics() {
         let (outer, inner) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let home_of = |dir: &tempfile::TempDir| dir.path().join("x").to_string_lossy().into_owned();
+        let home_of = |dir: &tempfile::TempDir| dir.path().join("x");
+        let expanded_home = || expand_token("~/x").map(PathBuf::from);
         assert!(TEST_HOME.with(|h| h.borrow().is_none()));
         with_test_home(outer.path(), || {
-            assert_eq!(expand_token("~/x"), Some(home_of(&outer)));
+            assert_eq!(expanded_home(), Some(home_of(&outer)));
             // 巢狀:離開內層(包括 panic)之後回到外層的家目錄。
             let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 with_test_home(inner.path(), || {
-                    assert_eq!(expand_token("~/x"), Some(home_of(&inner)));
+                    assert_eq!(expanded_home(), Some(home_of(&inner)));
                     panic!("the closure panics");
                 })
             }));
             assert!(panicked.is_err());
-            assert_eq!(expand_token("~/x"), Some(home_of(&outer)), "the outer home is back after the panic");
+            assert_eq!(expanded_home(), Some(home_of(&outer)), "the outer home is back after the panic");
         });
         assert!(TEST_HOME.with(|h| h.borrow().is_none()), "and nothing is left over after the outermost call");
     }
