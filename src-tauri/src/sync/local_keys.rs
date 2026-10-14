@@ -211,6 +211,9 @@ fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, pick
     }
     let now = env.now();
     let vault_file = vault_path(&env.state_path);
+    for target in [&env.state_path, &vault_file, &keys_dir, &path, &public_path(&path)] {
+        crate::fsutil::check_write(target)?;
+    }
     let entry = VaultEntry {
         private_key: text.to_string(),
         public_key: facts.public_key.clone(),
@@ -283,6 +286,9 @@ fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, pick
 fn restore_into(env: &SyncEnv, home: &Path, slot_id: &str, local: &LocalSlot, text: &str, facts: &KeyFacts) -> Result<Added, AppError> {
     let keys_dir = home.join(SLOT_DIR);
     let path = keys_dir.join(&local.file_name);
+    for target in [&env.state_path, &vault_path(&env.state_path), &keys_dir, &path, &public_path(&path)] {
+        crate::fsutil::check_write(target)?;
+    }
     if slot_files::occupied(&path) {
         return Err(AppError::Other(in_the_way_message(&path)));
     }
@@ -421,6 +427,15 @@ fn import_file_with(
 ) -> Result<ImportedKey, AppError> {
     let home = home_of(env)?;
     let key = key_file(path, &home)?;
+    if !keep_file {
+        crate::fsutil::check_write(&key)?;
+        if let Some(doc) = env.doc.lock().unwrap().as_ref() {
+            crate::config::include::validate_doc_write_boundaries(doc)?;
+            for file in &doc.files {
+                crate::fsutil::check_backup_write(&file.path)?;
+            }
+        }
+    }
     if !keep_file && env.doc.lock().unwrap().as_ref().is_some_and(config_changed) {
         return Err(AppError::Other(RELOAD_FIRST_MESSAGE.to_string()));
     }
@@ -871,6 +886,38 @@ fn point_hosts_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_external_key_move_refuses_before_vault_or_state_changes() {
+        let d = device("# main\n");
+        let external = tempfile::tempdir().unwrap();
+        let key = external.path().join("key");
+        std::fs::write(&key, test_keys::plain()).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: d.home.path().to_path_buf() }, || {
+            assert!(import_file(&d.env(), "external", key.to_str().unwrap(), false).is_err());
+        });
+        assert_eq!(std::fs::read_to_string(key).unwrap(), test_keys::plain());
+        assert!(d.state().key_slots.is_empty());
+        assert!(!vault_path(&d.env().state_path).exists());
+        assert!(slot_dir_files(&d).is_empty());
+        assert_eq!(d.main_config(), "# main\n");
+    }
+
+    #[test]
+    fn boundary_external_key_copy_is_read_only_at_source() {
+        let d = device("# main\n");
+        let external = tempfile::tempdir().unwrap();
+        let key = external.path().join("key");
+        std::fs::write(&key, test_keys::plain()).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: d.home.path().to_path_buf() }, || {
+            let result = import_file(&d.env(), "external", key.to_str().unwrap(), true).unwrap();
+            assert!(!result.removed_file);
+            assert!(vault_entry(&d, &result.slot_id).is_some());
+        });
+        assert_eq!(std::fs::read_to_string(key).unwrap(), test_keys::plain());
+        assert_eq!(d.main_config(), "# main\n");
+    }
+
     use crate::sync::dto::SlotStatusView;
     use crate::sync::fake_relay::FakeRelay;
     use crate::sync::round::tests::{pair, settle};

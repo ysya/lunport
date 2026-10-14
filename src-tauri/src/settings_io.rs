@@ -22,6 +22,12 @@ fn read_capped(path: &std::path::Path, max: u64) -> Result<String, AppError> {
     Ok(std::fs::read_to_string(path)?)
 }
 
+fn write_settings(path: &std::path::Path, json: &str) -> Result<(), AppError> {
+    crate::fsutil::check_write(path)?;
+    std::fs::write(path, json.as_bytes())?;
+    Ok(())
+}
+
 /// Open a native save dialog and write `json` (the frontend's pretty-printed
 /// settings envelope) to the chosen path. Returns the path, or `None` when the
 /// user cancels. Async so the blocking dialog never runs on the main thread.
@@ -42,7 +48,7 @@ pub async fn settings_export(
     let path = file_path
         .into_path()
         .map_err(|e| AppError::Other(e.to_string()))?;
-    std::fs::write(&path, json.as_bytes())?;
+    write_settings(&path, &json)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
@@ -68,6 +74,21 @@ pub async fn settings_import(app: tauri::AppHandle) -> Result<Option<String>, Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_settings_export_preserves_external_file_and_creates_no_new_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("existing.json");
+        let fresh = temp.path().join("fresh.json");
+        std::fs::write(&existing, b"keep").unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(write_settings(&existing, "{}").is_err());
+            assert!(write_settings(&fresh, "{}").is_err());
+        });
+        assert_eq!(std::fs::read(existing).unwrap(), b"keep");
+        assert!(!fresh.exists());
+    }
+
     use std::io::Write;
 
     #[test]

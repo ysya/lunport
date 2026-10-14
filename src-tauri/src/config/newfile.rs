@@ -124,11 +124,27 @@ pub fn plan_new_file(
     home: Option<&Path>,
 ) -> Result<NewFilePlan, AppError> {
     validate_file_name(name)?;
+    crate::fsutil::check_write(main_dir)?;
 
     let mut families: Vec<(String, GlobFamily)> = Vec::new();
     for value in include_patterns {
         for token in value.split_whitespace() {
-            if let Some(f) = glob_family(token, main_dir, home) {
+            let expanded;
+            let family_token = if crate::fsutil::writes_are_confined() {
+                expanded = shellexpand::env(token).map_err(|_| AppError::Other("cannot expand Include path in the development profile".into()))?.into_owned();
+                let path = if let Some(rest) = expanded.strip_prefix("~/") {
+                    home.ok_or_else(|| AppError::Other("cannot determine profile home".into()))?.join(rest)
+                } else if expanded == "~" {
+                    home.ok_or_else(|| AppError::Other("cannot determine profile home".into()))?.to_path_buf()
+                } else if Path::new(&expanded).is_absolute() {
+                    PathBuf::from(&expanded)
+                } else {
+                    main_dir.join(&expanded)
+                };
+                crate::fsutil::check_write(&path)?;
+                expanded.as_str()
+            } else { token };
+            if let Some(f) = glob_family(family_token, main_dir, home) {
                 families.push((token.to_string(), f));
             }
         }
@@ -142,8 +158,10 @@ pub fn plan_new_file(
     if let Some((token, family)) = picked {
         let final_name = family_name(family, name);
         validate_file_name(&final_name)?;
+        let path = family.dir.join(&final_name);
+        crate::fsutil::check_write(&path)?;
         return Ok(NewFilePlan {
-            path: family.dir.join(&final_name).to_string_lossy().into_owned(),
+            path: path.to_string_lossy().into_owned(),
             covered_by: Some(token.clone()),
             include_value: None,
             final_name,
@@ -152,6 +170,7 @@ pub fn plan_new_file(
     }
 
     let path = main_dir.join(name);
+    crate::fsutil::check_write(&path)?;
     let include_value = match home {
         Some(h) if main_dir.starts_with(h) => format!(
             "~/{}",
@@ -188,6 +207,27 @@ pub fn include_insert_index(items: &[Item]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn boundary_new_file_plan_refuses_an_environment_expansion_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().to_path_buf() }, || {
+            assert!(plan_new_file("new", temp.path(), &["${HOME}/.ssh/*.config".into()], Some(temp.path())).is_err());
+        });
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn boundary_new_file_plan_refuses_an_external_glob_family() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        let outside = temp.path().join("external");
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: root.clone() }, || {
+            assert!(plan_new_file("new", &root, &[format!("{}/*", outside.display())], Some(&root)).is_err());
+        });
+        assert!(!outside.exists());
+        assert!(!root.exists());
+    }
+
     use crate::config::model::{Directive, HostBlock};
 
     fn pat(values: &[&str]) -> Vec<String> {

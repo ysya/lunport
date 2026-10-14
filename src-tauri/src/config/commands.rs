@@ -56,10 +56,9 @@ pub struct BackupInfo {
 
 // ─── Testable helper functions ────────────────────────────────────────────────
 
-/// Default ~/.ssh/config path (uses dirs::home_dir). Errors if home dir is unknown.
+/// Default SSH config path in the immutable build profile.
 pub fn default_config_path() -> Result<PathBuf, AppError> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))?;
+    let home = fsutil::home_dir()?;
     Ok(home.join(".ssh").join("config"))
 }
 
@@ -364,7 +363,9 @@ pub fn persist_file(
     backed_up: &mut HashSet<PathBuf>,
     retention: Option<usize>,
 ) -> Result<(), AppError> {
+    crate::config::include::validate_doc_write_boundaries(doc)?;
     let path = doc.files[idx].path.clone();
+    fsutil::check_write(&path)?;
 
     // Conflict guard: never overwrite a file that changed on disk since we loaded/last wrote it
     // (an external editor, `ssh-keygen -R`, etc.). A vanished file is also a conflict. On Conflict
@@ -509,7 +510,12 @@ pub fn resolve_restore_target(
 ) -> Result<PathBuf, AppError> {
     let forbidden = || AppError::ForbiddenPath(backup_path.to_string());
 
+    for file in &doc.files {
+        fsutil::check_write(&file.path)?;
+    }
+    fsutil::check_write(Path::new(backup_path))?;
     let root = fsutil::backups_root()?;
+    fsutil::check_write(&root)?;
     std::fs::create_dir_all(&root)?;
     let root = root.canonicalize().map_err(|_| forbidden())?;
 
@@ -565,8 +571,10 @@ pub fn resolve_restore_target(
 /// - symlinks (and anything not a regular file) are never migrated;
 /// - the loaded ROOT config itself is never moved, even if backup-named;
 /// - `fs::rename` falls back to copy+remove (cross-device); any single failure is logged via
-///   eprintln and skipped without failing the load.
-pub fn migrate_legacy_backups(doc: &crate::config::model::SshConfigDoc) -> bool {
+///   eprintln and skipped without failing the load. Profile boundary denials fail before any move.
+pub fn migrate_legacy_backups(doc: &crate::config::model::SshConfigDoc) -> Result<bool, AppError> {
+    crate::config::include::validate_doc_write_boundaries(doc)?;
+    let mut planned = Vec::new();
     // Canonical identities of everything loaded AS config, captured BEFORE any file moves
     // (canonicalize fails once the file has been moved away).
     let loaded_canonical: Vec<Option<PathBuf>> =
@@ -621,38 +629,41 @@ pub fn migrate_legacy_backups(doc: &crate::config::model::SshConfigDoc) -> bool 
                 continue;
             }
 
-            if let Err(e) = std::fs::create_dir_all(&mirror) {
-                eprintln!("[migrate] cannot create {}: {e}", mirror.display());
-                continue;
-            }
             let dest = mirror.join(src.file_name().expect("candidate has a file name"));
-            let result = std::fs::rename(&src, &dest).or_else(|_| {
-                // Cross-device fallback: copy then remove the original.
-                std::fs::copy(&src, &dest).and_then(|_| std::fs::remove_file(&src))
-            });
-            match result {
-                Ok(()) => {
-                    if let Some(c) = src_canonical {
-                        moved.insert(c);
-                    }
-                    moved.insert(src);
+            fsutil::check_write(&src)?;
+            fsutil::check_write(&mirror)?;
+            fsutil::check_write(&dest)?;
+            planned.push((src, dest, mirror.clone(), src_canonical));
+        }
+    }
+
+    // Complete every source/destination check before moving the first neighboring backup.
+    for (src, dest, mirror, src_canonical) in planned {
+        if let Err(e) = std::fs::create_dir_all(&mirror) {
+            eprintln!("[migrate] cannot create {}: {e}", mirror.display());
+            continue;
+        }
+        let result = std::fs::rename(&src, &dest).or_else(|_| {
+            std::fs::copy(&src, &dest).and_then(|_| std::fs::remove_file(&src))
+        });
+        match result {
+            Ok(()) => {
+                if let Some(c) = src_canonical {
+                    moved.insert(c);
                 }
-                Err(e) => eprintln!(
-                    "[migrate] failed to move {} -> {}: {e}",
-                    src.display(),
-                    dest.display()
-                ),
+                moved.insert(src);
             }
+            Err(e) => eprintln!("[migrate] failed to move {} -> {}: {e}", src.display(), dest.display()),
         }
     }
 
     if moved.is_empty() {
-        return false;
+        return Ok(false);
     }
     // Did we move any file that had been loaded AS config? Then the doc is stale.
-    doc.files.iter().zip(&loaded_canonical).any(|(cf, canonical)| {
+    Ok(doc.files.iter().zip(&loaded_canonical).any(|(cf, canonical)| {
         moved.contains(&cf.path) || canonical.as_ref().is_some_and(|c| moved.contains(c))
-    })
+    }))
 }
 
 /// `load_doc` + legacy backup migration. If migration moved files that had been loaded AS config
@@ -660,7 +671,7 @@ pub fn migrate_legacy_backups(doc: &crate::config::model::SshConfigDoc) -> bool 
 /// unconditional-once (migration is not re-run on its result), so this can never loop.
 pub fn load_doc_migrated(path: &Path) -> Result<crate::config::model::SshConfigDoc, AppError> {
     let doc = load_doc(path)?;
-    if migrate_legacy_backups(&doc) {
+    if migrate_legacy_backups(&doc)? {
         return load_doc(path);
     }
     Ok(doc)
@@ -788,7 +799,7 @@ pub fn config_plan_new_file(
         .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
     let patterns = main_include_values(doc);
     let mut plan =
-        newfile::plan_new_file(&name, &main_dir, &patterns, dirs::home_dir().as_deref())?;
+        newfile::plan_new_file(&name, &main_dir, &patterns, Some(fsutil::home_dir()?.as_path()))?;
     plan.already_exists = Path::new(&plan.path).exists();
     Ok(plan)
 }
@@ -815,9 +826,14 @@ pub fn config_create_file(state: State<AppState>, name: String) -> Result<String
         .ok_or_else(|| AppError::Other("main config has no parent directory".to_string()))?;
 
     let patterns = main_include_values(doc);
-    let plan = newfile::plan_new_file(&name, &main_dir, &patterns, dirs::home_dir().as_deref())?;
+    let plan = newfile::plan_new_file(&name, &main_dir, &patterns, Some(fsutil::home_dir()?.as_path()))?;
 
     let target = PathBuf::from(&plan.path);
+    crate::config::include::validate_doc_write_boundaries(doc)?;
+    fsutil::check_write(&target)?;
+    for file in &doc.files {
+        fsutil::check_backup_write(&file.path)?;
+    }
     if target.exists() {
         return Err(AppError::Other(format!(
             "{} already exists",
@@ -1051,6 +1067,9 @@ pub(crate) fn move_host_and_persist(
         .as_mut()
         .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
     let main_path = doc.files[0].path.clone();
+    for file in &doc.files {
+        fsutil::check_write(&file.path)?;
+    }
     let (src, tgt) = move_host(doc, alias, target_file)?;
     // Persist the TARGET first: if the source write then fails, the block exists in
     // both files (a recoverable duplicate) rather than in neither.
@@ -1273,6 +1292,52 @@ pub fn config_restore_backup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn boundary_persist_rejects_new_external_include_before_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("config");
+        std::fs::write(&main, "# main\n").unwrap();
+        let mut doc = load_doc(&main).unwrap();
+        doc.files[0].items.push(Item::Directive(Directive::new("Include", "../outside/*", "")));
+        let mut backed_up = HashSet::from([main.clone()]);
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().to_path_buf() }, || {
+            assert!(persist_file(&mut doc, 0, &mut backed_up, None).is_err());
+        });
+        assert_eq!(std::fs::read_to_string(main).unwrap(), "# main\n");
+    }
+
+    #[test]
+    fn boundary_load_rejects_external_include_before_backup_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        std::fs::create_dir(&root).unwrap();
+        let main = root.join("config");
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, "Host external\n").unwrap();
+        let backup = root.join("config.123.bak");
+        std::fs::write(&backup, b"keep backup").unwrap();
+        std::fs::write(&main, format!("Include {}\n", outside.display())).unwrap();
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(load_doc_migrated(&main).is_err());
+        });
+        assert_eq!(std::fs::read(&backup).unwrap(), b"keep backup");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "Host external\n");
+    }
+
+    #[test]
+    fn boundary_persist_rejects_external_config_without_backup_or_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("config");
+        std::fs::write(&outside, "Host external\n").unwrap();
+        let mut doc = load_doc(&outside).unwrap();
+        let mut backed_up = HashSet::new();
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(persist_file(&mut doc, 0, &mut backed_up, None).is_err());
+        });
+        assert!(backed_up.is_empty());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "Host external\n");
+    }
+
     use crate::config::include::load_doc;
 
     fn write_config(dir: &tempfile::TempDir, name: &str, content: &str) -> PathBuf {
@@ -2199,7 +2264,7 @@ mod tests {
         std::fs::write(dir.path().join("other.999.bak"), b"decoy").unwrap(); // `other` not loaded
 
         let doc = load_doc(&config_path).expect("load_doc ok");
-        let needs_reload = migrate_legacy_backups(&doc);
+        let needs_reload = migrate_legacy_backups(&doc).unwrap();
         assert!(!needs_reload, "strays were not loaded as config → no reload needed");
 
         // Strays moved into the mirror dir, contents intact.
@@ -2274,7 +2339,7 @@ mod tests {
         std::os::unix::fs::symlink(&precious, &link).unwrap();
 
         let doc = load_doc(&config_path).expect("load_doc ok");
-        let needs_reload = migrate_legacy_backups(&doc);
+        let needs_reload = migrate_legacy_backups(&doc).unwrap();
         assert!(!needs_reload);
         assert!(link.exists(), "symlink must not be migrated");
         assert!(precious.exists());
