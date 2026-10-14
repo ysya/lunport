@@ -46,6 +46,7 @@ export const recordOverview = (
   shared_writes_blocked: false,
   relay_url: "https://relay.fixture.invalid",
   pending_account: null,
+  last_sync_ms: null,
   last_error: null,
   ...p,
 });

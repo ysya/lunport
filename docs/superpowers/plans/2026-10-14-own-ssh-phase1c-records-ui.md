@@ -67,3 +67,11 @@
 ## Base verification
 
 Focused frontend: 48 tests passed. Complete frontend: 58 files / 901 tests passed. TypeScript and production Vite bundle passed. Existing large bundle advisory remains; no dependency changes. Final account leave/rotation APIs remain an explicit follow-up owned by this worker once native contract is supplied; baseline has no fabricated live RPC success. No actual app launch, credential access, relay request or user migration was performed.
+
+## Authenticated key sync DTO follow-up
+
+Root native KeyView.synced:boolean|null is authoritative for private-key sync intent; Account authority only identifies public metadata. Overview.last_sync_ms exposes the last saved sync timestamp.
+
+- [x] RED tests for account metadata with synced=false (re-sync), null (disabled unknown), true (stop with queued-delivery wording), and last-sync/error display.
+- [x] Implement typed fields and sync-intent-based controls; focused GREEN and typecheck only.
+- [x] Exact owned commit under shared index flock. Leave/rotate/migration remain separate until root supplies actual contracts.

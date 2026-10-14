@@ -63,7 +63,8 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
         <div>
           <h1 className="text-lg font-semibold">Keys</h1>
           <p className="text-sm text-muted-foreground">
-            New keys are local until you choose to sync them.
+            New keys are local until you choose to sync them. Sync changes may
+            be waiting for the relay.
           </p>
         </div>
         {!mode && (
@@ -164,8 +165,13 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
                 {revealHidden(key.public?.name ?? key.id)}
               </h2>
               <p className="text-xs text-muted-foreground">
-                {key.authority === "account" ? "Synced key" : "Local key"} ·{" "}
-                {key.status.replace(/_/g, " ")}
+                {key.authority === "account" ? "Account key" : "Local key"} ·{" "}
+                {key.status.replace(/_/g, " ")} ·{" "}
+                {typeof key.synced !== "boolean"
+                  ? "Sync state unavailable"
+                  : key.synced
+                    ? "Sync enabled"
+                    : "Sync disabled"}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -205,16 +211,21 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
                   size="sm"
                   variant="outline"
                   disabled={
-                    busy || draft.busy || overview.shared_writes_blocked
+                    busy ||
+                    draft.busy ||
+                    overview.shared_writes_blocked ||
+                    typeof key.synced !== "boolean"
                   }
-                  onClick={() =>
-                    setConfirming({
-                      id: key.id,
-                      enabled: key.authority === "local",
-                    })
-                  }
+                  onClick={() => {
+                    if (typeof key.synced === "boolean")
+                      setConfirming({ id: key.id, enabled: !key.synced });
+                  }}
                 >
-                  {key.authority === "local" ? "Sync key" : "Stop syncing"}
+                  {typeof key.synced !== "boolean"
+                    ? "Sync state unavailable"
+                    : key.synced
+                      ? "Stop syncing"
+                      : "Sync key"}
                 </Button>
               )}
             </div>
@@ -256,10 +267,21 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
               <div className="flex gap-2">
                 <Button
                   disabled={
-                    busy || draft.busy || overview.shared_writes_blocked
+                    busy ||
+                    draft.busy ||
+                    overview.shared_writes_blocked ||
+                    typeof key.synced !== "boolean" ||
+                    key.status !== "available" ||
+                    confirming.enabled === key.synced
                   }
                   onClick={() =>
                     publicAction(async () => {
+                      if (
+                        typeof key.synced !== "boolean" ||
+                        key.status !== "available" ||
+                        confirming.enabled === key.synced
+                      )
+                        return;
                       applyRecordOverview(
                         client,
                         await setRecordKeySync(key.id, confirming.enabled),

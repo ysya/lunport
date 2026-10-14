@@ -139,6 +139,7 @@ describe("explicit import consent and key/account controls", () => {
     const key = {
       id: "a".repeat(32),
       authority: "account" as const,
+      synced: true,
       public: null,
       status: "needs_material" as const,
     };
@@ -153,6 +154,66 @@ describe("explicit import consent and key/account controls", () => {
     );
     expect(text(conflict)).not.toContain("Download synced key");
     expect(text(conflict)).toContain("metadata conflict");
+  });
+  it("offers sync again when account metadata survives an unpublished private key", () => {
+    const key = {
+      id: "a".repeat(32),
+      authority: "account" as const,
+      synced: false,
+      public: null,
+      status: "available" as const,
+    };
+    const html = render(
+      <RecordsKeysPanel
+        overview={recordOverview({
+          keys: [key],
+          account: { chain_id: "b".repeat(64), device_name: "Laptop" },
+        })}
+      />,
+    );
+    expect(buttonTag(html, "Sync key")).not.toContain(DISABLED);
+    expect(text(html)).not.toContain("Stop syncing");
+    expect(text(html)).toContain("Account key");
+    expect(text(html)).not.toContain("Synced key");
+  });
+  it("disables sync toggling when authenticated sync status is unknown", () => {
+    const key = {
+      id: "a".repeat(32),
+      authority: "account" as const,
+      synced: null,
+      public: null,
+      status: "available" as const,
+    };
+    const html = render(
+      <RecordsKeysPanel
+        overview={recordOverview({
+          keys: [key],
+          account: { chain_id: "b".repeat(64), device_name: "Laptop" },
+        })}
+      />,
+    );
+    expect(buttonTag(html, "Sync state unavailable")).toContain(DISABLED);
+    expect(text(html)).not.toContain("Stop syncing");
+  });
+  it("offers stop only for an explicitly enabled key without implying relay delivery", () => {
+    const key = {
+      id: "a".repeat(32),
+      authority: "account" as const,
+      synced: true,
+      public: null,
+      status: "available" as const,
+    };
+    const html = render(
+      <RecordsKeysPanel
+        overview={recordOverview({
+          keys: [key],
+          account: { chain_id: "b".repeat(64), device_name: "Laptop" },
+        })}
+      />,
+    );
+    expect(buttonTag(html, "Stop syncing")).not.toContain(DISABLED);
+    expect(text(html)).toContain("Sync enabled");
+    expect(text(html)).toContain("waiting for the relay");
   });
   it("keeps shared account controls disabled while shared writes are gated", () => {
     const html = render(
