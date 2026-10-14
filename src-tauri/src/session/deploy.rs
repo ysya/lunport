@@ -28,6 +28,9 @@ fn script(public: &str) -> Result<String, String> {
 #[cfg(test)]
 #[path = "deploy_tests.rs"]
 mod tests;
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[path = "deploy_ssh_tests.rs"]
+mod ssh_tests;
 
 use super::{
     auth::Owner,
