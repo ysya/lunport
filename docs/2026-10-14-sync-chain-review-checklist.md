@@ -26,7 +26,7 @@
 
 ## 驗證結果
 
-最後修正版 Rust：2,449 個通過、0 個失敗；排除 3 個實際 OS Keychain 測試。針對性驗證：engine 22 個、records 模組 268 個通過。前端已有 63 個測試檔、942 個測試通過，TypeScript 與 Vite build 通過；修正只涉及後端。
+最後修正版 Rust：2,451 個通過、0 個失敗；排除 3 個實際 OS Keychain 測試。針對性驗證：engine 22 個、records 模組 268 個通過。前端已有 63 個測試檔、942 個測試通過，TypeScript 與 Vite build 通過；修正只涉及後端。
 
 最後修正版 macOS Dev bundle 打包成功，實際重啟後原測試主機仍保留，重新整理後狀態一致。這是本機 debug bundle 驗收。
 
@@ -60,3 +60,5 @@
 詳細實作與測試紀錄：[active integration ledger](superpowers/plans/2026-10-14-own-ssh-phase1c-active-integration-ledger.md)、[final review fix ledger](superpowers/plans/2026-10-14-own-ssh-phase1c-final-review-fixes-ledger.md)。
 
 Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0.0-1.md)。
+
+首次原生 Windows CI 發現的路徑與測試假設已修正，針對性測試及整合 Rust suite 通過，正在重跑跨平台 CI。詳細：[beta validation](releases/1.0.0-1-validation.md)。
