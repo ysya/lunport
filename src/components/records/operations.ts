@@ -11,7 +11,7 @@ export async function connectSavedHost(
     throw new Error(
       "The host is missing or its ID is ambiguous. Refresh the workspace.",
     );
-  if (host.readiness.kind !== "ready")
+  if (host.readiness.kind !== "ready" || host.group_error)
     throw new Error("Resolve this host's key or settings before connecting.");
   await connectRecordHost(hostId, terminalId, newTab);
 }

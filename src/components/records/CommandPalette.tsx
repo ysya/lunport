@@ -15,6 +15,7 @@ import type { RecordOverview } from "@/lib/records";
 import { selectHost } from "./editor";
 import { connectSavedHost, scopeLabel } from "./operations";
 import { readinessLabel } from "./HostList";
+import { groupPath, recordHostSearchText } from "./group-tree";
 
 export function RecordsCommandPalette({
   overview,
@@ -104,10 +105,11 @@ export function RecordsCommandPalette({
                 <CommandItem
                   key={host.id}
                   data-host-id={host.id}
-                  value={`${host.payload.alias} ${host.payload.hostname} ${scopeLabel(overview, host.scope)} ${host.id}`}
+                  value={recordHostSearchText(overview, host)}
                   disabled={busy || editorBusy}
                   onSelect={() => {
-                    if (host.readiness.kind === "ready") void connect(host.id);
+                    if (host.readiness.kind === "ready" && !host.group_error)
+                      void connect(host.id);
                     else {
                       setOpen(false);
                       edit(host.id);
@@ -119,6 +121,9 @@ export function RecordsCommandPalette({
                   </span>
                   <span className="text-xs text-muted-foreground">
                     {revealHidden(scopeLabel(overview, host.scope))}
+                    {host.payload.group_id &&
+                      ` / ${revealHidden(groupPath(overview, host.payload.group_id, host.scope))}`}
+                    {host.group_error && " · Needs review"}
                     {host.readiness.kind !== "ready" &&
                       ` · ${readinessLabel[host.readiness.kind]}`}
                   </span>

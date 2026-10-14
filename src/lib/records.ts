@@ -26,7 +26,43 @@ export type ImportedSettings = {
     requires_review: boolean;
   }>;
 };
+export type InheritedField =
+  | "port"
+  | "user"
+  | "authentication"
+  | "jump"
+  | "keepalive_secs"
+  | "keepalive_max_missed"
+  | "connect_timeout_secs";
+export type GroupAuthentication = {
+  auth: "key" | "password" | "interactive";
+  key_id: string | null;
+};
+export type GroupDefaults = {
+  port?: number | null;
+  user?: string | null;
+  authentication?: GroupAuthentication | null;
+  jump?: string[] | null;
+  keepalive_secs?: number | null;
+  keepalive_max_missed?: number | null;
+  connect_timeout_secs?: number | null;
+};
+export type GroupPayload = {
+  schema: 1;
+  name: string;
+  parent_id: string | null;
+  defaults: GroupDefaults;
+};
+export type RecordGroupView = {
+  id: string;
+  scope: HostScope;
+  payload: GroupPayload;
+  revision: RecordRevision;
+  group_error: string | null;
+};
 export type HostPayload = {
+  group_id?: string | null;
+  inherit?: InheritedField[];
   schema: number;
   alias: string;
   hostname: string;
@@ -48,6 +84,9 @@ export type RecordHostView = {
   scope: HostScope;
   payload: HostPayload;
   revision: RecordRevision;
+  effective_payload: HostPayload;
+  inherited_from: Partial<Record<InheritedField, string>>;
+  group_error: string | null;
   readiness: {
     kind: "ready" | "needs_key" | "key_conflict" | "needs_review";
     key_id?: string;
@@ -72,6 +111,9 @@ export type RecordKeyView = {
 };
 export type RecordOverview = {
   generation: string;
+  groups: RecordGroupView[];
+  format_upgrade_required: boolean;
+  shared_format_upgrade_required: boolean;
   hosts: RecordHostView[];
   keys: RecordKeyView[];
   spaces: Array<{
@@ -175,15 +217,26 @@ export function applyRecordOverview(
 export async function createRecordHost(
   scope: HostScope,
   payload: HostPayload,
+  upgradeConfirmed?: boolean,
 ): Promise<RecordOverview> {
-  return tauriInvoke("records_host_create", { scope, payload });
+  return tauriInvoke("records_host_create", {
+    scope,
+    payload,
+    ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
+  });
 }
 export async function updateRecordHost(
   id: string,
   revision: RecordRevision,
   payload: HostPayload,
+  upgradeConfirmed?: boolean,
 ): Promise<RecordOverview> {
-  return tauriInvoke("records_host_update", { id, revision, payload });
+  return tauriInvoke("records_host_update", {
+    id,
+    revision,
+    payload,
+    ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
+  });
 }
 export async function deleteRecordHost(
   id: string,
@@ -417,4 +470,29 @@ export async function rotateRecordAccount(
   deviceName: string,
 ): Promise<AccountSetupResult> {
   return tauriInvoke("records_account_rotate", { deviceName });
+}
+
+export async function createRecordGroup(
+  scope: HostScope,
+  payload: GroupPayload,
+  upgradeConfirmed: boolean,
+): Promise<RecordOverview> {
+  return tauriInvoke("records_group_create", {
+    scope,
+    payload,
+    upgradeConfirmed,
+  });
+}
+export async function updateRecordGroup(
+  id: string,
+  revision: RecordRevision,
+  payload: GroupPayload,
+): Promise<RecordOverview> {
+  return tauriInvoke("records_group_update", { id, revision, payload });
+}
+export async function deleteRecordGroup(
+  id: string,
+  revision: RecordRevision,
+): Promise<RecordOverview> {
+  return tauriInvoke("records_group_delete", { id, revision });
 }

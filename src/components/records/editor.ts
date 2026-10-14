@@ -42,7 +42,11 @@ export function beginEditor(host: RecordHostView | null): EditorState {
   return {
     id: host?.id ?? null,
     scope: structuredClone(host?.scope ?? { kind: "local" }),
-    payload: structuredClone(host?.payload ?? emptyHostPayload()),
+    payload: structuredClone({
+      ...(host?.payload ?? emptyHostPayload()),
+      group_id: host?.payload.group_id ?? null,
+      inherit: host?.payload.inherit ?? [],
+    }),
     revision: host ? structuredClone(host.revision) : null,
     dirty: false,
     reviewed: false,
@@ -80,6 +84,12 @@ export function refreshEditor(
 export function buildEditorPayload(state: EditorState): HostPayload {
   const payload = structuredClone(state.payload);
   payload.host_key = null;
+  if (payload.group_id || payload.inherit?.length) payload.schema = 3;
+  else {
+    delete payload.group_id;
+    delete payload.inherit;
+    payload.schema = 2;
+  }
   if (state.reviewed && payload.imported)
     payload.imported.unsupported = payload.imported.unsupported.filter(
       (setting) => !setting.requires_review,
@@ -122,13 +132,15 @@ export function editorProblem(state: EditorState): string | null {
 }
 export async function submitEditor(
   state: EditorState,
+  upgradeConfirmed?: boolean,
 ): Promise<RecordOverview> {
   const problem = editorProblem(state);
   if (problem) throw new Error(problem);
   const payload = buildEditorPayload(state);
-  if (state.id === null) return createRecordHost(state.scope, payload);
+  if (state.id === null)
+    return createRecordHost(state.scope, payload, upgradeConfirmed);
   if (!state.revision) throw new Error("The saved revision is unavailable.");
-  return updateRecordHost(state.id, state.revision, payload);
+  return updateRecordHost(state.id, state.revision, payload, upgradeConfirmed);
 }
 export function selectHost(
   hosts: RecordHostView[],

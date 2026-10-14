@@ -20,6 +20,7 @@ import {
   recordsStatusKey,
   syncRecordsNow,
   type RecordOverview,
+  type HostScope,
   type RecordsStatus,
 } from "@/lib/records";
 import { usePlatform, useTerminals } from "@/lib/queries";
@@ -28,6 +29,8 @@ import { useSettingsStore } from "@/stores/settings";
 import { cn } from "@/lib/utils";
 import { RecordHostList } from "./HostList";
 import { RecordHostEditor } from "./HostEditor";
+import { RecordGroupEditor } from "./GroupEditor";
+import { selectGroup } from "./group-tree";
 import { selectHost } from "./editor";
 import { RecordsKeysPanel } from "./KeysPanel";
 import { RecordsAccountPanel } from "./AccountPanel";
@@ -57,6 +60,9 @@ export function RecordsWorkspace({
   const [selection, setSelection] = useState<HostSelection>({ kind: "none" });
   const [pendingSelection, setPendingSelection] =
     useState<HostSelection | null>(null);
+  const [creationScope, setCreationScope] = useState<HostScope>({
+    kind: "local",
+  });
   const [dirty, setDirty] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -91,6 +97,31 @@ export function RecordsWorkspace({
       setDirty(false);
     }
   };
+  const groupContext =
+    selection.kind === "group"
+      ? selectGroup(overview.groups, selection.id)
+      : selection.kind === "host"
+        ? (() => {
+            const host = selectHost(overview.hosts, selection.id);
+            return host?.payload.group_id
+              ? selectGroup(overview.groups, host.payload.group_id)
+              : null;
+          })()
+        : null;
+  const createHost = () =>
+    requestSelection({
+      kind: "new",
+      nonce: ++nonce.current,
+      groupId: groupContext?.id,
+      scope: groupContext?.scope ?? creationScope,
+    });
+  const createGroup = () =>
+    requestSelection({
+      kind: "new_group",
+      nonce: ++nonce.current,
+      parentId: groupContext?.id,
+      scope: groupContext?.scope ?? creationScope,
+    });
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)
@@ -102,7 +133,7 @@ export function RecordsWorkspace({
         return;
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
-        requestSelection({ kind: "new", nonce: ++nonce.current });
+        createHost();
       } else if (event.key.toLowerCase() === "f") {
         event.preventDefault();
         setPanel("hosts");
@@ -120,6 +151,10 @@ export function RecordsWorkspace({
   }, [requestSelection]);
   const onSaved = useCallback((id: string | null) => {
     setSelection(id ? { kind: "host", id } : { kind: "none" });
+    setDirty(false);
+  }, []);
+  const onGroupSaved = useCallback((id: string | null) => {
+    setSelection(id ? { kind: "group", id } : { kind: "none" });
     setDirty(false);
   }, []);
   const onDeleted = useCallback(() => {
@@ -143,6 +178,10 @@ export function RecordsWorkspace({
   };
   const selectedId = selection.kind === "host" ? selection.id : null;
   const selected = selectedId ? selectHost(overview.hosts, selectedId) : null;
+  const selectedGroupId = selection.kind === "group" ? selection.id : null;
+  const selectedGroup = selectedGroupId
+    ? selectGroup(overview.groups, selectedGroupId)
+    : null;
   return (
     <div className="app-shell flex h-screen flex-col overflow-hidden">
       <header
@@ -223,7 +262,7 @@ export function RecordsWorkspace({
               : value[0].toUpperCase() + value.slice(1)}
             {value === "hosts" && dirty && (
               <span
-                aria-label="Unsaved host changes"
+                aria-label="Unsaved record changes"
                 className="size-1.5 rounded-full bg-primary"
               />
             )}
@@ -237,9 +276,9 @@ export function RecordsWorkspace({
         }}
       >
         <DialogContent>
-          <DialogTitle>Unsaved host changes</DialogTitle>
+          <DialogTitle>Unsaved changes</DialogTitle>
           <DialogDescription>
-            Discard the unsaved host changes before opening another host?
+            Discard the unsaved changes before opening another host or Group?
           </DialogDescription>
           <DialogFooter>
             <Button
@@ -282,10 +321,15 @@ export function RecordsWorkspace({
           <RecordHostList
             overview={overview}
             selectedId={selectedId}
+            selectedGroupId={selectedGroupId}
+            selectGroup={(id) => requestSelection({ kind: "group", id })}
+            selectScope={(scope) => {
+              requestSelection({ kind: "none" });
+              setCreationScope(scope);
+            }}
             select={(id) => requestSelection({ kind: "host", id })}
-            create={() =>
-              requestSelection({ kind: "new", nonce: ++nonce.current })
-            }
+            create={createHost}
+            createGroup={createGroup}
             disabled={editorBusy}
           />
         </aside>
@@ -305,12 +349,43 @@ export function RecordsWorkspace({
                   Select a host, add a new one, or import an SSH configuration.
                 </p>
               </div>
+            ) : selection.kind === "group" || selection.kind === "new_group" ? (
+              <RecordGroupEditor
+                key={
+                  selection.kind === "group"
+                    ? `group:${selection.id}`
+                    : `new-group:${selection.nonce}`
+                }
+                group={selectedGroup}
+                groupId={selectedGroupId}
+                initialScope={
+                  selection.kind === "new_group" ? selection.scope : undefined
+                }
+                initialParentId={
+                  selection.kind === "new_group"
+                    ? selection.parentId
+                    : undefined
+                }
+                overview={overview}
+                accept={accept}
+                onSaved={onGroupSaved}
+                onDeleted={onDeleted}
+                onDirty={onDirty}
+                onBusy={setEditorBusy}
+                onCancel={onDeleted}
+              />
             ) : (
               <RecordHostEditor
                 key={
                   selection.kind === "host"
                     ? selection.id
                     : `new:${selection.nonce}`
+                }
+                initialScope={
+                  selection.kind === "new" ? selection.scope : undefined
+                }
+                initialGroupId={
+                  selection.kind === "new" ? selection.groupId : undefined
                 }
                 host={selected}
                 hostId={selectedId}
@@ -379,7 +454,7 @@ export function RecordsWorkspace({
         newTab={effectiveNewTab(preferNewTab, terminalId, terminals.data ?? [])}
         editorBusy={editorBusy}
         edit={(id) => requestSelection({ kind: "host", id })}
-        create={() => requestSelection({ kind: "new", nonce: ++nonce.current })}
+        create={createHost}
       />
       <SettingsDialog
         recordOverview={overview}

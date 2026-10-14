@@ -18,6 +18,12 @@ import {
 } from "./editor";
 afterEach(() => vi.unstubAllGlobals());
 describe("record editor", () => {
+  it("normalizes absent Group membership and inheritance for raw editing", () => {
+    const state = beginEditor(hostView());
+    expect(state.payload.group_id).toBeNull();
+    expect(state.payload.inherit).toEqual([]);
+    expect(buildEditorPayload(state)).toEqual(hostPayload());
+  });
   it("creates a local unpinned draft with no inferred key sharing", () => {
     const draft = beginEditor(null);
     expect(draft.scope).toEqual({ kind: "local" });
