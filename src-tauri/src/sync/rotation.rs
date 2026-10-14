@@ -304,6 +304,7 @@ pub fn drive_rotation(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: Chai
     if s.read_only() {
         return crate::sync::round::run_round(env, generation, s, keys, false).map(|_| ());
     }
+    crate::sync::account::check_local_write_paths(env)?;
     if rotation.paused_until_ms.is_some_and(|until| env.now() < until) {
         return Ok(());
     }
