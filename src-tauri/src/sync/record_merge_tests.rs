@@ -252,7 +252,7 @@ fn old_schema_accounts_require_explicit_migration_and_never_publish_a_new_gate()
     assert_eq!(out.section, before);
 }
 #[test]
-fn self_dangling_and_alias_conflicting_hosts_are_preserved_for_review() {
+fn relationship_conflicts_are_preserved_for_complete_snapshot_review() {
     let keys = ChainKeys::generate().unwrap();
     for jumps in [vec![HOST], vec!["ffffffffffffffff"]] {
         let mut value = host("web", 2);
@@ -265,7 +265,7 @@ fn self_dangling_and_alias_conflicting_hosts_are_preserved_for_review() {
             &AccountGate::Compatible,
         );
         assert_eq!(out.section.records.len(), 1);
-        assert!(out.review_required);
+        assert_eq!(out.gate, AccountGate::Compatible);
     }
     let one = host("web", 2);
     let mut two = host("web", 3);
@@ -278,7 +278,7 @@ fn self_dangling_and_alias_conflicting_hosts_are_preserved_for_review() {
         &AccountGate::Compatible,
     );
     assert_eq!(out.section.records.len(), 2);
-    assert!(out.review_required);
+    assert_eq!(out.gate, AccountGate::Compatible);
 }
 #[test]
 fn lww_uses_device_order_tombstones_and_keeps_dirty_local_winners() {

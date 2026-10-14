@@ -18,8 +18,8 @@ use crate::sync::record::{
     SpacePayload, ACCOUNT_META_ID,
 };
 use crate::sync::records_v3::{
-    decode_host, decode_keyslot, validate_hosts, validate_migration_gate, HostScope,
-    MigrationPhase, SpaceStateV3, TypedRecord, ACCOUNT_SCHEMA, MIN_ACCOUNT_SCHEMA,
+    decode_host, decode_keyslot, validate_migration_gate, HostScope, MigrationPhase, SpaceStateV3,
+    TypedRecord, ACCOUNT_SCHEMA, MIN_ACCOUNT_SCHEMA,
 };
 use crate::sync::relay::{PullResponse, PushItem};
 use crate::sync::slot_rules::is_slot_id;
@@ -54,7 +54,6 @@ pub enum DiagnosticCode {
     Unreadable,
     Unsupported,
     InvalidShape,
-    RelationConflict,
     OpaqueConflict,
 }
 
@@ -72,7 +71,6 @@ pub struct TypedMergeOutcome<S> {
     pub gate: AccountGate,
     pub observed_schema: Option<u32>,
     pub skipped: u32,
-    pub review_required: bool,
     pub conflicts: Vec<String>,
     pub diagnostics: Vec<MergeDiagnostic>,
     pub baseline_established: bool,
@@ -551,7 +549,6 @@ fn result<S: Clone>(
         gate,
         observed_schema: schema,
         skipped: 0,
-        review_required: false,
         conflicts: Vec::new(),
         diagnostics: Vec::new(),
         baseline_established: baseline,
@@ -1036,32 +1033,8 @@ pub fn merge_space(
         return out;
     }
     out.skipped = out.diagnostics.len().try_into().unwrap_or(u32::MAX);
-    let hosts: Vec<_> = out
-        .section
-        .records
-        .values()
-        .filter_map(|row| {
-            decode_host(
-                &row.record,
-                HostScope::Space {
-                    space_id: keys.chain_id.clone(),
-                },
-            )
-            .ok()
-        })
-        .filter_map(|row| match row {
-            TypedRecord::Live(host) => Some(host),
-            _ => None,
-        })
-        .collect();
-    out.review_required = validate_hosts(&hosts).is_err();
-    if out.review_required {
-        out.diagnostics.push(MergeDiagnostic {
-            kind: "host".into(),
-            id_hash: String::new(),
-            code: DiagnosticCode::RelationConflict,
-        });
-    }
+    // Relationship review needs effective Group settings and hosts from every selected scope.
+    // The round performs it after inserting this section into the complete candidate state.
     out.section.cursor_seq = pulled.latest_seq;
     out.section.baseline_established = true;
     out.baseline_established = true;
