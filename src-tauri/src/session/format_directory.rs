@@ -62,6 +62,32 @@ impl HostDirectory for FormatDirectory {
     ) -> Result<(), DirectoryError> {
         self.with_active(|d| d.replace_pin_for(hop, old, key))
     }
+    fn pin_confirmed(
+        &self,
+        hop: &HopRef,
+        previous: Option<&HostKey>,
+        key: &HostKey,
+        cancel: &super::connect::CancelToken,
+        guard: &(dyn Fn() -> Result<(), DirectoryError> + Sync),
+    ) -> Result<(), DirectoryError> {
+        // Request guards may themselves resolve through this adapter; never run them under lifecycle.
+        guard()?;
+        let lifecycle = self.lifecycle.lock().unwrap();
+        match (self.mode)() {
+            (RuntimeFormat::Records, _) => {
+                let records = self.records.clone();
+                drop(lifecycle);
+                records.pin_confirmed(hop, previous, key, cancel, guard)
+            }
+            (RuntimeFormat::Legacy, false) => {
+                self.legacy
+                    .pin_confirmed(hop, previous, key, cancel, &|| Ok(()))
+            }
+            _ => Err(DirectoryError::Unsupported(
+                "The workspace changed before host-key confirmation.".into(),
+            )),
+        }
+    }
     fn password_account(&self, id: &HostId) -> String {
         self.active()
             .map(|d| d.password_account(id))

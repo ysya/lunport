@@ -351,11 +351,9 @@ impl Connector<'_> {
             };
             return Err(failure_of(&refused, target));
         }
-        match &pinned {
-            None => self.directory.pin_for(hop, key),
-            Some(pinned) => self.directory.replace_pin_for(hop, pinned, key),
-        }
-        .map_err(|error| failure_at(Some(hop), target, kinds::HOST_KEY, error))?;
+        self.directory
+            .pin_confirmed(hop, pinned.as_ref(), key, cancel, &|| Ok(()))
+            .map_err(|error| failure_at(Some(hop), target, kinds::HOST_KEY, error))?;
         policy.pin(&hop.id, key.clone());
         if let Some(confirmed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
             confirmed.pinned = Some(key.clone());

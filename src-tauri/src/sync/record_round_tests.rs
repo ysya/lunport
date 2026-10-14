@@ -1104,3 +1104,271 @@ fn dirty_import_warning_allows_valid_peer_upload_but_still_blocks_connection() {
 fn clean_import_warning_allows_valid_peer_upload_but_still_blocks_connection() {
     assert_import_warning_does_not_block_space_uploads(true);
 }
+
+#[test]
+fn space_pin_credential_and_relay_waits_release_lifecycle_and_cancel_cannot_pin() {
+    use crate::session::{connect::CancelToken, record_pin};
+    use crate::ssh::{fake::default_server_key, AuthMethod, Hop};
+    struct BlockingKeys<'a> {
+        inner: &'a dyn Keychain,
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+    impl Keychain for BlockingKeys<'_> {
+        fn get(&self, a: &str) -> Result<Option<String>, AppError> {
+            self.entered.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            self.inner.get(a)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+            panic!()
+        }
+        fn delete(&self, _: &str) -> Result<(), AppError> {
+            panic!()
+        }
+    }
+    for credential in [true, false] {
+        let (device, keys) = fixture();
+        let child = add_space(&device, &keys, true);
+        fresh_account_gate(&device.env())
+            .unwrap()
+            .ensure_compatible()
+            .unwrap();
+        record_runtime::mutate_records(&device.env(),|s|crate::sync::record_repository::create_host(s,HOST,crate::sync::records_v3::HostScope::Space{space_id:child.chain_id.clone()},serde_json::from_value(json!({"schema":2,"alias":"web","hostname":"host.test","user":"ops","auth":"password"})).unwrap(),3).map_err(|e|AppError::Other(e.to_string()))).unwrap();
+        let (entered, observed) = std::sync::mpsc::sync_channel(1);
+        let (release, resume) = std::sync::mpsc::sync_channel(1);
+        let blocking = BlockingKeys {
+            inner: &device.keychain,
+            entered: entered.clone(),
+            release: Arc::new(Mutex::new(resume)),
+        };
+        let cancel = CancelToken::default();
+        let hop = Hop::new(HOST, "web", "host.test", 22, "ops", AuthMethod::Password).reference();
+        let hook = Hooks {
+            before_pull: (!credential).then(|| {
+                let entered = entered.clone();
+                let resume = blocking.release.clone();
+                Box::new(move || {
+                    entered.send(()).unwrap();
+                    resume.lock().unwrap().recv().unwrap();
+                }) as Box<dyn FnOnce() + Send>
+            }),
+            ..Default::default()
+        };
+        let connector = HookedConnector::new(&device.relay, hook);
+        let mut env = device.env();
+        if credential {
+            env.keychain = &blocking;
+        } else {
+            env.relays = &connector;
+        }
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                record_pin::confirm(
+                    &env,
+                    &hop,
+                    None,
+                    &default_server_key(),
+                    env.keychain,
+                    &cancel,
+                    &|| Ok(()),
+                )
+            });
+            observed
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            let lifecycle_free = device.runtime.lifecycle.try_lock().is_ok();
+            cancel.cancel();
+            release.send(()).unwrap();
+            let result = worker.join().unwrap();
+            assert!(
+                lifecycle_free,
+                "credential/relay wait must not own lifecycle"
+            );
+            assert!(result.is_err(), "canceled preparation must not pin");
+        });
+        assert!(crate::sync::record_repository::get_host(
+            &record_runtime::snapshot(&device.env()).unwrap().0,
+            HOST
+        )
+        .unwrap()
+        .host
+        .payload
+        .host_key
+        .is_none());
+    }
+}
+
+/// Public test fixture reused by the end-to-end MCP pin contract tests; no OS resources.
+pub(crate) fn pin_fixture() -> Arc<TestDevice> {
+    let (device, keys) = fixture();
+    let child = add_space(&device, &keys, true);
+    fresh_account_gate(&device.env())
+        .unwrap()
+        .ensure_compatible()
+        .unwrap();
+    record_runtime::mutate_records(&device.env(),|s|crate::sync::record_repository::create_host(s,HOST,crate::sync::records_v3::HostScope::Space{space_id:child.chain_id.clone()},serde_json::from_value(json!({"schema":2,"alias":"web","hostname":"host.test","user":"ops","auth":"interactive"})).unwrap(),3).map_err(|e|AppError::Other(e.to_string()))).unwrap();
+    device
+}
+
+#[test]
+fn pin_preparation_rejects_changed_generation_scope_account_endpoint_and_public_key() {
+    use crate::session::{connect::CancelToken, record_pin};
+    use crate::ssh::{fake::default_server_key, AuthMethod, Hop};
+    use crate::sync::{record_repository as repo, records_v3::*, slot_rules::test_keys};
+    const KEY: &str = "11111111111111111111111111111111";
+    for change in ["generation", "scope", "account", "endpoint", "public_key"] {
+        let device = pin_fixture();
+        record_runtime::mutate_records(&device.env(), |state| {
+            let mut next = state.clone();
+            let public = ssh_key::PublicKey::from_openssh(test_keys::PLAIN_PUBLIC).unwrap();
+            next.local.keys.insert(
+                KEY.into(),
+                LocalKeyMetadata {
+                    vault_id: KEY.into(),
+                    public: KeySlotPayload {
+                        schema: 2,
+                        name: "fixture".into(),
+                        public_key: test_keys::PLAIN_PUBLIC.into(),
+                        fingerprint: public.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+                        key_type: public.algorithm().to_string(),
+                        has_passphrase: false,
+                        created_at_ms: 1,
+                        origin_device_id: next.device_id.clone(),
+                    },
+                },
+            );
+            Ok(next)
+        })
+        .unwrap();
+        let changed = device.clone();
+        let connector = HookedConnector::new(
+            &device.relay,
+            Hooks {
+                before_pull: Some(Box::new(move || {
+                    assert!(changed.runtime.lifecycle.try_lock().is_ok());
+                    record_runtime::mutate_records(&changed.env(), |state| {
+                        let mut next = state.clone();
+                        let host = repo::get_host(state, HOST).unwrap();
+                        match change {
+                            "generation" => {}
+                            "scope" => {
+                                next = repo::move_host(
+                                    state,
+                                    HOST,
+                                    &host.revision,
+                                    HostScope::Local,
+                                    40,
+                                )
+                                .unwrap()
+                            }
+                            "account" => next.account.as_mut().unwrap().chain_id = "b".repeat(64),
+                            "endpoint" => {
+                                let mut payload = host.host.payload;
+                                payload.hostname = "changed.test".into();
+                                next = repo::update_host(state, HOST, &host.revision, payload, 40)
+                                    .unwrap();
+                            }
+                            "public_key" => {
+                                let public =
+                                    ssh_key::PublicKey::from_openssh(test_keys::ECDSA_PUBLIC)
+                                        .unwrap();
+                                let key = &mut next.local.keys.get_mut(KEY).unwrap().public;
+                                key.public_key = test_keys::ECDSA_PUBLIC.into();
+                                key.fingerprint =
+                                    public.fingerprint(ssh_key::HashAlg::Sha256).to_string();
+                                key.key_type = public.algorithm().to_string();
+                            }
+                            _ => unreachable!(),
+                        }
+                        Ok(next)
+                    })
+                    .unwrap();
+                })),
+                ..Default::default()
+            },
+        );
+        let mut env = device.env();
+        env.relays = &connector;
+        let hop =
+            Hop::new(HOST, "web", "host.test", 22, "ops", AuthMethod::Interactive).reference();
+        let result = record_pin::confirm(
+            &env,
+            &hop,
+            None,
+            &default_server_key(),
+            env.keychain,
+            &CancelToken::default(),
+            &|| Ok(()),
+        );
+        assert!(result.is_err(), "stale {change} preparation must fail");
+        let current = record_runtime::snapshot(&env).unwrap().0;
+        assert!(
+            repo::get_host(&current, HOST)
+                .unwrap()
+                .host
+                .payload
+                .host_key
+                .is_none(),
+            "{change}"
+        );
+        if change == "account" {
+            assert_eq!(
+                current.account.as_ref().unwrap().chain_id,
+                "b".repeat(64),
+                "preparation must not republish old account"
+            );
+        }
+    }
+}
+
+#[test]
+fn local_to_space_during_external_guard_cannot_bypass_fresh_account_preparation() {
+    use crate::session::{connect::CancelToken, record_pin};
+    use crate::ssh::{fake::default_server_key, AuthMethod, Hop};
+    use crate::sync::{record_repository as repo, records_v3::HostScope};
+    let device = pin_fixture();
+    let original = repo::get_host(&record_runtime::snapshot(&device.env()).unwrap().0, HOST)
+        .unwrap()
+        .host
+        .scope;
+    record_runtime::mutate_records(&device.env(), |state| {
+        let host = repo::get_host(state, HOST).unwrap();
+        Ok(repo::move_host(state, HOST, &host.revision, HostScope::Local, 40).unwrap())
+    })
+    .unwrap();
+    let once = std::sync::atomic::AtomicBool::new(false);
+    let guard = || {
+        assert!(
+            device.runtime.lifecycle.try_lock().is_ok(),
+            "caller guard must run outside lifecycle"
+        );
+        if !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            record_runtime::mutate_records(&device.env(), |state| {
+                let host = repo::get_host(state, HOST).unwrap();
+                Ok(repo::move_host(state, HOST, &host.revision, original.clone(), 41).unwrap())
+            })
+            .unwrap();
+        }
+        Ok(())
+    };
+    let hop = Hop::new(HOST, "web", "host.test", 22, "ops", AuthMethod::Interactive).reference();
+    assert!(record_pin::confirm(
+        &device.env(),
+        &hop,
+        None,
+        &default_server_key(),
+        &device.keychain,
+        &CancelToken::default(),
+        &guard
+    )
+    .is_err());
+    assert!(
+        repo::get_host(&record_runtime::snapshot(&device.env()).unwrap().0, HOST)
+            .unwrap()
+            .host
+            .payload
+            .host_key
+            .is_none()
+    );
+}

@@ -4,6 +4,7 @@
 //! on the session socket or named pipe. The token-authenticated loopback transport
 //! is retained only after the broker explicitly confirms Legacy workspace mode.
 
+use crate::session::deadline::InteractionDeadline;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -132,6 +133,7 @@ pub struct McpStatus {
 }
 
 struct PendingApproval {
+    deadline: InteractionDeadline,
     request: McpPendingRequest,
     decision: mpsc::SyncSender<ApprovalDecision>,
 }
@@ -240,6 +242,53 @@ impl McpRuntime {
         }
     }
 
+    fn resolve_approval(&self, request_id: &str, allow: bool) -> Result<(), AppError> {
+        let mut waiting = self.pending.lock().unwrap();
+        let pending = waiting
+            .remove(request_id)
+            .ok_or_else(|| AppError::NotFound("MCP request already resolved or expired".into()))?;
+        if pending.deadline.expired() {
+            let _ = pending.decision.try_send(ApprovalDecision::TimedOut);
+            return Err(AppError::NotFound(
+                "MCP request already resolved or expired".into(),
+            ));
+        }
+        pending
+            .decision
+            .try_send(if allow {
+                ApprovalDecision::Allow
+            } else {
+                ApprovalDecision::Deny
+            })
+            .map_err(|_| AppError::Other("MCP client disconnected".into()))
+    }
+    fn wait_approval(
+        &self,
+        request: &McpPendingRequest,
+        cancel: &crate::session::connect::CancelToken,
+        timeout: Duration,
+        publish: impl FnOnce(),
+    ) -> ApprovalDecision {
+        if cancel.is_cancelled() {
+            return ApprovalDecision::Cancel;
+        }
+        let deadline = InteractionDeadline::after(timeout);
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.pending.lock().unwrap().insert(
+            request.id.clone(),
+            PendingApproval {
+                deadline,
+                request: request.clone(),
+                decision: tx,
+            },
+        );
+        publish();
+        let decision = receive_approval(&rx, cancel, deadline, &|| {
+            (Instant::now(), SystemTime::now())
+        });
+        self.pending.lock().unwrap().remove(&request.id);
+        decision
+    }
     fn cancel_records(&self,host:Option<&str>){
         for (id,cancel) in self.records_active.lock().unwrap().values(){if host.is_none_or(|h|h==id){cancel.cancel();}}
     }
@@ -800,10 +849,12 @@ fn run_approved(
         requested_at_ms: unix_ms(),
         ..Default::default()
     };
+    let deadline=InteractionDeadline::after(APPROVAL_TIMEOUT);
     let (tx, rx) = mpsc::sync_channel(1);
     state.mcp.pending.lock().unwrap().insert(
         id.clone(),
         PendingApproval {
+            deadline,
             request: request.clone(),
             decision: tx,
         },
@@ -820,7 +871,9 @@ fn run_approved(
     crate::show_main_window(app);
     let _ = app.emit("mcp://approval-requested", &request);
 
-    let approved = match rx.recv_timeout(APPROVAL_TIMEOUT) {
+    let decision=rx.recv_timeout(deadline.remaining());
+    let decision=if deadline.expired(){Ok(ApprovalDecision::TimedOut)}else{decision};
+    let approved = match decision {
         Ok(ApprovalDecision::Allow) => true,
         Ok(ApprovalDecision::Deny) => false,
         Ok(ApprovalDecision::Cancel) => {
@@ -1128,23 +1181,40 @@ pub fn mcp_resolve_request(
     request_id: String,
     allow: bool,
 ) -> Result<(), AppError> {
-    let pending = state
-        .mcp
-        .pending
-        .lock()
-        .unwrap()
-        .remove(&request_id)
-        .ok_or_else(|| AppError::NotFound("MCP request already resolved or expired".to_string()))?;
-    pending
-        .decision
-        .send(if allow {
-            ApprovalDecision::Allow
-        } else {
-            ApprovalDecision::Deny
-        })
-        .map_err(|_| AppError::Other("MCP client disconnected".to_string()))
+    state.mcp.resolve_approval(&request_id,allow)
 }
 
+fn receive_approval(
+    rx: &mpsc::Receiver<ApprovalDecision>,
+    cancel: &crate::session::connect::CancelToken,
+    deadline: InteractionDeadline,
+    now: &dyn Fn() -> (Instant, SystemTime),
+) -> ApprovalDecision {
+    loop {
+        if cancel.is_cancelled() {
+            return ApprovalDecision::Cancel;
+        }
+        let (monotonic, utc) = now();
+        let left = deadline.remaining_at(monotonic, utc);
+        if left.is_zero() {
+            return ApprovalDecision::TimedOut;
+        }
+        match rx.recv_timeout(left.min(Duration::from_millis(50))) {
+            Ok(decision) => {
+                let (monotonic, utc) = now();
+                return if deadline.remaining_at(monotonic, utc).is_zero() {
+                    ApprovalDecision::TimedOut
+                } else if cancel.is_cancelled() {
+                    ApprovalDecision::Cancel
+                } else {
+                    decision
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return ApprovalDecision::Cancel,
+            Err(_) => {}
+        }
+    }
+}
 // ─── stdio MCP adapter ───────────────────────────────────────────────────────
 
 /// Run the headless MCP stdio adapter. Only JSON-RPC is written to stdout.

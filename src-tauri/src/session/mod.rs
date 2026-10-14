@@ -44,6 +44,8 @@ pub mod directory;
 pub mod format_directory;
 pub mod record_directory;
 pub mod record_material;
+pub(crate) mod record_pin;
+pub(crate) mod deadline;
 pub(crate) mod os_identity;
 pub mod hostkey_window;
 pub mod pins;

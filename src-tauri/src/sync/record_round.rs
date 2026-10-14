@@ -80,8 +80,8 @@ pub(crate) fn require_no_pending_migration(env: &SyncEnv) -> Result<(), AppError
 fn same_account(state: &crate::sync::records_v3::SyncStateV3, chain: &str, url: &str) -> bool {
     state.relay_url == url && state.account.as_ref().is_some_and(|a| a.chain_id == chain)
 }
-fn read_keys(
-    env: &SyncEnv,
+fn read_keys_from(
+    keychain: &dyn crate::sync::env::Keychain,
     state: &crate::sync::records_v3::SyncStateV3,
 ) -> Result<ChainKeys, AppError> {
     let account = state
@@ -89,7 +89,7 @@ fn read_keys(
         .as_ref()
         .ok_or_else(|| error("join or create a record account first"))?;
     let phrase = zeroize::Zeroizing::new(
-        env.keychain
+        keychain
             .get(crate::sync::state::MNEMONIC_ACCOUNT)
             .map_err(|_| error("the sync code could not be read"))?
             .ok_or_else(|| error("the sync code is unavailable on this device"))?,
@@ -139,15 +139,50 @@ fn fail_closed(env: &SyncEnv, chain: &str, url: &str, gate: &AccountGate, schema
 /// Publication owns publication -> core only, and never waits for vault/doc while holding it.
 pub fn fresh_account_gate(env: &SyncEnv) -> Result<FreshAccountProof, AppError> {
     preflight(env)?;
-    let (snapshot, _) = crate::sync::record_runtime::snapshot(env)?;
-    let keys = read_keys(env, &snapshot)?;
+    let (snapshot, generation) = crate::sync::record_runtime::snapshot(env)?;
+    let prepared = prepare_account_gate(env, env.keychain, snapshot, generation)?;
+    publish_prepared_account_gate(env, prepared, None)
+}
+/// Credential and network work only. This phase must not publish account state or own lifecycle.
+pub(crate) struct PreparedAccountGate {
+    snapshot: crate::sync::records_v3::SyncStateV3,
+    keys: ChainKeys,
+    pulled: crate::sync::relay::PullResponse,
+    pub generation: u64,
+}
+pub(crate) fn prepare_account_gate(
+    env: &SyncEnv,
+    credentials: &dyn crate::sync::env::Keychain,
+    snapshot: crate::sync::records_v3::SyncStateV3,
+    generation: u64,
+) -> Result<PreparedAccountGate, AppError> {
+    let keys = read_keys_from(credentials, &snapshot)?;
     let relay = env.relay(&snapshot.relay_url)?;
     let pulled = relay.pull(&keys.chain_id, &keys.auth_token, 0)?;
+    Ok(PreparedAccountGate {
+        snapshot,
+        keys,
+        pulled,
+        generation,
+    })
+}
+/// Local publication only; callers establish lifecycle/generation before entering this phase.
+pub(crate) fn publish_prepared_account_gate(
+    env: &SyncEnv,
+    prepared: PreparedAccountGate,
+    expected_generation: Option<u64>,
+) -> Result<FreshAccountProof, AppError> {
+    let PreparedAccountGate {
+        snapshot,
+        keys,
+        pulled,
+        ..
+    } = prepared;
     let mut observed = None;
     let mut gate = AccountGate::InvalidPull;
     let mut format_gate = AccountGate::InvalidPull;
     let _publication = env.runtime.format_publication.lock().unwrap();
-    let result = crate::sync::record_runtime::mutate_records(env, |latest| {
+    let transform = |latest: &crate::sync::records_v3::SyncStateV3| {
         if !same_account(latest, &keys.chain_id, &snapshot.relay_url) {
             return Err(crate::sync::runtime::superseded());
         }
@@ -184,7 +219,13 @@ pub fn fresh_account_gate(env: &SyncEnv) -> Result<FreshAccountProof, AppError> 
         }
         publish_gate(&mut next, &gate, observed);
         Ok(next)
-    });
+    };
+    let result = match expected_generation {
+        Some(generation) => {
+            crate::sync::record_runtime::mutate_records_at_generation(env, generation, transform)
+        }
+        None => crate::sync::record_runtime::mutate_records(env, transform),
+    };
     if let Err(e) = result {
         if gate != AccountGate::Compatible && !crate::sync::runtime::is_superseded(&e) {
             fail_closed(env, &keys.chain_id, &snapshot.relay_url, &gate, observed);
@@ -569,4 +610,4 @@ pub fn sync_once(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
 }
 #[cfg(test)]
 #[path = "record_round_tests.rs"]
-mod tests;
+pub(crate) mod tests;

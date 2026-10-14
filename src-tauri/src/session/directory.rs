@@ -87,6 +87,27 @@ pub trait HostDirectory: Send + Sync {
         self.replace_pin(&hop.id, previous, key)
     }
 
+    /// A native trust decision. Records adapters may prepare credentials/relay outside lifecycle,
+    /// then revalidate cancellation and the public snapshot before committing the pin.
+    fn pin_confirmed(
+        &self,
+        hop: &HopRef,
+        previous: Option<&HostKey>,
+        key: &HostKey,
+        cancel: &super::connect::CancelToken,
+        guard: &(dyn Fn() -> Result<(), DirectoryError> + Sync),
+    ) -> Result<(), DirectoryError> {
+        guard()?;
+        if cancel.is_cancelled() {
+            return Err(DirectoryError::Failed(
+                "The connection was cancelled.".into(),
+            ));
+        }
+        match previous {
+            Some(previous) => self.replace_pin_for(hop, previous, key),
+            None => self.pin_for(hop, key),
+        }
+    }
     /// The keychain account of the saved password of `host` (spec §5.5: `host:<host id>`).
     fn password_account(&self, host: &HostId) -> String;
 }

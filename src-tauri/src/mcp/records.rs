@@ -154,7 +154,10 @@ impl SshEngine for CheckedEngine<'_> {
 }
 
 /// Uses public resolution; private material is verified by KeyStore immediately before authentication.
-struct PublicDirectory<'a>(&'a dyn crate::session::directory::HostDirectory);
+struct PublicDirectory<'a>(
+    &'a dyn crate::session::directory::HostDirectory,
+    &'a (dyn Fn() -> Result<(), String> + Sync),
+);
 impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
     fn resolve(&self, q: &HostQuery) -> Result<Target, crate::session::directory::DirectoryError> {
         self.0.resolve_public(q)
@@ -206,6 +209,19 @@ impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
         k: &crate::ssh::HostKey,
     ) -> Result<(), crate::session::directory::DirectoryError> {
         self.0.replace_pin_for(h, p, k)
+    }
+    fn pin_confirmed(
+        &self,
+        hop: &crate::ssh::HopRef,
+        previous: Option<&crate::ssh::HostKey>,
+        key: &crate::ssh::HostKey,
+        cancel: &CancelToken,
+        guard: &(dyn Fn() -> Result<(), crate::session::directory::DirectoryError> + Sync),
+    ) -> Result<(), crate::session::directory::DirectoryError> {
+        self.0.pin_confirmed(hop, previous, key, cancel, &|| {
+            guard()?;
+            (self.1)().map_err(crate::session::directory::DirectoryError::Failed)
+        })
     }
     fn password_account(&self, h: &crate::ssh::HostId) -> String {
         self.0.password_account(h)
@@ -451,7 +467,7 @@ pub(super) fn execute_context(
             } else {
                 connector.keychain
             };
-            let directory = PublicDirectory(connector.directory);
+            let directory = PublicDirectory(connector.directory,&check);
             let guarded = Connector {
                 engine: &engine,
                 confirmer: &confirmer,
@@ -738,38 +754,10 @@ pub(crate) fn dispatch(
                 cancel,
                 &owner,
                 &|request| {
-                    if cancel.is_cancelled() {
-                        return ApprovalDecision::Cancel;
-                    }
-                    let (tx, rx) = mpsc::sync_channel(1);
-                    state.mcp.pending.lock().unwrap().insert(
-                        request.id.clone(),
-                        PendingApproval {
-                            request: request.clone(),
-                            decision: tx,
-                        },
-                    );
-                    crate::show_main_window(app);
-                    let _ = app.emit("mcp://approval-requested", request);
-                    let deadline = Instant::now() + APPROVAL_TIMEOUT;
-                    let approved = loop {
-                        if cancel.is_cancelled() {
-                            break ApprovalDecision::Cancel;
-                        }
-                        let left = deadline.saturating_duration_since(Instant::now());
-                        if left.is_zero() {
-                            break ApprovalDecision::TimedOut;
-                        }
-                        match rx.recv_timeout(left.min(Duration::from_millis(50))) {
-                            Ok(decision) => break decision,
-                            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                break ApprovalDecision::Cancel
-                            }
-                            Err(_) => {}
-                        }
-                    };
-                    state.mcp.pending.lock().unwrap().remove(&request.id);
-                    approved
+                    state.mcp.wait_approval(request,cancel,APPROVAL_TIMEOUT,||{
+                        crate::show_main_window(app);
+                        let _=app.emit("mcp://approval-requested",request);
+                    })
                 },
                 context,
             )
@@ -1498,5 +1486,296 @@ mod cancellation_tests {
         );
         assert!(validate_method("ssh_exec").is_ok());
         assert!(validate_method("get_effective_config").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod approval_deadline_tests {
+    use super::*;
+    use crate::session::testing::{FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner};
+    use crate::ssh::fake::{default_server_key, FakeEngine};
+    use crate::sync::testkit::MemKeychain;
+    #[test]
+    fn expired_pending_allow_is_rejected_without_connect_and_audited_timed_out() {
+        let r = McpRuntime::default();
+        {
+            let mut p = r.policy.lock().unwrap();
+            p.enabled = true;
+            p.allowed_hosts.insert("id-web".into());
+        }
+        let e = FakeEngine::new();
+        let d = FakeDirectory::new()
+            .with_host("web", AuthMethod::Password)
+            .with_pin("web", default_server_key());
+        let c = Connector {
+            engine: &e,
+            directory: &d,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+            confirmer: &FakeConfirmer::default(),
+        };
+        let result = execute(
+            &r,
+            &c,
+            "id-web",
+            "uptime",
+            60,
+            &CancelToken::default(),
+            &FakeOwner::default(),
+            &|request| {
+                r.wait_approval(
+                    request,
+                    &CancelToken::default(),
+                    Duration::from_millis(1),
+                    || {
+                        thread::sleep(Duration::from_millis(5));
+                        assert!(
+                            r.pending.lock().unwrap().contains_key(&request.id),
+                            "simulate a suspended waiter with pending still registered"
+                        );
+                        assert!(
+                            r.resolve_approval(&request.id, true).is_err(),
+                            "late resolve must fail at the command boundary"
+                        );
+                    },
+                )
+            },
+        );
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(e.events().is_empty());
+        assert_eq!(r.status().recent[0].outcome, "timed_out");
+    }
+    #[test]
+    fn queued_allow_after_deadline_is_not_consumed() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(ApprovalDecision::Allow).unwrap();
+        let start = Instant::now();
+        let calls = AtomicU64::new(0);
+        let decision = receive_approval(
+            &rx,
+            &CancelToken::default(),
+            InteractionDeadline::from_instant(start + Duration::from_secs(1)),
+            &|| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (start, SystemTime::now())
+                } else {
+                    (start + Duration::from_secs(2), SystemTime::now())
+                }
+            },
+        );
+        assert!(matches!(decision, ApprovalDecision::TimedOut));
+    }
+    #[test]
+    fn wall_expiry_rejects_late_allow_with_live_monotonic_deadline() {
+        let runtime = McpRuntime::default();
+        {
+            let mut p = runtime.policy.lock().unwrap();
+            p.enabled = true;
+            p.allowed_hosts.insert("id-web".into());
+        }
+        let engine = FakeEngine::new();
+        let directory = FakeDirectory::new()
+            .with_host("web", AuthMethod::Password)
+            .with_pin("web", default_server_key());
+        let connector = Connector {
+            engine: &engine,
+            directory: &directory,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+            confirmer: &FakeConfirmer::default(),
+        };
+        let result = execute(
+            &runtime,
+            &connector,
+            "id-web",
+            "uptime",
+            60,
+            &CancelToken::default(),
+            &FakeOwner::default(),
+            &|request| {
+                runtime.wait_approval(
+                    request,
+                    &CancelToken::default(),
+                    Duration::from_secs(120),
+                    || {
+                        {
+                            let mut pending = runtime.pending.lock().unwrap();
+                            let deadline = &mut pending.get_mut(&request.id).unwrap().deadline;
+                            assert!(deadline.monotonic > Instant::now());
+                            deadline.utc = SystemTime::now() - Duration::from_secs(1);
+                        }
+                        assert!(
+                            runtime.resolve_approval(&request.id, true).is_err(),
+                            "UTC-expired Allow must fail even while monotonic clock is live"
+                        );
+                    },
+                )
+            },
+        );
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(engine.events().is_empty());
+        assert_eq!(runtime.status().recent[0].outcome, "timed_out");
+    }
+    #[test]
+    fn wall_expiry_discards_queued_allow_after_clock_advances() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(ApprovalDecision::Allow).unwrap();
+        let now = Instant::now();
+        let utc = SystemTime::now();
+        let calls = AtomicU64::new(0);
+        let deadline = InteractionDeadline {
+            monotonic: now + Duration::from_secs(120),
+            utc: utc + Duration::from_secs(120),
+        };
+        let decision = receive_approval(&rx, &CancelToken::default(), deadline, &|| {
+            (
+                now,
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    utc
+                } else {
+                    utc + Duration::from_secs(121)
+                },
+            )
+        });
+        assert!(matches!(decision, ApprovalDecision::TimedOut));
+    }
+}
+
+#[cfg(test)]
+mod confirmed_pin_tests {
+    use super::*;
+    use crate::session::{
+        directory::DirectoryError,
+        format_directory::FormatDirectory,
+        record_directory::{RecordDirectory, RecordSources},
+        testing::{Decision, FakeConfirmer, FakeDirectory, FakeKeys, FakeOwner},
+    };
+    use crate::ssh::fake::{FakeEngine, FakeEvent};
+    use crate::sync::{
+        record_repository as repo,
+        record_round::tests::pin_fixture,
+        record_runtime,
+        testkit::{HookedConnector, Hooks},
+    };
+    #[test]
+    fn native_space_pin_wait_releases_lifecycle_and_revoke_disable_prevent_pin_and_exec() {
+        for action in ["allow", "revoke", "disable"] {
+            let device = pin_fixture();
+            let runtime = McpRuntime::default();
+            {
+                let mut p = runtime.policy.lock().unwrap();
+                p.enabled = true;
+                p.allowed_hosts.insert("0000000000000001".into());
+            }
+            let (entered, observed) = mpsc::sync_channel(1);
+            let (release, resume) = mpsc::sync_channel(1);
+            let relay = Arc::new(HookedConnector::new(
+                &device.relay,
+                Hooks {
+                    before_pull: Some(Box::new(move || {
+                        entered.send(()).unwrap();
+                        resume.recv().unwrap();
+                    })),
+                    ..Default::default()
+                },
+            ));
+            let read = device.clone();
+            let pin = device.clone();
+            let directory = RecordDirectory::new(RecordSources {
+                snapshot: Box::new(move || {
+                    record_runtime::snapshot(&read.env())
+                        .map(|(s, _)| s)
+                        .map_err(|e| DirectoryError::Failed(e.to_string()))
+                }),
+                material: Box::new(|_| panic!("public route must not read material")),
+                username: Box::new(|| Ok("ops".into())),
+                pin: Box::new(|_, _, _, _| {
+                    panic!("MCP must use the cancellable confirmed-pin contract")
+                }),
+            })
+            .with_confirmed_pin(Box::new(move |hop, previous, key, cancel, guard| {
+                let mut env = pin.env();
+                env.relays = relay.as_ref();
+                crate::session::record_pin::confirm(
+                    &env,
+                    hop,
+                    previous,
+                    key,
+                    env.keychain,
+                    cancel,
+                    guard,
+                )
+                .map_err(|e| DirectoryError::Failed(e.to_string()))
+            }));
+            let mode = device.clone();
+            let directory = FormatDirectory {
+                lifecycle: device.runtime.lifecycle.clone(),
+                mode: Box::new(move || {
+                    let core = mode.runtime.core.lock().unwrap();
+                    (core.format, core.legacy_paused)
+                }),
+                legacy: Arc::new(FakeDirectory::new()),
+                records: Arc::new(directory),
+            };
+            let engine = FakeEngine::new();
+            let keys = FakeKeys::new();
+            let confirmer = FakeConfirmer::deciding(vec![Decision::Trust]);
+            let connector = Connector {
+                engine: &engine,
+                directory: &directory,
+                keys: &keys,
+                keychain: &device.keychain,
+                confirmer: &confirmer,
+            };
+            let cancel = CancelToken::default();
+            thread::scope(|scope| {
+                let worker = scope.spawn(|| {
+                    execute(
+                        &runtime,
+                        &connector,
+                        "0000000000000001",
+                        "uptime",
+                        60,
+                        &cancel,
+                        &FakeOwner::default(),
+                        &|_| ApprovalDecision::Allow,
+                    )
+                });
+                observed.recv_timeout(Duration::from_secs(3)).unwrap();
+                let free = device.runtime.lifecycle.try_lock().is_ok();
+                if action != "allow" {
+                    let mut p = runtime.policy.lock().unwrap();
+                    if action == "revoke" {
+                        p.allowed_hosts.clear();
+                    } else {
+                        p.enabled = false;
+                    }
+                    drop(p);
+                    runtime.cancel_records(None);
+                    assert!(cancel.is_cancelled());
+                }
+                release.send(()).unwrap();
+                let result = worker.join().unwrap();
+                assert!(free, "external preparation must leave lifecycle available");
+                assert_eq!(result.is_ok(), action == "allow", "{result:?}");
+            });
+            let pinned = repo::get_host(
+                &record_runtime::snapshot(&device.env()).unwrap().0,
+                "0000000000000001",
+            )
+            .unwrap()
+            .host
+            .payload
+            .host_key
+            .is_some();
+            assert_eq!(pinned, action == "allow");
+            assert_eq!(
+                engine
+                    .events()
+                    .iter()
+                    .any(|e| matches!(e, FakeEvent::Exec { .. })),
+                action == "allow"
+            );
+        }
     }
 }

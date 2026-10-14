@@ -466,6 +466,20 @@ pub fn mutate_records(
     let candidate = transform(active_state(&core)?)?;
     persist_candidate(&mut core, &env.state_path, candidate)
 }
+/// Publish externally prepared data only against the captured generation. The transform is pure.
+pub(crate) fn mutate_records_at_generation(
+    env: &crate::sync::env::SyncEnv,
+    expected_generation: u64,
+    transform: impl FnOnce(&SyncStateV3) -> Result<SyncStateV3, AppError>,
+) -> Result<u64, AppError> {
+    let mut core = env.runtime.core.lock().unwrap();
+    writes_allowed(&core)?;
+    if core.generation != expected_generation {
+        return Err(crate::sync::runtime::superseded());
+    }
+    let candidate = transform(active_state(&core)?)?;
+    persist_candidate(&mut core, &env.state_path, candidate)
+}
 /// Call outside runtime locks; current mnemonic only, no staged-code promotion or cleanup.
 pub fn read_account_keys(
     state: &SyncStateV3,
