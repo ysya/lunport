@@ -188,6 +188,7 @@ fn remove_from_file(
     expected_hosts: &[String],
     retention: Option<usize>,
 ) -> Result<u32, AppError> {
+    fsutil::check_write(path)?;
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -215,9 +216,7 @@ fn remove_from_file(
 /// The ONE file these commands operate on: `~/.ssh/known_hosts`. v1 deliberately accepts no
 /// caller-supplied paths.
 fn known_hosts_path() -> Result<PathBuf, AppError> {
-    dirs::home_dir()
-        .map(|h| h.join(".ssh").join("known_hosts"))
-        .ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))
+    crate::fsutil::home_dir().map(|h| h.join(".ssh").join("known_hosts"))
 }
 
 /// Read the full known_hosts text; a missing file reads back as empty (the normal first-run
@@ -503,5 +502,26 @@ malformed-only-two fields
         let path = dir.path().join("known_hosts");
         let res = remove_from_file(&path, &[0], &["x".to_string()], None);
         assert!(matches!(res, Err(AppError::Conflict(_))), "got {res:?}");
+    }
+}
+
+#[cfg(test)]
+mod profile_boundary_tests {
+    use super::*;
+    #[test]
+    fn a_denied_known_hosts_edit_does_not_prune_an_allowed_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("known_hosts");
+        let original = "web ssh-ed25519 AAAA\n";
+        std::fs::write(&path, original).unwrap();
+        let mirror = fsutil::backup_dir_for(&path).unwrap();
+        std::fs::create_dir_all(&mirror).unwrap();
+        let kept = mirror.join("known_hosts.1.bak");
+        std::fs::write(&kept, b"backup").unwrap();
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: fsutil::test_backups_root().to_path_buf() }, || {
+            assert!(remove_from_file(&path, &[0], &["web".into()], Some(0)).is_err());
+        });
+        assert_eq!(std::fs::read(kept).unwrap(), b"backup");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
 }

@@ -356,6 +356,7 @@ pub fn forget_bridge(app: &AppHandle) {
 }
 
 fn remove_runtime_file_if_owned(path: &Path, pid: u32) -> std::io::Result<bool> {
+    crate::fsutil::check_write_io(path)?;
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -1341,6 +1342,18 @@ mod tests {
             pid,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn a_confined_profile_does_not_remove_an_owned_runtime_file_outside_its_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.json");
+        let bytes = runtime_json(4242);
+        std::fs::write(&path, &bytes).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(remove_runtime_file_if_owned(&path, 4242).is_err());
+        });
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
     #[test]

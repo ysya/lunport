@@ -20,6 +20,22 @@ pub const CURRENT: AppProfile = AppProfile::for_build(
 );
 
 impl AppProfile {
+    pub fn verify_configuration(
+        self,
+        identifier: &str,
+        product_name: Option<&str>,
+    ) -> Result<(), &'static str> {
+        if identifier == self.identifier() && product_name == Some(self.product_name()) {
+            Ok(())
+        } else {
+            Err("build profile and Tauri configuration disagree; use tauri:dev or tauri:build:dev for Development")
+        }
+    }
+
+    pub const fn allows_os_integrations(self) -> bool {
+        matches!(self, Self::Production)
+    }
+
     pub const fn for_build(debug: bool, development_feature: bool) -> Self {
         if debug || development_feature {
             Self::Development
@@ -147,5 +163,32 @@ mod tests {
         assert!(!local.exists(), "computing paths must not create them");
         assert!(!roaming.exists());
         assert!(!home.exists());
+    }
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    #[test]
+    fn a_profile_mismatch_is_rejected_before_initialization() {
+        for profile in [AppProfile::Production, AppProfile::Development] {
+            assert!(profile
+                .verify_configuration(profile.identifier(), Some(profile.product_name()))
+                .is_ok());
+            let other = if profile == AppProfile::Production {
+                AppProfile::Development
+            } else {
+                AppProfile::Production
+            };
+            assert!(profile
+                .verify_configuration(other.identifier(), Some(profile.product_name()))
+                .is_err());
+            assert!(profile
+                .verify_configuration(profile.identifier(), Some(other.product_name()))
+                .is_err());
+            assert!(profile
+                .verify_configuration(profile.identifier(), None)
+                .is_err());
+        }
     }
 }

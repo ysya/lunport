@@ -6,7 +6,7 @@
 use crate::error::AppError;
 
 /// keychain 的 service 名稱，全 app 固定。
-pub const SERVICE: &str = "SSHelter";
+pub const SERVICE: &str = crate::app_profile::CURRENT.keychain_service();
 
 /// 正式項目：使用者勾了「記住密碼」時使用，不會被自動刪除。
 pub fn host_account(alias: &str) -> String {
