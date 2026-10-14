@@ -1,7 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Bot, KeyRound, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
+
+import { useRecordsStatus, recordsStatusKey, useLegacyWorkspace } from "@/lib/records";
+import { WorkspaceGate } from "@/components/records/WorkspaceGate";
+import { RecordsWorkspace } from "@/components/records/RecordsWorkspace";
 
 import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
@@ -56,8 +60,7 @@ import {
  * Config is loaded on mount via `useHostsQuery` (a single `config_load` that
  * yields files + hosts). Errors are surfaced as a toast.
  */
-function App() {
-  useApplyTheme();
+function LegacyApp() {
   // Re-send persisted tray/close-to-tray/retention prefs (backend resets each launch).
   useSyncBackendSettings();
   // OS-level quick-connect hotkey (⌥⌘K / Ctrl+Alt+K) — registered when enabled.
@@ -286,7 +289,6 @@ function App() {
         <SyncKeyDialog />
         <KeysNeededDialog />
         <McpApprovalDialog />
-        <Toaster />
       </div>
     </TooltipProvider>
   );
@@ -306,6 +308,50 @@ function EmptySelection() {
         </p>
       </div>
     </div>
+  );
+}
+
+function App() {
+  useApplyTheme();
+  const status = useRecordsStatus();
+  const client = useQueryClient();
+  const [resuming, setResuming] = useState(false);
+  const resumeInFlight = useRef(false);
+  const chooseLegacy = async () => {
+    if (resumeInFlight.current) return;
+    resumeInFlight.current = true;
+    setResuming(true);
+    try {
+      await useLegacyWorkspace();
+      await client.cancelQueries({ queryKey: recordsStatusKey });
+      await client.invalidateQueries({ queryKey: recordsStatusKey });
+    } catch {
+      toast.error(
+        "Could not open the existing workspace. Retry when workspace status is available.",
+      );
+    } finally {
+      resumeInFlight.current = false;
+      setResuming(false);
+    }
+  };
+  return (
+    <>
+      <WorkspaceGate
+        status={status.data}
+        resuming={resuming}
+        error={status.isError}
+        retry={() => void status.refetch()}
+        useLegacy={() => void chooseLegacy()}
+        legacy={() => <LegacyApp />}
+        records={() => (
+          <RecordsWorkspace
+            overview={status.data!.overview!}
+            reload={() => void status.refetch()}
+          />
+        )}
+      />
+      <Toaster />
+    </>
   );
 }
 

@@ -1,0 +1,96 @@
+import type {
+  HostPayload,
+  ImportPreviewResult,
+  RecordHostView,
+  RecordOverview,
+  RecordsStatus,
+} from "@/lib/records";
+export const hostPayload = (p: Partial<HostPayload> = {}): HostPayload => ({
+  schema: 2,
+  alias: "web",
+  hostname: "fixture.invalid",
+  port: 22,
+  user: "deploy",
+  auth: "password",
+  key_id: null,
+  jump: [],
+  keepalive_secs: 30,
+  keepalive_max_missed: 3,
+  connect_timeout_secs: 15,
+  host_key: null,
+  tags: [],
+  notes: "",
+  imported: null,
+  ...p,
+});
+export const hostView = (p: Partial<RecordHostView> = {}): RecordHostView => ({
+  id: "0000000000000001",
+  scope: { kind: "local" },
+  payload: hostPayload(),
+  revision: {
+    version: "9007199254740993",
+    updated_at_ms: "18446744073709551614",
+    device_id: "d".repeat(32),
+  },
+  readiness: { kind: "ready" },
+  ...p,
+});
+export const recordOverview = (
+  p: Partial<RecordOverview> = {},
+): RecordOverview => ({
+  generation: "9007199254740993",
+  hosts: [hostView()],
+  keys: [],
+  spaces: [],
+  account: null,
+  shared_writes_blocked: false,
+  relay_url: "https://relay.fixture.invalid",
+  pending_account: null,
+  last_error: null,
+  ...p,
+});
+export const recordsStatus = (
+  p: Partial<RecordsStatus> = {},
+): RecordsStatus => ({
+  format: "records",
+  legacy_paused: false,
+  blocked_reason: null,
+  overview: recordOverview(),
+  ...p,
+});
+export const importPreview = (
+  p: Partial<ImportPreviewResult["preview"]> = {},
+): ImportPreviewResult => ({
+  token: "preview-token",
+  preview: {
+    candidates: [
+      {
+        id: "0000000000000002",
+        scope: { kind: "local" },
+        payload: hostPayload({ alias: "imported" }),
+      },
+    ],
+    warnings: [],
+    provenance: [
+      {
+        path: "/fixture/config",
+        canonical_path: "/fixture/config",
+        digest: "a".repeat(64),
+        bytes: 50,
+      },
+    ],
+    key_references: [
+      {
+        host_id: "0000000000000002",
+        key_id: "a".repeat(32),
+        value: "id_work",
+        resolved_path: "/fixture/id_work",
+        fingerprint: "SHA256:fixture",
+        will_copy: false,
+      },
+    ],
+    host_ids: {},
+    source_digest: "b".repeat(64),
+    ...p,
+  },
+});
