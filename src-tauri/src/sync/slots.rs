@@ -3764,20 +3764,37 @@ pub(crate) mod tests {
             let (a, _personal, _id, file) = a_parked_slot(hard_link);
             assert!(!slot_files::occupied(&public_path(&home(&a).join(SLOT_DIR).join(&file))), "hard_link={hard_link}");
         }
-        // 使用者把 symlink 換成自己的檔案:那是使用者的,旁邊的 `.pub` 也不碰。
-        let (_relay, _clock, a, _b, _words, personal) = pair();
-        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
-        let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
-        write_linked_public(&path, &source).unwrap();
-        use_slot(&a, &personal, &file);
-        settle(&a);
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, "mine").unwrap();
-        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
-        settle(&a);
-        assert!(a.state().key_slots[&id].parked);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
-        assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+        // A replacement file and its .pub survive: symlinks are parked, while a hard link
+        // whose contents differ from the source is retained as a possibly irreplaceable copy.
+        for hard_link in [false, true] {
+            let (_relay, _clock, a, _b, _words, personal) = pair();
+            let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+            if hard_link {
+                make_it_a_hard_link(&a, &id, &file, "id_mac");
+            }
+            let link = match &a.state().key_slots[&id].source {
+                Some(SlotSource::Linked { link, .. }) => *link,
+                source => panic!("the fixture must be linked: {source:?}"),
+            };
+            let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+            write_linked_public(&path, &source).unwrap();
+            use_slot(&a, &personal, &file);
+            settle(&a);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(&path, "mine").unwrap();
+            a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+            settle(&a);
+            let local = a.state().key_slots[&id].clone();
+            if link == LinkKind::Symlink {
+                assert!(local.parked);
+            } else {
+                assert!(!local.parked);
+                assert!(matches!(local.source, Some(SlotSource::Linked { link: LinkKind::Copy, .. })));
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine", "{link:?}");
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), test_keys::plain(), "the original key is untouched");
+            assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "{link:?}");
+        }
 
         // 連結已經不在了(使用者自己刪掉的),旁邊有個 `.pub`:沒有拿掉任何連結,那個 `.pub` 不能確定是這個插槽的,不碰。
         let (_relay, _clock, a, _b, _words, personal) = pair();
@@ -4075,21 +4092,39 @@ pub(crate) mod tests {
 
     #[test]
     fn an_unused_slot_does_not_keep_showing_an_error_from_when_it_was_needed() {
-        let (_relay, _clock, a, _b, _words, personal) = pair();
-        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
-        use_slot(&a, &personal, &file);
-        settle(&a);
-        let source = a.ssh_dir().join("id_mac");
-        std::fs::remove_file(&source).unwrap();
-        settle(&a);
-        assert!(matches!(view_of(&a)[0].status, SlotStatusView::Error { .. }), "{:?}", view_of(&a)[0].status);
+        for hard_link in [false, true] {
+            let (_relay, _clock, a, _b, _words, personal) = pair();
+            let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+            if hard_link {
+                make_it_a_hard_link(&a, &id, &file, "id_mac");
+            }
+            let link = match &a.state().key_slots[&id].source {
+                Some(SlotSource::Linked { link, .. }) => *link,
+                source => panic!("the fixture must be linked: {source:?}"),
+            };
+            use_slot(&a, &personal, &file);
+            settle(&a);
+            let source = a.ssh_dir().join("id_mac");
+            std::fs::remove_file(&source).unwrap();
+            settle(&a);
+            assert!(matches!(view_of(&a)[0].status, SlotStatusView::Error { .. }), "{:?}", view_of(&a)[0].status);
 
-        // 主機不再用到它:沒有什麼需要使用者處理的,記錄(連結、來源路徑)留著。
-        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
-        settle(&a);
-        assert_eq!(a.state().key_slots[&id].last_error, None);
-        assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
-        assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Linked { path, .. }) if *path == source.to_string_lossy()));
+            // Clear the now irrelevant error, but retain a hard link that is the key's last name.
+            a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+            settle(&a);
+            assert_eq!(a.state().key_slots[&id].last_error, None);
+            let slot_path = home(&a).join(SLOT_DIR).join(&file);
+            if link == LinkKind::Symlink {
+                assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
+                assert!(!slot_files::occupied(&slot_path));
+                assert!(a.state().key_slots[&id].parked);
+            } else {
+                assert_eq!(view_of(&a)[0].status, SlotStatusView::NotInUse { file: slot_path.display().to_string() });
+                assert_eq!(std::fs::read_to_string(&slot_path).unwrap(), test_keys::plain(), "the last copy is preserved");
+                assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Linked { link: LinkKind::Copy, .. })));
+            }
+            assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Linked { path, .. }) if *path == source.to_string_lossy()));
+        }
     }
 
     #[test]
