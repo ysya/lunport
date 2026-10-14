@@ -837,7 +837,7 @@ fn frozen_supported_format_proof_stays_blocked_for_shared_commands() {
 }
 
 #[test]
-fn group_schema_gate_failure_keeps_child_rows_local_until_acknowledged() {
+fn group_schema_gate_and_inherited_empty_route_upload_and_resolve_on_peer() {
     use crate::sync::{
         record_groups, record_repository,
         records_v3::{GroupPayload, HostPayload, HostScope},
@@ -851,9 +851,9 @@ fn group_schema_gate_failure_keeps_child_rows_local_until_acknowledged() {
     record_runtime::mutate_records(&d.env(),|s| {
         let parent:GroupPayload=serde_json::from_value(json!({"schema":1,"name":"Ops","defaults":{"user":"ops","port":22}})).unwrap();
         let s=record_groups::create_group(s,"0000000000000031",scope.clone(),parent,true,100).unwrap();
-        let nested:GroupPayload=serde_json::from_value(json!({"schema":1,"name":"Nested","parent_id":"0000000000000031","defaults":{"port":2222}})).unwrap();
+        let nested:GroupPayload=serde_json::from_value(json!({"schema":1,"name":"Nested","parent_id":"0000000000000031","defaults":{"port":2222,"jump":[]}})).unwrap();
         let s=record_groups::create_group(&s,"0000000000000032",scope.clone(),nested,false,101).unwrap();
-        let p:HostPayload=serde_json::from_value(json!({"schema":3,"alias":"grouped","hostname":"group.test","auth":"password","keepalive_secs":10,"group_id":"0000000000000032","inherit":["user","port"]})).unwrap();
+        let p:HostPayload=serde_json::from_value(json!({"schema":3,"alias":"grouped","hostname":"group.test","auth":"password","keepalive_secs":10,"group_id":"0000000000000032","jump":["0000000000000099"],"inherit":["user","port","jump"]})).unwrap();
         Ok(record_repository::create_host(&s,HOST,scope.clone(),p,102).unwrap())
     }).unwrap();
     d.relay.clear_calls();
@@ -866,7 +866,8 @@ fn group_schema_gate_failure_keeps_child_rows_local_until_acknowledged() {
         .iter()
         .any(|c| c.starts_with("push:") && c.ends_with(&child.chain_id[..8])));
     d.relay.set_push_quota(None);
-    sync_once(&d.env()).unwrap();
+    let report = sync_once(&d.env()).unwrap();
+    assert!(!report.review_required);
     assert_eq!(d.relay.rows(&child.chain_id).len(), 3);
     // A second device independently joins, decrypts and resolves the same literal values.
     let peer = TestDevice::new("group-peer", &d.relay, &TestClock::new());
@@ -892,9 +893,120 @@ fn group_schema_gate_failure_keeps_child_rows_local_until_acknowledged() {
     sync_once(&peer.env()).unwrap();
     for device in [&*d, &peer] {
         let h = record_repository::get_host(&state(device), HOST).unwrap();
+        assert_eq!(h.host.payload.jump, vec!["0000000000000099"]);
+        assert!(h.effective_payload.jump.is_empty());
+        assert_eq!(h.readiness, record_repository::HostReadiness::Ready);
         assert_eq!(h.effective_payload.user, "ops");
         assert_eq!(h.effective_payload.port, 2222);
         assert_eq!(h.effective_payload.keepalive_secs, 10);
         assert_eq!(h.inherited_from["port"], "0000000000000032");
     }
+}
+
+#[test]
+fn effective_missing_and_cyclic_routes_require_review_and_preserve_dirty_rows() {
+    use crate::sync::{record_repository, records_v3::HostScope};
+    for cycle in [false, true] {
+        let (d, keys) = fixture();
+        let child = add_space(&d, &keys, true);
+        update_meta(&d, &keys, 4, None);
+        sync_once(&d.env()).unwrap();
+        record_runtime::mutate_records(&d.env(), |s| {
+            let mut next = s.clone();
+            next.spaces
+                .get_mut(&child.chain_id)
+                .unwrap()
+                .records
+                .insert(
+                    record_key(RecordKind::Host, "0000000000000008"),
+                    LocalRecord {
+                        record: host("0000000000000008", "dirty", 10),
+                        seq: 0,
+                        dirty: true,
+                    },
+                );
+            Ok(next)
+        })
+        .unwrap();
+        let group = value(
+            RecordKind::Group,
+            "0000000000000031",
+            json!({
+                "schema":1,"name":"Route","defaults":{"jump":["0000000000000002"]}
+            }),
+            20,
+        );
+        let mut inherited = host(HOST, "inherited", 20);
+        inherited.payload["schema"] = json!(3);
+        inherited.payload["group_id"] = json!(group.id);
+        inherited.payload["inherit"] = json!(["jump"]);
+        let mut rows = vec![group, inherited];
+        if cycle {
+            let mut target = host("0000000000000002", "target", 20);
+            target.payload["jump"] = json!([HOST]);
+            rows.push(target);
+        }
+        let outgoing: Vec<_> = rows
+            .iter()
+            .map(|row| encode_record(&child, row, 0).unwrap())
+            .collect();
+        d.relay
+            .push(&child.chain_id, &child.auth_token, &outgoing)
+            .unwrap();
+        d.relay.clear_calls();
+        let report = sync_once(&d.env()).unwrap();
+        assert!(report.review_required, "cycle={cycle}");
+        let current = state(&d);
+        let view = record_repository::get_host(&current, HOST).unwrap();
+        assert_eq!(
+            view.host.scope,
+            HostScope::Space {
+                space_id: child.chain_id.clone()
+            }
+        );
+        assert_eq!(
+            view.readiness,
+            record_repository::HostReadiness::NeedsReview
+        );
+        assert!(view.host.payload.jump.is_empty());
+        assert_eq!(view.effective_payload.jump, vec!["0000000000000002"]);
+        assert!(
+            current.spaces[&child.chain_id].records
+                [&record_key(RecordKind::Host, "0000000000000008")]
+                .dirty
+        );
+        assert!(!d.relay.calls().iter().any(|call| call.starts_with("push:")));
+    }
+}
+
+#[test]
+fn route_review_uses_targets_from_other_scopes_in_the_candidate_snapshot() {
+    let (d, keys) = fixture();
+    let source = add_space(&d, &keys, true);
+    let target = add_space(&d, &keys, true);
+    sync_once(&d.env()).unwrap();
+    record_runtime::mutate_records(&d.env(), |s| {
+        let mut next = s.clone();
+        let mut root = host(HOST, "root", 10);
+        root.payload["jump"] = json!(["0000000000000002"]);
+        for (id, record) in [
+            (&source.chain_id, root),
+            (&target.chain_id, host("0000000000000002", "target", 10)),
+        ] {
+            next.spaces.get_mut(id).unwrap().records.insert(
+                record_key(record.kind, &record.id),
+                LocalRecord {
+                    record,
+                    seq: 0,
+                    dirty: true,
+                },
+            );
+        }
+        Ok(next)
+    })
+    .unwrap();
+    let report = sync_once(&d.env()).unwrap();
+    assert!(!report.review_required);
+    assert_eq!(d.relay.rows(&source.chain_id).len(), 1);
+    assert_eq!(d.relay.rows(&target.chain_id).len(), 1);
 }
