@@ -341,6 +341,7 @@ pub fn key_material_matches(
     local_public_key: &str,
     local_fingerprint: &str,
 ) -> Result<(), RecordValidationError> {
+    schema("keyslot", slot.schema, KEYSLOT_SCHEMA)?;
     let authoritative = parse_public(&slot.public_key, "account keyslot")?;
     let local = parse_public(local_public_key, "local key")?;
     let expected = authoritative

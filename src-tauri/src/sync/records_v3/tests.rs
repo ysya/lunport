@@ -346,3 +346,275 @@ fn migration_preflight_preserves_mapping_order_deduplicates_sources_and_refuses_
         Err(RecordValidationError::MigrationCollision { .. })
     ));
 }
+
+fn state() -> SyncStateV3 {
+    SyncStateV3 {
+        version: 3,
+        device_id: "d".repeat(32),
+        device_name: "fixture".into(),
+        relay_url: "http://127.0.0.1:8787".into(),
+        account: None,
+        spaces: Default::default(),
+        local: Default::default(),
+        rotation: None,
+        relay_features: None,
+        legacy_v1_backup: None,
+        phrase_cleanup_pending: false,
+        notices: vec![],
+        last_sync_ms: None,
+        last_error: None,
+    }
+}
+fn cached_host(host: &HostRecord, deleted: bool) -> crate::sync::record::LocalRecord {
+    crate::sync::record::LocalRecord {
+        record: record(
+            RecordKind::Host,
+            &host.id,
+            deleted,
+            serde_json::to_value(&host.payload).unwrap(),
+        ),
+        seq: 7,
+        dirty: true,
+    }
+}
+
+#[test]
+fn v3_state_decodes_local_hosts_public_metadata_and_tombstones() {
+    let mut s = state();
+    let h = host("0000000000000001", "web");
+    s.local
+        .hosts
+        .insert("host:0000000000000001".into(), cached_host(&h, false));
+    let deleted = record(
+        RecordKind::Host,
+        "0000000000000002",
+        true,
+        serde_json::json!({"schema":1,"text":"Host old"}),
+    );
+    s.local.hosts.insert(
+        "host:0000000000000002".into(),
+        crate::sync::record::LocalRecord {
+            record: deleted,
+            seq: 3,
+            dirty: false,
+        },
+    );
+    s.local.keys.insert(
+        "a".repeat(32),
+        LocalKeyMetadata {
+            vault_id: "a".repeat(32),
+            public: slot(),
+        },
+    );
+    let encoded = serde_json::to_string(&s).unwrap();
+    let decoded = decode_state(&encoded).unwrap();
+    assert!(matches!(decoded,DecodedState::V3(got) if *got==s));
+    let mut value = serde_json::to_value(&s).unwrap();
+    value["local"]["keys"]["a".repeat(32)]["private_key"] =
+        serde_json::json!("disallowed plaintext");
+    assert!(decode_state(&value.to_string()).is_err());
+    assert!(matches!(
+        decode_state(r#"{"version":99}"#),
+        Err(RecordValidationError::UnsupportedSchema {
+            kind: "state",
+            found: 99
+        })
+    ));
+}
+
+#[test]
+fn legacy_state_decoding_retains_sources_and_never_runs_the_upgrade() {
+    let legacy = r#"{"version":1,"chain_id":null,"device_id":"dddddddddddddddddddddddddddddddd","device_name":"legacy","relay_url":"http://127.0.0.1:8787","cursor_seq":9,"password_sync":false,"records":{},"last_sync_ms":null,"last_error":null}"#;
+    assert!(
+        matches!(decode_state(legacy),Ok(DecodedState::V1(s)) if s.version==1 && s.cursor_seq==9 && s.chain_id.is_none())
+    );
+    let mut old = crate::sync::state_v2::SyncStateV2::fresh("legacy").unwrap();
+    old.last_error = Some("unsent source edit".into());
+    let text = serde_json::to_string(&old).unwrap();
+    assert!(matches!(decode_state(&text),Ok(DecodedState::V2(s)) if *s==old));
+}
+
+#[test]
+fn public_state_caches_refuse_secret_record_kinds_and_inconsistent_cache_keys() {
+    for kind in [RecordKind::Key, RecordKind::Password, RecordKind::SpaceKey] {
+        let mut s = state();
+        let secret = record(
+            kind,
+            &"a".repeat(32),
+            false,
+            serde_json::json!({"sensitive":"fixture"}),
+        );
+        s.local.hosts.insert(
+            format!("{}:{}", kind.as_str(), secret.id),
+            crate::sync::record::LocalRecord {
+                record: secret,
+                seq: 0,
+                dirty: false,
+            },
+        );
+        assert!(validate_state(&s).is_err());
+    }
+    let mut s = state();
+    let h = host("0000000000000001", "web");
+    s.local
+        .hosts
+        .insert("host:wrong".into(), cached_host(&h, false));
+    assert!(validate_state(&s).is_err());
+    let mut s = state();
+    s.version = 2;
+    assert!(matches!(
+        validate_state(&s),
+        Err(RecordValidationError::UnsupportedSchema {
+            kind: "state",
+            found: 2
+        })
+    ));
+}
+
+#[test]
+fn state_hosts_have_global_ids_and_independent_account_schema_validation() {
+    let mut s = state();
+    let h = host("0000000000000001", "web");
+    s.local
+        .hosts
+        .insert(format!("host:{}", h.id), cached_host(&h, false));
+    s.account = Some(crate::sync::state_v2::AccountState::new(&"b".repeat(64)));
+    s.spaces.insert(
+        "a".repeat(64),
+        SpaceStateV3 {
+            selected: true,
+            records: std::collections::BTreeMap::from([(
+                format!("host:{}", h.id),
+                cached_host(&h, false),
+            )]),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        validate_state(&s),
+        Err(RecordValidationError::DuplicateId(_))
+    ));
+    assert!(validate_account_meta(&account_meta("1.0.0")).is_ok());
+    assert_eq!(account_meta("1.0.0").schema_version, 3);
+    let old = crate::sync::record::MetaPayload {
+        schema_version: 2,
+        created_by_app_version: "0.17.0".into(),
+    };
+    assert!(matches!(
+        validate_account_meta(&old),
+        Err(RecordValidationError::UnsupportedSchema {
+            kind: "account",
+            found: 2
+        })
+    ));
+}
+
+#[test]
+fn account_material_resolution_rejects_unknown_keyslot_schemas() {
+    let mut slot = slot();
+    slot.schema = 99;
+    assert!(matches!(
+        key_material_matches(&slot, test_keys::PLAIN_PUBLIC, &slot.fingerprint),
+        Err(RecordValidationError::UnsupportedSchema {
+            kind: "keyslot",
+            found: 99
+        })
+    ));
+}
+
+#[test]
+fn unknown_sealed_space_records_are_preserved_and_account_plain_secrets_are_refused() {
+    use crate::sync::record::Envelope;
+    use crate::sync::state_v2::{AccountState, SealedRecord};
+    let mut s = state();
+    s.account = Some(AccountState::new(&"b".repeat(64)));
+    let envelope = Envelope {
+        id_hash: "e".repeat(64),
+        kind: "future_kind".into(),
+        seq: 9,
+        nonce: "opaque nonce".into(),
+        ciphertext: "opaque ciphertext".into(),
+        deleted: false,
+    };
+    s.spaces.insert(
+        "a".repeat(64),
+        SpaceStateV3 {
+            selected: true,
+            cursor_seq: 9,
+            sealed: std::collections::BTreeMap::from([(
+                format!("future_kind:{}", envelope.id_hash),
+                SealedRecord {
+                    envelope,
+                    dirty: false,
+                },
+            )]),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(decode_state(&serde_json::to_string(&s).unwrap()), Ok(DecodedState::V3(got)) if *got == s)
+    );
+    let secret = record(
+        RecordKind::Key,
+        &"a".repeat(32),
+        false,
+        serde_json::json!({"sensitive":"fixture"}),
+    );
+    s.account.as_mut().unwrap().records.insert(
+        format!("key:{}", secret.id),
+        crate::sync::record::LocalRecord {
+            record: secret,
+            seq: 0,
+            dirty: true,
+        },
+    );
+    assert!(validate_state(&s).is_err());
+}
+
+#[test]
+fn decoding_defaults_ports_and_timers_but_refuses_out_of_range_values() {
+    let payload = serde_json::json!({"schema":2,"alias":"web","hostname":"web.example.com","auth":"interactive"});
+    let r = record(RecordKind::Host, "0000000000000001", false, payload.clone());
+    let TypedRecord::Live(h) = decode_host(&r, HostScope::Local).unwrap() else {
+        panic!("live host");
+    };
+    assert_eq!(
+        (
+            h.payload.port,
+            h.payload.connect_timeout_secs,
+            h.payload.keepalive_secs,
+            h.payload.keepalive_max_missed
+        ),
+        (22, 15, 30, 3)
+    );
+    for (field, value) in [
+        ("port", 65536_u64),
+        ("connect_timeout_secs", u64::MAX),
+        ("keepalive_secs", u64::MAX),
+    ] {
+        let mut invalid = payload.clone();
+        invalid[field] = serde_json::json!(value);
+        assert!(decode_host(
+            &record(RecordKind::Host, "0000000000000001", false, invalid),
+            HostScope::Local
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn later_jumps_do_not_inherit_their_route_but_effective_repeated_hops_are_refused() {
+    let mut a = host("0000000000000001", "a");
+    let mut b = host("0000000000000002", "b");
+    let mut c = host("0000000000000003", "c");
+    let d = host("0000000000000004", "d");
+    a.payload.jump = vec![b.id.clone(), c.id.clone()];
+    b.payload.jump = vec![d.id.clone()];
+    c.payload.jump = vec![d.id.clone()];
+    assert!(validate_hosts(&[a.clone(), b.clone(), c.clone(), d.clone()]).is_ok());
+    b.payload.jump = vec![c.id.clone()];
+    assert!(matches!(
+        validate_hosts(&[a, b, c, d]),
+        Err(RecordValidationError::RepeatedJump { .. })
+    ));
+}
