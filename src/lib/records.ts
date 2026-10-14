@@ -85,7 +85,12 @@ export type RecordOverview = {
   relay_url: string;
   pending_account: {
     id: string;
-    kind: "create_account" | "join_account" | "create_space";
+    kind:
+      | "create_account"
+      | "join_account"
+      | "create_space"
+      | "leave_account"
+      | "rotate_account";
     phase: string;
   } | null;
   last_sync_ms: number | null;
@@ -361,8 +366,12 @@ export async function confirmRecordMigration(
 }
 export async function resumeRecordMigration(
   migrationId: string,
+  words?: string,
 ): Promise<MigrationResult> {
-  return tauriInvoke("records_migration_resume", { migrationId });
+  return tauriInvoke("records_migration_resume", {
+    migrationId,
+    words: words ?? null,
+  });
 }
 export async function pendingRecordMigrations(): Promise<
   PendingRecordMigration[]
@@ -383,4 +392,29 @@ export function usePendingRecordMigrations() {
 
 export async function pauseLegacyWorkspace(): Promise<RecordsStatus> {
   return tauriInvoke("records_pause_legacy");
+}
+
+export type AccountLeaveReceipt = {
+  operation_id: string;
+  complete: boolean;
+  copied_hosts: number;
+  mappings: Array<{
+    source_space_id: string;
+    source_host_id: string;
+    local_host_id: string;
+    alias: string;
+  }>;
+  pending_error: string | null;
+};
+export type AccountLeaveResult = {
+  receipt: AccountLeaveReceipt;
+  overview: RecordOverview;
+};
+export async function leaveRecordAccount(): Promise<AccountLeaveResult> {
+  return tauriInvoke("records_account_leave");
+}
+export async function rotateRecordAccount(
+  deviceName: string,
+): Promise<AccountSetupResult> {
+  return tauriInvoke("records_account_rotate", { deviceName });
 }
