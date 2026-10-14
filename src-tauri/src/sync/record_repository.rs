@@ -24,6 +24,9 @@ pub enum HostReadiness {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostView {
     pub host: HostRecord,
+    pub effective_payload: HostPayload,
+    pub inherited_from: BTreeMap<String, String>,
+    pub group_error: Option<String>,
     pub revision: RecordRevision,
     pub readiness: HostReadiness,
 }
@@ -52,6 +55,7 @@ pub struct KeyView {
 pub struct RepositorySnapshot {
     pub hosts: Vec<HostView>,
     pub keys: Vec<KeyView>,
+    pub groups: Vec<crate::sync::record_groups::GroupView>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostEndpoint {
@@ -64,6 +68,8 @@ pub enum RepositoryError {
     RevisionConflict { id: String, current: RecordRevision },
     SpaceUnavailable(String),
     ReadOnlyAccount,
+    Group(String),
+    UpgradeConfirmationRequired,
     OpaqueHostAuthority(String),
     EndpointChanged(String),
     PinConflict(String),
@@ -82,7 +88,7 @@ impl std::fmt::Display for RepositoryError {
 }
 impl std::error::Error for RepositoryError {}
 
-fn invalid(field: &'static str, id: &str, reason: &str) -> RepositoryError {
+pub(crate) fn invalid(field: &'static str, id: &str, reason: &str) -> RepositoryError {
     RecordValidationError::Invalid {
         field,
         id: id.into(),
@@ -91,7 +97,7 @@ fn invalid(field: &'static str, id: &str, reason: &str) -> RepositoryError {
     .into()
 }
 fn validate_header(state: &SyncStateV3) -> Result<(), RepositoryError> {
-    if state.version != STATE_VERSION {
+    if !matches!(state.version, STATE_VERSION | GROUP_STATE_VERSION) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
             found: state.version,
@@ -124,7 +130,7 @@ fn validate_header(state: &SyncStateV3) -> Result<(), RepositoryError> {
     }
     Ok(())
 }
-fn validate_cache(key: &str, local: &LocalRecord) -> Result<(), RepositoryError> {
+pub(crate) fn validate_cache(key: &str, local: &LocalRecord) -> Result<(), RepositoryError> {
     if local.record.kind.is_secret() {
         return Err(invalid(
             "records",
@@ -148,14 +154,14 @@ fn validate_cache(key: &str, local: &LocalRecord) -> Result<(), RepositoryError>
     }
     Ok(())
 }
-fn revision(record: &Record) -> RecordRevision {
+pub(crate) fn revision(record: &Record) -> RecordRevision {
     RecordRevision {
         version: record.version,
         updated_at_ms: record.updated_at_ms,
         device_id: record.device_id.clone(),
     }
 }
-fn opaque_shadows(
+pub(crate) fn opaque_shadows(
     sealed: &crate::sync::state_v2::SealedRecord,
     local: Option<&LocalRecord>,
     kind: RecordKind,
@@ -180,8 +186,14 @@ fn read_hosts(
 ) -> Result<(), RepositoryError> {
     for (key, local) in records {
         validate_cache(key, local)?;
+        if local.record.kind == RecordKind::Group {
+            continue;
+        }
         if let TypedRecord::Live(host) = decode_host(&local.record, scope.clone())? {
             out.push(HostView {
+                effective_payload: host.payload.clone(),
+                inherited_from: BTreeMap::new(),
+                group_error: None,
                 host,
                 revision: revision(&local.record),
                 readiness: if sealed.is_some_and(|rows| {
@@ -242,13 +254,14 @@ fn route_indices(hosts: &[HostView], id: &str) -> Result<Vec<usize>, RecordValid
         out: &mut Vec<usize>,
     ) -> Result<(), RecordValidationError> {
         let host = &hosts[index].host;
+        let payload = &hosts[index].effective_payload;
         if !stack.insert(index) {
             return Err(RecordValidationError::JumpCycle(root.into()));
         }
         if stack.len() > MAX_JUMPS + 1 {
             return Err(RecordValidationError::JumpDepth(root.into()));
         }
-        for (position, id) in host.payload.jump.iter().enumerate() {
+        for (position, id) in payload.jump.iter().enumerate() {
             let jump = match host_index(hosts, id) {
                 Err(RecordValidationError::HostNotFound(_)) => {
                     return Err(RecordValidationError::MissingJump {
@@ -312,6 +325,18 @@ pub fn snapshot(state: &SyncStateV3) -> Result<RepositorySnapshot, RepositoryErr
             )?;
         }
     }
+    for view in &mut hosts {
+        match crate::sync::record_groups::resolve_effective(state, &view.host) {
+            Ok(effective) => {
+                view.effective_payload = effective.payload;
+                view.inherited_from = effective.inherited_from;
+            }
+            Err(e) => {
+                view.group_error = Some(e.to_string());
+                view.readiness = HostReadiness::NeedsReview;
+            }
+        }
+    }
     let readiness: Vec<_> = hosts
         .iter()
         .map(|view| {
@@ -323,8 +348,12 @@ pub fn snapshot(state: &SyncStateV3) -> Result<RepositorySnapshot, RepositoryErr
             {
                 return HostReadiness::NeedsReview;
             }
-            if host.payload.auth == AuthKind::Key {
-                let id = host.payload.key_id.as_ref().expect("decoded key reference");
+            if view.effective_payload.auth == AuthKind::Key {
+                let id = view
+                    .effective_payload
+                    .key_id
+                    .as_ref()
+                    .expect("decoded key reference");
                 return match keys.iter().find(|key| &key.id == id).map(|key| &key.status) {
                     Some(KeyStatus::Available) => HostReadiness::Ready,
                     Some(KeyStatus::Conflict) => HostReadiness::KeyConflict(id.clone()),
@@ -337,7 +366,11 @@ pub fn snapshot(state: &SyncStateV3) -> Result<RepositorySnapshot, RepositoryErr
     for (host, status) in hosts.iter_mut().zip(readiness) {
         host.readiness = status;
     }
-    Ok(RepositorySnapshot { hosts, keys })
+    Ok(RepositorySnapshot {
+        hosts,
+        keys,
+        groups: crate::sync::record_groups::list_groups(state)?,
+    })
 }
 pub fn list_hosts(state: &SyncStateV3) -> Result<Vec<HostView>, RepositoryError> {
     Ok(snapshot(state)?.hosts)
@@ -467,7 +500,7 @@ pub fn resolve_key(state: &SyncStateV3, id: &str) -> Result<KeyView, RepositoryE
         .ok_or_else(|| RepositoryError::KeyNotFound(id.into()))
 }
 
-fn ensure_scope(state: &SyncStateV3, scope: &HostScope) -> Result<(), RepositoryError> {
+pub(crate) fn ensure_scope(state: &SyncStateV3, scope: &HostScope) -> Result<(), RepositoryError> {
     if let HostScope::Space { space_id } = scope {
         state
             .account
@@ -536,7 +569,7 @@ fn checked_host(
     ensure_host_authority(state, &host.host)?;
     Ok(host)
 }
-fn ordered_record(
+pub(crate) fn ordered_record(
     state: &SyncStateV3,
     id: &str,
     payload: serde_json::Value,
@@ -568,7 +601,7 @@ fn ordered_record(
         payload,
     })
 }
-fn cached(record: Record, seq: u64, scope: &HostScope) -> LocalRecord {
+pub(crate) fn cached(record: Record, seq: u64, scope: &HostScope) -> LocalRecord {
     LocalRecord {
         record,
         seq,
@@ -576,11 +609,22 @@ fn cached(record: Record, seq: u64, scope: &HostScope) -> LocalRecord {
     }
 }
 /// Reject newly introduced relationship defects; existing unrelated remote conflicts remain repairable.
-fn validate_transition(before: &SyncStateV3, after: &SyncStateV3) -> Result<(), RepositoryError> {
+pub(crate) fn validate_transition(
+    before: &SyncStateV3,
+    after: &SyncStateV3,
+) -> Result<(), RepositoryError> {
     let old = snapshot(before)?.hosts;
     let new = snapshot(after)?.hosts;
     for view in &new {
         let host = &view.host;
+        if let Some(error) = &view.group_error {
+            if !old
+                .iter()
+                .any(|v| v.host.id == host.id && v.group_error.as_ref() == Some(error))
+            {
+                return Err(RepositoryError::Group(error.clone()));
+            }
+        }
         if duplicate_id(&new, &host.id) && !duplicate_id(&old, &host.id) {
             return Err(RecordValidationError::DuplicateId(host.id.clone()).into());
         }
@@ -619,6 +663,7 @@ pub fn create_host(
     now_ms: u64,
 ) -> Result<SyncStateV3, RepositoryError> {
     ensure_scope(state, &scope)?;
+    crate::sync::record_groups::require_host_format(state, &payload, &scope)?;
     let key = record_key(RecordKind::Host, id);
     if state.local.hosts.contains_key(&key)
         || state
@@ -656,8 +701,16 @@ pub fn update_host(
     now_ms: u64,
 ) -> Result<SyncStateV3, RepositoryError> {
     let host = checked_host(state, id, expected)?;
-    payload.host_key = if host.host.payload.hostname == payload.hostname
-        && host.host.payload.port == payload.port
+    crate::sync::record_groups::require_host_format(state, &payload, &host.host.scope)?;
+    let effective = crate::sync::record_groups::resolve_effective(
+        state,
+        &HostRecord {
+            payload: payload.clone(),
+            ..host.host.clone()
+        },
+    )?;
+    payload.host_key = if host.effective_payload.hostname == effective.payload.hostname
+        && host.effective_payload.port == effective.payload.port
     {
         host.host.payload.host_key.clone()
     } else {
@@ -733,7 +786,10 @@ pub fn move_host(
     let record = ordered_record(
         state,
         id,
-        source.record.payload.clone(),
+        serde_json::to_value(crate::sync::record_groups::materialize(
+            &crate::sync::record_groups::resolve_effective(state, &host.host)?.payload,
+        ))
+        .expect("host payload"),
         false,
         now_ms,
         &previous,
@@ -768,7 +824,10 @@ pub fn pin_host_key(
     let host = get_host(state, id)?;
     ensure_scope(state, &host.host.scope)?;
     ensure_host_authority(state, &host.host)?;
-    if host.host.payload.hostname != endpoint.hostname || host.host.payload.port != endpoint.port {
+    if host.group_error.is_some()
+        || host.effective_payload.hostname != endpoint.hostname
+        || host.effective_payload.port != endpoint.port
+    {
         return Err(RepositoryError::EndpointChanged(id.into()));
     }
     let current = host.host.payload.host_key.as_ref();

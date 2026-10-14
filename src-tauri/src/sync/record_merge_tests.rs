@@ -171,13 +171,13 @@ fn a_future_account_schema_preflights_every_record_and_preserves_the_exact_secti
         &pull(
             vec![
                 envelope(&keys, &keyslot(3), 2),
-                envelope(&keys, &meta(4, 0), 3),
+                envelope(&keys, &meta(5, 0), 3),
             ],
             3,
         ),
         1,
     );
-    assert_eq!(out.gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert_eq!(out.gate, AccountGate::NeedsUpdate { schema: 5 });
     assert_eq!(out.section, before);
 }
 #[test]
@@ -232,10 +232,10 @@ fn winning_active_meta_ignores_an_older_publishing_marker_but_future_schema_is_c
     let out = merge_account(
         &before,
         &keys,
-        &pull(vec![envelope(&keys, &meta(4, 0), 2)], 2),
+        &pull(vec![envelope(&keys, &meta(5, 0), 2)], 2),
         1,
     );
-    assert_eq!(out.gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert_eq!(out.gate, AccountGate::NeedsUpdate { schema: 5 });
     assert_eq!(out.section, before);
 }
 #[test]
@@ -460,7 +460,7 @@ fn outgoing_requires_supported_account_gate_and_established_baselines() {
     assert!(space_outgoing(&space(), &keys, &AccountGate::Compatible).is_err());
     let mut ready = space();
     ready.baseline_established = true;
-    assert!(space_outgoing(&ready, &keys, &AccountGate::NeedsUpdate { schema: 4 }).is_err());
+    assert!(space_outgoing(&ready, &keys, &AccountGate::NeedsUpdate { schema: 5 }).is_err());
 }
 #[test]
 fn partial_public_receipts_require_exact_revision_device_and_body_and_keep_cursor() {
@@ -986,7 +986,7 @@ fn secret_revision_returns_live_and_tombstone_headers_without_plaintext_payloads
 fn authenticated_future_meta_with_new_outer_fields_still_reports_needs_update() {
     let keys = crate::sync::crypto::ChainKeys::generate().unwrap();
     let old = crate::sync::state_v2::AccountState::new(&keys.chain_id);
-    let raw = serde_json::json!({"kind":"meta","id":"account","version":1,"updated_at_ms":1,"device_id":"a".repeat(32),"deleted":false,"payload":{"schema_version":4,"created_by_app_version":"future"},"future_header":"new"});
+    let raw = serde_json::json!({"kind":"meta","id":"account","version":1,"updated_at_ms":1,"device_id":"a".repeat(32),"deleted":false,"payload":{"schema_version":5,"created_by_app_version":"future"},"future_header":"new"});
     let seal =
         crate::sync::crypto::seal(&keys, "meta", "account", &serde_json::to_vec(&raw).unwrap())
             .unwrap();
@@ -1002,9 +1002,9 @@ fn authenticated_future_meta_with_new_outer_fields_still_reports_needs_update() 
         }],
     };
     let result = merge_account(&old, &keys, &pulled, 0);
-    assert_eq!(result.gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert_eq!(result.gate, AccountGate::NeedsUpdate { schema: 5 });
     assert_eq!(result.section, old);
-    assert_eq!(result.observed_schema, Some(4));
+    assert_eq!(result.observed_schema, Some(5));
 }
 #[test]
 fn authenticated_future_meta_precedes_an_inconsistent_cursor_without_advancing_it() {
@@ -1012,7 +1012,7 @@ fn authenticated_future_meta_precedes_an_inconsistent_cursor_without_advancing_i
     let mut old = crate::sync::state_v2::AccountState::new(&keys.chain_id);
     old.cursor_seq = 10;
     old.baseline_established = true;
-    let raw = serde_json::json!({"kind":"meta","id":"account","version":1,"updated_at_ms":1,"device_id":"a".repeat(32),"deleted":false,"payload":{"schema_version":4,"created_by_app_version":"future"}});
+    let raw = serde_json::json!({"kind":"meta","id":"account","version":1,"updated_at_ms":1,"device_id":"a".repeat(32),"deleted":false,"payload":{"schema_version":5,"created_by_app_version":"future"}});
     let seal =
         crate::sync::crypto::seal(&keys, "meta", "account", &serde_json::to_vec(&raw).unwrap())
             .unwrap();
@@ -1028,6 +1028,56 @@ fn authenticated_future_meta_precedes_an_inconsistent_cursor_without_advancing_i
         }],
     };
     let result = merge_account(&old, &keys, &pulled, 0);
-    assert_eq!(result.gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert_eq!(result.gate, AccountGate::NeedsUpdate { schema: 5 });
     assert_eq!(result.section, old);
+}
+
+#[test]
+fn group_future_winner_shadows_cached_parent_and_blocks_inherited_host() {
+    let keys = ChainKeys::generate().unwrap();
+    let gid = "0000000000000031";
+    let group = record(
+        RecordKind::Group,
+        gid,
+        json!({"schema":1,"name":"Ops","defaults":{"user":"ops"}}),
+        1,
+    );
+    let mut h = host("web", 2);
+    h.payload["schema"] = json!(3);
+    h.payload["group_id"] = json!(gid);
+    h.payload["inherit"] = json!(["user"]);
+    let first = merge_space(
+        &space(),
+        &keys,
+        &pull(vec![envelope(&keys, &group, 1), envelope(&keys, &h, 2)], 2),
+        0,
+        &AccountGate::Compatible,
+    );
+    assert_eq!(first.section.records.len(), 2);
+    let mut future = group;
+    future.version = 2;
+    future.updated_at_ms = 3;
+    future.payload["schema"] = json!(9);
+    let merged = merge_space(
+        &first.section,
+        &keys,
+        &pull(vec![envelope(&keys, &future, 3)], 3),
+        2,
+        &AccountGate::Compatible,
+    );
+    assert_eq!(merged.section.sealed.len(), 1);
+    assert_eq!(merged.section.records.len(), 2);
+    let mut state: crate::sync::records_v3::SyncStateV3=serde_json::from_value(json!({"version":4,"device_id":"d".repeat(32),"device_name":"fixture","relay_url":"http://127.0.0.1","last_sync_ms":null,"last_error":null})).unwrap();
+    state.version = 4;
+    state.account = Some(account(&ChainKeys::generate().unwrap()));
+    state.spaces.insert(keys.chain_id.clone(), merged.section);
+    let h = crate::sync::record_repository::get_host(&state, HOST).unwrap();
+    assert_eq!(
+        h.readiness,
+        crate::sync::record_repository::HostReadiness::NeedsReview
+    );
+    assert!(h
+        .group_error
+        .unwrap()
+        .contains("unsupported winning authority"));
 }

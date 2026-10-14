@@ -49,6 +49,8 @@ pub struct SyncStateV3 {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalState {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, LocalRecord>,
     #[serde(default)]
     pub hosts: BTreeMap<String, LocalRecord>,
     #[serde(default)]
@@ -113,7 +115,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
         2 => serde_json::from_str(text)
             .map(DecodedState::V2)
             .map_err(state_decode_error),
-        STATE_VERSION => {
+        STATE_VERSION | GROUP_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -194,7 +196,7 @@ pub fn account_writes_blocked(state: &SyncStateV3) -> bool {
 }
 
 pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> {
-    if state.version != STATE_VERSION {
+    if !matches!(state.version, STATE_VERSION | GROUP_STATE_VERSION) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
             found: state.version,
@@ -249,6 +251,32 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
         validate_state(&prepared)?;
     }
     read_hosts(&state.local.hosts, HostScope::Local)?;
+    for (key, row) in &state.local.groups {
+        validate_cache_key(key, row)?;
+        decode_group(&row.record, HostScope::Local)?;
+    }
+    if state.version == STATE_VERSION
+        && (!state.local.groups.is_empty()
+            || state
+                .local
+                .hosts
+                .values()
+                .chain(state.spaces.values().flat_map(|s| s.records.values()))
+                .any(|r| {
+                    r.record.kind == RecordKind::Group
+                        || r.record
+                            .payload
+                            .get("schema")
+                            .and_then(serde_json::Value::as_u64)
+                            == Some(3)
+                }))
+    {
+        return Err(state_invalid(
+            "version",
+            "state",
+            "groups require state version 4",
+        ));
+    }
     for (id, material) in &state.local.keys {
         validate_keyslot(id, &material.public)?;
         if !is_slot_id(&material.vault_id) {
@@ -314,7 +342,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                         validate_migration_gate(&gate)?;
                     }
                 }
-                RecordKind::Host => {
+                RecordKind::Host | RecordKind::Group => {
                     return Err(RecordValidationError::WrongKind {
                         expected: "account metadata",
                         found: "host".into(),
@@ -351,7 +379,11 @@ fn read_hosts(
 ) -> Result<(), RecordValidationError> {
     for (key, local) in records {
         validate_cache_key(key, local)?;
-        decode_host(&local.record, scope.clone())?;
+        if local.record.kind == RecordKind::Group {
+            decode_group(&local.record, scope.clone())?;
+        } else {
+            decode_host(&local.record, scope.clone())?;
+        }
     }
     Ok(())
 }
@@ -364,7 +396,7 @@ fn validate_sealed(
             if !hint.is_valid_for(&record.envelope)
                 || !matches!(
                     (account, record.envelope.kind.as_str()),
-                    (true, "keyslot") | (false, "host")
+                    (true, "keyslot") | (false, "host" | "group")
                 )
             {
                 return Err(state_invalid(
@@ -389,12 +421,12 @@ fn validate_sealed(
 
 pub fn account_meta(app_version: &str) -> MetaPayload {
     MetaPayload {
-        schema_version: ACCOUNT_SCHEMA,
+        schema_version: MIN_ACCOUNT_SCHEMA,
         created_by_app_version: app_version.into(),
     }
 }
 pub fn validate_account_meta(meta: &MetaPayload) -> Result<(), RecordValidationError> {
-    if meta.schema_version != ACCOUNT_SCHEMA {
+    if !(MIN_ACCOUNT_SCHEMA..=ACCOUNT_SCHEMA).contains(&meta.schema_version) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "account",
             found: meta.schema_version,

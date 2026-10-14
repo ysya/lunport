@@ -13,6 +13,8 @@ const KEY: &str = "11111111111111111111111111111111";
 fn payload(alias: &str) -> HostPayload {
     HostPayload {
         schema: 2,
+        group_id: None,
+        inherit: vec![],
         alias: alias.into(),
         hostname: format!("{alias}.example.com"),
         port: 22,
@@ -359,4 +361,41 @@ fn editing_the_endpoint_in_the_confirmation_window_refuses_the_connect() {
         .payload
         .host_key
         .is_none());
+}
+
+#[test]
+fn group_directory_uses_effective_destination_and_refuses_old_hop_after_parent_edit() {
+    let p = serde_json::from_value(
+        serde_json::json!({"schema":1,"name":"Ops","defaults":{"port":2222,"user":"ops"}}),
+    )
+    .unwrap();
+    let s = crate::sync::record_groups::create_group(
+        &state(),
+        "0000000000000031",
+        HostScope::Local,
+        p,
+        true,
+        2,
+    )
+    .unwrap();
+    let mut p = payload("web");
+    p.schema = 3;
+    p.group_id = Some("0000000000000031".into());
+    p.inherit = vec![InheritedField::Port, InheritedField::User];
+    let (directory, state, _) = fixture(add(&s, WEB, p), true, true);
+    let target = directory.resolve(&HostQuery::Id(WEB.into())).unwrap();
+    assert_eq!(target.hops[0].port, 2222);
+    assert_eq!(target.hops[0].user, "ops");
+    let old = target.hops[0].reference();
+    let mut state = state.lock().unwrap();
+    let group = crate::sync::record_groups::list_groups(&state)
+        .unwrap()
+        .remove(0);
+    let mut p = group.group.payload;
+    p.defaults.port = Some(2223);
+    *state =
+        crate::sync::record_groups::update_group(&state, &group.group.id, &group.revision, p, 3)
+            .unwrap();
+    drop(state);
+    assert!(directory.checked_host(&old).is_err());
 }

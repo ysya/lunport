@@ -19,7 +19,7 @@ use crate::sync::record::{
 };
 use crate::sync::records_v3::{
     decode_host, decode_keyslot, validate_hosts, validate_migration_gate, HostScope,
-    MigrationPhase, SpaceStateV3, TypedRecord, ACCOUNT_SCHEMA,
+    MigrationPhase, SpaceStateV3, TypedRecord, ACCOUNT_SCHEMA, MIN_ACCOUNT_SCHEMA,
 };
 use crate::sync::relay::{PullResponse, PushItem};
 use crate::sync::slot_rules::is_slot_id;
@@ -449,7 +449,7 @@ fn verified_public_identity(
 ) -> Option<crate::sync::state_v2::VerifiedPublicIdentity> {
     if !matches!(
         (account, envelope.kind.as_str()),
-        (true, "keyslot") | (false, "host")
+        (true, "keyslot") | (false, "host" | "group")
     ) {
         return None;
     }
@@ -570,7 +570,7 @@ fn valid_meta(record: &Record) -> Result<MetaPayloadV3, AccountGate> {
     }
     let meta: MetaPayloadV3 = serde_json::from_value(record.payload.clone())
         .map_err(|_| AccountGate::InvalidMigration)?;
-    if meta.schema_version != ACCOUNT_SCHEMA {
+    if !(MIN_ACCOUNT_SCHEMA..=ACCOUNT_SCHEMA).contains(&meta.schema_version) {
         return Err(AccountGate::NeedsMigration {
             schema: meta.schema_version,
         });
@@ -641,7 +641,7 @@ pub fn account_gate(
     let Some(winning_schema) = meta_schema(&winner.record) else {
         return (AccountGate::InvalidMigration, schema);
     };
-    if winning_schema < ACCOUNT_SCHEMA {
+    if winning_schema < MIN_ACCOUNT_SCHEMA {
         return (
             AccountGate::NeedsMigration {
                 schema: winning_schema,
@@ -763,6 +763,15 @@ fn valid_public(record: &Record, account: bool, keys: &ChainKeys) -> bool {
             }
             _ => false,
         }
+    } else if record.kind == RecordKind::Group {
+        crate::sync::records_v3::decode_group(
+            record,
+            HostScope::Space {
+                space_id: keys.chain_id.clone(),
+            },
+        )
+        .is_ok()
+            && (!record.deleted || record.payload.is_null())
     } else {
         decode_host(
             record,

@@ -61,7 +61,7 @@ fn minimal(
     device: &str,
 ) -> records_v3::SyncStateV3 {
     records_v3::SyncStateV3 {
-        version: 3,
+        version: records_v3::GROUP_STATE_VERSION,
         device_id: device.into(),
         device_name: "rotation validation".into(),
         relay_url: crate::sync::state::DEFAULT_RELAY_URL.into(),
@@ -404,11 +404,11 @@ fn store(env: &SyncEnv, mut op: PendingAccountOperation, accepted: bool) -> Resu
         let future = op
             .prepared_account
             .remote_schema_version
-            .is_some_and(|v| v > 3)
+            .is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA)
             || op.rotation.as_ref().is_some_and(|p| {
                 p.source_account
                     .remote_schema_version
-                    .is_some_and(|v| v > 3)
+                    .is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA)
             });
         if future {
             n.last_error =
@@ -492,15 +492,15 @@ fn ensure_latest(env: &SyncEnv, op: &PendingAccountOperation) -> Result<(), AppE
         .ok_or_else(crate::sync::runtime::superseded)?;
     if s.account
         .as_ref()
-        .is_some_and(|a| a.remote_schema_version.is_some_and(|v| v > 3))
+        .is_some_and(|a| a.remote_schema_version.is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA))
         || pending
             .prepared_account
             .remote_schema_version
-            .is_some_and(|v| v > 3)
+            .is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA)
         || pending.rotation.as_ref().is_some_and(|p| {
             p.source_account
                 .remote_schema_version
-                .is_some_and(|v| v > 3)
+                .is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA)
         })
         || records_v3::account_migration_pending(&s)
     {
@@ -536,7 +536,10 @@ fn source_proof(
         .pull(&keys.chain_id, &keys.auth_token, 0)?;
     let merged = record_merge::merge_account(&source, keys, &pulled, 0);
     if merged.gate != AccountGate::Compatible {
-        if let Some(v) = merged.observed_schema.filter(|v| *v > 3) {
+        if let Some(v) = merged
+            .observed_schema
+            .filter(|v| *v > records_v3::ACCOUNT_SCHEMA)
+        {
             op.rotation
                 .as_mut()
                 .unwrap()
@@ -575,12 +578,18 @@ fn prepare_targets(
         );
     }
     let mut account = AccountState::new(&new.chain_id);
-    account.remote_schema_version = Some(3);
+    let schema = source
+        .records
+        .get(&record_key(RecordKind::Meta, ACCOUNT_META_ID))
+        .and_then(|r| r.record.payload.get("schema_version"))
+        .and_then(Value::as_u64)
+        .unwrap_or(3);
+    account.remote_schema_version = Some(schema as u32);
     let pending = marker(op, MigrationPhase::Publishing);
     for row in source.records.values() {
         let mut r = row.record.clone();
         if r.kind == RecordKind::Meta && r.id == ACCOUNT_META_ID {
-            r.payload = json!({"schema_version":3,"created_by_app_version":env!("CARGO_PKG_VERSION"),"migration":pending});
+            r.payload = json!({"schema_version":schema,"created_by_app_version":env!("CARGO_PKG_VERSION"),"migration":pending});
         } else if r.kind == RecordKind::Space && !r.deleted {
             let oldid = r.id.clone();
             r.id = mapping
@@ -746,11 +755,16 @@ fn target_proof(
         AccountGate::MigrationPending(m) => {
             m.id == op.id && m.source_digest == op.rotation.as_ref().unwrap().source_digest
         }
-        AccountGate::NeedsMigration { schema } => *schema <= 3 && pulled.records.is_empty(),
+        AccountGate::NeedsMigration { schema } => {
+            *schema <= records_v3::ACCOUNT_SCHEMA && pulled.records.is_empty()
+        }
         _ => false,
     };
     if !authorized {
-        if let Some(v) = check.observed_schema.filter(|v| *v > 3) {
+        if let Some(v) = check
+            .observed_schema
+            .filter(|v| *v > records_v3::ACCOUNT_SCHEMA)
+        {
             op.prepared_account.remote_schema_version = Some(v);
         }
         retain_blocked_gate(env, op)?;

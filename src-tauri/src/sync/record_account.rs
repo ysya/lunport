@@ -385,7 +385,7 @@ fn target_pull(
     if new_empty {
         account.baseline_established = true;
         account.cursor_seq = 0;
-        account.remote_schema_version = Some(records_v3::ACCOUNT_SCHEMA);
+        account.remote_schema_version = Some(records_v3::MIN_ACCOUNT_SCHEMA);
         return Ok(account);
     }
     let merged = record_merge::merge_account(&account, keys, &pulled, 0);
@@ -627,7 +627,7 @@ pub fn create_account(env: &SyncEnv, device_name: &str) -> Result<AccountCreatio
     let id = new_id()?;
     let now = env.now();
     let mut account = AccountState::new(&keys.chain_id);
-    account.remote_schema_version = Some(records_v3::ACCOUNT_SCHEMA);
+    account.remote_schema_version = Some(records_v3::MIN_ACCOUNT_SCHEMA);
     insert_public(
         &mut account,
         row(

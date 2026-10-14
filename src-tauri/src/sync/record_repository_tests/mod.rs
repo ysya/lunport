@@ -30,6 +30,8 @@ fn state() -> SyncStateV3 {
 fn payload(alias: &str) -> HostPayload {
     HostPayload {
         schema: 2,
+        group_id: None,
+        inherit: vec![],
         alias: alias.into(),
         hostname: "server.example.com".into(),
         port: 22,
@@ -765,7 +767,7 @@ fn invalid_account_host_caches_or_chain_ids_are_not_accepted_as_a_valid_snapshot
 #[test]
 fn account_format_freeze_and_invalid_record_ordering_fail_without_losing_local_access() {
     let mut s = with_spaces();
-    s.account.as_mut().unwrap().remote_schema_version = Some(4);
+    s.account.as_mut().unwrap().remote_schema_version = Some(5);
     let h = get_host(&s, ID).unwrap();
     assert!(matches!(
         move_host(&s, ID, &h.revision, scope("a"), 101),
@@ -870,3 +872,39 @@ fn an_invalid_authenticated_gate_blocks_shared_writes_after_restart() {
 }
 
 mod shadow;
+
+#[test]
+fn group_authentication_uses_authoritative_conflict_without_local_key_fallback() {
+    let mut s = with_spaces();
+    let key = "a".repeat(32);
+    account_key(&mut s, &key, slot(PUBLIC), false);
+    s.local.keys.insert(
+        key.clone(),
+        LocalKeyMetadata {
+            vault_id: key.clone(),
+            public: slot(ECDSA),
+        },
+    );
+    let p=serde_json::from_value(serde_json::json!({"schema":1,"name":"Ops","defaults":{"authentication":{"auth":"key","key_id":key}}})).unwrap();
+    let s = crate::sync::record_groups::create_group(
+        &s,
+        "0000000000000031",
+        HostScope::Local,
+        p,
+        true,
+        101,
+    )
+    .unwrap();
+    let h = get_host(&s, ID).unwrap();
+    let mut p = h.host.payload;
+    p.schema = 3;
+    p.group_id = Some("0000000000000031".into());
+    p.inherit = vec![InheritedField::Authentication];
+    let s = update_host(&s, ID, &h.revision, p, 102).unwrap();
+    let h = get_host(&s, ID).unwrap();
+    assert_eq!(h.host.payload.auth, AuthKind::Password);
+    assert_eq!(h.effective_payload.auth, AuthKind::Key);
+    assert_eq!(h.effective_payload.key_id, Some(key.clone()));
+    assert_eq!(h.readiness, HostReadiness::KeyConflict(key.clone()));
+    assert!(resolve_key(&s, &key).unwrap().vault_id.is_none());
+}

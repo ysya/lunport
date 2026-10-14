@@ -819,7 +819,7 @@ fn future_account_on_resume_leaves_pending_progress_and_primary_originals_unchan
     let mut meta = row(
         RecordKind::Meta,
         ACCOUNT_META_ID,
-        json!({"schema_version":4,"created_by_app_version":"future"}),
+        json!({"schema_version":5,"created_by_app_version":"future"}),
     );
     meta.updated_at_ms = u64::MAX - 10;
     f.d.relay
