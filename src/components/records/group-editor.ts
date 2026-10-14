@@ -1,5 +1,6 @@
 import {
   createRecordGroup,
+  deleteRecordGroup,
   updateRecordGroup,
   type GroupPayload,
   type HostScope,
@@ -151,4 +152,30 @@ export async function submitGroupEditor(
     return createRecordGroup(state.scope, payload, upgradeConfirmed);
   if (!state.revision) throw new Error("The saved revision is unavailable.");
   return updateRecordGroup(state.id, state.revision, payload);
+}
+
+export type GroupDeletionCandidate = Readonly<{
+  id: string;
+  revision: Readonly<RecordRevision>;
+  counts: Readonly<{ groups: number; hosts: number }>;
+}>;
+export function beginGroupDeletion(
+  state: GroupEditorState,
+  counts: { groups: number; hosts: number },
+): GroupDeletionCandidate {
+  if (!state.id || !state.revision || state.unavailable)
+    throw new Error("The saved Group is unavailable.");
+  return Object.freeze({
+    id: state.id,
+    revision: Object.freeze(structuredClone(state.revision)),
+    counts: Object.freeze({ ...counts }),
+  });
+}
+export async function submitGroupDeletion(
+  candidate: GroupDeletionCandidate,
+  current: GroupEditorState,
+): Promise<RecordOverview> {
+  if (current.unavailable || current.id !== candidate.id || !current.revision)
+    throw new Error("The reviewed Group is unavailable.");
+  return deleteRecordGroup(candidate.id, candidate.revision);
 }

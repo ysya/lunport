@@ -9,7 +9,6 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import {
-  deleteRecordGroup,
   type GroupDefaults,
   type GroupPayload,
   type HostScope,
@@ -19,6 +18,9 @@ import {
 import { revealHidden } from "@/lib/sync-approvals";
 import {
   beginGroupEditor,
+  beginGroupDeletion,
+  submitGroupDeletion,
+  type GroupDeletionCandidate,
   changeGroupEditor,
   refreshGroupEditor,
   groupEditorProblem,
@@ -78,7 +80,7 @@ export function RecordGroupEditor({
   );
   const [busy, setBusy] = useState(false),
     [upgrade, setUpgrade] = useState(false),
-    [deleting, setDeleting] = useState(false);
+    [deleting, setDeleting] = useState<GroupDeletionCandidate | null>(null);
   const inFlight = useRef(false);
   useEffect(() => {
     setState((current) => refreshGroupEditor(current, group));
@@ -535,7 +537,7 @@ export function RecordGroupEditor({
           <Button
             variant="outline"
             disabled={busy || blocked || state.unavailable}
-            onClick={() => setDeleting(true)}
+            onClick={() => setDeleting(beginGroupDeletion(state, affected))}
           >
             Delete group…
           </Button>
@@ -551,24 +553,24 @@ export function RecordGroupEditor({
         cancel={() => setUpgrade(false)}
       />
       <Dialog
-        open={deleting}
+        open={deleting !== null}
         onOpenChange={(value) => {
-          if (!busy) setDeleting(value);
+          if (!busy && !value) setDeleting(null);
         }}
       >
         <DialogContent>
           <DialogTitle>Delete Group subtree?</DialogTitle>
           <DialogDescription>
-            Delete this Group and {affected.groups} descendant Groups. Keep all{" "}
-            {affected.hosts} hosts with their effective settings. Unsaved Group
-            edits will be discarded.
+            Delete this Group and {deleting?.counts.groups ?? 0} descendant
+            Groups. Keep all {deleting?.counts.hosts ?? 0} hosts with their
+            effective settings. Unsaved Group edits will be discarded.
           </DialogDescription>
           <DialogFooter>
             <Button
               autoFocus
               variant="outline"
               disabled={busy}
-              onClick={() => setDeleting(false)}
+              onClick={() => setDeleting(null)}
             >
               Keep editing
             </Button>
@@ -578,8 +580,8 @@ export function RecordGroupEditor({
               onClick={() =>
                 void run(async () => {
                   if (!state.id || !state.revision || !deleting) return;
-                  accept(await deleteRecordGroup(state.id, state.revision));
-                  setDeleting(false);
+                  accept(await submitGroupDeletion(deleting, state));
+                  setDeleting(null);
                   onDeleted();
                 })
               }

@@ -3,8 +3,9 @@ import type {
   HostScope,
   InheritedField,
   RecordOverview,
+  RecordHostView,
 } from "@/lib/records";
-import { groupAncestors } from "./group-tree";
+import { groupAncestors, scopeKey } from "./group-tree";
 export const inheritedFields: Array<[InheritedField, string]> = [
   ["port", "Port"],
   ["user", "Username"],
@@ -68,4 +69,22 @@ export function effectiveField(
   if (field === "jump")
     return payload.jump.length ? payload.jump.join(" → ") : "None";
   return String(payload[field]);
+}
+
+export function previewHostDraft(
+  overview: RecordOverview,
+  scope: HostScope,
+  raw: HostPayload,
+  saved: RecordHostView | null,
+) {
+  const preview = previewInheritance(overview, scope, raw);
+  // The saved winning-record diagnosis remains authoritative for the same
+  // dependency, even if a stale readable Group view exists. A replacement or
+  // detached draft resolves its own dependency and must be reviewable before save.
+  const sameDependency =
+    saved &&
+    scopeKey(saved.scope) === scopeKey(scope) &&
+    (saved.payload.group_id ?? null) === (raw.group_id ?? null);
+  if (sameDependency && saved.group_error) preview.error = saved.group_error;
+  return preview;
 }
