@@ -858,6 +858,17 @@ fn a_real_console_works_as_the_keys_reader_needs() {
 /// beside it (on CI the debug build's, in test-windows.yml, and each installer's release build, in windows-bundle-check.yml).
 const PAIR: &str = "SSHELTER_TEST_PAIR";
 
+/// The compiled profile of the external pair, which can differ from this test binary.
+const PAIR_PROFILE: &str = "SSHELTER_TEST_PAIR_PROFILE";
+
+fn pair_profile() -> crate::app_profile::AppProfile {
+    match std::env::var(PAIR_PROFILE).as_deref() {
+        Ok("development") => crate::app_profile::AppProfile::Development,
+        Ok("production") => crate::app_profile::AppProfile::Production,
+        _ => panic!("{PAIR_PROFILE} must name the external pair's profile: development or production"),
+    }
+}
+
 /// The full name of `the_pair_in_a_console_of_its_own`, which its children run again.
 const PAIR_TEST: &str = "cli::real_console_tests::the_pair_in_a_console_of_its_own";
 
@@ -874,7 +885,8 @@ const PAIR_TEST: &str = "cli::real_console_tests::the_pair_in_a_console_of_its_o
 ///   installer ends every `sshelter.exe` at an install, an update and an uninstall: once it has ended the helper puts the console's four
 ///   settings back, which the program alone leaves changed, and leaves with its exit code.
 ///
-/// A CI step runs it (`--ignored`) with `SSHELTER_TEST_PAIR` naming the pair's directory.
+/// A CI step runs it (`--ignored`) with `SSHELTER_TEST_PAIR` naming the pair's directory
+/// and `SSHELTER_TEST_PAIR_PROFILE` naming its compiled profile.
 #[test]
 #[ignore = "runs the console pair in the directory SSHELTER_TEST_PAIR names (a CI step)"]
 fn the_pair_in_a_console_of_its_own() {
@@ -913,7 +925,9 @@ fn pair_case(name: &str) {
             assert_eq!(code, 2);
         }
         "a_pipe_another_owner_made_is_refused_on_the_console" => {
-            let name = crate::session::pipe_name().expect("the session pipe's name");
+            let profile = pair_profile();
+            let role = profile.pipe_role(crate::app_profile::IpcRole::Session);
+            let name = crate::ipc::pipe_windows::pipe_name_for(role).expect("the external pair's session pipe name");
             let squatter = crate::ipc::pipe_windows::testing::squat_as_administrators(&name)
                 .expect("the Administrators group can own the pipe: the runner is elevated");
             let (code, screen) = run_the_pair(&dir, &["connect", "web"]);
@@ -921,7 +935,11 @@ fn pair_case(name: &str) {
             let started = sshelters_left();
             assert!(started.is_empty(), "an SSHelter was started (process ids {started:?}), and is stopped now");
             assert!(a_client_came(&squatter), r"sshelter.exe did not open \\.\pipe\{name}");
-            let refused = format!(r"Another program is using SSHelter's session pipe (\\.\pipe\{name})");
+            let label = match profile {
+                crate::app_profile::AppProfile::Production => "session",
+                crate::app_profile::AppProfile::Development => "dev",
+            };
+            let refused = format!(r"Another program is using SSHelter's {label} pipe (\\.\pipe\{name})");
             assert!(screen.contains(&refused), "the refusal is not on the console:\n{screen}");
             assert_eq!(code, 1);
         }

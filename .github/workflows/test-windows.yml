@@ -123,6 +123,7 @@ jobs:
         shell: pwsh
         run: |
           $env:SSHELTER_TEST_PAIR = (Resolve-Path target/debug).Path
+          $env:SSHELTER_TEST_PAIR_PROFILE = 'development'
           cargo test --locked --lib -- --ignored --exact cli::real_console_tests::the_pair_in_a_console_of_its_own --nocapture
           if ($LASTEXITCODE -ne 0) { throw "the pair in a console of its own failed (exit $LASTEXITCODE)" }
           exit 0
