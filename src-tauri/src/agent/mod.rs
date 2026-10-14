@@ -41,11 +41,15 @@ pub fn identity_agent_value() -> Result<String, AppError> {
     #[cfg(not(windows))]
     {
         if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Development {
-            Ok(agent_dir(&crate::fsutil::home_dir()?).join("sock").to_string_lossy().into_owned())
+            Ok(runtime_agent_dir()?.join("sock").to_string_lossy().into_owned())
         } else {
             Ok(SOCKET_VALUE.to_string())
         }
     }
+}
+
+fn runtime_agent_dir() -> Result<PathBuf, AppError> {
+    Ok(crate::app_profile::CURRENT.agent_ipc_dir(&crate::fsutil::home_dir()?, &crate::fsutil::app_data_root()?))
 }
 
 /// agent 有沒有在提供(spec §11)。
@@ -173,9 +177,7 @@ pub fn start(app: &tauri::AppHandle) {
 }
 
 fn listen(app: &tauri::AppHandle) -> Result<server::Started, AppError> {
-    let ssh_dir = crate::keys::ssh_dir()?;
-    let home = ssh_dir.parent().ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))?;
-    let dir = agent_dir(home);
+    let dir = runtime_agent_dir()?;
     let app = app.clone();
     let handle: server::Handler = std::sync::Arc::new(move |mut stream, pid| {
         let program = pid.and_then(|pid| peer::identify(&peer::process_chain(pid)));
@@ -301,5 +303,21 @@ mod tests {
         assert_eq!(name(&[&missing, &first, &system]).as_deref(), Some("web"), "the bad bytes hide nothing, and the earlier file wins");
         assert_eq!(name(&[&other_key, &system]).as_deref(), Some("lab"), "a file that does not know the key is passed over");
         assert_eq!(name(&[&missing, &other_key]), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod profile_endpoint_tests {
+    #[test]
+    fn listener_and_identity_agent_share_the_compact_runtime_directory() {
+        let value = super::identity_agent_value().unwrap();
+        match crate::app_profile::CURRENT {
+            crate::app_profile::AppProfile::Development => {
+                let dir = super::runtime_agent_dir().unwrap();
+                assert_eq!(value, dir.join("sock").to_string_lossy());
+                assert_eq!(dir, crate::fsutil::app_data_root().unwrap().join("ipc/a"));
+            }
+            crate::app_profile::AppProfile::Production => assert_eq!(value, super::SOCKET_VALUE),
+        }
     }
 }

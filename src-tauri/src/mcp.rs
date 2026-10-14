@@ -604,6 +604,7 @@ fn run_approved(
     policy: &McpPolicy,
     params: &Value,
 ) -> Result<Value, String> {
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
     let alias = string_param(params, "alias")?.to_string();
     let command = string_param(params, "command")?.to_string();
     if !display_safe_command(&command) {
@@ -820,6 +821,7 @@ fn execute_ssh(
     timeout_seconds: u64,
     canceled: &AtomicBool,
 ) -> Result<RunOutput, String> {
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
     let mut command = crate::process::background_command("ssh");
     if let Some(path) = config_path {
         command.arg("-F").arg(path);
@@ -1291,6 +1293,17 @@ fn bridge_call(method: &str, params: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn development_mcp_execution_is_refused_before_spawning() {
+        if crate::app_profile::CURRENT != crate::app_profile::AppProfile::Development { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("nonexistent");
+        let canceled = AtomicBool::new(false);
+        let error = execute_ssh("fixture", "true", Some(&config), 1, &canceled).err().expect("Development must refuse before opening a config or spawning ssh");
+        assert!(error.contains("Development"), "{error}");
+        assert!(!config.exists());
+    }
 
     #[test]
     fn rejects_bidi_control_characters_in_commands() {

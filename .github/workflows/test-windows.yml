@@ -66,14 +66,13 @@ jobs:
       # (`session::`: its platform-neutral parts and the broker on a named pipe; its socket tests are Unix only), sshelter connect
       # (`cli::`: the arguments, the console layer against a fake console and against real ones, the keys, control events and window
       # size, and run() over a pipe against the broker; the Unix terminal's tests are Unix only), and the terminal launch (`connect::`:
-      # Windows Terminal and cmd run the console helper, or a debug build itself). The rest of the suite runs on macOS; parts of it use
-      # the system keychain.
-      - name: Key slot, vault, agent, engine and broker tests
+      # Windows Terminal and cmd run the console helper, or a debug build itself). All platform-neutral tests also run here; the three real OS credential tests are explicitly excluded.
+      - name: Complete safe Rust suite
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `vault:: ipc:: agent::` is read as a YAML mapping and the workflow would not load.
         # --locked: the committed Cargo.lock, with russh in it, is what is built.
-        run: "cargo test --locked --lib -- app_profile:: write_policy:: fsutil::profile_boundary_tests sync::records_v3:: boundary_ newer_ sync::slot_rules sync::slot_files vault:: ipc:: agent:: ssh:: session:: cli:: connect::"
+        run: "cargo test --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
       - name: Profile selection in the normal library
         env:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
