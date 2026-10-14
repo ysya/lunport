@@ -1,0 +1,245 @@
+use super::*;
+use crate::sync::records_v3::{LocalState, STATE_VERSION};
+use crate::sync::state_v2::SyncStateV2;
+use std::fs;
+fn state() -> SyncStateV3 {
+    SyncStateV3 {
+        version: 3,
+        device_id: "d".repeat(32),
+        device_name: "fixture".into(),
+        relay_url: "http://127.0.0.1:8787".into(),
+        account: None,
+        spaces: Default::default(),
+        local: LocalState::default(),
+        rotation: None,
+        migration_gate: None,
+        shared_writes_blocked: false,
+        relay_features: None,
+        legacy_v1_backup: None,
+        phrase_cleanup_pending: false,
+        notices: vec![],
+        last_sync_ms: None,
+        last_error: None,
+    }
+}
+fn names(path: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+#[test]
+fn missing_state_starts_records_without_creating_state_or_parent() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("new/sync-state.json");
+    let StartupProbe::Records { state, fresh } = probe_startup(&path, "New device") else {
+        panic!("fresh records")
+    };
+    assert!(fresh);
+    assert_eq!(state.version, STATE_VERSION);
+    assert_eq!(state.device_name, "New device");
+    assert!(crate::sync::slot_rules::is_slot_id(&state.device_id));
+    assert!(state.account.is_none());
+    assert!(state.local.hosts.is_empty());
+    assert!(!path.parent().unwrap().exists());
+}
+#[test]
+fn legacy_v1_and_v2_probe_retains_original_bytes_without_upgrade_or_rename() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let v1=br#"{"version":1,"chain_id":null,"device_id":"dddddddddddddddddddddddddddddddd","device_name":"legacy","relay_url":"http://127.0.0.1:8787","cursor_seq":9,"password_sync":false,"records":{},"last_sync_ms":null,"last_error":null}"#.to_vec();
+    let v2 = serde_json::to_vec(&SyncStateV2::fresh("old").unwrap()).unwrap();
+    for (bytes, version) in [(v1, 1), (v2, 2)] {
+        fs::write(&path, &bytes).unwrap();
+        let StartupProbe::Legacy { state } = probe_startup(&path, "unused") else {
+            panic!("legacy")
+        };
+        assert!(match state {
+            DecodedState::V1(s) => s.version == version,
+            DecodedState::V2(s) => s.version == version,
+            _ => false,
+        });
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(names(temp.path()), vec!["sync-state.json"]);
+    }
+}
+#[test]
+fn valid_v3_probe_returns_unchanged_records_without_saving_or_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let original = state();
+    let bytes = serde_json::to_vec(&original).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    assert!(
+        matches!(probe_startup(&path,"unused"),StartupProbe::Records{state:loaded,fresh:false} if *loaded==original)
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(names(temp.path()), vec!["sync-state.json"]);
+}
+#[test]
+fn malformed_future_unknown_invalid_utf8_and_invalid_legacy_remain_original_and_blocked() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    for bytes in [
+        b"broken".to_vec(),
+        br#"{"version":99}"#.to_vec(),
+        br#"{"version":0}"#.to_vec(),
+        vec![255, 254],
+        br#"{"version":1}"#.to_vec(),
+        br#"{"version":2}"#.to_vec(),
+    ] {
+        fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            probe_startup(&path, "unused"),
+            StartupProbe::Blocked { .. }
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(names(temp.path()), vec!["sync-state.json"]);
+    }
+}
+#[test]
+fn oversized_and_nonregular_paths_block_without_reading_or_modifying_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len(MAX_STATE_BYTES + 1).unwrap();
+    assert!(matches!(
+        probe_startup(&path, "unused"),
+        StartupProbe::Blocked { .. }
+    ));
+    assert_eq!(fs::metadata(&path).unwrap().len(), MAX_STATE_BYTES + 1);
+    let directory = temp.path().join("directory");
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("keep"), b"sentinel").unwrap();
+    assert!(matches!(
+        probe_startup(&directory, "unused"),
+        StartupProbe::Blocked { .. }
+    ));
+    assert_eq!(fs::read(directory.join("keep")).unwrap(), b"sentinel");
+}
+#[cfg(unix)]
+#[test]
+fn a_redirected_state_file_is_blocked_without_touching_its_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let path = temp.path().join("sync-state.json");
+    let bytes = serde_json::to_vec(&state()).unwrap();
+    fs::write(&source, &bytes).unwrap();
+    std::os::unix::fs::symlink(&source, &path).unwrap();
+    assert!(matches!(
+        probe_startup(&path, "unused"),
+        StartupProbe::Blocked { .. }
+    ));
+    assert_eq!(fs::read(source).unwrap(), bytes);
+    assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+}
+#[test]
+fn invalid_state_save_preserves_existing_bytes_and_creates_no_other_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    fs::write(&path, b"source").unwrap();
+    let mut invalid = state();
+    invalid.version = 4;
+    assert!(save_active(&path, &invalid).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"source");
+    assert_eq!(names(temp.path()), vec!["sync-state.json"]);
+    let path = temp.path().join("absent/sync-state.json");
+    assert!(save_active(&path, &invalid).is_err());
+    assert!(!path.parent().unwrap().exists());
+}
+#[test]
+fn active_state_save_is_atomic_readable_and_secure() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("data/sync-state.json");
+    let original = state();
+    save_active(&path, &original).unwrap();
+    assert!(
+        matches!(probe_startup(&path,"unused"),StartupProbe::Records{state:loaded,fresh:false} if *loaded==original)
+    );
+    assert_eq!(names(path.parent().unwrap()), vec!["sync-state.json"]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+#[test]
+fn save_io_failure_returns_error_without_modifying_an_existing_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    fs::create_dir(&path).unwrap();
+    fs::write(path.join("keep"), b"sentinel").unwrap();
+    assert!(save_active(&path, &state()).is_err());
+    assert!(path.is_dir());
+    assert_eq!(fs::read(path.join("keep")).unwrap(), b"sentinel");
+}
+
+mod active;
+
+#[test]
+fn startup_error_classification_never_reports_unvalidated_payload_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    for (bytes, wanted) in [
+        (
+            br#"{"version":99,"unvalidated":"sensitive-marker"}"#.to_vec(),
+            StartupErrorKind::UnsupportedVersion,
+        ),
+        (
+            br#"{"version":3,"unvalidated":"sensitive-marker"}"#.to_vec(),
+            StartupErrorKind::InvalidData,
+        ),
+    ] {
+        fs::write(&path, &bytes).unwrap();
+        let StartupProbe::Blocked { kind, reason } = probe_startup(&path, "unused") else {
+            panic!("blocked")
+        };
+        assert_eq!(kind, wanted);
+        assert!(!reason.contains("sensitive-marker"));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+#[cfg(unix)]
+#[test]
+fn an_existing_fifo_is_refused_before_opening_and_cannot_block_startup() {
+    use std::os::unix::ffi::OsStrExt;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the NUL-terminated fixture path is owned for this call and names a new FIFO in temp.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+    assert!(matches!(
+        probe_startup(&path, "unused"),
+        StartupProbe::Blocked {
+            kind: StartupErrorKind::UnsafePath,
+            ..
+        }
+    ));
+    assert!(fs::symlink_metadata(&path).is_ok());
+}
+#[test]
+fn valid_remote_relationship_conflicts_are_saved_for_repair_without_blocking_startup() {
+    use crate::sync::record::{record_key, LocalRecord, Record, RecordKind};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let mut records = state();
+    for (id, jump) in [
+        ("0000000000000001", "0000000000000002"),
+        ("0000000000000002", "0000000000000001"),
+    ] {
+        records.local.hosts.insert(record_key(RecordKind::Host, id), LocalRecord {
+            record: Record { kind: RecordKind::Host, id: id.into(), version: 1, updated_at_ms: 1, device_id: "d".repeat(32), deleted: false,
+                payload: serde_json::json!({"schema":2,"alias":id,"hostname":"fixture.invalid","auth":"password","jump":[jump]}) },
+            seq: 0, dirty: false,
+        });
+    }
+    save_active(&path, &records).unwrap();
+    assert!(
+        matches!(probe_startup(&path, "unused"), StartupProbe::Records { state: loaded, fresh: false } if *loaded == records)
+    );
+}
