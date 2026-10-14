@@ -1,7 +1,7 @@
-//! 一輪同步(spec §7.1):準備 space 檔 → 讀檔與不變式(以 space 為單位)→ 本機 diff → 一個批次請求取得帳戶與各
-//! space 的新記錄(deferred 補抓、舊 relay 退回逐條查詢)→ **先處理帳戶**(有更換標記就記下 `frozen` 並停止)→ 提交
-//! 帳戶並調整 space 檔 → 逐一提交 space(各自全有或全無、只更新自己的區段)→ 上傳(帳戶與各 space 分開;`409 frozen`
-//! 立刻停止)→ 刪除排定的 chain → 事件。網路一律不持有 doc/core 鎖;每個提交都在 core 鎖內比 generation。
+//! A legacy sync round first checks the account format, then prepares files and local diffs.
+//! Compatible accounts batch-pull spaces, merge the account, apply each space, upload and delete
+//! queued chains. Newer accounts retain their starting caches and cursors and only poll the gate.
+
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -206,6 +206,13 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
     if env.runtime.syncing.swap(true, Ordering::SeqCst) {
         return Ok(()); // 已在同步中
     }
+    let blocked = env.runtime.core.lock().unwrap().save_blocked.as_ref()
+        .filter(|reason| reason.starts_with(crate::sync::engine::FUTURE_LOCAL_STATE_MESSAGE)).cloned();
+    if let Some(reason) = blocked {
+        env.runtime.syncing.store(false, Ordering::SeqCst);
+        env.events.status();
+        return Err(AppError::Other(reason));
+    }
     // v1 升級先做(spec §7.6)。失敗時 v1 狀態檔不動、ssh 讀得到的主機一直留在被列出的檔案裡(細節見 `upgrade` 的模組說明),錯誤顯示在
     // 狀態列(不寫狀態檔),下一輪接著做完(spec §9)。升級進行中使用者離開了(`superseded`)不是升級的錯誤;錯誤說明只寫在產生它的那一代
     // 狀態上,離開之後的狀態不留「could not upgrade」。
@@ -276,11 +283,31 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
         (outcome, _) => outcome,
     };
     // 更換同步碼的最後一步留下的 keychain 換碼:補做(`rotation::retry_pending_swap`;沒有待補的就什麼都不做)。
-    crate::sync::rotation::retry_pending_swap(env);
+    if !env
+        .runtime
+        .core
+        .lock()
+        .unwrap()
+        .state
+        .as_ref()
+        .is_some_and(SyncStateV2::read_only)
+    {
+        crate::sync::rotation::retry_pending_swap(env);
+    }
     // agent 的設定(金鑰保管庫 spec §6):主機或插槽變了就重寫 `agent/config`;第一次需要時把 Include 放在主 config 的第一行。每一次同步嘗試的最後都對一次,不論那一輪走到
     // 哪裡 —— 一輪常在金鑰那一步之前就結束(凍結、被限流、拉取失敗、relay 出錯,退避最長 15 分鐘),而這個只看這台的 config 與保管庫、不需要 relay。這裡沒有持有任何鎖。
-    if let Err(e) = crate::agent::wiring::refresh_env(env) {
+    if !env
+        .runtime
+        .core
+        .lock()
+        .unwrap()
+        .state
+        .as_ref()
+        .is_some_and(SyncStateV2::read_only)
+    {
+        if let Err(e) = crate::agent::wiring::refresh_env(env) {
         eprintln!("[agent] could not update the agent config: {e}");
+    }
     }
     env.events.status();
     outcome
@@ -289,7 +316,7 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
 /// 本機維護(`maintain_local_slots`)的快照:generation、有沒有帳戶、這台的插槽記錄,在同一把鎖內一起取 —— 這一輪可能剛改過它們。沒有插槽記錄就沒有東西要維護,不複製。
 fn local_slots_snapshot(env: &SyncEnv) -> Option<(u64, bool, BTreeMap<String, LocalSlot>)> {
     let core = env.runtime.core.lock().unwrap();
-    let s = core.state.as_ref().filter(|s| !s.key_slots.is_empty())?;
+    let s = core.state.as_ref().filter(|s| !s.read_only() && !s.key_slots.is_empty())?;
     Some((core.generation, s.joined(), s.key_slots.clone()))
 }
 
@@ -347,22 +374,10 @@ fn relay_supports_batch(env: &SyncEnv, s: &SyncStateV2, relay: &dyn RelayApi) ->
 /// 這台已偵測到帳戶被更換同步碼(spec §7.5):不做任何網路寫入。只收到 push `409 frozen`、還沒有標記時,讀帳戶 chain
 /// 取得標記(誰更換的),好讓狀態列說明。那一次讀取被限流(`429`)或 relay 出錯(`5xx`)時同 `finish`:這一輪以退避收尾
 /// (`note_backoff`:連續失敗的輪數加一、狀態列說明),不立刻再查;讀到了就把計數歸零、清掉之前留下的退避說明。
-fn refresh_markers(env: &SyncEnv, generation: u64, s: &SyncStateV2, keys: &ChainKeys, relay: &dyn RelayApi) -> Result<RoundOutcome, AppError> {
+fn refresh_markers(env: &SyncEnv, generation: u64, s: &SyncStateV2, keys: &ChainKeys, pulled: &PullResponse) -> Result<RoundOutcome, AppError> {
     if s.frozen().is_some_and(|f| !f.markers.is_empty()) {
         return Ok(RoundOutcome::default());
     }
-    let pulled = match relay.pull(&keys.chain_id, &keys.auth_token, 0) {
-        Ok(pulled) => pulled,
-        Err(RelayError::RateLimited) => {
-            note_backoff(env, generation, true, false);
-            return Ok(RoundOutcome { backoff: true, ..RoundOutcome::default() });
-        }
-        Err(RelayError::Http(code)) if code >= 500 => {
-            note_backoff(env, generation, false, true);
-            return Ok(RoundOutcome { backoff: true, ..RoundOutcome::default() });
-        }
-        Err(e) => return Err(e.into()),
-    };
     env.runtime.core.lock().unwrap().failed_rounds = 0;
     let markers = merge_account(&AccountState::new(&keys.chain_id), keys, &pulled).markers;
     let backoff_message = |m: Option<&str>| m.is_some_and(|m| m == RATE_LIMITED_MESSAGE || m == RELAY_TROUBLE_MESSAGE);
@@ -399,6 +414,46 @@ fn mark_frozen(env: &SyncEnv, generation: u64) -> Result<(), AppError> {
     })
 }
 
+/// Record only the newer format gate. Existing caches, cursors and pending local work stay intact.
+pub(crate) fn observe_account_format(
+    env: &SyncEnv,
+    generation: u64,
+    state: &SyncStateV2,
+    keys: &ChainKeys,
+    pulled: &PullResponse,
+) -> Result<bool, AppError> {
+    let Some(account) = state.account.as_ref() else {
+        return Err(crate::sync::runtime::superseded());
+    };
+    let version = crate::sync::merge::newer_account_schema(account, keys, pulled);
+    let latest_blocked = {
+        let core = env.runtime.core.lock().unwrap();
+        if core.generation != generation {
+            return Err(crate::sync::runtime::superseded());
+        }
+        core.state.as_ref().is_some_and(SyncStateV2::read_only)
+    };
+    if version.is_none() && !latest_blocked {
+        return Ok(false);
+    }
+    commit(env, generation, |latest| {
+        let account = latest
+            .account
+            .as_mut()
+            .filter(|account| account.chain_id == keys.chain_id)
+            .ok_or_else(crate::sync::runtime::superseded)?;
+        account.remote_schema_version = account
+            .remote_schema_version
+            .into_iter()
+            .chain(version)
+            .max();
+        latest.last_error = Some(READ_ONLY_MESSAGE.to_string());
+        Ok(())
+    })?;
+    env.runtime.core.lock().unwrap().failed_rounds = 0;
+    Ok(true)
+}
+
 /// 一輪(spec §7.1)。`generation`/`s`/`keys` 是 `sync_once` 在同一把 core 鎖內取得的快照。回傳 `RoundOutcome`:
 /// - `frozen`:上傳撞到凍結的 chain(`409 frozen`),這一輪的上傳到此為止、dirty 保留;
 /// - `markers`:拉帳戶 chain 時看到的更換標記(`meta` `rotation:*`),這一輪在套用、上傳任何東西之前就停了;
@@ -409,12 +464,38 @@ fn mark_frozen(env: &SyncEnv, generation: u64) -> Result<(), AppError> {
 /// 讓不讓給對方由它決定;true 時兩者都記下(`frozen`,之後的輪次不做任何網路寫入)。
 pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys, mark_frozen_chains: bool) -> Result<RoundOutcome, AppError> {
     let relay = env.relay(&s.relay_url)?;
+    // Check the account before preparing files, collecting diffs, or running maintenance.
+    let pulled = match relay.pull(
+        &keys.chain_id,
+        &keys.auth_token,
+        if s.frozen().is_some() { 0 } else { s.account.as_ref().expect("joined").cursor_seq },
+    ) {
+        Ok(pulled) => pulled,
+        Err(RelayError::NotFound) => return Err(AppError::Other(ACCOUNT_GONE_MESSAGE.to_string())),
+        Err(RelayError::RateLimited) => {
+            finish(env, generation, &s, None, 0, true, false)?;
+            return Ok(RoundOutcome {
+                backoff: true,
+                ..RoundOutcome::default()
+            });
+        }
+        Err(RelayError::Http(code)) if code >= 500 => {
+            finish(env, generation, &s, None, 0, false, true)?;
+            return Ok(RoundOutcome {
+                backoff: true,
+                ..RoundOutcome::default()
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if observe_account_format(env, generation, &s, &keys, &pulled)? {
+        return Ok(RoundOutcome::default());
+    }
     if s.frozen().is_some() {
-        return refresh_markers(env, generation, &s, &keys, relay.as_ref());
+        return refresh_markers(env, generation, &s, &keys, &pulled);
     }
     let batch = match relay_supports_batch(env, &s, relay.as_ref()) {
         Ok(batch) => batch,
-        // `GET /v1/info` 被限流:這一輪不再對 relay 發任何請求(什麼都沒同步到,不更新 `last_sync_ms`),退避之後再試。
         Err(_) => {
             finish(env, generation, &s, None, 0, true, false)?;
             return Ok(RoundOutcome { backoff: true, ..RoundOutcome::default() });
@@ -526,7 +607,8 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
         return Ok(RoundOutcome::default());
     }
 
-    // 4. 一個批次請求:帳戶 chain 一律排第一;舊 relay 的 space 每 3 輪查一次 —— 但還有沒上傳的記錄的 space(上一次的上傳撞到
+    // 4. Batch spaces after the separate account preflight; legacy spaces are pulled every third round.
+    //    舊 relay 的 space 每 3 輪查一次 —— 但還有沒上傳的記錄的 space(上一次的上傳撞到
     //    衝突、或剛修改過)每一輪都查:不先拿到 relay 上的版本,上傳只會一直撞衝突,連續 3 輪之後還會誤報「relay 上有這個
     //    SSHelter 讀不懂的版本」。唯讀的帳戶例外:它從不上傳,dirty 的記錄一直都在,照這條規則會每一輪都查。
     let rounds = {
@@ -535,7 +617,7 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
         core.rounds
     };
     let account = work.account.clone().expect("joined");
-    let mut items = vec![BatchPullItem { chain: keys.chain_id.clone(), token: keys.auth_token.clone(), since: account.cursor_seq }];
+    let mut items = Vec::new();
     let legacy_slot = rounds % LEGACY_SPACE_EVERY == 1;
     let uploads = !work.read_only();
     for id in healthy.keys() {
@@ -557,19 +639,14 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
         }
     }
     let (mut fetched, mut limited, mut failed) = (pulled_all.fetched, pulled_all.limited, pulled_all.failed);
+    if !items.is_empty() && !limited && fetched.values().all(|result| matches!(result, Fetched::Missed)) {
+        failed = true;
+    }
 
     // 5. 帳戶的結果一律先處理。
-    let pulled = match fetched.remove(&keys.chain_id) {
-        Some(Fetched::Ok(p)) => p,
-        Some(Fetched::NotFound) => return Err(AppError::Other(ACCOUNT_GONE_MESSAGE.to_string())),
-        Some(Fetched::Missed) | None => {
-            // 沒拿到帳戶(被限流、relay 出錯):不處理任何 space、不上傳,退避後再試。什麼都沒同步到,所以不更新
-            // `last_sync_ms`;沒有 429 / 5xx 的訊號卻拿不到(relay 一項都沒執行)也當成 relay 出錯。
-            failed = failed || !limited;
-            finish(env, generation, &work, None, 0, limited, failed)?;
-            return Ok(RoundOutcome { backoff: true, ..RoundOutcome::default() });
+    if observe_account_format(env, generation, &work, &keys, &pulled)?{
+        return Ok(RoundOutcome::default() );
         }
-    };
     let merged_account = merge_account(&account, &keys, &pulled);
     if merged_account.skipped > 0 {
         eprintln!("[sync] {} account record(s) could not be read and were skipped", merged_account.skipped);
@@ -839,6 +916,7 @@ fn commit_account(env: &SyncEnv, generation: u64, account: &AccountState) -> Res
             return Err(crate::sync::runtime::superseded());
         }
         if let Some(s) = core.state.as_mut() {
+            crate::sync::account::format_writes_allowed(s)?;
             s.account = Some(account.clone());
         }
         save_core(&mut core, &env.state_path)?;
@@ -1416,9 +1494,8 @@ pub(crate) mod tests {
         relay.clear_calls();
         settle(&b);
         let batches: Vec<String> = relay.calls().into_iter().filter(|c| c.starts_with("batch:")).collect();
-        let account = b.state().account.as_ref().unwrap().chain_id[..8].to_string();
         let (s1, s2) = if personal < work { (&personal[..8], &work[..8]) } else { (&work[..8], &personal[..8]) };
-        assert_eq!(batches[..3], [format!("batch:{account},{s1},{s2}"), format!("batch:{s1},{s2}"), format!("batch:{s2}")]);
+        assert_eq!(batches[..2], [format!("batch:{s1},{s2}"), format!("batch:{s2}")]);
         assert_eq!(b.read(&b.space_path(&personal)), "Host web\n");
         assert_eq!(b.read(&b.space_path(&work)), "Host db\n");
     }
@@ -2227,14 +2304,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_rate_limited_relay_info_ends_the_round_before_any_pull() {
+    fn a_rate_limited_relay_info_ends_the_round_after_account_preflight() {
         let (relay, _clock, _a, b, _words, _personal) = pair();
         b.runtime.core.lock().unwrap().relay_checked = None; // 新的行程:`GET /v1/info` 要再查一次
         relay.clear_calls();
         let faults = Faults { info: Some(rate_limited), ..Faults::default() };
         let out = run_with_faults(&b, &relay, &faults).unwrap();
         assert!(out.backoff);
-        assert!(relay.calls().is_empty(), "nothing else is sent after the 429: {:?}", relay.calls());
+        assert_eq!(relay.calls(), vec![format!("pull:{}", &b.state().account.as_ref().unwrap().chain_id[..8])], "only the format preflight precedes the info 429");
         assert_eq!(b.runtime.core.lock().unwrap().failed_rounds, 1);
         assert_eq!(b.state().last_error.as_deref(), Some(RATE_LIMITED_MESSAGE));
         assert!(b.runtime.core.lock().unwrap().relay_checked.is_none(), "asked again next time");
@@ -2261,8 +2338,183 @@ pub(crate) mod tests {
         assert_eq!(a.runtime.core.lock().unwrap().failed_rounds, 0);
     }
 
+    pub(crate) fn publish_newer_account(relay: &FakeRelay, device: &TestDevice) {
+        let mut account = device.state().account.unwrap();
+        let keys = device
+            .runtime
+            .core
+            .lock()
+            .unwrap()
+            .account_keys
+            .clone()
+            .unwrap();
+        put_account_record(
+            &mut account,
+            RecordKind::Meta,
+            crate::sync::record::ACCOUNT_META_ID,
+            serde_json::json!({"schema_version": 3, "created_by_app_version": "1.0.0"}),
+            false,
+            "future-device",
+            u64::MAX - 1,
+        );
+        for outgoing in account_outgoing(&account, &keys).unwrap() {
+            relay
+                .push(&keys.chain_id, &keys.auth_token, &[outgoing.item])
+                .unwrap();
+        }
+    }
+
     #[test]
-    fn an_old_relay_does_not_pull_a_read_only_accounts_space_every_round() {
+    fn a_format_gate_recorded_during_space_pull_prevents_apply_and_cursor_advance() {
+        use crate::sync::testkit::{HookedConnector, Hooks};
+        let (relay, _clock, a, b, _words, personal) = pair();
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName original.example\n");
+        settle(&a);
+        settle(&b);
+        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName remote.example\n");
+        settle(&a);
+        let b = Arc::new(b);
+        let setter = Arc::clone(&b);
+        let mut before = b.state();
+        let path = b.space_path(&personal);
+        let text = b.read(&path);
+        let connector = HookedConnector::new(&relay, Hooks { after_batch: Some(Box::new(move || {
+            setter.runtime.core.lock().unwrap().state.as_mut().unwrap().account.as_mut().unwrap().remote_schema_version = Some(3);
+        })), ..Hooks::default() });
+        let mut env = b.env();
+        env.relays = &connector;
+        relay.clear_calls();
+        sync_once(&env).unwrap();
+        before.account.as_mut().unwrap().remote_schema_version = Some(3);
+        before.last_error = Some(READ_ONLY_MESSAGE.to_string());
+        assert_eq!(b.state(), before);
+        assert_eq!(b.read(&path), text);
+        assert!(!relay.calls().iter().any(|call| call.starts_with("push:") || call.starts_with("delete:")));
+    }
+
+    #[test]
+    fn newer_format_is_checked_before_recording_relay_capabilities() {
+        let (relay, _clock, a, b, _words, _personal) = pair();
+        b.runtime.core.lock().unwrap().relay_checked = None;
+        b.runtime.core.lock().unwrap().state.as_mut().unwrap().relay_features = None;
+        publish_newer_account(&relay, &a);
+        sync_once(&b.env()).unwrap();
+        assert!(b.state().read_only());
+        assert!(b.state().relay_features.is_none(), "format discovery must not update other persisted state first");
+    }
+
+    #[test]
+    fn newer_format_is_detected_while_an_older_account_is_frozen() {
+        let (relay, _clock, a, b, _words, _personal) = pair();
+        b.runtime.core.lock().unwrap().state.as_mut().unwrap().account.as_mut().unwrap().frozen = Some(FreezeInfo { detected_at_ms: 1, markers: Vec::new() });
+        publish_newer_account(&relay, &a);
+        let mut before = b.state();
+        sync_once(&b.env()).unwrap();
+        before.account.as_mut().unwrap().remote_schema_version = Some(3);
+        before.last_error = Some(READ_ONLY_MESSAGE.to_string());
+        assert_eq!(b.state(), before);
+    }
+
+    #[test]
+    fn newer_format_preflight_preserves_files_caches_and_pending_edits() {
+        let (relay, _clock, a, b, words, personal) = pair();
+        a.save_in_app(
+            &a.space_path(&personal),
+            "Host web\n  HostName old.example\nHost risky\n  ProxyCommand nc review.example 22\n",
+        );
+        settle(&a);
+        settle(&b);
+        let doomed = create_space(&b.env(), "Pending deletion").unwrap();
+        settle(&b);
+        delete_space(&b.env(), &doomed).unwrap();
+        b.save_in_app(
+            &b.space_path(&personal),
+            "Host web\n  HostName local.example\n",
+        );
+        assert!(!b.state().account.as_ref().unwrap().chain_deletes.is_empty());
+        assert!(!b.state().spaces[&personal].pending_approvals.is_empty());
+        let space_path = b.space_path(&personal);
+        let main = b.main_config();
+        std::fs::remove_file(&space_path).unwrap();
+        let mut before = b.state();
+        let keys = a.runtime.core.lock().unwrap().account_keys.clone().unwrap();
+        let source_state = a.state();
+        let space_keys = space_keys(source_state.account.as_ref().unwrap(), &keys, &personal).unwrap();
+        let mut host_tombstone = source_state.spaces[&personal].records["host:web"].record.clone();
+        host_tombstone.deleted = true;
+        host_tombstone.payload = serde_json::Value::Null;
+        host_tombstone.version += 1;
+        host_tombstone.updated_at_ms = u64::MAX - 2;
+        let base_seq = source_state.spaces[&personal].records["host:web"].seq;
+        relay.push(&space_keys.chain_id, &space_keys.auth_token, &[crate::sync::reconcile::encode(&space_keys, &host_tombstone, base_seq).unwrap()]).unwrap();
+        let mut future = source_state.account.unwrap();
+        put_account_record(
+            &mut future,
+            RecordKind::Space,
+            &personal,
+            serde_json::Value::Null,
+            true,
+            "future-device",
+            u64::MAX - 2,
+        );
+        put_account_record(
+            &mut future,
+            RecordKind::KeySlot,
+            "0123456789abcdef",
+            serde_json::json!({"schema": 2}),
+            false,
+            "future-device",
+            u64::MAX - 2,
+        );
+        put_account_record(
+            &mut future,
+            RecordKind::Meta,
+            crate::sync::record::ACCOUNT_META_ID,
+            serde_json::json!({"schema_version": 3, "created_by_app_version": "1.0.0"}),
+            false,
+            "future-device",
+            u64::MAX - 1,
+        );
+        for outgoing in account_outgoing(&future, &keys).unwrap() {
+            relay
+                .push(&keys.chain_id, &keys.auth_token, &[outgoing.item])
+                .unwrap();
+        }
+        relay.clear_calls();
+        sync_once(&b.env()).unwrap();
+        assert!(
+            !space_path.exists(),
+            "a missing file cannot be rematerialized before checking the account format"
+        );
+        assert_eq!(b.main_config(), main);
+        before.account.as_mut().unwrap().remote_schema_version = Some(3);
+        before.last_error = Some(READ_ONLY_MESSAGE.to_string());
+        assert_eq!(
+            b.state(),
+            before,
+            "only the format gate and update notice may change"
+        );
+        assert_eq!(
+            b.keychain
+                .entry(crate::sync::state::MNEMONIC_ACCOUNT)
+                .as_deref(),
+            Some(words.as_str())
+        );
+        for _ in 0..4 {
+            sync_once(&b.env()).unwrap();
+        }
+        assert!(!space_path.exists());
+        assert_eq!(b.state(), before);
+        let account_call = format!("pull:{}", &keys.chain_id[..8]);
+        assert!(
+            relay.calls().iter().all(|call| call == &account_call),
+            "only account format checks are allowed: {:?}",
+            relay.calls()
+        );
+    }
+
+    #[test]
+    fn an_old_relay_never_pulls_a_read_only_accounts_spaces() {
         let (relay, _clock, a, b, _words, personal) = pair();
         relay.set_legacy(true);
         for d in [&a, &b] {
@@ -2280,9 +2532,9 @@ pub(crate) mod tests {
         assert!(!relay.calls().contains(&space), "{:?}", relay.calls());
         assert!(!relay.calls().iter().any(|c| c.starts_with("push:")), "a read-only account uploads nothing");
         assert!(b.state().spaces[&personal].records.values().any(|l| l.dirty));
-        // 輪到的那一輪照常查。
+        // The blocked account remains account-only even on the scheduled space round.
         sync_once(&b.env()).unwrap();
-        assert!(relay.calls().contains(&space));
+        assert!(!relay.calls().contains(&space));
     }
 
     #[test]

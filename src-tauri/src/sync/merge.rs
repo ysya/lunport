@@ -563,8 +563,43 @@ fn valid_account_record(record: &Record) -> bool {
 /// `spacekey` 與 `key`(SP3)只在記憶體解開比較,保存的是密文(`sealed`);其他種類(含未知)原樣存進 `sealed`、
 /// 永不解密 —— SP3 之前的版本這樣存下的 `keyslot` 除外,它們一開始就升格成 `records` 裡的明文記錄。拉到的 `meta`
 /// `rotation:*`(未刪除)收進 `markers`。
+pub (crate) fn newer_account_schema(
+    section: &AccountState,
+    keys: &ChainKeys,
+    pulled: &PullResponse,
+) -> Option<u32> {
+    let observed = pulled
+        .records
+        .iter()
+        .filter(|envelope| envelope.kind == RecordKind::Meta.as_str())
+        .filter_map(|envelope| {
+            let record = decode(keys, envelope).ok()?;
+            if record.kind != RecordKind::Meta || record.id != ACCOUNT_META_ID || record.deleted {
+                return None;
+            }
+            let version = record.payload.get("schema_version")?.as_u64()?;
+            Some(u32::try_from(version).unwrap_or(u32::MAX))
+        })
+        .max();
+    section
+        .remote_schema_version
+        .into_iter()
+        .chain(observed)
+        .max()
+        .filter(|version| *version > crate::sync::record::ACCOUNT_SCHEMA_VERSION)
+}
+
 pub fn merge_account(section: &AccountState, keys: &ChainKeys, pulled: &PullResponse) -> AccountMerged {
     let mut next = section.clone();
+    // Inspect the authenticated format gate before touching tombstones, sealed caches, or cursors.
+    if let Some(version) = newer_account_schema(section, keys, pulled) {
+        next.remote_schema_version = Some(version);
+        return AccountMerged {
+            section: next,
+            markers: Vec::new(),
+            skipped: 0,
+        };
+    }
     let mut markers = Vec::new();
     let mut skipped = 0;
     // SP3 之前的版本不認得 `keyslot`:當成未知種類,把密文原樣存進 `sealed`、cursor 照常前進;更新之後的增量拉取(只從
@@ -1287,6 +1322,70 @@ mod tests {
         let slot = space_key_slot(&k, &space.chain_id);
         assert!(again.section.sealed[&slot].dirty);
         assert_eq!(again.section.sealed[&slot].envelope.seq, 1);
+    }
+
+    #[test]
+    fn newer_account_meta_preserves_the_entire_starting_section() {
+        let k = keys();
+        let space = keys();
+        let mut original = AccountState::new(&k.chain_id);
+        original.cursor_seq = 8;
+        put_space_key(
+            &mut original,
+            &k,
+            &space.chain_id,
+            Some(&space),
+            "dev-a",
+            10,
+        )
+        .unwrap();
+        put_account_record(
+            &mut original,
+            RecordKind::Space,
+            &space.chain_id,
+            serde_json::json!({"schema": 1, "name": "Work", "slug": "work", "created_at_ms": 1}),
+            false,
+            "dev-a",
+            10,
+        );
+        let unreadable = Envelope {
+            id_hash: "ee".repeat(32),
+            kind: "keyslot".into(),
+            seq: 4,
+            nonce: "bad".into(),
+            ciphertext: "bad".into(),
+            deleted: false,
+        };
+        original.sealed.insert(
+            sealed_key(&unreadable.kind, &unreadable.id_hash),
+            SealedRecord {
+                envelope: unreadable,
+                dirty: false,
+            },
+        );
+        let mut tombstone = account_record(RecordKind::Space, &space.chain_id, Value::Null, 20);
+        tombstone.deleted = true;
+        let meta = account_record(
+            RecordKind::Meta,
+            ACCOUNT_META_ID,
+            serde_json::json!({"schema_version": 3, "created_by_app_version": "1.0.0"}),
+            30,
+        );
+        let response = pulled(&k, &[tombstone, meta], 9);
+        let merged = merge_account(&original, &k, &response);
+        let mut expected = original.clone();
+        expected.remote_schema_version = Some(3);
+        assert_eq!(
+            merged.section, expected,
+            "the gate is inspected before tombstones or unreadable sealed slots"
+        );
+        assert!(merged.markers.is_empty());
+        assert_eq!(merged.skipped, 0);
+        assert_eq!(
+            merge_account(&expected, &k, &pulled(&k, &[], 99)).section,
+            expected,
+            "future pulls cannot advance the blocked cursor"
+        );
     }
 
     #[test]

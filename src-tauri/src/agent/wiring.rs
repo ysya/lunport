@@ -244,6 +244,11 @@ fn put_include_first(doc: &mut SshConfigDoc, backed_up: &mut HashSet<PathBuf>, r
 pub fn refresh_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
     let Some(home) = env.ssh_dir.parent().map(Path::to_path_buf) else { return Ok(WiringStatus::NotNeeded) };
     let mut doc_lock = env.doc.lock().unwrap();
+    {
+        let core = env.runtime.core.lock().unwrap();
+        if let Some(reason) = core.save_blocked.as_ref() { return Err(AppError::Other(reason.clone())); }
+        if let Some(state) = core.state.as_ref() { crate::sync::account::format_writes_allowed(state)?; }
+    }
     let Some(doc) = doc_lock.as_mut() else { return Ok(WiringStatus::NotNeeded) };
     let mut backed_up = env.backed_up.lock().unwrap();
     let retention = env.retention();
