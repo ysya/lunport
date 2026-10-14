@@ -48,7 +48,10 @@ describe("migration direct native contract", () => {
         "records_migration_confirm",
         { token: "token", oldClientsStoppedOrCompatible: true },
       ],
-      ["records_migration_resume", { migrationId: "a".repeat(32) }],
+      [
+        "records_migration_resume",
+        { migrationId: "a".repeat(32), words: null },
+      ],
       ["records_migration_pending", {}],
       ["records_migration_cancel", { token: "token" }],
     ]);
@@ -173,7 +176,10 @@ describe("component-only migration draft", () => {
       cache.getQueryData<api.RecordsStatus>(api.recordsStatusKey)?.format,
     ).toBe("records");
     expect(calls).toEqual([
-      ["records_migration_resume", { migrationId: "a".repeat(32) }],
+      [
+        "records_migration_resume",
+        { migrationId: "a".repeat(32), words: null },
+      ],
     ]);
   });
   it("requires saved-edits acknowledgment before stopping the legacy writer", async () => {
@@ -261,5 +267,50 @@ describe("component-only migration draft", () => {
     expect(cache.getQueryData(api.recordsStatusKey)).toEqual(current);
     await applyMigrationStatus(cache, result(true));
     expect(cache.getQueryData(api.recordsStatusKey)).toEqual(current);
+  });
+});
+
+describe("migration staged-key recovery words", () => {
+  it("passes recovery words directly, clears them after resume and never caches them", async () => {
+    const cache = client();
+    const calls = stubBackend(async () => result(true));
+    let state = clearMigrationDraft("SECRET recovery fixture words");
+    const update = (patch: Partial<MigrationDraft>) => {
+      state = { ...state, ...patch };
+    };
+    expect(
+      await resumeMigrationDraft(cache, "a".repeat(32), update, state.words),
+    ).toBe(true);
+    expect(calls).toEqual([
+      [
+        "records_migration_resume",
+        { migrationId: "a".repeat(32), words: "SECRET recovery fixture words" },
+      ],
+    ]);
+    expect(state.words).toBe("");
+    expect(
+      JSON.stringify(
+        cache
+          .getQueryCache()
+          .getAll()
+          .map((q) => q.state),
+      ),
+    ).not.toContain("SECRET");
+    expect(cache.getMutationCache().getAll()).toEqual([]);
+  });
+  it("retains failed recovery input without reflecting it in errors", async () => {
+    const cache = client();
+    stubBackend(async () => {
+      throw "SECRET recovery fixture words invalid";
+    });
+    let state = clearMigrationDraft("SECRET recovery fixture words");
+    const update = (patch: Partial<MigrationDraft>) => {
+      state = { ...state, ...patch };
+    };
+    expect(
+      await resumeMigrationDraft(cache, "a".repeat(32), update, state.words),
+    ).toBe(false);
+    expect(state.words).toBe("SECRET recovery fixture words");
+    expect(state.error).not.toContain("SECRET");
   });
 });

@@ -199,8 +199,8 @@ export function RecordsMigrationPanel({
     if (inFlight.current) return;
     inFlight.current = true;
     try {
-      await resumeMigrationDraft(client, id, update);
-      onWordsCleared?.();
+      if (await resumeMigrationDraft(client, id, update, state.words))
+        onWordsCleared?.();
     } finally {
       inFlight.current = false;
       await client.invalidateQueries({ queryKey: recordsPendingMigrationsKey });
@@ -276,6 +276,32 @@ export function RecordsMigrationPanel({
             </p>
           )}
         </>
+      )}
+      {((state.receipt && !state.receipt.complete) ||
+        (pending.data ?? []).length > 0) && (
+        <RecordField label="Migration recovery code (optional)">
+          <Textarea
+            value={state.words}
+            autoComplete="off"
+            disabled={state.busy}
+            onChange={(event) => update({ words: event.target.value })}
+          />
+          <p className="text-xs text-muted-foreground">
+            Supply the original sync code if this device no longer has the
+            staged account key. It is used only for the selected resume
+            operation.
+          </p>
+          <Button
+            variant="outline"
+            disabled={state.busy || !state.words}
+            onClick={() => {
+              update({ words: "" });
+              onWordsCleared?.();
+            }}
+          >
+            Clear recovery code
+          </Button>
+        </RecordField>
       )}
       <section className="space-y-3 border-t pt-4">
         <div className="flex items-center justify-between gap-3">

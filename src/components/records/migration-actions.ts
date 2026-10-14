@@ -107,10 +107,11 @@ export async function resumeMigrationDraft(
   client: QueryClient,
   id: string,
   update: (patch: Partial<MigrationDraft>) => void,
+  words?: string,
 ): Promise<boolean> {
   update({ busy: true, error: null });
   try {
-    const result = await resumeRecordMigration(id);
+    const result = await resumeRecordMigration(id, words || undefined);
     await applyMigrationStatus(client, result);
     update({
       words: "",

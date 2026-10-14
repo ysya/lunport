@@ -1,8 +1,14 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { recordsPendingMigrationsKey } from "@/lib/records";
 import { describe, expect, it, vi } from "vitest";
 import { buttonTag, DISABLED, text } from "@/components/keychain/test-markup";
 import { LegacyPauseReview } from "./LegacyPauseReview";
-import { MigrationReview, MigrationOutcome } from "./MigrationPanel";
+import {
+  MigrationReview,
+  MigrationOutcome,
+  RecordsMigrationPanel,
+} from "./MigrationPanel";
 import { migrationPreview } from "./fixtures";
 describe("explicit migration review", () => {
   const render = (consent: boolean, eligible = true, consumed = false) => {
@@ -73,4 +79,25 @@ describe("explicit migration review", () => {
       buttonTag(renderPause(true), "Pause legacy workspace"),
     ).not.toContain(DISABLED);
   });
+});
+
+it("offers optional staged-key recovery for a persisted migration without creating a new preview", () => {
+  const client = new QueryClient();
+  client.setQueryData(recordsPendingMigrationsKey, [
+    {
+      migration_id: "a".repeat(32),
+      phase: "account-gated",
+      host_count: 2,
+      key_count: 1,
+    },
+  ]);
+  const html = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <RecordsMigrationPanel />
+    </QueryClientProvider>,
+  );
+  expect(text(html)).toContain("Migration recovery code (optional)");
+  expect(text(html)).toContain("original sync code");
+  expect(buttonTag(html, "Resume migration")).not.toContain(DISABLED);
+  expect(html).toContain('autoComplete="off"');
 });

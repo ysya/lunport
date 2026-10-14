@@ -18,6 +18,7 @@ import { revealHidden } from "@/lib/sync-approvals";
 import { clearAccountDraft, submitAccountDraft } from "./panel-actions";
 import { RecordField } from "./form";
 import { RecordsMigrationPanel } from "./MigrationPanel";
+import { RecordsAccountLifecyclePanel } from "./AccountLifecyclePanel";
 
 export function RecordsAccountPanel({
   overview,
@@ -26,12 +27,15 @@ export function RecordsAccountPanel({
 }) {
   const client = useQueryClient();
   const [migrationOpen, setMigrationOpen] = useState(false);
+  const [recoveryVersion, setRecoveryVersion] = useState(0);
   const [mode, setMode] = useState<"create" | "join" | null>(null);
   const [draft, setDraft] = useState(clearAccountDraft);
   const [name, setName] = useState("");
   const [relay, setRelay] = useState(overview.relay_url);
   const [relayDirty, setRelayDirty] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [settingsBusy, setBusy] = useState(false);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const busy = settingsBusy || lifecycleBusy;
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   useEffect(() => {
@@ -44,7 +48,7 @@ export function RecordsAccountPanel({
     setMode(null);
   };
   const submit = async () => {
-    if (inFlight.current) return;
+    if (inFlight.current || lifecycleBusy) return;
     inFlight.current = true;
     try {
       if (await submitAccountDraft(client, draft, update, mode === "create"))
@@ -54,7 +58,7 @@ export function RecordsAccountPanel({
     }
   };
   const run = async (operation: () => Promise<void>) => {
-    if (inFlight.current) return;
+    if (inFlight.current || lifecycleBusy) return;
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -74,6 +78,7 @@ export function RecordsAccountPanel({
       const result = await resumeRecordAccount(draft.words || undefined);
       update({ words: "", error: null });
       applyRecordOverview(client, result);
+      setRecoveryVersion((current) => current + 1);
     });
   const showCode = () =>
     run(async () => {
@@ -130,39 +135,49 @@ export function RecordsAccountPanel({
       )}
       {pending && (
         <section className="space-y-3 rounded-md border p-4">
-          <h2 className="font-medium">Sync setup is pending</h2>
+          <h2 className="font-medium">Sync operation is pending</h2>
           <p className="text-sm text-muted-foreground">
             {pending.kind.replace(/_/g, " ")} · {revealHidden(pending.phase)}
           </p>
           <p className="break-all font-mono text-xs text-muted-foreground">
             {pending.id}
           </p>
-          {pending.kind !== "create_space" && (
-            <RecordField label="Sync code for recovery (optional)">
-              <Textarea
-                autoComplete="off"
-                value={draft.words}
-                disabled={busy || draft.busy}
-                onChange={(event) => update({ words: event.target.value })}
-              />
-              <p className="text-xs text-muted-foreground">
-                Supply the code if this device no longer has the staged account
-                key.
-              </p>
-            </RecordField>
-          )}
+          {pending.kind !== "create_space" &&
+            pending.kind !== "leave_account" && (
+              <RecordField label="Sync code for recovery (optional)">
+                <Textarea
+                  autoComplete="off"
+                  value={draft.words}
+                  disabled={busy || draft.busy}
+                  onChange={(event) => update({ words: event.target.value })}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Supply the code if this device no longer has the staged
+                  account key.
+                </p>
+              </RecordField>
+            )}
           <Button disabled={busy || draft.busy} onClick={resume}>
             Retry sync setup
           </Button>
-          <Button
-            variant="outline"
-            disabled={busy || draft.busy || !draft.words}
-            onClick={() => update({ words: "" })}
-          >
-            Clear recovery code
-          </Button>
+          {pending.kind !== "create_space" &&
+            pending.kind !== "leave_account" && (
+              <Button
+                variant="outline"
+                disabled={busy || draft.busy || !draft.words}
+                onClick={() => update({ words: "" })}
+              >
+                Clear recovery code
+              </Button>
+            )}
         </section>
       )}
+      <RecordsAccountLifecyclePanel
+        overview={overview}
+        disabled={settingsBusy || draft.busy || !!draft.createdWords}
+        onBusyChange={setLifecycleBusy}
+        recoveryVersion={recoveryVersion}
+      />
       {overview.account ? (
         <section className="space-y-3 rounded-md border p-4">
           <h2 className="font-medium">
