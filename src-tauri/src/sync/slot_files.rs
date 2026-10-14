@@ -29,6 +29,7 @@ fn parent_of(path: &Path) -> Result<&Path, AppError> {
 /// 確保插槽目錄存在且只有目前使用者能存取。Unix:0700(已存在也改 —— 這是 SSHelter 自己的目錄);Windows:owner-only、
 /// 不繼承上層、會被子項繼承的 DACL。
 pub fn ensure_keys_dir(dir: &Path) -> Result<(), AppError> {
+    crate::fsutil::check_write(dir)?;
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -43,6 +44,7 @@ pub fn ensure_keys_dir(dir: &Path) -> Result<(), AppError> {
 /// 原子寫入私鑰檔:暫存檔建在同一個目錄(Unix 先設 0600 再寫;Windows 從 `ensure_keys_dir` 設好的目錄繼承 owner-only
 /// 權限),寫入、fsync、rename 蓋過去;Windows 另外把結果設成明確的 owner-only DACL。
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    crate::fsutil::check_write(path)?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent_of(path)?)?;
     #[cfg(unix)]
     {
@@ -68,9 +70,12 @@ pub fn link(source: &Path, slot: &Path) -> Result<LinkKind, AppError> {
     if !source.is_absolute() {
         return Err(AppError::Other(format!("the key path must be absolute: {}", source.display())));
     }
+    crate::fsutil::check_write(source)?;
+    crate::fsutil::check_write(slot)?;
     let dir = parent_of(slot)?;
     let name = slot.file_name().and_then(|n| n.to_str()).unwrap_or("slot");
     let tmp = dir.join(format!(".{name}.{}.tmp", new_slot_id()?));
+    crate::fsutil::check_write(&tmp)?;
     let kind = link_at(source, &tmp, slot)?;
     if kind != LinkKind::Copy {
         if let Err(e) = fs::rename(&tmp, slot) {
@@ -112,6 +117,7 @@ pub fn occupied(path: &Path) -> bool {
 }
 
 fn remove_if_present(path: &Path) -> Result<(), AppError> {
+    crate::fsutil::check_write(path)?;
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -121,6 +127,8 @@ fn remove_if_present(path: &Path) -> Result<(), AppError> {
 
 /// 移除插槽(連結本身或檔案)與它的 `.pub`;不存在不算錯。移除 symlink 不會動到它指向的金鑰。
 pub fn remove_slot(slot: &Path) -> Result<(), AppError> {
+    crate::fsutil::check_write(slot)?;
+    crate::fsutil::check_write(&public_path(slot))?;
     remove_if_present(slot)?;
     remove_if_present(&public_path(slot))
 }
@@ -137,6 +145,9 @@ pub fn retire(slot: &Path, tag: &str) -> Result<PathBuf, AppError> {
         kept = dir.join(format!("{base}-{n}"));
         n += 1;
     }
+    for path in [slot.to_path_buf(), public_path(slot), kept.clone(), public_path(&kept)] {
+        crate::fsutil::check_write(&path)?;
+    }
     fs::rename(slot, &kept)?;
     if occupied(&public_path(slot)) {
         fs::rename(public_path(slot), public_path(&kept))?;
@@ -147,6 +158,55 @@ pub fn retire(slot: &Path, tag: &str) -> Result<PathBuf, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_slot_writers_refuse_external_paths_before_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        let root = temp.path().join("dev");
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(ensure_keys_dir(&outside).is_err());
+            assert!(write_private(&temp.path().join("key"), b"private").is_err());
+        });
+        assert!(!outside.exists());
+        assert!(!temp.path().join("key").exists());
+    }
+
+    #[test]
+    fn boundary_link_refuses_external_source_before_creating_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, b"source").unwrap();
+        let root = temp.path().join("dev");
+        fs::create_dir(&root).unwrap();
+        let slot = root.join("slot");
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: root.clone() }, || {
+            assert!(link(&source, &slot).is_err());
+        });
+        assert!(!occupied(&slot));
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_remove_and_retire_check_public_path_before_private_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        fs::create_dir(&root).unwrap();
+        let slot = root.join("slot");
+        let outside = temp.path().join("outside");
+        fs::write(&slot, b"private").unwrap();
+        fs::write(&outside, b"public").unwrap();
+        std::os::unix::fs::symlink(&outside, public_path(&slot)).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(remove_slot(&slot).is_err());
+            assert!(retire(&slot, "old").is_err());
+        });
+        assert_eq!(fs::read(slot).unwrap(), b"private");
+        assert_eq!(fs::read(outside).unwrap(), b"public");
+    }
+
     use crate::sync::slot_rules::{public_path, test_keys};
 
     #[cfg(unix)]

@@ -220,7 +220,11 @@ fn set_aside(path: &Path, kind: &str, now_ms: u64, reason: String) -> VaultError
         n += 1;
         name = format!("vault.{kind}-{now_ms}-{n}.json");
     }
-    match std::fs::rename(path, path.with_file_name(&name)) {
+    let destination = path.with_file_name(&name);
+    if let Err(error) = fsutil::check_write(path).and_then(|()| fsutil::check_write(&destination)) {
+        return VaultError::Other(error);
+    }
+    match std::fs::rename(path, destination) {
         Ok(()) => VaultError::Unreadable { kept_as: Some(name), reason },
         Err(_) => VaultError::Unreadable { kept_as: None, reason },
     }
@@ -286,6 +290,7 @@ impl Vault {
 
     /// 放進(或取代)一筆,立刻存檔。第一次存東西時才產生金鑰並寫進 keychain。取代的時候舊的那一筆就沒了:插槽的金鑰換人一律用 `replace`。
     pub fn put(&mut self, keychain: &dyn Keychain, slot_id: &str, entry: &VaultEntry) -> Result<(), VaultError> {
+        fsutil::check_write(&self.path)?;
         self.ensure_key(keychain)?;
         self.seal_into(slot_id, entry)?;
         self.save()
@@ -294,6 +299,7 @@ impl Vault {
     /// 放進這個插槽的金鑰;原本是另一把(指紋不同)就把它改存成 retired 項目(`RETIRED_PREFIX`),不丟掉(spec §4.3:私鑰不自動刪除)。
     /// 兩件事一起存檔,回傳 retired 項目的 id。原本那一筆解不開就什麼都不改、回錯誤:不能換掉一把讀不出來的金鑰。
     pub fn replace(&mut self, keychain: &dyn Keychain, slot_id: &str, entry: &VaultEntry, now_ms: u64) -> Result<Option<String>, VaultError> {
+        fsutil::check_write(&self.path)?;
         self.ensure_key(keychain)?;
         let retired = match self.get(slot_id)? {
             Some(old) if old.fingerprint != entry.fingerprint => {
@@ -333,6 +339,7 @@ impl Vault {
 
     /// 拿掉一筆並存檔;回傳原本有沒有。
     pub fn remove(&mut self, slot_id: &str) -> Result<bool, VaultError> {
+        fsutil::check_write(&self.path)?;
         if self.file.entries.remove(slot_id).is_none() {
             return Ok(false);
         }
@@ -347,6 +354,7 @@ impl Vault {
     /// 改這台的 agent 設定並存檔。目前只有測試用到,所以只在測試編譯;plan 2 的設定畫面要用的時候,把 `#[cfg(test)]` 拿掉。
     #[cfg(test)]
     pub fn set_settings(&mut self, settings: AgentSettings) -> Result<(), VaultError> {
+        fsutil::check_write(&self.path)?;
         self.file.settings = settings;
         self.save()
     }
@@ -376,6 +384,7 @@ impl Vault {
     }
 
     fn save(&self) -> Result<(), VaultError> {
+        fsutil::check_write(&self.path)?;
         let bytes = serde_json::to_vec_pretty(&self.file).map_err(|e| VaultError::Other(AppError::Other(e.to_string())))?;
         let dir = self.path.parent();
         if let Some(dir) = dir {
@@ -428,6 +437,41 @@ pub fn stored_ids(path: &Path) -> Result<BTreeSet<String>, VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_unreadable_external_vault_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("vault.json");
+        std::fs::write(&path, b"unreadable vault").unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(Vault::open(&path, &MemKeychain::default(), 1).is_err());
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), b"unreadable vault");
+        assert!(!temp.path().join("vault.unreadable-1.json").exists());
+    }
+
+    #[test]
+    fn boundary_put_refuses_before_keychain_and_vault_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Default)]
+        struct CountingKeychain(AtomicUsize);
+        impl Keychain for CountingKeychain {
+            fn get(&self, _: &str) -> Result<Option<String>, AppError> { Ok(None) }
+            fn set(&self, _: &str, _: &str) -> Result<(), AppError> { self.0.fetch_add(1, Ordering::SeqCst); Ok(()) }
+            fn delete(&self, _: &str) -> Result<(), AppError> { Ok(()) }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("vault.json");
+        let keychain = CountingKeychain::default();
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(vault.put(&keychain, "slot", &entry("private")).is_err());
+        });
+        assert_eq!(keychain.0.load(Ordering::SeqCst), 0);
+        assert!(vault.ids().is_empty());
+        assert!(!path.exists());
+    }
+
     use crate::sync::runtime::SyncRuntime;
     use crate::sync::slot_rules::test_keys;
     use crate::sync::testkit::MemKeychain;

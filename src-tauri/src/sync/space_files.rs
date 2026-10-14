@@ -120,6 +120,7 @@ pub fn add_space_file(
     write_include: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<PathBuf, AppError> {
     let path = space_file_path(ssh_dir, file_name)?;
+    fsutil::check_write(&path)?;
     match initial {
         Some(bytes) => fsutil::atomic_write(&path, bytes, 0o600)?,
         // 空檔以 `create_new` 建立:檢查與建立之間剛出現的檔案、或一個斷掉的 symlink 都不會被空檔取代(同重新長出 space 檔)。
@@ -148,6 +149,7 @@ pub fn add_space_file(
 /// = 有人先放了,留著它 —— 之後的重載與讀檔會看到它(讀不到就是那個 space 的讀檔錯誤)。先 `try_exists` 再 `atomic_write` 的寫法有這個空窗,
 /// 還會把斷掉的 symlink 換成一般的空檔。
 pub fn create_empty_space_file(path: &Path) -> Result<bool, AppError> {
+    fsutil::check_write(path)?;
     if let Some(dir) = path.parent() {
         fsutil::ensure_dir_secure(dir)?;
     }
@@ -175,6 +177,10 @@ pub fn remove_space_file(
     write_include: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<Option<PathBuf>, AppError> {
     let path = space_file_path(ssh_dir, file_name)?;
+    fsutil::check_write(&path)?;
+    if path.try_exists()? {
+        fsutil::check_backup_write(&path)?;
+    }
     write_include()?;
     if !path.try_exists()? {
         return Ok(None);
@@ -213,6 +219,8 @@ pub fn rename_space_file(
 ) -> Result<RenameOutcome, AppError> {
     let old = space_file_path(ssh_dir, from)?;
     let new = space_file_path(ssh_dir, to)?;
+    fsutil::check_write(&old)?;
+    fsutil::check_write(&new)?;
     if from == to {
         return Ok(RenameOutcome::Unchanged);
     }
@@ -263,6 +271,8 @@ fn rename_without_links(
     new: &Path,
     write_include: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<RenameOutcome, AppError> {
+    fsutil::check_write(old)?;
+    fsutil::check_write(new)?;
     if new.try_exists()? {
         return Ok(RenameOutcome::TargetExists);
     }
@@ -328,6 +338,10 @@ pub fn keep_files_local(
     files: &[PathBuf],
     write_include: impl FnOnce(&[KeptFile]) -> Result<(), AppError>,
 ) -> Result<Vec<KeptFile>, AppError> {
+    fsutil::check_write(&local_dir(ssh_dir))?;
+    for path in files {
+        fsutil::check_write(path)?;
+    }
     let mut sources = Vec::new();
     for path in files {
         if path.try_exists()? {
@@ -356,6 +370,22 @@ fn create_kept_files(ssh_dir: &Path, sources: &[&PathBuf], kept: &mut Vec<KeptFi
         return Ok(());
     }
     let dir = local_dir(ssh_dir);
+    fsutil::check_write(&dir)?;
+    // Validate collision candidates for every source before creating the directory or a link.
+    let mut reserved = std::collections::HashSet::new();
+    for source in sources {
+        fsutil::check_write(source)?;
+        let name = source.file_name().and_then(|n| n.to_str()).ok_or_else(|| AppError::Other("file has no usable name".into()))?;
+        let stem = name.strip_suffix(".config").unwrap_or(name);
+        let mut n = 1u32;
+        loop {
+            let candidate = if n == 1 { name.to_string() } else { format!("{stem}-{n}.config") };
+            let target = dir.join(candidate);
+            fsutil::check_write(&target)?;
+            if std::fs::symlink_metadata(&target).is_err() && reserved.insert(target) { break; }
+            n += 1;
+        }
+    }
     fsutil::ensure_dir_secure(&dir)?;
     for source in sources {
         let name = source
@@ -377,6 +407,8 @@ fn create_kept_file(source: &Path, dir: &Path, file_name: &str) -> Result<(Strin
     loop {
         let name = if n == 1 { file_name.to_string() } else { format!("{stem}-{n}.config") };
         let target = dir.join(&name);
+        fsutil::check_write(source)?;
+        fsutil::check_write(&target)?;
         let made = if links { std::fs::hard_link(source, &target) } else { copy_new(source, &target) };
         match made {
             Ok(()) => return Ok((name, target)),
@@ -390,6 +422,8 @@ fn create_kept_file(source: &Path, dir: &Path, file_name: &str) -> Result<(Strin
 
 /// 複製成一個新檔:0600、`create_new`(目標已存在 → `AlreadyExists`,絕不覆蓋);寫到一半失敗就把它刪掉。
 fn copy_new(source: &Path, target: &Path) -> std::io::Result<()> {
+    fsutil::check_write_io(source)?;
+    fsutil::check_write_io(target)?;
     let bytes = std::fs::read(source)?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -409,6 +443,111 @@ fn copy_new(source: &Path, target: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn boundary_remove_checks_timestamped_backup_links_before_include() {
+        let root = fsutil::test_backups_root().to_path_buf();
+        let home = tempfile::tempdir_in(&root).unwrap();
+        let ssh = home.path().join(".ssh");
+        let file = space_file_name("Work", ID_A).unwrap();
+        let source = space_file_path(&ssh, &file).unwrap();
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"keep source").unwrap();
+        let mirror = fsutil::backup_dir_for(&source).unwrap();
+        std::fs::create_dir_all(&mirror).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"keep outside").unwrap();
+        let candidate = mirror.join(format!("{file}.123.bak"));
+        std::os::unix::fs::symlink(outside.path(), &candidate).unwrap();
+        let callback = Cell::new(false);
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(remove_space_file(&ssh, &file, || { callback.set(true); Ok(()) }).is_err());
+        });
+        assert!(!callback.get(), "backup link denial must precede Include update");
+        assert_eq!(std::fs::read(&source).unwrap(), b"keep source");
+        assert_eq!(std::fs::read(outside.path()).unwrap(), b"keep outside");
+        assert!(std::fs::symlink_metadata(candidate).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_kept_files_preflight_reserved_collisions_before_any_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        let ssh = root.join(".ssh");
+        let dir = local_dir(&ssh);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sources = Vec::new();
+        for name in ["one", "two"] {
+            let source = root.join(name).join("same.config");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(&source, name.as_bytes()).unwrap();
+            sources.push(source);
+        }
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("same-2.config")).unwrap();
+        let mut kept = Vec::new();
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(create_kept_files(&ssh, &sources.iter().collect::<Vec<_>>(), &mut kept).is_err());
+        });
+        assert!(kept.is_empty(), "no first link before a later collision denial");
+        assert!(!dir.join("same.config").exists());
+        assert_eq!(std::fs::read(outside).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn boundary_remove_preflights_backup_destination_before_include() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        let ssh = root.join(".ssh");
+        let file = space_file_name("Work", ID_A).unwrap();
+        let path = space_file_path(&ssh, &file).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"keep").unwrap();
+        let callback = Cell::new(false);
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(remove_space_file(&ssh, &file, || { callback.set(true); Ok(()) }).is_err());
+        });
+        assert!(!callback.get(), "backup refusal must precede Include update");
+        assert_eq!(std::fs::read(path).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn boundary_space_operations_refuse_before_include_callbacks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        let ssh = temp.path().join("external-ssh");
+        let file = space_file_name("Work", ID_A).unwrap();
+        let callback = Cell::new(false);
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(add_space_file(&ssh, &file, None, || { callback.set(true); Ok(()) }).is_err());
+            assert!(remove_space_file(&ssh, &file, || { callback.set(true); Ok(()) }).is_err());
+        });
+        assert!(!callback.get());
+        assert!(!ssh.exists());
+    }
+
+    #[test]
+    fn boundary_keep_files_preflights_every_source_before_first_move() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        let ssh = root.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        let inside = ssh.join("one.config");
+        let outside = temp.path().join("two.config");
+        std::fs::write(&inside, b"inside").unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        let callback = Cell::new(false);
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(keep_files_local(&ssh, &[inside.clone(), outside.clone()], |_| { callback.set(true); Ok(()) }).is_err());
+        });
+        assert!(!callback.get());
+        assert_eq!(std::fs::read(inside).unwrap(), b"inside");
+        assert_eq!(std::fs::read(outside).unwrap(), b"outside");
+        assert!(!local_dir(&ssh).exists());
+    }
+
     use std::cell::Cell;
 
     const ID_A: &str = "3fa2c1d9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
