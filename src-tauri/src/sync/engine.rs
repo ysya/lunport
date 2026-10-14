@@ -248,6 +248,7 @@ fn set_aside_unreadable_state(path: &Path, timestamp_ms: u64) -> std::io::Result
 
 /// 狀態檔還留在原路徑時附在說明後面的提示;同一段完整說明也放進 `save_blocked`。
 const STATE_LEFT_IN_PLACE: &str = "; the sync state file was left in place — restart SSHelter to retry";
+pub(crate) const FUTURE_LOCAL_STATE_MESSAGE: &str = "this sync state uses a newer local format";
 
 /// 啟動時 `state_v2::load` 失敗:回傳(要放進 `last_error` 的說明, `save_blocked`)。
 /// - 內容錯誤(`AppError::Other`:讀不懂的 JSON、更新版的格式)→ 搬到旁邊保留,之後照常存新狀態。搬不動 →
@@ -258,6 +259,11 @@ fn unreadable_state_outcome(path: &Path, timestamp_ms: u64, error: &AppError) ->
         let message = format!("{message}{STATE_LEFT_IN_PLACE}");
         (message.clone(), Some(message))
     };
+    let future_version = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64));
+    if let Some(version) = future_version.filter(|version| *version > u64::from(state_v2::STATE_VERSION_V2)) {
+        return left_in_place(format!("{FUTURE_LOCAL_STATE_MESSAGE} (version {version}); update SSHelter before changing sync"));
+    }
     match error {
         AppError::Other(_) => match set_aside_unreadable_state(path, timestamp_ms) {
             Ok(name) => (format!("{error}; the old file was kept as {name}"), None),
@@ -296,6 +302,13 @@ fn startup(loaded: Result<LoadedState, AppError>, keychain: &dyn Keychain, devic
                     Ok(k) => keys = Some(k),
                     // 換碼(更換同步碼的第 7 步,或其他電腦的重新加入)在「狀態已換成新帳戶、keychain 還是舊碼」之間中斷:以暫存的新碼補完。
                     // keychain 還是寫不進去時沿用暫存碼推導的金鑰、保留暫存碼,下次再換 —— 說明是 keychain 的事,不是「離開再加入」。
+                    Err(_) if s.read_only() => {
+                        if let Ok(Some((_, staged_keys))) = account::staged_code_for(keychain, &chain) {
+                            keys = Some(staged_keys);
+                            swap_pending = true;
+                        }
+                        s.last_error = Some(account::READ_ONLY_MESSAGE.to_string());
+                    }
                     Err(message) => match crate::sync::rotation::finish_interrupted_switch(keychain, &chain) {
                         Some(done) => {
                             keys = Some(done.keys);
@@ -795,6 +808,25 @@ mod tests {
     const WORDS: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
     #[test]
+    fn newer_account_startup_keeps_both_keychain_codes_without_promoting_the_swap() {
+        let keychain = MemKeychain::default();
+        let next_words = crate::sync::crypto::generate_mnemonic().unwrap();
+        let next_keys = crate::sync::crypto::derive_account(&next_words).unwrap();
+        keychain.set(MNEMONIC_ACCOUNT, WORDS).unwrap();
+        keychain.set(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT, &next_words).unwrap();
+        let mut state = SyncStateV2::fresh("Box").unwrap();
+        state.account = Some(crate::sync::state_v2::AccountState::new(&next_keys.chain_id));
+        state.account.as_mut().unwrap().remote_schema_version = Some(3);
+        let started = startup(Ok(LoadedState::Current(Box::new(state.clone()))), &keychain, "Box").unwrap();
+        assert_eq!(keychain.entry(MNEMONIC_ACCOUNT).as_deref(), Some(WORDS));
+        assert_eq!(keychain.entry(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT).as_deref(), Some(next_words.as_str()));
+        assert_eq!(started.keys.unwrap().chain_id, next_keys.chain_id, "the staged code may authenticate read-only format polling");
+        assert!(started.swap_pending, "the postponed swap remains pending");
+        state.last_error = Some(account::READ_ONLY_MESSAGE.to_string());
+        assert_eq!(started.state, state);
+    }
+
+    #[test]
     fn startup_loads_v2_keys_and_queues_a_joined_v1_state_for_the_upgrade() {
         let keychain = MemKeychain::default();
         keychain.set(MNEMONIC_ACCOUNT, WORDS).unwrap();
@@ -959,6 +991,31 @@ mod tests {
         assert!(Instant::now() < wait.deadline, "outside a backoff a save starts the round at once");
         drop(tx);
         assert!(wait_for_round(&rx, &wait).is_err(), "the sender is gone: the worker stops");
+    }
+
+
+
+    #[test]
+    fn future_local_state_is_preserved_and_startup_never_reads_the_keychain() {
+        struct NoCredentials;
+        impl Keychain for NoCredentials {
+            fn get(&self, _: &str) -> Result<Option<String>, AppError> { panic!("future state must not read credentials") }
+            fn set(&self, _: &str, _: &str) -> Result<(), AppError> { panic!("future state must not write credentials") }
+            fn delete(&self, _: &str) -> Result<(), AppError> { panic!("future state must not delete credentials") }
+        }
+        for version in [3, 4] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("sync-state.json");
+            let bytes = serde_json::to_vec(&serde_json::json!({"version": version, "account": {"chain_id": "future-account"}, "records": {"unreadable": "retained"}})).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let error = state_v2::load(&path).unwrap_err();
+            let (message, blocked) = unreadable_state_outcome(&path, 1234, &error);
+            assert!(blocked.is_some(), "newer local formats cannot be replaced by a fresh v2 state");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no unreadable archive may be created");
+            let start = startup(Err(AppError::Other(message)), &NoCredentials, "Old client").unwrap();
+            assert!(start.keys.is_none() && start.legacy.is_none() && !start.save_now && !start.swap_pending);
+        }
     }
 
     #[test]
