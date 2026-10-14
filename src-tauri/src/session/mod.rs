@@ -16,7 +16,7 @@ pub fn socket_path(app_data: &Path) -> PathBuf {
 /// finds it the same way, without the app.
 #[cfg(windows)]
 pub fn pipe_name() -> std::io::Result<String> {
-    crate::ipc::pipe_windows::pipe_name_for("session")
+    crate::ipc::pipe_windows::pipe_name_for(crate::app_profile::CURRENT.pipe_role(crate::app_profile::IpcRole::Session))
 }
 
 /// The broker's directory: its `lock`, and on macOS and Linux its `sock` (`ipc::server::take_lock` makes it owner-only).

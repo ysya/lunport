@@ -25,7 +25,7 @@ import {
 
 import { useUiStore, type SettingsCategory } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
-import { useHostsQuery, useLoadConfig, usePlatform, useTerminals } from "@/lib/queries";
+import { useHostsQuery, useLoadConfig, usePlatform, useTerminals, useIsDevelopment } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
 import { checkForUpdates } from "@/lib/updater";
 import { copyText } from "@/lib/clipboard";
@@ -203,6 +203,8 @@ function GeneralPane() {
   const updateChannel = normalizeUpdateChannel(useSettingsStore((s) => s.updateChannel));
   const setUpdateChannel = useSettingsStore((s) => s.setUpdateChannel);
   const platform = usePlatform();
+  const { data: isDevelopment } = useIsDevelopment();
+  const integrationsAllowed = isDevelopment === false;
   const [checking, setChecking] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   // Launch-at-login reflects the OS state (NOT a persisted flag): queried
@@ -213,13 +215,14 @@ function GeneralPane() {
 
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => setAppVersion(null));
+    if (!integrationsAllowed) return;
     autostartIsEnabled()
       .then(setLaunchAtLogin)
       .catch((e) => {
         setLaunchAtLogin(null);
         console.warn("[settings] autostart state query failed:", e);
       });
-  }, []);
+  }, [integrationsAllowed]);
 
   const onCheckNow = async () => {
     setChecking(true);
@@ -322,7 +325,7 @@ function GeneralPane() {
             <Switch
               id="set-launch-login"
               checked={launchAtLogin === true}
-              disabled={launchAtLogin === null}
+              disabled={!integrationsAllowed || launchAtLogin === null}
               onCheckedChange={onLaunchAtLogin}
             />
           </SettingsRow>
@@ -358,7 +361,8 @@ function GeneralPane() {
           >
             <Switch
               id="set-auto-update"
-              checked={autoCheckUpdates}
+              disabled={!integrationsAllowed}
+              checked={integrationsAllowed && autoCheckUpdates}
               onCheckedChange={setAutoCheckUpdates}
             />
           </SettingsRow>
@@ -367,7 +371,7 @@ function GeneralPane() {
             label="Update channel"
             description="Beta gets preview builds earlier and may be less stable. Switching back to Stable keeps your current version until a newer stable release is out."
           >
-            <Select value={updateChannel} onValueChange={(value) => onChannelChange(normalizeUpdateChannel(value))}>
+            <Select disabled={!integrationsAllowed} value={updateChannel} onValueChange={(value) => onChannelChange(normalizeUpdateChannel(value))}>
               <SelectTrigger id="set-update-channel" className="h-7 w-[10rem] text-sm">
                 <SelectValue />
               </SelectTrigger>
@@ -387,7 +391,7 @@ function GeneralPane() {
               size="sm"
               className="h-7"
               onClick={onCheckNow}
-              disabled={checking}
+              disabled={!integrationsAllowed || checking}
             >
               {checking ? "Checking…" : "Check now"}
             </Button>

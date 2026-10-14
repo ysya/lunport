@@ -32,6 +32,8 @@ pub enum Started {
 
 /// 拿 `dir/lock` 的鎖;別的 SSHelter 拿著 → None。`dir` 一併建好(只有目前使用者能存取)。
 pub(crate) fn take_lock(dir: &Path) -> Result<Option<File>, AppError> {
+    crate::fsutil::check_write(dir)?;
+    crate::fsutil::check_write(&dir.join("lock"))?;
     slot_files::ensure_keys_dir(dir)?;
     let file = OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("lock"))?;
     match file.try_lock() {
@@ -93,6 +95,9 @@ pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
     use std::os::unix::net::UnixListener;
 
     let sock = dir.join("sock");
+    crate::fsutil::check_write(dir)?;
+    crate::fsutil::check_write(&dir.join("lock"))?;
+    crate::fsutil::check_write(&sock)?;
     check_socket_path(&sock)?;
     let Some(lock) = take_lock(dir)? else { return Ok(Started::OtherInstance) };
     match std::fs::remove_file(&sock) {
@@ -382,5 +387,36 @@ mod tests {
         let _client = UnixStream::connect(agent.join("sock")).unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some(IDLE_TIMEOUT));
         assert_eq!(IDLE_TIMEOUT, Duration::from_secs(5 * 60));
+    }
+}
+
+#[cfg(test)]
+mod profile_boundary_tests {
+    use super::*;
+    use crate::{fsutil, write_policy::WritePolicy};
+    #[test]
+    fn a_confined_listener_refuses_an_outside_lock_before_creating_its_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        fsutil::with_test_write_policy(WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(take_lock(&outside).is_err());
+        });
+        assert!(!outside.exists());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_redirected_socket_is_not_removed_and_no_lock_is_created() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        std::fs::create_dir(&root).unwrap();
+        let sentinel = temp.path().join("keep");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        std::os::unix::fs::symlink(&sentinel, root.join("sock")).unwrap();
+        fsutil::with_test_write_policy(WritePolicy::Confined { root: root.clone() }, || {
+            assert!(listen_unix(&root, Arc::new(|_, _| {})).is_err());
+        });
+        assert!(root.join("sock").symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"keep");
+        assert!(!root.join("lock").exists());
     }
 }

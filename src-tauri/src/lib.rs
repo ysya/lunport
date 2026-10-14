@@ -62,6 +62,16 @@ fn app_platform() -> String {
     std::env::consts::OS.to_string()
 }
 
+#[tauri::command]
+fn app_is_development() -> bool {
+    app_profile::CURRENT == app_profile::AppProfile::Development
+}
+
+#[tauri::command]
+fn app_home_dir() -> Result<String, error::AppError> {
+    Ok(fsutil::home_dir()?.to_string_lossy().into_owned())
+}
+
 /// 設定「關閉視窗時收進系統匣（隱藏）而非結束程式」。
 #[tauri::command]
 fn app_set_close_to_tray(
@@ -132,18 +142,18 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
 }
 
 fn run_app(host: bool, start_hidden: bool) {
+    let context = tauri::generate_context!();
+    app_profile::CURRENT.verify_configuration(
+        &context.config().identifier,
+        context.config().product_name.as_deref(),
+    ).expect("SSHelter profile configuration mismatch");
     let builder = tauri::Builder::default();
     // Only one SSHelter runs at a time: a second launch hands over to the running instance and
     // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
     // sync engine or the SSH agent starts. It must be the first plugin registered.
-    // Release builds only: a debug build (`tauri dev`) has the same identifier, and would hand
-    // over to the installed SSHelter instead of running next to it.
+    // Each build profile has its own identifier and single-instance namespace.
     #[cfg(desktop)]
-    let builder = if cfg!(debug_assertions) {
-        builder
-    } else {
-        builder.plugin(tauri_plugin_single_instance::init(on_second_launch))
-    };
+    let builder = builder.plugin(tauri_plugin_single_instance::init(on_second_launch));
     let mut builder = builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
@@ -153,16 +163,13 @@ fn run_app(host: bool, start_hidden: bool) {
     // Desktop-only plugins (the crates are desktop-target dependencies).
     #[cfg(desktop)]
     {
+        builder = builder.manage(updater_channel::PendingBetaUpdate::default());
+        if app_profile::CURRENT.allows_os_integrations() {
+            builder = builder
+                .plugin(tauri_plugin_updater::Builder::new().build())
+                .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None));
+        }
         builder = builder
-            .plugin(tauri_plugin_updater::Builder::new().build())
-            // Beta 頻道暫存的更新(`PendingBetaUpdate` 只在桌面平台存在,所以在這裡才 manage)。
-            .manage(updater_channel::PendingBetaUpdate::default())
-            // Launch-at-login. macOS uses a LaunchAgent (no AppleScript); no
-            // extra args are passed to the binary on autostart.
-            .plugin(tauri_plugin_autostart::init(
-                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-                None,
-            ))
             // Global quick-connect hotkey; registration is driven from the
             // frontend (`useGlobalHotkey`) via the JS plugin API.
             .plugin(tauri_plugin_global_shortcut::Builder::new().build());
@@ -223,6 +230,8 @@ fn run_app(host: bool, start_hidden: bool) {
         })
         .invoke_handler(tauri::generate_handler![
             app_platform,
+            app_is_development,
+            app_home_dir,
             app_set_close_to_tray,
             updater_check_beta,
             updater_install_beta,
@@ -323,7 +332,7 @@ fn run_app(host: bool, start_hidden: bool) {
             hostkey_pending,
             hostkey_resolve,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| match event {
             // macOS: clicking SSHelter in the Dock or opening it from Finder while it runs starts

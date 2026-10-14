@@ -36,11 +36,15 @@ pub fn agent_dir(home: &Path) -> PathBuf {
 pub fn identity_agent_value() -> Result<String, AppError> {
     #[cfg(windows)]
     {
-        Ok(format!("//./pipe/{}", pipe_windows::pipe_name_for("agent")?))
+        Ok(format!("//./pipe/{}", pipe_windows::pipe_name_for(crate::app_profile::CURRENT.pipe_role(crate::app_profile::IpcRole::Agent))?))
     }
     #[cfg(not(windows))]
     {
-        Ok(SOCKET_VALUE.to_string())
+        if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Development {
+            Ok(agent_dir(&crate::fsutil::home_dir()?).join("sock").to_string_lossy().into_owned())
+        } else {
+            Ok(SOCKET_VALUE.to_string())
+        }
     }
 }
 
@@ -188,7 +192,7 @@ fn listen(app: &tauri::AppHandle) -> Result<server::Started, AppError> {
     }
     #[cfg(windows)]
     {
-        pipe_windows::listen(&dir, &pipe_windows::pipe_name_for("agent")?, "sshelter-agent", handle)
+        pipe_windows::listen(&dir, &pipe_windows::pipe_name_for(crate::app_profile::CURRENT.pipe_role(crate::app_profile::IpcRole::Agent))?, "sshelter-agent", handle)
     }
 }
 

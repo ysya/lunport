@@ -4,7 +4,6 @@ import {
   useQueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
-import { homeDir } from "@tauri-apps/api/path";
 import { enable as autostartEnable, isEnabled as autostartIsEnabled } from "@tauri-apps/plugin-autostart";
 import { toast } from "sonner";
 import { tauriInvoke } from "@/lib/ipc";
@@ -117,6 +116,17 @@ export function useLoadConfig() {
  * Host platform (`"macos" | "linux" | "windows"`). Cached indefinitely — it
  * never changes during a session. Used to gate macOS-only fields in the editor.
  */
+/** The immutable backend profile. Pending or unavailable profiles leave OS integrations disabled. */
+export function useIsDevelopment() {
+  return useQuery<boolean>({
+    queryKey: ["app", "isDevelopment"],
+    queryFn: () => tauriInvoke<boolean>("app_is_development"),
+    staleTime: Infinity,
+    gcTime: Infinity,
+    retry: false,
+  });
+}
+
 export function usePlatform() {
   return useQuery<string>({
     queryKey: ["app", "platform"],
@@ -128,13 +138,13 @@ export function usePlatform() {
 
 /**
  * The current user's home directory — the one the backend's `~/.ssh` is in (Tauri resolves both with
- * `dirs::home_dir`). Cached indefinitely. Key paths are written as `~/.ssh/…` only when they are inside its
+ * its compiled profile). Cached indefinitely. Key paths are written as `~/.ssh/…` only when they are inside its
  * `.ssh` directory (`toTildeSshPath`); until it is known, or if it can't be read, they are written as given.
  */
 export function useHomeDir() {
   return useQuery<string>({
     queryKey: ["app", "homeDir"],
-    queryFn: () => homeDir(),
+    queryFn: () => tauriInvoke<string>("app_home_dir"),
     staleTime: Infinity,
     gcTime: Infinity,
   });
@@ -777,7 +787,8 @@ export const launchAtLoginKey = ["app", "launchAtLogin"] as const;
 
 /** Whether SSHelter opens at login. The OS is the source of truth; Settings → General reads it again when it opens. */
 export function useLaunchAtLogin(enabled: boolean) {
-  return useQuery<boolean>({ queryKey: launchAtLoginKey, queryFn: () => autostartIsEnabled(), enabled });
+  const { data: isDevelopment } = useIsDevelopment();
+  return useQuery<boolean>({ queryKey: launchAtLoginKey, queryFn: () => autostartIsEnabled(), enabled: enabled && isDevelopment === false });
 }
 
 /**
@@ -790,6 +801,9 @@ export function useTurnOnLaunchAtLogin() {
   const queryClient = useQueryClient();
   return useMutation<void, unknown, void>({
     mutationFn: async () => {
+      if (await tauriInvoke<boolean>("app_is_development") !== false) {
+        throw "Launch at login is disabled in the development profile.";
+      }
       await autostartEnable();
       useSettingsStore.getState().setTrayVisible(true);
       await tauriInvoke<void>("tray_set_visible", { visible: true });

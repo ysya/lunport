@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { tauriInvoke } from "@/lib/ipc";
+import { useIsDevelopment } from "@/lib/queries";
 import { checkForUpdates } from "@/lib/updater";
 import { useSettingsStore } from "@/stores/settings";
 
@@ -46,9 +47,10 @@ export function useSyncBackendSettings(): void {
   // would otherwise only ever check once at launch, so while the preference is
   // on we ALSO re-check periodically and on window focus (throttled). The
   // updater module itself dedupes prompts per version.
+  const { data: isDevelopment } = useIsDevelopment();
   const autoCheckUpdates = useSettingsStore((s) => s.autoCheckUpdates);
   useEffect(() => {
-    if (!autoCheckUpdates) return;
+    if (!autoCheckUpdates || isDevelopment !== false) return;
 
     const RECHECK_MS = 4 * 3_600_000; // every 4 hours while running
     const FOCUS_THROTTLE_MS = 3_600_000; // at most one focus-triggered check per hour
@@ -72,5 +74,5 @@ export function useSyncBackendSettings(): void {
       window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
     };
-  }, [autoCheckUpdates]);
+  }, [autoCheckUpdates, isDevelopment]);
 }
