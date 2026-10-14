@@ -13,6 +13,8 @@ pub enum PendingAccountKind {
     CreateAccount,
     JoinAccount,
     CreateSpace,
+    LeaveAccount,
+    RotateAccount,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +41,10 @@ pub struct PendingAccountOperation {
     pub prepared_account: AccountState,
     pub space_id: Option<String>,
     pub prepared_space: Option<SpaceStateV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leave: Option<crate::sync::record_leave::LeavePlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<crate::sync::record_rotation::RotationPlan>,
 }
 
 pub fn validate_pending(op: &PendingAccountOperation) -> Result<(), AppError> {
@@ -55,6 +61,12 @@ pub fn validate_pending(op: &PendingAccountOperation) -> Result<(), AppError> {
     if let Some(marker) = &op.migration_gate {
         crate::sync::records_v3::validate_migration_gate(marker).map_err(|_| invalid())?;
     }
+    if op.kind != PendingAccountKind::LeaveAccount && op.leave.is_some() {
+        return Err(invalid());
+    }
+    if op.kind != PendingAccountKind::RotateAccount && op.rotation.is_some() {
+        return Err(invalid());
+    }
     match op.kind {
         PendingAccountKind::CreateAccount | PendingAccountKind::JoinAccount => {
             if op.staged_code_account.as_deref()
@@ -64,6 +76,26 @@ pub fn validate_pending(op: &PendingAccountOperation) -> Result<(), AppError> {
             {
                 return Err(invalid());
             }
+        }
+        PendingAccountKind::RotateAccount => {
+            if op.staged_code_account.as_deref()
+                != Some(format!("{PENDING_CODE_PREFIX}{}", op.id).as_str())
+                || op.space_id.is_some()
+                || op.prepared_space.is_some()
+                || op.leave.is_some()
+            {
+                return Err(invalid());
+            }
+            crate::sync::record_rotation::validate_plan(op)?;
+        }
+        PendingAccountKind::LeaveAccount => {
+            if op.staged_code_account.is_some()
+                || op.space_id.is_some()
+                || op.prepared_space.is_some()
+            {
+                return Err(invalid());
+            }
+            crate::sync::record_leave::validate_plan(op.leave.as_ref().ok_or_else(invalid)?)?;
         }
         PendingAccountKind::CreateSpace => {
             if op.staged_code_account.is_some()
@@ -407,6 +439,12 @@ fn resume_locked(env: &SyncEnv, provided: Option<&str>) -> Result<(), AppError> 
     crate::sync::record_round::preflight(env)?;
     let mut op = pending(env)?;
     validate_pending(&op)?;
+    if op.kind == PendingAccountKind::LeaveAccount {
+        return crate::sync::record_leave::resume_locked(env);
+    }
+    if op.kind == PendingAccountKind::RotateAccount {
+        return crate::sync::record_rotation::resume_locked(env, provided);
+    }
     let (keys, phrase) = pending_keys(env, &op, provided)?;
     if op.phase == PendingAccountPhase::Activated {
         // Cleanup remains a credential mutation, so an upgraded account must stop it too.
@@ -612,6 +650,8 @@ pub fn create_account(env: &SyncEnv, device_name: &str) -> Result<AccountCreatio
         prepared_account: account,
         space_id: None,
         prepared_space: None,
+        leave: None,
+        rotation: None,
     };
     save_pending(env, op)?;
     let result = resume_locked(env, Some(&code));
@@ -664,6 +704,8 @@ pub fn join_account(env: &SyncEnv, code: &str, device_name: &str) -> Result<(), 
         prepared_account: account,
         space_id: None,
         prepared_space: None,
+        leave: None,
+        rotation: None,
     };
     save_pending(env, op)?;
     let result = resume_locked(env, Some(&code));
@@ -715,6 +757,8 @@ pub fn create_space(env: &SyncEnv, name: &str) -> Result<String, AppError> {
         staged_code_account: None,
         prepared_account: account,
         space_id: Some(child.chain_id.clone()),
+        leave: None,
+        rotation: None,
         prepared_space: Some(SpaceStateV3 {
             selected: true,
             ..Default::default()

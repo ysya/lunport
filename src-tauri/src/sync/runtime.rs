@@ -61,7 +61,7 @@ pub struct SyncCore {
 #[derive(Default)]
 pub struct SyncRuntime {
     pub core: Mutex<SyncCore>,
-    pub lifecycle: Mutex<()>,
+    pub lifecycle: std::sync::Arc<Mutex<()>>,
     /// 保管庫檔(`vault::store`)的寫入互斥:開檔、改動、存檔全程持有(`vault::store::with_vault`)。同步執行緒、命令與 agent 共用。
     pub vault: Mutex<()>,
     /// Serializes newer-format publication with local material transactions. Acquire vault first for

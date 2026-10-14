@@ -71,22 +71,60 @@ struct AppKeyStore {
 }
 
 impl KeyStore for AppKeyStore {
-    fn key(&self, key_id: &str) -> Option<VaultKey> {
-        let state = self.app.state::<AppState>();
-        let core = state.sync.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        core.state.as_ref().and_then(|state| vault_key_in(state, key_id))
+    fn key(&self,key_id:&str)->Option<VaultKey>{
+        let state=self.app.state::<AppState>();let core=state.sync.core.lock().unwrap();
+        match core.format {
+            crate::sync::record_runtime::RuntimeFormat::Records=>{
+                let key=crate::sync::record_repository::resolve_key(core.records.as_ref()?,key_id).ok()?;
+                if key.status!=crate::sync::record_repository::KeyStatus::Available{return None;}
+                let public=key.public?;Some(VaultKey{name:public.name,public_key:public.public_key})
+            }
+            crate::sync::record_runtime::RuntimeFormat::Legacy if !core.legacy_paused=>core.state.as_ref().and_then(|s|vault_key_in(s,key_id)),
+            _=>None,
+        }
     }
+    fn private_text(&self,key_id:&str)->Result<Option<Zeroizing<String>>,String>{
+        crate::sync::engine::with_env(&self.app,|env|{
+            let _lifecycle=env.runtime.lifecycle.lock().unwrap();
+            let format={let core=env.runtime.core.lock().unwrap();if core.legacy_paused && core.format==crate::sync::record_runtime::RuntimeFormat::Legacy{return Err("Choose a workspace before using keys.".into());}core.format};
+            match format {
+                crate::sync::record_runtime::RuntimeFormat::Records=>{
+                    let _vault=env.runtime.vault.lock().unwrap();
+                    let(s,_)=crate::sync::record_runtime::snapshot(env).map_err(|e|e.to_string())?;
+                    let key=crate::sync::record_repository::resolve_key(&s,key_id).map_err(|e|e.to_string())?;
+                    let Some(vault_id)=&key.vault_id else{return Ok(None);};
+                    let vault=crate::vault::store::read_vault(&crate::vault::store::vault_path(&env.state_path),env.keychain).map_err(|_|"The vault is unavailable; its original file was retained.".to_string())?;
+                    let Some(entry)=vault.get(vault_id).map_err(|_|"The saved key cannot be read.".to_string())? else{return Ok(None);};
+                    if !super::record_material::matches(&key,&entry){return Err("The vault key does not match the authoritative public identity.".into());}
+                    Ok(Some(Zeroizing::new(entry.private_key.clone())))
+                }
+                crate::sync::record_runtime::RuntimeFormat::Legacy=>crate::vault::store::with_vault(env.runtime,&crate::vault::store::vault_path(&env.state_path),env.keychain,env.now(),|v|v.get(key_id)).map(|entry|entry.map(|entry|Zeroizing::new(entry.private_key.clone()))).map_err(|e|e.to_string()),
+                _=>Err("The workspace is blocked.".into()),
+            }
+        }).map_err(|e|e.to_string()).and_then(|r|r)
+    }
+}
 
-    fn private_text(&self, key_id: &str) -> Result<Option<Zeroizing<String>>, String> {
-        use crate::vault::store::{vault_path, with_vault};
-        crate::sync::engine::with_env(&self.app, |env| {
-            with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.get(key_id))
-                .map(|entry| entry.map(|entry| Zeroizing::new(entry.private_key.clone())))
-                .map_err(|error| error.to_string())
-        })
-        .map_err(|error| error.to_string())
-        .and_then(|inner| inner)
-    }
+fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirectory{
+    let(for_state,for_material,for_pin)=(app.clone(),app.clone(),app.clone());
+    let sources=super::record_directory::RecordSources{
+        snapshot:Box::new(move||crate::sync::engine::with_env(&for_state,|env|crate::sync::record_runtime::snapshot(env).map(|(s,_)|s)).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))),
+        material:Box::new(move|key|crate::sync::engine::with_env(&for_material,|env|{
+            let Some(id)=&key.vault_id else{return Ok(false);};let _vault=env.runtime.vault.lock().unwrap();
+            let vault=crate::vault::store::read_vault(&crate::vault::store::vault_path(&env.state_path),env.keychain).map_err(|_|super::directory::DirectoryError::Failed("The vault is unavailable; its original file was retained.".into()))?;
+            let entry=vault.get(id).map_err(|_|super::directory::DirectoryError::Failed("The saved key cannot be read.".into()))?;
+            Ok(entry.is_some_and(|entry|super::record_material::matches(key,&entry)))
+        }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?),
+        username:Box::new(||super::os_identity::current_username().map_err(|_|super::directory::DirectoryError::Failed("Cannot read this device's operating system username.".into()))),
+        pin:Box::new(move|id,endpoint,previous,candidate|crate::sync::engine::with_env(&for_pin,|env|{
+            let now=env.now();
+            let(s,_)=crate::sync::record_runtime::snapshot(env)?;
+            let host=crate::sync::record_repository::get_host(&s,id.as_str()).map_err(|e|AppError::Other(e.to_string()))?;
+            if matches!(host.host.scope,crate::sync::records_v3::HostScope::Space{..}){crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;}
+            crate::sync::record_runtime::mutate_records(env,|s|crate::sync::record_repository::pin_host_key(s,id.as_str(),endpoint,previous,candidate.clone(),now).map_err(|e|AppError::Other(e.to_string())))?;
+            env.events.wake();Ok::<_,AppError>(())
+        }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))),
+    };super::record_directory::RecordDirectory::new(sources)
 }
 
 /// The temporary directory over the app's ssh_config, sync state and keychain (`ssh_config_directory.rs`).
@@ -147,7 +185,11 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
             let confirmer = WindowConfirmer { hub: Arc::clone(&state.session.host_keys), surface: Arc::new(TauriHostKeySurface { app: app.clone() }), timeout: HOSTKEY_TIMEOUT };
             *slot = Some(Broker::new(
                 Arc::new(crate::ssh::russh_engine::RusshEngine::new()),
-                Arc::new(directory),
+                Arc::new(super::format_directory::FormatDirectory{
+                    lifecycle:Arc::clone(&state.sync.lifecycle),
+                    mode:{let app=app.clone();Box::new(move||{let state=app.state::<AppState>();let core=state.sync.core.lock().unwrap();(core.format,core.legacy_paused)})},
+                    legacy:Arc::new(directory),records:Arc::new(record_directory(app)),
+                }),
                 Arc::new(AppKeyStore { app: app.clone() }),
                 Arc::new(OsKeychain),
                 Arc::new(confirmer),

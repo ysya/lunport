@@ -517,6 +517,13 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
 
     match envelope.method.as_str() {
         "list_hosts" => {
+            let _lifecycle=state.sync.lifecycle.lock().unwrap();
+            let records={let core=state.sync.core.lock().unwrap();core.records.clone()};
+            if let Some(records)=records {
+                let hosts=crate::sync::record_repository::list_hosts(&records).map_err(|e|e.to_string())?.into_iter().filter(|h|policy.allowed_hosts.contains(&h.host.id)||policy.allowed_hosts.contains(&h.host.payload.alias)).map(|h|record_host_metadata(&h.host)).collect::<Vec<_>>();
+                return Ok(json!({"hosts":hosts}));
+            }
+            crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
             let doc = wait_for_loaded_doc(&state)?;
             let hosts: Vec<_> = host_summaries(&doc)
                 .into_iter()
@@ -525,6 +532,15 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
             Ok(json!({ "hosts": hosts }))
         }
         "get_effective_config" => {
+            let _lifecycle=state.sync.lifecycle.lock().unwrap();
+            let records={let core=state.sync.core.lock().unwrap();core.records.clone()};
+            if let Some(records)=records {
+                let alias=string_param(&envelope.params,"alias")?;
+                let host=crate::sync::record_repository::find_by_alias(&records,alias).map_err(|e|e.to_string())?;
+                if !policy.allowed_hosts.contains(&host.host.id){ensure_allowed(&policy,alias)?;}
+                return Ok(record_host_metadata(&host.host));
+            }
+            crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
             let alias = string_param(&envelope.params, "alias")?;
             ensure_allowed(&policy, alias)?;
             let doc = wait_for_loaded_doc(&state)?;
@@ -549,6 +565,20 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
     }
 }
 
+/// MCP sees endpoint and routing metadata, never notes or arbitrary imported directive values.
+fn record_host_metadata(host: &crate::sync::records_v3::HostRecord) -> Value {
+    json!({
+        "id": host.id,
+        "scope": host.scope,
+        "alias": host.payload.alias,
+        "hostname": host.payload.hostname,
+        "port": host.payload.port,
+        "user": host.payload.user,
+        "jump_ids": host.payload.jump,
+        "auth": host.payload.auth,
+        "key_id": host.payload.key_id,
+    })
+}
 fn string_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {
     params
         .get(key)
@@ -604,6 +634,8 @@ fn run_approved(
     policy: &McpPolicy,
     params: &Value,
 ) -> Result<Value, String> {
+    let _lifecycle=state.sync.lifecycle.lock().unwrap();
+    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
     crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
     let alias = string_param(params, "alias")?.to_string();
     let command = string_param(params, "command")?.to_string();
@@ -1294,6 +1326,13 @@ fn bridge_call(method: &str, params: Value) -> Result<Value, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn record_metadata_does_not_expose_notes_or_imported_directive_values(){
+        let host:crate::sync::records_v3::HostRecord=serde_json::from_value(json!({"id":"0123456789abcdef","scope":{"kind":"local"},"payload":{"schema":2,"alias":"web","hostname":"example.test","auth":"password","notes":"private-note-sentinel","imported":{"source":"private-source-sentinel","at_ms":1,"unsupported":[{"keyword":"setenv","value":"private-env-sentinel","requires_review":true}]}}})).unwrap();
+        let result=record_host_metadata(&host).to_string();
+        for private in ["private-note-sentinel","private-source-sentinel","private-env-sentinel"] {assert!(!result.contains(private));}
+        assert_eq!(record_host_metadata(&host)["hostname"],"example.test");
+    }
     #[test]
     fn development_mcp_execution_is_refused_before_spawning() {
         if crate::app_profile::CURRENT != crate::app_profile::AppProfile::Development { return; }

@@ -14,6 +14,7 @@ fn state() -> SyncStateV3 {
         rotation: None,
         migration_gate: None,
         shared_writes_blocked: false,
+        pending_account: None,
         relay_features: None,
         legacy_v1_backup: None,
         phrase_cleanup_pending: false,
