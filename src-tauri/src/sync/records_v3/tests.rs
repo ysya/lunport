@@ -298,3 +298,51 @@ fn editing_the_endpoint_clears_its_pin_and_rename_keeps_it_on_the_same_id() {
         assert!(changed.payload.host_key.is_none());
     }
 }
+
+#[test]
+fn migration_ids_match_independent_hash_vectors_and_utf8_byte_lengths() {
+    assert_eq!(
+        migration_host_id(&"a".repeat(64), "web").unwrap(),
+        "97ae2d71de67d6f1"
+    );
+    assert_eq!(
+        migration_host_id(&"a".repeat(64), "主機").unwrap(),
+        "631a98777505db35"
+    );
+    assert_ne!(
+        migration_host_id(&"a".repeat(64), "web").unwrap(),
+        migration_host_id(&"b".repeat(64), "web").unwrap()
+    );
+    assert!(migration_host_id("invalid-space", "web").is_err());
+    assert!(migration_host_id(&"a".repeat(64), "").is_err());
+}
+
+#[test]
+fn migration_preflight_preserves_mapping_order_deduplicates_sources_and_refuses_reserved_ids() {
+    let a = MigrationSource {
+        space_id: "a".repeat(64),
+        old_record_id: "web".into(),
+    };
+    let b = MigrationSource {
+        space_id: "b".repeat(64),
+        old_record_id: "web".into(),
+    };
+    let map = preflight_host_ids(&[a.clone(), b.clone(), a.clone()], &BTreeSet::new()).unwrap();
+    assert_eq!(map.len(), 2);
+    assert_eq!(map[&a], "97ae2d71de67d6f1");
+    assert_eq!(
+        map,
+        preflight_host_ids(&[b, a.clone()], &BTreeSet::new()).unwrap()
+    );
+    assert!(
+        matches!(preflight_host_ids(&[a.clone()], &BTreeSet::from(["97ae2d71de67d6f1".into()])), Err(RecordValidationError::MigrationCollision {id,..}) if id=="97ae2d71de67d6f1")
+    );
+    let legacy = MigrationSource {
+        space_id: "c".repeat(64),
+        old_record_id: "97ae2d71de67d6f1".into(),
+    };
+    assert!(matches!(
+        preflight_host_ids(&[a, legacy], &BTreeSet::new()),
+        Err(RecordValidationError::MigrationCollision { .. })
+    ));
+}
