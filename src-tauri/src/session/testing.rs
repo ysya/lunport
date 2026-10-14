@@ -58,6 +58,7 @@ impl FakeKeys {
 }
 
 impl KeyStore for FakeKeys {
+    fn private_text_noninteractive(&self,id:&str)->Result<Option<Zeroizing<String>>,String>{self.private_text(id)}
     fn key(&self, key_id: &str) -> Option<VaultKey> {
         self.keys.get(key_id).map(|(key, _)| key.clone())
     }

@@ -313,7 +313,7 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     let id = event.id().as_ref();
     match id {
         "quit" => app.exit(0),
-        "open" => crate::show_main_window(app),
+        "open" => crate::show_main_window_by_user(app),
         other => {
             if let Some(host_id) = other.strip_prefix("record-connect:") {
                 let (app, host_id) = (app.clone(), host_id.to_owned());

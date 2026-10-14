@@ -1,5 +1,5 @@
 //! The session broker (own-ssh spec §4, §7): it opens SSH sessions for its clients over the local IPC endpoint (a socket on macOS and
-//! Linux, a named pipe on Windows) — `sshelter connect` in this version, the MCP adapter in phase 2 — asks the client (or the app's
+//! Linux, a named pipe on Windows) — protocol-1 `sshelter connect` and the protocol-2 MCP adapter — asks the client (or the app's
 //! window, for host keys) what a login needs, and relays the terminal. Every SSH call it makes blocks, so it runs on plain threads, never
 //! in async code and never on the UI thread.
 
@@ -27,6 +27,7 @@ pub fn ipc_dir(app_data: &Path) -> PathBuf {
 /// The broker's state in the app (`AppState::session`).
 #[derive(Default)]
 pub struct SessionRuntime {
+    pub auth_questions: std::sync::Arc<auth_window::AuthHub>,
     /// The host key questions waiting for the window.
     pub host_keys: std::sync::Arc<hostkey_window::HostKeyHub>,
     /// The broker, once `app::start` built it.
@@ -36,6 +37,7 @@ pub struct SessionRuntime {
 
 pub mod app;
 pub mod auth;
+pub mod auth_window;
 pub mod broker;
 pub mod connect;
 pub mod directory;

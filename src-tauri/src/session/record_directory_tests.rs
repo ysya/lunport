@@ -137,6 +137,7 @@ fn a_missing_material_on_a_jump_refuses_the_whole_target() {
     web.jump = vec![GATE.into()];
     let s = add(&s, WEB, web);
     let (d, _, _) = fixture(s.clone(), false, true);
+    assert!(d.resolve_public(&HostQuery::Id(WEB.into())).is_ok(), "public route resolution must not require vault material");
     assert!(matches!(
         d.resolve(&HostQuery::Id(WEB.into())),
         Err(DirectoryError::Unsupported(_))

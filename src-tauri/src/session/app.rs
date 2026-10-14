@@ -83,26 +83,36 @@ impl KeyStore for AppKeyStore {
             _=>None,
         }
     }
-    fn private_text(&self,key_id:&str)->Result<Option<Zeroizing<String>>,String>{
+    fn private_text(&self,key_id:&str)->Result<Option<Zeroizing<String>>,String>{self.read_private(key_id,true)}
+    fn private_text_noninteractive(&self,key_id:&str)->Result<Option<Zeroizing<String>>,String>{self.read_private(key_id,false)}
+
+}
+
+impl AppKeyStore {
+    fn read_private(&self,key_id:&str,interactive:bool)->Result<Option<Zeroizing<String>>,String>{
+        if !interactive && !cfg!(windows) {return Err("needs interaction: this credential source has no verified noninteractive read".into());}
         crate::sync::engine::with_env(&self.app,|env|{
             let _lifecycle=env.runtime.lifecycle.lock().unwrap();
+            let noninteractive=crate::sync::env::NonInteractiveKeychain(env.keychain);
+            let read_keychain:&dyn Keychain=if interactive {&OsKeychain}else{&noninteractive};
             let format={let core=env.runtime.core.lock().unwrap();if core.legacy_paused && core.format==crate::sync::record_runtime::RuntimeFormat::Legacy{return Err("Choose a workspace before using keys.".into());}core.format};
             match format {
                 crate::sync::record_runtime::RuntimeFormat::Records=>{
+                    drop(_lifecycle);
                     let _vault=env.runtime.vault.lock().unwrap();
                     let(s,_)=crate::sync::record_runtime::snapshot(env).map_err(|e|e.to_string())?;
                     let key=crate::sync::record_repository::resolve_key(&s,key_id).map_err(|e|e.to_string())?;
                     let Some(vault_id)=&key.vault_id else{return Ok(None);};
-                    let vault=crate::vault::store::read_vault(&crate::vault::store::vault_path(&env.state_path),env.keychain).map_err(|_|"The vault is unavailable; its original file was retained.".to_string())?;
+                    let vault=crate::vault::store::read_vault(&crate::vault::store::vault_path(&env.state_path),read_keychain).map_err(|_|"The vault is unavailable; its original file was retained.".to_string())?;
                     let Some(entry)=vault.get(vault_id).map_err(|_|"The saved key cannot be read.".to_string())? else{return Ok(None);};
                     if !super::record_material::matches(&key,&entry){return Err("The vault key does not match the authoritative public identity.".into());}
                     Ok(Some(Zeroizing::new(entry.private_key.clone())))
                 }
-                crate::sync::record_runtime::RuntimeFormat::Legacy=>crate::vault::store::with_vault(env.runtime,&crate::vault::store::vault_path(&env.state_path),env.keychain,env.now(),|v|v.get(key_id)).map(|entry|entry.map(|entry|Zeroizing::new(entry.private_key.clone()))).map_err(|e|e.to_string()),
+                crate::sync::record_runtime::RuntimeFormat::Legacy=>crate::vault::store::with_vault(env.runtime,&crate::vault::store::vault_path(&env.state_path),read_keychain,env.now(),|v|v.get(key_id)).map(|entry|entry.map(|entry|Zeroizing::new(entry.private_key.clone()))).map_err(|e|e.to_string()),
                 _=>Err("The workspace is blocked.".into()),
             }
         }).map_err(|e|e.to_string()).and_then(|r|r)
-    }
+        }
 }
 
 fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirectory{
@@ -111,7 +121,7 @@ fn record_directory(app:&tauri::AppHandle)->super::record_directory::RecordDirec
         snapshot:Box::new(move||crate::sync::engine::with_env(&for_state,|env|crate::sync::record_runtime::snapshot(env).map(|(s,_)|s)).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?.map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))),
         material:Box::new(move|key|crate::sync::engine::with_env(&for_material,|env|{
             let Some(id)=&key.vault_id else{return Ok(false);};let _vault=env.runtime.vault.lock().unwrap();
-            let vault=crate::vault::store::read_vault(&crate::vault::store::vault_path(&env.state_path),env.keychain).map_err(|_|super::directory::DirectoryError::Failed("The vault is unavailable; its original file was retained.".into()))?;
+            let vault=crate::vault::store::read_vault(&crate::vault::store::vault_path(&env.state_path),&OsKeychain).map_err(|_|super::directory::DirectoryError::Failed("The vault is unavailable; its original file was retained.".into()))?;
             let entry=vault.get(id).map_err(|_|super::directory::DirectoryError::Failed("The saved key cannot be read.".into()))?;
             Ok(entry.is_some_and(|entry|super::record_material::matches(key,&entry)))
         }).map_err(|e|super::directory::DirectoryError::Failed(e.to_string()))?),
@@ -197,6 +207,8 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
         }
         slot.clone().expect("the broker was just built")
     };
+    broker.set_audit({let app=app.clone();Arc::new(move |entry|app.state::<AppState>().mcp.record(entry))});
+    broker.set_mcp_handler({let app=app.clone();Arc::new(move |connector,method,params,context,cancel|crate::mcp::records::dispatch(&app,connector,method,params,context,cancel))});
     let dir = match crate::fsutil::app_data_root() {
         Ok(root) => super::ipc_dir(&root),
         Err(error) => return BrokerStatus::Failed(error.to_string()),

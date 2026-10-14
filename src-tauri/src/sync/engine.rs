@@ -146,6 +146,8 @@ impl SyncEvents for TauriEvents {
 pub(crate) fn with_env<T>(app: &AppHandle, f: impl FnOnce(&SyncEnv) -> T) -> Result<T, AppError> {
     let state = app.state::<AppState>();
     let events = TauriEvents { app: app.clone() };
+    let noninteractive=crate::sync::env::NonInteractiveKeychain(&OsKeychain);
+    let credentials:&dyn Keychain=if state.background_credentials_only.load(Ordering::SeqCst){&noninteractive}else{&OsKeychain};
     let env = SyncEnv {
         doc: &state.doc,
         backed_up: &state.backed_up,
@@ -154,7 +156,7 @@ pub(crate) fn with_env<T>(app: &AppHandle, f: impl FnOnce(&SyncEnv) -> T) -> Res
         ssh_dir: crate::keys::ssh_dir()?,
         state_path: v1_state::state_path()?,
         home: None,
-        keychain: &OsKeychain,
+        keychain: credentials,
         relays: &HttpRelays,
         events: &events,
         clock: &SystemClock,
@@ -241,6 +243,9 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
             return;
         }
         while rx.try_recv().is_ok() {}
+        if app.state::<AppState>().background_credentials_only.load(Ordering::SeqCst) {
+            wait=Wait::after_round(Instant::now(),crate::sync::relay::IDLE_POLL_INTERVAL,Duration::ZERO);continue;
+        }
         if let Ok(next) = with_env(&app, |env| {
             let (format,legacy) = { let core=env.runtime.core.lock().unwrap(); (core.format,core.format == crate::sync::record_runtime::RuntimeFormat::Legacy && !core.legacy_paused && core.save_blocked.is_none()) };
             if legacy { let _ = round::sync_once(env); }
@@ -440,7 +445,9 @@ pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
         }
     }
     let keys = match &probe {
-        StartupProbe::Records{state,..} => Some(record_runtime::read_account_keys(state,&OsKeychain)),
+        StartupProbe::Records{state:records,..} => {
+            Some(read_startup_account_keys(records,&OsKeychain,state.background_credentials_only.load(Ordering::SeqCst)))
+        },
         _ => None,
     };
     {
@@ -1300,5 +1307,29 @@ mod tests {
         assert!(message.starts_with("sync is off in this SSHelter process: the sync lock could not be taken ("), "got: {message}");
         assert!(message.ends_with("); restart SSHelter to retry"), "got: {message}");
         assert_eq!(acquire_engine_lock(&not_a_dir).unwrap_err(), message);
+    }
+}
+
+/// Startup must not unlock the OS credential store merely because an MCP adapter started the host.
+fn read_startup_account_keys(records:&crate::sync::records_v3::SyncStateV3,source:&dyn Keychain,background:bool)->Result<Option<crate::sync::crypto::ChainKeys>,AppError>{
+    let noninteractive=crate::sync::env::NonInteractiveKeychain(source);
+    crate::sync::record_runtime::read_account_keys(records,if background{&noninteractive}else{source})
+}
+#[cfg(test)]
+mod noninteractive_startup_tests {
+    use super::*;
+    struct Locked;
+    impl Keychain for Locked {
+        fn get(&self,_:&str)->Result<Option<String>,AppError>{panic!("headless startup must not invoke interactive credential reads")}
+        fn set(&self,_:&str,_:&str)->Result<(),AppError>{panic!()}
+        fn delete(&self,_:&str)->Result<(),AppError>{panic!()}
+    }
+    #[test]
+    fn hidden_host_startup_account_and_vault_reads_fail_closed_without_os_prompts(){
+        let mut records:crate::sync::records_v3::SyncStateV3=serde_json::from_value(serde_json::json!({"version":3,"device_id":"a".repeat(32),"device_name":"fixture","relay_url":"http://127.0.0.1:8787","account":null,"spaces":{},"local":{"hosts":{},"keys":{}},"rotation":null,"relay_features":null,"legacy_v1_backup":null,"phrase_cleanup_pending":false,"migration_gate":null,"shared_writes_blocked":false,"pending_account":null,"notices":[],"last_sync_ms":null,"last_error":null})).unwrap();
+        let phrase=crate::sync::crypto::generate_mnemonic().unwrap();let keys=crate::sync::crypto::derive_account(&phrase).unwrap();records.account=Some(crate::sync::state_v2::AccountState::new(&keys.chain_id));
+        assert!(read_startup_account_keys(&records,&Locked,true).is_err());
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("vault.json");let bytes=br#"{"version":2,"key_account":"vault:key:0123456789abcdef","entries":{"slot":{"nonce":"x","ciphertext":"x"}}}"#;std::fs::write(&path,bytes).unwrap();
+        assert!(crate::vault::store::read_vault(&path,&crate::sync::env::NonInteractiveKeychain(&Locked)).is_err());assert_eq!(std::fs::read(path).unwrap(),bytes);
     }
 }

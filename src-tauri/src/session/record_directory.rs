@@ -116,8 +116,8 @@ impl RecordDirectory {
         )
     }
 }
-impl HostDirectory for RecordDirectory {
-    fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+impl RecordDirectory {
+    fn resolve_material(&self, query: &HostQuery, verify_material:bool) -> Result<Target, DirectoryError> {
         let state = (self.sources.snapshot)()?;
         let host = match query {
             HostQuery::Id(id) => repo::get_host(&state, id),
@@ -155,7 +155,7 @@ impl HostDirectory for RecordDirectory {
                         DirectoryError::Unsupported("The host has no key reference.".into())
                     })?;
                     let key = repo::resolve_key(&state, id).map_err(repository_error)?;
-                    if !(self.sources.material)(&key)? {
+                    if verify_material && !(self.sources.material)(&key)? {
                         return Err(DirectoryError::Unsupported(format!(
                             "{} needs key {id} material on this device.",
                             p.alias
@@ -195,6 +195,10 @@ impl HostDirectory for RecordDirectory {
         }
         Ok(Target { hops })
     }
+ }
+impl HostDirectory for RecordDirectory {
+    fn resolve(&self,query:&HostQuery)->Result<Target,DirectoryError>{self.resolve_material(query,true)}
+    fn resolve_public(&self,query:&HostQuery)->Result<Target,DirectoryError>{self.resolve_material(query,false)}
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
         self.host(host)?
             .host
