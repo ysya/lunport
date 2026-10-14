@@ -204,6 +204,34 @@ describe("records native client", () => {
       ["records_set_relay_url", { url: "https://relay.fixture.invalid" }],
     ]);
   });
+  it("retains authenticated sync intent and saved sync diagnostics from public DTOs", async () => {
+    const key = {
+      id: "a".repeat(32),
+      authority: "account" as const,
+      synced: false,
+      public: null,
+      status: "available" as const,
+    };
+    const status = recordsStatus({
+      overview: recordOverview({
+        keys: [key],
+        last_sync_ms: 1700000000000,
+        last_error: "Relay unavailable",
+      }),
+    });
+    stubBackend(async () => status);
+    const incoming = await api.fetchRecordsStatus();
+    const client = new QueryClient();
+    client.setQueryData(api.recordsStatusKey, recordsStatus());
+    api.applyRecordOverview(client, incoming.overview!);
+    expect(client.getQueryData(api.recordsStatusKey)).toEqual(status);
+    const unknown = { ...incoming.overview!, keys: [{ ...key, synced: null }] };
+    api.applyRecordOverview(client, unknown);
+    expect(
+      client.getQueryData<api.RecordsStatus>(api.recordsStatusKey)?.overview
+        ?.keys[0].synced,
+    ).toBeNull();
+  });
   it("keeps rejected host input and revision objects unchanged", async () => {
     stubBackend(async () => {
       throw "revision conflict";

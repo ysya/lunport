@@ -12,7 +12,6 @@ import {
 import { usePlatform, useTerminals } from "@/lib/queries";
 import { effectiveNewTab, terminalSupportsNewTab } from "@/lib/settings-logic";
 import { useSettingsStore } from "@/stores/settings";
-import { revealHidden } from "@/lib/sync-approvals";
 import { cn } from "@/lib/utils";
 import { RecordHostList } from "./HostList";
 import { RecordHostEditor } from "./HostEditor";
@@ -21,6 +20,7 @@ import { RecordsKeysPanel } from "./KeysPanel";
 import { RecordsAccountPanel } from "./AccountPanel";
 import { RecordsImportPanel } from "./ImportPanel";
 import { selectClass } from "./form";
+import { RecordSyncStatus } from "./SyncStatus";
 type Selection =
   | { kind: "none" }
   | { kind: "new"; nonce: number }
@@ -200,14 +200,10 @@ export function RecordsWorkspace({
           </Button>
         </div>
       )}
-      {(error || overview.last_error) && (
-        <p
-          role="status"
-          className="shrink-0 border-b p-3 text-xs text-destructive whitespace-pre-wrap"
-        >
-          {revealHidden(error ?? overview.last_error ?? "")}
-        </p>
-      )}
+      <RecordSyncStatus
+        lastSyncMs={overview.last_sync_ms}
+        error={error ?? overview.last_error}
+      />
       {overview.shared_writes_blocked && (
         <p
           role="status"

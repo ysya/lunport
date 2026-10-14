@@ -66,6 +66,7 @@ export type KeySlotPayload = {
 export type RecordKeyView = {
   id: string;
   authority: "local" | "account";
+  synced: boolean | null;
   public: KeySlotPayload | null;
   status: "available" | "needs_material" | "conflict" | "deleted";
 };
@@ -87,6 +88,7 @@ export type RecordOverview = {
     kind: "create_account" | "join_account" | "create_space";
     phase: string;
   } | null;
+  last_sync_ms: number | null;
   last_error: string | null;
 };
 export type RecordsStatus = {
