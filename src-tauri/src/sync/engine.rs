@@ -398,6 +398,21 @@ fn acquire_engine_lock_with(dir: &Path, attempts: u32, mut pause: impl FnMut()) 
     }
 }
 
+/// Select the startup snapshot and cross-process lock before credentials or runtime activation.
+fn startup_probe_with_lock(
+    mut probe: impl FnMut() -> crate::sync::record_runtime::StartupProbe,
+    take_lock: impl FnOnce() -> Result<File, String>,
+) -> (crate::sync::record_runtime::StartupProbe, Result<File, String>) {
+    let mut selected = probe();
+    let lock = take_lock();
+    if lock.is_ok() {
+        // The prior owner may finish a save or cutover while this process waits for the lock.
+        // Only the snapshot read under ownership can feed credentials, activation and first save.
+        selected = probe();
+    }
+    (selected, lock)
+}
+
 /// 啟動:取得同步鎖,載入狀態(v2;v1 交給背景執行緒升級),推導帳戶金鑰,開背景執行緒。狀態壞掉不阻擋 app 啟動
 /// (`unreadable_state_outcome`)。拿不到同步鎖的行程只讀一份狀態給 UI 看:不搬狀態檔、不讀 keychain、不開背景
 /// 執行緒、存檔 hook 不動作,`save_blocked` 讓所有會寫狀態的命令一律拒絕。
@@ -405,11 +420,18 @@ pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
     use crate::sync::record_runtime::{self, StartupProbe};
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
-    let probe = match v1_state::state_path() {
-        Ok(path) => record_runtime::probe_startup(&path,&default_device_name()),
-        Err(_) => StartupProbe::Blocked{kind:record_runtime::StartupErrorKind::Io,reason:"cannot locate sync state".into()},
-    };
-    let lock = fsutil::app_data_root().map_err(|e|engine_lock_error(&e)).and_then(|root|acquire_engine_lock(&root));
+    let (probe, lock) = startup_probe_with_lock(
+        || match v1_state::state_path() {
+            Ok(path) => record_runtime::probe_startup(&path, &default_device_name()),
+            Err(_) => StartupProbe::Blocked {
+                kind: record_runtime::StartupErrorKind::Io,
+                reason: "cannot locate sync state".into(),
+            },
+        },
+        || fsutil::app_data_root()
+            .map_err(|e| engine_lock_error(&e))
+            .and_then(|root| acquire_engine_lock(&root)),
+    );
     match lock {
         Ok(file) => { let _=ENGINE_LOCK.set(file); ENGINE_ACTIVE.store(true,Ordering::SeqCst); }
         Err(reason) => {
@@ -1131,6 +1153,141 @@ mod tests {
         });
         assert!(taken.is_ok(), "the lock is taken on the attempt after the old process let go");
         assert_eq!(pauses, 3);
+    }
+
+    fn startup_host(alias: &str) -> crate::sync::records_v3::HostPayload {
+        serde_json::from_value(serde_json::json!({
+            "schema": 2, "alias": alias, "hostname": "startup.invalid", "port": 22,
+            "user": "fixture", "auth": "password", "key_id": null, "jump": [],
+            "keepalive_secs": 30, "keepalive_max_missed": 3, "connect_timeout_secs": 15,
+            "host_key": null, "tags": [], "notes": "", "imported": null
+        }))
+        .unwrap()
+    }
+
+    // The previous owner writes while the real OS lock is held; no timing sleeps or credentials.
+    fn startup_after_holder_write(initial: Option<Vec<u8>>) -> crate::sync::testkit::TestDevice {
+        use crate::sync::testkit::{TestClock, TestDevice};
+        use crate::sync::{
+            record_repository as repo, record_runtime as runtime, records_v3::HostScope,
+        };
+        let relay = crate::sync::fake_relay::FakeRelay::new();
+        let device = TestDevice::new("a", &relay, &TestClock::new());
+        let path = device.env().state_path;
+        let runtime::StartupProbe::Records {
+            state: mut latest, ..
+        } = runtime::probe_startup(&path, "holder-final")
+        else {
+            panic!("temporary missing state")
+        };
+        if let Some(bytes) = initial {
+            if let Ok(crate::sync::records_v3::DecodedState::V3(previous)) =
+                crate::sync::records_v3::decode_state(std::str::from_utf8(&bytes).unwrap())
+            {
+                latest.device_id = previous.device_id;
+            }
+            fsutil::atomic_write(&path, &bytes, 0o600).unwrap();
+        }
+        let latest = repo::create_host(
+            &latest,
+            "0000000000000001",
+            HostScope::Local,
+            startup_host("holder-final"),
+            300,
+        )
+        .unwrap();
+        let root = path.parent().unwrap();
+        let old_process = acquire_engine_lock(root).unwrap();
+        let (probe, lock) = startup_probe_with_lock(
+            || runtime::probe_startup(&path, "contender"),
+            || {
+                acquire_engine_lock_with(root, 2, || {
+                    runtime::save_active(&path, &latest).unwrap();
+                    old_process.unlock().unwrap();
+                })
+            },
+        );
+        let _lock = lock.expect("the contender owns the lock after the holder's final save");
+        runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
+        assert_eq!(
+            device.runtime.core.lock().unwrap().format,
+            runtime::RuntimeFormat::Records,
+            "a completed cutover must select records mode"
+        );
+        runtime::mutate_records(&device.env(), |selected| {
+            repo::create_host(
+                selected,
+                "0000000000000002",
+                HostScope::Local,
+                startup_host("first-save"),
+                400,
+            )
+            .map_err(|error| AppError::Other(error.to_string()))
+        })
+        .unwrap();
+        let runtime::StartupProbe::Records {
+            state: saved,
+            fresh: false,
+        } = runtime::probe_startup(&path, "unused")
+        else {
+            panic!("persisted records")
+        };
+        assert_eq!(
+            saved.device_id, latest.device_id,
+            "do not persist a speculative contender identity"
+        );
+        assert_eq!(
+            repo::get_host(&saved, "0000000000000001")
+                .unwrap()
+                .host
+                .payload
+                .alias,
+            "holder-final",
+            "first save must retain the previous owner's final host"
+        );
+        assert_eq!(saved.device_name, "holder-final");
+        assert_eq!(
+            repo::get_host(&saved, "0000000000000002")
+                .unwrap()
+                .host
+                .payload
+                .alias,
+            "first-save"
+        );
+        device
+    }
+
+    #[test]
+    fn startup_lock_wait_retains_latest_records_through_first_save() {
+        use crate::sync::record_runtime::{probe_startup, StartupProbe};
+        let temp = tempfile::tempdir().unwrap();
+        let StartupProbe::Records { mut state, .. } =
+            probe_startup(&temp.path().join("missing"), "stale")
+        else {
+            panic!("records")
+        };
+        state.device_id = "d".repeat(32);
+        let state = crate::sync::record_repository::create_host(
+            &state,
+            "0000000000000001",
+            crate::sync::records_v3::HostScope::Local,
+            startup_host("stale"),
+            100,
+        )
+        .unwrap();
+        startup_after_holder_write(Some(serde_json::to_vec(&state).unwrap()));
+    }
+
+    #[test]
+    fn startup_lock_wait_recognizes_legacy_to_records_cutover() {
+        startup_after_holder_write(Some(
+            serde_json::to_vec(&SyncStateV2::fresh("legacy").unwrap()).unwrap(),
+        ));
+    }
+
+    #[test]
+    fn startup_lock_wait_retains_newly_created_state_instead_of_speculative_identity() {
+        startup_after_holder_write(None);
     }
 
     #[test]

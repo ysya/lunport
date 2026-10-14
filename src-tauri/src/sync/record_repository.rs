@@ -64,6 +64,7 @@ pub enum RepositoryError {
     RevisionConflict { id: String, current: RecordRevision },
     SpaceUnavailable(String),
     ReadOnlyAccount,
+    OpaqueHostAuthority(String),
     EndpointChanged(String),
     PinConflict(String),
     KeyNotFound(String),
@@ -506,6 +507,19 @@ fn records_mut<'a>(
         }
     }
 }
+/// Cached supported payloads remain inspectable, but cannot overwrite winning opaque authority.
+/// Imported review and route defects remain repairable; readiness alone is not an authority check.
+fn ensure_host_authority(state: &SyncStateV3, host: &HostRecord) -> Result<(), RepositoryError> {
+    let HostScope::Space { space_id } = &host.scope else {
+        return Ok(());
+    };
+    let space = &state.spaces[space_id];
+    let local = space.records.get(&record_key(RecordKind::Host, &host.id));
+    if space.sealed.values().any(|sealed| opaque_shadows(sealed, local, RecordKind::Host, &host.id)) {
+        return Err(RepositoryError::OpaqueHostAuthority(host.id.clone()));
+    }
+    Ok(())
+}
 fn checked_host(
     state: &SyncStateV3,
     id: &str,
@@ -519,6 +533,7 @@ fn checked_host(
         });
     }
     ensure_scope(state, &host.host.scope)?;
+    ensure_host_authority(state, &host.host)?;
     Ok(host)
 }
 fn ordered_record(
@@ -752,6 +767,7 @@ pub fn pin_host_key(
 ) -> Result<SyncStateV3, RepositoryError> {
     let host = get_host(state, id)?;
     ensure_scope(state, &host.host.scope)?;
+    ensure_host_authority(state, &host.host)?;
     if host.host.payload.hostname != endpoint.hostname || host.host.payload.port != endpoint.port {
         return Err(RepositoryError::EndpointChanged(id.into()));
     }

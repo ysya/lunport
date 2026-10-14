@@ -401,3 +401,226 @@ fn unknown_kinds_and_secret_identity_strings_never_become_persisted_hints() {
         json!({"id":KEY,"version":1,"updated_at_ms":1,"device_id":"d".repeat(32),"deleted":false});
     assert!(records_v3::decode_state(&value.to_string()).is_err());
 }
+
+// All mutation tests cross the authenticated merger and the persisted v3 restart boundary.
+fn opaque_mutation_fixture(pinned: bool) -> SyncStateV3 {
+    let (mut s, _, keys) = fixture();
+    local_key(&mut s);
+    if pinned {
+        s.spaces
+            .get_mut(&keys.chain_id)
+            .unwrap()
+            .records
+            .get_mut(&record_key(RecordKind::Host, ID))
+            .unwrap()
+            .record
+            .payload["host_key"] = json!(pin());
+    }
+    apply_host(&mut s, &keys, envelope(&keys, &future_host(), 10));
+    s
+}
+fn for_live_and_restarted(s: &SyncStateV3, check: impl Fn(&SyncStateV3)) {
+    for current in [s.clone(), restart(s)] {
+        let before = current.clone();
+        assert_eq!(
+            get_host(&current, ID).unwrap().readiness,
+            HostReadiness::NeedsReview
+        );
+        check(&current);
+        assert_eq!(
+            current, before,
+            "rejection preserves typed cache, sealed evidence and local material"
+        );
+        assert_eq!(
+            get_host(&restart(&current), ID).unwrap().readiness,
+            HostReadiness::NeedsReview
+        );
+    }
+}
+fn endpoint() -> HostEndpoint {
+    HostEndpoint {
+        hostname: "server.example.com".into(),
+        port: 22,
+    }
+}
+fn alternate_pin() -> StoredHostKey {
+    let public = slot(ECDSA);
+    StoredHostKey {
+        algorithm: public.key_type,
+        public_key: ECDSA.split_whitespace().nth(1).unwrap().into(),
+        fingerprint: public.fingerprint,
+        pinned_at_ms: 1,
+        pinned_by_device_id: "d".repeat(32),
+    }
+}
+#[test]
+fn winning_opaque_host_refuses_update_before_stale_endpoint_and_pin_become_ready() {
+    for_live_and_restarted(&opaque_mutation_fixture(true), |s| {
+        let host = get_host(s, ID).unwrap();
+        assert!(
+            matches!(update_host(s, ID, &host.revision, payload("renamed"), 300), Err(RepositoryError::OpaqueHostAuthority(id)) if id == ID),
+            "a stale typed revision cannot supersede winning unsupported authority"
+        );
+    });
+}
+#[test]
+fn winning_opaque_host_refuses_move_before_stale_payload_and_pin_become_local() {
+    for_live_and_restarted(&opaque_mutation_fixture(true), |s| {
+        let host = get_host(s, ID).unwrap();
+        assert!(
+            matches!(move_host(s, ID, &host.revision, HostScope::Local, 300), Err(RepositoryError::OpaqueHostAuthority(id)) if id == ID),
+            "opaque authority cannot be escaped by changing scope"
+        );
+        assert!(
+            matches!(move_host(s, ID, &host.revision, host.host.scope, 300), Err(RepositoryError::OpaqueHostAuthority(id)) if id == ID),
+            "same-scope no-op also checks canonical authority"
+        );
+    });
+}
+#[test]
+fn winning_opaque_host_refuses_delete_before_inventing_a_newer_tombstone() {
+    for_live_and_restarted(&opaque_mutation_fixture(true), |s| {
+        let host = get_host(s, ID).unwrap();
+        assert!(
+            matches!(delete_host(s, ID, &host.revision, 300), Err(RepositoryError::OpaqueHostAuthority(id)) if id == ID),
+            "a stale typed revision cannot delete unsupported authority"
+        );
+    });
+}
+#[test]
+fn winning_opaque_host_refuses_first_pin() {
+    for_live_and_restarted(&opaque_mutation_fixture(false), |s| {
+        assert!(
+            matches!(pin_host_key(s, ID, &endpoint(), None, pin(), 300), Err(RepositoryError::OpaqueHostAuthority(id)) if id == ID),
+            "an old endpoint cannot establish trust under unsupported authority"
+        );
+    });
+}
+#[test]
+fn winning_opaque_host_refuses_replacement_pin() {
+    for_live_and_restarted(&opaque_mutation_fixture(true), |s| {
+        assert!(
+            matches!(pin_host_key(s, ID, &endpoint(), Some(&pin()), alternate_pin(), 300), Err(RepositoryError::OpaqueHostAuthority(id)) if id == ID),
+            "old endpoint/pin CAS cannot supersede unsupported authority"
+        );
+    });
+}
+#[test]
+fn winning_opaque_host_refuses_idempotent_pin_acceptance() {
+    for_live_and_restarted(&opaque_mutation_fixture(true), |s| {
+        assert!(
+            matches!(pin_host_key(s, ID, &endpoint(), Some(&pin()), pin(), 300), Err(RepositoryError::OpaqueHostAuthority(id)) if id == ID),
+            "a repeated stale pin is not an accepted confirmation"
+        );
+    });
+}
+#[test]
+fn opaque_cached_id_cannot_be_recreated_but_unrelated_creation_remains_available() {
+    for_live_and_restarted(&opaque_mutation_fixture(true), |s| {
+        assert!(matches!(
+            create_host(s, ID, HostScope::Local, payload("replacement"), 300),
+            Err(RepositoryError::Validation(
+                RecordValidationError::DuplicateId(_)
+            ))
+        ));
+        let next = create_host(s, OTHER, HostScope::Local, payload("unrelated"), 300).unwrap();
+        assert_eq!(
+            get_host(&next, ID).unwrap().readiness,
+            HostReadiness::NeedsReview
+        );
+        assert_eq!(
+            get_host(&next, OTHER).unwrap().readiness,
+            HostReadiness::Ready
+        );
+        assert_eq!(next.spaces, s.spaces);
+        assert_eq!(next.local.keys, s.local.keys);
+    });
+}
+fn assert_known_host_mutations(s: &SyncStateV3) {
+    let host = get_host(s, ID).unwrap();
+    assert_eq!(host.readiness, HostReadiness::Ready);
+    let edited = update_host(s, ID, &host.revision, payload("edited"), 400).unwrap();
+    assert_eq!(
+        get_host(&edited, ID).unwrap().readiness,
+        HostReadiness::Ready
+    );
+    assert_eq!(get_host(&edited, ID).unwrap().host.payload.alias, "edited");
+    let moved = move_host(s, ID, &host.revision, HostScope::Local, 400).unwrap();
+    assert_eq!(get_host(&moved, ID).unwrap().host.scope, HostScope::Local);
+    assert_eq!(
+        get_host(&moved, ID).unwrap().readiness,
+        HostReadiness::Ready
+    );
+    let deleted = delete_host(s, ID, &host.revision, 400).unwrap();
+    assert!(get_host(&deleted, ID).is_err());
+    let pinned = pin_host_key(s, ID, &endpoint(), None, pin(), 400).unwrap();
+    assert_eq!(
+        get_host(&pinned, ID)
+            .unwrap()
+            .host
+            .payload
+            .host_key
+            .unwrap()
+            .fingerprint,
+        FP
+    );
+}
+#[test]
+fn older_lww_opaque_evidence_does_not_block_supported_host_mutations_after_restart() {
+    for (time, device) in [(99, "a"), (100, "e")] {
+        let (mut s, _, keys) = fixture();
+        let mut unsupported = future_host();
+        unsupported.updated_at_ms = time;
+        unsupported.device_id = device.repeat(32);
+        unsupported.version = u64::MAX;
+        apply_host(&mut s, &keys, envelope(&keys, &unsupported, 10));
+        assert!(!s.spaces[&keys.chain_id].sealed.is_empty());
+        let before = s.clone();
+        assert_known_host_mutations(&restart(&s));
+        assert_eq!(s, before);
+    }
+}
+#[test]
+fn newer_supported_replacement_reenables_repository_mutations_after_restart() {
+    let (mut s, _, keys) = fixture();
+    apply_host(&mut s, &keys, envelope(&keys, &future_host(), 10));
+    let mut supported = cached(ID, payload("replacement"), 11).record;
+    supported.updated_at_ms = 300;
+    let merged = record_merge::merge_space(
+        &s.spaces[&keys.chain_id],
+        &keys,
+        &PullResponse {
+            latest_seq: 11,
+            records: vec![envelope(&keys, &supported, 11)],
+        },
+        0,
+        &record_merge::AccountGate::Compatible,
+    );
+    assert_eq!(merged.gate, record_merge::AccountGate::Compatible);
+    s.spaces.insert(keys.chain_id.clone(), merged.section);
+    assert!(s.spaces[&keys.chain_id].sealed.is_empty());
+    assert_known_host_mutations(&restart(&s));
+}
+#[test]
+fn imported_needs_review_remains_editable_without_opaque_authority() {
+    let (mut s, _, keys) = fixture();
+    let host = s
+        .spaces
+        .get_mut(&keys.chain_id)
+        .unwrap()
+        .records
+        .get_mut(&record_key(RecordKind::Host, ID))
+        .unwrap();
+    host.record.payload["imported"] = json!({"source":"temporary fixture", "at_ms":1,"unsupported":[{"keyword":"ProxyCommand","value":"unsupported fixture","requires_review":true}]});
+    let s = restart(&s);
+    let view = get_host(&s, ID).unwrap();
+    assert_eq!(view.readiness, HostReadiness::NeedsReview);
+    let repaired = update_host(&s, ID, &view.revision, payload("reviewed"), 300).unwrap();
+    assert_eq!(
+        get_host(&repaired, ID).unwrap().readiness,
+        HostReadiness::Ready
+    );
+    assert!(move_host(&s, ID, &view.revision, HostScope::Local, 300).is_ok());
+    assert!(delete_host(&s, ID, &view.revision, 300).is_ok());
+    assert!(pin_host_key(&s, ID, &endpoint(), None, pin(), 300).is_ok());
+}
