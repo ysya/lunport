@@ -247,14 +247,19 @@ mod tests {
 
     #[test]
     fn directory_glob_covers_any_name() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["~/.ssh/config.d/*"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
-        assert_eq!(plan.path, "/home/f/.ssh/config.d/work");
+        assert_eq!(
+            PathBuf::from(&plan.path),
+            main_dir.join("config.d").join("work")
+        );
         assert_eq!(plan.covered_by.as_deref(), Some("~/.ssh/config.d/*"));
         assert_eq!(plan.include_value, None);
         assert_eq!(plan.final_name, "work");
@@ -262,24 +267,31 @@ mod tests {
 
     #[test]
     fn suffix_glob_appends_the_suffix() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["conf.d/*.conf"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.final_name, "work.conf");
-        assert_eq!(plan.path, "/home/f/.ssh/conf.d/work.conf");
+        assert_eq!(
+            PathBuf::from(&plan.path),
+            main_dir.join("conf.d").join("work.conf")
+        );
     }
 
     #[test]
     fn name_already_matching_the_suffix_is_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work.conf",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["conf.d/*.conf"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.final_name, "work.conf");
@@ -288,37 +300,46 @@ mod tests {
     #[test]
     fn fixed_file_includes_are_not_families() {
         // `Include ~/.orbstack/ssh/config` 是固定檔,不是可建檔家族 → 落到插入。
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["~/.orbstack/ssh/config"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.covered_by, None);
-        assert_eq!(plan.path, "/home/f/.ssh/work");
-        assert_eq!(plan.include_value.as_deref(), Some("~/.ssh/work"));
+        let expected = main_dir.join("work");
+        assert_eq!(PathBuf::from(&plan.path), expected);
+        let include_value = plan.include_value.as_deref().unwrap();
+        assert!(include_value.starts_with("~/"));
+        let expanded = crate::config::include::with_test_home(home.path(), || {
+            crate::config::include::expand_token(include_value).map(PathBuf::from)
+        });
+        assert_eq!(expanded, Some(expected));
     }
 
     #[test]
     fn non_home_main_dir_gets_an_absolute_include_value() {
-        let plan = plan_new_file(
-            "work",
-            Path::new("/etc/opt/ssh"),
-            &[],
-            Some(Path::new("/home/f")),
-        )
-        .unwrap();
-        assert_eq!(plan.include_value.as_deref(), Some("/etc/opt/ssh/work"));
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let main_dir = fixture.path().join("external").join("ssh");
+        let plan = plan_new_file("work", &main_dir, &[], Some(&home)).unwrap();
+        let include_path = PathBuf::from(plan.include_value.unwrap());
+        assert!(include_path.is_absolute());
+        assert_eq!(include_path, main_dir.join("work"));
     }
 
     #[test]
     fn multi_token_pattern_values_are_split() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["~/.orbstack/ssh/config ~/.ssh/config.d/*"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.covered_by.as_deref(), Some("~/.ssh/config.d/*"));
@@ -326,11 +347,16 @@ mod tests {
 
     #[test]
     fn prefers_a_family_under_the_main_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
-            &pat(&["/srv/shared/*", "~/.ssh/config.d/*"]),
-            Some(Path::new("/home/f")),
+            &main_dir,
+            &[
+                home.path().join("shared").join("*").to_string_lossy().into_owned(),
+                "~/.ssh/config.d/*".into(),
+            ],
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.covered_by.as_deref(), Some("~/.ssh/config.d/*"));
