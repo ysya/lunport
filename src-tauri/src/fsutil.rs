@@ -178,9 +178,10 @@ pub(crate) fn test_backups_root() -> &'static Path {
 /// root / prefix），例如 `/Users/frank/.ssh/config.d/leg.config` 的備份放在
 /// `<root>/Users/frank/.ssh/config.d/`。
 ///
-/// 此映射可逆：備份檔的隱含目標 = `/` + 備份父目錄相對 root 的路徑 + 檔名解析出的 `<name>`
-/// （見 `commands::resolve_restore_target`）。`.`/`..` 成分做字典式正規化，且 `..` 只會
-/// pop 已 push 的相對成分 —— 永遠不可能逃逸出 backups_root。
+/// Restore matches each managed target's canonical backup directory and file name;
+/// dropping a Windows drive prefix makes this mapping unsuitable for path inversion.
+/// Dot components are normalized lexically, and parent components only pop existing
+/// relative components, so the result cannot escape backups_root.
 pub fn backup_dir_for(target: &Path) -> Result<PathBuf, AppError> {
     let parent = target
         .parent()

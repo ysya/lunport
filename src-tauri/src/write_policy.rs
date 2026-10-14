@@ -31,6 +31,11 @@ fn projected(path: &Path) -> io::Result<PathBuf> {
     loop {
         match std::fs::canonicalize(&at) {
             Ok(mut resolved) => {
+                // Windows can report a child of a regular file as NotFound.
+                // Missing suffixes may only be projected below a directory.
+                if !missing.is_empty() && !std::fs::metadata(&at)?.is_dir() {
+                    return Err(denied());
+                }
                 for part in missing.iter().rev() {
                     resolved.push(part);
                 }
@@ -123,6 +128,7 @@ mod tests {
         std::fs::write(&file, b"keep").unwrap();
         let policy = WritePolicy::Confined { root };
         assert!(policy.check(&file.join("child")).is_err());
+        assert!(policy.check(&file.join("child/nested")).is_err());
         assert_eq!(std::fs::read(file).unwrap(), b"keep");
     }
 
