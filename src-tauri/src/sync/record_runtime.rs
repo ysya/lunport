@@ -63,6 +63,7 @@ fn fresh_records(device_name: &str) -> Result<SyncStateV3, AppError> {
         rotation: None,
         migration_gate: None,
         shared_writes_blocked: false,
+        pending_account: None,
         relay_features: None,
         legacy_v1_backup: None,
         phrase_cleanup_pending: false,
@@ -339,6 +340,72 @@ pub fn commit_candidate(
         return Err(crate::sync::runtime::superseded());
     }
     persist_candidate(&mut core, &env.state_path, candidate)
+}
+/// Explicit workspace pause is memory-only; it never loads credentials, upgrades, or saves sources.
+pub fn pause_legacy_workspace(env: &crate::sync::env::SyncEnv) -> Result<(), AppError> {
+    let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    let _doc = env.doc.lock().unwrap();
+    let mut core = env.runtime.core.lock().unwrap();
+    if core.format != RuntimeFormat::Legacy || core.save_blocked.is_some() || core.unsaved {
+        return Err(AppError::Other(
+            "the legacy workspace must be durable and available before pausing".into(),
+        ));
+    }
+    if core.legacy_paused {
+        return Ok(());
+    }
+    let generation = core
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| AppError::Other("sync state generation exhausted".into()))?;
+    core.legacy_paused = true;
+    core.generation = generation;
+    Ok(())
+}
+/// Caller owns lifecycle -> vault -> publication; this method takes the final Doc -> Core barrier.
+pub fn commit_migration_candidate(
+    env: &crate::sync::env::SyncEnv,
+    expected_generation: u64,
+    candidate: SyncStateV3,
+    keys: Option<crate::sync::crypto::ChainKeys>,
+) -> Result<u64, AppError> {
+    let mut doc = env.doc.lock().unwrap();
+    let mut core = env.runtime.core.lock().unwrap();
+    if core.generation != expected_generation {
+        return Err(crate::sync::runtime::superseded());
+    }
+    if core.format == RuntimeFormat::Blocked || core.save_blocked.is_some() {
+        return Err(AppError::Other(
+            "migration activation is blocked on this device".into(),
+        ));
+    }
+    if core.format == RuntimeFormat::Legacy && !core.legacy_paused {
+        return Err(AppError::Other(
+            "pause the legacy workspace before migration activation".into(),
+        ));
+    }
+    if keys.as_ref().is_some_and(|keys| {
+        candidate.account.as_ref().map(|a| a.chain_id.as_str()) != Some(keys.chain_id.as_str())
+    }) {
+        return Err(AppError::Other(
+            "migration account identity does not match its keys".into(),
+        ));
+    }
+    core.generation
+        .checked_add(1)
+        .ok_or_else(|| AppError::Other("sync state generation exhausted".into()))?;
+    save_active(&env.state_path, &candidate)?;
+    activate_probe(
+        &mut core,
+        StartupProbe::Records {
+            state: Box::new(candidate),
+            fresh: false,
+        },
+    )?;
+    core.account_keys = keys;
+    *doc = None;
+    Ok(core.generation)
 }
 /// The transform must be pure: no clock, credentials, network or event callbacks under core.
 /// Apply prepared overlays to the latest state here; disk failure preserves the original core.

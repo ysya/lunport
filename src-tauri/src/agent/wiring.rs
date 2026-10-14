@@ -244,6 +244,7 @@ fn put_include_first(doc: &mut SshConfigDoc, backed_up: &mut HashSet<PathBuf>, r
 /// Call under the document lock, before restoring or refreshing any config.
 fn check_writes_allowed(env: &SyncEnv) -> Result<(), AppError> {
     let core = env.runtime.core.lock().unwrap();
+    crate::sync::engine::legacy_mode_allowed(&core)?;
     if let Some(reason) = core.save_blocked.as_ref() {
         return Err(AppError::Other(reason.clone()));
     }

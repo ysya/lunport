@@ -1013,7 +1013,7 @@ mod tests {
         let (doc_path, ssh_g_path) = (config.to_path_buf(), config.to_path_buf());
         let sources = Sources {
             doc: Box::new(move || crate::config::include::load_doc(&doc_path).map_err(|error| error.to_string())),
-            effective: Box::new(move |alias| crate::config::intel::effective_config(alias, Some(&ssh_g_path)).map_err(|error| error.to_string())),
+            effective: Box::new(move |alias| crate::config::intel::effective_config_in_fixture(alias, &ssh_g_path).map_err(|error| error.to_string())),
             vault_key: Box::new(|_| None),
             password_saved: Box::new(|_| false),
         };
@@ -1096,7 +1096,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         std::fs::write(&config, "Host plain\n  HostName plain.example.com\n").unwrap();
-        let answer = crate::config::intel::effective_config("plain", Some(&config)).unwrap();
+        let answer = crate::config::intel::effective_config_in_fixture("plain", &config).unwrap();
         let local = answer.iter().find(|(key, _)| key == "user").map(|(_, user)| user.clone()).expect("ssh -G names a user");
         if !local.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
             return; // not a name that can be written into a ProxyJump line (a Windows account with a space, say)

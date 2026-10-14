@@ -1,5 +1,5 @@
 use super::*;
-use crate::sync::record::{Record, RecordKind};
+use crate::sync::record::{LocalRecord, Record, RecordKind};
 use crate::sync::slot_rules::test_keys;
 use std::collections::BTreeSet;
 
@@ -360,6 +360,9 @@ fn state() -> SyncStateV3 {
         relay_features: None,
         legacy_v1_backup: None,
         phrase_cleanup_pending: false,
+        migration_gate: None,
+        shared_writes_blocked: false,
+        pending_account: None,
         notices: vec![],
         last_sync_ms: None,
         last_error: None,
@@ -716,4 +719,32 @@ fn disk_state_retains_conflicting_key_material_but_the_identity_guard_refuses_it
         .record
         .deleted = true;
     assert!(matches!(decode_state(&serde_json::to_string(&s).unwrap()),Ok(DecodedState::V3(_))),"a tombstone retains local metadata for explicit recovery, not implicit authentication fallback");
+}
+
+#[test]
+fn migration_markers_require_an_account_and_valid_public_identity() {
+    let mut s = state();
+    s.migration_gate = Some(MigrationGate {
+        id: "a".repeat(32),
+        source_digest: "b".repeat(64),
+        phase: MigrationPhase::Publishing,
+    });
+    assert!(validate_state(&s).is_err());
+    s.account = Some(crate::sync::state_v2::AccountState::new(&"c".repeat(64)));
+    assert!(validate_state(&s).is_ok());
+    assert!(account_migration_pending(&s));
+    s.migration_gate.as_mut().unwrap().id = "invalid".into();
+    assert!(validate_state(&s).is_err());
+    s.migration_gate.as_mut().unwrap().id = "a".repeat(32);
+    s.migration_gate.as_mut().unwrap().source_digest = "invalid".into();
+    assert!(validate_state(&s).is_err());
+}
+#[test]
+fn an_unknown_cached_migration_phase_cannot_look_active() {
+    let mut s = state();
+    let mut account = crate::sync::state_v2::AccountState::new(&"c".repeat(64));
+    account.records.insert(crate::sync::record::record_key(RecordKind::Meta,crate::sync::record::ACCOUNT_META_ID),LocalRecord{record:Record{kind:RecordKind::Meta,id:crate::sync::record::ACCOUNT_META_ID.into(),version:1,updated_at_ms:1,device_id:"d".repeat(32),deleted:false,payload:serde_json::json!({"schema_version":3,"created_by_app_version":"fixture","migration":{"id":"a".repeat(32),"source_digest":"b".repeat(64),"phase":"future"}})},seq:1,dirty:false});
+    s.account = Some(account);
+    assert!(account_migration_pending(&s));
+    assert!(validate_state(&s).is_err());
 }

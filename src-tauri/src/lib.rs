@@ -185,10 +185,10 @@ fn run_app(host: bool, start_hidden: bool) {
                     window.show()?;
                 }
             }
-            mcp::initialize(app.handle(), host)?;
             sync::engine::initialize(app.handle())?;
+            mcp::initialize(app.handle(), host)?;
             // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
-            agent::start(app.handle());
+            if sync::engine::require_legacy(&app.state::<state::AppState>().sync).is_ok() { agent::start(app.handle()); }
             // The session broker that `sshelter connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
             session::app::start(app.handle());
             tray::rebuild_tray(app.handle(), &[])?;
@@ -235,6 +235,38 @@ fn run_app(host: bool, start_hidden: bool) {
             app_set_close_to_tray,
             updater_check_beta,
             updater_install_beta,
+            sync::record_commands::records_status,
+            sync::record_commands::records_host_create,
+            sync::record_commands::records_host_update,
+            sync::record_commands::records_host_delete,
+            sync::record_commands::records_host_move,
+            sync::record_commands::records_sync_now,
+            sync::record_commands::records_use_legacy,
+            sync::record_commands::records_pause_legacy,
+            sync::record_commands::records_connect,
+            sync::record_commands::records_import_preview,
+            sync::record_commands::records_import_confirm,
+            sync::record_commands::records_import_cancel,
+            sync::record_commands::records_import_resume,
+            sync::record_commands::records_import_pending,
+            sync::record_commands::records_set_relay_url,
+            sync::record_commands::records_account_words,
+            sync::record_commands::records_account_create,
+            sync::record_commands::records_account_join,
+            sync::record_commands::records_account_resume,
+            sync::record_commands::records_account_leave,
+            sync::record_commands::records_account_rotate,
+            sync::record_commands::records_space_create,
+            sync::record_commands::records_space_select,
+            sync::record_commands::records_key_import,
+            sync::record_commands::records_key_generate,
+            sync::record_commands::records_key_download,
+            sync::record_commands::records_key_sync,
+            sync::record_commands::records_migration_preview,
+            sync::record_commands::records_migration_confirm,
+            sync::record_commands::records_migration_cancel,
+            sync::record_commands::records_migration_resume,
+            sync::record_commands::records_migration_pending,
             config_load,
             config_list_files,
             config_plan_new_file,

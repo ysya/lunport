@@ -47,6 +47,7 @@ fn gate_message(gate: &AccountGate) -> &'static str {
 /// No SSH config, agent or vault path is touched by active record transport.
 pub(crate) fn preflight(env: &SyncEnv) -> Result<(), AppError> {
     crate::fsutil::check_write(&env.state_path)?;
+    require_no_pending_migration(env)?;
     match std::fs::symlink_metadata(&env.state_path) {
         Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
             return Err(error("record state must be a regular file"))
@@ -64,6 +65,15 @@ pub(crate) fn preflight(env: &SyncEnv) -> Result<(), AppError> {
     }
     if core.unsaved {
         crate::sync::runtime::save_core(&mut core, &env.state_path)?;
+    }
+    Ok(())
+}
+/// Call while holding lifecycle. Bounded journal inspection precedes credentials and shared IO.
+pub(crate) fn require_no_pending_migration(env: &SyncEnv) -> Result<(), AppError> {
+    if !crate::sync::record_migration::pending_migrations(env)?.is_empty() {
+        return Err(error(
+            "finish the pending account migration before changing shared data",
+        ));
     }
     Ok(())
 }

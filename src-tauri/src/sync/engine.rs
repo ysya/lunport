@@ -51,6 +51,16 @@ static ENGINE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
 /// 這個行程是否跑著同步引擎。搬進 space 檔的命令用它拒絕沒有引擎的行程(`migrate::refuse_while_sync_inactive`)。
+/// Legacy entry points must check under their transaction lock, before credentials or files.
+pub(crate) fn legacy_mode_allowed(core:&crate::sync::runtime::SyncCore)->Result<(),AppError>{
+    if core.format != crate::sync::record_runtime::RuntimeFormat::Legacy || core.legacy_paused {
+        return Err(AppError::Other("Legacy SSH operations are unavailable in this workspace; use the records interface.".into()));
+    }
+    if let Some(reason)=&core.save_blocked { return Err(AppError::Other(reason.clone())); }
+    Ok(())
+}
+pub(crate) fn require_legacy(runtime:&crate::sync::runtime::SyncRuntime)->Result<(),AppError>{legacy_mode_allowed(&runtime.core.lock().unwrap())}
+
 pub fn engine_active() -> bool {
     ENGINE_ACTIVE.load(Ordering::SeqCst)
 }
@@ -91,6 +101,9 @@ struct TauriEvents {
 
 impl SyncEvents for TauriEvents {
     fn status(&self) {
+        if let Ok(status)=crate::sync::record_commands::status(&self.app) { let _=self.app.emit("records://status",&status); }
+        let records={let state=self.app.state::<AppState>();let core=state.sync.core.lock().unwrap();if core.format==crate::sync::record_runtime::RuntimeFormat::Records{core.records.clone()}else{None}};
+        if let Some(records)=records {let _=crate::tray::rebuild_record_tray(&self.app,&records);return;}
         if let Ok(Ok(overview)) = with_env(&self.app, dto::overview) {
             let _ = self.app.emit("sync://status", &overview);
         }
@@ -157,7 +170,7 @@ pub fn note_file_written(path: &Path, items: &[Item]) {
         return;
     }
     let Some(app) = APP.get() else { return };
-    let _ = with_env(app, |env| files::note_written(env, path, items));
+    let _ = with_env(app, |env| { require_legacy(env.runtime)?; files::note_written(env, path, items); Ok::<_,AppError>(()) });
 }
 
 /// config 的命令改了主機區塊(改 `IdentityFile`、新增、刪除、改名、搬動、複製……),而且已經放掉 doc 與 backed_up 的鎖之後呼叫:馬上更新 agent 的設定
@@ -171,7 +184,7 @@ pub fn refresh_agent_config() {
         return;
     }
     let Some(app) = APP.get() else { return };
-    match with_env(app, crate::agent::wiring::refresh_env) {
+    match with_env(app, |env| { require_legacy(env.runtime)?; crate::agent::wiring::refresh_env(env) }) {
         Ok(Ok(_)) => {}
         Ok(Err(e)) | Err(e) => eprintln!("[agent] could not update the agent config: {e}"),
     }
@@ -229,7 +242,9 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
         }
         while rx.try_recv().is_ok() {}
         if let Ok(next) = with_env(&app, |env| {
-            let _ = round::sync_once(env);
+            let (format,legacy) = { let core=env.runtime.core.lock().unwrap(); (core.format,core.format == crate::sync::record_runtime::RuntimeFormat::Legacy && !core.legacy_paused && core.save_blocked.is_none()) };
+            if legacy { let _ = round::sync_once(env); }
+            else if format==crate::sync::record_runtime::RuntimeFormat::Records { let _=crate::sync::record_round::sync_once(env); }
             (round::next_delay(env), round::backoff_window(env))
         }) {
             (delay, backoff) = next;
@@ -387,61 +402,60 @@ fn acquire_engine_lock_with(dir: &Path, attempts: u32, mut pause: impl FnMut()) 
 /// (`unreadable_state_outcome`)。拿不到同步鎖的行程只讀一份狀態給 UI 看:不搬狀態檔、不讀 keychain、不開背景
 /// 執行緒、存檔 hook 不動作,`save_blocked` 讓所有會寫狀態的命令一律拒絕。
 pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
+    use crate::sync::record_runtime::{self, StartupProbe};
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
-    let lock = fsutil::app_data_root().map_err(|e| engine_lock_error(&e)).and_then(|root| acquire_engine_lock(&root));
-    match lock {
-        Ok(file) => {
-            let _ = ENGINE_LOCK.set(file);
-            ENGINE_ACTIVE.store(true, Ordering::SeqCst);
-        }
-        Err(reason) => {
-            // 檔案屬於持有鎖的那個行程,這裡絕不搬動或改寫它。
-            let mut shown = match v1_state::state_path().and_then(|path| state_v2::load(&path)) {
-                Ok(LoadedState::Current(s)) => *s,
-                Ok(LoadedState::Legacy(v1)) => upgrade::shell_state(&v1),
-                _ => SyncStateV2::fresh(&default_device_name())?,
-            };
-            shown.last_error = Some(reason.clone());
-            let mut core = state.sync.core.lock().unwrap();
-            core.state = Some(shown);
-            core.save_blocked = Some(reason);
-            return Ok(());
-        }
-    }
-    let (loaded, save_blocked) = match v1_state::state_path() {
-        Ok(path) => match state_v2::load(&path) {
-            Ok(loaded) => (Ok(loaded), None),
-            Err(e) => {
-                let (message, blocked) = unreadable_state_outcome(&path, SystemClock.now_ms(), &e);
-                (Err(AppError::Other(message)), blocked)
-            }
-        },
-        Err(e) => (Err(e), None),
+    let probe = match v1_state::state_path() {
+        Ok(path) => record_runtime::probe_startup(&path,&default_device_name()),
+        Err(_) => StartupProbe::Blocked{kind:record_runtime::StartupErrorKind::Io,reason:"cannot locate sync state".into()},
     };
-    let start = startup(loaded, &OsKeychain, &default_device_name())?;
-    {
-        let mut core = state.sync.core.lock().unwrap();
-        core.state = Some(start.state);
-        core.account_keys = start.keys;
-        core.legacy = start.legacy;
-        core.swap_pending = start.swap_pending;
-        core.save_blocked = save_blocked;
-        if start.save_now {
-            if let Ok(path) = v1_state::state_path() {
-                let _ = save_core(&mut core, &path);
-            }
+    let lock = fsutil::app_data_root().map_err(|e|engine_lock_error(&e)).and_then(|root|acquire_engine_lock(&root));
+    match lock {
+        Ok(file) => { let _=ENGINE_LOCK.set(file); ENGINE_ACTIVE.store(true,Ordering::SeqCst); }
+        Err(reason) => {
+            let mut core=state.sync.core.lock().unwrap();record_runtime::activate_probe(&mut core,probe)?;
+            core.save_blocked=Some(reason);return Ok(());
         }
     }
-    let (tx, rx) = mpsc::channel();
-    *WAKER.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(tx);
-    let handle = app.clone();
-    // 背景執行緒一啟動就跑第一輪(spec §6.4、§7.6),不必另外喚醒。
-    std::thread::Builder::new()
-        .name("sshelter-sync".into())
-        .spawn(move || worker_loop(handle, rx))
-        .map_err(AppError::Io)?;
+    let keys = match &probe {
+        StartupProbe::Records{state,..} => Some(record_runtime::read_account_keys(state,&OsKeychain)),
+        _ => None,
+    };
+    {
+        let mut core=state.sync.core.lock().unwrap();record_runtime::activate_probe(&mut core,probe)?;
+        match keys {
+            Some(Ok(keys))=>core.account_keys=keys,
+            Some(Err(_))=>{if let Some(s)=core.records.as_mut(){s.last_error=Some("The sync code is unavailable in this device's credential store.".into());}},
+            None=>{},
+        }
+    }
+    let(tx,rx)=mpsc::channel();*WAKER.get_or_init(||Mutex::new(None)).lock().unwrap()=Some(tx);
+    let handle=app.clone();std::thread::Builder::new().name("sshelter-sync".into()).spawn(move||worker_loop(handle,rx)).map_err(AppError::Io)?;
     Ok(())
+}
+
+/// Explicit Production legacy choice only; startup leaves these bytes and credentials untouched.
+pub(crate) fn resume_legacy(app:&AppHandle)->Result<(),AppError>{
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(|e|AppError::Other(e.into()))?;
+    let state=app.state::<AppState>();let lifecycle=state.sync.lifecycle.lock().unwrap();
+    // with_env only constructs borrowed adapters; pending_migrations only scans bounded files.
+    // Neither reacquires lifecycle, vault, publication, doc, or core (see their definitions).
+    let pending = with_env(app, crate::sync::record_migration::pending_migrations)??;
+    if !pending.is_empty() {
+        return Err(AppError::Other("Finish the pending account migration before reopening the legacy workspace.".into()));
+    }
+    let publication=state.sync.format_publication.lock().unwrap();
+    let loaded={let core=state.sync.core.lock().unwrap();
+        if core.format!=crate::sync::record_runtime::RuntimeFormat::Legacy || core.save_blocked.is_some(){return Err(AppError::Other("legacy workspace is unavailable".into()));}
+        if !core.legacy_paused{return Ok(());}
+        match (&core.state,&core.legacy){(Some(s),None)=>LoadedState::Current(Box::new(s.clone())),(None,Some(s))=>LoadedState::Legacy(Box::new(s.clone())),_=>return Err(AppError::Other("legacy state is unavailable".into()))}
+    };
+    let start=startup(Ok(loaded),&OsKeychain,&default_device_name())?;
+    {let mut core=state.sync.core.lock().unwrap();let generation=core.generation.checked_add(1).ok_or_else(||AppError::Other("sync state generation exhausted".into()))?;
+        core.state=Some(start.state);core.legacy=start.legacy;core.account_keys=start.keys;core.swap_pending=start.swap_pending;core.legacy_paused=false;core.generation=generation;
+        if start.save_now{save_core(&mut core,&v1_state::state_path()?)?;}
+    }
+    drop(publication);drop(lifecycle);crate::agent::start(app);wake();Ok(())
 }
 
 fn default_device_name() -> String {
@@ -474,7 +488,7 @@ async fn run<T: Send + 'static>(
         let state = handle.state::<AppState>();
         state.sync.note_activity(SystemClock.now_ms());
         let guard = lifecycle.then(|| state.sync.lifecycle.lock().unwrap());
-        let result = with_env(&handle, f);
+        let result = with_env(&handle, |env| { require_legacy(env.runtime)?; f(env) });
         drop(guard);
         let _ = with_env(&handle, |env| env.events.status());
         result?
@@ -812,6 +826,14 @@ mod tests {
 
     const WORDS: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
+    #[test]
+    fn legacy_commands_refuse_records_blocked_and_unconfirmed_startup(){
+        let mut core=crate::sync::runtime::SyncCore::default();
+        assert!(legacy_mode_allowed(&core).is_ok());
+        for (format,paused) in [(crate::sync::record_runtime::RuntimeFormat::Records,false),(crate::sync::record_runtime::RuntimeFormat::Blocked,false),(crate::sync::record_runtime::RuntimeFormat::Legacy,true)]{
+            core.format=format;core.legacy_paused=paused;assert!(legacy_mode_allowed(&core).is_err());
+        }
+    }
     #[test]
     fn newer_account_startup_keeps_both_keychain_codes_without_promoting_the_swap() {
         let keychain = MemKeychain::default();

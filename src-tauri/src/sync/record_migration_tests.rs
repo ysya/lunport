@@ -761,6 +761,8 @@ fn existing_pending_join_staged_code_is_read_only_until_explicit_migration_confi
         prepared_account: AccountState::new(&f.account.chain_id),
         space_id: None,
         prepared_space: None,
+        leave: None,
+        rotation: None,
     });
     f.d.keychain.set(&name, &f.code).unwrap();
     record_runtime::activate_probe(

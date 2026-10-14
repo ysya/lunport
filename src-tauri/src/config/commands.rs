@@ -695,12 +695,14 @@ fn after_host_edit<T>(edit: impl FnOnce() -> Result<T, AppError>, refresh: impl 
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn config_load(
     app: tauri::AppHandle,
     state: State<AppState>,
     path: Option<String>,
 ) -> Result<LoadResult, AppError> {
+    let _lifecycle=state.sync.lifecycle.lock().unwrap();
+    crate::sync::engine::require_legacy(&state.sync)?;
     let config_path = match path {
         Some(p) => PathBuf::from(p),
         None => default_config_path()?,
@@ -720,6 +722,7 @@ pub fn config_load(
     });
     let wake = {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let wake = load_wakes_sync(doc_lock.as_ref(), &doc, managed.as_deref());
         *doc_lock = Some(doc);
 
@@ -789,6 +792,7 @@ pub fn config_plan_new_file(
     name: String,
 ) -> Result<NewFilePlan, AppError> {
     let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     let doc = doc_lock
         .as_ref()
         .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
@@ -809,6 +813,7 @@ pub fn config_plan_new_file(
 #[tauri::command]
 pub fn config_create_file(state: State<AppState>, name: String) -> Result<String, AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     let mut backed_up_lock = state.backed_up.lock().unwrap();
     let retention = *state.backup_retention.lock().unwrap();
 
@@ -872,6 +877,7 @@ pub fn config_create_file(state: State<AppState>, name: String) -> Result<String
 #[tauri::command]
 pub fn config_list_files(state: State<AppState>) -> Result<Vec<String>, AppError> {
     let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     match doc_lock.as_ref() {
         None => Ok(Vec::new()),
         Some(doc) => Ok(doc.files.iter().map(|f| f.path.to_string_lossy().into_owned()).collect()),
@@ -881,6 +887,7 @@ pub fn config_list_files(state: State<AppState>) -> Result<Vec<String>, AppError
 #[tauri::command]
 pub fn config_get_host(state: State<AppState>, alias: String) -> Result<Option<HostDetail>, AppError> {
     let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     match doc_lock.as_ref() {
         None => Err(AppError::Other("no config loaded".to_string())),
         Some(doc) => Ok(host_detail(doc, &alias)),
@@ -895,6 +902,7 @@ pub fn config_save_host(
 ) -> Result<Option<HostDetail>, AppError> {
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
 
@@ -935,6 +943,7 @@ pub fn set_identity_file(
 pub fn config_set_identity_file(state: State<AppState>, alias: String, value: String) -> Result<Option<HostDetail>, AppError> {
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
         let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
@@ -952,6 +961,7 @@ pub fn config_add_host(
 ) -> Result<(), AppError> {
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
 
@@ -982,6 +992,7 @@ pub fn config_remove_host(
 ) -> Result<bool, AppError> {
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
 
@@ -1006,6 +1017,7 @@ pub fn config_rename_host(
 ) -> Result<Option<HostDetail>, AppError> {
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
 
@@ -1029,6 +1041,7 @@ pub fn config_move_host(
 ) -> Result<(), AppError> {
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
 
@@ -1089,6 +1102,7 @@ pub fn config_duplicate_host(
 ) -> Result<(), AppError> {
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
 
@@ -1108,6 +1122,7 @@ pub fn config_duplicate_host(
 #[tauri::command]
 pub fn config_read_file(state: State<AppState>, path: String) -> Result<String, AppError> {
     let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     match doc_lock.as_ref() {
         None => Err(AppError::Other("no config loaded".to_string())),
         Some(doc) => {
@@ -1128,6 +1143,7 @@ pub fn config_set_option_enabled(
     // 打開或關掉的可能是一行 `IdentityFile`:同樣要更新 agent 的設定。
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
 
@@ -1148,6 +1164,7 @@ pub fn config_set_tags(
     tags: Vec<String>,
 ) -> Result<(), AppError> {
     let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     let mut backed_up_lock = state.backed_up.lock().unwrap();
     let retention = *state.backup_retention.lock().unwrap();
 
@@ -1175,6 +1192,7 @@ pub fn config_reorder_hosts(
     // `agent/config` 依主機在 config 裡的順序列出它們。
     edit_hosts(|| {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let mut backed_up_lock = state.backed_up.lock().unwrap();
         let retention = *state.backup_retention.lock().unwrap();
 
@@ -1208,6 +1226,7 @@ pub fn config_set_backup_retention(
 #[tauri::command]
 pub fn config_check_drift(state: State<AppState>) -> Result<Vec<DriftInfo>, AppError> {
     let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     match doc_lock.as_ref() {
         None => Err(AppError::Other("no config loaded".to_string())),
         Some(doc) => drift(doc),
@@ -1217,6 +1236,7 @@ pub fn config_check_drift(state: State<AppState>) -> Result<Vec<DriftInfo>, AppE
 #[tauri::command]
 pub fn discover_hosts(state: State<AppState>) -> Result<Vec<crate::discover::Suggestion>, AppError> {
     let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     match doc_lock.as_ref() {
         None => Ok(Vec::new()),
         Some(doc) => Ok(crate::discover::discover_all(doc)),
@@ -1226,6 +1246,7 @@ pub fn discover_hosts(state: State<AppState>) -> Result<Vec<crate::discover::Sug
 #[tauri::command]
 pub fn config_list_backups(state: State<AppState>) -> Result<Vec<BackupInfo>, AppError> {
     let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
     match doc_lock.as_ref() {
         None => Ok(Vec::new()),
         Some(doc) => list_backups(doc),
@@ -1241,6 +1262,7 @@ pub fn config_restore_backup(
     // 1. Lock doc; none loaded → error. Validate BEFORE touching the filesystem.
     let target = {
         let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let doc = doc_lock
             .as_ref()
             .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
@@ -1276,6 +1298,7 @@ pub fn config_restore_backup(
 
     {
         let mut doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         *doc_lock = Some(doc);
 
         let mut backed_up_lock = state.backed_up.lock().unwrap();

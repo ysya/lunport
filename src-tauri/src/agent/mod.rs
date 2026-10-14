@@ -81,12 +81,15 @@ impl broker::AgentHost for AppAgentHost {
     fn keys(&self) -> Vec<broker::VaultKey> {
         let state = self.app.state::<AppState>();
         let core = state.sync.core.lock().unwrap();
+        if crate::sync::engine::legacy_mode_allowed(&core).is_err(){return Vec::new();}
         core.state.as_ref().map(broker::vault_keys).unwrap_or_default()
     }
 
     /// 使用者按了允許,金鑰卻拿不出來(keychain 鎖著、保管庫讀不懂)時回錯誤;原因由 broker 記(`refused`,帶插槽 id),這裡不再記一次。
     fn private_key(&self, slot_id: &str) -> Result<Option<Zeroizing<String>>, AppError> {
         crate::sync::engine::with_env(&self.app, |env| {
+            let _lifecycle=env.runtime.lifecycle.lock().unwrap();
+            crate::sync::engine::require_legacy(env.runtime)?;
             with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.get(slot_id))
                 .map(|entry| entry.map(|entry| Zeroizing::new(entry.private_key.clone())))
                 .map_err(AppError::from)
@@ -96,6 +99,8 @@ impl broker::AgentHost for AppAgentHost {
 
     fn settings(&self) -> AgentSettings {
         let result = crate::sync::engine::with_env(&self.app, |env| {
+            let _lifecycle=env.runtime.lifecycle.lock().unwrap();
+            crate::sync::engine::require_legacy(env.runtime)?;
             with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| Ok(vault.settings().clone()))
                 .map_err(AppError::from)
         })
@@ -112,6 +117,9 @@ impl broker::AgentHost for AppAgentHost {
     }
 
     fn host_name(&self, host_key: &KeyData) -> Option<String> {
+        let state=self.app.state::<AppState>();
+        let _lifecycle=state.sync.lifecycle.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync).ok()?;
         host_name_in_files(&known_hosts_files(), host_key)
     }
 

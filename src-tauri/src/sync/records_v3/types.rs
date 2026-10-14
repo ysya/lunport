@@ -6,6 +6,23 @@ pub const ACCOUNT_SCHEMA: u32 = 3;
 pub const STATE_VERSION: u32 = 3;
 pub const MAX_JUMPS: usize = 5;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MigrationPhase {
+    #[serde(rename = "account-gated")]
+    AccountGated,
+    #[serde(rename = "publishing")]
+    Publishing,
+    #[serde(rename = "active")]
+    Active,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationGate {
+    pub id: String,
+    pub source_digest: String,
+    pub phase: MigrationPhase,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostScope {

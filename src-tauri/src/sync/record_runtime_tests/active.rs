@@ -107,6 +107,92 @@ fn v1() -> crate::sync::state::SyncState {
 }
 
 #[test]
+fn explicit_legacy_pause_preserves_sources_doc_and_credentials_then_refuses_old_writers() {
+    let f = Fixture::new();
+    let env = f.env();
+    let legacy = legacy_state();
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    fs::write(&env.state_path, &bytes).unwrap();
+    let keys = ChainKeys::generate().unwrap();
+    let chain = keys.chain_id.clone();
+    {
+        let mut core = f.runtime.core.lock().unwrap();
+        core.state = Some(legacy.clone());
+        core.account_keys = Some(keys);
+        core.generation = 5;
+    }
+    *f.doc.lock().unwrap() = Some(crate::config::model::SshConfigDoc { files: vec![] });
+    pause_legacy_workspace(&env).unwrap();
+    let core = f.runtime.core.lock().unwrap();
+    assert!(core.legacy_paused);
+    assert_eq!(core.generation, 6);
+    assert_eq!(core.state.as_ref(), Some(&legacy));
+    assert_eq!(core.account_keys.as_ref().unwrap().chain_id, chain);
+    assert!(crate::sync::engine::legacy_mode_allowed(&core).is_err());
+    drop(core);
+    assert!(f.doc.lock().unwrap().is_some());
+    assert_eq!(fs::read(&env.state_path).unwrap(), bytes);
+    pause_legacy_workspace(&env).unwrap();
+    assert_eq!(f.runtime.core.lock().unwrap().generation, 6);
+}
+
+#[test]
+fn migration_activation_persists_before_switching_and_clears_legacy_doc() {
+    let f = Fixture::new();
+    activate_probe(
+        &mut f.runtime.core.lock().unwrap(),
+        StartupProbe::Legacy {
+            state: DecodedState::V2(Box::new(legacy_state())),
+        },
+    )
+    .unwrap();
+    *f.doc.lock().unwrap() = Some(crate::config::model::SshConfigDoc { files: vec![] });
+    let generation = f.runtime.core.lock().unwrap().generation;
+    let candidate = super::state();
+    let env = f.env();
+    let _life = f.runtime.lifecycle.lock().unwrap();
+    let _vault = f.runtime.vault.lock().unwrap();
+    let _publication = f.runtime.format_publication.lock().unwrap();
+    let next = commit_migration_candidate(&env, generation, candidate.clone(), None).unwrap();
+    assert_eq!(next, generation + 1);
+    let core = f.runtime.core.lock().unwrap();
+    assert_eq!(core.format, RuntimeFormat::Records);
+    assert_eq!(core.records.as_ref(), Some(&candidate));
+    assert!(core.state.is_none() && core.legacy.is_none());
+    assert!(f.doc.lock().unwrap().is_none());
+    assert_eq!(
+        serde_json::from_slice::<SyncStateV3>(&fs::read(&env.state_path).unwrap()).unwrap(),
+        candidate
+    );
+}
+
+#[test]
+fn migration_failed_save_and_stale_generation_preserve_legacy_runtime_and_source() {
+    let f = Fixture::new();
+    let legacy = legacy_state();
+    activate_probe(
+        &mut f.runtime.core.lock().unwrap(),
+        StartupProbe::Legacy {
+            state: DecodedState::V2(Box::new(legacy.clone())),
+        },
+    )
+    .unwrap();
+    let env = f.env();
+    let source = serde_json::to_vec(&legacy).unwrap();
+    fs::write(&env.state_path, &source).unwrap();
+    let generation = f.runtime.core.lock().unwrap().generation;
+    assert!(commit_migration_candidate(&env, generation + 1, super::state(), None).is_err());
+    assert_eq!(fs::read(&env.state_path).unwrap(), source);
+    fs::remove_file(&env.state_path).unwrap();
+    fs::create_dir(&env.state_path).unwrap();
+    assert!(commit_migration_candidate(&env, generation, super::state(), None).is_err());
+    let core = f.runtime.core.lock().unwrap();
+    assert_eq!(core.format, RuntimeFormat::Legacy);
+    assert_eq!(core.generation, generation);
+    assert_eq!(core.state.as_ref(), Some(&legacy));
+}
+
+#[test]
 fn activating_records_clears_legacy_keys_and_upgrade_state_in_the_single_core() {
     let mut core = SyncCore::default();
     core.state = Some(legacy_state());
