@@ -468,15 +468,13 @@ fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
             next.spaces.insert(id.clone(), merged.section);
             if gate == AccountGate::Compatible {
                 // Resolve inheritance and cross-scope routes against one complete candidate.
-                let repository = crate::sync::record_repository::snapshot(&next).map_err(|_| {
-                    error("record repository cannot be validated for synchronization")
-                })?;
-                review = repository.hosts.iter().any(|view| {
-                    matches!(&view.host.scope,
-                        crate::sync::records_v3::HostScope::Space { space_id } if space_id == &id)
-                        && view.readiness
-                            == crate::sync::record_repository::HostReadiness::NeedsReview
-                });
+                review = crate::sync::record_repository::scope_requires_relationship_review(
+                    &next,
+                    &crate::sync::records_v3::HostScope::Space {
+                        space_id: id.clone(),
+                    },
+                )
+                .map_err(|_| error("record repository cannot be validated for synchronization"))?;
             } else {
                 publish_gate(&mut next, &gate, None);
             }

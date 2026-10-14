@@ -372,6 +372,22 @@ pub fn snapshot(state: &SyncStateV3) -> Result<RepositorySnapshot, RepositoryErr
         groups: crate::sync::record_groups::list_groups(state)?,
     })
 }
+/// Upload review excludes connection-only import warnings and unavailable key material.
+/// Resolve against the complete snapshot so jumps can target hosts in another scope.
+pub(crate) fn scope_requires_relationship_review(
+    state: &SyncStateV3,
+    scope: &HostScope,
+) -> Result<bool, RepositoryError> {
+    let repository = snapshot(state)?;
+    Ok(repository.hosts.iter().any(|view| {
+        &view.host.scope == scope
+            && (view.group_error.is_some()
+                || ensure_host_authority(state, &view.host).is_err()
+                || alias_conflict(&repository.hosts, &view.host)
+                || route_indices(&repository.hosts, &view.host.id).is_err())
+    }))
+}
+
 pub fn list_hosts(state: &SyncStateV3) -> Result<Vec<HostView>, RepositoryError> {
     Ok(snapshot(state)?.hosts)
 }
