@@ -34,7 +34,7 @@ import {
 import {
   inheritedFields,
   toggleInheritance,
-  previewInheritance,
+  previewHostDraft,
 } from "./inheritance";
 import { FormatUpgradeReview } from "./FormatUpgradeReview";
 export function RecordHostEditor({
@@ -171,8 +171,7 @@ export function RecordHostEditor({
       const saved = selectHost(accepted.hosts, state.id);
       if (saved) setState(beginEditor(saved));
     });
-  const preview = previewInheritance(overview, state.scope, state.payload);
-  preview.error = host?.group_error ?? preview.error;
+  const preview = previewHostDraft(overview, state.scope, state.payload, host);
   const inherits = (field: InheritedField) =>
     state.payload.inherit?.includes(field) ?? false;
   const visible = { ...state.payload };

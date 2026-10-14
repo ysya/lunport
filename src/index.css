@@ -63,6 +63,7 @@
  * to a semantic --warning used only by the drift / "needs attention" banner.
  */
 :root {
+    color-scheme: light;
     --background: #ffffff;
     --foreground: #16181b;
     --card: #ffffff;
@@ -100,6 +101,7 @@
 }
 
 .dark {
+    color-scheme: dark;
     --background: #0f1011;
     --foreground: #f7f8f8;
     --card: #161718;
