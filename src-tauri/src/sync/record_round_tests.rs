@@ -1010,3 +1010,97 @@ fn route_review_uses_targets_from_other_scopes_in_the_candidate_snapshot() {
     assert_eq!(d.relay.rows(&source.chain_id).len(), 1);
     assert_eq!(d.relay.rows(&target.chain_id).len(), 1);
 }
+
+fn assert_import_warning_does_not_block_space_uploads(warning_already_clean: bool) {
+    use crate::session::directory::{DirectoryError, HostDirectory};
+    use crate::session::protocol::HostQuery;
+    use crate::session::record_directory::{RecordDirectory, RecordSources};
+    use crate::sync::record_repository::{self as repo, HostReadiness};
+
+    let (d, keys) = fixture();
+    let child = add_space(&d, &keys, true);
+    let mut warning = host("0000000000000002", "import-warning", 10);
+    warning.payload["imported"] = json!({
+        "source":"fixture/config","at_ms":1,"unsupported":[{
+            "keyword":"Include","value":"fixture/*.conf","requires_review":true
+        }]
+    });
+    let mut initial = vec![host(HOST, "valid-peer", 10)];
+    if warning_already_clean {
+        initial.push(warning.clone());
+    }
+    d.relay
+        .push(
+            &child.chain_id,
+            &child.auth_token,
+            &initial
+                .iter()
+                .map(|row| encode_record(&child, row, 0).unwrap())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    sync_once(&d.env()).unwrap();
+    record_runtime::mutate_records(&d.env(), |s| {
+        let current = repo::get_host(s, HOST).unwrap();
+        let mut payload = current.host.payload;
+        payload.notes = "Edited while an imported host awaits connection review".into();
+        let mut next = repo::update_host(s, HOST, &current.revision, payload, 20).unwrap();
+        if !warning_already_clean {
+            next.spaces
+                .get_mut(&child.chain_id)
+                .unwrap()
+                .records
+                .insert(
+                    record_key(warning.kind, &warning.id),
+                    LocalRecord {
+                        record: warning.clone(),
+                        seq: 0,
+                        dirty: true,
+                    },
+                );
+        }
+        Ok(next)
+    })
+    .unwrap();
+    let before = state(&d);
+    assert_eq!(
+        before.spaces[&child.chain_id].records[&record_key(warning.kind, &warning.id)].dirty,
+        !warning_already_clean
+    );
+    let report = sync_once(&d.env()).unwrap();
+    assert!(!report.review_required);
+    assert!(report.pushed >= 1);
+    let current = state(&d);
+    assert!(current.spaces[&child.chain_id]
+        .records
+        .values()
+        .all(|row| !row.dirty));
+    assert_eq!(d.relay.rows(&child.chain_id).len(), 2);
+    let imported = repo::get_host(&current, &warning.id).unwrap();
+    assert_eq!(imported.readiness, HostReadiness::NeedsReview);
+    assert!(imported.effective_payload.jump.is_empty());
+    assert_eq!(
+        repo::get_host(&current, HOST).unwrap().readiness,
+        HostReadiness::Ready
+    );
+    let directory = RecordDirectory::new(RecordSources {
+        snapshot: Box::new(move || Ok(current.clone())),
+        material: Box::new(|_| panic!("review must precede key material access")),
+        username: Box::new(|| panic!("review must precede username resolution")),
+        pin: Box::new(|_, _, _, _| panic!("review must precede pinning")),
+    });
+    assert!(matches!(
+        directory.resolve(&HostQuery::Id(warning.id)),
+        Err(DirectoryError::Unsupported(_))
+    ));
+}
+
+#[test]
+fn dirty_import_warning_allows_valid_peer_upload_but_still_blocks_connection() {
+    assert_import_warning_does_not_block_space_uploads(false);
+}
+
+#[test]
+fn clean_import_warning_allows_valid_peer_upload_but_still_blocks_connection() {
+    assert_import_warning_does_not_block_space_uploads(true);
+}

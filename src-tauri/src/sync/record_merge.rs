@@ -19,7 +19,7 @@ use crate::sync::record::{
 };
 use crate::sync::records_v3::{
     decode_host, decode_keyslot, validate_migration_gate, HostScope, MigrationPhase, SpaceStateV3,
-    TypedRecord, ACCOUNT_SCHEMA, MIN_ACCOUNT_SCHEMA,
+    ACCOUNT_SCHEMA, MIN_ACCOUNT_SCHEMA,
 };
 use crate::sync::relay::{PullResponse, PushItem};
 use crate::sync::slot_rules::is_slot_id;
