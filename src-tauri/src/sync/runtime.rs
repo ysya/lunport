@@ -10,6 +10,8 @@ use std::sync::{Mutex, MutexGuard};
 use crate::error::AppError;
 use crate::sync::crypto::ChainKeys;
 use crate::sync::env::SyncEnv;
+use crate::sync::record_runtime::RuntimeFormat;
+use crate::sync::records_v3::SyncStateV3;
 use crate::sync::state::SyncState as LegacyState;
 use crate::sync::state_v2::{self, SyncStateV2};
 
@@ -35,6 +37,10 @@ pub const UPGRADING_MESSAGE: &str = "SSHelter is upgrading sync on this device; 
 #[derive(Default)]
 pub struct SyncCore {
     pub generation: u64,
+    pub format: RuntimeFormat,
+    pub records: Option<SyncStateV3>,
+    /// Probe-selected legacy sources wait for explicit workspace choice or migration.
+    pub legacy_paused: bool,
     pub state: Option<SyncStateV2>,
     pub account_keys: Option<ChainKeys>,
     pub legacy: Option<LegacyState>,
@@ -107,6 +113,7 @@ impl<'a> MaterialTransaction<'a> {
         let publication = env.runtime.format_publication.lock().unwrap();
         {
             let core = env.runtime.core.lock().unwrap();
+            legacy_writes_allowed(&core)?;
             let state = core.state.as_ref().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
             crate::sync::account::format_writes_allowed(state)?;
         }
@@ -119,6 +126,14 @@ impl<'a> MaterialTransaction<'a> {
         let mut vault = crate::vault::store::Vault::open(&crate::vault::store::vault_path(&env.state_path), env.keychain, env.now())?;
         f(&mut vault)
     }
+}
+
+/// Old file, slot and upgrade helpers must never enter an active records or paused workspace.
+pub(crate) fn legacy_writes_allowed(core: &SyncCore) -> Result<(), AppError> {
+    if core.format != RuntimeFormat::Legacy || core.records.is_some() || core.legacy_paused {
+        return Err(AppError::Other("legacy SSH workspace is not active".into()));
+    }
+    Ok(())
 }
 
 pub fn superseded() -> AppError {
@@ -134,12 +149,20 @@ pub fn save_core(core: &mut SyncCore, state_path: &Path) -> Result<(), AppError>
     if let Some(reason) = &core.save_blocked {
         return Err(AppError::Other(reason.clone()));
     }
-    if core.legacy.is_some() {
-        return Err(AppError::Other(UPGRADING_MESSAGE.to_string()));
-    }
-    let result = match core.state.as_ref() {
-        Some(s) => state_v2::save(state_path, s),
-        None => Ok(()),
+    let result = match core.format {
+        RuntimeFormat::Records => crate::sync::record_runtime::active_state(core)
+            .and_then(|state| crate::sync::record_runtime::save_active(state_path, state)),
+        RuntimeFormat::Blocked => return Err(AppError::Other("sync workspace is blocked".into())),
+        RuntimeFormat::Legacy => {
+            legacy_writes_allowed(core)?;
+            if core.legacy.is_some() {
+                return Err(AppError::Other(UPGRADING_MESSAGE.to_string()));
+            }
+            match core.state.as_ref() {
+                Some(state) => state_v2::save(state_path, state),
+                None => Ok(()),
+            }
+        }
     };
     core.unsaved = result.is_err();
     result
@@ -154,6 +177,7 @@ pub fn save_core(core: &mut SyncCore, state_path: &Path) -> Result<(), AppError>
 /// 呼叫端不能把 Err 當成「什麼都沒改」。
 pub fn commit<T>(env: &SyncEnv, generation: u64, f: impl FnOnce(&mut SyncStateV2) -> Result<T, AppError>) -> Result<T, AppError> {
     let mut core = env.runtime.core.lock().unwrap();
+    legacy_writes_allowed(&core)?;
     if core.generation != generation {
         return Err(superseded());
     }
@@ -169,6 +193,7 @@ pub fn commit<T>(env: &SyncEnv, generation: u64, f: impl FnOnce(&mut SyncStateV2
 /// account/relay evidence survives local generation changes; absent/replaced state refuses it.
 pub(crate) fn commit_format_observation(env: &SyncEnv, chain_id: &str, relay_url: &str, f: impl FnOnce(&mut SyncStateV2) -> Result<(), AppError>) -> Result<(), AppError> {
     let mut core = env.runtime.core.lock().unwrap();
+    legacy_writes_allowed(&core)?;
     let state = core.state.as_mut().ok_or_else(superseded)?;
     if state.relay_url != relay_url || state.account.as_ref().map(|account| account.chain_id.as_str()) != Some(chain_id) {
         return Err(superseded());
@@ -184,6 +209,7 @@ pub(crate) fn commit_format_observation(env: &SyncEnv, chain_id: &str, relay_url
 pub fn mutate<T>(env: &SyncEnv, f: impl FnOnce(&mut SyncStateV2) -> Result<T, AppError>) -> Result<T, AppError> {
     let _doc = env.doc.lock().unwrap();
     let mut core = env.runtime.core.lock().unwrap();
+    legacy_writes_allowed(&core)?;
     if let Some(reason) = &core.save_blocked {
         return Err(AppError::Other(reason.clone()));
     }
@@ -200,7 +226,9 @@ pub fn mutate<T>(env: &SyncEnv, f: impl FnOnce(&mut SyncStateV2) -> Result<T, Ap
 
 /// 狀態的唯讀快照。
 pub fn snapshot(env: &SyncEnv) -> Option<SyncStateV2> {
-    env.runtime.core.lock().unwrap().state.clone()
+    let core = env.runtime.core.lock().unwrap();
+    legacy_writes_allowed(&core).ok()?;
+    core.state.clone()
 }
 
 #[cfg(test)]

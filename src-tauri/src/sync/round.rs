@@ -432,6 +432,7 @@ pub(crate) fn observe_account_format(
     let _publication = env.runtime.format_publication.lock().unwrap();
     let latest_blocked = {
         let core = env.runtime.core.lock().unwrap();
+        crate::sync::runtime::legacy_writes_allowed(&core)?;
         let latest = core.state.as_ref().ok_or_else(crate::sync::runtime::superseded)?;
         if latest.relay_url != state.relay_url || latest.account.as_ref().map(|account| account.chain_id.as_str()) != Some(keys.chain_id.as_str()) {
             return Err(crate::sync::runtime::superseded());
