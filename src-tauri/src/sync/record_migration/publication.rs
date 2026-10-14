@@ -571,6 +571,7 @@ fn verify_legacy_sources(
                         crate::sync::state_v2::SealedRecord {
                             envelope: e.clone(),
                             dirty: false,
+                            public_identity: None,
                         },
                     )
                 })

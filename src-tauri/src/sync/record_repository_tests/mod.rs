@@ -19,6 +19,9 @@ fn state() -> SyncStateV3 {
         relay_features: None,
         legacy_v1_backup: None,
         phrase_cleanup_pending: false,
+        migration_gate: None,
+        shared_writes_blocked: false,
+        pending_account: None,
         notices: vec![],
         last_sync_ms: None,
         last_error: None,
@@ -437,12 +440,20 @@ fn missing_cycles_and_repeated_jump_routes_are_rejected_without_mutating_input()
         .unwrap()
         .record
         .payload["jump"] = serde_json::json!([OTHER, OTHER]);
+    // Isolate the repeated-hop case from the cycle already verified above.
+    s.local.hosts.get_mut(&record_key(RecordKind::Host, OTHER)).unwrap().record.payload["jump"] = serde_json::json!([]);
+    let before = s.clone();
+    assert_eq!(
+        get_host(&s, ID).unwrap().readiness,
+        HostReadiness::NeedsReview
+    );
     assert!(matches!(
-        snapshot(&s),
+        resolve_host_chain(&s, ID),
         Err(RepositoryError::Validation(
             RecordValidationError::RepeatedJump { .. }
         ))
     ));
+    assert_eq!(s, before, "conflicting records remain available for repair");
 }
 #[test]
 fn missing_material_is_saveable_and_synced_account_metadata_is_authoritative() {
@@ -546,6 +557,7 @@ fn malformed_cache_keys_and_plain_secrets_are_refused_and_opaque_sealed_data_is_
             deleted: false,
         },
         dirty: false,
+        public_identity: None,
     };
     s.account
         .as_mut()
@@ -803,3 +815,58 @@ fn a_unique_alias_cannot_select_one_of_two_active_records_with_the_same_id() {
         .iter()
         .all(|h| h.readiness == HostReadiness::NeedsReview));
 }
+
+#[test]
+fn pending_migration_blocks_shared_writes_but_keeps_local_hosts_usable() {
+    for cached in [false, true] {
+        let mut s = with_spaces();
+        let gate = MigrationGate {
+            id: "9".repeat(32),
+            source_digest: "8".repeat(64),
+            phase: MigrationPhase::Publishing,
+        };
+        if cached {
+            let mut meta = cached_record_meta(&gate);
+            meta.record.payload["schema_version"] = serde_json::json!(3);
+            s.account.as_mut().unwrap().records.insert(
+                record_key(RecordKind::Meta, crate::sync::record::ACCOUNT_META_ID),
+                meta,
+            );
+        } else {
+            s.migration_gate = Some(gate);
+        }
+        let before = s.clone();
+        assert!(matches!(
+            create_host(&s, OTHER, scope("a"), payload("pending"), 100),
+            Err(RepositoryError::ReadOnlyAccount)
+        ));
+        assert!(create_host(&s, OTHER, HostScope::Local, payload("pending"), 100).is_ok());
+        assert_eq!(s, before);
+    }
+}
+fn cached_record_meta(gate: &MigrationGate) -> LocalRecord {
+    LocalRecord {
+        record: Record {
+            kind: RecordKind::Meta,
+            id: crate::sync::record::ACCOUNT_META_ID.into(),
+            version: 1,
+            updated_at_ms: 1,
+            device_id: "d".repeat(32),
+            deleted: false,
+            payload: serde_json::json!({"schema_version":3,"created_by_app_version":"fixture","migration":gate}),
+        },
+        seq: 1,
+        dirty: false,
+    }
+}
+
+#[test]
+fn an_invalid_authenticated_gate_blocks_shared_writes_after_restart() {
+    let mut s = with_spaces();
+    s.shared_writes_blocked = true;
+    let s: SyncStateV3 = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+    assert!(matches!(create_host(&s, OTHER, scope("a"), payload("shared"), 101), Err(RepositoryError::ReadOnlyAccount)));
+    assert!(create_host(&s, OTHER, HostScope::Local, payload("local"), 101).is_ok());
+}
+
+mod shadow;

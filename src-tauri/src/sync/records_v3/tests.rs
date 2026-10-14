@@ -546,6 +546,7 @@ fn unknown_sealed_space_records_are_preserved_and_account_plain_secrets_are_refu
                 SealedRecord {
                     envelope,
                     dirty: false,
+                    public_identity: None,
                 },
             )]),
             ..Default::default()
