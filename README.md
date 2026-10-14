@@ -77,9 +77,13 @@ Prerequisites: Rust (rustup), Node + pnpm, and platform build deps (macOS: Xcode
 
 ```bash
 pnpm install            # install JS deps
-pnpm tauri dev          # run the desktop app (Rust + Vite dev server)
+pnpm tauri:dev          # run SSHelter Dev (Rust + Vite dev server)
 pnpm build              # type-check + build the frontend
 ```
+
+Development builds use `org.homelab.sshelter.dev`, the `SSHelter Development` credential service, and a sandbox home under their data directory. They can run beside the installed app. File writes stay inside that directory; updates and launch at login are disabled. Use `pnpm tauri:build:dev` for a release-mode development bundle. A build whose Tauri identifier or product name disagrees with its compiled profile refuses to initialize.
+
+An ordinary `pnpm tauri build` remains the production profile. Development imports may read selected external sources; they must copy into the sandbox and preserve the originals.
 
 Tests:
 

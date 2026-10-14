@@ -209,6 +209,7 @@ pub fn backup_dir_for(target: &Path) -> Result<PathBuf, AppError> {
 /// A future timestamped destination has the same checked parent; existing links must not
 /// redirect it before `backup` gets to choose its timestamp.
 pub(crate) fn check_backup_write(target: &Path) -> Result<(), AppError> {
+    if !writes_are_confined() { return Ok(()); }
     let dir = backup_dir_for(target)?;
     check_write(&dir)?;
     let filename = target.file_name().and_then(|name| name.to_str())
@@ -232,10 +233,10 @@ pub(crate) fn check_backup_write(target: &Path) -> Result<(), AppError> {
 /// 備份一律寫進 `backups_root()` 下的鏡像目錄（見 `backup_dir_for`），絕不寫在目標旁邊
 /// —— 否則 glob `Include` 會把備份當成 live config 讀進去。
 pub fn backup(path: &Path) -> Result<Option<PathBuf>, AppError> {
-    check_backup_write(path)?;
     if !path.exists() {
         return Ok(None);
     }
+    check_backup_write(path)?;
     let millis = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| AppError::Other(e.to_string()))?

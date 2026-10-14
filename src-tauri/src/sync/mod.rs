@@ -30,6 +30,7 @@
 //! - `fake_relay`、`testkit`(只在測試):記憶體假 relay 與測試裝置
 
 pub mod records_v3;
+pub mod record_repository;
 pub mod account;
 pub mod approval;
 pub mod crypto;

@@ -54,7 +54,16 @@ jobs:
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- ssh:: session:: cli:: host_start:: vault::"
+        run: "cargo test --locked --lib -- app_profile:: write_policy:: fsutil::profile_boundary_tests sync::records_v3:: boundary_ newer_ ssh:: session:: cli:: host_start:: vault::"
+
+      - name: Profile selection in the normal library
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: |
+          cargo test --locked --test app_profile_build
+          cargo test --locked --release --test app_profile_build
+          cargo test --locked --release --features development-profile --test app_profile_build
 
   linux:
     # Not ubuntu-latest: the PAM image is ubuntu:24.04, and the package names below were checked against 24.04.
@@ -104,7 +113,16 @@ jobs:
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- ssh:: session:: cli:: host_start:: vault:: --skip ssh::engine_tests::login_methods::pam"
+        run: "cargo test --locked --lib -- app_profile:: write_policy:: fsutil::profile_boundary_tests sync::records_v3:: boundary_ newer_ ssh:: session:: cli:: host_start:: vault:: --skip ssh::engine_tests::login_methods::pam"
+
+      - name: Profile selection in the normal library
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: |
+          cargo test --locked --test app_profile_build
+          cargo test --locked --release --test app_profile_build
+          cargo test --locked --release --features development-profile --test app_profile_build
       # Runs whatever the scratch sshd step came to, so that a first run shows both results.
       - name: Password and keyboard-interactive tests against the container
         if: ${{ !cancelled() }}

@@ -218,7 +218,17 @@ impl<'a> BrokerAuth<'a> {
             let Some(text) = self.keys.private_text(key_id).map_err(|error| format!("SSHelter cannot read the key {} from its vault ({error}).", key.name))? else {
                 continue;
             };
+            let mismatch = || format!("SSHelter refused the key {}: its private key does not match its saved public key.", label(&key.name));
+            let identity = material::public_key_data(&key.public_key).ok_or_else(mismatch)?;
+            // The public half is readable even while the private half is encrypted. Refuse
+            // inconsistent metadata before any passphrase prompt or stale-passphrase cleanup.
+            if material::parse(&text).is_some_and(|private| private.public_key().key_data() != &identity) {
+                return Err(mismatch());
+            }
             let material = self.open(hop, key_id, &key, &text)?;
+            if material.key_data() != identity {
+                return Err(mismatch());
+            }
             locked(&self.opened).insert(key_id.clone(), (material, key.public_key));
         }
         Ok(())
@@ -410,6 +420,44 @@ mod tests {
         assert_eq!(policy.check(&other, &key(test_keys::PLAIN_PUBLIC)), HostKeyVerdict::Unknown);
         policy.pin(&other.id, key(test_keys::ECDSA_PUBLIC));
         assert_eq!(policy.check(&other, &key(test_keys::ECDSA_PUBLIC)), HostKeyVerdict::Pinned);
+    }
+
+    struct InconsistentKeys { public: String }
+    impl KeyStore for InconsistentKeys {
+        fn key(&self, _: &str) -> Option<VaultKey> { Some(VaultKey { name: "fixture".into(), public_key: self.public.clone() }) }
+        fn private_text(&self, _: &str) -> Result<Option<Zeroizing<String>>, String> {
+            Ok(Some(Zeroizing::new(test_keys::plain())))
+        }
+    }
+
+    #[test]
+    fn mismatched_or_malformed_public_identity_never_offers_or_signs_a_private_key() {
+        for public in [test_keys::ECDSA_PUBLIC, "unreadable public identity"] {
+            let keys = InconsistentKeys { public: public.into() };
+            let keychain = MemKeychain::default();
+            let directory = FakeDirectory::new();
+            let owner = FakeOwner::default();
+            let auth = BrokerAuth::new(&keys, &keychain, &owner, &directory);
+            let error = auth.unlock(&target(AuthMethod::Key { key_id: "fixture".into() })).unwrap_err();
+            assert!(error.contains("does not match"));
+            assert!(!error.contains(&test_keys::plain()));
+            assert_eq!(auth.public_key("fixture"), None);
+            assert!(matches!(auth.sign("fixture", b"challenge", None), Err(AuthError::KeyUnavailable(_))));
+            assert!(owner.asked().is_empty());
+        }
+    }
+
+    #[test]
+    fn public_key_comments_do_not_change_the_material_identity() {
+        let parsed = ssh_key::PublicKey::from_openssh(test_keys::PLAIN_PUBLIC).unwrap();
+        let keys = InconsistentKeys { public: format!("{} {} different-comment", parsed.algorithm(), parsed.to_openssh().unwrap().split_whitespace().nth(1).unwrap()) };
+        let keychain = MemKeychain::default();
+        let directory = FakeDirectory::new();
+        let owner = FakeOwner::default();
+        let auth = BrokerAuth::new(&keys, &keychain, &owner, &directory);
+        auth.unlock(&target(AuthMethod::Key { key_id: "fixture".into() })).unwrap();
+        assert!(auth.public_key("fixture").is_some());
+        assert!(auth.sign("fixture", b"challenge", None).is_ok());
     }
 
     #[test]
