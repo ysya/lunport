@@ -218,15 +218,34 @@ impl McpRuntime {
         }
     }
 
-    pub(crate) fn record(&self, mut entry: McpAuditEntry) {
-        entry.detail=None; // Legacy failures can contain remote text; no audit surface retains it.
-        if entry.at_ms==0 {entry.at_ms=entry.completed_at_ms;} if entry.client.is_empty(){entry.client="mcp".into();}
-        let mut audit=self.audit.lock().unwrap();
-        let mut recent=self.recent.lock().unwrap();recent.push_front(entry);recent.truncate(1000);
-        if let Some(path)=&audit.path {
-            let result=(||{let mut bytes=Vec::new();for item in recent.iter().rev(){let mut item=item.clone();item.detail=None;serde_json::to_writer(&mut bytes,&item).map_err(|_|"Cannot encode session log".to_string())?;bytes.push(b'\n');}fsutil::atomic_write(path,&bytes,0o600).map_err(|_|"Session log could not be saved; completed execution was not retried.".to_string())})();
-            if let Err(error)=result {audit.error=Some(error);}
-        }
+    pub(crate) fn record(&self, entry: McpAuditEntry) {
+        let _ = self.record_result(entry);
+    }
+    fn record_result(&self, mut entry: McpAuditEntry) -> Option<String> {
+        entry.detail = None;
+        if entry.at_ms == 0 { entry.at_ms = entry.completed_at_ms; }
+        if entry.client.is_empty() { entry.client = "mcp".into(); }
+        let mut audit = self.audit.lock().unwrap();
+        let mut recent = self.recent.lock().unwrap();
+        recent.push_front(entry);
+        recent.truncate(1000);
+        let result = audit.path.as_ref().map(|path| {
+            let mut bytes = Vec::new();
+            for item in recent.iter().rev() {
+                let mut item = item.clone();
+                item.detail = None;
+                serde_json::to_writer(&mut bytes, &item).map_err(|_| "Cannot encode session log".to_string())?;
+                bytes.push(b'\n');
+            }
+            fsutil::atomic_write(path, &bytes, 0o600).map_err(|_| "Session log could not be saved; completed execution was not retried.".to_string())
+        }).transpose();
+        let error = result.err();
+        if let Some(error) = &error { audit.error = Some(error.clone()); }
+        error
+    }
+    /// Returns this request's persistence result while holding the audit serialization lock.
+    pub(crate) fn record_deployment(&self, entry: McpAuditEntry) -> Option<String> {
+        self.record_result(entry)
     }
     fn load_audit(&self,path:PathBuf) {
         let mut audit=self.audit.lock().unwrap();audit.path=Some(path.clone());
@@ -1625,3 +1644,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mcp/deployment_audit_tests.rs"]
+pub(crate) mod deployment_audit_tests;

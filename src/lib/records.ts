@@ -496,3 +496,27 @@ export async function deleteRecordGroup(
 ): Promise<RecordOverview> {
   return tauriInvoke("records_group_delete", { id, revision });
 }
+
+export type RecordDeployPreview = {
+  id: string;
+  host_id: string;
+  key_id: string;
+  alias: string;
+  hostname: string;
+  port: number;
+  user: string;
+  route: string[];
+  key_name: string;
+  fingerprint: string;
+  public_key: string;
+};
+export type RecordDeployResult = {
+  outcome: "added" | "already_present" | "stale_preview" | "denied" | "canceled" | "timed_out" | "auth_abandoned" | "host_key_refused" | "unsupported_shell" | "remote_failed" | "connection_failed" | "unknown";
+  audit_error: string | null;
+};
+export const previewRecordDeploy = (hostId: string, keyId: string) =>
+  tauriInvoke<RecordDeployPreview>("records_deploy_preview", { hostId, keyId });
+export const confirmRecordDeploy = (previewId: string, authorized: boolean) =>
+  tauriInvoke<RecordDeployResult>("records_deploy_confirm", { previewId, authorized });
+export const cancelRecordDeploy = (previewId: string) =>
+  tauriInvoke<void>("records_deploy_cancel", { previewId });
