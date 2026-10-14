@@ -1,6 +1,6 @@
 # SSHelter sync chain 檢視清單
 
-本輪完成範圍：own SSH phase 1c 的 active records runtime，以及可操作的最小切換介面。功能分支 `codex/own-ssh-phase1c` 已依使用者 2026-10-14 的指示合併至 `next/own-ssh`，已發布 `v1.0.0-1` beta。
+本輪完成範圍：own SSH phase 1c 的 active records runtime，以及可操作的最小切換介面。功能分支 `codex/own-ssh-phase1c` 已依使用者 2026-10-14 的指示合併至 `next/own-ssh`，最初發布 `v1.0.0-1` beta；後續介面、設定與主機信任確認修正已發布為 `v1.0.0-2`。
 
 ## 設計方向
 
@@ -70,7 +70,7 @@ Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0
 - 來源：`22855e70c8b8fdf46b4539cadb16c4c2f1983d4f`，與最終 CI 相同。
 - macOS universal、Linux x86_64／ARM64、Windows x64；共 20 個 release assets。
 - Beta manifest 與新 release manifest 相同，15 個 platform entries 的下載資產存在且非空，簽章欄位存在；未宣稱另外下載所有安裝包並驗證其內容或密碼學簽章。
-- Beta 通道現提供 `1.0.0-1`；Stable 最新版仍為 `v0.16.0`。
+- 首次發布時 Beta 通道提供 `1.0.0-1`；現已更新至下列 `1.0.0-2`，Stable 仍為 `v0.16.0`。
 - 舊資料先暫停，遷移仍需要明確確認；更換同步碼後的歷史讀取與 phase 2 限制見 release notes。
 
 ## UI 與設定修正（1.0.0-2）
@@ -81,7 +81,11 @@ Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0
 - [x] MCP 主機授權改用 stable ID，支援主機清單與連線資訊。撤銷權限不等待執行鎖。
 - [x] 確認線上 relay 為 0.2.0，支援 pull-batch、freeze；本次不需更新。
 - [ ] Records MCP 遠端指令執行與 key deployment 仍未完成；不是補回介面就代表可用。
-- [ ] 1.0.0-2 跨平台 CI、beta 發布及 manifest 核對（完成後更新）。
+- [x] 1.0.0-2 跨平台 CI、四平台 beta 安裝包、發布及 manifest 核對全部通過。
 
 - [x] 主機信任確認改為資訊卡：endpoint、key type、完整指紋可複製，金鑰變更可比對新舊值；預設焦點在取消／拒絕，信任延遲不變。
 - [ ] Group 尚未實作：建議 Local／Space → 可巢狀 Group → Host，主機可覆寫群組預設並顯示來源；tags 提供交叉篩選。移動群組不暗中切換同步範圍，刪除群組預設保留主機。參考 [Termius 官方資料模型](https://docs.termius.com/getting-started/what-is-termius)。
+
+新版下載：[v1.0.0-2](https://github.com/ysya/sshelter/releases/tag/v1.0.0-2)。來源 `07e669a7682b4550d006e9e3ee6e1523502be424` 與最後 CI 相同；共 20 個已上傳且非空的 assets，15 個 manifest platform entries 指向存在且非空的資產，Release 與 Beta manifest 一致。Stable 維持 `v0.16.0`。完整紀錄：[1.0.0-2 validation](releases/1.0.0-2-validation.md)。
+
+本次前端 65 檔／950 個測試通過；macOS、Linux（含 PAM）、Windows（含 console 與實際 OpenSSH）CI 全部通過。新的信任確認畫面以實際元件在 480×320 的亮色首次連線、暗色金鑰變更情境檢查；Development bundle 打包成功。尚未宣稱原生剪貼簿執行或 Windows／Linux 的逐畫面視覺驗收。
