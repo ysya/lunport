@@ -43,6 +43,8 @@ function token(    c, word, quoted, escaped) {
     return word
 }
 {
+    # Normalize only the in-memory record used for parsing; never rewrite the file.
+    sub(/\r$/, "")
     pos=1; first=token()
     if (first == "" || substr(first,1,1) == "#") next
     second=token(); third=token()

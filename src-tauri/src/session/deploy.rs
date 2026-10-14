@@ -301,11 +301,27 @@ fn execute(
         inner: connector.engine,
         timed_out: std::sync::atomic::AtomicBool::new(false),
     };
+    let target_changed = std::sync::atomic::AtomicBool::new(false);
+    let check_resolved = |actual: &crate::ssh::Target| {
+        let result = review.target.check_resolved(actual, connector.keys);
+        if result.is_err() {
+            target_changed.store(true, Ordering::SeqCst);
+        }
+        result
+    };
+    let check_connected = |actual: &crate::ssh::Target| {
+        check()?;
+        let result = review.target.check_connected(actual, connector.keys);
+        if result.is_err() {
+            target_changed.store(true, Ordering::SeqCst);
+        }
+        result
+    };
     let engine = CheckedEngine {
         inner: &observed_engine,
-        check: &check,
+        check: &check_connected,
     };
-    let directory = PublicDirectory(connector.directory, &check);
+    let directory = PublicDirectory(connector.directory, &check, &check_resolved);
     let guarded = Connector {
         engine: &engine,
         directory: &directory,
@@ -326,7 +342,7 @@ fn execute(
         Err(error) => {
             let outcome = if cancel.is_cancelled() {
                 Outcome::Canceled
-            } else if check().is_err() {
+            } else if target_changed.load(Ordering::SeqCst) || check().is_err() {
                 Outcome::StalePreview
             } else if let Some(outcome) = *owner.outcome.lock().unwrap() {
                 outcome
@@ -346,7 +362,7 @@ fn execute(
         connected.session.close();
         return outcome.into();
     }
-    if check().is_err() {
+    if check_connected(&connected.target).is_err() {
         connected.session.close();
         return invalid().into();
     }
