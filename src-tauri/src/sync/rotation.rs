@@ -176,6 +176,7 @@ fn live_spaces(account: &AccountState, keys: &ChainKeys) -> Vec<SpaceEntry> {
 /// 第 1 步(spec §7.5):relay 要支援凍結 → 產生新同步碼(存 `sync:mnemonic-next`)→ 推導新帳戶 → 為帳戶內**每個**
 /// space(含這台沒勾選的)產生新的 chain id、權杖、金鑰,以新帳戶金鑰加密後寫進 `rotation`。背景執行緒接著做。
 pub fn start_rotation(env: &SyncEnv) -> Result<(), AppError> {
+    saves_allowed(env)?;
     let (s, keys) = {
         let core = env.runtime.core.lock().unwrap();
         let s = core.state.clone().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
@@ -1653,6 +1654,36 @@ mod tests {
         fn delete(&self, account: &str) -> Result<(), AppError> {
             self.0.keychain.delete(account)
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_start_rotation_checks_state_path_before_any_credentials_or_relay() {
+        struct Spy<'a> { inner: &'a dyn Keychain, calls: std::sync::atomic::AtomicUsize }
+        impl Keychain for Spy<'_> {
+            fn get(&self, account: &str) -> Result<Option<String>, AppError> { self.calls.fetch_add(1, Ordering::SeqCst); self.inner.get(account) }
+            fn set(&self, account: &str, secret: &str) -> Result<(), AppError> { self.calls.fetch_add(1, Ordering::SeqCst); self.inner.set(account, secret) }
+            fn delete(&self, account: &str) -> Result<(), AppError> { self.calls.fetch_add(1, Ordering::SeqCst); self.inner.delete(account) }
+        }
+        let (relay, _clock, a, _b, _words, _personal) = pair();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("production-state.json");
+        std::fs::write(&sentinel, b"production state sentinel").unwrap();
+        let mut env = a.env();
+        std::fs::remove_file(&env.state_path).unwrap();
+        std::os::unix::fs::symlink(&sentinel, &env.state_path).unwrap();
+        let spy = Spy { inner: env.keychain, calls: Default::default() }; env.keychain = &spy;
+        let before = a.state(); let generation = a.runtime.core.lock().unwrap().generation;
+        relay.clear_calls();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: a.ssh_dir().parent().unwrap().to_path_buf() }, || {
+            assert!(start_rotation(&env).is_err());
+        });
+        assert_eq!(spy.calls.load(Ordering::SeqCst), 0, "path denial must precede every Keychain call");
+        assert!(relay.calls().is_empty());
+        assert_eq!(a.state(), before);
+        assert_eq!(a.runtime.core.lock().unwrap().generation, generation);
+        assert!(a.keychain.entry(NEXT_MNEMONIC_ACCOUNT).is_none());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"production state sentinel");
     }
 
     #[test]

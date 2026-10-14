@@ -320,13 +320,15 @@ fn local_slots_snapshot(env: &SyncEnv) -> Option<(u64, bool, BTreeMap<String, Lo
     Some((core.generation, s.joined(), s.key_slots.clone()))
 }
 
-/// 這台插槽的本機維護(`slots::maintain_local`):檔案系統的動作不持有任何鎖,有變化才以快照時的 generation 提交 ——
-/// 這之間狀態被改過(使用者加了金鑰、加入或離開了帳戶……)就作廢(`SUPERSEDED`,呼叫端不當成錯誤),下一次同步嘗試再做。提交失敗(狀態存不進去)記成這一代狀態的 `last_error`。
+/// Local slot maintenance owns the material token through its state commit. A stale generation
+/// refuses before filesystem work; save failure remains an error on this generation.
 fn maintain_local_slots(env: &SyncEnv, generation: u64, joined: bool, mut slots: BTreeMap<String, LocalSlot>) -> Result<(), AppError> {
+    let transaction = crate::sync::runtime::MaterialTransaction::begin(env)?;
+    if env.runtime.core.lock().unwrap().generation != generation { return Err(crate::sync::runtime::superseded()); }
     let Some(home) = env.ssh_dir.parent() else { return Ok(()) };
     // 有帳戶時只看只在這台的金鑰,用不到哪些插槽有主機用到;沒有帳戶時 config 還沒載入就當成沒有主機用到:只維護只在這台的金鑰,連結一律不動。
     let in_use = if joined { BTreeMap::new() } else { crate::sync::slots::config_slot_uses(env).unwrap_or_default() };
-    if !crate::sync::slots::maintain_local(&mut slots, joined, home, &in_use, &crate::sync::slots::EnvVault { env }) {
+    if !crate::sync::slots::maintain_local(&mut slots, joined, home, &in_use, &crate::sync::slots::TransactionVault { env, transaction: &transaction }) {
         return Ok(());
     }
     let committed = commit(env, generation, |latest| {
@@ -426,17 +428,24 @@ pub(crate) fn observe_account_format(
         return Err(crate::sync::runtime::superseded());
     };
     let version = crate::sync::merge::newer_account_schema(account, keys, pulled);
+    // No doc/vault lock is held here; material transactions lock vault before this boundary.
+    let _publication = env.runtime.format_publication.lock().unwrap();
     let latest_blocked = {
         let core = env.runtime.core.lock().unwrap();
-        if core.generation != generation {
+        let latest = core.state.as_ref().ok_or_else(crate::sync::runtime::superseded)?;
+        if latest.relay_url != state.relay_url || latest.account.as_ref().map(|account| account.chain_id.as_str()) != Some(keys.chain_id.as_str()) {
             return Err(crate::sync::runtime::superseded());
         }
-        core.state.as_ref().is_some_and(SyncStateV2::read_only)
+        let blocked = latest.read_only();
+        if core.generation != generation && version.is_none() && !blocked {
+            return Err(crate::sync::runtime::superseded());
+        }
+        blocked
     };
     if version.is_none() && !latest_blocked {
         return Ok(false);
     }
-    commit(env, generation, |latest| {
+    crate::sync::runtime::commit_format_observation(env, &keys.chain_id, &state.relay_url, |latest| {
         let account = latest
             .account
             .as_mut()
@@ -772,7 +781,10 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
     //     (改寫失敗之後重載也失敗,極少見)就跳過這一步 —— 不知道哪些插槽有主機用到,不能收起任何連結 —— 下一輪再做。只在 SSHelter 的插槽
     //     經這台的保管庫(`EnvVault`)確認還在保管庫裡、補寫時讀它的私鑰(金鑰保管庫 spec §4.3、§11)。
     if let (Some(home), Some(in_use)) = (env.ssh_dir.parent(), crate::sync::slots::config_slot_uses(env)) {
-        let slot_round = crate::sync::slots::reconcile_with_vault(&mut work, &keys, home, &in_use, now, &crate::sync::slots::EnvVault { env });
+        // No doc/core lock is held when acquiring the material token.
+        let transaction = crate::sync::runtime::MaterialTransaction::begin(env)?;
+        if env.runtime.core.lock().unwrap().generation != generation { return Err(crate::sync::runtime::superseded()); }
+        let slot_round = crate::sync::slots::reconcile_with_vault(&mut work, &keys, home, &in_use, now, &crate::sync::slots::TransactionVault { env, transaction: &transaction });
         if slot_round.changed || !slot_round.notices.is_empty() {
             commit(env, generation, |latest| {
                 // 帳戶區段在這一輪已經整份提交過(`commit_account`),之後只有 space 的提交:用這一輪的版本整份換掉是安全的。
@@ -783,6 +795,7 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
                 }
                 Ok(())
             })?;
+            drop(transaction);
             for notice in &slot_round.notices {
                 env.events.notice(notice);
             }

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::error::AppError;
 use crate::sync::crypto::ChainKeys;
@@ -58,6 +58,12 @@ pub struct SyncRuntime {
     pub lifecycle: Mutex<()>,
     /// 保管庫檔(`vault::store`)的寫入互斥:開檔、改動、存檔全程持有(`vault::store::with_vault`)。同步執行緒、命令與 agent 共用。
     pub vault: Mutex<()>,
+    /// Serializes newer-format publication with local material transactions. Acquire vault first for
+    /// a transaction; observers acquire only this lock, then core. Never acquire vault while holding
+    /// this lock unless the transaction already owns vault; never start a transaction under doc/core.
+    pub(crate) format_publication: Mutex<()>,
+    #[cfg(test)]
+    pub(crate) material_wait_probe: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     pub syncing: AtomicBool,
     pub focused: AtomicBool,
     pub last_activity_ms: AtomicU64,
@@ -76,6 +82,42 @@ impl SyncRuntime {
         if focused {
             self.note_activity(now_ms);
         }
+    }
+}
+
+/// Owns local material writes through their final state commit. Waiting for vault leaves format
+/// observation unblocked. The latest gate check after vault -> publication acquisition is the
+/// transaction's linearization point; a later observer waits until this transaction completes.
+/// Nested helpers must use this token's vault access rather than locking runtime.vault again.
+pub(crate) struct MaterialTransaction<'a> {
+    runtime: &'a SyncRuntime,
+    _vault: MutexGuard<'a, ()>,
+    _publication: MutexGuard<'a, ()>,
+}
+
+impl<'a> MaterialTransaction<'a> {
+    pub fn begin(env: &SyncEnv<'a>) -> Result<Self, AppError> {
+        crate::sync::account::check_local_write_paths(env)?;
+        #[cfg(test)]
+        {
+            let probe = env.runtime.material_wait_probe.lock().unwrap().clone();
+            if let Some(probe) = probe { probe(); }
+        }
+        let vault = env.runtime.vault.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let publication = env.runtime.format_publication.lock().unwrap();
+        {
+            let core = env.runtime.core.lock().unwrap();
+            let state = core.state.as_ref().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+            crate::sync::account::format_writes_allowed(state)?;
+        }
+        Ok(Self { runtime: env.runtime, _vault: vault, _publication: publication })
+    }
+
+    /// Same open/change/save semantics as store::with_vault, under this token's existing vault lock.
+    pub fn with_vault<T>(&self, env: &SyncEnv, f: impl FnOnce(&mut crate::vault::store::Vault) -> Result<T, crate::vault::store::VaultError>) -> Result<T, crate::vault::store::VaultError> {
+        assert!(std::ptr::eq(self.runtime, env.runtime), "material token belongs to a different runtime");
+        let mut vault = crate::vault::store::Vault::open(&crate::vault::store::vault_path(&env.state_path), env.keychain, env.now())?;
+        f(&mut vault)
     }
 }
 
@@ -116,9 +158,23 @@ pub fn commit<T>(env: &SyncEnv, generation: u64, f: impl FnOnce(&mut SyncStateV2
         return Err(superseded());
     }
     let s = core.state.as_mut().ok_or_else(superseded)?;
+    crate::sync::account::format_writes_allowed(s)?;
     let out = f(s)?;
     save_core(&mut core, &env.state_path)?;
     Ok(out)
+}
+
+/// The observer is the only commit allowed after a newer gate is already present. Its caller owns
+/// format_publication; only gate/error may be changed, retaining cursors and pending work. Same
+/// account/relay evidence survives local generation changes; absent/replaced state refuses it.
+pub(crate) fn commit_format_observation(env: &SyncEnv, chain_id: &str, relay_url: &str, f: impl FnOnce(&mut SyncStateV2) -> Result<(), AppError>) -> Result<(), AppError> {
+    let mut core = env.runtime.core.lock().unwrap();
+    let state = core.state.as_mut().ok_or_else(superseded)?;
+    if state.relay_url != relay_url || state.account.as_ref().map(|account| account.chain_id.as_str()) != Some(chain_id) {
+        return Err(superseded());
+    }
+    f(state)?;
+    save_core(&mut core, &env.state_path)
 }
 
 /// 命令對狀態的修改:先拿 doc 鎖(與套用 + 發布的交易互斥,順序 doc → core),在同一個 core 臨界區「改狀態 + 換
@@ -135,6 +191,7 @@ pub fn mutate<T>(env: &SyncEnv, f: impl FnOnce(&mut SyncStateV2) -> Result<T, Ap
         return Err(AppError::Other(UPGRADING_MESSAGE.to_string()));
     }
     let s = core.state.as_mut().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+    crate::sync::account::format_writes_allowed(s)?;
     let out = f(s)?;
     core.generation += 1;
     save_core(&mut core, &env.state_path)?;
@@ -181,6 +238,104 @@ mod tests {
             state_v2::LoadedState::Current(saved) => assert_eq!(saved.device_name, "Renamed"),
             other => panic!("expected the saved v2 state, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn latest_newer_format_refuses_stale_state_mutation_and_regular_commit() {
+        let (relay, clock) = (FakeRelay::new(), TestClock::new());
+        let d = TestDevice::new("a", &relay, &clock);
+        let env = d.env();
+        let keys = crate::sync::crypto::ChainKeys::generate().unwrap();
+        {
+            let mut core = env.runtime.core.lock().unwrap();
+            let mut account = crate::sync::state_v2::AccountState::new(&keys.chain_id);
+            account.remote_schema_version = Some(3);
+            core.state.as_mut().unwrap().account = Some(account);
+        }
+        let before = snapshot(&env).unwrap();
+        let generation = env.runtime.core.lock().unwrap().generation;
+        let called = AtomicBool::new(false);
+        assert_eq!(mutate(&env, |_| { called.store(true, Ordering::SeqCst); Ok(()) }).unwrap_err().to_string(), crate::sync::account::READ_ONLY_MESSAGE);
+        assert_eq!(commit(&env, generation, |_| { called.store(true, Ordering::SeqCst); Ok(()) }).unwrap_err().to_string(), crate::sync::account::READ_ONLY_MESSAGE);
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(snapshot(&env).unwrap(), before);
+        assert_eq!(env.runtime.core.lock().unwrap().generation, generation);
+    }
+
+    #[test]
+    fn delayed_newer_format_observation_survives_a_material_commit_generation_change() {
+        use crate::sync::record::{Envelope, RecordKind, ACCOUNT_META_ID};
+        let (_relay, _clock, a, _b, _words, _personal) = crate::sync::round::tests::pair();
+        let env = a.env();
+        let before = snapshot(&env).unwrap();
+        let (generation, keys) = { let core = env.runtime.core.lock().unwrap(); (core.generation, core.account_keys.clone().unwrap()) };
+        let mut future = crate::sync::state_v2::AccountState::new(&keys.chain_id);
+        crate::sync::merge::put_account_record(&mut future, RecordKind::Meta, ACCOUNT_META_ID,
+            serde_json::json!({"schema_version":3}), false, "future-device", u64::MAX - 1);
+        let pulled = crate::sync::relay::PullResponse { records: crate::sync::merge::account_outgoing(&future, &keys).unwrap().into_iter().map(|out| Envelope {
+            id_hash: out.item.id_hash, kind: out.item.kind, seq: 1, nonce: out.item.nonce, ciphertext: out.item.ciphertext, deleted: false,
+        }).collect(), latest_seq: 1 };
+        let transaction = MaterialTransaction::begin(&env).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let observer = scope.spawn(|| { sent.send(()).unwrap(); crate::sync::round::observe_account_format(&env, generation, &before, &keys, &pulled) });
+            received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            assert!(env.runtime.format_publication.try_lock().is_err());
+            mutate(&env, |state| { state.device_name = "committed local change".into(); Ok(()) }).unwrap();
+            assert!(!snapshot(&env).unwrap().read_only(), "observer waits for the active transaction");
+            drop(transaction);
+            assert!(observer.join().unwrap().unwrap(), "same account evidence must survive its new generation");
+        });
+        let mut expected = before;
+        expected.device_name = "committed local change".into();
+        expected.account.as_mut().unwrap().remote_schema_version = Some(3);
+        expected.last_error = Some(crate::sync::account::READ_ONLY_MESSAGE.to_string());
+        assert_eq!(snapshot(&env).unwrap(), expected);
+        assert_eq!(env.runtime.core.lock().unwrap().generation, generation + 1);
+        assert_eq!(MaterialTransaction::begin(&env).err().unwrap().to_string(), crate::sync::account::READ_ONLY_MESSAGE);
+    }
+
+    #[test]
+    fn format_observation_refuses_replaced_account_relay_or_absent_legacy_state() {
+        use crate::sync::record::{Envelope, RecordKind, ACCOUNT_META_ID};
+        for replacement in ["account", "relay", "state"] {
+            let (_relay, _clock, a, _b, _words, _personal) = crate::sync::round::tests::pair();
+            let env = a.env(); let before = snapshot(&env).unwrap();
+            let (generation, keys) = { let core = env.runtime.core.lock().unwrap(); (core.generation, core.account_keys.clone().unwrap()) };
+            let mut future = crate::sync::state_v2::AccountState::new(&keys.chain_id);
+            crate::sync::merge::put_account_record(&mut future, RecordKind::Meta, ACCOUNT_META_ID, serde_json::json!({"schema_version":3}), false, "future-device", u64::MAX - 1);
+            let pulled = crate::sync::relay::PullResponse { records: crate::sync::merge::account_outgoing(&future, &keys).unwrap().into_iter().map(|out| Envelope {
+                id_hash: out.item.id_hash, kind: out.item.kind, seq: 1, nonce: out.item.nonce, ciphertext: out.item.ciphertext, deleted: false,
+            }).collect(), latest_seq: 1 };
+            {
+                let mut core = env.runtime.core.lock().unwrap(); core.generation += 1;
+                match replacement {
+                    "account" => core.state.as_mut().unwrap().account.as_mut().unwrap().chain_id = "replacement-account".into(),
+                    "relay" => core.state.as_mut().unwrap().relay_url = "https://replacement.test".into(),
+                    "state" => core.state = None,
+                    _ => unreachable!(),
+                }
+            }
+            let latest = snapshot(&env);
+            assert!(crate::sync::round::observe_account_format(&env, generation, &before, &keys, &pulled).as_ref().is_err_and(is_superseded));
+            assert_eq!(snapshot(&env), latest, "{replacement}");
+            assert_eq!(env.runtime.core.lock().unwrap().generation, generation + 1);
+        }
+    }
+
+    #[test]
+    fn material_transaction_holds_the_publication_boundary_through_state_commit() {
+        let (_relay, _clock, a, _b, _words, _personal) = crate::sync::round::tests::pair();
+        let env = a.env();
+        let transaction = MaterialTransaction::begin(&env).unwrap();
+        assert!(env.runtime.vault.try_lock().is_err());
+        assert!(env.runtime.format_publication.try_lock().is_err());
+        transaction.with_vault(&env, |vault| { assert!(vault.get("missing")?.is_none()); Ok(()) }).unwrap();
+        mutate(&env, |state| { state.device_name = "material transaction committed".into(); Ok(()) }).unwrap();
+        assert!(env.runtime.format_publication.try_lock().is_err(), "held through the commit");
+        drop(transaction);
+        assert!(env.runtime.vault.try_lock().is_ok());
+        assert!(env.runtime.format_publication.try_lock().is_ok());
     }
 
     #[test]
