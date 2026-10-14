@@ -162,6 +162,7 @@ fn a_future_account_schema_preflights_every_record_and_preserves_the_exact_secti
         SealedRecord {
             envelope: secret,
             dirty: true,
+            public_identity: None,
         },
     );
     let out = merge_account(
@@ -518,6 +519,7 @@ fn secret_ciphertext_receipts_do_not_clear_changed_material() {
         SealedRecord {
             envelope: env.clone(),
             dirty: true,
+            public_identity: None,
         },
     );
     let outgoing = account_outgoing(&before, &keys).unwrap();
@@ -587,6 +589,7 @@ fn older_typed_rows_cannot_discard_a_newer_opaque_revision() {
         SealedRecord {
             envelope: opaque,
             dirty: false,
+            public_identity: None,
         },
     );
     let mut stale = host("older", 5);
@@ -622,6 +625,7 @@ fn secret_lww_keeps_newer_dirty_material_and_clears_only_a_remote_winner() {
         SealedRecord {
             envelope: env.clone(),
             dirty: true,
+            public_identity: None,
         },
     );
     let old = record(
@@ -662,6 +666,7 @@ fn malformed_secret_collision_preserves_dirty_ciphertext_and_cursor() {
         SealedRecord {
             envelope: env,
             dirty: true,
+            public_identity: None,
         },
     );
     let mut malformed = mine;
@@ -895,6 +900,7 @@ fn opaque_supported_headers_follow_lww_instead_of_relay_arrival_order() {
         SealedRecord {
             envelope: newer_env.clone(),
             dirty: false,
+            public_identity: None,
         },
     );
     let out = merge_space(
@@ -948,6 +954,7 @@ fn secret_revision_returns_live_and_tombstone_headers_without_plaintext_payloads
         SealedRecord {
             envelope: env,
             dirty: false,
+            public_identity: None,
         },
     );
     let revision = secret_revision(&state, &keys, RecordKind::Key, KEY)

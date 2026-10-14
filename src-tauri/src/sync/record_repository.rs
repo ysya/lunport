@@ -154,9 +154,27 @@ fn revision(record: &Record) -> RecordRevision {
         device_id: record.device_id.clone(),
     }
 }
+fn opaque_shadows(
+    sealed: &crate::sync::state_v2::SealedRecord,
+    local: Option<&LocalRecord>,
+    kind: RecordKind,
+    id: &str,
+) -> bool {
+    let Some(identity) = sealed.public_identity.as_ref().filter(|hint| {
+        hint.is_valid_for(&sealed.envelope)
+            && hint.id == id
+            && sealed.envelope.kind == kind.as_str()
+    }) else {
+        return false;
+    };
+    crate::sync::record::merge(local, &identity.header(kind))
+        != crate::sync::record::MergeOutcome::KeepLocal
+}
+
 fn read_hosts(
     records: &BTreeMap<String, LocalRecord>,
     scope: HostScope,
+    sealed: Option<&BTreeMap<String, crate::sync::state_v2::SealedRecord>>,
     out: &mut Vec<HostView>,
 ) -> Result<(), RepositoryError> {
     for (key, local) in records {
@@ -165,7 +183,15 @@ fn read_hosts(
             out.push(HostView {
                 host,
                 revision: revision(&local.record),
-                readiness: HostReadiness::Ready,
+                readiness: if sealed.is_some_and(|rows| {
+                    rows.values().any(|row| {
+                        opaque_shadows(row, Some(local), RecordKind::Host, &local.record.id)
+                    })
+                }) {
+                    HostReadiness::NeedsReview
+                } else {
+                    HostReadiness::Ready
+                },
             });
         }
     }
@@ -272,7 +298,7 @@ pub fn snapshot(state: &SyncStateV3) -> Result<RepositorySnapshot, RepositoryErr
     validate_header(state)?;
     let keys = list_keys(state)?;
     let mut hosts = Vec::new();
-    read_hosts(&state.local.hosts, HostScope::Local, &mut hosts)?;
+    read_hosts(&state.local.hosts, HostScope::Local, None, &mut hosts)?;
     for (space_id, space) in &state.spaces {
         if space.selected && !space.missing {
             read_hosts(
@@ -280,6 +306,7 @@ pub fn snapshot(state: &SyncStateV3) -> Result<RepositorySnapshot, RepositoryErr
                 HostScope::Space {
                     space_id: space_id.clone(),
                 },
+                Some(&space.sealed),
                 &mut hosts,
             )?;
         }
@@ -288,7 +315,8 @@ pub fn snapshot(state: &SyncStateV3) -> Result<RepositorySnapshot, RepositoryErr
         .iter()
         .map(|view| {
             let host = &view.host;
-            if needs_import_review(host)
+            if view.readiness == HostReadiness::NeedsReview
+                || needs_import_review(host)
                 || alias_conflict(&hosts, host)
                 || route_indices(&hosts, &host.id).is_err()
             {
@@ -411,6 +439,23 @@ pub fn list_keys(state: &SyncStateV3) -> Result<Vec<KeyView>, RepositoryError> {
             };
             keys.insert(id.clone(), view);
         }
+        for sealed in account.sealed.values() {
+            let Some(identity) = sealed.public_identity.as_ref() else {
+                continue;
+            };
+            let Some(view) = keys.get_mut(&identity.id) else {
+                continue;
+            };
+            let local = account
+                .records
+                .get(&record_key(RecordKind::KeySlot, &identity.id));
+            if opaque_shadows(sealed, local, RecordKind::KeySlot, &identity.id) {
+                // Keep old public metadata for inspection, but never expose a vault fallback.
+                view.authority = KeyAuthority::Account;
+                view.status = KeyStatus::Conflict;
+                view.vault_id = None;
+            }
+        }
     }
     Ok(keys.into_values().collect())
 }
@@ -423,15 +468,11 @@ pub fn resolve_key(state: &SyncStateV3, id: &str) -> Result<KeyView, RepositoryE
 
 fn ensure_scope(state: &SyncStateV3, scope: &HostScope) -> Result<(), RepositoryError> {
     if let HostScope::Space { space_id } = scope {
-        let account = state
+        state
             .account
             .as_ref()
             .ok_or_else(|| RepositoryError::SpaceUnavailable(space_id.clone()))?;
-        if account.frozen.is_some()
-            || account
-                .remote_schema_version
-                .is_some_and(|schema| schema > ACCOUNT_SCHEMA)
-        {
+        if account_writes_blocked(state) {
             return Err(RepositoryError::ReadOnlyAccount);
         }
         let space = state

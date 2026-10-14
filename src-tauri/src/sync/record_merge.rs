@@ -242,6 +242,7 @@ pub fn seal_secret_record(
             deleted: item.deleted,
         },
         dirty: true,
+        public_identity: None,
     })
 }
 
@@ -390,8 +391,25 @@ pub(crate) fn legacy_own_slot_revision(
         return Ok(None);
     };
     let opened = open_record(keys, &sealed.envelope).map_err(|_| failure())?;
-    let fields = opened.0.payload.as_object().ok_or_else(failure)?;
-    if fields.keys().any(|key| {
+    if opened.0.kind != RecordKind::KeySlot
+        || opened.0.id != id
+        || opened.0.deleted
+        || !legacy_own_payload(&opened.0.payload)
+    {
+        return Err(failure());
+    }
+    Ok(Some(SecretRevision {
+        version: opened.0.version,
+        updated_at_ms: opened.0.updated_at_ms,
+        device_id: opened.0.device_id.clone(),
+        deleted: false,
+    }))
+}
+fn legacy_own_payload(payload: &Value) -> bool {
+    let Some(fields) = payload.as_object() else {
+        return false;
+    };
+    !fields.keys().any(|key| {
         ![
             "schema",
             "name",
@@ -404,41 +422,87 @@ pub(crate) fn legacy_own_slot_revision(
             "has_passphrase",
         ]
         .contains(&key.as_str())
-    }) {
-        return Err(failure());
-    }
-    // Borrow the strict legacy shape. Unsupported values are never cloned out of the
-    // zeroizing opened envelope, including unexpected private strings in public fields.
-    if opened.0.kind != RecordKind::KeySlot
-        || opened.0.id != id
-        || opened.0.deleted
-        || fields.get("schema").and_then(Value::as_u64) != Some(1)
-        || fields.get("mode").and_then(Value::as_str) != Some("own")
-        || !fields
+    }) && fields.get("schema").and_then(Value::as_u64) == Some(1)
+        && fields.get("mode").and_then(Value::as_str) == Some("own")
+        && fields
             .get("name")
             .and_then(Value::as_str)
             .is_some_and(crate::sync::slot_rules::valid_slot_name)
-        || !fields
+        && fields
             .get("origin_device_id")
             .and_then(Value::as_str)
             .is_some_and(is_slot_id)
-        || fields
+        && fields
             .get("created_at_ms")
             .and_then(Value::as_u64)
-            .is_none()
-        || ["public_key", "fingerprint", "key_type", "has_passphrase"]
+            .is_some()
+        && ["public_key", "fingerprint", "key_type", "has_passphrase"]
             .iter()
-            .any(|key| fields.get(*key).is_some_and(|value| !value.is_null()))
-    {
-        return Err(failure());
-    }
-    Ok(Some(SecretRevision {
-        version: opened.0.version,
-        updated_at_ms: opened.0.updated_at_ms,
-        device_id: opened.0.device_id.clone(),
-        deleted: false,
-    }))
+            .all(|key| fields.get(*key).is_none_or(Value::is_null))
 }
+/// Authenticate fixed public identity/ordering even when an unsupported outer header cannot be
+/// admitted as a Record. The protected JSON is cleared; only bounded public headers leave it.
+fn verified_public_identity(
+    keys: &ChainKeys,
+    envelope: &Envelope,
+    account: bool,
+) -> Option<crate::sync::state_v2::VerifiedPublicIdentity> {
+    if !matches!(
+        (account, envelope.kind.as_str()),
+        (true, "keyslot") | (false, "host")
+    ) {
+        return None;
+    }
+    let sealed = Sealed {
+        id_hash: envelope.id_hash.clone(),
+        nonce: envelope.nonce.clone(),
+        ciphertext: envelope.ciphertext.clone(),
+    };
+    let bytes =
+        Zeroizing::new(crypto::open(keys, &envelope.kind, &envelope.id_hash, &sealed).ok()?);
+    let value = SensitiveJson(serde_json::from_slice::<Value>(&bytes).ok()?);
+    let fields = value.0.as_object()?;
+    let id = fields.get("id")?.as_str()?;
+    if fields.get("kind")?.as_str()? != envelope.kind
+        || crypto::id_hash(keys, &envelope.kind, id) != envelope.id_hash
+    {
+        return None;
+    }
+    // Validate borrowed identities before copying even a header string out of protected JSON.
+    let actor = fields.get("device_id")?.as_str()?;
+    let version = fields.get("version")?.as_u64()?;
+    let deleted = fields.get("deleted")?.as_bool()?;
+    let known_id = if account {
+        is_slot_id(id)
+    } else {
+        crate::sync::records_v3::is_host_id(id)
+    };
+    if !known_id || !is_slot_id(actor) || version == 0 || deleted != envelope.deleted {
+        return None;
+    }
+    let hint = crate::sync::state_v2::VerifiedPublicIdentity {
+        id: id.into(),
+        version,
+        updated_at_ms: fields.get("updated_at_ms")?.as_u64()?,
+        device_id: actor.into(),
+        deleted,
+    };
+    if fields.len() == 7 && !hint.deleted {
+        if let Some(payload) = fields.get("payload") {
+            let legacy_alias = envelope.kind == "host"
+                && payload.as_object().is_some_and(|p| {
+                    p.len() == 2
+                        && p.get("schema").and_then(Value::as_u64) == Some(1)
+                        && p.get("text").and_then(Value::as_str).is_some()
+                });
+            if legacy_alias || envelope.kind == "keyslot" && legacy_own_payload(payload) {
+                return None;
+            }
+        }
+    }
+    Some(hint)
+}
+
 /// Old alias/text hosts intentionally retained by migration are source evidence, not active hosts.
 /// This recognizes only the old shape; callers must still reject an opaque shadow of a typed id.
 pub(crate) fn is_legacy_alias_host(keys: &ChainKeys, envelope: &Envelope) -> bool {
@@ -731,6 +795,7 @@ fn retain_opaque(
     sealed: &mut BTreeMap<String, SealedRecord>,
     keys: &ChainKeys,
     envelope: &Envelope,
+    account: bool,
 ) -> bool {
     let key = sealed_key(&envelope.kind, &envelope.id_hash);
     if let Some(local) = sealed.get_mut(&key) {
@@ -747,10 +812,12 @@ fn retain_opaque(
             ) == MergeOutcome::KeepLocal
             {
                 local.envelope.seq = local.envelope.seq.max(envelope.seq);
+                local.public_identity = verified_public_identity(keys, &local.envelope, account);
                 return true;
             }
         }
         if local.envelope.seq > envelope.seq {
+            local.public_identity = verified_public_identity(keys, &local.envelope, account);
             return true;
         }
     }
@@ -759,6 +826,7 @@ fn retain_opaque(
         SealedRecord {
             envelope: envelope.clone(),
             dirty: false,
+            public_identity: verified_public_identity(keys, envelope, account),
         },
     );
     true
@@ -792,7 +860,7 @@ fn merge_rows(
                 id_hash: envelope.id_hash.clone(),
                 code,
             });
-            if !retain_opaque(sealed, keys, envelope) {
+            if !retain_opaque(sealed, keys, envelope, account) {
                 return false;
             }
             continue;
@@ -823,6 +891,7 @@ fn merge_rows(
                     SealedRecord {
                         envelope: envelope.clone(),
                         dirty: false,
+                        public_identity: None,
                     },
                 );
             }

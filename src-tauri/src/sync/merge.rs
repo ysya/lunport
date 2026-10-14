@@ -646,7 +646,7 @@ pub fn merge_account(section: &AccountState, keys: &ChainKeys, pulled: &PullResp
             ) => {}
             _ => {
                 // 本版不處理的種類:密文原樣保存,不解密、不刪除(spec §4.1)。
-                next.sealed.insert(sealed_key(&env.kind, &env.id_hash), SealedRecord { envelope: env.clone(), dirty: false });
+                next.sealed.insert(sealed_key(&env.kind, &env.id_hash), SealedRecord { envelope: env.clone(), dirty: false, public_identity: None });
                 continue;
             }
         }
@@ -674,7 +674,7 @@ pub fn merge_account(section: &AccountState, keys: &ChainKeys, pulled: &PullResp
                     }
                 }
                 _ => {
-                    next.sealed.insert(slot, SealedRecord { envelope: env.clone(), dirty: false });
+                    next.sealed.insert(slot, SealedRecord { envelope: env.clone(), dirty: false, public_identity: None });
                 }
             }
             continue;
@@ -1361,6 +1361,7 @@ mod tests {
             SealedRecord {
                 envelope: unreadable,
                 dirty: false,
+                public_identity: None,
             },
         );
         let mut tombstone = account_record(RecordKind::Space, &space.chain_id, Value::Null, 20);

@@ -2207,7 +2207,7 @@ pub(crate) mod tests {
     /// cursor 照常前進。
     fn kept_sealed_by_an_older_build(account: &mut AccountState, items: &[Outgoing]) {
         for env in pulled(items, items.len() as u64).records {
-            account.sealed.insert(sealed_key(&env.kind, &env.id_hash), SealedRecord { envelope: env, dirty: false });
+            account.sealed.insert(sealed_key(&env.kind, &env.id_hash), SealedRecord { envelope: env, dirty: false, public_identity: None });
         }
     }
 

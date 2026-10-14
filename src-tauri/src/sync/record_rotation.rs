@@ -629,6 +629,7 @@ fn prepare_targets(
             SealedRecord {
                 envelope: e,
                 dirty: true,
+                public_identity: None,
             },
         );
     }
@@ -656,6 +657,7 @@ fn prepare_targets(
                 SealedRecord {
                     envelope: e,
                     dirty: true,
+                    public_identity: None,
                 },
             );
         }
