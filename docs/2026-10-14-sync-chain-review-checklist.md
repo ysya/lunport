@@ -82,3 +82,6 @@ Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0
 - [x] 確認線上 relay 為 0.2.0，支援 pull-batch、freeze；本次不需更新。
 - [ ] Records MCP 遠端指令執行與 key deployment 仍未完成；不是補回介面就代表可用。
 - [ ] 1.0.0-2 跨平台 CI、beta 發布及 manifest 核對（完成後更新）。
+
+- [x] 主機信任確認改為資訊卡：endpoint、key type、完整指紋可複製，金鑰變更可比對新舊值；預設焦點在取消／拒絕，信任延遲不變。
+- [ ] Group 尚未實作：建議 Local／Space → 可巢狀 Group → Host，主機可覆寫群組預設並顯示來源；tags 提供交叉篩選。移動群組不暗中切換同步範圍，刪除群組預設保留主機。參考 [Termius 官方資料模型](https://docs.termius.com/getting-started/what-is-termius)。
