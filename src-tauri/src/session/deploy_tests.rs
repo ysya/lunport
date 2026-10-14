@@ -59,6 +59,34 @@ mod shell {
             );
         }
     }
+    fn crlf_duplicate(prefix: &str, comment: &str) {
+        let original = format!("# original sentinel\r\n{prefix}{PLAIN_PUBLIC}{comment}\r\n");
+        let home = setup(original.as_bytes());
+        let output = run(&home, PLAIN_PUBLIC);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"SSHELTER_PRESENT\n");
+        assert_eq!(
+            fs::read(home.path().join(".ssh/authorized_keys")).unwrap(),
+            original.as_bytes(),
+            "CRLF matching must not rewrite original bytes or add an unrestricted duplicate"
+        );
+    }
+    #[test]
+    fn crlf_plain_without_comment_preserves_bytes() {
+        crlf_duplicate("", "");
+    }
+    #[test]
+    fn crlf_plain_with_comment_preserves_bytes() {
+        crlf_duplicate("", " existing comment");
+    }
+    #[test]
+    fn crlf_restricted_without_comment_preserves_bytes() {
+        crlf_duplicate("restrict,from=\"192.0.2.0/24\" ", "");
+    }
+    #[test]
+    fn crlf_restricted_with_comment_preserves_bytes() {
+        crlf_duplicate("restrict,from=\"192.0.2.0/24\" ", " existing comment");
+    }
     #[test]
     fn comment_and_quoted_command_do_not_count_as_authorized_identity() {
         for line in [
@@ -996,4 +1024,120 @@ fn connection_timeout_has_a_distinct_timeout_outcome_without_exec() {
         .events()
         .iter()
         .any(|e| matches!(e, FakeEvent::Exec { .. })));
+}
+
+#[test]
+fn deployment_aba_resolve_cannot_connect_or_execute_on_unreviewed_target() {
+    use crate::mcp::records::target_binding_tests::{AbaDirectory, RecordingEngine};
+    use crate::session::directory::HostDirectory;
+    for directory in [AbaDirectory::new(), AbaDirectory::auth_drift()] {
+        let engine = RecordingEngine::new(FakeEngine::new().with_exec(
+            &script(PLAIN_PUBLIC).unwrap(),
+            result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
+        ));
+        let connector = Connector {
+            engine: &engine,
+            directory: &directory,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+            confirmer: &FakeConfirmer::default(),
+        };
+        let requests = Deployments::default();
+        let preview = requests.preview(&connector, "id-web", "k-plain").unwrap();
+        assert_eq!(preview.hostname, "reviewed.example");
+        let (review, cancel) = requests.take(&preview.id, true).unwrap();
+        let result = execute(&review, &connector, &FakeOwner::default(), &cancel, &|| {
+            Ok(())
+        });
+        assert!(directory.returned_b());
+        assert_eq!(
+            directory
+                .resolve_public(&HostQuery::Id("id-web".into()))
+                .unwrap()
+                .hops[0]
+                .hostname,
+            "reviewed.example"
+        );
+        assert!(
+            engine.targets.lock().unwrap().is_empty(),
+            "unreviewed B must not reach the inner engine: {:?}",
+            engine.targets.lock().unwrap()
+        );
+        assert!(!engine
+            .inner
+            .events()
+            .iter()
+            .any(|event| matches!(event, FakeEvent::Exec { .. })));
+        assert_eq!(result.outcome, Outcome::StalePreview);
+    }
+}
+
+#[test]
+fn deployment_legitimate_new_pin_and_interactive_password_fallback_still_execute() {
+    use crate::mcp::records::target_binding_tests::RecordingEngine;
+    use crate::session::{directory::HostDirectory, testing::Decision};
+    use crate::ssh::fake::{FakeLogin, FakeMethods};
+    for fallback in [false, true] {
+        let auth = if fallback {
+            crate::ssh::AuthMethod::Interactive
+        } else {
+            AuthMethod::Key {
+                key_id: "k-plain".into(),
+            }
+        };
+        let directory = FakeDirectory::new().with_host("web", auth.clone());
+        let fake = FakeEngine::new().with_exec(
+            &script(PLAIN_PUBLIC).unwrap(),
+            result(Ended::Exited, Some(0), b"SSHELTER_ADDED\n"),
+        );
+        let engine = RecordingEngine::new(if fallback {
+            fake.with_login(FakeLogin::Server(FakeMethods::password("fixture-password")))
+        } else {
+            fake
+        });
+        let confirmer = FakeConfirmer::deciding(vec![Decision::Trust]);
+        let connector = Connector {
+            engine: &engine,
+            directory: &directory,
+            keys: &FakeKeys::new(),
+            keychain: &MemKeychain::default(),
+            confirmer: &confirmer,
+        };
+        let requests = Deployments::default();
+        let preview = requests.preview(&connector, "id-web", "k-plain").unwrap();
+        let (review, cancel) = requests.take(&preview.id, true).unwrap();
+        let owner = FakeOwner::typing(&["fixture-password"]);
+        assert_eq!(
+            execute(&review, &connector, &owner, &cancel, &|| Ok(())).outcome,
+            Outcome::Added
+        );
+        assert!(directory
+            .pinned(&crate::ssh::HostId::from("id-web"))
+            .unwrap()
+            .is_some());
+        let actual = engine.targets.lock().unwrap();
+        assert_eq!(actual.first().unwrap().hops[0].auth, auth);
+        assert!(actual.last().unwrap().hops[0].pinned.is_some());
+        if fallback {
+            assert_eq!(actual.last().unwrap().hops[0].auth, AuthMethod::Password);
+            assert_eq!(owner.asked().len(), 1);
+        }
+        assert_eq!(
+            directory
+                .resolve(&HostQuery::Id("id-web".into()))
+                .unwrap()
+                .hops[0]
+                .auth,
+            auth
+        );
+        assert_eq!(
+            engine
+                .inner
+                .events()
+                .iter()
+                .filter(|event| matches!(event, FakeEvent::Exec { .. }))
+                .count(),
+            1
+        );
+    }
 }

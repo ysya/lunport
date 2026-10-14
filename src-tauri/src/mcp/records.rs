@@ -74,7 +74,25 @@ impl ApprovedTarget {
             .directory
             .resolve_public(query)
             .map_err(|e| e.to_string())?;
-        if *self != Self::capture(&target, connector.keys)? {
+        self.check_resolved(&target, connector.keys)
+    }
+    /// Bind the exact snapshot returned by resolution, not another read of current state.
+    pub(crate) fn check_resolved(&self, target: &Target, keys: &dyn KeyStore) -> Result<(), String> {
+        self.check_identity(Self::capture(target, keys)?)
+    }
+    /// Connector may learn pins and, after a human password answer, retry Interactive as Password.
+    /// Initial resolution is checked strictly before those connector-owned adaptations are allowed.
+    pub(crate) fn check_connected(&self, target: &Target, keys: &dyn KeyStore) -> Result<(), String> {
+        let mut actual = Self::capture(target, keys)?;
+        for (actual_hop, approved_hop) in actual.target.hops.iter_mut().zip(&self.target.hops) {
+            if approved_hop.auth == AuthMethod::Interactive && actual_hop.auth == AuthMethod::Password {
+                actual_hop.auth = AuthMethod::Interactive;
+            }
+        }
+        self.check_identity(actual)
+    }
+    fn check_identity(&self, actual: Self) -> Result<(), String> {
+        if *self != actual {
             return Err(
                 "The approved destination, route or key changed; request approval again.".into(),
             );
@@ -139,7 +157,7 @@ impl HostKeyConfirmer for NoPin<'_> {
 }
 pub(crate) struct CheckedEngine<'a> {
     pub(crate) inner: &'a dyn SshEngine,
-    pub(crate) check: &'a (dyn Fn() -> Result<(), String> + Sync),
+    pub(crate) check: &'a (dyn Fn(&Target) -> Result<(), String> + Sync),
 }
 impl SshEngine for CheckedEngine<'_> {
     fn connect(
@@ -148,7 +166,7 @@ impl SshEngine for CheckedEngine<'_> {
         p: &dyn HostKeyPolicy,
         a: &dyn AuthSource,
     ) -> Result<Box<dyn Session>, ConnectError> {
-        (self.check)().map_err(|reason| ConnectError::BadJumpChain { why: reason })?;
+        (self.check)(t).map_err(|reason| ConnectError::BadJumpChain { why: reason })?;
         self.inner.connect(t, p, a)
     }
 }
@@ -157,10 +175,13 @@ impl SshEngine for CheckedEngine<'_> {
 pub(crate) struct PublicDirectory<'a>(
     pub(crate) &'a dyn crate::session::directory::HostDirectory,
     pub(crate) &'a (dyn Fn() -> Result<(), String> + Sync),
+    pub(crate) &'a (dyn Fn(&Target) -> Result<(), String> + Sync),
 );
 impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
     fn resolve(&self, q: &HostQuery) -> Result<Target, crate::session::directory::DirectoryError> {
-        self.0.resolve_public(q)
+        let target = self.0.resolve_public(q)?;
+        (self.2)(&target).map_err(crate::session::directory::DirectoryError::Failed)?;
+        Ok(target)
     }
     fn pinned(
         &self,
@@ -449,9 +470,14 @@ pub(super) fn execute_context(
             if mode == ApprovalMode::AutoLog && target.hops.iter().any(|h| h.pinned.is_none()) {
                 return Err("needs interaction: host key is not pinned".into());
             }
+            let check_resolved = |actual: &Target| approved.check_resolved(actual, connector.keys);
+            let check_connected = |actual: &Target| {
+                check()?;
+                approved.check_connected(actual, connector.keys)
+            };
             let engine = CheckedEngine {
                 inner: connector.engine,
-                check: &check,
+                check: &check_connected,
             };
             let keys = KeyView {
                 keys: connector.keys,
@@ -467,7 +493,7 @@ pub(super) fn execute_context(
             } else {
                 connector.keychain
             };
-            let directory = PublicDirectory(connector.directory,&check);
+            let directory = PublicDirectory(connector.directory, &check, &check_resolved);
             let guarded = Connector {
                 engine: &engine,
                 confirmer: &confirmer,
@@ -487,7 +513,7 @@ pub(super) fn execute_context(
                 connected.session.close();
                 return Err(reason.into());
             }
-            if let Err(error) = check() {
+            if let Err(error) = check_connected(&connected.target) {
                 connected.session.close();
                 return Err(error);
             }
@@ -1779,3 +1805,7 @@ mod confirmed_pin_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "target_binding_tests.rs"]
+pub(crate) mod target_binding_tests;
