@@ -73,7 +73,19 @@ jobs:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `vault:: ipc:: agent::` is read as a YAML mapping and the workflow would not load.
         # --locked: the committed Cargo.lock, with russh in it, is what is built.
-        run: "cargo test --locked --lib -- sync::slot_rules sync::slot_files vault:: ipc:: agent:: ssh:: session:: cli:: connect::"
+        run: "cargo test --locked --lib -- app_profile:: write_policy:: fsutil::profile_boundary_tests sync::records_v3:: boundary_ newer_ sync::slot_rules sync::slot_files vault:: ipc:: agent:: ssh:: session:: cli:: connect::"
+      - name: Profile selection in the normal library
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: |
+          cargo test --locked --test app_profile_build
+          if ($LASTEXITCODE -ne 0) { throw 'debug profile test failed' }
+          cargo test --locked --release --test app_profile_build
+          if ($LASTEXITCODE -ne 0) { throw 'production profile test failed' }
+          cargo test --locked --release --features development-profile --test app_profile_build
+          if ($LASTEXITCODE -ne 0) { throw 'development release profile test failed' }
+
       # The library and the binary in a debug build, with russh in the dependency graph (the release workflow builds the same graph).
       - name: Build the whole app
         run: cargo build --locked

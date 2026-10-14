@@ -34,7 +34,7 @@
 ## Task 3: writer completeness, build and review
 
 1. Integrate worker's direct-writer boundary patch; inspect fresh rg inventory of production fs create/write/copy/link/rename/remove/set_permissions/open and trace each to a guard. Fix gaps with sentinel tests.
-2. Run whole Rust suite with only the two existing real credential-store tests skipped; OpenSSH required. Run frontend tests, typecheck/build; no app launch or originals modified.
+2. Run whole Rust suite with only the three real credential-store tests skipped; OpenSSH required. Run frontend tests, typecheck/build; no app launch or originals modified.
 3. Run debug, ordinary release, release development-feature profile integration tests. Local release matrix may disable optimization for speed; debug assertions stay false and CI will use defaults.
 4. Review immutable branch patch independently; meaningful findings get reproducing tests and fixes. No main merge, release or actual migration. A new draft feature PR may be used for macOS/Linux/Windows CI under the user's autonomous completion instruction; never push shared next/main branches.
 

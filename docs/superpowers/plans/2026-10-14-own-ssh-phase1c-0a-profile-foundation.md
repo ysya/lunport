@@ -17,7 +17,7 @@
 - Never launch the app. Until all 1c-0 wiring and write-boundary work is complete, the legacy file writers still use their current paths.
 - No real ~/.ssh, Keychain, agent or relay access. Tests use temp directories; they never mutate HOME, USERPROFILE or the process environment.
 - Run Cargo from src-tauri with --offline --locked locally. Use the installed stable toolchain already used by the project. No dependencies are downloaded.
-- Whole-suite tests skip secrets::tests::round_trip_set_get_delete and askpass::tests::env_secret_takes_priority_over_keychain. Keep the existing scratch-sshd cleanup checks for runs that start sshd.
+- Whole-suite tests skip secrets::tests::round_trip_set_get_delete and both askpass::tests::env_secret_takes_priority_over_keychain and askpass::tests::missing_account_and_no_env_yields_none. Keep the existing scratch-sshd cleanup checks for runs that start sshd.
 - AppProfile::CURRENT is never special-cased for cfg(test). Integration tests verify the non-test library's actual build selection. Explicit profiles make unit tests independent of the current build.
 - WritePolicy is an accidental-write boundary, not protection against a hostile same-user process changing directories between the check and an I/O operation. Callers must check every write, not cache an old decision.
 - Dev writes will be confined to the development app-data root; its backups also live there. Production retains its existing roaming-data backup path on Windows.
@@ -474,11 +474,11 @@ Add this step after that test command, before building the whole app:
         run: cargo test --locked --test app_profile_build
 ```
 
-- [ ] Locally run the profile/policy tests, all three build-selection commands, and the whole existing lib suite with the two credential-store skips:
+- [ ] Locally run the profile/policy tests, all three build-selection commands, and the whole existing lib suite with the three credential-store skips:
 
 ```sh
 cargo test --offline --locked --lib -- app_profile:: write_policy::
-cargo test --offline --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain
+cargo test --offline --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none
 ```
 
 The first three tasks each supply focused tests; this whole-suite run is the regression gate after the new modules and Cargo feature are in place.
