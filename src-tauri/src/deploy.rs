@@ -428,6 +428,7 @@ fn effective_pairs(
     state: &tauri::State<crate::state::AppState>,
     alias: &str,
 ) -> Result<Vec<(String, String)>, AppError> {
+    require_legacy_deploy()?;
     {
         let doc_lock = state.doc.lock().unwrap();
         let doc = doc_lock
@@ -438,6 +439,10 @@ fn effective_pairs(
     crate::config::intel::effective_config(alias, None)
 }
 
+fn require_legacy_deploy() -> Result<(), AppError> {
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(|message| AppError::Other(message.into()))
+}
+
 /// in-app 部署要求「載入的設定檔就是 ssh 預設會讀的那一份」。
 ///
 /// 使用者可以把 SSHelter 指向任意 config 路徑，但部署跑的 `ssh <alias>` 永遠讀
@@ -445,6 +450,7 @@ fn effective_pairs(
 /// 都可能來自一份 ssh 根本不會讀的檔案 —— 與拒絕跳板同一個理由：無法保證我們推理的設定
 /// 就是 ssh 會用的設定，就不該把使用者的密碼送出去。
 fn require_default_config_root(state: &tauri::State<crate::state::AppState>) -> Result<(), AppError> {
+    require_legacy_deploy()?;
     let loaded = {
         let doc_lock = state.doc.lock().unwrap();
         doc_lock
@@ -481,6 +487,7 @@ fn resolve_endpoint(
     state: &tauri::State<crate::state::AppState>,
     alias: &str,
 ) -> Result<Endpoint, AppError> {
+    require_legacy_deploy()?;
     let main_path = {
         let doc_lock = state.doc.lock().unwrap();
         let doc = doc_lock
@@ -501,6 +508,7 @@ fn run_ssh_deploy(
     account: &str,
     env_secret: Option<&str>,
 ) -> Result<DeployOutcome, AppError> {
+    require_legacy_deploy()?;
     let exe = std::env::current_exe().map_err(AppError::Io)?;
 
     let mut cmd = crate::process::background_command("ssh");
@@ -658,6 +666,7 @@ pub fn deploy_preflight(
     state: tauri::State<crate::state::AppState>,
     alias: String,
 ) -> Result<DeployPreflight, AppError> {
+    require_legacy_deploy()?;
     let version = local_ssh_version();
 
     let pairs = effective_pairs(&state, &alias).unwrap_or_default();
@@ -674,6 +683,7 @@ pub fn deploy_precheck_host_key(
     state: tauri::State<crate::state::AppState>,
     alias: String,
 ) -> Result<HostKeyStatus, AppError> {
+    require_legacy_deploy()?;
     // Same reasoning as `deploy_key`: the actual deploy always reads `~/.ssh/config` (no
     // `-F`), so a precheck against a non-default loaded config could scan/trust the wrong host.
     require_default_config_root(&state)?;
@@ -708,6 +718,7 @@ pub fn deploy_trust_host_key(
     alias: String,
     fingerprint: String,
 ) -> Result<(), AppError> {
+    require_legacy_deploy()?;
     // **前端不提供要寫入的那一行。** 這個 command 會寫進使用者真實的
     // `~/.ssh/known_hosts`，而那個檔案的效力遠超出本 app —— 一旦寫進去，使用者從終端機
     // 直接 `ssh` 也會接受那把金鑰。若接受前端傳來的 key_line，一個被入侵或有 bug 的前端
@@ -740,6 +751,7 @@ pub fn deploy_key(
     password: String,
     remember: bool,
 ) -> Result<DeployOutcome, AppError> {
+    require_legacy_deploy()?;
     {
         let doc_lock = state.doc.lock().unwrap();
         let doc = doc_lock

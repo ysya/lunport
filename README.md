@@ -83,6 +83,8 @@ pnpm build              # type-check + build the frontend
 
 Development builds use `org.homelab.sshelter.dev`, the `SSHelter Development` credential service, and a sandbox home under their data directory. They can run beside the installed app. File writes stay inside that directory; updates and launch at login are disabled. Use `pnpm tauri:build:dev` for a release-mode development bundle. A build whose Tauri identifier or product name disagrees with its compiled profile refuses to initialize.
 
+During the records transition, Development refuses legacy system-SSH evaluation, Connect, deploy and MCP execution before spawning OpenSSH. Records connections use the built-in SSH engine. The development agent socket and lock use the shorter app-data `ipc/a` directory.
+
 An ordinary `pnpm tauri build` remains the production profile. Development imports may read selected external sources; they must copy into the sandbox and preserve the originals.
 
 Tests:

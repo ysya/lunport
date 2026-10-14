@@ -27,3 +27,11 @@ fn the_normal_library_enforces_the_profile_on_an_actual_vault_export() {
         }
     }
 }
+
+#[test]
+fn the_normal_library_uses_the_compiled_legacy_ssh_boundary() {
+    match CURRENT {
+        AppProfile::Development => assert!(CURRENT.require_legacy_ssh().is_err()),
+        AppProfile::Production => assert!(CURRENT.require_legacy_ssh().is_ok()),
+    }
+}

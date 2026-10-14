@@ -32,6 +32,21 @@ impl AppProfile {
         }
     }
 
+    /// External OpenSSH expands paths and runs local hooks outside the app's write policy.
+    pub fn require_legacy_ssh(self) -> Result<(), &'static str> {
+        match self {
+            Self::Production => Ok(()),
+            Self::Development => Err("Legacy system SSH is unavailable in Development; use the records connection adapter"),
+        }
+    }
+
+    pub fn agent_ipc_dir(self, home: &Path, data: &Path) -> PathBuf {
+        match self {
+            Self::Production => home.join(".ssh/sshelter/agent"),
+            Self::Development => data.join("ipc/a"),
+        }
+    }
+
     pub const fn allows_os_integrations(self) -> bool {
         matches!(self, Self::Production)
     }
@@ -143,6 +158,25 @@ mod tests {
         assert_eq!(prod.pipe_role(IpcRole::Session), "session");
         assert_eq!(dev.pipe_role(IpcRole::Agent), "dev-agent");
         assert_eq!(dev.pipe_role(IpcRole::Session), "dev-session");
+    }
+
+    #[test]
+    fn dev_agent_ipc_fits_a_long_macos_username_and_prod_keeps_the_old_path() {
+        let home = PathBuf::from("/Users/averylongusername");
+        let data_root = home.join("Library/Application Support");
+        let dev = AppPaths::from_os_roots(AppProfile::Development, &data_root, &data_root, &home);
+        let dir = AppProfile::Development.agent_ipc_dir(dev.home(), dev.data());
+        assert_eq!(dir, dev.data().join("ipc/a"));
+        assert!(dir.starts_with(dev.data()));
+        assert!(dir.join("sock").as_os_str().len() < 104);
+        assert!(dev.home().join(".ssh/sshelter/agent/sock").as_os_str().len() >= 104);
+        assert_eq!(AppProfile::Production.agent_ipc_dir(&home, Path::new("/unused")), home.join(".ssh/sshelter/agent"));
+    }
+
+    #[test]
+    fn external_legacy_ssh_is_available_only_in_production() {
+        assert!(AppProfile::Production.require_legacy_ssh().is_ok());
+        assert!(AppProfile::Development.require_legacy_ssh().unwrap_err().contains("Development"));
     }
 
     #[test]

@@ -61,6 +61,11 @@ pub fn vault_host_patterns(doc: &SshConfigDoc, vault_files: &BTreeSet<String>, h
 
 /// `agent/config` 的內容。`endpoint` = `IdentityAgent` 的值(`crate::agent::identity_agent_value`)。
 pub fn render(patterns: &[Vec<String>], endpoint: &str) -> String {
+    let endpoint = if endpoint.chars().any(|c| c.is_whitespace() || matches!(c, '"' | '\\' | '#')) {
+        format!("\"{}\"", endpoint.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        endpoint.to_string()
+    };
     let mut out = format!("{HEADER}\n");
     for host in patterns {
         out.push_str(&format!("Host {}\n  IdentityAgent {endpoint}\n  IdentitiesOnly yes\n", host.join(" ")));
@@ -236,6 +241,18 @@ fn put_include_first(doc: &mut SshConfigDoc, backed_up: &mut HashSet<PathBuf>, r
     Ok(())
 }
 
+/// Call under the document lock, before restoring or refreshing any config.
+fn check_writes_allowed(env: &SyncEnv) -> Result<(), AppError> {
+    let core = env.runtime.core.lock().unwrap();
+    if let Some(reason) = core.save_blocked.as_ref() {
+        return Err(AppError::Other(reason.clone()));
+    }
+    if let Some(state) = core.state.as_ref() {
+        crate::sync::account::format_writes_allowed(state)?;
+    }
+    Ok(())
+}
+
 /// 同步執行緒與命令用:先拿 doc 與 backed_up 的鎖,再在鎖裡短暫拿 core 鎖讀保管庫的插槽檔名(doc 然後 core,`config::commands` 與存檔 hook 同一個順序),呼叫 `refresh`。
 /// 插槽檔名不在 doc 鎖外先讀:兩邊同時更新時,後拿到 doc 鎖的那一個讀到的不會比先寫的那一個舊,`agent/config` 不會被過時的集合蓋回去。config 還沒載入就什麼都不做。
 ///
@@ -244,11 +261,7 @@ fn put_include_first(doc: &mut SshConfigDoc, backed_up: &mut HashSet<PathBuf>, r
 pub fn refresh_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
     let Some(home) = env.ssh_dir.parent().map(Path::to_path_buf) else { return Ok(WiringStatus::NotNeeded) };
     let mut doc_lock = env.doc.lock().unwrap();
-    {
-        let core = env.runtime.core.lock().unwrap();
-        if let Some(reason) = core.save_blocked.as_ref() { return Err(AppError::Other(reason.clone())); }
-        if let Some(state) = core.state.as_ref() { crate::sync::account::format_writes_allowed(state)?; }
-    }
+    check_writes_allowed(env)?;
     let Some(doc) = doc_lock.as_mut() else { return Ok(WiringStatus::NotNeeded) };
     let mut backed_up = env.backed_up.lock().unwrap();
     let retention = env.retention();
@@ -312,6 +325,8 @@ pub fn fix_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
     let home = env.ssh_dir.parent().map(Path::to_path_buf).ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))?;
     {
         let mut doc_lock = env.doc.lock().unwrap();
+        // Keep the same doc -> core order as refresh before restoring any Include or backup.
+        check_writes_allowed(env)?;
         let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("The SSH config isn't loaded yet.".to_string()))?;
         let mut backed_up = env.backed_up.lock().unwrap();
         let retention = env.retention();
@@ -323,8 +338,52 @@ pub fn fix_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn blocked_fix_checks_write_eligibility_before_doc_config_or_backup_changes() {
+        use crate::sync::fake_relay::FakeRelay;
+        use crate::sync::state_v2::AccountState;
+        use crate::sync::testkit::{TestClock, TestDevice};
+        for blocked in ["save-blocked", "future-local-state", "newer-account"] {
+            let d = TestDevice::with_main_config("blocked-fix", &FakeRelay::new(), &TestClock::new(), WEB);
+            put_in_vault(&d, SLOT);
+            {
+                let mut core = d.runtime.core.lock().unwrap();
+                if blocked == "newer-account" {
+                    let mut account = AccountState::new(&"a".repeat(64));
+                    account.remote_schema_version = Some(crate::sync::record::ACCOUNT_SCHEMA_VERSION + 1);
+                    core.state.as_mut().unwrap().account = Some(account);
+                } else {
+                    core.save_blocked = Some(blocked.into());
+                }
+            }
+            let mirror = crate::fsutil::backup_dir_for(&d.main_path()).unwrap();
+            assert!(!mirror.exists());
+            assert!(fix_env(&d.env()).is_err(), "blocked kind: {blocked}");
+            assert_eq!(d.main_config(), WEB, "blocked kind: {blocked}");
+            let doc = d.doc.lock().unwrap();
+            let main = &doc.as_ref().unwrap().files[0];
+            assert_eq!(serialize_items(&main.items, main.trailing_newline), WEB, "blocked kind: {blocked}");
+            assert!(d.backed_up.lock().unwrap().is_empty());
+            assert!(!mirror.exists(), "no backup creation: {blocked}");
+            assert!(!agent_config_path(d.home.path()).exists());
+        }
+    }
+
     use crate::config::parser::parse_file;
     use crate::config::serialize::serialize_items;
+
+    #[test]
+    fn an_endpoint_with_spaces_is_accepted_by_openssh() {
+        let Some(_tools) = crate::ssh::testing::harness::tools() else { return; };
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let endpoint = dir.path().join("Application Support").join("agent.sock");
+        std::fs::write(&config, render(&[vec!["fixture".into()]], &endpoint.to_string_lossy())).unwrap();
+        let output = crate::process::output(crate::process::background_command("ssh").arg("-G").arg("-F").arg(&config).arg("fixture")).unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let resolved = String::from_utf8_lossy(&output.stdout);
+        assert!(resolved.lines().any(|line| line == format!("identityagent {}", endpoint.display())));
+    }
 
     const SOCK: &str = "~/.ssh/sshelter/agent/sock";
 
