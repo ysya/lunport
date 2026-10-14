@@ -375,6 +375,98 @@ pub fn secret_revision(
     }))
 }
 
+/// A migrated Own1 slot has no account-wide public identity. Only explicit publishing may
+/// replace this recognized opaque revision; arbitrary future/invalid slots still fail closed.
+pub(crate) fn legacy_own_slot_revision(
+    section: &AccountState,
+    keys: &ChainKeys,
+    id: &str,
+) -> Result<Option<SecretRevision>, AppError> {
+    if section.chain_id != keys.chain_id || !is_slot_id(id) {
+        return Err(failure());
+    }
+    let key = sealed_key("keyslot", &crypto::id_hash(keys, "keyslot", id));
+    let Some(sealed) = section.sealed.get(&key) else {
+        return Ok(None);
+    };
+    let opened = open_record(keys, &sealed.envelope).map_err(|_| failure())?;
+    let fields = opened.0.payload.as_object().ok_or_else(failure)?;
+    if fields.keys().any(|key| {
+        ![
+            "schema",
+            "name",
+            "mode",
+            "origin_device_id",
+            "created_at_ms",
+            "public_key",
+            "fingerprint",
+            "key_type",
+            "has_passphrase",
+        ]
+        .contains(&key.as_str())
+    }) {
+        return Err(failure());
+    }
+    let old: crate::sync::slot_rules::KeySlotPayload =
+        serde_json::from_value(opened.0.payload.clone()).map_err(|_| failure())?;
+    if opened.0.kind != RecordKind::KeySlot
+        || opened.0.id != id
+        || opened.0.deleted
+        || old.schema != 1
+        || old.mode != crate::sync::slot_rules::SlotMode::Own
+        || !crate::sync::slot_rules::valid_slot_name(&old.name)
+        || !is_slot_id(&old.origin_device_id)
+        || old.public_key.is_some()
+        || old.fingerprint.is_some()
+        || old.key_type.is_some()
+        || old.has_passphrase.is_some()
+    {
+        return Err(failure());
+    }
+    Ok(Some(SecretRevision {
+        version: opened.0.version,
+        updated_at_ms: opened.0.updated_at_ms,
+        device_id: opened.0.device_id.clone(),
+        deleted: false,
+    }))
+}
+/// Old alias/text hosts intentionally retained by migration are source evidence, not active hosts.
+/// This recognizes only the old shape; callers must still reject an opaque shadow of a typed id.
+pub(crate) fn is_legacy_alias_host(keys: &ChainKeys, envelope: &Envelope) -> bool {
+    let Ok(opened) = open_record(keys, envelope) else {
+        return false;
+    };
+    let Some(fields) = opened.0.payload.as_object() else {
+        return false;
+    };
+    opened.0.kind == RecordKind::Host
+        && !opened.0.deleted
+        && fields.len() == 2
+        && fields.get("schema").and_then(Value::as_u64) == Some(1)
+        && fields.get("text").and_then(Value::as_str).is_some()
+}
+/// A future account may extend its outer header. Authenticate its fixed identity and format
+/// hint without admitting its payload or weakening the supported-record shape validation.
+fn authenticated_future_schema(keys: &ChainKeys, envelope: &Envelope) -> Option<u32> {
+    let sealed = Sealed {
+        id_hash: envelope.id_hash.clone(),
+        nonce: envelope.nonce.clone(),
+        ciphertext: envelope.ciphertext.clone(),
+    };
+    let bytes = Zeroizing::new(crypto::open(keys, "meta", &envelope.id_hash, &sealed).ok()?);
+    let value = SensitiveJson(serde_json::from_slice::<Value>(&bytes).ok()?);
+    let fields = value.0.as_object()?;
+    if fields.get("kind")?.as_str()? != "meta"
+        || fields.get("id")?.as_str()? != ACCOUNT_META_ID
+        || fields.get("deleted")?.as_bool()? != envelope.deleted
+        || crypto::id_hash(keys, "meta", ACCOUNT_META_ID) != envelope.id_hash
+    {
+        return None;
+    }
+    let schema = fields.get("payload")?.get("schema_version")?.as_u64()?;
+    (schema > u64::from(ACCOUNT_SCHEMA)).then(|| u32::try_from(schema).unwrap_or(u32::MAX))
+}
+
 fn result<S: Clone>(
     section: &S,
     gate: AccountGate,
@@ -450,7 +542,13 @@ pub fn account_gate(
                     });
                 }
             }
-            Err(_) => unreadable_meta = true,
+            Err(_) => {
+                schema = schema
+                    .into_iter()
+                    .chain(authenticated_future_schema(keys, envelope))
+                    .max();
+                unreadable_meta = true;
+            }
         }
     }
     if let Some(schema) = schema.filter(|schema| *schema > ACCOUNT_SCHEMA) {
@@ -488,7 +586,7 @@ pub fn account_gate(
         Err(gate) => (gate, schema),
     }
 }
-fn valid_pull(
+pub(crate) fn valid_pull(
     cursor: u64,
     baseline: bool,
     known_seq: u64,

@@ -721,3 +721,58 @@ fn unpublish_only_tombstones_transport_and_keeps_public_metadata_and_local_vault
     );
     assert!(!d.relay.calls().iter().any(|c| c.starts_with("delete:")));
 }
+
+#[test]
+fn explicitly_publishing_migrated_own_slot_upgrades_the_same_wire_identity_with_cas() {
+    let (d, keys) = joined();
+    let id = "a".repeat(32);
+    let s = state(&d);
+    let old = Record {
+        kind: RecordKind::KeySlot,
+        id: id.clone(),
+        version: 7,
+        updated_at_ms: 8000,
+        device_id: s.device_id.clone(),
+        deleted: false,
+        payload: json!({"schema":1,"name":"old-own","mode":"own","origin_device_id":s.device_id,"created_at_ms":1,"public_key":null,"fingerprint":null,"key_type":null,"has_passphrase":null}),
+    };
+    d.relay
+        .push(
+            &keys.chain_id,
+            &keys.auth_token,
+            &[encode_record(&keys, &old, 0).unwrap()],
+        )
+        .unwrap();
+    crate::sync::record_round::sync_once(&d.env()).unwrap();
+    let text = crate::sync::slot_rules::test_keys::plain();
+    publish_key(
+        &d.env(),
+        &id,
+        public(&text, &state(&d)),
+        Zeroizing::new(text.clone()),
+    )
+    .unwrap();
+    let after = state(&d);
+    let a = after.account.as_ref().unwrap();
+    assert!(!a.sealed.contains_key(&sealed_key(
+        "keyslot",
+        &crypto::id_hash(&keys, "keyslot", &id)
+    )));
+    let row = &a.records[&record_key(RecordKind::KeySlot, &id)];
+    assert_eq!(row.record.payload["schema"], json!(2));
+    assert!(row.record.version > old.version);
+    assert!(row.record.updated_at_ms > old.updated_at_ms);
+    assert!(!row.dirty);
+    assert!(row.seq > 0);
+    assert_eq!(
+        record_merge::key_secret(a, &keys, &id)
+            .unwrap()
+            .unwrap()
+            .as_str(),
+        text
+    );
+    let remote = d.relay.pull(&keys.chain_id, &keys.auth_token, 0).unwrap();
+    let slot = remote.records.iter().find(|r| r.kind == "keyslot").unwrap();
+    assert_eq!(slot.seq, row.seq);
+    assert!(!serde_json::to_string(&after).unwrap().contains(&text));
+}

@@ -1,0 +1,12 @@
+# Typed account compatibility verification
+
+Scope: migrated Own1 explicit key publication, future account metadata header recognition, and authenticated format versus local frozen policy. English code/commits; isolated fixtures only. No real credentials, SSH writer, relay, launch, push or merge.
+
+- RED: `sshelter-record-legacy-opaque-red.log` proves migrated Own1 explicit publication refused as opaque and legacy alias source incorrectly blocked detach. `sshelter-record-merge-future-header-red.log` proves authenticated schema4 with an extended outer header returned InvalidMigration instead of durable NeedsUpdate. Existing future/cursor priority already passed and was preserved.
+- GREEN in actual worktree: `CARGO_TARGET_DIR=/Users/ysya/project/sideproj/sshelter/src-tauri/target cargo test --offline --locked --manifest-path src-tauri/Cargo.toml --lib sync::record_account::tests` 20/20, `sync::record_merge::tests` 30/30, `sync::record_round::tests` 22/22. Logs under `/private/tmp/sshelter-record-compat-main-{account,merge,round}-green.log`. `git diff --check` passed for these six owned files.
+- Publication upgrades only authenticated strictly recognized Own1. Initial candidate CAS compares exact cached public/opaque source; new metadata uses previous wire sequence and a later stamp. A second fresh proof may retain source ciphertext again, so explicit upgrade removes it only when its old timestamp remains below our dirty target. Unknown/future/deleted authority still refuses. Private key stays encrypted and exact accepted receipts clear dirty rows.
+- Future-schema fallback authenticates fixed meta identity/deleted flag even if a newer header has additional fields, extracts only its numeric schema hint and zeroizes bytes/JSON. Supported shape validation remains strict; unsupported payload never applies.
+- Fresh proof exposes `format_gate` independently of frozen/rotation policy. Frozen policy cannot hide future schema, and supported frozen accounts still fail shared `ensure_compatible`. The narrow caller-owned lifecycle flush seam is for typed rotation only.
+- Additional NEW leave/rotation modules are separately planned and verified in an isolated latest-source harness; module registration/native/UI remain root-owned. This ledger does not claim those modules have passed actual-worktree formal tests yet.
+
+One focused TDD fix pass; no repeat independent review requested. No dependencies changed, no production effects. Parent performs final full integration gate.
