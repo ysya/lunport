@@ -345,7 +345,7 @@ pub(super) fn expand_path(
 pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
-fn snapshot_digest(files: &[SourceFile], options: &ImportOptions) -> String {
+pub(super) fn snapshot_digest(files: &[SourceFile], options: &ImportOptions) -> String {
     let mut hash = Sha256::new();
     hash.update(b"sshelter-import-snapshot-v1");
     let mut field = |bytes: &[u8]| {
@@ -363,4 +363,46 @@ fn snapshot_digest(files: &[SourceFile], options: &ImportOptions) -> String {
         field(file.digest.as_bytes());
     }
     hex(&hash.finalize())
+}
+
+pub(super) fn memory_snapshot(
+    label: &Path,
+    text: &str,
+    options: &ImportOptions,
+) -> Result<Snapshot, ImportError> {
+    let location = SourceLocation {
+        path: label.into(),
+        line: 1,
+    };
+    if text.len() > MAX_FILE_BYTES {
+        return Err(ImportError::Limit {
+            location,
+            limit: "file bytes",
+        });
+    }
+    if text.contains("PRIVATE KEY-----") {
+        return Err(ImportError::PrivateKeyContent { location });
+    }
+    let mut line = 1;
+    let mut events = flatten(crate::config::parser::parse_file(text).0, label, &mut line);
+    for event in &mut events {
+        if event.directive.key == "include" {
+            event.issue = Some((
+                "legacy relay Include belongs to another device and is not opened".into(),
+                true,
+            ));
+        }
+    }
+    let files = vec![SourceFile {
+        path: label.into(),
+        canonical_path: label.into(),
+        digest: hex(&Sha256::digest(text.as_bytes())),
+        bytes: text.len(),
+    }];
+    let digest = snapshot_digest(&files, options);
+    Ok(Snapshot {
+        events,
+        files,
+        digest,
+    })
 }
