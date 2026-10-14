@@ -34,6 +34,8 @@ export function RecordHostEditor({
   onSaved,
   onDeleted,
   onDirty,
+  onBusy,
+  onCancel,
 }: {
   host: RecordHostView | null;
   hostId: string | null;
@@ -44,6 +46,8 @@ export function RecordHostEditor({
   onSaved: (id: string | null) => void;
   onDeleted: () => void;
   onDirty: (dirty: boolean) => void;
+  onBusy?: (busy: boolean) => void;
+  onCancel?: () => void;
 }) {
   const [state, setState] = useState(() =>
     hostId && !host
@@ -73,6 +77,7 @@ export function RecordHostEditor({
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
+    onBusy?.(true);
     setState((current) => ({ ...current, error: null }));
     try {
       await operation();
@@ -86,6 +91,7 @@ export function RecordHostEditor({
     } finally {
       inFlight.current = false;
       setBusy(false);
+      onBusy?.(false);
     }
   };
   const save = () =>
@@ -136,33 +142,72 @@ export function RecordHostEditor({
       (value) => value.requires_review,
     ) ?? [];
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-6">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">
+    <div className="mx-auto max-w-3xl space-y-5 px-6 pb-6">
+      <header className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b bg-background py-4">
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-lg font-semibold">
             {state.id ? revealHidden(state.payload.alias) : "New host"}
           </h1>
           <p className="text-xs text-muted-foreground">
             {revealHidden(scopeLabel(overview, state.scope))}
-            {state.id && ` · ${state.id}`} ·{" "}
-            {state.dirty ? "Unsaved changes" : "Saved"}
+            {" · "}
+            {!state.id
+              ? "Not saved yet"
+              : state.dirty
+                ? "Unsaved changes"
+                : "Saved"}
           </p>
         </div>
-        <Button
-          disabled={
-            busy ||
-            state.dirty ||
-            state.unavailable ||
-            !host ||
-            host.readiness.kind !== "ready"
-          }
-          onClick={() =>
-            run(() => connectSavedHost(overview, state.id!, terminalId, newTab))
-          }
-        >
-          Connect
-        </Button>
+        <div className="flex items-center gap-2">
+          {state.dirty && state.id && (
+            <Button
+              variant="ghost"
+              disabled={busy || !host}
+              onClick={() => setState(beginEditor(host))}
+            >
+              Discard changes
+            </Button>
+          )}
+          {!state.id && onCancel && (
+            <Button variant="ghost" disabled={busy} onClick={onCancel}>
+              Cancel
+            </Button>
+          )}
+          <Button
+            disabled={
+              busy ||
+              sharedBlocked ||
+              (!state.dirty && state.id !== null) ||
+              editorProblem(state) !== null
+            }
+            onClick={save}
+          >
+            {busy ? "Working…" : state.id ? "Save changes" : "Create host"}
+          </Button>
+          <Button
+            variant="outline"
+            disabled={
+              busy ||
+              state.dirty ||
+              state.unavailable ||
+              !host ||
+              host.readiness.kind !== "ready"
+            }
+            onClick={() =>
+              run(() =>
+                connectSavedHost(overview, state.id!, terminalId, newTab),
+              )
+            }
+          >
+            Connect
+          </Button>
+        </div>
       </header>
+      {state.dirty && editorProblem(state) && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {editorProblem(state)}
+        </p>
+      )}
       {host && host.readiness.kind !== "ready" && (
         <p role="status" className="rounded-md border p-3 text-sm">
           {readinessLabel[host.readiness.kind]}. Review the key reference and
@@ -308,75 +353,93 @@ export function RecordHostEditor({
             </p>
           </RecordField>
         )}
-        <RecordField label="Jump hosts (in order)">
-          {state.payload.jump.map((id, index) => (
-            <div key={`${id}:${index}`} className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 truncate text-sm">
-                {index + 1}.{" "}
-                {revealHidden(
-                  selectHost(overview.hosts, id)?.payload.alias ??
-                    `Missing or conflicting host (${id})`,
-                )}
-              </span>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  patch({
-                    jump: state.payload.jump.filter((_, at) => at !== index),
-                  })
-                }
-              >
-                Remove
-              </Button>
-            </div>
-          ))}
-          <select
-            aria-label="Add jump host"
-            className={selectClass}
-            value=""
-            disabled={state.payload.jump.length >= 5}
-            onChange={(e) => {
-              if (e.target.value)
-                patch({ jump: [...state.payload.jump, e.target.value] });
-            }}
-          >
-            <option value="">Add jump host…</option>
-            {overview.hosts
-              .filter(
-                (value) =>
-                  value.id !== state.id &&
-                  !state.payload.jump.includes(value.id) &&
-                  selectHost(overview.hosts, value.id),
-              )
-              .map((value) => (
-                <option key={value.id} value={value.id}>
-                  {revealHidden(value.payload.alias)} ·{" "}
-                  {revealHidden(scopeLabel(overview, value.scope))}
-                </option>
+        {state.payload.auth === "password" && (
+          <p className="text-xs text-muted-foreground">
+            Passwords are requested in the terminal when needed and stay on
+            this device.
+          </p>
+        )}
+        <details
+          className="rounded-lg border p-4"
+          open={state.payload.jump.length > 0 || undefined}
+        >
+          <summary className="text-sm font-medium">
+            Advanced SSH settings
+          </summary>
+          <div className="mt-4 space-y-4">
+            <RecordField label="Jump hosts (in order)">
+              {state.payload.jump.map((id, index) => (
+                <div key={`${id}:${index}`} className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    {index + 1}.{" "}
+                    {revealHidden(
+                      selectHost(overview.hosts, id)?.payload.alias ??
+                        `Missing or conflicting host (${id})`,
+                    )}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      patch({
+                        jump: state.payload.jump.filter(
+                          (_, at) => at !== index,
+                        ),
+                      })
+                    }
+                  >
+                    Remove
+                  </Button>
+                </div>
               ))}
-          </select>
-        </RecordField>
-        <div className="grid gap-4 sm:grid-cols-3">
-          {(
-            [
-              ["Keepalive interval (seconds)", "keepalive_secs", 0],
-              ["Missed keepalives", "keepalive_max_missed", 0],
-              ["Connect timeout (seconds)", "connect_timeout_secs", 1],
-            ] as const
-          ).map(([label, name, min]) => (
-            <RecordField key={name} label={label}>
-              <Input
-                type="number"
-                min={min}
-                max={4294967295}
-                value={state.payload[name]}
-                onChange={(e) => patch({ [name]: Number(e.target.value) })}
-              />
+              <select
+                aria-label="Add jump host"
+                className={selectClass}
+                value=""
+                disabled={state.payload.jump.length >= 5}
+                onChange={(e) => {
+                  if (e.target.value)
+                    patch({ jump: [...state.payload.jump, e.target.value] });
+                }}
+              >
+                <option value="">Add jump host…</option>
+                {overview.hosts
+                  .filter(
+                    (value) =>
+                      value.id !== state.id &&
+                      !state.payload.jump.includes(value.id) &&
+                      selectHost(overview.hosts, value.id),
+                  )
+                  .map((value) => (
+                    <option key={value.id} value={value.id}>
+                      {revealHidden(value.payload.alias)} ·{" "}
+                      {revealHidden(scopeLabel(overview, value.scope))}
+                    </option>
+                  ))}
+              </select>
             </RecordField>
-          ))}
-        </div>
+            <div className="grid gap-4 sm:grid-cols-3">
+              {(
+                [
+                  ["Keepalive interval (seconds)", "keepalive_secs", 0],
+                  ["Missed keepalives", "keepalive_max_missed", 0],
+                  ["Connect timeout (seconds)", "connect_timeout_secs", 1],
+                ] as const
+              ).map(([label, name, min]) => (
+                <RecordField key={name} label={label}>
+                  <Input
+                    type="number"
+                    min={min}
+                    max={4294967295}
+                    value={state.payload[name]}
+                    onChange={(e) => patch({ [name]: Number(e.target.value) })}
+                  />
+                </RecordField>
+              ))}
+            </div>
+          </div>
+        </details>
         <RecordField label="Tags">
           <Input
             value={state.payload.tags.join(", ")}
@@ -423,16 +486,6 @@ export function RecordHostEditor({
             </Label>
           </div>
         )}
-        <Button
-          disabled={
-            busy ||
-            (!state.dirty && state.id !== null) ||
-            editorProblem(state) !== null
-          }
-          onClick={save}
-        >
-          {busy ? "Working…" : state.id ? "Save changes" : "Create host"}
-        </Button>
       </fieldset>
       {state.payload.host_key && (
         <div className="space-y-1 rounded-md border p-3 text-xs">
@@ -447,77 +500,87 @@ export function RecordHostEditor({
         </div>
       )}
       {state.id && (
-        <section className="space-y-3 border-t pt-4">
-          <div className="flex items-center gap-2">
-            <select
-              aria-label="Move destination"
-              className={selectClass}
-              value={destination}
-              disabled={
-                busy || state.dirty || state.unavailable || sharedBlocked
-              }
-              onChange={(e) => setDestination(e.target.value)}
-            >
-              <option value="local">Local</option>
-              {overview.spaces
-                .filter((space) => space.selected && !space.missing)
-                .map((space) => (
-                  <option
-                    key={space.id}
-                    disabled={overview.shared_writes_blocked}
-                    value={space.id}
-                  >
-                    {revealHidden(space.name)}
-                  </option>
-                ))}
-            </select>
-            <Button
-              variant="outline"
-              disabled={
-                busy ||
-                state.dirty ||
-                state.unavailable ||
-                sharedBlocked ||
-                (state.scope.kind === "local"
-                  ? destination === "local"
-                  : destination === state.scope.space_id) ||
-                (destination !== "local" && overview.shared_writes_blocked)
-              }
-              onClick={move}
-            >
-              Move host
-            </Button>
-          </div>
-          {askingDelete ? (
-            <div className="flex items-center gap-3">
-              <p className="text-sm">
-                Delete this saved host and discard its draft?
-              </p>
-              <Button
-                variant="destructive"
-                disabled={busy || state.unavailable || sharedBlocked}
-                onClick={remove}
+        <details className="rounded-lg border p-4">
+          <summary className="text-sm font-medium">Manage host</summary>
+          <section className="mt-4 space-y-3">
+            <p className="text-xs text-muted-foreground">
+              Move this host to a synced space to share it with your other
+              devices, or keep it Local.
+            </p>
+            <div className="flex items-center gap-2">
+              <select
+                aria-label="Move destination"
+                className={selectClass}
+                value={destination}
+                disabled={
+                  busy || state.dirty || state.unavailable || sharedBlocked
+                }
+                onChange={(e) => setDestination(e.target.value)}
               >
-                Confirm delete
-              </Button>
+                <option value="local">Local</option>
+                {overview.spaces
+                  .filter((space) => space.selected && !space.missing)
+                  .map((space) => (
+                    <option
+                      key={space.id}
+                      disabled={overview.shared_writes_blocked}
+                      value={space.id}
+                    >
+                      {revealHidden(space.name)}
+                    </option>
+                  ))}
+              </select>
               <Button
                 variant="outline"
-                disabled={busy}
-                onClick={() => setAskingDelete(false)}
+                disabled={
+                  busy ||
+                  state.dirty ||
+                  state.unavailable ||
+                  sharedBlocked ||
+                  (state.scope.kind === "local"
+                    ? destination === "local"
+                    : destination === state.scope.space_id) ||
+                  (destination !== "local" && overview.shared_writes_blocked)
+                }
+                onClick={move}
               >
-                Cancel
+                Move host
               </Button>
             </div>
-          ) : (
-            <Button
-              variant="outline"
-              disabled={busy || state.unavailable || sharedBlocked}
-              onClick={() => setAskingDelete(true)}
-            >
-              Delete host
-            </Button>
-          )}
-        </section>
+            {askingDelete ? (
+              <div className="flex items-center gap-3">
+                <p className="text-sm">
+                  Delete this saved host and discard its draft?
+                </p>
+                <Button
+                  variant="destructive"
+                  disabled={busy || state.unavailable || sharedBlocked}
+                  onClick={remove}
+                >
+                  Confirm delete
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => setAskingDelete(false)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                disabled={busy || state.unavailable || sharedBlocked}
+                onClick={() => setAskingDelete(true)}
+              >
+                Delete host
+              </Button>
+            )}
+          </section>
+          <p className="mt-4 break-all font-mono text-xs text-muted-foreground">
+            Host ID: {state.id}
+          </p>
+        </details>
       )}
     </div>
   );
