@@ -106,6 +106,7 @@ struct Table {
     /// `end_all` has started: the app is quitting, and no session is started any more.
     quitting: bool,
     mcp: BTreeMap<u64, CancelToken>,
+    deployments: BTreeMap<u64, CancelToken>,
 }
 
 /// The broker. One per app; its handler serves the IPC socket.
@@ -124,6 +125,14 @@ pub struct Broker {
     /// Notified whenever a session leaves the table (`end_all` waits on it).
     changed: Condvar,
     next_id: AtomicU64,
+}
+
+pub(crate) struct DeploymentRegistration<'a> { broker: &'a Broker, id: u64 }
+impl Drop for DeploymentRegistration<'_> {
+    fn drop(&mut self) {
+        locked(&self.broker.table).deployments.remove(&self.id);
+        self.broker.changed.notify_all();
+    }
 }
 
 impl Broker {
@@ -167,6 +176,15 @@ impl Broker {
         Connector {engine:self.engine.as_ref(),directory:self.directory.as_ref(),keys:self.keys.as_ref(),keychain:self.keychain.as_ref(),confirmer:self.confirmer.as_ref()}
     }
 
+    /// Human deployments participate in the same quit barrier, without consulting MCP policy.
+    pub(crate) fn register_deployment(&self, cancel: CancelToken) -> Result<DeploymentRegistration<'_>, String> {
+        let mut table = locked(&self.table);
+        if table.quitting { cancel.cancel(); return Err("The application is quitting.".into()); }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        table.deployments.insert(id, cancel);
+        Ok(DeploymentRegistration { broker: self, id })
+    }
+
     pub fn set_audit(&self,callback:Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>){*locked(&self.audit)=Some(callback);}
     pub fn set_mcp_handler(&self, handler:McpHandler) { *locked(&self.mcp)=Some(handler); }
 
@@ -185,7 +203,7 @@ impl Broker {
     /// one that is open.
     pub fn has_sessions(&self) -> bool {
         let table=locked(&self.table);
-        !table.entries.is_empty() || !table.mcp.is_empty()
+        !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty()
     }
 
     /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. Waits up to `wait` for the table to
@@ -208,6 +226,7 @@ impl Broker {
             let mut table = locked(&self.table);
             table.quitting = true;
             for cancel in table.mcp.values() {cancel.cancel();}
+            for cancel in table.deployments.values() {cancel.cancel();}
             let (mut connecting, mut open) = (Vec::new(), Vec::new());
             for entry in table.entries.values_mut() {
                 match entry.info.state {
@@ -240,7 +259,7 @@ impl Broker {
         }
         let deadline = Instant::now() + wait;
         let mut table = locked(&self.table);
-        while !table.entries.is_empty() || !table.mcp.is_empty() {
+        while !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;

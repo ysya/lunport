@@ -27,6 +27,7 @@ pub fn ipc_dir(app_data: &Path) -> PathBuf {
 /// The broker's state in the app (`AppState::session`).
 #[derive(Default)]
 pub struct SessionRuntime {
+    pub deployments: deploy::Deployments,
     pub auth_questions: std::sync::Arc<auth_window::AuthHub>,
     /// The host key questions waiting for the window.
     pub host_keys: std::sync::Arc<hostkey_window::HostKeyHub>,
@@ -41,6 +42,7 @@ pub mod auth_window;
 pub mod broker;
 pub mod connect;
 pub mod directory;
+pub mod deploy;
 pub mod format_directory;
 pub mod record_directory;
 pub mod record_material;

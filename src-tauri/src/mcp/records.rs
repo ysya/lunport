@@ -137,9 +137,9 @@ impl HostKeyConfirmer for NoPin<'_> {
         }
     }
 }
-struct CheckedEngine<'a> {
-    inner: &'a dyn SshEngine,
-    check: &'a (dyn Fn() -> Result<(), String> + Sync),
+pub(crate) struct CheckedEngine<'a> {
+    pub(crate) inner: &'a dyn SshEngine,
+    pub(crate) check: &'a (dyn Fn() -> Result<(), String> + Sync),
 }
 impl SshEngine for CheckedEngine<'_> {
     fn connect(
@@ -154,9 +154,9 @@ impl SshEngine for CheckedEngine<'_> {
 }
 
 /// Uses public resolution; private material is verified by KeyStore immediately before authentication.
-struct PublicDirectory<'a>(
-    &'a dyn crate::session::directory::HostDirectory,
-    &'a (dyn Fn() -> Result<(), String> + Sync),
+pub(crate) struct PublicDirectory<'a>(
+    pub(crate) &'a dyn crate::session::directory::HostDirectory,
+    pub(crate) &'a (dyn Fn() -> Result<(), String> + Sync),
 );
 impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
     fn resolve(&self, q: &HostQuery) -> Result<Target, crate::session::directory::DirectoryError> {

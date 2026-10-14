@@ -14,8 +14,10 @@ import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
 import { clearKeyDraft, submitKeyDraft } from "./panel-actions";
 import { RecordField } from "./form";
+import { RecordsDeployKeyDialog } from "./DeployKeyDialog";
 export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   const client = useQueryClient();
+  const [deployKeyId, setDeployKeyId] = useState<string | null>(null);
   const [mode, setMode] = useState<"import" | "generate" | null>(null);
   const [draft, setDraft] = useState(clearKeyDraft);
   const [confirming, setConfirming] = useState<{
@@ -59,6 +61,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   };
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-6">
+      {deployKeyId && <RecordsDeployKeyDialog overview={overview} keyId={deployKeyId} onClose={() => setDeployKeyId(null)} />}
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold">Keys</h1>
@@ -175,6 +178,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {key.status === "available" && key.public && <Button size="sm" variant="outline" disabled={busy || draft.busy} onClick={() => setDeployKeyId(key.id)}>Deploy public key</Button>}
               {key.public && (
                 <Button
                   size="sm"
