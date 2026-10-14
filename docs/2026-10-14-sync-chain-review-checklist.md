@@ -72,3 +72,13 @@ Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0
 - Beta manifest 與新 release manifest 相同，15 個 platform entries 的下載資產存在且非空，簽章欄位存在；未宣稱另外下載所有安裝包並驗證其內容或密碼學簽章。
 - Beta 通道現提供 `1.0.0-1`；Stable 最新版仍為 `v0.16.0`。
 - 舊資料先暫停，遷移仍需要明確確認；更換同步碼後的歷史讀取與 phase 2 限制見 release notes。
+
+## UI 與設定修正（1.0.0-2）
+
+- [x] 修正主機側欄、固定儲存列、切頁保留草稿及捨棄確認。
+- [x] 將進階 SSH 設定與管理動作收合，scrollbar 改為細、低對比樣式。
+- [x] 補回設定選單、MCP 入口、常用偏好與快捷選單；設定分類不載入舊 SSH config。
+- [x] MCP 主機授權改用 stable ID，支援主機清單與連線資訊。撤銷權限不等待執行鎖。
+- [x] 確認線上 relay 為 0.2.0，支援 pull-batch、freeze；本次不需更新。
+- [ ] Records MCP 遠端指令執行與 key deployment 仍未完成；不是補回介面就代表可用。
+- [ ] 1.0.0-2 跨平台 CI、beta 發布及 manifest 核對（完成後更新）。

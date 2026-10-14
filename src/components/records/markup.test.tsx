@@ -45,6 +45,8 @@ describe("records host controls", () => {
     expect(buttonTag(html, "Connect")).toContain(DISABLED);
     expect(buttonTag(html, "Create host")).toContain(DISABLED);
     expect(html).not.toContain("Pinned host key");
+    expect(text(html)).toContain("Not saved yet");
+    expect(text(html)).not.toContain(" · Saved");
   });
   it("shows blocked readiness and never enables a missing-key connection", () => {
     const html = editor(
@@ -221,7 +223,7 @@ describe("explicit import consent and key/account controls", () => {
         overview={recordOverview({ shared_writes_blocked: true })}
       />,
     );
-    expect(buttonTag(html, "Create sync account")).toContain(DISABLED);
+    expect(buttonTag(html, "Create sync chain")).toContain(DISABLED);
     expect(buttonTag(html, "Join with sync code")).toContain(DISABLED);
     expect(text(html)).toContain("Local hosts remain editable");
   });

@@ -520,7 +520,7 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
             let _lifecycle=state.sync.lifecycle.lock().unwrap();
             let records={let core=state.sync.core.lock().unwrap();core.records.clone()};
             if let Some(records)=records {
-                let hosts=crate::sync::record_repository::list_hosts(&records).map_err(|e|e.to_string())?.into_iter().filter(|h|policy.allowed_hosts.contains(&h.host.id)||policy.allowed_hosts.contains(&h.host.payload.alias)).map(|h|record_host_metadata(&h.host)).collect::<Vec<_>>();
+                let hosts=crate::sync::record_repository::list_hosts(&records).map_err(|e|e.to_string())?.into_iter().filter(|h|ensure_record_allowed(&policy,&h.host).is_ok()).map(|h|record_host_metadata(&h.host)).collect::<Vec<_>>();
                 return Ok(json!({"hosts":hosts}));
             }
             crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
@@ -536,8 +536,10 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
             let records={let core=state.sync.core.lock().unwrap();core.records.clone()};
             if let Some(records)=records {
                 let alias=string_param(&envelope.params,"alias")?;
-                let host=crate::sync::record_repository::find_by_alias(&records,alias).map_err(|e|e.to_string())?;
-                if !policy.allowed_hosts.contains(&host.host.id){ensure_allowed(&policy,alias)?;}
+                let host=crate::sync::record_repository::get_host(&records,alias)
+                    .or_else(|_|crate::sync::record_repository::find_by_alias(&records,alias))
+                    .map_err(|e|e.to_string())?;
+                ensure_record_allowed(&policy,&host.host)?;
                 return Ok(record_host_metadata(&host.host));
             }
             crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
@@ -608,6 +610,27 @@ fn ensure_allowed(policy: &McpPolicy, alias: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_record_allowed(policy: &McpPolicy, host: &crate::sync::records_v3::HostRecord) -> Result<(), String> {
+    ensure_allowed(policy, &host.id)
+}
+
+fn change_host_permission(
+    policy: &Mutex<McpPolicy>,
+    target: &str,
+    allowed: bool,
+    validate: impl FnOnce() -> Result<(), AppError>,
+    persist: impl FnOnce(&McpPolicy) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if allowed { validate()?; }
+    let mut policy = policy.lock().unwrap();
+    let mut next = policy.clone();
+    if allowed { next.allowed_hosts.insert(target.into()); }
+    else { next.allowed_hosts.remove(target); }
+    persist(&next)?;
+    *policy = next;
+    Ok(())
+}
+
 fn display_safe_command(command: &str) -> bool {
     !command.is_empty()
         && command.len() <= MAX_COMMAND_BYTES
@@ -635,6 +658,9 @@ fn run_approved(
     params: &Value,
 ) -> Result<Value, String> {
     let _lifecycle=state.sync.lifecycle.lock().unwrap();
+    if state.sync.core.lock().unwrap().records.is_some() {
+        return Err("MCP remote command execution is not available in the records workspace yet".into());
+    }
     crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
     crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
     let alias = string_param(params, "alias")?.to_string();
@@ -963,24 +989,22 @@ pub fn mcp_set_host_allowed(
     alias: String,
     allowed: bool,
 ) -> Result<McpStatus, AppError> {
-    if allowed {
-        let doc = state.doc.lock().unwrap();
-        let doc = doc
-            .as_ref()
-            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-        validate_alias(doc, &alias)?;
-    }
-    {
-        let mut policy = state.mcp.policy.lock().unwrap();
-        let mut next = policy.clone();
-        if allowed {
-            next.allowed_hosts.insert(alias.clone());
+    change_host_permission(&state.mcp.policy, &alias, allowed, || {
+        let _lifecycle = state.sync.lifecycle.lock().unwrap();
+        let records = state.sync.core.lock().unwrap().records.clone();
+        if let Some(records) = records {
+            crate::sync::record_repository::get_host(&records, &alias)
+                .map_err(|error| AppError::Other(error.to_string()))?;
         } else {
-            next.allowed_hosts.remove(&alias);
+            crate::sync::engine::require_legacy(&state.sync)?;
+            let doc = state.doc.lock().unwrap();
+            let doc = doc
+                .as_ref()
+                .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+            validate_alias(doc, &alias)?;
         }
-        save_policy(&next)?;
-        *policy = next;
-    }
+        Ok(())
+    }, save_policy)?;
     if !allowed {
         let denied: Vec<_> = {
             let mut pending = state.mcp.pending.lock().unwrap();
@@ -1174,7 +1198,7 @@ fn tool_definitions() -> Value {
             "description": "Resolve non-secret connection settings for an AI-approved host.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "alias": { "type": "string", "description": "Exact SSHelter host alias" } },
+                "properties": { "alias": { "type": "string", "description": "Stable host ID returned by list_hosts in a records workspace, or an exact unambiguous host alias" } },
                 "required": ["alias"],
                 "additionalProperties": false
             },
@@ -1325,6 +1349,28 @@ fn bridge_call(method: &str, params: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revoking_a_host_does_not_wait_for_an_active_run_lifecycle_lock() {
+        let lifecycle = Mutex::new(());
+        let _active_run = lifecycle.lock().unwrap();
+        let policy = Mutex::new(McpPolicy { enabled: true, allowed_hosts: BTreeSet::from(["web".into()]) });
+        change_host_permission(&policy, "web", false, || {
+            let _guard = lifecycle.try_lock().map_err(|_| AppError::Other("an active run owns lifecycle".into()))?;
+            Ok(())
+        }, |_| Ok(())).unwrap();
+        assert!(!policy.lock().unwrap().allowed_hosts.contains("web"));
+    }
+
+    #[test]
+    fn records_allowlist_does_not_inherit_a_legacy_alias_grant() {
+        let host: crate::sync::records_v3::HostRecord = serde_json::from_value(json!({"id":"0123456789abcdef","scope":{"kind":"local"},"payload":{"schema":2,"alias":"web","hostname":"fixture.invalid","auth":"password"}})).unwrap();
+        let mut policy = McpPolicy::default();
+        policy.allowed_hosts.insert("web".into());
+        assert!(ensure_record_allowed(&policy, &host).is_err());
+        policy.allowed_hosts.insert(host.id.clone());
+        assert!(ensure_record_allowed(&policy, &host).is_ok());
+    }
 
     #[test]
     fn record_metadata_does_not_expose_notes_or_imported_directive_values(){

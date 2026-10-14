@@ -3,6 +3,25 @@ import { describe, expect, it } from "vitest";
 import { text } from "@/components/keychain/test-markup";
 import { RecordSyncStatus } from "./SyncStatus";
 describe("records sync status", () => {
+  it("does not imply failed sync when this device only has local data", () => {
+    const html = renderToStaticMarkup(
+      <RecordSyncStatus lastSyncMs={null} error={null} connected={false} />,
+    );
+    expect(text(html)).toContain("Local only");
+    expect(text(html)).not.toContain("Not synced yet");
+  });
+  it("distinguishes an incomplete setup from an account waiting for sync", () => {
+    const html = renderToStaticMarkup(
+      <RecordSyncStatus
+        lastSyncMs={null}
+        error={null}
+        connected={false}
+        pending
+      />,
+    );
+    expect(text(html)).toContain("Sync setup pending");
+    expect(text(html)).not.toContain("Local only");
+  });
   it("shows the saved last sync timestamp and public error independently", () => {
     const html = renderToStaticMarkup(
       <RecordSyncStatus lastSyncMs={1700000000000} error="Relay unavailable" />,

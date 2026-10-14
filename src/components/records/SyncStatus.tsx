@@ -2,19 +2,24 @@ import { revealHidden } from "@/lib/sync-approvals";
 export function RecordSyncStatus({
   lastSyncMs,
   error,
+  connected = true,
+  pending = false,
 }: {
   lastSyncMs: number | null;
   error: string | null;
+  connected?: boolean;
+  pending?: boolean;
 }) {
   const date = lastSyncMs === null ? null : new Date(lastSyncMs);
   const validDate = date !== null && Number.isFinite(date.getTime());
   return (
-    <div
-      className="shrink-0 space-y-1 border-b p-3 text-xs text-muted-foreground"
-      role="status"
-    >
+    <div className="min-w-0 text-xs text-muted-foreground" role="status">
       <p>
-        {lastSyncMs === null ? (
+        {pending ? (
+          "Sync setup pending"
+        ) : !connected ? (
+          "Local only"
+        ) : lastSyncMs === null ? (
           "Not synced yet"
         ) : validDate ? (
           <>
@@ -26,7 +31,10 @@ export function RecordSyncStatus({
         )}
       </p>
       {error && (
-        <p className="text-destructive whitespace-pre-wrap" role="alert">
+        <p
+          className="mt-1 max-h-20 overflow-y-auto text-destructive whitespace-pre-wrap"
+          role="alert"
+        >
           {revealHidden(error)}
         </p>
       )}

@@ -226,26 +226,31 @@ export function RecordsAccountLifecyclePanel({
         />
       )}
       {overview.account && !state.words && (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant="outline"
-            disabled={blocked}
-            onClick={() => setState(clearLifecycleDraft("leave"))}
-          >
-            Leave sync account…
-          </Button>
-          <Button
-            variant="outline"
-            disabled={blocked}
-            onClick={() =>
-              setState(
-                clearLifecycleDraft("rotate", overview.account?.device_name),
-              )
-            }
-          >
-            Rotate sync code…
-          </Button>
-        </div>
+        <details className="rounded-lg border p-4">
+          <summary className="text-sm font-medium">
+            Advanced sync actions
+          </summary>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              disabled={blocked}
+              onClick={() => setState(clearLifecycleDraft("leave"))}
+            >
+              Leave sync account…
+            </Button>
+            <Button
+              variant="outline"
+              disabled={blocked}
+              onClick={() =>
+                setState(
+                  clearLifecycleDraft("rotate", overview.account?.device_name),
+                )
+              }
+            >
+              Rotate sync code…
+            </Button>
+          </div>
+        </details>
       )}
       <Dialog
         open={state.mode !== null}

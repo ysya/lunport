@@ -77,6 +77,77 @@ import {
 } from "@/components/ui/select";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 import { SyncPane } from "@/components/SyncPane";
+import { revealHidden } from "@/lib/sync-approvals";
+import type { RecordOverview } from "@/lib/records";
+
+export function SettingsCategoryPane({
+  category,
+  recordOverview,
+  onOpenImport,
+  onOpenSync,
+}: {
+  category: SettingsCategory;
+  recordOverview?: RecordOverview;
+  onOpenImport?: () => void;
+  onOpenSync?: () => void;
+}) {
+  if (category === "general") return <GeneralPane />;
+  if (category === "appearance") return <AppearancePane />;
+  if (category === "connection") return <ConnectionPane />;
+  if (category === "files")
+    return recordOverview ? (
+      <Section
+        title="Local data"
+        description="Hosts and keys are managed in this workspace. Import an SSH configuration to copy selected entries; the original files stay in place."
+      >
+        <Button variant="outline" onClick={onOpenImport}>
+          Import SSH configuration…
+        </Button>
+      </Section>
+    ) : (
+      <FilesPane />
+    );
+  if (category === "ai")
+    return recordOverview ? (
+      <McpPane
+        records
+        hosts={recordOverview.hosts.map((host) => ({
+          id: host.id,
+          alias: revealHidden(host.payload.alias),
+          hostname: revealHidden(host.payload.hostname),
+          user: revealHidden(host.payload.user),
+        }))}
+      />
+    ) : (
+      <LegacyMcpPane />
+    );
+  if (category === "sync")
+    return recordOverview ? (
+      <Section
+        title="Sync chain"
+        description="Manage your relay, sync code and shared spaces in the Sync workspace."
+      >
+        <Button variant="outline" onClick={onOpenSync}>
+          Open sync workspace
+        </Button>
+      </Section>
+    ) : (
+      <SyncPane />
+    );
+  if (recordOverview)
+    return (
+      <Section
+        title="Workspace capabilities"
+        description="This workspace uses SSHelter's built-in SSH engine. Hosts and keys stay local unless you explicitly share them into a sync chain."
+      >
+        <p className="text-sm text-muted-foreground">
+          MCP supports selected host metadata. Remote command execution and key
+          deployment are not available in this records workspace.
+        </p>
+      </Section>
+    );
+  return <AdvancedPane />;
+}
 
 /** Radix Select values must be non-empty; this sentinel round-trips to `null`. */
 const TERMINAL_DEFAULT = "__default__";
@@ -106,7 +177,11 @@ const CATEGORIES: {
  * `useSyncBackendSettings`. Open state lives in the UI store so the toolbar
  * gear, the ⌘K palette, and the ⌘, shortcut can all drive it.
  */
-export function SettingsDialog() {
+export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
+  recordOverview?: RecordOverview;
+  onOpenImport?: () => void;
+  onOpenSync?: () => void;
+} = {}) {
   const open = useUiStore((s) => s.settingsOpen);
   const setOpen = useUiStore((s) => s.setSettingsOpen);
   const category = useUiStore((s) => s.settingsCategory);
@@ -128,7 +203,7 @@ export function SettingsDialog() {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-2xl">
+      <DialogContent className="app-shell gap-0 overflow-hidden p-0 sm:max-w-2xl">
         <div className="flex h-[480px] max-h-[80vh]">
           {/* Sidebar — category list. */}
           <aside className="flex w-44 shrink-0 flex-col gap-0.5 border-r bg-muted/40 p-2">
@@ -172,13 +247,7 @@ export function SettingsDialog() {
               <h2 className="text-sm font-semibold">{active.label}</h2>
             </header>
             <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
-              {category === "general" && <GeneralPane />}
-              {category === "appearance" && <AppearancePane />}
-              {category === "connection" && <ConnectionPane />}
-              {category === "files" && <FilesPane />}
-              {category === "ai" && <McpPane />}
-              {category === "sync" && <SyncPane />}
-              {category === "advanced" && <AdvancedPane />}
+              <SettingsCategoryPane category={category} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenSync={onOpenSync} />
             </div>
           </div>
         </div>
@@ -688,14 +757,20 @@ function shellQuoted(value: string, platform: string | undefined): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function McpPane() {
+function LegacyMcpPane() {
+  const query = useHostsQuery();
+  return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
+}
+
+function McpPane({ hosts, records = false }: {
+  hosts: Array<{id: string; alias: string; hostname: string | null; user: string | null}>;
+  records?: boolean;
+}) {
   const status = useMcpStatus(2_000);
-  const hostsQuery = useHostsQuery();
   const platform = usePlatform();
   const setEnabled = useSetMcpEnabled();
   const setHostAllowed = useSetMcpHostAllowed();
   const allowed = new Set(status.data?.allowed_hosts ?? []);
-  const hosts = (hostsQuery.data?.hosts ?? []).filter((host) => !isWildcardOnly(host));
   const setupCommand = status.data
     ? `codex mcp add sshelter -- ${shellQuoted(status.data.executable, platform.data)} --mcp`
     : "";
@@ -713,7 +788,7 @@ function McpPane() {
     <>
       <Section
         title="MCP access"
-        description="Let local AI clients request SSH actions through SSHelter. Remote commands always require an Allow once decision here."
+        description={records ? "Let local AI clients list selected hosts and inspect connection metadata. Remote command execution is not available in this records workspace." : "Let local AI clients request SSH actions through SSHelter. Remote commands always require an Allow once decision here."}
       >
         <SettingsGroup>
           <SettingsRow
@@ -767,7 +842,7 @@ function McpPane() {
 
       <Section
         title="Allowed hosts"
-        description="Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."
+        description={records ? "Select individual host IDs. Legacy alias permissions do not grant access to this workspace." : "Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."}
       >
         <SettingsGroup>
           {hosts.length === 0 ? (
@@ -775,8 +850,8 @@ function McpPane() {
           ) : (
             hosts.map((host) => (
               <SettingsRow
-                key={host.alias}
-                id={`mcp-host-${host.alias}`}
+                key={host.id}
+                id={`mcp-host-${host.id}`}
                 label={host.alias}
                 description={
                   host.hostname
@@ -786,11 +861,11 @@ function McpPane() {
                 mono
               >
                 <Switch
-                  id={`mcp-host-${host.alias}`}
-                  checked={allowed.has(host.alias)}
+                  id={`mcp-host-${host.id}`}
+                  checked={allowed.has(host.id)}
                   disabled={setHostAllowed.isPending}
                   onCheckedChange={(value) =>
-                    setHostAllowed.mutate({ alias: host.alias, allowed: value })
+                    setHostAllowed.mutate({ alias: host.id, allowed: value })
                   }
                 />
               </SettingsRow>

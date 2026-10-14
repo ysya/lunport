@@ -1,7 +1,20 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Plus, RotateCw, Terminal, SunMoon } from "lucide-react";
+import { Bot, RotateCw, Settings, Terminal, SunMoon } from "lucide-react";
+import { SettingsDialog } from "@/components/SettingsDialog";
+import { useUiStore } from "@/stores/ui";
+import { useSyncBackendSettings } from "@/lib/backend-settings";
+import { useGlobalHotkey } from "@/lib/global-hotkey";
+import { isTypingContext, SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
+import { RecordsCommandPalette } from "./CommandPalette";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import {
   applyRecordOverview,
   recordsStatusKey,
@@ -21,10 +34,7 @@ import { RecordsAccountPanel } from "./AccountPanel";
 import { RecordsImportPanel } from "./ImportPanel";
 import { selectClass } from "./form";
 import { RecordSyncStatus } from "./SyncStatus";
-type Selection =
-  | { kind: "none" }
-  | { kind: "new"; nonce: number }
-  | { kind: "host"; id: string };
+import { decideHostSelection, type HostSelection } from "./selection";
 export function RecordsWorkspace({
   overview,
   reload,
@@ -32,15 +42,23 @@ export function RecordsWorkspace({
   overview: RecordOverview;
   reload: () => void;
 }) {
+  useSyncBackendSettings();
+  useGlobalHotkey();
+  const setSettingsOpen = useUiStore((state) => state.setSettingsOpen);
+  const setSettingsCategory = useUiStore((state) => state.setSettingsCategory);
+  const openSettings = (category: "general" | "ai") => {
+    setSettingsCategory(category);
+    setSettingsOpen(true);
+  };
   const client = useQueryClient();
   const [panel, setPanel] = useState<"hosts" | "keys" | "account" | "import">(
     "hosts",
   );
-  const [selection, setSelection] = useState<Selection>({ kind: "none" });
-  const [pendingSelection, setPendingSelection] = useState<Selection | null>(
-    null,
-  );
+  const [selection, setSelection] = useState<HostSelection>({ kind: "none" });
+  const [pendingSelection, setPendingSelection] =
+    useState<HostSelection | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [editorBusy, setEditorBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const nonce = useRef(0);
@@ -63,20 +81,43 @@ export function RecordsWorkspace({
     },
     [client],
   );
-  const requestSelection = (next: Selection) => {
+  const requestSelection = (next: HostSelection) => {
+    if (editorBusy) return;
     setPanel("hosts");
-    if (
-      next.kind === "host" &&
-      selection.kind === "host" &&
-      next.id === selection.id
-    )
-      return;
-    if (dirty) setPendingSelection(next);
-    else {
+    const decision = decideHostSelection(selection, next, dirty, editorBusy);
+    if (decision === "confirm") setPendingSelection(next);
+    if (decision === "select") {
       setSelection(next);
       setDirty(false);
     }
   };
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)
+        return;
+      if (
+        isTypingContext(event.target) &&
+        (event.target as HTMLElement).id !== SEARCH_INPUT_ID
+      )
+        return;
+      if (event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        requestSelection({ kind: "new", nonce: ++nonce.current });
+      } else if (event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setPanel("hosts");
+        window.requestAnimationFrame(() => {
+          const input = document.getElementById(SEARCH_INPUT_ID);
+          if (input instanceof HTMLInputElement) {
+            input.focus();
+            input.select();
+          }
+        });
+      }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [requestSelection]);
   const onSaved = useCallback((id: string | null) => {
     setSelection(id ? { kind: "host", id } : { kind: "none" });
     setDirty(false);
@@ -122,6 +163,22 @@ export function RecordsWorkspace({
           <Button
             variant="ghost"
             size="icon"
+            aria-label="AI access (MCP)"
+            onClick={() => openSettings("ai")}
+          >
+            <Bot className="size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Settings"
+            onClick={() => openSettings("general")}
+          >
+            <Settings className="size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
             aria-label="Refresh workspace"
             onClick={reload}
           >
@@ -138,10 +195,14 @@ export function RecordsWorkspace({
           <Button
             variant="outline"
             size="sm"
-            disabled={syncing || !overview.account}
-            onClick={sync}
+            disabled={syncing}
+            onClick={overview.account ? sync : () => setPanel("account")}
           >
-            {syncing ? "Starting sync…" : "Sync now"}
+            {syncing
+              ? "Starting sync…"
+              : overview.account
+                ? "Sync now"
+                : "Set up sync"}
           </Button>
         </div>
       </header>
@@ -158,52 +219,52 @@ export function RecordsWorkspace({
             onClick={() => setPanel(value)}
           >
             {value === "account"
-              ? "Sync account"
+              ? "Sync"
               : value[0].toUpperCase() + value.slice(1)}
+            {value === "hosts" && dirty && (
+              <span
+                aria-label="Unsaved host changes"
+                className="size-1.5 rounded-full bg-primary"
+              />
+            )}
           </Button>
         ))}
-        <Button
-          className="ml-auto"
-          size="sm"
-          onClick={() =>
-            requestSelection({ kind: "new", nonce: ++nonce.current })
-          }
-        >
-          <Plus className="size-4" />
-          New host
-        </Button>
       </nav>
-      {pendingSelection && (
-        <div
-          role="alertdialog"
-          aria-label="Unsaved host changes"
-          className="flex shrink-0 flex-wrap items-center gap-3 border-b bg-muted p-3"
-        >
-          <p className="text-sm">Discard the unsaved host changes?</p>
-          <Button
-            size="sm"
-            variant="destructive"
-            onClick={() => {
-              setSelection(pendingSelection);
-              setPendingSelection(null);
-              setDirty(false);
-            }}
-          >
-            Discard changes
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setPendingSelection(null)}
-          >
-            Keep editing
-          </Button>
-        </div>
-      )}
-      <RecordSyncStatus
-        lastSyncMs={overview.last_sync_ms}
-        error={error ?? overview.last_error}
-      />
+      <Dialog
+        open={pendingSelection !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingSelection(null);
+        }}
+      >
+        <DialogContent>
+          <DialogTitle>Unsaved host changes</DialogTitle>
+          <DialogDescription>
+            Discard the unsaved host changes before opening another host?
+          </DialogDescription>
+          <DialogFooter>
+            <Button
+              size="sm"
+              variant="outline"
+              autoFocus
+              onClick={() => setPendingSelection(null)}
+            >
+              Keep editing
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={() => {
+                if (!pendingSelection || editorBusy) return;
+                setSelection(pendingSelection);
+                setPendingSelection(null);
+                setDirty(false);
+              }}
+            >
+              Discard changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {overview.shared_writes_blocked && (
         <p
           role="status"
@@ -214,18 +275,32 @@ export function RecordsWorkspace({
         </p>
       )}
       <div className="flex min-h-0 flex-1">
-        <aside className="app-sidebar w-64 shrink-0 overflow-y-auto border-r">
+        <aside
+          hidden={panel !== "hosts"}
+          className="app-sidebar min-h-0 w-60 shrink-0 border-r"
+        >
           <RecordHostList
             overview={overview}
             selectedId={selectedId}
             select={(id) => requestSelection({ kind: "host", id })}
+            create={() =>
+              requestSelection({ kind: "new", nonce: ++nonce.current })
+            }
+            disabled={editorBusy}
           />
         </aside>
-        <main className="app-main min-w-0 flex-1 overflow-y-auto">
-          <section hidden={panel !== "hosts"}>
+        <main className="app-main min-h-0 min-w-0 flex-1 overflow-hidden">
+          <section
+            hidden={panel !== "hosts"}
+            className="h-full overflow-y-auto"
+          >
             {selection.kind === "none" ? (
               <div className="flex min-h-80 flex-col items-center justify-center gap-3 p-6 text-center">
-                <h1 className="font-medium">No host selected</h1>
+                <h1 className="font-medium">
+                  {overview.hosts.length
+                    ? "Select a host to connect"
+                    : "Add your first host"}
+                </h1>
                 <p className="text-sm text-muted-foreground">
                   Select a host, add a new one, or import an SSH configuration.
                 </p>
@@ -250,12 +325,20 @@ export function RecordsWorkspace({
                 onSaved={onSaved}
                 onDeleted={onDeleted}
                 onDirty={onDirty}
+                onBusy={setEditorBusy}
+                onCancel={onDeleted}
               />
             )}
           </section>
-          {panel === "keys" && <RecordsKeysPanel overview={overview} />}
-          {panel === "account" && <RecordsAccountPanel overview={overview} />}
-          {panel === "import" && <RecordsImportPanel />}
+          {panel !== "hosts" && (
+            <div key={panel} className="h-full overflow-y-auto">
+              {panel === "keys" && <RecordsKeysPanel overview={overview} />}
+              {panel === "account" && (
+                <RecordsAccountPanel overview={overview} />
+              )}
+              {panel === "import" && <RecordsImportPanel />}
+            </div>
+          )}
         </main>
       </div>
       <footer className="app-toolbar flex shrink-0 flex-wrap items-center gap-3 border-t px-3 py-2">
@@ -281,10 +364,34 @@ export function RecordsWorkspace({
           />
           New tab
         </label>
-        <p className="ml-auto text-xs text-muted-foreground">
-          AI access and key deployment are unavailable in this workspace.
-        </p>
+        <div className="ml-auto max-w-md text-right">
+          <RecordSyncStatus
+            connected={!!overview.account}
+            pending={!!overview.pending_account}
+            lastSyncMs={overview.last_sync_ms}
+            error={error ?? overview.last_error}
+          />
+        </div>
       </footer>
+      <RecordsCommandPalette
+        overview={overview}
+        terminalId={terminalId}
+        newTab={effectiveNewTab(preferNewTab, terminalId, terminals.data ?? [])}
+        editorBusy={editorBusy}
+        edit={(id) => requestSelection({ kind: "host", id })}
+        create={() => requestSelection({ kind: "new", nonce: ++nonce.current })}
+      />
+      <SettingsDialog
+        recordOverview={overview}
+        onOpenImport={() => {
+          setSettingsOpen(false);
+          setPanel("import");
+        }}
+        onOpenSync={() => {
+          setSettingsOpen(false);
+          setPanel("account");
+        }}
+      />
     </div>
   );
 }
