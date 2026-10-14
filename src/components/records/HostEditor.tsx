@@ -8,6 +8,7 @@ import {
   deleteRecordHost,
   moveRecordHost,
   type HostPayload,
+  type InheritedField,
   type HostScope,
   type RecordHostView,
   type RecordOverview,
@@ -24,6 +25,18 @@ import {
 import { connectSavedHost, scopeLabel } from "./operations";
 import { readinessLabel } from "./HostList";
 import { RecordField, selectClass } from "./form";
+import {
+  groupPath,
+  requiresFormatUpgrade,
+  scopeKey,
+  selectGroup,
+} from "./group-tree";
+import {
+  inheritedFields,
+  toggleInheritance,
+  previewInheritance,
+} from "./inheritance";
+import { FormatUpgradeReview } from "./FormatUpgradeReview";
 export function RecordHostEditor({
   host,
   hostId,
@@ -36,6 +49,8 @@ export function RecordHostEditor({
   onDirty,
   onBusy,
   onCancel,
+  initialScope = { kind: "local" },
+  initialGroupId = null,
 }: {
   host: RecordHostView | null;
   hostId: string | null;
@@ -48,6 +63,8 @@ export function RecordHostEditor({
   onDirty: (dirty: boolean) => void;
   onBusy?: (busy: boolean) => void;
   onCancel?: () => void;
+  initialScope?: HostScope;
+  initialGroupId?: string | null;
 }) {
   const [state, setState] = useState(() =>
     hostId && !host
@@ -57,9 +74,16 @@ export function RecordHostEditor({
           unavailable: true,
           changedOnServer: true,
         }
-      : beginEditor(host),
+      : host
+        ? beginEditor(host)
+        : {
+            ...beginEditor(null),
+            scope: structuredClone(initialScope),
+            payload: { ...beginEditor(null).payload, group_id: initialGroupId },
+          },
   );
   const [busy, setBusy] = useState(false);
+  const [askingUpgrade, setAskingUpgrade] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
   const [destination, setDestination] = useState("local");
   const inFlight = useRef(false);
@@ -94,9 +118,17 @@ export function RecordHostEditor({
       onBusy?.(false);
     }
   };
-  const save = () =>
-    run(async () => {
-      const result = await submitEditor(state);
+  const save = (confirmed?: boolean) => {
+    if (
+      (state.payload.group_id || state.payload.inherit?.length) &&
+      requiresFormatUpgrade(overview, state.scope) &&
+      confirmed !== true
+    ) {
+      setAskingUpgrade(true);
+      return;
+    }
+    return run(async () => {
+      const result = await submitEditor(state, confirmed);
       const accepted = accept(result);
       const oldIds = new Set(overview.hosts.map((value) => value.id));
       const created = result.hosts.filter(
@@ -108,8 +140,10 @@ export function RecordHostEditor({
       const id = state.id ?? (created.length === 1 ? created[0].id : null);
       const saved = id ? selectHost(accepted.hosts, id) : null;
       if (saved) setState(beginEditor(saved));
+      setAskingUpgrade(false);
       onSaved(id);
     });
+  };
   const remove = () =>
     run(async () => {
       if (
@@ -137,6 +171,44 @@ export function RecordHostEditor({
       const saved = selectHost(accepted.hosts, state.id);
       if (saved) setState(beginEditor(saved));
     });
+  const preview = previewInheritance(overview, state.scope, state.payload);
+  preview.error = host?.group_error ?? preview.error;
+  const inherits = (field: InheritedField) =>
+    state.payload.inherit?.includes(field) ?? false;
+  const visible = { ...state.payload };
+  for (const field of state.payload.inherit ?? []) {
+    if (field === "authentication") {
+      visible.auth = preview.payload.auth;
+      visible.key_id = preview.payload.key_id;
+    } else Object.assign(visible, { [field]: preview.payload[field] });
+  }
+  const inheritedControl = (field: InheritedField) => (
+    <div className="space-y-1">
+      <label className="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          aria-label={`${inheritedFields.find(([name]) => name === field)?.[1]}: Use ${state.payload.group_id ? "group" : "app"} default`}
+          checked={inherits(field)}
+          onChange={(e) =>
+            patch(toggleInheritance(state.payload, field, e.target.checked))
+          }
+        />
+        Use {state.payload.group_id ? "group" : "app"} default
+      </label>
+      {inherits(field) && (
+        <p className="break-words text-xs text-muted-foreground">
+          {preview.error
+            ? "Effective value unavailable"
+            : `Source: ${preview.sources[field] === "default" ? "App default" : revealHidden(overview.groups.find((g) => g.id === preview.sources[field])?.payload.name ?? "Group")}`}
+        </p>
+      )}
+    </div>
+  );
+  const groupChoices = overview.groups.filter(
+    (g) =>
+      scopeKey(g.scope) === scopeKey(state.scope) &&
+      selectGroup(overview.groups, g.id),
+  );
   const blocking =
     state.payload.imported?.unsupported.filter(
       (value) => value.requires_review,
@@ -158,7 +230,7 @@ export function RecordHostEditor({
                 : "Saved"}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {state.dirty && state.id && (
             <Button
               variant="ghost"
@@ -180,7 +252,7 @@ export function RecordHostEditor({
               (!state.dirty && state.id !== null) ||
               editorProblem(state) !== null
             }
-            onClick={save}
+            onClick={() => save()}
           >
             {busy ? "Working…" : state.id ? "Save changes" : "Create host"}
           </Button>
@@ -191,7 +263,9 @@ export function RecordHostEditor({
               state.dirty ||
               state.unavailable ||
               !host ||
-              host.readiness.kind !== "ready"
+              host.readiness.kind !== "ready" ||
+              !!host.group_error ||
+              !!preview.error
             }
             onClick={() =>
               run(() =>
@@ -212,6 +286,15 @@ export function RecordHostEditor({
         <p role="status" className="rounded-md border p-3 text-sm">
           {readinessLabel[host.readiness.kind]}. Review the key reference and
           jump hosts before connecting.
+        </p>
+      )}
+      {host?.group_error && (
+        <p
+          role="status"
+          className="rounded-md border p-3 text-sm text-destructive"
+        >
+          {revealHidden(host.group_error)}. Connection is blocked until the
+          Group settings are resolved.
         </p>
       )}
       {state.changedOnServer && (
@@ -257,6 +340,7 @@ export function RecordHostEditor({
                   e.target.value === "local"
                     ? { kind: "local" }
                     : { kind: "space", space_id: e.target.value },
+                payload: { ...current.payload, group_id: null },
                 dirty: true,
               }))
             }
@@ -276,10 +360,35 @@ export function RecordHostEditor({
           </select>
         </RecordField>
       )}
+      {preview.error && (
+        <p role="status" className="text-sm text-destructive">
+          {revealHidden(preview.error)}. Effective settings are unavailable.
+        </p>
+      )}
       <fieldset
         disabled={busy || state.unavailable || sharedBlocked}
         className="space-y-4 disabled:opacity-60"
       >
+        <RecordField label="Group">
+          <select
+            className={selectClass}
+            value={state.payload.group_id ?? ""}
+            onChange={(e) => patch({ group_id: e.target.value || null })}
+          >
+            <option value="">Ungrouped</option>
+            {state.payload.group_id &&
+              !groupChoices.some((g) => g.id === state.payload.group_id) && (
+                <option value={state.payload.group_id}>
+                  Unavailable Group ({state.payload.group_id})
+                </option>
+              )}
+            {groupChoices.map((g) => (
+              <option key={g.id} value={g.id}>
+                {revealHidden(groupPath(overview, g.id, g.scope))}
+              </option>
+            ))}
+          </select>
+        </RecordField>
         <div className="grid gap-4 sm:grid-cols-2">
           <RecordField label="Alias">
             <Input
@@ -298,21 +407,33 @@ export function RecordHostEditor({
               type="number"
               min={1}
               max={65535}
-              value={state.payload.port}
+              disabled={inherits("port")}
+              value={inherits("port") && preview.error ? "" : visible.port}
               onChange={(e) => patch({ port: Number(e.target.value) })}
             />
+            {inheritedControl("port")}
           </RecordField>
           <RecordField label="Username">
             <Input
-              value={state.payload.user}
+              disabled={inherits("user")}
+              placeholder={
+                inherits("user") && preview.error
+                  ? "Unavailable"
+                  : "OS username"
+              }
+              value={inherits("user") && preview.error ? "" : visible.user}
               onChange={(e) => patch({ user: e.target.value })}
             />
+            {inheritedControl("user")}
           </RecordField>
         </div>
         <RecordField label="Authentication">
           <select
             className={selectClass}
-            value={state.payload.auth}
+            disabled={inherits("authentication")}
+            value={
+              inherits("authentication") && preview.error ? "" : visible.auth
+            }
             onChange={(e) =>
               patch({
                 auth: e.target.value as HostPayload["auth"],
@@ -320,84 +441,106 @@ export function RecordHostEditor({
               })
             }
           >
+            {inherits("authentication") && preview.error && (
+              <option value="">Unavailable</option>
+            )}
             <option value="password">Password</option>
             <option value="key">SSH key</option>
             <option value="interactive">Keyboard interactive</option>
           </select>
+          {inheritedControl("authentication")}
         </RecordField>
-        {state.payload.auth === "key" && (
-          <RecordField label="Key reference">
-            <select
-              className={selectClass}
-              value={state.payload.key_id ?? ""}
-              onChange={(e) => patch({ key_id: e.target.value || null })}
-            >
-              <option value="">Choose a key…</option>
-              {state.payload.key_id &&
-                !overview.keys.some(
-                  (key) => key.id === state.payload.key_id,
-                ) && (
-                  <option value={state.payload.key_id}>
-                    Missing key ({state.payload.key_id})
+        {visible.auth === "key" &&
+          !(inherits("authentication") && preview.error) && (
+            <RecordField label="Key reference">
+              <select
+                className={selectClass}
+                disabled={inherits("authentication")}
+                value={visible.key_id ?? ""}
+                onChange={(e) => patch({ key_id: e.target.value || null })}
+              >
+                <option value="">Choose a key…</option>
+                {visible.key_id &&
+                  !overview.keys.some((key) => key.id === visible.key_id) && (
+                    <option value={visible.key_id}>
+                      Missing key ({visible.key_id})
+                    </option>
+                  )}
+                {overview.keys.map((key) => (
+                  <option key={key.id} value={key.id}>
+                    {revealHidden(key.public?.name ?? key.id)} ·{" "}
+                    {key.status.replace(/_/g, " ")}
                   </option>
-                )}
-              {overview.keys.map((key) => (
-                <option key={key.id} value={key.id}>
-                  {revealHidden(key.public?.name ?? key.id)} ·{" "}
-                  {key.status.replace(/_/g, " ")}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground">
-              Key availability is verified again when connecting.
-            </p>
-          </RecordField>
-        )}
-        {state.payload.auth === "password" && (
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Key availability is verified again when connecting.
+              </p>
+            </RecordField>
+          )}
+        {visible.auth === "password" && (
           <p className="text-xs text-muted-foreground">
-            Passwords are requested in the terminal when needed and stay on
-            this device.
+            Passwords are requested in the terminal when needed and stay on this
+            device.
           </p>
         )}
         <details
           className="rounded-lg border p-4"
-          open={state.payload.jump.length > 0 || undefined}
+          open={
+            visible.jump.length > 0 ||
+            state.payload.inherit?.some((f) =>
+              [
+                "jump",
+                "keepalive_secs",
+                "keepalive_max_missed",
+                "connect_timeout_secs",
+              ].includes(f),
+            ) ||
+            undefined
+          }
         >
           <summary className="text-sm font-medium">
             Advanced SSH settings
           </summary>
           <div className="mt-4 space-y-4">
             <RecordField label="Jump hosts (in order)">
-              {state.payload.jump.map((id, index) => (
-                <div key={`${id}:${index}`} className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate text-sm">
-                    {index + 1}.{" "}
-                    {revealHidden(
-                      selectHost(overview.hosts, id)?.payload.alias ??
-                        `Missing or conflicting host (${id})`,
-                    )}
-                  </span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      patch({
-                        jump: state.payload.jump.filter(
-                          (_, at) => at !== index,
-                        ),
-                      })
-                    }
+              {inheritedControl("jump")}
+              {(inherits("jump") && preview.error ? [] : visible.jump).map(
+                (id, index) => (
+                  <div
+                    key={`${id}:${index}`}
+                    className="flex items-center gap-2"
                   >
-                    Remove
-                  </Button>
-                </div>
-              ))}
+                    <span className="min-w-0 flex-1 truncate text-sm">
+                      {index + 1}.{" "}
+                      {revealHidden(
+                        selectHost(overview.hosts, id)?.payload.alias ??
+                          `Missing or conflicting host (${id})`,
+                      )}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={inherits("jump")}
+                      onClick={() =>
+                        patch({
+                          jump: state.payload.jump.filter(
+                            (_, at) => at !== index,
+                          ),
+                        })
+                      }
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                ),
+              )}
               <select
                 aria-label="Add jump host"
                 className={selectClass}
                 value=""
-                disabled={state.payload.jump.length >= 5}
+                disabled={inherits("jump") || state.payload.jump.length >= 5}
                 onChange={(e) => {
                   if (e.target.value)
                     patch({ jump: [...state.payload.jump, e.target.value] });
@@ -432,9 +575,11 @@ export function RecordHostEditor({
                     type="number"
                     min={min}
                     max={4294967295}
-                    value={state.payload[name]}
+                    disabled={inherits(name)}
+                    value={inherits(name) && preview.error ? "" : visible[name]}
                     onChange={(e) => patch({ [name]: Number(e.target.value) })}
                   />
+                  {inheritedControl(name)}
                 </RecordField>
               ))}
             </div>
@@ -505,7 +650,8 @@ export function RecordHostEditor({
           <section className="mt-4 space-y-3">
             <p className="text-xs text-muted-foreground">
               Move this host to a synced space to share it with your other
-              devices, or keep it Local.
+              devices, or keep it Local. Moving between scopes preserves
+              effective settings and removes Group membership and inheritance.
             </p>
             <div className="flex items-center gap-2">
               <select
@@ -582,6 +728,12 @@ export function RecordHostEditor({
           </p>
         </details>
       )}
+      <FormatUpgradeReview
+        open={askingUpgrade}
+        busy={busy}
+        confirm={() => save(true)}
+        cancel={() => setAskingUpgrade(false)}
+      />
     </div>
   );
 }

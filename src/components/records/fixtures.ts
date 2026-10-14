@@ -2,6 +2,7 @@ import type {
   HostPayload,
   ImportPreviewResult,
   RecordHostView,
+  RecordGroupView,
   RecordOverview,
   RecordsStatus,
 } from "@/lib/records";
@@ -32,6 +33,9 @@ export const hostView = (p: Partial<RecordHostView> = {}): RecordHostView => ({
     updated_at_ms: "18446744073709551614",
     device_id: "d".repeat(32),
   },
+  effective_payload: p.payload ?? hostPayload(),
+  inherited_from: {},
+  group_error: null,
   readiness: { kind: "ready" },
   ...p,
 });
@@ -40,6 +44,9 @@ export const recordOverview = (
 ): RecordOverview => ({
   generation: "9007199254740993",
   hosts: [hostView()],
+  groups: [],
+  format_upgrade_required: false,
+  shared_format_upgrade_required: false,
   keys: [],
   spaces: [],
   account: null,
@@ -110,3 +117,14 @@ export const migrationPreview =
       can_confirm: true,
     },
   });
+
+export const groupView = (
+  p: Partial<RecordGroupView> = {},
+): RecordGroupView => ({
+  id: "0000000000000010",
+  scope: { kind: "local" },
+  payload: { schema: 1, name: "Operations", parent_id: null, defaults: {} },
+  revision: hostView().revision,
+  group_error: null,
+  ...p,
+});
