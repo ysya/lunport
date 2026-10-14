@@ -306,3 +306,81 @@ export async function recordAccountWords(): Promise<string> {
 export async function setRecordRelayUrl(url: string): Promise<RecordOverview> {
   return tauriInvoke("records_set_relay_url", { url });
 }
+
+export type MigrationPreview = {
+  source_digest: string;
+  source_kind: string;
+  account_schema: number;
+  selected_space_ids: string[];
+  host_count: number;
+  key_count: number;
+  diagnostics: Array<{
+    code: string;
+    host_id?: string | null;
+    space_id?: string | null;
+  }>;
+  can_confirm: boolean;
+};
+export type MigrationPreviewResult = {
+  token: string;
+  preview: MigrationPreview;
+};
+export type MigrationReceipt = {
+  migration_id: string;
+  phase: string;
+  complete: boolean;
+};
+export type MigrationResult = {
+  receipt: MigrationReceipt;
+  status: RecordsStatus;
+};
+export type PendingRecordMigration = {
+  migration_id: string;
+  phase: string;
+  host_count: number;
+  key_count: number;
+};
+export const recordsPendingMigrationsKey = [
+  "records",
+  "migrations",
+  "pending",
+] as const;
+export async function previewRecordMigration(
+  words?: string,
+): Promise<MigrationPreviewResult> {
+  return tauriInvoke("records_migration_preview", { words: words ?? null });
+}
+export async function confirmRecordMigration(
+  token: string,
+  oldClientsStoppedOrCompatible: boolean,
+): Promise<MigrationResult> {
+  return tauriInvoke("records_migration_confirm", {
+    token,
+    oldClientsStoppedOrCompatible,
+  });
+}
+export async function resumeRecordMigration(
+  migrationId: string,
+): Promise<MigrationResult> {
+  return tauriInvoke("records_migration_resume", { migrationId });
+}
+export async function pendingRecordMigrations(): Promise<
+  PendingRecordMigration[]
+> {
+  return tauriInvoke("records_migration_pending");
+}
+export async function cancelRecordMigration(token: string): Promise<void> {
+  return tauriInvoke("records_migration_cancel", { token });
+}
+
+export function usePendingRecordMigrations() {
+  return useQuery({
+    queryKey: recordsPendingMigrationsKey,
+    queryFn: pendingRecordMigrations,
+    retry: false,
+  });
+}
+
+export async function pauseLegacyWorkspace(): Promise<RecordsStatus> {
+  return tauriInvoke("records_pause_legacy");
+}

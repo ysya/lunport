@@ -9,6 +9,7 @@ export function WorkspaceGate({
   useLegacy,
   legacy,
   records,
+  pausedLegacy,
   resuming = false,
 }: {
   status?: RecordsStatus;
@@ -17,6 +18,7 @@ export function WorkspaceGate({
   retry: () => void;
   useLegacy: () => void;
   legacy: () => ReactNode;
+  pausedLegacy?: () => ReactNode;
   records: () => ReactNode;
 }) {
   if (!error && status?.format === "records" && status.overview)
@@ -24,6 +26,7 @@ export function WorkspaceGate({
   if (!error && status?.format === "legacy" && !status.legacy_paused)
     return legacy();
   const paused = !error && status?.format === "legacy" && status.legacy_paused;
+  if (paused && pausedLegacy) return pausedLegacy();
   const message =
     status?.format === "blocked"
       ? (status.blocked_reason ?? "The workspace could not be opened.")
