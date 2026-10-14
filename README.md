@@ -1,5 +1,7 @@
 # SSHelter
 
+> **Own SSH development branch:** the records workspace keeps its vault local, syncs selected records and keys through encrypted chains, and uses explicit legacy migration. The release descriptions below refer to the existing legacy mode. See the [development review checklist](docs/2026-10-14-sync-chain-review-checklist.md) for current behavior, verification, and remaining gates.
+
 A cross-platform desktop app for managing your **local OpenSSH** setup — `~/.ssh/config`, keys, `ssh-agent`, and `known_hosts` — with lossless, format-preserving editing. macOS + Linux first (Windows later).
 
 ## Why
