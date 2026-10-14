@@ -26,6 +26,10 @@ describe("records settings compatibility", () => {
   it("renders every settings category without loading the legacy config", () => {
     const client = new QueryClient();
     client.setQueryData(mcpStatusKey, {
+      approval_mode: "ask",
+      noninteractive_credentials_supported: false,
+      noninteractive_credentials_notice: "Ask required for stored credentials",
+      audit_error: null,
       enabled: false,
       bridge_active: true,
       allowed_hosts: [],
@@ -56,7 +60,7 @@ describe("records settings compatibility", () => {
       if (category === "ai") {
         expect(text(html)).toContain("MCP");
         expect(text(html)).toContain(
-          "Remote command execution is not available",
+          "execute commands on individually allowed hosts",
         );
         expect(html).toContain("mcp-host-0000000000000001");
       }

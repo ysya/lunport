@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+import type { ApprovalMode } from "@/bindings/ApprovalMode";
 import type { McpStatus } from "@/bindings/McpStatus";
 import { tauriInvoke } from "@/lib/ipc";
 
@@ -47,5 +48,14 @@ export function useResolveMcpRequest() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: mcpStatusKey }),
     onError: (error) =>
       toast.error("Could not resolve AI request", { description: errorMessage(error) }),
+  });
+}
+
+export function useSetMcpApprovalMode() {
+  const queryClient = useQueryClient();
+  return useMutation<McpStatus, unknown, { approvalMode: ApprovalMode; riskAcknowledged: boolean }>({
+    mutationFn: (args) => tauriInvoke<McpStatus>("mcp_set_approval_mode", args),
+    onSuccess: (status) => queryClient.setQueryData(mcpStatusKey, status),
+    onError: (error) => toast.error("Could not update approval mode", { description: errorMessage(error) }),
   });
 }
