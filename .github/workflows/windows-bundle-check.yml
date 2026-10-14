@@ -167,6 +167,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the app's tests did not build (exit $LASTEXITCODE)" }
           foreach ($image in @($env:SSHELTER_NSIS_DIR, $env:SSHELTER_MSI_DIR)) {
             $env:SSHELTER_TEST_PAIR = $image
+            $env:SSHELTER_TEST_PAIR_PROFILE = 'production'
             cargo test --locked --lib -- --ignored --exact cli::real_console_tests::the_pair_in_a_console_of_its_own --nocapture
             if ($LASTEXITCODE -ne 0) { throw "the pair from $image in a console of its own failed (exit $LASTEXITCODE)" }
           }
