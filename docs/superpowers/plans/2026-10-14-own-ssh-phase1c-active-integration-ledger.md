@@ -18,7 +18,7 @@ This ledger records the active records runtime integration and its verification.
 | --- | --- | --- |
 | Active runtime including migration activation and explicit legacy pause | 32 passed | /private/tmp/sshelter-legacy-pause-green.log |
 | All active record modules including canonical unsupported authority and mutation guards | 268 passed | /private/tmp/sshelter-final-review-record-green.log |
-| Full safe Rust suite after final fixes | 2449 passed, 0 failed, 3 credential tests filtered | /private/tmp/sshelter-final-review-safe-suite.log |
+| Full safe Rust suite after Windows corrections | 2451 passed, 0 failed, 3 credential tests filtered | /private/tmp/sshelter-beta-corrected-safe-suite.log |
 | Native adapters and two-device host/key flow | 5 passed before migration guard addition | /private/tmp/sshelter-native-two-device.log |
 | Frontend suite, TypeScript and production asset build | 942 passed plus successful build | /private/tmp/sshelter-lifecycle-ui-build.log |
 | Normal-library debug profile | 3 passed | /private/tmp/sshelter-profile-final-debug.log |
@@ -33,7 +33,7 @@ A debug macOS bundle was built at `src-tauri/target/debug/bundle/macos/SSHelter 
 
 ## Completion gates
 
-Account migration and leave/rotation formal registration are complete. Native commands return their real partial-operation receipts; migration resume accepts optional recovery words through Zeroizing native memory. Pending migration journals block account and shared effects before credentials while Local host/key work stays available. Canonical unsupported authority protection retains cached bodies for inspection but prevents stale connections and material fallback, including after restart. The immutable whole-branch review and its single scoped fix re-review are complete; both Important/P1 findings were addressed, with no new Critical/Important breakage. Draft pull request CI remains unstarted because push was rejected by automatic approval review. The user checklist reports each result with its actual verification boundary.
+Account migration and leave/rotation formal registration are complete. Native commands return their real partial-operation receipts; migration resume accepts optional recovery words through Zeroizing native memory. Pending migration journals block account and shared effects before credentials while Local host/key work stays available. Canonical unsupported authority protection retains cached bodies for inspection but prevents stale connections and material fallback, including after restart. The immutable whole-branch review and its single scoped fix re-review are complete; both Important/P1 findings were addressed, with no new Critical/Important breakage. At the initial local handoff, draft pull request CI had not started because push was rejected. The subsequent user authorization directly merged/published the beta; final native CI and installer checks succeeded without a PR. The user checklist reports each result with its actual verification boundary.
 
 ## Final immutable review and fix wave
 
@@ -44,3 +44,7 @@ The attempted push to `github.com/ysya/sshelter` was rejected by automatic appro
 The final fixed debug Development bundle was rebuilt successfully (55.06s Rust build; `/private/tmp/sshelter-final-fixed-dev-bundle.log`, exit 0). The prior Dev process was closed, the new bundle launched, and the public `development-smoke-test` fixture remained present across restart and refresh; the Host detail showed Local/Ready/Saved. No connect, account creation, private key generation or real migration was performed. The bundle build emits 15 library dead-code warnings; the safe test build emits three. They do not fail compilation, and no optimized release acceptance is claimed.
 
 User handoff: `docs/2026-10-14-sync-chain-review-checklist.md`. Named feature branch and managed worktree are preserved for review.
+
+## Authorized merge and beta delivery
+
+The user later explicitly requested direct merge and beta publication. The implementation was fast-forwarded into next/own-ssh and pushed. Windows CI exposed two real path bugs plus Unix-specific fixture expectations; these were corrected with focused regressions and bounded independent review. The ignored Windows console-pair fixture was then made aware of the external pair's compiled profile, retaining all security/restoration assertions. Final source 22855e7 passed native macOS/Linux/Windows/PAM and both Windows installer pairs. v1.0.0-1 and the Beta channel were published successfully; Stable remains v0.16.0. See docs/releases/1.0.0-1-validation.md for exact run URLs and metadata verification. Earlier no-push/no-release statements describe the local handoff checkpoint, not the final delivery. No actual user migration, installed-app update or production relay deployment occurred.

@@ -1,6 +1,6 @@
 # SSHelter sync chain 檢視清單
 
-本輪完成範圍：own SSH phase 1c 的 active records runtime，以及可操作的最小切換介面。功能分支 `codex/own-ssh-phase1c` 已依使用者 2026-10-14 的指示合併至 `next/own-ssh`，準備發布 `v1.0.0-1` beta。
+本輪完成範圍：own SSH phase 1c 的 active records runtime，以及可操作的最小切換介面。功能分支 `codex/own-ssh-phase1c` 已依使用者 2026-10-14 的指示合併至 `next/own-ssh`，已發布 `v1.0.0-1` beta。
 
 ## 設計方向
 
@@ -44,9 +44,9 @@
 
 ## 尚未執行與功能邊界
 
-- 使用者已明確授權直接合併與發布 beta；跨平台 CI 與安裝包發布正在進行，採既有 publish beta workflow。
+- 已依使用者授權合併、推送並發布 beta；跨平台 CI、Windows 安裝包驗證與 publish beta workflow 全部成功。
 - 已合併到 `next/own-ssh`；Stable 正式發版、真實帳戶遷移及正式 relay 部署尚未執行。
-- Windows／Linux 執行行為仍需 CI 與裝置驗收。release profile 檢查使用降低最佳化的設定，不能當作正式最佳化安裝包驗收。
+- macOS／Linux／Windows 原生 CI 已通過，包含 Linux PAM、Windows 實際 OpenSSH 與 debug／Production console。四平台的最佳化 beta 安裝包建置成功；真實使用者裝置更新與資料遷移驗收仍待進行。
 - Records 模式的 MCP 遠端執行與 key deployment 留在 phase 2；目前入口明確回報不可用。Legacy 原有功能依模式保留。
 - 本輪是同步與切換基礎完成，不代表 Termius 所有功能已具備。
 
@@ -61,4 +61,14 @@
 
 Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0.0-1.md)。
 
-首次原生 Windows CI 發現的路徑與測試假設已修正，針對性測試及整合 Rust suite 通過，正在重跑跨平台 CI。詳細：[beta validation](releases/1.0.0-1-validation.md)。
+首次原生 Windows CI 發現的路徑與測試假設，以及後續 console fixture profile 問題均已修正；針對性測試、整合 Rust suite 與最終跨平台 CI 全部通過。詳細：[beta validation](releases/1.0.0-1-validation.md)。
+
+## 已發布 beta
+
+- [v1.0.0-1 下載與 release notes](https://github.com/ysya/sshelter/releases/tag/v1.0.0-1)
+- [發布流程](https://github.com/ysya/sshelter/actions/runs/38542143759)
+- 來源：`22855e70c8b8fdf46b4539cadb16c4c2f1983d4f`，與最終 CI 相同。
+- macOS universal、Linux x86_64／ARM64、Windows x64；共 20 個 release assets。
+- Beta manifest 與新 release manifest 相同，15 個 platform entries 的下載資產存在且非空，簽章欄位存在；未宣稱另外下載所有安裝包並驗證其內容或密碼學簽章。
+- Beta 通道現提供 `1.0.0-1`；Stable 最新版仍為 `v0.16.0`。
+- 舊資料先暫停，遷移仍需要明確確認；更換同步碼後的歷史讀取與 phase 2 限制見 release notes。
