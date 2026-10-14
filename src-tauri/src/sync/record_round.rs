@@ -288,6 +288,42 @@ fn push_section(
     if crate::sync::records_v3::account_writes_blocked(&latest) {
         return Err(error("record account shared writes are blocked"));
     }
+    if space_id.is_some()
+        && sent
+            .iter()
+            .any(|row| row.outgoing.item.kind == "group" || row.outgoing.item.kind == "host")
+    {
+        let account = latest
+            .account
+            .as_ref()
+            .ok_or_else(|| error("account missing"))?;
+        let meta = account.records.get(&crate::sync::record::record_key(
+            crate::sync::record::RecordKind::Meta,
+            crate::sync::record::ACCOUNT_META_ID,
+        ));
+        let needs_gate = latest.spaces.values().any(|s| {
+            s.records.values().any(|r| {
+                r.record.kind == crate::sync::record::RecordKind::Group
+                    || r.record
+                        .payload
+                        .get("schema")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(3)
+            })
+        });
+        if needs_gate
+            && !meta.is_some_and(|m| {
+                !m.dirty
+                    && m.record
+                        .payload
+                        .get("schema_version")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(4)
+            })
+        {
+            return Err(error("group account schema gate has not been acknowledged"));
+        }
+    }
     let relay = env.relay(&proof.relay_url)?;
     let outgoing: Vec<_> = sent.iter().map(|row| row.outgoing.clone()).collect();
     let mut pushed =

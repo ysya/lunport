@@ -210,6 +210,46 @@ pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
         Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
+    if state.version == crate::sync::records_v3::GROUP_STATE_VERSION && path.exists() {
+        use sha2::{Digest, Sha256};
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(AppError::Other("sync source must be a regular file".into()));
+        }
+        let mut source = Vec::new();
+        file.take(MAX_STATE_BYTES + 1).read_to_end(&mut source)?;
+        let value: serde_json::Value = serde_json::from_slice(&source)
+            .map_err(|_| AppError::Other("cannot read format upgrade source".into()))?;
+        if value.get("version").and_then(serde_json::Value::as_u64) == Some(3) {
+            let digest = format!("{:x}", Sha256::digest(&source));
+            let backup = path.with_file_name(format!("sync-state-v3-{digest}.backup.json"));
+            match fs::symlink_metadata(&backup) {
+                Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
+                    return Err(AppError::Other(
+                        "format backup must be a regular file".into(),
+                    ))
+                }
+                Ok(_) => {
+                    if fs::read(&backup)? != source {
+                        return Err(AppError::Other(
+                            "format backup does not match source".into(),
+                        ));
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    crate::fsutil::atomic_write(&backup, &source, 0o600)?
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
     crate::fsutil::atomic_write(path, &bytes, 0o600)
 }
 
@@ -305,9 +345,17 @@ pub fn snapshot(env: &crate::sync::env::SyncEnv) -> Result<(SyncStateV3, u64), A
 fn persist_candidate(
     core: &mut crate::sync::runtime::SyncCore,
     path: &Path,
-    candidate: SyncStateV3,
+    mut candidate: SyncStateV3,
 ) -> Result<u64, AppError> {
     writes_allowed(core)?;
+    if candidate.version == STATE_VERSION && crate::sync::record_groups::has_group_data(&candidate)
+    {
+        candidate.version = crate::sync::records_v3::GROUP_STATE_VERSION;
+    }
+    if let Some(before) = core.records.as_ref() {
+        candidate = crate::sync::record_groups::invalidate_changed_pins(before, candidate)
+            .map_err(|e| AppError::Other(e.to_string()))?;
+    }
     let generation = core
         .generation
         .checked_add(1)

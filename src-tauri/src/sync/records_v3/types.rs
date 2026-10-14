@@ -2,7 +2,11 @@ use serde::{Deserialize, Serialize};
 
 pub const HOST_SCHEMA: u32 = 2;
 pub const KEYSLOT_SCHEMA: u32 = 2;
-pub const ACCOUNT_SCHEMA: u32 = 3;
+pub const ACCOUNT_SCHEMA: u32 = 4;
+pub const MIN_ACCOUNT_SCHEMA: u32 = 3;
+pub const GROUP_SCHEMA: u32 = 1;
+pub const GROUPED_HOST_SCHEMA: u32 = 3;
+pub const GROUP_STATE_VERSION: u32 = 4;
 pub const STATE_VERSION: u32 = 3;
 pub const MAX_JUMPS: usize = 5;
 
@@ -42,6 +46,10 @@ pub enum AuthKind {
 #[serde(deny_unknown_fields)]
 pub struct HostPayload {
     pub schema: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherit: Vec<InheritedField>,
     pub alias: String,
     pub hostname: String,
     #[serde(default = "default_port")]
@@ -200,3 +208,69 @@ impl std::fmt::Display for RecordValidationError {
     }
 }
 impl std::error::Error for RecordValidationError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InheritedField {
+    Port,
+    User,
+    Authentication,
+    Jump,
+    KeepaliveSecs,
+    KeepaliveMaxMissed,
+    ConnectTimeoutSecs,
+}
+impl InheritedField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Port => "port",
+            Self::User => "user",
+            Self::Authentication => "authentication",
+            Self::Jump => "jump",
+            Self::KeepaliveSecs => "keepalive_secs",
+            Self::KeepaliveMaxMissed => "keepalive_max_missed",
+            Self::ConnectTimeoutSecs => "connect_timeout_secs",
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupAuthentication {
+    pub auth: AuthKind,
+    pub key_id: Option<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<GroupAuthentication>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive_max_missed: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_secs: Option<u32>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupPayload {
+    pub schema: u32,
+    pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub defaults: GroupDefaults,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupRecord {
+    pub id: String,
+    pub scope: HostScope,
+    pub payload: GroupPayload,
+}

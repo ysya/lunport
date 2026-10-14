@@ -9,6 +9,8 @@ pub(super) fn host(id: &str, alias: &str) -> HostRecord {
         scope: HostScope::Local,
         payload: HostPayload {
             schema: 2,
+            group_id: None,
+            inherit: vec![],
             alias: alias.into(),
             hostname: "web.example.com".into(),
             port: 22,

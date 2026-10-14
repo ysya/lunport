@@ -147,7 +147,7 @@ fn future_account_format_refuses_before_copy_even_when_frozen() {
         .clone();
     meta.version += 1;
     meta.updated_at_ms += 100;
-    meta.payload["schema_version"] = json!(4);
+    meta.payload["schema_version"] = json!(5);
     let base =
         s.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, ACCOUNT_META_ID)].seq;
     d.relay
@@ -336,7 +336,7 @@ fn future_format_after_partial_copy_blocks_retry_before_next_namespace_write() {
     let row =
         &before.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, ACCOUNT_META_ID)];
     let mut meta = row.record.clone();
-    meta.payload["schema_version"] = json!(4);
+    meta.payload["schema_version"] = json!(5);
     meta.version += 1;
     meta.updated_at_ms += 10;
     d.relay
@@ -646,7 +646,7 @@ fn denied_cleanup_gate_save_retains_newer_format_and_blocks_memory_before_code_d
     let mut future = old.record.clone();
     future.updated_at_ms += 1;
     future.version += 1;
-    future.payload["schema_version"] = json!(4);
+    future.payload["schema_version"] = json!(5);
     d.relay
         .push(
             &keys.chain_id,
@@ -675,7 +675,7 @@ fn denied_cleanup_gate_save_retains_newer_format_and_blocks_memory_before_code_d
             .unwrap()
             .prepared_account
             .remote_schema_version,
-        Some(4)
+        Some(5)
     );
     assert_eq!(n.local, s.local);
     assert!(d.keychain.entry(MNEMONIC_ACCOUNT).is_some());
@@ -704,4 +704,84 @@ fn a_leave_journal_cannot_substitute_another_endpoint_or_drop_source_annotations
         altered.hosts[0].local.record.payload[field] = value;
         assert!(validate_plan(&altered).is_err());
     }
+}
+
+#[test]
+fn group_leave_preserves_nested_defaults_parent_membership_and_jump_remaps() {
+    let (d, sid, _) = fixture();
+    let scope = HostScope::Space {
+        space_id: sid.clone(),
+    };
+    record_runtime::mutate_records(&d.env(),|s|{
+        let parent=serde_json::from_value(json!({"schema":1,"name":"Ops","defaults":{"user":"ops","jump":[A]}})).unwrap();
+        let s=crate::sync::record_groups::create_group(s,"0000000000000031",scope.clone(),parent,true,100).unwrap();
+        let child=serde_json::from_value(json!({"schema":1,"name":"Child","parent_id":"0000000000000031","defaults":{"port":2222}})).unwrap();
+        let s=crate::sync::record_groups::create_group(&s,"0000000000000032",scope.clone(),child,false,101).unwrap();
+        let h=crate::sync::record_repository::get_host(&s,B).unwrap();let mut p=h.host.payload;p.schema=3;p.group_id=Some("0000000000000032".into());p.inherit=vec![records_v3::InheritedField::User,records_v3::InheritedField::Port,records_v3::InheritedField::Jump];
+        Ok(crate::sync::record_repository::update_host(&s,B,&h.revision,p,102).unwrap())
+    }).unwrap();
+    record_round::sync_once(&d.env()).unwrap();
+    let result = leave_account(&d.env()).unwrap();
+    assert!(result.complete, "{:?}", result.pending_error);
+    let s = state(&d);
+    let new_id = &result
+        .mappings
+        .iter()
+        .find(|m| m.source_host_id == B)
+        .unwrap()
+        .local_host_id;
+    let jump_id = &result
+        .mappings
+        .iter()
+        .find(|m| m.source_host_id == A)
+        .unwrap()
+        .local_host_id;
+    let h = crate::sync::record_repository::get_host(&s, new_id).unwrap();
+    assert_eq!(h.effective_payload.user, "ops");
+    assert_eq!(h.effective_payload.port, 2222);
+    assert_eq!(&h.effective_payload.jump, &vec![jump_id.clone()]);
+    let groups = crate::sync::record_groups::list_groups(&s).unwrap();
+    assert_eq!(groups.len(), 2);
+    assert!(groups.iter().all(|g| g.group.scope == HostScope::Local
+        && g.group.id != "0000000000000031"
+        && g.group.id != "0000000000000032"));
+    assert!(groups
+        .iter()
+        .any(|g| Some(&g.group.id) == h.host.payload.group_id.as_ref()
+            && g.group.payload.parent_id.is_some()));
+    assert_eq!(
+        d.keychain
+            .get(&format!("host:{new_id}"))
+            .unwrap()
+            .as_deref(),
+        Some("fixture password B")
+    );
+}
+
+#[test]
+fn group_unreadable_selected_source_refuses_detach_without_credential_copies() {
+    let (d, sid, keys) = fixture();
+    let before = state(&d);
+    let child = record_merge::space_keys(before.account.as_ref().unwrap(), &keys, &sid)
+        .unwrap()
+        .unwrap();
+    let row = Record {
+        kind: RecordKind::Group,
+        id: "0000000000000031".into(),
+        version: 1,
+        updated_at_ms: 10,
+        device_id: before.device_id.clone(),
+        deleted: false,
+        payload: json!({"schema":99,"name":"Future"}),
+    };
+    d.relay
+        .push(
+            &sid,
+            &child.auth_token,
+            &[record_merge::encode_record(&child, &row, 0).unwrap()],
+        )
+        .unwrap();
+    assert!(leave_account(&d.env()).is_err());
+    assert!(state(&d).account.is_some());
+    assert_eq!(state(&d).local, before.local);
 }

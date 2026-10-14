@@ -188,10 +188,10 @@ fn cached_cursor_never_hides_future_account_format_and_only_account_is_polled() 
     })
     .unwrap();
     let before = state(&d);
-    update_meta(&d, &keys, 4, None);
+    update_meta(&d, &keys, 5, None);
     d.relay.clear_calls();
     let report = sync_once(&d.env()).unwrap();
-    assert_eq!(report.gate, Some(AccountGate::NeedsUpdate { schema: 4 }));
+    assert_eq!(report.gate, Some(AccountGate::NeedsUpdate { schema: 5 }));
     let after = state(&d);
     assert_eq!(after.spaces, before.spaces);
     assert_eq!(after.local, before.local);
@@ -478,7 +478,7 @@ impl RelayApi for PullHookRelay {
 #[test]
 fn gate_persistence_failure_keeps_original_disk_and_blocks_current_memory() {
     let (d, keys) = fixture();
-    update_meta(&d, &keys, 4, None);
+    update_meta(&d, &keys, 5, None);
     let old = std::fs::read(d.env().state_path).unwrap();
     let sentinel = d.home.path().join("outside-state");
     std::fs::write(&sentinel, &old).unwrap();
@@ -506,7 +506,7 @@ fn gate_persistence_failure_keeps_original_disk_and_blocks_current_memory() {
             .as_ref()
             .unwrap()
             .remote_schema_version,
-        Some(4)
+        Some(5)
     );
 }
 #[cfg(unix)]
@@ -561,7 +561,7 @@ fn accepted_receipts_remain_unsaved_in_memory_when_disk_breaks_and_next_round_ha
 #[test]
 fn delayed_authenticated_gate_survives_a_local_generation_change_and_keeps_latest_local_cache() {
     let (d, keys) = fixture();
-    update_meta(&d, &keys, 4, None);
+    update_meta(&d, &keys, 5, None);
     let publication = d.runtime.format_publication.lock().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let connector = PullHookConnector {
@@ -595,7 +595,7 @@ fn delayed_authenticated_gate_survives_a_local_generation_change_and_keeps_lates
         drop(publication);
         assert_eq!(
             join.join().unwrap().unwrap().gate,
-            AccountGate::NeedsUpdate { schema: 4 }
+            AccountGate::NeedsUpdate { schema: 5 }
         );
     });
     let latest = state(&d);
@@ -646,10 +646,10 @@ fn remote_relationship_conflict_is_cached_for_review_and_dirty_hosts_are_not_pus
 }
 
 #[test]
-fn authenticated_schema_three_cannot_clear_a_retained_schema_four_observation() {
+fn authenticated_schema_three_cannot_clear_a_retained_schema_five_observation() {
     let (d, keys) = fixture();
     let child = add_space(&d, &keys, true);
-    update_meta(&d, &keys, 4, None);
+    update_meta(&d, &keys, 5, None);
     fresh_account_gate(&d.env()).unwrap();
     let previous = d
         .relay
@@ -674,7 +674,7 @@ fn authenticated_schema_three_cannot_clear_a_retained_schema_four_observation() 
     let before = state(&d);
     d.relay.clear_calls();
     let report = sync_once(&d.env()).unwrap();
-    assert_eq!(report.gate, Some(AccountGate::NeedsUpdate { schema: 4 }));
+    assert_eq!(report.gate, Some(AccountGate::NeedsUpdate { schema: 5 }));
     assert!(state(&d).shared_writes_blocked);
     assert_eq!(
         state(&d).spaces[&child.chain_id],
@@ -787,7 +787,7 @@ fn network_failure_keeps_a_more_important_retained_format_gate_message() {
     record_runtime::mutate_records(&d.env(), |s| {
         let mut n = s.clone();
         n.shared_writes_blocked = true;
-        n.account.as_mut().unwrap().remote_schema_version = Some(4);
+        n.account.as_mut().unwrap().remote_schema_version = Some(5);
         n.last_error = Some("newer format requires update".into());
         Ok(n)
     })
@@ -812,10 +812,10 @@ fn frozen_policy_cannot_hide_an_authenticated_future_format_gate() {
         Ok(n)
     })
     .unwrap();
-    update_meta(&d, &keys, 4, None);
+    update_meta(&d, &keys, 5, None);
     let proof = fresh_account_gate(&d.env()).unwrap();
-    assert_eq!(proof.format_gate, AccountGate::NeedsUpdate { schema: 4 });
-    assert_eq!(proof.gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert_eq!(proof.format_gate, AccountGate::NeedsUpdate { schema: 5 });
+    assert_eq!(proof.gate, AccountGate::NeedsUpdate { schema: 5 });
     assert!(proof.ensure_compatible().is_err());
 }
 #[test]
@@ -834,4 +834,67 @@ fn frozen_supported_format_proof_stays_blocked_for_shared_commands() {
     assert_eq!(proof.format_gate, AccountGate::Compatible);
     assert!(proof.ensure_compatible().is_err());
     assert!(state(&d).shared_writes_blocked);
+}
+
+#[test]
+fn group_schema_gate_failure_keeps_child_rows_local_until_acknowledged() {
+    use crate::sync::{
+        record_groups, record_repository,
+        records_v3::{GroupPayload, HostPayload, HostScope},
+    };
+    let (d, keys) = fixture();
+    let child = add_space(&d, &keys, true);
+    sync_once(&d.env()).unwrap();
+    let scope = HostScope::Space {
+        space_id: child.chain_id.clone(),
+    };
+    record_runtime::mutate_records(&d.env(),|s| {
+        let parent:GroupPayload=serde_json::from_value(json!({"schema":1,"name":"Ops","defaults":{"user":"ops","port":22}})).unwrap();
+        let s=record_groups::create_group(s,"0000000000000031",scope.clone(),parent,true,100).unwrap();
+        let nested:GroupPayload=serde_json::from_value(json!({"schema":1,"name":"Nested","parent_id":"0000000000000031","defaults":{"port":2222}})).unwrap();
+        let s=record_groups::create_group(&s,"0000000000000032",scope.clone(),nested,false,101).unwrap();
+        let p:HostPayload=serde_json::from_value(json!({"schema":3,"alias":"grouped","hostname":"group.test","auth":"password","keepalive_secs":10,"group_id":"0000000000000032","inherit":["user","port"]})).unwrap();
+        Ok(record_repository::create_host(&s,HOST,scope.clone(),p,102).unwrap())
+    }).unwrap();
+    d.relay.clear_calls();
+    d.relay.set_push_quota(Some(0));
+    assert!(sync_once(&d.env()).is_err());
+    assert!(d.relay.rows(&child.chain_id).is_empty());
+    assert!(!d
+        .relay
+        .calls()
+        .iter()
+        .any(|c| c.starts_with("push:") && c.ends_with(&child.chain_id[..8])));
+    d.relay.set_push_quota(None);
+    sync_once(&d.env()).unwrap();
+    assert_eq!(d.relay.rows(&child.chain_id).len(), 3);
+    // A second device independently joins, decrypts and resolves the same literal values.
+    let peer = TestDevice::new("group-peer", &d.relay, &TestClock::new());
+    let StartupProbe::Records {
+        state: mut peer_state,
+        ..
+    } = record_runtime::probe_startup(&peer.env().state_path, "peer")
+    else {
+        panic!()
+    };
+    peer_state.relay_url = crate::sync::testkit::RELAY_URL.into();
+    record_runtime::activate_probe(
+        &mut peer.runtime.core.lock().unwrap(),
+        StartupProbe::Records {
+            state: peer_state,
+            fresh: false,
+        },
+    )
+    .unwrap();
+    let phrase = d.keychain.get(MNEMONIC_ACCOUNT).unwrap().unwrap();
+    crate::sync::record_account::join_account(&peer.env(), &phrase, "peer").unwrap();
+    crate::sync::record_account::select_space(&peer.env(), &child.chain_id, true).unwrap();
+    sync_once(&peer.env()).unwrap();
+    for device in [&*d, &peer] {
+        let h = record_repository::get_host(&state(device), HOST).unwrap();
+        assert_eq!(h.effective_payload.user, "ops");
+        assert_eq!(h.effective_payload.port, 2222);
+        assert_eq!(h.effective_payload.keepalive_secs, 10);
+        assert_eq!(h.inherited_from["port"], "0000000000000032");
+    }
 }

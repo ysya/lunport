@@ -207,7 +207,7 @@ fn future_source_format_refuses_before_staging_new_code_or_freeze() {
     let s = state(&d);
     let row = &s.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, ACCOUNT_META_ID)];
     let mut meta = row.record.clone();
-    meta.payload["schema_version"] = json!(4);
+    meta.payload["schema_version"] = json!(5);
     meta.version += 1;
     meta.updated_at_ms += 1;
     d.relay
@@ -242,7 +242,7 @@ fn future_target_format_during_retry_refuses_push_and_current_code_promotion() {
         updated_at_ms: u64::MAX,
         device_id: state(&d).device_id.clone(),
         deleted: false,
-        payload: json!({"schema_version":4,"created_by_app_version":"future"}),
+        payload: json!({"schema_version":5,"created_by_app_version":"future"}),
     };
     d.relay
         .push(
@@ -302,7 +302,7 @@ fn retained_future_source_observation_cannot_be_cleared_by_an_older_supported_pu
     let before = state(&d);
     record_runtime::mutate_records(&d.env(), |s| {
         let mut n = s.clone();
-        n.account.as_mut().unwrap().remote_schema_version = Some(4);
+        n.account.as_mut().unwrap().remote_schema_version = Some(5);
         n.shared_writes_blocked = true;
         Ok(n)
     })
@@ -642,7 +642,7 @@ fn failed_future_gate_persistence_keeps_the_observation_and_blocks_current_memor
         updated_at_ms: 99,
         device_id: s.device_id.clone(),
         deleted: false,
-        payload: json!({"schema_version":4,"created_by_app_version":"future"}),
+        payload: json!({"schema_version":5,"created_by_app_version":"future"}),
     };
     d.relay
         .push(
@@ -672,7 +672,7 @@ fn failed_future_gate_persistence_keeps_the_observation_and_blocks_current_memor
             .unwrap()
             .prepared_account
             .remote_schema_version,
-        Some(4)
+        Some(5)
     );
     assert_eq!(after.local, s.local);
     assert_eq!(after.account.as_ref().unwrap().chain_id, old.chain_id);
@@ -806,4 +806,88 @@ fn storage_preflight_rejects_when_the_initial_journal_fits_but_complete_copy_can
     let limit = serde_json::to_vec_pretty(&initial).unwrap().len() as u64 + 512;
     assert!(check_storage_budget(&state, &op, &old, &new, limit).is_err());
     assert!(check_storage_budget(&state, &op, &old, &new, record_runtime::MAX_STATE_BYTES).is_ok());
+}
+
+#[test]
+fn group_rotation_preserves_live_and_tombstone_rows_and_effective_values() {
+    let (d, sid, _) = fixture();
+    let scope = records_v3::HostScope::Space {
+        space_id: sid.clone(),
+    };
+    record_runtime::mutate_records(&d.env(), |s| {
+        let p = serde_json::from_value(
+            json!({"schema":1,"name":"Ops","defaults":{"user":"ops","port":2222}}),
+        )
+        .unwrap();
+        let s = crate::sync::record_groups::create_group(
+            s,
+            "0000000000000031",
+            scope.clone(),
+            p,
+            true,
+            100,
+        )
+        .unwrap();
+        let p = serde_json::from_value(json!({"schema":1,"name":"Deleted","defaults":{}})).unwrap();
+        let s = crate::sync::record_groups::create_group(
+            &s,
+            "0000000000000032",
+            scope.clone(),
+            p,
+            false,
+            101,
+        )
+        .unwrap();
+        let g = crate::sync::record_groups::list_groups(&s)
+            .unwrap()
+            .into_iter()
+            .find(|g| g.group.id == "0000000000000032")
+            .unwrap();
+        let s =
+            crate::sync::record_groups::delete_group(&s, &g.group.id, &g.revision, 102).unwrap();
+        let h = crate::sync::record_repository::get_host(&s, B).unwrap();
+        let mut p = h.host.payload;
+        p.schema = 3;
+        p.group_id = Some("0000000000000031".into());
+        p.inherit = vec![
+            records_v3::InheritedField::User,
+            records_v3::InheritedField::Port,
+        ];
+        Ok(crate::sync::record_repository::update_host(&s, B, &h.revision, p, 103).unwrap())
+    })
+    .unwrap();
+    record_round::sync_once(&d.env()).unwrap();
+    let before = state(&d);
+    let rows = before.spaces[&sid].records.clone();
+    let r = start_rotation(&d.env(), "rotated").unwrap();
+    assert!(
+        r.complete,
+        "{:?}; retry: {:?}",
+        r.pending_error,
+        resume_locked(&d.env(), None)
+    );
+    let after = state(&d);
+    let groups: Vec<_> = after
+        .spaces
+        .values()
+        .flat_map(|s| s.records.values())
+        .filter(|r| r.record.kind == RecordKind::Group)
+        .collect();
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups.iter().filter(|r| r.record.deleted).count(), 1);
+    for g in groups {
+        assert_eq!(
+            g.record,
+            rows[&record_key(RecordKind::Group, &g.record.id)].record
+        );
+    }
+    let h = crate::sync::record_repository::get_host(&after, B).unwrap();
+    assert_eq!(h.effective_payload.user, "ops");
+    assert_eq!(h.effective_payload.port, 2222);
+    assert_eq!(
+        after.account.as_ref().unwrap().records[&record_key(RecordKind::Meta, ACCOUNT_META_ID)]
+            .record
+            .payload["schema_version"],
+        4
+    );
 }

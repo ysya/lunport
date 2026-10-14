@@ -43,8 +43,8 @@ fn repository_error(error: RepositoryError) -> DirectoryError {
 }
 fn endpoint(host: &HostView) -> HostEndpoint {
     HostEndpoint {
-        hostname: host.host.payload.hostname.clone(),
-        port: host.host.payload.port,
+        hostname: host.effective_payload.hostname.clone(),
+        port: host.effective_payload.port,
     }
 }
 fn stored(key: &HostKey) -> StoredHostKey {
@@ -75,7 +75,10 @@ impl RecordDirectory {
     }
     fn checked_host(&self, hop: &HopRef) -> Result<HostView, DirectoryError> {
         let host = self.host(&hop.id)?;
-        if host.host.payload.hostname != hop.hostname || host.host.payload.port != hop.port {
+        if host.group_error.is_some()
+            || host.effective_payload.hostname != hop.hostname
+            || host.effective_payload.port != hop.port
+        {
             return Err(DirectoryError::Failed(format!(
                 "The endpoint of {} changed while connecting; connect again.",
                 hop.id
@@ -145,7 +148,7 @@ impl HostDirectory for RecordDirectory {
                     )))
                 }
             }
-            let p = &view.host.payload;
+            let p = &view.effective_payload;
             let auth = match p.auth {
                 AuthKind::Key => {
                     let id = p.key_id.as_ref().ok_or_else(|| {

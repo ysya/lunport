@@ -315,6 +315,8 @@ fn link_jumps(
 fn empty_payload(alias: &str, location: &SourceLocation, options: &ImportOptions) -> HostPayload {
     HostPayload {
         schema: 2,
+        group_id: None,
+        inherit: vec![],
         alias: alias.into(),
         hostname: alias.into(),
         port: 22,

@@ -163,7 +163,13 @@ pub struct VerifiedPublicIdentity {
 impl VerifiedPublicIdentity {
     pub(crate) fn is_valid_for(&self, envelope: &Envelope) -> bool {
         let public_id = match envelope.kind.as_str() {
-            "host" => self.id.len() == 16 && self.id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "host" | "group" => {
+                self.id.len() == 16
+                    && self
+                        .id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }
             "keyslot" => crate::sync::slot_rules::is_slot_id(&self.id),
             _ => false,
         };

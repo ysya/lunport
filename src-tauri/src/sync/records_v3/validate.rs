@@ -26,7 +26,34 @@ fn schema(kind: &'static str, found: u32, expected: u32) -> Result<(), RecordVal
 }
 /// Disk and relay admission validate record shape. Relationship conflicts remain visible to the repository.
 pub fn validate_host_shape(host: &HostRecord) -> Result<(), RecordValidationError> {
-    schema("host", host.payload.schema, HOST_SCHEMA)?;
+    if !matches!(host.payload.schema, HOST_SCHEMA | GROUPED_HOST_SCHEMA) {
+        return Err(RecordValidationError::UnsupportedSchema {
+            kind: "host",
+            found: host.payload.schema,
+        });
+    }
+    if host.payload.schema == HOST_SCHEMA
+        && (host.payload.group_id.is_some() || !host.payload.inherit.is_empty())
+    {
+        return Err(invalid(
+            "group_id",
+            &host.id,
+            "inheritance requires host schema 3",
+        ));
+    }
+    if host
+        .payload
+        .group_id
+        .as_deref()
+        .is_some_and(|id| !is_host_id(id))
+        || host.payload.inherit.iter().collect::<BTreeSet<_>>().len() != host.payload.inherit.len()
+    {
+        return Err(invalid(
+            "inherit",
+            &host.id,
+            "invalid group or duplicate inherited field",
+        ));
+    }
     if !is_host_id(&host.id) {
         return Err(invalid(
             "id",
@@ -302,7 +329,18 @@ pub fn decode_host(
             id: record.id.clone(),
         });
     }
-    payload_schema(record, "host", HOST_SCHEMA)?;
+
+    let schema = record
+        .payload
+        .get("schema")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if !matches!(schema, 2 | 3) {
+        return Err(RecordValidationError::UnsupportedSchema {
+            kind: "host",
+            found: u32::try_from(schema).unwrap_or(u32::MAX),
+        });
+    }
     let payload = serde_json::from_value(record.payload.clone()).map_err(|e| {
         RecordValidationError::Decode {
             kind: "host",
@@ -381,4 +419,93 @@ pub fn replace_host_payload(
     };
     validate_host(&updated)?;
     Ok(updated)
+}
+
+pub fn validate_group(group: &GroupRecord) -> Result<(), RecordValidationError> {
+    schema("group", group.payload.schema, GROUP_SCHEMA)?;
+    let p = &group.payload;
+    if !is_host_id(&group.id) || p.parent_id.as_deref().is_some_and(|id| !is_host_id(id)) {
+        return Err(invalid("id", &group.id, "expected group ids"));
+    }
+    if let HostScope::Space { space_id } = &group.scope {
+        if !is_chain_id(space_id) {
+            return Err(invalid("scope", &group.id, "invalid space id"));
+        }
+    }
+    if p.name.trim() != p.name
+        || p.name.is_empty()
+        || p.name.chars().count() > 128
+        || p.name.chars().any(char::is_control)
+    {
+        return Err(invalid(
+            "name",
+            &group.id,
+            "expected a trimmed name of 1 to 128 characters",
+        ));
+    }
+    let d = &p.defaults;
+    if d.port == Some(0)
+        || d.connect_timeout_secs == Some(0)
+        || d.user
+            .as_ref()
+            .is_some_and(|u| u.chars().any(|c| c.is_control() || c.is_whitespace()))
+    {
+        return Err(invalid(
+            "defaults",
+            &group.id,
+            "invalid connection defaults",
+        ));
+    }
+    if let Some(auth) = &d.authentication {
+        if (auth.auth == AuthKind::Key) != auth.key_id.is_some()
+            || auth.key_id.as_deref().is_some_and(|id| !is_slot_id(id))
+        {
+            return Err(invalid(
+                "authentication",
+                &group.id,
+                "authentication and key identity must be consistent",
+            ));
+        }
+    }
+    if let Some(jumps) = &d.jump {
+        if jumps.len() > MAX_JUMPS
+            || jumps.iter().any(|id| !is_host_id(id))
+            || jumps.iter().collect::<BTreeSet<_>>().len() != jumps.len()
+        {
+            return Err(invalid("jump", &group.id, "invalid jump defaults"));
+        }
+    }
+    Ok(())
+}
+pub fn decode_group(
+    record: &Record,
+    scope: HostScope,
+) -> Result<TypedRecord<GroupRecord>, RecordValidationError> {
+    if record.kind != RecordKind::Group {
+        return Err(RecordValidationError::WrongKind {
+            expected: "group",
+            found: record.kind.as_str().into(),
+        });
+    }
+    if !is_host_id(&record.id) {
+        return Err(invalid("id", &record.id, "expected a group id"));
+    }
+    if record.deleted {
+        return Ok(TypedRecord::Tombstone {
+            id: record.id.clone(),
+        });
+    }
+    let payload = serde_json::from_value(record.payload.clone()).map_err(|e| {
+        RecordValidationError::Decode {
+            kind: "group",
+            reason: e.to_string(),
+        }
+    })?;
+    let group = GroupRecord {
+        id: record.id.clone(),
+        scope,
+        payload,
+    };
+    validate_group(&group)?;
+    Ok(TypedRecord::Live(group))
 }

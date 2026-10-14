@@ -28,9 +28,19 @@ pub struct PlannedHost {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeavePlan {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<PlannedGroup>,
     pub source_spaces: BTreeMap<String, SpaceStateV3>,
     pub hosts: Vec<PlannedHost>,
     pub passwords_copied: BTreeSet<String>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlannedGroup {
+    pub source_space_id: String,
+    pub source_group_id: String,
+    pub local_group_id: String,
+    pub local: LocalRecord,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct LeaveReceipt {
@@ -48,6 +58,9 @@ fn new_id(bytes: usize) -> Result<String, AppError> {
     getrandom::fill(&mut b).map_err(|_| error("cannot create local preservation identity"))?;
     Ok(b.iter().map(|v| format!("{v:02x}")).collect())
 }
+fn remapped_group_name(name: &str, id: &str) -> String {
+    format!("{}-{id}", name.chars().take(111).collect::<String>())
+}
 pub fn validate_plan(plan: &LeavePlan) -> Result<(), AppError> {
     let mut ids = BTreeSet::new();
     let mut sources = BTreeSet::new();
@@ -56,10 +69,20 @@ pub fn validate_plan(plan: &LeavePlan) -> Result<(), AppError> {
             return Err(error("invalid leave source space"));
         }
         for (key, row) in &space.records {
-            if *key != record_key(RecordKind::Host, &row.record.id)
-                || row.record.kind != RecordKind::Host
+            if *key != record_key(row.record.kind, &row.record.id)
+                || !matches!(row.record.kind, RecordKind::Host | RecordKind::Group)
             {
                 return Err(error("invalid leave source row"));
+            }
+            if row.record.kind == RecordKind::Group {
+                records_v3::decode_group(
+                    &row.record,
+                    HostScope::Space {
+                        space_id: id.clone(),
+                    },
+                )
+                .map_err(|_| error("invalid leave source group"))?;
+                continue;
             }
             records_v3::decode_host(
                 &row.record,
@@ -79,6 +102,11 @@ pub fn validate_plan(plan: &LeavePlan) -> Result<(), AppError> {
                 h.mapping.local_host_id.as_str(),
             )
         })
+        .collect();
+    let group_remap: BTreeMap<_, _> = plan
+        .groups
+        .iter()
+        .map(|g| (g.source_group_id.as_str(), g.local_group_id.as_str()))
         .collect();
     for host in &plan.hosts {
         let m = &host.mapping;
@@ -115,6 +143,12 @@ pub fn validate_plan(plan: &LeavePlan) -> Result<(), AppError> {
             return Err(error("leave alias is not a stable source remap"));
         }
         expected.payload.alias = m.alias.clone();
+        if let Some(id) = &mut expected.payload.group_id {
+            *id = group_remap
+                .get(id.as_str())
+                .ok_or_else(|| error("missing preserved group"))?
+                .to_string();
+        }
         for jump in &mut expected.payload.jump {
             if let Some(target) = remap.get(jump.as_str()) {
                 *jump = (*target).to_string();
@@ -132,7 +166,63 @@ pub fn validate_plan(plan: &LeavePlan) -> Result<(), AppError> {
             return Err(error("inconsistent leave mapping"));
         }
     }
-    if plan.passwords_copied.iter().any(|id| !ids.contains(id)) {
+    for g in &plan.groups {
+        if !ids.insert(&g.local_group_id)
+            || !sources.insert((&g.source_space_id, &g.source_group_id))
+        {
+            return Err(error("duplicate preserved group identity"));
+        }
+        let source = plan
+            .source_spaces
+            .get(&g.source_space_id)
+            .and_then(|s| {
+                s.records
+                    .get(&record_key(RecordKind::Group, &g.source_group_id))
+            })
+            .ok_or_else(|| error("group source missing"))?;
+        let TypedRecord::Live(mut expected) =
+            records_v3::decode_group(&source.record, HostScope::Local)
+                .map_err(|_| error("invalid group source"))?
+        else {
+            return Err(error("deleted group source"));
+        };
+        let TypedRecord::Live(local) = records_v3::decode_group(&g.local.record, HostScope::Local)
+            .map_err(|_| error("invalid preserved group"))?
+        else {
+            return Err(error("deleted preserved group"));
+        };
+        if let Some(parent) = &mut expected.payload.parent_id {
+            *parent = group_remap
+                .get(parent.as_str())
+                .ok_or_else(|| error("missing preserved parent"))?
+                .to_string();
+        }
+        if let Some(jumps) = &mut expected.payload.defaults.jump {
+            for jump in jumps {
+                if let Some(target) = remap.get(jump.as_str()) {
+                    *jump = target.to_string();
+                }
+            }
+        }
+        if local.payload.name != expected.payload.name
+            && local.payload.name != remapped_group_name(&expected.payload.name, &g.local_group_id)
+        {
+            return Err(error("group name is not a stable remap"));
+        }
+        expected.payload.name = local.payload.name.clone();
+        if local.id != g.local_group_id
+            || local.payload != expected.payload
+            || g.local.seq != 0
+            || g.local.dirty
+        {
+            return Err(error("group preservation mismatch"));
+        }
+    }
+    if plan
+        .passwords_copied
+        .iter()
+        .any(|id| !plan.hosts.iter().any(|h| &h.mapping.local_host_id == id))
+    {
         return Err(error("invalid leave credential receipt"));
     }
     if plan
@@ -140,7 +230,7 @@ pub fn validate_plan(plan: &LeavePlan) -> Result<(), AppError> {
         .values()
         .map(|s| s.records.values().filter(|r| !r.record.deleted).count())
         .sum::<usize>()
-        != plan.hosts.len()
+        != plan.hosts.len() + plan.groups.len()
     {
         return Err(error("incomplete leave plan"));
     }
@@ -170,7 +260,7 @@ fn source_spaces(
         if merged.gate != AccountGate::Compatible
             || !merged.baseline_established
             || merged.section.sealed.values().any(|r| {
-                r.envelope.kind == "host"
+                (r.envelope.kind == "group" || r.envelope.kind == "host")
                     && !r.envelope.deleted
                     && (!record_merge::is_legacy_alias_host(&child, &r.envelope)
                         || merged.section.records.values().any(|known| {
@@ -181,7 +271,7 @@ fn source_spaces(
             })
         {
             return Err(error(
-                "a selected space has unreadable hosts; local preservation did not complete",
+                "a selected space has unreadable hosts or groups; local preservation did not complete",
             ));
         }
         let mut section = merged.section;
@@ -201,17 +291,17 @@ fn check_source_key_material(
         .account
         .as_ref()
         .ok_or_else(|| error("source account changed"))?;
-    for row in spaces
-        .values()
-        .flat_map(|s| s.records.values())
-        .filter(|r| !r.record.deleted)
+    let mut source = state.clone();
+    source.spaces = spaces.clone();
+    for view in crate::sync::record_repository::snapshot(&source)
+        .map_err(|_| error("invalid source hosts"))?
+        .hosts
+        .into_iter()
+        .filter(|h| matches!(h.host.scope, HostScope::Space { .. }))
     {
-        let TypedRecord::Live(host) = records_v3::decode_host(&row.record, HostScope::Local)
-            .map_err(|_| error("invalid source host"))?
-        else {
-            continue;
-        };
-        let Some(id) = host.payload.key_id.as_ref() else {
+        let effective = crate::sync::record_groups::resolve_effective(&source, &view.host)
+            .map_err(|_| error("invalid source inheritance"))?;
+        let Some(id) = effective.payload.key_id.as_ref() else {
             continue;
         };
         let Some(local) = state.local.keys.get(id) else {
@@ -272,10 +362,10 @@ fn ensure_latest(env: &SyncEnv, op: &PendingAccountOperation) -> Result<(), AppE
         .ok_or_else(crate::sync::runtime::superseded)?;
     if s.account
         .as_ref()
-        .is_some_and(|a| a.remote_schema_version.is_some_and(|v| v > 3))
+        .is_some_and(|a| a.remote_schema_version.is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA))
         || p.prepared_account
             .remote_schema_version
-            .is_some_and(|v| v > 3)
+            .is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA)
         || records_v3::account_migration_pending(&s)
     {
         return Err(error(
@@ -312,6 +402,7 @@ fn plan(
         .values()
         .map(|r| r.record.id.clone())
         .collect();
+    used_ids.extend(state.local.groups.values().map(|r| r.record.id.clone()));
     let local_ids = used_ids.clone();
     used_ids.extend(
         spaces
@@ -340,13 +431,67 @@ fn plan(
     }
     let now = env.now();
     let mut hosts = Vec::new();
+    let mut groups = Vec::new();
+    let mut names: BTreeSet<_> = crate::sync::record_groups::list_groups(state)
+        .map_err(|_| error("invalid existing groups"))?
+        .into_iter()
+        .filter(|g| g.group.scope == HostScope::Local)
+        .map(|g| (g.group.payload.parent_id, g.group.payload.name))
+        .collect();
     for (sid, source, id) in rows {
+        if source.record.kind == RecordKind::Group {
+            let TypedRecord::Live(mut g) =
+                records_v3::decode_group(&source.record, HostScope::Local)
+                    .map_err(|_| error("invalid source group"))?
+            else {
+                unreachable!()
+            };
+            if let Some(parent) = &mut g.payload.parent_id {
+                *parent = remap
+                    .get(parent)
+                    .ok_or_else(|| error("missing source parent"))?
+                    .clone();
+            }
+            if let Some(jumps) = &mut g.payload.defaults.jump {
+                for jump in jumps {
+                    if let Some(target) = remap.get(jump) {
+                        *jump = target.clone();
+                    }
+                }
+            }
+            if !names.insert((g.payload.parent_id.clone(), g.payload.name.clone())) {
+                g.payload.name = remapped_group_name(&g.payload.name, &id);
+            }
+            let mut record = source.record.clone();
+            record.id = id.clone();
+            record.version = 1;
+            record.updated_at_ms = now;
+            record.device_id = state.device_id.clone();
+            record.payload = serde_json::to_value(g.payload).unwrap();
+            groups.push(PlannedGroup {
+                source_space_id: sid.clone(),
+                source_group_id: source.record.id.clone(),
+                local_group_id: id,
+                local: LocalRecord {
+                    record,
+                    seq: 0,
+                    dirty: false,
+                },
+            });
+            continue;
+        }
         let TypedRecord::Live(mut h) = records_v3::decode_host(&source.record, HostScope::Local)
             .map_err(|_| error("source host needs review before leaving"))?
         else {
             unreachable!()
         };
         h.id = id.clone();
+        if let Some(group) = &mut h.payload.group_id {
+            *group = remap
+                .get(group)
+                .ok_or_else(|| error("missing source group"))?
+                .clone();
+        }
         for jump in &mut h.payload.jump {
             if let Some(new) = remap.get(jump) {
                 *jump = new.clone();
@@ -381,10 +526,31 @@ fn plan(
             },
         });
     }
-    records_v3::validate_hosts(&existing).map_err(|_| {
+    let mut candidate = state.clone();
+    candidate.spaces.clear();
+    for g in &groups {
+        candidate.local.groups.insert(
+            record_key(RecordKind::Group, &g.local_group_id),
+            g.local.clone(),
+        );
+    }
+    let effective = existing
+        .iter()
+        .map(|h| {
+            crate::sync::record_groups::resolve_effective(&candidate, h).map(|e| {
+                records_v3::HostRecord {
+                    payload: e.payload,
+                    ..h.clone()
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("source inheritance requires review"))?;
+    records_v3::validate_hosts(&effective).map_err(|_| {
         error("selected hosts have unresolved routes or conflicts; review before leaving")
     })?;
     let plan = LeavePlan {
+        groups,
         source_spaces: spaces,
         hosts,
         passwords_copied: BTreeSet::new(),
@@ -578,7 +744,26 @@ pub(crate) fn resume_locked(env: &SyncEnv) -> Result<(), AppError> {
                 }
                 n.local.hosts.insert(k, h.local.clone());
             }
-            records_v3::validate_hosts(&local_hosts(&n)?)
+            for g in &op.leave.as_ref().unwrap().groups {
+                let key = record_key(RecordKind::Group, &g.local_group_id);
+                if n.local.groups.contains_key(&key) {
+                    return Err(error("planned group identity became occupied"));
+                }
+                n.local.groups.insert(key, g.local.clone());
+            }
+            let effective = local_hosts(&n)?
+                .into_iter()
+                .map(|h| {
+                    crate::sync::record_groups::resolve_effective(&n, &h).map(|e| {
+                        records_v3::HostRecord {
+                            payload: e.payload,
+                            ..h
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| error("preserved inheritance needs review"))?;
+            records_v3::validate_hosts(&effective)
                 .map_err(|_| error("latest local routes conflict with preservation plan"))?;
             n.account = None;
             n.spaces.clear();

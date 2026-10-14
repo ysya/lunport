@@ -5,7 +5,7 @@ use crate::sync::record_repository::{
     self as repo, HostReadiness, KeyAuthority, KeyStatus, RecordRevision,
 };
 use crate::sync::record_runtime::{self, RuntimeFormat};
-use crate::sync::records_v3::{HostPayload, HostScope, KeySlotPayload, SyncStateV3};
+use crate::sync::records_v3::{GroupPayload, HostPayload, HostScope, KeySlotPayload, SyncStateV3};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -56,8 +56,19 @@ pub struct HostView {
     id: String,
     scope: HostScope,
     payload: HostPayload,
+    effective_payload: HostPayload,
+    inherited_from: std::collections::BTreeMap<String, String>,
+    group_error: Option<String>,
     revision: RevisionToken,
     readiness: Readiness,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct GroupView {
+    id: String,
+    scope: HostScope,
+    payload: GroupPayload,
+    revision: RevisionToken,
+    group_error: Option<String>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct KeyView {
@@ -90,6 +101,9 @@ pub struct RecordOverview {
     generation: String,
     relay_url: String,
     hosts: Vec<HostView>,
+    groups: Vec<GroupView>,
+    format_upgrade_required: bool,
+    shared_format_upgrade_required: bool,
     keys: Vec<KeyView>,
     spaces: Vec<SpaceView>,
     account: Option<AccountView>,
@@ -149,6 +163,9 @@ pub fn overview_from(
                 id: view.host.id,
                 scope: view.host.scope,
                 payload: view.host.payload,
+                effective_payload: view.effective_payload,
+                inherited_from: view.inherited_from,
+                group_error: view.group_error,
                 revision: view.revision.into(),
                 readiness,
             }
@@ -223,6 +240,32 @@ pub fn overview_from(
         generation: generation.to_string(),
         relay_url: state.relay_url.clone(),
         hosts,
+        groups: snapshot
+            .groups
+            .into_iter()
+            .map(|g| GroupView {
+                id: g.group.id,
+                scope: g.group.scope,
+                payload: g.group.payload,
+                revision: g.revision.into(),
+                group_error: g.group_error,
+            })
+            .collect(),
+        format_upgrade_required: state.version < 4,
+        shared_format_upgrade_required: state.account.as_ref().is_some_and(|a| {
+            a.records
+                .get(&crate::sync::record::record_key(
+                    crate::sync::record::RecordKind::Meta,
+                    crate::sync::record::ACCOUNT_META_ID,
+                ))
+                .is_none_or(|r| {
+                    r.record
+                        .payload
+                        .get("schema_version")
+                        .and_then(serde_json::Value::as_u64)
+                        != Some(4)
+                })
+        }),
         keys,
         spaces,
         account: state.account.as_ref().map(|a| AccountView {
@@ -305,15 +348,71 @@ async fn edit(
     .map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
+pub async fn records_group_create(
+    app: AppHandle,
+    scope: HostScope,
+    payload: GroupPayload,
+    upgrade_confirmed: bool,
+) -> Result<RecordOverview, AppError> {
+    let id = new_host_id()?;
+    edit(app, move |s, now| {
+        crate::sync::record_groups::create_group(
+            s,
+            &id,
+            scope.clone(),
+            payload.clone(),
+            upgrade_confirmed,
+            now,
+        )
+        .map_err(error)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn records_group_update(
+    app: AppHandle,
+    id: String,
+    revision: RevisionToken,
+    payload: GroupPayload,
+) -> Result<RecordOverview, AppError> {
+    let revision = revision.revision()?;
+    edit(app, move |s, now| {
+        crate::sync::record_groups::update_group(s, &id, &revision, payload.clone(), now)
+            .map_err(error)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn records_group_delete(
+    app: AppHandle,
+    id: String,
+    revision: RevisionToken,
+) -> Result<RecordOverview, AppError> {
+    let revision = revision.revision()?;
+    edit(app, move |s, now| {
+        crate::sync::record_groups::delete_group(s, &id, &revision, now).map_err(error)
+    })
+    .await
+}
+#[tauri::command]
 pub async fn records_host_create(
     app: AppHandle,
     scope: HostScope,
     payload: HostPayload,
+    upgrade_confirmed: Option<bool>,
 ) -> Result<RecordOverview, AppError> {
     let payload = new_host_payload(payload);
     let id = new_host_id()?;
     edit(app, move |s, now| {
-        repo::create_host(s, &id, scope.clone(), payload.clone(), now).map_err(error)
+        let candidate = crate::sync::record_groups::promote_for_host(
+            s,
+            &scope,
+            &payload,
+            upgrade_confirmed.unwrap_or(false),
+            now,
+        )
+        .map_err(error)?;
+        repo::create_host(&candidate, &id, scope.clone(), payload.clone(), now).map_err(error)
     })
     .await
 }
@@ -323,10 +422,20 @@ pub async fn records_host_update(
     id: String,
     revision: RevisionToken,
     payload: HostPayload,
+    upgrade_confirmed: Option<bool>,
 ) -> Result<RecordOverview, AppError> {
     let revision = revision.revision()?;
     edit(app, move |s, now| {
-        repo::update_host(s, &id, &revision, payload.clone(), now).map_err(error)
+        let scope = repo::get_host(s, &id).map_err(error)?.host.scope;
+        let candidate = crate::sync::record_groups::promote_for_host(
+            s,
+            &scope,
+            &payload,
+            upgrade_confirmed.unwrap_or(false),
+            now,
+        )
+        .map_err(error)?;
+        repo::update_host(&candidate, &id, &revision, payload.clone(), now).map_err(error)
     })
     .await
 }

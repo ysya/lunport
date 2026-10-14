@@ -299,7 +299,7 @@ fn space_select_and_rename_require_fresh_format_before_staging_any_change() {
         updated_at_ms: u64::MAX,
         device_id: "d".repeat(32),
         deleted: false,
-        payload: json!({"schema_version":4,"created_by_app_version":"future"}),
+        payload: json!({"schema_version":5,"created_by_app_version":"future"}),
     };
     d.relay
         .push(
@@ -455,7 +455,7 @@ fn activated_cleanup_rechecks_account_format_before_deleting_staged_credentials(
         updated_at_ms: u64::MAX,
         device_id: "d".repeat(32),
         deleted: false,
-        payload: json!({"schema_version":4,"created_by_app_version":"future"}),
+        payload: json!({"schema_version":5,"created_by_app_version":"future"}),
     };
     d.relay
         .push(
@@ -622,7 +622,7 @@ fn synced_download_fresh_future_gate_stops_before_vault_material() {
         updated_at_ms: u64::MAX,
         device_id: "d".repeat(32),
         deleted: false,
-        payload: json!({"schema_version":4,"created_by_app_version":"future"}),
+        payload: json!({"schema_version":5,"created_by_app_version":"future"}),
     };
     d.relay
         .push(
@@ -653,7 +653,7 @@ fn known_future_pending_account_retry_only_polls_and_never_rewrites_staged_crede
         updated_at_ms: u64::MAX,
         device_id: "d".repeat(32),
         deleted: false,
-        payload: json!({"schema_version":4,"created_by_app_version":"future"}),
+        payload: json!({"schema_version":5,"created_by_app_version":"future"}),
     };
     d.relay
         .push(
