@@ -186,6 +186,21 @@ enum Phase {
     VaultPublished,
     Active,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceKind {
+    #[default]
+    Files,
+    Material,
+    Synced,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyncedPrecondition {
+    chain_id: String,
+    key_row: LocalRecord,
+    old_material: Option<LocalKeyMetadata>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
@@ -193,6 +208,12 @@ struct Journal {
     import_id: String,
     source: PathBuf,
     source_digest: String,
+    #[serde(default)]
+    source_kind: SourceKind,
+    #[serde(default)]
+    material_digests: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authoritative: Option<SyncedPrecondition>,
     options: PublicOptions,
     provenance: Vec<Provenance>,
     copies: BTreeMap<String, KeyCopyConsent>,
@@ -448,6 +469,9 @@ fn save_journal(paths: &Paths, journal: &Journal) -> Result<(), AppError> {
     fsutil::atomic_write(&paths.journal, &bytes, 0o600)
 }
 fn source_unchanged(journal: &Journal) -> Result<(), AppError> {
+    if journal.source_kind != SourceKind::Files {
+        return Ok(());
+    }
     for file in &journal.provenance {
         if !file.path.is_absolute()
             || !file.canonical_path.is_absolute()
@@ -553,6 +577,9 @@ pub fn confirm(env: &SyncEnv, prepared: PreparedImport) -> Result<ImportReceipt,
         import_id: id,
         source: prepared.source,
         source_digest: actual.source_digest,
+        source_kind: SourceKind::Files,
+        material_digests: BTreeMap::new(),
+        authoritative: None,
         options: PublicOptions {
             home: prepared.options.home,
             env_digest: digest(
@@ -588,13 +615,212 @@ pub fn confirm(env: &SyncEnv, prepared: PreparedImport) -> Result<ImportReceipt,
     // First durable side effect. All later writes have this consent/mapping receipt to recover from.
     save_journal(&paths, &journal)?;
     step(PublishStep::JournalPrepared)?;
-    execute(env, &paths, &mut journal).map_err(|error| {
+    execute(env, &paths, &mut journal, None).map_err(|error| {
         AppError::Other(format!(
             "confirmed import {} remains pending: {error}",
             journal.import_id
         ))
     })
 }
+/// Shared explicit Local material publication. Never open virtual provenance as a file.
+pub(crate) fn publish_material(
+    env: &SyncEnv,
+    name: &str,
+    mut entry: VaultEntry,
+) -> Result<(ImportReceipt, KeySlotPayload), AppError> {
+    let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+    let _vault = env
+        .runtime
+        .vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    let (state, _) = snapshot_for_write(env)?;
+    let import_id = crate::sync::slot_rules::new_slot_id()?;
+    let key_id = crate::sync::slot_rules::new_slot_id()?;
+    let paths = Paths::new(env, &import_id)?;
+    if paths.dir.exists() {
+        return Err(failure("import journal id is already occupied"));
+    }
+    let at_ms = env.now();
+    let private = crate::vault::material::parse(&entry.private_key)
+        .ok_or_else(|| failure("local private material is not readable"))?;
+    let public = KeySlotPayload {
+        schema: crate::sync::records_v3::KEYSLOT_SCHEMA,
+        name: name.into(),
+        public_key: private
+            .public_key()
+            .to_openssh()
+            .map_err(|_| failure("local public identity is not readable"))?,
+        fingerprint: private
+            .public_key()
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string(),
+        key_type: private.public_key().algorithm().as_str().into(),
+        has_passphrase: private.is_encrypted(),
+        created_at_ms: at_ms,
+        origin_device_id: state.device_id.clone(),
+    };
+    crate::sync::records_v3::validate_keyslot(&key_id, &public)
+        .map_err(|_| failure("local key metadata is not valid"))?;
+    let material_digest = digest(entry.private_key.as_bytes());
+    entry.added_at_ms = at_ms;
+    let mut journal = Journal {
+        version: JOURNAL_VERSION,
+        import_id: import_id.clone(),
+        source: paths.dir.join("memory-source"),
+        source_digest: material_digest.clone(),
+        source_kind: SourceKind::Material,
+        material_digests: BTreeMap::from([(key_id.clone(), material_digest)]),
+        authoritative: None,
+        options: PublicOptions {
+            home: env.state_path.parent().unwrap().into(),
+            env_digest: digest(b""),
+            host_ids: BTreeMap::new(),
+            key_ids: BTreeMap::from([(name.into(), key_id.clone())]),
+        },
+        provenance: vec![],
+        copies: BTreeMap::new(),
+        hosts: vec![],
+        keys: BTreeMap::from([(
+            key_id.clone(),
+            LocalKeyMetadata {
+                vault_id: key_id.clone(),
+                public: public.clone(),
+            },
+        )]),
+        device_id: state.device_id.clone(),
+        at_ms,
+        phase: Phase::Prepared,
+        originals_captured: false,
+        original_vault_digest: None,
+        staged_vault_digest: None,
+        staged_key_account: None,
+        completed_hosts: BTreeSet::new(),
+        completed_keys: BTreeSet::new(),
+    };
+    verify_entry(&journal, &key_id, &entry)?;
+    overlay(&state, &journal)?;
+    save_journal(&paths, &journal)?;
+    let provided = BTreeMap::from([(key_id, entry)]);
+    let receipt = execute(env, &paths, &mut journal, Some(provided)).map_err(|error| {
+        AppError::Other(format!(
+            "confirmed local key {} remains pending: {error}",
+            journal.import_id
+        ))
+    })?;
+    Ok((receipt, public))
+}
+
+/// Caller owns lifecycle; this activation owns vault -> publication only.
+pub(crate) fn publish_synced_material(
+    env: &SyncEnv,
+    key_id: &str,
+    public: KeySlotPayload,
+    mut entry: VaultEntry,
+) -> Result<ImportReceipt, AppError> {
+    let _vault = env
+        .runtime
+        .vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    let (state, _) = snapshot_for_write(env)?;
+    if crate::sync::records_v3::account_writes_blocked(&state) {
+        return Err(failure(
+            "shared account writes are blocked; download requires a compatible fresh pull",
+        ));
+    }
+    let account = state
+        .account
+        .as_ref()
+        .ok_or_else(|| failure("download requires a joined account"))?;
+    let row = account
+        .records
+        .get(&record_key(RecordKind::KeySlot, key_id))
+        .ok_or_else(|| failure("account key metadata is not available"))?;
+    let authoritative = match crate::sync::records_v3::decode_keyslot(&row.record)
+        .map_err(|_| failure("account key metadata is not valid"))?
+    {
+        crate::sync::records_v3::TypedRecord::Live(public) => public,
+        _ => return Err(failure("account key metadata was deleted")),
+    };
+    if authoritative != public {
+        return Err(failure(
+            "authoritative account key metadata changed; download it again",
+        ));
+    }
+    let import_id = crate::sync::slot_rules::new_slot_id()?;
+    let vault_id = crate::sync::slot_rules::new_slot_id()?;
+    let paths = Paths::new(env, &import_id)?;
+    if paths.dir.exists() {
+        return Err(failure("import journal id is already occupied"));
+    }
+    let at_ms = env.now();
+    entry.added_at_ms = at_ms;
+    let material_digest = digest(entry.private_key.as_bytes());
+    let mut source = Sha256::new();
+    source.update(b"sshelter-explicit-key-download-v1");
+    source.update(account.chain_id.as_bytes());
+    source.update(
+        serde_json::to_vec(&row.record)
+            .map_err(|_| failure("cannot fingerprint public account metadata"))?,
+    );
+    source.update(material_digest.as_bytes());
+    let source_digest = source
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut journal = Journal {
+        version: JOURNAL_VERSION,
+        import_id: import_id.clone(),
+        source: paths.dir.join("download-source"),
+        source_digest,
+        source_kind: SourceKind::Synced,
+        material_digests: BTreeMap::from([(key_id.into(), material_digest)]),
+        authoritative: Some(SyncedPrecondition {
+            chain_id: account.chain_id.clone(),
+            key_row: row.clone(),
+            old_material: state.local.keys.get(key_id).cloned(),
+        }),
+        options: PublicOptions {
+            home: env.state_path.parent().unwrap().into(),
+            env_digest: digest(b""),
+            host_ids: BTreeMap::new(),
+            key_ids: BTreeMap::from([(public.name.clone(), key_id.into())]),
+        },
+        provenance: vec![],
+        copies: BTreeMap::new(),
+        hosts: vec![],
+        keys: BTreeMap::from([(key_id.into(), LocalKeyMetadata { vault_id, public })]),
+        device_id: state.device_id.clone(),
+        at_ms,
+        phase: Phase::Prepared,
+        originals_captured: false,
+        original_vault_digest: None,
+        staged_vault_digest: None,
+        staged_key_account: None,
+        completed_hosts: BTreeSet::new(),
+        completed_keys: BTreeSet::new(),
+    };
+    verify_entry(&journal, key_id, &entry)?;
+    overlay(&state, &journal)?;
+    save_journal(&paths, &journal)?;
+    execute(
+        env,
+        &paths,
+        &mut journal,
+        Some(BTreeMap::from([(key_id.into(), entry)])),
+    )
+    .map_err(|error| {
+        AppError::Other(format!(
+            "confirmed key download {} remains pending: {error}",
+            journal.import_id
+        ))
+    })
+}
+
 /// Resume the exact confirmed mapping; it never discovers or imports new sources on retry.
 pub fn resume(env: &SyncEnv, id: &str) -> Result<ImportReceipt, AppError> {
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
@@ -621,29 +847,81 @@ pub fn resume(env: &SyncEnv, id: &str) -> Result<ImportReceipt, AppError> {
     if journal.hosts.iter().any(|h| h.scope != HostScope::Local) {
         return Err(failure("file import journal contains a non-local host"));
     }
-    if journal.keys.len() != journal.copies.len() {
+    if journal.source_kind == SourceKind::Files && journal.keys.len() != journal.copies.len() {
         return Err(failure("import journal has inconsistent copy consent"));
     }
+    if journal.source_kind != SourceKind::Files
+        && (!journal.hosts.is_empty()
+            || !journal.copies.is_empty()
+            || !journal.provenance.is_empty()
+            || journal.keys.len() != journal.material_digests.len())
+    {
+        return Err(failure("material journal has inconsistent public mapping"));
+    }
     for (id, key) in &journal.keys {
-        let consent = journal
-            .copies
-            .get(id)
-            .ok_or_else(|| failure("import journal has inconsistent copy consent"))?;
-        if consent.key_id != *id
-            || !consent.source.is_absolute()
-            || !consent.canonical_source.is_absolute()
-            || !is_digest(&consent.digest)
-            || consent.public_key != key.public.public_key
-            || consent.fingerprint != key.public.fingerprint
-            || consent.key_type != key.public.key_type
-            || consent.has_passphrase != key.public.has_passphrase
-        {
-            return Err(failure("import journal material identity is inconsistent"));
-        }
         crate::sync::records_v3::validate_keyslot(id, &key.public)
             .map_err(|_| failure("import journal contains invalid key metadata"))?;
-        if key.vault_id != *id || !journal.copies.contains_key(id) {
+        if !crate::sync::slot_rules::is_slot_id(&key.vault_id)
+            || (journal.source_kind != SourceKind::Synced && key.vault_id != *id)
+        {
             return Err(failure("import journal has inconsistent key mapping"));
+        }
+        match journal.source_kind {
+            SourceKind::Files => {
+                let consent = journal
+                    .copies
+                    .get(id)
+                    .ok_or_else(|| failure("import journal has inconsistent copy consent"))?;
+                if consent.key_id != *id
+                    || !consent.source.is_absolute()
+                    || !consent.canonical_source.is_absolute()
+                    || !is_digest(&consent.digest)
+                    || consent.public_key != key.public.public_key
+                    || consent.fingerprint != key.public.fingerprint
+                    || consent.key_type != key.public.key_type
+                    || consent.has_passphrase != key.public.has_passphrase
+                {
+                    return Err(failure("import journal material identity is inconsistent"));
+                }
+            }
+            SourceKind::Material | SourceKind::Synced => {
+                if !journal
+                    .material_digests
+                    .get(id)
+                    .is_some_and(|digest| is_digest(digest))
+                {
+                    return Err(failure("material journal is missing its confirmed digest"));
+                }
+            }
+        }
+    }
+    match (&journal.authoritative, journal.source_kind) {
+        (Some(authority), SourceKind::Synced) => {
+            if !crate::sync::crypto::is_chain_id(&authority.chain_id)
+                || journal.keys.len() != 1
+                || authority.key_row.record.kind != RecordKind::KeySlot
+                || authority.key_row.record.deleted
+                || !journal.keys.contains_key(&authority.key_row.record.id)
+            {
+                return Err(failure(
+                    "synced journal has invalid public authority mapping",
+                ));
+            }
+            let public = match crate::sync::records_v3::decode_keyslot(&authority.key_row.record)
+                .map_err(|_| failure("synced journal public authority is not valid"))?
+            {
+                crate::sync::records_v3::TypedRecord::Live(public) => public,
+                _ => return Err(failure("synced journal public authority was deleted")),
+            };
+            if journal.keys[&authority.key_row.record.id].public != public {
+                return Err(failure("synced journal public authority is inconsistent"));
+            }
+        }
+        (None, SourceKind::Files | SourceKind::Material) => {}
+        _ => {
+            return Err(failure(
+                "journal source kind has inconsistent authority metadata",
+            ))
         }
     }
     if journal
@@ -661,7 +939,7 @@ pub fn resume(env: &SyncEnv, id: &str) -> Result<ImportReceipt, AppError> {
             "active import has no matching durable state receipt",
         ));
     }
-    execute(env, &paths, &mut journal)
+    execute(env, &paths, &mut journal, None)
 }
 fn expected_receipt(journal: &Journal) -> crate::sync::records_v3::LocalImportReceipt {
     crate::sync::records_v3::LocalImportReceipt {
@@ -679,6 +957,49 @@ fn already_applied(state: &SyncStateV3, journal: &Journal) -> Result<bool, AppEr
         None => Ok(false),
     }
 }
+fn verify_authority(state: &SyncStateV3, journal: &Journal) -> Result<(), AppError> {
+    if journal.source_kind != SourceKind::Synced {
+        return Ok(());
+    }
+    if crate::sync::records_v3::account_writes_blocked(state) {
+        return Err(failure(
+            "shared account writes are blocked; download requires a compatible fresh pull",
+        ));
+    }
+    let authority = journal
+        .authoritative
+        .as_ref()
+        .ok_or_else(|| failure("synced journal is missing its public authority"))?;
+    let account = state
+        .account
+        .as_ref()
+        .ok_or_else(|| failure("the download account is no longer joined"))?;
+    let id = &authority.key_row.record.id;
+    let latest = account
+        .records
+        .get(&record_key(RecordKind::KeySlot, id))
+        .ok_or_else(|| failure("authoritative account key metadata changed; download it again"))?;
+    if account.chain_id != authority.chain_id
+        || latest.record != authority.key_row.record
+        || state.local.keys.get(id) != authority.old_material.as_ref()
+    {
+        return Err(failure(
+            "authoritative account or local key metadata changed; review before retry",
+        ));
+    }
+    let view = crate::sync::record_repository::resolve_key(state, id)
+        .map_err(|_| failure("account key metadata is not available"))?;
+    if matches!(
+        view.status,
+        crate::sync::record_repository::KeyStatus::Conflict
+            | crate::sync::record_repository::KeyStatus::Deleted
+    ) {
+        return Err(failure(
+            "local key conflicts with account identity; review is required",
+        ));
+    }
+    Ok(())
+}
 fn overlay(state: &SyncStateV3, journal: &Journal) -> Result<SyncStateV3, AppError> {
     check_runtime(state)?;
     // This receipt was saved atomically with the whole import overlay. All subsequent edits,
@@ -686,6 +1007,7 @@ fn overlay(state: &SyncStateV3, journal: &Journal) -> Result<SyncStateV3, AppErr
     if already_applied(state, journal)? {
         return Ok(state.clone());
     }
+    verify_authority(state, journal)?;
     let mut candidate = state.clone();
     for host in &journal.hosts {
         crate::sync::records_v3::validate_host(host)
@@ -718,16 +1040,18 @@ fn overlay(state: &SyncStateV3, journal: &Journal) -> Result<SyncStateV3, AppErr
         );
     }
     for (id, key) in &journal.keys {
-        if state.local.keys.contains_key(id) {
+        if journal.source_kind != SourceKind::Synced && state.local.keys.contains_key(id) {
             return Err(failure(
                 "import key id conflicts with existing local material",
             ));
         }
-        if state.account.as_ref().is_some_and(|account| {
-            account
-                .records
-                .contains_key(&record_key(RecordKind::KeySlot, id))
-        }) {
+        if journal.source_kind != SourceKind::Synced
+            && state.account.as_ref().is_some_and(|account| {
+                account
+                    .records
+                    .contains_key(&record_key(RecordKind::KeySlot, id))
+            })
+        {
             return Err(failure("import key id conflicts with account metadata"));
         }
         candidate.local.keys.insert(id.clone(), key.clone());
@@ -877,18 +1201,63 @@ fn validate_vault(path: &Path, keychain: &dyn Keychain) -> Result<store::ReadOnl
     }
     Ok(vault)
 }
-fn stage(env: &SyncEnv, paths: &Paths, journal: &mut Journal) -> Result<(), AppError> {
+fn stage(
+    env: &SyncEnv,
+    paths: &Paths,
+    journal: &mut Journal,
+    provided: Option<BTreeMap<String, VaultEntry>>,
+) -> Result<(), AppError> {
     source_unchanged(journal)?;
     let (state, _) = snapshot_for_write(env)?;
     let candidate = overlay(&state, journal)?;
     let mut entries = Vec::new();
-    for (id, consent) in &journal.copies {
-        let (actual, mut entry) = inspect_copy(id, &consent.source)?;
-        if &actual != consent {
-            return Err(failure("selected private source changed; select it again"));
+    match journal.source_kind {
+        SourceKind::Files => {
+            for (id, consent) in &journal.copies {
+                let (actual, mut entry) = inspect_copy(id, &consent.source)?;
+                if &actual != consent {
+                    return Err(failure("selected private source changed; select it again"));
+                }
+                entry.added_at_ms = journal.at_ms;
+                entries.push((id.clone(), entry));
+            }
         }
-        entry.added_at_ms = journal.at_ms;
-        entries.push((id.clone(), entry));
+        SourceKind::Material | SourceKind::Synced => {
+            let staged = if provided.is_none() {
+                let scoped = ScopedKeychain {
+                    inner: env.keychain,
+                    import_id: &journal.import_id,
+                    receipts: &paths.masters,
+                };
+                if !paths.vault.exists() {
+                    return Err(failure(
+                        "local key material was not durably staged; provide it again",
+                    ));
+                }
+                Some(validate_vault(&paths.vault, &scoped)?)
+            } else {
+                None
+            };
+            let mut provided = provided.unwrap_or_default();
+            for id in journal.keys.keys() {
+                let mut entry = match provided.remove(id) {
+                    Some(entry) => entry,
+                    None => staged
+                        .as_ref()
+                        .ok_or_else(|| {
+                            failure("local key material was not durably staged; provide it again")
+                        })?
+                        .get(&journal.keys[id].vault_id)
+                        .map_err(|_| failure("staged local key material is not readable"))?
+                        .ok_or_else(|| {
+                            failure("local key material was not durably staged; provide it again")
+                        })?,
+                };
+                entry.added_at_ms = journal.at_ms;
+                verify_entry(journal, id, &entry)?;
+                entries.push((id.clone(), entry));
+            }
+        }
     }
     // All original entries decrypt before the stage writer can perform its archival behavior.
     let original = if entries.is_empty() {
@@ -942,8 +1311,9 @@ fn stage(env: &SyncEnv, paths: &Paths, journal: &mut Journal) -> Result<(), AppE
         let mut vault = Vault::open(&paths.vault, &scoped, journal.at_ms)
             .map_err(|_| failure("cannot open validated staged vault"))?;
         for (id, entry) in entries {
+            let vault_id = &journal.keys[&id].vault_id;
             if let Some(existing) = vault
-                .get(&id)
+                .get(vault_id)
                 .map_err(|_| failure("cannot read staged import material"))?
             {
                 if existing != entry {
@@ -953,7 +1323,7 @@ fn stage(env: &SyncEnv, paths: &Paths, journal: &mut Journal) -> Result<(), AppE
                 }
             } else {
                 vault
-                    .put(&scoped, &id, &entry)
+                    .put(&scoped, vault_id, &entry)
                     .map_err(|_| failure("cannot save copied material in staged vault"))?;
             }
         }
@@ -969,52 +1339,88 @@ fn stage(env: &SyncEnv, paths: &Paths, journal: &mut Journal) -> Result<(), AppE
     save_journal(paths, journal)?;
     step(PublishStep::Staged)
 }
-fn verify_published_material(env: &SyncEnv, journal: &Journal) -> Result<(), AppError> {
-    if journal.copies.is_empty() {
-        return Ok(());
+fn verify_entry(journal: &Journal, id: &str, entry: &VaultEntry) -> Result<(), AppError> {
+    let metadata = journal
+        .keys
+        .get(id)
+        .ok_or_else(|| failure("import journal has inconsistent key mapping"))?;
+    let expected_digest = match journal.source_kind {
+        SourceKind::Files => journal
+            .copies
+            .get(id)
+            .map(|consent| consent.digest.as_str()),
+        SourceKind::Material | SourceKind::Synced => journal
+            .material_digests
+            .get(id)
+            .map(|digest| digest.as_str()),
     }
-    let vault = validate_vault(&store::vault_path(&env.state_path), env.keychain)?;
+    .ok_or_else(|| failure("import journal has inconsistent material consent"))?;
+    let private = crate::vault::material::parse(&entry.private_key)
+        .ok_or_else(|| failure("import private material is not readable"))?;
+    if private.is_encrypted() != metadata.public.has_passphrase
+        || Some(private.public_key().key_data().clone())
+            != crate::vault::material::public_key_data(&metadata.public.public_key)
+        || crate::sync::records_v3::key_material_matches(
+            &metadata.public,
+            &entry.public_key,
+            &entry.fingerprint,
+        )
+        .is_err()
+        || digest(entry.private_key.as_bytes()) != expected_digest
+    {
+        return Err(failure(
+            "import material identity changed; import retained for recovery",
+        ));
+    }
+    Ok(())
+}
+fn verify_material(vault: &store::ReadOnlyVault, journal: &Journal) -> Result<(), AppError> {
     for (id, metadata) in &journal.keys {
-        if journal.completed_keys.contains(id) {
-            continue;
-        }
         let entry = vault
             .get(&metadata.vault_id)
             .map_err(|_| failure("published import material is not readable"))?
             .ok_or_else(|| {
                 failure("published import material was removed; import retained for recovery")
             })?;
-        let consent = journal
-            .copies
-            .get(id)
-            .ok_or_else(|| failure("import journal has inconsistent copy consent"))?;
-        let private = crate::vault::material::parse(&entry.private_key)
-            .ok_or_else(|| failure("published import private material is not readable"))?;
-        if private.is_encrypted() != metadata.public.has_passphrase
-            || Some(private.public_key().key_data().clone())
-                != crate::vault::material::public_key_data(&metadata.public.public_key)
-            || entry.fingerprint != metadata.public.fingerprint
-            || digest(entry.private_key.as_bytes()) != consent.digest
-            || crate::vault::material::public_key_data(&entry.public_key)
-                != crate::vault::material::public_key_data(&metadata.public.public_key)
-        {
-            return Err(failure(
-                "published import material changed; import retained for recovery",
-            ));
-        }
+        verify_entry(journal, id, &entry)?;
     }
     Ok(())
 }
-fn execute(env: &SyncEnv, paths: &Paths, journal: &mut Journal) -> Result<ImportReceipt, AppError> {
+fn verify_published_material(env: &SyncEnv, journal: &Journal) -> Result<(), AppError> {
+    if journal.keys.is_empty() {
+        return Ok(());
+    }
+    let vault = validate_vault(&store::vault_path(&env.state_path), env.keychain)?;
+    verify_material(&vault, journal)
+}
+fn execute(
+    env: &SyncEnv,
+    paths: &Paths,
+    journal: &mut Journal,
+    provided: Option<BTreeMap<String, VaultEntry>>,
+) -> Result<ImportReceipt, AppError> {
+    // The state receipt is the publication proof even if the separate journal phase was lost.
+    // Do not read/rewrite old sources or vault material after the user has edited completed data.
+    if already_applied(&snapshot_for_write(env)?.0, journal)? {
+        if journal.phase != Phase::Active {
+            journal
+                .completed_hosts
+                .extend(journal.hosts.iter().map(|host| host.id.clone()));
+            journal.completed_keys.extend(journal.keys.keys().cloned());
+            journal.phase = Phase::Active;
+            save_journal(paths, journal)?;
+        }
+        return Ok(journal.receipt());
+    }
     if journal.phase == Phase::Active {
         return Ok(journal.receipt());
     }
     if journal.phase == Phase::Prepared {
-        stage(env, paths, journal)?;
+        stage(env, paths, journal, provided)?;
     }
     if journal.phase == Phase::Staged {
         overlay(&snapshot_for_write(env)?.0, journal)?;
-        if !journal.copies.is_empty() {
+        if !journal.keys.is_empty() {
             let bytes = bounded_read(&paths.vault, store::MAX_READ_ONLY_VAULT_BYTES)?;
             if journal.staged_vault_digest.as_deref() != Some(digest(&bytes).as_str()) {
                 return Err(failure(
@@ -1027,6 +1433,7 @@ fn execute(env: &SyncEnv, paths: &Paths, journal: &mut Journal) -> Result<Import
                 receipts: &paths.masters,
             };
             let staged = validate_vault(&paths.vault, &scoped)?;
+            verify_material(&staged, journal)?;
             if journal.staged_key_account.as_deref() != Some(staged.key_account()) {
                 return Err(failure("staged vault account changed"));
             }
@@ -1085,7 +1492,7 @@ fn execute(env: &SyncEnv, paths: &Paths, journal: &mut Journal) -> Result<Import
     ))
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PublishStep {
+pub(crate) enum PublishStep {
     JournalPrepared,
     VaultStaged,
     Staged,
@@ -1114,7 +1521,7 @@ fn step(value: PublishStep) -> Result<(), AppError> {
 #[cfg(test)]
 thread_local! { static TEST_STEP:std::cell::RefCell<Option<Box<dyn FnMut(PublishStep)->Result<(),AppError>>>>=const { std::cell::RefCell::new(None) }; }
 #[cfg(test)]
-fn with_test_step<T>(
+pub(crate) fn with_test_step<T>(
     hook: impl FnMut(PublishStep) -> Result<(), AppError> + 'static,
     f: impl FnOnce() -> T,
 ) -> T {

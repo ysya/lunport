@@ -859,3 +859,48 @@ fn explicit_source_reads_are_allowed_outside_a_confined_profile_but_destinations
     assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     assert_eq!(denied.credentials.writes.load(Ordering::SeqCst), 0);
 }
+#[test]
+fn atomic_state_receipt_supersedes_an_older_journal_phase_and_unavailable_sources() {
+    let fixture = Fixture::new();
+    assert!(with_test_step(
+        |step| if step == PublishStep::StateSaved {
+            Err(failure("separate journal phase lost"))
+        } else {
+            Ok(())
+        },
+        || confirm(&fixture.env(), fixture.with_copy())
+    )
+    .is_err());
+    let pending = pending_imports(&fixture.env()).unwrap();
+    let path = fixture
+        .imports()
+        .join(&pending[0].import_id)
+        .join("journal.json");
+    let mut journal: Journal = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    journal.phase = Phase::Prepared;
+    fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    fs::write(
+        &fixture.private,
+        "source unavailable after completed publication",
+    )
+    .unwrap();
+    record_runtime::mutate_records(&fixture.env(), |state| {
+        let mut next = state.clone();
+        next.local.keys.clear();
+        for host in next.local.hosts.values_mut() {
+            host.record.payload["notes"] = serde_json::json!("Later user edit");
+            host.record.version += 1;
+        }
+        Ok(next)
+    })
+    .unwrap();
+    let state = fixture.state();
+    let generation = fixture.device.runtime.core.lock().unwrap().generation;
+    resume(&fixture.env(), &pending[0].import_id).unwrap();
+    assert_eq!(fixture.state(), state);
+    assert_eq!(
+        fixture.device.runtime.core.lock().unwrap().generation,
+        generation
+    );
+    assert!(pending_imports(&fixture.env()).unwrap().is_empty());
+}
