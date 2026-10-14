@@ -975,3 +975,52 @@ fn secret_revision_returns_live_and_tombstone_headers_without_plaintext_payloads
     )
     .is_err());
 }
+#[test]
+fn authenticated_future_meta_with_new_outer_fields_still_reports_needs_update() {
+    let keys = crate::sync::crypto::ChainKeys::generate().unwrap();
+    let old = crate::sync::state_v2::AccountState::new(&keys.chain_id);
+    let raw = serde_json::json!({"kind":"meta","id":"account","version":1,"updated_at_ms":1,"device_id":"a".repeat(32),"deleted":false,"payload":{"schema_version":4,"created_by_app_version":"future"},"future_header":"new"});
+    let seal =
+        crate::sync::crypto::seal(&keys, "meta", "account", &serde_json::to_vec(&raw).unwrap())
+            .unwrap();
+    let pulled = crate::sync::relay::PullResponse {
+        latest_seq: 1,
+        records: vec![crate::sync::record::Envelope {
+            kind: "meta".into(),
+            id_hash: seal.id_hash,
+            nonce: seal.nonce,
+            ciphertext: seal.ciphertext,
+            seq: 1,
+            deleted: false,
+        }],
+    };
+    let result = merge_account(&old, &keys, &pulled, 0);
+    assert_eq!(result.gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert_eq!(result.section, old);
+    assert_eq!(result.observed_schema, Some(4));
+}
+#[test]
+fn authenticated_future_meta_precedes_an_inconsistent_cursor_without_advancing_it() {
+    let keys = crate::sync::crypto::ChainKeys::generate().unwrap();
+    let mut old = crate::sync::state_v2::AccountState::new(&keys.chain_id);
+    old.cursor_seq = 10;
+    old.baseline_established = true;
+    let raw = serde_json::json!({"kind":"meta","id":"account","version":1,"updated_at_ms":1,"device_id":"a".repeat(32),"deleted":false,"payload":{"schema_version":4,"created_by_app_version":"future"}});
+    let seal =
+        crate::sync::crypto::seal(&keys, "meta", "account", &serde_json::to_vec(&raw).unwrap())
+            .unwrap();
+    let pulled = crate::sync::relay::PullResponse {
+        latest_seq: 1,
+        records: vec![crate::sync::record::Envelope {
+            kind: "meta".into(),
+            id_hash: seal.id_hash,
+            nonce: seal.nonce,
+            ciphertext: seal.ciphertext,
+            seq: 1,
+            deleted: false,
+        }],
+    };
+    let result = merge_account(&old, &keys, &pulled, 0);
+    assert_eq!(result.gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert_eq!(result.section, old);
+}

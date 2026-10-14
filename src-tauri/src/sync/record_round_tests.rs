@@ -723,6 +723,7 @@ fn receipt_generation_overflow_does_not_replace_current_state() {
         keys,
         relay_url: before.relay_url.clone(),
         gate: AccountGate::Compatible,
+        format_gate: AccountGate::Compatible,
         observed_schema: Some(3),
     };
     d.runtime.core.lock().unwrap().generation = u64::MAX;
@@ -797,4 +798,40 @@ fn network_failure_keeps_a_more_important_retained_format_gate_message() {
         state(&d).last_error.as_deref(),
         Some("newer format requires update")
     );
+}
+
+#[test]
+fn frozen_policy_cannot_hide_an_authenticated_future_format_gate() {
+    let (d, keys) = fixture();
+    record_runtime::mutate_records(&d.env(), |s| {
+        let mut n = s.clone();
+        n.account.as_mut().unwrap().frozen = Some(crate::sync::state_v2::FreezeInfo {
+            detected_at_ms: 1,
+            markers: Vec::new(),
+        });
+        Ok(n)
+    })
+    .unwrap();
+    update_meta(&d, &keys, 4, None);
+    let proof = fresh_account_gate(&d.env()).unwrap();
+    assert_eq!(proof.format_gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert_eq!(proof.gate, AccountGate::NeedsUpdate { schema: 4 });
+    assert!(proof.ensure_compatible().is_err());
+}
+#[test]
+fn frozen_supported_format_proof_stays_blocked_for_shared_commands() {
+    let (d, _) = fixture();
+    record_runtime::mutate_records(&d.env(), |s| {
+        let mut n = s.clone();
+        n.account.as_mut().unwrap().frozen = Some(crate::sync::state_v2::FreezeInfo {
+            detected_at_ms: 1,
+            markers: Vec::new(),
+        });
+        Ok(n)
+    })
+    .unwrap();
+    let proof = fresh_account_gate(&d.env()).unwrap();
+    assert_eq!(proof.format_gate, AccountGate::Compatible);
+    assert!(proof.ensure_compatible().is_err());
+    assert!(state(&d).shared_writes_blocked);
 }

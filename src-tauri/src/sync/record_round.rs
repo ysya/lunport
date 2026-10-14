@@ -9,6 +9,8 @@ pub struct FreshAccountProof {
     pub keys: ChainKeys,
     pub relay_url: String,
     pub gate: AccountGate,
+    /// Authenticated format result, before local freeze/rotation policy. Only local detach uses it.
+    pub format_gate: AccountGate,
     pub observed_schema: Option<u32>,
 }
 impl FreshAccountProof {
@@ -133,6 +135,7 @@ pub fn fresh_account_gate(env: &SyncEnv) -> Result<FreshAccountProof, AppError> 
     let pulled = relay.pull(&keys.chain_id, &keys.auth_token, 0)?;
     let mut observed = None;
     let mut gate = AccountGate::InvalidPull;
+    let mut format_gate = AccountGate::InvalidPull;
     let _publication = env.runtime.format_publication.lock().unwrap();
     let result = crate::sync::record_runtime::mutate_records(env, |latest| {
         if !same_account(latest, &keys.chain_id, &snapshot.relay_url) {
@@ -140,13 +143,16 @@ pub fn fresh_account_gate(env: &SyncEnv) -> Result<FreshAccountProof, AppError> 
         }
         let section = latest.account.as_ref().unwrap();
         let merged = crate::sync::record_merge::merge_account(section, &keys, &pulled, 0);
+        format_gate = merged.gate.clone();
         gate = merged.gate;
         observed = merged.observed_schema;
-        if latest.rotation.is_some() || section.frozen.is_some() {
+        if format_gate == AccountGate::Compatible
+            && (latest.rotation.is_some() || section.frozen.is_some())
+        {
             gate = AccountGate::InvalidMigration;
         }
         let mut next = latest.clone();
-        if gate == AccountGate::Compatible {
+        if format_gate == AccountGate::Compatible {
             next.account = Some(merged.section);
             // Discovery is passive. New spaces are unselected; deleted spaces retain every cache.
             for row in next
@@ -187,6 +193,7 @@ pub fn fresh_account_gate(env: &SyncEnv) -> Result<FreshAccountProof, AppError> 
         keys,
         relay_url: snapshot.relay_url,
         gate,
+        format_gate,
         observed_schema: observed,
     })
 }
@@ -331,6 +338,9 @@ pub(crate) fn mark_frozen(env: &SyncEnv, proof: &FreshAccountProof) -> Result<()
     Ok(())
 }
 
+pub(crate) fn flush_for_rotation(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
+    run(env)
+}
 fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
     preflight(env)?;
     let (snapshot, _) = crate::sync::record_runtime::snapshot(env)?;

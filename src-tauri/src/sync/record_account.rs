@@ -829,14 +829,10 @@ pub fn publish_key(
         records_v3::key_material_matches(&authoritative, &public.public_key, &public.fingerprint)
             .map_err(|_| failure("account key identity conflicts; review before publishing"))?;
     }
-    if account.sealed.contains_key(&sealed_key(
-        "keyslot",
-        &crypto::id_hash(&proof.keys, "keyslot", id),
-    )) {
-        return Err(failure(
-            "account key authority is opaque; review before publishing",
-        ));
-    }
+    let opaque_key = sealed_key("keyslot", &crypto::id_hash(&proof.keys, "keyslot", id));
+    let opaque = account.sealed.get(&opaque_key);
+    let legacy = record_merge::legacy_own_slot_revision(account, &proof.keys, id)
+        .map_err(|_| failure("account key authority is opaque; review before publishing"))?;
     let secret_key = sealed_key("key", &crypto::id_hash(&proof.keys, "key", id));
     let base = account
         .sealed
@@ -867,27 +863,54 @@ pub fn publish_key(
     );
     secret.version = version;
     let sealed = record_merge::seal_secret_record(&proof.keys, secret, base)?;
-    let metadata = row(
-        &state,
-        RecordKind::KeySlot,
-        id,
-        serde_json::to_value(public).map_err(|_| failure("key metadata cannot be encoded"))?,
-        now,
-    );
+    let mut metadata = existing.map(|row| row.record.clone()).unwrap_or_else(|| {
+        row(
+            &state,
+            RecordKind::KeySlot,
+            id,
+            serde_json::to_value(public).expect("public key metadata"),
+            now,
+        )
+    });
+    if let Some(legacy) = &legacy {
+        metadata.version = metadata
+            .version
+            .max(legacy.version)
+            .checked_add(1)
+            .ok_or_else(|| failure("key metadata revision exhausted"))?;
+        metadata.updated_at_ms = metadata
+            .updated_at_ms
+            .max(legacy.updated_at_ms)
+            .checked_add(1)
+            .ok_or_else(|| failure("key metadata timestamp exhausted"))?
+            .max(now);
+        metadata.device_id = state.device_id.clone();
+    }
     record_runtime::mutate_records(env, |latest| {
         ensure_shared(latest)?;
         let mut next = latest.clone();
         let account = next.account.as_mut().unwrap();
-        if account.records.get(&key) != existing {
+        if account.records.get(&key) != existing || account.sealed.get(&opaque_key) != opaque {
             return Err(crate::sync::runtime::superseded());
         }
-        if existing.is_none() {
-            insert_public(account, metadata);
+        if existing.is_none() || legacy.is_some() {
+            account.records.insert(
+                key.clone(),
+                LocalRecord {
+                    record: metadata,
+                    seq: opaque
+                        .map(|r| r.envelope.seq)
+                        .unwrap_or(0)
+                        .max(existing.map(|r| r.seq).unwrap_or(0)),
+                    dirty: true,
+                },
+            );
         }
+        account.sealed.remove(&opaque_key);
         account.sealed.insert(secret_key, sealed);
         Ok(next)
     })?;
-    let result = publish_current(env, &proof);
+    let result = publish_current(env, &proof, legacy.as_ref().map(|_| id));
     drop(lifecycle);
     env.events.status();
     env.events.wake();
@@ -896,9 +919,33 @@ pub fn publish_key(
 fn publish_current(
     env: &SyncEnv,
     proof: &crate::sync::record_round::FreshAccountProof,
+    upgrade_own: Option<&str>,
 ) -> Result<(), AppError> {
     let fresh = crate::sync::record_round::fresh_account_gate(env)?;
     fresh.ensure_compatible()?;
+    if let Some(id) = upgrade_own {
+        record_runtime::mutate_records(env, |latest| {
+            ensure_shared(latest)?;
+            let mut next = latest.clone();
+            let account = next.account.as_mut().unwrap();
+            if let Some(old) = record_merge::legacy_own_slot_revision(account, &fresh.keys, id)? {
+                let key = sealed_key("keyslot", &crypto::id_hash(&fresh.keys, "keyslot", id));
+                let opaque = account.sealed.get(&key).unwrap();
+                let row = account
+                    .records
+                    .get_mut(&record_key(RecordKind::KeySlot, id))
+                    .ok_or_else(|| failure("key upgrade was superseded"))?;
+                // Our explicit upgrade always stamps beyond the captured legacy timestamp.
+                // A newly observed equal/newer authority needs a new user-reviewed attempt.
+                if !row.dirty || row.record.updated_at_ms <= old.updated_at_ms {
+                    return Err(failure("key authority changed; review before publishing"));
+                }
+                row.seq = row.seq.max(opaque.envelope.seq);
+                account.sealed.remove(&key);
+            }
+            Ok(next)
+        })?;
+    }
     let (state, _) = record_runtime::snapshot(env)?;
     ensure_shared(&state)?;
     let sent = record_merge::account_outgoing(state.account.as_ref().unwrap(), &fresh.keys)?;
@@ -985,7 +1032,7 @@ pub fn unpublish_key(env: &SyncEnv, id: &str) -> Result<(), AppError> {
         account.sealed.insert(key, sealed);
         Ok(next)
     })?;
-    let result = publish_current(env, &proof);
+    let result = publish_current(env, &proof, None);
     drop(lifecycle);
     env.events.status();
     env.events.wake();
