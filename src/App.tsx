@@ -6,6 +6,10 @@ import { Bot, KeyRound, RotateCw, Settings, Terminal, ServerCog } from "lucide-r
 import { useRecordsStatus, recordsStatusKey, useLegacyWorkspace } from "@/lib/records";
 import { WorkspaceGate } from "@/components/records/WorkspaceGate";
 import { RecordsWorkspace } from "@/components/records/RecordsWorkspace";
+import { RecordsMigrationPanel } from "@/components/records/MigrationPanel";
+import { LegacyMigrationLanding } from "@/components/records/LegacyMigrationLanding";
+import { LegacyPauseReview } from "@/components/records/LegacyPauseReview";
+import { pauseLegacyForMigration } from "@/components/records/migration-actions";
 
 import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
@@ -60,7 +64,7 @@ import {
  * Config is loaded on mount via `useHostsQuery` (a single `config_load` that
  * yields files + hosts). Errors are surfaced as a toast.
  */
-function LegacyApp() {
+function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => void }) {
   // Re-send persisted tray/close-to-tray/retention prefs (backend resets each launch).
   useSyncBackendSettings();
   // OS-level quick-connect hotkey (⌥⌘K / Ctrl+Alt+K) — registered when enabled.
@@ -229,6 +233,7 @@ function LegacyApp() {
               <TooltipContent>Settings (⌘,)</TooltipContent>
             </Tooltip>
 
+            <Button variant="outline" size="sm" onClick={requestMigrationPause}>Pause for migration</Button>
             <AddHostDialog />
           </div>
         </header>
@@ -316,6 +321,12 @@ function App() {
   const status = useRecordsStatus();
   const client = useQueryClient();
   const [resuming, setResuming] = useState(false);
+  const [migrationOpen, setMigrationOpen] = useState(false);
+  const [pauseOpen, setPauseOpen] = useState(false);
+  const [savedEdits, setSavedEdits] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [pauseError, setPauseError] = useState<string | null>(null);
+  const pauseInFlight = useRef(false);
   const resumeInFlight = useRef(false);
   const chooseLegacy = async () => {
     if (resumeInFlight.current) return;
@@ -334,6 +345,25 @@ function App() {
       setResuming(false);
     }
   };
+  const pauseForMigration = async () => {
+    if (pauseInFlight.current || !savedEdits) return;
+    pauseInFlight.current = true;
+    setPausing(true);
+    setPauseError(null);
+    try {
+      if (await pauseLegacyForMigration(client, savedEdits)) {
+        setPauseOpen(false);
+        setSavedEdits(false);
+      }
+    } catch {
+      setPauseError(
+        "Could not pause the workspace. Save your edits and retry.",
+      );
+    } finally {
+      pauseInFlight.current = false;
+      setPausing(false);
+    }
+  };
   return (
     <>
       <WorkspaceGate
@@ -342,7 +372,23 @@ function App() {
         error={status.isError}
         retry={() => void status.refetch()}
         useLegacy={() => void chooseLegacy()}
-        legacy={() => <LegacyApp />}
+        legacy={() => (
+          <LegacyApp
+            requestMigrationPause={() => {
+              setPauseError(null);
+              setSavedEdits(false);
+              setPauseOpen(true);
+            }}
+          />
+        )}
+        pausedLegacy={() => (
+          <LegacyMigrationLanding
+            busy={resuming}
+            useLegacy={() => void chooseLegacy()}
+            retry={() => void status.refetch()}
+            previewMigration={() => setMigrationOpen(true)}
+          />
+        )}
         records={() => (
           <RecordsWorkspace
             overview={status.data!.overview!}
@@ -350,6 +396,26 @@ function App() {
           />
         )}
       />
+      {pauseOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/90 p-8">
+          <LegacyPauseReview
+            saved={savedEdits}
+            busy={pausing}
+            setSaved={setSavedEdits}
+            error={pauseError}
+            confirm={() => void pauseForMigration()}
+            cancel={() => {
+              setPauseOpen(false);
+              setSavedEdits(false);
+            }}
+          />
+        </div>
+      )}
+      {migrationOpen && (
+        <div className="app-shell fixed inset-0 z-50 overflow-y-auto pt-11">
+          <RecordsMigrationPanel onClose={() => setMigrationOpen(false)} />
+        </div>
+      )}
       <Toaster />
     </>
   );

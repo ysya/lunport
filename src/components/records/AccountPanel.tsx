@@ -17,6 +17,7 @@ import {
 import { revealHidden } from "@/lib/sync-approvals";
 import { clearAccountDraft, submitAccountDraft } from "./panel-actions";
 import { RecordField } from "./form";
+import { RecordsMigrationPanel } from "./MigrationPanel";
 
 export function RecordsAccountPanel({
   overview,
@@ -24,6 +25,7 @@ export function RecordsAccountPanel({
   overview: RecordOverview;
 }) {
   const client = useQueryClient();
+  const [migrationOpen, setMigrationOpen] = useState(false);
   const [mode, setMode] = useState<"create" | "join" | null>(null);
   const [draft, setDraft] = useState(clearAccountDraft);
   const [name, setName] = useState("");
@@ -88,6 +90,15 @@ export function RecordsAccountPanel({
   } catch {
     /* Native validation remains authoritative. */
   }
+
+  if (migrationOpen)
+    return (
+      <RecordsMigrationPanel
+        initialWords={draft.words}
+        onWordsCleared={() => update({ words: "", migrationOffered: false })}
+        onClose={() => setMigrationOpen(false)}
+      />
+    );
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-6">
@@ -229,6 +240,21 @@ export function RecordsAccountPanel({
                   onChange={(event) => update({ words: event.target.value })}
                 />
               </RecordField>
+            )}
+            {mode === "join" && draft.migrationOffered && (
+              <div className="space-y-2">
+                <p className="text-sm text-muted-foreground">
+                  If this account uses an older format, preview its migration
+                  with the code above.
+                </p>
+                <Button
+                  variant="outline"
+                  disabled={draft.busy}
+                  onClick={() => setMigrationOpen(true)}
+                >
+                  Preview older account migration
+                </Button>
+              </div>
             )}
             <div className="flex gap-2">
               <Button

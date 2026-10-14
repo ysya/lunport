@@ -95,3 +95,18 @@ export const importPreview = (
     ...p,
   },
 });
+
+export const migrationPreview =
+  (): import("@/lib/records").MigrationPreviewResult => ({
+    token: "migration-fixture-token",
+    preview: {
+      source_digest: "a".repeat(64),
+      source_kind: "v2",
+      account_schema: 2,
+      selected_space_ids: ["b".repeat(64)],
+      host_count: 2,
+      key_count: 1,
+      diagnostics: [],
+      can_confirm: true,
+    },
+  });

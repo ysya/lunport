@@ -109,6 +109,25 @@ describe("secret form boundary", () => {
     expect(state.error).toContain("Relay is unavailable");
     expect(cacheText(cache)).not.toContain("SECRET");
   });
+  it("retains a refused old-account code and offers authoritative migration preview", async () => {
+    const cache = client();
+    stubBackend(async () => {
+      throw "this account needs explicit migration before joining records mode";
+    });
+    let state = {
+      ...clearAccountDraft(),
+      deviceName: "Laptop",
+      words: "SECRET older fixture words",
+    };
+    const update = (patch: Partial<typeof state>) => {
+      state = { ...state, ...patch };
+    };
+    expect(await submitAccountDraft(cache, state, update, false)).toBe(false);
+    expect(state.words).toBe("SECRET older fixture words");
+    expect(state).toMatchObject({ migrationOffered: true });
+    expect(cacheText(cache)).not.toContain("SECRET");
+    expect(state.error).not.toContain("SECRET");
+  });
   it("clears join words on success without leaving mutation variables in cache", async () => {
     const cache = client();
     const calls = stubBackend(async () => recordOverview());

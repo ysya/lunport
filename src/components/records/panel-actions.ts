@@ -22,6 +22,7 @@ export type AccountDraft = {
   deviceName: string;
   words: string;
   createdWords: string;
+  migrationOffered: boolean;
   busy: boolean;
   error: string | null;
 };
@@ -33,6 +34,7 @@ export function clearAccountDraft(): AccountDraft {
     deviceName: "",
     words: "",
     createdWords: "",
+    migrationOffered: false,
     busy: false,
     error: null,
   };
@@ -81,7 +83,7 @@ export async function submitAccountDraft(
     (!create && !state.words.trim())
   )
     return false;
-  update({ busy: true, error: null });
+  update({ busy: true, error: null, migrationOffered: false });
   try {
     if (create) {
       const result = await createRecordAccount(state.deviceName);
@@ -102,6 +104,7 @@ export async function submitAccountDraft(
     return true;
   } catch {
     update({
+      migrationOffered: !create,
       error:
         "Could not set up sync. Check the sync code and workspace, then retry or resume a pending setup.",
     });

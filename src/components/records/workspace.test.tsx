@@ -60,6 +60,27 @@ describe("records workspace mode boundary", () => {
     expect(text(blocked.html)).toContain("Invalid state");
     expect(text(blocked.html)).not.toContain("Use existing SSH configuration");
   });
+  it("renders the paused migration callback without evaluating legacy config hooks", () => {
+    const legacy = vi.fn(() => <p>Legacy mounted</p>);
+    const paused = vi.fn(() => <p>Migration landing</p>);
+    const html = renderToStaticMarkup(
+      <WorkspaceGate
+        status={recordsStatus({
+          format: "legacy",
+          legacy_paused: true,
+          overview: null,
+        })}
+        retry={vi.fn()}
+        useLegacy={vi.fn()}
+        legacy={legacy}
+        records={vi.fn()}
+        pausedLegacy={paused}
+      />,
+    );
+    expect(paused).toHaveBeenCalledOnce();
+    expect(legacy).not.toHaveBeenCalled();
+    expect(text(html)).toContain("Migration landing");
+  });
   it("mounts legacy only after its explicit in-memory pause is cleared", () => {
     const result = render(
       recordsStatus({ format: "legacy", overview: null, legacy_paused: false }),
