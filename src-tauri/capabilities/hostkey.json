@@ -3,5 +3,5 @@
   "identifier": "hostkey",
   "description": "The host key window of SSHelter's own SSH client: it lists and answers the host key questions (app commands) and listens for their updates. This file limits plugin and core permissions only; app commands are not ACL-checked without an app manifest.",
   "windows": ["hostkey"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "clipboard-manager:allow-write-text"]
 }
