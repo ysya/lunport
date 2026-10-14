@@ -139,8 +139,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             "spaces require an account",
         ));
     }
-    let mut hosts = Vec::new();
-    read_hosts(&state.local.hosts, HostScope::Local, &mut hosts)?;
+    read_hosts(&state.local.hosts, HostScope::Local)?;
     for (id, material) in &state.local.keys {
         validate_keyslot(id, &material.public)?;
         if !is_slot_id(&material.vault_id) {
@@ -156,7 +155,6 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             HostScope::Space {
                 space_id: space_id.clone(),
             },
-            &mut hosts,
         )?;
         validate_sealed(&space.sealed)?;
     }
@@ -173,15 +171,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             let record = &local.record;
             match record.kind {
                 RecordKind::KeySlot => {
-                    if let TypedRecord::Live(slot) = decode_keyslot(record)? {
-                        if let Some(local) = state.local.keys.get(&record.id) {
-                            key_material_matches(
-                                &slot,
-                                &local.public.public_key,
-                                &local.public.fingerprint,
-                            )?;
-                        }
-                    }
+                    decode_keyslot(record)?;
                 }
                 RecordKind::Meta if record.id == ACCOUNT_META_ID && !record.deleted => {
                     let meta: MetaPayload = serde_json::from_value(record.payload.clone())
@@ -199,7 +189,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
         }
         validate_sealed(&account.sealed)?;
     }
-    validate_hosts(&hosts)
+    Ok(())
 }
 
 fn validate_cache_key(key: &str, local: &LocalRecord) -> Result<(), RecordValidationError> {
@@ -222,13 +212,10 @@ fn validate_cache_key(key: &str, local: &LocalRecord) -> Result<(), RecordValida
 fn read_hosts(
     records: &BTreeMap<String, LocalRecord>,
     scope: HostScope,
-    out: &mut Vec<HostRecord>,
 ) -> Result<(), RecordValidationError> {
     for (key, local) in records {
         validate_cache_key(key, local)?;
-        if let TypedRecord::Live(host) = decode_host(&local.record, scope.clone())? {
-            out.push(host);
-        }
+        decode_host(&local.record, scope.clone())?;
     }
     Ok(())
 }

@@ -472,7 +472,7 @@ fn public_state_caches_refuse_secret_record_kinds_and_inconsistent_cache_keys() 
 }
 
 #[test]
-fn state_hosts_have_global_ids_and_independent_account_schema_validation() {
+fn state_schema_validation_is_independent_from_cross_scope_host_conflicts() {
     let mut s = state();
     let h = host("0000000000000001", "web");
     s.local
@@ -490,10 +490,10 @@ fn state_hosts_have_global_ids_and_independent_account_schema_validation() {
             ..Default::default()
         },
     );
-    assert!(matches!(
-        validate_state(&s),
-        Err(RecordValidationError::DuplicateId(_))
-    ));
+    assert!(
+        validate_state(&s).is_ok(),
+        "disk shape retains records with cross-scope conflicts"
+    );
     assert!(validate_account_meta(&account_meta("1.0.0")).is_ok());
     assert_eq!(account_meta("1.0.0").schema_version, 3);
     let old = crate::sync::record::MetaPayload {
@@ -617,4 +617,102 @@ fn later_jumps_do_not_inherit_their_route_but_effective_repeated_hops_are_refuse
         validate_hosts(&[a, b, c, d]),
         Err(RecordValidationError::RepeatedJump { .. })
     ));
+}
+
+#[test]
+fn disk_state_preserves_dangling_cyclic_and_self_jump_records_for_conflict_review() {
+    let mut a = host("0000000000000001", "web");
+    let mut b = host("0000000000000002", "jump");
+    a.payload.jump = vec![b.id.clone()];
+    let mut dangling = state();
+    dangling
+        .local
+        .hosts
+        .insert(format!("host:{}", a.id), cached_host(&a, false));
+    assert!(matches!(
+        decode_state(&serde_json::to_string(&dangling).unwrap()),
+        Ok(DecodedState::V3(_))
+    ));
+    assert!(matches!(
+        validate_hosts(&[a.clone()]),
+        Err(RecordValidationError::MissingJump { .. })
+    ));
+    b.payload.jump = vec![a.id.clone()];
+    let mut cyclic = dangling;
+    cyclic
+        .local
+        .hosts
+        .insert(format!("host:{}", b.id), cached_host(&b, false));
+    assert!(matches!(
+        decode_state(&serde_json::to_string(&cyclic).unwrap()),
+        Ok(DecodedState::V3(_))
+    ));
+    assert!(matches!(
+        validate_hosts(&[a.clone(), b]),
+        Err(RecordValidationError::JumpCycle(_))
+    ));
+    a.payload.jump = vec![a.id.clone()];
+    let mut self_jump = state();
+    self_jump
+        .local
+        .hosts
+        .insert(format!("host:{}", a.id), cached_host(&a, false));
+    assert!(matches!(
+        decode_state(&serde_json::to_string(&self_jump).unwrap()),
+        Ok(DecodedState::V3(_))
+    ));
+    assert!(matches!(
+        validate_host(&a),
+        Err(RecordValidationError::JumpCycle(_))
+    ));
+}
+
+#[test]
+fn disk_state_retains_conflicting_key_material_but_the_identity_guard_refuses_it() {
+    use crate::sync::state_v2::AccountState;
+    let local = slot();
+    let mut authoritative = local.clone();
+    authoritative.public_key = test_keys::ECDSA_PUBLIC.into();
+    authoritative.fingerprint = "SHA256:vUthAmDZoxYXCTAPEZUn5qtWSMHWQCEcUfpnyM05mMs".into();
+    authoritative.key_type = "ecdsa-sha2-nistp256".into();
+    let id = "a".repeat(32);
+    let mut s = state();
+    s.local.keys.insert(
+        id.clone(),
+        LocalKeyMetadata {
+            vault_id: id.clone(),
+            public: local.clone(),
+        },
+    );
+    let mut account = AccountState::new(&"b".repeat(64));
+    account.records.insert(
+        format!("keyslot:{id}"),
+        crate::sync::record::LocalRecord {
+            record: record(
+                RecordKind::KeySlot,
+                &id,
+                false,
+                serde_json::to_value(&authoritative).unwrap(),
+            ),
+            seq: 9,
+            dirty: false,
+        },
+    );
+    s.account = Some(account);
+    assert!(
+        matches!(decode_state(&serde_json::to_string(&s).unwrap()),Ok(DecodedState::V3(got)) if *got==s)
+    );
+    assert!(matches!(
+        key_material_matches(&authoritative, &local.public_key, &local.fingerprint),
+        Err(RecordValidationError::PublicKeyMismatch(_))
+    ));
+    s.account
+        .as_mut()
+        .unwrap()
+        .records
+        .get_mut(&format!("keyslot:{id}"))
+        .unwrap()
+        .record
+        .deleted = true;
+    assert!(matches!(decode_state(&serde_json::to_string(&s).unwrap()),Ok(DecodedState::V3(_))),"a tombstone retains local metadata for explicit recovery, not implicit authentication fallback");
 }
