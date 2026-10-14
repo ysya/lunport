@@ -133,9 +133,21 @@ pub fn remove_slot(slot: &Path) -> Result<(), AppError> {
     remove_if_present(&public_path(slot))
 }
 
-/// 把插槽上的舊副本改名保留成 `<file>.previous-<tag>`(計畫裁定 3:私鑰不自動刪除),已存在時加 `-2`、`-3`…,
-/// 不覆蓋任何檔案;`.pub` 一起改名。回傳保留的路徑。
-pub fn retire(slot: &Path, tag: &str) -> Result<PathBuf, AppError> {
+/// Read-only path planning lets callers reject a retirement before vault or Keychain writes.
+#[derive(Clone, Debug)]
+pub struct RetirementPlan {
+    source: PathBuf,
+    destination: PathBuf,
+}
+
+impl RetirementPlan {
+    pub fn kept_path(&self) -> &Path {
+        &self.destination
+    }
+}
+
+/// Choose and validate the existing suffix-based retirement destinations without writing.
+pub fn plan_retirement(slot: &Path, tag: &str) -> Result<RetirementPlan, AppError> {
     let dir = parent_of(slot)?;
     let name = slot.file_name().and_then(|n| n.to_str()).unwrap_or("slot");
     let base = format!("{name}.previous-{tag}");
@@ -148,16 +160,84 @@ pub fn retire(slot: &Path, tag: &str) -> Result<PathBuf, AppError> {
     for path in [slot.to_path_buf(), public_path(slot), kept.clone(), public_path(&kept)] {
         crate::fsutil::check_write(&path)?;
     }
-    fs::rename(slot, &kept)?;
-    if occupied(&public_path(slot)) {
-        fs::rename(public_path(slot), public_path(&kept))?;
+    Ok(RetirementPlan { source: slot.to_path_buf(), destination: kept })
+}
+
+/// Execute the validated retirement without picking a different destination after caller effects.
+pub fn retire_planned(plan: &RetirementPlan) -> Result<PathBuf, AppError> {
+    let slot = plan.source.as_path();
+    let kept = plan.kept_path();
+    for path in [slot.to_path_buf(), public_path(slot), kept.to_path_buf(), public_path(kept)] {
+        crate::fsutil::check_write(&path)?;
     }
-    Ok(kept)
+    if occupied(kept) {
+        return Err(AppError::Conflict(kept.display().to_string()));
+    }
+    fs::rename(slot, kept)?;
+    if occupied(&public_path(slot)) {
+        fs::rename(public_path(slot), public_path(kept))?;
+    }
+    Ok(kept.to_path_buf())
+}
+
+/// 把插槽上的舊副本改名保留成 `<file>.previous-<tag>`(計畫裁定 3:私鑰不自動刪除),已存在時加 `-2`、`-3`…,
+/// 不覆蓋任何檔案;`.pub` 一起改名。回傳保留的路徑。
+pub fn retire(slot: &Path, tag: &str) -> Result<PathBuf, AppError> {
+    retire_planned(&plan_retirement(slot, tag)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn retirement_plan_rejects_outside_public_destination_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        fs::create_dir(&root).unwrap();
+        let slot = root.join("slot");
+        fs::write(&slot, b"private").unwrap();
+        fs::write(public_path(&slot), b"public").unwrap();
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"keep").unwrap();
+        let kept = root.join("slot.previous-old");
+        std::os::unix::fs::symlink(&outside, public_path(&kept)).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(plan_retirement(&slot, "old").is_err());
+        });
+        assert_eq!(fs::read(slot).unwrap(), b"private");
+        assert_eq!(fs::read(outside).unwrap(), b"keep");
+        assert!(!occupied(&kept));
+    }
+
+    #[test]
+    fn retirement_execution_preserves_a_destination_occupied_after_planning() {
+        let temp = tempfile::tempdir().unwrap();
+        let slot = temp.path().join("slot");
+        fs::write(&slot, b"private").unwrap();
+        fs::write(public_path(&slot), b"public").unwrap();
+        let plan = plan_retirement(&slot, "old").unwrap();
+        fs::write(plan.kept_path(), b"new occupant").unwrap();
+        assert!(retire_planned(&plan).is_err());
+        assert_eq!(fs::read(&slot).unwrap(), b"private");
+        assert_eq!(fs::read(public_path(&slot)).unwrap(), b"public");
+        assert_eq!(fs::read(plan.kept_path()).unwrap(), b"new occupant");
+        assert!(!occupied(&temp.path().join("slot.previous-old-2")), "planned name must not change");
+    }
+
+    #[test]
+    fn retirement_planning_is_read_only_and_retains_existing_collision_suffixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let slot = temp.path().join("slot");
+        fs::write(&slot, b"private").unwrap();
+        fs::write(temp.path().join("slot.previous-old"), b"previous").unwrap();
+        let plan = plan_retirement(&slot, "old").unwrap();
+        assert_eq!(plan.kept_path(), temp.path().join("slot.previous-old-2"));
+        assert_eq!(fs::read(&slot).unwrap(), b"private");
+        assert!(!occupied(plan.kept_path()));
+        assert_eq!(fs::read(temp.path().join("slot.previous-old")).unwrap(), b"previous");
+    }
+
 
     #[test]
     fn boundary_slot_writers_refuse_external_paths_before_creation() {
