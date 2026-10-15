@@ -245,7 +245,9 @@
 
   /* While the sidebar edge is dragged: keep the resize cursor everywhere and select nothing. */
   .sidebar-resizing,
-  .sidebar-resizing * {
+  .sidebar-resizing *,
+  .host-preview-resizing,
+  .host-preview-resizing * {
     cursor: col-resize !important;
     user-select: none !important;
     -webkit-user-select: none !important;

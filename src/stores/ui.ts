@@ -5,6 +5,7 @@ import type { MoveFailure } from "@/bindings/MoveFailure";
 import type { KeySetupRequest } from "@/lib/key-slots";
 import type { KeychainSelection } from "@/lib/keychain";
 import { DEFAULT_SIDEBAR_WIDTH, clampSidebarWidth } from "@/lib/sidebar-width";
+import { DEFAULT_HOST_PREVIEW_WIDTH, clampHostPreviewWidth } from "@/lib/host-preview-width";
 
 /** What the New-config-file dialog should do after the file exists. */
 export type NewFileIntent =
@@ -65,6 +66,9 @@ interface UiState {
   /** Sidebar width in rem, set by dragging its edge (persisted; see lib/sidebar-width). */
   sidebarWidth: number;
   setSidebarWidth: (width: number) => void;
+  /** Preferred Connection details width in CSS pixels; viewport limits never overwrite it. */
+  hostPreviewWidth: number;
+  setHostPreviewWidth: (width: number) => void;
   /** The sidebar's Hosts | Keychain switch (persisted, like its width). */
   sidebarView: SidebarView;
   setSidebarView: (view: SidebarView) => void;
@@ -157,6 +161,8 @@ export const useUiStore = create<UiState>()(
       setGroupMode: (groupMode) => set({ groupMode }),
       sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
       setSidebarWidth: (width) => set({ sidebarWidth: clampSidebarWidth(width) }),
+      hostPreviewWidth: DEFAULT_HOST_PREVIEW_WIDTH,
+      setHostPreviewWidth: (width) => set({ hostPreviewWidth: clampHostPreviewWidth(width) }),
       sidebarView: "hosts",
       setSidebarView: (sidebarView) => set({ sidebarView }),
       keychainSelection: null,
@@ -200,6 +206,7 @@ export const useUiStore = create<UiState>()(
         fileScope: s.fileScope,
         groupMode: s.groupMode,
         sidebarWidth: s.sidebarWidth,
+        hostPreviewWidth: s.hostPreviewWidth,
         sidebarView: s.sidebarView,
         launchHintDismissed: s.launchHintDismissed,
       }),
