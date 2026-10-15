@@ -479,13 +479,43 @@ pub fn update_group(
     records_mut(&mut next, &scope).insert(key, repo::cached(row, old.seq, &scope));
     finish(s, next, &scope, now)
 }
+/// Conservative review fingerprint over public connection records, including ancestors outside
+/// the deleted subtree. Unrelated Group/host edits also require a fresh human review.
+/// No credentials, private key material, or process-local generation enter this token.
+pub fn deletion_snapshot_token(
+    snapshot: &repo::RepositorySnapshot,
+) -> Result<String, RepositoryError> {
+    use sha2::{Digest, Sha256};
+    let hosts: Vec<_> = snapshot
+        .hosts
+        .iter()
+        .map(|h| {
+            (
+                &h.host,
+                &h.revision,
+                &h.effective_payload,
+                &h.inherited_from,
+                &h.group_error,
+            )
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&("group-delete-v1", &snapshot.groups, hosts))
+        .map_err(|_| error("Group deletion review could not be prepared."))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 pub fn delete_group(
     s: &SyncStateV3,
     id: &str,
     expected: &RecordRevision,
+    reviewed_snapshot: Option<&str>,
     now: u64,
 ) -> Result<SyncStateV3, RepositoryError> {
     let root = checked(s, id, expected)?;
+    let snapshot = repo::snapshot(s)?;
+    if reviewed_snapshot != Some(deletion_snapshot_token(&snapshot)?.as_str()) {
+        return Err(error("Group deletion review is missing or stale. Refresh the records and review the deletion again."));
+    }
     let scope = root.group.scope;
     if let HostScope::Space { space_id } = &scope {
         if s.spaces[space_id]
@@ -515,7 +545,7 @@ pub fn delete_group(
         }
     }
     let mut next = s.clone();
-    for view in repo::snapshot(s)?.hosts.into_iter().filter(|h| {
+    for view in snapshot.hosts.into_iter().filter(|h| {
         h.host.scope == scope
             && h.host
                 .payload

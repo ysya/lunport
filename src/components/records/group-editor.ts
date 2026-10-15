@@ -158,15 +158,20 @@ export type GroupDeletionCandidate = Readonly<{
   id: string;
   revision: Readonly<RecordRevision>;
   counts: Readonly<{ groups: number; hosts: number }>;
+  snapshotToken: string;
 }>;
 export function beginGroupDeletion(
   state: GroupEditorState,
   counts: { groups: number; hosts: number },
+  snapshotToken: string,
 ): GroupDeletionCandidate {
   if (!state.id || !state.revision || state.unavailable)
     throw new Error("The saved Group is unavailable.");
+  if (!snapshotToken)
+    throw new Error("Refresh the records and review the deletion again.");
   return Object.freeze({
     id: state.id,
+    snapshotToken,
     revision: Object.freeze(structuredClone(state.revision)),
     counts: Object.freeze({ ...counts }),
   });
@@ -177,5 +182,5 @@ export async function submitGroupDeletion(
 ): Promise<RecordOverview> {
   if (current.unavailable || current.id !== candidate.id || !current.revision)
     throw new Error("The reviewed Group is unavailable.");
-  return deleteRecordGroup(candidate.id, candidate.revision);
+  return deleteRecordGroup(candidate.id, candidate.revision, candidate.snapshotToken);
 }

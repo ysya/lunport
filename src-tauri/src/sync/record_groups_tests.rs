@@ -197,6 +197,243 @@ mod behavior_tests {
         );
     }
     #[test]
+    fn group_delete_rejects_changed_descendants_after_review() {
+        let reviewed = host_state();
+        let root = list_groups(&reviewed).unwrap().remove(0);
+        let mut changed = reviewed.clone();
+        let child = changed
+            .local
+            .groups
+            .get_mut("group:0000000000000002")
+            .unwrap();
+        child.record.version += 1;
+        child.record.payload["defaults"]["port"] = json!(2223);
+        let before = changed.clone();
+        let token = deletion_snapshot_token(&repo::snapshot(&reviewed).unwrap()).unwrap();
+        let result = delete_group(&changed, &root.group.id, &root.revision, Some(&token), 9);
+        assert!(
+            result.is_err(),
+            "an unchanged root revision must not approve changed descendants"
+        );
+        assert_eq!(changed, before, "rejection must not partially edit state");
+    }
+    #[test]
+    fn group_delete_review_binds_every_materialization_dependency_and_rejects_atomically() {
+        for change in [
+            "root_revision",
+            "new_descendant",
+            "moved_in_descendant",
+            "updated_descendant",
+            "moved_out_descendant",
+            "host_join",
+            "host_leave",
+            "host_settings",
+            "outside_ancestor",
+        ] {
+            let mut reviewed = host_state();
+            let mut outsider = reviewed.local.groups["group:0000000000000002"].clone();
+            outsider.record.id = "0000000000000003".into();
+            outsider.record.payload["name"] = json!("Outside");
+            outsider.record.payload["parent_id"] = json!(null);
+            reviewed
+                .local
+                .groups
+                .insert("group:0000000000000003".into(), outsider);
+            let mut outsider_host = reviewed.local.hosts["host:0000000000000010"].clone();
+            outsider_host.record.id = "0000000000000011".into();
+            outsider_host.record.payload["alias"] = json!("outside-host");
+            outsider_host.record.payload["group_id"] = json!(null);
+            outsider_host.record.payload["inherit"] = json!([]);
+            reviewed
+                .local
+                .hosts
+                .insert("host:0000000000000011".into(), outsider_host);
+            let root_id = if change == "outside_ancestor" {
+                "0000000000000002"
+            } else {
+                "0000000000000001"
+            };
+            let root = list_groups(&reviewed)
+                .unwrap()
+                .into_iter()
+                .find(|g| g.group.id == root_id)
+                .unwrap();
+            // Exercise the actual overview producer used by the UI, not a test-only token.
+            let overview = serde_json::to_value(
+                crate::sync::record_commands::overview_from(&reviewed, 7, None).unwrap(),
+            )
+            .unwrap();
+            let token = overview["group_deletion_token"].as_str().unwrap();
+            let mut changed = reviewed.clone();
+            match change {
+                "root_revision" => {
+                    changed
+                        .local
+                        .groups
+                        .get_mut("group:0000000000000001")
+                        .unwrap()
+                        .record
+                        .version += 1
+                }
+                "new_descendant" => {
+                    let mut row = changed.local.groups["group:0000000000000002"].clone();
+                    row.record.id = "0000000000000004".into();
+                    row.record.payload["name"] = json!("New child");
+                    changed
+                        .local
+                        .groups
+                        .insert("group:0000000000000004".into(), row);
+                }
+                "moved_in_descendant" => {
+                    changed
+                        .local
+                        .groups
+                        .get_mut("group:0000000000000003")
+                        .unwrap()
+                        .record
+                        .payload["parent_id"] = json!(root_id)
+                }
+                "updated_descendant" => {
+                    changed
+                        .local
+                        .groups
+                        .get_mut("group:0000000000000002")
+                        .unwrap()
+                        .record
+                        .payload["defaults"]["user"] = json!("new-user")
+                }
+                "moved_out_descendant" => {
+                    changed
+                        .local
+                        .groups
+                        .get_mut("group:0000000000000002")
+                        .unwrap()
+                        .record
+                        .payload["parent_id"] = json!(null)
+                }
+                "host_join" => {
+                    changed
+                        .local
+                        .hosts
+                        .get_mut("host:0000000000000011")
+                        .unwrap()
+                        .record
+                        .payload["group_id"] = json!("0000000000000002")
+                }
+                "host_leave" => {
+                    changed
+                        .local
+                        .hosts
+                        .get_mut("host:0000000000000010")
+                        .unwrap()
+                        .record
+                        .payload["group_id"] = json!(null)
+                }
+                "host_settings" => {
+                    changed
+                        .local
+                        .hosts
+                        .get_mut("host:0000000000000010")
+                        .unwrap()
+                        .record
+                        .payload["keepalive_secs"] = json!(99)
+                }
+                "outside_ancestor" => {
+                    changed
+                        .local
+                        .groups
+                        .get_mut("group:0000000000000001")
+                        .unwrap()
+                        .record
+                        .payload["defaults"]["user"] = json!("ancestor-updated")
+                }
+                _ => unreachable!(),
+            }
+            let before = changed.clone();
+            let result = delete_group(&changed, root_id, &root.revision, Some(token), 9);
+            assert!(result.is_err(), "stale review accepted: {change}");
+            assert_eq!(changed, before, "partial edit on rejection: {change}");
+            assert!(changed.local.groups.values().all(|g| !g.record.deleted));
+            if change != "root_revision" {
+                assert_eq!(
+                    list_groups(&changed)
+                        .unwrap()
+                        .into_iter()
+                        .find(|g| g.group.id == root_id)
+                        .unwrap()
+                        .revision,
+                    root.revision
+                );
+            }
+            let snapshot = repo::snapshot(&changed).unwrap();
+            let fresh_token = deletion_snapshot_token(&snapshot).unwrap();
+            let current_root = snapshot
+                .groups
+                .iter()
+                .find(|g| g.group.id == root_id)
+                .unwrap();
+            let next = delete_group(
+                &changed,
+                root_id,
+                &current_root.revision,
+                Some(&fresh_token),
+                10,
+            )
+            .unwrap();
+            assert!(
+                next.local.groups[&format!("group:{root_id}")]
+                    .record
+                    .deleted
+            );
+            for before in snapshot.hosts {
+                let after = repo::get_host(&next, &before.host.id).unwrap();
+                assert_eq!(
+                    materialize(&after.effective_payload),
+                    materialize(&before.effective_payload),
+                    "effective host values changed after fresh review: {change}"
+                );
+                let affected = ancestor_path(
+                    &changed,
+                    &before.host.scope,
+                    before.host.payload.group_id.as_deref(),
+                )
+                .unwrap()
+                .iter()
+                .any(|group| group.id == root_id);
+                if affected {
+                    assert!(
+                        after.host.payload.group_id.is_none(),
+                        "membership retained: {change}"
+                    );
+                    assert!(
+                        after.host.payload.inherit.is_empty(),
+                        "inheritance retained: {change}"
+                    );
+                } else {
+                    assert_eq!(
+                        after.host.payload, before.host.payload,
+                        "unaffected host changed: {change}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn group_delete_missing_review_fails_closed_and_sync_bookkeeping_does_not_expire_review() {
+        let s = host_state();
+        let root = list_groups(&s).unwrap().remove(0);
+        assert!(delete_group(&s, &root.group.id, &root.revision, None, 9)
+            .unwrap_err()
+            .to_string()
+            .contains("review"));
+        assert!(delete_group(&s, &root.group.id, &root.revision, Some(""), 9).is_err());
+        let token = deletion_snapshot_token(&repo::snapshot(&s).unwrap()).unwrap();
+        let mut refreshed = s.clone();
+        refreshed.last_sync_ms = Some(99);
+        assert!(delete_group(&refreshed, &root.group.id, &root.revision, Some(&token), 10).is_ok());
+    }
+    #[test]
     fn group_delete_materializes_subtree_without_changing_host_or_credentials() {
         let mut s = host_state();
         s.local
@@ -213,7 +450,8 @@ mod behavior_tests {
             .record
             .payload["inherit"] = json!(["user", "port", "authentication"]);
         let g = list_groups(&s).unwrap().remove(0);
-        let next = delete_group(&s, &g.group.id, &g.revision, 9).unwrap();
+        let token = deletion_snapshot_token(&repo::snapshot(&s).unwrap()).unwrap();
+        let next = delete_group(&s, &g.group.id, &g.revision, Some(&token), 9).unwrap();
         let h = repo::get_host(&next, "0000000000000010").unwrap();
         assert_eq!(h.host.payload.user, "ops");
         assert_eq!(h.host.payload.port, 2222);

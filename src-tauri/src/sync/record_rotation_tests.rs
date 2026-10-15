@@ -843,8 +843,12 @@ fn group_rotation_preserves_live_and_tombstone_rows_and_effective_values() {
             .into_iter()
             .find(|g| g.group.id == "0000000000000032")
             .unwrap();
-        let s =
-            crate::sync::record_groups::delete_group(&s, &g.group.id, &g.revision, 102).unwrap();
+        let token = crate::sync::record_groups::deletion_snapshot_token(
+            &crate::sync::record_repository::snapshot(&s).unwrap(),
+        ).unwrap();
+        let s = crate::sync::record_groups::delete_group(
+            &s, &g.group.id, &g.revision, Some(&token), 102,
+        ).unwrap();
         let h = crate::sync::record_repository::get_host(&s, B).unwrap();
         let mut p = h.host.payload;
         p.schema = 3;

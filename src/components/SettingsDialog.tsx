@@ -1,3 +1,4 @@
+import { auditRows } from "@/lib/mcp-audit-rows";
 import { useEffect, useState } from "react";
 import type { ComponentType } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -967,8 +968,8 @@ export function McpPane({ hosts, records = false }: {
           {(status.data?.recent.length ?? 0) === 0 ? (
             <p className="px-3 py-3 text-sm text-muted-foreground">No AI commands yet.</p>
           ) : (
-            status.data?.recent.slice(0, 10).map((entry) => (
-              <div key={entry.id} className="space-y-1 px-3 py-2">
+            auditRows(status.data?.recent ?? []).map(({ entry, key }) => (
+              <div key={key} className="space-y-1 px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
                   <span className="min-w-0 break-all font-mono text-xs">{revealHidden(entry.alias)}</span>
                   <span className="break-words text-xs">{entry.client} · {entry.mode} · {entry.outcome.split("_").join(" ")}</span>
