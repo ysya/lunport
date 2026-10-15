@@ -1,6 +1,8 @@
 # macOS 原生啟動保護：實作與驗證
 
-日期：2026-10-16，Asia/Taipei。工作分支：`codex/macos-coreaudio-startup-guard`，基底為接手提交 `654b984a919cf11857b2556a4ac9572bd65ee27f`。沒有版本發布、正式 app 更新或系統音訊設定變更。
+日期：2026-10-16，Asia/Taipei。工作分支：`codex/macos-coreaudio-startup-guard`，基底為接手提交 `654b984a919cf11857b2556a4ac9572bd65ee27f`。原修補階段沒有版本發布、正式 app 更新或系統音訊設定變更。
+
+後續發布：修補驗證完成後，使用者另行要求發布；[Beta 10 已發布](releases/1.0.0-10-validation.md)，四平台及 Beta 通道全部核對成功。原修補階段與後續發布分開記錄；沒有安裝或啟動使用者正式 GUI。
 
 這個修補讓**啟動前可偵測到的 CoreAudio 無回應／錯誤，改以原生提示呈現，避免直接建立可能全黑的 WebView**。它沒有根除 CoreAudio 死鎖，不能識別造成死鎖的驅動，也不能保證檢查通過後 GPU 永遠能繪圖。
 
@@ -55,7 +57,7 @@ GPU 停滯與 WebContent 結束分開處理。本輪沒有宣稱能自動可靠�
 
 測試來源固定為 [`f9ad05afe79452f4d1deb112d06971c7b6934a48`](https://github.com/ysya/sshelter/commit/f9ad05afe79452f4d1deb112d06971c7b6934a48)。手動執行的只有既有測試 workflow，沒有 dispatch 發布。之後補上的收據文件不改變這個程式碼來源。
 
-- [SSH engine workflow 38808771989](https://github.com/ysya/sshelter/actions/runs/38808771989)：frontend、Linux（安全 suite、profile、PAM）通過。macOS 超過設定的 45 分鐘仍停在 `Complete safe Rust suite`，沒有取得成功收據或完整 log；已送出 force-cancel 請求，紀錄時 GitHub 仍顯示執行中。不能把這項標為通過，也不能在缺少 log 時判定卡住原因。本機以相同 required-OpenSSH 條件的補跑已通過，兩者分開記錄。
+- [SSH engine workflow 38808771989](https://github.com/ysya/sshelter/actions/runs/38808771989)：frontend、Linux（安全 suite、profile、PAM）通過。第一次 macOS 超過設定的 45 分鐘仍停在 `Complete safe Rust suite`，之後取消；沒有取得該次完整 log，不能判定卡住原因。2026-10-16 發布 Beta 10 時重跑該 macOS job，第二次已成功，整個 workflow 現為 success；[收據](releases/1.0.0-10-review/publication/engine-ci.json) 保留 attempt 2 與來源 SHA。本機相同 required-OpenSSH 條件的補跑也已通過，兩者分開記錄。
 - [Windows workflow 38808775339](https://github.com/ysya/sshelter/actions/runs/38808775339)：整個 workflow 通過，包含安全 suite、profile、完整 app 編譯、console helper、獨立 console 與 OpenSSH 登入／engine 測試。
 
 CI 的編譯／測試結果與上方原生畫面、故障注入證據分別記錄；跨平台 CI 通過也不代表完成實體裝置 UI 驗收。
@@ -111,4 +113,4 @@ fault file 只在編譯選定的 Development profile 讀取，值限定為 `succ
 - Windows／Linux 的 native UI；CoreAudio／NSAlert 邏輯由 macOS cfg 隔離，快捷鍵的共用原生註冊需跨平台 CI／裝置補驗。
 - 檢查成功後才發生的 GPU／CoreAudio 故障仍可能造成黑畫面；本輪提供原生診斷與保守的 WebContent 恢復，未宣稱可靠的自動 GPU 故障偵測或系統死鎖根治。
 
-沒有 sudo、coreaudiod 重啟、正式 WebKit defaults 寫入、驅動移除、vault 重置或發布動作。
+原修補驗證階段沒有 sudo、coreaudiod 重啟、正式 WebKit defaults 寫入、驅動移除、vault 重置或發布動作；後續 Beta 10 發布收據另見上方連結。

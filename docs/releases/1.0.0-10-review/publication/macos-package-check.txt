@@ -1,0 +1,8 @@
+Artifact: SSHelter_universal.app.tar.gz
+Architectures: x86_64 arm64
+CFBundleShortVersionString: 1.0.0-10
+CFBundleIdentifier: org.homelab.sshelter
+Command: SSHelter.app/Contents/MacOS/sshelter --check-window-health
+Exit: 0
+Profile: Production; CoreAudio: Ok(()); elapsed_ms=63. This does not prove GPU rendering health.
+No installation or production GUI launch was performed.

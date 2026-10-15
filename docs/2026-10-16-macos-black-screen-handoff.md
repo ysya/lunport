@@ -2,11 +2,11 @@
 
 更新日期：2026-10-16，時間均為 Asia/Tokyo。接手分支為 `codex/host-menu-sync-feedback`；本次調查起點是 `854512370c180fce9ef588c1a4f7f865486b51ed`，已安裝的應用程式是 Beta 9 `1.0.0-9`。
 
-**後續已實作原生啟動保護，尚未發布。** 修補分支為 `codex/macos-coreaudio-startup-guard`，實作、可重跑指令、原生故障注入與未驗證限制見 [啟動保護驗證紀錄](2026-10-16-macos-startup-guard-validation.md)。以下保留 `654b984` 接手時的研究證據；後續驗證日期採 Asia/Taipei。
+**原生啟動保護已隨 Beta 10 發布。** 修補分支為 `codex/macos-coreaudio-startup-guard`，[發布與公開收據](releases/1.0.0-10-validation.md) 已核對四平台安裝包與 Beta 通道；Stable 維持 0.16.0。實作、可重跑指令、原生故障注入與未驗證限制見 [啟動保護驗證紀錄](2026-10-16-macos-startup-guard-validation.md)。以下保留 `654b984` 接手時的研究證據；後續驗證日期採 Asia/Taipei。
 
 本次直接阻塞點是 CoreAudio 服務無回應，WebKit GPU 程序等待音訊初始化而無法繪圖。系統服務最初為何卡住仍未確定，不能把恢復成功或啟動保護當成系統死鎖的永久修正，也不能認定某個第三方驅動就是元兇。
 
-原接手提交 `654b984` 只保存研究、探測程式與接手指引；後續修補已變更產品程式碼，但沒有更新正式安裝包、vault 或同步設定，也沒有發布新版本。Beta 9 既有發布、來源和跨平台 CI 收據見 [Beta 9 接手文件](2026-10-16-beta9-remote-handoff.md)。
+原接手提交 `654b984` 只保存研究、探測程式與接手指引；後續修補已變更產品程式碼，修補階段未發布。之後經使用者明確要求發布 Beta 10；沒有安裝正式 app、變更 vault 或同步設定。Beta 9 既有發布、來源和跨平台 CI 收據見 [Beta 9 接手文件](2026-10-16-beta9-remote-handoff.md)。
 
 ## 本次故障與恢復證據
 
