@@ -19,8 +19,10 @@ import { RecordsAccountLifecyclePanel } from "./AccountLifecyclePanel";
 
 export function RecordsAccountPanel({
   overview,
+  onBusyChange,
 }: {
   overview: RecordOverview;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const client = useQueryClient();
   const [migrationOpen, setMigrationOpen] = useState(false);
@@ -42,6 +44,11 @@ export function RecordsAccountPanel({
   const [settingsBusy, setBusy] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const busy = settingsBusy || lifecycleBusy;
+  const active = busy || draft.busy || !!overview.syncing;
+  useEffect(() => {
+    onBusyChange?.(busy || draft.busy);
+    return () => onBusyChange?.(false);
+  }, [busy, draft.busy, onBusyChange]);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   useEffect(() => {
@@ -163,14 +170,23 @@ export function RecordsAccountPanel({
       )}
       {pending && (
         <section className="space-y-3 rounded-md border p-4">
-          <h2 className="font-medium">Sync operation is pending</h2>
+          <h2 className="font-medium">
+            {active ? "Setting up sync…" : "Finish sync setup"}
+          </h2>
           <p className="text-sm text-muted-foreground">
-            {pending.kind.replace(/_/g, " ")} · {revealHidden(pending.phase)}
+            {active
+              ? "Please wait while this step finishes. Your saved records are kept."
+              : "The previous setup did not finish. Resume it to continue using the same sync chain."}
           </p>
-          <p className="break-all font-mono text-xs text-muted-foreground">
-            {pending.id}
-          </p>
-          {pending.kind !== "create_space" &&
+          <details className="text-xs text-muted-foreground">
+            <summary>Setup details</summary>
+            <p>
+              {pending.kind.replace(/_/g, " ")} · {revealHidden(pending.phase)}
+            </p>
+            <p className="break-all font-mono">{pending.id}</p>
+          </details>
+          {!active &&
+            pending.kind !== "create_space" &&
             pending.kind !== "leave_account" && (
               <RecordField label="Sync code for recovery (optional)">
                 <Textarea
@@ -185,10 +201,11 @@ export function RecordsAccountPanel({
                 </p>
               </RecordField>
             )}
-          <Button disabled={busy || draft.busy} onClick={resume}>
-            Retry sync setup
+          <Button disabled={active} onClick={resume}>
+            {active ? "Working…" : "Resume sync setup"}
           </Button>
-          {pending.kind !== "create_space" &&
+          {!active &&
+            pending.kind !== "create_space" &&
             pending.kind !== "leave_account" && (
               <Button
                 variant="outline"
@@ -369,8 +386,12 @@ export function RecordsAccountPanel({
         </section>
       )}
       {overview.shared_writes_blocked && (
-        <p role="status" className="text-sm text-destructive">
-          Sync changes are paused while account data is reviewed.
+        <p role="status" className="text-sm text-muted-foreground">
+          {active
+            ? "Setting up sync… Shared changes will continue when this step finishes."
+            : pending
+              ? "Resume the pending setup to continue syncing changes."
+              : "Sync changes are paused. Review account settings to continue."}
         </p>
       )}
       {error && (

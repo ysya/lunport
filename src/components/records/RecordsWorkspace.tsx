@@ -99,6 +99,8 @@ export function RecordsWorkspace({
   const isGroupEditor =
     selection.kind === "group" || selection.kind === "new_group";
   const [syncing, setSyncing] = useState(false);
+  const [accountBusy, setAccountBusy] = useState(false);
+  const syncActive = syncing || accountBusy || !!overview.syncing;
   const [error, setError] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const connectInFlight = useRef(false);
@@ -313,9 +315,12 @@ export function RecordsWorkspace({
         />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {overview.shared_writes_blocked && (
-            <p role="status" className="library-notice text-destructive">
-              Shared changes are paused. Review account status before syncing
-              changes.
+            <p role="status" className="library-notice">
+              {syncActive
+                ? "Setting up sync… Your saved records are kept while this finishes."
+                : overview.pending_account
+                  ? "Sync setup is incomplete. Resume setup to continue."
+                  : "Shared changes are paused. Review sync settings to continue."}
               <Button
                 variant="ghost"
                 size="sm"
@@ -326,7 +331,8 @@ export function RecordsWorkspace({
               </Button>
             </p>
           )}
-          {overview.account &&
+          {!syncActive &&
+            overview.account &&
             (!overview.library_enabled ||
               [...overview.hosts, ...overview.groups].some(
                 (row) => row.scope.kind === "local",
@@ -395,7 +401,10 @@ export function RecordsWorkspace({
               >
                 {panel === "keys" && <RecordsKeysPanel overview={overview} />}
                 {panel === "account" && (
-                  <RecordsAccountPanel overview={overview} />
+                  <RecordsAccountPanel
+                    overview={overview}
+                    onBusyChange={setAccountBusy}
+                  />
                 )}
                 {panel === "import" && <RecordsImportPanel />}
               </main>
@@ -415,19 +424,20 @@ export function RecordsWorkspace({
                 pendingChanges={overview.pending_changes}
                 lastSyncMs={overview.last_sync_ms}
                 error={error ?? overview.last_error}
+                syncing={syncActive}
               />
             </button>
             <Button
               variant="ghost"
               size="sm"
               className="library-sync-now"
-              disabled={syncing}
+              disabled={syncActive}
               onClick={
                 overview.library_enabled ? sync : () => setPanel("account")
               }
             >
-              {syncing
-                ? "Starting…"
+              {syncActive
+                ? "Syncing…"
                 : overview.library_enabled
                   ? "Sync now"
                   : "Set up sync"}

@@ -93,6 +93,28 @@ fn setup_preserves_identity_payload_inheritance_and_needs_explicit_group_upgrade
     );
 }
 #[test]
+fn setup_establishes_baselines_when_a_background_round_is_already_queued() {
+    use std::sync::atomic::Ordering;
+    let relay = FakeRelay::new();
+    let d = device(&relay);
+    add(&d, false);
+    record_account::create_account(&d.env(), "library").unwrap();
+    record_account::create_library_space(&d.env()).unwrap();
+    // A background round claims this flag before waiting for lifecycle. Setup must
+    // establish its own authoritative baselines rather than interpret a skipped round.
+    d.runtime.syncing.store(true, Ordering::SeqCst);
+    let result = enable(&d.env(), false);
+    d.runtime.syncing.store(false, Ordering::SeqCst);
+    result.unwrap();
+    let saved = state(&d);
+    assert!(enabled(&saved));
+    assert!(saved.spaces.values().all(|space| space.baseline_established));
+    assert!(matches!(
+        repo::get_host(&saved, HOST).unwrap().host.scope,
+        HostScope::Space { .. }
+    ));
+}
+#[test]
 fn joined_device_reuses_library_and_offline_changes_persist_then_reach_other_device() {
     let relay = FakeRelay::new();
     let a = device(&relay);

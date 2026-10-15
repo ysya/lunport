@@ -38,6 +38,43 @@ const editor = (
     />,
   );
 describe("records host controls", () => {
+  it("uses progress rather than failure styling while setup is active", () => {
+    const html = render(
+      <RecordsAccountPanel
+        overview={recordOverview({
+          syncing: true,
+          shared_writes_blocked: true,
+          pending_account: {
+            id: "a".repeat(32),
+            kind: "join_account",
+            phase: "publishing",
+          },
+        })}
+      />,
+    );
+    expect(text(html)).toContain("Setting up sync…");
+    expect(text(html)).not.toContain("Sync changes are paused");
+    expect(html).not.toContain('role="alert"');
+    expect(buttonTag(html, "Working…")).toContain(DISABLED);
+    expect(text(html)).not.toContain("Sync code for recovery");
+  });
+  it("offers resumable setup without marking the journal itself as a failure", () => {
+    const html = render(
+      <RecordsAccountPanel
+        overview={recordOverview({
+          shared_writes_blocked: true,
+          pending_account: {
+            id: "a".repeat(32),
+            kind: "join_account",
+            phase: "publishing",
+          },
+        })}
+      />,
+    );
+    expect(text(html)).toContain("Finish sync setup");
+    expect(text(html)).toContain("Resume sync setup");
+    expect(html).not.toContain('role="alert"');
+  });
   it("starts new hosts in the library and disables connect until a persisted host exists", () => {
     const html = editor(null);
     expect(text(html)).toContain("New host");

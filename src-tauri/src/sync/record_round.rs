@@ -588,6 +588,8 @@ pub fn sync_once(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
             review_required: false,
         });
     }
+    // Publish transient activity before acquiring lifecycle; event callbacks may read state.
+    env.events.status();
     struct Running<'a>(&'a std::sync::atomic::AtomicBool);
     impl Drop for Running<'_> {
         fn drop(&mut self) {
@@ -596,6 +598,33 @@ pub fn sync_once(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
     }
     let running = Running(&env.runtime.syncing);
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    let result = finish_round(env);
+    // Clear activity while still owning lifecycle. An explicit setup round may be
+    // waiting for it and must never have its activity cleared by this round.
+    drop(running);
+    drop(lifecycle);
+    env.events.status();
+    result
+}
+
+/// Library setup requires an authoritative report, even when a background round
+/// already claimed `syncing` and is waiting for lifecycle. Never interpret a skipped
+/// round as an incompatible account. The caller must not already own lifecycle.
+pub(crate) fn sync_once_required(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
+    use std::sync::atomic::Ordering;
+    let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    let owns_activity = !env.runtime.syncing.swap(true, Ordering::SeqCst);
+    let result = finish_round(env);
+    if owns_activity {
+        env.runtime.syncing.store(false, Ordering::SeqCst);
+    }
+    // If a queued background round owns activity, it will clear it after running.
+    drop(lifecycle);
+    env.events.status();
+    result
+}
+
+fn finish_round(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
     let result = run(env);
     if let Err(e) = &result {
         if !crate::sync::runtime::is_superseded(e) {
@@ -604,9 +633,6 @@ pub fn sync_once(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
     } else {
         env.runtime.core.lock().unwrap().failed_rounds = 0;
     }
-    drop(lifecycle);
-    drop(running);
-    env.events.status();
     result
 }
 #[cfg(test)]

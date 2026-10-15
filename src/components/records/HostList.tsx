@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
@@ -31,6 +31,7 @@ import type { HostScope, RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { cn } from "@/lib/utils";
 import { CollectionActions } from "./CollectionActions";
+import { HostContextMenu } from "./HostContextMenu";
 import {
   buildRecordTree,
   affectedRecords,
@@ -89,6 +90,7 @@ export function RecordHostList({
   const showTags = useSettingsStore((state) => state.showHostTags);
   const recent = useSettingsStore((state) => state.recentConnections);
   const [search, setSearch] = useState("");
+  const list = useRef<HTMLElement>(null);
   const [layout, setLayout] = useState<"grid" | "list">("grid");
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -367,7 +369,7 @@ export function RecordHostList({
             </div>
           </section>
         )}
-        <section aria-label="Saved hosts">
+        <section ref={list} tabIndex={-1} aria-label="Saved hosts">
           <div className="library-section-label">
             {search.trim() ? "Search results" : "Hosts"}
             <span>{hosts.length}</span>
@@ -396,105 +398,127 @@ export function RecordHostList({
               const target = revealHidden(host.effective_payload.hostname);
               const user = revealHidden(host.effective_payload.user);
               return (
-                <article
+                <HostContextMenu
                   key={host.id + ":" + index}
-                  className={cn(
-                    "library-host-card",
-                    active && "is-selected",
-                    blocked && "needs-attention",
-                  )}
+                  host={host}
+                  overview={overview}
+                  disabled={disabled || ambiguous || selecting}
+                  organizeDisabled={!canOrganize(host)}
+                  connectDisabled={blocked || !!connectingId}
+                  connect={connect ? () => connectHost(host) : undefined}
+                  edit={edit ? () => edit(host.id) : undefined}
+                  accept={accept}
+                  onBusy={onBusy}
+                  returnFocus={() => {
+                    const next = list.current?.querySelector<HTMLElement>(
+                      '[data-slot="context-menu-trigger"]:not([data-disabled])',
+                    );
+                    (next ?? list.current)?.focus();
+                  }}
                 >
-                  <button
-                    type="button"
-                    className="library-host-summary"
-                    aria-pressed={active}
-                    disabled={
-                      disabled || ambiguous || (selecting && !canOrganize(host))
-                    }
-                    onClick={() => openHost(host)}
-                    onKeyDown={(e) => {
-                      if (isImeKey(e)) return;
-                      if (e.key === "Enter" && !selecting && connect) {
-                        e.preventDefault();
-                        connectHost(host);
-                      }
-                    }}
+                  <article
+                    tabIndex={0}
+                    aria-label={"Host actions for " + name}
+                    className={cn(
+                      "library-host-card",
+                      active && "is-selected",
+                      blocked && "needs-attention",
+                    )}
                   >
-                    <span className="library-server-icon">
-                      {selecting ? (
-                        checked.has(host.id) ? (
-                          <Check className="size-5" />
+                    <button
+                      type="button"
+                      className="library-host-summary"
+                      aria-pressed={active}
+                      disabled={
+                        disabled ||
+                        ambiguous ||
+                        (selecting && !canOrganize(host))
+                      }
+                      onClick={() => openHost(host)}
+                      onKeyDown={(e) => {
+                        if (isImeKey(e)) return;
+                        if (e.key === "Enter" && !selecting && connect) {
+                          e.preventDefault();
+                          connectHost(host);
+                        }
+                      }}
+                    >
+                      <span className="library-server-icon">
+                        {selecting ? (
+                          checked.has(host.id) ? (
+                            <Check className="size-5" />
+                          ) : (
+                            <span className="size-4 rounded border border-current" />
+                          )
                         ) : (
-                          <span className="size-4 rounded border border-current" />
-                        )
-                      ) : (
-                        <Server className="size-5" />
-                      )}
-                    </span>
-                    <span className="library-host-identity">
-                      <strong title={name}>{name}</strong>
-                      <span className="library-host-address" title={target}>
-                        {target}
+                          <Server className="size-5" />
+                        )}
                       </span>
-                    </span>
-                    <span className="library-host-meta">
-                      <span className="library-host-user">
-                        {user || "Default user"}
-                        <span>:{host.effective_payload.port}</span>
+                      <span className="library-host-identity">
+                        <strong title={name}>{name}</strong>
+                        <span className="library-host-address" title={target}>
+                          {target}
+                        </span>
                       </span>
-                      {showTags && !!host.payload.tags.length && (
-                        <span className="library-host-tags">
-                          {host.payload.tags.slice(0, 3).map((tag) => (
-                            <span key={tag}>{revealHidden(tag)}</span>
-                          ))}
+                      <span className="library-host-meta">
+                        <span className="library-host-user">
+                          {user || "Default user"}
+                          <span>:{host.effective_payload.port}</span>
+                        </span>
+                        {showTags && !!host.payload.tags.length && (
+                          <span className="library-host-tags">
+                            {host.payload.tags.slice(0, 3).map((tag) => (
+                              <span key={tag}>{revealHidden(tag)}</span>
+                            ))}
+                          </span>
+                        )}
+                      </span>
+                      {blocked && (
+                        <span className="library-host-warning">
+                          {ambiguous
+                            ? "Conflicting host ID"
+                            : host.group_error
+                              ? "Needs review"
+                              : readinessLabel[host.readiness.kind]}
                         </span>
                       )}
-                    </span>
-                    {blocked && (
-                      <span className="library-host-warning">
-                        {ambiguous
-                          ? "Conflicting host ID"
-                          : host.group_error
-                            ? "Needs review"
-                            : readinessLabel[host.readiness.kind]}
-                      </span>
+                    </button>
+                    {!selecting && (
+                      <div className="library-host-actions">
+                        <span className="library-protocol">SSH</span>
+                        {connect && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            aria-label={"Connect to " + name}
+                            disabled={disabled || !!connectingId || blocked}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              connectHost(host);
+                            }}
+                          >
+                            {connectingId === host.id ? "Opening…" : "Connect"}
+                            <ArrowUpRight className="size-3.5" />
+                          </Button>
+                        )}
+                        {edit && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={"Edit " + name}
+                            disabled={disabled || ambiguous}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              edit(host.id);
+                            }}
+                          >
+                            <Pencil className="size-3.5" />
+                          </Button>
+                        )}
+                      </div>
                     )}
-                  </button>
-                  {!selecting && (
-                    <div className="library-host-actions">
-                      <span className="library-protocol">SSH</span>
-                      {connect && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          aria-label={"Connect to " + name}
-                          disabled={disabled || !!connectingId || blocked}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            connectHost(host);
-                          }}
-                        >
-                          {connectingId === host.id ? "Opening…" : "Connect"}
-                          <ArrowUpRight className="size-3.5" />
-                        </Button>
-                      )}
-                      {edit && (
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={"Edit " + name}
-                          disabled={disabled || ambiguous}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            edit(host.id);
-                          }}
-                        >
-                          <Pencil className="size-3.5" />
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </article>
+                  </article>
+                </HostContextMenu>
               );
             })}
           </div>
