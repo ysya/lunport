@@ -43,8 +43,10 @@ describe("connection details width policy", () => {
     expect(hostPreviewWidthAfterKey(400, "ArrowRight", 640)).toBe(384);
     expect(hostPreviewWidthAfterKey(400, "Home", 480)).toBe(320);
     expect(hostPreviewWidthAfterKey(400, "End", 480)).toBe(480);
-    expect(hostPreviewWidthAfterKey(320, "ArrowRight", 640)).toBe(320);
-    expect(hostPreviewWidthAfterKey(480, "ArrowLeft", 480)).toBe(480);
+    expect(hostPreviewWidthAfterKey(320, "ArrowRight", 640)).toBeNull();
+    expect(hostPreviewWidthAfterKey(480, "ArrowLeft", 480)).toBeNull();
+    expect(hostPreviewWidthAfterKey(577, "ArrowLeft", 577)).toBeNull();
+    expect(hostPreviewWidthAfterKey(577, "End", 577)).toBeNull();
     expect(hostPreviewWidthAfterKey(400, "Tab", 640)).toBeNull();
   });
 });

@@ -318,7 +318,8 @@
     }
     *::-webkit-scrollbar-thumb,
     *::-webkit-scrollbar-thumb:is(:hover, :active),
-    [data-slot="scroll-area-thumb"] {
+    [data-slot="scroll-area-thumb"],
+    [data-slot="scroll-area-scrollbar"]:is(:hover, :active) [data-slot="scroll-area-thumb"] {
       background-color: CanvasText;
     }
   }

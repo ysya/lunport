@@ -44,7 +44,11 @@ export function HostPreviewResizeHandle({
       handle.releasePointerCapture(current.pointerId);
     document.documentElement.classList.remove("host-preview-resizing");
     setLiveWidth(null);
-    if (cancelled) paint(width);
+    if (
+      cancelled ||
+      Math.round(current.width) === Math.round(current.startWidth)
+    )
+      paint(width);
     else setWidth(current.width);
   };
   useEffect(
