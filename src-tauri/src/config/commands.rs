@@ -694,6 +694,33 @@ pub fn load_doc_migrated(path: &Path) -> Result<crate::config::model::SshConfigD
     Ok(doc)
 }
 
+/// The default config may not exist on a new computer. Initialize only that
+/// path; a missing custom config remains an error so a typo cannot create files.
+/// `create_new` keeps a concurrent writer's file (and any symlink) intact.
+fn load_app_config(path: &Path, initialize_default: bool) -> Result<crate::config::model::SshConfigDoc, AppError> {
+    match load_doc_migrated(path) {
+        Err(AppError::Io(e)) if initialize_default && e.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().ok_or_else(|| AppError::Other("config has no parent directory".into()))?;
+            fsutil::check_write(path)?;
+            fsutil::ensure_dir_secure(parent)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(path) {
+                Ok(file) => file.sync_all()?,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
+            load_doc_migrated(path)
+        }
+        result => result,
+    }
+}
+
 // ─── Tauri command wrappers ───────────────────────────────────────────────────
 
 /// 改了主機區塊的命令(改 `IdentityFile`、新增、刪除、改名、搬動、複製、重排、還原備份……)的外殼:`edit` 做完(它拿的 doc、backed_up 鎖都在它裡面放掉)而且存檔成功,
@@ -720,12 +747,13 @@ pub fn config_load(
 ) -> Result<LoadResult, AppError> {
     let _lifecycle=state.sync.lifecycle.lock().unwrap();
     crate::sync::engine::require_legacy(&state.sync)?;
+    let initialize_default = path.is_none();
     let config_path = match path {
         Some(p) => PathBuf::from(p),
         None => default_config_path()?,
     };
 
-    let doc = load_doc_migrated(&config_path)?;
+    let doc = load_app_config(&config_path, initialize_default)?;
     let files = doc.files.iter().map(|f| f.path.to_string_lossy().into_owned()).collect();
     let hosts = host_summaries(&doc);
 
@@ -1379,6 +1407,81 @@ mod tests {
     }
 
     use crate::config::include::load_doc;
+
+    #[test]
+    fn first_launch_initializes_a_missing_ssh_directory_and_config() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".ssh/config");
+        let doc = load_app_config(&path, true).unwrap();
+        assert_eq!(doc.files.len(), 1);
+        assert_eq!(doc.files[0].path, path);
+        assert!(host_summaries(&doc).is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert!(drift(&doc).unwrap().iter().all(|file| !file.changed));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn first_launch_preserves_an_existing_config_and_directory_permissions() {
+        let home = tempfile::tempdir().unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let path = ssh.join("config");
+        let permissions = std::fs::metadata(&ssh).unwrap().permissions();
+        load_app_config(&path, true).unwrap();
+        assert_eq!(std::fs::metadata(&ssh).unwrap().permissions(), permissions);
+        let text = "Host web\n  HostName example.com\n";
+        std::fs::write(&path, text).unwrap();
+        for _ in 0..2 {
+            let doc = load_app_config(&path, true).unwrap();
+            assert_eq!(host_summaries(&doc).len(), 1);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
+        assert_eq!(std::fs::metadata(&ssh).unwrap().permissions(), permissions);
+    }
+
+    #[test]
+    fn a_missing_custom_config_is_not_created() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("custom/config");
+        assert!(matches!(load_app_config(&path, false), Err(AppError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound));
+        assert!(!path.parent().unwrap().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_launch_does_not_replace_a_dangling_config_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config");
+        let target = home.path().join("missing-target");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(load_app_config(&path, true).is_err());
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn an_invalid_config_path_still_reports_an_error() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config");
+        std::fs::create_dir(&path).unwrap();
+        assert!(load_app_config(&path, true).is_err());
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn first_launch_respects_the_development_write_boundary() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("outside/.ssh/config");
+        let policy = crate::write_policy::WritePolicy::Confined { root: home.path().join("sandbox") };
+        assert!(fsutil::with_test_write_policy(policy, || load_app_config(&path, true)).is_err());
+        assert!(!path.parent().unwrap().exists());
+    }
 
     fn write_config(dir: &tempfile::TempDir, name: &str, content: &str) -> PathBuf {
         let path = dir.path().join(name);

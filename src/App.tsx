@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Bot, KeyRound, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
@@ -100,14 +100,6 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
   const setSettingsCategory = useUiStore((s) => s.setSettingsCategory);
   const mcpStatus = useMcpStatus(2_000);
   const pendingMcp = mcpStatus.data?.pending.length ?? 0;
-
-  useEffect(() => {
-    if (isError) {
-      toast.error("Failed to load SSH config", {
-        description: typeof error === "string" ? error : String(error),
-      });
-    }
-  }, [isError, error]);
 
   const hosts = data?.hosts ?? [];
   // Wildcard-only blocks (`Host *`) are config defaults, not hosts — keep them
@@ -252,7 +244,12 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
             ) : (
               // HostList fills its parent (`h-full`): this wrapper is the room left under the switch.
               <div className="flex min-h-0 flex-1 flex-col">
-                <HostList hosts={hosts} isLoading={isLoading} />
+                {isError ? <div role="alert" className="m-3 space-y-3 rounded-lg border border-destructive/30 p-3 text-sm">
+                  <p className="font-medium">Could not load SSH config</p>
+                  <p className="break-words text-xs text-muted-foreground">{String(error)}</p>
+                  <Button size="sm" variant="outline" disabled={reload.isPending} onClick={handleReload}>Retry</Button>
+                  <Button size="sm" variant="ghost" onClick={() => { setSettingsCategory("files"); setSettingsOpen(true); }}>Config settings</Button>
+                </div> : <HostList hosts={hosts} isLoading={isLoading} />}
               </div>
             )}
           </aside>

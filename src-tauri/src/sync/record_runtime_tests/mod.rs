@@ -47,6 +47,23 @@ fn missing_state_starts_records_without_creating_state_or_parent() {
     assert!(!path.parent().unwrap().exists());
 }
 #[test]
+fn a_fresh_records_workspace_can_save_when_its_data_directory_does_not_exist() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("new-profile/data/sync-state.json");
+    let StartupProbe::Records { state, fresh: true } = probe_startup(&path, "New device") else {
+        panic!("missing directories must open a fresh records workspace")
+    };
+    save_active(&path, &state).unwrap();
+    assert!(matches!(probe_startup(&path, "unused"), StartupProbe::Records { state: loaded, fresh: false } if *loaded == *state));
+    assert!(!temp.path().join(".ssh").exists(), "records mode does not create a legacy SSH config");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
+#[test]
 fn legacy_v1_and_v2_probe_retains_original_bytes_without_upgrade_or_rename() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sync-state.json");

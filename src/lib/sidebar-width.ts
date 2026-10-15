@@ -1,8 +1,8 @@
 /**
  * Sidebar width, in rem: it follows Settings → Appearance → Text size like the rest of the UI
- * (the text size sets the root font size). 16rem is the former fixed `w-64`.
+ * (the text size sets the root font size). 24rem gives the host collection room for its tools and connection details.
  */
-export const DEFAULT_SIDEBAR_WIDTH = 16;
+export const DEFAULT_SIDEBAR_WIDTH = 24;
 export const MIN_SIDEBAR_WIDTH = 12;
 export const MAX_SIDEBAR_WIDTH = 32;
 /** How far one arrow-key press on the resize handle moves it (rem). */
