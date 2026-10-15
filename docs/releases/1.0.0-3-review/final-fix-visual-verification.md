@@ -1,0 +1,9 @@
+# Final fix mounted React receipt
+
+Source30c4a4c689b86a95bb17b8cc4fae90bb3469b686; actual GroupEditor/RecordsWorkspace/SettingsDialog components, isolated fake invoke only. No actual hosts, credentials, permissions, relay or native deletion.
+
+- Preliminary1100x720dark subtree race verified before commit; final800x560light repeated at committed30c. Initial candidate shows1descendant/17hosts, Keep editing focus; mock sync adds child with unchanged rootrevision. Confirm sends frozenfixture-review-v1 versuscurrentv2, fails, closes dialog, refreshes, retains newchild/17hosts and exactly1dedicatedalert. No automatic retry/approval. New manual Delete opens2descendant/17host review with Keep editing focus; explicitconfirm sendsv2/currentv2 and mockmaterializes hosts/removesreviewedGroups. webhost remains, rootremoved. Backendatomic/no-partial/tokenSHA properties are established byRustmatrix, notthismock.
+- Minimumdialog top191.375 bottom368.625; controls bottom353.625 within800x560. Screenshot sshelter-group-delete-min-light.jpg in durablevisualroot.
+- ActualSettingsAI pane with historical sameID/timestamp andtwoidenticalevents displaysFixtureduplicateA twice andB once; capturedlogfilter samekey returns[]. Helperregression separately verifies stableidentity onprepend. No warning-freeclaim: preexisting SettingsDialog Radix missingDescription consolewarning observed; baseline0e9 importsDialogContent/Title withoutDescription, unchanged bythiswave.
+- Browser4tab2, serverlocalhost10496session16014 after interrupted oldserverexpired. Coldnavigationtimedout beforecompletion; inventorythenverifiedloadedrealroute, no alternateUImechanism. Initial sandboxcurlrefused while approvedcurl200; notaproductfailure. Vitebuild/HMR canresetfixtureselection, so finalsubtreeflow repeated withoutinterveningbuild andverifiedDOMresult.
+- NativeWindows popup/actualOS authwindow/suspend/credentials/clipboard remainnotestablished; priorTask2/4/5presentationreceipts retained.
