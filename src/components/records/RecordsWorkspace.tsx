@@ -1,4 +1,5 @@
 import "./library.css";
+import { UpdateIndicator } from "@/components/UpdatesPane";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -272,6 +273,7 @@ export function RecordsWorkspace({
           <span>Quick connect</span>
           <kbd>{shortcut}</kbd>
         </button>
+        <UpdateIndicator />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon-sm" aria-label="Workspace menu">

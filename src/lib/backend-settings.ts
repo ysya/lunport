@@ -46,7 +46,7 @@ export function useSyncBackendSettings(): void {
   // Auto update checks. A long-running app (especially with close-to-tray)
   // would otherwise only ever check once at launch, so while the preference is
   // on we ALSO re-check periodically and on window focus (throttled). The
-  // updater module itself dedupes prompts per version.
+  // updater module serializes checks and keeps their results in the Updates page.
   const { data: isDevelopment } = useIsDevelopment();
   const autoCheckUpdates = useSettingsStore((s) => s.autoCheckUpdates);
   useEffect(() => {

@@ -39,6 +39,7 @@ import { SyncUpgradeDialog } from "@/components/SyncUpgradeDialog";
 import { SyncApprovalDialog } from "@/components/SyncApprovalDialog";
 import { SyncKeyDialog } from "@/components/SyncKeyDialog";
 import { KeysNeededDialog } from "@/components/KeysNeededDialog";
+import { UpdateIndicator } from "@/components/UpdatesPane";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
@@ -139,6 +140,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
           </div>
 
           <div className="ml-auto flex items-center gap-1">
+            <UpdateIndicator />
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
