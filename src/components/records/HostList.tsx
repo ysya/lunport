@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Folder, Plus } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  Plus,
+  Search,
+  Square,
+  SquareCheck,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 import { useSettingsStore } from "@/stores/settings";
@@ -7,9 +15,12 @@ import { Input } from "@/components/ui/input";
 import type { HostScope, RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { cn } from "@/lib/utils";
+import { CollectionActions } from "./CollectionActions";
+import { selectClass } from "./form";
 import { scopeLabel } from "./operations";
 import {
   buildRecordTree,
+  scopeKey,
   selectGroup as uniqueGroup,
   type GroupNode,
 } from "./group-tree";
@@ -29,6 +40,10 @@ export function RecordHostList({
   create,
   createGroup,
   disabled = false,
+  organizeDisabled = false,
+  accept,
+  onBusy,
+  expand,
 }: {
   overview: RecordOverview;
   selectedId: string | null;
@@ -39,11 +54,24 @@ export function RecordHostList({
   create?: () => void;
   createGroup?: () => void;
   disabled?: boolean;
+  organizeDisabled?: boolean;
+  accept?: (overview: RecordOverview) => unknown;
+  onBusy?: (busy: boolean) => void;
+  expand?: () => void;
 }) {
   const showTags = useSettingsStore((state) => state.showHostTags);
   const [search, setSearch] = useState(""),
     [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const roots = buildRecordTree(overview, search);
+  const [scope, setScope] = useState("all");
+  const [selecting, setSelecting] = useState(false);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const scopes = buildRecordTree(overview);
+  const validScope = scopes.some((root) => scopeKey(root.scope) === scope)
+    ? scope
+    : "all";
+  const roots = buildRecordTree(overview, search).filter(
+    (root) => validScope === "all" || scopeKey(root.scope) === validScope,
+  );
   const counts = new Map<string, number>();
   for (const host of overview.hosts)
     counts.set(host.id, (counts.get(host.id) ?? 0) + 1);
@@ -54,26 +82,64 @@ export function RecordHostList({
         key={`${host.id}:${index}`}
         type="button"
         className={cn(
-          "w-full rounded-md px-3 py-2 text-left hover:bg-accent",
-          selectedId === host.id && !ambiguous && "bg-accent",
+          "record-host-row w-full rounded-md px-3 py-2 text-left hover:bg-accent",
+          (selecting
+            ? checked.has(host.id)
+            : selectedId === host.id && !ambiguous) && "bg-accent",
         )}
-        aria-pressed={selectedId === host.id && !ambiguous}
-        disabled={disabled || ambiguous}
-        onClick={() => select(host.id)}
+        aria-pressed={
+          selecting
+            ? checked.has(host.id)
+            : selectedId === host.id && !ambiguous
+        }
+        disabled={
+          disabled ||
+          ambiguous ||
+          (selecting && (!!host.group_error || organizeDisabled))
+        }
+        onClick={() => {
+          if (!selecting) {
+            select(host.id);
+            return;
+          }
+          setChecked((current) => {
+            const next = new Set(current);
+            if (next.has(host.id)) next.delete(host.id);
+            else next.add(host.id);
+            return next;
+          });
+        }}
       >
-        <span className="block truncate text-sm font-medium">
-          {revealHidden(host.payload.alias)}
+        <span className="record-host-name flex min-w-0 items-center gap-2 text-sm font-medium">
+          {selecting &&
+            (checked.has(host.id) ? (
+              <SquareCheck
+                className="size-4 shrink-0 text-primary"
+                aria-hidden
+              />
+            ) : (
+              <Square
+                className="size-4 shrink-0 text-muted-foreground"
+                aria-hidden
+              />
+            ))}
+          <span className="truncate" title={revealHidden(host.payload.alias)}>
+            {revealHidden(host.payload.alias)}
+          </span>
         </span>
         {showTags && host.payload.tags.length > 0 && (
-          <span className="block truncate text-xs text-muted-foreground">
+          <span className="record-host-tags block truncate text-xs text-muted-foreground">
             {revealHidden(host.payload.tags.join(" · "))}
           </span>
         )}
-        <span className="block truncate text-xs text-muted-foreground">
-          {revealHidden(host.payload.hostname)} ·{" "}
+        <span
+          className="record-host-target block truncate font-mono text-xs text-muted-foreground"
+          title={`${revealHidden(host.effective_payload.user)}@${revealHidden(host.effective_payload.hostname)}:${host.effective_payload.port}`}
+        >
+          {revealHidden(host.effective_payload.hostname)} ·{" "}
           {revealHidden(scopeLabel(overview, host.scope))}
         </span>
-        <span className="text-xs text-muted-foreground">
+        <span className="record-host-status text-xs text-muted-foreground">
           {ambiguous
             ? "Conflicting host ID"
             : host.group_error
@@ -142,7 +208,12 @@ export function RecordHostList({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="shrink-0 space-y-3 border-b p-3">
-        <h2 className="text-sm font-semibold">Hosts</h2>
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">Hosts</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Browse connections and organize them by space, Group or tag.
+          </p>
+        </div>
         <div className="flex flex-wrap gap-1">
           {create && (
             <Button
@@ -165,13 +236,58 @@ export function RecordHostList({
             </Button>
           )}
         </div>
-        <Input
-          id={SEARCH_INPUT_ID}
-          aria-label="Search hosts"
-          placeholder="Search hosts or Groups…"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-        />
+        <div className="relative">
+          <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="h-9 pl-9"
+            id={SEARCH_INPUT_ID}
+            aria-label="Search hosts"
+            placeholder="Search hosts or Groups…"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            aria-label="Filter by space"
+            className={cn(selectClass, "h-8 min-w-0 flex-1 text-xs")}
+            value={validScope}
+            onChange={(event) => setScope(event.target.value)}
+          >
+            <option value="all">All spaces</option>
+            {scopes.map((root) => (
+              <option key={scopeKey(root.scope)} value={scopeKey(root.scope)}>
+                {revealHidden(root.label)}
+              </option>
+            ))}
+          </select>
+          {accept && (
+            <Button
+              size="sm"
+              variant={selecting ? "secondary" : "ghost"}
+              aria-pressed={selecting}
+              disabled={
+                disabled ||
+                (!selecting && (organizeDisabled || !overview.hosts.length))
+              }
+              title={
+                organizeDisabled
+                  ? "Save or discard your draft before organizing hosts"
+                  : "Select multiple hosts"
+              }
+              onClick={() => {
+                setSelecting(!selecting);
+                setChecked(new Set());
+                if (!selecting) expand?.();
+              }}
+            >
+              {selecting ? "Done" : "Select"}
+            </Button>
+          )}
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {overview.hosts.length} hosts
+          </span>
+        </div>
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-2">
         {!overview.hosts.length && !overview.groups.length && (
@@ -179,11 +295,19 @@ export function RecordHostList({
             No hosts yet. Add a host or import a configuration.
           </p>
         )}
-        {!roots.length && (
-          <p className="p-3 text-sm text-muted-foreground">
-            No matching hosts or Groups
-          </p>
-        )}
+        {!roots.some(
+          (root) =>
+            root.groups.length ||
+            root.ungrouped.length ||
+            root.diagnostics.length,
+        ) &&
+          (!!overview.hosts.length ||
+            !!overview.groups.length ||
+            !!search.trim()) && (
+            <p className="p-3 text-sm text-muted-foreground">
+              No matching hosts or Groups
+            </p>
+          )}
         {roots.map((root, index) => (
           <section key={index}>
             <button
@@ -230,6 +354,22 @@ export function RecordHostList({
           </section>
         ))}
       </div>
+      {accept && selecting && (
+        <CollectionActions
+          overview={overview}
+          ids={[...checked]}
+          disabled={disabled || organizeDisabled}
+          accept={accept}
+          onBusy={onBusy}
+          clear={() => setChecked(new Set())}
+          onCompleted={(ids) =>
+            setChecked(
+              (current) =>
+                new Set([...current].filter((id) => !ids.includes(id))),
+            )
+          }
+        />
+      )}
     </div>
   );
 }

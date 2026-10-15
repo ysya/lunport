@@ -16,6 +16,9 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 
 ## Features
 
+- **Collection workspaces** — browse Hosts at full width, filter by space, and select multiple hosts to move or tag. Selecting a host or Group opens its editor; Expand list keeps its draft mounted. Batch changes use the reviewed host revisions and stop on a conflict while retaining completed changes.
+- **First launch** — a Records workspace opens without an existing data directory or SSH config and creates its data directory on save. The legacy workspace initializes a missing default `~/.ssh/config`; other config read failures stay visible with Retry and Config settings actions.
+
 - **Lossless config editing** — a clean GUI host editor over `~/.ssh/config` and every `Include`d file; only the lines you change are touched, so comments, ordering, and unknown directives survive byte-for-byte. Create new config files from any file picker: SSHelter detects an existing `Include` glob (like `config.d/*`) and drops the file where it's already loaded, or adds the `Include` line for you.
 - **Connect** — open a host in your terminal of choice (macOS Terminal/iTerm2, common Linux emulators, Windows Terminal or Command Prompt), from a per-row button, the editor header, the command palette, or the menubar tray's quick-connect list. From 0.17.0-10 (Beta channel), the terminal runs `sshelter connect <host>` (on Windows through `sshelter-cli.exe`, a small console program installed next to SSHelter): the connection lives in SSHelter's own SSH client, a first-time host key is confirmed in SSHelter's window, a saved password is tried first, and passphrases and 2FA codes are asked in the terminal. When the connection fails before the session opens, the reason stays on screen: from 0.17.0-11, terminals that close their window when the command fails (iTerm2, Linux emulators) keep it there until you press Enter; Terminal, Command Prompt and Windows Terminal (with its default settings) keep it anyway. That client signs only with keys kept in SSHelter (Keychain → Only in SSHelter): a host whose `IdentityFile` is a key file in `~/.ssh` connects once that key is moved into SSHelter (Keychain → Move), a host that relies on OpenSSH's default `~/.ssh/id_*` files has to name its key first, and hosts that use `ProxyCommand` don't connect through it yet (`ProxyJump` does). Up to 0.17.0-9 and in 0.16 (Stable), Connect launches `ssh <host>` instead, and a saved password is auto-filled through the built-in `SSH_ASKPASS` helper straight from your OS keychain — it never appears in the launch command; auto-fill steps aside for jump hosts, first-time hosts (confirm the host key manually once), and keyboard-interactive/2FA hosts.
 - **Command palette (⌘K)** — fuzzy-jump to any host with your recent connections surfaced first; <kbd>Enter</kbd> connects, <kbd>⌘Enter</kbd> edits, plus quick actions (new host, deploy key, toggle theme, reload).
@@ -75,7 +78,9 @@ The button copies `relay/` into a new repository on your GitHub or GitLab accoun
 
 ## Development
 
-Prerequisites: Rust (rustup), Node + pnpm, and platform build deps (macOS: Xcode Command Line Tools; Linux: `libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev`).
+Prerequisites: Rust (mise or rustup), Node + pnpm, and platform build deps (macOS: Xcode Command Line Tools; Linux: `libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev`).
+
+With mise, run `mise install` for the project Rust toolchain; use `mise exec --` before commands if mise is not activated in your shell.
 
 ```bash
 pnpm install            # install JS deps
