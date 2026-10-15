@@ -72,7 +72,7 @@ interface SettingsState {
   /** Show tag chips on sidebar host rows (file grouping only). */
   showHostTags: boolean;
   setShowHostTags: (enabled: boolean) => void;
-  /** alias → last successful connect (epoch ms); drives the ⌘K Recent group. */
+  /** Legacy alias or records:<stable host ID> → last accepted connection launch (epoch ms). */
   recentConnections: Record<string, number>;
   recordConnection: (alias: string) => void;
   /** Check GitHub Releases for a newer build shortly after launch. */

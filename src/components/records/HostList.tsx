@@ -1,26 +1,44 @@
 import { useState } from "react";
 import {
+  ArrowUpRight,
+  Check,
   ChevronDown,
-  ChevronRight,
   Folder,
+  FolderPlus,
+  LayoutGrid,
+  List,
+  MoreHorizontal,
+  Pencil,
   Plus,
   Search,
-  Square,
-  SquareCheck,
+  Server,
+  SlidersHorizontal,
+  Upload,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { isImeKey } from "@/lib/ime";
 import { SEARCH_INPUT_ID } from "@/lib/app-shortcuts";
 import { useSettingsStore } from "@/stores/settings";
-import { Input } from "@/components/ui/input";
 import type { HostScope, RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { cn } from "@/lib/utils";
 import { CollectionActions } from "./CollectionActions";
 import {
   buildRecordTree,
+  affectedRecords,
+  groupPath,
   selectGroup as uniqueGroup,
-  type GroupNode,
 } from "./group-tree";
+import { libraryHosts, type LibraryFilter } from "./library-view";
+
 export const readinessLabel = {
   ready: "Ready",
   needs_key: "Needs key",
@@ -30,9 +48,9 @@ export const readinessLabel = {
 export function RecordHostList({
   overview,
   selectedId,
-  selectedGroupId = null,
   select,
   selectGroup,
+  edit,
   create,
   createGroup,
   disabled = false,
@@ -40,11 +58,18 @@ export function RecordHostList({
   accept,
   onBusy,
   expand,
+  connect,
+  connectingId,
+  filter = { kind: "all" },
+  changeFilter,
+  importHosts,
+  searchShortcut = "Ctrl F",
 }: {
   overview: RecordOverview;
   selectedId: string | null;
   selectedGroupId?: string | null;
   select: (id: string) => void;
+  edit?: (id: string) => void;
   selectGroup?: (id: string) => void;
   selectScope?: (scope: HostScope) => void;
   create?: () => void;
@@ -54,279 +79,502 @@ export function RecordHostList({
   accept?: (overview: RecordOverview) => unknown;
   onBusy?: (busy: boolean) => void;
   expand?: () => void;
+  connect?: (id: string) => void;
+  connectingId?: string | null;
+  filter?: LibraryFilter;
+  changeFilter?: (filter: LibraryFilter) => void;
+  importHosts?: () => void;
+  searchShortcut?: string;
 }) {
   const showTags = useSettingsStore((state) => state.showHostTags);
-  const [search, setSearch] = useState(""),
-    [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const recent = useSettingsStore((state) => state.recentConnections);
+  const [search, setSearch] = useState("");
+  const [layout, setLayout] = useState<"grid" | "list">("grid");
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
-  const roots = buildRecordTree(overview, search);
+  const hosts = libraryHosts(overview, filter, search, recent);
+  const roots = buildRecordTree(overview);
+  const groups = roots
+    .flatMap((root) => root.groups)
+    .sort((a, b) => a.group.payload.name.localeCompare(b.group.payload.name));
+  const allNodes = roots.flatMap((root) => root.groups);
+  const findNode = (
+    nodes: typeof allNodes,
+  ): (typeof allNodes)[number] | undefined => {
+    for (const node of nodes) {
+      if (filter.kind === "group" && node.group.id === filter.id) return node;
+      const child = findNode(node.children);
+      if (child) return child;
+    }
+  };
+  const browsableGroups =
+    filter.kind === "all"
+      ? groups
+      : filter.kind === "group"
+        ? (findNode(allNodes)?.children ?? [])
+        : [];
+  const currentGroup =
+    filter.kind === "group" ? uniqueGroup(overview.groups, filter.id) : null;
+  const title =
+    filter.kind === "group"
+      ? (currentGroup?.payload.name ?? "Unavailable group")
+      : filter.kind === "tag"
+        ? "# " + filter.id
+        : (
+            {
+              all: "All hosts",
+              recent: "Recent",
+              attention: "Needs attention",
+              ungrouped: "Ungrouped",
+            } as const
+          )[filter.kind];
   const counts = new Map<string, number>();
   for (const host of overview.hosts)
     counts.set(host.id, (counts.get(host.id) ?? 0) + 1);
-  const hostRow = (host: RecordHostView, index: number) => {
-    const ambiguous = (counts.get(host.id) ?? 0) > 1;
-    return (
-      <button
-        key={`${host.id}:${index}`}
-        type="button"
-        className={cn(
-          "record-host-row w-full rounded-md px-3 py-2 text-left hover:bg-accent",
-          (selecting
-            ? checked.has(host.id)
-            : selectedId === host.id && !ambiguous) && "bg-accent",
-        )}
-        aria-pressed={
-          selecting
-            ? checked.has(host.id)
-            : selectedId === host.id && !ambiguous
-        }
-        disabled={
-          disabled ||
-          ambiguous ||
-          (selecting && (!!host.group_error || organizeDisabled))
-        }
-        onClick={() => {
-          if (!selecting) {
-            select(host.id);
-            return;
-          }
-          setChecked((current) => {
-            const next = new Set(current);
-            if (next.has(host.id)) next.delete(host.id);
-            else next.add(host.id);
-            return next;
-          });
-        }}
-      >
-        <span className="record-host-name flex min-w-0 items-center gap-2 text-sm font-medium">
-          {selecting &&
-            (checked.has(host.id) ? (
-              <SquareCheck
-                className="size-4 shrink-0 text-primary"
-                aria-hidden
-              />
-            ) : (
-              <Square
-                className="size-4 shrink-0 text-muted-foreground"
-                aria-hidden
-              />
-            ))}
-          <span className="truncate" title={revealHidden(host.payload.alias)}>
-            {revealHidden(host.payload.alias)}
-          </span>
-        </span>
-        {showTags && host.payload.tags.length > 0 && (
-          <span className="record-host-tags block truncate text-xs text-muted-foreground">
-            {revealHidden(host.payload.tags.join(" · "))}
-          </span>
-        )}
-        <span
-          className="record-host-target block truncate font-mono text-xs text-muted-foreground"
-          title={`${revealHidden(host.effective_payload.user)}@${revealHidden(host.effective_payload.hostname)}:${host.effective_payload.port}`}
-        >
-          {revealHidden(host.effective_payload.hostname)}
-        </span>
-        <span className="record-host-status text-xs text-muted-foreground">
-          {ambiguous
-            ? "Conflicting host ID"
-            : host.group_error
-              ? "Needs review"
-              : readinessLabel[host.readiness.kind]}
-        </span>
-        {host.group_error && (
-          <span className="block break-words text-xs text-destructive">
-            {revealHidden(host.group_error)}
-          </span>
-        )}
-      </button>
-    );
+  const toggle = (id: string) =>
+    setChecked((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const openHost = (host: RecordHostView) => {
+    if (selecting) toggle(host.id);
+    else select(host.id);
   };
-  const groupRow = (node: GroupNode): React.ReactNode => {
-    const open = !!search || !collapsed.has(node.group.id);
-    return (
-      <div key={node.group.id}>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            aria-label={`${open ? "Collapse" : "Expand"} ${revealHidden(node.group.payload.name)}`}
-            aria-expanded={open}
-            className="rounded p-1 hover:bg-accent"
-            disabled={disabled}
-            onClick={() =>
-              setCollapsed((current) => {
-                const next = new Set(current);
-                if (open) next.add(node.group.id);
-                else next.delete(node.group.id);
-                return next;
-              })
-            }
-          >
-            {open ? (
-              <ChevronDown className="size-3.5" />
-            ) : (
-              <ChevronRight className="size-3.5" />
-            )}
-          </button>
-          <button
-            type="button"
-            aria-pressed={selectedGroupId === node.group.id}
-            className={cn(
-              "flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-2 pr-2 text-left text-sm hover:bg-accent",
-              selectedGroupId === node.group.id && "bg-accent",
-            )}
-            disabled={disabled || !selectGroup}
-            onClick={() => selectGroup?.(node.group.id)}
-          >
-            <Folder className="size-3.5 shrink-0 text-muted-foreground" />
-            <span className="truncate">
-              {revealHidden(node.group.payload.name)}
-            </span>
-          </button>
-        </div>
-        {open && (
-          <div className="ml-3 border-l pl-1">
-            {node.children.map(groupRow)}
-            {node.hosts.map(hostRow)}
-          </div>
-        )}
-      </div>
-    );
+  const connectHost = (host: RecordHostView) => {
+    if (!connect || disabled || connectingId || (counts.get(host.id) ?? 0) > 1)
+      return;
+    if (host.readiness.kind !== "ready" || host.group_error) select(host.id);
+    else connect(host.id);
   };
+  const canOrganize = (host: RecordHostView) =>
+    !disabled &&
+    !organizeDisabled &&
+    !host.group_error &&
+    counts.get(host.id) === 1;
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 space-y-3 border-b p-3">
+    <div className="library-catalog flex h-full min-h-0 flex-col">
+      <header className="library-page-header">
         <div>
-          <h2 className="text-lg font-semibold tracking-tight">Hosts</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            One library for your hosts. Organize connections with Groups and
-            tags.
+          <div className="library-breadcrumb">
+            <button
+              type="button"
+              onClick={() => changeFilter?.({ kind: "all" })}
+            >
+              Library
+            </button>
+            <span>/</span>
+            <span>Hosts</span>
+          </div>
+          <h1>
+            {revealHidden(title)}{" "}
+            <span className="library-total">{hosts.length}</span>
+          </h1>
+          <p>
+            {filter.kind === "recent"
+              ? "Pick up where you left off. Your recently opened connections."
+              : filter.kind === "attention"
+                ? "Review connection settings and keys before connecting."
+                : currentGroup
+                  ? revealHidden(
+                      groupPath(overview, currentGroup.id, currentGroup.scope),
+                    )
+                  : "Your servers, one connection away."}
           </p>
         </div>
-        <div className="flex flex-wrap gap-1">
+        <div className="flex shrink-0 items-center gap-2">
+          {currentGroup && selectGroup && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => selectGroup(currentGroup.id)}
+              disabled={disabled}
+            >
+              <SlidersHorizontal className="size-3.5" />
+              Group settings
+            </Button>
+          )}
           {create && (
             <Button
-              size="sm"
-              variant="ghost"
-              disabled={disabled}
+              className="library-create"
               onClick={create}
+              disabled={disabled}
             >
-              <Plus className="size-3.5" /> New host
+              <Plus className="size-4" />
+              New host
             </Button>
           )}
-          {createGroup && (
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={disabled}
-              onClick={createGroup}
-            >
-              <Folder className="size-3.5" /> New group
-            </Button>
+          {(createGroup || importHosts) && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  aria-label="More library actions"
+                >
+                  <ChevronDown className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {createGroup && (
+                  <DropdownMenuItem disabled={disabled} onSelect={createGroup}>
+                    <FolderPlus />
+                    New group
+                  </DropdownMenuItem>
+                )}
+                {importHosts && (
+                  <DropdownMenuItem onSelect={importHosts}>
+                    <Upload />
+                    Import hosts
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
         </div>
-        <div className="relative">
-          <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+      </header>
+      <div className="library-catalog-toolbar">
+        <div className="library-search">
+          <Search className="size-4" />
           <Input
-            className="h-9 pl-9"
             id={SEARCH_INPUT_ID}
             aria-label="Search hosts"
-            placeholder="Search hosts or Groups…"
+            placeholder="Search name, address, username or tag…"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => {
+              if (isImeKey(e)) return;
+              if (e.key === "Enter" && !selecting && hosts[0]) {
+                e.preventDefault();
+                connectHost(hosts[0]);
+              }
+            }}
           />
-        </div>
-        <div className="flex items-center gap-2">
-          {accept && (
-            <Button
-              size="sm"
-              variant={selecting ? "secondary" : "ghost"}
-              aria-pressed={selecting}
-              disabled={
-                disabled ||
-                (!selecting && (organizeDisabled || !overview.hosts.length))
-              }
-              title={
-                organizeDisabled
-                  ? "Save or discard your draft before organizing hosts"
-                  : "Select multiple hosts"
-              }
-              onClick={() => {
-                setSelecting(!selecting);
-                setChecked(new Set());
-                if (!selecting) expand?.();
-              }}
-            >
-              {selecting ? "Done" : "Select"}
-            </Button>
-          )}
-          <span className="shrink-0 text-xs text-muted-foreground">
-            {overview.hosts.length} hosts
-          </span>
-        </div>
-      </div>
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-2">
-        {!overview.hosts.length && !overview.groups.length && (
-          <p className="p-3 text-sm text-muted-foreground">
-            No hosts yet. Add a host or import a configuration.
-          </p>
-        )}
-        {!roots.some(
-          (root) =>
-            root.groups.length ||
-            root.ungrouped.length ||
-            root.diagnostics.length,
-        ) &&
-          (!!overview.hosts.length ||
-            !!overview.groups.length ||
-            !!search.trim()) && (
-            <p className="p-3 text-sm text-muted-foreground">
-              No matching hosts or Groups
-            </p>
-          )}
-        {roots
-          .flatMap((root) => root.groups)
-          .sort((a, b) =>
-            a.group.payload.name.localeCompare(b.group.payload.name),
-          )
-          .map(groupRow)}
-        {roots
-          .flatMap((root) => root.diagnostics)
-          .map(({ group, error }, at) => (
+          {search ? (
             <button
-              key={`${group.id}:${at}`}
               type="button"
-              className="w-full rounded-md px-3 py-2 text-left hover:bg-accent"
-              disabled={
-                disabled ||
-                !selectGroup ||
-                !uniqueGroup(overview.groups, group.id)
-              }
-              aria-pressed={
-                !!uniqueGroup(overview.groups, group.id) &&
-                selectedGroupId === group.id
-              }
-              onClick={() => selectGroup?.(group.id)}
+              aria-label="Clear search"
+              onClick={() => setSearch("")}
             >
-              <span className="block truncate text-sm">
-                {revealHidden(group.payload.name)}
-              </span>
-              <span className="block break-words text-xs text-destructive">
-                {revealHidden(error)}
-              </span>
+              <X className="size-3.5" />
             </button>
-          ))}
-        {roots.some((root) => root.ungrouped.length > 0) && (
-          <section>
-            <h3 className="px-3 py-1 text-xs font-medium text-muted-foreground">
-              Ungrouped
-            </h3>
-            {roots
-              .flatMap((root) => root.ungrouped)
-              .sort((a, b) => a.payload.alias.localeCompare(b.payload.alias))
-              .map(hostRow)}
+          ) : (
+            <kbd>{searchShortcut}</kbd>
+          )}
+        </div>
+        <div className="library-view-toggle" aria-label="Host view">
+          <button
+            type="button"
+            aria-label="Grid view"
+            aria-pressed={layout === "grid"}
+            onClick={() => setLayout("grid")}
+          >
+            <LayoutGrid className="size-4" />
+          </button>
+          <button
+            type="button"
+            aria-label="List view"
+            aria-pressed={layout === "list"}
+            onClick={() => setLayout("list")}
+          >
+            <List className="size-4" />
+          </button>
+        </div>
+        {accept && (
+          <Button
+            variant={selecting ? "secondary" : "ghost"}
+            size="sm"
+            aria-pressed={selecting}
+            disabled={
+              disabled ||
+              (!selecting && (organizeDisabled || !overview.hosts.length))
+            }
+            title={
+              organizeDisabled
+                ? "Save or discard your draft before organizing hosts"
+                : "Select multiple hosts"
+            }
+            onClick={() => {
+              setSelecting(!selecting);
+              setChecked(new Set());
+              if (!selecting) expand?.();
+            }}
+          >
+            {selecting ? "Done" : "Select"}
+          </Button>
+        )}
+      </div>
+      <div className="library-catalog-scroll min-h-0 flex-1 overflow-y-auto">
+        {selecting && (
+          <div className="library-selection-bar">
+            <span>{checked.size} selected</span>
+            <button
+              type="button"
+              onClick={() =>
+                setChecked(new Set(hosts.filter(canOrganize).map((h) => h.id)))
+              }
+            >
+              Select visible
+            </button>
+            <button type="button" onClick={() => setChecked(new Set())}>
+              Clear
+            </button>
+          </div>
+        )}
+        {!search.trim() && !!browsableGroups.length && (
+          <section className="library-group-section" aria-label="Browse groups">
+            <div className="library-section-label">
+              Groups <span>{browsableGroups.length}</span>
+            </div>
+            <div className="library-group-grid">
+              {browsableGroups.map((node) => (
+                <div key={node.group.id} className="library-group-card">
+                  <button
+                    type="button"
+                    disabled={disabled || !changeFilter}
+                    onClick={() =>
+                      changeFilter?.({ kind: "group", id: node.group.id })
+                    }
+                  >
+                    <span className="library-folder-icon">
+                      <Folder className="size-5" />
+                    </span>
+                    <span className="min-w-0">
+                      <strong className="block truncate">
+                        {revealHidden(node.group.payload.name)}
+                      </strong>
+                      <span>
+                        {affectedRecords(overview, node.group).hosts} hosts
+                      </span>
+                    </span>
+                  </button>
+                  {selectGroup && (
+                    <button
+                      type="button"
+                      className="library-group-edit"
+                      aria-label={
+                        "Edit group " + revealHidden(node.group.payload.name)
+                      }
+                      disabled={disabled}
+                      onClick={() => selectGroup(node.group.id)}
+                    >
+                      <MoreHorizontal className="size-4" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
           </section>
         )}
+        <section aria-label="Saved hosts">
+          <div className="library-section-label">
+            {search.trim() ? "Search results" : "Hosts"}
+            <span>{hosts.length}</span>
+            {search.trim() && connect && (
+              <small>Enter to connect · Click for details</small>
+            )}
+          </div>
+          {layout === "list" && !!hosts.length && (
+            <div className="library-list-head">
+              <span>Name</span>
+              <span>Address</span>
+              <span>Connection</span>
+            </div>
+          )}
+          <div className="library-host-grid" data-layout={layout}>
+            {hosts.map((host, index) => {
+              const ambiguous = (counts.get(host.id) ?? 0) > 1;
+              const blocked =
+                host.readiness.kind !== "ready" ||
+                !!host.group_error ||
+                ambiguous;
+              const active = selecting
+                ? checked.has(host.id)
+                : selectedId === host.id && !ambiguous;
+              const name = revealHidden(host.payload.alias);
+              const target = revealHidden(host.effective_payload.hostname);
+              const user = revealHidden(host.effective_payload.user);
+              return (
+                <article
+                  key={host.id + ":" + index}
+                  className={cn(
+                    "library-host-card",
+                    active && "is-selected",
+                    blocked && "needs-attention",
+                  )}
+                >
+                  <button
+                    type="button"
+                    className="library-host-summary"
+                    aria-pressed={active}
+                    disabled={
+                      disabled || ambiguous || (selecting && !canOrganize(host))
+                    }
+                    onClick={() => openHost(host)}
+                    onKeyDown={(e) => {
+                      if (isImeKey(e)) return;
+                      if (e.key === "Enter" && !selecting && connect) {
+                        e.preventDefault();
+                        connectHost(host);
+                      }
+                    }}
+                  >
+                    <span className="library-server-icon">
+                      {selecting ? (
+                        checked.has(host.id) ? (
+                          <Check className="size-5" />
+                        ) : (
+                          <span className="size-4 rounded border border-current" />
+                        )
+                      ) : (
+                        <Server className="size-5" />
+                      )}
+                    </span>
+                    <span className="library-host-identity">
+                      <strong title={name}>{name}</strong>
+                      <span className="library-host-address" title={target}>
+                        {target}
+                      </span>
+                    </span>
+                    <span className="library-host-meta">
+                      <span className="library-host-user">
+                        {user || "Default user"}
+                        <span>:{host.effective_payload.port}</span>
+                      </span>
+                      {showTags && !!host.payload.tags.length && (
+                        <span className="library-host-tags">
+                          {host.payload.tags.slice(0, 3).map((tag) => (
+                            <span key={tag}>{revealHidden(tag)}</span>
+                          ))}
+                        </span>
+                      )}
+                    </span>
+                    {blocked && (
+                      <span className="library-host-warning">
+                        {ambiguous
+                          ? "Conflicting host ID"
+                          : host.group_error
+                            ? "Needs review"
+                            : readinessLabel[host.readiness.kind]}
+                      </span>
+                    )}
+                  </button>
+                  {!selecting && (
+                    <div className="library-host-actions">
+                      <span className="library-protocol">SSH</span>
+                      {connect && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          aria-label={"Connect to " + name}
+                          disabled={disabled || !!connectingId || blocked}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            connectHost(host);
+                          }}
+                        >
+                          {connectingId === host.id ? "Opening…" : "Connect"}
+                          <ArrowUpRight className="size-3.5" />
+                        </Button>
+                      )}
+                      {edit && (
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={"Edit " + name}
+                          disabled={disabled || ambiguous}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            edit(host.id);
+                          }}
+                        >
+                          <Pencil className="size-3.5" />
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+          {!hosts.length && (
+            <div className="library-empty">
+              <div>
+                <Server className="size-7" />
+              </div>
+              <h2>
+                {search.trim()
+                  ? "No matching hosts"
+                  : filter.kind === "recent"
+                    ? "Your next connection starts here"
+                    : filter.kind === "attention"
+                      ? "All hosts are ready"
+                      : "No hosts here yet"}
+              </h2>
+              <p>
+                {search.trim()
+                  ? "Try another name, address, username or tag."
+                  : filter.kind === "recent"
+                    ? "Open a connection and it will appear here for quick access."
+                    : filter.kind === "attention"
+                      ? "There are no connection settings or keys to review."
+                      : "Add a server or bring your connections from an SSH config."}
+              </p>
+              {search.trim() ? (
+                <Button variant="outline" onClick={() => setSearch("")}>
+                  Clear search
+                </Button>
+              ) : filter.kind === "recent" || filter.kind === "attention" ? (
+                <Button
+                  variant="outline"
+                  onClick={() => changeFilter?.({ kind: "all" })}
+                >
+                  Browse all hosts
+                </Button>
+              ) : (
+                <div className="flex gap-2">
+                  {create && (
+                    <Button onClick={create}>
+                      <Plus className="size-4" />
+                      New host
+                    </Button>
+                  )}
+                  {importHosts && (
+                    <Button variant="outline" onClick={importHosts}>
+                      Import hosts
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+        {filter.kind === "all" &&
+          roots.some((root) => root.diagnostics.length) && (
+            <section className="mt-6">
+              <div className="library-section-label">Groups to review</div>
+              {roots
+                .flatMap((root) => root.diagnostics)
+                .map(({ group, error }, at) => (
+                  <button
+                    key={group.id + ":" + at}
+                    className="mb-2 block w-full rounded-lg border p-3 text-left text-sm"
+                    disabled={
+                      disabled ||
+                      !selectGroup ||
+                      !uniqueGroup(overview.groups, group.id)
+                    }
+                    onClick={() => selectGroup?.(group.id)}
+                  >
+                    <strong>{revealHidden(group.payload.name)}</strong>
+                    <span className="mt-1 block text-xs text-destructive">
+                      {revealHidden(error)}
+                    </span>
+                  </button>
+                ))}
+            </section>
+          )}
       </div>
       {accept && selecting && (
         <CollectionActions
