@@ -7,14 +7,12 @@ import {
   Bot,
   ChevronDown,
   Cloud,
-  Command,
   MoreHorizontal,
   RotateCw,
   Search,
   Settings,
   SunMoon,
   Terminal,
-  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SettingsDialog } from "@/components/SettingsDialog";
@@ -498,13 +496,12 @@ export function RecordsWorkspace({
           showCloseButton={false}
           className={cn(
             "library-editor-dialog",
-            isGroupEditor ? "library-group-dialog sm:max-w-xl" : "sm:max-w-3xl",
+            isGroupEditor ? "library-group-dialog sm:max-w-xl" : "library-host-dialog sm:max-w-2xl",
           )}
           onOpenAutoFocus={(event) => {
-            if (!isGroupEditor) return;
             const name =
               editorRef.current?.querySelector<HTMLInputElement>(
-                "[data-group-name]",
+                isGroupEditor ? "[data-group-name]" : "[data-host-alias]",
               );
             if (name && !name.matches(":disabled")) {
               event.preventDefault();
@@ -522,28 +519,11 @@ export function RecordsWorkspace({
               </DialogDescription>
             </>
           )}
-          {!isGroupEditor && (
-            <div className="library-editor-topline">
-              <span>
-                <Command className="size-3.5" />
-                Connection settings
-              </span>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Close editor"
-                disabled={editorBusy}
-                onClick={() => requestSelection({ kind: "none" })}
-              >
-                <X className="size-4" />
-              </Button>
-            </div>
-          )}
           <div
             className={
               isGroupEditor
                 ? "library-group-editor-container"
-                : "library-editor-scroll"
+                : "library-host-editor-container"
             }
           >
             {selection.kind === "group" || selection.kind === "new_group" ? (

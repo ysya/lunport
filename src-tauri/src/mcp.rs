@@ -28,6 +28,7 @@ use crate::state::AppState;
 
 pub(crate) mod records;
 mod adapter;
+mod management;
 pub use records::RequestContext;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -73,6 +74,9 @@ struct RuntimeInfo {
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct McpPendingRequest {
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub host_proposal: Option<McpHostProposal>,
     #[serde(default)] pub host_id: Option<String>,
     #[serde(default)] pub route: Vec<String>,
     #[serde(default)] pub requested_by: Vec<String>,
@@ -136,6 +140,13 @@ struct PendingApproval {
     deadline: InteractionDeadline,
     request: McpPendingRequest,
     decision: mpsc::SyncSender<ApprovalDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct McpHostProposal {
+    pub settings: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1269,7 +1280,7 @@ pub fn run_stdio() {
         }
         if method=="tools/list" && message.get("id").is_some(){
             let mode=adapter::ipc_call("mode",json!({}),&info,&adapter::Call::default());
-            let response=match mode {Ok(v)=>{let mut tools=tool_definitions();if v["mode"]=="records" {tools[1]["name"]=json!("get_host");tools[2]["name"]=json!("ssh_exec");tools[2]["description"]=json!("Run a remote command under the current SSHelter Ask or Auto-log policy.");}json!({"jsonrpc":"2.0","id":message["id"],"result":{"tools":tools}})},Err(e)=>jsonrpc_error(message["id"].clone(),-32000,e)};
+            let response=match mode {Ok(v)=>json!({"jsonrpc":"2.0","id":message["id"],"result":{"tools":tools_for_mode(v["mode"].as_str().unwrap_or("legacy"))}}),Err(e)=>jsonrpc_error(message["id"].clone(),-32000,e)};
             if !write_mcp_response(&response){break;}continue;
         }
         if let Some(response)=handle_mcp_message(message){if !write_mcp_response(&response){break;}}
@@ -1304,7 +1315,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "sshelter", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "SSHelter exposes only hosts explicitly allowed in its AI Access settings. Records commands follow the Ask or Auto-log policy configured by the user. Never ask for or send passwords, passphrases, private keys, or secrets in command arguments."
+                "instructions": "Existing hosts are exposed only when individually allowed in SSHelter AI Access. Records create_host always needs native human approval and never grants AI access. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log never silently trusts keys or requests credentials. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -1371,6 +1382,17 @@ fn tool_definitions() -> Value {
             "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true }
         }
     ])
+}
+
+fn tools_for_mode(mode: &str) -> Value {
+    let mut tools = tool_definitions();
+    if mode == "records" {
+        tools[1]["name"] = json!("get_host");
+        tools[2]["name"] = json!("ssh_exec");
+        tools[2]["description"] = json!("Run a remote command under the current SSHelter Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.");
+        tools.as_array_mut().unwrap().extend(management::tool_definitions());
+    }
+    tools
 }
 
 fn call_tool(params: &Value, request_id: Option<&str>) -> Value {

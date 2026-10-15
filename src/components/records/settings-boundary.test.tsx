@@ -61,7 +61,7 @@ describe("records settings compatibility", () => {
       if (category === "ai") {
         expect(text(html)).toContain("MCP");
         expect(text(html)).toContain(
-          "execute commands on individually allowed hosts",
+          "Existing hosts require individual permission",
         );
         expect(html).toContain("mcp-host-0000000000000001");
       }

@@ -25,37 +25,49 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
   const deny = useRef<HTMLButtonElement>(null);
   useEffect(() => { deny.current?.focus(); }, [request.id]);
   const endpoint = `${request.user ? `${revealHidden(request.user)}@` : ""}${revealHidden(request.hostname ?? request.alias)}${request.port ? `:${request.port}` : ""}`;
+  const proposal = request.host_proposal;
 
   return (
     <>
       <DialogHeader>
         <ShieldAlert className="size-5 text-amber-600 dark:text-amber-400" />
-        <DialogTitle>Allow this AI SSH command?</DialogTitle>
+        <DialogTitle>{proposal ? "Add this SSH host?" : "Allow this AI SSH command?"}</DialogTitle>
         <DialogDescription>
-          SSHelter will run this command once. Review the complete command and resolved target; the MCP client cannot approve it.
+          {proposal
+            ? "Review these connection settings before saving. This does not connect, trust a server key or grant AI access. The MCP client cannot approve this request."
+            : "SSHelter will run this command once. Review the complete command and resolved target; the MCP client cannot approve it."}
         </DialogDescription>
       </DialogHeader>
       <div className="min-h-0 space-y-3 overflow-y-auto break-all">
         <div className="space-y-1 rounded-lg border bg-muted/30 px-3 py-2 text-xs">
-          <p>Host: {revealHidden(request.alias)} · ID: {request.host_id ?? "Legacy alias"}</p>
+          <p>Host: {revealHidden(request.alias)} · {proposal ? "New record · AI access remains off" : `ID: ${request.host_id ?? "Legacy alias"}`}</p>
           <p>Resolved: {endpoint}</p>
-          <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>
+          {!proposal && <p>Route: {request.route.length ? request.route.map(revealHidden).join(" → ") : "Direct"}</p>}
           <McpAttribution requestedBy={request.requested_by} requesterId={request.requester_id} clientInfo={request.client_info} />
         </div>
-        <div className="space-y-1.5">
+        {proposal ? (
+          <dl className="space-y-2 rounded-lg border p-3 text-xs">
+            {proposal.settings.map(([label, value]) => (
+              <div key={label} className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3">
+                <dt className="text-muted-foreground">{revealHidden(label)}</dt>
+                <dd className="min-w-0 break-words">{revealHidden(value || "None")}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : <div className="space-y-1.5">
           <p className="text-xs font-medium text-muted-foreground">Remote command</p>
           <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100">
             {request.command}
           </pre>
-        </div>
+        </div>}
         <p className="text-xs text-muted-foreground">
-          Review pipes, redirects and nested shell syntax. Requests expire after 120 seconds; changed targets require fresh approval.
+          {proposal ? "Only public connection information is saved. Passwords and private keys are not accepted. Requests expire after 120 seconds; changed settings require fresh approval." : "Review pipes, redirects and nested shell syntax. Requests expire after 120 seconds; changed targets require fresh approval."}
         </p>
         {expired && <p role="alert" className="text-xs text-destructive">This request expired. Ask the client to start a fresh request.</p>}
       </div>
       <DialogFooter>
         <Button autoFocus ref={deny} variant="outline" disabled={busy} onClick={() => onAnswer(false)}>Deny</Button>
-        <Button disabled={busy || !armed || expired} onClick={() => onAnswer(true)}>{busy ? "Sending…" : "Allow once"}</Button>
+        <Button disabled={busy || !armed || expired} onClick={() => onAnswer(true)}>{busy ? "Sending…" : proposal ? "Add host" : "Allow once"}</Button>
       </DialogFooter>
     </>
   );

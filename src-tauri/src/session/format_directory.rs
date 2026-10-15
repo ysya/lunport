@@ -30,6 +30,7 @@ impl FormatDirectory {
     }
 }
 impl HostDirectory for FormatDirectory {
+    fn resolve_host_key(&self,q:&HostQuery)->Result<Target,DirectoryError>{self.with_active(|d|d.resolve_host_key(q))}
     fn resolve_public(&self,q:&HostQuery)->Result<Target,DirectoryError>{self.with_active(|d|d.resolve_public(q))}
     fn resolve(&self, q: &HostQuery) -> Result<Target, DirectoryError> {
         self.with_active(|d| d.resolve(q))

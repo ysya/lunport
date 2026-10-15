@@ -53,6 +53,24 @@ describe("MCP command review", () => {
     expect(disabled(html, "Deny")).toBe(false);
     expect(disabled(renderReview({ expired: true }), "Allow once")).toBe(true);
   });
+
+  it("reviews host creation with complete settings, no implicit access, and delayed consent", () => {
+    const proposed = { ...request, command: "", host_proposal: { settings: [
+      ["Alias", "new-web"], ["Hostname", "127.0.0.1"], ["Port", "2222"],
+      ["Storage", "This device's library"], ["Tags", "<untrusted>"],
+    ] as [string, string][] } };
+    const html = renderReview({ request: proposed });
+    expect(html).toContain("Add this SSH host?");
+    expect(html).toContain("AI access remains off");
+    expect(html).toContain("127.0.0.1");
+    expect(html).toContain("2222");
+    expect(html).toContain("&lt;untrusted&gt;");
+    expect(html).not.toContain("Remote command");
+    expect(disabled(html, "Add host")).toBe(false);
+    expect(disabled(renderReview({ request: proposed, armed: false }), "Add host")).toBe(true);
+    expect(disabled(renderReview({ request: proposed, expired: true }), "Add host")).toBe(true);
+    expect(disabled(html, "Deny")).toBe(false);
+  });
 });
 
 describe("native authentication rendering", () => {

@@ -312,10 +312,41 @@ export async function joinRecordAccount(
     ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
   });
 }
+export type LibraryRename = { kind: "host" | "group"; id: string; name: string };
+export type LibrarySyncPreview = {
+  token: string;
+  conflicts: Array<{
+    kind: "host" | "group";
+    id: string;
+    current_name: string;
+    suggested_name: string;
+  }>;
+  local_hosts: number;
+  local_groups: number;
+};
+export function previewLibrarySync(): Promise<LibrarySyncPreview> {
+  return tauriInvoke("records_library_preview");
+}
+export type VerifiedServerIdentity = {
+  host_id: string;
+  alias: string;
+  hostname: string;
+  port: number;
+  algorithm: string;
+  fingerprint: string;
+  trusted: boolean;
+};
+export function verifyRecordHostKey(id: string): Promise<{ identity: VerifiedServerIdentity; overview: RecordOverview }> {
+  return tauriInvoke("records_host_verify_key", { id });
+}
 export function enableLibrarySync(
   upgradeConfirmed: boolean,
+  review?: { token: string; renames: LibraryRename[] },
 ): Promise<RecordOverview> {
-  return tauriInvoke("records_library_enable", { upgradeConfirmed });
+  return tauriInvoke("records_library_enable", {
+    upgradeConfirmed,
+    ...(review ? { review } : {}),
+  });
 }
 export function setRecordHostGroup(
   id: string,

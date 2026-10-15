@@ -316,6 +316,8 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::record_commands::records_set_relay_url,
             sync::record_commands::records_account_words,
             sync::record_commands::records_account_create,
+            sync::record_commands::records_library_preview,
+            sync::record_commands::records_host_verify_key,
             sync::record_commands::records_library_enable,
             sync::record_commands::records_account_join,
             sync::record_commands::records_account_resume,

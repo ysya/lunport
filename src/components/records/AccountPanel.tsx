@@ -6,16 +6,21 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   applyRecordOverview,
   enableLibrarySync,
+  previewLibrarySync,
   recordAccountWords,
   resumeRecordAccount,
   setRecordRelayUrl,
   type RecordOverview,
+  type LibrarySyncPreview,
+  type LibraryRename,
 } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { clearAccountDraft, submitAccountDraft } from "./panel-actions";
 import { RecordField } from "./form";
 import { RecordsMigrationPanel } from "./MigrationPanel";
 import { RecordsAccountLifecyclePanel } from "./AccountLifecyclePanel";
+import { LibrarySyncReview } from "./LibrarySyncReview";
+import { librarySyncError, suggestedLibraryRenames } from "./library-sync";
 
 export function RecordsAccountPanel({
   overview,
@@ -30,6 +35,8 @@ export function RecordsAccountPanel({
   const [mode, setMode] = useState<"create" | "join" | null>(null);
   const [draft, setDraft] = useState(clearAccountDraft);
   const [upgradeConfirmed, setUpgradeConfirmed] = useState(false);
+  const [libraryReview, setLibraryReview] = useState<LibrarySyncPreview | null>(null);
+  const [libraryRenames, setLibraryRenames] = useState<LibraryRename[]>([]);
   const pendingRecords = [...overview.hosts, ...overview.groups].filter(
     (row) => row.scope.kind === "local",
   ).length;
@@ -80,7 +87,7 @@ export function RecordsAccountPanel({
   };
   const run = async (
     operation: () => Promise<void>,
-    failureMessage?: string,
+    failureMessage?: string | ((error: unknown) => string),
   ) => {
     if (inFlight.current || lifecycleBusy) return;
     inFlight.current = true;
@@ -88,9 +95,9 @@ export function RecordsAccountPanel({
     setError(null);
     try {
       await operation();
-    } catch {
+    } catch (error) {
       setError(
-        failureMessage ??
+        (typeof failureMessage === "function" ? failureMessage(error) : failureMessage) ??
           "Could not update sync settings. Refresh and retry the pending setup if one is listed.",
       );
     } finally {
@@ -98,6 +105,20 @@ export function RecordsAccountPanel({
       setBusy(false);
     }
   };
+  const prepareLibrary = (refreshOnly = false) => run(async () => {
+    const preview = await previewLibrarySync();
+    if (preview.conflicts.length || refreshOnly) {
+      setLibraryReview(preview);
+      setLibraryRenames(suggestedLibraryRenames(preview));
+      return;
+    }
+    applyRecordOverview(client, await enableLibrarySync(upgradeConfirmed, { token: preview.token, renames: [] }));
+  }, librarySyncError);
+  const includeReviewedLibrary = () => run(async () => {
+    if (!libraryReview) return;
+    applyRecordOverview(client, await enableLibrarySync(upgradeConfirmed, { token: libraryReview.token, renames: libraryRenames }));
+    setLibraryReview(null);
+  }, librarySyncError);
   const resume = () =>
     run(async () => {
       const result = await resumeRecordAccount(draft.words || undefined);
@@ -135,6 +156,7 @@ export function RecordsAccountPanel({
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-6">
+      {libraryReview && <LibrarySyncReview preview={libraryReview} renames={libraryRenames} setRenames={setLibraryRenames} busy={busy} error={error} confirm={includeReviewedLibrary} refresh={() => prepareLibrary(true)} cancel={() => { setLibraryReview(null); setError(null); }} />}
       <header className="space-y-2">
         <h1 className="text-lg font-semibold">Sync</h1>
         <p className="text-sm text-muted-foreground">
@@ -394,7 +416,7 @@ export function RecordsAccountPanel({
               : "Sync changes are paused. Review account settings to continue."}
         </p>
       )}
-      {error && (
+      {error && !libraryReview && (
         <p role="alert" className="text-sm text-destructive">
           {error}
         </p>
@@ -430,14 +452,7 @@ export function RecordsAccountPanel({
                   overview.shared_writes_blocked ||
                   (needsUpgrade && !upgradeConfirmed)
                 }
-                onClick={() =>
-                  run(async () => {
-                    applyRecordOverview(
-                      client,
-                      await enableLibrarySync(upgradeConfirmed),
-                    );
-                  }, "The library could not be included. Review duplicate host or Group names and unavailable sync data, then retry. Existing records have been kept.")
-                }
+                onClick={() => prepareLibrary()}
               >
                 {overview.library_enabled
                   ? "Include remaining records"

@@ -63,6 +63,16 @@ pub trait HostDirectory: Send + Sync {
     /// Public resolution for approval and noninteractive connections. Implementations must not read private material here.
     fn resolve_public(&self, query:&HostQuery)->Result<Target,DirectoryError>{self.resolve(query)}
 
+    /// Handshake-only identity verification must not require destination login credentials.
+    /// Jump hosts still require their normal credentials to reach the destination.
+    fn resolve_host_key(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+        let mut target = self.resolve_public(query)?;
+        if let Some(last) = target.hops.last_mut() {
+            last.auth = crate::ssh::AuthMethod::Interactive;
+        }
+        Ok(target)
+    }
+
     /// The key pinned for `host`, if any. An error reading the pins is `Err`, never "nothing pinned": a host that was pinned must not
     /// look new because a file could not be read.
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError>;

@@ -21,15 +21,23 @@ fn live(cancel: &CancelToken) -> Result<(), AppError> {
     }
 }
 /// Pure current-snapshot identity: scope, effective route, revisions and authoritative key metadata.
-fn identity(
-    state: &SyncStateV3,
-    id: &str,
-) -> Result<(Vec<repo::HostView>, Vec<repo::KeyView>), AppError> {
+type PinIdentity = (Vec<repo::HostView>, Vec<(String, Option<repo::KeyView>)>);
+fn identity(state: &SyncStateV3, id: &str) -> Result<PinIdentity, AppError> {
     let route = repo::resolve_host_chain(state, id).map_err(failed)?;
     let keys = route
         .iter()
         .filter_map(|host| host.effective_payload.key_id.as_deref())
-        .map(|id| repo::resolve_key(state, id).map_err(failed))
+        .map(|id| {
+            // A handshake-only probe may verify an endpoint before its login key is
+            // installed. Bind the missing identity too: adding or replacing its
+            // public metadata during approval must invalidate this snapshot.
+            let key = match repo::resolve_key(state, id) {
+                Ok(key) => Some(key),
+                Err(repo::RepositoryError::KeyNotFound(_)) => None,
+                Err(error) => return Err(failed(error)),
+            };
+            Ok((id.to_owned(), key))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((route, keys))
 }
@@ -132,4 +140,110 @@ pub(crate) fn confirm(
     }
     env.events.wake();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::{
+        fake_relay::FakeRelay,
+        records_v3::HostPayload,
+        testkit::{TestClock, TestDevice},
+    };
+    const HOST: &str = "0000000000000001";
+    fn device() -> TestDevice {
+        let d = TestDevice::new("pin-probe", &FakeRelay::new(), &TestClock::new());
+        let record_runtime::StartupProbe::Records { state, .. } =
+            record_runtime::probe_startup(&d.env().state_path, "pin-probe")
+        else {
+            panic!("records")
+        };
+        record_runtime::activate_probe(
+            &mut d.runtime.core.lock().unwrap(),
+            record_runtime::StartupProbe::Records {
+                state,
+                fresh: false,
+            },
+        )
+        .unwrap();
+        record_runtime::mutate_records(&d.env(),|s|{
+            let payload:HostPayload=serde_json::from_value(serde_json::json!({"schema":2,"alias":"web","hostname":"fixture.invalid","auth":"key","key_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})).unwrap();
+            repo::create_host(s,HOST,HostScope::Local,payload,1).map_err(failed)
+        }).unwrap();
+        d
+    }
+    fn hop() -> HopRef {
+        HopRef {
+            id: crate::ssh::HostId::from(HOST),
+            alias: "web".into(),
+            hostname: "fixture.invalid".into(),
+            port: 22,
+            user: "ops".into(),
+        }
+    }
+    #[test]
+    fn a_verified_endpoint_can_be_pinned_before_its_login_key_is_installed() {
+        let d = device();
+        let env = d.env();
+        let key = crate::ssh::fake::default_server_key();
+        confirm(
+            &env,
+            &hop(),
+            None,
+            &key,
+            &d.keychain,
+            &CancelToken::default(),
+            &|| Ok(()),
+        )
+        .unwrap();
+        let state = record_runtime::snapshot(&env).unwrap().0;
+        let saved = repo::get_host(&state, HOST).unwrap();
+        assert_eq!(
+            saved.host.payload.host_key.unwrap().fingerprint,
+            key.fingerprint
+        );
+        assert!(matches!(saved.readiness, repo::HostReadiness::NeedsKey(_)));
+    }
+    #[test]
+    fn canceled_or_changed_probe_never_commits_an_endpoint_pin() {
+        for change in [true, false] {
+            let d = device();
+            let env = d.env();
+            let cancel = CancelToken::default();
+            let count = std::sync::atomic::AtomicUsize::new(0);
+            let result = confirm(
+                &env,
+                &hop(),
+                None,
+                &crate::ssh::fake::default_server_key(),
+                &d.keychain,
+                &cancel,
+                &|| {
+                    if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        if change {
+                            crate::sync::record_commands::edit_records(&env, |s, now| {
+                                let view = repo::get_host(s, HOST).map_err(failed)?;
+                                let mut payload = view.host.payload;
+                                payload.hostname = "changed.invalid".into();
+                                repo::update_host(s, HOST, &view.revision, payload, now)
+                                    .map_err(failed)
+                            })
+                            .unwrap();
+                        } else {
+                            cancel.cancel();
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            let state = record_runtime::snapshot(&env).unwrap().0;
+            assert!(repo::get_host(&state, HOST)
+                .unwrap()
+                .host
+                .payload
+                .host_key
+                .is_none());
+        }
+    }
 }

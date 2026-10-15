@@ -128,7 +128,7 @@ fn new_host_payload(mut payload: HostPayload) -> HostPayload {
     payload.host_key = None;
     payload
 }
-fn new_host_id() -> Result<String, AppError> {
+pub(crate) fn new_host_id() -> Result<String, AppError> {
     let mut bytes = [0u8; 8];
     getrandom::fill(&mut bytes).map_err(|_| AppError::Other("cannot create host id".into()))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
@@ -321,7 +321,10 @@ pub fn overview(env: &SyncEnv) -> Result<RecordOverview, AppError> {
         core.generation,
         core.account_keys.as_ref(),
     )?;
-    overview.syncing = env.runtime.syncing.load(std::sync::atomic::Ordering::SeqCst);
+    overview.syncing = env
+        .runtime
+        .syncing
+        .load(std::sync::atomic::Ordering::SeqCst);
     Ok(overview)
 }
 pub fn status(app: &AppHandle) -> Result<RecordStatus, AppError> {
@@ -390,7 +393,9 @@ async fn edit(
 ) -> Result<RecordOverview, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| edit_records(env, transform))?
-    }).await.map_err(crate::sync::engine::join_error)?
+    })
+    .await
+    .map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
 pub async fn records_group_create(
@@ -441,7 +446,8 @@ pub async fn records_group_delete(
 ) -> Result<RecordOverview, AppError> {
     let revision = revision.revision()?;
     edit(app, move |s, now| {
-        crate::sync::record_groups::delete_group(s, &id, &revision, snapshot_token.as_deref(), now).map_err(error)
+        crate::sync::record_groups::delete_group(s, &id, &revision, snapshot_token.as_deref(), now)
+            .map_err(error)
     })
     .await
 }
@@ -715,18 +721,87 @@ pub async fn records_account_resume(
     .map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
-pub async fn records_library_enable(
+pub async fn records_library_preview(
     app: AppHandle,
-    upgrade_confirmed: bool,
-) -> Result<RecordOverview, AppError> {
+) -> Result<
+    crate::sync::record_library::review::LibraryPreview,
+    crate::sync::record_library::review::LibraryFailure,
+> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_library::enable(env, upgrade_confirmed)?;
-            overview(env)
-        })?
+        crate::sync::engine::with_env(&app, crate::sync::record_library::prepare)?
+    })
+    .await
+    .map_err(|_| {
+        crate::sync::record_library::review::LibraryFailure::new(
+            "unavailable",
+            "Library sync could not finish checking this workspace. Retry when it is available.",
+        )
+    })?
+}
+
+#[derive(Serialize)]
+pub struct HostKeyVerificationReply {
+    identity: crate::session::verify::VerifiedHostKey,
+    overview: RecordOverview,
+}
+#[tauri::command]
+pub async fn records_host_verify_key(
+    app: AppHandle,
+    id: String,
+) -> Result<HostKeyVerificationReply, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::state::AppState>();
+        let broker = state
+            .session
+            .broker
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                AppError::Other("The SSH broker is unavailable. Restart SSHelter and retry.".into())
+            })?;
+        let cancel = crate::session::connect::CancelToken::default();
+        let _active = broker.register_deployment(cancel.clone()).map_err(error)?;
+        let owner = crate::session::auth_window::NativeOwner {
+            hub: state.session.auth_questions.clone(),
+            surface: std::sync::Arc::new(crate::session::auth_window::TauriAuthSurface {
+                app: app.clone(),
+            }),
+            request_id: format!("verify-{}", new_host_id()?),
+            cancel: cancel.clone(),
+        };
+        let identity = crate::session::verify::verify(
+            &broker.connector(),
+            &crate::session::protocol::HostQuery::Id(id),
+            &owner,
+            &cancel,
+        )
+        .map_err(error)?;
+        let overview = crate::sync::engine::with_env(&app, overview)??;
+        Ok(HostKeyVerificationReply { identity, overview })
     })
     .await
     .map_err(crate::sync::engine::join_error)?
+}
+#[tauri::command]
+pub async fn records_library_enable(
+    app: AppHandle,
+    upgrade_confirmed: bool,
+    review: Option<crate::sync::record_library::review::LibraryReview>,
+) -> Result<RecordOverview, crate::sync::record_library::review::LibraryFailure> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::sync::engine::with_env(&app, |env| {
+            crate::sync::record_library::enable_reviewed(env, upgrade_confirmed, review.as_ref())?;
+            overview(env).map_err(Into::into)
+        })?
+    })
+    .await
+    .map_err(|_| {
+        crate::sync::record_library::review::LibraryFailure::new(
+            "unavailable",
+            "Library sync could not finish updating this workspace. Retry when it is available.",
+        )
+    })?
 }
 #[tauri::command]
 pub async fn records_space_create(
