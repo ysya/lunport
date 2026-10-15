@@ -67,7 +67,7 @@ export function SidebarResizeHandle({ sidebarRef }: { sidebarRef: RefObject<HTML
     <div
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize sidebar"
+      aria-label="Resize collection"
       aria-valuemin={MIN_SIDEBAR_WIDTH}
       aria-valuemax={MAX_SIDEBAR_WIDTH}
       aria-valuenow={width}

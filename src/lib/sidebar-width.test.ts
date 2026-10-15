@@ -86,9 +86,9 @@ describe("the stored sidebar width", () => {
     return { store, items };
   }
 
-  it("starts at the former fixed width", () => {
+  it("starts with room for collection tools", () => {
     expect(useUiStore.getInitialState().sidebarWidth).toBe(DEFAULT_SIDEBAR_WIDTH);
-    expect(DEFAULT_SIDEBAR_WIDTH).toBe(16);
+    expect(DEFAULT_SIDEBAR_WIDTH).toBe(24);
   });
 
   it("is clamped when set", () => {
