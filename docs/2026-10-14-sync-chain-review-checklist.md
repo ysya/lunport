@@ -2,6 +2,8 @@
 
 本輪完成範圍：own SSH phase 1c 的 active records runtime，以及可操作的最小切換介面。功能分支 `codex/own-ssh-phase1c` 已依使用者 2026-10-14 的指示合併至 `next/own-ssh`，最初發布 `v1.0.0-1` beta；後續介面、設定與主機信任確認修正已發布為 `v1.0.0-2`。
 
+後續 Groups、Records MCP 執行與公鑰部署已完成並通過原生 CI；Beta 3 尚未發布，遠端接手請讀 [2026-10-15 接手文件](2026-10-15-beta3-remote-handoff.md) 與 [Beta 3 清單](releases/1.0.0-3-review-checklist.md)。以下保留 Beta 1／2 的歷史驗證。
+
 ## 設計方向
 
 沿用你要的 sync chain 體驗：不需要信箱或登入服務，以 24 個單字的同步碼加入同一組裝置。這裡的 chain 是同步鏈。
@@ -47,7 +49,7 @@
 - 已依使用者授權合併、推送並發布 beta；跨平台 CI、Windows 安裝包驗證與 publish beta workflow 全部成功。
 - 已合併到 `next/own-ssh`；Stable 正式發版、真實帳戶遷移及正式 relay 部署尚未執行。
 - macOS／Linux／Windows 原生 CI 已通過，包含 Linux PAM、Windows 實際 OpenSSH 與 debug／Production console。四平台的最佳化 beta 安裝包建置成功；真實使用者裝置更新與資料遷移驗收仍待進行。
-- Records 模式的 MCP 遠端執行與 key deployment 留在 phase 2；目前入口明確回報不可用。Legacy 原有功能依模式保留。
+- Beta 1／2 當時未提供 Records MCP 遠端執行與 key deployment；兩者現已於 Beta 3 待發布來源完成，詳見接手文件。Legacy 原有功能依模式保留。
 - 本輪是同步與切換基礎完成，不代表 Termius 所有功能已具備。
 
 ## 本輪決策
@@ -80,11 +82,11 @@ Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0
 - [x] 補回設定選單、MCP 入口、常用偏好與快捷選單；設定分類不載入舊 SSH config。
 - [x] MCP 主機授權改用 stable ID，支援主機清單與連線資訊。撤銷權限不等待執行鎖。
 - [x] 確認線上 relay 為 0.2.0，支援 pull-batch、freeze；本次不需更新。
-- [ ] Records MCP 遠端指令執行與 key deployment 仍未完成；不是補回介面就代表可用。
+- [x] 後續 Beta 3 原始碼已完成 Records MCP `ssh_exec` 與公鑰部署；原生 CI 全成功，尚待 Beta 3 發布。
 - [x] 1.0.0-2 跨平台 CI、四平台 beta 安裝包、發布及 manifest 核對全部通過。
 
 - [x] 主機信任確認改為資訊卡：endpoint、key type、完整指紋可複製，金鑰變更可比對新舊值；預設焦點在取消／拒絕，信任延遲不變。
-- [ ] Group 尚未實作：建議 Local／Space → 可巢狀 Group → Host，主機可覆寫群組預設並顯示來源；tags 提供交叉篩選。移動群組不暗中切換同步範圍，刪除群組預設保留主機。參考 [Termius 官方資料模型](https://docs.termius.com/getting-started/what-is-termius)。
+- [x] 後續 Beta 3 原始碼已完成 Local／Space → 巢狀 Group → Host、逐欄位繼承／來源與覆寫、刪除保留主機設定及過期確認防護；跨範圍搬移保留有效設定。現有 tags 保留，不代表新增所有 Termius 群組功能。
 
 新版下載：[v1.0.0-2](https://github.com/ysya/sshelter/releases/tag/v1.0.0-2)。來源 `07e669a7682b4550d006e9e3ee6e1523502be424` 與最後 CI 相同；共 20 個已上傳且非空的 assets，15 個 manifest platform entries 指向存在且非空的資產，Release 與 Beta manifest 一致。Stable 維持 `v0.16.0`。完整紀錄：[1.0.0-2 validation](releases/1.0.0-2-validation.md)。
 

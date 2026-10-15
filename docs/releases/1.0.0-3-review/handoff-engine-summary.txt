@@ -1,0 +1,13 @@
+linux	Complete safe Rust suite against a scratch sshd	2026-10-15T03:57:26.1549627Z test session::deploy::ssh_tests::real_ssh_installer_preserves_bytes_is_idempotent_and_refuses_symlinks ... ok
+linux	Complete safe Rust suite against a scratch sshd	2026-10-15T03:58:41.8751115Z test result: ok. 2544 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 93.58s
+linux	Profile selection in the normal library	2026-10-15T03:59:09.4407773Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Profile selection in the normal library	2026-10-15T03:59:33.4458200Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+linux	Profile selection in the normal library	2026-10-15T04:00:03.2765870Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Password and keyboard-interactive tests against the container	2026-10-15T04:00:49.8235233Z test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 2547 filtered out; finished in 5.45s
+macos	Complete safe Rust suite	2026-10-15T03:57:30.4593190Z test session::deploy::ssh_tests::real_ssh_installer_preserves_bytes_is_idempotent_and_refuses_symlinks ... ok
+macos	Complete safe Rust suite	2026-10-15T03:59:08.5716810Z test result: ok. 2544 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 119.43s
+macos	Profile selection in the normal library	2026-10-15T03:59:36.9507280Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+macos	Profile selection in the normal library	2026-10-15T04:00:09.9517090Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+macos	Profile selection in the normal library	2026-10-15T04:00:44.3155300Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+frontend	Run pnpm test	2026-10-15T03:55:08.0985346Z ^[[2m Test Files ^[[22m ^[[1m^[[32m74 passed^[[39m^[[22m^[[90m (74)^[[39m
+frontend	Run pnpm test	2026-10-15T03:55:08.0991819Z ^[[2m      Tests ^[[22m ^[[1m^[[32m1006 passed^[[39m^[[22m^[[90m (1006)^[[39m

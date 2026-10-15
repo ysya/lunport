@@ -40,7 +40,7 @@
 
 **Produces:** Exported Group payload/defaults/record/view types; `RecordOverview.groups`, format-upgrade flags; `HostView.effective_payload`, `inherited_from`, `group_error`; repository Group CRUD and effective resolution; `records_group_create(scope,payload,upgrade_confirmed)`, `records_group_update(id,revision,payload)`, `records_group_delete(id,revision)` returning overview. Existing host create/update add optional `upgrade_confirmed: Option<bool>` (missing means false) and use the same protected promotion path for first inheritance. `HostPayload.group_id` and `inherit` use the spec's names. Detail any justified API adjustment in the task report before frontend implementation.
 
-- [ ] Step 1: Add behavioral tests using JSON fixtures so existing Rust literals are not needed for RED. Assert literal effective values/provenance for parent user `ops`, child port `2222`, host override keepalive `10`. Test missing/opaque ancestor, cycles and same-scope validation. Run `cargo test --offline --locked --lib group` and retain RED log; a missing function/field is an expected feature failure, unrelated syntax/type errors are not evidence.
+- [x] Step 1: Add behavioral tests using JSON fixtures so existing Rust literals are not needed for RED. Assert literal effective values/provenance for parent user `ops`, child port `2222`, host override keepalive `10`. Test missing/opaque ancestor, cycles and same-scope validation. Run `cargo test --offline --locked --lib group` and retain RED log; a missing function/field is an expected feature failure, unrelated syntax/type errors are not evidence.
 
 ```rust
 // Desired boundary contract, implemented in record_groups.rs:
@@ -51,11 +51,11 @@
 // Mutating inheritance precedence or flattening raw host values must fail this test.
 ```
 
-- [ ] Step 2: Implement Group types/codec/validation and old/new format support. Add Group kind and Local groups, schema-2 omission, schema-3 host membership. Keep raw/effective values separate; reject missing parents and unsafe authentication combinations. Use strict known fields and preserve future envelopes.
-- [ ] Step 3: Extend snapshot/readiness/routes and directory effective endpoint/pin CAS. Tests: a parent port changing from 22 to 2222 clears the descendant pin; using an old endpoint to pin fails; an unrelated host pin remains. Group auth resolves key ID atomically and never falls back to a conflicted same-ID key.
-- [ ] Step 4: Add pure CRUD candidates, revision checks and native commands. Before state-3 promotion require upgrade confirmation and protected source backup. Before shared uploads promote account metadata and prove a failed schema-gate push yields zero Group/host-schema-3 child pushes. Tests reject unconfirmed promotion, stale revision, cross-scope parent and invalid effective jump route. Deletion preserves literal effective payload/ID/credential references.
-- [ ] Step 5: Integrate encrypted merge, unknown shadows, round trips, rotation and leave journals. Use the existing fake-relay fixtures to assert two clients resolve the same literal nested defaults after sync. Assert leave remaps Group/host/jump IDs without changing effective values, and rotation preserves all Group/tombstone rows. Unreadable selected Group sources prevent a destructive detach.
-- [ ] Step 6: Run focused repository/Group/directory/round/lifecycle tests and the full safe Rust suite (the three actual OS credential tests may be excluded as before). Update generated binding/fixture code only as necessary and report exact counts/errors. Commit only owned paths as `feat(records): add nested groups and inherited settings`.
+- [x] Step 2: Implement Group types/codec/validation and old/new format support. Add Group kind and Local groups, schema-2 omission, schema-3 host membership. Keep raw/effective values separate; reject missing parents and unsafe authentication combinations. Use strict known fields and preserve future envelopes.
+- [x] Step 3: Extend snapshot/readiness/routes and directory effective endpoint/pin CAS. Tests: a parent port changing from 22 to 2222 clears the descendant pin; using an old endpoint to pin fails; an unrelated host pin remains. Group auth resolves key ID atomically and never falls back to a conflicted same-ID key.
+- [x] Step 4: Add pure CRUD candidates, revision checks and native commands. Before state-3 promotion require upgrade confirmation and protected source backup. Before shared uploads promote account metadata and prove a failed schema-gate push yields zero Group/host-schema-3 child pushes. Tests reject unconfirmed promotion, stale revision, cross-scope parent and invalid effective jump route. Deletion preserves literal effective payload/ID/credential references.
+- [x] Step 5: Integrate encrypted merge, unknown shadows, round trips, rotation and leave journals. Use the existing fake-relay fixtures to assert two clients resolve the same literal nested defaults after sync. Assert leave remaps Group/host/jump IDs without changing effective values, and rotation preserves all Group/tombstone rows. Unreadable selected Group sources prevent a destructive detach.
+- [x] Step 6: Run focused repository/Group/directory/round/lifecycle tests and the full safe Rust suite (the three actual OS credential tests may be excluded as before). Update generated binding/fixture code only as necessary and report exact counts/errors. Commit only owned paths as `feat(records): add nested groups and inherited settings`.
 
 ### Task 2: Group workspace and inheritance editor
 
@@ -63,16 +63,16 @@
 
 **Consumes:** Task-1 overview/API/types; report records exact shape. **Produces:** Local/Space → nested Group → host browsing, create/edit/delete, raw inheritance controls, format confirmation, dirty-draft preservation.
 
-- [ ] Step 1: Write RED tests for a grouped host using raw `user:"fallback"` but effective `user:"ops"`, proving editor save preserves raw values and selected inherit field rather than flattening. Test search reveals ancestors and stable-ID selection. Use real component/helper behavior and literal expected results.
+- [x] Step 1: Write RED tests for a grouped host using raw `user:"fallback"` but effective `user:"ops"`, proving editor save preserves raw values and selected inherit field rather than flattening. Test search reveals ancestors and stable-ID selection. Use real component/helper behavior and literal expected results.
 ```ts
 // A host with inherit:["user"] must save raw user:"fallback" and inherit:["user"].
 // Its visible effective user/source must be "ops" / the parent Group.
 // Clearing Use group default must save the user's explicit value and inherit:[] for user.
 ```
-- [ ] Step 2: Extend frontend types/wrappers from Task 1. Build a focused tree helper with stable ordering, cycle/missing diagnostics, scope roots and Ungrouped. Keep search and actions outside scrolling content. Do not invent Group grants or bulk execution.
-- [ ] Step 3: Implement GroupEditor with explicit scope, parent/defaults, affected host counts, upgrade confirmation and delete preservation notice. Reuse dirty/busy selection guards and Keep editing default focus for host/group switches. Test API payload selection with correct IDs/revisions and failed save retaining drafts.
-- [ ] Step 4: Add host Group dropdown and per-field inheritance, source labels, effective preview and new-host-in-selected-Group behavior. Check atomic authentication/key handling, scope moves, drafts across tabs and error recovery.
-- [ ] Step 5: Run frontend suite, TypeScript and Vite; inspect actual real-component layouts in light/dark and minimum-size states when integration is available. Commit `feat(ui): add group browsing and settings inheritance`.
+- [x] Step 2: Extend frontend types/wrappers from Task 1. Build a focused tree helper with stable ordering, cycle/missing diagnostics, scope roots and Ungrouped. Keep search and actions outside scrolling content. Do not invent Group grants or bulk execution.
+- [x] Step 3: Implement GroupEditor with explicit scope, parent/defaults, affected host counts, upgrade confirmation and delete preservation notice. Reuse dirty/busy selection guards and Keep editing default focus for host/group switches. Test API payload selection with correct IDs/revisions and failed save retaining drafts.
+- [x] Step 4: Add host Group dropdown and per-field inheritance, source labels, effective preview and new-host-in-selected-Group behavior. Check atomic authentication/key handling, scope moves, drafts across tabs and error recovery.
+- [x] Step 5: Run frontend suite, TypeScript and Vite; inspect actual real-component layouts in light/dark and minimum-size states when integration is available. Commit `feat(ui): add group browsing and settings inheritance`.
 
 ### Task 3: Records MCP IPC, execution, policy and audit backend
 
@@ -80,16 +80,16 @@
 
 **Consumes:** Effective Records directory and existing connector/keychain/material/host-key hub; OS-verified peer PID/process chain. **Produces:** broker-backed Records metadata and exec; Ask/auto-log policy, native auth hub commands, persistent session log/status DTOs; adapter sanitizes clientInfo and propagates cancellation.
 
-- [ ] Step 1: Read approved own-SSH spec section 8 and completion spec section 5. Record chosen IPC frames/version in the report. Add RED tests against real dispatch/policy with FakeEngine/temporary public state: allowed ID reaches engine; denied ID never reaches it; old `run` returns rename error; spoofed clientInfo/PID never replaces OS attribution.
+- [x] Step 1: Read approved own-SSH spec section 8 and completion spec section 5. Record chosen IPC frames/version in the report. Add RED tests against real dispatch/policy with FakeEngine/temporary public state: allowed ID reaches engine; denied ID never reaches it; old `run` returns rename error; spoofed clientInfo/PID never replaces OS attribution.
 ```rust
 // A scripted FakeEngine exec returns Ended::Disconnected and exit_code:None.
 // The MCP result must retain disconnected/null, not successful/0.
 // A Group-derived endpoint changes while approval is pending: no exec call occurs.
 ```
-- [ ] Step 2: Extend MCP broker IPC, thin stdio adapter and lifecycle/cancel behavior. Keep Legacy mode usable. Do not expose a new unauthenticated port; Records must not depend on TCP/runtime-token files. Test protocol mismatch, EOF and cancellation before registration/approval/auth/exec. Bound request concurrency and serialized output frames.
-- [ ] Step 3: Implement Ask/auto-log, responsive revoke/disable, resolved-target rechecks and native questions. Default Ask, risk acknowledgement on auto-log change; no auto-log pin/auth prompts. Tests cover every interactive category, changed route/key/port after approval, output cap and all endings. Never hold lifecycle locks across waits.
-- [ ] Step 4: Persist/load/bound the public-only 1000-entry session log and include requester/clientInfo/mode/outcome in status. Test restart, cap, malformed trailing line, I/O failure visibility and no auth/output secret sentinel. Integrate app quit with cancellation/drain; produce auth-question command DTOs for Task 4.
-- [ ] Step 5: Run focused MCP/broker/auth/audit tests, safe Rust suite and binding exports. Check existing revocation and profile guard regressions. Commit `feat(mcp): execute records commands through the session broker` and document exact UI API/DTO interfaces.
+- [x] Step 2: Extend MCP broker IPC, thin stdio adapter and lifecycle/cancel behavior. Keep Legacy mode usable. Do not expose a new unauthenticated port; Records must not depend on TCP/runtime-token files. Test protocol mismatch, EOF and cancellation before registration/approval/auth/exec. Bound request concurrency and serialized output frames.
+- [x] Step 3: Implement Ask/auto-log, responsive revoke/disable, resolved-target rechecks and native questions. Default Ask, risk acknowledgement on auto-log change; no auto-log pin/auth prompts. Tests cover every interactive category, changed route/key/port after approval, output cap and all endings. Never hold lifecycle locks across waits.
+- [x] Step 4: Persist/load/bound the public-only 1000-entry session log and include requester/clientInfo/mode/outcome in status. Test restart, cap, malformed trailing line, I/O failure visibility and no auth/output secret sentinel. Integrate app quit with cancellation/drain; produce auth-question command DTOs for Task 4.
+- [x] Step 5: Run focused MCP/broker/auth/audit tests, safe Rust suite and binding exports. Check existing revocation and profile guard regressions. Commit `feat(mcp): execute records commands through the session broker` and document exact UI API/DTO interfaces.
 
 ### Task 4: MCP approval, auth window and AI Access UI
 
@@ -97,10 +97,10 @@
 
 **Consumes:** Task-3 mode/status/question/log commands and DTOs. **Produces:** usable Ask/auto-log control, attribution, native auth questions and recent public audit view.
 
-- [ ] Step 1: Add RED tests: auto-log is not applied until acknowledgement; switching back to Ask is immediate; requester/clientInfo labels remain distinct; cancel/refuse default focus; echoed versus concealed prompt fields; expired questions remove inputs and never resubmit secrets.
-- [ ] Step 2: Implement controls and concrete auto-log warning using existing Dialog primitives. Show individually permitted host IDs/Group paths without Group grants, most recent 10 outcomes and explicit nullable exit status. Replace metadata-only limitations only when actual backend capability is ready.
-- [ ] Step 3: Build compact native auth window with escaped server labels, request/hop attribution, expiry, no clipboard/secret persistence, cancellable inputs and clearly abandoned retry state. Do not autofocus Allow on command or key questions. Preserve full command visibility.
-- [ ] Step 4: Run frontend suite, TypeScript/Vite and actual-component visual checks at normal/minimum size. Report any native interaction limits. Commit `feat(ui): add records MCP approval and authentication flows`.
+- [x] Step 1: Add RED tests: auto-log is not applied until acknowledgement; switching back to Ask is immediate; requester/clientInfo labels remain distinct; cancel/refuse default focus; echoed versus concealed prompt fields; expired questions remove inputs and never resubmit secrets.
+- [x] Step 2: Implement controls and concrete auto-log warning using existing Dialog primitives. Show individually permitted host IDs/Group paths without Group grants, most recent 10 outcomes and explicit nullable exit status. Replace metadata-only limitations only when actual backend capability is ready.
+- [x] Step 3: Build compact native auth window with escaped server labels, request/hop attribution, expiry, no clipboard/secret persistence, cancellable inputs and clearly abandoned retry state. Do not autofocus Allow on command or key questions. Preserve full command visibility.
+- [x] Step 4: Run frontend suite, TypeScript/Vite and actual-component visual checks at normal/minimum size. Report any native interaction limits. Commit `feat(ui): add records MCP approval and authentication flows`.
 
 ### Task 5: Human-confirmed Records public-key deployment
 
@@ -108,22 +108,22 @@
 
 **Consumes:** Authoritative public key metadata, effective target, own connector and native authentication hub. **Produces:** preview/confirm/cancel deployment APIs and Keys workflow for POSIX remote accounts.
 
-- [ ] Step 1: Add RED behavioral tests using a temporary HOME and running the actual generated POSIX script locally: existing authorized_keys content survives; duplicate deployment is a no-op; symlinks are refused; only canonical public text appears in the command. No test may write actual user ~/.ssh.
+- [x] Step 1: Add RED behavioral tests using a temporary HOME and running the actual generated POSIX script locally: existing authorized_keys content survives; duplicate deployment is a no-op; symlinks are refused; only canonical public text appears in the command. No test may write actual user ~/.ssh.
 ```rust
 // Run the generated script twice with a public fixture key and a TempDir HOME.
 // Assert the original sentinel line survives and the fixture algorithm/blob occurs once.
 // A symlink authorized_keys leaves the target bytes unchanged and returns failure.
 ```
-- [ ] Step 2: Add preview with stable target/key identity and effective route snapshot; confirmation checks snapshot unchanged and explicit authorization, then connects/executes without invoking OS ssh/askpass. Test stale Group endpoint/key preview, unavailable key metadata, refusal/cancel/timeout/unknown ending.
-- [ ] Step 3: Implement bounded lock/secure permissions/idempotent append, distinct outcomes and public-only audit. Remote POSIX limitation is shown before confirmation; Windows clients still support POSIX deployment. Never set auth mode/key ID on a host automatically as a side effect of installing a public key.
-- [ ] Step 4: Add Keys deploy dialog target/fingerprint/authorization preview, progress/cancel, durable success/error state and stale-preview refresh. Run focused tests and complete frontend/safe Rust integration as necessary; commit `feat(keys): deploy public keys to records hosts`.
+- [x] Step 2: Add preview with stable target/key identity and effective route snapshot; confirmation checks snapshot unchanged and explicit authorization, then connects/executes without invoking OS ssh/askpass. Test stale Group endpoint/key preview, unavailable key metadata, refusal/cancel/timeout/unknown ending.
+- [x] Step 3: Implement bounded lock/secure permissions/idempotent append, distinct outcomes and public-only audit. Remote POSIX limitation is shown before confirmation; Windows clients still support POSIX deployment. Never set auth mode/key ID on a host automatically as a side effect of installing a public key.
+- [x] Step 4: Add Keys deploy dialog target/fingerprint/authorization preview, progress/cancel, durable success/error state and stale-preview refresh. Run focused tests and complete frontend/safe Rust integration as necessary; commit `feat(keys): deploy public keys to records hosts`.
 
 ### Task 6: Integration, review, native validation and Beta publication
 
 **Ownership:** Controller integration fixes, CI fixture extensions when needed, release notes/checklist/validation. No speculative feature expansion.
 
-- [ ] Step 1: Review combined APIs, generated bindings, legacy/profile boundaries and actual UI flows. Add disposable real SSH integration coverage for own-engine exec endings/cancel/auth and public deployment where the existing CI fixtures permit it; never operate real user hosts.
-- [ ] Step 2: Run full safe Rust, all frontend tests, TypeScript/Vite, Development bundle and independent final branch review. Correct consequential findings and scoped re-review only new repairs. Capture screenshots of Group/MCP/deployment without granting real permissions.
-- [ ] Step 3: Write Beta notes describing actual compatibility upgrade and remote-POSIX limit; remove completed backlog items, retain honest device/runtime limitations. Merge only reviewed code into next/own-ssh, push and wait for exact-source macOS/Linux/frontend/PAM and Windows CI.
+- [x] Step 1: Review combined APIs, generated bindings, legacy/profile boundaries and actual UI flows. Add disposable real SSH integration coverage for own-engine exec endings/cancel/auth and public deployment where the existing CI fixtures permit it; never operate real user hosts.
+- [x] Step 2: Run full safe Rust, all frontend tests, TypeScript/Vite, Development bundle and independent final branch review. Correct consequential findings and scoped re-review only new repairs. Capture screenshots of Group/MCP/deployment without granting real permissions.
+- [x] Step 3: Write Beta notes describing actual compatibility upgrade and remote-POSIX limit; remove completed backlog items, retain honest device/runtime limitations. Merge only reviewed code into next/own-ssh, push and wait for exact-source macOS/Linux/frontend/PAM and Windows CI.
 - [ ] Step 4: Use beta.yml with the next unoccupied 1.0.0 suffix. After all four installer jobs and Beta manifest succeed, independently check exact tag/source, complete assets/platforms/signatures, canonical manifests and Stable unchanged. Save receipt/checklist and commit docs only. Do not update the installed Production app.
 - [ ] Step 5: Persist this plan's ledger in repository documentation and clean only its git-ignored scratch. Final response includes Beta link, actual completed features, verification and material remaining limits, with screenshots and memory citation if used.
