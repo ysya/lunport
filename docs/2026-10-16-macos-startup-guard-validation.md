@@ -35,7 +35,7 @@ GPU 停滯與 WebContent 結束分開處理。本輪沒有宣稱能自動可靠�
 | 項目 | 結果與證據 |
 | --- | --- |
 | 前端 | 80 files、1,056 tests 通過；TypeScript／Vite build 通過，保留既有 large-chunk warning。 |
-| Rust 安全 suite | 2,566 tests 通過，0 failed；依 CI 指令排除 Keychain／PAM 等 10 個案例。使用暫存 localhost SSH server；受 sandbox 限制的首次測試中止後，在允許這些本機操作的環境重跑完成。 |
+| Rust 安全 suite | 2,566 tests 通過，0 failed；依 CI 指令排除 Keychain／PAM 等 10 個案例。使用暫存 localhost SSH server；受 sandbox 限制的首次測試中止後，在允許這些本機操作的環境重跑完成。之後以 CI 相同的 `SSHELTER_REQUIRE_OPENSSH=1`、預設 build features 再跑，仍為 2,566 passed，168.70 秒，避免 OpenSSH 測試因環境而靜默跳過。 |
 | Profile／靜態檢查 | 3 項 Development profile integration tests 通過；cargo clippy --lib 完成，保留既有 66 項 warnings；git diff --check 通過。 |
 | health 測試 | 5 項通過：成功／非零／spawn 失敗區分、逾時 kill + wait 並確認 ECHILD、恢復後再查詢、sleep clock expiry、queue 合併及 reload budget、三種安全請求拒絕規則。部分項目同屬一個 test。 |
 | 真實 CoreAudio helper | 連續 8 次成功；第一次 executable/query 約 1.113 秒，其餘約 8–9 ms。後續完整父／子診斷的暖啟動約 20 ms。這些數據不是跨裝置冷啟動保證。 |
@@ -50,6 +50,15 @@ GPU 停滯與 WebContent 結束分開處理。本輪沒有宣稱能自動可靠�
 | 睡眠／喚醒 | 暫停 monotonic、前進 wall time 的 deadline 測試通過；每次顯示都重新查詢，沒有沿用睡前成功快取。未讓整台共用 Mac 實際睡眠，實際硬體循環仍待驗收。 |
 
 實際觀察使用原生 accessibility 配合畫面截圖；沒有把 accessibility tree、React mounted 或 page loaded 單獨當成繪圖證據。原始程序 sample、測試 log 及畫面留在本機／工作對話，不把可能含本機資料的原始紀錄加入 Git。
+
+## 遠端 CI 收據
+
+測試來源固定為 [`f9ad05afe79452f4d1deb112d06971c7b6934a48`](https://github.com/ysya/sshelter/commit/f9ad05afe79452f4d1deb112d06971c7b6934a48)。手動執行的只有既有測試 workflow，沒有 dispatch 發布。之後補上的收據文件不改變這個程式碼來源。
+
+- [SSH engine workflow 38808771989](https://github.com/ysya/sshelter/actions/runs/38808771989)：frontend、Linux（安全 suite、profile、PAM）通過。macOS 超過設定的 45 分鐘仍停在 `Complete safe Rust suite`，沒有取得成功收據或完整 log；已送出 force-cancel 請求，紀錄時 GitHub 仍顯示執行中。不能把這項標為通過，也不能在缺少 log 時判定卡住原因。本機以相同 required-OpenSSH 條件的補跑已通過，兩者分開記錄。
+- [Windows workflow 38808775339](https://github.com/ysya/sshelter/actions/runs/38808775339)：整個 workflow 通過，包含安全 suite、profile、完整 app 編譯、console helper、獨立 console 與 OpenSSH 登入／engine 測試。
+
+CI 的編譯／測試結果與上方原生畫面、故障注入證據分別記錄；跨平台 CI 通過也不代表完成實體裝置 UI 驗收。
 
 ## 重跑方式
 
@@ -85,6 +94,14 @@ printf 'success\n' > /tmp/sshelter-coreaudio-fault.txt
 fault file 只在編譯選定的 Development profile 讀取，值限定為 `success`、`error`、`timeout`、`real`；Production 忽略此變數。正常啟動不設定此變數。**不要直接把內部 `--coreaudio-probe` 當成支援指令；使用有父程序期限的 `--check-window-health`。**
 
 ## 尚待裝置驗收
+
+實際睡眠／喚醒後續可依下列步驟驗收；本輪沒有執行整台 Mac 的睡眠動作：
+
+1. 不設定 fault file，啟動 Development app；只使用測試資料與已授權的測試主機。
+2. 保持一條 CLI SSH 連線，另在主視窗輸入可拋棄的未儲存草稿。
+3. 手動讓 Mac 睡眠並喚醒，再分別用 Dock、tray、已啟用的實體全域快捷鍵開窗。
+4. 以截圖確認畫面真正繪出，檢查草稿欄位及原 SSH terminal 的輸入／輸出仍正常；若出現原生提示，先保留診斷，確認服務恢復後明確 Retry。
+5. 用目前 Development executable 的 `--check-window-health` 記錄有期限的查詢結果，連同 macOS／裝置版本及睡眠情境記錄。這個結果不能代替畫面驗證。
 
 - Intel macOS、其他 macOS 版本及真正冷開機／無輸出裝置的誤判率；2 秒門檻仍需更多樣本。
 - 真實睡眠／喚醒、藍牙及輸出裝置切換。保留音訊正常的環境，不故意破壞 coreaudiod。
