@@ -14,6 +14,22 @@ afterEach(() => {
 });
 
 describe("connection library browsing", () => {
+  it("offers a keyboard-accessible separator for connection details", () => {
+    const html = renderToStaticMarkup(
+      <HostPreview
+        host={hostView()}
+        overview={recordOverview()}
+        connect={vi.fn()}
+        edit={vi.fn()}
+        close={vi.fn()}
+        busy={false}
+      />,
+    );
+    expect(html).toContain('role="separator"');
+    expect(html).toContain('aria-label="Resize connection details"');
+    expect(html).toContain("aria-controls=");
+    expect(html).toContain('aria-valuenow="400"');
+  });
   it("searches multiple words across inherited connection values, tags and group paths", () => {
     const group = groupView({
       payload: {

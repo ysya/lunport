@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import {
   ArrowUpRight,
   ArrowRight,
@@ -13,6 +13,12 @@ import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { groupPath } from "./group-tree";
 import { readinessLabel } from "./HostList";
+import { HostPreviewResizeHandle } from "./HostPreviewResizeHandle";
+import {
+  clampHostPreviewWidth,
+  hostPreviewLimit,
+} from "@/lib/host-preview-width";
+import { useUiStore } from "@/stores/ui";
 
 export function HostPreview({
   host,
@@ -31,10 +37,34 @@ export function HostPreview({
 }) {
   const payload = host.effective_payload;
   const closeButton = useRef<HTMLButtonElement>(null);
+  const pane = useRef<HTMLElement>(null);
+  const paneId = useId();
+  const preferredWidth = clampHostPreviewWidth(
+    useUiStore((state) => state.hostPreviewWidth),
+  );
+  const setWidth = useUiStore((state) => state.setHostPreviewWidth);
+  const [available, setAvailable] = useState(Infinity);
+  const limit = hostPreviewLimit(available);
+  const width = Math.min(preferredWidth, limit);
+  const previousView = useRef({ hostId: "", compact: false });
   useEffect(() => {
-    if (window.matchMedia("(max-width: 820px)").matches)
+    const parent = pane.current?.parentElement;
+    if (!parent) return;
+    const measure = () => setAvailable(parent.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(parent);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    const compact = window.matchMedia("(max-width: 820px)").matches;
+    if (
+      compact &&
+      (!previousView.current.compact || previousView.current.hostId !== host.id)
+    )
       closeButton.current?.focus();
-  }, [host.id]);
+    previousView.current = { hostId: host.id, compact };
+  }, [host.id, available]);
   const ready = host.readiness.kind === "ready" && !host.group_error;
   const field = (name: string, value: string, mono = false) => (
     <div>
@@ -43,7 +73,20 @@ export function HostPreview({
     </div>
   );
   return (
-    <aside className="library-host-preview" aria-label="Host details">
+    <aside
+      ref={pane}
+      id={paneId}
+      className="library-host-preview"
+      aria-label="Host details"
+      style={{ "--host-preview-width": `${width}px` } as CSSProperties}
+    >
+      <HostPreviewResizeHandle
+        pane={pane}
+        width={width}
+        limit={limit}
+        controls={paneId}
+        setWidth={setWidth}
+      />
       <header>
         <span>Connection details</span>
         <Button

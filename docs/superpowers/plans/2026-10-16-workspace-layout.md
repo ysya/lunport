@@ -43,11 +43,11 @@
 
 **Interfaces:** Export `DEFAULT_HOST_PREVIEW_WIDTH`, `MIN_HOST_PREVIEW_WIDTH`, `MAX_HOST_PREVIEW_WIDTH`, `clampHostPreviewWidth(value: unknown)`, `hostPreviewLimit(available: number)`, `hostPreviewWidthAfterDrag(start: number, delta: number, limit: number)`, and `hostPreviewWidthAfterKey(width: number, key: string, limit: number)`. The UI store gains `hostPreviewWidth` / `setHostPreviewWidth`.
 
-- [ ] Add and run failing policy/store tests. Examples: `hostPreviewWidthAfterDrag(400, -80, 640) === 480`; `hostPreviewWidthAfterKey(400, 'ArrowRight', 640) === 384`; `hostPreviewLimit(800) === 480`. Assert invalid inputs, limits, persistence, old envelopes and preservation of the requested width across viewport caps.
-- [ ] Implement the pure policy, store setter and partial persistence. Clamp at render as well as setter so old/untrusted persisted values are safe.
-- [ ] Observe the actual parent content width. Size the aside from the saved preference and current limit; remove the old 20rem/18rem fixed overrides.
-- [ ] Add an accessible left-edge separator controlling the aside. Use pointer capture, reverse drag direction for the right pane, commit on release, restore on cancel, clean up lost capture/unmount, and implement arrow/Home/End/reset behavior.
-- [ ] Verify the tests pass and exercise actual drag, keyboard, cancellation, host switching, reopening and viewport changes. Confirm no navigation or draft state is changed by resizing.
+- [x] Add and run failing policy/store tests. Examples: `hostPreviewWidthAfterDrag(400, -80, 640) === 480`; `hostPreviewWidthAfterKey(400, 'ArrowRight', 640) === 384`; `hostPreviewLimit(800) === 480`. Assert invalid inputs, limits, persistence, old envelopes and preservation of the requested width across viewport caps.
+- [x] Implement the pure policy, store setter and partial persistence. Clamp at render as well as setter so old/untrusted persisted values are safe.
+- [x] Observe the actual parent content width. Size the aside from the saved preference and current limit; remove the old 20rem/18rem fixed overrides.
+- [x] Add an accessible left-edge separator controlling the aside. Use pointer capture, reverse drag direction for the right pane, commit on release, restore on cancel, clean up lost capture/unmount, and implement arrow/Home/End/reset behavior.
+- [x] Verify the tests pass and exercise actual drag, keyboard, cancellation, host switching, reopening and viewport changes. Confirm no navigation or draft state is changed by resizing.
 
 ### Task 3: Shared colors and final acceptance
 
