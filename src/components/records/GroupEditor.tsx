@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { ChevronDown, Folder, SlidersHorizontal, X } from "lucide-react";
+import { isImeKey } from "@/lib/ime";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -25,6 +27,7 @@ import {
   changeGroupEditor,
   refreshGroupEditor,
   groupEditorProblem,
+  groupConnectionSettingsChanged,
   submitGroupEditor,
 } from "./group-editor";
 import {
@@ -148,7 +151,13 @@ export function RecordGroupEditor({
     }
   };
   const save = (confirmed = false) => {
-    if (blocked || state.unavailable) return;
+    if (
+      busy ||
+      blocked ||
+      state.unavailable ||
+      groupEditorProblem(state, overview)
+    )
+      return;
     if (
       !state.id &&
       requiresFormatUpgrade(overview, state.scope) &&
@@ -185,375 +194,528 @@ export function RecordGroupEditor({
       ),
   );
   const problem = groupEditorProblem(state, overview);
+  const defaults = state.payload.defaults;
+  const connectionCount = [
+    defaults.port,
+    defaults.user,
+    defaults.authentication,
+  ].filter((value) => value != null).length;
+  const advancedCount = [
+    defaults.jump,
+    defaults.keepalive_secs,
+    defaults.keepalive_max_missed,
+    defaults.connect_timeout_secs,
+  ].filter((value) => value != null).length;
+  const settingsChanged = groupConnectionSettingsChanged(group, state);
+  const showImpact =
+    settingsChanged && (affected.hosts > 0 || affected.groups > 0);
+  const portMayChange =
+    group &&
+    ((defaults.port ?? null) !== (group.payload.defaults.port ?? null) ||
+      state.payload.parent_id !== group.payload.parent_id);
+  const parentPreview = previewInheritance(overview, state.scope, {
+    ...emptyHostPayload(),
+    group_id: state.payload.parent_id,
+    inherit: inheritedFields.map(([field]) => field),
+  });
+  const canSave = !busy && !blocked && !problem && (!state.id || state.dirty);
   return (
-    <div className="mx-auto max-w-3xl space-y-5 px-6 pb-6">
-      <header className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b bg-background py-4">
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-lg font-semibold">
-            {state.id ? revealHidden(state.payload.name) : "New group"}
-          </h1>
-          <p className="text-xs text-muted-foreground">
-            {revealHidden(scopeLabel(overview, state.scope))} ·{" "}
-            {state.dirty
-              ? "Unsaved changes"
-              : state.id
-                ? "Saved"
-                : "Not saved yet"}
-          </p>
+    <div className="group-editor">
+      <header className="group-editor-header">
+        <span className="group-editor-symbol">
+          <Folder aria-hidden="true" className="size-5" />
+        </span>
+        <div>
+          <DialogTitle>{state.id ? "Edit group" : "New group"}</DialogTitle>
+          <DialogDescription>
+            {state.id
+              ? `${affected.hosts} host${affected.hosts === 1 ? "" : "s"} · ${revealHidden(scopeLabel(overview, state.scope))}`
+              : "Keep related hosts together in your library."}
+          </DialogDescription>
         </div>
-        <div className="flex flex-wrap gap-2">
+        {onCancel && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Close editor"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            <X className="size-4" />
+          </Button>
+        )}
+      </header>
+      <div className="group-editor-body">
+        {state.changedOnServer && (
+          <div role="status" className="group-editor-notice">
+            This group changed or became unavailable. Your draft is kept.
+            <Button
+              className="mt-2"
+              size="sm"
+              variant="outline"
+              disabled={busy || !group}
+              onClick={() => setState(beginGroupEditor(group))}
+            >
+              Reload saved settings
+            </Button>
+          </div>
+        )}
+        {group?.group_error && (
+          <p role="status" className="text-sm text-destructive">
+            {revealHidden(group.group_error)}
+          </p>
+        )}
+        {blocked && (
+          <p role="status" className="text-sm text-destructive">
+            Sync changes are paused while account data is reviewed.
+          </p>
+        )}
+        {state.error && (
+          <p
+            role="alert"
+            className="text-sm text-destructive whitespace-pre-wrap"
+          >
+            {state.error}
+          </p>
+        )}
+        <fieldset
+          disabled={busy || blocked || state.unavailable}
+          className="group-editor-fields disabled:opacity-60"
+        >
+          <div className="group-editor-basics">
+            <RecordField label="Group name">
+              <Input
+                data-group-name
+                autoComplete="off"
+                placeholder="e.g. Production"
+                value={state.payload.name}
+                maxLength={128}
+                onChange={(e) => patch({ name: e.target.value })}
+                onKeyDown={(e) => {
+                  if (isImeKey(e)) return;
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (canSave) save();
+                  }
+                }}
+              />
+            </RecordField>
+            <RecordField label="Parent group">
+              <select
+                className={selectClass}
+                value={state.payload.parent_id ?? ""}
+                onChange={(e) => {
+                  const parent = selectGroup(overview.groups, e.target.value);
+                  setState((current) => ({
+                    ...changeGroupEditor(current, {
+                      parent_id: e.target.value || null,
+                    }),
+                    scope:
+                      !current.id && parent
+                        ? structuredClone(parent.scope)
+                        : current.scope,
+                  }));
+                }}
+              >
+                <option value="">Library root</option>
+                {state.payload.parent_id &&
+                  !parentChoices.some(
+                    (g) => g.id === state.payload.parent_id,
+                  ) && (
+                    <option value={state.payload.parent_id}>
+                      Unavailable parent ({state.payload.parent_id})
+                    </option>
+                  )}
+                {parentChoices.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {revealHidden(groupPath(overview, g.id, g.scope))}
+                  </option>
+                ))}
+              </select>
+              <p className="group-field-hint">
+                Choose where this group belongs.
+              </p>
+            </RecordField>
+          </div>
+          <div className="group-editor-options">
+            <GroupSettingsSection
+              title="Connection defaults"
+              description="Username, port and authentication"
+              count={connectionCount}
+              initialOpen={!!state.id && connectionCount > 0}
+            >
+              <p className="group-field-hint">
+                Optional. Leave fields empty to use parent or app defaults.
+                Hosts use these values only for fields set to inherit.
+              </p>
+              <div className="group-connection-grid">
+                <RecordField label="Username">
+                  <Input
+                    placeholder={
+                      defaults.user === ""
+                        ? "OS username"
+                        : parentPreview.payload.user || "Use OS username"
+                    }
+                    value={defaults.user ?? ""}
+                    disabled={defaults.user === ""}
+                    onChange={(e) =>
+                      defaultPatch({ user: e.target.value || null })
+                    }
+                  />
+                  <label className="group-os-user">
+                    <input
+                      type="checkbox"
+                      checked={defaults.user === ""}
+                      onChange={(e) =>
+                        defaultPatch({ user: e.target.checked ? "" : null })
+                      }
+                    />
+                    Use OS username
+                  </label>
+                </RecordField>
+                <RecordField label="Port">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={65535}
+                    placeholder={String(parentPreview.payload.port)}
+                    value={defaults.port ?? ""}
+                    onChange={(e) =>
+                      defaultPatch({
+                        port:
+                          e.target.value === "" ? null : Number(e.target.value),
+                      })
+                    }
+                  />
+                </RecordField>
+              </div>
+              <RecordField label="Authentication">
+                <select
+                  className={selectClass}
+                  value={state.payload.defaults.authentication?.auth ?? ""}
+                  onChange={(e) =>
+                    defaultPatch({
+                      authentication: e.target.value
+                        ? {
+                            auth: e.target.value as
+                              "key" | "password" | "interactive",
+                            key_id:
+                              e.target.value === "key"
+                                ? (state.payload.defaults.authentication
+                                    ?.key_id ?? null)
+                                : null,
+                          }
+                        : null,
+                    })
+                  }
+                >
+                  <option value="">Use parent/app default</option>
+                  <option value="password">Password</option>
+                  <option value="interactive">Keyboard interactive</option>
+                  <option value="key">SSH key</option>
+                </select>
+              </RecordField>
+              {state.payload.defaults.authentication?.auth === "key" && (
+                <RecordField label="SSH key">
+                  <select
+                    className={selectClass}
+                    value={state.payload.defaults.authentication.key_id ?? ""}
+                    onChange={(e) =>
+                      defaultPatch({
+                        authentication: {
+                          auth: "key",
+                          key_id: e.target.value || null,
+                        },
+                      })
+                    }
+                  >
+                    <option value="">Choose a key…</option>
+                    {state.payload.defaults.authentication.key_id &&
+                      !overview.keys.some(
+                        (k) =>
+                          k.id ===
+                          state.payload.defaults.authentication?.key_id,
+                      ) && (
+                        <option
+                          value={state.payload.defaults.authentication.key_id}
+                        >
+                          Missing key (
+                          {state.payload.defaults.authentication.key_id})
+                        </option>
+                      )}
+                    {overview.keys.map((k) => (
+                      <option key={k.id} value={k.id}>
+                        {revealHidden(k.public?.name ?? k.id)} ·{" "}
+                        {k.status.replace(/_/g, " ")}
+                      </option>
+                    ))}
+                  </select>
+                </RecordField>
+              )}
+            </GroupSettingsSection>
+            <GroupSettingsSection
+              title="Advanced SSH options"
+              description="Jump hosts, keepalive and timeout"
+              count={advancedCount}
+              initialOpen={!!state.id && advancedCount > 0}
+            >
+              <RecordField label="Jump hosts">
+                <select
+                  className={selectClass}
+                  value={
+                    state.payload.defaults.jump == null ? "inherit" : "explicit"
+                  }
+                  onChange={(e) =>
+                    defaultPatch({
+                      jump: e.target.value === "inherit" ? null : [],
+                    })
+                  }
+                >
+                  <option value="inherit">Use parent/app default</option>
+                  <option value="explicit">
+                    Custom route (empty connects directly)
+                  </option>
+                </select>
+                {state.payload.defaults.jump != null && (
+                  <div className="space-y-2">
+                    {state.payload.defaults.jump.map((id, index) => (
+                      <div
+                        className="flex items-center gap-2"
+                        key={`${id}:${index}`}
+                      >
+                        <span className="min-w-0 flex-1 truncate text-sm">
+                          {index + 1}.{" "}
+                          {revealHidden(
+                            selectHost(overview.hosts, id)?.payload.alias ??
+                              `Missing or conflicting host (${id})`,
+                          )}
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            defaultPatch({
+                              jump: state.payload.defaults.jump!.filter(
+                                (_, i) => i !== index,
+                              ),
+                            })
+                          }
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+                    <select
+                      aria-label="Add default jump host"
+                      className={selectClass}
+                      value=""
+                      disabled={state.payload.defaults.jump.length >= 5}
+                      onChange={(e) => {
+                        if (e.target.value)
+                          defaultPatch({
+                            jump: [
+                              ...state.payload.defaults.jump!,
+                              e.target.value,
+                            ],
+                          });
+                      }}
+                    >
+                      <option value="">Add jump host…</option>
+                      {overview.hosts
+                        .filter(
+                          (h) =>
+                            selectHost(overview.hosts, h.id) &&
+                            !state.payload.defaults.jump!.includes(h.id),
+                        )
+                        .map((h) => (
+                          <option key={h.id} value={h.id}>
+                            {revealHidden(h.payload.alias)} ·{" "}
+                            {revealHidden(scopeLabel(overview, h.scope))}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
+              </RecordField>
+
+              <div className="group-connection-grid">
+                {(
+                  [
+                    ["Keepalive interval (seconds)", "keepalive_secs", 0],
+                    ["Missed keepalives", "keepalive_max_missed", 0],
+                    ["Connect timeout (seconds)", "connect_timeout_secs", 1],
+                  ] as const
+                ).map(([label, field, min]) => (
+                  <RecordField key={field} label={label}>
+                    <Input
+                      type="number"
+                      min={min}
+                      max={4294967295}
+                      placeholder={String(parentPreview.payload[field])}
+                      value={defaults[field] ?? ""}
+                      onChange={(e) =>
+                        defaultPatch({
+                          [field]:
+                            e.target.value === ""
+                              ? null
+                              : Number(e.target.value),
+                        })
+                      }
+                    />
+                  </RecordField>
+                ))}
+              </div>
+            </GroupSettingsSection>
+          </div>
+        </fieldset>
+        {showImpact && (
+          <div role="status" className="group-editor-notice">
+            These settings may affect {affected.hosts} host
+            {affected.hosts === 1 ? "" : "s"}
+            {affected.groups > 0 && (
+              <>
+                {" "}
+                and {affected.groups} subgroup{affected.groups === 1 ? "" : "s"}
+              </>
+            )}
+            . Only inherited fields will change.
+            {portMayChange && affected.hosts > 0 && (
+              <p className="group-field-hint mt-1">
+                If a host’s inherited port changes, its saved host-key pin will
+                be cleared.
+              </p>
+            )}
+          </div>
+        )}
+        <details className="group-defaults-preview">
+          <summary>
+            View effective defaults{" "}
+            <ChevronDown aria-hidden="true" className="size-3.5" />
+          </summary>
+          {preview.error ? (
+            <p role="status" className="text-sm text-destructive">
+              {revealHidden(preview.error)}
+            </p>
+          ) : (
+            <dl>
+              {inheritedFields.map(([field, label]) => (
+                <div key={field}>
+                  <dt>{label}</dt>
+                  <dd>
+                    {revealHidden(effectiveField(preview.payload, field))}
+                    <small>
+                      {preview.sources[field] === "default"
+                        ? "App default"
+                        : revealHidden(
+                            previewOverview.groups.find(
+                              (g) => g.id === preview.sources[field],
+                            )?.payload.name ?? "Group",
+                          )}
+                    </small>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </details>
+        {state.id && (
+          <details className="group-management">
+            <summary>
+              Manage group{" "}
+              <ChevronDown aria-hidden="true" className="size-3.5" />
+            </summary>
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium">
+                Delete group and subgroups
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Includes {affected.groups} descendant Group
+                {affected.groups === 1 ? "" : "s"}.
+              </p>
+              {deletionError && (
+                <p
+                  role="alert"
+                  className="break-words text-xs text-destructive"
+                >
+                  {deletionError}
+                </p>
+              )}
+              {!overview.group_deletion_token && (
+                <p role="alert" className="text-xs text-destructive">
+                  Refresh the records to prepare a new deletion review.
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                All {affected.hosts} hosts are preserved with their current
+                effective settings, IDs and credential references. Membership
+                and inheritance are removed.
+              </p>
+              <Button
+                variant="outline"
+                disabled={
+                  busy ||
+                  blocked ||
+                  state.unavailable ||
+                  !overview.group_deletion_token
+                }
+                onClick={() => {
+                  setDeletionError(null);
+                  setDeleting(
+                    beginGroupDeletion(
+                      state,
+                      affected,
+                      overview.group_deletion_token,
+                    ),
+                  );
+                }}
+              >
+                Delete group…
+              </Button>
+              <p className="break-all font-mono text-xs text-muted-foreground">
+                Group ID: {state.id}
+              </p>
+            </div>
+          </details>
+        )}
+      </div>
+      <footer className="group-editor-footer">
+        <div className="group-editor-save-state">
+          <span
+            role="status"
+            className={state.dirty && problem ? "text-destructive" : undefined}
+          >
+            {state.unavailable
+              ? "Group unavailable"
+              : state.dirty && problem
+                ? problem
+                : state.id
+                  ? state.dirty
+                    ? "Unsaved changes"
+                    : "All changes saved"
+                  : "Only a name is required"}
+          </span>
           {state.id && state.dirty && (
             <Button
+              size="sm"
               variant="ghost"
               disabled={busy || !group}
               onClick={() => setState(beginGroupEditor(group))}
             >
-              Discard changes
+              Reset
             </Button>
           )}
-          {!state.id && onCancel && (
-            <Button variant="ghost" disabled={busy} onClick={onCancel}>
+        </div>
+        <div className="group-editor-actions">
+          {onCancel && (
+            <Button variant="outline" disabled={busy} onClick={onCancel}>
               Cancel
             </Button>
           )}
-          <Button
-            disabled={
-              busy || blocked || !!problem || (!!state.id && !state.dirty)
-            }
-            onClick={() => save()}
-          >
-            {busy ? "Working…" : state.id ? "Save group" : "Create group"}
+          <Button disabled={!canSave} onClick={() => save()}>
+            {busy ? "Saving…" : state.id ? "Save changes" : "Create group"}
           </Button>
         </div>
-      </header>
-      {state.changedOnServer && (
-        <div role="status" className="rounded-md border p-3 text-sm">
-          This Group changed or became unavailable. Your draft and saved
-          revision are retained.{" "}
-          <Button
-            className="mt-2"
-            size="sm"
-            variant="outline"
-            disabled={busy || !group}
-            onClick={() => setState(beginGroupEditor(group))}
-          >
-            Reload saved settings
-          </Button>
-        </div>
-      )}
-      {group?.group_error && (
-        <p role="status" className="text-sm text-destructive">
-          {revealHidden(group.group_error)}
-        </p>
-      )}
-      {blocked && (
-        <p role="status" className="text-sm text-destructive">
-          Sync changes are paused while account data is reviewed.
-        </p>
-      )}
-      {state.error && (
-        <p
-          role="alert"
-          className="text-sm text-destructive whitespace-pre-wrap"
-        >
-          {state.error}
-        </p>
-      )}
-      {state.dirty && problem && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {problem}
-        </p>
-      )}
-      <p className="rounded-md border p-3 text-sm">
-        Changes can affect {affected.groups} descendant Group
-        {affected.groups === 1 ? "" : "s"} and {affected.hosts} host
-        {affected.hosts === 1 ? "" : "s"}. Inherited port changes clear affected
-        host-key pins.
-      </p>
-      <fieldset
-        disabled={busy || blocked || state.unavailable}
-        className="space-y-4 disabled:opacity-60"
-      >
-        <RecordField label="Group name">
-          <Input
-            value={state.payload.name}
-            maxLength={128}
-            onChange={(e) => patch({ name: e.target.value })}
-          />
-        </RecordField>
-        <RecordField label="Parent Group">
-          <select
-            className={selectClass}
-            value={state.payload.parent_id ?? ""}
-            onChange={(e) => {
-              const group = selectGroup(overview.groups, e.target.value);
-              setState((current) => ({
-                ...changeGroupEditor(current, {
-                  parent_id: e.target.value || null,
-                }),
-                scope:
-                  !current.id && group
-                    ? structuredClone(group.scope)
-                    : current.scope,
-              }));
-            }}
-          >
-            <option value="">Library root</option>
-            {state.payload.parent_id &&
-              !parentChoices.some((g) => g.id === state.payload.parent_id) && (
-                <option value={state.payload.parent_id}>
-                  Unavailable parent ({state.payload.parent_id})
-                </option>
-              )}
-            {parentChoices.map((g) => (
-              <option key={g.id} value={g.id}>
-                {revealHidden(groupPath(overview, g.id, g.scope))}
-              </option>
-            ))}
-          </select>
-        </RecordField>
-        <h2 className="text-sm font-semibold">Connection defaults</h2>
-        <p className="text-xs text-muted-foreground">
-          Unset values use the nearest parent default, then the app default.
-          Hosts inherit only fields they explicitly select.
-        </p>
-        <div className="grid gap-4 sm:grid-cols-2">
-          {(
-            [
-              ["Port", "port", 1],
-              ["Keepalive interval (seconds)", "keepalive_secs", 0],
-              ["Missed keepalives", "keepalive_max_missed", 0],
-              ["Connect timeout (seconds)", "connect_timeout_secs", 1],
-            ] as const
-          ).map(([label, field, min]) => (
-            <RecordField key={field} label={label}>
-              <Input
-                type="number"
-                min={min}
-                placeholder="Use parent/app default"
-                value={state.payload.defaults[field] ?? ""}
-                onChange={(e) =>
-                  defaultPatch({
-                    [field]:
-                      e.target.value === "" ? null : Number(e.target.value),
-                  })
-                }
-              />
-            </RecordField>
-          ))}
-        </div>
-        <RecordField label="Username default">
-          <Input
-            placeholder="Use parent/app default"
-            value={state.payload.defaults.user ?? ""}
-            onChange={(e) => defaultPatch({ user: e.target.value || null })}
-          />
-          <label className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={state.payload.defaults.user === ""}
-              onChange={(e) =>
-                defaultPatch({ user: e.target.checked ? "" : null })
-              }
-            />
-            Use OS username explicitly
-          </label>
-        </RecordField>
-        <RecordField label="Authentication default">
-          <select
-            className={selectClass}
-            value={state.payload.defaults.authentication?.auth ?? ""}
-            onChange={(e) =>
-              defaultPatch({
-                authentication: e.target.value
-                  ? {
-                      auth: e.target.value as
-                        | "key"
-                        | "password"
-                        | "interactive",
-                      key_id:
-                        e.target.value === "key"
-                          ? (state.payload.defaults.authentication?.key_id ??
-                            null)
-                          : null,
-                    }
-                  : null,
-              })
-            }
-          >
-            <option value="">Use parent/app default</option>
-            <option value="password">Password</option>
-            <option value="interactive">Keyboard interactive</option>
-            <option value="key">SSH key</option>
-          </select>
-        </RecordField>
-        {state.payload.defaults.authentication?.auth === "key" && (
-          <RecordField label="Default key reference">
-            <select
-              className={selectClass}
-              value={state.payload.defaults.authentication.key_id ?? ""}
-              onChange={(e) =>
-                defaultPatch({
-                  authentication: {
-                    auth: "key",
-                    key_id: e.target.value || null,
-                  },
-                })
-              }
-            >
-              <option value="">Choose a key…</option>
-              {state.payload.defaults.authentication.key_id &&
-                !overview.keys.some(
-                  (k) => k.id === state.payload.defaults.authentication?.key_id,
-                ) && (
-                  <option value={state.payload.defaults.authentication.key_id}>
-                    Missing key ({state.payload.defaults.authentication.key_id})
-                  </option>
-                )}
-              {overview.keys.map((k) => (
-                <option key={k.id} value={k.id}>
-                  {revealHidden(k.public?.name ?? k.id)} ·{" "}
-                  {k.status.replace(/_/g, " ")}
-                </option>
-              ))}
-            </select>
-          </RecordField>
-        )}
-        <RecordField label="Jump defaults">
-          <select
-            className={selectClass}
-            value={state.payload.defaults.jump == null ? "inherit" : "explicit"}
-            onChange={(e) =>
-              defaultPatch({ jump: e.target.value === "inherit" ? null : [] })
-            }
-          >
-            <option value="inherit">Use parent/app default</option>
-            <option value="explicit">
-              Explicit route (empty means direct)
-            </option>
-          </select>
-          {state.payload.defaults.jump != null && (
-            <div className="space-y-2">
-              {state.payload.defaults.jump.map((id, index) => (
-                <div className="flex items-center gap-2" key={`${id}:${index}`}>
-                  <span className="min-w-0 flex-1 truncate text-sm">
-                    {index + 1}.{" "}
-                    {revealHidden(
-                      selectHost(overview.hosts, id)?.payload.alias ??
-                        `Missing or conflicting host (${id})`,
-                    )}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      defaultPatch({
-                        jump: state.payload.defaults.jump!.filter(
-                          (_, i) => i !== index,
-                        ),
-                      })
-                    }
-                  >
-                    Remove
-                  </Button>
-                </div>
-              ))}
-              <select
-                aria-label="Add default jump host"
-                className={selectClass}
-                value=""
-                disabled={state.payload.defaults.jump.length >= 5}
-                onChange={(e) => {
-                  if (e.target.value)
-                    defaultPatch({
-                      jump: [...state.payload.defaults.jump!, e.target.value],
-                    });
-                }}
-              >
-                <option value="">Add jump host…</option>
-                {overview.hosts
-                  .filter(
-                    (h) =>
-                      selectHost(overview.hosts, h.id) &&
-                      !state.payload.defaults.jump!.includes(h.id),
-                  )
-                  .map((h) => (
-                    <option key={h.id} value={h.id}>
-                      {revealHidden(h.payload.alias)} ·{" "}
-                      {revealHidden(scopeLabel(overview, h.scope))}
-                    </option>
-                  ))}
-              </select>
-            </div>
-          )}
-        </RecordField>
-      </fieldset>
-      <section className="space-y-2 rounded-lg border p-4">
-        <h2 className="text-sm font-semibold">Effective defaults preview</h2>
-        {preview.error ? (
-          <p role="status" className="text-sm text-destructive">
-            {revealHidden(preview.error)}
-          </p>
-        ) : (
-          inheritedFields.map(([field, label]) => (
-            <p key={field} className="break-words text-xs">
-              <span className="font-medium">{label}: </span>
-              {revealHidden(effectiveField(preview.payload, field))} ·{" "}
-              {preview.sources[field] === "default"
-                ? "App default"
-                : revealHidden(
-                    previewOverview.groups.find(
-                      (g) => g.id === preview.sources[field],
-                    )?.payload.name ?? "Group",
-                  )}
-            </p>
-          ))
-        )}
-      </section>
-      {state.id && (
-        <section className="space-y-3 rounded-lg border p-4">
-          <h2 className="text-sm font-semibold">Delete Group subtree</h2>
-          {deletionError && (
-            <p role="alert" className="break-words text-xs text-destructive">
-              {deletionError}
-            </p>
-          )}
-          {!overview.group_deletion_token && (
-            <p role="alert" className="text-xs text-destructive">
-              Refresh the records to prepare a new deletion review.
-            </p>
-          )}
-          <p className="text-xs text-muted-foreground">
-            All {affected.hosts} hosts are preserved with their current
-            effective settings, IDs and credential references. Membership and
-            inheritance are removed.
-          </p>
-          <Button
-            variant="outline"
-            disabled={
-              busy ||
-              blocked ||
-              state.unavailable ||
-              !overview.group_deletion_token
-            }
-            onClick={() => {
-              setDeletionError(null);
-              setDeleting(
-                beginGroupDeletion(
-                  state,
-                  affected,
-                  overview.group_deletion_token,
-                ),
-              );
-            }}
-          >
-            Delete group…
-          </Button>
-          <p className="break-all font-mono text-xs text-muted-foreground">
-            Group ID: {state.id}
-          </p>
-        </section>
-      )}
+      </footer>
       <FormatUpgradeReview
         open={upgrade}
         busy={busy}
@@ -615,5 +777,49 @@ export function RecordGroupEditor({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function GroupSettingsSection({
+  title,
+  description,
+  count,
+  initialOpen,
+  children,
+}: {
+  title: string;
+  description: string;
+  count: number;
+  initialOpen: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(initialOpen);
+  const id = useId();
+  return (
+    <section className="group-settings-section" data-open={open}>
+      <button
+        type="button"
+        className="group-settings-toggle"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen(!open)}
+      >
+        <SlidersHorizontal aria-hidden="true" className="size-4" />
+        <span>
+          <strong>{title}</strong>
+          <small>{description}</small>
+        </span>
+        <span className="group-settings-count">
+          {count ? `${count} set` : "Optional"}
+        </span>
+        <ChevronDown
+          aria-hidden="true"
+          className="group-settings-chevron size-4"
+        />
+      </button>
+      <div id={id} className="group-settings-content" hidden={!open}>
+        {children}
+      </div>
+    </section>
   );
 }

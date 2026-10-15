@@ -2,6 +2,7 @@ import {
   createRecordGroup,
   deleteRecordGroup,
   updateRecordGroup,
+  type GroupDefaults,
   type GroupPayload,
   type HostScope,
   type RecordGroupView,
@@ -19,6 +20,31 @@ export type GroupEditorState = {
   unavailable: boolean;
   error: string | null;
 };
+
+// Missing and null defaults both inherit. Empty usernames, direct routes and
+// zero keepalive values are explicit settings and must still count as changes.
+export function groupConnectionSettingsChanged(
+  saved: RecordGroupView | null,
+  draft: GroupEditorState,
+): boolean {
+  if (!saved || !draft.id) return false;
+  const normalize = (defaults: GroupDefaults) => [
+    defaults.port ?? null,
+    defaults.user ?? null,
+    defaults.authentication
+      ? [defaults.authentication.auth, defaults.authentication.key_id]
+      : null,
+    defaults.jump ?? null,
+    defaults.keepalive_secs ?? null,
+    defaults.keepalive_max_missed ?? null,
+    defaults.connect_timeout_secs ?? null,
+  ];
+  return (
+    saved.payload.parent_id !== draft.payload.parent_id ||
+    JSON.stringify(normalize(saved.payload.defaults)) !==
+      JSON.stringify(normalize(draft.payload.defaults))
+  );
+}
 export function beginGroupEditor(
   group: RecordGroupView | null,
   scope: HostScope = { kind: "local" },
@@ -96,17 +122,17 @@ export function groupEditorProblem(
   )
     return "A Group with this name already exists under this parent.";
   const d = state.payload.defaults;
-  for (const [field, min, max] of [
-    ["port", 1, 65535],
-    ["keepalive_secs", 0, 4294967295],
-    ["keepalive_max_missed", 0, 4294967295],
-    ["connect_timeout_secs", 1, 4294967295],
+  for (const [field, label, min, max] of [
+    ["port", "Port", 1, 65535],
+    ["keepalive_secs", "Keepalive interval", 0, 4294967295],
+    ["keepalive_max_missed", "Missed keepalives", 0, 4294967295],
+    ["connect_timeout_secs", "Connect timeout", 1, 4294967295],
   ] as const)
     if (
       d[field] != null &&
       (!Number.isInteger(d[field]) || d[field]! < min || d[field]! > max)
     )
-      return `${field} is out of range.`;
+      return `${label} must be a whole number between ${min} and ${max}.`;
   if (d.user != null && /[\s\u0000-\u001f\u007f]/.test(d.user))
     return "Username cannot contain spaces or controls.";
   if (
@@ -182,5 +208,9 @@ export async function submitGroupDeletion(
 ): Promise<RecordOverview> {
   if (current.unavailable || current.id !== candidate.id || !current.revision)
     throw new Error("The reviewed Group is unavailable.");
-  return deleteRecordGroup(candidate.id, candidate.revision, candidate.snapshotToken);
+  return deleteRecordGroup(
+    candidate.id,
+    candidate.revision,
+    candidate.snapshotToken,
+  );
 }

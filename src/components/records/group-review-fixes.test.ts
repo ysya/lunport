@@ -4,6 +4,8 @@ import { groupView, hostPayload, hostView, recordOverview } from "./fixtures";
 import {
   beginGroupEditor,
   beginGroupDeletion,
+  changeGroupEditor,
+  groupConnectionSettingsChanged,
   refreshGroupEditor,
   submitGroupDeletion,
 } from "./group-editor";
@@ -15,7 +17,11 @@ describe("immutable Group deletion review", () => {
   it("uses reviewed revision and counts after a pristine editor refresh", async () => {
     const group = groupView();
     const original = beginGroupEditor(group);
-    const candidate = beginGroupDeletion(original, { groups: 1, hosts: 2 }, "reviewed-snapshot");
+    const candidate = beginGroupDeletion(
+      original,
+      { groups: 1, hosts: 2 },
+      "reviewed-snapshot",
+    );
     const updated = {
       ...group,
       revision: {
@@ -64,24 +70,46 @@ describe("immutable Group deletion review", () => {
   });
   it("passes the frozen snapshot token even when only descendants change", async () => {
     const state = beginGroupEditor(groupView());
-    const reviewed = recordOverview({ group_deletion_token: "before-descendant-edit" });
-    const candidate = beginGroupDeletion(state, { groups: 1, hosts: 2 }, reviewed.group_deletion_token);
+    const reviewed = recordOverview({
+      group_deletion_token: "before-descendant-edit",
+    });
+    const candidate = beginGroupDeletion(
+      state,
+      { groups: 1, hosts: 2 },
+      reviewed.group_deletion_token,
+    );
     reviewed.group_deletion_token = "after-descendant-edit";
     const calls = stubBackend(async (_command, args) => {
-      if ((args as { snapshotToken: string }).snapshotToken !== reviewed.group_deletion_token)
+      if (
+        (args as { snapshotToken: string }).snapshotToken !==
+        reviewed.group_deletion_token
+      )
         throw new Error("Refresh the records and review the deletion again.");
       return reviewed;
     });
-    await expect(submitGroupDeletion(candidate, state)).rejects.toThrow("review the deletion again");
+    await expect(submitGroupDeletion(candidate, state)).rejects.toThrow(
+      "review the deletion again",
+    );
     expect(calls).toHaveLength(1);
     expect(candidate.snapshotToken).toBe("before-descendant-edit");
-    const fresh = beginGroupDeletion(state, { groups: 2, hosts: 3 }, reviewed.group_deletion_token);
+    const fresh = beginGroupDeletion(
+      state,
+      { groups: 2, hosts: 3 },
+      reviewed.group_deletion_token,
+    );
     await expect(submitGroupDeletion(fresh, state)).resolves.toBe(reviewed);
-    expect(calls[1][1]).toMatchObject({ snapshotToken: "after-descendant-edit" });
+    expect(calls[1][1]).toMatchObject({
+      snapshotToken: "after-descendant-edit",
+    });
   });
   it("refuses to open a deletion review without a backend snapshot token", () => {
-    expect(() => beginGroupDeletion(beginGroupEditor(groupView()), { groups: 1, hosts: 2 }, ""))
-      .toThrow("Refresh the records and review the deletion again");
+    expect(() =>
+      beginGroupDeletion(
+        beginGroupEditor(groupView()),
+        { groups: 1, hosts: 2 },
+        "",
+      ),
+    ).toThrow("Refresh the records and review the deletion again");
   });
   it("copies the candidate values instead of retaining mutable editor/count objects", () => {
     const state = beginGroupEditor(groupView());
@@ -188,5 +216,89 @@ describe("saved diagnosis versus repair draft preview", () => {
         saved,
       ).error,
     ).toMatch(/missing or conflicting/i);
+  });
+});
+
+describe("Group connection-change guidance", () => {
+  it("does not warn for a new group, a rename, or inherited null values", () => {
+    expect(groupConnectionSettingsChanged(null, beginGroupEditor(null))).toBe(
+      false,
+    );
+    const saved = groupView();
+    expect(
+      groupConnectionSettingsChanged(
+        saved,
+        changeGroupEditor(beginGroupEditor(saved), { name: "New name" }),
+      ),
+    ).toBe(false);
+    expect(
+      groupConnectionSettingsChanged(
+        saved,
+        changeGroupEditor(beginGroupEditor(saved), {
+          defaults: { ...saved.payload.defaults, port: null, jump: null },
+        }),
+      ),
+    ).toBe(false);
+  });
+  it("detects parent moves and explicit OS username, direct routes and zero keepalives", () => {
+    const saved = groupView({
+      payload: { schema: 1, name: "Team", parent_id: null, defaults: {} },
+    });
+    for (const defaults of [
+      { user: "" },
+      { jump: [] },
+      { keepalive_secs: 0 },
+      { port: 2222 },
+    ]) {
+      expect(
+        groupConnectionSettingsChanged(
+          saved,
+          changeGroupEditor(beginGroupEditor(saved), { defaults }),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      groupConnectionSettingsChanged(
+        saved,
+        changeGroupEditor(beginGroupEditor(saved), {
+          parent_id: "0000000000000020",
+        }),
+      ),
+    ).toBe(true);
+  });
+  it("compares authentication by value and preserves jump route ordering", () => {
+    const saved = groupView({
+      payload: {
+        schema: 1,
+        name: "Team",
+        parent_id: null,
+        defaults: {
+          authentication: { auth: "password", key_id: null },
+          jump: ["0000000000000001", "0000000000000002"],
+        },
+      },
+    });
+    expect(
+      groupConnectionSettingsChanged(
+        saved,
+        changeGroupEditor(beginGroupEditor(saved), {
+          defaults: {
+            jump: [...saved.payload.defaults.jump!],
+            authentication: { key_id: null, auth: "password" },
+          },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      groupConnectionSettingsChanged(
+        saved,
+        changeGroupEditor(beginGroupEditor(saved), {
+          defaults: {
+            ...saved.payload.defaults,
+            jump: [...saved.payload.defaults.jump!].reverse(),
+          },
+        }),
+      ),
+    ).toBe(true);
   });
 });
