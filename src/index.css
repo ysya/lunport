@@ -57,84 +57,85 @@
 }
 
 /*
- * Color system: near-neutral GRAPHITE surface ladder + hairline borders +
- * minimal shadows. The ONE accent is macOS system blue (#0A84FF), used only for
- * the selection pill, the primary button, and the focus ring. Amber is demoted
- * to a semantic --warning used only by the drift / "needs attention" banner.
+ * Neutral surfaces share one palette across the workspace and portaled controls.
+ * Blue marks selection, primary actions and keyboard focus; warning/error colors
+ * remain semantic. Light and dark themes use separate accessible blue pairs.
  */
 :root {
     color-scheme: light;
-    --background: #ffffff;
-    --foreground: #16181b;
+    --background: #f6f7f9;
+    --foreground: #20242b;
     --card: #ffffff;
-    --card-foreground: #16181b;
+    --card-foreground: #20242b;
     --popover: #ffffff;
-    --popover-foreground: #16181b;
-    --primary: #0a84ff;
+    --popover-foreground: #20242b;
+    --primary: #1d4ed8;
     --primary-foreground: #ffffff;
-    --secondary: #f0f1f3;
-    --secondary-foreground: #16181b;
-    --muted: #f5f6f7;
-    --muted-foreground: #6b7178;
-    --accent: #eef0f2;
-    --accent-foreground: #16181b;
-    --destructive: #e5484d;
-    --warning: #d9a200;
-    --warning-foreground: #3d2c00;
-    --border: #e4e6e9;
-    --input: #dcdfe3;
-    --ring: #0a84ff;
-    --chart-1: #0a84ff;
-    --chart-2: #6b7178;
+    --secondary: #eceef2;
+    --secondary-foreground: #20242b;
+    --muted: #eceef2;
+    --muted-foreground: #626a76;
+    --accent: #e8ebf0;
+    --accent-foreground: #20242b;
+    --destructive: #bf303b;
+    --warning: #a16a00;
+    --warning-foreground: #ffffff;
+    --border: #d9dde4;
+    --input: #c7cdd7;
+    --ring: var(--primary);
+    --chart-1: var(--primary);
+    --chart-2: #626a76;
     --chart-3: #8a8f98;
     --chart-4: #b5b9bf;
     --chart-5: #d6d9dd;
+    --scrollbar-thumb: color-mix(in srgb, var(--muted-foreground) 36%, transparent);
+    --scrollbar-thumb-hover: color-mix(in srgb, var(--muted-foreground) 60%, transparent);
     --radius: 0.5rem;
-    --sidebar: #f5f6f7;
-    --sidebar-foreground: #16181b;
-    --sidebar-primary: #0a84ff;
-    --sidebar-primary-foreground: #ffffff;
-    --sidebar-accent: #eef0f2;
-    --sidebar-accent-foreground: #16181b;
-    --sidebar-border: #e4e6e9;
-    --sidebar-ring: #0a84ff;
+    --sidebar: #edeff3;
+    --sidebar-foreground: var(--foreground);
+    --sidebar-primary: var(--primary);
+    --sidebar-primary-foreground: var(--primary-foreground);
+    --sidebar-accent: #e1e5ec;
+    --sidebar-accent-foreground: var(--foreground);
+    --sidebar-border: var(--border);
+    --sidebar-ring: var(--ring);
 }
 
 .dark {
     color-scheme: dark;
-    --background: #0f1011;
-    --foreground: #f7f8f8;
-    --card: #161718;
-    --card-foreground: #f7f8f8;
-    --popover: #18191a;
-    --popover-foreground: #f7f8f8;
-    --primary: #0a84ff;
-    --primary-foreground: #ffffff;
-    --secondary: #1f2123;
-    --secondary-foreground: #f7f8f8;
-    --muted: #1a1b1d;
-    --muted-foreground: #8a8f98;
-    --accent: #222426;
-    --accent-foreground: #f7f8f8;
-    --destructive: #ff6161;
+    --background: #111214;
+    --foreground: #eef0f4;
+    --card: #1b1d21;
+    --card-foreground: #eef0f4;
+    --popover: #23252a;
+    --popover-foreground: #eef0f4;
+    --primary: #82b1ff;
+    --primary-foreground: #10213d;
+    --secondary: #22252b;
+    --secondary-foreground: #eef0f4;
+    --muted: #22252b;
+    --muted-foreground: #a8aeb8;
+    --accent: #2b2e35;
+    --accent-foreground: #eef0f4;
+    --destructive: #ff8087;
     --warning: #ffc533;
     --warning-foreground: #2a2000;
-    --border: #26282b;
-    --input: #2a2c2f;
-    --ring: #0a84ff;
-    --chart-1: #0a84ff;
-    --chart-2: #8a8f98;
+    --border: #34373f;
+    --input: #41454f;
+    --ring: var(--primary);
+    --chart-1: var(--primary);
+    --chart-2: #a8aeb8;
     --chart-3: #6b7178;
     --chart-4: #4a4d52;
-    --chart-5: #2a2c2f;
-    --sidebar: #0c0d0e;
-    --sidebar-foreground: #f7f8f8;
-    --sidebar-primary: #0a84ff;
-    --sidebar-primary-foreground: #ffffff;
-    --sidebar-accent: #222426;
-    --sidebar-accent-foreground: #f7f8f8;
-    --sidebar-border: #26282b;
-    --sidebar-ring: #0a84ff;
+    --chart-5: #34373f;
+    --sidebar: #17191d;
+    --sidebar-foreground: var(--foreground);
+    --sidebar-primary: var(--primary);
+    --sidebar-primary-foreground: var(--primary-foreground);
+    --sidebar-accent: #2b2e35;
+    --sidebar-accent-foreground: var(--foreground);
+    --sidebar-border: var(--border);
+    --sidebar-ring: var(--ring);
 }
 
 @layer base {
@@ -269,34 +270,55 @@
     background-color: var(--background);
   }
 
-  /* Keep scroll position discoverable without a bright, full-width track. */
-  .app-shell * {
+  /* Shared by native scroll regions and Radix surfaces, including portals. */
+  * {
     scrollbar-width: thin;
-    scrollbar-color: color-mix(in srgb, var(--muted-foreground) 28%, transparent) transparent;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
   }
-  .app-shell *::-webkit-scrollbar {
-    width: 7px;
-    height: 7px;
-  }
-  .app-shell *::-webkit-scrollbar-track,
-  .app-shell *::-webkit-scrollbar-corner {
-    background: transparent;
-  }
-  .app-shell *::-webkit-scrollbar-thumb {
-    border: 2px solid transparent;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--muted-foreground) 28%, transparent);
-    background-clip: padding-box;
-  }
-  .app-shell *::-webkit-scrollbar-thumb:hover {
-    background-color: color-mix(in srgb, var(--muted-foreground) 55%, transparent);
-  }
-  @media (forced-colors: active) {
-    .app-shell * {
+  /* Non-auto standard properties override WebKit thumb rounding in Chromium. */
+  @supports selector(::-webkit-scrollbar) {
+    * {
       scrollbar-width: auto;
       scrollbar-color: auto;
     }
-    .app-shell *::-webkit-scrollbar-thumb {
+    *::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    *::-webkit-scrollbar-track,
+    *::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+    *::-webkit-scrollbar-thumb {
+      min-height: 28px;
+      min-width: 28px;
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background: var(--scrollbar-thumb);
+      background-clip: padding-box;
+    }
+    *::-webkit-scrollbar-thumb:is(:hover, :active) {
+      background-color: var(--scrollbar-thumb-hover);
+    }
+  }
+  [data-slot="scroll-area-thumb"] {
+    background: var(--scrollbar-thumb);
+  }
+  [data-slot="scroll-area-scrollbar"]:is(:hover, :active) [data-slot="scroll-area-thumb"] {
+    background: var(--scrollbar-thumb-hover);
+  }
+  @media (forced-colors: active) {
+    * {
+      scrollbar-width: auto;
+      scrollbar-color: auto;
+    }
+    *::-webkit-scrollbar {
+      width: auto;
+      height: auto;
+    }
+    *::-webkit-scrollbar-thumb,
+    *::-webkit-scrollbar-thumb:is(:hover, :active),
+    [data-slot="scroll-area-thumb"] {
       background-color: CanvasText;
     }
   }

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clampHostPreviewWidth,
   hostPreviewLimit,
+  hostPreviewNeedsCompact,
   hostPreviewWidthAfterDrag,
   hostPreviewWidthAfterKey,
 } from "./host-preview-width";
@@ -13,6 +14,13 @@ describe("connection details width policy", () => {
     expect(clampHostPreviewWidth(-1)).toBe(320);
     expect(clampHostPreviewWidth(900)).toBe(640);
     expect(clampHostPreviewWidth(420.4)).toBe(420);
+  });
+  it("uses a single pane when two minimum widths no longer fit", () => {
+    expect(hostPreviewNeedsCompact(639.5)).toBe(true);
+    expect(hostPreviewNeedsCompact(634.5)).toBe(true);
+    expect(hostPreviewNeedsCompact(640)).toBe(false);
+    expect(hostPreviewNeedsCompact(900)).toBe(false);
+    expect(hostPreviewNeedsCompact(Infinity)).toBe(false);
   });
   it("reserves list space while keeping the preferred width independent", () => {
     expect(hostPreviewLimit(800)).toBe(480);

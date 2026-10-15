@@ -1,18 +1,11 @@
 /* Connection library: navigation, catalog, and an optional read-only inspector. */
 .library-shell {
-  --library-canvas: #f8f9fb;
-  --library-nav: #f3f5f8;
-  --library-selected: #e9f2ff;
-  --library-line: #e2e6ed;
-  --library-dim: #657084;
+  --library-canvas: var(--background);
+  --library-nav: var(--sidebar);
+  --library-selected: color-mix(in srgb, var(--primary) 10%, var(--background));
+  --library-line: var(--border);
+  --library-dim: var(--muted-foreground);
   background: var(--library-canvas);
-}
-.dark .library-shell {
-  --library-canvas: #111418;
-  --library-nav: #171b21;
-  --library-selected: #182d47;
-  --library-line: #2b323c;
-  --library-dim: #98a3b4;
 }
 .library-titlebar {
   display: flex;
@@ -22,7 +15,7 @@
   flex-shrink: 0;
   padding: 0 1rem;
   border-bottom: 1px solid var(--library-line);
-  background: var(--background);
+  background: var(--card);
 }
 .library-titlebar.is-macos {
   padding-left: 5rem;
@@ -199,7 +192,7 @@
   color: var(--library-dim);
 }
 .library-create {
-  box-shadow: 0 1px 2px #0870ce18;
+  box-shadow: 0 1px 2px #0000000d;
 }
 .library-catalog-toolbar {
   display: flex;
@@ -304,7 +297,7 @@
   min-width: 0;
   border: 1px solid var(--library-line);
   border-radius: 0.7rem;
-  background: var(--background);
+  background: var(--card);
 }
 .library-group-card > button:first-child {
   display: flex;
@@ -351,14 +344,14 @@
   overflow: hidden;
   border: 1px solid var(--library-line);
   border-radius: 0.75rem;
-  background: var(--background);
+  background: var(--card);
   transition:
     border-color 0.12s,
     box-shadow 0.12s;
 }
 .library-host-card:hover {
   border-color: color-mix(in srgb, var(--primary) 40%, var(--library-line));
-  box-shadow: 0 2px 8px #182c4d06;
+  box-shadow: 0 2px 8px #0000000a;
 }
 .library-host-card.is-selected {
   border-color: var(--primary);
@@ -580,7 +573,18 @@
   flex-shrink: 0;
   flex-direction: column;
   border-left: 1px solid var(--library-line);
-  background: var(--background);
+  background: var(--card);
+}
+[data-inspecting="true"]:has(> .library-host-preview[data-compact="true"]) > .library-main {
+  display: none;
+}
+.library-host-preview[data-compact="true"] {
+  width: auto;
+  flex: 1;
+  border-left: 0;
+}
+.library-host-preview[data-compact="true"] .library-preview-resize {
+  display: none;
 }
 .library-preview-resize {
   position: absolute;
@@ -726,7 +730,7 @@
   min-height: 2.5rem;
   padding: 0.25rem 1rem;
   border-top: 1px solid var(--library-line);
-  background: var(--background);
+  background: var(--card);
 }
 .library-sync-link {
   display: flex;
