@@ -1,58 +1,108 @@
 import { Channel } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { createElement } from "react";
-import { toast } from "sonner";
+import { create } from "zustand";
 
 import type { UpdateDownloadEvent } from "@/bindings/UpdateDownloadEvent";
 import type { UpdateInfo } from "@/bindings/UpdateInfo";
-import { UpdateProgress } from "@/components/UpdateProgress";
-import { type DownloadEvent, createDownloadTracker, progressView } from "@/lib/download-progress";
+import {
+  type DownloadEvent,
+  type ProgressView,
+  createDownloadTracker,
+  progressView,
+} from "@/lib/download-progress";
 import { tauriInvoke } from "@/lib/ipc";
-import { normalizeUpdateChannel } from "@/lib/settings-logic";
+import {
+  normalizeUpdateChannel,
+  type UpdateChannel,
+} from "@/lib/settings-logic";
 import { useSettingsStore } from "@/stores/settings";
 
-/** True while a check is already running (avoid double prompts). */
-let busy = false;
-/** True from "Install & restart" until that install fails (when it succeeds, the app restarts). */
-let installing = false;
-/** Last version a silent check already prompted for — never re-toast the same one. */
-let lastPromptedVersion: string | null = null;
-/** A stable toast id so repeated prompts replace rather than stack. */
-const UPDATE_TOAST_ID = "sshelter-update";
-/** How often the progress toast refreshes while an update installs (its stall timer counts on between chunks). */
-export const PROGRESS_REFRESH_MS = 500;
-
-// Any channel change — the Settings switch or a settings import — retires the current prompt:
-// its button would otherwise install from the channel the user just left.
-useSettingsStore.subscribe((state, previous) => {
-  if (normalizeUpdateChannel(state.updateChannel) !== normalizeUpdateChannel(previous.updateChannel)) {
-    toast.dismiss(UPDATE_TOAST_ID);
-  }
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "current"
+  | "available"
+  | "installing"
+  | "restarting"
+  | "restart_required"
+  | "error";
+export interface UpdaterState {
+  phase: UpdatePhase;
+  channel: UpdateChannel;
+  version: string | null;
+  body: string | null;
+  checkedAt: number | null;
+  progress: ProgressView | null;
+  error: string | null;
+  errorStage: "check" | "install" | null;
+}
+const selectedChannel = () =>
+  normalizeUpdateChannel(useSettingsStore.getState().updateChannel);
+const initialState = (): UpdaterState => ({
+  phase: "idle",
+  channel: selectedChannel(),
+  version: null,
+  body: null,
+  checkedAt: null,
+  progress: null,
+  error: null,
+  errorStage: null,
 });
+/** Session state survives closing Settings; it never persists an installer or automatically opens a window. */
+export const useUpdaterState = create<UpdaterState>(initialState);
+export const PROGRESS_REFRESH_MS = 500;
+export const updateInProgress = (phase: UpdatePhase) =>
+  phase === "installing" ||
+  phase === "restarting" ||
+  phase === "restart_required";
 
-/** What the prompt needs from either channel. */
 interface FoundUpdate {
   version: string;
   body?: string | null;
-  /** Downloads and installs the update, reporting the download to `onEvent`. */
   install: (onEvent: (event: DownloadEvent) => void) => Promise<void>;
+  close?: () => Promise<void>;
 }
+let candidate: FoundUpdate | null = null;
+let checkFlight: Promise<void> | null = null;
+let epoch = 0;
+function retire(update: FoundUpdate | null) {
+  void update?.close?.().catch(() => {});
+}
+function clearCandidate() {
+  const old = candidate;
+  candidate = null;
+  retire(old);
+}
+useSettingsStore.subscribe((state, previous) => {
+  if (
+    normalizeUpdateChannel(state.updateChannel) ===
+    normalizeUpdateChannel(previous.updateChannel)
+  )
+    return;
+  epoch++;
+  // A settings import may change the preference during installation. Keep showing the actual install.
+  if (updateInProgress(useUpdaterState.getState().phase)) return;
+  clearCandidate();
+  useUpdaterState.setState(initialState(), true);
+});
 
-/** Stable: the plugin's own check against tauri.conf.json's endpoint — the pre-channel path. */
 async function checkStable(): Promise<FoundUpdate | null> {
   const update = await check();
-  if (!update) return null;
-  return { version: update.version, body: update.body, install: (onEvent) => update.downloadAndInstall(onEvent) };
+  return update
+    ? {
+        version: update.version,
+        body: update.body,
+        install: (onEvent) => update.downloadAndInstall(onEvent),
+        close: () => update.close(),
+      }
+    : null;
 }
-
-/** Beta: the backend checks the `updater-beta` manifest and installs what it found. */
 async function checkBeta(): Promise<FoundUpdate | null> {
   const info = await tauriInvoke<UpdateInfo | null>("updater_check_beta");
   if (!info) return null;
   return {
-    version: info.version,
-    body: info.body,
+    ...info,
     install: (onEvent) => {
       const channel = new Channel<UpdateDownloadEvent>();
       channel.onmessage = onEvent;
@@ -60,108 +110,144 @@ async function checkBeta(): Promise<FoundUpdate | null> {
     },
   };
 }
+const errorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
 
-/**
- * Check the selected channel for a newer signed build: Stable reads GitHub
- * Releases' `latest.json`, Beta reads the `updater-beta` release's. When one is
- * found, prompt via a persistent toast; on confirm, download + install + relaunch.
- *
- * `silent` is for the automatic checks: no "up to date" confirmation, no error
- * toasts (dev builds and offline machines would nag otherwise), and the same
- * version is only prompted ONCE per app run — a manual check always prompts.
- */
-export async function checkForUpdates({ silent }: { silent: boolean }): Promise<void> {
-  // While an update installs, its toast shows the progress, and a new prompt could start a second download.
-  if (busy || installing) return;
-  busy = true;
+/** Manual and automatic checks update the same inline state. Neither creates a toast or opens Settings. */
+export async function checkForUpdates({
+  silent,
+}: {
+  silent: boolean;
+}): Promise<void> {
+  if (updateInProgress(useUpdaterState.getState().phase)) return;
+  const channel = selectedChannel();
+  if (checkFlight) {
+    await checkFlight;
+    // A channel switch waits for the old backend check, then checks the new channel.
+    // This also keeps Beta's pending installer from being overwritten by concurrent checks.
+    if (
+      selectedChannel() === channel &&
+      useUpdaterState.getState().phase === "idle"
+    ) {
+      return checkForUpdates({ silent });
+    }
+    return;
+  }
+  const generation = epoch;
+  clearCandidate();
+  useUpdaterState.setState({
+    ...initialState(),
+    phase: "checking",
+    checkedAt: useUpdaterState.getState().checkedAt,
+  });
+  const flight = (async () => {
+    try {
+      const update =
+        channel === "beta" ? await checkBeta() : await checkStable();
+      if (generation !== epoch || selectedChannel() !== channel) {
+        retire(update);
+        return;
+      }
+      candidate = update;
+      useUpdaterState.setState({
+        phase: update ? "available" : "current",
+        channel,
+        version: update?.version ?? null,
+        body: update?.body ?? null,
+        checkedAt: Date.now(),
+        progress: null,
+        error: null,
+        errorStage: null,
+      });
+    } catch (error) {
+      if (generation !== epoch || selectedChannel() !== channel) return;
+      useUpdaterState.setState({
+        phase: "error",
+        error: errorMessage(error),
+        errorStage: "check",
+      });
+      if (silent) console.warn("[updater] automatic check failed:", error);
+    }
+  })();
+  checkFlight = flight;
   try {
-    const channel = normalizeUpdateChannel(useSettingsStore.getState().updateChannel);
-    const update = channel === "beta" ? await checkBeta() : await checkStable();
-    // The user switched channels while this check was in flight: its result belongs to the
-    // old channel, so drop it rather than prompt (and later install) from the wrong one. The same
-    // when an install started meanwhile: a prompt now could only offer a second download.
-    if (installing || normalizeUpdateChannel(useSettingsStore.getState().updateChannel) !== channel) return;
-    if (!update) {
-      if (!silent) toast.success("SSHelter is up to date");
-      return;
-    }
-
-    if (silent && update.version === lastPromptedVersion) return;
-    lastPromptedVersion = update.version;
-
-    toast.info(`Update available: v${update.version}`, {
-      id: UPDATE_TOAST_ID,
-      description: update.body?.split("\n")[0],
-      duration: Infinity,
-      action: {
-        label: "Install & restart",
-        onClick: () => {
-          void installUpdate(update);
-        },
-      },
-    });
-  } catch (e) {
-    if (!silent) {
-      toast.error("Could not check for updates", { description: String(e) });
-    } else {
-      console.warn("[updater] silent check failed:", e);
-    }
+    await flight;
   } finally {
-    busy = false;
+    if (checkFlight === flight) checkFlight = null;
   }
 }
 
-/**
- * Show an update's download in a toast until `stop()`: the bytes, the speed, the time left, and a warning when no
- * data arrives. It refreshes every PROGRESS_REFRESH_MS, and at once when the download finishes.
- */
-function showDownloadProgress(version: string) {
-  const tracker = createDownloadTracker(performance.now());
-  let id: string | number | undefined;
-  let stopped = false;
-  const render = () => {
-    const view = progressView(version, tracker.snapshot(performance.now()));
-    id = toast.loading(view.title, {
-      id,
-      description: createElement(UpdateProgress, { view }),
-      // Let the bar span the toast rather than the width of its text.
-      classNames: { content: "flex-1" },
+export async function restartAfterUpdate(): Promise<void> {
+  if (useUpdaterState.getState().phase !== "restart_required") return;
+  useUpdaterState.setState({ phase: "restarting", error: null });
+  try {
+    await relaunch();
+  } catch (error) {
+    useUpdaterState.setState({
+      phase: "restart_required",
+      error: errorMessage(error),
     });
-  };
-  render();
-  const timer = setInterval(render, PROGRESS_REFRESH_MS);
-  return {
-    id: id as string | number,
-    onEvent: (event: DownloadEvent) => {
-      // Tauri evaluates channel messages in the page, apart from the command's result, so one can arrive after the
-      // install returned: it must not replace the result.
-      if (stopped) return;
-      tracker.handle(event, performance.now());
-      // The bytes wait for the next refresh: rendering at Started would flash "0 B" before the first chunk.
-      if (event.event === "Finished") render();
-    },
-    stop: () => {
-      stopped = true;
-      clearInterval(timer);
-    },
-  };
+  }
 }
 
-async function installUpdate(update: FoundUpdate) {
-  if (installing) return;
-  installing = true;
-  const progress = showDownloadProgress(update.version);
+/** Only the explicitly reviewed candidate can install. Checking, double clicks and stale channels cannot start another download. */
+export async function installAvailableUpdate(): Promise<void> {
+  const state = useUpdaterState.getState();
+  if (
+    checkFlight ||
+    state.phase !== "available" ||
+    state.channel !== selectedChannel() ||
+    !candidate
+  )
+    return;
+  const update = candidate;
+  candidate = null;
+  const tracker = createDownloadTracker(performance.now());
+  let stopped = false;
+  const render = () =>
+    useUpdaterState.setState({
+      progress: progressView(
+        update.version,
+        tracker.snapshot(performance.now()),
+      ),
+    });
+  useUpdaterState.setState({
+    phase: "installing",
+    error: null,
+    errorStage: null,
+  });
+  render();
+  const timer = setInterval(render, PROGRESS_REFRESH_MS);
+  const stop = () => {
+    stopped = true;
+    clearInterval(timer);
+  };
   try {
-    try {
-      await update.install(progress.onEvent);
-    } finally {
-      progress.stop();
-    }
-    toast.success("Update installed — restarting…", { id: progress.id, description: undefined });
-    await relaunch();
-  } catch (e) {
-    toast.error("Update failed", { id: progress.id, description: String(e) });
+    await update.install((event) => {
+      if (stopped) return;
+      tracker.handle(event, performance.now());
+      if (event.event === "Finished") render();
+    });
+  } catch (error) {
+    useUpdaterState.setState({
+      phase: "error",
+      channel: selectedChannel(),
+      error: errorMessage(error),
+      errorStage: "install",
+      progress: null,
+    });
+    return;
   } finally {
-    installing = false;
+    stop();
+    retire(update);
+  }
+  useUpdaterState.setState({ phase: "restarting", progress: null });
+  try {
+    await relaunch();
+  } catch (error) {
+    useUpdaterState.setState({
+      phase: "restart_required",
+      error: errorMessage(error),
+    });
   }
 }

@@ -40,6 +40,7 @@ describe("records settings compatibility", () => {
     });
     for (const category of [
       "general",
+      "updates",
       "appearance",
       "connection",
       "files",

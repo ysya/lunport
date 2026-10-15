@@ -22,7 +22,7 @@ import { pathToFileURL } from "node:url";
 export const CHANNEL_TAG = "updater-beta";
 const MANIFEST = "latest.json";
 const CHANNEL_NOTES =
-  "Maintained by CI: holds the Beta update channel's latest.json (Settings → General → Update channel). Not a release.";
+  "Maintained by CI: holds the Beta update channel's latest.json (Settings → Updates → Release channel). Not a release.";
 
 const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$/;
 
