@@ -2,9 +2,11 @@
 
 更新日期：2026-10-16，時間均為 Asia/Tokyo。接手分支為 `codex/host-menu-sync-feedback`；本次調查起點是 `854512370c180fce9ef588c1a4f7f865486b51ed`，已安裝的應用程式是 Beta 9 `1.0.0-9`。
 
-**目前已恢復畫面，但預防措施尚未實作。** 本次直接阻塞點是 CoreAudio 服務無回應，WebKit GPU 程序等待音訊初始化而無法繪圖。系統服務最初為何卡住仍未確定，不能把恢復成功當成永久修正，也不能認定某個第三方驅動就是元兇。
+**後續已實作原生啟動保護，尚未發布。** 修補分支為 `codex/macos-coreaudio-startup-guard`，實作、可重跑指令、原生故障注入與未驗證限制見 [啟動保護驗證紀錄](2026-10-16-macos-startup-guard-validation.md)。以下保留 `654b984` 接手時的研究證據；後續驗證日期採 Asia/Taipei。
 
-本次提交只保存研究、探測程式與接手指引；沒有變更產品程式碼、安裝包、vault 或同步設定，也沒有發布新版本。Beta 9 既有發布、來源和跨平台 CI 收據見 [Beta 9 接手文件](2026-10-16-beta9-remote-handoff.md)。
+本次直接阻塞點是 CoreAudio 服務無回應，WebKit GPU 程序等待音訊初始化而無法繪圖。系統服務最初為何卡住仍未確定，不能把恢復成功或啟動保護當成系統死鎖的永久修正，也不能認定某個第三方驅動就是元兇。
+
+原接手提交 `654b984` 只保存研究、探測程式與接手指引；後續修補已變更產品程式碼，但沒有更新正式安裝包、vault 或同步設定，也沒有發布新版本。Beta 9 既有發布、來源和跨平台 CI 收據見 [Beta 9 接手文件](2026-10-16-beta9-remote-handoff.md)。
 
 ## 本次故障與恢復證據
 
@@ -68,16 +70,18 @@ Wry `0.55.1` 的 `src/wkwebview/mod.rs` 透過 `mediaTypesRequiringUserActionFor
 
 ## 建議接續順序
 
+此節為原調查的建議；第 2 點及第 3 點中的 WebContent 有限次恢復，已由後續修補實作與部分實機驗證。完整結果及未完成的裝置驗收以 [驗證紀錄](2026-10-16-macos-startup-guard-validation.md) 為準，不要再次直接套用本節描述的舊啟動流程。
+
 1. **先降低主機風險。** 在使用者安排的時段更新 SoundSource，確認實際載入的 ARK 版本，再觀察睡眠喚醒、藍牙／輸出裝置切換與 SSHelter 啟動。若復發，在重啟服務前取得 coreaudiod 的 sample 和同時段紀錄，才有機會查到持鎖來源。不要因為安裝了某個驅動就直接移除它。
 2. **優先補上原生啟動保護。** 在建立 macOS WebView 前，用可終止的子程序做 CoreAudio 存活查詢，設定有限期限；逾時顯示原生 AppKit 提示及重試入口。這能讓已卡住的系統服務獲得明確提示，不能保證阻止系統服務本身死鎖。探測不能跑在 UI 執行緒，也不能只丟到不可取消的 thread 後無限堆積。期限可先以 2 秒作實驗起點，再用冷啟動與睡眠喚醒資料調整。
 3. **再驗證執行中的繪圖故障處理。** 以公開 WebContent termination hook 加入有次數上限的處理；另研究 GPU 仍無法繪製時的可靠判定。任何 snapshot／繪圖探測方案都須經 GPU 停滯情境驗證；單靠前端 ready 或 heartbeat 不足。恢復動作不能自動結束 SSH sessions、略過金鑰核准或丟棄未儲存編輯。
 4. **私有偏好只保留為實驗候選。** 不要直接對正式 app 執行大範圍 `defaults write`、把所有 GPU 功能永久關閉，或把自動播放開關宣稱為根治。先用隔離 Development app 驗證實際故障、效能與跨版本相容性，再決定是否有必要採用。
 
-原生提示必須不依賴 WebKit，不能用另一個 React／WebView 視窗代替。現有 dialog 相依 rfd `0.16.0` 的 macOS message dialog 使用 `NSAlert`，可作實作評估起點。Tauri WindowConfig 有 `create: false` 與 `WebviewWindowBuilder::from_config` 可延後建立 WebView；目前只是確認 API，尚未修改啟動流程。
+原生提示必須不依賴 WebKit，不能用另一個 React／WebView 視窗代替。後續實作確認 rfd `0.16.0` 只在有父視窗的路徑使用 `NSAlert`，parentless 路徑實際使用 `CFUserNotification`；最終修補改採明確的 AppKit NSAlert bridge。Tauri 的 `create: false` 與 `WebviewWindowBuilder::from_config` 已用於延後 macOS WebView 建立。
 
 ## 實作邊界與驗收
 
-目前主視窗從設定自動建立，`src-tauri/src/lib.rs` 的 setup 隨即 show，沒有上述前置檢查。改為延後建立時，需要一起檢視 tray、single-instance、Reopen、全域快捷鍵的主視窗入口，以及 authentication／hostkey／approval 視窗。背景 MCP／SSH broker、CLI connect 與 ASKPASS helper 不能因為 GUI 檢查失敗而被一起阻斷。
+接手時主視窗從設定自動建立，`src-tauri/src/lib.rs` 的 setup 隨即 show，沒有上述前置檢查。後續修補已把 tray、single-instance、Reopen、全域快捷鍵的主視窗入口，以及 authentication／hostkey／approval 視窗納入檢查；背景 MCP／SSH broker、CLI connect 與 ASKPASS helper 維持獨立。具體測試與尚待驗收項目見新驗證紀錄。
 
 後續至少驗證：
 
@@ -89,7 +93,7 @@ Wry `0.55.1` 的 `src/wkwebview/mod.rs` 透過 `mediaTypesRequiringUserActionFor
 - 已存在的 SSH sessions、未儲存草稿及待核准金鑰請求的保留與拒絕規則。
 - macOS Intel／Apple Silicon 驗收；Windows／Linux 啟動行為不受 macOS 專用邏輯影響。
 
-本輪沒有故意把目前已恢復的系統音訊服務再次卡住，也沒有驗證任何預防性產品修補。正式版候選仍需原接手文件中的裝置驗收，這次恢復紀錄不能代替預防措施的驗收。
+原研究沒有故意把已恢復的系統音訊服務再次卡住；後續也只對 Development helper／WebContent／GPU 做隔離故障注入，沒有破壞系統音訊。正式版候選仍需原接手文件及新驗證紀錄中的裝置驗收。
 
 ## 在另一台電腦接手
 

@@ -252,8 +252,10 @@ fn rebuild_menu(app: &tauri::AppHandle, items: &[RecordTrayItem]) -> tauri::Resu
 
     builder = builder
         .separator()
-        .text("open", "Open SSHelter")
-        .text("quit", "Quit");
+        .text("open", "Open SSHelter");
+    #[cfg(target_os = "macos")]
+    { builder = builder.text("window-diagnostics", "Window Diagnostics…"); }
+    builder = builder.text("quit", "Quit");
 
     let menu = builder.build()?;
 
@@ -314,6 +316,8 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     match id {
         "quit" => app.exit(0),
         "open" => crate::show_main_window_by_user(app),
+        #[cfg(target_os = "macos")]
+        "window-diagnostics" => crate::macos_health::request(app, crate::macos_health::Surface::Diagnostics),
         other => {
             if let Some(host_id) = other.strip_prefix("record-connect:") {
                 let (app, host_id) = (app.clone(), host_id.to_owned());
