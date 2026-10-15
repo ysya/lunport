@@ -112,6 +112,9 @@ pub struct RecordOverview {
     pending_account: Option<PendingAccountView>,
     last_sync_ms: Option<u64>,
     last_error: Option<String>,
+    library_enabled: bool,
+    library_scope: Option<HostScope>,
+    pending_changes: usize,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordStatus {
@@ -138,7 +141,8 @@ pub fn overview_from(
     account_keys: Option<&crate::sync::crypto::ChainKeys>,
 ) -> Result<RecordOverview, AppError> {
     let snapshot = repo::snapshot(state).map_err(error)?;
-    let group_deletion_token = crate::sync::record_groups::deletion_snapshot_token(&snapshot).map_err(error)?;
+    let group_deletion_token =
+        crate::sync::record_groups::deletion_snapshot_token(&snapshot).map_err(error)?;
     let hosts = snapshot
         .hosts
         .into_iter()
@@ -281,6 +285,29 @@ pub fn overview_from(
             kind: op.kind,
             phase: op.phase,
         }),
+        library_enabled: crate::sync::record_library::enabled(state),
+        library_scope: crate::sync::record_library::creation_scope(state).ok(),
+        pending_changes: state
+            .spaces
+            .values()
+            .flat_map(|s| s.records.values())
+            .filter(|r| r.dirty)
+            .count()
+            + state
+                .account
+                .as_ref()
+                .map_or(0, |a| a.records.values().filter(|r| r.dirty).count())
+            + if crate::sync::record_library::enabled(state) {
+                state
+                    .local
+                    .hosts
+                    .values()
+                    .chain(state.local.groups.values())
+                    .filter(|r| !r.record.deleted)
+                    .count()
+            } else {
+                0
+            },
         last_sync_ms: state.last_sync_ms,
         last_error: state.last_error.clone(),
     })
@@ -314,41 +341,48 @@ pub async fn records_status(app: AppHandle) -> Result<RecordStatus, AppError> {
         .await
         .map_err(crate::sync::engine::join_error)?
 }
+pub(crate) fn edit_records(
+    env: &SyncEnv,
+    transform: impl Fn(&SyncStateV3, u64) -> Result<SyncStateV3, AppError>,
+) -> Result<RecordOverview, AppError> {
+    let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    let now = env.now();
+    env.runtime.note_activity(now);
+    let (before, _) = record_runtime::snapshot(env)?;
+    let proposed = transform(&before, now)?;
+    if proposed.relay_url != before.relay_url {
+        crate::sync::record_round::require_no_pending_migration(env)?;
+    }
+    if proposed.spaces != before.spaces {
+        crate::sync::record_round::require_no_pending_migration(env)?;
+    }
+    // Routine library edits save to the cache offline. Transport still performs a
+    // fresh authenticated format check before any upload. Format upgrades require
+    // an online check here because they also modify account metadata.
+    if proposed.spaces != before.spaces
+        && (!crate::sync::record_library::enabled(&before) || proposed.account != before.account)
+    {
+        crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;
+        if crate::sync::records_v3::account_writes_blocked(&record_runtime::snapshot(env)?.0) {
+            return Err(AppError::Other(
+                "Shared writes are blocked until the pending account operation completes.".into(),
+            ));
+        }
+    }
+    record_runtime::mutate_records(env, |s| transform(s, now))?;
+    drop(lifecycle);
+    let view = overview(env)?;
+    env.events.status();
+    env.events.wake();
+    Ok(view)
+}
 async fn edit(
     app: AppHandle,
     transform: impl Fn(&SyncStateV3, u64) -> Result<SyncStateV3, AppError> + Send + 'static,
 ) -> Result<RecordOverview, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::sync::engine::with_env(&app, |env| {
-            let lifecycle = env.runtime.lifecycle.lock().unwrap();
-            let now = env.now();
-            env.runtime.note_activity(now);
-            let (before, _) = record_runtime::snapshot(env)?;
-            let proposed = transform(&before, now)?;
-            if proposed.relay_url != before.relay_url {
-                crate::sync::record_round::require_no_pending_migration(env)?;
-            }
-            if proposed.spaces != before.spaces {
-                crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;
-                if crate::sync::records_v3::account_writes_blocked(
-                    &record_runtime::snapshot(env)?.0,
-                ) {
-                    return Err(AppError::Other(
-                        "Shared writes are blocked until the pending account operation completes."
-                            .into(),
-                    ));
-                }
-            }
-            record_runtime::mutate_records(env, |s| transform(s, now))?;
-            drop(lifecycle);
-            let view = overview(env)?;
-            env.events.status();
-            env.events.wake();
-            Ok(view)
-        })?
-    })
-    .await
-    .map_err(crate::sync::engine::join_error)?
+        crate::sync::engine::with_env(&app, |env| edit_records(env, transform))?
+    }).await.map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
 pub async fn records_group_create(
@@ -359,6 +393,11 @@ pub async fn records_group_create(
 ) -> Result<RecordOverview, AppError> {
     let id = new_host_id()?;
     edit(app, move |s, now| {
+        let scope = if scope == HostScope::Local {
+            crate::sync::record_library::creation_scope(s).map_err(error)?
+        } else {
+            scope.clone()
+        };
         crate::sync::record_groups::create_group(
             s,
             &id,
@@ -408,6 +447,11 @@ pub async fn records_host_create(
     let payload = new_host_payload(payload);
     let id = new_host_id()?;
     edit(app, move |s, now| {
+        let scope = if scope == HostScope::Local {
+            crate::sync::record_library::creation_scope(s).map_err(error)?
+        } else {
+            scope.clone()
+        };
         let candidate = crate::sync::record_groups::promote_for_host(
             s,
             &scope,
@@ -430,16 +474,15 @@ pub async fn records_host_update(
 ) -> Result<RecordOverview, AppError> {
     let revision = revision.revision()?;
     edit(app, move |s, now| {
-        let scope = repo::get_host(s, &id).map_err(error)?.host.scope;
-        let candidate = crate::sync::record_groups::promote_for_host(
+        crate::sync::record_library::update_host(
             s,
-            &scope,
-            &payload,
+            &id,
+            &revision,
+            payload.clone(),
             upgrade_confirmed.unwrap_or(false),
             now,
         )
-        .map_err(error)?;
-        repo::update_host(&candidate, &id, &revision, payload.clone(), now).map_err(error)
+        .map_err(error)
     })
     .await
 }
@@ -465,6 +508,20 @@ pub async fn records_host_move(
     let revision = revision.revision()?;
     edit(app, move |s, now| {
         repo::move_host(s, &id, &revision, destination.clone(), now).map_err(error)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn records_host_group(
+    app: AppHandle,
+    id: String,
+    revision: RevisionToken,
+    group_id: Option<String>,
+) -> Result<RecordOverview, AppError> {
+    let revision = revision.revision()?;
+    edit(app, move |s, now| {
+        crate::sync::record_library::set_host_group(s, &id, &revision, group_id.as_deref(), now)
+            .map_err(error)
     })
     .await
 }
@@ -589,10 +646,21 @@ pub struct AccountSetupReply {
 pub async fn records_account_create(
     app: AppHandle,
     device_name: String,
+    upgrade_confirmed: Option<bool>,
 ) -> Result<AccountSetupReply, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
-            let result = crate::sync::record_account::create_account(env, &device_name)?;
+            let mut result = crate::sync::record_account::create_account(env, &device_name)?;
+            if result.complete {
+                if let Err(error) =
+                    crate::sync::record_library::enable(env, upgrade_confirmed.unwrap_or(false))
+                {
+                    result.complete = false;
+                    result.pending_error = Some(format!(
+                        "The sync chain was created. Finish library sync setup: {error}"
+                    ));
+                }
+            }
             Ok(AccountSetupReply {
                 words: result.code.to_string(),
                 overview: overview(env)?,
@@ -610,11 +678,13 @@ pub async fn records_account_join(
     app: AppHandle,
     words: String,
     device_name: String,
+    upgrade_confirmed: Option<bool>,
 ) -> Result<RecordOverview, AppError> {
     let words = zeroize::Zeroizing::new(words);
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
             crate::sync::record_account::join_account(env, &words, &device_name)?;
+            crate::sync::record_library::enable(env, upgrade_confirmed.unwrap_or(false))?;
             overview(env)
         })?
     })
@@ -630,6 +700,20 @@ pub async fn records_account_resume(
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
             crate::sync::record_account::resume_pending(env, words.as_ref().map(|w| w.as_str()))?;
+            overview(env)
+        })?
+    })
+    .await
+    .map_err(crate::sync::engine::join_error)?
+}
+#[tauri::command]
+pub async fn records_library_enable(
+    app: AppHandle,
+    upgrade_confirmed: bool,
+) -> Result<RecordOverview, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::sync::engine::with_env(&app, |env| {
+            crate::sync::record_library::enable(env, upgrade_confirmed)?;
             overview(env)
         })?
     })

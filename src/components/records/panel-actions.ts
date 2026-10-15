@@ -76,6 +76,7 @@ export async function submitAccountDraft(
   state: AccountDraft,
   update: (patch: Partial<AccountDraft>) => void,
   create: boolean,
+  upgradeConfirmed?: boolean,
 ): Promise<boolean> {
   if (
     state.busy ||
@@ -86,7 +87,10 @@ export async function submitAccountDraft(
   update({ busy: true, error: null, migrationOffered: false });
   try {
     if (create) {
-      const result = await createRecordAccount(state.deviceName);
+      const result = await createRecordAccount(
+        state.deviceName,
+        upgradeConfirmed,
+      );
       update({
         words: "",
         createdWords: result.words,
@@ -97,7 +101,11 @@ export async function submitAccountDraft(
       });
       applyRecordOverview(client, result.overview);
     } else {
-      const overview = await joinRecordAccount(state.words, state.deviceName);
+      const overview = await joinRecordAccount(
+        state.words,
+        state.deviceName,
+        upgradeConfirmed,
+      );
       update({ words: "", createdWords: "" });
       applyRecordOverview(client, overview);
     }

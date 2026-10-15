@@ -9,6 +9,7 @@ import {
   type ImportPreviewResult,
 } from "@/lib/records";
 export type EditorState = {
+  originalScope?: HostScope;
   id: string | null;
   scope: HostScope;
   payload: HostPayload;
@@ -42,6 +43,7 @@ export function beginEditor(host: RecordHostView | null): EditorState {
   return {
     id: host?.id ?? null,
     scope: structuredClone(host?.scope ?? { kind: "local" }),
+    originalScope: host ? structuredClone(host.scope) : undefined,
     payload: structuredClone({
       ...(host?.payload ?? emptyHostPayload()),
       group_id: host?.payload.group_id ?? null,
@@ -78,7 +80,8 @@ export function refreshEditor(
     state.revision?.version !== host.revision.version ||
     state.revision.updated_at_ms !== host.revision.updated_at_ms ||
     state.revision.device_id !== host.revision.device_id ||
-    JSON.stringify(state.scope) !== JSON.stringify(host.scope);
+    JSON.stringify(state.originalScope ?? state.scope) !==
+      JSON.stringify(host.scope);
   return { ...state, changedOnServer: changed, unavailable: false };
 }
 export function buildEditorPayload(state: EditorState): HostPayload {

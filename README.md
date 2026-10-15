@@ -1,6 +1,6 @@
 # SSHelter
 
-> **Own SSH development branch:** the records workspace keeps its vault local, syncs selected records and keys through encrypted chains, and uses explicit legacy migration. The release descriptions below refer to the existing legacy mode. Groups, Records MCP execution and POSIX public-key deployment are available in [Beta 1.0.0-3](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3), with native CI and four-platform publication verified. See the [remote handoff](docs/2026-10-15-beta3-remote-handoff.md) and [Beta 3 checklist](docs/releases/1.0.0-3-review-checklist.md) for current behavior, verification, and remaining gates.
+> **Own SSH development branch:** the records workspace keeps its vault local, syncs one host library through encrypted chains with separate key-sharing controls, and uses explicit legacy migration. The release descriptions below refer to the existing legacy mode. Groups, Records MCP execution and POSIX public-key deployment are available in [Beta 1.0.0-3](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3), with native CI and four-platform publication verified. See the [remote handoff](docs/2026-10-15-beta3-remote-handoff.md) and [Beta 3 checklist](docs/releases/1.0.0-3-review-checklist.md) for current behavior, verification, and remaining gates.
 
 A cross-platform desktop app for managing your **local OpenSSH** setup — `~/.ssh/config`, keys, `ssh-agent`, and `known_hosts` — with lossless, format-preserving editing. macOS + Linux first (Windows later).
 
@@ -116,3 +116,11 @@ To point the Beta channel at a release by hand, run **update beta channel** with
 ## License
 
 [PolyForm Noncommercial](LICENSE) © Frank Sung
+
+## Library sync (development)
+
+Hosts and Groups share one library. Creating or joining sync includes existing records on this device; previously connected devices enable Library sync once from Sync settings. New records then sync automatically, including imported hosts. Keys retain their explicit sharing controls.
+
+The library remains editable offline and queues cached changes for the next connection. Every upload still checks authenticated account format metadata. First-time Group format upgrades need an online check and acknowledgement that older clients have been stopped or updated.
+
+Existing encrypted space chains are retained as transport details. Setup downloads their baselines before including existing records, keeps stable IDs and Group inheritance, and rejects conflicting identities or names without removing the source records. Interrupted setup can resume its original operation.

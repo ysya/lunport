@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import type { HostScope, RecordOverview } from "@/lib/records";
+import type { RecordOverview } from "@/lib/records";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -32,7 +32,7 @@ export function CollectionActions({
 }) {
   const [dialog, setDialog] = useState<"move" | "tag" | null>(null);
   const [tag, setTag] = useState("");
-  const [destination, setDestination] = useState("local");
+  const [destination, setDestination] = useState("none");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
@@ -51,15 +51,14 @@ export function CollectionActions({
     onBusy?.(true);
     setError(null);
     try {
-      const scope: HostScope =
-        destination === "local"
-          ? { kind: "local" }
-          : { kind: "space", space_id: destination };
       const result = await applyCollectionAction(
         reviewed.current.overview,
         reviewed.current.ids,
         dialog === "move"
-          ? { kind: "move", destination: scope }
+          ? {
+              kind: "group",
+              groupId: destination === "none" ? null : destination,
+            }
           : { kind: "tag", tag },
         accept,
       );
@@ -94,7 +93,7 @@ export function CollectionActions({
             disabled={disabled || busy || !ids.length}
             onClick={() => open("move")}
           >
-            Move to…
+            Move to group…
           </Button>
           <Button
             size="sm"
@@ -123,30 +122,31 @@ export function CollectionActions({
         <DialogContent showCloseButton={!busy}>
           <DialogTitle>
             {dialog === "move"
-              ? "Move selected hosts"
+              ? "Move selected hosts to a Group"
               : "Add a tag to selected hosts"}
           </DialogTitle>
           <DialogDescription>
             Apply to {reviewed.current?.ids.length ?? ids.length} hosts. Changes
             apply one host at a time. If a host changed elsewhere, the operation
-            stops so you can review it.
+            stops so you can review it. Grouping keeps current connection
+            settings as host overrides.
           </DialogDescription>
           {dialog === "move" ? (
             <label className="space-y-2 text-sm">
-              Destination
+              Group
               <select
-                aria-label="Destination scope"
+                aria-label="Destination Group"
                 value={destination}
                 onChange={(event) => setDestination(event.target.value)}
                 disabled={busy}
                 className={selectClass}
               >
-                <option value="local">Local</option>
-                {overview.spaces
-                  .filter((space) => space.selected && !space.missing)
-                  .map((space) => (
-                    <option key={space.id} value={space.id}>
-                      {revealHidden(space.name)}
+                <option value="none">Ungrouped</option>
+                {overview.groups
+                  .filter((group) => !group.group_error)
+                  .map((group) => (
+                    <option key={group.id} value={group.id}>
+                      {revealHidden(group.payload.name)}
                     </option>
                   ))}
               </select>

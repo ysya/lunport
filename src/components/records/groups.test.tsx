@@ -321,7 +321,7 @@ describe("Group editor presentation", () => {
         onDirty={vi.fn()}
       />,
     );
-    expect(html).toContain("Scope: Local");
+    expect(html).toContain("Library");
     expect(html).toContain("1 descendant Group");
     expect(html).toContain("1 host");
     expect(html).toContain("preserved");

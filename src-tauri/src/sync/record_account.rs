@@ -223,6 +223,9 @@ fn plan_device(
         timestamp,
     );
     record.version = version;
+    if previous.is_some_and(|r| r.record.payload.get("sync_library").and_then(serde_json::Value::as_bool) == Some(true)) {
+        record.payload["sync_library"] = true.into();
+    }
     let seq = previous.map(|r| r.seq).unwrap_or(0);
     account.records.insert(
         record_key(record.kind, &record.id),
@@ -714,6 +717,12 @@ pub fn join_account(env: &SyncEnv, code: &str, device_name: &str) -> Result<(), 
     result
 }
 pub fn create_space(env: &SyncEnv, name: &str) -> Result<String, AppError> {
+    create_space_with_slug(env, name, "records")
+}
+pub(crate) fn create_library_space(env: &SyncEnv) -> Result<String, AppError> {
+    create_space_with_slug(env, "Library", crate::sync::record_library::library_slug())
+}
+fn create_space_with_slug(env: &SyncEnv, name: &str, slug: &str) -> Result<String, AppError> {
     let name = clean_name(name)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     crate::sync::record_round::preflight(env)?;
@@ -721,6 +730,9 @@ pub fn create_space(env: &SyncEnv, name: &str) -> Result<String, AppError> {
     proof.ensure_compatible()?;
     let (state, _) = record_runtime::snapshot(env)?;
     ensure_shared(&state)?;
+    if slug == crate::sync::record_library::library_slug() {
+        if let Some(id) = crate::sync::record_library::space_id(&state) { return Ok(id); }
+    }
     let child = ChainKeys::generate()?;
     let id = new_id()?;
     let now = env.now();
@@ -731,7 +743,7 @@ pub fn create_space(env: &SyncEnv, name: &str) -> Result<String, AppError> {
             &state,
             RecordKind::Space,
             &child.chain_id,
-            json!({"schema":1,"name":name,"slug":"records","created_at_ms":now}),
+            json!({"schema":1,"name":name,"slug":slug,"created_at_ms":now}),
             now,
         ),
     );

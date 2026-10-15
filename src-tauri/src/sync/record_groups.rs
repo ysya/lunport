@@ -257,7 +257,7 @@ fn account_group_enabled(s: &SyncStateV3) -> bool {
         })
 }
 /// Acknowledgement is required for the first local format or shared-account promotion.
-fn promote(
+pub(crate) fn promote(
     s: &mut SyncStateV3,
     scope: &HostScope,
     confirmed: bool,
@@ -292,7 +292,7 @@ fn promote(
     }
     Ok(())
 }
-fn validate_groups(s: &SyncStateV3, scope: &HostScope) -> Result<(), RepositoryError> {
+pub(crate) fn validate_groups(s: &SyncStateV3, scope: &HostScope) -> Result<(), RepositoryError> {
     let groups = list_groups(s)?;
     let mut names = BTreeSet::new();
     for g in groups.iter().filter(|g| &g.group.scope == scope) {

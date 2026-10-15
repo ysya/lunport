@@ -38,10 +38,11 @@ const editor = (
     />,
   );
 describe("records host controls", () => {
-  it("starts new hosts Local and disables connect until a persisted host exists", () => {
+  it("starts new hosts in the library and disables connect until a persisted host exists", () => {
     const html = editor(null);
     expect(text(html)).toContain("New host");
-    expect(text(html)).toContain("Local");
+    expect(text(html)).toContain("Library");
+    expect(text(html)).not.toContain("Save in");
     expect(buttonTag(html, "Connect")).toContain(DISABLED);
     expect(buttonTag(html, "Create host")).toContain(DISABLED);
     expect(html).not.toContain("Pinned host key");
@@ -65,7 +66,7 @@ describe("records host controls", () => {
     expect(text(html)).toContain("unavailable");
     expect(buttonTag(html, "Connect")).toContain(DISABLED);
   });
-  it("shows distinct scope labels for duplicate aliases and a conflict for duplicate IDs", () => {
+  it("shows all storage scopes in one library for duplicate aliases and a conflict for duplicate IDs", () => {
     const first = hostView();
     const second = hostView({
       id: "0000000000000002",
@@ -84,8 +85,9 @@ describe("records host controls", () => {
         select={vi.fn()}
       />,
     );
-    expect(text(html)).toContain("Local");
-    expect(text(html)).toContain("Team");
+    expect(text(html)).not.toContain("Local");
+    expect(text(html)).not.toContain("Team");
+    expect((text(html).match(/web/g) ?? []).length).toBe(2);
     expect(html).toContain('aria-pressed="true"');
     const conflict = render(
       <RecordHostList
@@ -225,6 +227,6 @@ describe("explicit import consent and key/account controls", () => {
     );
     expect(buttonTag(html, "Create sync chain")).toContain(DISABLED);
     expect(buttonTag(html, "Join with sync code")).toContain(DISABLED);
-    expect(text(html)).toContain("Local hosts remain editable");
+    expect(text(html)).toContain("Sync changes are paused");
   });
 });

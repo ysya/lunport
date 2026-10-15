@@ -45,7 +45,7 @@ export function AccountLifecycleReview({
     <section className="space-y-4">
       <p className="text-sm text-muted-foreground">
         {leaving
-          ? "Selected space hosts become Local copies with new IDs and updated jump references. Existing Local hosts, keys and passwords stay on this device. Missing or invalid selected spaces must be resolved first. The remote account remains retained; leaving does not delete its data or export private key files."
+          ? "Synced hosts and Groups are kept on this device with new IDs and updated jump references. Existing hosts, keys and passwords stay on this device. Missing or invalid selected spaces must be resolved first. The remote account remains retained; leaving does not delete its data or export private key files."
           : "Future updates use a new sync code. Other devices must rejoin with that code. The source chains are frozen and retained: the old code can still read historical data. Rotation does not revoke access to that history."}
       </p>
       {!leaving && (
@@ -65,7 +65,7 @@ export function AccountLifecycleReview({
         />
         <span>
           {leaving
-            ? "I understand that selected hosts will be copied to Local and remote sources will remain."
+            ? "I understand that selected hosts will be kept on this device and remote sources will remain."
             : "I understand that devices must rejoin and the old code still reads historical data."}
         </span>
       </Label>
@@ -93,7 +93,9 @@ export function AccountLeaveOutcome({
       <h2 className="font-medium">
         {receipt.complete ? "Account left" : "Leaving account is pending"}
       </h2>
-      <p className="text-sm">{receipt.copied_hosts} hosts copied to Local.</p>
+      <p className="text-sm">
+        {receipt.copied_hosts} hosts kept on this device.
+      </p>
       <p className="break-all font-mono text-xs text-muted-foreground">
         Operation {receipt.operation_id}
       </p>
@@ -105,11 +107,11 @@ export function AccountLeaveOutcome({
       )}
       {receipt.mappings.length > 0 && (
         <details className="text-xs text-muted-foreground">
-          <summary className="cursor-pointer">Local host mappings</summary>
+          <summary className="cursor-pointer">Saved host mappings</summary>
           {receipt.mappings.map((mapping) => (
             <p key={mapping.local_host_id} className="mt-2 break-all">
               {revealHidden(mapping.alias)} · {mapping.source_space_id}/
-              {mapping.source_host_id} → Local {mapping.local_host_id}
+              {mapping.source_host_id} → Saved {mapping.local_host_id}
             </p>
           ))}
         </details>

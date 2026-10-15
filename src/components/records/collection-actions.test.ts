@@ -5,6 +5,24 @@ import { hostPayload, hostView, recordOverview } from "./fixtures";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("collection operations use reviewed stable IDs", () => {
+  it("organizes by Group with the reviewed host revision", async () => {
+    const overview = recordOverview();
+    const host = overview.hosts[0];
+    const calls = stubBackend(async () => overview);
+    const result = await applyCollectionAction(
+      overview,
+      [host.id],
+      { kind: "group", groupId: "0000000000000010" },
+      vi.fn(),
+    );
+    expect(result).toEqual({ completed: [host.id], error: null });
+    expect(calls).toEqual([
+      [
+        "records_host_group",
+        { id: host.id, revision: host.revision, groupId: "0000000000000010" },
+      ],
+    ]);
+  });
   it("rejects removed and conflicting IDs before changing any host", async () => {
     const host = hostView();
     const calls = stubBackend(async () => recordOverview());

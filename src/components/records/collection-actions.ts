@@ -1,5 +1,6 @@
 import {
   moveRecordHost,
+  setRecordHostGroup,
   updateRecordHost,
   type HostScope,
   type RecordOverview,
@@ -9,7 +10,8 @@ import { scopeKey } from "./group-tree";
 
 export type CollectionAction =
   | { kind: "move"; destination: HostScope }
-  | { kind: "tag"; tag: string };
+  | { kind: "tag"; tag: string }
+  | { kind: "group"; groupId: string | null };
 
 /** Keep the reviewed revisions: a concurrent edit must fail instead of being overwritten. */
 export async function applyCollectionAction(
@@ -36,6 +38,10 @@ export async function applyCollectionAction(
           accept(
             await moveRecordHost(host.id, host.revision, action.destination),
           );
+      } else if (action.kind === "group") {
+        accept(
+          await setRecordHostGroup(host.id, host.revision, action.groupId),
+        );
       } else {
         const payload = buildEditorPayload(beginEditor(host));
         payload.tags = [...new Set([...payload.tags, action.tag.trim()])];

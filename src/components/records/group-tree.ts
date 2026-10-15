@@ -116,7 +116,7 @@ export function buildRecordTree(
       ): GroupNode | null => {
         const matched =
           parentMatch ||
-          `${label} ${groupPath(overview, group.id, scope)}`
+          `${groupPath(overview, group.id, scope)}`
             .toLowerCase()
             .includes(needle);
         const children = valid
@@ -188,12 +188,5 @@ export function recordHostSearchText(
   overview: RecordOverview,
   host: RecordHostView,
 ): string {
-  const scope =
-    host.scope.kind === "local"
-      ? "Local"
-      : (overview.spaces.find(
-          (s) =>
-            s.id === (host.scope.kind === "space" ? host.scope.space_id : ""),
-        )?.name ?? "Missing space");
-  return `${host.payload.alias} ${host.payload.hostname} ${host.payload.tags.join(" ")} ${scope} ${groupPath(overview, host.payload.group_id, host.scope)} ${host.id}`;
+  return `${host.payload.alias} ${host.payload.hostname} ${host.payload.tags.join(" ")} ${groupPath(overview, host.payload.group_id, host.scope)} ${host.id}`;
 }

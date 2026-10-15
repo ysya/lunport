@@ -176,7 +176,8 @@ export function RecordGroupEditor({
   };
   const parentChoices = overview.groups.filter(
     (g) =>
-      scopeKey(g.scope) === scopeKey(state.scope) &&
+      ((!state.id && overview.library_enabled) ||
+        scopeKey(g.scope) === scopeKey(state.scope)) &&
       g.id !== state.id &&
       selectGroup(overview.groups, g.id) &&
       !groupAncestors(overview, g.id, g.scope).groups.some(
@@ -192,7 +193,7 @@ export function RecordGroupEditor({
             {state.id ? revealHidden(state.payload.name) : "New group"}
           </h1>
           <p className="text-xs text-muted-foreground">
-            Scope: {revealHidden(scopeLabel(overview, state.scope))} ·{" "}
+            {revealHidden(scopeLabel(overview, state.scope))} ·{" "}
             {state.dirty
               ? "Unsaved changes"
               : state.id
@@ -247,7 +248,7 @@ export function RecordGroupEditor({
       )}
       {blocked && (
         <p role="status" className="text-sm text-destructive">
-          Shared changes are paused. Local Groups remain editable.
+          Sync changes are paused while account data is reviewed.
         </p>
       )}
       {state.error && (
@@ -273,38 +274,6 @@ export function RecordGroupEditor({
         disabled={busy || blocked || state.unavailable}
         className="space-y-4 disabled:opacity-60"
       >
-        {!state.id && (
-          <RecordField label="Save in">
-            <select
-              className={selectClass}
-              value={
-                state.scope.kind === "local" ? "local" : state.scope.space_id
-              }
-              onChange={(e) => {
-                setState((current) => ({
-                  ...changeGroupEditor(current, { parent_id: null }),
-                  scope:
-                    e.target.value === "local"
-                      ? { kind: "local" }
-                      : { kind: "space", space_id: e.target.value },
-                }));
-              }}
-            >
-              <option value="local">Local</option>
-              {overview.spaces
-                .filter((s) => s.selected && !s.missing)
-                .map((s) => (
-                  <option
-                    key={s.id}
-                    disabled={overview.shared_writes_blocked}
-                    value={s.id}
-                  >
-                    {revealHidden(s.name)}
-                  </option>
-                ))}
-            </select>
-          </RecordField>
-        )}
         <RecordField label="Group name">
           <Input
             value={state.payload.name}
@@ -316,9 +285,20 @@ export function RecordGroupEditor({
           <select
             className={selectClass}
             value={state.payload.parent_id ?? ""}
-            onChange={(e) => patch({ parent_id: e.target.value || null })}
+            onChange={(e) => {
+              const group = selectGroup(overview.groups, e.target.value);
+              setState((current) => ({
+                ...changeGroupEditor(current, {
+                  parent_id: e.target.value || null,
+                }),
+                scope:
+                  !current.id && group
+                    ? structuredClone(group.scope)
+                    : current.scope,
+              }));
+            }}
           >
-            <option value="">Scope root</option>
+            <option value="">Library root</option>
             {state.payload.parent_id &&
               !parentChoices.some((g) => g.id === state.payload.parent_id) && (
                 <option value={state.payload.parent_id}>
@@ -388,7 +368,9 @@ export function RecordGroupEditor({
                 authentication: e.target.value
                   ? {
                       auth: e.target.value as
-                        "key" | "password" | "interactive",
+                        | "key"
+                        | "password"
+                        | "interactive",
                       key_id:
                         e.target.value === "key"
                           ? (state.payload.defaults.authentication?.key_id ??
@@ -532,7 +514,9 @@ export function RecordGroupEditor({
         <section className="space-y-3 rounded-lg border p-4">
           <h2 className="text-sm font-semibold">Delete Group subtree</h2>
           {deletionError && (
-            <p role="alert" className="break-words text-xs text-destructive">{deletionError}</p>
+            <p role="alert" className="break-words text-xs text-destructive">
+              {deletionError}
+            </p>
           )}
           {!overview.group_deletion_token && (
             <p role="alert" className="text-xs text-destructive">
@@ -546,10 +530,21 @@ export function RecordGroupEditor({
           </p>
           <Button
             variant="outline"
-            disabled={busy || blocked || state.unavailable || !overview.group_deletion_token}
+            disabled={
+              busy ||
+              blocked ||
+              state.unavailable ||
+              !overview.group_deletion_token
+            }
             onClick={() => {
               setDeletionError(null);
-              setDeleting(beginGroupDeletion(state, affected, overview.group_deletion_token));
+              setDeleting(
+                beginGroupDeletion(
+                  state,
+                  affected,
+                  overview.group_deletion_token,
+                ),
+              );
             }}
           >
             Delete group…

@@ -61,13 +61,19 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   };
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-6">
-      {deployKeyId && <RecordsDeployKeyDialog overview={overview} keyId={deployKeyId} onClose={() => setDeployKeyId(null)} />}
+      {deployKeyId && (
+        <RecordsDeployKeyDialog
+          overview={overview}
+          keyId={deployKeyId}
+          onClose={() => setDeployKeyId(null)}
+        />
+      )}
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold">Keys</h1>
           <p className="text-sm text-muted-foreground">
-            New keys are local until you choose to sync them. Sync changes may
-            be waiting for the relay.
+            New keys stay on this device until you choose to sync them. Sync
+            changes may be waiting for the relay.
           </p>
         </div>
         {!mode && (
@@ -178,7 +184,16 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              {key.status === "available" && key.public && <Button size="sm" variant="outline" disabled={busy || draft.busy} onClick={() => setDeployKeyId(key.id)}>Deploy public key</Button>}
+              {key.status === "available" && key.public && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || draft.busy}
+                  onClick={() => setDeployKeyId(key.id)}
+                >
+                  Deploy public key
+                </Button>
+              )}
               {key.public && (
                 <Button
                   size="sm"
