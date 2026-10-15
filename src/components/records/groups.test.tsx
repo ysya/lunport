@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { Dialog } from "@/components/ui/dialog";
 import { stubBackend } from "@/lib/test-ipc";
 import { hostPayload, hostView, recordOverview, groupView } from "./fixtures";
 import { beginEditor, changeEditor, submitEditor } from "./editor";
@@ -296,30 +297,66 @@ describe("Group draft and command contract", () => {
 });
 
 describe("Group editor presentation", () => {
+  it("keeps first-time group creation free of impact and deletion warnings", async () => {
+    const { RecordGroupEditor } = await import("./GroupEditor");
+    const html = renderToStaticMarkup(
+      <Dialog>
+        <RecordGroupEditor
+          group={null}
+          groupId={null}
+          overview={recordOverview({ group_deletion_token: "" })}
+          accept={(v) => v}
+          onSaved={vi.fn()}
+          onDeleted={vi.fn()}
+          onDirty={vi.fn()}
+        />
+      </Dialog>,
+    );
+    expect(html).not.toContain("host-key pin");
+    expect(html).not.toContain("deletion review");
+    expect(html).not.toContain("Manage group");
+    expect(html).toContain("Only a name is required");
+  });
+
   it("explains how to recover when no deletion snapshot is available", async () => {
     const { RecordGroupEditor } = await import("./GroupEditor");
     const html = renderToStaticMarkup(
-      <RecordGroupEditor group={parent()} groupId={parent().id}
-        overview={recordOverview({ groups: [parent()], group_deletion_token: "" })}
-        accept={(v) => v} onSaved={vi.fn()} onDeleted={vi.fn()} onDirty={vi.fn()} />,
+      <Dialog>
+        <RecordGroupEditor
+          group={parent()}
+          groupId={parent().id}
+          overview={recordOverview({
+            groups: [parent()],
+            group_deletion_token: "",
+          })}
+          accept={(v) => v}
+          onSaved={vi.fn()}
+          onDeleted={vi.fn()}
+          onDirty={vi.fn()}
+        />
+      </Dialog>,
     );
-    expect(html).toContain("Refresh the records to prepare a new deletion review.");
+    expect(html).toContain(
+      "Refresh the records to prepare a new deletion review.",
+    );
   });
   it("states immutable scope, descendant effects and host-preserving deletion", async () => {
     const { RecordGroupEditor } = await import("./GroupEditor");
     const html = renderToStaticMarkup(
-      <RecordGroupEditor
-        group={parent()}
-        groupId={parent().id}
-        overview={recordOverview({
-          groups: [parent(), child()],
-          hosts: [inherited()],
-        })}
-        accept={(v) => v}
-        onSaved={vi.fn()}
-        onDeleted={vi.fn()}
-        onDirty={vi.fn()}
-      />,
+      <Dialog>
+        <RecordGroupEditor
+          group={parent()}
+          groupId={parent().id}
+          overview={recordOverview({
+            groups: [parent(), child()],
+            hosts: [inherited()],
+          })}
+          accept={(v) => v}
+          onSaved={vi.fn()}
+          onDeleted={vi.fn()}
+          onDirty={vi.fn()}
+        />
+      </Dialog>,
     );
     expect(html).toContain("Library");
     expect(html).toContain("1 descendant Group");
@@ -339,7 +376,11 @@ describe("Group creation, format and safety boundaries", () => {
     });
     const calls = stubBackend(async () => overview);
     await submitGroupEditor(state, overview, true);
-    await deleteRecordGroup(parent().id, parent().revision, overview.group_deletion_token);
+    await deleteRecordGroup(
+      parent().id,
+      parent().revision,
+      overview.group_deletion_token,
+    );
     expect(calls).toEqual([
       [
         "records_group_create",
@@ -351,7 +392,11 @@ describe("Group creation, format and safety boundaries", () => {
       ],
       [
         "records_group_delete",
-        { id: parent().id, revision: parent().revision, snapshotToken: overview.group_deletion_token },
+        {
+          id: parent().id,
+          revision: parent().revision,
+          snapshotToken: overview.group_deletion_token,
+        },
       ],
     ]);
     expect(state.payload.name).toBe(" Team ");

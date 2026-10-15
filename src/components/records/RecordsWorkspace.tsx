@@ -94,6 +94,9 @@ export function RecordsWorkspace({
     useState<HostSelection | null>(null);
   const [dirty, setDirty] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const isGroupEditor =
+    selection.kind === "group" || selection.kind === "new_group";
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
@@ -479,37 +482,58 @@ export function RecordsWorkspace({
         }}
       >
         <DialogContent
+          ref={editorRef}
           showCloseButton={false}
-          className="library-editor-dialog sm:max-w-3xl"
+          className={cn(
+            "library-editor-dialog",
+            isGroupEditor ? "library-group-dialog sm:max-w-xl" : "sm:max-w-3xl",
+          )}
+          onOpenAutoFocus={(event) => {
+            if (!isGroupEditor) return;
+            const name =
+              editorRef.current?.querySelector<HTMLInputElement>(
+                "[data-group-name]",
+              );
+            if (name && !name.matches(":disabled")) {
+              event.preventDefault();
+              name.focus();
+            }
+          }}
         >
-          <DialogTitle className="sr-only">
-            {selection.kind === "group" || selection.kind === "new_group"
-              ? "Group settings"
-              : selection.kind === "new"
-                ? "New host"
-                : "Edit host"}
-          </DialogTitle>
-          <DialogDescription className="sr-only">
-            Update connection settings, then save your changes.
-          </DialogDescription>
-          <div className="library-editor-topline">
-            <span>
-              <Command className="size-3.5" />
-              {selection.kind === "group" || selection.kind === "new_group"
-                ? "Group settings"
-                : "Connection settings"}
-            </span>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Close editor"
-              disabled={editorBusy}
-              onClick={() => requestSelection({ kind: "none" })}
-            >
-              <X className="size-4" />
-            </Button>
-          </div>
-          <div className="library-editor-scroll">
+          {!isGroupEditor && (
+            <>
+              <DialogTitle className="sr-only">
+                {selection.kind === "new" ? "New host" : "Edit host"}
+              </DialogTitle>
+              <DialogDescription className="sr-only">
+                Update connection settings, then save your changes.
+              </DialogDescription>
+            </>
+          )}
+          {!isGroupEditor && (
+            <div className="library-editor-topline">
+              <span>
+                <Command className="size-3.5" />
+                Connection settings
+              </span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Close editor"
+                disabled={editorBusy}
+                onClick={() => requestSelection({ kind: "none" })}
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+          )}
+          <div
+            className={
+              isGroupEditor
+                ? "library-group-editor-container"
+                : "library-editor-scroll"
+            }
+          >
             {selection.kind === "group" || selection.kind === "new_group" ? (
               <RecordGroupEditor
                 key={
