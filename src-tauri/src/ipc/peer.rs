@@ -527,14 +527,24 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_live_process_keeps_only_what_the_rules_read_of_its_command_line() {
-        // `read line; : secret-token`:兩個指令,shell 不會直接換成別的程式;它停在內建的 read(等 stdin,我們不關),不會留下子程序。
-        let mut child =
-            crate::process::spawn(std::process::Command::new("sh").args(["-c", "read line; : secret-token"]).stdin(std::process::Stdio::piped()))
-                .unwrap();
+        use std::io::Read;
+
+        // 等 shell 自己回報已啟動,避免 Linux 在 exec 尚未完成時讀到空的 /proc/<pid>/cmdline。
+        // 它停在內建的 read(等 stdin,我們不關),後面還有指令,不會換成別的程式或留下子程序。
+        let mut child = crate::process::spawn(
+            std::process::Command::new("sh")
+                .args(["-c", "printf R; read line; : secret-token"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        let mut ready = [0];
+        child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
         let pid = child.id();
         let chain = process_chain(pid);
         child.kill().unwrap();
         child.wait().unwrap();
+        assert_eq!(&ready, b"R");
         assert!(!chain.is_empty(), "a child of ours is readable");
         assert_eq!(chain[0].pid, pid);
         assert_eq!(chain[0].argv, vec!["sh"], "only argv[0] of a program that is not an interpreter");
