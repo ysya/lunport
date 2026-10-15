@@ -37,16 +37,23 @@ export function hostPreviewWidthAfterKey(
   key: string,
   limit: number,
 ): number | null {
+  let next: number;
   switch (key) {
     case "ArrowLeft":
-      return hostPreviewWidthAfterDrag(width, -16, limit);
+      next = hostPreviewWidthAfterDrag(width, -16, limit);
+      break;
     case "ArrowRight":
-      return hostPreviewWidthAfterDrag(width, 16, limit);
+      next = hostPreviewWidthAfterDrag(width, 16, limit);
+      break;
     case "Home":
-      return MIN_HOST_PREVIEW_WIDTH;
+      next = MIN_HOST_PREVIEW_WIDTH;
+      break;
     case "End":
-      return clampHostPreviewWidth(limit);
+      next = clampHostPreviewWidth(limit);
+      break;
     default:
       return null;
   }
+  // A no-op at a viewport cap must not replace a larger saved preference.
+  return next === clampHostPreviewWidth(width) ? null : next;
 }
