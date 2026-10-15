@@ -1,6 +1,6 @@
 # SSHelter Beta 3 遠端接手
 
-使用者最新指示：先收尾、推送本次工作並交接到遠端機器執行。原先的「完成後直接 merge 與發布 Beta」授權仍有效；本機此次交接沒有啟動 Beta 3 發布。接手者應先核對下列 CI 與遠端狀態，再完成發布。
+**Beta 3 已完成發布與核對。** [下載／release notes](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3)、[發布收據](releases/1.0.0-3-validation.md)。遠端接續以裝置驗收與後續工作為主，不要重複 dispatch `v1.0.0-3`。所有來源、CI、公開截圖與核對工具均已推送。
 
 ## 原始碼與目前狀態
 
@@ -12,11 +12,11 @@
 | 發布 SHA | `d1642a8b5c57dc9eb1f8e23d5c36645d5082e056` |
 | 最後 runtime 修正 | `30c4a4c689b86a95bb17b8cc4fae90bb3469b686`；到發布 SHA 只有文件變更 |
 | 後續交接提交 | 僅文件、公開視覺證據與唯讀發布核對工具；不改 runtime，位於 `next/own-ssh` |
-| 待發布版本 | `v1.0.0-3`；交接時尚未 dispatch、建立 tag 或發布 |
-| 目前 Beta | 最後核對為 `v1.0.0-2`；接手時重新查詢 |
-| Stable | 最後核對 `v0.16.0` / release ID `400974628`；發布前重新保存 baseline |
+| 已發布版本 | `v1.0.0-3`；四平台與 Beta manifest 已成功並獨立核對 |
+| 目前 Beta | 核對時為 `v1.0.0-3` |
+| Stable | 發布前後均為 `v0.16.0` / release ID `400974628` |
 
-不要只用 `next/own-ssh` 最新 HEAD 當發布來源：交接文件會讓這個分支前進。Beta 必須從凍結分支的 `d1642a8…` dispatch，才能對應已經跑的原生 CI。不要把新功能修正在未重驗的情況下加到這個凍結分支。
+不要只用 `next/own-ssh` 最新 HEAD 當發布來源：交接文件會讓這個分支前進。本版 Beta 已從凍結分支的 `d1642a8…` dispatch，對應相同來源的原生 CI。不要把新功能修正在未重驗的情況下加到這個凍結分支。
 
 ## 已完成與證據
 
@@ -74,7 +74,9 @@ gh run view 38678695106 --repo ysya/sshelter --json headSha,status,conclusion,jo
 
 若失敗，先 `gh run view RUN_ID --repo ysya/sshelter --log-failed`。修正必須保留既有工作、使用 Conventional Commit、跑受影響測試與限定複查。runtime 有新提交就重新跑相應原生 CI，並明確更新凍結發布來源；不得沿用舊 SHA 的成功結果。
 
-## 接著發布 Beta
+## 發布／故障恢復程序（本版已完成，勿重複 dispatch）
+
+以下保留已執行的發布程序供追蹤或故障恢復；本版 run 為 [38680461866](https://github.com/ysya/sshelter/actions/runs/38680461866)，已成功。下一版必須用新的版本與對應的 CI 來源。
 
 以下 shell 範例供 bash／zsh 使用；Windows 可用 Git Bash，依環境將 `python3` 換為 Python 3 的實際命令。不要先發布再補 CI。
 
@@ -122,6 +124,10 @@ gh run view 38678695106 --repo ysya/sshelter --json headSha,status,conclusion,jo
 
 不要手動 bump package.json／Cargo／Tauri 的 0.16.0；`beta.yml` 僅在 CI workspace stamp `1.0.0-3`。不要使用 `build-platform.yml` 發布 Beta。若 `v1.0.0-3` 已被另一輪佔用，先了解狀態，再選新 suffix 並同步 release notes，絕不刪 tag 重用。
 
+## 自動更新
+
+更新不依賴設定面板是否開啟；正式版本的正常 Records／Legacy 工作區需開啟自動檢查並選 Beta 通道。若仍停在缺設定入口的 Beta 1 Records，該版也缺自動檢查掛載，需手動安裝新版一次。Beta 2 起已修正，Dev 不啟用 updater；詳見 [來源核對](releases/1.0.0-3-review/updater-verification.md)。
+
 ## 接手時仍須保留的限制
 
 - 這是 Brave 類型的免帳號 E2E chain，不是區塊鏈。Vault／master key 留裝置；relay 保存 E2E 共享 records 與明確選擇共享的私鑰。SSH 密碼／passphrase 留本機。
@@ -137,4 +143,4 @@ gh run view 38678695106 --repo ysya/sshelter --json headSha,status,conclusion,jo
 
 本機自己的 preview Vite 已停止、viewport 已重設、實際 QA tab 已關閉。另一個已失效的 agent 暫存錯誤頁無法透過 URL policy 重新綁定，未繞過限制；它不屬於 app 或遠端執行必要狀態。原 phase-1c worktree、使用者安裝中的 app、真實 vault／主機／授權皆保留。
 
-原機這個計畫的 ignored scratch 先保留；遠端以已提交的 ledger 為準，Task 1–5 不要重做，Task 6 接續 CI／發布。完成後如需清理，只能可回復地封存本計畫 scratch，不能 `rm -rf`、`git clean` 或刪除其他計畫／worktree。所有決策與代價已保存，後續新增決策也要追加到 ledger 與 rulings。
+原機這個計畫的 ignored scratch 以可回復方式保留；遠端以已提交的 ledger 為準，Task 1–6 的實作、CI 與發布已完成，不要重做；裝置驗收仍維持清單中的未勾選狀態。完成後如需清理，只能可回復地封存本計畫 scratch，不能 `rm -rf`、`git clean` 或刪除其他計畫／worktree。所有決策與代價已保存，後續新增決策也要追加到 ledger 與 rulings。

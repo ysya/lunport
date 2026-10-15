@@ -2,7 +2,7 @@
 
 本輪完成範圍：own SSH phase 1c 的 active records runtime，以及可操作的最小切換介面。功能分支 `codex/own-ssh-phase1c` 已依使用者 2026-10-14 的指示合併至 `next/own-ssh`，最初發布 `v1.0.0-1` beta；後續介面、設定與主機信任確認修正已發布為 `v1.0.0-2`。
 
-後續 Groups、Records MCP 執行與公鑰部署已完成並通過原生 CI；Beta 3 尚未發布，遠端接手請讀 [2026-10-15 接手文件](2026-10-15-beta3-remote-handoff.md) 與 [Beta 3 清單](releases/1.0.0-3-review-checklist.md)。以下保留 Beta 1／2 的歷史驗證。
+後續 Groups、Records MCP 執行與公鑰部署已完成並通過原生 CI；Beta 3 已發布並核對四平台與更新清單，遠端接手請讀 [2026-10-15 接手文件](2026-10-15-beta3-remote-handoff.md) 與 [Beta 3 清單](releases/1.0.0-3-review-checklist.md)。以下保留 Beta 1／2 的歷史驗證。
 
 ## 設計方向
 
@@ -82,7 +82,7 @@ Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0
 - [x] 補回設定選單、MCP 入口、常用偏好與快捷選單；設定分類不載入舊 SSH config。
 - [x] MCP 主機授權改用 stable ID，支援主機清單與連線資訊。撤銷權限不等待執行鎖。
 - [x] 確認線上 relay 為 0.2.0，支援 pull-batch、freeze；本次不需更新。
-- [x] 後續 Beta 3 原始碼已完成 Records MCP `ssh_exec` 與公鑰部署；原生 CI 全成功，尚待 Beta 3 發布。
+- [x] 後續 Beta 3 原始碼已完成 Records MCP `ssh_exec` 與公鑰部署；原生 CI 全成功，Beta 3 已發布。
 - [x] 1.0.0-2 跨平台 CI、四平台 beta 安裝包、發布及 manifest 核對全部通過。
 
 - [x] 主機信任確認改為資訊卡：endpoint、key type、完整指紋可複製，金鑰變更可比對新舊值；預設焦點在取消／拒絕，信任延遲不變。
@@ -91,3 +91,5 @@ Beta 安裝前注意事項與功能限制：[1.0.0-1 release notes](releases/1.0
 新版下載：[v1.0.0-2](https://github.com/ysya/sshelter/releases/tag/v1.0.0-2)。來源 `07e669a7682b4550d006e9e3ee6e1523502be424` 與最後 CI 相同；共 20 個已上傳且非空的 assets，15 個 manifest platform entries 指向存在且非空的資產，Release 與 Beta manifest 一致。Stable 維持 `v0.16.0`。完整紀錄：[1.0.0-2 validation](releases/1.0.0-2-validation.md)。
 
 本次前端 65 檔／950 個測試通過；macOS、Linux（含 PAM）、Windows（含 console 與實際 OpenSSH）CI 全部通過。新的信任確認畫面以實際元件在 480×320 的亮色首次連線、暗色金鑰變更情境檢查；Development bundle 打包成功。尚未宣稱原生剪貼簿執行或 Windows／Linux 的逐畫面視覺驗收。
+
+Beta 3 後續完成：[下載](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3)、[發布驗證](releases/1.0.0-3-validation.md)。原生 CI、四平台安裝包、Beta manifest 與 Stable 前後核對均成功；原有 Beta 1／2 收據仍保留為歷史證據。

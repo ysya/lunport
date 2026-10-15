@@ -1,0 +1,5 @@
+build (windows-latest, --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}')	UNKNOWN STEP	2026-10-15T04:16:15.5211486Z ##[notice]SSHELTER_RELAY_URL is not set: this beta has no built-in sync relay (users enter one in Settings → Sync).
+build (ubuntu-22.04-arm)	Check the sync relay URL	2026-10-15T04:16:33.6761850Z ##[notice]SSHELTER_RELAY_URL is not set: this beta has no built-in sync relay (users enter one in Settings → Sync).
+build (macos-latest, --target universal-apple-darwin)	Check the sync relay URL	2026-10-15T04:15:52.3107050Z ##[notice]SSHELTER_RELAY_URL is not set: this beta has no built-in sync relay (users enter one in Settings → Sync).
+build (ubuntu-22.04)	Check the sync relay URL	2026-10-15T04:16:05.3508900Z ##[notice]SSHELTER_RELAY_URL is not set: this beta has no built-in sync relay (users enter one in Settings → Sync).
+beta-manifest	Update the Beta channel manifest	2026-10-15T04:33:51.9137441Z updater-beta now offers 1.0.0-3 (was 1.0.0-2)

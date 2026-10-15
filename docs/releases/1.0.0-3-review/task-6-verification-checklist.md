@@ -1,4 +1,4 @@
-# Final integration checklist (publication pending remote handoff)
+# Final integration checklist (publication complete; device acceptance pending)
 
 - [x] Tasks1–5 implementation/review gates complete; no repeats. Task5 scoped fixes85a902e clear.
 - [x] Verify final public bindings/frontend wrappers, native capability/window routes, existing Legacy and unknown/profile guards.
@@ -12,10 +12,10 @@
 - [x] Persist task reports/reviews/ledger and rulings in repo docs before scratch cleanup.
 - [x] Fresh remote branch/tag check; merge reviewed branch into next/own-ssh with no force, push authorized.
 - [x] Wait exact source macOS/Linux/frontend/PAM and Windows actual OpenSSH/console CI.
-- [ ] Capture fresh stable-before.json then choose next unused Beta suffix; dispatch beta.yml with structured notes JSON.
-- [ ] Four installer jobs + manifest succeed; verify exact tag/source, all actual uploaded nonempty asset/platform/signatures, canonical Release/channel manifests and Stable id/tag unchanged. Metadata check is not independent installer crypto verification.
-- [ ] Save validation receipt/inspection list, docs commit/push; installed Production untouched; stop only own preview server/reset viewport/close own tabs.
+- [x] Capture fresh stable-before.json then choose next unused Beta suffix; dispatch beta.yml with structured notes JSON.
+- [x] Four installer jobs + manifest succeed; verify exact tag/source, all actual uploaded nonempty asset/platform/signatures, canonical Release/channel manifests and Stable id/tag unchanged. Metadata check is not independent installer crypto verification.
+- [x] Save validation receipt/inspection list, docs commit/push; installed Production untouched; stop only own preview server/reset viewport/close own tabs.
 
 Read-only live relay /v1/info checked 2026-10-15: version0.2.0, features pull-batch/freeze. No relay mutations or deployment.
 
-User requested remote handoff after exact-source native CI succeeded. No Beta3 dispatch yet; frozen release source d1642a8 on codex/groups-mcp-beta3. See ../../2026-10-15-beta3-remote-handoff.md. Scratch retained; no duplicate implementation/review required.
+Beta3 publication subsequently authorized and completed: run38680461866, frozen source d1642a8, four installers/manifest success, independent public receipt verified. See ../../2026-10-15-beta3-remote-handoff.md. Own preview stopped and viewport reset; plan scratch may be reversibly archived, no duplicate implementation/review required.
