@@ -6,7 +6,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   deleteRecordHost,
-  moveRecordHost,
   type HostPayload,
   type InheritedField,
   type HostScope,
@@ -85,7 +84,6 @@ export function RecordHostEditor({
   const [busy, setBusy] = useState(false);
   const [askingUpgrade, setAskingUpgrade] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
-  const [destination, setDestination] = useState("local");
   const inFlight = useRef(false);
   useEffect(() => {
     setState((current) => refreshEditor(current, host));
@@ -158,19 +156,6 @@ export function RecordHostEditor({
       setAskingDelete(false);
       onDeleted();
     });
-  const move = () =>
-    run(async () => {
-      if (!state.id || !state.revision || state.dirty || state.unavailable)
-        return;
-      const scope: HostScope =
-        destination === "local"
-          ? { kind: "local" }
-          : { kind: "space", space_id: destination };
-      const result = await moveRecordHost(state.id, state.revision, scope);
-      const accepted = accept(result);
-      const saved = selectHost(accepted.hosts, state.id);
-      if (saved) setState(beginEditor(saved));
-    });
   const preview = previewHostDraft(overview, state.scope, state.payload, host);
   const inherits = (field: InheritedField) =>
     state.payload.inherit?.includes(field) ?? false;
@@ -205,7 +190,8 @@ export function RecordHostEditor({
   );
   const groupChoices = overview.groups.filter(
     (g) =>
-      scopeKey(g.scope) === scopeKey(state.scope) &&
+      (overview.library_enabled ||
+        scopeKey(g.scope) === scopeKey(state.scope)) &&
       selectGroup(overview.groups, g.id),
   );
   const blocking =
@@ -313,7 +299,7 @@ export function RecordHostEditor({
       )}
       {sharedBlocked && (
         <p role="status" className="text-sm text-destructive">
-          Shared changes are paused. Local hosts remain editable.
+          Sync changes are paused while account data is reviewed.
         </p>
       )}
       {state.error && (
@@ -323,41 +309,6 @@ export function RecordHostEditor({
         >
           {state.error}
         </p>
-      )}
-      {!state.id && (
-        <RecordField label="Save in">
-          <select
-            className={selectClass}
-            disabled={busy}
-            value={
-              state.scope.kind === "local" ? "local" : state.scope.space_id
-            }
-            onChange={(e) =>
-              setState((current) => ({
-                ...current,
-                scope:
-                  e.target.value === "local"
-                    ? { kind: "local" }
-                    : { kind: "space", space_id: e.target.value },
-                payload: { ...current.payload, group_id: null },
-                dirty: true,
-              }))
-            }
-          >
-            <option value="local">Local</option>
-            {overview.spaces
-              .filter((space) => space.selected && !space.missing)
-              .map((space) => (
-                <option
-                  key={space.id}
-                  disabled={overview.shared_writes_blocked}
-                  value={space.id}
-                >
-                  {revealHidden(space.name)}
-                </option>
-              ))}
-          </select>
-        </RecordField>
       )}
       {preview.error && (
         <p role="status" className="text-sm text-destructive">
@@ -372,7 +323,13 @@ export function RecordHostEditor({
           <select
             className={selectClass}
             value={state.payload.group_id ?? ""}
-            onChange={(e) => patch({ group_id: e.target.value || null })}
+            onChange={(e) => {
+              const group = selectGroup(overview.groups, e.target.value);
+              setState((current) => ({
+                ...changeEditor(current, { group_id: e.target.value || null }),
+                scope: structuredClone(group?.scope ?? current.scope),
+              }));
+            }}
           >
             <option value="">Ungrouped</option>
             {state.payload.group_id &&
@@ -647,51 +604,6 @@ export function RecordHostEditor({
         <details className="rounded-lg border p-4">
           <summary className="text-sm font-medium">Manage host</summary>
           <section className="mt-4 space-y-3">
-            <p className="text-xs text-muted-foreground">
-              Move this host to a synced space to share it with your other
-              devices, or keep it Local. Moving between scopes preserves
-              effective settings and removes Group membership and inheritance.
-            </p>
-            <div className="flex items-center gap-2">
-              <select
-                aria-label="Move destination"
-                className={selectClass}
-                value={destination}
-                disabled={
-                  busy || state.dirty || state.unavailable || sharedBlocked
-                }
-                onChange={(e) => setDestination(e.target.value)}
-              >
-                <option value="local">Local</option>
-                {overview.spaces
-                  .filter((space) => space.selected && !space.missing)
-                  .map((space) => (
-                    <option
-                      key={space.id}
-                      disabled={overview.shared_writes_blocked}
-                      value={space.id}
-                    >
-                      {revealHidden(space.name)}
-                    </option>
-                  ))}
-              </select>
-              <Button
-                variant="outline"
-                disabled={
-                  busy ||
-                  state.dirty ||
-                  state.unavailable ||
-                  sharedBlocked ||
-                  (state.scope.kind === "local"
-                    ? destination === "local"
-                    : destination === state.scope.space_id) ||
-                  (destination !== "local" && overview.shared_writes_blocked)
-                }
-                onClick={move}
-              >
-                Move host
-              </Button>
-            </div>
             {askingDelete ? (
               <div className="flex items-center gap-3">
                 <p className="text-sm">

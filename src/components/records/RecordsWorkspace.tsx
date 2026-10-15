@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Bot, RotateCw, Settings, Terminal, SunMoon } from "lucide-react";
+import {
+  Bot,
+  RotateCw,
+  Settings,
+  Terminal,
+  SunMoon,
+  Plus,
+  FolderPlus,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from "lucide-react";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { useUiStore } from "@/stores/ui";
 import { useSyncBackendSettings } from "@/lib/backend-settings";
@@ -27,6 +37,8 @@ import { usePlatform, useTerminals } from "@/lib/queries";
 import { effectiveNewTab, terminalSupportsNewTab } from "@/lib/settings-logic";
 import { useSettingsStore } from "@/stores/settings";
 import { cn } from "@/lib/utils";
+import { SidebarResizeHandle } from "@/components/SidebarResizeHandle";
+import { clampSidebarWidth } from "@/lib/sidebar-width";
 import { RecordHostList } from "./HostList";
 import { RecordHostEditor } from "./HostEditor";
 import { RecordGroupEditor } from "./GroupEditor";
@@ -60,14 +72,18 @@ export function RecordsWorkspace({
   const [selection, setSelection] = useState<HostSelection>({ kind: "none" });
   const [pendingSelection, setPendingSelection] =
     useState<HostSelection | null>(null);
-  const [creationScope, setCreationScope] = useState<HostScope>({
-    kind: "local",
-  });
+  const creationScope: HostScope = overview.library_scope ?? { kind: "local" };
   const [dirty, setDirty] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const nonce = useRef(0);
+  const collectionRef = useRef<HTMLElement>(null);
+  const collectionWidth = clampSidebarWidth(
+    useUiStore((state) => state.sidebarWidth),
+  );
+  const [listExpanded, setListExpanded] = useState(false);
+  const showDetail = selection.kind !== "none" && !listExpanded;
   const syncInFlight = useRef(false);
   const platform = usePlatform();
   const terminals = useTerminals();
@@ -90,6 +106,7 @@ export function RecordsWorkspace({
   const requestSelection = (next: HostSelection) => {
     if (editorBusy) return;
     setPanel("hosts");
+    setListExpanded(false);
     const decision = decideHostSelection(selection, next, dirty, editorBusy);
     if (decision === "confirm") setPendingSelection(next);
     if (decision === "select") {
@@ -235,11 +252,13 @@ export function RecordsWorkspace({
             variant="outline"
             size="sm"
             disabled={syncing}
-            onClick={overview.account ? sync : () => setPanel("account")}
+            onClick={
+              overview.library_enabled ? sync : () => setPanel("account")
+            }
           >
             {syncing
               ? "Starting sync…"
-              : overview.account
+              : overview.library_enabled
                 ? "Sync now"
                 : "Set up sync"}
           </Button>
@@ -268,6 +287,37 @@ export function RecordsWorkspace({
             )}
           </Button>
         ))}
+        {panel === "hosts" && (
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {selection.kind !== "none" && (
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-expanded={showDetail}
+                aria-controls="record-details"
+                onClick={() => setListExpanded(!listExpanded)}
+              >
+                {showDetail ? (
+                  <PanelLeftClose className="size-4" />
+                ) : (
+                  <PanelLeftOpen className="size-4" />
+                )}
+                {showDetail ? "Expand list" : "Show details"}
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={editorBusy}
+              onClick={createGroup}
+            >
+              <FolderPlus className="size-4" /> New group
+            </Button>
+            <Button size="sm" disabled={editorBusy} onClick={createHost}>
+              <Plus className="size-4" /> New host
+            </Button>
+          </div>
+        )}
       </nav>
       <Dialog
         open={pendingSelection !== null}
@@ -313,108 +363,152 @@ export function RecordsWorkspace({
           changes.
         </p>
       )}
-      <div className="flex min-h-0 flex-1">
-        <aside
-          hidden={panel !== "hosts"}
-          className="app-sidebar min-h-0 w-60 shrink-0 border-r"
-        >
-          <RecordHostList
-            overview={overview}
-            selectedId={selectedId}
-            selectedGroupId={selectedGroupId}
-            selectGroup={(id) => requestSelection({ kind: "group", id })}
-            selectScope={(scope) => {
-              requestSelection({ kind: "none" });
-              setCreationScope(scope);
-            }}
-            select={(id) => requestSelection({ kind: "host", id })}
-            create={createHost}
-            createGroup={createGroup}
-            disabled={editorBusy}
-          />
-        </aside>
-        <main className="app-main min-h-0 min-w-0 flex-1 overflow-hidden">
-          <section
-            hidden={panel !== "hosts"}
-            className="h-full overflow-y-auto"
+      {overview.account &&
+        (!overview.library_enabled ||
+          [...overview.hosts, ...overview.groups].some(
+            (row) => row.scope.kind === "local",
+          )) && (
+          <div
+            role="status"
+            className="flex shrink-0 items-center justify-between gap-3 border-b bg-muted/40 px-4 py-2 text-sm"
           >
-            {selection.kind === "none" ? (
-              <div className="flex min-h-80 flex-col items-center justify-center gap-3 p-6 text-center">
-                <h1 className="font-medium">
-                  {overview.hosts.length
-                    ? "Select a host to connect"
-                    : "Add your first host"}
-                </h1>
-                <p className="text-sm text-muted-foreground">
-                  Select a host, add a new one, or import an SSH configuration.
-                </p>
-              </div>
-            ) : selection.kind === "group" || selection.kind === "new_group" ? (
-              <RecordGroupEditor
-                key={
-                  selection.kind === "group"
-                    ? `group:${selection.id}`
-                    : `new-group:${selection.nonce}`
-                }
-                group={selectedGroup}
-                groupId={selectedGroupId}
-                initialScope={
-                  selection.kind === "new_group" ? selection.scope : undefined
-                }
-                initialParentId={
-                  selection.kind === "new_group"
-                    ? selection.parentId
-                    : undefined
-                }
-                overview={overview}
-                accept={accept}
-                onSaved={onGroupSaved}
-                onDeleted={onDeleted}
-                onDirty={onDirty}
-                onBusy={setEditorBusy}
-                onCancel={onDeleted}
-              />
-            ) : (
-              <RecordHostEditor
-                key={
-                  selection.kind === "host"
-                    ? selection.id
-                    : `new:${selection.nonce}`
-                }
-                initialScope={
-                  selection.kind === "new" ? selection.scope : undefined
-                }
-                initialGroupId={
-                  selection.kind === "new" ? selection.groupId : undefined
-                }
-                host={selected}
-                hostId={selectedId}
-                overview={overview}
-                terminalId={terminalId}
-                newTab={effectiveNewTab(
-                  preferNewTab,
-                  terminalId,
-                  terminals.data ?? [],
-                )}
-                accept={accept}
-                onSaved={onSaved}
-                onDeleted={onDeleted}
-                onDirty={onDirty}
-                onBusy={setEditorBusy}
-                onCancel={onDeleted}
-              />
-            )}
+            <span>
+              {overview.library_enabled
+                ? "Some records need review before they can sync."
+                : "Finish library sync setup to include all existing hosts and Groups."}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setPanel("account")}
+            >
+              Review sync setup
+            </Button>
+          </div>
+        )}
+      <div className="flex min-h-0 flex-1">
+        <section
+          hidden={panel !== "hosts"}
+          className="records-host-workspace flex min-h-0 min-w-0 flex-1"
+          data-detail={showDetail}
+          aria-label="Hosts workspace"
+        >
+          <section
+            ref={collectionRef}
+            className="records-collection flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden"
+            aria-label="Host collection"
+            style={
+              showDetail
+                ? { width: `${collectionWidth}rem`, maxWidth: "45%" }
+                : { width: "100%" }
+            }
+          >
+            <RecordHostList
+              overview={overview}
+              selectedId={selectedId}
+              selectedGroupId={selectedGroupId}
+              selectGroup={(id) => requestSelection({ kind: "group", id })}
+              select={(id) => requestSelection({ kind: "host", id })}
+              disabled={editorBusy}
+              organizeDisabled={dirty || editorBusy}
+              accept={accept}
+              onBusy={setEditorBusy}
+              expand={() => setListExpanded(true)}
+            />
           </section>
-          {panel !== "hosts" && (
-            <div key={panel} className="h-full overflow-y-auto">
-              {panel === "keys" && <RecordsKeysPanel overview={overview} />}
-              {panel === "account" && (
-                <RecordsAccountPanel overview={overview} />
+          {showDetail && <SidebarResizeHandle sidebarRef={collectionRef} />}
+          <main
+            id="record-details"
+            hidden={!showDetail}
+            className="app-main min-h-0 min-w-0 flex-1 overflow-hidden border-l"
+            aria-label="Record details"
+          >
+            <section
+              hidden={panel !== "hosts"}
+              className="h-full overflow-y-auto"
+            >
+              {selection.kind === "none" ? (
+                <div className="flex min-h-80 flex-col items-center justify-center gap-3 p-6 text-center">
+                  <h1 className="font-medium">
+                    {overview.hosts.length
+                      ? "Select a host to connect"
+                      : "Add your first host"}
+                  </h1>
+                  <p className="text-sm text-muted-foreground">
+                    Select a host, add a new one, or import an SSH
+                    configuration.
+                  </p>
+                </div>
+              ) : selection.kind === "group" ||
+                selection.kind === "new_group" ? (
+                <RecordGroupEditor
+                  key={
+                    selection.kind === "group"
+                      ? `group:${selection.id}`
+                      : `new-group:${selection.nonce}`
+                  }
+                  group={selectedGroup}
+                  groupId={selectedGroupId}
+                  initialScope={
+                    selection.kind === "new_group" ? selection.scope : undefined
+                  }
+                  initialParentId={
+                    selection.kind === "new_group"
+                      ? selection.parentId
+                      : undefined
+                  }
+                  overview={overview}
+                  accept={accept}
+                  onSaved={onGroupSaved}
+                  onDeleted={onDeleted}
+                  onDirty={onDirty}
+                  onBusy={setEditorBusy}
+                  onCancel={onDeleted}
+                />
+              ) : (
+                <RecordHostEditor
+                  key={
+                    selection.kind === "host"
+                      ? selection.id
+                      : `new:${selection.nonce}`
+                  }
+                  initialScope={
+                    selection.kind === "new" ? selection.scope : undefined
+                  }
+                  initialGroupId={
+                    selection.kind === "new" ? selection.groupId : undefined
+                  }
+                  host={selected}
+                  hostId={selectedId}
+                  overview={overview}
+                  terminalId={terminalId}
+                  newTab={effectiveNewTab(
+                    preferNewTab,
+                    terminalId,
+                    terminals.data ?? [],
+                  )}
+                  accept={accept}
+                  onSaved={onSaved}
+                  onDeleted={onDeleted}
+                  onDirty={onDirty}
+                  onBusy={setEditorBusy}
+                  onCancel={onDeleted}
+                />
               )}
-              {panel === "import" && <RecordsImportPanel />}
-            </div>
-          )}
-        </main>
+            </section>
+          </main>
+        </section>
+        {panel !== "hosts" && (
+          <main
+            key={panel}
+            className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto"
+            aria-label="Workspace content"
+          >
+            {panel === "keys" && <RecordsKeysPanel overview={overview} />}
+            {panel === "account" && <RecordsAccountPanel overview={overview} />}
+            {panel === "import" && <RecordsImportPanel />}
+          </main>
+        )}
       </div>
       <footer className="app-toolbar flex shrink-0 flex-wrap items-center gap-3 border-t px-3 py-2">
         <select
@@ -441,8 +535,9 @@ export function RecordsWorkspace({
         </label>
         <div className="ml-auto max-w-md text-right">
           <RecordSyncStatus
-            connected={!!overview.account}
+            connected={!!overview.account && overview.library_enabled}
             pending={!!overview.pending_account}
+            pendingChanges={overview.pending_changes}
             lastSyncMs={overview.last_sync_ms}
             error={error ?? overview.last_error}
           />

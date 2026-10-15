@@ -18,6 +18,20 @@ import {
 } from "./editor";
 afterEach(() => vi.unstubAllGlobals());
 describe("record editor", () => {
+  it("retains a Group move draft while detecting actual external scope changes", () => {
+    const saved = hostView();
+    const draft = {
+      ...changeEditor(beginEditor(saved), { group_id: "0000000000000010" }),
+      scope: { kind: "space" as const, space_id: "a".repeat(64) },
+    };
+    expect(refreshEditor(draft, saved).changedOnServer).toBe(false);
+    expect(
+      refreshEditor(
+        draft,
+        hostView({ scope: { kind: "space", space_id: "b".repeat(64) } }),
+      ).changedOnServer,
+    ).toBe(true);
+  });
   it("normalizes absent Group membership and inheritance for raw editing", () => {
     const state = beginEditor(hostView());
     expect(state.payload.group_id).toBeNull();

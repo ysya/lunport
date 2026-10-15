@@ -1,6 +1,6 @@
 # SSHelter
 
-> **Own SSH development branch:** the records workspace keeps its vault local, syncs selected records and keys through encrypted chains, and uses explicit legacy migration. The release descriptions below refer to the existing legacy mode. Groups, Records MCP execution and POSIX public-key deployment are available in [Beta 1.0.0-3](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3), with native CI and four-platform publication verified. See the [remote handoff](docs/2026-10-15-beta3-remote-handoff.md) and [Beta 3 checklist](docs/releases/1.0.0-3-review-checklist.md) for current behavior, verification, and remaining gates.
+> **Own SSH development branch:** the records workspace keeps its vault local, syncs one host library through encrypted chains with separate key-sharing controls, and uses explicit legacy migration. The release descriptions below refer to the existing legacy mode. Groups, Records MCP execution and POSIX public-key deployment are available in [Beta 1.0.0-3](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3), with native CI and four-platform publication verified. See the [remote handoff](docs/2026-10-15-beta3-remote-handoff.md) and [Beta 3 checklist](docs/releases/1.0.0-3-review-checklist.md) for current behavior, verification, and remaining gates.
 
 A cross-platform desktop app for managing your **local OpenSSH** setup — `~/.ssh/config`, keys, `ssh-agent`, and `known_hosts` — with lossless, format-preserving editing. macOS + Linux first (Windows later).
 
@@ -15,6 +15,9 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **Approach:** hybrid — pure-Rust where it's byte-compatible (config CST parser, keys, known_hosts), shell-out only where the system tool is clearly better (`ssh-add` Keychain/FIDO, launching `ssh` in a terminal).
 
 ## Features
+
+- **Collection workspaces** — browse Hosts at full width, filter by space, and select multiple hosts to move or tag. Selecting a host or Group opens its editor; Expand list keeps its draft mounted. Batch changes use the reviewed host revisions and stop on a conflict while retaining completed changes.
+- **First launch** — a Records workspace opens without an existing data directory or SSH config and creates its data directory on save. The legacy workspace initializes a missing default `~/.ssh/config`; other config read failures stay visible with Retry and Config settings actions.
 
 - **Lossless config editing** — a clean GUI host editor over `~/.ssh/config` and every `Include`d file; only the lines you change are touched, so comments, ordering, and unknown directives survive byte-for-byte. Create new config files from any file picker: SSHelter detects an existing `Include` glob (like `config.d/*`) and drops the file where it's already loaded, or adds the `Include` line for you.
 - **Connect** — open a host in your terminal of choice (macOS Terminal/iTerm2, common Linux emulators, Windows Terminal or Command Prompt), from a per-row button, the editor header, the command palette, or the menubar tray's quick-connect list. From 0.17.0-10 (Beta channel), the terminal runs `sshelter connect <host>` (on Windows through `sshelter-cli.exe`, a small console program installed next to SSHelter): the connection lives in SSHelter's own SSH client, a first-time host key is confirmed in SSHelter's window, a saved password is tried first, and passphrases and 2FA codes are asked in the terminal. When the connection fails before the session opens, the reason stays on screen: from 0.17.0-11, terminals that close their window when the command fails (iTerm2, Linux emulators) keep it there until you press Enter; Terminal, Command Prompt and Windows Terminal (with its default settings) keep it anyway. That client signs only with keys kept in SSHelter (Keychain → Only in SSHelter): a host whose `IdentityFile` is a key file in `~/.ssh` connects once that key is moved into SSHelter (Keychain → Move), a host that relies on OpenSSH's default `~/.ssh/id_*` files has to name its key first, and hosts that use `ProxyCommand` don't connect through it yet (`ProxyJump` does). Up to 0.17.0-9 and in 0.16 (Stable), Connect launches `ssh <host>` instead, and a saved password is auto-filled through the built-in `SSH_ASKPASS` helper straight from your OS keychain — it never appears in the launch command; auto-fill steps aside for jump hosts, first-time hosts (confirm the host key manually once), and keyboard-interactive/2FA hosts.
@@ -75,7 +78,9 @@ The button copies `relay/` into a new repository on your GitHub or GitLab accoun
 
 ## Development
 
-Prerequisites: Rust (rustup), Node + pnpm, and platform build deps (macOS: Xcode Command Line Tools; Linux: `libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev`).
+Prerequisites: Rust (mise or rustup), Node + pnpm, and platform build deps (macOS: Xcode Command Line Tools; Linux: `libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev`).
+
+With mise, run `mise install` for the project Rust toolchain; use `mise exec --` before commands if mise is not activated in your shell.
 
 ```bash
 pnpm install            # install JS deps
@@ -111,3 +116,11 @@ To point the Beta channel at a release by hand, run **update beta channel** with
 ## License
 
 [PolyForm Noncommercial](LICENSE) © Frank Sung
+
+## Library sync (development)
+
+Hosts and Groups share one library. Creating or joining sync includes existing records on this device; previously connected devices enable Library sync once from Sync settings. New records then sync automatically, including imported hosts. Keys retain their explicit sharing controls.
+
+The library remains editable offline and queues cached changes for the next connection. Every upload still checks authenticated account format metadata. First-time Group format upgrades need an online check and acknowledgement that older clients have been stopped or updated.
+
+Existing encrypted space chains are retained as transport details. Setup downloads their baselines before including existing records, keeps stable IDs and Group inheritance, and rejects conflicting identities or names without removing the source records. Interrupted setup can resume its original operation.

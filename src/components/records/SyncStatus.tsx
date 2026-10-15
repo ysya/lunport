@@ -4,11 +4,13 @@ export function RecordSyncStatus({
   error,
   connected = true,
   pending = false,
+  pendingChanges = 0,
 }: {
   lastSyncMs: number | null;
   error: string | null;
   connected?: boolean;
   pending?: boolean;
+  pendingChanges?: number;
 }) {
   const date = lastSyncMs === null ? null : new Date(lastSyncMs);
   const validDate = date !== null && Number.isFinite(date.getTime());
@@ -18,7 +20,9 @@ export function RecordSyncStatus({
         {pending ? (
           "Sync setup pending"
         ) : !connected ? (
-          "Local only"
+          "Sync not set up"
+        ) : pendingChanges > 0 ? (
+          `${pendingChanges} changes saved, waiting to sync`
         ) : lastSyncMs === null ? (
           "Not synced yet"
         ) : validDate ? (

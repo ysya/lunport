@@ -217,6 +217,7 @@ pub(crate) fn publish_prepared_account_gate(
                 }
             }
         }
+        crate::sync::record_library::select_library_spaces(&mut next);
         publish_gate(&mut next, &gate, observed);
         Ok(next)
     };

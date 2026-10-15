@@ -19,8 +19,7 @@ export function scopeLabel(
   overview: RecordOverview,
   scope: RecordOverview["hosts"][number]["scope"],
 ): string {
-  return scope.kind === "local"
-    ? "Local"
-    : (overview.spaces.find((space) => space.id === scope.space_id)?.name ??
-        "Missing space");
+  void overview;
+  void scope;
+  return "Library";
 }

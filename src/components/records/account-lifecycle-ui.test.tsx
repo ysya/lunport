@@ -23,11 +23,11 @@ describe("explicit account lifecycle consent and outcomes", () => {
         cancel={vi.fn()}
       />,
     );
-  it("requires leave consent and explains Local copies and retained sources", () => {
+  it("requires leave consent and explains saved copies and retained sources", () => {
     const html = review("leave");
     expect(buttonTag(html, "Leave account")).toContain(DISABLED);
     expect(html).toContain('data-state="unchecked"');
-    expect(text(html)).toContain("Local");
+    expect(text(html)).toContain("on this device");
     expect(text(html)).toContain("remote");
     expect(text(html)).toContain("passwords");
     expect(buttonTag(review("leave", true), "Leave account")).not.toContain(

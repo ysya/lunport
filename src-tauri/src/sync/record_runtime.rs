@@ -352,6 +352,7 @@ fn persist_candidate(
     {
         candidate.version = crate::sync::records_v3::GROUP_STATE_VERSION;
     }
+    candidate = crate::sync::record_library::include_new_records(candidate);
     if let Some(before) = core.records.as_ref() {
         candidate = crate::sync::record_groups::invalidate_changed_pins(before, candidate)
             .map_err(|e| AppError::Other(e.to_string()))?;
