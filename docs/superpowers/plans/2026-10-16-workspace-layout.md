@@ -51,11 +51,12 @@
 
 ### Task 3: Shared colors and final acceptance
 
-**Files:** Modify `src/index.css`, `src/components/records/library.css`, and `docs/releases/1.0.0-9-validation.md`.
+**Files:** Modify `src/index.css`, `src/components/records/library.css`, `src/components/ui/scroll-area.tsx`, and `docs/releases/1.0.0-9-validation.md`.
 
 **Interfaces:** Existing semantic CSS variables remain stable. Library derives its canvas/nav/line/dim tokens from global background/sidebar/border/muted-foreground values.
 
-- [ ] Apply the chosen neutral palette. Start with light primary `#2563eb` / white text and dark primary `#82b1ff` / `#10213d` text; use neutral surfaces and semantic error colors. Calculate contrast before accepting the values.
-- [ ] Check complete workspace, menus, selection controls, details, host/group editors and settings in both themes. Confirm long names and lower status bars do not cause horizontal overflow or unreadable text.
+- [x] Apply the chosen neutral palette. Start with light primary `#2563eb` / white text and dark primary `#82b1ff` / `#10213d` text; use neutral surfaces and semantic error colors. Calculate contrast before accepting the values.
+- [x] Unify native and Radix scrollbar styling across all scrolling surfaces, including portaled dialogs. Check transparent tracks, rounded thumbs, hover/drag cues, forced colors, and vertical/horizontal scroll access.
+- [x] Check complete workspace, menus, selection controls, details, host/group editors and settings in both themes. Confirm long names and lower status bars do not cause horizontal overflow or unreadable text.
 - [ ] Run the full frontend suite and build. Obtain one scoped independent review of this new patch and resolve its actionable findings.
 - [ ] Commit and push the revised source, run required cross-platform CI, then publish an unused Beta version from that exact source. Verify all installer jobs, tag, Beta manifest/signature-file coherence and the fresh Stable baseline. Update the inspection checklist with results and remaining device-only acceptance.

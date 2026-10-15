@@ -17,6 +17,7 @@ import { HostPreviewResizeHandle } from "./HostPreviewResizeHandle";
 import {
   clampHostPreviewWidth,
   hostPreviewLimit,
+  hostPreviewNeedsCompact,
 } from "@/lib/host-preview-width";
 import { useUiStore } from "@/stores/ui";
 
@@ -44,6 +45,7 @@ export function HostPreview({
   );
   const setWidth = useUiStore((state) => state.setHostPreviewWidth);
   const [available, setAvailable] = useState(Infinity);
+  const contentCompact = hostPreviewNeedsCompact(available);
   const limit = hostPreviewLimit(available);
   const width = Math.min(preferredWidth, limit);
   const previousView = useRef({ hostId: "", compact: false });
@@ -57,14 +59,15 @@ export function HostPreview({
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
-    const compact = window.matchMedia("(max-width: 820px)").matches;
+    const compact =
+      contentCompact || window.matchMedia("(max-width: 820px)").matches;
     if (
       compact &&
       (!previousView.current.compact || previousView.current.hostId !== host.id)
     )
       closeButton.current?.focus();
     previousView.current = { hostId: host.id, compact };
-  }, [host.id, available]);
+  }, [host.id, available, contentCompact]);
   const ready = host.readiness.kind === "ready" && !host.group_error;
   const field = (name: string, value: string, mono = false) => (
     <div>
@@ -78,6 +81,7 @@ export function HostPreview({
       id={paneId}
       className="library-host-preview"
       aria-label="Host details"
+      data-compact={contentCompact || undefined}
       style={{ "--host-preview-width": `${width}px` } as CSSProperties}
     >
       <HostPreviewResizeHandle

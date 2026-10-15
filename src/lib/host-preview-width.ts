@@ -11,6 +11,11 @@ export function clampHostPreviewWidth(value: unknown): number {
   );
 }
 
+/** Large fonts or navigation can exhaust the content area above the window breakpoint. */
+export function hostPreviewNeedsCompact(available: number): boolean {
+  return Number.isFinite(available) && available < 2 * MIN_HOST_PREVIEW_WIDTH;
+}
+
 /** Reserve list space without modifying the user's saved preferred width. */
 export function hostPreviewLimit(available: number): number {
   if (!Number.isFinite(available)) return MAX_HOST_PREVIEW_WIDTH;
