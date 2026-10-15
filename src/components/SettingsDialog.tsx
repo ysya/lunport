@@ -1,5 +1,5 @@
 import { auditRows } from "@/lib/mcp-audit-rows";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -17,7 +17,6 @@ import {
   TerminalSquare,
 } from "lucide-react";
 
-import { getVersion } from "@tauri-apps/api/app";
 import {
   disable as autostartDisable,
   enable as autostartEnable,
@@ -28,7 +27,8 @@ import { useUiStore, type SettingsCategory } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
 import { useHostsQuery, useLoadConfig, usePlatform, useTerminals, useIsDevelopment } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
-import { checkForUpdates } from "@/lib/updater";
+import { useUpdaterState, updateInProgress } from "@/lib/updater";
+import { UpdatesPane } from "@/components/UpdatesPane";
 import { copyText } from "@/lib/clipboard";
 import { isImeKey } from "@/lib/ime";
 import {
@@ -40,11 +40,9 @@ import {
 import {
   FONT_SIZE_OPTIONS,
   LINT_RULES,
-  normalizeUpdateChannel,
   quickConnectLabel,
   terminalSupportsNewTab,
   type ThemePref,
-  type UpdateChannel,
 } from "@/lib/settings-logic";
 import { cn } from "@/lib/utils";
 import { isWildcardOnly } from "@/lib/host-display";
@@ -55,7 +53,7 @@ import {
   useSetMcpApprovalMode,
 } from "@/lib/mcp";
 
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -97,6 +95,7 @@ export function SettingsCategoryPane({
   onOpenSync?: () => void;
 }) {
   if (category === "general") return <GeneralPane />;
+  if (category === "updates") return <UpdatesPane />;
   if (category === "appearance") return <AppearancePane />;
   if (category === "connection") return <ConnectionPane />;
   if (category === "files")
@@ -167,6 +166,7 @@ const CATEGORIES: {
   badge?: string;
 }[] = [
   { id: "general", label: "General", icon: Settings2 },
+  { id: "updates", label: "Updates", icon: RefreshCw },
   { id: "appearance", label: "Appearance", icon: SunMoon },
   { id: "connection", label: "Connection", icon: TerminalSquare },
   { id: "files", label: "Files & Backups", icon: FolderCog },
@@ -188,6 +188,7 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
   onOpenImport?: () => void;
   onOpenSync?: () => void;
 } = {}) {
+  const contentRef = useRef<HTMLDivElement>(null);
   const open = useUiStore((s) => s.settingsOpen);
   const setOpen = useUiStore((s) => s.setSettingsOpen);
   const category = useUiStore((s) => s.settingsCategory);
@@ -205,18 +206,25 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [setOpen]);
 
+  const updatePhase = useUpdaterState((state) => state.phase);
+  const updateAttention = updatePhase === "available" || updateInProgress(updatePhase);
   const active = CATEGORIES.find((c) => c.id === category) ?? CATEGORIES[0];
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="app-shell gap-0 overflow-hidden p-0 sm:max-w-2xl">
-        <div className="flex h-[480px] max-h-[80vh]">
+      <DialogContent ref={contentRef} className="app-shell gap-0 overflow-hidden p-0 sm:max-w-2xl"
+        onOpenAutoFocus={(event) => {
+          const active = contentRef.current?.querySelector<HTMLButtonElement>('button[aria-current="true"]');
+          if (active) { event.preventDefault(); active.focus(); }
+        }}>
+        <DialogDescription className="sr-only">Manage application preferences and software updates.</DialogDescription>
+        <div className="flex h-[480px] max-h-[80vh] max-sm:flex-col">
           {/* Sidebar — category list. */}
-          <aside className="flex w-44 shrink-0 flex-col gap-0.5 border-r bg-muted/40 p-2">
+          <aside className="flex w-44 shrink-0 flex-col gap-0.5 border-r bg-muted/40 p-2 max-sm:w-full max-sm:border-r-0 max-sm:border-b">
             <DialogTitle className="px-2 pt-1 pb-2 text-sm font-semibold select-none">
               Settings
             </DialogTitle>
-            <nav aria-label="Settings categories" className="flex flex-col gap-0.5">
+            <nav aria-label="Settings categories" className="flex flex-col gap-0.5 max-sm:flex-row max-sm:overflow-x-auto max-sm:pb-1">
               {CATEGORIES.map((c) => {
                 const Icon = c.icon;
                 const isActive = c.id === category;
@@ -227,7 +235,7 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
                     onClick={() => setCategory(c.id)}
                     aria-current={isActive ? "true" : undefined}
                     className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors select-none cursor-default",
+                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors select-none cursor-default max-sm:w-auto max-sm:shrink-0",
                       "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
                       isActive
                         ? "bg-primary/12 text-foreground"
@@ -236,6 +244,7 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
                   >
                     <Icon className="size-4 shrink-0" />
                     {c.label}
+                    {c.id === "updates" && updateAttention && <span aria-hidden="true" className="ml-auto size-1.5 rounded-full bg-primary" />}
                     {c.badge && (
                       <Badge variant="outline" className="ml-auto h-4 px-1 text-[10px] font-normal">
                         {c.badge}
@@ -248,11 +257,11 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
           </aside>
 
           {/* Detail pane — scrollable. */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <header className="shrink-0 border-b px-5 py-3 select-none">
               <h2 className="text-sm font-semibold">{active.label}</h2>
             </header>
-            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
+            <div key={category} className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
               <SettingsCategoryPane category={category} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenSync={onOpenSync} />
             </div>
           </div>
@@ -273,15 +282,9 @@ function GeneralPane() {
   const setCloseToTray = useSettingsStore((s) => s.setCloseToTray);
   const globalHotkey = useSettingsStore((s) => s.globalHotkey);
   const setGlobalHotkey = useSettingsStore((s) => s.setGlobalHotkey);
-  const autoCheckUpdates = useSettingsStore((s) => s.autoCheckUpdates);
-  const setAutoCheckUpdates = useSettingsStore((s) => s.setAutoCheckUpdates);
-  const updateChannel = normalizeUpdateChannel(useSettingsStore((s) => s.updateChannel));
-  const setUpdateChannel = useSettingsStore((s) => s.setUpdateChannel);
   const platform = usePlatform();
   const { data: isDevelopment } = useIsDevelopment();
   const integrationsAllowed = isDevelopment === false;
-  const [checking, setChecking] = useState(false);
-  const [appVersion, setAppVersion] = useState<string | null>(null);
   // Launch-at-login reflects the OS state (NOT a persisted flag): queried
   // fresh every time this pane mounts; null = still loading → switch disabled.
   const [launchAtLogin, setLaunchAtLogin] = useState<boolean | null>(null);
@@ -289,7 +292,6 @@ function GeneralPane() {
   const [pendingImport, setPendingImport] = useState<SettingsEnvelope | null>(null);
 
   useEffect(() => {
-    getVersion().then(setAppVersion).catch(() => setAppVersion(null));
     if (!integrationsAllowed) return;
     autostartIsEnabled()
       .then(setLaunchAtLogin)
@@ -298,21 +300,6 @@ function GeneralPane() {
         console.warn("[settings] autostart state query failed:", e);
       });
   }, [integrationsAllowed]);
-
-  const onCheckNow = async () => {
-    setChecking(true);
-    try {
-      await checkForUpdates({ silent: false });
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  const onChannelChange = (channel: UpdateChannel) => {
-    setUpdateChannel(channel);
-    // Switching to Beta checks right away so the user learns whether a beta is available.
-    if (channel === "beta") void onCheckNow();
-  };
 
   const onTray = (visible: boolean) => {
     setTrayVisible(visible);
@@ -423,53 +410,6 @@ function GeneralPane() {
                 onCheckedChange={setGlobalHotkey}
               />
             </div>
-          </SettingsRow>
-        </SettingsGroup>
-      </Section>
-
-      <Section title="Updates">
-        <SettingsGroup>
-          <SettingsRow
-            id="set-auto-update"
-            label="Check for updates automatically"
-            description="Checks GitHub Releases at launch, every few hours, and when the window regains focus."
-          >
-            <Switch
-              id="set-auto-update"
-              disabled={!integrationsAllowed}
-              checked={integrationsAllowed && autoCheckUpdates}
-              onCheckedChange={setAutoCheckUpdates}
-            />
-          </SettingsRow>
-          <SettingsRow
-            id="set-update-channel"
-            label="Update channel"
-            description="Beta gets preview builds earlier and may be less stable. Switching back to Stable keeps your current version until a newer stable release is out."
-          >
-            <Select disabled={!integrationsAllowed} value={updateChannel} onValueChange={(value) => onChannelChange(normalizeUpdateChannel(value))}>
-              <SelectTrigger id="set-update-channel" className="h-7 w-[10rem] text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="stable">Stable</SelectItem>
-                <SelectItem value="beta">Beta</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingsRow>
-          <SettingsRow
-            label="Version"
-            description={appVersion ? `SSHelter ${appVersion}` : undefined}
-          >
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="h-7"
-              onClick={onCheckNow}
-              disabled={!integrationsAllowed || checking}
-            >
-              {checking ? "Checking…" : "Check now"}
-            </Button>
           </SettingsRow>
         </SettingsGroup>
       </Section>
