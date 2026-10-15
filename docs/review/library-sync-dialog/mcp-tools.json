@@ -1,0 +1,190 @@
+{
+  "id": 2,
+  "jsonrpc": "2.0",
+  "result": {
+    "tools": [
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "List only SSH hosts that the user explicitly allowed in SSHelter's AI Access interface.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "name": "list_hosts",
+        "title": "List AI-approved SSH hosts"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Resolve non-secret connection settings for an AI-approved host.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "alias": {
+              "description": "Stable host ID returned by list_hosts in a records workspace, or an exact unambiguous host alias",
+              "type": "string"
+            }
+          },
+          "required": [
+            "alias"
+          ],
+          "type": "object"
+        },
+        "name": "get_host",
+        "title": "Get sanitized SSH configuration"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        },
+        "description": "Run a remote command under the current SSHelter Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "alias": {
+              "description": "Exact AI-approved SSHelter host alias",
+              "type": "string"
+            },
+            "command": {
+              "description": "Exact remote shell command shown to the user for approval",
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "default": 60,
+              "maximum": 300,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "alias",
+            "command"
+          ],
+          "type": "object"
+        },
+        "name": "ssh_exec",
+        "title": "Run an approved SSH command"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Propose public connection settings. SSHelter always asks the user before saving, including in Auto-log mode. Does not connect, trust a host key, import private keys or grant AI access.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "alias": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "auth": {
+              "default": "password",
+              "enum": [
+                "password",
+                "key",
+                "interactive"
+              ],
+              "type": "string"
+            },
+            "connect_timeout_secs": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "group_id": {
+              "description": "Optional existing Group ID; settings remain explicit overrides.",
+              "type": "string"
+            },
+            "hostname": {
+              "maxLength": 255,
+              "type": "string"
+            },
+            "jump": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            "keepalive_max_missed": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "keepalive_secs": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "key_id": {
+              "description": "Existing SSHelter key ID; no private key or password.",
+              "type": "string"
+            },
+            "port": {
+              "default": 22,
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "tags": {
+              "items": {
+                "maxLength": 64,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            },
+            "user": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          "required": [
+            "alias",
+            "hostname"
+          ],
+          "type": "object"
+        },
+        "name": "create_host",
+        "title": "Propose a new SSH host"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": false
+        },
+        "description": "For an AI-approved host, perform the SSH handshake and show SSHelter's native trust window for a new or changed server key. Always needs a human trust decision; never authenticates to the destination or runs a command. Jump hosts may require login. Does not bypass Auto-log's no-interaction policy for ssh_exec.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "alias": {
+              "description": "AI-approved stable host ID or exact unambiguous alias.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "alias"
+          ],
+          "type": "object"
+        },
+        "name": "verify_host_key",
+        "title": "Verify and review a server fingerprint"
+      }
+    ]
+  }
+}

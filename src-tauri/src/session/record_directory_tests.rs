@@ -137,7 +137,10 @@ fn a_missing_material_on_a_jump_refuses_the_whole_target() {
     web.jump = vec![GATE.into()];
     let s = add(&s, WEB, web);
     let (d, _, _) = fixture(s.clone(), false, true);
-    assert!(d.resolve_public(&HostQuery::Id(WEB.into())).is_ok(), "public route resolution must not require vault material");
+    assert!(
+        d.resolve_public(&HostQuery::Id(WEB.into())).is_ok(),
+        "public route resolution must not require vault material"
+    );
     assert!(matches!(
         d.resolve(&HostQuery::Id(WEB.into())),
         Err(DirectoryError::Unsupported(_))
@@ -399,4 +402,67 @@ fn group_directory_uses_effective_destination_and_refuses_old_hop_after_parent_e
             .unwrap();
     drop(state);
     assert!(directory.checked_host(&old).is_err());
+}
+
+#[test]
+fn server_key_probe_uses_no_destination_key_or_private_material() {
+    let mut web = payload("web");
+    web.auth = AuthKind::Key;
+    web.key_id = Some(KEY.into());
+    let (d, _, _) = fixture(add(&state(), WEB, web), false, true);
+    assert!(d.resolve_public(&HostQuery::Id(WEB.into())).is_err());
+    let probe = d.resolve_host_key(&HostQuery::Id(WEB.into())).unwrap();
+    assert_eq!(probe.hops[0].auth, AuthMethod::Interactive);
+    let mut gate = payload("gate");
+    gate.auth = AuthKind::Key;
+    gate.key_id = Some(KEY.into());
+    let mut web = payload("web");
+    web.jump = vec![GATE.into()];
+    let (d, _, _) = fixture(add(&add(&state(), GATE, gate), WEB, web), false, true);
+    assert!(
+        d.resolve_host_key(&HostQuery::Id(WEB.into())).is_err(),
+        "jump identities are still required"
+    );
+}
+
+#[test]
+fn editing_the_destination_during_probe_review_cannot_trust_the_old_endpoint() {
+    use crate::session::{
+        connect::{Connector, HostKeyConfirmer, HostKeyQuestion},
+        testing::{FakeKeys, FakeOwner},
+    };
+    use crate::sync::testkit::MemKeychain;
+    struct Edit(Arc<Mutex<SyncStateV3>>);
+    impl HostKeyConfirmer for Edit {
+        fn confirm(&self, q: &HostKeyQuestion, _: &crate::session::connect::CancelToken) -> Option<String> {
+            let mut state = self.0.lock().unwrap();
+            let view = repo::get_host(&state, WEB).unwrap();
+            let mut payload = view.host.payload;
+            payload.hostname = "changed.invalid".into();
+            *state = repo::update_host(&state, WEB, &view.revision, payload, 50).unwrap();
+            Some(q.fingerprint.clone())
+        }
+    }
+    let (directory, state, _) = fixture(add(&state(), WEB, payload("web")), false, true);
+    let confirmer = Edit(state.clone());
+    let connector = Connector {
+        directory: &directory,
+        engine: &crate::ssh::fake::FakeEngine::new(),
+        confirmer: &confirmer,
+        keys: &FakeKeys::new(),
+        keychain: &MemKeychain::default(),
+    };
+    assert!(crate::session::verify::verify(
+        &connector,
+        &HostQuery::Id(WEB.into()),
+        &FakeOwner::default(),
+        &crate::session::connect::CancelToken::default()
+    )
+    .is_err());
+    assert!(repo::get_host(&state.lock().unwrap(), WEB)
+        .unwrap()
+        .host
+        .payload
+        .host_key
+        .is_none());
 }

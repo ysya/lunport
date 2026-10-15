@@ -133,7 +133,12 @@ impl RecordDirectory {
     }
 }
 impl RecordDirectory {
-    fn resolve_material(&self, query: &HostQuery, verify_material:bool) -> Result<Target, DirectoryError> {
+    fn resolve_material(
+        &self,
+        query: &HostQuery,
+        verify_material: bool,
+        host_key_only: bool,
+    ) -> Result<Target, DirectoryError> {
         let state = (self.sources.snapshot)()?;
         let host = match query {
             HostQuery::Id(id) => repo::get_host(&state, id),
@@ -143,9 +148,12 @@ impl RecordDirectory {
         let route = repo::resolve_host_chain(&state, &host.host.id).map_err(repository_error)?;
         let mut hops = Vec::with_capacity(route.len());
         let mut os_user = None;
-        for view in route {
+        let last = route.len().saturating_sub(1);
+        for (index, view) in route.into_iter().enumerate() {
+            let probe = host_key_only && index == last;
             match view.readiness {
                 HostReadiness::Ready => {}
+                HostReadiness::NeedsKey(_) | HostReadiness::KeyConflict(_) if probe => {}
                 HostReadiness::NeedsKey(ref id) => {
                     return Err(DirectoryError::Unsupported(format!(
                         "{} needs key {id} on this device.",
@@ -165,22 +173,26 @@ impl RecordDirectory {
                 }
             }
             let p = &view.effective_payload;
-            let auth = match p.auth {
-                AuthKind::Key => {
-                    let id = p.key_id.as_ref().ok_or_else(|| {
-                        DirectoryError::Unsupported("The host has no key reference.".into())
-                    })?;
-                    let key = repo::resolve_key(&state, id).map_err(repository_error)?;
-                    if verify_material && !(self.sources.material)(&key)? {
-                        return Err(DirectoryError::Unsupported(format!(
-                            "{} needs key {id} material on this device.",
-                            p.alias
-                        )));
+            let auth = if probe {
+                AuthMethod::Interactive
+            } else {
+                match p.auth {
+                    AuthKind::Key => {
+                        let id = p.key_id.as_ref().ok_or_else(|| {
+                            DirectoryError::Unsupported("The host has no key reference.".into())
+                        })?;
+                        let key = repo::resolve_key(&state, id).map_err(repository_error)?;
+                        if verify_material && !(self.sources.material)(&key)? {
+                            return Err(DirectoryError::Unsupported(format!(
+                                "{} needs key {id} material on this device.",
+                                p.alias
+                            )));
+                        }
+                        AuthMethod::Key { key_id: id.clone() }
                     }
-                    AuthMethod::Key { key_id: id.clone() }
+                    AuthKind::Password => AuthMethod::Password,
+                    AuthKind::Interactive => AuthMethod::Interactive,
                 }
-                AuthKind::Password => AuthMethod::Password,
-                AuthKind::Interactive => AuthMethod::Interactive,
             };
             let user = if p.user.is_empty() {
                 if os_user.is_none() {
@@ -211,10 +223,17 @@ impl RecordDirectory {
         }
         Ok(Target { hops })
     }
- }
+}
 impl HostDirectory for RecordDirectory {
-    fn resolve(&self,query:&HostQuery)->Result<Target,DirectoryError>{self.resolve_material(query,true)}
-    fn resolve_public(&self,query:&HostQuery)->Result<Target,DirectoryError>{self.resolve_material(query,false)}
+    fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+        self.resolve_material(query, true, false)
+    }
+    fn resolve_public(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+        self.resolve_material(query, false, false)
+    }
+    fn resolve_host_key(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+        self.resolve_material(query, false, true)
+    }
     fn pinned(&self, host: &HostId) -> Result<Option<PinnedKey>, DirectoryError> {
         self.host(host)?
             .host

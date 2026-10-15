@@ -103,7 +103,7 @@ pub(super) fn tool(params: &Value, id: &str, info: &McpClientInfo, call: &Call) 
         .unwrap_or_default();
     if !matches!(
         name,
-        "list_hosts" | "get_host" | "get_effective_config" | "ssh_exec" | "run"
+        "list_hosts" | "get_host" | "get_effective_config" | "ssh_exec" | "run" | "create_host" | "verify_host_key"
     ) {
         return tool_error(format!("Unknown tool: {name}"));
     }
@@ -117,6 +117,9 @@ pub(super) fn tool(params: &Value, id: &str, info: &McpClientInfo, call: &Call) 
         .err()
         .is_some_and(|e| e == "legacy_transport_required")
     {
+        if matches!(name, "create_host" | "verify_host_key") {
+            return tool_error("This tool requires a Records workspace in the current SSHelter version.".into());
+        }
         call.legacy.store(true, Ordering::SeqCst);
         if call.cancel.is_cancelled() {
             return tool_error("MCP request was canceled".into());

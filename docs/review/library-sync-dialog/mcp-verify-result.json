@@ -1,0 +1,22 @@
+{
+  "id": 2,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "{\n  \"algorithm\": \"ssh-ed25519\",\n  \"alias\": \"mcp-fingerprint-fixture\",\n  \"fingerprint\": \"SHA256:gABxpc3goaMwL1RkvreIkS9lz3aqCXGDYIl5ANt/dhE\",\n  \"host_id\": \"e1119028558e01fd\",\n  \"hostname\": \"127.0.0.1\",\n  \"port\": 56738,\n  \"trusted\": true\n}",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "algorithm": "ssh-ed25519",
+      "alias": "mcp-fingerprint-fixture",
+      "fingerprint": "SHA256:gABxpc3goaMwL1RkvreIkS9lz3aqCXGDYIl5ANt/dhE",
+      "host_id": "e1119028558e01fd",
+      "hostname": "127.0.0.1",
+      "port": 56738,
+      "trusted": true
+    }
+  }
+}

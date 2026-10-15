@@ -744,7 +744,7 @@ export function McpPane({ hosts, records = false }: {
     <>
       <Section
         title="MCP access"
-        description={records ? "Let local AI clients inspect and execute commands on individually allowed hosts through SSHelter." : "Let local AI clients request SSH actions through SSHelter. Remote commands require an Allow once decision here."}
+        description={records ? "AI clients can propose new connections for your review. Existing hosts require individual permission before inspection, fingerprint verification or command execution." : "Let local AI clients request SSH actions through SSHelter. Remote commands require an Allow once decision here."}
       >
         <SettingsGroup>
           <SettingsRow
@@ -802,7 +802,7 @@ export function McpPane({ hosts, records = false }: {
             {status.data?.noninteractive_credentials_notice}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Auto-log never opens authentication or host-key trust windows. Missing credentials, 2FA, or an untrusted server require switching to Ask.
+            Auto-log command execution never opens authentication or trust windows. Use Verify server fingerprint in the host editor, or the separate MCP verify_host_key tool, to review a server key. Missing credentials or 2FA require Ask.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             If background sync remains unavailable after a hidden launch, open SSHelter from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
@@ -914,7 +914,12 @@ export function McpPane({ hosts, records = false }: {
                   <span className="min-w-0 break-all font-mono text-xs">{revealHidden(entry.alias)}</span>
                   <span className="break-words text-xs">{entry.client} · {entry.mode} · {entry.outcome.split("_").join(" ")}</span>
                 </div>
-                <p className="break-all text-xs text-muted-foreground">ID: {entry.host_id ?? "Unknown"} · Ended: {entry.ended ?? "unknown"} · Exit: {entry.exit_code ?? "unknown"} · Signal: {entry.signal ?? "none reported"}</p>
+                <p className="break-all text-xs text-muted-foreground">
+                  ID: {entry.host_id ?? "Unknown"}
+                  {entry.outcome.startsWith("host_")
+                    ? " · Connection management · No remote command"
+                    : ` · Ended: ${entry.ended ?? "unknown"} · Exit: ${entry.exit_code ?? "unknown"} · Signal: ${entry.signal ?? "none reported"}`}
+                </p>
                 <McpAttribution requestedBy={entry.requested_by} requesterId={entry.requester_id} clientInfo={entry.client_info} />
                 <p className="truncate font-mono text-xs text-muted-foreground" title={entry.command}>
                   {entry.command}

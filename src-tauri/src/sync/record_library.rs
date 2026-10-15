@@ -9,6 +9,9 @@ use crate::sync::{
     records_v3::{HostScope, SyncStateV3},
 };
 
+pub mod review;
+use review::{LibraryFailure, LibraryReview};
+
 const LIBRARY_SLUG: &str = "sshelter-library";
 const DEVICE_FLAG: &str = "sync_library";
 
@@ -122,6 +125,15 @@ pub(crate) fn include_existing(
         let kind = row.record.kind;
         let key = record_key(kind, id);
         for space in state.spaces.values() {
+            if space
+                .sealed
+                .values()
+                .any(|r| r.envelope.kind == kind.as_str() && r.public_identity.is_none())
+            {
+                return Err(RepositoryError::SpaceUnavailable(
+                    "Some synced record identities cannot be read".into(),
+                ));
+            }
             if space.records.get(&key).is_some_and(|r| !r.record.deleted)
                 || space.sealed.values().any(|r| {
                     r.envelope.kind == kind.as_str()
@@ -197,14 +209,24 @@ pub(crate) fn select_library_spaces(state: &mut SyncStateV3) {
 
 /// Setup can be retried after a failed child-chain creation or publication. Existing
 /// resumable account operations retain their original identities.
-pub fn enable(env: &SyncEnv, confirmed: bool) -> Result<(), AppError> {
-    {
+pub fn prepare(env: &SyncEnv) -> Result<review::LibraryPreview, LibraryFailure> {
+    prepare_library(env)?;
+    review::preview(&record_runtime::snapshot(env)?.0)
+}
+
+fn prepare_library(env: &SyncEnv) -> Result<(), LibraryFailure> {
+    let check_account = || -> Result<(), LibraryFailure> {
         let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-        crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;
-    }
+        let proof = crate::sync::record_round::fresh_account_gate(env).map_err(|_| LibraryFailure::new(
+            "account_check", "Could not verify the sync chain. Check relay access and the sync code stored on this device, then retry. Existing records have been kept."))?;
+        proof.ensure_compatible().map_err(|_| LibraryFailure::new(
+            "account_review", "The sync chain is paused or uses an incompatible format. Finish pending setup or update SSHelter before enabling library sync."))
+    };
+    check_account()?;
     let (state, _) = record_runtime::snapshot(env)?;
     if space_id(&state).is_none() {
-        crate::sync::record_account::create_library_space(env)?;
+        crate::sync::record_account::create_library_space(env).map_err(|_| LibraryFailure::new(
+            "library_setup", "The sync library could not be created. Check relay access or resume the pending sync setup, then retry. Existing records have been kept."))?;
     }
     {
         let _lifecycle = env.runtime.lifecycle.lock().unwrap();
@@ -217,55 +239,51 @@ pub fn enable(env: &SyncEnv, confirmed: bool) -> Result<(), AppError> {
             Ok(next)
         })?;
     }
-    // Establish authoritative space baselines before checking IDs and names.
-    let report = crate::sync::record_round::sync_once_required(env)?;
+    let report = crate::sync::record_round::sync_once_required(env).map_err(|_| LibraryFailure::new(
+        "library_download", "Library data could not be downloaded. Check the relay connection and retry. Existing records have been kept."))?;
     if report.review_required
         || report.gate != Some(crate::sync::record_merge::AccountGate::Compatible)
     {
-        return Err(AppError::Other(
-            "Review sync account data before including the library".into(),
-        ));
+        return Err(LibraryFailure::new("sync_data_unavailable", "Some sync data needs review or could not be read. Finish syncing or update SSHelter, then retry. Existing records have been kept."));
     }
-    {
-        let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-        crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;
-        let now = env.now();
-        record_runtime::mutate_records(env, |state| {
-            let id = space_id(state)
-                .ok_or_else(|| AppError::Other("The sync library is unavailable".into()))?;
-            let mut next = include_existing(state, &id, confirmed, now)
-                .map_err(|e| AppError::Other(e.to_string()))?;
+    Ok(())
+}
+
+pub fn enable(env: &SyncEnv, confirmed: bool) -> Result<(), AppError> {
+    enable_reviewed(env, confirmed, None).map_err(Into::into)
+}
+
+pub fn enable_reviewed(
+    env: &SyncEnv,
+    confirmed: bool,
+    review: Option<&LibraryReview>,
+) -> Result<(), LibraryFailure> {
+    prepare_library(env)?;
+    let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+    crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;
+    let now = env.now();
+    let mut failure = None;
+    record_runtime::mutate_records(env, |state| {
+        let build = || -> Result<SyncStateV3, LibraryFailure> {
+            let id = space_id(state).ok_or_else(|| LibraryFailure::new("sync_data_unavailable", "The sync library is unavailable. Retry after syncing."))?;
+            let mut next = review::include_reviewed(state, &id, confirmed, now, review)?;
             let key = record_key(RecordKind::Device, &state.device_id);
-            let previous = state
-                .account
-                .as_ref()
-                .and_then(|a| a.records.get(&key))
-                .ok_or_else(|| AppError::Other("Device metadata is unavailable".into()))?;
+            let previous = state.account.as_ref().and_then(|a| a.records.get(&key))
+                .ok_or_else(|| LibraryFailure::new("device_metadata", "This device's sync metadata is unavailable. Finish or resume sync setup, then retry."))?;
             if !enabled(state) {
                 let mut payload = previous.record.payload.clone();
                 payload[DEVICE_FLAG] = true.into();
-                let mut record = repo::ordered_record(
-                    state,
-                    &state.device_id,
-                    payload,
-                    false,
-                    now,
-                    &[&previous.record],
-                )
-                .map_err(|e| AppError::Other(e.to_string()))?;
+                let mut record = repo::ordered_record(state, &state.device_id, payload, false, now, &[&previous.record])?;
                 record.kind = RecordKind::Device;
-                next.account.as_mut().unwrap().records.insert(
-                    key,
-                    LocalRecord {
-                        record,
-                        seq: previous.seq,
-                        dirty: true,
-                    },
-                );
+                next.account.as_mut().unwrap().records.insert(key, LocalRecord { record, seq: previous.seq, dirty: true });
             }
             Ok(next)
-        })?;
-    }
+        };
+        build().map_err(|error| {
+            failure = Some(error.clone());
+            AppError::from(error)
+        })
+    }).map_err(|error| failure.unwrap_or_else(|| error.into()))?;
     env.events.status();
     env.events.wake();
     Ok(())

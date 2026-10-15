@@ -794,25 +794,108 @@
   padding: 0;
   overflow: hidden;
 }
-.library-editor-topline {
+.library-sync-review {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-shrink: 0;
-  padding: 0.55rem 0.8rem 0.55rem 1.5rem;
-  border-bottom: 1px solid var(--library-line, var(--border));
-  background: var(--muted);
+  max-height: min(90vh, 46rem);
+  flex-direction: column;
 }
-.library-editor-topline > span {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--muted-foreground);
-  font-size: 0.8rem;
-}
-.library-editor-scroll {
+.library-sync-review-body {
   min-height: 0;
   overflow-y: auto;
+  overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
+}
+.library-sync-review-body > * + * {
+  margin-top: 1rem;
+}
+.library-sync-review-body label {
+  overflow-wrap: anywhere;
+}
+.library-host-editor-container,
+.host-editor {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+.host-editor-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 1.35rem 1.5rem 1.15rem;
+}
+.host-editor-header h1 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+.host-editor-header p {
+  margin-top: 0.25rem;
+  line-height: 1.5;
+}
+.host-editor-symbol {
+  display: grid;
+  width: 2.65rem;
+  height: 2.65rem;
+  flex-shrink: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.host-editor-body {
+  min-height: 0;
+  padding: 0.2rem 1.5rem 1.25rem;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+.host-editor-body > * + * {
+  margin-top: 1.1rem;
+}
+.host-editor-fields {
+  display: grid;
+  min-width: 0;
+  gap: 1.1rem;
+}
+.host-editor-fields :is(input:not([type="checkbox"]), select) {
+  height: 2.5rem;
+  border-radius: 0.5rem;
+  background-color: color-mix(in srgb, var(--input) 12%, var(--popover));
+  font-size: 0.875rem;
+}
+.host-editor-footer {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--border);
+  background: var(--muted);
+}
+.host-editor-save-state {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+.host-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+.library-host-dialog :is(button, summary):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+@media (max-width: 540px) {
+  .host-editor-header { padding: 1.1rem 1rem; }
+  .host-editor-body { padding: 0 1rem 1rem; }
+  .host-editor-footer { padding: 0.85rem 1rem; }
 }
 /* Group dialogs keep the main task short and optional SSH settings secondary. */
 .library-group-editor-container,

@@ -139,3 +139,7 @@ clang -fobjc-arc docs/research/macos-webkit/preferences-probe.m \
 ```
 
 私有 API 不存在時會回傳非零狀態；跨版本結果以當地輸出為準。後續產品實驗請使用 `pnpm tauri:dev` 的隔離 Development profile，不要用 Production identifier、vault 或 Keychain 作可拋棄測試資料。
+
+## 2026-10-16：後續 Library／MCP 修補
+
+Beta 10 發布後回報的 Library sync、連線對話框與 MCP 建立連線／核對指紋另於 `codex/library-sync-host-dialog-fixes` 完成；[實作與驗證](2026-10-16-library-mcp-connection-validation.md) 記錄行為、安全規則及實機收據。此批尚未另發新版 Beta，不能當作已包含於 Beta 10。CoreAudio 啟動防護維持既有設計，仍未聲稱根除系統音訊死鎖。

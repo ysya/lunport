@@ -52,3 +52,7 @@ Groups 屬於統一 Library，啟用 Sync 後與 Hosts 同步。舊本機記錄�
 Repository 未設定內建 relay URL。已儲存的同步設定沿用；新裝置在 Sync 輸入先前指定的 `https://sshelter-relay.ysyavv.workers.dev`。本輪未重新部署 relay。不要擅自變更 repo variable、relay 或共享格式。
 
 本輪的瀏覽器證據採實際元件與假資料；CI／manifest 通過不代表上面這些實機項目已驗收。發布結果補齊後，不要重複 dispatch 相同版本或覆蓋 tag。
+
+## 2026-10-16：後續 Library／MCP 修補
+
+Beta 10 發布後回報的 Library sync、連線對話框與 MCP 建立連線／核對指紋另於 `codex/library-sync-host-dialog-fixes` 完成；[實作與驗證](2026-10-16-library-mcp-connection-validation.md) 記錄行為、安全規則及實機收據。此批尚未另發新版 Beta，不能當作已包含於 Beta 10。CoreAudio 啟動防護維持既有設計，仍未聲稱根除系統音訊死鎖。

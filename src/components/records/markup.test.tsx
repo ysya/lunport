@@ -75,12 +75,12 @@ describe("records host controls", () => {
     expect(text(html)).toContain("Resume sync setup");
     expect(html).not.toContain('role="alert"');
   });
-  it("starts new hosts in the library and disables connect until a persisted host exists", () => {
+  it("starts new hosts in the library and offers creation before connection", () => {
     const html = editor(null);
     expect(text(html)).toContain("New host");
     expect(text(html)).toContain("Library");
     expect(text(html)).not.toContain("Save in");
-    expect(buttonTag(html, "Connect")).toContain(DISABLED);
+    expect(() => buttonTag(html, "Connect")).toThrow("no Connect button");
     expect(buttonTag(html, "Create host")).toContain(DISABLED);
     expect(html).not.toContain("Pinned host key");
     expect(text(html)).toContain("Not saved yet");
@@ -96,6 +96,7 @@ describe("records host controls", () => {
     expect(text(html)).toContain("Needs key");
     expect(buttonTag(html, "Connect")).toContain(DISABLED);
     expect(text(html)).toContain("Missing key");
+    expect(buttonTag(html, "Verify server fingerprint")).not.toContain(DISABLED);
   });
   it("does not turn a removed or conflicting selected ID into a new-host form", () => {
     const html = editor(null, hostView().id);

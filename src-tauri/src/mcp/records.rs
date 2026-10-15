@@ -77,15 +77,25 @@ impl ApprovedTarget {
         self.check_resolved(&target, connector.keys)
     }
     /// Bind the exact snapshot returned by resolution, not another read of current state.
-    pub(crate) fn check_resolved(&self, target: &Target, keys: &dyn KeyStore) -> Result<(), String> {
+    pub(crate) fn check_resolved(
+        &self,
+        target: &Target,
+        keys: &dyn KeyStore,
+    ) -> Result<(), String> {
         self.check_identity(Self::capture(target, keys)?)
     }
     /// Connector may learn pins and, after a human password answer, retry Interactive as Password.
     /// Initial resolution is checked strictly before those connector-owned adaptations are allowed.
-    pub(crate) fn check_connected(&self, target: &Target, keys: &dyn KeyStore) -> Result<(), String> {
+    pub(crate) fn check_connected(
+        &self,
+        target: &Target,
+        keys: &dyn KeyStore,
+    ) -> Result<(), String> {
         let mut actual = Self::capture(target, keys)?;
         for (actual_hop, approved_hop) in actual.target.hops.iter_mut().zip(&self.target.hops) {
-            if approved_hop.auth == AuthMethod::Interactive && actual_hop.auth == AuthMethod::Password {
+            if approved_hop.auth == AuthMethod::Interactive
+                && actual_hop.auth == AuthMethod::Password
+            {
                 actual_hop.auth = AuthMethod::Interactive;
             }
         }
@@ -178,6 +188,14 @@ pub(crate) struct PublicDirectory<'a>(
     pub(crate) &'a (dyn Fn(&Target) -> Result<(), String> + Sync),
 );
 impl crate::session::directory::HostDirectory for PublicDirectory<'_> {
+    fn resolve_host_key(
+        &self,
+        q: &HostQuery,
+    ) -> Result<Target, crate::session::directory::DirectoryError> {
+        let target = self.0.resolve_host_key(q)?;
+        (self.2)(&target).map_err(crate::session::directory::DirectoryError::Failed)?;
+        Ok(target)
+    }
     fn resolve(&self, q: &HostQuery) -> Result<Target, crate::session::directory::DirectoryError> {
         let target = self.0.resolve_public(q)?;
         (self.2)(&target).map_err(crate::session::directory::DirectoryError::Failed)?;
@@ -387,6 +405,7 @@ pub(super) fn execute_context(
         id: context.id.clone(),
     };
     let request = McpPendingRequest {
+        host_proposal: None,
         id: context.id.clone(),
         alias: destination.alias.clone(),
         host_id: Some(host_id.clone()),
@@ -681,7 +700,12 @@ pub(super) fn validate_method(method: &str) -> Result<(), String> {
         Err("run was renamed to ssh_exec".into())
     } else if matches!(
         method,
-        "list_hosts" | "get_host" | "get_effective_config" | "ssh_exec"
+        "list_hosts"
+            | "get_host"
+            | "get_effective_config"
+            | "ssh_exec"
+            | "create_host"
+            | "verify_host_key"
     ) {
         Ok(())
     } else {
@@ -733,6 +757,41 @@ pub(crate) fn dispatch(
         .last_client_at_ms
         .store(unix_ms(), Ordering::Relaxed);
     match method {
+        "create_host" => crate::sync::engine::with_env(app, |env| {
+            super::management::create(env, &state.mcp, params, context, cancel, &|request| {
+                state
+                    .mcp
+                    .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                        crate::show_main_window(app);
+                        let _ = app.emit("mcp://approval-requested", request);
+                    })
+            })
+        })
+        .map_err(|e| e.to_string())?,
+        "verify_host_key" => {
+            if params
+                .as_object()
+                .is_none_or(|p| p.len() != 1 || !p.contains_key("alias"))
+            {
+                return Err("verify_host_key accepts only an AI-approved host ID or alias; it never accepts a trust answer from the client.".into());
+            }
+            let owner = crate::session::auth_window::NativeOwner {
+                hub: state.session.auth_questions.clone(),
+                surface: Arc::new(crate::session::auth_window::TauriAuthSurface {
+                    app: app.clone(),
+                }),
+                request_id: context.id.clone(),
+                cancel: cancel.clone(),
+            };
+            super::management::verify(
+                &state.mcp,
+                connector,
+                string_param(params, "alias")?,
+                context,
+                cancel,
+                &owner,
+            )
+        }
         "list_hosts" => {
             let hosts = repo::list_hosts(&records)
                 .map_err(|e| e.to_string())?
@@ -780,10 +839,12 @@ pub(crate) fn dispatch(
                 cancel,
                 &owner,
                 &|request| {
-                    state.mcp.wait_approval(request,cancel,APPROVAL_TIMEOUT,||{
-                        crate::show_main_window(app);
-                        let _=app.emit("mcp://approval-requested",request);
-                    })
+                    state
+                        .mcp
+                        .wait_approval(request, cancel, APPROVAL_TIMEOUT, || {
+                            crate::show_main_window(app);
+                            let _ = app.emit("mcp://approval-requested", request);
+                        })
                 },
                 context,
             )
@@ -791,7 +852,7 @@ pub(crate) fn dispatch(
         _ => Err(format!("Unknown MCP method: {method}")),
     }
 }
-fn metadata(
+pub(super) fn metadata(
     state: &crate::sync::records_v3::SyncStateV3,
     view: &crate::sync::record_repository::HostView,
 ) -> Result<Value, String> {

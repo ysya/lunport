@@ -108,7 +108,10 @@ fn setup_establishes_baselines_when_a_background_round_is_already_queued() {
     result.unwrap();
     let saved = state(&d);
     assert!(enabled(&saved));
-    assert!(saved.spaces.values().all(|space| space.baseline_established));
+    assert!(saved
+        .spaces
+        .values()
+        .all(|space| space.baseline_established));
     assert!(matches!(
         repo::get_host(&saved, HOST).unwrap().host.scope,
         HostScope::Space { .. }
@@ -334,4 +337,223 @@ fn ambiguous_destination_preserves_existing_records_without_partial_inclusion() 
         repo::get_host(&after, HOST).unwrap().host.payload,
         repo::get_host(&before, HOST).unwrap().host.payload
     );
+}
+
+fn name_conflict_fixture() -> TestDevice {
+    let relay = FakeRelay::new();
+    let d = device(&relay);
+    add(&d, true);
+    record_account::create_account(&d.env(), "library").unwrap();
+    enable(&d.env(), true).unwrap();
+    record_round::sync_once(&d.env()).unwrap();
+    record_runtime::mutate_records(&d.env(), |s| {
+        let next = record_groups::create_group(
+            s,
+            "0000000000000004",
+            HostScope::Local,
+            serde_json::from_value(
+                json!({"schema":1,"name":"Production","parent_id":null,"defaults":{"user":"ops"}}),
+            )
+            .unwrap(),
+            true,
+            100,
+        )
+        .unwrap();
+        let mut payload = host("web");
+        payload.schema = GROUPED_HOST_SCHEMA;
+        payload.group_id = Some("0000000000000004".into());
+        payload.inherit = vec![InheritedField::User];
+        repo::create_host(&next, "0000000000000003", HostScope::Local, payload, 101)
+            .map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    d
+}
+fn accept_names(preview: &review::LibraryPreview) -> review::LibraryReview {
+    review::LibraryReview {
+        token: preview.token.clone(),
+        renames: preview
+            .conflicts
+            .iter()
+            .map(|c| review::Rename {
+                kind: c.kind,
+                id: c.id.clone(),
+                name: c.suggested_name.clone(),
+            })
+            .collect(),
+    }
+}
+#[test]
+fn reviewed_names_include_both_hosts_and_groups_without_merging_identity_or_inheritance() {
+    let d = name_conflict_fixture();
+    let before = state(&d);
+    let remote = repo::get_host(&before, HOST).unwrap();
+    let local = repo::get_host(&before, "0000000000000003").unwrap();
+    assert!(enable(&d.env(), true).is_err());
+    let preview = prepare(&d.env()).unwrap();
+    assert_eq!(preview.conflicts.len(), 2);
+    assert_eq!(preview.conflicts[0].suggested_name, "Production (2)");
+    assert_eq!(preview.conflicts[1].suggested_name, "web-2");
+    // Preparing is not consent: local payloads and remote records stay unchanged.
+    assert_eq!(state(&d).local, before.local);
+    enable_reviewed(&d.env(), true, Some(&accept_names(&preview))).unwrap();
+    let after = state(&d);
+    let included = repo::get_host(&after, "0000000000000003").unwrap();
+    let mut expected = local.host.payload.clone();
+    expected.alias = "web-2".into();
+    assert_eq!(included.host.payload, expected);
+    assert_eq!(included.effective_payload.user, "ops");
+    assert_eq!(repo::get_host(&after, HOST).unwrap().host, remote.host);
+    assert_eq!(after.local.keys, before.local.keys);
+    let group = record_groups::list_groups(&after)
+        .unwrap()
+        .into_iter()
+        .find(|g| g.group.id == "0000000000000004")
+        .unwrap();
+    assert_eq!(group.group.payload.name, "Production (2)");
+    assert_eq!(group.group.payload.defaults.user.as_deref(), Some("ops"));
+    assert!(
+        after.local.hosts[&record_key(RecordKind::Host, "0000000000000003")]
+            .record
+            .deleted
+    );
+}
+#[test]
+fn stale_or_invalid_name_review_preserves_every_record() {
+    let d = name_conflict_fixture();
+    let preview = prepare(&d.env()).unwrap();
+    let mut review = accept_names(&preview);
+    review.renames[1].name = "web".into();
+    let before = state(&d).local;
+    assert_eq!(
+        enable_reviewed(&d.env(), true, Some(&review))
+            .unwrap_err()
+            .code,
+        "name_conflict"
+    );
+    assert_eq!(state(&d).local, before);
+    review = accept_names(&preview);
+    review.renames[1].id = HOST.into();
+    assert_eq!(
+        enable_reviewed(&d.env(), true, Some(&review))
+            .unwrap_err()
+            .code,
+        "invalid_rename"
+    );
+    assert_eq!(state(&d).local, before);
+    review = accept_names(&preview);
+    record_runtime::mutate_records(&d.env(), |s| {
+        let saved = repo::get_host(s, "0000000000000003").unwrap();
+        let mut payload = saved.host.payload.clone();
+        payload.notes = "Newer draft saved elsewhere".into();
+        repo::update_host(s, &saved.host.id, &saved.revision, payload, 200)
+            .map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    let latest = state(&d).local;
+    assert_eq!(
+        enable_reviewed(&d.env(), true, Some(&review))
+            .unwrap_err()
+            .code,
+        "stale_review"
+    );
+    assert_eq!(state(&d).local, latest);
+}
+#[test]
+fn preview_reserves_other_local_names_and_handles_maximum_length_group_names() {
+    let d = name_conflict_fixture();
+    record_runtime::mutate_records(&d.env(), |s| {
+        repo::create_host(s, "0000000000000005", HostScope::Local, host("web-2"), 110)
+            .map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    let mut s = state(&d);
+    let name = "長".repeat(128);
+    let id = space_id(&s).unwrap();
+    s.local
+        .groups
+        .get_mut(&record_key(RecordKind::Group, "0000000000000004"))
+        .unwrap()
+        .record
+        .payload["name"] = name.clone().into();
+    s.spaces
+        .get_mut(&id)
+        .unwrap()
+        .records
+        .get_mut(&record_key(RecordKind::Group, GROUP))
+        .unwrap()
+        .record
+        .payload["name"] = name.into();
+    let preview = review::preview(&s).unwrap();
+    assert!(preview
+        .conflicts
+        .iter()
+        .any(|c| c.suggested_name == "web-3"));
+    let group = &preview.conflicts[0];
+    assert_eq!(group.suggested_name.chars().count(), 128);
+    assert!(group.suggested_name.ends_with(" (2)"));
+}
+#[test]
+fn library_failures_distinguish_unavailable_sync_data_from_record_identity_conflicts() {
+    let d = name_conflict_fixture();
+    let mut s = state(&d);
+    let id = space_id(&s).unwrap();
+    s.spaces.get_mut(&id).unwrap().baseline_established = false;
+    assert_eq!(
+        review::preview(&s).unwrap_err().code,
+        "sync_data_unavailable"
+    );
+    s.spaces.get_mut(&id).unwrap().baseline_established = true;
+    let remote = s.spaces[&id].records[&record_key(RecordKind::Host, HOST)].clone();
+    s.local
+        .hosts
+        .insert(record_key(RecordKind::Host, HOST), remote);
+    assert_eq!(review::preview(&s).unwrap_err().code, "identity_conflict");
+    let failure = review::LibraryFailure::from(AppError::Other("secret relay body".into()));
+    assert!(!failure.message.contains("secret relay body"));
+    assert_eq!(
+        serde_json::to_value(failure).unwrap()["code"],
+        "unavailable"
+    );
+}
+
+#[test]
+fn joined_device_can_enable_library_after_reviewing_its_duplicate_local_names() {
+    let relay = FakeRelay::new();
+    let a = device(&relay);
+    add(&a, true);
+    let created = record_account::create_account(&a.env(), "first").unwrap();
+    enable(&a.env(), true).unwrap();
+    record_round::sync_once(&a.env()).unwrap();
+    let b = device(&relay);
+    record_runtime::mutate_records(&b.env(), |s| {
+        let next = record_groups::create_group(s, "0000000000000004", HostScope::Local,
+            serde_json::from_value(json!({"schema":1,"name":"Production","parent_id":null,"defaults":{"user":"personal"}})).unwrap(), true, 100).unwrap();
+        let mut payload = host("web");
+        payload.schema = GROUPED_HOST_SCHEMA;
+        payload.group_id = Some("0000000000000004".into());
+        payload.inherit = vec![InheritedField::User];
+        repo::create_host(&next, "0000000000000003", HostScope::Local, payload, 101).map_err(|e| AppError::Other(e.to_string()))
+    }).unwrap();
+    record_account::join_account(&b.env(), &created.code, "second").unwrap();
+    assert!(!enabled(&state(&b)));
+    assert!(enable(&b.env(), true).is_err());
+    let before = state(&b).local;
+    let preview = prepare(&b.env()).unwrap();
+    assert_eq!(preview.conflicts.len(), 2);
+    assert!(!enabled(&state(&b)));
+    assert_eq!(state(&b).local, before);
+    enable_reviewed(&b.env(), true, Some(&accept_names(&preview))).unwrap();
+    assert!(enabled(&state(&b)));
+    record_round::sync_once(&b.env()).unwrap();
+    record_round::sync_once(&a.env()).unwrap();
+    let hosts = repo::list_hosts(&state(&a)).unwrap();
+    assert_eq!(hosts.len(), 2);
+    assert_eq!(
+        repo::get_host(&state(&a), HOST).unwrap().host.payload.alias,
+        "web"
+    );
+    let included = repo::get_host(&state(&a), "0000000000000003").unwrap();
+    assert_eq!(included.host.payload.alias, "web-2");
+    assert_eq!(included.effective_payload.user, "personal");
 }
