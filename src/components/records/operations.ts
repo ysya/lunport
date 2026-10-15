@@ -1,5 +1,7 @@
 import { connectRecordHost, type RecordOverview } from "@/lib/records";
 import { selectHost } from "./editor";
+import { useSettingsStore } from "@/stores/settings";
+import { recentHostKey } from "./library-view";
 export async function connectSavedHost(
   overview: RecordOverview,
   hostId: string,
@@ -14,6 +16,11 @@ export async function connectSavedHost(
   if (host.readiness.kind !== "ready" || host.group_error)
     throw new Error("Resolve this host's key or settings before connecting.");
   await connectRecordHost(hostId, terminalId, newTab);
+  try {
+    useSettingsStore.getState().recordConnection(recentHostKey(hostId));
+  } catch {
+    // A local history write must not turn a successful terminal launch into an error.
+  }
 }
 export function scopeLabel(
   overview: RecordOverview,
