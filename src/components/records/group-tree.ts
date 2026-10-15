@@ -188,5 +188,5 @@ export function recordHostSearchText(
   overview: RecordOverview,
   host: RecordHostView,
 ): string {
-  return `${host.payload.alias} ${host.payload.hostname} ${host.payload.tags.join(" ")} ${groupPath(overview, host.payload.group_id, host.scope)} ${host.id}`;
+  return `${host.payload.alias} ${host.payload.hostname} ${host.effective_payload.hostname} ${host.effective_payload.user} ${host.effective_payload.port} ${host.payload.tags.join(" ")} ${groupPath(overview, host.payload.group_id, host.scope)} ${host.id}`;
 }
