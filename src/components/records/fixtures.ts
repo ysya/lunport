@@ -42,6 +42,9 @@ export const hostView = (p: Partial<RecordHostView> = {}): RecordHostView => ({
 export const recordOverview = (
   p: Partial<RecordOverview> = {},
 ): RecordOverview => ({
+  library_enabled: false,
+  library_scope: { kind: "local" },
+  pending_changes: 0,
   generation: "9007199254740993",
   group_deletion_token: "fixture-reviewed-snapshot",
   hosts: [hostView()],

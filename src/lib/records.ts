@@ -110,6 +110,9 @@ export type RecordKeyView = {
   status: "available" | "needs_material" | "conflict" | "deleted";
 };
 export type RecordOverview = {
+  library_enabled: boolean;
+  library_scope: HostScope | null;
+  pending_changes: number;
   generation: string;
   group_deletion_token: string;
   groups: RecordGroupView[];
@@ -289,14 +292,35 @@ export async function generateRecordKey(name: string): Promise<RecordOverview> {
 }
 export async function createRecordAccount(
   deviceName: string,
+  upgradeConfirmed?: boolean,
 ): Promise<AccountSetupResult> {
-  return tauriInvoke("records_account_create", { deviceName });
+  return tauriInvoke("records_account_create", {
+    deviceName,
+    ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
+  });
 }
 export async function joinRecordAccount(
   words: string,
   deviceName: string,
+  upgradeConfirmed?: boolean,
 ): Promise<RecordOverview> {
-  return tauriInvoke("records_account_join", { words, deviceName });
+  return tauriInvoke("records_account_join", {
+    words,
+    deviceName,
+    ...(upgradeConfirmed === undefined ? {} : { upgradeConfirmed }),
+  });
+}
+export function enableLibrarySync(
+  upgradeConfirmed: boolean,
+): Promise<RecordOverview> {
+  return tauriInvoke("records_library_enable", { upgradeConfirmed });
+}
+export function setRecordHostGroup(
+  id: string,
+  revision: RecordRevision,
+  groupId: string | null,
+): Promise<RecordOverview> {
+  return tauriInvoke("records_host_group", { id, revision, groupId });
 }
 export async function createRecordSpace(name: string): Promise<RecordOverview> {
   return tauriInvoke("records_space_create", { name });
@@ -513,12 +537,27 @@ export type RecordDeployPreview = {
   public_key: string;
 };
 export type RecordDeployResult = {
-  outcome: "added" | "already_present" | "stale_preview" | "denied" | "canceled" | "timed_out" | "auth_abandoned" | "host_key_refused" | "unsupported_shell" | "remote_failed" | "connection_failed" | "unknown";
+  outcome:
+    | "added"
+    | "already_present"
+    | "stale_preview"
+    | "denied"
+    | "canceled"
+    | "timed_out"
+    | "auth_abandoned"
+    | "host_key_refused"
+    | "unsupported_shell"
+    | "remote_failed"
+    | "connection_failed"
+    | "unknown";
   audit_error: string | null;
 };
 export const previewRecordDeploy = (hostId: string, keyId: string) =>
   tauriInvoke<RecordDeployPreview>("records_deploy_preview", { hostId, keyId });
 export const confirmRecordDeploy = (previewId: string, authorized: boolean) =>
-  tauriInvoke<RecordDeployResult>("records_deploy_confirm", { previewId, authorized });
+  tauriInvoke<RecordDeployResult>("records_deploy_confirm", {
+    previewId,
+    authorized,
+  });
 export const cancelRecordDeploy = (previewId: string) =>
   tauriInvoke<void>("records_deploy_cancel", { previewId });

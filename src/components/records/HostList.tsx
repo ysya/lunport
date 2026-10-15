@@ -16,11 +16,8 @@ import type { HostScope, RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { cn } from "@/lib/utils";
 import { CollectionActions } from "./CollectionActions";
-import { selectClass } from "./form";
-import { scopeLabel } from "./operations";
 import {
   buildRecordTree,
-  scopeKey,
   selectGroup as uniqueGroup,
   type GroupNode,
 } from "./group-tree";
@@ -36,7 +33,6 @@ export function RecordHostList({
   selectedGroupId = null,
   select,
   selectGroup,
-  selectScope,
   create,
   createGroup,
   disabled = false,
@@ -62,16 +58,9 @@ export function RecordHostList({
   const showTags = useSettingsStore((state) => state.showHostTags);
   const [search, setSearch] = useState(""),
     [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [scope, setScope] = useState("all");
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
-  const scopes = buildRecordTree(overview);
-  const validScope = scopes.some((root) => scopeKey(root.scope) === scope)
-    ? scope
-    : "all";
-  const roots = buildRecordTree(overview, search).filter(
-    (root) => validScope === "all" || scopeKey(root.scope) === validScope,
-  );
+  const roots = buildRecordTree(overview, search);
   const counts = new Map<string, number>();
   for (const host of overview.hosts)
     counts.set(host.id, (counts.get(host.id) ?? 0) + 1);
@@ -136,8 +125,7 @@ export function RecordHostList({
           className="record-host-target block truncate font-mono text-xs text-muted-foreground"
           title={`${revealHidden(host.effective_payload.user)}@${revealHidden(host.effective_payload.hostname)}:${host.effective_payload.port}`}
         >
-          {revealHidden(host.effective_payload.hostname)} ·{" "}
-          {revealHidden(scopeLabel(overview, host.scope))}
+          {revealHidden(host.effective_payload.hostname)}
         </span>
         <span className="record-host-status text-xs text-muted-foreground">
           {ambiguous
@@ -211,7 +199,8 @@ export function RecordHostList({
         <div>
           <h2 className="text-lg font-semibold tracking-tight">Hosts</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Browse connections and organize them by space, Group or tag.
+            One library for your hosts. Organize connections with Groups and
+            tags.
           </p>
         </div>
         <div className="flex flex-wrap gap-1">
@@ -248,19 +237,6 @@ export function RecordHostList({
           />
         </div>
         <div className="flex items-center gap-2">
-          <select
-            aria-label="Filter by space"
-            className={cn(selectClass, "h-8 min-w-0 flex-1 text-xs")}
-            value={validScope}
-            onChange={(event) => setScope(event.target.value)}
-          >
-            <option value="all">All spaces</option>
-            {scopes.map((root) => (
-              <option key={scopeKey(root.scope)} value={scopeKey(root.scope)}>
-                {revealHidden(root.label)}
-              </option>
-            ))}
-          </select>
           {accept && (
             <Button
               size="sm"
@@ -308,51 +284,49 @@ export function RecordHostList({
               No matching hosts or Groups
             </p>
           )}
-        {roots.map((root, index) => (
-          <section key={index}>
+        {roots
+          .flatMap((root) => root.groups)
+          .sort((a, b) =>
+            a.group.payload.name.localeCompare(b.group.payload.name),
+          )
+          .map(groupRow)}
+        {roots
+          .flatMap((root) => root.diagnostics)
+          .map(({ group, error }, at) => (
             <button
+              key={`${group.id}:${at}`}
               type="button"
-              className="w-full rounded px-2 py-2 text-left text-xs font-semibold text-muted-foreground hover:bg-accent"
-              disabled={disabled || !selectScope}
-              onClick={() => selectScope?.(root.scope)}
+              className="w-full rounded-md px-3 py-2 text-left hover:bg-accent"
+              disabled={
+                disabled ||
+                !selectGroup ||
+                !uniqueGroup(overview.groups, group.id)
+              }
+              aria-pressed={
+                !!uniqueGroup(overview.groups, group.id) &&
+                selectedGroupId === group.id
+              }
+              onClick={() => selectGroup?.(group.id)}
             >
-              {revealHidden(root.label)}
+              <span className="block truncate text-sm">
+                {revealHidden(group.payload.name)}
+              </span>
+              <span className="block break-words text-xs text-destructive">
+                {revealHidden(error)}
+              </span>
             </button>
-            {root.groups.map(groupRow)}
-            {root.diagnostics.map(({ group, error }, at) => (
-              <button
-                key={`${group.id}:${at}`}
-                type="button"
-                className="w-full rounded-md px-3 py-2 text-left hover:bg-accent"
-                disabled={
-                  disabled ||
-                  !selectGroup ||
-                  !uniqueGroup(overview.groups, group.id)
-                }
-                aria-pressed={
-                  !!uniqueGroup(overview.groups, group.id) &&
-                  selectedGroupId === group.id
-                }
-                onClick={() => selectGroup?.(group.id)}
-              >
-                <span className="block truncate text-sm">
-                  {revealHidden(group.payload.name)}
-                </span>
-                <span className="block break-words text-xs text-destructive">
-                  {revealHidden(error)}
-                </span>
-              </button>
-            ))}
-            {root.ungrouped.length > 0 && (
-              <div>
-                <h3 className="px-3 py-1 text-xs font-medium text-muted-foreground">
-                  Ungrouped
-                </h3>
-                {root.ungrouped.map(hostRow)}
-              </div>
-            )}
+          ))}
+        {roots.some((root) => root.ungrouped.length > 0) && (
+          <section>
+            <h3 className="px-3 py-1 text-xs font-medium text-muted-foreground">
+              Ungrouped
+            </h3>
+            {roots
+              .flatMap((root) => root.ungrouped)
+              .sort((a, b) => a.payload.alias.localeCompare(b.payload.alias))
+              .map(hostRow)}
           </section>
-        ))}
+        )}
       </div>
       {accept && selecting && (
         <CollectionActions

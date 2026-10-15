@@ -3,12 +3,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
 import {
   applyRecordOverview,
-  createRecordSpace,
-  selectRecordSpace,
+  enableLibrarySync,
   recordAccountWords,
   resumeRecordAccount,
   setRecordRelayUrl,
@@ -30,7 +27,16 @@ export function RecordsAccountPanel({
   const [recoveryVersion, setRecoveryVersion] = useState(0);
   const [mode, setMode] = useState<"create" | "join" | null>(null);
   const [draft, setDraft] = useState(clearAccountDraft);
-  const [name, setName] = useState("");
+  const [upgradeConfirmed, setUpgradeConfirmed] = useState(false);
+  const pendingRecords = [...overview.hosts, ...overview.groups].filter(
+    (row) => row.scope.kind === "local",
+  ).length;
+  const needsUpgrade =
+    (!overview.account || overview.shared_format_upgrade_required) &&
+    (overview.groups.some((g) => g.scope.kind === "local") ||
+      overview.hosts.some(
+        (h) => h.scope.kind === "local" && h.payload.schema === 3,
+      ));
   const [relay, setRelay] = useState(overview.relay_url);
   const [relayDirty, setRelayDirty] = useState(false);
   const [settingsBusy, setBusy] = useState(false);
@@ -51,13 +57,24 @@ export function RecordsAccountPanel({
     if (inFlight.current || lifecycleBusy) return;
     inFlight.current = true;
     try {
-      if (await submitAccountDraft(client, draft, update, mode === "create"))
+      if (
+        await submitAccountDraft(
+          client,
+          draft,
+          update,
+          mode === "create",
+          needsUpgrade ? upgradeConfirmed : undefined,
+        )
+      )
         setMode(null);
     } finally {
       inFlight.current = false;
     }
   };
-  const run = async (operation: () => Promise<void>) => {
+  const run = async (
+    operation: () => Promise<void>,
+    failureMessage?: string,
+  ) => {
     if (inFlight.current || lifecycleBusy) return;
     inFlight.current = true;
     setBusy(true);
@@ -66,7 +83,8 @@ export function RecordsAccountPanel({
       await operation();
     } catch {
       setError(
-        "Could not update sync settings. Refresh and retry the pending setup if one is listed.",
+        failureMessage ??
+          "Could not update sync settings. Refresh and retry the pending setup if one is listed.",
       );
     } finally {
       inFlight.current = false;
@@ -114,8 +132,8 @@ export function RecordsAccountPanel({
         <h1 className="text-lg font-semibold">Sync</h1>
         <p className="text-sm text-muted-foreground">
           Sync across your devices with a private code. No login is required.
-          The relay stores encrypted data; you choose which hosts and keys to
-          share.
+          Your entire host library and Groups sync automatically. Keys have
+          their own sharing controls.
         </p>
       </header>
       {draft.createdWords && (
@@ -240,8 +258,9 @@ export function RecordsAccountPanel({
       ) : !mode ? (
         <section className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            Hosts and keys stay on this device until you create or join a sync
-            chain and choose what to sync.
+            Your library works offline. Creating or joining sync includes all
+            existing hosts and Groups on this device. Changes made offline are
+            saved and sync when the connection returns.
           </p>
           <div className="flex gap-2">
             <Button
@@ -314,9 +333,23 @@ export function RecordsAccountPanel({
                 </Button>
               </div>
             )}
+            {needsUpgrade && (
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={upgradeConfirmed}
+                  onChange={(event) =>
+                    setUpgradeConfirmed(event.target.checked)
+                  }
+                />
+                I have updated or stopped older clients. Include Groups and
+                inherited settings using the current sync format.
+              </label>
+            )}
             <div className="flex gap-2">
               <Button
                 disabled={
+                  (needsUpgrade && !upgradeConfirmed) ||
                   !draft.deviceName.trim() ||
                   (mode === "join" && !draft.words.trim())
                 }
@@ -337,8 +370,7 @@ export function RecordsAccountPanel({
       )}
       {overview.shared_writes_blocked && (
         <p role="status" className="text-sm text-destructive">
-          Shared changes are paused while account data is reviewed. Local hosts
-          remain editable.
+          Sync changes are paused while account data is reviewed.
         </p>
       )}
       {error && (
@@ -347,69 +379,51 @@ export function RecordsAccountPanel({
         </p>
       )}
       {overview.account && (
-        <section className="space-y-4 border-t pt-4">
-          <h2 className="font-medium">Spaces</h2>
+        <section className="space-y-3 border-t pt-4">
+          <h2 className="font-medium">Library sync</h2>
           <p className="text-sm text-muted-foreground">
-            Select a space to show its hosts. Move hosts into a selected space
-            to sync them.
+            {overview.library_enabled && !pendingRecords
+              ? "All hosts and Groups are included. Offline changes sync automatically when connected."
+              : `Include your entire library in sync. ${pendingRecords} existing hosts and Groups on this device will be included together.`}
           </p>
-          {overview.spaces.map((space) => (
-            <Label key={space.id} className="flex items-center gap-2">
-              <Checkbox
-                checked={space.selected}
+          {(!overview.library_enabled || pendingRecords > 0) && (
+            <>
+              {needsUpgrade && (
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={upgradeConfirmed}
+                    onChange={(event) =>
+                      setUpgradeConfirmed(event.target.checked)
+                    }
+                  />
+                  I have updated or stopped older clients. Include Groups and
+                  inherited settings using the current sync format.
+                </label>
+              )}
+              <Button
                 disabled={
                   busy ||
                   draft.busy ||
-                  space.missing ||
+                  !!pending ||
                   overview.shared_writes_blocked ||
-                  !!pending
+                  (needsUpgrade && !upgradeConfirmed)
                 }
-                onCheckedChange={(checked) =>
+                onClick={() =>
                   run(async () => {
                     applyRecordOverview(
                       client,
-                      await selectRecordSpace(space.id, checked === true),
+                      await enableLibrarySync(upgradeConfirmed),
                     );
-                  })
+                  }, "The library could not be included. Review duplicate host or Group names and unavailable sync data, then retry. Existing records have been kept.")
                 }
-              />
-              {revealHidden(space.name)}
-              {space.missing && (
-                <span className="text-muted-foreground">Missing space</span>
-              )}
-            </Label>
-          ))}
-          <div className="flex items-center gap-2">
-            <Input
-              aria-label="New space name"
-              placeholder="New space name"
-              value={name}
-              disabled={
-                busy ||
-                draft.busy ||
-                overview.shared_writes_blocked ||
-                !!pending
-              }
-              onChange={(event) => setName(event.target.value)}
-            />
-            <Button
-              disabled={
-                busy ||
-                draft.busy ||
-                overview.shared_writes_blocked ||
-                !!pending ||
-                !name.trim()
-              }
-              onClick={() =>
-                run(async () => {
-                  applyRecordOverview(client, await createRecordSpace(name));
-                  setName("");
-                })
-              }
-            >
-              Create space
-            </Button>
-          </div>
+              >
+                {overview.library_enabled
+                  ? "Include remaining records"
+                  : "Enable library sync"}
+              </Button>
+            </>
+          )}
         </section>
       )}
       <RecordsAccountLifecyclePanel

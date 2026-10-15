@@ -72,9 +72,7 @@ export function RecordsWorkspace({
   const [selection, setSelection] = useState<HostSelection>({ kind: "none" });
   const [pendingSelection, setPendingSelection] =
     useState<HostSelection | null>(null);
-  const [creationScope, setCreationScope] = useState<HostScope>({
-    kind: "local",
-  });
+  const creationScope: HostScope = overview.library_scope ?? { kind: "local" };
   const [dirty, setDirty] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -254,11 +252,13 @@ export function RecordsWorkspace({
             variant="outline"
             size="sm"
             disabled={syncing}
-            onClick={overview.account ? sync : () => setPanel("account")}
+            onClick={
+              overview.library_enabled ? sync : () => setPanel("account")
+            }
           >
             {syncing
               ? "Starting sync…"
-              : overview.account
+              : overview.library_enabled
                 ? "Sync now"
                 : "Set up sync"}
           </Button>
@@ -363,6 +363,29 @@ export function RecordsWorkspace({
           changes.
         </p>
       )}
+      {overview.account &&
+        (!overview.library_enabled ||
+          [...overview.hosts, ...overview.groups].some(
+            (row) => row.scope.kind === "local",
+          )) && (
+          <div
+            role="status"
+            className="flex shrink-0 items-center justify-between gap-3 border-b bg-muted/40 px-4 py-2 text-sm"
+          >
+            <span>
+              {overview.library_enabled
+                ? "Some records need review before they can sync."
+                : "Finish library sync setup to include all existing hosts and Groups."}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setPanel("account")}
+            >
+              Review sync setup
+            </Button>
+          </div>
+        )}
       <div className="flex min-h-0 flex-1">
         <section
           hidden={panel !== "hosts"}
@@ -385,10 +408,6 @@ export function RecordsWorkspace({
               selectedId={selectedId}
               selectedGroupId={selectedGroupId}
               selectGroup={(id) => requestSelection({ kind: "group", id })}
-              selectScope={(scope) => {
-                requestSelection({ kind: "none" });
-                setCreationScope(scope);
-              }}
               select={(id) => requestSelection({ kind: "host", id })}
               disabled={editorBusy}
               organizeDisabled={dirty || editorBusy}
@@ -516,8 +535,9 @@ export function RecordsWorkspace({
         </label>
         <div className="ml-auto max-w-md text-right">
           <RecordSyncStatus
-            connected={!!overview.account}
+            connected={!!overview.account && overview.library_enabled}
             pending={!!overview.pending_account}
+            pendingChanges={overview.pending_changes}
             lastSyncMs={overview.last_sync_ms}
             error={error ?? overview.last_error}
           />
