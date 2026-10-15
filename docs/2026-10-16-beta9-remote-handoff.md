@@ -4,6 +4,8 @@
 
 本輪完成主機右鍵操作、同步進度提示、選單寬度、可調整 Connection details、灰階配色及整體捲軸整理。以這份文件與 [Beta 9 檢視清單](releases/1.0.0-9-validation.md) 為準；Beta 3 文件保留作歷史紀錄。
 
+2026-10-16 後續：Mac 更新後曾因 CoreAudio 卡住造成 WebKit 全黑；重啟系統音訊服務及應用程式後已恢復，預防措施尚未實作。繼續工作請先看 [macOS 黑畫面調查與接手](2026-10-16-macos-black-screen-handoff.md)，其中包含實測、上游來源及下一步；不要把這次恢復當成永久修正或完成正式版驗收。
+
 ## 來源
 
 - Repository：`ysya/sshelter`

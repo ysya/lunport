@@ -1,0 +1,21 @@
+
+Default in-memory configuration
+UseGPUProcessForCanvasRenderingEnabled=true
+UseGPUProcessForDOMRenderingEnabled=true
+UseGPUProcessForMediaEnabled=true
+UseGPUProcessForWebGLEnabled=true
+MediaPlaybackEnabled=true
+
+Public API requiring user action for all media playback
+UseGPUProcessForCanvasRenderingEnabled=true
+UseGPUProcessForDOMRenderingEnabled=true
+UseGPUProcessForMediaEnabled=true
+UseGPUProcessForWebGLEnabled=true
+MediaPlaybackEnabled=true
+
+Private API disabling media playback related features in memory only
+UseGPUProcessForCanvasRenderingEnabled=true
+UseGPUProcessForDOMRenderingEnabled=true
+UseGPUProcessForMediaEnabled=false
+UseGPUProcessForWebGLEnabled=true
+MediaPlaybackEnabled=false
