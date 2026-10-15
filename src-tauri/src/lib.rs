@@ -14,8 +14,11 @@ pub mod host_start;
 mod ipc;
 mod keys;
 mod known_hosts;
+#[cfg(target_os = "macos")]
+pub mod macos_health;
 pub mod mcp;
 mod process;
+mod quick_connect;
 mod secrets;
 mod session;
 mod settings_io;
@@ -113,6 +116,22 @@ pub fn starts_hidden(value: Option<&std::ffi::OsStr>) -> bool {
 
 /// Show, unminimize and focus the main window.
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        macos_health::request(app, macos_health::Surface::Main);
+    }
+    #[cfg(not(target_os = "macos"))]
+    show_main_window_now(app);
+}
+
+pub(crate) fn show_main_window_now(app: &tauri::AppHandle) {
+    if app.get_webview_window("main").is_none() {
+        let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else { return; };
+        if let Err(error) = tauri::WebviewWindowBuilder::from_config(app, config).and_then(|w| w.build()) {
+            eprintln!("[window] cannot create main window: {error}");
+            return;
+        }
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -139,6 +158,11 @@ fn second_launch_shows_window(args: &[String]) -> bool {
 /// its arguments to this instance.
 #[cfg(desktop)]
 fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
+    #[cfg(target_os = "macos")]
+    if args.get(1).is_some_and(|mode| mode == "--window-diagnostics") {
+        macos_health::request(app, macos_health::Surface::Diagnostics);
+        return;
+    }
     if second_launch_shows_window(&args) {
         show_main_window_by_user(app);
     } else {
@@ -149,11 +173,30 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
 
 fn run_app(host: bool, start_hidden: bool) {
     let context = tauri::generate_context!();
+    // macOS must not create even a hidden WKWebView before the CoreAudio check.
+    // Other platforms retain Tauri's existing automatic window creation.
+    #[cfg(target_os = "macos")]
+    let context = {
+        let mut context = context;
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+        }
+        context
+    };
     app_profile::CURRENT.verify_configuration(
         &context.config().identifier,
         context.config().product_name.as_deref(),
     ).expect("SSHelter profile configuration mismatch");
     let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .manage(macos_health::HealthState::default())
+        .on_web_content_process_terminate(macos_health::web_content_terminated)
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "window-diagnostics" {
+                macos_health::request(app, macos_health::Surface::Diagnostics);
+            }
+        });
     // Only one SSHelter runs at a time: a second launch hands over to the running instance and
     // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
     // sync engine or the SSH agent starts. It must be the first plugin registered.
@@ -182,15 +225,8 @@ fn run_app(host: bool, start_hidden: bool) {
     }
     builder
         .manage(state::AppState::default())
+        .manage(quick_connect::QuickConnect::default())
         .setup(move |app| {
-            // The main window is created hidden (`"visible": false` in tauri.conf.json), so a
-            // hidden start never flashes it. Any other start shows it before anything else
-            // starts, as when it was created visible.
-            if !start_hidden {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.show()?;
-                }
-            }
             app.state::<state::AppState>().background_credentials_only.store(host && start_hidden,std::sync::atomic::Ordering::SeqCst);
             sync::engine::initialize(app.handle())?;
             mcp::initialize(app.handle(), host)?;
@@ -199,6 +235,17 @@ fn run_app(host: bool, start_hidden: bool) {
             // The session broker that `sshelter connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
             session::app::start(app.handle());
             tray::rebuild_tray(app.handle(), &[])?;
+            quick_connect::initialize(app.handle());
+            #[cfg(target_os = "macos")]
+            macos_health::install_diagnostics_menu(app.handle())?;
+            if !start_hidden {
+                #[cfg(target_os = "macos")]
+                if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--window-diagnostics")) {
+                    macos_health::request(app.handle(), macos_health::Surface::Diagnostics);
+                    return Ok(());
+                }
+                show_main_window(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -242,6 +289,8 @@ fn run_app(host: bool, start_hidden: bool) {
         .invoke_handler(tauri::generate_handler![
             app_platform,
             app_is_development,
+            quick_connect::app_set_global_hotkey,
+            quick_connect::app_take_quick_connect,
             app_home_dir,
             app_set_close_to_tray,
             updater_check_beta,

@@ -1,6 +1,11 @@
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "macos" {
+        println!("cargo:rerun-if-changed=src/native_alert.m");
+        cc::Build::new().file("src/native_alert.m").flag("-fobjc-arc").compile("sshelter_native_alert");
+        println!("cargo:rustc-link-lib=framework=AppKit");
+    }
     if target_os != "windows" || target_env != "msvc" {
         tauri_build::build();
         return;

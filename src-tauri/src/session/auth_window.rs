@@ -234,29 +234,53 @@ pub struct TauriAuthSurface {
 }
 impl AuthSurface for TauriAuthSurface {
     fn changed(&self, requests: &[AuthRequest]) {
-        use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-        if requests.is_empty() {
-            if let Some(w) = self.app.get_webview_window(AUTH_WINDOW) {
-                let _ = w.destroy();
+        #[cfg(target_os = "macos")]
+        {
+            use tauri::Manager;
+            if requests.is_empty() {
+                if let Some(window) = self.app.get_webview_window(AUTH_WINDOW) {
+                    let _ = window.destroy();
+                }
+            } else {
+                crate::macos_health::request(&self.app, crate::macos_health::Surface::Authentication);
             }
-            return;
         }
-        if self.app.get_webview_window(AUTH_WINDOW).is_none() {
-            let _ = WebviewWindowBuilder::new(
-                &self.app,
-                AUTH_WINDOW,
-                WebviewUrl::App("index.html".into()),
-            )
-            .title("SSHelter — Authentication")
-            .inner_size(480.0, 360.0)
-            .resizable(true)
-            .always_on_top(true)
-            .center()
-            .build();
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = requests;
+            present(&self.app);
         }
-        let _ = self.app.emit_to(AUTH_WINDOW, AUTH_EVENT, requests);
     }
 }
+
+/// Read the current hub after the health check; never replay an expired snapshot.
+pub(crate) fn present(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let requests = app.state::<crate::state::AppState>().session.auth_questions.pending();
+
+    use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
+    if requests.is_empty() {
+        if let Some(w) = app.get_webview_window(AUTH_WINDOW) {
+            let _ = w.destroy();
+        }
+        return;
+    }
+    if app.get_webview_window(AUTH_WINDOW).is_none() {
+        let _ = WebviewWindowBuilder::new(
+            app,
+            AUTH_WINDOW,
+            WebviewUrl::App("index.html".into()),
+        )
+        .title("SSHelter — Authentication")
+        .inner_size(480.0, 360.0)
+        .resizable(true)
+        .always_on_top(true)
+        .center()
+        .build();
+    }
+    let _ = app.emit_to(AUTH_WINDOW, AUTH_EVENT, &requests);
+}
+
 #[tauri::command]
 pub fn auth_pending(state: tauri::State<crate::state::AppState>) -> Vec<AuthRequest> {
     state.session.auth_questions.pending()

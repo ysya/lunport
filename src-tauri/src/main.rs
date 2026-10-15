@@ -2,12 +2,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // SSH_ASKPASS helper 模式：ssh 會用這支執行檔再次啟動我們來要密碼。
-    // 必須在任何 Tauri 初始化「之前」攔截，helper 模式完全不開 GUI。
+    // ASKPASS always takes precedence: an SSH challenge that happens to match an
+    // internal option must still go through the helper's refusal rules.
     if std::env::var_os("SSHELTER_ASKPASS").is_some() {
         sshelter_lib::askpass::run();
     }
 
+    // Internal, disposable CoreAudio child: no Tauri, keychain, broker or GUI initialization.
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--coreaudio-probe")) {
+        std::process::exit(sshelter_lib::macos_health::probe_child());
+    }
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--check-window-health")) {
+        std::process::exit(sshelter_lib::macos_health::check_from_terminal());
+    }
     // 用戶端（MCP adapter、`sshelter connect`）在背景啟動 SSHelter 時設 SSHELTER_START_HIDDEN=1，主視窗先不顯示。
     // 讀完就從環境移除，趁行程還只有這一個執行緒（Tauri 還沒啟動，edition 2021 的 remove_var 不需要 unsafe）：
     // 重新啟動（例如更新的「Install & restart」）沿用同樣的參數與這個環境，要帶著視窗回來。
