@@ -188,6 +188,14 @@ impl Default for McpRuntime {
     }
 }
 
+const AUDIT_READ_LIMIT: u64 = 32 * 1024 * 1024;
+
+fn read_audit_bytes(reader: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(AUDIT_READ_LIMIT + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 impl McpRuntime {
     fn status(&self) -> McpStatus {
         let policy = self.policy.lock().unwrap().clone();
@@ -249,8 +257,8 @@ impl McpRuntime {
     }
     fn load_audit(&self,path:PathBuf) {
         let mut audit=self.audit.lock().unwrap();audit.path=Some(path.clone());
-        match std::fs::read(&path) {
-            Ok(bytes) if bytes.len()<=32*1024*1024=>{
+        match std::fs::File::open(&path).and_then(read_audit_bytes) {
+            Ok(bytes) if bytes.len() as u64 <= AUDIT_READ_LIMIT=>{
                 let mut entries=VecDeque::new();let lines=bytes.split(|b|*b==b'\n').collect::<Vec<_>>();
                 for (i,line) in lines.iter().enumerate(){if line.is_empty(){continue;}match serde_json::from_slice::<McpAuditEntry>(line){Ok(mut entry)=>{entry.detail=None;entries.push_front(entry);entries.truncate(1000);},Err(_)=>{audit.error=Some(if i==lines.len()-1 && !bytes.ends_with(b"\n"){"Partial trailing session-log entry was ignored."}else{"Session log contains a corrupt entry; valid entries were retained."}.into());}}}
                 *self.recent.lock().unwrap()=entries;

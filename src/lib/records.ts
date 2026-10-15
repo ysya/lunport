@@ -111,6 +111,7 @@ export type RecordKeyView = {
 };
 export type RecordOverview = {
   generation: string;
+  group_deletion_token: string;
   groups: RecordGroupView[];
   format_upgrade_required: boolean;
   shared_format_upgrade_required: boolean;
@@ -493,8 +494,9 @@ export async function updateRecordGroup(
 export async function deleteRecordGroup(
   id: string,
   revision: RecordRevision,
+  snapshotToken: string,
 ): Promise<RecordOverview> {
-  return tauriInvoke("records_group_delete", { id, revision });
+  return tauriInvoke("records_group_delete", { id, revision, snapshotToken });
 }
 
 export type RecordDeployPreview = {

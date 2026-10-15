@@ -296,6 +296,15 @@ describe("Group draft and command contract", () => {
 });
 
 describe("Group editor presentation", () => {
+  it("explains how to recover when no deletion snapshot is available", async () => {
+    const { RecordGroupEditor } = await import("./GroupEditor");
+    const html = renderToStaticMarkup(
+      <RecordGroupEditor group={parent()} groupId={parent().id}
+        overview={recordOverview({ groups: [parent()], group_deletion_token: "" })}
+        accept={(v) => v} onSaved={vi.fn()} onDeleted={vi.fn()} onDirty={vi.fn()} />,
+    );
+    expect(html).toContain("Refresh the records to prepare a new deletion review.");
+  });
   it("states immutable scope, descendant effects and host-preserving deletion", async () => {
     const { RecordGroupEditor } = await import("./GroupEditor");
     const html = renderToStaticMarkup(
@@ -330,7 +339,7 @@ describe("Group creation, format and safety boundaries", () => {
     });
     const calls = stubBackend(async () => overview);
     await submitGroupEditor(state, overview, true);
-    await deleteRecordGroup(parent().id, parent().revision);
+    await deleteRecordGroup(parent().id, parent().revision, overview.group_deletion_token);
     expect(calls).toEqual([
       [
         "records_group_create",
@@ -342,7 +351,7 @@ describe("Group creation, format and safety boundaries", () => {
       ],
       [
         "records_group_delete",
-        { id: parent().id, revision: parent().revision },
+        { id: parent().id, revision: parent().revision, snapshotToken: overview.group_deletion_token },
       ],
     ]);
     expect(state.payload.name).toBe(" Team ");

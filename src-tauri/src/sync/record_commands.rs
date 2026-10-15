@@ -99,6 +99,7 @@ pub struct PendingAccountView {
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordOverview {
     generation: String,
+    group_deletion_token: String,
     relay_url: String,
     hosts: Vec<HostView>,
     groups: Vec<GroupView>,
@@ -137,6 +138,7 @@ pub fn overview_from(
     account_keys: Option<&crate::sync::crypto::ChainKeys>,
 ) -> Result<RecordOverview, AppError> {
     let snapshot = repo::snapshot(state).map_err(error)?;
+    let group_deletion_token = crate::sync::record_groups::deletion_snapshot_token(&snapshot).map_err(error)?;
     let hosts = snapshot
         .hosts
         .into_iter()
@@ -238,6 +240,7 @@ pub fn overview_from(
         .collect();
     Ok(RecordOverview {
         generation: generation.to_string(),
+        group_deletion_token,
         relay_url: state.relay_url.clone(),
         hosts,
         groups: snapshot
@@ -387,10 +390,11 @@ pub async fn records_group_delete(
     app: AppHandle,
     id: String,
     revision: RevisionToken,
+    snapshot_token: Option<String>,
 ) -> Result<RecordOverview, AppError> {
     let revision = revision.revision()?;
     edit(app, move |s, now| {
-        crate::sync::record_groups::delete_group(s, &id, &revision, now).map_err(error)
+        crate::sync::record_groups::delete_group(s, &id, &revision, snapshot_token.as_deref(), now).map_err(error)
     })
     .await
 }

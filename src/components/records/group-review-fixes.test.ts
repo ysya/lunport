@@ -15,7 +15,7 @@ describe("immutable Group deletion review", () => {
   it("uses reviewed revision and counts after a pristine editor refresh", async () => {
     const group = groupView();
     const original = beginGroupEditor(group);
-    const candidate = beginGroupDeletion(original, { groups: 1, hosts: 2 });
+    const candidate = beginGroupDeletion(original, { groups: 1, hosts: 2 }, "reviewed-snapshot");
     const updated = {
       ...group,
       revision: {
@@ -50,6 +50,7 @@ describe("immutable Group deletion review", () => {
         "records_group_delete",
         {
           id: "0000000000000010",
+          snapshotToken: "reviewed-snapshot",
           revision: {
             version: "9007199254740993",
             updated_at_ms: "18446744073709551614",
@@ -61,10 +62,31 @@ describe("immutable Group deletion review", () => {
     expect(candidate.counts).toEqual({ groups: 1, hosts: 2 });
     expect(refreshed.payload.name).toBe("Operations");
   });
+  it("passes the frozen snapshot token even when only descendants change", async () => {
+    const state = beginGroupEditor(groupView());
+    const reviewed = recordOverview({ group_deletion_token: "before-descendant-edit" });
+    const candidate = beginGroupDeletion(state, { groups: 1, hosts: 2 }, reviewed.group_deletion_token);
+    reviewed.group_deletion_token = "after-descendant-edit";
+    const calls = stubBackend(async (_command, args) => {
+      if ((args as { snapshotToken: string }).snapshotToken !== reviewed.group_deletion_token)
+        throw new Error("Refresh the records and review the deletion again.");
+      return reviewed;
+    });
+    await expect(submitGroupDeletion(candidate, state)).rejects.toThrow("review the deletion again");
+    expect(calls).toHaveLength(1);
+    expect(candidate.snapshotToken).toBe("before-descendant-edit");
+    const fresh = beginGroupDeletion(state, { groups: 2, hosts: 3 }, reviewed.group_deletion_token);
+    await expect(submitGroupDeletion(fresh, state)).resolves.toBe(reviewed);
+    expect(calls[1][1]).toMatchObject({ snapshotToken: "after-descendant-edit" });
+  });
+  it("refuses to open a deletion review without a backend snapshot token", () => {
+    expect(() => beginGroupDeletion(beginGroupEditor(groupView()), { groups: 1, hosts: 2 }, ""))
+      .toThrow("Refresh the records and review the deletion again");
+  });
   it("copies the candidate values instead of retaining mutable editor/count objects", () => {
     const state = beginGroupEditor(groupView());
     const counts = { groups: 1, hosts: 2 };
-    const candidate = beginGroupDeletion(state, counts);
+    const candidate = beginGroupDeletion(state, counts, "reviewed-snapshot");
     state.revision!.version = "999";
     counts.hosts = 5;
     expect(candidate.revision.version).toBe("9007199254740993");

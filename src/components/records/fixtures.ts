@@ -43,6 +43,7 @@ export const recordOverview = (
   p: Partial<RecordOverview> = {},
 ): RecordOverview => ({
   generation: "9007199254740993",
+  group_deletion_token: "fixture-reviewed-snapshot",
   hosts: [hostView()],
   groups: [],
   format_upgrade_required: false,

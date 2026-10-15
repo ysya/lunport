@@ -9,6 +9,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import {
+  fetchRecordsStatus,
   type GroupDefaults,
   type GroupPayload,
   type HostScope,
@@ -68,6 +69,7 @@ export function RecordGroupEditor({
   onBusy?: (busy: boolean) => void;
   onCancel?: () => void;
 }) {
+  const [deletionError, setDeletionError] = useState<string | null>(null);
   const [state, setState] = useState(() =>
     groupId && !group
       ? {
@@ -529,6 +531,14 @@ export function RecordGroupEditor({
       {state.id && (
         <section className="space-y-3 rounded-lg border p-4">
           <h2 className="text-sm font-semibold">Delete Group subtree</h2>
+          {deletionError && (
+            <p role="alert" className="break-words text-xs text-destructive">{deletionError}</p>
+          )}
+          {!overview.group_deletion_token && (
+            <p role="alert" className="text-xs text-destructive">
+              Refresh the records to prepare a new deletion review.
+            </p>
+          )}
           <p className="text-xs text-muted-foreground">
             All {affected.hosts} hosts are preserved with their current
             effective settings, IDs and credential references. Membership and
@@ -536,8 +546,11 @@ export function RecordGroupEditor({
           </p>
           <Button
             variant="outline"
-            disabled={busy || blocked || state.unavailable}
-            onClick={() => setDeleting(beginGroupDeletion(state, affected))}
+            disabled={busy || blocked || state.unavailable || !overview.group_deletion_token}
+            onClick={() => {
+              setDeletionError(null);
+              setDeleting(beginGroupDeletion(state, affected, overview.group_deletion_token));
+            }}
           >
             Delete group…
           </Button>
@@ -580,7 +593,22 @@ export function RecordGroupEditor({
               onClick={() =>
                 void run(async () => {
                   if (!state.id || !state.revision || !deleting) return;
-                  accept(await submitGroupDeletion(deleting, state));
+                  try {
+                    accept(await submitGroupDeletion(deleting, state));
+                  } catch (error) {
+                    // Retire the failed review. Refresh for an explicit new confirmation;
+                    // never silently replace the frozen candidate and retry deletion.
+                    setDeleting(null);
+                    try {
+                      const fresh = await fetchRecordsStatus();
+                      if (fresh.overview) accept(fresh.overview);
+                    } catch {
+                      // Keep the recovery guidance visible if the refresh also fails.
+                    }
+                    const message = `${error instanceof Error ? error.message : String(error)} Refresh the records and review the deletion again.`;
+                    setDeletionError(revealHidden(message));
+                    return;
+                  }
                   setDeleting(null);
                   onDeleted();
                 })
