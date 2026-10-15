@@ -3,6 +3,31 @@ import { describe, expect, it } from "vitest";
 import { text } from "@/components/keychain/test-markup";
 import { RecordSyncStatus } from "./SyncStatus";
 describe("records sync status", () => {
+  it("shows real activity and retains the previous failure without raising a new alert", () => {
+    const html = renderToStaticMarkup(
+      <RecordSyncStatus
+        lastSyncMs={null}
+        error="Relay unavailable"
+        syncing
+        pending
+      />,
+    );
+    expect(text(html)).toContain("Setting up sync…");
+    expect(text(html)).toContain("Previous attempt");
+    expect(text(html)).toContain("Relay unavailable");
+    expect(html).not.toContain('role="alert"');
+    expect(html).not.toContain("text-destructive");
+  });
+  it("shows the failure as an alert once the attempt ends", () => {
+    const html = renderToStaticMarkup(
+      <RecordSyncStatus
+        lastSyncMs={null}
+        error="Relay unavailable"
+        syncing={false}
+      />,
+    );
+    expect(html).toContain('role="alert"');
+  });
   it("shows queued offline changes instead of implying the last sync includes them", () => {
     const html = renderToStaticMarkup(
       <RecordSyncStatus

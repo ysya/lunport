@@ -218,7 +218,7 @@ pub fn enable(env: &SyncEnv, confirmed: bool) -> Result<(), AppError> {
         })?;
     }
     // Establish authoritative space baselines before checking IDs and names.
-    let report = crate::sync::record_round::sync_once(env)?;
+    let report = crate::sync::record_round::sync_once_required(env)?;
     if report.review_required
         || report.gate != Some(crate::sync::record_merge::AccountGate::Compatible)
     {

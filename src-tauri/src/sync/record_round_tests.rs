@@ -14,6 +14,43 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 const HOST: &str = "0000000000000001";
+#[test]
+fn required_round_waits_for_transport_and_activity_is_public_without_persisting_it() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (device, keys) = fixture();
+    add_space(&device, &keys, true);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let connector = HookedConnector::new(&device.relay, Hooks {
+        before_pull: Some(Box::new(move || {
+            started_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        })),
+        ..Default::default()
+    });
+    let background_device = Arc::clone(&device);
+    let background = std::thread::spawn(move || {
+        let mut env = background_device.env();
+        env.relays = &connector;
+        sync_once(&env)
+    });
+    started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let active = serde_json::to_value(crate::sync::record_commands::overview(&device.env()).unwrap()).unwrap();
+    assert_eq!(active["syncing"], true);
+    assert_eq!(sync_once(&device.env()).unwrap().gate, None); // ordinary wake still coalesces
+    let setup_device = Arc::clone(&device);
+    let setup = std::thread::spawn(move || sync_once_required(&setup_device.env()));
+    resume_tx.send(()).unwrap();
+    background.join().unwrap().unwrap();
+    let report = setup.join().unwrap().unwrap();
+    assert_eq!(report.gate, Some(AccountGate::Compatible));
+    assert_eq!(report.spaces_pulled, 1);
+    let idle = serde_json::to_value(crate::sync::record_commands::overview(&device.env()).unwrap()).unwrap();
+    assert_eq!(idle["syncing"], false);
+    let disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&device.env().state_path).unwrap()).unwrap();
+    assert!(disk.get("syncing").is_none());
+}
 fn value(kind: RecordKind, id: &str, payload: serde_json::Value, at: u64) -> Record {
     Record {
         kind,

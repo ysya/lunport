@@ -98,6 +98,7 @@ pub struct PendingAccountView {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordOverview {
+    syncing: bool,
     generation: String,
     group_deletion_token: String,
     relay_url: String,
@@ -243,6 +244,7 @@ pub fn overview_from(
         })
         .collect();
     Ok(RecordOverview {
+        syncing: false,
         generation: generation.to_string(),
         group_deletion_token,
         relay_url: state.relay_url.clone(),
@@ -314,11 +316,13 @@ pub fn overview_from(
 }
 pub fn overview(env: &SyncEnv) -> Result<RecordOverview, AppError> {
     let core = env.runtime.core.lock().unwrap();
-    overview_from(
+    let mut overview = overview_from(
         record_runtime::active_state(&core)?,
         core.generation,
         core.account_keys.as_ref(),
-    )
+    )?;
+    overview.syncing = env.runtime.syncing.load(std::sync::atomic::Ordering::SeqCst);
+    Ok(overview)
 }
 pub fn status(app: &AppHandle) -> Result<RecordStatus, AppError> {
     let state = app.state::<crate::state::AppState>();
@@ -326,7 +330,11 @@ pub fn status(app: &AppHandle) -> Result<RecordStatus, AppError> {
     let overview = core
         .records
         .as_ref()
-        .map(|s| overview_from(s, core.generation, core.account_keys.as_ref()))
+        .map(|s| {
+            let mut overview = overview_from(s, core.generation, core.account_keys.as_ref())?;
+            overview.syncing = state.sync.syncing.load(std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, AppError>(overview)
+        })
         .transpose()?;
     Ok(RecordStatus {
         format: core.format,

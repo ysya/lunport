@@ -110,6 +110,8 @@ export type RecordKeyView = {
   status: "available" | "needs_material" | "conflict" | "deleted";
 };
 export type RecordOverview = {
+  /** Transient transport activity; absent in older backend fixtures. */
+  syncing?: boolean;
   library_enabled: boolean;
   library_scope: HostScope | null;
   pending_changes: number;

@@ -115,7 +115,7 @@ describe("account workspace lifecycle integration", () => {
   });
   it("uses generic durable retry for both kinds and avoids a code field for leaving", () => {
     const leaving = render("leave_account");
-    expect(text(leaving)).toContain("Retry sync setup");
+    expect(text(leaving)).toContain("Resume sync setup");
     expect(buttonTag(leaving, "Leave sync account…")).toContain(DISABLED);
     expect(text(leaving)).not.toContain("Sync code for recovery");
     const rotating = render("rotate_account");
