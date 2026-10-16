@@ -1249,12 +1249,100 @@ pub(crate) fn pin_fixture() -> Arc<TestDevice> {
 }
 
 #[test]
-fn pin_preparation_rejects_changed_generation_scope_account_endpoint_and_public_key() {
+fn confirmed_pin_survives_a_background_sync_round_without_losing_its_updates() {
+    use crate::session::{connect::CancelToken, record_pin};
+    use crate::ssh::{fake::default_server_key, AuthMethod, Hop};
+    use crate::sync::{record_repository as repo, records_v3::HostScope};
+    let device = pin_fixture();
+    let changed = device.clone();
+    let connector = HookedConnector::new(
+        &device.relay,
+        Hooks {
+            before_pull: Some(Box::new(move || {
+                assert!(changed.runtime.lifecycle.try_lock().is_ok());
+                record_runtime::mutate_records(&changed.env(), |state| {
+                    repo::create_host(
+                        state,
+                        "0000000000000002",
+                        HostScope::Local,
+                        serde_json::from_value(json!({"schema":2,"alias":"other","hostname":"other.test","auth":"interactive"})).unwrap(),
+                        40,
+                    ).map_err(|e| AppError::Other(e.to_string()))
+                }).unwrap();
+                let report = sync_once(&changed.env()).unwrap();
+                assert_eq!(report.gate, Some(AccountGate::Compatible));
+                assert!(report.pushed > 0, "exercise real upload receipts");
+            })),
+            ..Default::default()
+        },
+    );
+    let mut env = device.env();
+    env.relays = &connector;
+    let hop = Hop::new(HOST, "web", "host.test", 22, "ops", AuthMethod::Interactive).reference();
+    let key = default_server_key();
+    record_pin::confirm(
+        &env,
+        &hop,
+        None,
+        &key,
+        env.keychain,
+        &CancelToken::default(),
+        &|| Ok(()),
+    )
+    .unwrap();
+    let (current, _) = record_runtime::snapshot(&env).unwrap();
+    assert_eq!(
+        repo::get_host(&current, HOST)
+            .unwrap()
+            .host
+            .payload
+            .host_key
+            .unwrap()
+            .fingerprint,
+        key.fingerprint
+    );
+    assert_eq!(
+        repo::get_host(&current, "0000000000000002")
+            .unwrap()
+            .host
+            .payload
+            .alias,
+        "other"
+    );
+    let scope = repo::get_host(&current, HOST).unwrap().host.scope;
+    let HostScope::Space { space_id } = scope else {
+        panic!("shared host")
+    };
+    let host_key = record_key(RecordKind::Host, HOST);
+    assert!(
+        current.spaces[&space_id].records[&host_key].seq > 0,
+        "keep the sync receipt"
+    );
+    assert!(
+        current.spaces[&space_id].records[&host_key].dirty,
+        "publish the newly saved pin next"
+    );
+    let disk: crate::sync::records_v3::SyncStateV3 =
+        serde_json::from_slice(&std::fs::read(&env.state_path).unwrap()).unwrap();
+    assert_eq!(disk, current, "pin and intervening updates must be durable");
+}
+
+#[test]
+fn pin_preparation_rejects_changed_scope_account_endpoint_and_referenced_public_key() {
     use crate::session::{connect::CancelToken, record_pin};
     use crate::ssh::{fake::default_server_key, AuthMethod, Hop};
     use crate::sync::{record_repository as repo, records_v3::*, slot_rules::test_keys};
     const KEY: &str = "11111111111111111111111111111111";
-    for change in ["generation", "scope", "account", "endpoint", "public_key"] {
+    for change in [
+        "scope",
+        "account",
+        "relay",
+        "device",
+        "endpoint",
+        "public_key",
+        "pin",
+        "deselected",
+    ] {
         let device = pin_fixture();
         record_runtime::mutate_records(&device.env(), |state| {
             let mut next = state.clone();
@@ -1275,7 +1363,12 @@ fn pin_preparation_rejects_changed_generation_scope_account_endpoint_and_public_
                     },
                 },
             );
-            Ok(next)
+            let host = repo::get_host(&next, HOST).unwrap();
+            let mut payload = host.host.payload;
+            payload.auth = AuthKind::Key;
+            payload.key_id = Some(KEY.into());
+            repo::update_host(&next, HOST, &host.revision, payload, 4)
+                .map_err(|e| AppError::Other(e.to_string()))
         })
         .unwrap();
         let changed = device.clone();
@@ -1288,7 +1381,6 @@ fn pin_preparation_rejects_changed_generation_scope_account_endpoint_and_public_
                         let mut next = state.clone();
                         let host = repo::get_host(state, HOST).unwrap();
                         match change {
-                            "generation" => {}
                             "scope" => {
                                 next = repo::move_host(
                                     state,
@@ -1300,6 +1392,8 @@ fn pin_preparation_rejects_changed_generation_scope_account_endpoint_and_public_
                                 .unwrap()
                             }
                             "account" => next.account.as_mut().unwrap().chain_id = "b".repeat(64),
+                            "relay" => next.relay_url = "https://changed.test".into(),
+                            "device" => next.device_id = "c".repeat(32),
                             "endpoint" => {
                                 let mut payload = host.host.payload;
                                 payload.hostname = "changed.test".into();
@@ -1315,6 +1409,38 @@ fn pin_preparation_rejects_changed_generation_scope_account_endpoint_and_public_
                                 key.fingerprint =
                                     public.fingerprint(ssh_key::HashAlg::Sha256).to_string();
                                 key.key_type = public.algorithm().to_string();
+                            }
+                            "pin" => {
+                                let key =
+                                    crate::ssh::HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC)
+                                        .unwrap();
+                                next = repo::pin_host_key(
+                                    state,
+                                    HOST,
+                                    &repo::HostEndpoint {
+                                        hostname: "host.test".into(),
+                                        port: 22,
+                                    },
+                                    None,
+                                    StoredHostKey {
+                                        algorithm: key.algorithm,
+                                        public_key: base64::Engine::encode(
+                                            &base64::engine::general_purpose::STANDARD,
+                                            &key.public_key,
+                                        ),
+                                        fingerprint: key.fingerprint,
+                                        pinned_at_ms: 0,
+                                        pinned_by_device_id: String::new(),
+                                    },
+                                    40,
+                                )
+                                .unwrap();
+                            }
+                            "deselected" => {
+                                let HostScope::Space { space_id } = host.host.scope else {
+                                    panic!("shared")
+                                };
+                                next.spaces.get_mut(&space_id).unwrap().selected = false;
                             }
                             _ => unreachable!(),
                         }
@@ -1340,15 +1466,37 @@ fn pin_preparation_rejects_changed_generation_scope_account_endpoint_and_public_
         );
         assert!(result.is_err(), "stale {change} preparation must fail");
         let current = record_runtime::snapshot(&env).unwrap().0;
-        assert!(
-            repo::get_host(&current, HOST)
-                .unwrap()
-                .host
-                .payload
-                .host_key
-                .is_none(),
-            "{change}"
-        );
+        if change == "deselected" {
+            assert!(repo::get_host(&current, HOST).is_err());
+            assert!(current.spaces.values().all(|space| {
+                space
+                    .records
+                    .get(&record_key(RecordKind::Host, HOST))
+                    .is_none_or(|row| {
+                        row.record
+                            .payload
+                            .get("host_key")
+                            .is_none_or(serde_json::Value::is_null)
+                    })
+            }));
+            continue;
+        }
+        let saved = repo::get_host(&current, HOST)
+            .unwrap()
+            .host
+            .payload
+            .host_key;
+        if change == "pin" {
+            assert_eq!(
+                saved.unwrap().fingerprint,
+                crate::ssh::HostKey::from_openssh_line(test_keys::ECDSA_PUBLIC)
+                    .unwrap()
+                    .fingerprint,
+                "retain the superseding pin"
+            );
+        } else {
+            assert!(saved.is_none(), "{change}");
+        }
         if change == "account" {
             assert_eq!(
                 current.account.as_ref().unwrap().chain_id,

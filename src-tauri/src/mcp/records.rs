@@ -1746,7 +1746,7 @@ mod confirmed_pin_tests {
     };
     #[test]
     fn native_space_pin_wait_releases_lifecycle_and_revoke_disable_prevent_pin_and_exec() {
-        for action in ["allow", "revoke", "disable"] {
+        for action in ["allow", "allow_after_sync", "revoke", "disable"] {
             let device = pin_fixture();
             let runtime = McpRuntime::default();
             {
@@ -1830,7 +1830,11 @@ mod confirmed_pin_tests {
                 });
                 observed.recv_timeout(Duration::from_secs(3)).unwrap();
                 let free = device.runtime.lifecycle.try_lock().is_ok();
-                if action != "allow" {
+                if action == "allow_after_sync" {
+                    let report = crate::sync::record_round::sync_once(&device.env()).unwrap();
+                    assert!(report.pushed > 0, "complete sync while pin preparation waits");
+                }
+                if matches!(action, "revoke" | "disable") {
                     let mut p = runtime.policy.lock().unwrap();
                     if action == "revoke" {
                         p.allowed_hosts.clear();
@@ -1844,7 +1848,7 @@ mod confirmed_pin_tests {
                 release.send(()).unwrap();
                 let result = worker.join().unwrap();
                 assert!(free, "external preparation must leave lifecycle available");
-                assert_eq!(result.is_ok(), action == "allow", "{result:?}");
+                assert_eq!(result.is_ok(), action.starts_with("allow"), "{result:?}");
             });
             let pinned = repo::get_host(
                 &record_runtime::snapshot(&device.env()).unwrap().0,
@@ -1855,13 +1859,13 @@ mod confirmed_pin_tests {
             .payload
             .host_key
             .is_some();
-            assert_eq!(pinned, action == "allow");
+            assert_eq!(pinned, action.starts_with("allow"));
             assert_eq!(
                 engine
                     .events()
                     .iter()
                     .any(|e| matches!(e, FakeEvent::Exec { .. })),
-                action == "allow"
+                action.starts_with("allow")
             );
         }
     }
