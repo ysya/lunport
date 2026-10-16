@@ -33,6 +33,11 @@ on:
         description: Baseline commit or ref in this repository for native_probe
         type: string
         default: main
+      probe_kind:
+        description: Native regression to compare
+        type: choice
+        options: [tray, handles]
+        default: tray
 
 permissions:
   contents: read
@@ -256,9 +261,20 @@ jobs:
       - name: Ten independent native tray processes
         timeout-minutes: 5
         shell: pwsh
+        env:
+          PROBE_KIND: ${{ inputs.probe_kind || 'tray' }}
         run: |
+          $testName = switch ($env:PROBE_KIND) {
+            'tray' { 'sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates' }
+            'handles' { 'sync::engine::windows_tests::concurrent_app_handles_preserve_native_event_loop' }
+            default { throw 'Unknown native probe kind.' }
+          }
+          $listed = cargo test --locked --lib -- --ignored --list
+          if ($LASTEXITCODE -ne 0 -or -not ($listed | Where-Object { $_ -eq "${testName}: test" })) {
+            throw 'The selected source does not contain the requested native regression.'
+          }
           for ($attempt = 1; $attempt -le 10; $attempt++) {
             Write-Output "Native tray attempt $attempt/10"
-            cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
+            cargo test --locked --lib -- --ignored --exact $testName --nocapture
             if ($LASTEXITCODE -ne 0) { throw "native tray attempt $attempt failed (exit $LASTEXITCODE)" }
           }
