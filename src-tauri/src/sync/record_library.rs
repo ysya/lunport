@@ -2,12 +2,14 @@
 //! Per-device opt-in is public device metadata; old clients can ignore it.
 use crate::error::AppError;
 use crate::sync::{
+    crypto::ChainKeys,
     env::SyncEnv,
     record::{record_key, LocalRecord, RecordKind},
     record_repository::{self as repo, RepositoryError},
     record_runtime,
     records_v3::{HostScope, SyncStateV3},
 };
+use std::collections::BTreeSet;
 
 pub mod review;
 use review::{LibraryFailure, LibraryReview};
@@ -60,6 +62,51 @@ pub fn creation_scope(state: &SyncStateV3) -> Result<HostScope, RepositoryError>
     Ok(scope)
 }
 
+/// Recognize migration evidence using already-derived transport keys, with no credential IO.
+/// Exact old alias/text records stay encrypted in state. Never exempt an unreadable/future
+/// payload or an alias whose wire identity shadows any typed host (including an incoming ID).
+fn retained_legacy_aliases(
+    state: &SyncStateV3,
+    keys: Option<&ChainKeys>,
+) -> BTreeSet<(String, String)> {
+    let mut retained = BTreeSet::new();
+    let (Some(account), Some(keys)) = (&state.account, keys) else {
+        return retained;
+    };
+    let host_ids: BTreeSet<_> = state
+        .local
+        .hosts
+        .values()
+        .chain(state.spaces.values().flat_map(|s| s.records.values()))
+        .filter(|r| r.record.kind == RecordKind::Host)
+        .map(|r| r.record.id.as_str())
+        .collect();
+    for (id, space) in &state.spaces {
+        if !space
+            .sealed
+            .values()
+            .any(|r| r.envelope.kind == "host" && r.public_identity.is_none())
+        {
+            continue;
+        }
+        let Ok(Some(child)) = crate::sync::record_merge::space_keys(account, keys, id) else {
+            continue;
+        };
+        for (wire, row) in &space.sealed {
+            if row.envelope.kind == "host"
+                && row.public_identity.is_none()
+                && crate::sync::record_merge::is_legacy_alias_host(&child, &row.envelope)
+                && !host_ids.iter().any(|id| {
+                    crate::sync::crypto::id_hash(&child, "host", id) == row.envelope.id_hash
+                })
+            {
+                retained.insert((id.clone(), wire.clone()));
+            }
+        }
+    }
+    retained
+}
+
 /// Move public records together, preserving IDs, raw inheritance, routes, pins and local keys.
 /// No mutation is published if any destination ID/name or relationship conflicts.
 pub(crate) fn include_existing(
@@ -67,6 +114,7 @@ pub(crate) fn include_existing(
     destination: &str,
     confirmed: bool,
     now: u64,
+    keys: Option<&ChainKeys>,
 ) -> Result<SyncStateV3, RepositoryError> {
     let scope = HostScope::Space {
         space_id: destination.into(),
@@ -109,6 +157,7 @@ pub(crate) fn include_existing(
     if rows.is_empty() {
         return Ok(state.clone());
     }
+    let retained = retained_legacy_aliases(state, keys);
     let mut next = state.clone();
     if rows.iter().any(|r| {
         r.record.kind == RecordKind::Group
@@ -124,19 +173,20 @@ pub(crate) fn include_existing(
         let id = &row.record.id;
         let kind = row.record.kind;
         let key = record_key(kind, id);
-        for space in state.spaces.values() {
-            if space
-                .sealed
-                .values()
-                .any(|r| r.envelope.kind == kind.as_str() && r.public_identity.is_none())
-            {
+        for (space_id, space) in &state.spaces {
+            if space.sealed.iter().any(|(wire, r)| {
+                r.envelope.kind == kind.as_str()
+                    && r.public_identity.is_none()
+                    && !retained.contains(&(space_id.clone(), wire.clone()))
+            }) {
                 return Err(RepositoryError::SpaceUnavailable(
                     "Some synced record identities cannot be read".into(),
                 ));
             }
             if space.records.get(&key).is_some_and(|r| !r.record.deleted)
-                || space.sealed.values().any(|r| {
+                || space.sealed.iter().any(|(wire, r)| {
                     r.envelope.kind == kind.as_str()
+                        && !retained.contains(&(space_id.clone(), wire.clone()))
                         && (r.public_identity.is_none()
                             || r.public_identity.as_ref().is_some_and(|p| p.id == *id))
                 })
@@ -180,7 +230,7 @@ pub(crate) fn include_existing(
 
 /// Used inside the atomic state publication. Failed inclusion leaves the saved records
 /// inspectable and the UI reports them as requiring sync setup; unrelated pulls still work.
-pub(crate) fn include_new_records(state: SyncStateV3) -> SyncStateV3 {
+pub(crate) fn include_new_records(state: SyncStateV3, keys: Option<&ChainKeys>) -> SyncStateV3 {
     if !enabled(&state) || crate::sync::records_v3::account_writes_blocked(&state) {
         return state;
     }
@@ -196,7 +246,7 @@ pub(crate) fn include_new_records(state: SyncStateV3) -> SyncStateV3 {
     let Some(id) = space_id(&state) else {
         return state;
     };
-    include_existing(&state, &id, false, 0).unwrap_or(state)
+    include_existing(&state, &id, false, 0, keys).unwrap_or(state)
 }
 
 pub(crate) fn select_library_spaces(state: &mut SyncStateV3) {
@@ -211,7 +261,11 @@ pub(crate) fn select_library_spaces(state: &mut SyncStateV3) {
 /// resumable account operations retain their original identities.
 pub fn prepare(env: &SyncEnv) -> Result<review::LibraryPreview, LibraryFailure> {
     prepare_library(env)?;
-    review::preview(&record_runtime::snapshot(env)?.0)
+    let core = env.runtime.core.lock().unwrap();
+    review::preview(
+        record_runtime::active_state(&core)?,
+        core.account_keys.as_ref(),
+    )
 }
 
 fn prepare_library(env: &SyncEnv) -> Result<(), LibraryFailure> {
@@ -260,13 +314,14 @@ pub fn enable_reviewed(
 ) -> Result<(), LibraryFailure> {
     prepare_library(env)?;
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-    crate::sync::record_round::fresh_account_gate(env)?.ensure_compatible()?;
+    let proof = crate::sync::record_round::fresh_account_gate(env)?;
+    proof.ensure_compatible()?;
     let now = env.now();
     let mut failure = None;
     record_runtime::mutate_records(env, |state| {
         let build = || -> Result<SyncStateV3, LibraryFailure> {
             let id = space_id(state).ok_or_else(|| LibraryFailure::new("sync_data_unavailable", "The sync library is unavailable. Retry after syncing."))?;
-            let mut next = review::include_reviewed(state, &id, confirmed, now, review)?;
+            let mut next = review::include_reviewed(state, &id, confirmed, now, review, Some(&proof.keys))?;
             let key = record_key(RecordKind::Device, &state.device_id);
             let previous = state.account.as_ref().and_then(|a| a.records.get(&key))
                 .ok_or_else(|| LibraryFailure::new("device_metadata", "This device's sync metadata is unavailable. Finish or resume sync setup, then retry."))?;

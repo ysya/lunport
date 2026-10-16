@@ -30,7 +30,11 @@ impl From<RepositoryError> for LibraryFailure {
             RepositoryError::UpgradeConfirmationRequired => Self::new("upgrade_required", "Confirm that older clients have been updated or stopped before including Groups and inherited settings."),
             RepositoryError::Validation(RecordValidationError::AliasConflict { alias, .. }) => Self::new("name_conflict", format!("Host alias {alias:?} is already used. Review the proposed names and choose a unique alias.")),
             RepositoryError::Validation(RecordValidationError::DuplicateId(_)) => Self::new("identity_conflict", "A local record and synced record share an identity. They have been kept separately; review the conflicting records before including the library."),
-            RepositoryError::SpaceUnavailable(_) => Self::new("sync_data_unavailable", "Some library data has not been downloaded or cannot be read. Finish syncing or update SSHelter, then retry. Existing records have been kept."),
+            RepositoryError::SpaceUnavailable(reason) => Self::new("sync_data_unavailable", match reason.as_str() {
+                "Finish downloading the library before including existing records" => "Library setup is waiting for a complete download of every selected sync space. Finish syncing, then retry. Existing records have been kept.",
+                "Some synced record identities cannot be read" => "A synced host or Group has an unreadable or unsupported identity. Update SSHelter on the devices in this chain and retry. Existing records and encrypted source data have been kept.",
+                _ => "Some library data has not been downloaded or cannot be read. Finish syncing or update SSHelter, then retry. Existing records have been kept.",
+            }),
             RepositoryError::Group(_) => Self::new("group_conflict", "Group names or relationships conflict. Choose unique names under each parent and review unavailable parent Groups, then retry. Existing records have been kept."),
             _ => Self::new("record_validation", "A host or Group needs review before it can be included. Check its fields, Group and jump-host references. Existing records have been kept."),
         }
@@ -258,7 +262,10 @@ fn rename(state: &SyncStateV3, renames: &[Rename]) -> Result<SyncStateV3, Librar
     Ok(next)
 }
 
-pub fn preview(state: &SyncStateV3) -> Result<LibraryPreview, LibraryFailure> {
+pub fn preview(
+    state: &SyncStateV3,
+    keys: Option<&ChainKeys>,
+) -> Result<LibraryPreview, LibraryFailure> {
     let id = space_id(state).ok_or_else(|| {
         LibraryFailure::new(
             "sync_data_unavailable",
@@ -282,7 +289,7 @@ pub fn preview(state: &SyncStateV3) -> Result<LibraryPreview, LibraryFailure> {
         .collect();
     // Validate the complete proposal without publishing a format upgrade or changing records.
     let proposed = rename(state, &renames)?;
-    include_existing(&proposed, &id, true, 0)?;
+    include_existing(&proposed, &id, true, 0, keys)?;
     Ok(LibraryPreview {
         token: token(state, &id),
         conflicts,
@@ -307,9 +314,10 @@ pub fn include_reviewed(
     confirmed: bool,
     now: u64,
     review: Option<&LibraryReview>,
+    keys: Option<&ChainKeys>,
 ) -> Result<SyncStateV3, LibraryFailure> {
     let Some(review) = review else {
-        return include_existing(state, id, confirmed, now).map_err(Into::into);
+        return include_existing(state, id, confirmed, now, keys).map_err(Into::into);
     };
     if review.token != token(state, id) {
         return Err(LibraryFailure::new("stale_review", "The library changed while you were reviewing it. Review the latest records and retry; no names have been changed."));
@@ -327,7 +335,7 @@ pub fn include_reviewed(
         return Err(LibraryFailure::new("invalid_rename", "Review every conflicting name before including the library. Only those local records may be renamed."));
     }
     let proposed = rename(state, &review.renames)?;
-    let next = include_existing(&proposed, id, confirmed, now)?;
+    let next = include_existing(&proposed, id, confirmed, now, keys)?;
     repo::validate_transition(state, &next)?;
     Ok(next)
 }
