@@ -153,6 +153,12 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_NSIS_DIR=$dir"
           exit 0
 
+      - name: Upgrade published SSHelter 1.0.0 to Lunport
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/validate-windows-rebrand.ps1
+
       # The same two programs in a console of their own, as a terminal runs them (own-ssh spec §7.3), from each installer: the helper
       # started with that console's own buffers as its standard handles, as a shell in the console starts a program, and the GUI
       # sshelter.exe attaching to the helper's console and reading it through the handles it inherits (no step through pipes reaches that).
@@ -173,12 +179,6 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "the pair from $image in a console of its own failed (exit $LASTEXITCODE)" }
           }
           exit 0
-
-      - name: Upgrade published SSHelter 1.0.0 to Lunport
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/validate-windows-rebrand.ps1
 
       - name: Show disposable upgrade logs on failure
         if: failure()
