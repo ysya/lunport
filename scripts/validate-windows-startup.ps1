@@ -27,14 +27,24 @@ $logPath = Join-Path $profileDirectory 'diagnostics\app.log'
 $program = (Resolve-Path 'target\debug\sshelter.exe').Path
 $stdout = Join-Path $env:RUNNER_TEMP 'sshelter-startup.stdout'
 $stderr = Join-Path $env:RUNNER_TEMP 'sshelter-startup.stderr'
+function ConvertFrom-CompleteLogLines {
+    param([AllowEmptyString()][string]$LogText)
+    # Explicit types also cover an empty file observed between creation and the first append.
+    if ([string]::IsNullOrEmpty($LogText)) { return @() }
+    [int]$lineEnd = $LogText.LastIndexOf([char]"`n")
+    if ($lineEnd -lt 0) { return @() }
+    return @($LogText.Substring(0, $lineEnd).Split([char]"`n", [StringSplitOptions]::RemoveEmptyEntries) |
+        ForEach-Object { $_ | ConvertFrom-Json })
+}
+# Exercise empty, incomplete and concurrently appended log records before launching the app.
+if (@(ConvertFrom-CompleteLogLines '').Count -ne 0) { throw 'Empty log parsing failed.' }
+if (@(ConvertFrom-CompleteLogLines '{"pid":1}').Count -ne 0) { throw 'Incomplete log parsing failed.' }
+$probe = @(ConvertFrom-CompleteLogLines ('{"pid":1}' + "`r`n" + '{"pid":2'))
+if ($probe.Count -ne 1 -or $probe[0].pid -ne 1) { throw 'Complete-line log parsing failed.' }
 $process = Start-Process $program -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 function Read-ProcessEvents {
-    # Read only complete JSON lines while the app may still be appending the last event.
-    $text = Get-Content -Raw $logPath
-    $end = $text.LastIndexOf("`n")
-    if ($end -lt 0) { return @() }
-    return @($text.Substring(0, $end).Split("`n", [StringSplitOptions]::RemoveEmptyEntries) |
-        ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.pid -eq $process.Id })
+    [string]$logText = Get-Content -LiteralPath $logPath -Raw
+    return @(ConvertFrom-CompleteLogLines $logText | Where-Object { $_.pid -eq $process.Id })
 }
 try {
     $ready = $false
