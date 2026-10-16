@@ -89,6 +89,16 @@ jobs:
       - name: Build the whole app
         run: cargo build --locked
 
+      # Unit doubles never touch the Rc-backed Win32 tray or its event loop. Restart from
+      # saved synced records, race startup/status/visibility, and check real native menu data
+      # and USER object counts. No production profile, OS credentials or remote relay is used.
+      - name: Synced library startup and concurrent native tray updates
+        timeout-minutes: 5
+        run: cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
+
+      - name: Native crash leaves metadata without suppressing Windows Error Reporting
+        run: cargo test --locked --lib -- --ignored --exact diagnostics::tests::native_exception_leaves_metadata_for_windows_error_reporting --nocapture
+
       # sshelter-cli.exe, the console program a Windows terminal runs for Connect (cli-helper/; the app's builds above never build it):
       # its tests (the relay of arguments and exit codes against a test program, the built helper next to a stand-in sshelter.exe, and
       # the console's four settings kept across the relay, against a fake console).

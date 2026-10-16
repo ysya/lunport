@@ -617,13 +617,16 @@ pub(crate) fn sync_once_required(env: &SyncEnv) -> Result<RecordRoundReport, App
 }
 
 fn finish_round(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
+    crate::diagnostics::event("records_sync_started", None);
     let result = run(env);
     if let Err(e) = &result {
         if !crate::sync::runtime::is_superseded(e) {
+            crate::diagnostics::app_error("records_sync_failed", e);
             note_failure(env);
         }
     } else {
         env.runtime.core.lock().unwrap().failed_rounds = 0;
+        crate::diagnostics::event("records_sync_finished", None);
     }
     result
 }

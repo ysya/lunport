@@ -1,6 +1,7 @@
 //! Tray quick-connect. Pure public-data helpers choose IDs, labels and readiness; Tauri menu
 //! building stays thin. Click workers validate the latest runtime before launching a terminal.
 
+use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
@@ -37,6 +38,17 @@ struct RecordTrayItem {
     id: String,
     label: String,
     enabled: bool,
+}
+
+/// Only public menu data crosses threads. Native menus are created, replaced and dropped
+/// together on the event-loop thread, including the first publication during startup.
+#[derive(Default)]
+pub(crate) struct TrayState {
+    installed: Mutex<Option<Vec<RecordTrayItem>>>,
+    #[cfg(test)]
+    publications: std::sync::atomic::AtomicUsize,
+    #[cfg(all(test, windows))]
+    menu_handle: std::sync::atomic::AtomicIsize,
 }
 
 fn menu_label(value: &str) -> String {
@@ -210,14 +222,14 @@ fn record_connect_id(
 }
 
 /// Build the records menu from one public snapshot. Callers must release all runtime locks before
-/// this function: Tauri menu operations synchronously wait for the main thread.
+/// this function: the entire native publication synchronously waits for the main thread.
 pub fn rebuild_record_tray(
     app: &tauri::AppHandle,
     state: &crate::sync::records_v3::SyncStateV3,
 ) -> tauri::Result<()> {
     let items =
         tray_record_items(state).map_err(|error| std::io::Error::other(error.to_string()))?;
-    rebuild_menu(app, &items)
+    rebuild_menu(app, items)
 }
 
 /// Build (or update) the single menubar tray with the given aliases.
@@ -231,10 +243,35 @@ pub fn rebuild_tray(app: &tauri::AppHandle, aliases: &[String]) -> tauri::Result
             enabled: true,
         })
         .collect();
-    rebuild_menu(app, &items)
+    rebuild_menu(app, items)
 }
 
-fn rebuild_menu(app: &tauri::AppHandle, items: &[RecordTrayItem]) -> tauri::Result<()> {
+fn rebuild_menu(app: &tauri::AppHandle, items: Vec<RecordTrayItem>) -> tauri::Result<()> {
+    on_main_thread(app, move |app| publish_menu(app, items))
+}
+
+fn on_main_thread(
+    app: &tauri::AppHandle,
+    action: impl FnOnce(&tauri::AppHandle) -> tauri::Result<()> + Send + 'static,
+) -> tauri::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(action(&handle));
+    })?;
+    rx.recv()
+        .map_err(|_| tauri::Error::FailedToReceiveMessage)?
+}
+
+/// Main-thread-only transaction. Do not split the tray lookup, native construction and
+/// installation into separate event-loop messages: startup and sync can publish concurrently.
+fn publish_menu(app: &tauri::AppHandle, items: Vec<RecordTrayItem>) -> tauri::Result<()> {
+    let state = app.state::<TrayState>();
+    if state.installed.lock().unwrap().as_ref() == Some(&items)
+        && app.tray_by_id("main-tray").is_some()
+    {
+        return Ok(());
+    }
     let mut builder = MenuBuilder::new(app);
     let mut connect_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
     for entry in items.iter().take(MAX_TRAY_ALIASES) {
@@ -250,14 +287,21 @@ fn rebuild_menu(app: &tauri::AppHandle, items: &[RecordTrayItem]) -> tauri::Resu
         builder = builder.item(item);
     }
 
-    builder = builder
-        .separator()
-        .text("open", "Open SSHelter");
+    builder = builder.separator().text("open", "Open SSHelter");
     #[cfg(target_os = "macos")]
-    { builder = builder.text("window-diagnostics", "Window Diagnostics…"); }
+    {
+        builder = builder.text("window-diagnostics", "Window Diagnostics…");
+    }
     builder = builder.text("quit", "Quit");
 
     let menu = builder.build()?;
+    #[cfg(all(test, windows))]
+    {
+        use tauri::menu::ContextMenu;
+        state
+            .menu_handle
+            .store(menu.hpopupmenu()?, std::sync::atomic::Ordering::SeqCst);
+    }
 
     if let Some(tray) = app.tray_by_id("main-tray") {
         tray.set_menu(Some(menu))?;
@@ -289,7 +333,64 @@ fn rebuild_menu(app: &tauri::AppHandle, items: &[RecordTrayItem]) -> tauri::Resu
         tray.set_visible(visible)?;
     }
 
+    *state.installed.lock().unwrap() = Some(items);
+    #[cfg(test)]
+    state
+        .publications
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn test_publications(app: &tauri::AppHandle) -> usize {
+    app.state::<TrayState>()
+        .publications
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn test_assert_menu(app: &tauri::AppHandle, expected: &str) {
+    let expected = expected.to_owned();
+    on_main_thread(app, move |app| {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetMenuItemCount(menu: *mut std::ffi::c_void) -> i32;
+            fn GetMenuStringW(
+                menu: *mut std::ffi::c_void,
+                item: u32,
+                text: *mut u16,
+                max: i32,
+                flags: u32,
+            ) -> i32;
+        }
+        let menu = app
+            .state::<TrayState>()
+            .menu_handle
+            .load(std::sync::atomic::Ordering::SeqCst) as *mut std::ffi::c_void;
+        let count = unsafe { GetMenuItemCount(menu) };
+        assert_eq!(count, 20); // 17 hosts, separator, Open and Quit.
+        let mut labels = Vec::new();
+        for i in 0..count {
+            let mut text = [0u16; 256];
+            let length = unsafe {
+                GetMenuStringW(menu, i as u32, text.as_mut_ptr(), text.len() as i32, 0x400)
+            };
+            assert!(length >= 0);
+            labels.push(String::from_utf16_lossy(&text[..length as usize]));
+        }
+        assert!(labels.iter().any(|label| label == &expected), "{labels:?}");
+        assert_eq!(
+            app.resources_table()
+                .names()
+                .filter(|(_, name)| name.contains("TrayIcon"))
+                .count(),
+            1,
+            "startup must register exactly one tray resource"
+        );
+        Ok(())
+    })
+    .unwrap();
 }
 
 /// Show or hide the menubar tray icon. The desired state is stored in AppState so
@@ -303,11 +404,19 @@ pub fn tray_set_visible(
     state
         .tray_visible
         .store(visible, std::sync::atomic::Ordering::Relaxed);
-    if let Some(tray) = app.tray_by_id("main-tray") {
-        tray.set_visible(visible)
-            .map_err(|e| crate::error::AppError::Other(e.to_string()))?;
-    }
-    Ok(())
+    on_main_thread(&app, |app| {
+        // Read the latest desired value after reaching the event loop. Even obtaining a
+        // TrayIcon clones its Rc-backed native handle in Tauri 2.11; keep it here too.
+        let visible = app
+            .state::<crate::state::AppState>()
+            .tray_visible
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(tray) = app.tray_by_id("main-tray") {
+            tray.set_visible(visible)?;
+        }
+        Ok(())
+    })
+    .map_err(|e| crate::error::AppError::Other(e.to_string()))
 }
 
 /// Handle tray menu clicks. Errors are logged and swallowed — never panic from a menu callback.
@@ -317,7 +426,9 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         "quit" => app.exit(0),
         "open" => crate::show_main_window_by_user(app),
         #[cfg(target_os = "macos")]
-        "window-diagnostics" => crate::macos_health::request(app, crate::macos_health::Surface::Diagnostics),
+        "window-diagnostics" => {
+            crate::macos_health::request(app, crate::macos_health::Surface::Diagnostics)
+        }
         other => {
             if let Some(host_id) = other.strip_prefix("record-connect:") {
                 let (app, host_id) = (app.clone(), host_id.to_owned());

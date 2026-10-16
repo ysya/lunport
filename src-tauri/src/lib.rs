@@ -8,6 +8,7 @@ mod config;
 mod connect;
 mod deploy;
 mod discover;
+mod diagnostics;
 mod error;
 mod fsutil;
 pub mod host_start;
@@ -172,6 +173,8 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
 }
 
 fn run_app(host: bool, start_hidden: bool) {
+    diagnostics::install();
+    diagnostics::stage(diagnostics::Stage::Context);
     let context = tauri::generate_context!();
     // macOS must not create even a hidden WKWebView before the CoreAudio check.
     // Other platforms retain Tauri's existing automatic window creation.
@@ -223,18 +226,30 @@ fn run_app(host: bool, start_hidden: bool) {
             // frontend (`useGlobalHotkey`) via the JS plugin API.
             .plugin(tauri_plugin_global_shortcut::Builder::new().build());
     }
-    builder
+    diagnostics::stage(diagnostics::Stage::Window);
+    let application = builder
         .manage(state::AppState::default())
+        .manage(tray::TrayState::default())
         .manage(quick_connect::QuickConnect::default())
         .setup(move |app| {
+            diagnostics::stage(diagnostics::Stage::Setup);
             app.state::<state::AppState>().background_credentials_only.store(host && start_hidden,std::sync::atomic::Ordering::SeqCst);
+            // Publish the initial native tray before any worker can request an update.
+            // A missing/unavailable notification area must not prevent the main UI from opening.
+            diagnostics::stage(diagnostics::Stage::Tray);
+            if let Err(error) = tray::rebuild_tray(app.handle(), &[]) {
+                diagnostics::tauri_error("tray_initialization_failed", &error);
+                eprintln!("[tray] initial menu unavailable: {error}");
+            }
+            diagnostics::stage(diagnostics::Stage::Sync);
             sync::engine::initialize(app.handle())?;
+            diagnostics::stage(diagnostics::Stage::Mcp);
             mcp::initialize(app.handle(), host)?;
             // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
             if sync::engine::require_legacy(&app.state::<state::AppState>().sync).is_ok() { agent::start(app.handle()); }
             // The session broker that `sshelter connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
+            diagnostics::stage(diagnostics::Stage::Broker);
             session::app::start(app.handle());
-            tray::rebuild_tray(app.handle(), &[])?;
             quick_connect::initialize(app.handle());
             #[cfg(target_os = "macos")]
             macos_health::install_diagnostics_menu(app.handle())?;
@@ -246,6 +261,7 @@ fn run_app(host: bool, start_hidden: bool) {
                 }
                 show_main_window(app.handle());
             }
+            diagnostics::stage(diagnostics::Stage::Ready);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -288,6 +304,7 @@ fn run_app(host: bool, start_hidden: bool) {
         })
         .invoke_handler(tauri::generate_handler![
             app_platform,
+            diagnostics::app_open_diagnostics,
             app_is_development,
             quick_connect::app_set_global_hotkey,
             quick_connect::app_take_quick_connect,
@@ -437,14 +454,24 @@ fn run_app(host: bool, start_hidden: bool) {
             hostkey_pending,
             hostkey_resolve,
         ])
-        .build(context)
-        .expect("error while building tauri application")
-        .run(|app, event| match event {
+        .build(context);
+    let application = match application {
+        Ok(app) => app,
+        Err(error) => {
+            diagnostics::tauri_error("gui_build_failed", &error);
+            #[cfg(windows)]
+            if !start_hidden { diagnostics::show_startup_failure(); }
+            eprintln!("[startup] could not build application: {error}");
+            return;
+        }
+    };
+    application.run(|app, event| match event {
             // macOS: clicking SSHelter in the Dock or opening it from Finder while it runs starts
             // no second process; it sends Reopen. Bring back the window, even a hidden one.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_main_window_by_user(app),
             tauri::RunEvent::Exit => {
+                diagnostics::stage(diagnostics::Stage::Exit);
                 mcp::forget_bridge(app);
                 // Quitting ends every session; each terminal is told why (own-ssh spec §4).
                 session::app::quit(app);

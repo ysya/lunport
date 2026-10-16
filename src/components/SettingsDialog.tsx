@@ -438,6 +438,15 @@ function GeneralPane() {
       >
         <SettingsGroup>
           <SettingsRow
+            label="Diagnostic logs"
+            description="Local startup and error logs. Hosts, credentials and sync codes are excluded."
+          >
+            <Button type="button" variant="secondary" size="sm" className="h-7"
+              onClick={() => tauriInvoke<void>("app_open_diagnostics").catch(() => toast.error("Could not open diagnostic logs"))}>
+              Open logs
+            </Button>
+          </SettingsRow>
+          <SettingsRow
             label="Export settings"
             description="Save all preferences to a JSON file."
           >
