@@ -255,6 +255,7 @@ jobs:
           if (Test-Path $scratch) {
             Get-ChildItem $scratch -Filter '*.log' | ForEach-Object {
               Write-Output $_.Name
+              Select-String -Path $_.FullName -Pattern 'INSTALLDIR|InstallDir|FindRelatedProducts|RemoveExistingProducts|Component: Path|Component: RegistryEntries'
               Get-Content $_.FullName -Tail 100
             }
           }

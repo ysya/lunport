@@ -88,7 +88,10 @@ Remove-Item -LiteralPath $productKey -Recurse -Force
 # MSI major upgrade: use its previous registry InstallDir and frozen UpgradeCode.
 $msiDir = Join-Path $scratch 'original MSI directory'
 Run-Installer 'msiexec.exe' ('/i "{0}" /qn /norestart INSTALLDIR="{1}" /l*v "{2}"' -f $baselineMsi, $msiDir, (Join-Path $scratch 'old-msi.log'))
+Check-Installed $msiDir 'SSHelter'
+Write-Output "MSI registered directory before update: $((Get-ItemProperty $productKey).InstallDir)"
 Run-Installer 'msiexec.exe' ('/i "{0}" /qn /norestart /l*v "{1}"' -f $newMsi[0].FullName, (Join-Path $scratch 'new-msi.log'))
+Write-Output "MSI registered directory after update: $((Get-ItemProperty $productKey).InstallDir)"
 Check-Installed $msiDir
 $installer = New-Object -ComObject WindowsInstaller.Installer
 if ($installer.ProductState((Msi-Property $baselineMsi 'ProductCode')) -ne -1) { throw 'The previous MSI is still registered.' }
