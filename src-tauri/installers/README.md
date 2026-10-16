@@ -17,7 +17,7 @@ Visible product names, metadata and shortcuts use Lunport / Lunport Dev. These p
 | MSI UpgradeCode | `d00b09d3-45df-5130-b6d5-52034e820843` | Selected in `tauri.dev.conf.json` from the old product name |
 | Login-item identity | `SSHelter` | `SSHelter Dev` (OS integration remains disabled) |
 
-The NSIS template separates `INSTALLERIDENTITY` from `PRODUCTNAME`, accepts the previous MSI display name, and removes the existing login entry on uninstall. `hooks.nsh` renames only old shortcuts that target the installed executable; it leaves unrelated shortcuts alone. The WiX template keeps the existing registry paths so the previous install directory survives and removes the old product's shortcuts on a major upgrade.
+The NSIS template separates `INSTALLERIDENTITY` from `PRODUCTNAME`, accepts the previous MSI display name, and removes the existing login entry on uninstall. `hooks.nsh` renames only old shortcuts that target the installed executable; it leaves unrelated shortcuts alone. The WiX template keeps the existing registry paths so the previous install directory survives and removes the old product's shortcuts on a major upgrade. Its registry separators are literal single backslashes; duplicated separators in the custom XML cause WiX ICE03 validation errors.
 
 The main executable (`sshelter`, Windows `sshelter.exe`) and Windows console helper (`sshelter-cli.exe`) keep their names. Saved MCP commands and terminal launches continue to use them. Keychain services, SSH paths, local-storage keys, IPC roles, crypto contexts and updater public key retain their existing values. Active repository URLs use ysya/lunport; GitHub redirects the previous repository and release download URLs.
 

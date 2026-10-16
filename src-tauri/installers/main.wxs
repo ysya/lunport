@@ -86,10 +86,10 @@
              search second so that the MSI-specific path takes priority when both keys exist. -->
         <Property Id="INSTALLDIR">
           <!-- First attempt: Search for the default key value (this is how the nsis installer stores the path) -->
-          <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\\{{manufacturer}}\\$(var.InstallerIdentity)" Type="raw" />
+          <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\{{manufacturer}}\$(var.InstallerIdentity)" Type="raw" />
 
           <!-- Second attempt: Search for "InstallDir" which takes priority if found (this is how the msi installer stores the path) -->
-          <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\\{{manufacturer}}\\$(var.InstallerIdentity)" Name="InstallDir" Type="raw" />
+          <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\{{manufacturer}}\$(var.InstallerIdentity)" Name="InstallDir" Type="raw" />
         </Property>
 
         <!-- launch app checkbox -->
@@ -125,7 +125,7 @@
                 <Component Id="ApplicationShortcutDesktop" Guid="*">
                     <Shortcut Id="ApplicationDesktopShortcut" Name="{{product_name}}" Description="Runs {{product_name}}" Target="[!Path]" WorkingDirectory="INSTALLDIR" />
                     <RemoveFolder Id="DesktopFolder" On="uninstall" />
-                    <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\$(var.InstallerIdentity)" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
+                    <RegistryValue Root="HKCU" Key="Software\{{manufacturer}}\$(var.InstallerIdentity)" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
             </Directory>
             <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
@@ -146,18 +146,18 @@
                 <RemoveFile Id="LegacyStartShortcut" Directory="LegacyProgramsFolder" Name="$(var.InstallerIdentity).lnk" On="install"/>
                 <RemoveFile Id="LegacyUninstallShortcut" Directory="LegacyProgramsFolder" Name="Uninstall $(var.InstallerIdentity).lnk" On="install"/>
                 <RemoveFolder Id="LegacyStartFolder" Directory="LegacyProgramsFolder" On="install"/>
-                <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\$(var.InstallerIdentity)" Name="Lunport shortcuts" Type="integer" Value="1" KeyPath="yes"/>
+                <RegistryValue Root="HKCU" Key="Software\{{manufacturer}}\$(var.InstallerIdentity)" Name="Lunport shortcuts" Type="integer" Value="1" KeyPath="yes"/>
             </Component>
         </DirectoryRef>
 
         <DirectoryRef Id="INSTALLDIR">
             <Component Id="RegistryEntries" Guid="*">
-                <RegistryKey Root="HKCU" Key="Software\\{{manufacturer}}\\$(var.InstallerIdentity)">
+                <RegistryKey Root="HKCU" Key="Software\{{manufacturer}}\$(var.InstallerIdentity)">
                     <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
                 </RegistryKey>
                 <!-- Change the Root to HKCU for perUser installations -->
                 {{#each deep_link_protocols as |protocol| ~}}
-                <RegistryKey Root="HKLM" Key="Software\Classes\\{{protocol}}">
+                <RegistryKey Root="HKLM" Key="Software\Classes\{{protocol}}">
                     <RegistryValue Type="string" Name="URL Protocol" Value=""/>
                     <RegistryValue Type="string" Value="URL:{{bundle_id}} protocol"/>
                     <RegistryKey Key="DefaultIcon">
@@ -210,7 +210,7 @@
 							  On="uninstall" />
 
 				<RegistryValue Root="HKCU"
-							   Key="Software\\{{manufacturer}}\\$(var.InstallerIdentity)"
+							   Key="Software\{{manufacturer}}\$(var.InstallerIdentity)"
 							   Name="Uninstaller Shortcut"
 							   Type="integer"
 							   Value="1"
@@ -229,7 +229,7 @@
                     <ShortcutProperty Key="System.AppUserModel.ID" Value="{{bundle_id}}"/>
                 </Shortcut>
                 <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
-                <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\$(var.InstallerIdentity)" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
+                <RegistryValue Root="HKCU" Key="Software\{{manufacturer}}\$(var.InstallerIdentity)" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes"/>
            </Component>
         </DirectoryRef>
 

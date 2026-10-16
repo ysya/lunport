@@ -47,6 +47,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          cache-on-failure: true
 
       # As in beta.yml (its comment says why it is built this way).
       - name: Build the console helper (Windows)
@@ -178,3 +179,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/validate-windows-rebrand.ps1
+
+      - name: Show disposable upgrade logs on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP 'lunport-upgrade'
+          if (Test-Path $scratch) {
+            Get-ChildItem $scratch -Filter '*.log' | ForEach-Object {
+              Write-Output $_.Name
+              Get-Content $_.FullName -Tail 100
+            }
+          }
