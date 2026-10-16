@@ -1,6 +1,6 @@
 # Library sync、連線編輯器與 MCP 連線設定修補
 
-本輪接續已發布的 Beta 10，工作分支為 `codex/library-sync-host-dialog-fixes`。修補尚未發布成新版 Beta；Beta 10 的安裝包不包含本文件描述的新功能。
+本輪接續已發布的 Beta 10，工作分支為 `codex/library-sync-host-dialog-fixes`，程式碼凍結提交 `21759b76801fe2be77fc196f1a651a9dfae75cd9`。修補尚未發布成新版 Beta；Beta 10 的安裝包不包含本文件描述的新功能。
 
 ## Library sync
 
@@ -28,7 +28,7 @@
 
 ## MCP 新增連線與指紋
 
-Records 模式現在提供 `list_hosts`、`get_host`、`ssh_exec`、`create_host`、`verify_host_key`；Legacy 三個工具維持既有相容行為。
+Records 模式現在提供 `list_hosts`、`get_host`、`ssh_exec`、`create_host`、`verify_host_key`；Legacy 三個工具維持既有相容行為。安裝含修補的版本後，需重新連線／重啟 MCP client 以取得新的工具清單；已發布的 Beta 10 尚未包含它們。
 
 `create_host` 接受公開連線欄位及既有金鑰／Group／跳板 ID，不接受密碼、私人金鑰、host-key pin 或額外欄位。即使在 Auto-log 也必須在 SSHelter 審核完整設定並明確核准。等待期間取消、停用 MCP、改變模式、儲存目的地或相關設定，都不能套用舊核准；重名仍由 repository 的原子驗證拒絕。儲存只回傳新記錄的公開欄位，不授予 AI 權限、不登入、不信任指紋、不執行命令。
 
@@ -36,24 +36,28 @@ Records 模式現在提供 `list_hosts`、`get_host`、`ssh_exec`、`create_host
 
 - 已儲存主機的 Edit → Server identity → Verify server fingerprint。
 - `verify_host_key` 只適用已個別允許 AI 存取的主機。新／變更的指紋仍由既有原生 host-key 視窗明確核准；工具不接受 trust answer。
-- 透過同一 Connector、native confirmer 與 endpoint／previous-pin CAS 流程處理未知及變更的指紋。已知相符指紋不重複詢問。
-- 握手在目的端驗證後即停止，不準備目的端登入憑證、不開 session 或執行命令。跳板若需登入仍可要求其憑證。目的端缺少登入金鑰時也可以先核對指紋，保存流程綁定金鑰缺失狀態，期間新增／替換公開金鑰資料會使快照失效。
-- 路由、目的地、公開金鑰、AI 權限或取消狀態改變都不能沿用先前核准；取消／拒絕／錯誤指紋不新增信任。Quit barrier 仍可取消進行中工作。
+- 透過同一 Connector、native confirmer 與 endpoint／previous-pin CAS 流程處理未知及變更的指紋。已知相符指紋不重複詢問；成功回覆前再次確認目前保存的目的端 pin 仍相符，期間遭替換則拒絕回報已信任，不覆寫較新的 pin、不自動重試。
+- 握手在目的端驗證後即停止，不準備目的端登入憑證、不開 session 或執行命令。跳板若需登入仍可要求其憑證。目的端缺少登入金鑰時也可以先核對指紋，保存流程在準備階段綁定金鑰缺失狀態，準備至提交期間新增／替換公開金鑰資料會使快照失效。指紋核對本身不授予目的端登入金鑰的使用權。
+- 路由、目的地、用於跳板登入的公開金鑰、AI 權限或取消狀態改變都不能沿用先前核准；取消／拒絕／錯誤指紋不新增信任。Quit barrier 仍可取消進行中工作。
 
 實機 Development 驗證：僅綁定 127.0.0.1 的臨時 OpenSSH，使用新生成的測試 host key，沒有允許任何登入憑證。GUI 按鈕及真實 MCP stdio 都顯示原生視窗，與獨立 `ssh-keygen -lf` 指紋一致。先取消確認沒有 pin，後明確信任才保存。MCP 新建連線先顯示核准視窗，回傳 `ai_access_allowed: false`；再僅允許此拋棄式主機，`verify_host_key` 在目的端登入金鑰不存在時仍最終回傳 `isError: false`、`trusted: true`。sshd DEBUG1 紀錄沒有 userauth、接受登入或啟動 session。
 
-第一次端到端 MCP 試驗曾發現共用 pin 保存檢查錯誤地要求目的端登入金鑰；已修補並新增實際持久化回歸測試，重新建置後重跑成功。不是只以「視窗有出現」判定成功。
+第一次端到端 MCP 試驗曾發現共用 pin 保存檢查錯誤地要求目的端登入金鑰；已修補並新增實際持久化回歸測試，重新建置後重跑成功。不是只以「視窗有出現」判定成功。最終提交另外在同一 loopback endpoint 換上新的測試 host key，驗證原生視窗正確顯示新舊指紋、明確替換後保存新 pin；再次核對相符 pin 不彈窗，仍無目的端登入／session。見 [最終換 key 畫面](review/library-sync-dialog/native-final-changed-fingerprint.jpg) 及 [保存結果](review/library-sync-dialog/native-final-pin-saved.jpg)。
 
 [原生指紋視窗](review/library-sync-dialog/native-fingerprint-prompt.jpg)、[MCP 指紋視窗](review/library-sync-dialog/native-mcp-fingerprint-prompt.jpg)、[MCP 新增連線審核](review/library-sync-dialog/native-mcp-create-review.jpg)、[最終 MCP 回覆](review/library-sync-dialog/mcp-verify-result.json)、[原生驗證收據](review/library-sync-dialog/native-verification.json)。
+
+這裡的「原生指紋視窗」是既有獨立 Tauri host-key 視窗，內容仍使用 WebView，由 Rust 核准 hub 管理；不是新建的 AppKit 指紋 UI。macOS 建立視窗前的 CoreAudio 保護仍涵蓋它，檢查失敗時的 AppKit 提示不依賴 WebKit。畫面驗證包含實際截圖，沒有以 mounted、loaded 或 accessibility 文字單獨推定繪圖正常。
 
 MCP 工具宣告、`structuredContent`／`isError` 與使用者核准遵循現有 [官方 MCP tools specification](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)。沒有改變 `ssh_exec` 的 Auto-log 無互動／不自動信任規則。
 
 ## 測試與限制
 
 - 前端 81 個測試檔、1,060 項通過；TypeScript 與 Vite build 通過，仍有原有的 chunk size 提示。
-- macOS complete safe Rust suite：2,589 項通過、0 失敗、10 filtered；`SSHELTER_REQUIRE_OPENSSH=1`，依現有 CI 排除會操作真實 Keychain 的測試及不可用的 PAM 測試。
-- 其中新增的管理／握手／持久化測試涵蓋明確同意、拒絕、取消、過期、撤權、設定／儲存目的地變更、未知／變更指紋、錯誤答案、跳板，以及真實 OpenSSH 握手。最初完整 suite 有一項既有 shell 等待 prompt 的暫時失敗；單獨重跑及最終完整 suite 均通過，未修改該測試或實作。
+- macOS complete safe Rust suite：最終提交 2,590 項通過、0 失敗、10 filtered；`SSHELTER_REQUIRE_OPENSSH=1`，依現有 CI 排除會操作真實 Keychain 的測試及不可用的 PAM 測試。
+- 其中新增的管理／握手／持久化測試涵蓋明確同意、拒絕、取消、過期、撤權、設定／儲存目的地變更、未知／變更指紋、錯誤答案、跳板、最終握手期間的 pin 替換，以及真實 OpenSSH 握手。最初完整 suite 有一項既有 shell 等待 prompt 的暫時失敗；單獨重跑及最終完整 suite 均通過，未修改該測試或實作。
 - Development app 建置及實際 WKWebView／MCP stdio 操作通過。Clippy 成功，仍有既有警告；本輪新增檔案沒有 Clippy 警告。
-- 正常 library 的 debug profile 測試 3 項通過；Windows CI 收據在完成後補記；尚未在 Windows WebView2 進行真人互動驗收。沒有取得使用者兩平台的正式同步狀態，仍需其實際資料驗收。
+- 正常 library 的 debug profile 測試 3 項通過；[Windows CI 38826962440](https://github.com/ysya/sshelter/actions/runs/38826962440) 對同一凍結提交的完整安全 suite（2,398 passed、1 ignored、9 filtered）、三種 profile（各 3 passed）、整體 app／CLI helper 建置、實際 console、OpenSSH client 登入與 engine 連線檢查全部成功；workflow 整體成功。[Windows 收據](review/library-sync-dialog/windows-ci.json) 保留各步驟狀態，[測試總數](review/library-sync-dialog/windows-test-results.json) 由成功 job log 擷取。尚未在 Windows WebView2 進行真人互動驗收。沒有取得使用者兩平台的正式同步狀態，仍需其實際資料驗收。
 - 本輪未安裝／更新正式 app、修改正式資料或正式 MCP 權限，未重置 vault、修改音訊服務或 WebKit defaults。測試使用 Development profile 與拋棄式 loopback server。完成後已撤回測試主機 AI 權限、關閉 Development MCP、Development app 及 loopback server，恢復測試瀏覽器尺寸並移除暫時 harness。Development 保留兩筆無登入憑證的測試連線及公開稽核紀錄。
 - Beta 10 的 CoreAudio 啟動防護維持原行為；本輪沒有聲稱根除系統音訊死鎖或驗證任何私有 API 根治方式。
+
+[本機檢查收據](review/library-sync-dialog/local-checks.json) 綁定凍結的程式碼提交；後續文件提交不改變該次建置／CI 來源。

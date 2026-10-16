@@ -1,0 +1,47 @@
+{
+  "source_commit": "21759b76801fe2be77fc196f1a651a9dfae75cd9",
+  "branch": "codex/library-sync-host-dialog-fixes",
+  "macos_safe_rust_suite": {
+    "passed": 2590,
+    "failed": 0,
+    "filtered": 10,
+    "requires_openssh": true,
+    "duration_seconds": 167.11,
+    "exclusions": [
+      "secrets::tests::round_trip_set_get_delete",
+      "askpass::tests::env_secret_takes_priority_over_keychain",
+      "askpass::tests::missing_account_and_no_env_yields_none",
+      "ssh::engine_tests::login_methods::pam"
+    ],
+    "status": "success",
+    "prior_full_suite_passed": 2589,
+    "expected_tests": 2590
+  },
+  "frontend": {
+    "test_files": 81,
+    "passed": 1060,
+    "failed": 0,
+    "typecheck": true,
+    "production_build": true
+  },
+  "debug_profile_tests": {
+    "passed": 3,
+    "failed": 0
+  },
+  "clippy": {
+    "completed": true,
+    "existing_warnings": 66,
+    "new_file_warnings": 0
+  },
+  "development_build": true,
+  "native_verification": "native-verification.json",
+  "windows_ci": {
+    "run_id": 38826962440,
+    "url": "https://github.com/ysya/sshelter/actions/runs/38826962440",
+    "status": "completed",
+    "supersedes_run_id": 38826377860,
+    "conclusion": "success",
+    "functional_checks": "success",
+    "receipt": "windows-ci.json"
+  }
+}

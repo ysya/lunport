@@ -13,5 +13,18 @@
   "mcp_verified_with_missing_destination_key": true,
   "production_data_modified": false,
   "development_mcp_disabled_after_test": true,
-  "development_allowed_hosts_after_test": 0
+  "development_allowed_hosts_after_test": 0,
+  "final_pin_guard_revalidation": {
+    "source_commit": "21759b76801fe2be77fc196f1a651a9dfae75cd9",
+    "endpoint": "127.0.0.1:56738",
+    "new_fingerprint": "SHA256:pb9+GRQdZpvmqn4YvdsMjvPGWTr0Mlb42AJw+26PKMw",
+    "changed_key_native_review": true,
+    "explicit_replacement_saved": true,
+    "matching_pin_repeat_without_new_window": true,
+    "connections": 3,
+    "destination_userauth_seen": false,
+    "destination_login_accepted": false,
+    "remote_session_opened": false,
+    "development_mcp_enabled": false
+  }
 }
