@@ -1,0 +1,13 @@
+{
+  "version": "1.1.0",
+  "productName": "Lunport",
+  "msiUpgradeCode": "d00b09d3-45df-5130-b6d5-52034e820843",
+  "previousDirectoryRegistrySearch": [
+    "Software\\homelab\\$(var.InstallerIdentity)",
+    "Software\\homelab\\$(var.InstallerIdentity)"
+  ],
+  "nsisIdentity": "SSHelter",
+  "mainExecutable": "sshelter.exe",
+  "source": "07f6b4c5013fb0d2f8d76b513f02b23c05869689",
+  "scope": "Rendered templates of the exact unsigned candidate; actual upgrade results recorded in CI."
+}

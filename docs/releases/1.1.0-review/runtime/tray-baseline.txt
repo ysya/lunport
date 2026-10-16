@@ -1,0 +1,21 @@
+2026-10-16T21:50:44.7983355Z Native tray attempt 1/10
+2026-10-16T21:50:48.1378191Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.47s
+2026-10-16T21:50:48.1556879Z Native tray attempt 2/10
+2026-10-16T21:50:51.3868034Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.43s
+2026-10-16T21:50:51.4032856Z Native tray attempt 3/10
+2026-10-16T21:50:54.6802907Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.46s
+2026-10-16T21:50:54.6990010Z Native tray attempt 4/10
+2026-10-16T21:50:58.0848441Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.52s
+2026-10-16T21:50:58.1026208Z Native tray attempt 5/10
+2026-10-16T21:51:01.4108174Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.51s
+2026-10-16T21:51:01.4265673Z Native tray attempt 6/10
+2026-10-16T21:51:04.6586219Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.42s
+2026-10-16T21:51:04.6747348Z Native tray attempt 7/10
+2026-10-16T21:51:07.8556522Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.39s
+2026-10-16T21:51:07.8708746Z Native tray attempt 8/10
+2026-10-16T21:51:11.1156574Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.45s
+2026-10-16T21:51:11.1332135Z Native tray attempt 9/10
+2026-10-16T21:51:14.7405527Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2418 filtered out; finished in 2.78s
+2026-10-16T21:51:14.7606662Z Native tray attempt 10/10
+2026-10-16T21:51:22.2722736Z   process didn't exit successfully: `D:\a\lunport\lunport\src-tauri\target\debug\deps\sshelter_lib-34283a22b40154ba.exe --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture` (exit code: 0xc0000374, STATUS_HEAP_CORRUPTION)
+2026-10-16T21:51:24.1681849Z      | native tray attempt 10 failed (exit -1073740940)

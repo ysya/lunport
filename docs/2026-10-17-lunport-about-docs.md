@@ -38,3 +38,7 @@ The native test has no WebView or production startup plugins and does not load t
 The About/documentation work is validated independently and introduces no Windows native runtime logic. The native stability defect remains open and must be resolved before publishing the next release; do not describe the initial full Windows job or baseline probe as passing. Its logs and outcomes are retained here, rather than suppressing or retrying failed processes until green.
 
 The follow-up changes no installer template, bundle identity, credential service, executable name, persisted path, published release or updater signature. No renamed release is published by this PR.
+
+## Follow-up resolution
+
+The native runtime defect was subsequently reproduced without the tray, repaired with shared context ownership, and validated on the final Lunport 1.1.0 candidate. See [release validation](releases/1.1.0-validation.md) for the failing baseline, repaired regressions and complete platform/installer results. The failed checks above remain historical evidence.
