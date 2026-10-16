@@ -3,6 +3,76 @@ use super::*;
 use crate::sync::{record_repository as repo, record_runtime};
 use std::sync::Arc;
 
+/// Isolate runtime handle ownership from tray icons, menus, WebViews and sync.
+/// AppHandle's public Send + Sync contract permits these ordinary worker clones.
+#[test]
+#[ignore = "requires its own Windows native event loop; run separately in CI"]
+fn concurrent_app_handles_preserve_native_event_loop() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let _native_fault_trace = NativeFaultTrace::install();
+    let mut context = tauri::generate_context!();
+    context.config_mut().app.windows.clear();
+    let (done_tx, done_rx) = mpsc::channel();
+    let threads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let setup_threads = Arc::clone(&threads);
+    let finished = Arc::new(AtomicBool::new(false));
+    let setup_finished = Arc::clone(&finished);
+    let app = tauri::Builder::default()
+        .any_thread()
+        .setup(move |app| {
+            // Only this initial clone runs on the UI thread. Arc cloning below is atomic.
+            let handle = Arc::new(app.handle().clone());
+            let watchdog = Arc::clone(&handle);
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let watchdog_thread = std::thread::spawn(move || {
+                if stop_rx.recv_timeout(Duration::from_secs(90)).is_err() {
+                    watchdog.exit(2);
+                }
+            });
+            let controller = std::thread::spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let start = Arc::new(std::sync::Barrier::new(4));
+                    let completed = Arc::new(AtomicUsize::new(0));
+                    let workers: Vec<_> = (0..4).map(|_| {
+                        let handle = Arc::clone(&handle);
+                        let start = Arc::clone(&start);
+                        let completed = Arc::clone(&completed);
+                        std::thread::spawn(move || {
+                            start.wait();
+                            for _ in 0..25_000 {
+                                let cloned = handle.as_ref().clone();
+                                std::hint::black_box(&cloned);
+                                drop(cloned);
+                                completed.fetch_add(1, Ordering::Relaxed);
+                            }
+                        })
+                    }).collect();
+                    for worker in workers { worker.join().unwrap(); }
+                    assert_eq!(completed.load(Ordering::Relaxed), 100_000);
+                    eprintln!("Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync");
+                }));
+                let code = if outcome.is_ok() { 0 } else { 1 };
+                let _ = stop_tx.send(());
+                let _ = done_tx.send(outcome);
+                setup_finished.store(true, Ordering::Release);
+                handle.exit(code);
+            });
+            setup_threads.lock().unwrap().extend([watchdog_thread, controller]);
+            Ok(())
+        })
+        .build(context)
+        .unwrap();
+    assert_eq!(app.run_return(move |_, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) && finished.load(Ordering::Acquire) {
+            for thread in threads.lock().unwrap().drain(..) { thread.join().unwrap(); }
+        }
+    }), 0);
+    if let Err(panic) = done_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+        std::panic::resume_unwind(panic);
+    }
+    eprintln!("Runtime handle ownership: event loop and helpers cleaned up normally");
+}
+
 #[test]
 #[ignore = "requires a Windows desktop and its own native event loop; run separately in CI"]
 fn synced_library_startup_and_concurrent_tray_updates() {

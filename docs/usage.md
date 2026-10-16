@@ -1,6 +1,6 @@
 # Using Lunport
 
-Lunport is your SSH workspace for hosts, keys and Groups. This guide describes the current source on `main`; the next release introduces the Lunport name. The latest published Stable is still [SSHelter 1.0.0](https://github.com/ysya/lunport/releases/tag/v1.0.0).
+Lunport is your SSH workspace for hosts, keys and Groups, formerly named SSHelter. Download the current Stable from [Releases](https://github.com/ysya/lunport/releases/latest). Existing SSHelter installations retain their data, credentials and command-line integrations through the rename.
 
 ## Your host library
 

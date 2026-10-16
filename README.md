@@ -8,7 +8,7 @@
 
 Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly named **SSHelter**. It combines a local host library, a private-key vault and a built-in SSH engine with optional encrypted sync and AI access.
 
-> **Release status:** the Lunport name and Folded L icon are on `main` for the next release. The latest published Stable is [SSHelter 1.0.0](https://github.com/ysya/lunport/releases/tag/v1.0.0). Its installers still use the SSHelter name. Existing data, credentials, command-line integrations and update signatures keep their established identities through the rename.
+> **Upgrading from SSHelter:** Lunport continues the same project with a new name and Folded L icon. Existing data, credentials and command-line integrations keep their established identities. Historical [SSHelter 1.0.0](https://github.com/ysya/lunport/releases/tag/v1.0.0) installers retain their original names; use [Releases](https://github.com/ysya/lunport/releases/latest) for the current Stable.
 
 ## A workspace for your connections
 
@@ -30,13 +30,13 @@ Choose an installer from [Releases](https://github.com/ysya/lunport/releases/lat
 | Windows x64 | `.exe` installer |
 | Linux x64 or ARM64 | `.AppImage`, `.deb` or `.rpm` for your architecture |
 
-**macOS:** builds are not yet notarized. For the published SSHelter 1.0.0 app, drag it into Applications and, if Gatekeeper blocks it, run:
+**macOS:** builds are not yet notarized. Drag Lunport into Applications and, if Gatekeeper blocks it, run:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/SSHelter.app
+xattr -dr com.apple.quarantine /Applications/Lunport.app
 ```
 
-Use `/Applications/Lunport.app` for a renamed build. Subsequent in-app updates do not require this step again.
+For the historical SSHelter 1.0.0 app, use `/Applications/SSHelter.app` instead. Subsequent in-app updates do not require this step again.
 
 **Windows:** the installer is not code-signed, so SmartScreen may show a warning. Choose **More info → Run anyway** to proceed. Connections use the installed console helper and open in Windows Terminal when available, otherwise Command Prompt. See [Windows integrations](docs/usage.md#windows-integrations) for OpenSSH deployment and Git/agent setup.
 

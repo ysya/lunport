@@ -97,3 +97,8 @@ libc = "0.2"
 # release 建置不受影響。
 [profile.dev.package.num-bigint-dig]
 opt-level = 3
+
+# Keep the 2.11 API/bundler contracts while fixing Context/AppHandle ownership.
+# See vendor/tauri-runtime-wry/LUNPORT_PATCH.md for provenance and regression evidence.
+[patch.crates-io]
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
