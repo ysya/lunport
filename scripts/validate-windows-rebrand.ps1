@@ -93,3 +93,6 @@ foreach ($directory in @([Environment]::GetFolderPath('CommonPrograms'), $start)
 Run-Installer 'msiexec.exe' ('/x "{0}" /qn /norestart' -f (Msi-Property $newMsi[0].FullName 'ProductCode'))
 if ((Get-FileHash $sentinel -Algorithm SHA256).Hash -ne $sentinelHash) { throw 'The MSI uninstall removed application data.' }
 Write-Output 'NSIS and MSI upgraded SSHelter 1.0.0 to Lunport with saved paths, data and CLI compatibility.'
+# The expected CLI usage checks exit with 2. GitHub's pwsh wrapper forwards
+# LASTEXITCODE unless the successful validation script returns an explicit 0.
+exit 0
