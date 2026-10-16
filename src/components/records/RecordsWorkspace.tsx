@@ -1,5 +1,6 @@
 import "./library.css";
 import { UpdateIndicator } from "@/components/UpdatesPane";
+import { BrandMark } from "@/components/app/BrandMark";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -275,8 +276,8 @@ export function RecordsWorkspace({
           {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
         </Button>
         <span className="library-app-name">
-          <Terminal className="size-4" />
-          SSHelter
+          <BrandMark className="size-5" />
+          Lunport
         </span>
         <button
           type="button"

@@ -144,7 +144,7 @@ export function progressView(version: string, s: DownloadSnapshot): ProgressView
   // Nothing is written before the whole download is in and its signature checked, so a restart is safe.
   const warning =
     s.idleMs >= STALL_AFTER_MS
-      ? `No data for ${idleFor(s.idleMs)} — the download may have stalled. Restart SSHelter to try again.`
+      ? `No data for ${idleFor(s.idleMs)} — the download may have stalled. Restart Lunport to try again.`
       : null;
   if (s.phase === "connecting") return { title, line: "Connecting…", warning, fraction: null };
 

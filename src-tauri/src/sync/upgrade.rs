@@ -876,7 +876,7 @@ mod tests {
         let (d, _) = v1_device("a", &relay, &clock, "Host web\n");
         relay.set_offline(true);
         assert!(sync_once(&d.env()).is_err());
-        assert!(d.state().last_error.unwrap().starts_with("SSHelter could not upgrade this device's sync yet"));
+        assert!(d.state().last_error.unwrap().starts_with("Lunport could not upgrade this device's sync yet"));
         assert!(hosts_file::managed_path(&d.ssh_dir()).exists());
         assert_eq!(d.main_config(), MAIN);
         assert!(matches!(state_v2::load(&d.env().state_path).unwrap(), state_v2::LoadedState::Legacy(_)));
@@ -1864,7 +1864,7 @@ mod tests {
         d.keychain.delete(MNEMONIC_ACCOUNT).unwrap();
         assert!(sync_once(&d.env()).is_err());
         let message = d.state().last_error.unwrap();
-        assert!(message.starts_with("SSHelter could not upgrade this device's sync yet") && message.contains("leave and join again"), "{message}");
+        assert!(message.starts_with("Lunport could not upgrade this device's sync yet") && message.contains("leave and join again"), "{message}");
         // 照說明離開:離開之後的狀態不該還帶著「could not upgrade」與退避的計數。
         leave_account(&d.env(), false).unwrap();
         assert!(!d.state().joined());

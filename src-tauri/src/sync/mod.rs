@@ -10,7 +10,7 @@
 //! - `slot_files_windows`(只在 Windows):owner-only、不繼承上層的 DACL
 //! - `slot_setup`: 金鑰插槽(SP3)的建立:還沒設定的金鑰(候選)、建立或沿用插槽、無損改寫主機的 `IdentityFile`
 //! - `slots`: 金鑰插槽(SP3)的引擎:帳戶裡 `keyslot` 與 `key` 記錄的讀寫、每一輪在這台維護插槽(`reconcile`)、給 UI 的插槽檢視(`views`)
-//! - `local_keys`: 這台自己加進 SSHelter 的金鑰(貼上的、從檔案匯入的):放進這台的保管庫、記成只在這台的金鑰,不寫任何帳戶記錄
+//! - `local_keys`: 這台自己加進 Lunport 的金鑰(貼上的、從檔案匯入的):放進這台的保管庫、記成只在這台的金鑰,不寫任何帳戶記錄
 //! - `relay`: relay HTTP client(`RelayApi`)與輪詢間隔
 //! - `reconcile`: 記錄的加解密編碼與套到檔案的效果
 //! - `merge`: 帳戶與 space 區段的本機 diff、合併、上傳(純函式)

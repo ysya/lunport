@@ -78,8 +78,8 @@ export function SlotKeyDetailView({
   const status = slotStatusText(slot.status);
   const actions = slotActions(slot);
   const where = whereLine(slot);
-  // The file this computer uses, for the states that name one. A key in SSHelter has none (its slot path holds only the .pub):
-  // the line above says where the key is. A key SSHelter's agent can never hold stays a file without being a "file for now".
+  // The file this computer uses, for the states that name one. A key in Lunport has none (its slot path holds only the .pub):
+  // the line above says where the key is. A key Lunport's agent can never hold stays a file without being a "file for now".
   const file = !slot.in_vault && "file" in slot.status ? slot.status.file : null;
   const devices = deviceLine(slot);
   const passphrase = passphraseFact(slot);
@@ -123,7 +123,7 @@ export function SlotKeyDetailView({
         {button("copy", "Copy public key", { off: !keyHere })}
         {button("exportHost", "Export to host…", { off: !keyHere })}
         {slot.in_vault && button("exportPrivate", "Export private key…")}
-        {slot.file_for_now && button("move", "Move into SSHelter")}
+        {slot.file_for_now && button("move", "Move into Lunport")}
         {button("addHost", "Add a host for this key…", { off: !keyHere })}
       </div>
       <div className="settings-group">
@@ -143,7 +143,7 @@ export function SlotKeyDetailView({
           {where && <p className="text-xs text-muted-foreground">{where}</p>}
           {file && <p className="font-mono text-xs break-all text-muted-foreground">{file}</p>}
           {slot.stays_file && <p className="text-xs text-muted-foreground">{`It stays a file: ${revealHidden(slot.stays_file)}`}</p>}
-          {moveFailure && <p className={cn("text-xs", TONE_TEXT.error)}>{`Couldn't move into SSHelter: ${revealHidden(moveFailure)}`}</p>}
+          {moveFailure && <p className={cn("text-xs", TONE_TEXT.error)}>{`Couldn't move into Lunport: ${revealHidden(moveFailure)}`}</p>}
         </Fact>
         <Fact label="Hosts">{hostLinks(slot.hosts, onHost)}</Fact>
         {devices && (
@@ -158,7 +158,7 @@ export function SlotKeyDetailView({
 }
 
 /**
- * A key file in ~/.ssh (key vault spec §7.3): SSHelter doesn't manage it, and never deletes it (§7.6). "Import into SSHelter…" opens
+ * A key file in ~/.ssh (key vault spec §7.3): Lunport doesn't manage it, and never deletes it (§7.6). "Import into Lunport…" opens
  * New key with this file chosen; "Add a host for this key…" needs the private file only. No hooks: exported for the tests.
  */
 export function FileKeyDetailView({
@@ -182,7 +182,7 @@ export function FileKeyDetailView({
           </Badge>
           {file.in_agent && <Badge variant="outline">in ssh-agent</Badge>}
         </div>
-        <p className="text-xs text-muted-foreground">{"SSHelter doesn't manage this file: any program can use it without asking."}</p>
+        <p className="text-xs text-muted-foreground">{"Lunport doesn't manage this file: any program can use it without asking."}</p>
       </header>
       <div className="flex flex-wrap gap-1.5">
         <Button type="button" size="sm" variant="outline" className="h-7" disabled={!hasPub} onClick={() => onAction("copy")}>
@@ -191,9 +191,9 @@ export function FileKeyDetailView({
         <Button type="button" size="sm" variant="outline" className="h-7" disabled={!hasPub} onClick={() => onAction("exportHost")}>
           Export to host…
         </Button>
-        {/* Adding the key to SSHelter needs the private file only, so this does not wait for a .pub. */}
+        {/* Adding the key to Lunport needs the private file only, so this does not wait for a .pub. */}
         <Button type="button" size="sm" variant="outline" className="h-7" onClick={() => onAction("import")}>
-          Import into SSHelter…
+          Import into Lunport…
         </Button>
         <Button type="button" size="sm" variant="outline" className="h-7" onClick={() => onAction("addHost")}>
           Add a host for this key…
@@ -289,7 +289,7 @@ export function KeyDetailFor({
       </div>
     );
   }
-  // Not only while joined: a key kept in SSHelter after leaving the account still has its detail and its exports.
+  // Not only while joined: a key kept in Lunport after leaving the account still has its detail and its exports.
   const slots = overview.data?.key_slots ?? [];
   const slot = selection?.kind === "slot" ? (slots.find((s) => s.id === selection.id) ?? null) : null;
   const file = selection?.kind === "file" ? ((keys.data ?? []).find((k) => k.private_path === selection.path) ?? null) : null;
@@ -328,7 +328,7 @@ export function KeyDetailFor({
         setExporting(s);
         break;
       case "move":
-        delivery.mutate({ slotId: s.id, vault: true }, { onSuccess: () => toast.success(`${name} is now in SSHelter on this computer`) });
+        delivery.mutate({ slotId: s.id, vault: true }, { onSuccess: () => toast.success(`${name} is now in Lunport on this computer`) });
         break;
       case "sync":
       case "syncNew":

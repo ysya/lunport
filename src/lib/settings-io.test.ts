@@ -23,9 +23,9 @@ describe("parseSettingsEnvelope", () => {
   });
 
   it("rejects JSON that is not an object envelope", () => {
-    expect(() => parseSettingsEnvelope("[1,2,3]")).toThrow(/not an SSHelter settings export/);
-    expect(() => parseSettingsEnvelope('"hello"')).toThrow(/not an SSHelter settings export/);
-    expect(() => parseSettingsEnvelope("null")).toThrow(/not an SSHelter settings export/);
+    expect(() => parseSettingsEnvelope("[1,2,3]")).toThrow(/not a Lunport settings export/);
+    expect(() => parseSettingsEnvelope('"hello"')).toThrow(/not a Lunport settings export/);
+    expect(() => parseSettingsEnvelope("null")).toThrow(/not a Lunport settings export/);
   });
 
   it("rejects envelopes without a state object", () => {
@@ -37,7 +37,7 @@ describe("parseSettingsEnvelope", () => {
   it("rejects envelopes from a newer settings schema", () => {
     expect(() =>
       parseSettingsEnvelope(JSON.stringify({ state: {}, version: SETTINGS_VERSION + 1 })),
-    ).toThrow(/newer SSHelter/);
+    ).toThrow(/newer Lunport/);
   });
 
   it("rejects a non-numeric version", () => {

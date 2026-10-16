@@ -52,7 +52,7 @@ pub fn verdict(protection: KeyProtection, settings: &AgentSettings, context_know
     }
 }
 
-/// 記住的核准(只在記憶體;螢幕鎖定、SSHelter 結束時清除)。值是到期時間(ms)。
+/// 記住的核准(只在記憶體;螢幕鎖定、Lunport 結束時清除)。值是到期時間(ms)。
 #[derive(Default)]
 pub struct ApprovalCache {
     entries: HashMap<ApprovalKey, u64>,

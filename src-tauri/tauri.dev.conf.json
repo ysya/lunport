@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "identifier": "org.homelab.sshelter.dev",
-  "productName": "SSHelter Dev",
+  "productName": "Lunport Dev",
   "app": {
     "windows": [
       {
-        "title": "SSHelter Dev",
+        "title": "Lunport Dev",
         "width": 1100,
         "height": 720,
         "minWidth": 800,
@@ -24,6 +24,32 @@
     ]
   },
   "bundle": {
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "wix": {
+        "upgradeCode": "cbb71e88-3302-5c89-a246-87037d1645f3"
+      }
+    },
+    "linux": {
+      "deb": {
+        "provides": [
+          "ss-helter-dev"
+        ],
+        "conflicts": [
+          "ss-helter-dev"
+        ],
+        "replaces": [
+          "ss-helter-dev"
+        ]
+      },
+      "rpm": {
+        "provides": [
+          "ss-helter-dev"
+        ],
+        "obsoletes": [
+          "ss-helter-dev"
+        ]
+      }
+    }
   }
 }

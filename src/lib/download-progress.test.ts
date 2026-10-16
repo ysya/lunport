@@ -170,7 +170,7 @@ describe("what the inline progress panel says", () => {
   it("warns when no data has arrived for a while, also before the first chunk, and says what to do", () => {
     const stalled = progressView("1.0.0", snapshot({ bytesPerSecond: 0, secondsLeft: null, idleMs: 12_400 }));
     expect(stalled.line).toBe("8.5 MB of 48.0 MB · 0 B/s");
-    expect(stalled.warning).toBe("No data for 12 s — the download may have stalled. Restart SSHelter to try again.");
+    expect(stalled.warning).toBe("No data for 12 s — the download may have stalled. Restart Lunport to try again.");
 
     const neverStarted = progressView("1.0.0", snapshot({ phase: "connecting", downloaded: 0, total: null, idleMs: STALL_AFTER_MS }));
     expect(neverStarted.warning).toMatch(/^No data for 10 s — /);

@@ -59,7 +59,7 @@ pub struct PinnedSummary {
     pub pinned_at_ms: u64,
 }
 
-/// A host key for the person to confirm in SSHelter's window (spec §10, §14).
+/// A host key for the person to confirm in Lunport's window (spec §10, §14).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostKeyQuestion {
     pub alias: String,
@@ -67,11 +67,11 @@ pub struct HostKeyQuestion {
     pub port: u16,
     pub algorithm: String,
     pub fingerprint: String,
-    /// `None` for a key SSHelter has not seen; for a changed key, the one that is pinned.
+    /// `None` for a key Lunport has not seen; for a changed key, the one that is pinned.
     pub changed: Option<PinnedSummary>,
 }
 
-/// SSHelter's host key window, for the broker. It blocks until the person decides, the question times out or `cancel` is set, and returns
+/// Lunport's host key window, for the broker. It blocks until the person decides, the question times out or `cancel` is set, and returns
 /// the fingerprint the person trusted (`None`: refused, closed, timed out, cancelled). The broker pins only the key it observed itself,
 /// and only when the fingerprints match.
 pub trait HostKeyConfirmer: Send + Sync {
@@ -268,7 +268,7 @@ impl Connector<'_> {
             }
         }
         let alias = target.hops.last().map(|hop| hop.alias.clone()).unwrap_or_default();
-        Err(ConnectFailure::new(kinds::CONNECT, format!("SSHelter gave up connecting to {alias} after too many attempts.")))
+        Err(ConnectFailure::new(kinds::CONNECT, format!("Lunport gave up connecting to {alias} after too many attempts.")))
     }
 
     /// The pinned key `pinned`, which the key the server presented was compared with, as the question about a changed key shows it: its
@@ -282,7 +282,7 @@ impl Connector<'_> {
         match self.directory.pinned_for(hop).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
             Some(record) if record.key.fingerprint == pinned.fingerprint => Ok(PinnedSummary { fingerprint: pinned.fingerprint.clone(), pinned_at_ms: record.pinned_at_ms }),
             _ => {
-                let sentence = format!("SSHelter's record of {}'s host key changed while it was connecting. Connect again.", hop.alias);
+                let sentence = format!("Lunport's record of {}'s host key changed while it was connecting. Connect again.", hop.alias);
                 Err(failure_at(Some(hop), target, kinds::HOST, sentence))
             }
         }
@@ -303,7 +303,7 @@ impl Connector<'_> {
         pinned: Option<HostKey>,
     ) -> Result<(), ConnectFailure> {
         // The engine found a key that the policy has no pin for, and the directory holds one by now: another connection pinned a key since
-        // this one resolved the host. The window would say that SSHelter has not seen a key it has, and `pin` would turn the person's yes
+        // this one resolved the host. The window would say that Lunport has not seen a key it has, and `pin` would turn the person's yes
         // down. The policy takes that pin and the next round decides: the server shows the pinned key (nothing to ask) or another one (a
         // changed key, with the pin and its date). From then on the policy has a pin for the host, so this happens once for each host.
         if pinned.is_none() {
@@ -319,7 +319,7 @@ impl Connector<'_> {
         // that key; one that presents another still is a server whose key keeps changing, and asking again for each key it shows would
         // only teach clicking through. The sentence is about the server's key and blames nobody.
         if !done.asked_host_key.insert(hop.id.clone()) {
-            let sentence = format!("The host key of {} kept changing while SSHelter was connecting. Connection refused.", hop.alias);
+            let sentence = format!("The host key of {} kept changing while Lunport was connecting. Connection refused.", hop.alias);
             return Err(failure_at(Some(hop), target, kinds::HOST_KEY, sentence));
         }
         // The summary first: when there is none to give, nobody is asked, and nobody is told to wait for a window that stays closed.
@@ -331,7 +331,7 @@ impl Connector<'_> {
         if cancel.is_cancelled() {
             return Err(ConnectFailure::cancelled());
         }
-        owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in SSHelter.", label(&hop.alias)));
+        owner.host_key_notice(&format!("Waiting for you to confirm {}'s host key in Lunport.", label(&hop.alias)));
         let question = HostKeyQuestion {
             alias: hop.alias.clone(),
             hostname: hop.hostname.clone(),
@@ -378,7 +378,7 @@ mod tests {
     use crate::sync::slot_rules::test_keys;
     use crate::sync::testkit::MemKeychain;
 
-    const WAITING: &str = "Waiting for you to confirm web's host key in SSHelter.";
+    const WAITING: &str = "Waiting for you to confirm web's host key in Lunport.";
 
     fn key(line: &str) -> HostKey {
         HostKey::from_openssh_line(line).unwrap()
@@ -593,7 +593,7 @@ mod tests {
         let saved = || FakeDirectory::new().with_host("web", AuthMethod::Password).with_pin("web", old.clone());
         let forgotten = PinMovedOn { inner: saved(), now: None };
         let replaced = PinMovedOn { inner: saved(), now: Some(PinnedKey { key: key(test_keys::ECDSA_PUBLIC), pinned_at_ms: 42 }) };
-        let sentence = "SSHelter's record of web's host key changed while it was connecting. Connect again.";
+        let sentence = "Lunport's record of web's host key changed while it was connecting. Connect again.";
         for (what, directory) in [("forgotten", forgotten), ("replaced", replaced)] {
             let world = world(FakeEngine::new(), FakeDirectory::new()).with_saved_password().deciding(vec![Decision::Trust]);
             assert_eq!(world.connect_through(&directory, &web(), &world.owner).err(), Some(failure(kinds::HOST, sentence)), "{what}");
@@ -632,7 +632,7 @@ mod tests {
     }
 
     /// The engine finds a key it has no pin for, but the directory has one by now (another connection pinned it while this one was
-    /// connecting). The window must not say that SSHelter has not seen the key before: the broker connects again with that pin in the
+    /// connecting). The window must not say that Lunport has not seen the key before: the broker connects again with that pin in the
     /// policy. If the server shows the pinned key, nothing is asked; if it shows another one, the person is asked about a changed key,
     /// with the pin and its date, and accepting it replaces that pin (a pin of the unknown-key question would be refused).
     #[test]
@@ -726,18 +726,18 @@ mod tests {
         let changed = world(FakeEngine::new(), chain().with_pin("bastion", key(test_keys::ENC_PUBLIC))).deciding(vec![Decision::Refuse]);
         assert_eq!(changed.connect(&db).err(), through(kinds::HOST_KEY, "The host key of bastion changed. Connection refused."));
 
-        let unwritable = PinsCannotBeWritten { inner: chain(), reason: "SSHelter cannot write its pinned host keys in host-pins.json." };
+        let unwritable = PinsCannotBeWritten { inner: chain(), reason: "Lunport cannot write its pinned host keys in host-pins.json." };
         let trusting = world(FakeEngine::new(), FakeDirectory::new()).deciding(vec![Decision::Trust]);
         assert_eq!(
             trusting.connect_through(&unwritable, &db, &trusting.owner).err(),
-            through(kinds::HOST_KEY, "SSHelter cannot write its pinned host keys in host-pins.json.")
+            through(kinds::HOST_KEY, "Lunport cannot write its pinned host keys in host-pins.json.")
         );
 
         let forgotten = PinMovedOn { inner: chain().with_pin("bastion", key(test_keys::ENC_PUBLIC)), now: None };
         let trusting = world(FakeEngine::new(), FakeDirectory::new()).deciding(vec![Decision::Trust]);
         assert_eq!(
             trusting.connect_through(&forgotten, &db, &trusting.owner).err(),
-            through(kinds::HOST, "SSHelter's record of bastion's host key changed while it was connecting. Connect again.")
+            through(kinds::HOST, "Lunport's record of bastion's host key changed while it was connecting. Connect again.")
         );
         assert!(trusting.confirmer.asked().is_empty());
 
@@ -747,7 +747,7 @@ mod tests {
             let trusting = world(FakeEngine::new(), FakeDirectory::new()).deciding(vec![Decision::Trust]);
             assert_eq!(
                 trusting.connect_through(&unreadable, &db, &trusting.owner).err(),
-                through(kinds::HOST, "SSHelter cannot read its pinned host keys in host-pins.json (the file is damaged)."),
+                through(kinds::HOST, "Lunport cannot read its pinned host keys in host-pins.json (the file is damaged)."),
                 "{what}"
             );
             assert!(trusting.confirmer.asked().is_empty(), "{what}");
@@ -782,7 +782,7 @@ mod tests {
             let web = directory.resolve(&web()).unwrap().hops.remove(0).reference();
             FakeEngine::new().failing_with(ConnectError::NoCommonHostKeyAlgorithm { hop: web, ours: vec!["ssh-ed25519".into()], theirs: vec!["ssh-dss".into()] })
         };
-        let sentence = failure(kinds::CONNECT, "Could not agree on a host key algorithm with web: the server offers ssh-dss, SSHelter accepts ssh-ed25519.");
+        let sentence = failure(kinds::CONNECT, "Could not agree on a host key algorithm with web: the server offers ssh-dss, Lunport accepts ssh-ed25519.");
 
         let pinned = saved().with_pin("web", default_server_key());
         let pinned = world(none_in_common(&pinned), pinned);
@@ -1109,7 +1109,7 @@ mod tests {
         let no_common = world(FakeEngine::new().failing_with(offered), directory());
         assert_eq!(
             no_common.connect(&db).err(),
-            Some(failure(kinds::CONNECT, "Could not agree on a host key algorithm with db: the server offers ssh-dss?[31m, evil\nline, SSHelter accepts ssh-ed25519."))
+            Some(failure(kinds::CONNECT, "Could not agree on a host key algorithm with db: the server offers ssh-dss?[31m, evil\nline, Lunport accepts ssh-ed25519."))
         );
     }
 
@@ -1156,10 +1156,10 @@ mod tests {
         before.connect(&query).expect("the password is right");
         assert_eq!(before.owner.questions(), [asks]);
 
-        // The notice that the host key waits in SSHelter's window.
+        // The notice that the host key waits in Lunport's window.
         let noticed = world(FakeEngine::new(), hostile(AuthMethod::Key { key_id: "k-plain".into() })).deciding(vec![Decision::Trust]);
         noticed.connect(&query).expect("connects once the key is trusted");
-        assert_eq!(*locked(&noticed.owner.notices), ["Waiting for you to confirm we?[2Jb's host key in SSHelter."]);
+        assert_eq!(*locked(&noticed.owner.notices), ["Waiting for you to confirm we?[2Jb's host key in Lunport."]);
     }
 
     /// A first contact with a password-first host connects twice (the key is unknown the first time); the person types the password once.
@@ -1308,7 +1308,7 @@ mod tests {
         let keys = || vec![key(test_keys::PLAIN_PUBLIC), key(test_keys::ENC_PUBLIC), key(test_keys::ECDSA_PUBLIC), key(test_keys::RSA_PUBLIC)];
         let server = || KeysInTurn { keys: keys(), connects: AtomicUsize::new(0) };
         let refused = |text: &str| Some(failure(kinds::HOST_KEY, text));
-        let kept_changing = "The host key of web kept changing while SSHelter was connecting. Connection refused.";
+        let kept_changing = "The host key of web kept changing while Lunport was connecting. Connection refused.";
         let connect = |world: &World, server: &KeysInTurn, query: &str| {
             let connector = Connector { engine: server, directory: &world.directory, keys: &world.keys, keychain: &world.keychain, confirmer: &world.confirmer };
             connector.connect(&HostQuery::Alias(query.into()), &world.owner, &world.cancel).err()
@@ -1328,7 +1328,7 @@ mod tests {
 
         let chain = FakeDirectory::new().with_host("bastion", AuthMethod::Password).with_host_via("db", AuthMethod::Password, &["bastion"]);
         let through = world(FakeEngine::new(), chain).deciding(vec![Decision::Trust; 4]);
-        let sentence = "Could not connect through bastion: The host key of bastion kept changing while SSHelter was connecting. Connection refused.";
+        let sentence = "Could not connect through bastion: The host key of bastion kept changing while Lunport was connecting. Connection refused.";
         assert_eq!(connect(&through, &server(), "db"), refused(sentence));
         assert_eq!(through.confirmer.asked().len(), 1);
     }
@@ -1355,7 +1355,7 @@ mod tests {
         };
         // The first round stops at the host key, which the person confirms; the second gets through.
         let short = new();
-        assert_eq!(within(&short, |_| 1).err(), Some(failure(kinds::CONNECT, "SSHelter gave up connecting to web after too many attempts.")));
+        assert_eq!(within(&short, |_| 1).err(), Some(failure(kinds::CONNECT, "Lunport gave up connecting to web after too many attempts.")));
         assert_eq!(short.engine.attempts(), 1);
         let enough = new();
         within(&enough, |_| 2).expect("two rounds are enough");

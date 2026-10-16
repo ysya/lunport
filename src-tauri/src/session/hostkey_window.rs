@@ -1,4 +1,4 @@
-//! SSHelter's host key window (own-ssh spec §10, §14, decision 6): the broker's `HostKeyConfirmer`. A host key is confirmed only here,
+//! Lunport's host key window (own-ssh spec §10, §14, decision 6): the broker's `HostKeyConfirmer`. A host key is confirmed only here,
 //! never in a terminal: the broker's session thread asks (`HostKeyHub::ask` blocks it), a small always-on-top window labelled `hostkey`
 //! shows the oldest question, and the person's answer comes back through `hostkey_resolve`. Closing the window refuses every waiting
 //! question (`deny_all`, from lib.rs). The window and its hub are modelled on the SSH agent's approval window (`agent/prompt.rs`), copied
@@ -191,7 +191,7 @@ fn note_head(shown: &mut Option<String>, pending: &[HostKeyRequest]) -> bool {
     new_head
 }
 
-/// The app's surface: a small window that stays on top, shown even while SSHelter sits in the tray; destroyed when nothing is pending
+/// The app's surface: a small window that stays on top, shown even while Lunport sits in the tray; destroyed when nothing is pending
 /// (`destroy` does not go through `CloseRequested`, so it is not taken for the person closing it).
 pub struct TauriHostKeySurface {
     pub app: tauri::AppHandle,
@@ -235,7 +235,7 @@ pub(crate) fn present(app: &tauri::AppHandle) {
     let (window, built) = match app.get_webview_window(HOSTKEY_WINDOW) {
         Some(window) => (Some(window), false),
         None => match WebviewWindowBuilder::new(app, HOSTKEY_WINDOW, WebviewUrl::App("index.html".into()))
-            .title("SSHelter")
+            .title("Lunport")
             .inner_size(480.0, 320.0)
             .resizable(false)
             .always_on_top(true)

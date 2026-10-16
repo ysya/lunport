@@ -45,9 +45,9 @@ const NEXT_CODE_GONE_BEFORE_FREEZE_MESSAGE: &str =
 /// 每一輪都重讀 keychain,所以這句話不叫使用者重啟。
 pub(crate) const NEXT_CODE_GONE_AFTER_FREEZE_MESSAGE: &str =
     "the new sync code is missing from the keychain, so this sync code change can never finish and the old sync account can no longer be joined — leave the sync account on this computer, then create a new sync account on one computer; the other computers leave the old account and join the new one";
-/// 狀態已經換成新帳戶,keychain 卻還沒收下新碼(上鎖或被拒):新碼暫存在 `sync:mnemonic-next`,SSHelter 沿用它、之後再試(狀態列說明)。
+/// 狀態已經換成新帳戶,keychain 卻還沒收下新碼(上鎖或被拒):新碼暫存在 `sync:mnemonic-next`,Lunport 沿用它、之後再試(狀態列說明)。
 pub const SWAP_PENDING_MESSAGE: &str =
-    "the keychain did not accept the new sync code yet; SSHelter keeps the new code and retries, and syncing continues meanwhile";
+    "the keychain did not accept the new sync code yet; Lunport keeps the new code and retries, and syncing continues meanwhile";
 /// 其他電腦重新加入時,這台勾選的 space 沒有任何一個被輸入的同步碼的帳戶接續。原因不只一種(別的帳戶的碼、同步碼之後又換過、或這台勾選的都是新帳戶沒有
 /// 接續的 space —— 例如只剩一個從沒送出去的本機 space),所以不指責這組碼,只說實情與出路:它若是最新的碼,離開(檔案留成本機檔案)再用它加入。
 pub const NOT_A_SUCCESSOR_MESSAGE: &str =
@@ -55,7 +55,7 @@ pub const NOT_A_SUCCESSOR_MESSAGE: &str =
 /// 上一次的換碼還沒換進 keychain 時不能再開始一次更換:暫存的碼就是這個帳戶現在的碼,再暫存另一組新碼會蓋掉它。這句話在每一種會顯示的情形都
 /// 要是真的:換碼寫不進 keychain 時每一輪都再試,但第 7 步連狀態檔都存不下來時(`swap_pending` 沒設)要等下次啟動 —— 所以只承諾最晚下次啟動。
 pub const SWAP_PENDING_BLOCKS_MESSAGE: &str =
-    "the new sync code is not saved to the keychain yet; SSHelter finishes that by itself, at the latest the next time it starts — change the sync code again after that";
+    "the new sync code is not saved to the keychain yet; Lunport finishes that by itself, at the latest the next time it starts — change the sync code again after that";
 /// 建立 chain 被限流(每 IP 每小時 20 次)時暫停多久再接續(spec §6.6、§7.5)。
 const CREATE_PAUSE_MS: u64 = 60 * 60 * 1000;
 
@@ -267,13 +267,13 @@ pub(crate) fn read_new_code(keychain: &dyn Keychain, rotation: &RotationProgress
     }
 }
 
-/// 新同步碼:`read_new_code` 讀得到的那一組。讀不到時的說明是實情:每一輪都會重讀 keychain(上鎖就解鎖,SSHelter 自己會再試),不叫使用者重啟;
+/// 新同步碼:`read_new_code` 讀得到的那一組。讀不到時的說明是實情:每一輪都會重讀 keychain(上鎖就解鎖,Lunport 自己會再試),不叫使用者重啟;
 /// 找不回來的說明依能不能取消而不同(第 3 步之前取消再來,凍結之後只能離開)。
 fn new_words(env: &SyncEnv, rotation: &RotationProgress) -> Result<(String, ChainKeys), StepError> {
     let message = match read_new_code(env.keychain, rotation) {
         NewCode::Ready(words, keys) => return Ok((words, keys)),
         NewCode::Unreadable(e) => {
-            format!("could not read the new sync code from the keychain ({e}); unlock the keychain — SSHelter tries again on every sync")
+            format!("could not read the new sync code from the keychain ({e}); unlock the keychain — Lunport tries again on every sync")
         }
         NewCode::Gone if rotation.cancellable() => NEXT_CODE_GONE_BEFORE_FREEZE_MESSAGE.to_string(),
         NewCode::Gone => NEXT_CODE_GONE_AFTER_FREEZE_MESSAGE.to_string(),
@@ -837,7 +837,7 @@ fn switch(env: &SyncEnv, s: &SyncStateV2, keys: &ChainKeys, rotation: &RotationP
         // 檔案改不成本機檔案、什麼都還沒換:這一步由背景執行緒自己重試,但不要以一般的間隔一直重試;說明不能叫使用者再試一次。
         Err(InstallError::Kept(e)) => {
             count_failed_round(env);
-            return Err(kept_error(&e, "SSHelter retries the sync code change by itself").into());
+            return Err(kept_error(&e, "Lunport retries the sync code change by itself").into());
         }
         // 換帳戶之前就失敗了(或換了卻存不了檔):同樣退避。
         Err(InstallError::Other(e)) => {
@@ -932,7 +932,7 @@ pub fn retry_pending_swap(env: &SyncEnv) {
 /// → 依 `previous_id` 保留勾選、檔名、待核准項目;本機尚未上傳的 dirty 記錄沿用原時間戳帶進新 space(第一輪是一般
 /// LWW 合併,不是基線輪),所以被凍結擋下的修改不會遺失。
 pub fn rejoin_account(env: &SyncEnv, words: &str) -> Result<(), AppError> {
-    // 同 `create_account` / `join_account` / `leave_account`:沒有同步鎖的行程(別的 SSHelter 行程在跑引擎)、或狀態檔讀不到的 session 不寫狀態 ——
+    // 同 `create_account` / `join_account` / `leave_account`:沒有同步鎖的行程(別的 Lunport 行程在跑引擎)、或狀態檔讀不到的 session 不寫狀態 ——
     // 也不該先暫存新碼到共用的 keychain、搬動 `~/.ssh` 的檔案、改寫主 config,最後才在存檔時失敗。
     saves_allowed(env)?;
     let words = crypto::normalize_mnemonic(words)?;
@@ -1582,12 +1582,12 @@ mod tests {
         assert_eq!(step(&a), Some(RotationStep::LocalChangesSent));
         assert!(!relay.is_frozen(&old_account));
         assert_eq!(a.state().last_error.as_deref(), Some(NEXT_CODE_GONE_BEFORE_FREEZE_MESSAGE));
-        // keychain 讀不到(上鎖)和「碼不見了」是兩回事:說明叫使用者解鎖,SSHelter 每一輪自己再試 —— 不叫它重啟。
+        // keychain 讀不到(上鎖)和「碼不見了」是兩回事:說明叫使用者解鎖,Lunport 每一輪自己再試 —— 不叫它重啟。
         a.keychain.fail_reads.store(true, Ordering::SeqCst);
         tick(&a);
         let unreadable = a.state().last_error.unwrap();
         assert!(unreadable.starts_with("could not read the new sync code from the keychain ("), "{unreadable}");
-        assert!(unreadable.ends_with("unlock the keychain — SSHelter tries again on every sync") && !unreadable.contains("restart"), "{unreadable}");
+        assert!(unreadable.ends_with("unlock the keychain — Lunport tries again on every sync") && !unreadable.contains("restart"), "{unreadable}");
         assert_eq!(step(&a), Some(RotationStep::LocalChangesSent));
         a.keychain.fail_reads.store(false, Ordering::SeqCst);
         // 碼回來了,就照常往下走。
@@ -1974,7 +1974,7 @@ mod tests {
         // 這一步是背景執行緒自己重試:說明不能叫使用者再試一次;退避一輪。
         let message = a.state().last_error.unwrap();
         assert!(message.starts_with("could not keep this device's synced files as local files"), "{message}");
-        assert!(message.ends_with("SSHelter retries the sync code change by itself") && !message.contains("try again"), "{message}");
+        assert!(message.ends_with("Lunport retries the sync code change by itself") && !message.contains("try again"), "{message}");
         assert_eq!(a.runtime.core.lock().unwrap().failed_rounds, 1, "a failed switch backs off");
         // 擋路的東西移開:下一次就成功。
         std::fs::remove_file(&blocker).unwrap();
@@ -2183,7 +2183,7 @@ mod tests {
         finish(&a);
         settle(&b);
         assert!(b.state().frozen().is_some());
-        // 另一個 SSHelter 行程持有同步鎖(`engine::initialize`):這個行程不寫狀態(`save_blocked`)、沒有帳戶金鑰、也不該動共用的 keychain 與 `~/.ssh`。
+        // 另一個 Lunport 行程持有同步鎖(`engine::initialize`):這個行程不寫狀態(`save_blocked`)、沒有帳戶金鑰、也不該動共用的 keychain 與 `~/.ssh`。
         {
             let mut core = b.runtime.core.lock().unwrap();
             core.save_blocked = Some(ANOTHER_ENGINE_MESSAGE.to_string());

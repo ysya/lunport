@@ -100,7 +100,7 @@ pub fn refuse_wildcard(doc: &SshConfigDoc, alias: &str) -> Result<(), AppError> 
 
 /// 區塊含 synced hosts 不能用的內容:不能搬進 space(spec §7.2、§7.4)—— 搬進去那個 space 就違反不變式而暫停。
 /// `hosts_file::forbidden_directive` 擋的每一種都算:`Include`、帶引號的 keyword、以 `=` 開頭的行、HostName / User /
-/// HostKeyAlias / ProxyJump 的值有 ssh 會交給 shell 的字元、不可見字元、OpenSSH 讀法與 SSHelter 不同的 Host / Match 行。
+/// HostKeyAlias / ProxyJump 的值有 ssh 會交給 shell 的字元、不可見字元、OpenSSH 讀法與 Lunport 不同的 Host / Match 行。
 pub fn refuse_forbidden(doc: &SshConfigDoc, alias: &str) -> Result<(), AppError> {
     match block_to_move(doc, alias).and_then(|block| forbidden_directive(std::slice::from_ref(block))) {
         Some(f) => Err(AppError::Other(format!(
@@ -598,7 +598,7 @@ pub fn move_into_new_spaces(env: &SyncEnv, active: bool, groups: Vec<NewSpaceGro
 
 /// 搬移精靈列出的、不能搬進 space 的本機主機與原因(spec §7.2、§8):不在任何勾選 space 檔裡、所有 pattern 都具名,
 /// 卻含 synced hosts 不能用的內容的區塊 —— `hosts_file::forbidden_directive` 擋的每一種:`Include`、帶引號的 keyword、以 `=`
-/// 開頭的行、HostName / User / HostKeyAlias / ProxyJump 的值有 ssh 會交給 shell 的字元、不可見字元、OpenSSH 讀法與 SSHelter
+/// 開頭的行、HostName / User / HostKeyAlias / ProxyJump 的值有 ssh 會交給 shell 的字元、不可見字元、OpenSSH 讀法與 Lunport
 /// 不同的 Host / Match 行。同一個 alias 定義在好幾個檔案時,只判斷搬移會拿的那一份(`block_to_move`:doc 裡第一個定義它的檔案),
 /// 清單才和實際搬移一致。
 pub fn unmovable_hosts(env: &SyncEnv) -> Result<Vec<MigrationFailure>, AppError> {
@@ -1388,8 +1388,8 @@ mod tests {
         let id = "3fa2c1d9".repeat(8);
         let runtime = runtime_with(&id, false);
         assert_eq!(refuse_while_sync_inactive(false, &runtime).unwrap_err().to_string(), ANOTHER_ENGINE_MESSAGE);
-        runtime.core.lock().unwrap().save_blocked = Some("sync is off in this SSHelter process: boom".into());
-        assert_eq!(refuse_while_sync_inactive(false, &runtime).unwrap_err().to_string(), "sync is off in this SSHelter process: boom");
+        runtime.core.lock().unwrap().save_blocked = Some("sync is off in this Lunport process: boom".into());
+        assert_eq!(refuse_while_sync_inactive(false, &runtime).unwrap_err().to_string(), "sync is off in this Lunport process: boom");
         assert!(refuse_while_sync_inactive(true, &runtime).is_ok());
         assert_eq!(refuse_before_first_sync(&runtime, &id).unwrap_err().to_string(), WAIT_FOR_FIRST_SYNC);
         assert!(refuse_before_first_sync(&runtime_with(&id, true), &id).is_ok());

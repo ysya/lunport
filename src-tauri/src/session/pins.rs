@@ -2,7 +2,7 @@
 //! `host-pins.json`, keyed by host id. A host id stands for exactly one server, one hostname and one port (see `HostDirectory`): the pin
 //! of an id is the one key that server may present. The store cannot tell two endpoints under one id apart, so the directory that owns
 //! it must never hand out one id for two. Plan 1c moves the pins into the host records (`host_key`, spec §5.1) and deletes this file's
-//! code. SSHelter's own client never reads or writes `~/.ssh/known_hosts` (spec §1, non-goals).
+//! code. Lunport's own client never reads or writes `~/.ssh/known_hosts` (spec §1, non-goals).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -76,10 +76,10 @@ impl PinStore {
     }
 
     fn unreadable(&self, why: impl std::fmt::Display) -> String {
-        format!("SSHelter cannot read its pinned host keys in {} ({why}).", self.path.display())
+        format!("Lunport cannot read its pinned host keys in {} ({why}).", self.path.display())
     }
 
-    /// The whole file; a missing file is an empty one. The format version is read before anything else: a newer SSHelter may have changed
+    /// The whole file; a missing file is an empty one. The format version is read before anything else: a newer Lunport may have changed
     /// the structure, and its file is then in another format, not damaged.
     fn read(&self) -> Result<PinFile, String> {
         let bytes = match std::fs::read(&self.path) {
@@ -91,15 +91,15 @@ impl PinStore {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| damaged())?;
         match value.get("version").and_then(serde_json::Value::as_u64) {
             Some(version) if version == u64::from(FILE_VERSION) => {}
-            Some(version) => return Err(self.unreadable(format!("it is in format {version}, which this version of SSHelter does not know"))),
+            Some(version) => return Err(self.unreadable(format!("it is in format {version}, which this version of Lunport does not know"))),
             None => return Err(damaged()),
         }
         serde_json::from_value(value).map_err(|_| damaged())
     }
 
     fn write(&self, file: &PinFile) -> Result<(), String> {
-        let bytes = serde_json::to_vec_pretty(file).map_err(|error| format!("SSHelter cannot save the pinned host key: {error}"))?;
-        crate::fsutil::atomic_write(&self.path, &bytes, 0o600).map_err(|error| format!("SSHelter cannot save the pinned host key in {}: {error}", self.path.display()))
+        let bytes = serde_json::to_vec_pretty(file).map_err(|error| format!("Lunport cannot save the pinned host key: {error}"))?;
+        crate::fsutil::atomic_write(&self.path, &bytes, 0o600).map_err(|error| format!("Lunport cannot save the pinned host key in {}: {error}", self.path.display()))
     }
 
     /// The key pinned for `host`. An unreadable file is an error, never "nothing pinned".

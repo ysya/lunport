@@ -1,4 +1,4 @@
-//! Starting SSHelter in the background for a client that needs it and finds it not running (own-ssh spec §4): the MCP adapter, and
+//! Starting Lunport in the background for a client that needs it and finds it not running (own-ssh spec §4): the MCP adapter, and
 //! `sshelter connect` from plan 1b on. Both start the same thing, the app as a host (`--host`, its window hidden), under the same two
 //! locks, so that they never start two. Moved here from `mcp.rs` unchanged, but for four things: the message for "nothing answered" is
 //! the caller's (spec §11 gives the CLI its own); the flag is `--host`, with the old `--mcp-host` still accepted (an update's
@@ -15,26 +15,26 @@ use std::time::{Duration, Instant};
 use crate::error::AppError;
 use crate::fsutil;
 
-/// First argument that starts SSHelter as the host of its clients (main.rs): the desktop app, in the background.
+/// First argument that starts Lunport as the host of its clients (main.rs): the desktop app, in the background.
 pub const HOST_FLAG: &str = "--host";
 /// The host flag before plan 1b. Still accepted, for the restart of an app that was started with it.
 pub const LEGACY_HOST_FLAG: &str = "--mcp-host";
 
-/// Whether `arg`, the first argument (main.rs reads the mode from it), starts SSHelter as a host.
+/// Whether `arg`, the first argument (main.rs reads the mode from it), starts Lunport as a host.
 pub fn is_host_flag(arg: &str) -> bool {
     arg == HOST_FLAG || arg == LEGACY_HOST_FLAG
 }
 
-/// How long a client waits for the SSHelter it started, and how often it looks.
+/// How long a client waits for the Lunport it started, and how often it looks.
 pub(crate) const START_WAIT: Duration = Duration::from_secs(12);
 const START_POLL: Duration = Duration::from_millis(120);
 
-/// Serializes starting SSHelter between this process's calls, which can run in parallel (the MCP adapter's tool calls).
+/// Serializes starting Lunport between this process's calls, which can run in parallel (the MCP adapter's tool calls).
 static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 /// What a call got when it asked for the spawn locks.
 pub(crate) enum SpawnLocks<G> {
-    /// Start SSHelter while holding `G`.
+    /// Start Lunport while holding `G`.
     Held(G),
     /// Another client kept `mcp-spawn.lock` past the deadline: it may be stopped in the middle
     /// of a start (its AI CLI or its terminal suspended, for example).
@@ -44,8 +44,8 @@ pub(crate) enum SpawnLocks<G> {
 }
 
 /// Return what `answering` finds (a bridge, a socket) once it answers. If nothing does, take the
-/// spawn locks and look again: a parallel call or another client may have started SSHelter
-/// meanwhile. Only if still nothing answers, start SSHelter once and wait for it. Several
+/// spawn locks and look again: a parallel call or another client may have started Lunport
+/// meanwhile. Only if still nothing answers, start Lunport once and wait for it. Several
 /// near-simultaneous starts could each claim the single instance before the others see it
 /// (macOS), and leave two SSHelters running; so when another client keeps the locks too long,
 /// look once more instead of starting a second one. `no_answer` is the error when nothing
@@ -108,13 +108,13 @@ fn take_spawn_locks_at(
         FileLock::Busy => SpawnLocks::Busy,
         FileLock::Denied(reason) => SpawnLocks::Denied(reason),
         FileLock::Unavailable(reason) => {
-            eprintln!("[host] starting SSHelter without mcp-spawn.lock: {reason}");
+            eprintln!("[host] starting Lunport without mcp-spawn.lock: {reason}");
             SpawnLocks::Held((calls, None))
         }
     }
 }
 
-/// The lock file keeps the name it had when only the MCP adapter started SSHelter: a 0.17 adapter
+/// The lock file keeps the name it had when only the MCP adapter started Lunport: a 0.17 adapter
 /// and a newer client on the same computer still take the same lock.
 fn spawn_lock_path() -> Result<PathBuf, AppError> {
     Ok(crate::fsutil::app_data_root()?.join("mcp-spawn.lock"))
@@ -163,13 +163,13 @@ fn lock_file_until(path: &Path, deadline: Instant) -> FileLock {
     }
 }
 
-/// Start SSHelter in the background, or, when it already runs, hand over to it (single
-/// instance): the running SSHelter rewrites the MCP runtime file and starts the broker's socket
+/// Start Lunport in the background, or, when it already runs, hand over to it (single
+/// instance): the running Lunport rewrites the MCP runtime file and starts the broker's socket
 /// again if it is not listening (lib.rs `on_second_launch`).
 pub(crate) fn start_host() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("cannot locate SSHelter: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate Lunport: {e}"))?;
     let mut host = crate::process::spawn(&mut host_command(&exe))
-        .map_err(|e| format!("cannot start SSHelter desktop: {e}"))?;
+        .map_err(|e| format!("cannot start Lunport desktop: {e}"))?;
     // A launch that hands over exits at once: reap it instead of leaving a zombie behind.
     let _ = thread::Builder::new()
         .name("sshelter-host-wait".to_string())
@@ -179,7 +179,7 @@ pub(crate) fn start_host() -> Result<(), String> {
     Ok(())
 }
 
-/// `--host` decides the hand-over and keeps SSHelter running when its window closes;
+/// `--host` decides the hand-over and keeps Lunport running when its window closes;
 /// `SSHELTER_START_HIDDEN=1` keeps the window hidden at this start only (lib.rs `starts_hidden`).
 fn host_command(exe: &Path) -> Command {
     let mut command = Command::new(exe);
@@ -195,7 +195,7 @@ fn host_command(exe: &Path) -> Command {
 
 /// Start the host outside the client's process group: an AI tool that ends its session by killing
 /// its MCP server's process group, or a terminal tab that is closed with `sshelter connect` in it,
-/// must not take SSHelter down with it.
+/// must not take Lunport down with it.
 fn detach_from_client(command: &mut Command) {
     #[cfg(unix)]
     {
@@ -232,12 +232,12 @@ mod tests {
 
     #[test]
     fn a_call_that_finds_a_bridge_once_it_holds_the_locks_starts_nothing() {
-        // Another call or adapter started SSHelter while this one waited for the locks.
+        // Another call or adapter started Lunport while this one waited for the locks.
         let mut answers = [None, Some("bridge")].into_iter();
         let found = ensure_started(
             || answers.next().flatten(),
             || SpawnLocks::Held(()),
-            || panic!("SSHelter already answers: starting it again could run two"),
+            || panic!("Lunport already answers: starting it again could run two"),
             Duration::ZERO,
             NO_ANSWER,
         );

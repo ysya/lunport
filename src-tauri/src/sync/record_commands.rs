@@ -758,7 +758,7 @@ pub async fn records_host_verify_key(
             .unwrap()
             .clone()
             .ok_or_else(|| {
-                AppError::Other("The SSH broker is unavailable. Restart SSHelter and retry.".into())
+                AppError::Other("The SSH broker is unavailable. Restart Lunport and retry.".into())
             })?;
         let cancel = crate::session::connect::CancelToken::default();
         let _active = broker.register_deployment(cancel.clone()).map_err(error)?;

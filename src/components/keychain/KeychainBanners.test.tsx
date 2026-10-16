@@ -16,10 +16,10 @@ import { buttonTag, buttonsIn, DISABLED, text, textIn } from "./test-markup";
 describe("the agent's problem", () => {
   it("shows why the agent can't be reached, with Fix for a removed Include", () => {
     const missing = renderToStaticMarkup(<AgentProblemLine problem={{ kind: "include_missing" }} busy={false} onFix={() => {}} />);
-    expect(text(missing)).toContain("Hosts that use keys in SSHelter can't reach its agent.");
+    expect(text(missing)).toContain("Hosts that use keys in Lunport can't reach its agent.");
     expect(missing).toContain(">Fix<");
     const failed = renderToStaticMarkup(<AgentProblemLine problem={{ kind: "not_running", reason: "path too long" }} busy={false} onFix={() => {}} />);
-    expect(text(failed)).toContain("SSHelter's agent isn't running: path too long");
+    expect(text(failed)).toContain("Lunport's agent isn't running: path too long");
     expect(failed).not.toContain(">Fix<");
   });
 
@@ -71,9 +71,9 @@ describe("the banners above the Keychain's list", () => {
     const t = text(banners({ problem: { kind: "include_missing" }, movable: 2, launchHint: true, gitHint: GIT }));
     const order = [
       "can't reach its agent",
-      "2 keys can move into SSHelter",
-      "Keys in SSHelter work only while SSHelter is running.",
-      "Git for Windows uses its own ssh, which can't reach SSHelter's agent. Run this once:",
+      "2 keys can move into Lunport",
+      "Keys in Lunport work only while Lunport is running.",
+      "Git for Windows uses its own ssh, which can't reach Lunport's agent. Run this once:",
     ].map((part) => t.indexOf(part));
     expect(order.every((at) => at >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
@@ -125,27 +125,27 @@ describe("this computer's banners", () => {
     );
   };
 
-  it("show the agent's problem only while a key is in SSHelter", () => {
+  it("show the agent's problem only while a key is in Lunport", () => {
     expect(render([keySlot({ in_vault: true })])).toContain("can't reach its agent");
     expect(render([keySlot()])).not.toContain("can't reach its agent");
   });
 
   it("count the keys that are files for now", () => {
     expect(render([keySlot({ file_for_now: true }), keySlot({ id: "b".repeat(32), file_for_now: true })])).toContain(
-      "2 keys can move into SSHelter",
+      "2 keys can move into Lunport",
     );
   });
 
-  it("stay without a sync account: the keys this computer keeps in SSHelter still need the agent, launch at login and Move", () => {
+  it("stay without a sync account: the keys this computer keeps in Lunport still need the agent, launch at login and Move", () => {
     const t = render([keySlot({ in_account: false, in_vault: true })], { joined: false, launchAtLogin: false });
     expect(t).toContain("can't reach its agent");
-    expect(t).toContain("Keys in SSHelter work only while SSHelter is running.");
-    expect(render([keySlot({ in_account: false, file_for_now: true })], { joined: false })).toContain("1 key can move into SSHelter");
+    expect(t).toContain("Keys in Lunport work only while Lunport is running.");
+    expect(render([keySlot({ in_account: false, file_for_now: true })], { joined: false })).toContain("1 key can move into Lunport");
   });
 
-  it("suggest launch at login until it is on, SSHelter keeps running in the menu bar, or the hint is dismissed", () => {
+  it("suggest launch at login until it is on, Lunport keeps running in the menu bar, or the hint is dismissed", () => {
     const vault = [keySlot({ in_vault: true })];
-    expect(render(vault, { launchAtLogin: false })).toContain("Keys in SSHelter work only while SSHelter is running.");
+    expect(render(vault, { launchAtLogin: false })).toContain("Keys in Lunport work only while Lunport is running.");
     expect(render(vault, { launchAtLogin: true })).not.toContain("work only while");
     expect(render(vault, { launchAtLogin: false, closeToTray: true })).not.toContain("work only while");
     expect(render(vault, { launchAtLogin: false, dismissed: true })).not.toContain("work only while");

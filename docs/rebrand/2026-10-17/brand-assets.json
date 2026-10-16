@@ -1,0 +1,127 @@
+{
+  "sourceCommit": "f634a55efefb2587d29a62b90b4dd306084316d0",
+  "selectedDirection": "A / Folded L",
+  "geometry": "src/brand/lunport-mark.json",
+  "generator": "scripts/generate-brand-icons.mjs",
+  "tauriCliVersion": "2.11.2",
+  "nativeAboutVerified": true,
+  "files": [
+    {
+      "file": "src-tauri/icons/128x128.png",
+      "sha256": "efc6e1d7251f75fdd716aeed9047a07b70239375be57ba8013393e6ed539b438",
+      "width": 128,
+      "height": 128,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/128x128@2x.png",
+      "sha256": "b2b12b7684e821fc232a6060e2c34f299e021107cea11dc746e134dd287cc4ad",
+      "width": 256,
+      "height": 256,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/32x32.png",
+      "sha256": "87ad981e7c8b39bda3eee0d465f586d53ec7a940319b05062d8bab88f59e1d92",
+      "width": 32,
+      "height": 32,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square107x107Logo.png",
+      "sha256": "50cf1cc6a9f1d2b739b1437d5e6dc159ebdce62f2f4dd0a846b3a569e076f6ed",
+      "width": 107,
+      "height": 107,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square142x142Logo.png",
+      "sha256": "a15b1e09d48cf94181e1a2dac1c3f60f0a93953de93aea85964fc277f7b61f01",
+      "width": 142,
+      "height": 142,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square150x150Logo.png",
+      "sha256": "ce2016545dbc7500a462d16d4529691660805113bd8939461e442d0487403b10",
+      "width": 150,
+      "height": 150,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square284x284Logo.png",
+      "sha256": "a9508be39328b9c361e16c5d7fb21204df7ed2efa2c02394301fdf10dec42a6d",
+      "width": 284,
+      "height": 284,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square30x30Logo.png",
+      "sha256": "c7bfebc76433e125e42efc6b1422e52c009b28c21645dd10e42d4141681881f4",
+      "width": 30,
+      "height": 30,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square310x310Logo.png",
+      "sha256": "13350e64e57555199429766ed89e8228d55db901687ef4f9cc174e3ab1c2cfd4",
+      "width": 310,
+      "height": 310,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square44x44Logo.png",
+      "sha256": "c732892ddbeb9dbaf0a2fb84f6f3221aac8d867059f25f2a46741386be155983",
+      "width": 44,
+      "height": 44,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square71x71Logo.png",
+      "sha256": "eb2e8ec963f8c2be09ca80b8cf13687e98cf00ceef4b19b34aa168cf5eab3df3",
+      "width": 71,
+      "height": 71,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/Square89x89Logo.png",
+      "sha256": "3edceab112762d4907a99b44dea509b42ec93fc6d0ec2f44752c9f6290d3c1b9",
+      "width": 89,
+      "height": 89,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/StoreLogo.png",
+      "sha256": "ca4761818392aeee875c8e8f6c955833e821f5c214ff20db52af64d75825c7b1",
+      "width": 50,
+      "height": 50,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/icon.icns",
+      "sha256": "cee35c729a1db8b59ec04f5e5f23a770c9bc23bd227fc7867cb8aa21a62edcb5"
+    },
+    {
+      "file": "src-tauri/icons/icon.ico",
+      "sha256": "ac95663b68da9e02834dd7af896e2ec7317032fec6434604cb9bc41cdd416f6f"
+    },
+    {
+      "file": "src-tauri/icons/icon.png",
+      "sha256": "42c84521283efb8d707dd3b6303ac89b3873e1cb0d95cf20c7401adbeb95458e",
+      "width": 512,
+      "height": 512,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/tray.png",
+      "sha256": "aa71bcf075c269b160fb34126240e45439b59cd7b1a80f84114bca146fd3c884",
+      "width": 36,
+      "height": 36,
+      "rgba": true
+    },
+    {
+      "file": "src-tauri/icons/tray.svg",
+      "sha256": "c2d7d8dc45458e30ebdf8212d4ef363452d052a15cc30feca80621b7e0b5f8a2"
+    }
+  ]
+}

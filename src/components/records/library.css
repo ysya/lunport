@@ -29,7 +29,7 @@
   letter-spacing: -0.02em;
 }
 .library-app-name svg {
-  color: var(--library-dim);
+  color: var(--primary);
 }
 .library-quick-connect {
   display: flex;

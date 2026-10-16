@@ -138,7 +138,7 @@ describe("structureLock", () => {
 
   it("says why neither works right now, in words that fit both", () => {
     expect(structureLock(overview({ frozen: { detected_at_ms: NOW, by_devices: [] } }))).toBe("Enter the new sync code first.");
-    expect(structureLock(overview({ read_only: true }))).toBe("Update SSHelter first: this sync account uses a newer format.");
+    expect(structureLock(overview({ read_only: true }))).toBe("Update Lunport first: this sync account uses a newer format.");
     expect(structureLock(overview({ joined: false }))).toBe("Join or create a sync account first.");
     expect(structureLock(overview({ joined: false, upgrading: true }))).toBe("Wait until this computer has finished upgrading its sync.");
   });

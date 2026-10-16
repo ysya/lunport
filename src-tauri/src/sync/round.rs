@@ -37,7 +37,7 @@ pub const MISSING_KEY_MESSAGE: &str = "the key for this space has not arrived fr
 pub const RATE_LIMITED_MESSAGE: &str = "the relay is limiting requests from this network; sync retries automatically in a few minutes";
 pub const RELAY_TROUBLE_MESSAGE: &str = "the relay had trouble answering; sync retries with a growing delay";
 const STUCK_CONFLICTS_MESSAGE: &str =
-    "Some changes could not be uploaded because the relay holds a newer version this SSHelter cannot read — update SSHelter";
+    "Some changes could not be uploaded because the relay holds a newer version this Lunport cannot read — update Lunport";
 /// 連續這麼多輪以推送衝突收尾之後,不再立刻重跑(同 v1)。
 const CONFLICT_RETRY_LIMIT: u32 = 3;
 /// 舊版 relay(沒有批次查詢)時,space 每幾輪查一次;帳戶 chain 每輪都查(spec §6.4)。
@@ -230,7 +230,7 @@ pub fn sync_once(env: &SyncEnv) -> Result<(), AppError> {
                 let mut core = env.runtime.core.lock().unwrap();
                 if core.generation == generation {
                     if let Some(s) = core.state.as_mut() {
-                        s.last_error = Some(format!("SSHelter could not upgrade this device's sync yet: {e}"));
+                        s.last_error = Some(format!("Lunport could not upgrade this device's sync yet: {e}"));
                     }
                 }
                 Err(e)
@@ -620,7 +620,7 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
     // 4. Batch spaces after the separate account preflight; legacy spaces are pulled every third round.
     //    舊 relay 的 space 每 3 輪查一次 —— 但還有沒上傳的記錄的 space(上一次的上傳撞到
     //    衝突、或剛修改過)每一輪都查:不先拿到 relay 上的版本,上傳只會一直撞衝突,連續 3 輪之後還會誤報「relay 上有這個
-    //    SSHelter 讀不懂的版本」。唯讀的帳戶例外:它從不上傳,dirty 的記錄一直都在,照這條規則會每一輪都查。
+    //    Lunport 讀不懂的版本」。唯讀的帳戶例外:它從不上傳,dirty 的記錄一直都在,照這條規則會每一輪都查。
     let rounds = {
         let mut core = env.runtime.core.lock().unwrap();
         core.rounds += 1;
@@ -779,7 +779,7 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
     //     不持有任何鎖;帳戶的變更(`device.slots`、補寫的 `keyslot`/`key`)跟著下面的上傳送出;通知存進狀態、放掉鎖之後發出。
     //     用到插槽的主機不只在勾選的 space 裡:整份 config(主 config、`~/.ssh/sshelter-local/` 的檔案……)裡用到的插槽也不收起來、不移除
     //     (spec §4.2)。那份清單先算好(`config_slot_uses`:只在算的時候短暫拿 doc 鎖,任何檔案系統的動作之前就放掉);config 這時沒有載入
-    //     (改寫失敗之後重載也失敗,極少見)就跳過這一步 —— 不知道哪些插槽有主機用到,不能收起任何連結 —— 下一輪再做。只在 SSHelter 的插槽
+    //     (改寫失敗之後重載也失敗,極少見)就跳過這一步 —— 不知道哪些插槽有主機用到,不能收起任何連結 —— 下一輪再做。只在 Lunport 的插槽
     //     經這台的保管庫(`EnvVault`)確認還在保管庫裡、補寫時讀它的私鑰(金鑰保管庫 spec §4.3、§11)。
     if let (Some(home), Some(in_use)) = (env.ssh_dir.parent(), crate::sync::slots::config_slot_uses(env)) {
         // No doc/core lock is held when acquiring the material token.
@@ -898,7 +898,7 @@ pub fn run_round(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys
                         env,
                         generation,
                         id,
-                        &format!("space \"{name}\" could not be uploaded ({e}); sync retries — if this keeps happening, update SSHelter or the relay"),
+                        &format!("space \"{name}\" could not be uploaded ({e}); sync retries — if this keeps happening, update Lunport or the relay"),
                     )?;
                 }
                 // 連不上 relay 這類傳輸的錯誤:整輪結束。

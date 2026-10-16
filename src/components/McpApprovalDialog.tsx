@@ -36,7 +36,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
         <DialogDescription>
           {proposal
             ? "Review these connection settings before saving. This does not connect, trust a server key or grant AI access. The MCP client cannot approve this request."
-            : "SSHelter will run this command once. Review the complete command and resolved target; the MCP client cannot approve it."}
+            : "Lunport will run this command once. Review the complete command and resolved target; the MCP client cannot approve it."}
         </DialogDescription>
       </DialogHeader>
       <TaskDialogBody className="break-all">

@@ -101,7 +101,7 @@ export function UpdatesPane() {
           <Terminal className="size-5" />
         </div>
         <div>
-          <h3 className="text-base font-semibold">SSHelter</h3>
+          <h3 className="text-base font-semibold">Lunport</h3>
           <p className="text-xs text-muted-foreground">
             {version
               ? `Installed version ${version}`
@@ -139,7 +139,7 @@ export function UpdatesPane() {
           <SettingsRow
             id="set-auto-update"
             label="Check automatically"
-            description="Check at launch and while SSHelter is running."
+            description="Check at launch and while Lunport is running."
           >
             <Switch
               id="set-auto-update"
@@ -222,13 +222,13 @@ export function UpdateStatusCard({
             {allowed && (
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                 {phase === "available"
-                  ? "Installing restarts SSHelter and ends active SSH sessions."
+                  ? "Installing restarts Lunport and ends active SSH sessions."
                   : phase === "installing"
                     ? "You can close Settings and return to see the progress."
                     : phase === "restart_required"
-                      ? "The update is installed. Restart SSHelter to use the new version."
+                      ? "The update is installed. Restart Lunport to use the new version."
                       : phase === "restarting"
-                        ? "SSHelter will reopen shortly."
+                        ? "Lunport will reopen shortly."
                         : phase === "error"
                           ? "Check your connection and try again."
                           : phase === "current"
@@ -272,7 +272,7 @@ export function UpdateStatusCard({
         )}
         {allowed && phase === "restart_required" && (
           <Button size="sm" onClick={onRestart}>
-            Restart SSHelter
+            Restart Lunport
           </Button>
         )}
         {allowed && state.checkedAt && !checking && !active && (

@@ -52,12 +52,12 @@ describe("a key slot's detail", () => {
     const html = slotDetail(
       keySlot({ in_vault: true, hosts: ["web", "db"], devices: [{ name: "FRANK-DESKTOP", fingerprint: null, synced_copy: true, in_vault: true }] }),
     );
-    for (const part of ["id_mac", "Synced", "ssh-ed25519", SLOT_FINGERPRINT, "Ready", "In SSHelter — programs ask before they use it", "web", "db", "FRANK-DESKTOP: in SSHelter"]) {
+    for (const part of ["id_mac", "Synced", "ssh-ed25519", SLOT_FINGERPRINT, "Ready", "In Lunport — programs ask before they use it", "web", "db", "FRANK-DESKTOP: in Lunport"]) {
       expect(text(html)).toContain(part);
     }
   });
 
-  it("offers Export private key only for a key in SSHelter, and Move only for a file for now", () => {
+  it("offers Export private key only for a key in Lunport, and Move only for a file for now", () => {
     expect(pressEach(keySlot({ in_vault: true }))).toEqual({
       ...COPY_EXPORT,
       "Export private key…": "exportPrivate",
@@ -66,7 +66,7 @@ describe("a key slot's detail", () => {
     });
     expect(pressEach(keySlot({ file_for_now: true }))).toEqual({
       ...COPY_EXPORT,
-      "Move into SSHelter": "move",
+      "Move into Lunport": "move",
       "Change…": "pick",
       "Stop syncing": "stop",
     });
@@ -129,11 +129,11 @@ describe("a key slot's detail", () => {
     const html = slotDetail(keySlot({ file_for_now: true }), { moveFailure: "The key this slot points to is gone: /home/f/.ssh/id_mac." });
     expect(text(html)).toContain("File for now — any program can use it without asking");
     expect(text(html)).toContain("/home/f/.ssh/id_mac");
-    expect(text(html)).toContain("Couldn't move into SSHelter: The key this slot points to is gone: /home/f/.ssh/id_mac.");
+    expect(text(html)).toContain("Couldn't move into Lunport: The key this slot points to is gone: /home/f/.ssh/id_mac.");
   });
 
   it("says why a file stays a file", () => {
-    const reason = "SSHelter's agent can't use this kind of key (for example a security key or a DSA key), so it stays as a file.";
+    const reason = "Lunport's agent can't use this kind of key (for example a security key or a DSA key), so it stays as a file.";
     expect(text(slotDetail(keySlot({ stays_file: reason })))).toContain(`It stays a file: ${reason}`);
   });
 
@@ -158,7 +158,7 @@ describe("a key slot's detail", () => {
     expect(text(html).split(SPOOFED_NAME_SHOWN).length - 1).toBe(4);
   });
 
-  it("shows the file a key is kept in, unless the key is in SSHelter", () => {
+  it("shows the file a key is kept in, unless the key is in Lunport", () => {
     const FILE = "/home/f/.ssh/id_work";
     const named: SlotStatusView[] = [
       { kind: "ready", file: FILE, synced_copy: false, fingerprint: SLOT_FINGERPRINT },
@@ -167,9 +167,9 @@ describe("a key slot's detail", () => {
       { kind: "source_changed", file: FILE },
     ];
     for (const status of named) {
-      // A key SSHelter's agent can never hold stays a file without being a "file for now".
+      // A key Lunport's agent can never hold stays a file without being a "file for now".
       expect(text(slotDetail(keySlot({ status, in_vault: false, file_for_now: false }))), status.kind).toContain(FILE);
-      // A key in SSHelter has no file here: its slot path holds only the .pub.
+      // A key in Lunport has no file here: its slot path holds only the .pub.
       expect(text(slotDetail(keySlot({ status, in_vault: true }))), status.kind).not.toContain(FILE);
     }
   });
@@ -177,14 +177,14 @@ describe("a key slot's detail", () => {
   it("reveals hidden characters in the reason a Move gave", () => {
     const html = slotDetail(keySlot({ file_for_now: true }), { moveFailure: `The key ${SPOOFED_NAME} is gone.` });
     expect(html).not.toMatch(HIDDEN_CHARS);
-    expect(text(html)).toContain(`Couldn't move into SSHelter: The key ${SPOOFED_NAME_SHOWN} is gone.`);
+    expect(text(html)).toContain(`Couldn't move into Lunport: The key ${SPOOFED_NAME_SHOWN} is gone.`);
   });
 });
 
 describe("a key file's detail", () => {
   const fileDetail = (file: KeyInfo) => renderToStaticMarkup(FileKeyDetailView({ file, onAction: () => {}, onHost: () => {} }));
 
-  it("shows its type, fingerprint, comment, paths, ssh-agent and hosts, and that SSHelter doesn't manage it", () => {
+  it("shows its type, fingerprint, comment, paths, ssh-agent and hosts, and that Lunport doesn't manage it", () => {
     const t = text(fileDetail(keyFile()));
     for (const part of [
       "id_ed25519",
@@ -194,7 +194,7 @@ describe("a key file's detail", () => {
       "frank@laptop",
       "/home/f/.ssh/id_ed25519.pub",
       "web",
-      "SSHelter doesn't manage this file: any program can use it without asking.",
+      "Lunport doesn't manage this file: any program can use it without asking.",
     ]) {
       expect(t).toContain(part);
     }
@@ -211,8 +211,8 @@ describe("a key file's detail", () => {
     const none = fileDetail(keyFile({ public_path: null }));
     expect(buttonTag(none, "Copy public key")).toContain(DISABLED);
     expect(buttonTag(none, "Export to host…")).toContain(DISABLED);
-    // Adding the key to SSHelter, or a host that uses it, needs the private file only.
-    expect(buttonTag(none, "Import into SSHelter…")).not.toContain(DISABLED);
+    // Adding the key to Lunport, or a host that uses it, needs the private file only.
+    expect(buttonTag(none, "Import into Lunport…")).not.toContain(DISABLED);
     expect(buttonTag(none, "Add a host for this key…")).not.toContain(DISABLED);
     expect(text(none)).toContain("No .pub file next to it.");
   });
@@ -255,7 +255,7 @@ describe("the detail pane", () => {
     const slot = keySlot({ file_for_now: true });
     const t = pane({ kind: "slot", id: slot.id }, [slot], [], [{ slot_id: slot.id, name: "id_mac", message: "boom" }]);
     expect(t).toContain("id_mac");
-    expect(t).toContain("Couldn't move into SSHelter: boom");
+    expect(t).toContain("Couldn't move into Lunport: boom");
   });
 
   it("shows the selected slot without a sync account, with what it can still do here", () => {
@@ -267,7 +267,7 @@ describe("the detail pane", () => {
   });
 
   it("shows the selected key file", () => {
-    expect(pane({ kind: "file", path: "/home/f/.ssh/id_ed25519" }, [], [keyFile()])).toContain("SSHelter doesn't manage this file");
+    expect(pane({ kind: "file", path: "/home/f/.ssh/id_ed25519" }, [], [keyFile()])).toContain("Lunport doesn't manage this file");
   });
 
   it("shows the New key and Generate key forms", () => {
@@ -285,14 +285,14 @@ describe("the detail pane", () => {
 
   it("shows a form in place of the prompt to choose a key and of the keys, starting from the right source", () => {
     const blank = pane({ kind: "new", mode: "import", path: null }, [keySlot()], []);
-    expect(blank).toContain("SSHelter keeps the key in its vault. Programs ask before they use it.");
-    expect(blank).toContain("Add to SSHelter");
+    expect(blank).toContain("Lunport keeps the key in its vault. Programs ask before they use it.");
+    expect(blank).toContain("Add to Lunport");
     expect(blank).not.toContain("No key selected");
     expect(blank).not.toContain("id_mac");
     const chosen = pane({ kind: "new", mode: "import", path: "/home/f/.ssh/id_work" }, [], []);
     expect(chosen).not.toContain("No file chosen");
     const generating = pane({ kind: "new", mode: "generate", path: null }, [keySlot()], []);
-    expect(generating).toContain("A new key made in SSHelter. It exists only in SSHelter until you export it.");
+    expect(generating).toContain("A new key made in Lunport. It exists only in Lunport until you export it.");
     expect(generating).toContain("Ed25519");
     expect(generating).not.toContain("No key selected");
   });

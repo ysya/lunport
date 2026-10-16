@@ -1,5 +1,5 @@
 //! SP3 金鑰插槽的引擎(spec `docs/superpowers/specs/2026-10-05-sp3-key-slots-design.md` §4、§6):帳戶裡 `keyslot` 與
-//! `key` 記錄的讀寫、每一輪在這台維護插槽(`reconcile`)與給 UI 的插槽檢視(`views`)、模式切換與挑選(Task 6),以及只在 SSHelter 的
+//! `key` 記錄的讀寫、每一輪在這台維護插槽(`reconcile`)與給 UI 的插槽檢視(`views`)、模式切換與挑選(Task 6),以及只在 Lunport 的
 //! 插槽(金鑰保管庫 spec §4.3:`SlotSource::Vault`,`set_delivery`)。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -119,14 +119,14 @@ pub(crate) fn landable_key(
     Ok((secret, facts))
 }
 
-// ── 只在 SSHelter 的插槽(金鑰保管庫 spec §4.3、§4.4、§11)──────────────────────────────────────────
+// ── 只在 Lunport 的插槽(金鑰保管庫 spec §4.3、§4.4、§11)──────────────────────────────────────────
 //
-// 「Only in SSHelter」= `SlotSource::Vault`:私鑰在保管庫(`vault.json`),插槽目錄只放 `<file>.pub`,插槽路徑本身沒有檔案,`ssh` 經 SSHelter
+// 「Only in Lunport」= `SlotSource::Vault`:私鑰在保管庫(`vault.json`),插槽目錄只放 `<file>.pub`,插槽路徑本身沒有檔案,`ssh` 經 Lunport
 // 的 agent 取用。同步來的金鑰,這一輪先落地進保管庫(`land_in_vault`;插槽路徑被佔住、agent 用不了、或保管庫用不了才照 SP3 寫成檔案);從那之後每一輪只維護
 // `.pub`、回報擋路的檔案,從不把私鑰落地到這樣的插槽(`maintain`);保管庫裡不見的那一筆從帳戶放回去(`recover_vault_entry`);補寫帳戶裡的 `key` 時
 // 照 SP3 的同意規則讀保管庫裡的私鑰(`republish`)。使用者也能自己搬進、搬出保管庫(`set_delivery`)。
 
-/// 同步的一輪用到的保管庫:補寫帳戶裡的 `key`(SP3 spec §6.6)要讀私鑰;「只在 SSHelter」的插槽要確認保管庫裡還有它,沒有就從帳戶放回去
+/// 同步的一輪用到的保管庫:補寫帳戶裡的 `key`(SP3 spec §6.6)要讀私鑰;「只在 Lunport」的插槽要確認保管庫裡還有它,沒有就從帳戶放回去
 /// (金鑰保管庫 spec §11)。`holds` 只讀檔案裡的 id,不讀 keychain;`private_key` 與 `restore` 才開保管庫。
 pub trait VaultKeys {
     fn private_key(&self, slot_id: &str) -> Option<(Zeroizing<String>, EntryOrigin)>;
@@ -152,7 +152,7 @@ impl VaultKeys for NoVault {
     }
 
     fn restore(&self, _slot_id: &str, _entry: &VaultEntry) -> Result<(), AppError> {
-        Err(AppError::Other("SSHelter's vault is not available here".to_string()))
+        Err(AppError::Other("Lunport's vault is not available here".to_string()))
     }
 }
 
@@ -207,13 +207,13 @@ impl VaultKeys for TransactionVault<'_, '_> {
     }
 }
 
-pub const VAULT_ENTRY_LOST: &str = "This key was lost from SSHelter's vault. Pick it again on this computer.";
+pub const VAULT_ENTRY_LOST: &str = "This key was lost from Lunport's vault. Pick it again on this computer.";
 
 /// 只在這台的金鑰(`LocalSlot::local_only`)或沒有帳戶時的金鑰,保管庫裡那一筆不見了:沒有帳戶可以取回,記錄留著、標這個錯誤。使用者用 New key 再加一次
 /// 這把金鑰,就放回這筆記錄(`local_keys::restore_into`)。
-pub const LOCAL_KEY_LOST_MESSAGE: &str = "This key is no longer in SSHelter's vault. If you exported a copy, add it again with New key.";
+pub const LOCAL_KEY_LOST_MESSAGE: &str = "This key is no longer in Lunport's vault. If you exported a copy, add it again with New key.";
 
-/// 只在 SSHelter 的金鑰(`SlotSource::Vault`),保管庫裡那一筆確定不見了(`holds` 是 `Some(false)`;`None` = 保管庫讀不了,不判斷),而它沒有別處可以取回
+/// 只在 Lunport 的金鑰(`SlotSource::Vault`),保管庫裡那一筆確定不見了(`holds` 是 `Some(false)`;`None` = 保管庫讀不了,不判斷),而它沒有別處可以取回
 /// (只在這台的金鑰,或沒有帳戶):記錄與來源留著(清單照舊列出),標 `LOCAL_KEY_LOST_MESSAGE`;使用者匯出過的話,用 New key 再加一次就放回這筆記錄。
 /// 標這個錯誤的只有這裡:`recover_vault_entry`(只在這台的金鑰)與本機維護(`maintain_local`)都經過這裡。「保管庫沒有它」(`holds`)本身不只這裡看:
 /// 有帳戶的同步金鑰由 `recover_vault_entry` 自己看,從帳戶取回(取不回就讓這台回到還沒有金鑰,`VAULT_ENTRY_LOST`);New key 要放回去之前也看
@@ -227,13 +227,13 @@ fn mark_lost_if_gone(local: &mut LocalSlot, slot_id: &str, vault: &dyn VaultKeys
 /// 保管庫收不了的金鑰(`inspect_private_key` 讀不懂)的原因,給 Move 與 New key 用(同步的說法是 `Unsyncable::message`)。
 pub fn vault_unreadable_message(reason: Unsyncable) -> &'static str {
     match reason {
-        Unsyncable::TooLarge => "This key is larger than 16 KiB, which SSHelter's vault doesn't take.",
+        Unsyncable::TooLarge => "This key is larger than 16 KiB, which Lunport's vault doesn't take.",
         Unsyncable::NotOpenSsh => "This key isn't in the OpenSSH format. Convert it with ssh-keygen -p -f <file>, then try again.",
-        Unsyncable::Unreadable => "This isn't an OpenSSH private key SSHelter can read.",
+        Unsyncable::Unreadable => "This isn't an OpenSSH private key Lunport can read.",
     }
 }
 
-/// 只在 SSHelter 的插槽,保管庫裡卻沒有它(保管庫檔讀不懂、或保管庫的金鑰不見而搬到旁邊之後;金鑰保管庫 spec §11):帳戶裡有同一把同步金鑰
+/// 只在 Lunport 的插槽,保管庫裡卻沒有它(保管庫檔讀不懂、或保管庫的金鑰不見而搬到旁邊之後;金鑰保管庫 spec §11):帳戶裡有同一把同步金鑰
 /// 就放回保管庫;沒有就讓這台回到「還沒有金鑰」,之後照 SP3 的流程落地同步的金鑰或請使用者挑。保管庫讀不了(`holds` 是 None)就不動。
 /// 只在這台的金鑰(`LocalSlot::local_only`)不在帳戶裡,沒有別處可以取回:記錄與來源留著,標 `LOCAL_KEY_LOST_MESSAGE`。
 ///
@@ -279,7 +279,7 @@ fn recover_vault_entry(
     }
 }
 
-/// 這台「只在 SSHelter」的插槽檔名(`SlotSource::Vault`):`agent::wiring` 據此列出要走 agent 的主機。
+/// 這台「只在 Lunport」的插槽檔名(`SlotSource::Vault`):`agent::wiring` 據此列出要走 agent 的主機。
 pub fn vault_slot_files(state: &SyncStateV2) -> BTreeSet<String> {
     state
         .key_slots
@@ -346,23 +346,23 @@ pub fn move_all_into_vault(env: &SyncEnv) -> Result<Vec<crate::sync::dto::MoveFa
 }
 
 /// 保管庫裡這個插槽的那一筆不是記錄裡的那一把(指紋不同):不拿它當成這個插槽的金鑰(`vault_text`、`set_delivery`)。
-pub const VAULT_MISMATCH_MESSAGE: &str = "The key in SSHelter's vault doesn't match this slot.";
+pub const VAULT_MISMATCH_MESSAGE: &str = "The key in Lunport's vault doesn't match this slot.";
 
-/// 「Only in SSHelter」拒絕 agent 簽不了的種類(不是 Ed25519、ECDSA、RSA:`sk-*` 的安全金鑰、DSA;`vault::material::agent_can_sign`)。
+/// 「Only in Lunport」拒絕 agent 簽不了的種類(不是 Ed25519、ECDSA、RSA:`sk-*` 的安全金鑰、DSA;`vault::material::agent_can_sign`)。
 pub const VAULT_KEY_TYPE_MESSAGE: &str =
-    "SSHelter's agent can't use this kind of key (for example a security key or a DSA key), so it stays as a file.";
+    "Lunport's agent can't use this kind of key (for example a security key or a DSA key), so it stays as a file.";
 
-/// 「Only in SSHelter」拒絕 agent 解不開的加密方式(不在 `vault::material::SUPPORTED_CIPHERS` 上,例如 `3des-cbc`)。
+/// 「Only in Lunport」拒絕 agent 解不開的加密方式(不在 `vault::material::SUPPORTED_CIPHERS` 上,例如 `3des-cbc`)。
 pub const VAULT_KEY_CIPHER_MESSAGE: &str =
-    "SSHelter's agent can't open this key's encryption. Re-encrypt it with `ssh-keygen -p`, then try again.";
+    "Lunport's agent can't open this key's encryption. Re-encrypt it with `ssh-keygen -p`, then try again.";
 
-/// 「Only in SSHelter」拒絕 agent 讀不懂的金鑰(`ssh-key` 解析不了,`vault::material::agent_can_read`):同步讀標頭用的 `inspect_private_key` 比 `ssh-key` 寬鬆,
+/// 「Only in Lunport」拒絕 agent 讀不懂的金鑰(`ssh-key` 解析不了,`vault::material::agent_can_read`):同步讀標頭用的 `inspect_private_key` 比 `ssh-key` 寬鬆,
 /// 例如 comment 不是 UTF-8 的金鑰,它收、`ssh-key` 不收。
-pub const VAULT_KEY_UNREADABLE_MESSAGE: &str = "SSHelter's agent can't read this key, so it stays as a file.";
+pub const VAULT_KEY_UNREADABLE_MESSAGE: &str = "Lunport's agent can't read this key, so it stays as a file.";
 
 // ── 每一輪在這台維護插槽(SP3 spec §6.2–§6.6)──────────────────────────────────────────────────
 //
-// 一個檔案是不是 SSHelter 放的,只看這個插槽 id 自己的本機記錄(`SyncStateV2::key_slots[id]`),不看檔名:插槽檔名
+// 一個檔案是不是 Lunport 放的,只看這個插槽 id 自己的本機記錄(`SyncStateV2::key_slots[id]`),不看檔名:插槽檔名
 // (`<name>-<id8>`)不保證在插槽 id 之間唯一,帳戶裡的成員可以發佈同名、同 id 前 8 字元的另一個插槽。從主機的
 // `IdentityFile` 值取得的檔名(`slot_hosts`、`identity_slot_files`)只當查詢的 key,絕不拿來組出要寫入或移除的路徑。
 // 同一個檔名有兩個以上還在的插槽時,主機的 `IdentityFile` 分不出指的是哪一個:只有這台已經握著的那個照常維護,其他的在這台
@@ -374,7 +374,7 @@ pub const MISMATCH_MESSAGE: &str = "The synced key didn't match and was not writ
 pub const CONTESTED_MESSAGE: &str = "Another key slot in your account uses the same file name, so this one isn't used on this computer.";
 
 pub fn in_the_way_message(path: &Path) -> String {
-    format!("A file SSHelter didn't create is in the way: {}. Move it, then sync again.", path.display())
+    format!("A file Lunport didn't create is in the way: {}. Move it, then sync again.", path.display())
 }
 
 pub fn source_gone_message(path: &str) -> String {
@@ -567,7 +567,7 @@ pub fn add_notice(notices: &mut Vec<SyncNotice>, notice: &SyncNotice) {
 /// 補寫帳戶裡不見的記錄;`in_use`(`config_slot_hosts`:整份 config 裡用到的,含主 config 與 `~/.ssh/sshelter-local/` 的主機)只決定連結留不留 ——
 /// 任何主機用到的插槽都照常維護、不收起來,帳戶裡完全找不到的也不移除(spec §4.2:沒有任何主機用到、或 `keyslot` 被刪除才移除連結)。
 ///
-/// `vault` = 這台的保管庫(金鑰保管庫 spec §4.3、§11):有主機用到的「只在 SSHelter」的插槽,每一輪確認保管庫裡還有它(`recover_vault_entry`);
+/// `vault` = 這台的保管庫(金鑰保管庫 spec §4.3、§11):有主機用到的「只在 Lunport」的插槽,每一輪確認保管庫裡還有它(`recover_vault_entry`);
 /// 補寫這樣的插槽的 `key` 時從這裡讀私鑰(`republish`)。只在這台的金鑰(`LocalSlot::local_only`)不論有沒有主機用到都照常維護(`.pub`、保管庫裡還在不在)。
 ///
 /// 沒有帳戶(`state.account` 是 None)時什麼都不做。這台的插槽另外由 `maintain_local` 維護:每一次同步嘗試的最後都做,不論這一輪有沒有走到這裡、有沒有帳戶。
@@ -745,7 +745,7 @@ pub fn maintain_local(
 
 /// 這台的 `device.slots` 裡這個插槽那一項。連結(symlink / hard link)只在有主機用到(`used`:勾選的 space 或整份 config 裡的任何主機)、
 /// 而且連結真的在插槽路徑上的時候才列:收起來的(`LocalSlot::parked`,`park_link`)連結,插槽路徑上現在沒有這個插槽的東西;複製檔與同步來的
-/// 副本是真的放在插槽裡的金鑰,一直列著。保管庫裡的金鑰(`SlotSource::Vault`)也一直列著,記成 SSHelter 保管的副本(`synced_copy`、`in_vault`)。
+/// 副本是真的放在插槽裡的金鑰,一直列著。保管庫裡的金鑰(`SlotSource::Vault`)也一直列著,記成 Lunport 保管的副本(`synced_copy`、`in_vault`)。
 /// 只在這台的金鑰(`LocalSlot::local_only`)不列。
 fn device_slot(slot_id: &str, local: &LocalSlot, used: bool) -> Option<DeviceSlot> {
     // 只在這台的金鑰不告訴帳戶(`LocalSlot::local_only`)。
@@ -768,9 +768,9 @@ fn device_slot(slot_id: &str, local: &LocalSlot, used: bool) -> Option<DeviceSlo
 /// 一個 `Linked` 來源在插槽路徑上的連結檔,能不能拿掉。只看這個插槽自己的本機記錄(記著的連結種類與原檔),不看檔名。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LinkFate {
-    /// 是 SSHelter 放的連結(或路徑上已經沒有東西),拿掉它不會讓任何金鑰消失。
+    /// 是 Lunport 放的連結(或路徑上已經沒有東西),拿掉它不會讓任何金鑰消失。
     Removable,
-    /// 記錄說這裡是 SSHelter 建的 symlink、現在卻是一般檔案(使用者自己換上的):不是 SSHelter 放的,不碰。
+    /// 記錄說這裡是 Lunport 建的 symlink、現在卻是一般檔案(使用者自己換上的):不是 Lunport 放的,不碰。
     NotOurs,
     /// hard link 的原檔不見了,或內容和它不同(原檔被換成另一把):這個名字可能是那份金鑰僅存的名字,不拿掉,記成複製檔。
     LastName,
@@ -875,7 +875,7 @@ fn drop_link(local: &mut LocalSlot, path: &Path) {
 /// 這台有主機用到的插槽,維護這台已經放進去的東西:連結的確認原檔還在、hard link 與複製跟上原檔。收起來的連結(`parked`)只在路徑空著的
 /// 時候重新連結;symlink 的插槽路徑上不是自己的 symlink 就是擋路(記錄收起來)。回傳 true = 插槽裡沒有這台的東西(沒有來源,或同步來的副本
 /// 被刪掉了;`source` 已清掉):要不要落地同步的金鑰由呼叫端決定 —— 只有勾選的 space 用到的插槽才落地(`land_into`,spec §6.2)。
-/// 只在 SSHelter 的插槽(`SlotSource::Vault`)只維護 `.pub`、回報擋路的檔案,一律回 false:私鑰在保管庫,從不落地到插槽路徑上。
+/// 只在 Lunport 的插槽(`SlotSource::Vault`)只維護 `.pub`、回報擋路的檔案,一律回 false:私鑰在保管庫,從不落地到插槽路徑上。
 fn maintain(local: &mut LocalSlot, keys_dir: &Path, path: &Path) -> bool {
     match local.source.clone() {
         Some(SlotSource::Linked { path: source, link, origin, fingerprint: recorded }) => {
@@ -930,7 +930,7 @@ fn maintain(local: &mut LocalSlot, keys_dir: &Path, path: &Path) -> bool {
             false
         }
         Some(SlotSource::Vault { public_key, .. }) => {
-            // 只在 SSHelter:插槽路徑上不該有檔案(`ssh` 會先讀它)。出現了就擋路、不碰;`.pub` 不見或不對就從記錄重寫。
+            // 只在 Lunport:插槽路徑上不該有檔案(`ssh` 會先讀它)。出現了就擋路、不碰;`.pub` 不見或不對就從記錄重寫。
             if slot_files::occupied(path) {
                 local.last_error = Some(in_the_way_message(path));
                 return false;
@@ -1096,7 +1096,7 @@ pub(crate) fn check_synced_key(secret: &str, payload: &KeySlotPayload) -> Result
 /// 離開帳戶 A、建立或加入另一個帳戶之後,`~/.ssh/sshelter-local/` 裡用到 A 的插槽的主機被搬進新帳戶的 space,新帳戶裡當然沒有那個插槽;
 /// 照寫的話,A 的插槽與私鑰(這台選了同步的那把,或 A 同步來的副本)就進了新帳戶、落地到新帳戶的每一台電腦。回傳有沒有寫(沒寫的,呼叫端照常維護)。
 ///
-/// 只在 SSHelter 的金鑰(`SlotSource::Vault`)從保管庫讀(`vault`),規則同上:這台同意上傳過的那把(`uploaded_fingerprint`),或從這個帳戶
+/// 只在 Lunport 的金鑰(`SlotSource::Vault`)從保管庫讀(`vault`),規則同上:這台同意上傳過的那把(`uploaded_fingerprint`),或從這個帳戶
 /// 同步來、不是之前的帳戶留下的(保管庫那一筆的來源是 `Synced`,`copy_from_another_account` 是 false)。保管庫裡那一筆的私鑰本身也要是記錄裡的
 /// 那一把(以私鑰推出的指紋):同意與來源說的都是記錄裡的金鑰,不是保管庫裡剛好放著的另一把。只在 `holds` 說保管庫讀得懂、有這一筆時才開它
 /// (開讀不懂的保管庫會把檔案搬到旁邊,一輪同步不做這件事)。
@@ -1297,7 +1297,7 @@ fn kept_status(local: &LocalSlot, source: &SlotSource, slot_path: &Path) -> Slot
 }
 
 /// 這台插槽裡那把金鑰(`readable_key`:連到的金鑰,或仍是記錄裡那一把的同步副本)有沒有 passphrase;讀不到、讀不懂 → None。每次組 overview
-/// 都可能跑,所以先確認它是不超過 64 KiB 的私鑰檔(`slot_setup::is_private_key_file`:一般檔案),不會卡在 FIFO 之類的檔案上。只在 SSHelter 的
+/// 都可能跑,所以先確認它是不超過 64 KiB 的私鑰檔(`slot_setup::is_private_key_file`:一般檔案),不會卡在 FIFO 之類的檔案上。只在 Lunport 的
 /// 金鑰看記錄(`SlotSource::Vault::has_passphrase`),不開保管庫。
 fn local_key_passphrase(local: Option<&LocalSlot>, keys_dir: &Path) -> Option<bool> {
     let local = local?;
@@ -1383,10 +1383,10 @@ pub fn slot_status(
 
 // ── 使用者的動作(SP3 spec §6.3、§7.2)─────────────────────────────────────────────────────────
 //
-// 和每一輪的維護一樣,插槽路徑上的東西是不是 SSHelter 放的,只看這個插槽 id 自己的本機記錄(spec §4.2):挑金鑰與改用同步的金鑰
+// 和每一輪的維護一樣,插槽路徑上的東西是不是 Lunport 放的,只看這個插槽 id 自己的本機記錄(spec §4.2):挑金鑰與改用同步的金鑰
 // 只換掉記錄擁有的東西(`occupant`),其他的一律回 `in_the_way_message`;刪除副本只刪路徑上仍是記錄裡那一份的副本。被換掉的金鑰
 // 改名保留(`retire_key`,計畫裁定 3;spec §1 私鑰不自動刪除),只有連結本身直接拿掉。和帳戶裡另一個插槽同檔名、這台又沒有握著的
-// 插槽(`contested_and_not_held`)一律拒絕。拒絕的時候,檔案與狀態都不動。只在 SSHelter 的插槽一樣能挑金鑰、改用同步的金鑰:新的放進保管庫,
+// 插槽(`contested_and_not_held`)一律拒絕。拒絕的時候,檔案與狀態都不動。只在 Lunport 的插槽一樣能挑金鑰、改用同步的金鑰:新的放進保管庫,
 // 舊的改存成 retired 項目(`into_vault`)。
 
 pub const IN_USE_MESSAGE: &str = "Hosts on this computer still use this key; change them first.";
@@ -1404,7 +1404,7 @@ fn contested_error() -> AppError {
 }
 
 /// 讀這台插槽裡的私鑰:連到的金鑰(這台的使用者連給這個插槽的那把),或同步來的副本。副本只認這筆記錄自己的路徑上、仍是記錄裡那一把
-/// 的檔案(同 `republish`):那個位置可能被換成了別的檔案(使用者的、別的插槽放的),不能把它當成這個插槽的金鑰上傳。只在 SSHelter 的
+/// 的檔案(同 `republish`):那個位置可能被換成了別的檔案(使用者的、別的插槽放的),不能把它當成這個插槽的金鑰上傳。只在 Lunport 的
 /// 金鑰不在檔案裡 → None(要它的呼叫端自己讀保管庫,`vault_text`)。
 fn readable_key(local: Option<&LocalSlot>, keys_dir: &Path) -> Option<String> {
     let local = local?;
@@ -1434,8 +1434,8 @@ fn transaction_vault_text(env: &SyncEnv, transaction: &MaterialTransaction<'_>, 
     Ok(Some(entry.private_key.clone()))
 }
 
-/// 「Export private key…」的對象不是只在 SSHelter 的金鑰(它本來就是這台的檔案)。
-pub const NOT_IN_VAULT_MESSAGE: &str = "This key isn't in SSHelter on this computer.";
+/// 「Export private key…」的對象不是只在 Lunport 的金鑰(它本來就是這台的檔案)。
+pub const NOT_IN_VAULT_MESSAGE: &str = "This key isn't in Lunport on this computer.";
 
 /// 「Export private key…」要寫的內容(金鑰保管庫 spec §7.3.2):這個插槽在保管庫裡的私鑰(要是記錄裡那一把,`vault_text`),可選擇加上 passphrase
 /// (`vault::export::export_text`)。回傳(預設檔名 = 插槽名稱、內容)。不改任何東西。不需要帳戶(`local_snapshot`)。
@@ -1486,7 +1486,7 @@ fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError
 /// 快照:(狀態、家目錄),不要帳戶金鑰。只動這台的插槽與保管庫的動作用(`export_private`、`set_delivery`、`delete_copy`、`move_all_into_vault`):沒有加入帳戶也做得到
 /// —— 離開帳戶之後,這台的保管庫還有那些金鑰,常常是這台僅存的一份(金鑰保管庫 spec §4.3)。
 ///
-/// 狀態存不進去(`save_blocked`:別的 SSHelter 行程跑著同步引擎,或狀態檔留在原地)就在任何動作之前拒絕,理由同 `mutate`。這些動作先動檔案與保管庫、最後才提交記錄:
+/// 狀態存不進去(`save_blocked`:別的 Lunport 行程跑著同步引擎,或狀態檔留在原地)就在任何動作之前拒絕,理由同 `mutate`。這些動作先動檔案與保管庫、最後才提交記錄:
 /// 提交被拒的話,跑引擎的那個行程還記著原本的連結,檔案與保管庫卻已經動過了,沒有帳戶可以對照著修回來(同步嘗試只補回有主機用到的連結,
 /// `maintain_local`)。(有帳戶金鑰的 `snapshot` 不必:這種行程從來推導不出帳戶金鑰,那些動作本來就先失敗。)
 pub(crate) fn local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
@@ -1519,7 +1519,7 @@ enum Occupant {
     /// 改名保留(`retire_key`),不刪除。
     OwnKey,
     /// 不是這個插槽的:這台沒有它的記錄、記錄沒有來源或記著別的檔名、記錄收起來了(`parked`),或是 symlink 的記錄、路徑上卻不是指到
-    /// 記錄原檔的 symlink(同 `maintain` 每一輪的檢查);只在 SSHelter 的記錄(`SlotSource::Vault`)在插槽路徑上什麼都不擁有。不覆蓋、不移除。
+    /// 記錄原檔的 symlink(同 `maintain` 每一輪的檢查);只在 Lunport 的記錄(`SlotSource::Vault`)在插槽路徑上什麼都不擁有。不覆蓋、不移除。
     NotOurs,
 }
 
@@ -1560,7 +1560,7 @@ fn retire_key(path: &Path) -> Result<(), AppError> {
 }
 
 /// 改成同步(`own` → `synced`;建立插槽的那台換了金鑰後的「Sync the new key」也是它)或停止同步(`synced` → `own`,
-/// `key` 寫 tombstone;別台的副本留著)。同步要在讀得到這把私鑰的電腦上做(只在 SSHelter 的金鑰從保管庫讀,`vault_text`),並在這台的
+/// `key` 寫 tombstone;別台的副本留著)。同步要在讀得到這把私鑰的電腦上做(只在 Lunport 的金鑰從保管庫讀,`vault_text`),並在這台的
 /// 插槽記錄上記下上傳的是哪一把(`LocalSlot::uploaded_fingerprint`:補寫 `key` 時只認它),記錄也從此是這個帳戶的(`LocalSlot::learned_in`:
 /// 同意是在這個帳戶給的);停止同步清掉同意。更換同步碼進行中、或這台已被別台擋下時拒絕(`account_ready`,提交時再檢查一次;原因見
 /// `account_still_ready`):什麼都不讀、不寫。
@@ -1782,7 +1782,7 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
         let _ = slot_files::remove_slot(&slot_path);
         return Err(e);
     }
-    // 原本只在 SSHelter 的插槽(快照裡它的記錄說金鑰在保管庫)改成連結了:金鑰離開保管庫(同 Keep a file),記在這台的 passphrase 是它的,一起忘掉。
+    // 原本只在 Lunport 的插槽(快照裡它的記錄說金鑰在保管庫)改成連結了:金鑰離開保管庫(同 Keep a file),記在這台的 passphrase 是它的,一起忘掉。
     if is_in_vault(state.key_slots.get(slot_id)) {
         forget_remembered_passphrase(env, slot_id);
     }
@@ -1855,7 +1855,7 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
         local.copy_from_another_account = local.learned_in.as_deref() != Some(keys.chain_id.as_str());
         Ok(())
     })?;
-    // 原本只在 SSHelter 的插槽改成檔案了(上面的 `AsFile`):金鑰離開保管庫(同 Keep a file),記在這台的 passphrase 是它的,一起忘掉。放進保管庫的(`Done`)不在這裡:
+    // 原本只在 Lunport 的插槽改成檔案了(上面的 `AsFile`):金鑰離開保管庫(同 Keep a file),記在這台的 passphrase 是它的,一起忘掉。放進保管庫的(`Done`)不在這裡:
     // 換掉另一把金鑰時,`into_vault` 已經忘掉了。
     if left_the_vault {
         forget_remembered_passphrase(env, slot_id);
@@ -1866,7 +1866,7 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 插槽路徑 `path` 上的檔案還是不是這筆記錄放的那一份副本(刪除副本之前)。只看檔案本身的位元組,不看旁邊的 `.pub`:那是 SSHelter 從記錄的
+/// 插槽路徑 `path` 上的檔案還是不是這筆記錄放的那一份副本(刪除副本之前)。只看檔案本身的位元組,不看旁邊的 `.pub`:那是 Lunport 從記錄的
 /// 金鑰寫的,私鑰的檔案被換掉時它還留著(`local_key_fingerprint` 對讀不懂的私鑰會改讀它,所以這裡不用它)。同步來的副本一定是 OpenSSH 格式:
 /// 以檔案本身推出的指紋等於記錄的指紋。複製檔:內容和記錄的原檔相同,或以檔案本身推出的指紋等於記錄的指紋(記錄沒有指紋就只看內容)。
 fn holds_recorded_copy(copy: &SlotSource, path: &Path) -> bool {
@@ -1888,7 +1888,7 @@ fn holds_recorded_copy(copy: &SlotSource, path: &Path) -> bool {
 /// 刪除沒有主機用到的副本(同步來的,或 Windows 上的複製檔)與它的 `.pub`。用得到的插槽不能刪:勾選的 space 裡的主機,以及整份 config 裡的任何
 /// 主機(主 config、`~/.ssh/sshelter-local/`……,`config_slot_uses`;config 還沒載入就不知道有沒有,不刪)。路徑上的檔案必須還是這筆記錄放的那一份
 /// (`holds_recorded_copy`);不是(使用者換上的、別的插槽放的)就擋路,什麼都不刪。副本已經不在了:只忘掉記錄,旁邊的 `.pub` 不能確定是
-/// 自己的,不碰(同 `park_link`)。只在 SSHelter 的金鑰(`SlotSource::Vault`):插槽路徑上有檔案就擋路;否則拿掉保管庫裡那一筆與插槽旁的
+/// 自己的,不碰(同 `park_link`)。只在 Lunport 的金鑰(`SlotSource::Vault`):插槽路徑上有檔案就擋路;否則拿掉保管庫裡那一筆與插槽旁的
 /// `.pub`(那是這筆記錄每一輪維護的),再忘掉記錄;記在這台 keychain 的 passphrase 也一起忘掉(`forget_remembered_passphrase`)。不需要帳戶(`local_snapshot`)。
 ///
 /// 帳戶裡已經沒有(或根本沒有帳戶)的連結(symlink、hard link):做每一輪對它做的事(`drop_link`)—— 拿掉自己的連結與 `.pub`、忘掉記錄;原檔不見或內容不同的
@@ -1960,7 +1960,7 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 插槽的金鑰變了 —— 離開保管庫(`set_delivery` 改回檔案、`delete_copy` 刪掉只在 SSHelter 的金鑰、`pick` 與 `use_synced` 放不進保管庫而改用連結或檔案),或被另一把
+/// 插槽的金鑰變了 —— 離開保管庫(`set_delivery` 改回檔案、`delete_copy` 刪掉只在 Lunport 的金鑰、`pick` 與 `use_synced` 放不進保管庫而改用連結或檔案),或被另一把
 /// 取代(`Vault::replace` 把原本那把改存成 retired:`into_vault`、`set_delivery` 搬進來、`EnvVault::restore`)—— 時,忘掉記在這台 keychain 的 passphrase
 /// (`vault:passphrase:<插槽 id>`):它是原本那把金鑰的。不忘掉的話,這個插槽的新金鑰第一次用的時候,核准視窗先當成記住了 passphrase、不顯示輸入欄,拿舊的去試
 /// 新金鑰而失敗,接著才跳第二個視窗;新金鑰沒有 passphrase 的話,舊的就一直留在 keychain。同一把金鑰放回去(`Vault::replace` 回 `None`)不動它。盡力而為:
@@ -1986,7 +1986,7 @@ pub(crate) fn agent_refusal(text: &str, facts: &KeyFacts) -> Option<&'static str
     None
 }
 
-/// 這台的插槽改成只在 SSHelter(`vault` = true:私鑰放進保管庫,插槽目錄只留 `.pub`)或改回檔案(插槽路徑放私鑰的副本,保管庫不再留它)。
+/// 這台的插槽改成只在 Lunport(`vault` = true:私鑰放進保管庫,插槽目錄只留 `.pub`)或改回檔案(插槽路徑放私鑰的副本,保管庫不再留它)。
 /// 使用者自己的原檔一律不碰;插槽路徑上可能是某把金鑰僅存名字的 hard link 或複製檔,改名保留(`retire_key`)而不刪除。
 ///
 /// 搬進保管庫:先確認 agent 簽得了、打得開、讀得懂這把金鑰(`agent_refusal`:`material::agent_can_sign`、`material::unsupported_cipher`、`material::agent_can_read`),不行就拒絕
@@ -2090,7 +2090,7 @@ pub(crate) fn set_delivery_in(env: &SyncEnv, transaction: &MaterialTransaction<'
         if let Some(copy) = synced_copy {
             if holds_recorded_copy(copy, &slot_path) {
                 if let Err(e) = remove_if_present(&slot_path) {
-                    eprintln!("[sync] a key moved into SSHelter's vault is still in its slot file: {e}");
+                    eprintln!("[sync] a key moved into Lunport's vault is still in its slot file: {e}");
                 }
             }
         }
@@ -2100,13 +2100,13 @@ pub(crate) fn set_delivery_in(env: &SyncEnv, transaction: &MaterialTransaction<'
             return Err(AppError::Other(in_the_way_message(&slot_path)));
         }
         let entry = transaction.with_vault(env, |v| v.get(slot_id))?
-            .ok_or_else(|| AppError::Other("This key is missing from SSHelter's vault.".to_string()))?;
+            .ok_or_else(|| AppError::Other("This key is missing from Lunport's vault.".to_string()))?;
         if entry.fingerprint != *recorded {
             return Err(AppError::Other(VAULT_MISMATCH_MESSAGE.to_string()));
         }
         slot_files::ensure_keys_dir(&keys_dir)?;
         slot_files::write_private(&slot_path, entry.private_key.as_bytes())?;
-        // 收回剛寫的私鑰檔(`.pub` 是同一把的,留著):記錄還說金鑰在保管庫、保管庫裡也還有它,留著的話下一輪會把 SSHelter 自己的檔案當成擋路。
+        // 收回剛寫的私鑰檔(`.pub` 是同一把的,留著):記錄還說金鑰在保管庫、保管庫裡也還有它,留著的話下一輪會把 Lunport 自己的檔案當成擋路。
         let take_back = || {
             let _ = remove_if_present(&slot_path);
         };
@@ -2132,7 +2132,7 @@ pub(crate) fn set_delivery_in(env: &SyncEnv, transaction: &MaterialTransaction<'
         }
         // 記錄已經是檔案了:保管庫那一筆拿不掉也只是一筆沒有記錄用到的,不影響這台用檔案連線。
         if let Err(e) = transaction.with_vault(env, |v| v.remove(slot_id)) {
-            eprintln!("[sync] a key kept as a file again is still in SSHelter's vault: {e}");
+            eprintln!("[sync] a key kept as a file again is still in Lunport's vault: {e}");
         }
         // 金鑰已經不在保管庫裡了:記在這台的 passphrase 也忘掉(`forget_remembered_passphrase`)。
         forget_remembered_passphrase(env, slot_id);
@@ -2140,7 +2140,7 @@ pub(crate) fn set_delivery_in(env: &SyncEnv, transaction: &MaterialTransaction<'
     Ok(())
 }
 
-/// 這台現在的狀態裡,這個插槽還是只在 SSHelter(`set_delivery` 的提交失敗之後判斷要不要收回剛寫的檔案)。
+/// 這台現在的狀態裡,這個插槽還是只在 Lunport(`set_delivery` 的提交失敗之後判斷要不要收回剛寫的檔案)。
 fn still_in_vault(env: &SyncEnv, slot_id: &str) -> bool {
     let core = env.runtime.core.lock().unwrap();
     core.state.as_ref().and_then(|s| s.key_slots.get(slot_id)).is_some_and(|l| matches!(l.source, Some(SlotSource::Vault { .. })))
@@ -2752,7 +2752,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// 同步的金鑰到了另一台:放進保管庫,插槽目錄只有 `.pub`(金鑰保管庫 spec §4.3);那台的 `~/.ssh/config` 接上 SSHelter 的 agent。
+    /// 同步的金鑰到了另一台:放進保管庫,插槽目錄只有 `.pub`(金鑰保管庫 spec §4.3);那台的 `~/.ssh/config` 接上 Lunport 的 agent。
     #[test]
     fn a_synced_key_lands_in_the_vault_on_the_other_computer() {
         let (_relay, _clock, a, b, _words, personal) = pair();
@@ -3156,7 +3156,7 @@ pub(crate) mod tests {
     }
 
     // 插槽檔名(`<name>-<id8>`)不保證在插槽 id 之間唯一:帳戶裡的成員可以發佈同名、同 id 前 8 字元的另一個插槽。
-    // 一個檔案是不是 SSHelter 放的,只看這個插槽 id 自己的本機記錄,不看檔名;同檔名的插槽,只有這台已經握著的那個照常維護。
+    // 一個檔案是不是 Lunport 放的,只看這個插槽 id 自己的本機記錄,不看檔名;同檔名的插槽,只有這台已經握著的那個照常維護。
 
     #[test]
     fn two_slots_with_the_same_file_name_never_overwrite_each_others_copy() {
@@ -3188,7 +3188,7 @@ pub(crate) mod tests {
         settle(&b);
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), test_keys::plain());
         assert!(b.state().key_slots.contains_key(&first) && !b.state().key_slots.contains_key(&second));
-        // 第一個被刪掉:副本留著(不是 SSHelter 放的連結),也不會被另一個覆蓋 —— 另一個重新發佈,仍然擋在外面。
+        // 第一個被刪掉:副本留著(不是 Lunport 放的連結),也不會被另一個覆蓋 —— 另一個重新發佈,仍然擋在外面。
         publish(&a, &second, &ecdsa_payload(&me), Some(&test_keys::ecdsa()));
         unpublish(&a, &first);
         settle(&a);
@@ -3433,7 +3433,7 @@ pub(crate) mod tests {
         let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
         use_slot(&a, &personal, &file);
         settle(&a);
-        // 使用者自己把插槽上的 symlink 換成一份金鑰(SSHelter 沒有放它)。
+        // 使用者自己把插槽上的 symlink 換成一份金鑰(Lunport 沒有放它)。
         let slot_path = home(&a).join(SLOT_DIR).join(&file);
         std::fs::remove_file(&slot_path).unwrap();
         std::fs::write(&slot_path, test_keys::ecdsa()).unwrap();
@@ -5767,7 +5767,7 @@ pub(crate) mod tests {
 
     // ── 修正第 1 輪:刪除副本只認檔案本身;「這台的金鑰換了」只告訴上傳了目前同步金鑰的那台 ───────────────────────────
 
-    /// 同步來的副本被換成了別種格式的私鑰(PEM、PKCS#8),旁邊 SSHelter 從記錄的金鑰寫的 `.pub` 還在:那不是這份副本,不刪。辨認副本只看
+    /// 同步來的副本被換成了別種格式的私鑰(PEM、PKCS#8),旁邊 Lunport 從記錄的金鑰寫的 `.pub` 還在:那不是這份副本,不刪。辨認副本只看
     /// 檔案本身的位元組(同步來的副本一定是 OpenSSH 格式),不看旁邊的 `.pub`。
     #[test]
     fn a_key_in_another_format_put_over_a_synced_copy_is_never_deleted_as_the_copy() {
@@ -5786,7 +5786,7 @@ pub(crate) mod tests {
         for header in [concat!("-----BEGIN RSA ", "PRIVATE KEY-----"), concat!("-----BEGIN ", "PRIVATE KEY-----")] {
             let footer = header.replace("BEGIN", "END");
             std::fs::write(&copy, format!("{header}\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n{footer}\n")).unwrap();
-            assert_eq!(std::fs::read_to_string(public_path(&copy)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "SSHelter's .pub is still beside it");
+            assert_eq!(std::fs::read_to_string(public_path(&copy)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "Lunport's .pub is still beside it");
             refused(&b, &in_the_way_message(&copy), || delete_copy(&b.env(), &id));
         }
     }
@@ -5929,7 +5929,7 @@ pub(crate) mod tests {
         assert_eq!(after, before, "no record and no local state was written");
     }
 
-    // ── 只在 SSHelter 的插槽(金鑰保管庫 spec §4.3、§4.4)────────────────────────────────────────────────
+    // ── 只在 Lunport 的插槽(金鑰保管庫 spec §4.3、§4.4)────────────────────────────────────────────────
 
     pub(crate) fn vault_entry(d: &TestDevice, id: &str) -> Option<crate::vault::store::VaultEntry> {
         let env = d.env();
@@ -6000,7 +6000,7 @@ pub(crate) mod tests {
 
         set_delivery(&a.env(), &id, true).unwrap();
         assert_eq!(std::fs::read_to_string(&original).unwrap(), test_keys::plain(), "the user's own file is untouched");
-        assert!(!slot_files::occupied(&slot), "SSHelter's link is gone");
+        assert!(!slot_files::occupied(&slot), "Lunport's link is gone");
         assert!(public_path(&slot).is_file());
         assert_eq!(vault_entry(&a, &id).unwrap().origin, crate::vault::store::EntryOrigin::Imported);
 
@@ -6181,7 +6181,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(b.main_path()).unwrap(), main, "the Include stays");
     }
 
-    /// 沒有用「只在 SSHelter」的電腦(絕大多數):每一輪的那一步什麼都不留 —— 沒有 agent 的目錄、`agent/config`,主 config 也沒有那一行。
+    /// 沒有用「只在 Lunport」的電腦(絕大多數):每一輪的那一步什麼都不留 —— 沒有 agent 的目錄、`agent/config`,主 config 也沒有那一行。
     #[test]
     fn a_computer_that_keeps_its_keys_in_files_never_gets_an_agent_config() {
         let (_relay, _clock, a, b, _words, personal) = pair();
@@ -6480,7 +6480,7 @@ pub(crate) mod tests {
         assert!(matches!(&b.state().key_slots[&id].source, Some(SlotSource::Linked { .. })));
     }
 
-    /// 挑的金鑰進了保管庫,用這個插槽的主機當場改走 SSHelter 的 agent(`agent/config`,主 config 接上 Include):金鑰只在保管庫裡,不等下一輪同步。
+    /// 挑的金鑰進了保管庫,用這個插槽的主機當場改走 Lunport 的 agent(`agent/config`,主 config 接上 Include):金鑰只在保管庫裡,不等下一輪同步。
     #[test]
     fn picking_a_key_into_the_vault_wires_its_hosts_to_the_agent() {
         let (_a, b, id, _file) = own_slot_waiting_on_b();
@@ -6600,7 +6600,7 @@ pub(crate) mod tests {
         assert_eq!(vault_entry(&a, &id).unwrap().private_key, test_keys::ecdsa(), "what was put in the vault stays there, unused");
     }
 
-    /// 補寫只在 SSHelter 的金鑰時,保管庫裡那一筆的私鑰本身要是記錄裡的那一把:這台同意上傳的是記錄裡的 plain,保管庫裡放著的卻是 ecdsa
+    /// 補寫只在 Lunport 的金鑰時,保管庫裡那一筆的私鑰本身要是記錄裡的那一把:這台同意上傳的是記錄裡的 plain,保管庫裡放著的卻是 ecdsa
     /// (例如提交失敗留下的)時不上傳 —— 即使這台最後看到的 payload 填的正是 ecdsa 的指紋(帳戶裡的成員改得動)。
     #[test]
     fn republish_never_uploads_a_vault_key_other_than_the_recorded_one() {
@@ -6896,7 +6896,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// 只在 SSHelter 的插槽記錄(plain 那把)。
+    /// 只在 Lunport 的插槽記錄(plain 那把)。
     fn vault_record() -> LocalSlot {
         LocalSlot {
             file_name: "id_mac-3fa2c1d9".into(),
@@ -7016,7 +7016,7 @@ pub(crate) mod tests {
         assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Vault { fingerprint, .. }) if fingerprint == test_keys::PLAIN_FINGERPRINT));
     }
 
-    // ── 「Only in SSHelter」只收 agent 簽得了、打得開的金鑰 ───────────────────────────────────────────
+    // ── 「Only in Lunport」只收 agent 簽得了、打得開的金鑰 ───────────────────────────────────────────
 
     /// 保管庫檔裡有哪些插槽 id(只讀檔裡的 id,不開 keychain)。
     fn vault_ids(d: &TestDevice) -> BTreeSet<String> {
@@ -7093,7 +7093,7 @@ pub(crate) mod tests {
         id
     }
 
-    /// Keep a file 之後,記在這台的 passphrase 是那把金鑰的:忘掉它。不然之後這個插槽放進別把有 passphrase 的金鑰、再按 Only in SSHelter 時,核准視窗先拿舊的
+    /// Keep a file 之後,記在這台的 passphrase 是那把金鑰的:忘掉它。不然之後這個插槽放進別把有 passphrase 的金鑰、再按 Only in Lunport 時,核准視窗先拿舊的
     /// passphrase 去試新金鑰而失敗,再跳第二個視窗。別的插槽的 passphrase 不動。
     #[test]
     fn keeping_a_file_forgets_the_passphrase_remembered_for_the_key() {
@@ -7120,7 +7120,7 @@ pub(crate) mod tests {
         assert_eq!(a.keychain.entry(&mine).as_deref(), Some("test-passphrase"), "the keychain refused, so the entry is still there");
     }
 
-    /// 刪掉只在 SSHelter 的金鑰(`delete_copy` 的保管庫那一支)時,它記在這台的 passphrase 一起忘掉。
+    /// 刪掉只在 Lunport 的金鑰(`delete_copy` 的保管庫那一支)時,它記在這台的 passphrase 一起忘掉。
     #[test]
     fn deleting_a_vault_key_forgets_the_passphrase_remembered_for_it() {
         let (_relay, _clock, a, _b, _words, personal) = pair();
@@ -7316,7 +7316,7 @@ pub(crate) mod tests {
             let (id, _) = create_slot_on(&a, SlotMode::Own, &key, file);
             set_delivery(&a.env(), &id, true).unwrap_or_else(|e| panic!("{file}: {e}"));
             assert_eq!(vault_entry(&a, &id).map(|entry| entry.private_key.clone()), Some(key), "{file} is in the vault");
-            assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "{file} is recorded as only in SSHelter");
+            assert!(matches!(a.state().key_slots[&id].source, Some(SlotSource::Vault { .. })), "{file} is recorded as only in Lunport");
         }
     }
 
@@ -7551,7 +7551,7 @@ pub(crate) mod tests {
 
     // ── 「Export private key…」(金鑰保管庫 spec §7.3.2)──────────────────────────────────────────────────────
 
-    /// 匯出只在 SSHelter 的金鑰:內容是保管庫裡記錄的那一把,預設檔名是插槽名稱;不是只在 SSHelter 的插槽拒絕。
+    /// 匯出只在 Lunport 的金鑰:內容是保管庫裡記錄的那一把,預設檔名是插槽名稱;不是只在 Lunport 的插槽拒絕。
     #[test]
     fn exporting_gives_the_vault_key_and_refuses_a_key_that_is_a_file() {
         let (_relay, _clock, a, b, _words, personal) = pair();
@@ -7761,7 +7761,7 @@ pub(crate) mod tests {
         assert!(overview_row(&d, &id).is_none(), "and the row");
     }
 
-    /// 跑不了同步引擎的行程(`save_blocked`:例如第二個 SSHelter;沒有帳戶時它不再因為沒有帳戶金鑰而先失敗):「Move」與「Delete copy」在動任何東西之前就以
+    /// 跑不了同步引擎的行程(`save_blocked`:例如第二個 Lunport;沒有帳戶時它不再因為沒有帳戶金鑰而先失敗):「Move」與「Delete copy」在動任何東西之前就以
     /// `mutate` 的理由拒絕 —— 連結還在、保管庫沒變、記錄沒變。不然檔案與保管庫先動了、記錄卻寫不進去:跑引擎的那個行程還記著連結,沒有帳戶可以對照著修回來
     /// (沒有帳戶時同步嘗試只補回有主機用到的連結)。
     #[test]
@@ -8047,7 +8047,7 @@ pub(crate) mod tests {
         std::fs::remove_file(&public).unwrap();
         let agent_config = crate::agent::wiring::agent_config_path(&home(&a));
         if agent_config.exists() { std::fs::remove_file(&agent_config).unwrap(); }
-        let reason = "this sync state uses a newer local format; update SSHelter";
+        let reason = "this sync state uses a newer local format; update Lunport";
         a.runtime.core.lock().unwrap().save_blocked = Some(reason.to_string());
         a.runtime.core.lock().unwrap().swap_pending = true;
         a.env().keychain.set(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT, &words).unwrap();
@@ -8143,7 +8143,7 @@ pub(crate) mod tests {
         let reason = crate::sync::engine::ANOTHER_ENGINE_MESSAGE;
         a.runtime.core.lock().unwrap().save_blocked = Some(reason.to_string());
         assert_eq!(move_all_into_vault(&a.env()).unwrap_err().to_string(), reason, "Move");
-        assert_eq!(set_delivery(&a.env(), &linked, true).unwrap_err().to_string(), reason, "Move into SSHelter");
+        assert_eq!(set_delivery(&a.env(), &linked, true).unwrap_err().to_string(), reason, "Move into Lunport");
         assert_eq!(delete_copy(&a.env(), &vaulted).unwrap_err().to_string(), reason, "Delete copy");
         assert_eq!(std::fs::read_to_string(&link).unwrap(), test_keys::plain(), "the link is still in place");
         assert!(vault_entry(&a, &linked).is_none(), "nothing went into the vault");
@@ -8329,12 +8329,12 @@ pub(crate) mod tests {
     /// 保管庫收不了的金鑰的三種原因(Move 與 New key 顯示給使用者的字句)。
     #[test]
     fn the_vault_words_why_it_cannot_take_a_key() {
-        assert_eq!(vault_unreadable_message(Unsyncable::TooLarge), "This key is larger than 16 KiB, which SSHelter's vault doesn't take.");
+        assert_eq!(vault_unreadable_message(Unsyncable::TooLarge), "This key is larger than 16 KiB, which Lunport's vault doesn't take.");
         assert_eq!(
             vault_unreadable_message(Unsyncable::NotOpenSsh),
             "This key isn't in the OpenSSH format. Convert it with ssh-keygen -p -f <file>, then try again."
         );
-        assert_eq!(vault_unreadable_message(Unsyncable::Unreadable), "This isn't an OpenSSH private key SSHelter can read.");
+        assert_eq!(vault_unreadable_message(Unsyncable::Unreadable), "This isn't an OpenSSH private key Lunport can read.");
     }
 
     /// 帳戶裡的 `own` 插槽沒有記錄上的類型:金鑰在這台保管庫裡就顯示它的類型。

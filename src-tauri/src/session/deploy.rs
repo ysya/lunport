@@ -538,7 +538,7 @@ fn audit(
         ended: Some(outcome.clone()),
         signal: None,
         mode: crate::mcp::ApprovalMode::Ask,
-        requested_by: vec!["SSHelter Keys".into()],
+        requested_by: vec!["Lunport Keys".into()],
         requester_id: None,
         client_info: Default::default(),
         at_ms: started,

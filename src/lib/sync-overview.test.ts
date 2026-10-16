@@ -207,7 +207,7 @@ describe("changeCodeBlocker", () => {
     expect(changeCodeBlocker(overview({ rotation: { step: "prepared", cancellable: true, paused_until_ms: null } }))?.reason).toBe(
       "The sync code is being changed.",
     );
-    expect(changeCodeBlocker(overview({ read_only: true }))?.reason).toBe("Update SSHelter first: this sync account uses a newer format.");
+    expect(changeCodeBlocker(overview({ read_only: true }))?.reason).toBe("Update Lunport first: this sync account uses a newer format.");
     expect(changeCodeBlocker(overview({ joined: false }))?.reason).toBe("Join or create a sync account first.");
   });
 });
@@ -218,7 +218,7 @@ describe("syncCodeNote", () => {
     expect(syncCodeNote(overview({ rotation: { step: "copying", cancellable: false, paused_until_ms: null } }))).toBe(
       "While the sync code is being changed, Show gives the old code: it stops working once the old data is frozen, and the new code is shown when the change finishes.",
     );
-    expect(syncCodeNote(overview({ read_only: true }))).toBe("Update SSHelter first: this sync account uses a newer format.");
+    expect(syncCodeNote(overview({ read_only: true }))).toBe("Update Lunport first: this sync account uses a newer format.");
   });
 });
 
@@ -288,7 +288,7 @@ describe("leaveRotationNote", () => {
       "A sync code change is in progress. Leaving cancels it first: nothing on the relay is frozen yet.",
     );
     expect(leaveRotationNote(overview({ rotation: { step: "copying", cancellable: false, paused_until_ms: null } }))).toBe(
-      "A sync code change is in progress and can no longer be cancelled, so SSHelter lets this computer leave only if the change can never finish (its new sync code is gone from the keychain). Otherwise, let it finish first.",
+      "A sync code change is in progress and can no longer be cancelled, so Lunport lets this computer leave only if the change can never finish (its new sync code is gone from the keychain). Otherwise, let it finish first.",
     );
   });
 });
@@ -339,13 +339,13 @@ describe("shownCodeNote", () => {
 describe("strayFilesNote", () => {
   it("speaks of one file in the singular", () => {
     expect(strayFilesNote(["hosts.config"])).toBe(
-      "ssh doesn't read hosts.config in ~/.ssh/sshelter: it is not in SSHelter's Include line. SSHelter leaves it alone — copy any host you still need into your SSH config before deleting it.",
+      "ssh doesn't read hosts.config in ~/.ssh/sshelter: it is not in Lunport's Include line. Lunport leaves it alone — copy any host you still need into your SSH config before deleting it.",
     );
   });
 
   it("and of several in the plural", () => {
     expect(strayFilesNote(["a.config", "b.config"])).toBe(
-      "ssh doesn't read a.config, b.config in ~/.ssh/sshelter: they are not in SSHelter's Include line. SSHelter leaves them alone — copy any host you still need into your SSH config before deleting them.",
+      "ssh doesn't read a.config, b.config in ~/.ssh/sshelter: they are not in Lunport's Include line. Lunport leaves them alone — copy any host you still need into your SSH config before deleting them.",
     );
   });
 });
@@ -437,7 +437,7 @@ describe("noticeRows", () => {
     // Joined, every notice keeps its own words and the new-code one its button.
     const joined = noticeRows(overview({ notices }));
     expect(joined.map((row) => row.index)).toEqual([0, 2, 3, 4, 5]);
-    expect(joined[0].description).toContain("SSHelter renames the space's file on the next sync");
+    expect(joined[0].description).toContain("Lunport renames the space's file on the next sync");
     expect(joined.map((row) => row.showsNewCode)).toEqual([false, true, false, false, false]);
   });
 

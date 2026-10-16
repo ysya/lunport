@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "SSHelter",
+  "productName": "Lunport",
   "version": "1.0.0",
   "identifier": "org.homelab.sshelter",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "SSHelter",
+        "title": "Lunport",
         "width": 1100,
         "height": 720,
         "minWidth": 800,
@@ -43,13 +43,45 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "shortDescription": "Lunport \u2014 Your SSH workspace",
+    "windows": {
+      "wix": {
+        "upgradeCode": "d00b09d3-45df-5130-b6d5-52034e820843",
+        "template": "installers/main.wxs"
+      },
+      "nsis": {
+        "template": "installers/nsis.nsi",
+        "installerHooks": "installers/hooks.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "provides": [
+          "ss-helter"
+        ],
+        "conflicts": [
+          "ss-helter"
+        ],
+        "replaces": [
+          "ss-helter"
+        ]
+      },
+      "rpm": {
+        "provides": [
+          "ss-helter"
+        ],
+        "obsoletes": [
+          "ss-helter"
+        ]
+      }
+    }
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdEMkUwQUEzMzNDNTA3QzMKUldUREI4VXpvd291ZlJQU1FKcmt1MlpiZW9nQ1N3NjIyNUJwSlV2RjV0dWJ2UUtQdmV5UUEvdGIK",
       "endpoints": [
-        "https://github.com/ysya/sshelter/releases/latest/download/latest.json"
+        "https://github.com/ysya/lunport/releases/latest/download/latest.json"
       ]
     }
   }

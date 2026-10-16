@@ -40,7 +40,7 @@ function keyFile(name: string, overrides: Partial<KeyInfo> = {}): KeyInfo {
   };
 }
 
-describe("the In SSHelter list", () => {
+describe("the In Lunport list", () => {
   it("puts the slots that need something done here first, then sorts by name", () => {
     const slots = [
       keySlot({ id: "a".repeat(32), name: "zeta" }),
@@ -112,7 +112,7 @@ describe("Generate key's kinds", () => {
 });
 
 describe("other key files in ~/.ssh", () => {
-  it("leaves out a file a slot still serves, and lists one a slot only copied into SSHelter", () => {
+  it("leaves out a file a slot still serves, and lists one a slot only copied into Lunport", () => {
     const keys = [keyFile("id_mac"), keyFile("id_work"), keyFile("id_old")];
     const slots = [
       keySlot({ status: { kind: "ready", file: "/home/f/.ssh/id_mac", synced_copy: false, fingerprint: null } }),
@@ -135,13 +135,13 @@ describe("other key files in ~/.ssh", () => {
 });
 
 describe("the banners", () => {
-  it("count the keys that can move into SSHelter", () => {
+  it("count the keys that can move into Lunport", () => {
     expect(moveCount([keySlot(), keySlot({ file_for_now: true }), keySlot({ file_for_now: true, in_account: false })])).toBe(2);
-    expect(moveBannerText(1)).toBe("1 key can move into SSHelter");
-    expect(moveBannerText(3)).toBe("3 keys can move into SSHelter");
+    expect(moveBannerText(1)).toBe("1 key can move into Lunport");
+    expect(moveBannerText(3)).toBe("3 keys can move into Lunport");
   });
 
-  it("suggest launching at login once a key is in SSHelter and nothing keeps SSHelter running", () => {
+  it("suggest launching at login once a key is in Lunport and nothing keeps Lunport running", () => {
     const base = { anyInVault: true, launchAtLogin: false, closeToTray: false, dismissed: false };
     expect(launchHintNeeded(base)).toBe(true);
     expect(launchHintNeeded({ ...base, anyInVault: false })).toBe(false);
@@ -230,10 +230,10 @@ describe("the host editor's IdentityFile", () => {
     expect(pickableSlots([b, missing, a]).map((s) => s.name)).toEqual(["a-key", "b-key"]);
   });
 
-  it("explains under IdentityFile that a key in SSHelter needs SSHelter running", () => {
+  it("explains under IdentityFile that a key in Lunport needs Lunport running", () => {
     const slot = keySlot({ name: SPOOFED_NAME, in_vault: true, value: "~/.ssh/sshelter/keys/id_mac-3fa2c1d9" });
     expect(sshelterKeyNote("~/.ssh/sshelter/keys/id_mac-3fa2c1d9", [slot])).toBe(
-      `${SPOOFED_NAME_SHOWN} is in SSHelter: ssh can use it only while SSHelter is running.`,
+      `${SPOOFED_NAME_SHOWN} is in Lunport: ssh can use it only while Lunport is running.`,
     );
     expect(sshelterKeyNote('"%d/.ssh/sshelter/keys/id_mac-3fa2c1d9"', [slot])).not.toBeNull();
     expect(sshelterKeyNote("~/.ssh/sshelter/keys/id_mac-3fa2c1d9", [{ ...slot, in_vault: false }])).toBeNull();

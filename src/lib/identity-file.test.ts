@@ -119,7 +119,7 @@ describe("pickedIdentityFile", () => {
     expect(pickedIdentityFile("/Users/frank/.ssh/id_ed25519", null)).toBe("/Users/frank/.ssh/id_ed25519");
   });
 
-  it("writes a key in SSHelter as its slot path", () => {
+  it("writes a key in Lunport as its slot path", () => {
     for (const home of [MAC_HOME, WIN_HOME, null]) {
       expect(pickedIdentityFile("~/.ssh/sshelter/keys/id_mac-3fa2c1d9", home)).toBe("~/.ssh/sshelter/keys/id_mac-3fa2c1d9");
     }

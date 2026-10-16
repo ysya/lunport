@@ -113,11 +113,11 @@ describe("the confirm before a copy is deleted", () => {
   });
 });
 
-describe("deleting a key in SSHelter", () => {
+describe("deleting a key in Lunport", () => {
   it("warns that deleting a vault key may delete the only copy", () => {
     const tree = DeleteCopyConfirm({ slot: keySlot({ in_vault: true, status: { kind: "not_in_use", file: "/f" } }), open: true, onCancel: () => {}, onConfirm: () => {} });
     expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
-      "The key id_mac kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.",
+      "The key id_mac kept in Lunport on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.",
     ]);
   });
 
@@ -125,7 +125,7 @@ describe("deleting a key in SSHelter", () => {
     const slot = keySlot({ in_vault: true, name: SPOOFED_NAME, status: { kind: "not_in_use", file: "/f" } });
     const tree = DeleteCopyConfirm({ slot, open: true, onCancel: () => {}, onConfirm: () => {} });
     expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
-      `The key ${SPOOFED_NAME_SHOWN} kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`,
+      `The key ${SPOOFED_NAME_SHOWN} kept in Lunport on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`,
     ]);
   });
 });
@@ -136,7 +136,7 @@ describe("deleting a key only on this computer", () => {
     const tree = DeleteKeyConfirm({ slot: keySlot({ name: SPOOFED_NAME, local_only: true }), open: true, onCancel: () => {}, onConfirm: () => deleted++ });
     expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Delete ${SPOOFED_NAME_SHOWN}?`);
     expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
-      "SSHelter removes this key from this computer. It's the only copy unless you exported one.",
+      "Lunport removes this key from this computer. It's the only copy unless you exported one.",
     ]);
     const [action] = elementsOf(tree, AlertDialogAction);
     expect(textIn(action)).toBe("Delete");
@@ -154,14 +154,14 @@ describe("the confirm before a Move removes a key file", () => {
 
   it("names the file, and says the vault keeps the only copy while the file goes", () => {
     const tree = confirm();
-    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe("Move id_work into SSHelter?");
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe("Move id_work into Lunport?");
     expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
-      "SSHelter keeps the only copy of this key on this computer and removes /home/f/.ssh/id_work. Export private key… gets a file back.",
+      "Lunport keeps the only copy of this key on this computer and removes /home/f/.ssh/id_work. Export private key… gets a file back.",
     ]);
   });
 
   it("names a Windows file by its last part", () => {
-    expect(textIn(elementsOf(confirm("C:\\Users\\f\\.ssh\\id_work"), AlertDialogTitle))).toBe("Move id_work into SSHelter?");
+    expect(textIn(elementsOf(confirm("C:\\Users\\f\\.ssh\\id_work"), AlertDialogTitle))).toBe("Move id_work into Lunport?");
   });
 
   it("lets a long file name and path wrap anywhere, as other paths do: neither has a space to break at", () => {
@@ -171,28 +171,28 @@ describe("the confirm before a Move removes a key file", () => {
     const breaksAnywhere = elementsOf(tree, "span").filter((span) => String((span.props as { className?: string }).className).includes("break-all"));
     expect(breaksAnywhere.map(textIn)).toEqual([name, path]);
     // The sentences around them still wrap between words.
-    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Move ${name} into SSHelter?`);
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Move ${name} into Lunport?`);
     expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
-      `SSHelter keeps the only copy of this key on this computer and removes ${path}. Export private key… gets a file back.`,
+      `Lunport keeps the only copy of this key on this computer and removes ${path}. Export private key… gets a file back.`,
     ]);
   });
 
   it("reveals hidden characters in the file's name and path: they come from the disk", () => {
     const tree = confirm(`/home/f/Downloads/${SPOOFED_NAME}`);
-    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Move ${SPOOFED_NAME_SHOWN} into SSHelter?`);
+    expect(textIn(elementsOf(tree, AlertDialogTitle))).toBe(`Move ${SPOOFED_NAME_SHOWN} into Lunport?`);
     expect(elementsOf(tree, AlertDialogDescription).map(textIn)).toEqual([
-      `SSHelter keeps the only copy of this key on this computer and removes /home/f/Downloads/${SPOOFED_NAME_SHOWN}. Export private key… gets a file back.`,
+      `Lunport keeps the only copy of this key on this computer and removes /home/f/Downloads/${SPOOFED_NAME_SHOWN}. Export private key… gets a file back.`,
     ]);
     expect(textIn(tree)).not.toMatch(HIDDEN_CHARS);
   });
 
-  it("moves only when Move into SSHelter is pressed; Cancel, Escape and a click outside leave everything as it is", () => {
+  it("moves only when Move into Lunport is pressed; Cancel, Escape and a click outside leave everything as it is", () => {
     let moved = 0;
     let cancelled = 0;
     const tree = confirm(PATH, { onConfirm: () => moved++, onCancel: () => cancelled++ });
     expect(elementsOf(tree, AlertDialogCancel).map(textIn)).toEqual(["Cancel"]);
     const [action] = elementsOf(tree, AlertDialogAction);
-    expect(textIn(action)).toBe("Move into SSHelter");
+    expect(textIn(action)).toBe("Move into Lunport");
     expect([moved, cancelled]).toEqual([0, 0]);
     closeDialog(tree);
     expect([moved, cancelled]).toEqual([0, 1]);
@@ -208,8 +208,8 @@ describe("the confirm before a Move removes a key file", () => {
 });
 
 describe("what happens to the key a pick replaces", () => {
-  it("stays in SSHelter for a key in SSHelter, and becomes a .previous file for a synced copy", () => {
-    expect(replacedKeyNote(keySlot({ in_vault: true }))).toBe("SSHelter keeps the key it replaces.");
+  it("stays in Lunport for a key in Lunport, and becomes a .previous file for a synced copy", () => {
+    expect(replacedKeyNote(keySlot({ in_vault: true }))).toBe("Lunport keeps the key it replaces.");
     expect(replacedKeyNote(keySlot({ status: { kind: "ready", file: "/f", synced_copy: true, fingerprint: null } }))).toBe(
       "The synced copy on this computer is kept as a .previous file.",
     );
@@ -237,7 +237,7 @@ describe("Export private key", () => {
     const tree = form({ name: SPOOFED_NAME });
     expect(textIn(elementsOf(tree, DialogTitle))).toBe(`Export ${SPOOFED_NAME_SHOWN}?`);
     expect(textIn(elementsOf(tree, DialogDescription))).toBe(
-      "Any program can use the exported file without asking, and SSHelter won't keep track of it.",
+      "Any program can use the exported file without asking, and Lunport won't keep track of it.",
     );
   });
 

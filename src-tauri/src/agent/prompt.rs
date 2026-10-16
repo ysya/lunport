@@ -34,7 +34,7 @@ pub struct AgentApprovalRequest {
     pub needs_passphrase: bool,
     /// 上一次輸入的 passphrase 不對時的說明。
     pub passphrase_error: Option<String>,
-    /// 已經核准,只需要 passphrase:從 SSHelter 按 Connect(spec §5.6),或剛允許了、記住的 passphrase 卻不對、或上一次輸入的不對。
+    /// 已經核准,只需要 passphrase:從 Lunport 按 Connect(spec §5.6),或剛允許了、記住的 passphrase 卻不對、或上一次輸入的不對。
     pub preapproved: bool,
 }
 
@@ -167,7 +167,7 @@ fn note_head(shown: &mut Option<String>, pending: &[AgentApprovalRequest]) -> bo
     new_head
 }
 
-/// production 的畫面:核准視窗是獨立的小視窗,永遠在最上層;SSHelter 縮在系統匣時也會出現(spec §7.4)。沒有請求時銷毀它
+/// production 的畫面:核准視窗是獨立的小視窗,永遠在最上層;Lunport 縮在系統匣時也會出現(spec §7.4)。沒有請求時銷毀它
 /// (`destroy` 不經過 `CloseRequested`,所以不會被當成使用者關掉視窗而拒絕等待中的請求,見 `lib.rs` 的 `on_window_event`)。
 pub struct TauriPromptSurface {
     pub app: tauri::AppHandle,
@@ -211,7 +211,7 @@ pub(crate) fn present(app: &tauri::AppHandle) {
     let (window, built) = match app.get_webview_window(APPROVAL_WINDOW) {
         Some(window) => (Some(window), false),
         None => match WebviewWindowBuilder::new(app, APPROVAL_WINDOW, WebviewUrl::App("index.html".into()))
-            .title("SSHelter")
+            .title("Lunport")
             .inner_size(460.0, 340.0)
             .resizable(false)
             .always_on_top(true)

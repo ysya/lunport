@@ -30,7 +30,7 @@ use crate::sync::upgrade;
 
 /// app data 目錄裡的行程間同步鎖:一個 OS 使用者同時只有一個行程跑同步引擎。
 const ENGINE_LOCK_FILE: &str = "sync.lock";
-pub(crate) const ANOTHER_ENGINE_MESSAGE: &str = "Sync is running in another SSHelter process — quit it to use sync here";
+pub(crate) const ANOTHER_ENGINE_MESSAGE: &str = "Sync is running in another Lunport process — quit it to use sync here";
 
 /// 喚醒背景執行緒的原因(`wake`、`wake_implicit`):退避期間(spec §6.4)只有順便的喚醒要等。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,7 +267,7 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
     }
 }
 
-/// 狀態檔讀不懂(損毀,或更新版 SSHelter 寫的)時,把它搬到同一目錄的 `sync-state.unreadable-<ms>.json`:
+/// 狀態檔讀不懂(損毀,或更新版 Lunport 寫的)時,把它搬到同一目錄的 `sync-state.unreadable-<ms>.json`:
 /// 之後的任何存檔都會把新狀態寫到原路徑,不搬就會蓋掉它。回傳新檔名;搬不動回傳 I/O 錯誤。
 fn set_aside_unreadable_state(path: &Path, timestamp_ms: u64) -> std::io::Result<String> {
     let name = format!("sync-state.unreadable-{timestamp_ms}.json");
@@ -279,7 +279,7 @@ fn set_aside_unreadable_state(path: &Path, timestamp_ms: u64) -> std::io::Result
 }
 
 /// 狀態檔還留在原路徑時附在說明後面的提示;同一段完整說明也放進 `save_blocked`。
-const STATE_LEFT_IN_PLACE: &str = "; the sync state file was left in place — restart SSHelter to retry";
+const STATE_LEFT_IN_PLACE: &str = "; the sync state file was left in place — restart Lunport to retry";
 pub(crate) const FUTURE_LOCAL_STATE_MESSAGE: &str = "this sync state uses a newer local format";
 
 /// 啟動時 `state_v2::load` 失敗:回傳(要放進 `last_error` 的說明, `save_blocked`)。
@@ -294,7 +294,7 @@ fn unreadable_state_outcome(path: &Path, timestamp_ms: u64, error: &AppError) ->
     let future_version = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64));
     if let Some(version) = future_version.filter(|version| *version > u64::from(state_v2::STATE_VERSION_V2)) {
-        return left_in_place(format!("{FUTURE_LOCAL_STATE_MESSAGE} (version {version}); update SSHelter before changing sync"));
+        return left_in_place(format!("{FUTURE_LOCAL_STATE_MESSAGE} (version {version}); update Lunport before changing sync"));
     }
     match error {
         AppError::Other(_) => match set_aside_unreadable_state(path, timestamp_ms) {
@@ -374,7 +374,7 @@ fn startup(loaded: Result<LoadedState, AppError>, keychain: &dyn Keychain, devic
 
 /// 取不到同步鎖時要顯示的說明。
 fn engine_lock_error(e: &dyn std::fmt::Display) -> String {
-    format!("sync is off in this SSHelter process: the sync lock could not be taken ({e}); restart SSHelter to retry")
+    format!("sync is off in this Lunport process: the sync lock could not be taken ({e}); restart Lunport to retry")
 }
 
 /// 同步鎖被別的行程拿著時最多試幾次、每次之間等多久(合計約 2 秒;app 內更新時舊行程還沒結束)。
@@ -501,7 +501,7 @@ fn default_device_name() -> String {
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("SSHelter on {}", std::env::consts::OS))
+        .unwrap_or_else(|| format!("Lunport on {}", std::env::consts::OS))
 }
 
 /// spawn_blocking 的 JoinHandle 錯誤 → AppError(`sync::migrate` 的 command 共用)。
@@ -735,7 +735,7 @@ pub async fn sync_key_delete_copy(app: AppHandle, slot_id: String) -> Result<Syn
     run_then_overview(app, false, move |env| crate::sync::slots::delete_copy(env, &slot_id)).await
 }
 
-/// 這台的插槽改成只在 SSHelter,或改回檔案(金鑰保管庫 spec §4.3;只改這台)。
+/// 這台的插槽改成只在 Lunport,或改回檔案(金鑰保管庫 spec §4.3;只改這台)。
 #[tauri::command]
 pub async fn sync_key_set_delivery(app: AppHandle, slot_id: String, vault: bool) -> Result<SyncOverview, AppError> {
     run_then_overview(app, false, move |env| crate::sync::slots::set_delivery(env, &slot_id, vault)).await
@@ -768,7 +768,7 @@ pub async fn sync_key_export_private(app: AppHandle, slot_id: String, passphrase
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
-/// 「New key」→ Paste(金鑰保管庫 spec §7.5):貼上的私鑰加進 SSHelter,成為只在這台的金鑰。回傳最新狀態與新插槽的 id。
+/// 「New key」→ Paste(金鑰保管庫 spec §7.5):貼上的私鑰加進 Lunport,成為只在這台的金鑰。回傳最新狀態與新插槽的 id。
 #[tauri::command]
 pub async fn sync_key_import_text(app: AppHandle, name: String, text: String) -> Result<crate::sync::dto::NewKeyResult, AppError> {
     let text = zeroize::Zeroizing::new(text);
@@ -779,7 +779,7 @@ pub async fn sync_key_import_text(app: AppHandle, name: String, text: String) ->
     .await
 }
 
-/// 「New key」→ From a file 與 `~/.ssh` 的「Import」:`keep_file` = Keep the file too,否則 Move into SSHelter。
+/// 「New key」→ From a file 與 `~/.ssh` 的「Import」:`keep_file` = Keep the file too,否則 Move into Lunport。
 #[tauri::command]
 pub async fn sync_key_import_file(app: AppHandle, name: String, path: String, keep_file: bool) -> Result<crate::sync::dto::ImportResult, AppError> {
     run(app, false, move |env| {
@@ -916,7 +916,7 @@ mod tests {
         assert!(start.keys.is_none() && !start.swap_pending);
         assert!(start.state.joined(), "an unreadable keychain is not 'not joined'");
         let message = start.state.last_error.as_deref().unwrap();
-        assert!(message.starts_with("could not read the sync code from the keychain (") && message.ends_with("unlock the keychain and restart SSHelter"), "{message}");
+        assert!(message.starts_with("could not read the sync code from the keychain (") && message.ends_with("unlock the keychain and restart Lunport"), "{message}");
         assert!(!message.contains("abandon"), "the sync code never reaches the message");
         // 已加入的 v1:等升級;core 放未加入的外殼(沿用裝置身分)。
         let mut v1 = LegacyState::fresh("Old").unwrap();
@@ -1123,7 +1123,7 @@ mod tests {
         assert_eq!(std::fs::read(dir.path().join("sync-state.unreadable-1234.json")).unwrap(), b"{ not json");
         let (failed, blocked) = unreadable_state_outcome(&path, 1235, &error);
         assert!(failed.starts_with("sync state is unreadable: boom; could not set the old file aside: "), "got: {failed}");
-        assert!(failed.ends_with("; the sync state file was left in place — restart SSHelter to retry"), "got: {failed}");
+        assert!(failed.ends_with("; the sync state file was left in place — restart Lunport to retry"), "got: {failed}");
         assert_eq!(blocked.as_deref(), Some(failed.as_str()));
     }
 
@@ -1134,7 +1134,7 @@ mod tests {
         std::fs::write(&path, b"{ \"version\": 2 }").unwrap();
         let io = AppError::Io(std::io::Error::other("device busy"));
         let (message, blocked) = unreadable_state_outcome(&path, 1234, &io);
-        assert_eq!(message, "io error: device busy; the sync state file was left in place — restart SSHelter to retry");
+        assert_eq!(message, "io error: device busy; the sync state file was left in place — restart Lunport to retry");
         assert_eq!(blocked.as_deref(), Some(message.as_str()));
         assert!(path.exists(), "a transient read error must not move a healthy state aside");
     }
@@ -1147,7 +1147,7 @@ mod tests {
         let mut pauses = 0;
         assert_eq!(
             acquire_engine_lock_with(dir.path(), ENGINE_LOCK_ATTEMPTS, || pauses += 1).unwrap_err(),
-            "Sync is running in another SSHelter process — quit it to use sync here",
+            "Sync is running in another Lunport process — quit it to use sync here",
             "a second holder is refused while the first one lives"
         );
         assert_eq!(pauses, ENGINE_LOCK_ATTEMPTS - 1, "it retried before giving up");
@@ -1313,8 +1313,8 @@ mod tests {
         std::fs::write(&not_a_dir, b"").unwrap();
         let message =
             acquire_engine_lock_with(&not_a_dir, ENGINE_LOCK_ATTEMPTS, || panic!("only a held lock is retried")).unwrap_err();
-        assert!(message.starts_with("sync is off in this SSHelter process: the sync lock could not be taken ("), "got: {message}");
-        assert!(message.ends_with("); restart SSHelter to retry"), "got: {message}");
+        assert!(message.starts_with("sync is off in this Lunport process: the sync lock could not be taken ("), "got: {message}");
+        assert!(message.ends_with("); restart Lunport to retry"), "got: {message}");
         assert_eq!(acquire_engine_lock(&not_a_dir).unwrap_err(), message);
     }
 }

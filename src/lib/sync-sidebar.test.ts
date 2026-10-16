@@ -91,7 +91,7 @@ describe("a space's name, which another computer chose", () => {
     const places = ambiguousNames([host("web", WORK), host("web", MAIN)], labels).get("web")!;
     const labelOf = (file: string) => labels.get(file) ?? "config";
     expect(ambiguityReason("web", places, labelOf)).toBe(
-      `web is defined in ${SPOOFED_NAME_SHOWN} and config, so SSHelter can't tell which copy this would change. Select the host to see how to fix that.`,
+      `web is defined in ${SPOOFED_NAME_SHOWN} and config, so Lunport can't tell which copy this would change. Select the host to see how to fix that.`,
     );
     expect(copiesNote("web", places, labelOf).groups[0].copies[0].label).toBe(SPOOFED_NAME_SHOWN);
   });
@@ -313,18 +313,18 @@ describe("what is said about a name that has several copies", () => {
 
   it("names the places in the reason the alias-addressed actions are off", () => {
     expect(ambiguityReason("web", copies, labelOf)).toBe(
-      "web is defined in Work and config, so SSHelter can't tell which copy this would change. Select the host to see how to fix that.",
+      "web is defined in Work and config, so Lunport can't tell which copy this would change. Select the host to see how to fix that.",
     );
     // A file that holds the name twice is named once.
     expect(ambiguityReason("web", [...copies, copies[1]], labelOf)).toContain("defined in Work and config, so");
   });
 
-  it("explains how ssh combines the copies, and what SSHelter does not do until one copy is left", () => {
+  it("explains how ssh combines the copies, and what Lunport does not do until one copy is left", () => {
     const note = noteFor([host("web", PERSONAL), host("web", WORK)]);
     expect(note.title).toBe("web is defined in more than one place");
     expect(note.combine).toBe(`${SSH_COMBINES}.`);
     expect(note.fix).toBe(
-      "SSHelter edits, renames, moves and removes a host by its name, so it can't tell which copy you mean and leaves all of them alone. Once only one copy is left, web can be edited again.",
+      "Lunport edits, renames, moves and removes a host by its name, so it can't tell which copy you mean and leaves all of them alone. Once only one copy is left, web can be edited again.",
     );
   });
 
@@ -421,7 +421,7 @@ describe("what is said about a name that has several copies", () => {
 
     it("says so, and places no copy: not synced, not read first, not in any order", () => {
       expect(note.unknown).toBe(
-        "SSHelter has not read which spaces this computer syncs, so it can't tell whether one of these copies is synced, or which one ssh reads first.",
+        "Lunport has not read which spaces this computer syncs, so it can't tell whether one of these copies is synced, or which one ssh reads first.",
       );
       expect(note.groups).toEqual([
         {
@@ -443,7 +443,7 @@ describe("what is said about a name that has several copies", () => {
     it("leaves every copy alone until it knows, and says where to look if that lasts", () => {
       expect(note.title).toBe("web is defined in more than one place");
       expect(note.combine).toBe(`${SSH_COMBINES}.`);
-      expect(note.fix).toBe("Until it can, SSHelter leaves all of them alone. If this stays, Settings → Sync shows why.");
+      expect(note.fix).toBe("Until it can, Lunport leaves all of them alone. If this stays, Settings → Sync shows why.");
     });
 
     it("is not said once the spaces are known", () => {
@@ -453,7 +453,7 @@ describe("what is said about a name that has several copies", () => {
 
   it("says why the deployed key was not written into the host", () => {
     expect(identityFileNote("web", "~/.ssh/id_ed25519")).toBe(
-      "web is defined in more than one place, so SSHelter did not edit it. Once only one copy is left, add “IdentityFile ~/.ssh/id_ed25519” to it so that ssh offers this key.",
+      "web is defined in more than one place, so Lunport did not edit it. Once only one copy is left, add “IdentityFile ~/.ssh/id_ed25519” to it so that ssh offers this key.",
     );
   });
 });

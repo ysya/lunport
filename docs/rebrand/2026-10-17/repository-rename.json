@@ -1,0 +1,68 @@
+{
+  "repositoryId": 1264083592,
+  "previousName": "ysya/sshelter",
+  "name": "ysya/lunport",
+  "remote": "git@github.com:ysya/lunport.git",
+  "oldApiRedirectsToSameRepository": true,
+  "releaseTagCommit": "be39161f970a0c93dac1eb71fd6d89c6f678e72b",
+  "stable100AssetsUnchanged": true,
+  "stable100AssetCount": 20,
+  "oldStableManifestUnchanged": true,
+  "oldBetaManifestUnchanged": true,
+  "oldUpdaterDownloads": [
+    {
+      "name": "SSHelter-1.0.0-1.aarch64.rpm",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    },
+    {
+      "name": "SSHelter-1.0.0-1.x86_64.rpm",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    },
+    {
+      "name": "SSHelter_1.0.0_aarch64.AppImage",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    },
+    {
+      "name": "SSHelter_1.0.0_amd64.AppImage",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    },
+    {
+      "name": "SSHelter_1.0.0_amd64.deb",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    },
+    {
+      "name": "SSHelter_1.0.0_arm64.deb",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    },
+    {
+      "name": "SSHelter_1.0.0_x64-setup.exe",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    },
+    {
+      "name": "SSHelter_1.0.0_x64_en-US.msi",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    },
+    {
+      "name": "SSHelter_universal.app.tar.gz",
+      "oldDownloadUrlWorks": true,
+      "firstByteMatchesVerifiedArtifact": true,
+      "oldSignatureUrlMatches": true
+    }
+  ]
+}

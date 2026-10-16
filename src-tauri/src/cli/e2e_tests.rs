@@ -164,7 +164,7 @@ fn sshelter_connect_confirms_the_host_key_runs_a_shell_and_exits_with_its_status
     session.type_text("exit 7\r");
     let ended = session.finish();
     assert_eq!(ended.code, 7);
-    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\n");
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in Lunport.\n");
     assert!(ended.restored, "the terminal is as it was");
     assert_eq!(ended.directory.pins().get(&HostId::from("host-lab")).map(|pin| pin.key.clone()), Some(server.host_key()));
     ended.forgotten();
@@ -178,7 +178,7 @@ fn a_host_key_the_person_does_not_trust_ends_sshelter_connect() {
     let session = connect(&server, server.sshd.port, vec![Decision::Refuse]);
     let ended = session.finish();
     assert_eq!(ended.code, 255);
-    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\nThe host key of lab has not been confirmed yet.\n");
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in Lunport.\nThe host key of lab has not been confirmed yet.\n");
     assert_eq!(ended.stdout, "", "no shell was opened, and nothing of one was shown");
     assert!(ended.restored, "the terminal is as it was");
     assert!(ended.directory.pins().is_empty());
@@ -203,7 +203,7 @@ fn with_pause_on_error_a_refused_host_key_waits_for_enter_before_sshelter_connec
     session.type_text("\n");
     let ended = session.finish();
     assert_eq!(ended.code, 255);
-    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\nThe host key of lab has not been confirmed yet.\nPress Enter to exit.\n");
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in Lunport.\nThe host key of lab has not been confirmed yet.\nPress Enter to exit.\n");
     assert_eq!(ended.stdout, "");
     assert!(ended.restored, "the terminal is as it was");
 }
@@ -219,7 +219,7 @@ fn a_connection_lost_in_the_middle_of_a_shell_is_said_and_the_status_is_255() {
     proxy.set(Mode::Cut);
     let ended = session.finish();
     assert_eq!(ended.code, 255);
-    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in SSHelter.\n\nConnection to lab lost (early eof).\n");
+    assert_eq!(ended.stderr, "Waiting for you to confirm lab's host key in Lunport.\n\nConnection to lab lost (early eof).\n");
     assert!(ended.restored, "the terminal is as it was");
     ended.forgotten();
 }

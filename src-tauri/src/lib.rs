@@ -96,7 +96,7 @@ pub fn run() {
 /// The desktop app (main.rs).
 /// - `host`: started with `--host` (or the older `--mcp-host`) by a client that needed it: the
 ///   stdio MCP adapter or `sshelter connect` (`host_start`). Closing the window hides it instead
-///   of ending what the clients are using. (When SSHelter already runs, such a launch hands over
+///   of ending what the clients are using. (When Lunport already runs, such a launch hands over
 ///   without showing a window: `second_launch_shows_window`.)
 /// - `start_hidden`: see `starts_hidden`. A client's start runs in the background: no window
 ///   until the user opens it or something needs the user (an MCP approval, a host key).
@@ -104,7 +104,7 @@ pub fn run_desktop(host: bool, start_hidden: bool) {
     run_app(host, start_hidden);
 }
 
-/// Set to `1` by a client on the SSHelter it starts (host_start.rs `host_command`).
+/// Set to `1` by a client on the Lunport it starts (host_start.rs `host_command`).
 /// main.rs reads it, then removes it before anything else runs.
 pub const START_HIDDEN_ENV: &str = "SSHELTER_START_HIDDEN";
 
@@ -149,10 +149,10 @@ pub(crate) fn show_main_window_by_user(app: &tauri::AppHandle) {
     show_main_window(app);
 }
 
-/// What a second launch does in the running SSHelter. `args` are the second process's
+/// What a second launch does in the running Lunport. `args` are the second process's
 /// arguments, executable path first, so its mode is `args[1]` (as in main.rs). A host launch
 /// means a client could not reach this instance: it needs the bridge or the socket, not a
-/// window. Any other launch is the user opening SSHelter again.
+/// window. Any other launch is the user opening Lunport again.
 #[cfg(desktop)]
 fn second_launch_shows_window(args: &[String]) -> bool {
     !args.get(1).is_some_and(|mode| host_start::is_host_flag(mode))
@@ -192,7 +192,7 @@ fn run_app(host: bool, start_hidden: bool) {
     app_profile::CURRENT.verify_configuration(
         &context.config().identifier,
         context.config().product_name.as_deref(),
-    ).expect("SSHelter profile configuration mismatch");
+    ).expect("Lunport profile configuration mismatch");
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -203,7 +203,7 @@ fn run_app(host: bool, start_hidden: bool) {
                 macos_health::request(app, macos_health::Surface::Diagnostics);
             }
         });
-    // Only one SSHelter runs at a time: a second launch hands over to the running instance and
+    // Only one Lunport runs at a time: a second launch hands over to the running instance and
     // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
     // sync engine or the SSH agent starts. It must be the first plugin registered.
     // Each build profile has its own identifier and single-instance namespace.
@@ -222,7 +222,9 @@ fn run_app(host: bool, start_hidden: bool) {
         if app_profile::CURRENT.allows_os_integrations() {
             builder = builder
                 .plugin(tauri_plugin_updater::Builder::new().build())
-                .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None));
+                .plugin(tauri_plugin_autostart::Builder::new()
+                    .app_name(app_profile::CURRENT.autostart_name())
+                    .build());
         }
         builder = builder
             // Global quick-connect hotkey; registration is driven from the
@@ -248,7 +250,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::engine::initialize(app.handle())?;
             diagnostics::stage(diagnostics::Stage::Mcp);
             mcp::initialize(app.handle(), host)?;
-            // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
+            // Lunport 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
             if sync::engine::require_legacy(&app.state::<state::AppState>().sync).is_ok() { agent::start(app.handle()); }
             // The session broker that `sshelter connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
             diagnostics::stage(diagnostics::Stage::Broker);
@@ -300,7 +302,7 @@ fn run_app(host: bool, start_hidden: bool) {
                     state.mcp.keep_alive.load(std::sync::atomic::Ordering::Relaxed),
                     session::app::has_sessions(window.app_handle()),
                 ) {
-                    // Hide to tray instead of quitting; the tray "Open SSHelter" item
+                    // Hide to tray instead of quitting; the tray "Open Lunport" item
                     // (show + set_focus) brings it back.
                     api.prevent_close();
                     let _ = window.hide();
@@ -472,7 +474,7 @@ fn run_app(host: bool, start_hidden: bool) {
         }
     };
     application.run(|app, event| match event {
-            // macOS: clicking SSHelter in the Dock or opening it from Finder while it runs starts
+            // macOS: clicking Lunport in the Dock or opening it from Finder while it runs starts
             // no second process; it sends Reopen. Bring back the window, even a hidden one.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_main_window_by_user(app),
@@ -490,7 +492,7 @@ fn run_app(host: bool, start_hidden: bool) {
 mod tests {
     use super::*;
 
-    const EXE: &str = "/Applications/SSHelter.app/Contents/MacOS/sshelter";
+    const EXE: &str = "/Applications/Lunport.app/Contents/MacOS/sshelter";
 
     /// The decision for a second launch with these arguments.
     fn shows(list: &[&str]) -> bool {
@@ -502,7 +504,7 @@ mod tests {
     fn a_second_host_launch_shows_no_window_with_the_new_flag_or_the_old_one() {
         assert!(!shows(&[EXE, "--host"]));
         assert!(!shows(&[EXE, "--mcp-host"]));
-        assert!(!shows(&[r"C:\SSHelter\sshelter.exe", "--host"]));
+        assert!(!shows(&[r"C:\Lunport\sshelter.exe", "--host"]));
     }
 
     #[test]

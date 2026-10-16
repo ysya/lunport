@@ -5,7 +5,7 @@
  */
 export type KeyFilePreview = { default_name: string, fingerprint: string | null, key_type: string | null, has_passphrase: boolean | null, 
 /**
- * Move into SSHelter 會改的主機:每一個 `IdentityFile` 指到這個檔案的 Host 區塊(萬用字元的 Host 也算),名稱是區塊的第一個 pattern,依出現順序、不重複。
+ * Move into Lunport 會改的主機:每一個 `IdentityFile` 指到這個檔案的 Host 區塊(萬用字元的 Host 也算),名稱是區塊的第一個 pattern,依出現順序、不重複。
  * 來自 config,畫面以 `revealHidden` 顯示。
  */
 hosts: Array<string>, 

@@ -19,7 +19,7 @@ import { useFileLabels } from "@/lib/sync-labels";
 import { basename } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
 
-/** The key a new host is made for: its name, and the IdentityFile value the host gets (a key in SSHelter's slot path, or a key file's `~/` path). */
+/** The key a new host is made for: its name, and the IdentityFile value the host gets (a key in Lunport's slot path, or a key file's `~/` path). */
 export interface AddHostForKeyTarget {
   name: string;
   value: string;

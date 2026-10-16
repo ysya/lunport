@@ -467,7 +467,7 @@ mod tests {
             let _cleanup = EndSleep(sleeper);
             assert_eq!(
                 answer,
-                Err(DirectoryError::Failed("SSHelter cannot read the settings of slow: ssh -G did not finish within 1 second.".to_string())),
+                Err(DirectoryError::Failed("Lunport cannot read the settings of slow: ssh -G did not finish within 1 second.".to_string())),
                 "after {elapsed:?}"
             );
             assert!(elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(5), "the deadline is 1 second; it took {elapsed:?}");

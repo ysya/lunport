@@ -223,7 +223,7 @@ function NotJoinedPane({
   return (
     <>
       {/* Errors while not joined — a state file set aside at startup, an I/O error that
-          needs a restart, sync running in another SSHelter process — show here. */}
+          needs a restart, sync running in another Lunport process — show here. */}
       {o.last_error && !o.upgrading && (
         <Section title="Sync error">
           <SettingsGroup>
@@ -261,7 +261,7 @@ function NotJoinedPane({
       )}
 
       {o.upgrading ? (
-        <Section title="Upgrading sync" description="This computer synced with an earlier SSHelter. Its hosts move into a space named “Synced”; nothing needs to be entered again.">
+        <Section title="Upgrading sync" description="This computer synced with an earlier Lunport. Its hosts move into a space named “Synced”; nothing needs to be entered again.">
           <SettingsGroup>
             <SettingsRow label="Status" description={upgrade.text}>
               {upgrade.tone === "error" ? <Badge variant="destructive">Error</Badge> : <Loader2 className="size-4 animate-spin text-muted-foreground" />}
@@ -550,7 +550,7 @@ function JoinedPane({
           ))}
           {o.stray_files.length > 0 && (
             <SettingsRow
-              label="Files SSHelter doesn't use"
+              label="Files Lunport doesn't use"
               description={strayFilesNote(o.stray_files)}
             >
               <span />
@@ -648,14 +648,14 @@ function AccountSection({ overview: o, reading, onShowCode }: { overview: SyncOv
           <AlertDialogHeader>
             <AlertDialogTitle>Change the sync code?</AlertDialogTitle>
             <AlertDialogDescription>
-              Use this when a computer with the sync code was lost or stolen. SSHelter creates a new sync code, freezes the old data on the relay so
+              Use this when a computer with the sync code was lost or stolen. Lunport creates a new sync code, freezes the old data on the relay so
               nothing more can be written to it, and copies every space to new locations. A computer that only has the old code keeps what it had but
               can't read or write anything new.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
             <li>Every other computer stops syncing until you enter the new sync code on it. Changes it hasn't uploaded yet are kept and sent afterwards.</li>
-            <li>Your relay must support freezing data; SSHelter checks that before it starts.</li>
+            <li>Your relay must support freezing data; Lunport checks that before it starts.</li>
             <li>You can cancel only until the old data is frozen.</li>
             {o.key_slots.some((s) => s.mode === "synced") && (
               <li>Keys you synced stay on every computer that has them. If a computer was lost, replace those keys on your servers.</li>
