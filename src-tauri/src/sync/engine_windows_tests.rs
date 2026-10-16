@@ -34,6 +34,10 @@ fn synced_library_startup_and_concurrent_tray_updates() {
     // Menus use real Win32 HWNDs. WebView2 and all production startup plugins are deliberately absent.
     context.config_mut().app.windows.clear();
     let (done_tx, done_rx) = mpsc::channel();
+    let threads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let setup_threads = Arc::clone(&threads);
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let setup_finished = Arc::clone(&finished);
     let fixture = Arc::clone(&device);
     let app = tauri::Builder::default()
         .any_thread()
@@ -43,12 +47,12 @@ fn synced_library_startup_and_concurrent_tray_updates() {
             let handle = app.handle().clone();
             let watchdog = handle.clone();
             let (stop_tx, stop_rx) = mpsc::channel();
-            std::thread::spawn(move || {
+            let watchdog_thread = std::thread::spawn(move || {
                 if stop_rx.recv_timeout(Duration::from_secs(90)).is_err() {
                     watchdog.exit(2);
                 }
             });
-            std::thread::spawn(move || {
+            let controller = std::thread::spawn(move || {
                 eprintln!("native tray stage: exercise");
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     exercise(&handle, &fixture)
@@ -56,16 +60,38 @@ fn synced_library_startup_and_concurrent_tray_updates() {
                 let code = if outcome.is_ok() { 0 } else { 1 };
                 let _ = stop_tx.send(());
                 let _ = done_tx.send(outcome);
+                setup_finished.store(true, std::sync::atomic::Ordering::Release);
                 eprintln!("native tray stage: exit requested ({code})");
                 handle.exit(code);
             });
+            setup_threads
+                .lock()
+                .unwrap()
+                .extend([watchdog_thread, controller]);
             // Race the first background status with the same initial publication used by setup.
             crate::tray::rebuild_tray(app.handle(), &[])?;
             Ok(())
         })
         .build(context)
         .unwrap();
-    assert_eq!(app.run_return(|_, _| {}), 0);
+    assert_eq!(
+        app.run_return(move |_, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. })
+                && finished.load(std::sync::atomic::Ordering::Acquire)
+            {
+                // AppHandle owns native resources. Ensure the controller and watchdog release
+                // their handles before Tauri clears those resources and destroys its event loop.
+                // The watchdog's failure path must remain able to exit a stuck controller.
+                for thread in threads.lock().unwrap().drain(..) {
+                    thread
+                        .join()
+                        .expect("native test helper must finish before cleanup");
+                }
+                eprintln!("native tray stage: test helpers joined before cleanup");
+            }
+        }),
+        0
+    );
     eprintln!("native tray stage: event loop returned");
     if let Err(panic) = done_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
         std::panic::resume_unwind(panic);
@@ -165,8 +191,10 @@ unsafe extern "system" fn trace_native_fault(
     static LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !info.is_null() && !unsafe { (*info).ExceptionRecord }.is_null() {
         let exception = unsafe { &*(*info).ExceptionRecord };
-        if matches!(exception.ExceptionCode as u32, 0xc000001d | 0xc0000005)
-            && !LOGGING.swap(true, std::sync::atomic::Ordering::SeqCst)
+        if matches!(
+            exception.ExceptionCode as u32,
+            0xc000001d | 0xc0000005 | 0xc0000374
+        ) && !LOGGING.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             eprintln!(
                 "native tray exception: code=0x{:08x}, address={:p}\n{}",
