@@ -31,4 +31,17 @@
 - Windows disposable child 透過 RaiseException 注入自訂例外，核對退出代碼與 native-crash.log；只在該 child 使用 WER_NO_UI，產品不關閉 Windows Error Reporting。
 - CI-only PowerShell smoke 額外啟動真正的 Development exe 與 WebView2，讀取上述已同步 state（不匯出 MemKeychain），檢查 PID 對應 ready／exit log、原生視窗、背景更新後仍存活及正常關閉。拒絕覆蓋既有 Development state，且限定 disposable GitHub runner。此 CI 的 frontend 為 placeholder，驗證的是 bootstrap／WebView2 建立，並非 React 繪圖或正式 Windows 實機驗收。
 
-測試結果與 Beta 發布收據待本次驗證完成後補齊。仍需回報機器實際更新後驗收；若繼續閃退，應保留 app.log／native-crash.log 與 Windows Application Error／WER 的模組及例外資料，不重建 chain、重置 vault 或刪除 sync-state.json。
+## 最終來源與結果
+
+凍結來源：`3d39718e085bf3d7db14cc28515d713a4df22c09`，工作分支 `codex/library-sync-host-dialog-fixes`。後續驗證文件提交不改變安裝包來源。
+
+- macOS complete safe Rust：2,597 passed、0 failed、10 filtered，168.82 秒；略過既有 OS Keychain 與 PAM 測試，要求實際 OpenSSH 工具。
+- 前端 81 檔／1,060 tests 通過；TypeScript、Vite 及 Development app bundle 成功。Clippy `--lib --tests` 成功，97 項既有 lib-test 警告（含 50 重複），修改的產品程式碼無 Clippy 診斷。
+- [Windows CI 38886319832](https://github.com/ysya/sshelter/actions/runs/38886319832) 對凍結來源整體成功：2,404 passed、0 failed、3 ignored、9 filtered，219.12 秒；三種 profile 各 3 passed，app／CLI helper、真實 console 及 OpenSSH client／engine 成功。
+- Windows 原生 tray 額外測試 1 passed：17 hosts＋Group、10 rounds、300 組並行 status／visibility，選單僅在初始、首次 Records 與改名時發布（2 → 3），USER objects 10 → 10、只有一個 tray resource，SSH config 不變。原生故障 child 額外 1 passed（0.04 秒），確認例外代碼與階段保存。真正 Development exe 的 WebView2 HWND、背景狀態與正常退出驗證成功。
+- 本機最終來源的 Development app 原生 UI 已操作：Open logs 打開正確 Development 資料夾，tray 顯示切換恢復原值，正常退出留下 PID 對應 exit log；沒有啟動正式 GUI。
+- [本機收據](review/beta13/local-checks.json)、[Windows 測試輸出](review/beta13/windows-test-results.txt)、[CI metadata](review/beta13/windows-ci.json)、[Development log 收據](review/beta13/development-log-validation.json)、[UI 截圖](review/beta13/diagnostics-ui.png)。
+
+初次 Windows CI 因新診斷的 Win32 System Kernel feature 未啟用而編譯失敗，已修正；兩次中間來源驗證隨後續來源更新取消，沒有將它們視為成功。最終來源的必要測試通過後才啟動 Beta 發布；CI 快取收尾與打包可並行，不省略任何必要測試。
+
+[Beta 13 已發布](releases/1.0.0-13-validation.md)，四平台／15 項 Beta manifest／九個套件簽章均已核對，Stable 維持 v0.16.0。仍需回報機器實際更新後驗收；若繼續閃退，應保留 app.log／native-crash.log 與 Windows Application Error／WER 的模組及例外資料，不重建 chain、重置 vault 或刪除 sync-state.json。macOS CoreAudio 防護仍只避免可偵測的啟動前故障變成無提示黑畫面，沒有根除系統音訊死鎖。

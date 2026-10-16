@@ -1,0 +1,40 @@
+slots	Complete safe Rust suite	2026-10-16T10:27:14.8893327Z test result: ok. 2404 passed; 0 failed; 3 ignored; 0 measured; 9 filtered out; finished in 219.12s
+slots	Profile selection in the normal library	2026-10-16T10:28:30.0120306Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	Profile selection in the normal library	2026-10-16T10:30:08.7298950Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	Profile selection in the normal library	2026-10-16T10:31:06.8186972Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T10:34:37.2298833Z Windows native startup: 17 synced hosts + inherited Group; 10 transport rounds; 300 concurrent status/visibility pairs; menu publications 2 -> 3; USER objects 10 -> 10; SSH config unchanged
+slots	Synced library startup and concurrent native tray updates	2026-10-16T10:34:37.2350045Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2415 filtered out; finished in 2.07s
+slots	Native crash leaves metadata without suppressing Windows Error Reporting	2026-10-16T10:34:38.5319843Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2415 filtered out; finished in 0.04s
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.1562928Z Actual Windows Development GUI: synced 17-host/Group fixture, WebView2 HWND, background status and normal shutdown passed. No credential fixture or production workspace was used.
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2350356Z     "event": "logging_started",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2350747Z     "stage": "bootstrap"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2353165Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2353448Z     "stage": "context"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2356100Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2356392Z     "stage": "window"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2358601Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2358870Z     "stage": "setup"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2361055Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2361331Z     "stage": "tray"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2363533Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2364323Z     "stage": "sync"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2366549Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2366825Z     "stage": "mcp"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2369283Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2369568Z     "stage": "broker"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2371974Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2372249Z     "stage": "window"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2374377Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2374649Z     "stage": "ready"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2376757Z     "event": "records_sync_started",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2377056Z     "stage": "ready"
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2379411Z     "event": "records_sync_failed",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2379715Z     "stage": "ready",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2382139Z     "event": "startup_stage",
+slots	Actual Development GUI startup from a synced library	2026-10-16T10:36:02.2382461Z     "stage": "exit"
+slots	The console helper's tests	2026-10-16T10:36:03.6916691Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	The console helper's tests	2026-10-16T10:36:03.7052784Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper's tests	2026-10-16T10:36:03.8945611Z test result: ok. 3 passed
+slots	The console helper's tests	2026-10-16T10:36:05.0389472Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	The console helper and sshelter.exe in a console of their own	2026-10-16T10:36:08.0940350Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2415 filtered out; finished in 1.16s
+slots	The engine against the runner's OpenSSH server	2026-10-16T10:36:16.8802325Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2415 filtered out; finished in 0.24s

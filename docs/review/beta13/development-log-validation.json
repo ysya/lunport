@@ -1,0 +1,29 @@
+{
+  "source": "3d39718e085bf3d7db14cc28515d713a4df22c09",
+  "profile": "development",
+  "version": "0.16.0 (repository debug build)",
+  "pid": 75231,
+  "startupStages": [
+    "context",
+    "window",
+    "setup",
+    "tray",
+    "sync",
+    "mcp",
+    "broker",
+    "ready",
+    "exit"
+  ],
+  "eventTypes": [
+    "logging_started",
+    "records_sync_finished",
+    "records_sync_started",
+    "startup_stage"
+  ],
+  "allLinesValidJson": true,
+  "openLogsFinderPathVerified": "~/Library/Application Support/org.homelab.sshelter.dev/diagnostics",
+  "trayVisibilityRestored": true,
+  "nativeWindowClosedNormally": true,
+  "joinedSyncChain": false,
+  "productionGuiLaunched": false
+}

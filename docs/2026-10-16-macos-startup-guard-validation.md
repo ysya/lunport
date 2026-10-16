@@ -4,6 +4,8 @@
 
 後續發布：修補驗證完成後，使用者另行要求發布；[Beta 10 已發布](releases/1.0.0-10-validation.md)，四平台及 Beta 通道全部核對成功。原修補階段與後續發布分開記錄；沒有安裝或啟動使用者正式 GUI。
 
+後續 Windows 啟動修補：Beta 13 亦停用 Windows 的 Tauri 自動主 WebView 建立，以明確捕捉 WebView2 建立失敗並顯示原生診斷提示；不在 Windows 執行 CoreAudio 檢查。以下實作與故障注入證據描述原本的 macOS 修補；[Windows 後續驗證](2026-10-16-windows-startup-diagnostics.md) 另列新行為。
+
 這個修補讓**啟動前可偵測到的 CoreAudio 無回應／錯誤，改以原生提示呈現，避免直接建立可能全黑的 WebView**。它沒有根除 CoreAudio 死鎖，不能識別造成死鎖的驅動，也不能保證檢查通過後 GPU 永遠能繪圖。
 
 ## 實作

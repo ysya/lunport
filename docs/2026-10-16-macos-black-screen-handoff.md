@@ -147,3 +147,9 @@ Beta 10 發布後回報的 Library sync、連線對話框與 MCP 建立連線／
 ## 2026-10-16：Beta 12 後續修補
 
 Beta 11 發布後，使用者回報同意指紋仍因全域同步狀態更新而結束連線，以及同一 chain 的 Library sync 被保留的舊版來源密文阻擋。已修補並隨 [Beta 12 發布](releases/1.0.0-12-validation.md)；[修補與故障注入驗證](2026-10-16-beta11-followup-validation.md) 記錄修補前失敗、實際 OpenSSH 連線、兩裝置同步及安全拒絕案例。macOS 2,594 項及 Windows 2,401 項安全測試通過，四平台產物與 Beta 通道均已核對。正式資料在另一台 Mac，仍待使用者兩平台更新驗收；沒有重建 chain 或重置 vault，CoreAudio 系統根因仍未確定。
+
+## 2026-10-16：Windows 啟動與錯誤 log
+
+使用者確認原本有錯誤的電腦更新後已成功同步，另回報 Windows Beta 12 在啟動時閃退，尚無足以確認根因的 exception／module 證據。已完成 Windows tray 執行緒／啟動順序修補、明確處理主 WebView 建立失敗與本機有限輪替的錯誤／panic／原生例外 log；[來源、實機與 Windows CI 驗證](2026-10-16-windows-startup-diagnostics.md) 記錄完整結果及限制。不是以事件 10000／10010 或上游 issue 代替故障機證據；CoreAudio 系統死鎖根因仍未確認。
+
+上述修補已隨 [Beta 13 發布](releases/1.0.0-13-validation.md)；四平台、Beta 通道與九個 updater 套件簽章均核對成功，Stable v0.16.0 未變。
