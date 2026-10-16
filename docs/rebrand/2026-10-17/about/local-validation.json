@@ -1,0 +1,45 @@
+{
+  "source": "4d0f2bf5ecf77350b2a636c0599c279b350fab2e",
+  "frontend": {
+    "files": 84,
+    "passed": 1071
+  },
+  "typescript": "passed",
+  "vite_build": "passed",
+  "macos_rust_development_check": "passed",
+  "macos_development_bundle": "passed",
+  "native": {
+    "profile": "Development",
+    "name": "Lunport Dev",
+    "version": "1.0.0",
+    "existing_disposable_hosts": 2,
+    "existing_disposable_keys": 1,
+    "settings_about": "verified",
+    "native_about": "verified",
+    "normal_quit": "verified",
+    "preferences_changed": false,
+    "records_changed": false
+  },
+  "screenshots": {
+    "settings-about.png": "0945b130258d904b1a9cb684df1fa5bb524b35cb5d9df8509c7054168d499ce4",
+    "macos-about.png": "333478b39252a30420dbf8fb8e3dbf279be51298b7d244f67480ba0e1ae1392d",
+    "github-readme.png": "63bff8f2a2dc7651bff22018d4f17cc74bb7b31348e74815a54f51f6bf345a3d"
+  },
+  "github_readme_render": "verified: Folded L, Lunport heading, tagline, download/user guide/development/issues links",
+  "windows": {
+    "initial_run": 38964914502,
+    "full_job": "failed at native tray cleanup; later GUI/console/SSH checks skipped",
+    "safe_suite": {
+      "passed": 2407,
+      "ignored": 3,
+      "filtered": 9
+    },
+    "profile_tests": "3 configurations, 3 passed each",
+    "whole_app_build": "passed",
+    "candidate_native_probe": "10 independent processes passed",
+    "baseline_ref": "e83e6580e05fdc56e8425d10959c49791529dbf6",
+    "baseline_native_probe": "failed, access violation in event-loop cleanup",
+    "native_probe_run": 38968578777,
+    "stability_defect_fixed": false
+  }
+}

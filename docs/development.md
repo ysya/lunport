@@ -41,6 +41,8 @@ Use Lunport for visible product copy and `ysya/lunport` for current repository l
 
 Stable releases use release-please. A push to `main` opens or updates a release PR; merging that PR creates the version tag and GitHub Release, then builds the platform installers and updater assets. Review the version, changelog and checks before merging a release PR. An ordinary feature or documentation merge does not itself publish an installer.
 
+When publishing the first Lunport release, update the release-status notes in README and the user guide, and make `Lunport.app` the primary macOS installation example. Keep the SSHelter 1.0.0 release and its assets intact. Resolve the [observed Windows native tray instability](2026-10-17-lunport-about-docs.md#ci) before publishing the next release; the baseline comparison is not a fix.
+
 For a beta, run **publish beta** in GitHub Actions with a new `X.Y.Z-N` version, using a numeric suffix. The workflow stamps the version, creates the prerelease, builds the platforms and updates the `updater-beta` manifest. Beta-channel devices can receive Stable releases too.
 
 If a build fails, use **Re-run failed jobs** on that run to keep the same source and inputs. Do not use `build-platform.yml` for a beta: it does not stamp the beta version or update that channel. Use a new version for changed release content; preserve published tags, installers and signatures.
