@@ -189,6 +189,7 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
   onOpenSync?: () => void;
 } = {}) {
   const contentRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const open = useUiStore((s) => s.settingsOpen);
   const setOpen = useUiStore((s) => s.setSettingsOpen);
   const category = useUiStore((s) => s.settingsCategory);
@@ -208,24 +209,37 @@ export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
 
   const updatePhase = useUpdaterState((state) => state.phase);
   const updateAttention = updatePhase === "available" || updateInProgress(updatePhase);
-  const active = CATEGORIES.find((c) => c.id === category) ?? CATEGORIES[0];
+  const categories = recordOverview ? CATEGORIES.map((item) => ({
+    ...item,
+    label: item.id === "files" ? "Local data" : item.label,
+    badge: item.id === "sync" ? undefined : item.badge,
+  })) : CATEGORIES;
+  const active = categories.find((c) => c.id === category) ?? categories[0];
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent ref={contentRef} className="app-shell gap-0 overflow-hidden p-0 sm:max-w-2xl"
+      <DialogContent ref={contentRef} className="app-shell w-[calc(100%-2rem)] gap-0 overflow-hidden p-0 sm:max-w-[50.666667rem]"
         onOpenAutoFocus={(event) => {
+          const origin = document.activeElement;
+          returnFocusRef.current = origin instanceof HTMLElement && origin !== document.body && !contentRef.current?.contains(origin) ? origin : null;
           const active = contentRef.current?.querySelector<HTMLButtonElement>('button[aria-current="true"]');
           if (active) { event.preventDefault(); active.focus(); }
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const target = returnFocusRef.current;
+          if (target?.isConnected) target.focus();
+          else document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
         }}>
         <DialogDescription className="sr-only">Manage application preferences and software updates.</DialogDescription>
-        <div className="flex h-[480px] max-h-[80vh] max-sm:flex-col">
+        <div className="flex h-[36rem] max-h-[80vh] max-sm:flex-col">
           {/* Sidebar — category list. */}
           <aside className="flex w-44 shrink-0 flex-col gap-0.5 border-r bg-muted/40 p-2 max-sm:w-full max-sm:border-r-0 max-sm:border-b">
             <DialogTitle className="px-2 pt-1 pb-2 text-sm font-semibold select-none">
               Settings
             </DialogTitle>
             <nav aria-label="Settings categories" className="flex flex-col gap-0.5 max-sm:flex-row max-sm:overflow-x-auto max-sm:pb-1">
-              {CATEGORIES.map((c) => {
+              {categories.map((c) => {
                 const Icon = c.icon;
                 const isActive = c.id === category;
                 return (
@@ -509,6 +523,8 @@ function AppearancePane() {
   const setFontSize = useSettingsStore((s) => s.setFontSize);
   const showHostTags = useSettingsStore((s) => s.showHostTags);
   const setShowHostTags = useSettingsStore((s) => s.setShowHostTags);
+  const motion = useSettingsStore((s) => s.motion);
+  const setMotion = useSettingsStore((s) => s.setMotion);
   return (
     <Section
       title="Appearance"
@@ -538,10 +554,19 @@ function AppearancePane() {
             </SelectContent>
           </Select>
         </SettingsRow>
+        <SettingsRow id="set-motion" label="Motion" description="System follows your OS preference for reduced motion.">
+          <Select value={motion === "reduced" ? "reduced" : "system"} onValueChange={(value) => setMotion(value === "reduced" ? "reduced" : "system")}>
+            <SelectTrigger id="set-motion" className="h-7 w-[10rem] text-sm"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="system">System</SelectItem>
+              <SelectItem value="reduced">Reduced</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
         <SettingsRow
           id="set-show-host-tags"
           label="Show tags in host list"
-          description="Tag chips on sidebar rows when grouping by file."
+          description="Show tags alongside hosts in the list."
         >
           <Switch
             id="set-show-host-tags"

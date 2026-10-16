@@ -20,9 +20,11 @@ export function text(html: string): string {
 
 /** The opening tag of the button labelled `label`, without its closing ">". */
 export function buttonTag(html: string, label: string): string {
-  const at = html.indexOf(`>${label}<`);
-  if (at < 0) throw new Error(`no ${label} button`);
-  return html.slice(html.lastIndexOf("<button", at), at);
+  const button = [...html.matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/g)]
+    .map((match) => match[0])
+    .find((markup) => text(markup).trim() === label);
+  if (!button) throw new Error(`no ${label} button`);
+  return button.slice(0, button.indexOf(">"));
 }
 
 /** The shared Button's class names carry `disabled:` variants, so only the attribute itself says a button is off. */

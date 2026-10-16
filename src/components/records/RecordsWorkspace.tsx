@@ -8,6 +8,8 @@ import {
   ChevronDown,
   Cloud,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   RotateCw,
   Search,
   Settings,
@@ -58,14 +60,15 @@ import { RecordHostEditor } from "./HostEditor";
 import { RecordGroupEditor } from "./GroupEditor";
 import { selectGroup } from "./group-tree";
 import { selectHost } from "./editor";
-import { RecordsKeysPanel } from "./KeysPanel";
+import { RecordsKeysPanel, KEYS_SEARCH_INPUT_ID, GENERATE_KEY_BUTTON_ID } from "./KeysPanel";
 import { RecordsAccountPanel } from "./AccountPanel";
 import { RecordsImportPanel } from "./ImportPanel";
 import { RecordSyncStatus } from "./SyncStatus";
 import { decideHostSelection, type HostSelection } from "./selection";
-import { LibraryNavigation, type WorkspacePanel } from "./LibraryNavigation";
+import { LibraryNavigation, LIBRARY_NAVIGATION_ID, type WorkspacePanel } from "./LibraryNavigation";
 import type { LibraryFilter } from "./library-view";
 import { HostPreview } from "./HostPreview";
+import { DetailPresence } from "@/components/app/DetailPresence";
 import { connectSavedHost } from "./operations";
 
 export function RecordsWorkspace({
@@ -80,6 +83,8 @@ export function RecordsWorkspace({
   const setSettingsOpen = useUiStore((state) => state.setSettingsOpen);
   const setSettingsCategory = useUiStore((state) => state.setSettingsCategory);
   const setPaletteOpen = useUiStore((state) => state.setPaletteOpen);
+  const sidebarCollapsed = useUiStore((state) => state.librarySidebarCollapsed);
+  const toggleSidebar = useUiStore((state) => state.toggleLibrarySidebar);
   const openSettings = (category: "general" | "ai") => {
     setSettingsCategory(category);
     setSettingsOpen(true);
@@ -94,6 +99,7 @@ export function RecordsWorkspace({
   const [dirty, setDirty] = useState(false);
   const [editorBusy, setEditorBusy] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
+  const editorOrigin = useRef<HTMLElement | null>(null);
   const isGroupEditor =
     selection.kind === "group" || selection.kind === "new_group";
   const [syncing, setSyncing] = useState(false);
@@ -132,6 +138,7 @@ export function RecordsWorkspace({
     const decision = decideHostSelection(selection, next, dirty, editorBusy);
     if (decision === "confirm") setPendingSelection(next);
     if (decision === "select") {
+      if (selection.kind === "none" && next.kind !== "none") editorOrigin.current = document.activeElement as HTMLElement | null;
       setSelection(next);
       setDirty(false);
     }
@@ -183,19 +190,22 @@ export function RecordsWorkspace({
     const keydown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)
         return;
+      if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
       if (
         isTypingContext(event.target) &&
-        (event.target as HTMLElement).id !== SEARCH_INPUT_ID
+        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID].includes((event.target as HTMLElement).id)
       )
         return;
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
-        createHost();
+        if (panel === "keys") document.getElementById(GENERATE_KEY_BUTTON_ID)?.click();
+        else createHost();
       } else if (event.key.toLowerCase() === "f") {
         event.preventDefault();
-        setPanel("hosts");
+        const searchId = panel === "keys" ? KEYS_SEARCH_INPUT_ID : SEARCH_INPUT_ID;
+        if (panel !== "keys") setPanel("hosts");
         window.requestAnimationFrame(() => {
-          const input = document.getElementById(SEARCH_INPUT_ID);
+          const input = document.getElementById(searchId);
           if (input instanceof HTMLInputElement) {
             input.focus();
             input.select();
@@ -205,7 +215,7 @@ export function RecordsWorkspace({
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [requestSelection]);
+  }, [requestSelection, panel]);
   const onSaved = useCallback((id: string | null) => {
     setPanel("hosts");
     setSelection({ kind: "none" });
@@ -260,6 +270,10 @@ export function RecordsWorkspace({
           platform.data === "macos" && "is-macos",
         )}
       >
+        <Button type="button" variant="ghost" size="icon" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!sidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID} onClick={toggleSidebar}>
+          {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+        </Button>
         <span className="library-app-name">
           <Terminal className="size-4" />
           SSHelter
@@ -352,7 +366,7 @@ export function RecordsWorkspace({
               </div>
             )}
           <div
-            className="flex min-h-0 flex-1"
+            className="library-detail-layout flex min-h-0 flex-1"
             data-inspecting={panel === "hosts" && !!inspected}
           >
             <main
@@ -381,20 +395,27 @@ export function RecordsWorkspace({
                 importHosts={() => setPanel("import")}
               />
             </main>
-            {panel === "hosts" && inspected && (
+            {panel === "hosts" && <DetailPresence>{inspected ? (
               <HostPreview
                 host={inspected}
                 overview={overview}
                 connect={() => void connect(inspected.id)}
                 edit={() => editHost(inspected.id)}
-                close={() => setInspectedId(null)}
+                close={() => {
+                  const previousId = inspectedId;
+                  setInspectedId(null);
+                  requestAnimationFrame(() => {
+                    const target = document.querySelector<HTMLElement>(`[data-host-id="${CSS.escape(previousId ?? "")}"]`);
+                    (target ?? document.getElementById(SEARCH_INPUT_ID))?.focus();
+                  });
+                }}
                 busy={editorBusy || !!connectingId}
               />
-            )}
+            ) : null}</DetailPresence>}
             {panel !== "hosts" && (
               <main
                 key={panel}
-                className="library-tools-main app-main min-h-0 min-w-0 flex-1 overflow-y-auto"
+                className={cn("library-tools-main app-main min-h-0 min-w-0 flex-1", panel === "keys" ? "flex flex-col overflow-hidden" : "overflow-y-auto")}
                 aria-label="Workspace content"
               >
                 {panel === "keys" && <RecordsKeysPanel overview={overview} />}
@@ -508,6 +529,11 @@ export function RecordsWorkspace({
               name.focus();
             }
           }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const origin = editorOrigin.current;
+            (origin?.isConnected ? origin : document.getElementById(SEARCH_INPUT_ID))?.focus();
+          }}
         >
           {!isGroupEditor && (
             <>
@@ -588,7 +614,12 @@ export function RecordsWorkspace({
           if (!open) setPendingSelection(null);
         }}
       >
-        <DialogContent>
+        <DialogContent onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const name = editorRef.current?.querySelector<HTMLElement>("[data-group-name], [data-host-alias]");
+          const origin = editorOrigin.current;
+          (name ?? (origin?.isConnected ? origin : document.getElementById(SEARCH_INPUT_ID)))?.focus();
+        }}>
           <DialogTitle>Unsaved changes</DialogTitle>
           <DialogDescription>
             Discard your unsaved changes before leaving this editor?

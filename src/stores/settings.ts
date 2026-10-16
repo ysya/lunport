@@ -69,6 +69,8 @@ interface SettingsState {
   /** Root font-size in px (the whole UI is rem-based and scales with it). */
   fontSize: number;
   setFontSize: (px: number) => void;
+  motion: "system" | "reduced";
+  setMotion: (motion: "system" | "reduced") => void;
   /** Show tag chips on sidebar host rows (file grouping only). */
   showHostTags: boolean;
   setShowHostTags: (enabled: boolean) => void;
@@ -158,6 +160,8 @@ export const useSettingsStore = create<SettingsState>()(
         }),
       fontSize: DEFAULT_FONT_SIZE,
       setFontSize: (fontSize) => set({ fontSize: clampFontSize(fontSize) }),
+      motion: "system",
+      setMotion: (motion) => set({ motion }),
       showHostTags: true,
       setShowHostTags: (showHostTags) => set({ showHostTags }),
       recentConnections: {},

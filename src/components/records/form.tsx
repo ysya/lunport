@@ -13,7 +13,7 @@ export function RecordField({
   const nodes = Array.isArray(children) ? children : [children];
   let assigned = false;
   return (
-    <div className="space-y-2">
+    <div className="app-field space-y-2">
       <Label htmlFor={id}>{label}</Label>
       {nodes.map((child, index) => {
         if (

@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ActionBar, EditorHeader, FormSection } from "@/components/app/Workflow";
 import {
   deleteRecordHost,
   verifyRecordHostKey,
@@ -202,14 +203,14 @@ export function RecordHostEditor({
     ) ?? [];
   return (
     <div className="host-editor">
-      <header className="host-editor-header">
-        <span className="host-editor-symbol">
-          <Server aria-hidden="true" className="size-5" />
-        </span>
-        <div className="min-w-0 flex-1">
+      <EditorHeader
+        icon={<Server className="size-5" />}
+        title={
           <h1 className="truncate">
             {state.id ? revealHidden(state.payload.alias) : "New host"}
           </h1>
+        }
+        description={
           <p className="text-xs text-muted-foreground">
             {revealHidden(scopeLabel(overview, state.scope))}
             {" · "}
@@ -219,8 +220,8 @@ export function RecordHostEditor({
                 ? "Unsaved changes"
                 : "Saved"}
           </p>
-        </div>
-        {onCancel && (
+        }
+        close={onCancel && (
           <Button
             variant="ghost"
             size="icon-sm"
@@ -231,8 +232,8 @@ export function RecordHostEditor({
             <X className="size-4" />
           </Button>
         )}
-      </header>
-      <div className="host-editor-body">
+      />
+      <div className="app-editor-body">
         {state.dirty && editorProblem(state) && (
           <p role="status" className="text-sm text-muted-foreground">
             {editorProblem(state)}
@@ -290,132 +291,136 @@ export function RecordHostEditor({
           disabled={busy || state.unavailable || sharedBlocked}
           className="host-editor-fields disabled:opacity-60"
         >
-          <RecordField label="Group">
-            <select
-              className={selectClass}
-              value={state.payload.group_id ?? ""}
-              onChange={(e) => {
-                const group = selectGroup(overview.groups, e.target.value);
-                setState((current) => ({
-                  ...changeEditor(current, { group_id: e.target.value || null }),
-                  scope: structuredClone(group?.scope ?? current.scope),
-                }));
-              }}
-            >
-              <option value="">Ungrouped</option>
-              {state.payload.group_id &&
-                !groupChoices.some((g) => g.id === state.payload.group_id) && (
-                  <option value={state.payload.group_id}>
-                    Unavailable Group ({state.payload.group_id})
-                  </option>
-                )}
-              {groupChoices.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {revealHidden(groupPath(overview, g.id, g.scope))}
-                </option>
-              ))}
-            </select>
-          </RecordField>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <RecordField label="Alias">
-              <Input
-                data-host-alias
-                autoComplete="off"
-                placeholder="e.g. production-web"
-                value={state.payload.alias}
-                onChange={(e) => patch({ alias: e.target.value })}
-              />
-            </RecordField>
-            <RecordField label="Hostname or IP">
-              <Input
-                autoComplete="off"
-                placeholder="e.g. server.example.com"
-                value={state.payload.hostname}
-                onChange={(e) => patch({ hostname: e.target.value })}
-              />
-            </RecordField>
-            <RecordField label="Port">
-              <Input
-                type="number"
-                min={1}
-                max={65535}
-                disabled={inherits("port")}
-                value={inherits("port") && preview.error ? "" : visible.port}
-                onChange={(e) => patch({ port: Number(e.target.value) })}
-              />
-              {inheritedControl("port")}
-            </RecordField>
-            <RecordField label="Username">
-              <Input
-                disabled={inherits("user")}
-                placeholder={
-                  inherits("user") && preview.error
-                    ? "Unavailable"
-                    : "OS username"
-                }
-                value={inherits("user") && preview.error ? "" : visible.user}
-                onChange={(e) => patch({ user: e.target.value })}
-              />
-              {inheritedControl("user")}
-            </RecordField>
-          </div>
-          <RecordField label="Authentication">
-            <select
-              className={selectClass}
-              disabled={inherits("authentication")}
-              value={
-                inherits("authentication") && preview.error ? "" : visible.auth
-              }
-              onChange={(e) =>
-                patch({
-                  auth: e.target.value as HostPayload["auth"],
-                  key_id: e.target.value === "key" ? state.payload.key_id : null,
-                })
-              }
-            >
-              {inherits("authentication") && preview.error && (
-                <option value="">Unavailable</option>
-              )}
-              <option value="password">Password</option>
-              <option value="key">SSH key</option>
-              <option value="interactive">Keyboard interactive</option>
-            </select>
-            {inheritedControl("authentication")}
-          </RecordField>
-          {visible.auth === "key" &&
-            !(inherits("authentication") && preview.error) && (
-              <RecordField label="Key reference">
-                <select
-                  className={selectClass}
-                  disabled={inherits("authentication")}
-                  value={visible.key_id ?? ""}
-                  onChange={(e) => patch({ key_id: e.target.value || null })}
-                >
-                  <option value="">Choose a key…</option>
-                  {visible.key_id &&
-                    !overview.keys.some((key) => key.id === visible.key_id) && (
-                      <option value={visible.key_id}>
-                        Missing key ({visible.key_id})
-                      </option>
-                    )}
-                  {overview.keys.map((key) => (
-                    <option key={key.id} value={key.id}>
-                      {revealHidden(key.public?.name ?? key.id)} ·{" "}
-                      {key.status.replace(/_/g, " ")}
+          <FormSection title="Connection" description="Name this host and set its address. Inherited values follow the selected group.">
+            <RecordField label="Group">
+              <select
+                className={selectClass}
+                value={state.payload.group_id ?? ""}
+                onChange={(e) => {
+                  const group = selectGroup(overview.groups, e.target.value);
+                  setState((current) => ({
+                    ...changeEditor(current, { group_id: e.target.value || null }),
+                    scope: structuredClone(group?.scope ?? current.scope),
+                  }));
+                }}
+              >
+                <option value="">Ungrouped</option>
+                {state.payload.group_id &&
+                  !groupChoices.some((g) => g.id === state.payload.group_id) && (
+                    <option value={state.payload.group_id}>
+                      Unavailable Group ({state.payload.group_id})
                     </option>
-                  ))}
-                </select>
-                <p className="text-xs text-muted-foreground">
-                  Key availability is verified again when connecting.
-                </p>
+                  )}
+                {groupChoices.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {revealHidden(groupPath(overview, g.id, g.scope))}
+                  </option>
+                ))}
+              </select>
+            </RecordField>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <RecordField label="Alias">
+                <Input
+                  data-host-alias
+                  autoComplete="off"
+                  placeholder="e.g. production-web"
+                  value={state.payload.alias}
+                  onChange={(e) => patch({ alias: e.target.value })}
+                />
               </RecordField>
+              <RecordField label="Hostname or IP">
+                <Input
+                  autoComplete="off"
+                  placeholder="e.g. server.example.com"
+                  value={state.payload.hostname}
+                  onChange={(e) => patch({ hostname: e.target.value })}
+                />
+              </RecordField>
+              <RecordField label="Port">
+                <Input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  disabled={inherits("port")}
+                  value={inherits("port") && preview.error ? "" : visible.port}
+                  onChange={(e) => patch({ port: Number(e.target.value) })}
+                />
+                {inheritedControl("port")}
+              </RecordField>
+              <RecordField label="Username">
+                <Input
+                  disabled={inherits("user")}
+                  placeholder={
+                    inherits("user") && preview.error
+                      ? "Unavailable"
+                      : "OS username"
+                  }
+                  value={inherits("user") && preview.error ? "" : visible.user}
+                  onChange={(e) => patch({ user: e.target.value })}
+                />
+                {inheritedControl("user")}
+              </RecordField>
+            </div>
+          </FormSection>
+          <FormSection title="Authentication" description="Choose how this device signs in to the server.">
+            <RecordField label="Authentication">
+              <select
+                className={selectClass}
+                disabled={inherits("authentication")}
+                value={
+                  inherits("authentication") && preview.error ? "" : visible.auth
+                }
+                onChange={(e) =>
+                  patch({
+                    auth: e.target.value as HostPayload["auth"],
+                    key_id: e.target.value === "key" ? state.payload.key_id : null,
+                  })
+                }
+              >
+                {inherits("authentication") && preview.error && (
+                  <option value="">Unavailable</option>
+                )}
+                <option value="password">Password</option>
+                <option value="key">SSH key</option>
+                <option value="interactive">Keyboard interactive</option>
+              </select>
+              {inheritedControl("authentication")}
+            </RecordField>
+            {visible.auth === "key" &&
+              !(inherits("authentication") && preview.error) && (
+                <RecordField label="Key reference">
+                  <select
+                    className={selectClass}
+                    disabled={inherits("authentication")}
+                    value={visible.key_id ?? ""}
+                    onChange={(e) => patch({ key_id: e.target.value || null })}
+                  >
+                    <option value="">Choose a key…</option>
+                    {visible.key_id &&
+                      !overview.keys.some((key) => key.id === visible.key_id) && (
+                        <option value={visible.key_id}>
+                          Missing key ({visible.key_id})
+                        </option>
+                      )}
+                    {overview.keys.map((key) => (
+                      <option key={key.id} value={key.id}>
+                        {revealHidden(key.public?.name ?? key.id)} ·{" "}
+                        {key.status.replace(/_/g, " ")}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Key availability is verified again when connecting.
+                  </p>
+                </RecordField>
+              )}
+            {visible.auth === "password" && (
+              <p className="text-xs text-muted-foreground">
+                Passwords are requested in the terminal when needed and stay on this
+                device.
+              </p>
             )}
-          {visible.auth === "password" && (
-            <p className="text-xs text-muted-foreground">
-              Passwords are requested in the terminal when needed and stay on this
-              device.
-            </p>
-          )}
+          </FormSection>
           <details
             className="rounded-lg border p-4"
             open={
@@ -517,25 +522,27 @@ export function RecordHostEditor({
               </div>
             </div>
           </details>
-          <RecordField label="Tags">
-            <Input
-              value={state.payload.tags.join(", ")}
-              onChange={(e) =>
-                patch({
-                  tags: e.target.value
-                    .split(",")
-                    .map((value) => value.trim())
-                    .filter(Boolean),
-                })
-              }
-            />
-          </RecordField>
-          <RecordField label="Notes">
-            <Textarea
-              value={state.payload.notes}
-              onChange={(e) => patch({ notes: e.target.value })}
-            />
-          </RecordField>
+          <FormSection title="Organization" description="Add searchable tags and notes for this host.">
+            <RecordField label="Tags">
+              <Input
+                value={state.payload.tags.join(", ")}
+                onChange={(e) =>
+                  patch({
+                    tags: e.target.value
+                      .split(",")
+                      .map((value) => value.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+            </RecordField>
+            <RecordField label="Notes">
+              <Textarea
+                value={state.payload.notes}
+                onChange={(e) => patch({ notes: e.target.value })}
+              />
+            </RecordField>
+          </FormSection>
           {blocking.length > 0 && (
             <div className="space-y-3 rounded-md border p-3">
               <p className="text-sm">
@@ -617,15 +624,15 @@ export function RecordHostEditor({
           </details>
         )}
       </div>
-      <footer className="host-editor-footer">
-        <span className="host-editor-save-state">
+      <ActionBar className="app-editor-action-bar" label="Host editor actions" hint={
+        <span role="status">
           {state.dirty
             ? "Unsaved changes"
             : state.id
               ? "Saved to your library"
               : "Save this host before connecting."}
         </span>
-        <div className="host-editor-actions">
+      }>
           {state.dirty && state.id && (
             <Button
               variant="ghost"
@@ -672,8 +679,7 @@ export function RecordHostEditor({
               Connect
             </Button>
           )}
-        </div>
-      </footer>
+      </ActionBar>
       <FormatUpgradeReview
         open={askingUpgrade}
         busy={busy}

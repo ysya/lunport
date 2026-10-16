@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { KeyRound } from "lucide-react";
 
 import type { AgentApprovalAnswer } from "@/bindings/AgentApprovalAnswer";
 import type { AgentApprovalRequest } from "@/bindings/AgentApprovalRequest";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { DecisionLayout } from "@/components/app/DecisionLayout";
+import { useApplyTheme } from "@/lib/theme";
 import {
   afterFailedAnswer,
   allowDisabled,
@@ -45,8 +48,14 @@ export function ApprovalCardView({
   const chain = programChainLine(request);
   const answer = (allow: boolean) => onAnswer(buildAnswer(request, allow, { remember, passphrase, rememberPassphrase }));
   return (
-    <div className="space-y-3 p-4">
-      <h1 className="text-sm font-semibold break-words">{approvalTitle(request)}</h1>
+    <DecisionLayout title={approvalTitle(request)} icon={<KeyRound className="size-5" />} actions={<>
+        <Button type="button" variant="outline" size="sm" autoFocus={!request.needs_passphrase} disabled={busy} onClick={() => answer(false)}>
+          {request.preapproved ? "Cancel" : "Deny"}
+        </Button>
+        <Button type="button" size="sm" disabled={cannotAllow} onClick={() => answer(true)}>
+          {request.preapproved ? "Unlock" : "Allow"}
+        </Button>
+      </>}>
       {chain && <p className="text-xs text-muted-foreground break-all">{chain}</p>}
       {!request.preapproved && <p className="text-sm break-all">{destination(request)}</p>}
       <p className="font-mono text-xs text-muted-foreground break-all">{request.key_fingerprint}</p>
@@ -77,15 +86,7 @@ export function ApprovalCardView({
           {rememberLabel(request.remember_minutes)}
         </label>
       )}
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => answer(false)}>
-          {request.preapproved ? "Cancel" : "Deny"}
-        </Button>
-        <Button type="button" size="sm" disabled={cannotAllow} onClick={() => answer(true)}>
-          {request.preapproved ? "Unlock" : "Allow"}
-        </Button>
-      </div>
-    </div>
+    </DecisionLayout>
   );
 }
 
@@ -110,6 +111,7 @@ export function ApprovalCard({
 
 /** The `approval` window (spec §7.4): shows the oldest waiting request; Rust opens and destroys the window. */
 export default function AgentApprovalWindow() {
+  useApplyTheme();
   const [pending, setPending] = useState<AgentApprovalRequest[]>([]);
   // The request the user answered last. Its card stays busy for as long as the hub still lists it (`isAnswering`), whatever the IPC call does.
   const [answeredId, setAnsweredId] = useState<string | null>(null);

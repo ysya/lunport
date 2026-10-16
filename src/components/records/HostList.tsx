@@ -17,6 +17,8 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/app/PageHeader";
+import { useUiStore } from "@/stores/ui";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -91,14 +93,12 @@ export function RecordHostList({
   const recent = useSettingsStore((state) => state.recentConnections);
   const [search, setSearch] = useState("");
   const list = useRef<HTMLElement>(null);
-  const [layout, setLayout] = useState<"grid" | "list">("grid");
+  const layout = useUiStore((s) => s.hostLayout);
+  const setLayout = useUiStore((s) => s.setHostLayout);
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const hosts = libraryHosts(overview, filter, search, recent);
   const roots = buildRecordTree(overview);
-  const groups = roots
-    .flatMap((root) => root.groups)
-    .sort((a, b) => a.group.payload.name.localeCompare(b.group.payload.name));
   const allNodes = roots.flatMap((root) => root.groups);
   const findNode = (
     nodes: typeof allNodes,
@@ -110,9 +110,7 @@ export function RecordHostList({
     }
   };
   const browsableGroups =
-    filter.kind === "all"
-      ? groups
-      : filter.kind === "group"
+    filter.kind === "group"
         ? (findNode(allNodes)?.children ?? [])
         : [];
   const currentGroup =
@@ -157,9 +155,8 @@ export function RecordHostList({
     counts.get(host.id) === 1;
   return (
     <div className="library-catalog flex h-full min-h-0 flex-col">
-      <header className="library-page-header">
-        <div>
-          <div className="library-breadcrumb">
+      <PageHeader className="library-page-header" title={revealHidden(title)} count={hosts.length}
+        breadcrumb={filter.kind === "group" || filter.kind === "tag" ? <div className="library-breadcrumb">
             <button
               type="button"
               onClick={() => changeFilter?.({ kind: "all" })}
@@ -168,24 +165,9 @@ export function RecordHostList({
             </button>
             <span>/</span>
             <span>Hosts</span>
-          </div>
-          <h1>
-            {revealHidden(title)}{" "}
-            <span className="library-total">{hosts.length}</span>
-          </h1>
-          <p>
-            {filter.kind === "recent"
-              ? "Pick up where you left off. Your recently opened connections."
-              : filter.kind === "attention"
-                ? "Review connection settings and keys before connecting."
-                : currentGroup
-                  ? revealHidden(
-                      groupPath(overview, currentGroup.id, currentGroup.scope),
-                    )
-                  : "Your servers, one connection away."}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
+          </div> : undefined}
+        description={filter.kind === "attention" ? "Review connection settings and keys before connecting." : currentGroup ? revealHidden(groupPath(overview, currentGroup.id, currentGroup.scope)) : undefined}
+        actions={<>
           {currentGroup && selectGroup && (
             <Button
               variant="outline"
@@ -234,8 +216,8 @@ export function RecordHostList({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-        </div>
-      </header>
+        </>}
+      />
       <div className="library-catalog-toolbar">
         <div className="library-search">
           <Search className="size-4" />
@@ -427,6 +409,7 @@ export function RecordHostList({
                   >
                     <button
                       type="button"
+                      data-host-id={host.id}
                       className="library-host-summary"
                       aria-pressed={active}
                       disabled={

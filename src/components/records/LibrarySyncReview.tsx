@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
@@ -5,7 +6,7 @@ import type { LibrarySyncPreview, LibraryRename } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { RecordField } from "./form";
 
-export function LibrarySyncReview({ preview, renames, setRenames, busy, error, confirm, refresh, cancel }: {
+export function LibrarySyncReview({ preview, renames, setRenames, busy, error, confirm, refresh, cancel, restoreFocus }: {
   preview: LibrarySyncPreview;
   renames: LibraryRename[];
   setRenames: (renames: LibraryRename[]) => void;
@@ -14,10 +15,24 @@ export function LibrarySyncReview({ preview, renames, setRenames, busy, error, c
   confirm: () => void;
   refresh: () => void;
   cancel: () => void;
+  restoreFocus?: () => void;
 }) {
+  const content = useRef<HTMLDivElement>(null);
+  const focused = useRef(false);
+  useEffect(() => {
+    if (busy || focused.current) return;
+    const input = content.current?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled)");
+    if (input) { input.focus(); focused.current = true; }
+  }, [busy]);
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !busy) cancel(); }}>
-      <DialogContent className="library-sync-review sm:max-w-xl" showCloseButton={false}>
+      <DialogContent ref={content} className="library-sync-review sm:max-w-xl" showCloseButton={false}
+        onOpenAutoFocus={(event) => {
+          const input = content.current?.querySelector<HTMLInputElement>("input:not(:disabled)");
+          if (input) { event.preventDefault(); input.focus(); focused.current = true; }
+        }}
+        onCloseAutoFocus={(event) => { if (restoreFocus) { event.preventDefault(); requestAnimationFrame(restoreFocus); } }}
+      >
         <DialogHeader>
           <DialogTitle>Review library sync</DialogTitle>
           <DialogDescription>
