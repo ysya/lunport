@@ -2,7 +2,7 @@
 
 > **Own SSH development branch:** the records workspace keeps its vault local, syncs one host library through encrypted chains with separate key-sharing controls, and uses explicit legacy migration. The release descriptions below refer to the existing legacy mode. Groups, Records MCP execution and POSIX public-key deployment are available in [Beta 1.0.0-3](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3), with native CI and four-platform publication verified. See the [remote handoff](docs/2026-10-15-beta3-remote-handoff.md) and [Beta 3 checklist](docs/releases/1.0.0-3-review-checklist.md) for current behavior, verification, and remaining gates.
 
-[Beta 14](https://github.com/ysya/sshelter/releases/tag/v1.0.0-14) adds a consistent Records interface, collapsible sidebar and Groups, shared host/key details and editing workflows, and System/Reduced motion preferences. See the [validation record](docs/releases/1.0.0-14-validation.md) for verification and remaining visual follow-ups.
+[Beta 15](https://github.com/ysya/sshelter/releases/tag/v1.0.0-15) organizes Settings into Application, Workspace and Maintenance with searchable sections, and unifies Legacy, Keychain, deployment, sync and maintenance dialogs. It builds on the consistent Records interface, collapsible sidebar and System/Reduced motion preferences from Beta 14. See the [validation record](docs/releases/1.0.0-15-validation.md) for verification and remaining visual follow-ups.
 
 A cross-platform desktop app for managing your **local OpenSSH** setup — `~/.ssh/config`, keys, `ssh-agent`, and `known_hosts` — with lossless, format-preserving editing. macOS + Linux first (Windows later).
 

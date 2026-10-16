@@ -77,6 +77,7 @@
 - Config path 草稿經分類與搜尋返回仍保留；Keep editing 焦點還原；慢速載入時 Escape 不關閉、關閉按鈕暫停、完成後可操作；Legacy Sync relay 草稿切頁保留。Legacy 檔案群組收起後 `inert`／`aria-hidden`，儲存列左側與調整後側欄右側同為 345px。
 - 第三批 macOS Development bundle 可啟動，實際 WebView 的搜尋跳轉、分類切換、15／17px、System／Reduced、選單卸載、關閉後返回 Settings 焦點均通過；偏好還原為 System theme／15px／System motion，正常退出。未在原生環境切入 Legacy 或執行遠端操作。
 - [第三批驗收收據與截圖](ui-review/2026-10-16-settings-legacy/validation.json)，[macOS 原生設定畫面](ui-review/2026-10-16-settings-legacy/macos-native-local-data.jpg)。
+- 第三批已發布為 [Beta 15](https://github.com/ysya/sshelter/releases/tag/v1.0.0-15)。固定來源的 macOS／Linux／Windows CI 及六個發布工作全部通過；9 份更新套件的 SHA-256、updater 簽章及竄改拒絕檢查成功，Beta 通道已更新，Stable 維持 `0.16.0`。完整產物與驗證限制見[Beta 15 驗證](releases/1.0.0-15-validation.md)。
 
 ## 後續工作
 
