@@ -1,10 +1,10 @@
 # SSHelter
 
-> **Own SSH development branch:** the records workspace keeps its vault local, syncs one host library through encrypted chains with separate key-sharing controls, and uses explicit legacy migration. The release descriptions below refer to the existing legacy mode. Groups, Records MCP execution and POSIX public-key deployment are available in [Beta 1.0.0-3](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3), with native CI and four-platform publication verified. See the [remote handoff](docs/2026-10-15-beta3-remote-handoff.md) and [Beta 3 checklist](docs/releases/1.0.0-3-review-checklist.md) for current behavior, verification, and remaining gates.
+> **Stable 1.0.0:** manage hosts, Groups and keys in a Records library with SSHelter's SSH engine, encrypted library sync and separate private-key sharing controls. Existing Legacy workspaces keep their OpenSSH files and use an explicit migration flow. Download [1.0.0](https://github.com/ysya/sshelter/releases/tag/v1.0.0) for macOS, Windows or Linux; see the [validation record](docs/releases/1.0.0-validation.md) for checks and remaining visual follow-ups.
 
-[Beta 15](https://github.com/ysya/sshelter/releases/tag/v1.0.0-15) organizes Settings into Application, Workspace and Maintenance with searchable sections, and unifies Legacy, Keychain, deployment, sync and maintenance dialogs. It builds on the consistent Records interface, collapsible sidebar and System/Reduced motion preferences from Beta 14. See the [validation record](docs/releases/1.0.0-15-validation.md) for verification and remaining visual follow-ups.
+Settings uses searchable Application, Workspace and Maintenance navigation. Records, Legacy, Keychain, deployment, sync and maintenance dialogs share layout rules, with an animated collapsible sidebar and System/Reduced motion preferences. In Records, **Keys → Import private key → From a file** opens the system file picker; pasting remains available. File imports copy supported OpenSSH private keys into the local vault, preserve the source file and stay on this device until key sync is explicitly enabled.
 
-A cross-platform desktop app for managing your **local OpenSSH** setup — `~/.ssh/config`, keys, `ssh-agent`, and `known_hosts` — with lossless, format-preserving editing. macOS + Linux first (Windows later).
+A cross-platform desktop app for managing SSH connections and keys, with a Records library and lossless, format-preserving editing of your **local OpenSSH** setup in Legacy mode. Available for macOS universal, Windows x64 and Linux x64/ARM64.
 
 ## Why
 
