@@ -223,3 +223,64 @@ fn real_openssh_handshake_verifies_without_any_destination_authentication() {
         "the server saw only the handshake: {log}"
     );
 }
+
+#[test]
+fn replacing_the_saved_pin_during_the_final_handshake_cannot_report_trusted() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Replace<'a> {
+        directory: &'a FakeDirectory,
+        rounds: AtomicUsize,
+        inner: FakeEngine,
+        replacement: HostKey,
+    }
+    impl SshEngine for Replace<'_> {
+        fn connect(
+            &self,
+            t: &Target,
+            p: &dyn HostKeyPolicy,
+            a: &dyn AuthSource,
+        ) -> Result<Box<dyn Session>, ConnectError> {
+            let result = self.inner.connect(t, p, a);
+            if self.rounds.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.directory
+                    .replace_pin(
+                        &HostId::from("id-web"),
+                        &default_server_key(),
+                        &self.replacement,
+                    )
+                    .unwrap();
+            }
+            result
+        }
+    }
+    let directory = FakeDirectory::new().with_host("web", AuthMethod::Password);
+    let replacement =
+        HostKey::from_openssh_line(crate::sync::slot_rules::test_keys::ECDSA_PUBLIC).unwrap();
+    let engine = Replace {
+        directory: &directory,
+        rounds: AtomicUsize::new(0),
+        inner: FakeEngine::new(),
+        replacement: replacement.clone(),
+    };
+    let result = run(
+        &directory,
+        &engine,
+        &FakeConfirmer::deciding(vec![Decision::Trust]),
+        &FakeOwner::default(),
+        &CancelToken::default(),
+    );
+    assert!(result.unwrap_err().contains("saved server key changed"));
+    assert_eq!(
+        directory
+            .pinned(&HostId::from("id-web"))
+            .unwrap()
+            .unwrap()
+            .key,
+        replacement
+    );
+    assert_eq!(
+        engine.rounds.load(Ordering::SeqCst),
+        2,
+        "no automatic retry or replacement of the newer pin"
+    );
+}

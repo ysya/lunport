@@ -240,17 +240,28 @@ pub fn verify(
     if cancel.is_cancelled() {
         return Err("Server identity verification was canceled.".into());
     }
-    directory.checked().map_err(|e| e.to_string())?;
+    let current = directory.checked().map_err(|e| e.to_string())?;
     match engine.completed.into_inner().unwrap() {
-        Some((hop, key)) => Ok(VerifiedHostKey {
-            host_id: hop.id.as_str().into(),
-            alias: hop.alias,
-            hostname: hop.hostname,
-            port: hop.port,
-            algorithm: key.algorithm,
-            fingerprint: key.fingerprint,
-            trusted: true,
-        }),
+        Some((hop, key))
+            if current
+                .hops
+                .iter()
+                .any(|h| h.id == hop.id && h.pinned.as_ref() == Some(&key)) =>
+        {
+            Ok(VerifiedHostKey {
+                host_id: hop.id.as_str().into(),
+                alias: hop.alias,
+                hostname: hop.hostname,
+                port: hop.port,
+                algorithm: key.algorithm,
+                fingerprint: key.fingerprint,
+                trusted: true,
+            })
+        }
+        Some(_) => Err(
+            "The saved server key changed during verification. Verify the current identity again."
+                .into(),
+        ),
         None => Err(result
             .err()
             .map(|e| e.text)
