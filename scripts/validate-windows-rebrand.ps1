@@ -24,21 +24,22 @@ function Msi-Property([string] $Path, [string] $Name) {
     $installer = New-Object -ComObject WindowsInstaller.Installer
     $database = $installer.OpenDatabase($Path, 0)
     $view = $database.OpenView("SELECT Value FROM Property WHERE Property = '$Name'")
-    $view.Execute()
+    [void] $view.Execute()
     $record = $view.Fetch()
     if (-not $record) { throw "The MSI has no $Name" }
-    $value = $record.StringData(1)
-    $view.Close()
+    $value = [string] $record.StringData(1)
+    [void] $view.Close()
     return $value
 }
 $newNsis = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe')
 $newMsi = @(Get-ChildItem 'src-tauri/target/release/bundle/msi' -Filter '*.msi')
 if ($newNsis.Count -ne 1 -or $newMsi.Count -ne 1) { throw 'Expected one renamed installer per format.' }
 $baselineMsi = Join-Path $scratch 'SSHelter_1.0.0_x64_en-US.msi'
-$oldUpgrade = Msi-Property $baselineMsi 'UpgradeCode'
-$newUpgrade = Msi-Property $newMsi[0].FullName 'UpgradeCode'
+$oldUpgrade = [guid] (Msi-Property $baselineMsi 'UpgradeCode')
+$newUpgrade = [guid] (Msi-Property $newMsi[0].FullName 'UpgradeCode')
 if ($oldUpgrade -ne $newUpgrade) { throw "MSI UpgradeCode changed: $oldUpgrade / $newUpgrade" }
 if ((Msi-Property $newMsi[0].FullName 'ProductName') -ne 'Lunport') { throw 'The MSI is not branded Lunport.' }
+Write-Output "Verified the published MSI UpgradeCode is preserved: $newUpgrade"
 $sentinel = Join-Path $env:LOCALAPPDATA 'org.homelab.sshelter/rebrand-sentinel.txt'
 New-Item -ItemType Directory -Force (Split-Path $sentinel) | Out-Null
 Set-Content -LiteralPath $sentinel -Value 'disposable nonsecret upgrade fixture' -NoNewline
