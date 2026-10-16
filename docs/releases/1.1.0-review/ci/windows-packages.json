@@ -1,0 +1,261 @@
+{
+  "conclusion": "success",
+  "headSha": "07f6b4c5013fb0d2f8d76b513f02b23c05869689",
+  "jobs": [
+    {
+      "completedAt": "2026-10-16T22:12:55Z",
+      "conclusion": "success",
+      "databaseId": 117213337794,
+      "name": "installers",
+      "startedAt": "2026-10-16T21:53:03Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T21:53:07Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T21:53:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T21:53:13Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T21:53:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T21:53:17Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 3,
+          "startedAt": "2026-10-16T21:53:13Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T21:53:25Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 4,
+          "startedAt": "2026-10-16T21:53:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T21:53:46Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 5,
+          "startedAt": "2026-10-16T21:53:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T21:53:47Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 6,
+          "startedAt": "2026-10-16T21:53:46Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T21:53:51Z",
+          "conclusion": "success",
+          "name": "Build the console helper (Windows)",
+          "number": 7,
+          "startedAt": "2026-10-16T21:53:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T21:54:02Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 8,
+          "startedAt": "2026-10-16T21:53:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:04:13Z",
+          "conclusion": "success",
+          "name": "Build the installers",
+          "number": 9,
+          "startedAt": "2026-10-16T21:54:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:04:13Z",
+          "conclusion": "skipped",
+          "name": "Restore verified runtime binaries for installer-only changes",
+          "number": 10,
+          "startedAt": "2026-10-16T22:04:13Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:04:13Z",
+          "conclusion": "skipped",
+          "name": "Repackage the verified runtime with the current installer templates",
+          "number": 11,
+          "startedAt": "2026-10-16T22:04:13Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:04:14Z",
+          "conclusion": "success",
+          "name": "Record the unsigned candidate source and checksums",
+          "number": 12,
+          "startedAt": "2026-10-16T22:04:13Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:04:17Z",
+          "conclusion": "success",
+          "name": "Preserve unsigned test installers and generated templates",
+          "number": 13,
+          "startedAt": "2026-10-16T22:04:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:04:18Z",
+          "conclusion": "success",
+          "name": "The NSIS installer holds sshelter-cli.exe next to sshelter.exe",
+          "number": 14,
+          "startedAt": "2026-10-16T22:04:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:04:19Z",
+          "conclusion": "success",
+          "name": "The MSI holds sshelter-cli.exe next to sshelter.exe",
+          "number": 15,
+          "startedAt": "2026-10-16T22:04:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:04:26Z",
+          "conclusion": "success",
+          "name": "The installers' two programs run sshelter connect",
+          "number": 16,
+          "startedAt": "2026-10-16T22:04:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:10:37Z",
+          "conclusion": "success",
+          "name": "The installers' two programs in a console of their own",
+          "number": 17,
+          "startedAt": "2026-10-16T22:04:26Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:12:39Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 31,
+          "startedAt": "2026-10-16T22:10:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:12:49Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 32,
+          "startedAt": "2026-10-16T22:12:39Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:12:49Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 33,
+          "startedAt": "2026-10-16T22:12:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:12:52Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 34,
+          "startedAt": "2026-10-16T22:12:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:12:53Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 35,
+          "startedAt": "2026-10-16T22:12:52Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/lunport/actions/runs/38972301193/job/117213337794"
+    },
+    {
+      "completedAt": "2026-10-16T22:13:28Z",
+      "conclusion": "success",
+      "databaseId": 117220175502,
+      "name": "upgrade published 1.0.0",
+      "startedAt": "2026-10-16T22:13:00Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T22:13:02Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T22:13:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:13:09Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T22:13:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:13:15Z",
+          "conclusion": "success",
+          "name": "Download and verify the matching unsigned candidate",
+          "number": 3,
+          "startedAt": "2026-10-16T22:13:09Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:13:25Z",
+          "conclusion": "success",
+          "name": "Upgrade published SSHelter 1.0.0 to Lunport on a clean runner",
+          "number": 4,
+          "startedAt": "2026-10-16T22:13:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:13:25Z",
+          "conclusion": "skipped",
+          "name": "Show disposable upgrade logs on failure",
+          "number": 5,
+          "startedAt": "2026-10-16T22:13:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:13:27Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 10,
+          "startedAt": "2026-10-16T22:13:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T22:13:28Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 11,
+          "startedAt": "2026-10-16T22:13:27Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/lunport/actions/runs/38972301193/job/117220175502"
+    }
+  ],
+  "status": "completed"
+}

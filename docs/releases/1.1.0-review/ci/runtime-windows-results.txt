@@ -1,0 +1,37 @@
+2026-10-16T21:51:03.3039470Z test result: ok. 2407 passed; 0 failed; 4 ignored; 0 measured; 9 filtered out; finished in 441.00s
+2026-10-16T21:52:05.9708866Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+2026-10-16T21:53:01.4681856Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+2026-10-16T21:53:48.3814551Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-10-16T21:56:19.9231325Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:56:19.9243111Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:56:19.9245856Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.05s
+2026-10-16T21:56:20.0433074Z   Write-Output "Native tray attempt $attempt/10"
+2026-10-16T21:56:21.7789111Z Native tray attempt 1/10
+2026-10-16T21:56:27.5421325Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 3.89s
+2026-10-16T21:56:27.5644496Z Native tray attempt 2/10
+2026-10-16T21:56:31.9645020Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 3.75s
+2026-10-16T21:56:31.9779893Z Native tray attempt 3/10
+2026-10-16T21:56:35.5379043Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 2.91s
+2026-10-16T21:56:35.5512332Z Native tray attempt 4/10
+2026-10-16T21:56:40.8625999Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 4.65s
+2026-10-16T21:56:40.8666062Z Native tray attempt 5/10
+2026-10-16T21:56:44.4349751Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 2.95s
+2026-10-16T21:56:44.4490010Z Native tray attempt 6/10
+2026-10-16T21:56:48.0709389Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 3.00s
+2026-10-16T21:56:48.0844873Z Native tray attempt 7/10
+2026-10-16T21:56:51.8935654Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 3.19s
+2026-10-16T21:56:51.9071760Z Native tray attempt 8/10
+2026-10-16T21:56:57.6223450Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 5.08s
+2026-10-16T21:56:57.6289549Z Native tray attempt 9/10
+2026-10-16T21:57:02.3291466Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 4.07s
+2026-10-16T21:57:02.3424700Z Native tray attempt 10/10
+2026-10-16T21:57:07.4635805Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 4.50s
+2026-10-16T21:57:08.4529582Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.06s
+2026-10-16T21:58:28.7915544Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-10-16T21:58:28.8008566Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-10-16T21:58:29.0276861Z test result: ok. 3 passed
+2026-10-16T21:58:31.2414830Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-10-16T21:58:34.7322352Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 1.16s
+2026-10-16T21:58:40.4242673Z & "$openssh\ssh.exe" -F NUL -p $env:SSHELTER_TEST_SSH_PORT -i $env:SSHELTER_TEST_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL "$env:SSHELTER_TEST_SSH_USER@127.0.0.1" 'echo client-ok'
+2026-10-16T21:58:41.0740451Z client-ok
+2026-10-16T21:58:42.5628448Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.21s

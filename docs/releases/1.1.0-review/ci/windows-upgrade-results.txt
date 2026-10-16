@@ -1,0 +1,4 @@
+2026-10-16T22:13:09.5801941Z   if ((Get-FileHash (Join-Path $base $file.path) -Algorithm SHA256).Hash -ne $file.sha256) { throw 'Candidate package checksum mismatch.' }
+2026-10-16T22:13:09.5802874Z Write-Output "Verified unsigned candidate from $($candidate.source)"
+2026-10-16T22:13:14.8822188Z Verified unsigned candidate from 07f6b4c5013fb0d2f8d76b513f02b23c05869689
+2026-10-16T22:13:25.4742353Z NSIS and MSI upgraded SSHelter 1.0.0 to Lunport with saved paths, data and CLI compatibility.

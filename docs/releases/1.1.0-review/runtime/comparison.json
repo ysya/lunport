@@ -29,7 +29,7 @@
     "filtered": 10,
     "requireOpenSSH": true
   },
-  "fullPlatformChecks": "pending; see final release validation record",
+  "fullPlatformChecks": "passed; final 1.1.0 product candidate 07f6b4c5013fb0d2f8d76b513f02b23c05869689; see adjacent CI receipts",
   "trayBaseline": {
     "commit": "e977a03317a90a5203e00bc572bb61f4207348ef",
     "run": 38970871083,

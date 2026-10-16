@@ -37,6 +37,10 @@ const channel = read('channel/latest.json');
 validateManifest(manifest, tag);
 validateManifest(channel, tag);
 assert.equal(canonicalJson(manifest), canonicalJson(channel));
+assert.equal(canonicalJson(manifest), canonicalJson(read('legacy-stable.json')),
+  'existing SSHelter Stable endpoint does not offer this release');
+assert.equal(canonicalJson(channel), canonicalJson(read('legacy-beta.json')),
+  'existing SSHelter Beta endpoint does not offer this release');
 assert.deepEqual(Object.keys(manifest.platforms).sort(), [
   'darwin-aarch64', 'darwin-aarch64-app', 'darwin-x86_64', 'darwin-x86_64-app',
   'linux-aarch64', 'linux-aarch64-appimage', 'linux-aarch64-deb', 'linux-aarch64-rpm',
@@ -81,6 +85,7 @@ for (const name of [...unique].sort()) {
 const receipt = { version: manifest.version, sourceCommit: commit, releaseId: release.id,
   assetCount: assets.size, platforms: Object.keys(manifest.platforms), allAssetsUploadedNonempty: true,
   allAssetDigestsMatch: true, stablePointsAtRelease: true, betaMatchesStable: true,
+  legacyStableAndBetaEndpointsMatch: true,
   historicalReleaseUnchanged: true, verifier: 'minisign-verify 0.2.5 (same version as Tauri updater)',
   allowLegacySignatures: false, artifacts };
 writeFileSync(`${root}/verification.json`, `${JSON.stringify(receipt, null, 2)}\n`);

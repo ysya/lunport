@@ -1,0 +1,21 @@
+{
+  "candidateCommit": "07f6b4c5013fb0d2f8d76b513f02b23c05869689",
+  "version": "1.1.0",
+  "profile": "Development",
+  "bundleIdentifier": "org.homelab.sshelter.dev",
+  "executable": "sshelter",
+  "productionBundleIdUnchanged": true,
+  "updaterPublicKeyUnchanged": true,
+  "typescriptAndViteBuild": "passed",
+  "developmentNativeBundle": "passed",
+  "settingsAbout": "Lunport Dev 1.1.0, Folded L, shared product/support/license metadata",
+  "nativeMacosAbout": "Lunport Dev 1.1.0 (1.1.0), shared tagline/repository/license/copyright",
+  "disposableLibrary": {
+    "hosts": 2,
+    "keys": 1,
+    "recordsOrPreferencesEdited": false
+  },
+  "productionLaunched": false,
+  "quitNormally": true,
+  "confirmedNotRunning": true
+}

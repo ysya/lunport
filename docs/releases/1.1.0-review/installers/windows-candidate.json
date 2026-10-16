@@ -1,0 +1,15 @@
+{
+  "runtimeSource": "07f6b4c5013fb0d2f8d76b513f02b23c05869689",
+  "files": [
+    {
+      "path": "bundle/nsis/Lunport_1.1.0_x64-setup.exe",
+      "sha256": "A96E22EFFDC3AFDF3BC016119D757A88C3649EDFDCBB8CBC2EA91EA8DD9CF725"
+    },
+    {
+      "path": "bundle/msi/Lunport_1.1.0_x64_en-US.msi",
+      "sha256": "D697512A973478AB4A1FE187A73FDA7FC840304D55321517AE5C9D2E9FBA0B30"
+    }
+  ],
+  "source": "07f6b4c5013fb0d2f8d76b513f02b23c05869689",
+  "repository": "ysya/lunport"
+}
