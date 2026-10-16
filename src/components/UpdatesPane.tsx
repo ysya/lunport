@@ -6,9 +6,9 @@ import {
   CircleAlert,
   LoaderCircle,
   RotateCw,
-  Terminal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BrandMark } from "@/components/app/BrandMark";
 import {
   Select,
   SelectContent,
@@ -98,7 +98,7 @@ export function UpdatesPane() {
     <div className="space-y-5">
       <div className="flex items-center gap-3">
         <div className="app-editor-symbol">
-          <Terminal className="size-5" />
+          <BrandMark className="size-5" />
         </div>
         <div>
           <h3 className="text-base font-semibold">Lunport</h3>

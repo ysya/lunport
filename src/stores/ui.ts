@@ -22,6 +22,7 @@ export const UI_STORAGE_KEY = "sshelter-ui";
 export type SettingsCategory =
   | "general"
   | "updates"
+  | "about"
   | "appearance"
   | "connection"
   | "files"

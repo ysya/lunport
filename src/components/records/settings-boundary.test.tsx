@@ -47,6 +47,7 @@ describe("records settings compatibility", () => {
       "ai",
       "sync",
       "advanced",
+      "about",
     ] as const) {
       const html = renderToStaticMarkup(
         <QueryClientProvider client={client}>
