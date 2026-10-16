@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/app/PageHeader";
+import { ActionBar, FormSection, WorkflowSteps } from "@/components/app/Workflow";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -34,6 +36,33 @@ export function RecordsAccountPanel({
   const [recoveryVersion, setRecoveryVersion] = useState(0);
   const [mode, setMode] = useState<"create" | "join" | null>(null);
   const [draft, setDraft] = useState(clearAccountDraft);
+  const deviceNameInput = useRef<HTMLInputElement>(null);
+  const createTrigger = useRef<HTMLButtonElement>(null);
+  const joinTrigger = useRef<HTMLButtonElement>(null);
+  const codeRegion = useRef<HTMLElement>(null);
+  const connectedRegion = useRef<HTMLDivElement>(null);
+  const libraryHeading = useRef<HTMLHeadingElement>(null);
+  const libraryTrigger = useRef<HTMLButtonElement>(null);
+  const [focusLibrary, setFocusLibrary] = useState(false);
+  const previousMode = useRef(mode);
+  const hadCode = useRef(false);
+  useEffect(() => {
+    if (mode && mode !== previousMode.current) deviceNameInput.current?.focus();
+    else if (!mode && previousMode.current && !overview.account) (previousMode.current === "create" ? createTrigger.current : joinTrigger.current)?.focus();
+    else if (!mode && previousMode.current && overview.account && !draft.createdWords) connectedRegion.current?.focus();
+    previousMode.current = mode;
+  }, [mode, overview.account, draft.createdWords]);
+  useEffect(() => {
+    if (draft.createdWords) codeRegion.current?.focus();
+    else if (hadCode.current) connectedRegion.current?.focus();
+    hadCode.current = !!draft.createdWords;
+  }, [draft.createdWords, overview.account?.chain_id]);
+  useEffect(() => {
+    if (focusLibrary && libraryHeading.current) {
+      libraryHeading.current.focus();
+      setFocusLibrary(false);
+    }
+  });
   const [upgradeConfirmed, setUpgradeConfirmed] = useState(false);
   const [libraryReview, setLibraryReview] = useState<LibrarySyncPreview | null>(null);
   const [libraryRenames, setLibraryRenames] = useState<LibraryRename[]>([]);
@@ -113,6 +142,7 @@ export function RecordsAccountPanel({
       return;
     }
     applyRecordOverview(client, await enableLibrarySync(upgradeConfirmed, { token: preview.token, renames: [] }));
+    setFocusLibrary(true);
   }, librarySyncError);
   const includeReviewedLibrary = () => run(async () => {
     if (!libraryReview) return;
@@ -125,6 +155,7 @@ export function RecordsAccountPanel({
       update({ words: "", error: null });
       applyRecordOverview(client, result);
       setRecoveryVersion((current) => current + 1);
+      if (!result.pending_account) setFocusLibrary(true);
     });
   const showCode = () =>
     run(async () => {
@@ -155,18 +186,12 @@ export function RecordsAccountPanel({
     );
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-6">
-      {libraryReview && <LibrarySyncReview preview={libraryReview} renames={libraryRenames} setRenames={setLibraryRenames} busy={busy} error={error} confirm={includeReviewedLibrary} refresh={() => prepareLibrary(true)} cancel={() => { setLibraryReview(null); setError(null); }} />}
-      <header className="space-y-2">
-        <h1 className="text-lg font-semibold">Sync</h1>
-        <p className="text-sm text-muted-foreground">
-          Sync across your devices with a private code. No login is required.
-          Your entire host library and Groups sync automatically. Keys have
-          their own sharing controls.
-        </p>
-      </header>
+    <div className="app-workflow-page space-y-6">
+      {libraryReview && <LibrarySyncReview preview={libraryReview} renames={libraryRenames} setRenames={setLibraryRenames} busy={busy} error={error} confirm={includeReviewedLibrary} refresh={() => prepareLibrary(true)} cancel={() => { setLibraryReview(null); setError(null); }} restoreFocus={() => (libraryTrigger.current ?? libraryHeading.current)?.focus()} />}
+      <PageHeader title="Sync" description="Your host library and Groups sync across devices with a private code. Keys have their own sharing controls." />
+      <WorkflowSteps steps={["Relay", "Device", "Library sync"]} current={pending ? 1 : overview.account ? 2 : overview.relay_url ? 1 : 0} complete={!!overview.account && overview.library_enabled && !pending && !overview.shared_writes_blocked && !draft.createdWords} />
       {draft.createdWords && (
-        <section className="space-y-3 rounded-md border p-4">
+        <section ref={codeRegion} tabIndex={-1} aria-label="Save your sync code" className="app-notice space-y-3 outline-none">
           <h2 className="font-medium">Save your sync code</h2>
           <p className="text-sm text-muted-foreground">
             Keep this code private. It lets another computer join your sync
@@ -179,19 +204,19 @@ export function RecordsAccountPanel({
             autoComplete="off"
             className="font-mono"
           />
-          <Button onClick={reset}>I saved the code</Button>
+          <ActionBar label="Sync code actions"><Button onClick={reset}>I saved the code</Button></ActionBar>
         </section>
       )}
       {draft.error && (
         <p
           role="alert"
-          className="text-sm text-destructive whitespace-pre-wrap"
+          className="app-task-error whitespace-pre-wrap"
         >
           {revealHidden(draft.error)}
         </p>
       )}
       {pending && (
-        <section className="space-y-3 rounded-md border p-4">
+        <section className="app-notice space-y-3" aria-busy={active}>
           <h2 className="font-medium">
             {active ? "Setting up sync…" : "Finish sync setup"}
           </h2>
@@ -223,9 +248,7 @@ export function RecordsAccountPanel({
                 </p>
               </RecordField>
             )}
-          <Button disabled={active} onClick={resume}>
-            {active ? "Working…" : "Resume sync setup"}
-          </Button>
+          <ActionBar label="Sync recovery actions">
           {!active &&
             pending.kind !== "create_space" &&
             pending.kind !== "leave_account" && (
@@ -237,15 +260,20 @@ export function RecordsAccountPanel({
                 Clear recovery code
               </Button>
             )}
+          <Button disabled={active} onClick={resume}>
+            {active ? "Working…" : "Resume sync setup"}
+          </Button>
+          </ActionBar>
         </section>
       )}
-      <section className="space-y-3 border-t pt-4">
+      <FormSection title="Relay connection" description="The relay carries encrypted changes between your devices.">
         <RecordField label="Relay URL">
           <Input
             type="url"
             value={relay}
             disabled={relayLocked || busy || draft.busy}
             placeholder="https://your-relay.example"
+            className="font-mono"
             onChange={(event) => {
               setRelay(event.target.value);
               setRelayDirty(true);
@@ -263,7 +291,7 @@ export function RecordsAccountPanel({
               Enter and save your HTTPS relay URL before creating or joining a
               sync chain.
             </p>
-            <Button
+            <ActionBar label="Relay actions"><Button
               variant="outline"
               disabled={busy || draft.busy || !relayDirty || !validRelay}
               onClick={() =>
@@ -274,35 +302,38 @@ export function RecordsAccountPanel({
               }
             >
               Save relay URL
-            </Button>
+            </Button></ActionBar>
           </>
         )}
-      </section>
+      </FormSection>
       {overview.account ? (
-        <section className="space-y-3 rounded-md border p-4">
-          <h2 className="font-medium">
+        <FormSection title="Connected device">
+          <div ref={connectedRegion} tabIndex={-1} aria-label="Connected device details" className="space-y-2 outline-none">
+          <p className="text-sm font-medium">
             {revealHidden(overview.account.device_name)}
-          </h2>
+          </p>
           <p className="break-all font-mono text-xs text-muted-foreground">
             Chain {overview.account.chain_id}
           </p>
-          <Button
+          </div>
+          <div><Button
             variant="outline"
             disabled={busy || draft.busy || !!pending}
             onClick={showCode}
           >
             Show sync code
-          </Button>
-        </section>
+          </Button></div>
+        </FormSection>
       ) : !mode ? (
-        <section className="space-y-3">
+        <FormSection title="Set up this device" description="Create a private sync chain or join one you already use.">
           <p className="text-sm text-muted-foreground">
             Your library works offline. Creating or joining sync includes all
             existing hosts and Groups on this device. Changes made offline are
             saved and sync when the connection returns.
           </p>
-          <div className="flex gap-2">
+          <div className="app-page-actions">
             <Button
+              ref={createTrigger}
               disabled={
                 busy ||
                 overview.shared_writes_blocked ||
@@ -317,6 +348,7 @@ export function RecordsAccountPanel({
               Create sync chain
             </Button>
             <Button
+              ref={joinTrigger}
               variant="outline"
               disabled={
                 busy ||
@@ -332,18 +364,16 @@ export function RecordsAccountPanel({
               Join with sync code
             </Button>
           </div>
-        </section>
+        </FormSection>
       ) : (
-        <section className="space-y-4 rounded-md border p-4">
-          <h2 className="font-medium">
-            {mode === "create" ? "Create sync chain" : "Join with sync code"}
-          </h2>
+        <FormSection title={mode === "create" ? "Create sync chain" : "Join with sync code"} description={mode === "create" ? "Name this device. You will receive a private code to connect your other computers." : "Name this device and enter the private code from a computer already in your chain."}>
           <fieldset
             disabled={draft.busy || overview.shared_writes_blocked || !!pending}
             className="space-y-4"
           >
             <RecordField label="Device name">
               <Input
+                ref={deviceNameInput}
                 value={draft.deviceName}
                 onChange={(event) => update({ deviceName: event.target.value })}
               />
@@ -385,7 +415,10 @@ export function RecordsAccountPanel({
                 inherited settings using the current sync format.
               </label>
             )}
-            <div className="flex gap-2">
+            <ActionBar label="Device setup actions">
+              <Button variant="outline" onClick={reset}>
+                Cancel
+              </Button>
               <Button
                 disabled={
                   (needsUpgrade && !upgradeConfirmed) ||
@@ -400,12 +433,9 @@ export function RecordsAccountPanel({
                     ? "Create chain"
                     : "Join chain"}
               </Button>
-              <Button variant="outline" onClick={reset}>
-                Cancel
-              </Button>
-            </div>
+            </ActionBar>
           </fieldset>
-        </section>
+        </FormSection>
       )}
       {overview.shared_writes_blocked && (
         <p role="status" className="text-sm text-muted-foreground">
@@ -417,13 +447,12 @@ export function RecordsAccountPanel({
         </p>
       )}
       {error && !libraryReview && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="app-task-error">
           {error}
         </p>
       )}
       {overview.account && (
-        <section className="space-y-3 border-t pt-4">
-          <h2 className="font-medium">Library sync</h2>
+        <FormSection title="Library sync" headingRef={libraryHeading}>
           <p className="text-sm text-muted-foreground">
             {overview.library_enabled && !pendingRecords
               ? "All hosts and Groups are included. Offline changes sync automatically when connected."
@@ -444,7 +473,8 @@ export function RecordsAccountPanel({
                   inherited settings using the current sync format.
                 </label>
               )}
-              <Button
+              <ActionBar label="Library sync actions"><Button
+                ref={libraryTrigger}
                 disabled={
                   busy ||
                   draft.busy ||
@@ -457,10 +487,10 @@ export function RecordsAccountPanel({
                 {overview.library_enabled
                   ? "Include remaining records"
                   : "Enable library sync"}
-              </Button>
+              </Button></ActionBar>
             </>
           )}
-        </section>
+        </FormSection>
       )}
       <RecordsAccountLifecyclePanel
         overview={overview}

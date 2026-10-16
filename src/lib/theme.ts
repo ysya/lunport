@@ -3,6 +3,11 @@ import { useEffect } from "react";
 import { useSettingsStore } from "@/stores/settings";
 import { clampFontSize, resolveTheme, systemPrefersDark } from "@/lib/settings-logic";
 
+/** Apply before React's first paint, including independently opened approval windows. */
+export function applyInitialMotionPreference(): void {
+  document.documentElement.dataset.motion = useSettingsStore.getState().motion === "reduced" ? "reduced" : "system";
+}
+
 /**
  * Applies the current `useSettingsStore.theme` preference to the document:
  * resolves "system" via `prefers-color-scheme`, toggles the `dark` class on
@@ -12,6 +17,9 @@ import { clampFontSize, resolveTheme, systemPrefersDark } from "@/lib/settings-l
  */
 export function useApplyTheme(): void {
   const theme = useSettingsStore((s) => s.theme);
+  const motion = useSettingsStore((s) => s.motion);
+
+  useEffect(() => { applyInitialMotionPreference(); }, [motion]);
 
   useEffect(() => {
     const apply = () => {

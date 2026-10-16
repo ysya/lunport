@@ -1,25 +1,16 @@
-import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import {
   ArrowUpRight,
   ArrowRight,
   KeyRound,
   Pencil,
-  Server,
   ShieldCheck,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { RecordHostView, RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { groupPath } from "./group-tree";
 import { readinessLabel } from "./HostList";
-import { HostPreviewResizeHandle } from "./HostPreviewResizeHandle";
-import {
-  clampHostPreviewWidth,
-  hostPreviewLimit,
-  hostPreviewNeedsCompact,
-} from "@/lib/host-preview-width";
-import { useUiStore } from "@/stores/ui";
+import { DetailPane } from "./DetailPane";
 
 export function HostPreview({
   host,
@@ -37,37 +28,6 @@ export function HostPreview({
   busy: boolean;
 }) {
   const payload = host.effective_payload;
-  const closeButton = useRef<HTMLButtonElement>(null);
-  const pane = useRef<HTMLElement>(null);
-  const paneId = useId();
-  const preferredWidth = clampHostPreviewWidth(
-    useUiStore((state) => state.hostPreviewWidth),
-  );
-  const setWidth = useUiStore((state) => state.setHostPreviewWidth);
-  const [available, setAvailable] = useState(Infinity);
-  const contentCompact = hostPreviewNeedsCompact(available);
-  const limit = hostPreviewLimit(available);
-  const width = Math.min(preferredWidth, limit);
-  const previousView = useRef({ hostId: "", compact: false });
-  useEffect(() => {
-    const parent = pane.current?.parentElement;
-    if (!parent) return;
-    const measure = () => setAvailable(parent.getBoundingClientRect().width);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(parent);
-    return () => observer.disconnect();
-  }, []);
-  useEffect(() => {
-    const compact =
-      contentCompact || window.matchMedia("(max-width: 820px)").matches;
-    if (
-      compact &&
-      (!previousView.current.compact || previousView.current.hostId !== host.id)
-    )
-      closeButton.current?.focus();
-    previousView.current = { hostId: host.id, compact };
-  }, [host.id, available, contentCompact]);
   const ready = host.readiness.kind === "ready" && !host.group_error;
   const field = (name: string, value: string, mono = false) => (
     <div>
@@ -76,37 +36,7 @@ export function HostPreview({
     </div>
   );
   return (
-    <aside
-      ref={pane}
-      id={paneId}
-      className="library-host-preview"
-      aria-label="Host details"
-      data-compact={contentCompact || undefined}
-      style={{ "--host-preview-width": `${width}px` } as CSSProperties}
-    >
-      <HostPreviewResizeHandle
-        pane={pane}
-        width={width}
-        limit={limit}
-        controls={paneId}
-        setWidth={setWidth}
-      />
-      <header>
-        <span>Connection details</span>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Close details"
-          ref={closeButton}
-          onClick={close}
-        >
-          <X className="size-4" />
-        </Button>
-      </header>
-      <div className="library-preview-scroll">
-        <div className="library-preview-icon">
-          <Server className="size-7" />
-        </div>
+    <DetailPane itemId={host.id} title="Connection details" label="Host details" close={close}>
         <h2>{revealHidden(host.payload.alias)}</h2>
         <p className="library-preview-address">
           {revealHidden(payload.hostname)}
@@ -202,8 +132,6 @@ export function HostPreview({
             </p>
           </div>
         )}
-      </div>
-      <footer>Use Quick connect to switch hosts</footer>
-    </aside>
+    </DetailPane>
   );
 }

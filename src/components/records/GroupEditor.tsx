@@ -2,6 +2,8 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, Folder, SlidersHorizontal, X } from "lucide-react";
 import { isImeKey } from "@/lib/ime";
 import { Button } from "@/components/ui/button";
+import { ActionBar, EditorHeader, FormSection } from "@/components/app/Workflow";
+import { Disclosure } from "@/components/app/Disclosure";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -221,19 +223,19 @@ export function RecordGroupEditor({
   const canSave = !busy && !blocked && !problem && (!state.id || state.dirty);
   return (
     <div className="group-editor">
-      <header className="group-editor-header">
-        <span className="group-editor-symbol">
-          <Folder aria-hidden="true" className="size-5" />
-        </span>
-        <div>
+      <EditorHeader
+        icon={<Folder className="size-5" />}
+        title={
           <DialogTitle>{state.id ? "Edit group" : "New group"}</DialogTitle>
+        }
+        description={
           <DialogDescription>
             {state.id
               ? `${affected.hosts} host${affected.hosts === 1 ? "" : "s"} · ${revealHidden(scopeLabel(overview, state.scope))}`
               : "Keep related hosts together in your library."}
           </DialogDescription>
-        </div>
-        {onCancel && (
+        }
+        close={onCancel && (
           <Button
             variant="ghost"
             size="icon-sm"
@@ -244,8 +246,8 @@ export function RecordGroupEditor({
             <X className="size-4" />
           </Button>
         )}
-      </header>
-      <div className="group-editor-body">
+      />
+      <div className="app-editor-body">
         {state.changedOnServer && (
           <div role="status" className="group-editor-notice">
             This group changed or became unavailable. Your draft is kept.
@@ -282,7 +284,7 @@ export function RecordGroupEditor({
           disabled={busy || blocked || state.unavailable}
           className="group-editor-fields disabled:opacity-60"
         >
-          <div className="group-editor-basics">
+          <FormSection title="Organization" description="Name this group and choose where it belongs.">
             <RecordField label="Group name">
               <Input
                 data-group-name
@@ -336,7 +338,7 @@ export function RecordGroupEditor({
                 Choose where this group belongs.
               </p>
             </RecordField>
-          </div>
+          </FormSection>
           <div className="group-editor-options">
             <GroupSettingsSection
               title="Connection defaults"
@@ -678,8 +680,8 @@ export function RecordGroupEditor({
           </details>
         )}
       </div>
-      <footer className="group-editor-footer">
-        <div className="group-editor-save-state">
+      <ActionBar className="app-editor-action-bar" label="Group editor actions" hint={
+        <>
           <span
             role="status"
             className={state.dirty && problem ? "text-destructive" : undefined}
@@ -704,8 +706,8 @@ export function RecordGroupEditor({
               Reset
             </Button>
           )}
-        </div>
-        <div className="group-editor-actions">
+        </>
+      }>
           {onCancel && (
             <Button variant="outline" disabled={busy} onClick={onCancel}>
               Cancel
@@ -714,8 +716,7 @@ export function RecordGroupEditor({
           <Button disabled={!canSave} onClick={() => save()}>
             {busy ? "Saving…" : state.id ? "Save changes" : "Create group"}
           </Button>
-        </div>
-      </footer>
+      </ActionBar>
       <FormatUpgradeReview
         open={upgrade}
         busy={busy}
@@ -817,9 +818,11 @@ function GroupSettingsSection({
           className="group-settings-chevron size-4"
         />
       </button>
-      <div id={id} className="group-settings-content" hidden={!open}>
+      <Disclosure id={id} open={open}>
+      <div className="group-settings-content">
         {children}
       </div>
+      </Disclosure>
     </section>
   );
 }

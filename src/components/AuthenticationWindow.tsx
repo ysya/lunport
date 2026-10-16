@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
+import { DecisionLayout } from "@/components/app/DecisionLayout";
 
 import type { AuthRequest } from "@/bindings/AuthRequest";
 import { armAfterDelay } from "@/lib/hostkey";
@@ -19,6 +20,7 @@ import { revealHidden } from "@/lib/sync-approvals";
 import { useApplyTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 export type AuthenticationCardViewProps = {
   request: AuthRequest;
@@ -36,36 +38,23 @@ export function AuthenticationCardView({
   request, busy, armed, remainingMs, answer, abandoned = false, error, onChange, onAnswer,
 }: AuthenticationCardViewProps) {
   const cancel = useRef<HTMLButtonElement>(null);
+  const answerId = useId();
   useEffect(() => { cancel.current?.focus(); }, [request.id]);
   const expired = remainingMs <= 0;
   const inactive = expired || abandoned;
   const cannotSubmit = busy || !armed || inactive;
 
   return (
-    <div className="app-shell flex h-full min-h-0 flex-col overflow-hidden">
-      <header className="flex shrink-0 items-center gap-2 px-5 pt-4 pb-2">
-        <KeyRound className="size-5 shrink-0 text-primary" />
-        <h1 className="text-sm font-semibold">SSH authentication</h1>
-        <span className="ml-auto text-xs text-muted-foreground">
-          {Math.ceil(Math.max(0, remainingMs) / 1000)}s
-        </span>
-      </header>
-      <main className="min-h-0 flex-1 space-y-2 overflow-y-auto break-all px-5 pb-3 text-xs">
-        <div className="space-y-1 rounded-lg border bg-muted/30 p-2">
-          <p>Request: {revealHidden(request.request_id)} · Question: {revealHidden(request.id)}</p>
-          {request.hop ? (
-            <>
-              <p>Server: {revealHidden(request.hop.alias)} · ID: {revealHidden(request.hop.host_id)}</p>
-              <p>{revealHidden(request.hop.user)}@{revealHidden(request.hop.hostname)}:{request.hop.port}</p>
-            </>
-          ) : <p>Server context: Unknown</p>}
-        </div>
-        <div>
-          <p className="mb-1 text-muted-foreground">Server prompt · {revealHidden(request.kind)}</p>
-          <pre className="whitespace-pre-wrap break-all font-sans">{revealHidden(request.text)}</pre>
-        </div>
-      </main>
-      <section aria-label="Authentication response" className="shrink-0 space-y-2 px-5 pb-3 text-xs">
+    <DecisionLayout
+      title="SSH authentication"
+      icon={<KeyRound className="size-5" />}
+      meta={`${Math.ceil(Math.max(0, remainingMs) / 1000)}s`}
+      actions={<>
+        <Button autoFocus ref={cancel} variant="outline" disabled={busy} onClick={() => onAnswer(null)}>Cancel</Button>
+        <Button disabled={cannotSubmit} onClick={() => onAnswer(answer)}>{busy ? "Sending…" : "Submit"}</Button>
+      </>}
+      response={
+      <section aria-label="Authentication response" className="space-y-2 text-xs">
         {inactive ? (
           <p role="alert" className={busy ? "text-muted-foreground" : "text-destructive"}>
             {expired ? "This question expired. Previous input was cleared. Start a fresh connection request to retry."
@@ -73,7 +62,10 @@ export function AuthenticationCardView({
               : "This answer was abandoned. Previous input was cleared. Start a fresh connection request to retry."}
           </p>
         ) : (
+          <>
+          <Label htmlFor={answerId}>Authentication answer</Label>
           <Input
+            id={answerId}
             aria-label="Authentication answer"
             type={request.echo ? "text" : "password"}
             value={answer}
@@ -89,14 +81,33 @@ export function AuthenticationCardView({
               if (!event.nativeEvent.isComposing && !cannotSubmit) onAnswer(answer);
             }}
           />
+          </>
         )}
         {error && <p role="alert" className="text-destructive">{error}</p>}
       </section>
-      <footer className="flex shrink-0 justify-end gap-2 border-t px-5 py-3">
-        <Button autoFocus ref={cancel} variant="outline" disabled={busy} onClick={() => onAnswer(null)}>Cancel</Button>
-        <Button disabled={cannotSubmit} onClick={() => onAnswer(answer)}>{busy ? "Sending…" : "Submit"}</Button>
-      </footer>
-    </div>
+      }
+    >
+        <section aria-label="Connection context" className="space-y-1 text-sm">
+          {request.hop ? (
+            <>
+              <p className="font-medium">{revealHidden(request.hop.alias)}</p>
+              <p className="break-all font-mono text-xs text-muted-foreground">{revealHidden(request.hop.user)}@{revealHidden(request.hop.hostname)}:{request.hop.port}</p>
+            </>
+          ) : <p>Server context: Unknown</p>}
+        </section>
+        <div>
+          <p className="mb-1 text-muted-foreground">Server prompt · {revealHidden(request.kind)}</p>
+          <pre className="whitespace-pre-wrap break-all font-sans">{revealHidden(request.text)}</pre>
+        </div>
+        <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer">Connection details</summary>
+          <div className="mt-2 space-y-1 break-all font-mono">
+            <p>Request: {revealHidden(request.request_id)}</p>
+            <p>Question: {revealHidden(request.id)}</p>
+            {request.hop && <p>Host ID: {revealHidden(request.hop.host_id)}</p>}
+          </div>
+        </details>
+    </DecisionLayout>
   );
 }
 

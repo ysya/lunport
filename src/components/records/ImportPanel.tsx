@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/app/PageHeader";
+import { ActionBar, FormSection, WorkflowSteps } from "@/components/app/Workflow";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -37,19 +39,19 @@ export function ImportReview({
   ];
   return (
     <div className="space-y-4">
-      <section className="space-y-2">
-        <h2 className="font-medium">
-          Hosts to import ({preview.preview.candidates.length})
-        </h2>
+      <FormSection title={`Hosts to import (${preview.preview.candidates.length})`} description="Hosts are saved to the local library. Review any connection warnings before continuing.">
+        <div className="app-review-list">
         {preview.preview.candidates.map((candidate) => (
-          <div key={candidate.id} className="rounded-md border p-3">
+          <div key={candidate.id} className="app-review-row">
+            <div className="min-w-0">
             <p className="text-sm font-medium">
               {revealHidden(candidate.payload.alias)}
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="break-all font-mono text-xs text-muted-foreground">
               {revealHidden(candidate.payload.hostname)}:
               {candidate.payload.port} · Local
             </p>
+            </div>
             {candidate.payload.imported?.unsupported.some(
               (setting) => setting.requires_review,
             ) && (
@@ -59,10 +61,10 @@ export function ImportReview({
             )}
           </div>
         ))}
-      </section>
+        </div>
+      </FormSection>
       {preview.preview.warnings.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="font-medium">Import notes</h2>
+        <FormSection title="Import notes">
           {preview.preview.warnings.map((warning, index) => (
             <p key={index} className="text-xs whitespace-pre-wrap">
               <span
@@ -78,15 +80,10 @@ export function ImportReview({
               </span>
             </p>
           ))}
-        </section>
+        </FormSection>
       )}
       {refs.length > 0 && (
-        <section className="space-y-3 rounded-md border p-4">
-          <h2 className="font-medium">Optional key copies</h2>
-          <p className="text-sm text-muted-foreground">
-            Choose each private key to copy into SSHelter. Source files remain
-            in place. Hosts with missing keys can be saved and completed later.
-          </p>
+        <FormSection title="Optional key copies" description="Choose each private key to copy into SSHelter. Source files remain in place. Hosts with missing keys can be saved and completed later.">
           {refs.map((reference) => (
             <div key={reference.key_id} className="space-y-1">
               <Label className="flex items-center gap-2">
@@ -110,7 +107,7 @@ export function ImportReview({
               </p>
             </div>
           ))}
-        </section>
+        </FormSection>
       )}
       <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer">
@@ -142,6 +139,13 @@ export function RecordsImportPanel() {
   const inFlight = useRef(false);
   const token = useRef<string | null>(null);
   const mounted = useRef(true);
+  const reviewRegion = useRef<HTMLDivElement>(null);
+  const resultRegion = useRef<HTMLElement>(null);
+  const sourceInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (preview) reviewRegion.current?.focus();
+    else if (receipt) resultRegion.current?.focus();
+  }, [preview, receipt]);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -224,55 +228,61 @@ export function RecordsImportPanel() {
       }
     });
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-6">
-      <h1 className="text-lg font-semibold">Import SSH configuration</h1>
-      <p className="text-sm text-muted-foreground">
-        Review an existing file before importing hosts into the local workspace.
-        The source configuration stays in place.
-      </p>
+    <div className="app-workflow-page space-y-6" aria-busy={busy}>
+      <PageHeader title="Import SSH configuration" description="Review an existing file before importing hosts into the local workspace. The source configuration stays in place." />
+      <WorkflowSteps steps={["Choose source", "Review", "Finish"]} current={preview ? 1 : receipt ? 2 : 0} complete={!!receipt && !preview} />
       {error && (
         <p
           role="alert"
-          className="text-sm text-destructive whitespace-pre-wrap"
+          className="app-task-error whitespace-pre-wrap"
         >
           {error}
         </p>
       )}
       {receipt && (
-        <p role="status" className="rounded-md border p-3 text-sm">
+        <section ref={resultRegion} tabIndex={-1} role="status" className="app-notice space-y-2 outline-none">
+          <h2>Import completed</h2>
+          <p>
           Import completed: {receipt.host_ids.length} hosts,{" "}
           {receipt.copied_key_ids.length} copied keys.
-        </p>
+          </p>
+        </section>
       )}
       {!preview && (
-        <section className="space-y-3">
+        <FormSection title={receipt ? "Import another file" : "Source file"} description="Choose your SSH configuration file, then preview the hosts and key references it contains.">
           <RecordField label="Configuration file">
             <Input
+              ref={sourceInput}
               value={source}
               disabled={busy}
               placeholder="/path/to/ssh/config"
+              className="font-mono"
               onChange={(event) => setSource(event.target.value)}
             />
           </RecordField>
-          <div className="flex gap-2">
+          <ActionBar label="Source actions">
             <Button variant="outline" disabled={busy} onClick={chooseFile}>
               Choose file
             </Button>
             <Button disabled={busy || !source.trim()} onClick={requestPreview}>
               {busy ? "Working…" : "Preview import"}
             </Button>
-          </div>
-        </section>
+          </ActionBar>
+        </FormSection>
       )}
       {preview && (
-        <>
+        <div ref={reviewRegion} role="region" aria-label="Import review" tabIndex={-1} className="space-y-6 outline-none">
+          <p className="break-all font-mono text-xs text-muted-foreground">{revealHidden(source)}</p>
           <ImportReview
             preview={preview}
             copies={copies}
             setCopies={setCopies}
             busy={busy || consumed}
           />
-          <div className="flex flex-wrap gap-2">
+          <ActionBar label="Import actions" hint={consumed ? "This preview was already submitted. Resume a pending import below, or preview the file again." : `${copies.length} private key ${copies.length === 1 ? "copy" : "copies"} selected.`}>
+            <Button variant="outline" disabled={busy} onClick={() => { cancel(); requestAnimationFrame(() => sourceInput.current?.focus()); }}>
+              {consumed ? "Preview again" : "Cancel import"}
+            </Button>
             <Button
               disabled={
                 busy || consumed || preview.preview.candidates.length === 0
@@ -283,21 +293,10 @@ export function RecordsImportPanel() {
                 ? "Working…"
                 : `Import ${preview.preview.candidates.length} hosts`}
             </Button>
-            <Button variant="outline" disabled={busy} onClick={cancel}>
-              {consumed ? "Preview again" : "Cancel import"}
-            </Button>
-          </div>
-          {consumed && (
-            <p className="text-sm text-muted-foreground">
-              This preview was already submitted. Resume a pending import below,
-              or preview the file again.
-            </p>
-          )}
-        </>
+          </ActionBar>
+        </div>
       )}
-      <section className="space-y-3 border-t pt-4">
-        <div className="flex items-center justify-between">
-          <h2 className="font-medium">Pending imports</h2>
+      <FormSection title="Pending imports" description="Continue imports whose saved progress still needs to finish." actions={
           <Button
             variant="outline"
             size="sm"
@@ -306,9 +305,9 @@ export function RecordsImportPanel() {
           >
             Refresh pending imports
           </Button>
-        </div>
-        {pending.isError ? (
-          <p className="text-sm text-destructive">
+      }>
+        {pending.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading pending imports…</p> : pending.isError ? (
+          <p role="alert" className="app-task-error">
             Pending imports could not be read.
           </p>
         ) : (pending.data ?? []).length === 0 ? (
@@ -317,7 +316,7 @@ export function RecordsImportPanel() {
           pending.data?.map((entry) => (
             <div
               key={entry.import_id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
+              className="app-review-row"
             >
               <div>
                 <p className="font-mono text-xs">{entry.import_id}</p>
@@ -336,7 +335,7 @@ export function RecordsImportPanel() {
             </div>
           ))
         )}
-      </section>
+      </FormSection>
     </div>
   );
 }

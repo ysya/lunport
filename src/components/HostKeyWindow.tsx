@@ -4,6 +4,7 @@ import { Check, Copy, KeyRound, ShieldAlert } from "lucide-react";
 import type { HostKeyAnswer } from "@/bindings/HostKeyAnswer";
 import type { HostKeyRequest } from "@/bindings/HostKeyRequest";
 import { Button } from "@/components/ui/button";
+import { DecisionLayout } from "@/components/app/DecisionLayout";
 import {
   answerRejectedMessage,
   armAfterDelay,
@@ -53,30 +54,33 @@ export function HostKeyCardView({
     }
   };
   return (
-    <div className="app-shell flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 items-center gap-3 px-5 pt-5 pb-3">
-        <div
-          className={cn(
-            "flex size-9 shrink-0 items-center justify-center rounded-xl",
-            changed
-              ? "bg-destructive/10 text-destructive"
-              : "bg-primary/10 text-primary",
-          )}
+    <DecisionLayout
+      title={hostKeyTitle(request)}
+      description={revealHidden(request.alias)}
+      icon={changed ? <ShieldAlert className="size-5" /> : <KeyRound className="size-5" />}
+      danger={changed}
+      actions={<>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          autoFocus
+          disabled={busy}
+          onClick={() => onAnswer(buildHostKeyAnswer(request, false))}
         >
-          {changed ? (
-            <ShieldAlert className="size-5" />
-          ) : (
-            <KeyRound className="size-5" />
-          )}
-        </div>
-        <div className="min-w-0">
-          <h1 className="text-sm font-semibold">{hostKeyTitle(request)}</h1>
-          <p className="truncate text-xs text-muted-foreground">
-            {revealHidden(request.alias)}
-          </p>
-        </div>
-      </header>
-      <main className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 pb-4">
+          {buttons.refuse}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={request.changed === null ? "default" : "destructive"}
+          disabled={busy || !armed}
+          onClick={() => onAnswer(buildHostKeyAnswer(request, true))}
+        >
+          {buttons.trust}
+        </Button>
+      </>}
+    >
         {changed && (
           <p role="alert" className="text-xs leading-relaxed text-destructive">
             {hostKeyBody(request)}
@@ -145,29 +149,7 @@ export function HostKeyCardView({
             Could not copy. Select the fingerprint and copy it manually.
           </p>
         )}
-      </main>
-      <footer className="app-toolbar flex shrink-0 justify-end gap-2 border-t px-5 py-3">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          autoFocus
-          disabled={busy}
-          onClick={() => onAnswer(buildHostKeyAnswer(request, false))}
-        >
-          {buttons.refuse}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant={request.changed === null ? "default" : "destructive"}
-          disabled={busy || !armed}
-          onClick={() => onAnswer(buildHostKeyAnswer(request, true))}
-        >
-          {buttons.trust}
-        </Button>
-      </footer>
-    </div>
+    </DecisionLayout>
   );
 }
 

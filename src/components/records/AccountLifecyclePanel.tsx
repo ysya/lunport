@@ -5,6 +5,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { ActionBar } from "@/components/app/Workflow";
 import {
   Dialog,
   DialogContent,
@@ -69,17 +70,17 @@ export function AccountLifecycleReview({
             : "I understand that devices must rejoin and the old code still reads historical data."}
         </span>
       </Label>
-      <div className="flex flex-wrap gap-2">
+      <ActionBar label="Account review actions">
+        <Button variant="outline" disabled={busy} onClick={cancel}>
+          Cancel
+        </Button>
         <Button
           disabled={busy || !consent || (!leaving && !deviceName.trim())}
           onClick={confirm}
         >
           {leaving ? "Leave account" : "Rotate sync code"}
         </Button>
-        <Button variant="outline" disabled={busy} onClick={cancel}>
-          Cancel
-        </Button>
-      </div>
+      </ActionBar>
     </section>
   );
 }
@@ -89,7 +90,7 @@ export function AccountLeaveOutcome({
   receipt: AccountLeaveReceipt;
 }) {
   return (
-    <section className="space-y-3 rounded-md border p-4" role="status">
+    <section className="app-notice space-y-3" role="status">
       <h2 className="font-medium">
         {receipt.complete ? "Account left" : "Leaving account is pending"}
       </h2>
@@ -131,7 +132,7 @@ export function AccountRotationOutcome({
   clear: () => void;
 }) {
   return (
-    <section className="space-y-3 rounded-md border p-4" role="status">
+    <section className="app-notice space-y-3" role="status">
       <h2 className="font-medium">
         {rotation
           ? rotation.complete

@@ -12,12 +12,14 @@ export function HostPreviewResizeHandle({
   limit,
   controls,
   setWidth,
+  label = "Resize connection details",
 }: {
   pane: RefObject<HTMLElement | null>;
   width: number;
   limit: number;
   controls: string;
   setWidth: (width: number) => void;
+  label?: string;
 }) {
   const drag = useRef<{
     pointerId: number;
@@ -60,7 +62,7 @@ export function HostPreviewResizeHandle({
   return (
     <div
       role="separator"
-      aria-label="Resize connection details"
+      aria-label={label}
       aria-orientation="vertical"
       aria-controls={controls}
       aria-valuemin={MIN_HOST_PREVIEW_WIDTH}

@@ -54,6 +54,13 @@ interface UiState {
   /** Full source_file paths of collapsed sidebar groups (persisted). */
   collapsedGroups: string[];
   toggleGroup: (file: string) => void;
+  /** Records Library navigation; intentionally separate from legacy file groups. */
+  librarySidebarCollapsed: boolean;
+  toggleLibrarySidebar: () => void;
+  collapsedRecordGroups: string[];
+  toggleRecordGroup: (id: string) => void;
+  hostLayout: "list" | "grid";
+  setHostLayout: (layout: "list" | "grid") => void;
   /**
    * Sidebar file-scope filter: a full source_file path to show ONLY that file's
    * hosts, or null for the grouped "All files" view (persisted).
@@ -149,6 +156,16 @@ export const useUiStore = create<UiState>()(
       search: "",
       setSearch: (search) => set({ search }),
       collapsedGroups: [],
+      librarySidebarCollapsed: false,
+      toggleLibrarySidebar: () => set((s) => ({ librarySidebarCollapsed: !s.librarySidebarCollapsed })),
+      collapsedRecordGroups: [],
+      toggleRecordGroup: (id) => set((s) => ({
+        collapsedRecordGroups: s.collapsedRecordGroups.includes(id)
+          ? s.collapsedRecordGroups.filter((value) => value !== id)
+          : [...s.collapsedRecordGroups, id],
+      })),
+      hostLayout: "list",
+      setHostLayout: (hostLayout) => set({ hostLayout }),
       toggleGroup: (file) =>
         set((s) => ({
           collapsedGroups: s.collapsedGroups.includes(file)
@@ -203,6 +220,9 @@ export const useUiStore = create<UiState>()(
       // else is session-only.
       partialize: (s) => ({
         collapsedGroups: s.collapsedGroups,
+        librarySidebarCollapsed: s.librarySidebarCollapsed,
+        collapsedRecordGroups: s.collapsedRecordGroups,
+        hostLayout: s.hostLayout,
         fileScope: s.fileScope,
         groupMode: s.groupMode,
         sidebarWidth: s.sidebarWidth,

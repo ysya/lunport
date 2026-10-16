@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/app/PageHeader";
+import { ActionBar, FormSection, WorkflowSteps } from "@/components/app/Workflow";
 import {
   recordsPendingMigrationsKey,
   usePendingRecordMigrations,
@@ -27,6 +29,7 @@ export function MigrationReview({
   consumed,
   setConsent,
   confirm,
+  cancel,
 }: {
   preview: MigrationPreviewResult;
   consent: boolean;
@@ -34,11 +37,11 @@ export function MigrationReview({
   consumed: boolean;
   setConsent: (value: boolean) => void;
   confirm: () => void;
+  cancel?: () => void;
 }) {
   const data = preview.preview;
   return (
-    <section className="space-y-4 rounded-md border p-4">
-      <h2 className="font-medium">Migration preview</h2>
+    <FormSection title="Migration preview">
       <p className="text-sm">
         {data.host_count} hosts · {data.key_count} keys ·{" "}
         {data.selected_space_ids.length} selected spaces
@@ -80,12 +83,6 @@ export function MigrationReview({
           devices use a compatible version.
         </span>
       </Label>
-      <Button
-        disabled={busy || consumed || !data.can_confirm || !consent}
-        onClick={confirm}
-      >
-        Confirm migration
-      </Button>
       <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer">Reviewed source details</summary>
         <p className="mt-2 break-all font-mono">Digest {data.source_digest}</p>
@@ -95,7 +92,11 @@ export function MigrationReview({
           </p>
         ))}
       </details>
-    </section>
+      <ActionBar label="Migration actions" hint={consumed ? "This preview was submitted. Resume an existing migration below, or prepare a new preview." : undefined}>
+        {cancel && <Button variant="outline" disabled={busy} onClick={cancel}>{consumed ? "Preview again" : "Cancel preview"}</Button>}
+        <Button disabled={busy || consumed || !data.can_confirm || !consent} onClick={confirm}>Confirm migration</Button>
+      </ActionBar>
+    </FormSection>
   );
 }
 export function MigrationOutcome({
@@ -108,7 +109,7 @@ export function MigrationOutcome({
   resume: () => void;
 }) {
   return (
-    <section className="space-y-3 rounded-md border p-4" role="status">
+    <section className="app-notice space-y-3" role="status">
       <h2 className="font-medium">
         {receipt.complete ? "Migration completed" : "Migration pending"}
       </h2>
@@ -207,21 +208,15 @@ export function RecordsMigrationPanel({
     }
   };
   return (
-    <div className="mx-auto max-w-3xl space-y-6 p-6">
-      <header className="flex items-center justify-between gap-3">
-        <h1 className="text-lg font-semibold">Move to the records workspace</h1>
-        {onClose && (
+    <div className="app-workflow-page space-y-6" aria-busy={state.busy}>
+      <PageHeader title="Move to the records workspace" description="Preview the saved workspace and review its hosts and keys before starting migration. The preview is read-only." actions={onClose && (
           <Button variant="outline" disabled={state.busy} onClick={close}>
             Close migration
           </Button>
-        )}
-      </header>
-      <p className="text-sm text-muted-foreground">
-        Preview the saved workspace and review its hosts and keys before
-        starting migration. The preview is read-only.
-      </p>
+      )} />
+      <WorkflowSteps steps={["Saved workspace", "Review", "Finish"]} current={state.receipt ? 2 : state.preview ? 1 : 0} complete={state.receipt?.complete} />
       {state.error && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="app-task-error">
           {state.error}
         </p>
       )}
@@ -233,7 +228,7 @@ export function RecordsMigrationPanel({
         />
       )}
       {!state.preview && !state.receipt && (
-        <section className="space-y-3">
+        <FormSection title="Saved workspace">
           <RecordField label="Sync code (optional)">
             <Textarea
               autoComplete="off"
@@ -246,15 +241,15 @@ export function RecordsMigrationPanel({
               an older account or if the stored code is unavailable.
             </p>
           </RecordField>
-          <div className="flex gap-2">
-            <Button disabled={state.busy} onClick={preview}>
-              {state.busy ? "Preparing preview…" : "Preview migration"}
-            </Button>
+          <ActionBar label="Migration source actions">
             <Button variant="outline" disabled={state.busy} onClick={reset}>
               Clear code
             </Button>
-          </div>
-        </section>
+            <Button disabled={state.busy} onClick={preview}>
+              {state.busy ? "Preparing preview…" : "Preview migration"}
+            </Button>
+          </ActionBar>
+        </FormSection>
       )}
       {state.preview && (
         <>
@@ -265,16 +260,8 @@ export function RecordsMigrationPanel({
             consumed={state.consumed}
             setConsent={(value) => update({ consent: value })}
             confirm={() => void confirm()}
+            cancel={reset}
           />
-          <Button variant="outline" disabled={state.busy} onClick={reset}>
-            {state.consumed ? "Preview again" : "Cancel preview"}
-          </Button>
-          {state.consumed && (
-            <p className="text-sm text-muted-foreground">
-              This preview was submitted. Resume an existing migration below, or
-              prepare a new preview.
-            </p>
-          )}
         </>
       )}
       {((state.receipt && !state.receipt.complete) ||
@@ -303,9 +290,7 @@ export function RecordsMigrationPanel({
           </Button>
         </RecordField>
       )}
-      <section className="space-y-3 border-t pt-4">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="font-medium">Pending migrations</h2>
+      <FormSection title="Pending migrations" actions={
           <Button
             variant="outline"
             size="sm"
@@ -314,9 +299,9 @@ export function RecordsMigrationPanel({
           >
             Refresh pending migrations
           </Button>
-        </div>
-        {pending.isError ? (
-          <p className="text-sm text-destructive">
+      }>
+        {pending.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading pending migrations…</p> : pending.isError ? (
+          <p role="alert" className="app-task-error">
             Pending migrations could not be read.
           </p>
         ) : (pending.data ?? []).length === 0 ? (
@@ -327,7 +312,7 @@ export function RecordsMigrationPanel({
           pending.data?.map((entry) => (
             <div
               key={entry.migration_id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
+              className="app-review-row"
             >
               <div>
                 <p className="break-all font-mono text-xs">
@@ -348,7 +333,7 @@ export function RecordsMigrationPanel({
             </div>
           ))
         )}
-      </section>
+      </FormSection>
     </div>
   );
 }
