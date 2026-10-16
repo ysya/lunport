@@ -8,7 +8,8 @@ import { revealHidden } from "@/lib/sync-approvals";
 
 /**
  * The host key window of SSHelter's own SSH client (own-ssh spec §10, §14): a host key is confirmed here, never in a terminal. The
- * texts are spec §14's, word for word. Names come from the user's hosts and the server, so they are shown through `revealHidden`.
+ * Security semantics follow spec §14. The compact structured presentation was revised in beta 1.0.0-2. Names come from the user's
+ * hosts and the server, so they are shown through `revealHidden`.
  */
 
 export const HOSTKEY_EVENT = "hostkey://requests";
@@ -17,39 +18,65 @@ export function fetchPending(): Promise<HostKeyRequest[]> {
   return tauriInvoke<HostKeyRequest[]>("hostkey_pending");
 }
 
-export function resolveHostKey(requestId: string, answer: HostKeyAnswer): Promise<void> {
+export function resolveHostKey(
+  requestId: string,
+  answer: HostKeyAnswer,
+): Promise<void> {
   return tauriInvoke<void>("hostkey_resolve", { requestId, answer });
 }
 
-export function onHostKeyRequests(handler: (pending: HostKeyRequest[]) => void): Promise<UnlistenFn> {
-  return listen<HostKeyRequest[]>(HOSTKEY_EVENT, (event) => handler(event.payload));
+export function onHostKeyRequests(
+  handler: (pending: HostKeyRequest[]) => void,
+): Promise<UnlistenFn> {
+  return listen<HostKeyRequest[]>(HOSTKEY_EVENT, (event) =>
+    handler(event.payload),
+  );
 }
 
 /** When the old key was pinned, as the changed-key text says it. */
 export function pinnedOn(pinnedAtMs: number): string {
-  return new Date(pinnedAtMs).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return new Date(pinnedAtMs).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
 }
 
 export function hostKeyTitle(r: HostKeyRequest): string {
-  const alias = revealHidden(r.alias);
-  return r.changed === null ? `Is this ${alias}?` : `${alias}'s host key changed`;
+  return r.changed === null
+    ? "Verify server identity"
+    : "Server identity changed";
 }
 
 export function hostKeyBody(r: HostKeyRequest): string {
-  const where = `${revealHidden(r.hostname)}:${r.port}`;
   if (r.changed === null) {
-    return `${where} presented the key ${revealHidden(r.algorithm)} ${revealHidden(r.fingerprint)}. SSHelter has not seen it before. Connect only if the fingerprint matches what the server's administrator gave you.`;
+    return "This server is new to SSHelter. Compare its fingerprint with a trusted source before connecting.";
   }
-  return `The key ${where} presented does not match the one SSHelter pinned on ${pinnedOn(r.changed.pinned_at_ms)}. Someone could be intercepting the connection. Refuse unless you know the server's key was reinstalled.`;
+  return "This key differs from the saved identity. The connection may be intercepted. Refuse unless you have verified why the server's key changed.";
+}
+
+export function hostKeyEndpoint(r: HostKeyRequest): string {
+  const host =
+    r.hostname.includes(":") && !r.hostname.startsWith("[")
+      ? `[${r.hostname}]`
+      : r.hostname;
+  return `${revealHidden(host)}:${r.port}`;
 }
 
 /** The two buttons: the one that refuses, then the one that trusts. */
-export function hostKeyButtons(r: HostKeyRequest): { refuse: string; trust: string } {
-  return r.changed === null ? { refuse: "Cancel", trust: "Trust this key" } : { refuse: "Refuse", trust: "Accept new key" };
+export function hostKeyButtons(r: HostKeyRequest): {
+  refuse: string;
+  trust: string;
+} {
+  return r.changed === null
+    ? { refuse: "Cancel", trust: "Trust this key" }
+    : { refuse: "Refuse", trust: "Accept new key" };
 }
 
 /** The answer for a button: trust carries the fingerprint the window showed, and the broker pins only a key with that fingerprint. */
-export function buildHostKeyAnswer(r: HostKeyRequest, trust: boolean): HostKeyAnswer {
+export function buildHostKeyAnswer(
+  r: HostKeyRequest,
+  trust: boolean,
+): HostKeyAnswer {
   return { trust, fingerprint: r.fingerprint };
 }
 
@@ -65,7 +92,10 @@ export function armAfterDelay(arm: () => void): () => void {
 }
 
 /** The console line for an answer the backend rejected: the request id and the error only. */
-export function answerRejectedMessage(requestId: string, error: unknown): string {
+export function answerRejectedMessage(
+  requestId: string,
+  error: unknown,
+): string {
   return `[hostkey] the answer to ${requestId} was rejected: ${errorMessage(error)}`;
 }
 
@@ -74,7 +104,9 @@ export function answerRejectedMessage(requestId: string, error: unknown): string
  * is registered first and the list fetched after it: a change emitted between a fetch's answer and the listener's registration would be
  * lost, and the window would go on showing a list that is no longer pending.
  */
-export function followPending(set: (list: HostKeyRequest[]) => void): () => void {
+export function followPending(
+  set: (list: HostKeyRequest[]) => void,
+): () => void {
   let unlisten: UnlistenFn | undefined;
   let live = true;
   const feed = pendingFeed((list) => {
@@ -101,7 +133,10 @@ export function followPending(set: (list: HostKeyRequest[]) => void): () => void
  * (After a rejected answer the window fetches the list once more, outside this guard: an event that arrives while that fetch is in
  * flight can be overwritten by the older list until the next change. Plan 1d's rework of the window routes it through the guard.)
  */
-export function pendingFeed(set: (list: HostKeyRequest[]) => void): { fromFetch: (list: HostKeyRequest[]) => void; fromEvent: (list: HostKeyRequest[]) => void } {
+export function pendingFeed(set: (list: HostKeyRequest[]) => void): {
+  fromFetch: (list: HostKeyRequest[]) => void;
+  fromEvent: (list: HostKeyRequest[]) => void;
+} {
   let sawEvent = false;
   return {
     fromFetch: (list) => {

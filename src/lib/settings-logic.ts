@@ -129,7 +129,7 @@ export function effectiveNewTab(
   return newTabConnect && terminalSupportsNewTab(terminalId, terminals);
 }
 
-/** Update channels (Settings → General → Updates). */
+/** Update channels (Settings → Updates). */
 export type UpdateChannel = "stable" | "beta";
 
 /**

@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/app/Disclosure";
 import { useState } from "react";
 import {
   ChevronRight,
@@ -172,6 +173,7 @@ function EffectiveConfigSection({ alias }: { alias: string }) {
           onClick={() => setOpen((o) => !o)}
           className="flex h-6 -mr-1 items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
           aria-expanded={open}
+          aria-controls="legacy-effective-config"
         >
           {open ? (
             <ChevronDown className="size-3.5" />
@@ -182,7 +184,7 @@ function EffectiveConfigSection({ alias }: { alias: string }) {
         </button>
       }
     >
-      {open && (
+      <Disclosure open={open} id="legacy-effective-config">
         <SettingsGroup>
           {isLoading ? (
             <p className="px-3 py-2.5 text-sm text-muted-foreground">
@@ -205,7 +207,7 @@ function EffectiveConfigSection({ alias }: { alias: string }) {
             </div>
           )}
         </SettingsGroup>
-      )}
+      </Disclosure>
     </Section>
   );
 }

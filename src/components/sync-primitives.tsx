@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useState } from "react";
 import { Copy } from "lucide-react";
 import { toast } from "sonner";
@@ -8,7 +9,7 @@ import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /** Text color for a status tone (Settings → Sync rows, space rows). */
 export const TONE_TEXT: Record<Tone, string> = {
@@ -113,21 +114,19 @@ export function SyncCodeDialog({
           <DialogTitle>{copy.title}</DialogTitle>
           <DialogDescription>{description ?? copy.description}</DialogDescription>
         </DialogHeader>
+        <TaskDialogBody>
         {note && <p className={cn("text-sm", TONE_TEXT.warning)}>{note}</p>}
         <WordGrid words={words ?? ""} />
-        {copy.confirm !== null && (
-          <>
-            <label className="flex items-center gap-2 text-sm">
+        {copy.confirm !== null && <label className="flex items-center gap-2 text-sm">
               <Checkbox checked={saved} onCheckedChange={(v) => setSaved(v === true)} />
               {copy.confirm}
-            </label>
-            <DialogFooter>
+            </label>}
+        </TaskDialogBody>
+        {copy.confirm !== null ? <DialogFooter>
               <Button type="button" disabled={!saved} onClick={finish}>
                 Continue
               </Button>
-            </DialogFooter>
-          </>
-        )}
+            </DialogFooter> : <DialogFooter><Button type="button" variant="outline" onClick={finish}>Close</Button></DialogFooter>}
       </DialogContent>
     </Dialog>
   );

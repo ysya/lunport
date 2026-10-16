@@ -248,7 +248,7 @@ impl Connector<'_> {
                     let Some(index) = target.hops.iter().position(|candidate| candidate.id == hop.id) else { return Err(failure_of(&error, &target)) };
                     let deadline = std::time::Instant::now().checked_add(prompt_wait(&target.hops[index]));
                     *typed += 1;
-                    match owner.ask(QuestionKind::Password, &question, false, deadline) {
+                    match owner.ask_at(hop, QuestionKind::Password, &question, false, deadline) {
                         Reply::Answer(password) => {
                             auth.set_typed(&hop.id, password);
                             // Amended R8: the hop is connected again as it is. A server that takes a key and then wants the password
@@ -279,7 +279,7 @@ impl Connector<'_> {
     /// it is now. The refusal is the safest answer: the question has no place for a missing date, and a date that is made up (1970) or
     /// belongs to another key is worse than none.
     fn pinned_summary(&self, target: &Target, hop: &HopRef, pinned: &HostKey) -> Result<PinnedSummary, ConnectFailure> {
-        match self.directory.pinned(&hop.id).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
+        match self.directory.pinned_for(hop).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
             Some(record) if record.key.fingerprint == pinned.fingerprint => Ok(PinnedSummary { fingerprint: pinned.fingerprint.clone(), pinned_at_ms: record.pinned_at_ms }),
             _ => {
                 let sentence = format!("SSHelter's record of {}'s host key changed while it was connecting. Connect again.", hop.alias);
@@ -307,7 +307,7 @@ impl Connector<'_> {
         // down. The policy takes that pin and the next round decides: the server shows the pinned key (nothing to ask) or another one (a
         // changed key, with the pin and its date). From then on the policy has a pin for the host, so this happens once for each host.
         if pinned.is_none() {
-            if let Some(record) = self.directory.pinned(&hop.id).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
+            if let Some(record) = self.directory.pinned_for(hop).map_err(|error| failure_at(Some(hop), target, kinds::HOST, error))? {
                 policy.pin(&hop.id, record.key.clone());
                 if let Some(refreshed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
                     refreshed.pinned = Some(record.key);
@@ -351,11 +351,9 @@ impl Connector<'_> {
             };
             return Err(failure_of(&refused, target));
         }
-        match &pinned {
-            None => self.directory.pin(&hop.id, key),
-            Some(pinned) => self.directory.replace_pin(&hop.id, pinned, key),
-        }
-        .map_err(|error| failure_at(Some(hop), target, kinds::HOST_KEY, error))?;
+        self.directory
+            .pin_confirmed(hop, pinned.as_ref(), key, cancel, &|| Ok(()))
+            .map_err(|error| failure_at(Some(hop), target, kinds::HOST_KEY, error))?;
         policy.pin(&hop.id, key.clone());
         if let Some(confirmed) = target.hops.iter_mut().find(|candidate| candidate.id == hop.id) {
             confirmed.pinned = Some(key.clone());

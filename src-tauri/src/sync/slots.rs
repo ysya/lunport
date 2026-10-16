@@ -18,7 +18,7 @@ use crate::sync::env::SyncEnv;
 use crate::sync::merge::{device_name, devices, put_account_record, set_device_slots};
 use crate::sync::planner::next_timestamp;
 use crate::sync::record::{record_key, HostPayload, Record, RecordKind};
-use crate::sync::runtime::{mutate, SyncRuntime};
+use crate::sync::runtime::{mutate, MaterialTransaction, SyncRuntime};
 use crate::sync::slot_files::{self, LinkKind};
 use crate::sync::slot_rules::{
     inspect_private_key, parse_public_key, public_path, resolve_identity_value, slot_file_name, slot_file_of_value, slot_value,
@@ -181,6 +181,28 @@ impl VaultKeys for EnvVault<'_, '_> {
         if retired.is_some() {
             forget_remembered_passphrase(self.env, slot_id);
         }
+        Ok(())
+    }
+}
+
+/// Vault access for helpers inside an explicit material transaction; does not reacquire vault.
+pub(crate) struct TransactionVault<'a, 'b> {
+    pub env: &'a SyncEnv<'b>,
+    pub transaction: &'a MaterialTransaction<'b>,
+}
+
+impl VaultKeys for TransactionVault<'_, '_> {
+    fn private_key(&self, slot_id: &str) -> Option<(Zeroizing<String>, EntryOrigin)> {
+        self.transaction.with_vault(self.env, |vault| vault.get(slot_id)).ok().flatten()
+            .map(|entry| (Zeroizing::new(entry.private_key.clone()), entry.origin))
+    }
+    fn holds(&self, slot_id: &str) -> Option<bool> {
+        crate::vault::store::stored_ids(&vault_path(&self.env.state_path)).ok().map(|ids| ids.contains(slot_id))
+    }
+    fn restore(&self, slot_id: &str, entry: &VaultEntry) -> Result<(), AppError> {
+        let now = self.env.now();
+        let retired = self.transaction.with_vault(self.env, |vault| vault.replace(self.env.keychain, slot_id, entry, now))?;
+        if retired.is_some() { forget_remembered_passphrase(self.env, slot_id); }
         Ok(())
     }
 }
@@ -465,6 +487,7 @@ pub fn local_key_fingerprint(path: &Path) -> Option<String> {
 /// 是別的插槽(或別人)放在這個位置的。插槽目錄要已經建好(`slot_files::ensure_keys_dir`)。建立插槽(Task 5)與挑選金鑰(Task 6)
 /// 也用它。
 pub fn write_linked_public(slot: &Path, source: &Path) -> Result<(), AppError> {
+    crate::fsutil::check_write(&public_path(slot))?;
     match local_key_public(source) {
         Some((public_key, _)) => slot_files::write_public(slot, &public_key),
         None => Ok(remove_if_present(&public_path(slot))?),
@@ -1405,13 +1428,19 @@ pub(crate) fn vault_text(env: &SyncEnv, slot_id: &str, fingerprint: &str) -> Res
     Ok(Some(entry.private_key.clone()))
 }
 
+fn transaction_vault_text(env: &SyncEnv, transaction: &MaterialTransaction<'_>, slot_id: &str, fingerprint: &str) -> Result<Option<String>, AppError> {
+    let Some(entry) = transaction.with_vault(env, |vault| vault.get(slot_id))? else { return Ok(None) };
+    if entry.fingerprint != fingerprint { return Err(AppError::Other(VAULT_MISMATCH_MESSAGE.to_string())); }
+    Ok(Some(entry.private_key.clone()))
+}
+
 /// 「Export private key…」的對象不是只在 SSHelter 的金鑰(它本來就是這台的檔案)。
 pub const NOT_IN_VAULT_MESSAGE: &str = "This key isn't in SSHelter on this computer.";
 
 /// 「Export private key…」要寫的內容(金鑰保管庫 spec §7.3.2):這個插槽在保管庫裡的私鑰(要是記錄裡那一把,`vault_text`),可選擇加上 passphrase
 /// (`vault::export::export_text`)。回傳(預設檔名 = 插槽名稱、內容)。不改任何東西。不需要帳戶(`local_snapshot`)。
 pub fn export_private(env: &SyncEnv, slot_id: &str, passphrase: Option<&str>) -> Result<(String, Zeroizing<String>), AppError> {
-    let (state, _home) = local_snapshot(env)?;
+    let (state, _home) = read_local_snapshot(env)?;
     let local = state.key_slots.get(slot_id).ok_or_else(not_found)?;
     let Some(SlotSource::Vault { fingerprint, .. }) = &local.source else {
         return Err(AppError::Other(NOT_IN_VAULT_MESSAGE.to_string()));
@@ -1444,8 +1473,10 @@ pub(crate) fn learned_now(s: &SyncStateV2, chain_id: &str) -> Option<String> {
 
 /// 快照:(狀態、帳戶金鑰、家目錄)。要帳戶的動作用(挑金鑰、改用同步的金鑰、改成同步或停止同步)。
 fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError> {
+    crate::sync::account::check_local_write_paths(env)?;
     let core = env.runtime.core.lock().unwrap();
     let state = core.state.clone().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+    crate::sync::account::format_writes_allowed(&state)?;
     let keys = core.account_keys.clone().ok_or_else(|| AppError::Other("join a sync account first".to_string()))?;
     drop(core);
     let home = env.ssh_dir.parent().map(Path::to_path_buf).ok_or_else(|| AppError::Other("cannot determine the home directory".to_string()))?;
@@ -1459,6 +1490,13 @@ fn snapshot(env: &SyncEnv) -> Result<(SyncStateV2, ChainKeys, PathBuf), AppError
 /// 提交被拒的話,跑引擎的那個行程還記著原本的連結,檔案與保管庫卻已經動過了,沒有帳戶可以對照著修回來(同步嘗試只補回有主機用到的連結,
 /// `maintain_local`)。(有帳戶金鑰的 `snapshot` 不必:這種行程從來推導不出帳戶金鑰,那些動作本來就先失敗。)
 pub(crate) fn local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
+    crate::sync::account::check_local_write_paths(env)?;
+    let (state, home) = read_local_snapshot(env)?;
+    crate::sync::account::format_writes_allowed(&state)?;
+    Ok((state, home))
+}
+
+fn read_local_snapshot(env: &SyncEnv) -> Result<(SyncStateV2, PathBuf), AppError> {
     let state = {
         let core = env.runtime.core.lock().unwrap();
         if let Some(reason) = &core.save_blocked {
@@ -1511,6 +1549,11 @@ fn occupant(local: Option<&LocalSlot>, file: &str, path: &Path) -> Occupant {
 }
 
 /// 把插槽路徑上的金鑰(連同 `.pub`)改名保留成 `<file>.previous-<內容雜湊的前 8 字元>`(計畫裁定 3;spec §1 私鑰不自動刪除)。
+fn plan_retire_key(path: &Path) -> Result<slot_files::RetirementPlan, AppError> {
+    let tag = slot_files::content_sha256(path).map(|h| h[..8].to_string()).unwrap_or_else(|| "old".to_string());
+    slot_files::plan_retirement(path, &tag)
+}
+
 fn retire_key(path: &Path) -> Result<(), AppError> {
     let tag = slot_files::content_sha256(path).map(|h| h[..8].to_string()).unwrap_or_else(|| "old".to_string());
     slot_files::retire(path, &tag).map(|_| ())
@@ -1522,6 +1565,7 @@ fn retire_key(path: &Path) -> Result<(), AppError> {
 /// 同意是在這個帳戶給的);停止同步清掉同意。更換同步碼進行中、或這台已被別台擋下時拒絕(`account_ready`,提交時再檢查一次;原因見
 /// `account_still_ready`):什麼都不讀、不寫。
 pub fn set_mode(env: &SyncEnv, slot_id: &str, mode: SlotMode) -> Result<(), AppError> {
+    let transaction = MaterialTransaction::begin(env)?;
     let (state, keys, home) = snapshot(env)?;
     account_ready(&state, Some(&keys))?;
     let account = state.account.as_ref().ok_or_else(not_found)?;
@@ -1529,7 +1573,7 @@ pub fn set_mode(env: &SyncEnv, slot_id: &str, mode: SlotMode) -> Result<(), AppE
     let not_here = || AppError::Other(not_here_message(&device_name(account, &payload.origin_device_id)));
     let text = match mode {
         SlotMode::Synced => Some(match state.key_slots.get(slot_id).and_then(|l| l.source.as_ref()) {
-            Some(SlotSource::Vault { fingerprint, .. }) => vault_text(env, slot_id, fingerprint)?.ok_or_else(not_here)?,
+            Some(SlotSource::Vault { fingerprint, .. }) => transaction_vault_text(env, &transaction, slot_id, fingerprint)?.ok_or_else(not_here)?,
             _ => readable_key(state.key_slots.get(slot_id), &home.join(SLOT_DIR)).ok_or_else(not_here)?,
         }),
         SlotMode::Own => None,
@@ -1589,6 +1633,7 @@ enum IntoVault {
 #[allow(clippy::too_many_arguments)]
 fn into_vault(
     env: &SyncEnv,
+    transaction: &MaterialTransaction<'_>,
     local: Option<&LocalSlot>,
     slot_id: &str,
     file: &str,
@@ -1598,6 +1643,8 @@ fn into_vault(
     origin: EntryOrigin,
 ) -> Result<IntoVault, AppError> {
     let slot_path = keys_dir.join(file);
+    crate::fsutil::check_write(&slot_path)?;
+    crate::fsutil::check_write(&public_path(&slot_path))?;
     if let Some(message) = agent_refusal(text, facts) {
         return Ok(IntoVault::AsFile(message.to_string()));
     }
@@ -1605,6 +1652,7 @@ fn into_vault(
     if here == Occupant::NotOurs {
         return Err(AppError::Other(in_the_way_message(&slot_path)));
     }
+    let retirement = if here == Occupant::OwnKey { Some(plan_retire_key(&slot_path)?) } else { None };
     let now = env.now();
     let entry = VaultEntry {
         private_key: text.to_string(),
@@ -1613,7 +1661,7 @@ fn into_vault(
         origin,
         added_at_ms: now,
     };
-    match with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, now, |v| v.replace(env.keychain, slot_id, &entry, now)) {
+    match transaction.with_vault(env, |v| v.replace(env.keychain, slot_id, &entry, now)) {
         Err(e) => return Ok(IntoVault::AsFile(AppError::from(e).to_string())),
         // 原本是另一把金鑰(改存成 retired 了):記在這台的 passphrase 是它的,不是新金鑰的。
         Ok(Some(_)) => forget_remembered_passphrase(env, slot_id),
@@ -1621,7 +1669,7 @@ fn into_vault(
     }
     match here {
         Occupant::OwnLink => slot_files::remove_slot(&slot_path)?,
-        Occupant::OwnKey => retire_key(&slot_path)?,
+        Occupant::OwnKey => { slot_files::retire_planned(retirement.as_ref().expect("planned own key"))?; }
         Occupant::Empty | Occupant::NotOurs => {}
     }
     slot_files::ensure_keys_dir(keys_dir)?;
@@ -1675,6 +1723,7 @@ fn is_in_vault(local: Option<&LocalSlot>) -> bool {
 /// `into_vault`);讀不懂(例如舊式 PEM)、agent 用不了、保管庫用不了 → 照 SP3 連結原檔(「File for now」)。成功之後一律更新 agent 的設定(`refresh_agent`):
 /// 原本在保管庫的插槽改成連結時,用它的主機當場不再走 agent,記在這台的 passphrase 也忘掉(`forget_remembered_passphrase`:金鑰離開了保管庫)。
 pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
+    let transaction = MaterialTransaction::begin(env)?;
     let source = PathBuf::from(path);
     if !source.is_absolute() || !crate::sync::slot_setup::is_private_key_file(&source) {
         return Err(AppError::Other(format!("{path} isn't a private key file")));
@@ -1689,13 +1738,14 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
     let file = slot_file_name(&payload.name, slot_id);
     let slot_path = keys_dir.join(&file);
     if let Some((text, facts)) = std::fs::read_to_string(&source).ok().and_then(|text| inspect_private_key(&text).ok().map(|facts| (text, facts))) {
-        match into_vault(env, state.key_slots.get(slot_id), slot_id, &file, &keys_dir, &text, &facts, EntryOrigin::Imported)? {
+        match into_vault(env, &transaction, state.key_slots.get(slot_id), slot_id, &file, &keys_dir, &text, &facts, EntryOrigin::Imported)? {
             IntoVault::Done(vault_source) => {
                 mutate(env, |s| {
                     let record = picked_record(s, slot_id, &file, &payload, &keys.chain_id, vault_source);
                     s.key_slots.insert(slot_id.to_string(), record);
                     Ok(())
                 })?;
+                drop(transaction);
                 refresh_agent(env);
                 env.events.wake();
                 return Ok(());
@@ -1736,6 +1786,7 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
     if is_in_vault(state.key_slots.get(slot_id)) {
         forget_remembered_passphrase(env, slot_id);
     }
+    drop(transaction);
     refresh_agent(env);
     env.events.wake();
     Ok(())
@@ -1748,6 +1799,7 @@ pub fn pick(env: &SyncEnv, slot_id: &str, path: &str) -> Result<(), AppError> {
 /// (`copy_from_another_account`)。先放進保管庫(這台原本那把改存成 retired,`into_vault`);放不進去照 SP3 落地成檔案,原本在保管庫的插槽因此離開保管庫時,
 /// 記在這台的 passphrase 也忘掉(`forget_remembered_passphrase`)。
 pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
+    let transaction = MaterialTransaction::begin(env)?;
     let (state, keys, home) = snapshot(env)?;
     let account = state.account.as_ref().ok_or_else(not_found)?;
     let payload = slot(account, slot_id).ok_or_else(not_found)?;
@@ -1763,7 +1815,7 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     let file = slot_file_name(&payload.name, slot_id);
     let slot_path = keys_dir.join(&file);
     let local = state.key_slots.get(slot_id);
-    let (source, left_the_vault) = match into_vault(env, local, slot_id, &file, &keys_dir, &secret, &facts, EntryOrigin::Synced)? {
+    let (source, left_the_vault) = match into_vault(env, &transaction, local, slot_id, &file, &keys_dir, &secret, &facts, EntryOrigin::Synced)? {
         IntoVault::Done(source) => (source, false),
         IntoVault::AsFile(reason) => {
             eprintln!("[sync] slot {slot_id} gets a file for now: {reason}");
@@ -1808,6 +1860,7 @@ pub fn use_synced(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
     if left_the_vault {
         forget_remembered_passphrase(env, slot_id);
     }
+    drop(transaction);
     refresh_agent(env);
     env.events.wake();
     Ok(())
@@ -1842,11 +1895,15 @@ fn holds_recorded_copy(copy: &SlotSource, path: &Path) -> bool {
 /// hard link 可能是那把金鑰僅存的名字,不拿掉,記成複製檔(這一列留著,之後可以當成副本刪掉)。沒有帳戶時沒有哪一輪會做這件事,不然這一列永遠刪不掉。
 /// 帳戶裡還在的插槽的連結照舊不刪(每一輪把沒有主機用到的收起來,`park_link`)。
 pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
+    let transaction = MaterialTransaction::begin(env)?;
     let (state, home) = local_snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
         return Err(contested_error());
     }
     let local = state.key_slots.get(slot_id).ok_or_else(not_found)?;
+    let path = home.join(SLOT_DIR).join(&local.file_name);
+    crate::fsutil::check_write(&path)?;
+    crate::fsutil::check_write(&public_path(&path))?;
     let in_use = config_slot_uses(env).ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
     if slot_hosts(&state).contains_key(&local.file_name) || in_use.contains_key(&local.file_name) {
         return Err(AppError::Other(IN_USE_MESSAGE.to_string()));
@@ -1856,7 +1913,7 @@ pub fn delete_copy(env: &SyncEnv, slot_id: &str) -> Result<(), AppError> {
         if slot_files::occupied(&path) {
             return Err(AppError::Other(in_the_way_message(&path)));
         }
-        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.remove(slot_id))?;
+        transaction.with_vault(env, |vault| vault.remove(slot_id))?;
         forget_remembered_passphrase(env, slot_id);
         let _ = std::fs::remove_file(public_path(&path));
         mutate(env, |s| {
@@ -1952,6 +2009,14 @@ pub(crate) fn agent_refusal(text: &str, facts: &KeyFacts) -> Option<&'static str
 ///
 /// 不需要帳戶(`local_snapshot`):只動這台的插槽、插槽檔與保管庫,離開帳戶之後「Move」照樣搬得動。
 pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), AppError> {
+    let transaction = MaterialTransaction::begin(env)?;
+    let result = set_delivery_in(env, &transaction, slot_id, vault);
+    drop(transaction);
+    if result.is_ok() { refresh_agent(env); env.events.wake(); }
+    result
+}
+
+pub(crate) fn set_delivery_in(env: &SyncEnv, transaction: &MaterialTransaction<'_>, slot_id: &str, vault: bool) -> Result<(), AppError> {
     let (state, home) = local_snapshot(env)?;
     if contested_and_not_held(&state, slot_id) {
         return Err(contested_error());
@@ -1959,7 +2024,8 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
     let local = state.key_slots.get(slot_id).cloned().ok_or_else(not_found)?;
     let keys_dir = home.join(SLOT_DIR);
     let slot_path = keys_dir.join(&local.file_name);
-    let vault_file = vault_path(&env.state_path);
+    crate::fsutil::check_write(&slot_path)?;
+    crate::fsutil::check_write(&public_path(&slot_path))?;
     let now = env.now();
     if vault {
         let origin = match &local.source {
@@ -1978,6 +2044,10 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
             Occupant::NotOurs => return Err(AppError::Other(in_the_way_message(&slot_path))),
             Occupant::OwnLink | Occupant::OwnKey | Occupant::Empty => {}
         }
+        let synced_copy = local.source.as_ref().filter(|source| matches!(source, SlotSource::SyncedCopy { .. }));
+        let retirement = if synced_copy.is_none() && occupant(Some(&local), &local.file_name, &slot_path) == Occupant::OwnKey {
+            Some(plan_retire_key(&slot_path)?)
+        } else { None };
         let entry = VaultEntry {
             private_key: text,
             public_key: facts.public_key.clone(),
@@ -1986,17 +2056,19 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
             added_at_ms: now,
         };
         // 保管庫裡原本是另一把金鑰(改存成 retired 了):記在這台的 passphrase 是它的,一起忘掉。
-        if with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.replace(env.keychain, slot_id, &entry, now))?.is_some() {
+        if transaction.with_vault(env, |v| v.replace(env.keychain, slot_id, &entry, now))?.is_some() {
             forget_remembered_passphrase(env, slot_id);
         }
-        let synced_copy = local.source.as_ref().filter(|source| matches!(source, SlotSource::SyncedCopy { .. }));
         match occupant(Some(&local), &local.file_name, &slot_path) {
             // 第一次檢查之後才出現在路徑上的檔案:不是這個插槽的,不碰(保管庫多了一筆沒有記錄用到的)。
             Occupant::NotOurs => return Err(AppError::Other(in_the_way_message(&slot_path))),
             // 自己的連結:現在就拿掉,金鑰還在原檔。
             Occupant::OwnLink => slot_files::remove_slot(&slot_path)?,
             // 複製檔或可能是僅存名字的 hard link:改名保留。
-            Occupant::OwnKey if synced_copy.is_none() => retire_key(&slot_path)?,
+            Occupant::OwnKey if synced_copy.is_none() => {
+                let plan = retirement.as_ref().ok_or_else(|| AppError::Other(in_the_way_message(&slot_path)))?;
+                slot_files::retire_planned(plan)?;
+            }
             // 同步來的副本:記錄提交之後才拿掉(下面)。
             Occupant::OwnKey | Occupant::Empty => {}
         }
@@ -2027,7 +2099,7 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
         if slot_files::occupied(&slot_path) {
             return Err(AppError::Other(in_the_way_message(&slot_path)));
         }
-        let entry = with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.get(slot_id))?
+        let entry = transaction.with_vault(env, |v| v.get(slot_id))?
             .ok_or_else(|| AppError::Other("This key is missing from SSHelter's vault.".to_string()))?;
         if entry.fingerprint != *recorded {
             return Err(AppError::Other(VAULT_MISMATCH_MESSAGE.to_string()));
@@ -2059,14 +2131,12 @@ pub fn set_delivery(env: &SyncEnv, slot_id: &str, vault: bool) -> Result<(), App
             return Err(e);
         }
         // 記錄已經是檔案了:保管庫那一筆拿不掉也只是一筆沒有記錄用到的,不影響這台用檔案連線。
-        if let Err(e) = with_vault(env.runtime, &vault_file, env.keychain, now, |v| v.remove(slot_id)) {
+        if let Err(e) = transaction.with_vault(env, |v| v.remove(slot_id)) {
             eprintln!("[sync] a key kept as a file again is still in SSHelter's vault: {e}");
         }
         // 金鑰已經不在保管庫裡了:記在這台的 passphrase 也忘掉(`forget_remembered_passphrase`)。
         forget_remembered_passphrase(env, slot_id);
     }
-    refresh_agent(env);
-    env.events.wake();
     Ok(())
 }
 
@@ -2137,7 +2207,7 @@ pub(crate) mod tests {
     /// cursor 照常前進。
     fn kept_sealed_by_an_older_build(account: &mut AccountState, items: &[Outgoing]) {
         for env in pulled(items, items.len() as u64).records {
-            account.sealed.insert(sealed_key(&env.kind, &env.id_hash), SealedRecord { envelope: env, dirty: false });
+            account.sealed.insert(sealed_key(&env.kind, &env.id_hash), SealedRecord { envelope: env, dirty: false, public_identity: None });
         }
     }
 
@@ -3694,20 +3764,37 @@ pub(crate) mod tests {
             let (a, _personal, _id, file) = a_parked_slot(hard_link);
             assert!(!slot_files::occupied(&public_path(&home(&a).join(SLOT_DIR).join(&file))), "hard_link={hard_link}");
         }
-        // 使用者把 symlink 換成自己的檔案:那是使用者的,旁邊的 `.pub` 也不碰。
-        let (_relay, _clock, a, _b, _words, personal) = pair();
-        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
-        let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
-        write_linked_public(&path, &source).unwrap();
-        use_slot(&a, &personal, &file);
-        settle(&a);
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, "mine").unwrap();
-        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
-        settle(&a);
-        assert!(a.state().key_slots[&id].parked);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
-        assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC));
+        // A replacement file and its .pub survive: symlinks are parked, while a hard link
+        // whose contents differ from the source is retained as a possibly irreplaceable copy.
+        for hard_link in [false, true] {
+            let (_relay, _clock, a, _b, _words, personal) = pair();
+            let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+            if hard_link {
+                make_it_a_hard_link(&a, &id, &file, "id_mac");
+            }
+            let link = match &a.state().key_slots[&id].source {
+                Some(SlotSource::Linked { link, .. }) => *link,
+                source => panic!("the fixture must be linked: {source:?}"),
+            };
+            let (path, source) = (home(&a).join(SLOT_DIR).join(&file), a.ssh_dir().join("id_mac"));
+            write_linked_public(&path, &source).unwrap();
+            use_slot(&a, &personal, &file);
+            settle(&a);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(&path, "mine").unwrap();
+            a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+            settle(&a);
+            let local = a.state().key_slots[&id].clone();
+            if link == LinkKind::Symlink {
+                assert!(local.parked);
+            } else {
+                assert!(!local.parked);
+                assert!(matches!(local.source, Some(SlotSource::Linked { link: LinkKind::Copy, .. })));
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine", "{link:?}");
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), test_keys::plain(), "the original key is untouched");
+            assert_eq!(std::fs::read_to_string(public_path(&path)).unwrap(), format!("{}\n", test_keys::PLAIN_PUBLIC), "{link:?}");
+        }
 
         // 連結已經不在了(使用者自己刪掉的),旁邊有個 `.pub`:沒有拿掉任何連結,那個 `.pub` 不能確定是這個插槽的,不碰。
         let (_relay, _clock, a, _b, _words, personal) = pair();
@@ -4005,21 +4092,39 @@ pub(crate) mod tests {
 
     #[test]
     fn an_unused_slot_does_not_keep_showing_an_error_from_when_it_was_needed() {
-        let (_relay, _clock, a, _b, _words, personal) = pair();
-        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
-        use_slot(&a, &personal, &file);
-        settle(&a);
-        let source = a.ssh_dir().join("id_mac");
-        std::fs::remove_file(&source).unwrap();
-        settle(&a);
-        assert!(matches!(view_of(&a)[0].status, SlotStatusView::Error { .. }), "{:?}", view_of(&a)[0].status);
+        for hard_link in [false, true] {
+            let (_relay, _clock, a, _b, _words, personal) = pair();
+            let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+            if hard_link {
+                make_it_a_hard_link(&a, &id, &file, "id_mac");
+            }
+            let link = match &a.state().key_slots[&id].source {
+                Some(SlotSource::Linked { link, .. }) => *link,
+                source => panic!("the fixture must be linked: {source:?}"),
+            };
+            use_slot(&a, &personal, &file);
+            settle(&a);
+            let source = a.ssh_dir().join("id_mac");
+            std::fs::remove_file(&source).unwrap();
+            settle(&a);
+            assert!(matches!(view_of(&a)[0].status, SlotStatusView::Error { .. }), "{:?}", view_of(&a)[0].status);
 
-        // 主機不再用到它:沒有什麼需要使用者處理的,記錄(連結、來源路徑)留著。
-        a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
-        settle(&a);
-        assert_eq!(a.state().key_slots[&id].last_error, None);
-        assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
-        assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Linked { path, .. }) if *path == source.to_string_lossy()));
+            // Clear the now irrelevant error, but retain a hard link that is the key's last name.
+            a.save_in_app(&a.space_path(&personal), "Host web\n  HostName 10.0.0.1\n");
+            settle(&a);
+            assert_eq!(a.state().key_slots[&id].last_error, None);
+            let slot_path = home(&a).join(SLOT_DIR).join(&file);
+            if link == LinkKind::Symlink {
+                assert_eq!(view_of(&a)[0].status, SlotStatusView::NotUsedHere);
+                assert!(!slot_files::occupied(&slot_path));
+                assert!(a.state().key_slots[&id].parked);
+            } else {
+                assert_eq!(view_of(&a)[0].status, SlotStatusView::NotInUse { file: slot_path.display().to_string() });
+                assert_eq!(std::fs::read_to_string(&slot_path).unwrap(), test_keys::plain(), "the last copy is preserved");
+                assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Linked { link: LinkKind::Copy, .. })));
+            }
+            assert!(matches!(&a.state().key_slots[&id].source, Some(SlotSource::Linked { path, .. }) if *path == source.to_string_lossy()));
+        }
     }
 
     #[test]
@@ -7659,6 +7764,369 @@ pub(crate) mod tests {
     /// 跑不了同步引擎的行程(`save_blocked`:例如第二個 SSHelter;沒有帳戶時它不再因為沒有帳戶金鑰而先失敗):「Move」與「Delete copy」在動任何東西之前就以
     /// `mutate` 的理由拒絕 —— 連結還在、保管庫沒變、記錄沒變。不然檔案與保管庫先動了、記錄卻寫不進去:跑引擎的那個行程還記著連結,沒有帳戶可以對照著修回來
     /// (沒有帳戶時同步嘗試只補回有主機用到的連結)。
+    #[test]
+    fn boundary_linked_public_key_cleanup_checks_its_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dev");
+        let slot = dir.path().join("production-key");
+        let public = public_path(&slot);
+        std::fs::write(&public, b"keep").unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(write_linked_public(&slot, &dir.path().join("missing-source")).is_err());
+        });
+        assert_eq!(std::fs::read(public).unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_delete_copy_checks_public_path_before_removing_vault_material() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let (id, file) = local_key_on(&a, &test_keys::plain(), "local");
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("production.pub");
+        std::fs::write(&target, b"keep").unwrap();
+        let public = public_path(&home(&a).join(SLOT_DIR).join(&file));
+        std::fs::remove_file(&public).unwrap();
+        std::os::unix::fs::symlink(&target, &public).unwrap();
+        let before = a.state();
+        let vault_before = std::fs::read(vault_path(&a.env().state_path)).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: home(&a) }, || {
+            assert!(delete_copy(&a.env(), &id).is_err());
+        });
+        assert_eq!(a.state(), before);
+        assert_eq!(std::fs::read(vault_path(&a.env().state_path)).unwrap(), vault_before);
+        assert!(std::fs::symlink_metadata(&public).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_set_delivery_checks_public_path_before_changing_the_vault() {
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "linked");
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("production.pub");
+        std::fs::write(&target, b"keep").unwrap();
+        let public = public_path(&home(&a).join(SLOT_DIR).join(&file));
+        if public.exists() { std::fs::remove_file(&public).unwrap(); }
+        std::os::unix::fs::symlink(&target, &public).unwrap();
+        let before = a.state();
+        assert!(vault_entry(&a, &id).is_none());
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: home(&a) }, || {
+            crate::config::include::with_test_home(&home(&a), || {
+                assert!(set_delivery(&a.env(), &id, true).is_err());
+            });
+        });
+        assert!(vault_entry(&a, &id).is_none(), "denial must happen before the vault receives material");
+        assert_eq!(a.state(), before);
+        assert!(std::fs::symlink_metadata(&public).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+    }
+
+    fn format_race_at_vault_wait(action: &str) {
+        use crate::sync::env::Keychain;
+        use crate::sync::record::{RecordKind, ACCOUNT_META_ID};
+        {
+            let (_relay, _clock, a, _b, _words, _personal) = pair();
+            let (id, file) = if matches!(action, "delete" | "keep-file") {
+                local_key_on(&a, &test_keys::plain(), "local")
+            } else {
+                create_slot_on(&a, SlotMode::Synced, &test_keys::plain(), "original")
+            };
+            let replacement = a.ssh_dir().join("replacement");
+            std::fs::write(&replacement, test_keys::ecdsa()).unwrap();
+            if action == "setup" {
+                let personal = a.state().spaces.keys().next().unwrap().clone();
+                a.save_in_app(&a.space_path(&personal), &format!("Host setup-race\n  IdentityFile {}\n", replacement.display()));
+                settle(&a);
+            }
+            let remembered = crate::agent::broker::passphrase_account(&id);
+            a.keychain.set(&remembered, "retained-test-passphrase").unwrap();
+            let before = a.state();
+            let keys = account_keys(&a);
+            let mut future = AccountState::new(&keys.chain_id);
+            crate::sync::merge::put_account_record(&mut future, RecordKind::Meta, ACCOUNT_META_ID,
+                serde_json::json!({"schema_version":3}), false, "future-device", u64::MAX - 1);
+            let pulled = PullResponse { records: account_outgoing(&future, &keys).unwrap().into_iter().map(|o| Envelope {
+                id_hash: o.item.id_hash, kind: o.item.kind, seq: 1, nonce: o.item.nonce, ciphertext: o.item.ciphertext, deleted: false,
+            }).collect(), latest_seq: 1 };
+            let path = home(&a).join(SLOT_DIR).join(&file);
+            let private = std::fs::read(&path).ok();
+            let public = std::fs::read(public_path(&path)).ok();
+            let vault = std::fs::read(vault_path(&a.env().state_path)).ok();
+            let names = std::fs::read_dir(path.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect::<std::collections::BTreeSet<_>>();
+            let generation = a.runtime.core.lock().unwrap().generation;
+            let locked = a.runtime.vault.lock().unwrap();
+            let (sent, received) = std::sync::mpsc::channel();
+            *a.runtime.material_wait_probe.lock().unwrap() = Some(std::sync::Arc::new(move || { sent.send(()).unwrap(); }));
+            std::thread::scope(|scope| {
+                let command = scope.spawn(|| {
+                    let env = a.env();
+                    match action {
+                        "delete" => delete_copy(&env, &id),
+                        "keep-file" => set_delivery(&env, &id, false),
+                        "move" => set_delivery(&env, &id, true),
+                        "pick" => pick(&env, &id, replacement.to_str().unwrap()),
+                        "use-synced" => use_synced(&env, &id),
+                        "import" => crate::sync::local_keys::import_file(&env, "replacement", replacement.to_str().unwrap(), true).map(|_| ()),
+                        "setup" => crate::sync::slot_setup::setup_keys(&env, true, vec![crate::sync::slot_setup::KeyChoice {
+                            path: replacement.to_string_lossy().into_owned(), decision: crate::sync::slot_setup::KeyDecision::Keep { name: "replacement".into() },
+                        }]).map(|_| ()),
+
+                        _ => unreachable!(),
+                    }
+                });
+                received.recv_timeout(std::time::Duration::from_secs(5)).expect("command reached its material wait point");
+                assert!(crate::sync::round::observe_account_format(&a.env(), generation, &before, &keys, &pulled).unwrap());
+                drop(locked);
+                assert_eq!(command.join().unwrap().unwrap_err().to_string(), crate::sync::account::READ_ONLY_MESSAGE, "{action}");
+            });
+            let mut expected = before;
+            expected.account.as_mut().unwrap().remote_schema_version = Some(3);
+            expected.last_error = Some(crate::sync::account::READ_ONLY_MESSAGE.to_string());
+            assert_eq!(a.state(), expected, "{action}: only gate/error may change");
+            assert_eq!(std::fs::read(&path).ok(), private, "{action}: private material");
+            assert_eq!(std::fs::read(public_path(&path)).ok(), public, "{action}: public material");
+            assert_eq!(std::fs::read(vault_path(&a.env().state_path)).ok(), vault, "{action}: vault bytes");
+            assert_eq!(a.keychain.entry(&remembered).as_deref(), Some("retained-test-passphrase"), "{action}: remembered passphrase");
+            assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect::<std::collections::BTreeSet<_>>(), names, "{action}: no retirement files");
+            assert_eq!(a.runtime.core.lock().unwrap().generation, generation);
+        }
+    }
+
+    #[test]
+    fn newer_format_vault_wait_delete() { format_race_at_vault_wait("delete"); }
+
+    #[test]
+    fn newer_format_vault_wait_keep_file() { format_race_at_vault_wait("keep-file"); }
+
+    #[test]
+    fn newer_format_vault_wait_move() { format_race_at_vault_wait("move"); }
+
+    #[test]
+    fn newer_format_vault_wait_pick() { format_race_at_vault_wait("pick"); }
+
+    #[test]
+    fn newer_format_vault_wait_use_synced() { format_race_at_vault_wait("use-synced"); }
+
+    #[test]
+    fn newer_format_vault_wait_import() { format_race_at_vault_wait("import"); }
+
+    #[test]
+    fn newer_format_vault_wait_setup() { format_race_at_vault_wait("setup"); }
+
+    #[cfg(unix)]
+    fn retirement_boundary_before_materials(action: &str) {
+        use crate::sync::env::Keychain;
+        let (_relay, _clock, a, _b, _words, _personal) = pair();
+        let (id, file) = create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "original");
+        let path = home(&a).join(SLOT_DIR).join(&file);
+        std::fs::remove_file(&path).unwrap();
+        slot_files::write_private(&path, test_keys::plain().as_bytes()).unwrap();
+        slot_files::write_public(&path, test_keys::PLAIN_PUBLIC).unwrap();
+        mutate(&a.env(), |state| {
+            if let Some(SlotSource::Linked { link, .. }) = state.key_slots.get_mut(&id).unwrap().source.as_mut() { *link = LinkKind::Copy; }
+            Ok(())
+        }).unwrap();
+        let replacement = a.ssh_dir().join("replacement");
+        std::fs::write(&replacement, test_keys::ecdsa()).unwrap();
+        let old = inspect_private_key(&test_keys::ecdsa()).unwrap();
+        let env = a.env();
+        with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, 1, |vault| vault.put(env.keychain, &id, &VaultEntry {
+            private_key: test_keys::ecdsa(), public_key: old.public_key.clone(), fingerprint: old.fingerprint.clone(), origin: EntryOrigin::Imported, added_at_ms: 1,
+        })).unwrap();
+        let remembered = crate::agent::broker::passphrase_account(&id);
+        a.keychain.set(&remembered, "retained-test-passphrase").unwrap();
+        let tag = slot_files::content_sha256(&path).unwrap()[..8].to_string();
+        let plan = slot_files::plan_retirement(&path, &tag).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("production.pub");
+        std::fs::write(&sentinel, b"untouched").unwrap();
+        let kept_public = public_path(plan.kept_path());
+        std::os::unix::fs::symlink(&sentinel, &kept_public).unwrap();
+        let before = a.state(); let vault = std::fs::read(vault_path(&env.state_path)).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: home(&a) }, || {
+            crate::config::include::with_test_home(&home(&a), || {
+                let result = if action == "pick" { pick(&env, &id, replacement.to_str().unwrap()) } else { set_delivery(&env, &id, true) };
+                assert!(matches!(&result, Err(AppError::ForbiddenPath(reason)) if reason.contains(&kept_public.to_string_lossy().to_string())), "{action} refuses the planned retirement destination: {result:?}");
+            });
+        });
+        assert_eq!(a.state(), before);
+        assert!(std::fs::read(vault_path(&env.state_path)).unwrap() == vault, "{action}: vault replacement must not begin");
+        assert_eq!(a.keychain.entry(&remembered).as_deref(), Some("retained-test-passphrase"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), test_keys::plain());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"untouched");
+        assert!(!plan.kept_path().exists());
+        assert!(std::fs::symlink_metadata(kept_public).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_pick_retirement_plan_precedes_vault_replacement() { retirement_boundary_before_materials("pick"); }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_delivery_retirement_plan_precedes_vault_replacement() { retirement_boundary_before_materials("delivery"); }
+
+    #[test]
+    fn newer_format_accounts_refuse_local_slot_writes_but_allow_exports() {
+        let (_relay, _clock, a, _b, _words, personal) = pair();
+        let (linked, linked_file) =
+            create_slot_on(&a, SlotMode::Own, &test_keys::plain(), "id_mac");
+        let (vaulted, _) = local_key_on(&a, &test_keys::ecdsa(), "local");
+        use_slot(&a, &personal, &linked_file);
+        settle(&a);
+        a.runtime
+            .core
+            .lock()
+            .unwrap()
+            .state
+            .as_mut()
+            .unwrap()
+            .account
+            .as_mut()
+            .unwrap()
+            .remote_schema_version = Some(3);
+        let before = a.state();
+        let main = a.main_config();
+        let path = home(&a).join(SLOT_DIR).join(&linked_file);
+        let vault_before = std::fs::read(vault_path(&a.env().state_path)).unwrap();
+        let reason = crate::sync::account::READ_ONLY_MESSAGE;
+        assert_eq!(
+            move_all_into_vault(&a.env()).unwrap_err().to_string(),
+            reason
+        );
+        assert_eq!(
+            set_delivery(&a.env(), &linked, true)
+                .unwrap_err()
+                .to_string(),
+            reason
+        );
+        assert_eq!(
+            set_delivery(&a.env(), &vaulted, false)
+                .unwrap_err()
+                .to_string(),
+            reason
+        );
+        assert_eq!(
+            delete_copy(&a.env(), &vaulted).unwrap_err().to_string(),
+            reason
+        );
+        let source = home(&a).join("replacement");
+        std::fs::write(&source, test_keys::plain()).unwrap();
+        assert_eq!(
+            pick(&a.env(), &linked, source.to_str().unwrap())
+                .unwrap_err()
+                .to_string(),
+            reason
+        );
+        assert_eq!(
+            use_synced(&a.env(), &linked).unwrap_err().to_string(),
+            reason
+        );
+        assert_eq!(a.state(), before);
+        assert_eq!(a.main_config(), main);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), test_keys::plain());
+        assert_eq!(
+            std::fs::read(vault_path(&a.env().state_path)).unwrap(),
+            vault_before
+        );
+        assert_eq!(
+            export_private(&a.env(), &vaulted, None).unwrap().1.as_str(),
+            test_keys::ecdsa()
+        );
+        assert_eq!(a.state(), before);
+    }
+
+    #[test]
+    fn a_future_local_state_blocks_background_files_and_pending_keychain_swap() {
+        let (relay, _clock, a, _b, words, personal) = pair();
+        let (_id, file) = local_key_on(&a, &test_keys::plain(), "local");
+        use_slot(&a, &personal, &file);
+        let public = public_path(&home(&a).join(SLOT_DIR).join(&file));
+        std::fs::remove_file(&public).unwrap();
+        let agent_config = crate::agent::wiring::agent_config_path(&home(&a));
+        if agent_config.exists() { std::fs::remove_file(&agent_config).unwrap(); }
+        let reason = "this sync state uses a newer local format; update SSHelter";
+        a.runtime.core.lock().unwrap().save_blocked = Some(reason.to_string());
+        a.runtime.core.lock().unwrap().swap_pending = true;
+        a.env().keychain.set(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT, &words).unwrap();
+        let before = a.state();
+        relay.clear_calls();
+        assert_eq!(crate::sync::round::sync_once(&a.env()).unwrap_err().to_string(), reason);
+        assert_eq!(a.state(), before);
+        assert!(!public.exists() && !agent_config.exists());
+        assert!(relay.calls().is_empty());
+        assert_eq!(crate::agent::wiring::refresh_env(&a.env()).unwrap_err().to_string(), reason);
+        crate::sync::rotation::retry_pending_swap(&a.env());
+        assert_eq!(a.keychain.entry(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT).as_deref(), Some(words.as_str()));
+        assert!(a.runtime.core.lock().unwrap().swap_pending);
+    }
+
+    #[test]
+    fn newer_format_accounts_skip_public_key_repair_and_agent_wiring() {
+        let (relay, _clock, a, _b, words, personal) = pair();
+        let (local, file) = local_key_on(&a, &test_keys::plain(), "local");
+        use_slot(&a, &personal, &file);
+        let (_linked, linked_file) = create_slot_on(&a, SlotMode::Own, &test_keys::ecdsa(), "linked");
+        let linked_path = home(&a).join(SLOT_DIR).join(&linked_file);
+        std::fs::remove_file(&linked_path).unwrap();
+        a.save_in_app(&a.space_path(&personal), &format!("Host web\n  IdentityFile ~/.ssh/sshelter/keys/{file}\nHost linked\n  IdentityFile ~/.ssh/sshelter/keys/{linked_file}\n"));
+        let pub_path = public_path(&home(&a).join(SLOT_DIR).join(&file));
+        std::fs::remove_file(&pub_path).unwrap();
+        let main = a.main_config();
+        let agent_config = crate::agent::wiring::agent_config_path(&home(&a));
+        if agent_config.exists() {
+            std::fs::remove_file(&agent_config).unwrap();
+        }
+        a.runtime
+            .core
+            .lock()
+            .unwrap()
+            .state
+            .as_mut()
+            .unwrap()
+            .account
+            .as_mut()
+            .unwrap()
+            .remote_schema_version = Some(3);
+        a.runtime.core.lock().unwrap().swap_pending = true;
+        a.env()
+            .keychain
+            .set(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT, &words)
+            .unwrap();
+        let mut before = a.state();
+        crate::sync::round::sync_once(&a.env()).unwrap();
+        assert!(
+            !pub_path.exists(),
+            "tail maintenance must not repair a missing public key"
+        );
+        assert!(!linked_path.exists(), "the blocked round cannot repair a missing linked slot");
+        assert!(
+            !agent_config.exists(),
+            "tail wiring must not create an agent configuration"
+        );
+        assert_eq!(a.main_config(), main);
+        assert_eq!(
+            a.keychain
+                .entry(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT)
+                .as_deref(),
+            Some(words.as_str())
+        );
+        assert!(a.runtime.core.lock().unwrap().swap_pending);
+        before.last_error = Some(crate::sync::account::READ_ONLY_MESSAGE.to_string());
+        assert_eq!(a.state(), before);
+        assert!(a.state().key_slots.contains_key(&local));
+        assert_eq!(
+            crate::agent::wiring::refresh_env(&a.env())
+                .unwrap_err()
+                .to_string(),
+            crate::sync::account::READ_ONLY_MESSAGE
+        );
+        assert!(!agent_config.exists());
+        assert!(relay.exists(&a.state().account.unwrap().chain_id));
+    }
+
     #[test]
     fn a_process_that_cannot_save_the_state_refuses_move_and_delete_copy_before_touching_anything() {
         let (_relay, _clock, a, _b, _words, personal) = pair();

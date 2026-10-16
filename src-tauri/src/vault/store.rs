@@ -220,7 +220,11 @@ fn set_aside(path: &Path, kind: &str, now_ms: u64, reason: String) -> VaultError
         n += 1;
         name = format!("vault.{kind}-{now_ms}-{n}.json");
     }
-    match std::fs::rename(path, path.with_file_name(&name)) {
+    let destination = path.with_file_name(&name);
+    if let Err(error) = fsutil::check_write(path).and_then(|()| fsutil::check_write(&destination)) {
+        return VaultError::Other(error);
+    }
+    match std::fs::rename(path, destination) {
         Ok(()) => VaultError::Unreadable { kept_as: Some(name), reason },
         Err(_) => VaultError::Unreadable { kept_as: None, reason },
     }
@@ -286,6 +290,7 @@ impl Vault {
 
     /// 放進(或取代)一筆,立刻存檔。第一次存東西時才產生金鑰並寫進 keychain。取代的時候舊的那一筆就沒了:插槽的金鑰換人一律用 `replace`。
     pub fn put(&mut self, keychain: &dyn Keychain, slot_id: &str, entry: &VaultEntry) -> Result<(), VaultError> {
+        fsutil::check_write(&self.path)?;
         self.ensure_key(keychain)?;
         self.seal_into(slot_id, entry)?;
         self.save()
@@ -294,6 +299,7 @@ impl Vault {
     /// 放進這個插槽的金鑰;原本是另一把(指紋不同)就把它改存成 retired 項目(`RETIRED_PREFIX`),不丟掉(spec §4.3:私鑰不自動刪除)。
     /// 兩件事一起存檔,回傳 retired 項目的 id。原本那一筆解不開就什麼都不改、回錯誤:不能換掉一把讀不出來的金鑰。
     pub fn replace(&mut self, keychain: &dyn Keychain, slot_id: &str, entry: &VaultEntry, now_ms: u64) -> Result<Option<String>, VaultError> {
+        fsutil::check_write(&self.path)?;
         self.ensure_key(keychain)?;
         let retired = match self.get(slot_id)? {
             Some(old) if old.fingerprint != entry.fingerprint => {
@@ -333,6 +339,7 @@ impl Vault {
 
     /// 拿掉一筆並存檔;回傳原本有沒有。
     pub fn remove(&mut self, slot_id: &str) -> Result<bool, VaultError> {
+        fsutil::check_write(&self.path)?;
         if self.file.entries.remove(slot_id).is_none() {
             return Ok(false);
         }
@@ -347,6 +354,7 @@ impl Vault {
     /// 改這台的 agent 設定並存檔。目前只有測試用到,所以只在測試編譯;plan 2 的設定畫面要用的時候,把 `#[cfg(test)]` 拿掉。
     #[cfg(test)]
     pub fn set_settings(&mut self, settings: AgentSettings) -> Result<(), VaultError> {
+        fsutil::check_write(&self.path)?;
         self.file.settings = settings;
         self.save()
     }
@@ -376,6 +384,7 @@ impl Vault {
     }
 
     fn save(&self) -> Result<(), VaultError> {
+        fsutil::check_write(&self.path)?;
         let bytes = serde_json::to_vec_pretty(&self.file).map_err(|e| VaultError::Other(AppError::Other(e.to_string())))?;
         let dir = self.path.parent();
         if let Some(dir) = dir {
@@ -392,6 +401,94 @@ impl Vault {
         }
         Ok(())
     }
+}
+
+/// Maximum snapshot input for read-only preview, migration and connection (64 MiB).
+pub const MAX_READ_ONLY_VAULT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// This view intentionally exposes no filesystem or credential-store mutators.
+#[derive(Debug)]
+pub struct ReadOnlyVault {
+    vault: Vault,
+}
+
+impl ReadOnlyVault {
+    pub fn ids(&self) -> Vec<String> { self.vault.ids() }
+    pub fn get(&self, slot_id: &str) -> Result<Option<VaultEntry>, VaultError> { self.vault.get(slot_id) }
+    pub fn settings(&self) -> &AgentSettings { self.vault.settings() }
+    pub fn key_account(&self) -> &str { self.vault.file.key_account() }
+}
+
+/// Snapshot a vault without archiving, creating files, or modifying credentials.
+/// Missing files are empty views; all source and credential failures use static safe diagnostics.
+pub fn read_vault(path: &Path, keychain: &dyn Keychain) -> Result<ReadOnlyVault, VaultError> {
+    let empty = || ReadOnlyVault { vault: Vault { path: path.to_path_buf(), key: None, file: VaultFile::default() } };
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(empty()),
+        Err(_) => return Err(readonly_vault_error("the vault source could not be read")),
+    };
+    check_readonly_vault_metadata(&metadata)?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(empty()),
+        Err(_) => return Err(readonly_vault_error("the vault source could not be read")),
+    };
+    // Check the opened object too; replacement or growth after the first metadata read is bounded.
+    check_readonly_vault_metadata(&file.metadata().map_err(|_| readonly_vault_error("the vault source could not be read"))?)?;
+    let bytes = read_capped_vault_bytes(file, MAX_READ_ONLY_VAULT_BYTES)?;
+    let version = file_version(&bytes).map_err(|_| readonly_vault_error("the vault format is not readable"))?;
+    if version > VAULT_VERSION {
+        return Err(VaultError::Newer { version });
+    }
+    if version != LEGACY_VERSION && version != VAULT_VERSION {
+        return Err(readonly_vault_error("the vault format is not supported"));
+    }
+    let file: VaultFile = serde_json::from_slice(&bytes).map_err(|_| readonly_vault_error("the vault format is not readable"))?;
+    let account = file.key_account();
+    let known_account = account == VAULT_KEY_ACCOUNT
+        || account.strip_prefix(VAULT_KEY_ACCOUNT_PREFIX).is_some_and(|suffix| {
+            suffix.len() == 16 && suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+    if !known_account {
+        return Err(readonly_vault_error("the vault key account is not recognized"));
+    }
+    let key = if file.entries.is_empty() {
+        None
+    } else {
+        Some(read_key(keychain, account)
+            .map_err(|_| readonly_vault_error("the vault key could not be read from the keychain"))?
+            .ok_or(VaultError::KeyMissing)?)
+    };
+    Ok(ReadOnlyVault { vault: Vault { path: path.to_path_buf(), key, file } })
+}
+
+fn readonly_vault_error(reason: &'static str) -> VaultError {
+    VaultError::Unreadable { kept_as: None, reason: reason.into() }
+}
+
+fn readonly_vault_limit_error() -> VaultError {
+    readonly_vault_error("the vault exceeds the read-only input size limit (64 MiB)")
+}
+
+fn check_readonly_vault_metadata(metadata: &std::fs::Metadata) -> Result<(), VaultError> {
+    if !metadata.is_file() {
+        return Err(readonly_vault_error("the vault source is not a regular file"));
+    }
+    if metadata.len() > MAX_READ_ONLY_VAULT_BYTES {
+        return Err(readonly_vault_limit_error());
+    }
+    Ok(())
+}
+
+fn read_capped_vault_bytes(reader: impl std::io::Read, limit: u64) -> Result<Vec<u8>, VaultError> {
+    let mut bytes = Vec::new();
+    let mut capped = std::io::Read::take(reader, limit.saturating_add(1));
+    std::io::Read::read_to_end(&mut capped, &mut bytes).map_err(|_| readonly_vault_error("the vault source could not be read"))?;
+    if bytes.len() as u64 > limit {
+        return Err(readonly_vault_limit_error());
+    }
+    Ok(bytes)
 }
 
 /// 持有 `runtime.vault` 開啟保管庫並執行 `f`:同一個行程裡改動保管庫的地方都經過這裡,寫入不會互相蓋掉。鎖只護著 `()`,沒有狀態會因為先前某次 panic 而不一致,
@@ -428,6 +525,250 @@ pub fn stored_ids(path: &Path) -> Result<BTreeSet<String>, VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Default)]
+    struct ReadOnlyKeychainSpy {
+        inner: MemKeychain,
+        reads: std::sync::atomic::AtomicUsize,
+        writes: std::sync::atomic::AtomicUsize,
+        deletes: std::sync::atomic::AtomicUsize,
+        fail_reads: std::sync::atomic::AtomicBool,
+    }
+
+    impl Keychain for ReadOnlyKeychainSpy {
+        fn get(&self, account: &str) -> Result<Option<String>, AppError> {
+            use std::sync::atomic::Ordering;
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.fail_reads.load(Ordering::SeqCst) {
+                return Err(AppError::Other("credential failure CREDENTIAL_SENTINEL".into()));
+            }
+            self.inner.get(account)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+            self.writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(AppError::Other("unexpected read-only credential write".into()))
+        }
+        fn delete(&self, _: &str) -> Result<(), AppError> {
+            self.deletes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(AppError::Other("unexpected read-only credential delete".into()))
+        }
+    }
+
+    impl ReadOnlyKeychainSpy {
+        fn assert_reads(&self, count: usize) {
+            use std::sync::atomic::Ordering;
+            assert_eq!(self.reads.load(Ordering::SeqCst), count);
+            assert_eq!(self.writes.load(Ordering::SeqCst), 0);
+            assert_eq!(self.deletes.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    fn readonly_vault_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn readonly_vault_missing_and_empty_views_create_nothing_and_skip_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing/vault.json");
+        let spy = ReadOnlyKeychainSpy::default();
+        let view = read_vault(&path, &spy).unwrap();
+        assert!(view.ids().is_empty());
+        assert!(view.get("missing").unwrap().is_none());
+        assert_eq!(view.settings(), &AgentSettings::default());
+        assert_eq!(view.key_account(), VAULT_KEY_ACCOUNT);
+        spy.assert_reads(0);
+        assert!(readonly_vault_names(dir.path()).is_empty());
+
+        let path = dir.path().join("vault.json");
+        let original = br#"{"version":1,"entries":{}}"#;
+        std::fs::write(&path, original).unwrap();
+        assert!(read_vault(&path, &spy).unwrap().ids().is_empty());
+        spy.assert_reads(0);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+    }
+
+    #[test]
+    fn readonly_vault_reads_keys_metadata_and_settings_without_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let keychain = MemKeychain::default();
+        let mut writable = Vault::open(&path, &keychain, 1).unwrap();
+        writable.put(&keychain, "slot", &entry("READONLY_PRIVATE_FIXTURE")).unwrap();
+        writable.set_settings(AgentSettings { remember_minutes: 9, always_ask: true }).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let account = account_of(&path);
+        let spy = ReadOnlyKeychainSpy { inner: keychain, ..Default::default() };
+        let view = read_vault(&path, &spy).unwrap();
+        assert_eq!(view.ids(), ["slot"]);
+        assert_eq!(view.get("slot").unwrap().unwrap().private_key, "READONLY_PRIVATE_FIXTURE");
+        assert_eq!(view.settings(), &AgentSettings { remember_minutes: 9, always_ask: true });
+        assert_eq!(view.key_account(), account);
+        assert!(!format!("{view:?}").contains("READONLY_PRIVATE_FIXTURE"));
+        spy.assert_reads(1);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+    }
+
+    #[test]
+    fn readonly_vault_corruption_preserves_original_bytes_names_and_safe_errors() {
+        for original in ["{ not json", "{\"version\":\"PRIVATE_SENTINEL\"}", "{\"version\":2,\"entries\":[]}"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("vault.json");
+            std::fs::write(&path, original).unwrap();
+            let spy = ReadOnlyKeychainSpy::default();
+            let error = read_vault(&path, &spy).unwrap_err();
+            assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
+            spy.assert_reads(0);
+            assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+            assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+        }
+    }
+
+    #[test]
+    fn readonly_vault_keyless_source_is_never_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let original = br#"{"version":2,"key_account":"vault:key:0123456789abcdef","entries":{"slot":{"nonce":"x","ciphertext":"x"}}}"#;
+        std::fs::write(&path, original).unwrap();
+        let spy = ReadOnlyKeychainSpy::default();
+        assert!(matches!(read_vault(&path, &spy), Err(VaultError::KeyMissing)));
+        spy.assert_reads(1);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+    }
+
+    #[test]
+    fn readonly_vault_future_header_is_probed_before_body_or_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let original = br#"{"version":3,"key_account":"sync:mnemonic","entries":[]}"#;
+        std::fs::write(&path, original).unwrap();
+        let spy = ReadOnlyKeychainSpy::default();
+        assert!(matches!(read_vault(&path, &spy), Err(VaultError::Newer { version: 3 })));
+        spy.assert_reads(0);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+    }
+
+    #[test]
+    fn readonly_vault_unknown_and_untrusted_headers_never_query_credentials() {
+        let cases = [(0, VAULT_KEY_ACCOUNT), (2, "sync:mnemonic"), (2, "host:private"),
+                     (2, "vault:key:0123456789abcdeF"), (2, "vault:key:0123456789abcdef0"), (2, "vault:key:")];
+        for (version, account) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("vault.json");
+            let original = serde_json::json!({"version":version,"key_account":account,"entries":{}}).to_string();
+            std::fs::write(&path, &original).unwrap();
+            let spy = ReadOnlyKeychainSpy::default();
+            assert!(read_vault(&path, &spy).is_err(), "header {version}/{account}");
+            spy.assert_reads(0);
+            assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+            assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+        }
+    }
+
+    #[test]
+    fn readonly_vault_credential_errors_preserve_source_and_hide_credential_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let original = br#"{"version":1,"entries":{"slot":{"nonce":"x","ciphertext":"x"}}}"#;
+        std::fs::write(&path, original).unwrap();
+        let spy = ReadOnlyKeychainSpy::default();
+        spy.fail_reads.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = read_vault(&path, &spy).unwrap_err();
+        assert!(!error.to_string().contains("CREDENTIAL_SENTINEL"));
+        spy.assert_reads(1);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+    }
+
+    #[test]
+    fn readonly_vault_decrypted_type_errors_hide_plaintext_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let spy = ReadOnlyKeychainSpy::default();
+        spy.inner.set(VAULT_KEY_ACCOUNT, &B64.encode([7u8; 32])).unwrap();
+        let plaintext = br#"{"private_key":"private fixture","public_key":"ssh-ed25519 AAAA","fingerprint":"SHA256:x","origin":"PRIVATE_SENTINEL","added_at_ms":1}"#;
+        let (nonce, ciphertext) = seal_raw(&[7u8; 32], &aad("slot"), plaintext).unwrap();
+        let file = VaultFile { entries: BTreeMap::from([("slot".into(), SealedEntry { nonce, ciphertext })]), ..Default::default() };
+        let original = serde_json::to_vec(&file).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let view = read_vault(&path, &spy).unwrap();
+        assert!(!view.get("slot").unwrap_err().to_string().contains("PRIVATE_SENTINEL"));
+        spy.assert_reads(1);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+    }
+
+    #[test]
+    fn readonly_vault_read_cap_stops_growth_after_metadata_validation() {
+        struct GrowingReader<'a> { remaining: usize, delivered: &'a std::cell::Cell<usize> }
+        impl std::io::Read for GrowingReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.remaining.min(buffer.len());
+                buffer[..count].fill(b'x');
+                self.remaining -= count;
+                self.delivered.set(self.delivered.get() + count);
+                Ok(count)
+            }
+        }
+        let delivered = std::cell::Cell::new(0);
+        let source = GrowingReader { remaining: 16, delivered: &delivered };
+        assert!(read_capped_vault_bytes(source, 8).is_err());
+        assert_eq!(delivered.get(), 9, "read only limit plus one byte");
+    }
+
+    #[test]
+    fn readonly_vault_metadata_cap_preserves_an_oversized_source_before_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        std::fs::File::create(&path).unwrap().set_len(MAX_READ_ONLY_VAULT_BYTES + 1).unwrap();
+        let spy = ReadOnlyKeychainSpy::default();
+        let error = read_vault(&path, &spy).unwrap_err();
+        assert!(error.to_string().contains("limit"));
+        spy.assert_reads(0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_READ_ONLY_VAULT_BYTES + 1);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+    }
+
+
+    #[test]
+    fn boundary_unreadable_external_vault_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("vault.json");
+        std::fs::write(&path, b"unreadable vault").unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(Vault::open(&path, &MemKeychain::default(), 1).is_err());
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), b"unreadable vault");
+        assert!(!temp.path().join("vault.unreadable-1.json").exists());
+    }
+
+    #[test]
+    fn boundary_put_refuses_before_keychain_and_vault_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Default)]
+        struct CountingKeychain(AtomicUsize);
+        impl Keychain for CountingKeychain {
+            fn get(&self, _: &str) -> Result<Option<String>, AppError> { Ok(None) }
+            fn set(&self, _: &str, _: &str) -> Result<(), AppError> { self.0.fetch_add(1, Ordering::SeqCst); Ok(()) }
+            fn delete(&self, _: &str) -> Result<(), AppError> { Ok(()) }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("vault.json");
+        let keychain = CountingKeychain::default();
+        let mut vault = Vault::open(&path, &keychain, 1).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(vault.put(&keychain, "slot", &entry("private")).is_err());
+        });
+        assert_eq!(keychain.0.load(Ordering::SeqCst), 0);
+        assert!(vault.ids().is_empty());
+        assert!(!path.exists());
+    }
+
     use crate::sync::runtime::SyncRuntime;
     use crate::sync::slot_rules::test_keys;
     use crate::sync::testkit::MemKeychain;

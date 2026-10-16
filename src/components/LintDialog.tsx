@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useMemo, useState } from "react";
 import {
   ShieldCheck,
@@ -17,7 +18,8 @@ import { basename, cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogContent,
+  DialogClose,
+  DialogFooter,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -46,7 +48,7 @@ function severityIcon(sev: string) {
 /** Toolbar lint indicator + a dialog listing issues grouped by severity. */
 export function LintDialog() {
   const [open, setOpen] = useState(false);
-  const { data } = useLint();
+  const { data, isLoading, isError, refetch } = useLint();
   const lintRules = useSettingsStore((s) => s.lintRules);
   // Both the dialog AND the toolbar badge count only enabled rules.
   const issues = useMemo(
@@ -73,7 +75,7 @@ export function LintDialog() {
     return map;
   }, [issues]);
 
-  const tooltip =
+  const tooltip = isLoading ? "Checking config…" : isError ? "Config lint unavailable" :
     total === 0
       ? "Config lint — all clear"
       : `Config lint — ${errorCount} error${errorCount === 1 ? "" : "s"}, ${warningCount} warning${warningCount === 1 ? "" : "s"}`;
@@ -90,7 +92,7 @@ export function LintDialog() {
               className="relative size-7"
               aria-label={tooltip}
             >
-              {total === 0 ? (
+              {total === 0 && !isLoading && !isError ? (
                 <ShieldCheck className="size-4 text-emerald-600 dark:text-emerald-400" />
               ) : (
                 <ShieldAlert
@@ -128,14 +130,15 @@ export function LintDialog() {
               : `${total} issue${total === 1 ? "" : "s"} across your SSH config.`}
           </DialogDescription>
         </DialogHeader>
+        <TaskDialogBody>
 
-        {total === 0 ? (
+        {isLoading ? <div className="app-task-state" role="status">Checking configuration…</div> : isError ? <div className="app-task-state" role="alert"><p>Could not check configuration.</p><Button size="sm" variant="outline" onClick={() => void refetch()}>Retry</Button></div> : total === 0 ? (
           <div className="flex flex-col items-center gap-2 py-6 text-center select-none">
             <ShieldCheck className="size-8 text-emerald-600 dark:text-emerald-400" />
             <p className="text-sm text-muted-foreground">All clear</p>
           </div>
         ) : (
-          <div className="-mx-1 max-h-[60vh] space-y-4 overflow-y-auto px-1">
+          <div className="-mx-1 space-y-4 overflow-y-auto px-1">
             {[...grouped.entries()].map(([severity, list]) => (
               <div key={severity}>
                 <span className="section-label">
@@ -159,6 +162,8 @@ export function LintDialog() {
             ))}
           </div>
         )}
+              </TaskDialogBody>
+        <DialogFooter><DialogClose asChild><Button variant="outline">Close</Button></DialogClose></DialogFooter>
       </DialogContent>
     </Dialog>
   );

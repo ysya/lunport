@@ -9,7 +9,7 @@
 //!
 //! Which config: the app wires the source without `-F` (`effective_within(alias, None, EFFECTIVE_DEADLINE)`), so `ssh` reads the default
 //! config files, `~/.ssh/config` and the system's `ssh_config`, as today's Connect does (`effective_config(alias, None)`). That is on
-//! purpose: `sshelter connect` replaces `ssh <alias>`, which reads those files, and the broker has to see the settings `ssh <alias>` would
+//! purpose in Production only; Development refuses before spawning. `sshelter connect` replaces `ssh <alias>`, which reads those files, and the broker has to see the settings `ssh <alias>` would
 //! use. Tests give `-F` and a config file of their own.
 //!
 //! What happens at the deadline: `ssh` started as the leader of a process group of its own (Unix), so the group is killed, and with it the
@@ -51,6 +51,17 @@ const LONGEST_POLL: Duration = Duration::from_millis(20);
 /// started, did not finish within the deadline (and was killed with what it had started), failed with the first line it complained about,
 /// or gave an answer that could not be read whole.
 pub fn effective_within(alias: &str, config_path: Option<&Path>, deadline: Duration) -> Result<Vec<(String, String)>, String> {
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
+    effective_process_within(alias, config_path, deadline)
+}
+
+#[cfg(test)]
+fn fixture_effective_within(alias: &str, config_path: Option<&Path>, deadline: Duration) -> Result<Vec<(String, String)>, String> {
+    assert!(config_path.is_some(), "Production process tests require an explicit temporary config");
+    effective_process_within(alias, config_path, deadline)
+}
+
+fn effective_process_within(alias: &str, config_path: Option<&Path>, deadline: Duration) -> Result<Vec<(String, String)>, String> {
     let mut command = crate::process::background_command("ssh");
     if let Some(path) = config_path {
         command.arg("-F").arg(path);
@@ -330,6 +341,19 @@ mod tests {
         assert_eq!(in_words(Duration::from_millis(500)), "0.5 seconds");
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn development_bounded_config_refuses_before_match_exec() {
+        if crate::app_profile::CURRENT != crate::app_profile::AppProfile::Development { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("executed");
+        let config = dir.path().join("config");
+        std::fs::write(&config, format!("Match exec \"touch {}\"\n HostName 127.0.0.1\n", marker.display())).unwrap();
+        let error = effective_within("fixture", Some(&config), EFFECTIVE_DEADLINE).unwrap_err();
+        assert!(error.contains("Development"));
+        assert!(!marker.exists());
+    }
+
     /// The answer is the one `effective_config` gives, line for line, and so are the complaints of a `ssh -G` that fails; an alias that
     /// looks like an option is a host name for `ssh`, never an option.
     #[test]
@@ -343,19 +367,19 @@ mod tests {
         )
         .unwrap();
         for alias in ["bastion", "db", "unlisted"] {
-            let bounded = effective_within(alias, Some(&config), EFFECTIVE_DEADLINE).unwrap();
-            assert_eq!(bounded, crate::config::intel::effective_config(alias, Some(&config)).unwrap(), "{alias}");
+            let bounded = fixture_effective_within(alias, Some(&config), EFFECTIVE_DEADLINE).unwrap();
+            assert_eq!(bounded, crate::config::intel::effective_config_in_fixture(alias, &config).unwrap(), "{alias}");
             assert!(bounded.iter().any(|(key, _)| key == "hostname"), "{alias}: an answer, not an empty one");
         }
         let broken = dir.path().join("broken");
         std::fs::write(&broken, "Host x\n  Bogus yes\n").unwrap();
-        let error = effective_within("x", Some(&broken), EFFECTIVE_DEADLINE).unwrap_err();
+        let error = fixture_effective_within("x", Some(&broken), EFFECTIVE_DEADLINE).unwrap_err();
         assert!(error.contains("Bad configuration option"), "{error}");
-        assert_eq!(Err(error), crate::config::intel::effective_config("x", Some(&broken)).map_err(|error| error.to_string()));
+        assert_eq!(Err(error), crate::config::intel::effective_config_in_fixture("x", &broken).map_err(|error| error.to_string()));
         let missing = dir.path().join("missing");
-        let error = effective_within("x", Some(&missing), EFFECTIVE_DEADLINE).unwrap_err();
-        assert_eq!(Err(error), crate::config::intel::effective_config("x", Some(&missing)).map_err(|error| error.to_string()));
-        let option = effective_within("-oProxyCommand=evil", Some(&config), EFFECTIVE_DEADLINE).unwrap_err();
+        let error = fixture_effective_within("x", Some(&missing), EFFECTIVE_DEADLINE).unwrap_err();
+        assert_eq!(Err(error), crate::config::intel::effective_config_in_fixture("x", &missing).map_err(|error| error.to_string()));
+        let option = fixture_effective_within("-oProxyCommand=evil", Some(&config), EFFECTIVE_DEADLINE).unwrap_err();
         assert!(option.contains("invalid characters"), "a host name, which ssh rejects, and not an option it would take: {option}");
     }
 
@@ -431,7 +455,7 @@ mod tests {
             let (doc_path, ssh_g_path) = (config.clone(), config.clone());
             let sources = Sources {
                 doc: Box::new(move || crate::config::include::load_doc(&doc_path).map_err(|error| error.to_string())),
-                effective: Box::new(move |alias| effective_within(alias, Some(&ssh_g_path), Duration::from_secs(1))),
+                effective: Box::new(move |alias| fixture_effective_within(alias, Some(&ssh_g_path), Duration::from_secs(1))),
                 vault_key: Box::new(|_| None),
                 password_saved: Box::new(|_| false),
             };
@@ -470,7 +494,7 @@ mod tests {
             )
             .unwrap();
             let started = Instant::now();
-            let answer = effective_within("leftover", Some(&config), EFFECTIVE_DEADLINE);
+            let answer = fixture_effective_within("leftover", Some(&config), EFFECTIVE_DEADLINE);
             let elapsed = started.elapsed();
             let _cleanup = EndSleep(pid_in(&pidfile));
             let answer = answer.expect("ssh -G finished");

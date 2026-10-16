@@ -1,3 +1,4 @@
+import { ActionBar } from "@/components/app/Workflow";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
@@ -98,7 +99,7 @@ export function ImportKeyView({
   return (
     <div className="space-y-5">
       <header className="space-y-1">
-        <h2 className="text-lg font-semibold">New key</h2>
+        <h2 className="app-inspector-title">New key</h2>
         <p className="text-sm text-muted-foreground">SSHelter keeps the key in its vault. Programs ask before they use it.</p>
       </header>
       {choices<"paste" | "file">("Where the key comes from", [["paste", "Paste"], ["file", "From a file"]], state.source, onSource, state.busy)}
@@ -152,14 +153,14 @@ export function ImportKeyView({
           )}
         </div>
       )}
-      <div className="flex gap-1.5">
+      <ActionBar>
         <Button type="button" size="sm" variant="outline" className="h-7" disabled={state.busy} onClick={onCancel}>
           Cancel
         </Button>
         <Button type="button" size="sm" className="h-7" disabled={state.busy || !isValidSlotName(state.name) || !ready} onClick={onAdd}>
           {state.busy ? "Adding…" : "Add to SSHelter"}
         </Button>
-      </div>
+      </ActionBar>
     </div>
   );
 }
@@ -194,7 +195,7 @@ export function GenerateKeyView({
   return (
     <div className="space-y-5">
       <header className="space-y-1">
-        <h2 className="text-lg font-semibold">Generate key</h2>
+        <h2 className="app-inspector-title">Generate key</h2>
         <p className="text-sm text-muted-foreground">A new key made in SSHelter. It exists only in SSHelter until you export it.</p>
       </header>
       {choices<KeyAlgorithm>("Key type", KEY_TYPES.map((t): [KeyAlgorithm, string] => [t.algorithm, t.label]), state.algorithm, onAlgorithm, state.busy)}
@@ -210,14 +211,14 @@ export function GenerateKeyView({
           <Input id="new-key-passphrase-repeat" type="password" autoComplete="new-password" value={state.repeat} disabled={state.busy} onChange={(e) => onRepeat(e.target.value)} />
         </div>
       )}
-      <div className="flex gap-1.5">
+      <ActionBar>
         <Button type="button" size="sm" variant="outline" className="h-7" disabled={state.busy} onClick={onCancel}>
           Cancel
         </Button>
         <Button type="button" size="sm" className="h-7" disabled={state.busy || !isValidSlotName(state.name) || !passphraseOk} onClick={onGenerate}>
           {state.busy ? "Generating…" : "Generate"}
         </Button>
-      </div>
+      </ActionBar>
     </div>
   );
 }

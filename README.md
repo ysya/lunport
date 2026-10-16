@@ -1,5 +1,9 @@
 # SSHelter
 
+> **Own SSH development branch:** the records workspace keeps its vault local, syncs one host library through encrypted chains with separate key-sharing controls, and uses explicit legacy migration. The release descriptions below refer to the existing legacy mode. Groups, Records MCP execution and POSIX public-key deployment are available in [Beta 1.0.0-3](https://github.com/ysya/sshelter/releases/tag/v1.0.0-3), with native CI and four-platform publication verified. See the [remote handoff](docs/2026-10-15-beta3-remote-handoff.md) and [Beta 3 checklist](docs/releases/1.0.0-3-review-checklist.md) for current behavior, verification, and remaining gates.
+
+[Beta 15](https://github.com/ysya/sshelter/releases/tag/v1.0.0-15) organizes Settings into Application, Workspace and Maintenance with searchable sections, and unifies Legacy, Keychain, deployment, sync and maintenance dialogs. It builds on the consistent Records interface, collapsible sidebar and System/Reduced motion preferences from Beta 14. See the [validation record](docs/releases/1.0.0-15-validation.md) for verification and remaining visual follow-ups.
+
 A cross-platform desktop app for managing your **local OpenSSH** setup — `~/.ssh/config`, keys, `ssh-agent`, and `known_hosts` — with lossless, format-preserving editing. macOS + Linux first (Windows later).
 
 ## Why
@@ -14,6 +18,9 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 
 ## Features
 
+- **Collection workspaces** — browse Hosts at full width, filter by space, and select multiple hosts to move or tag. Selecting a host or Group opens its editor; Expand list keeps its draft mounted. Batch changes use the reviewed host revisions and stop on a conflict while retaining completed changes.
+- **First launch** — a Records workspace opens without an existing data directory or SSH config and creates its data directory on save. The legacy workspace initializes a missing default `~/.ssh/config`; other config read failures stay visible with Retry and Config settings actions.
+
 - **Lossless config editing** — a clean GUI host editor over `~/.ssh/config` and every `Include`d file; only the lines you change are touched, so comments, ordering, and unknown directives survive byte-for-byte. Create new config files from any file picker: SSHelter detects an existing `Include` glob (like `config.d/*`) and drops the file where it's already loaded, or adds the `Include` line for you.
 - **Connect** — open a host in your terminal of choice (macOS Terminal/iTerm2, common Linux emulators, Windows Terminal or Command Prompt), from a per-row button, the editor header, the command palette, or the menubar tray's quick-connect list. From 0.17.0-10 (Beta channel), the terminal runs `sshelter connect <host>` (on Windows through `sshelter-cli.exe`, a small console program installed next to SSHelter): the connection lives in SSHelter's own SSH client, a first-time host key is confirmed in SSHelter's window, a saved password is tried first, and passphrases and 2FA codes are asked in the terminal. When the connection fails before the session opens, the reason stays on screen: from 0.17.0-11, terminals that close their window when the command fails (iTerm2, Linux emulators) keep it there until you press Enter; Terminal, Command Prompt and Windows Terminal (with its default settings) keep it anyway. That client signs only with keys kept in SSHelter (Keychain → Only in SSHelter): a host whose `IdentityFile` is a key file in `~/.ssh` connects once that key is moved into SSHelter (Keychain → Move), a host that relies on OpenSSH's default `~/.ssh/id_*` files has to name its key first, and hosts that use `ProxyCommand` don't connect through it yet (`ProxyJump` does). Up to 0.17.0-9 and in 0.16 (Stable), Connect launches `ssh <host>` instead, and a saved password is auto-filled through the built-in `SSH_ASKPASS` helper straight from your OS keychain — it never appears in the launch command; auto-fill steps aside for jump hosts, first-time hosts (confirm the host key manually once), and keyboard-interactive/2FA hosts.
 - **Command palette (⌘K)** — fuzzy-jump to any host with your recent connections surfaced first; <kbd>Enter</kbd> connects, <kbd>⌘Enter</kbd> edits, plus quick actions (new host, deploy key, toggle theme, reload).
@@ -27,7 +34,7 @@ Editing `~/.ssh/config` by hand is fiddly and error-prone. SSHelter gives it a c
 - **Settings (⌘,)** — System-Settings-style preferences: theme (system/light/dark), text size, menu bar icon & close-to-tray, launch at login, global quick-connect hotkey, default + per-host terminal, new-tab launch (iTerm2, Windows Terminal), custom config path, backup retention, discovery sources, drift auto-check, per-rule lint toggles, and settings export/import.
 - **AI Access (MCP)** — expose an explicit host allowlist to local MCP clients such as Codex. Read-only host/config tools stay scoped to that list; every remote command opens SSHelter, shows the resolved destination and exact command, and waits for an in-app **Allow once** or **Deny** decision. Recent decisions and exit codes remain visible in the interface.
 - **Sync (no account)** — create a sync account on one computer, enter its 24-word sync code on the others, choose which spaces of hosts each computer syncs, and your synced hosts follow you. Records are end-to-end encrypted before they reach the relay (which is open source and self-hostable). Hosts sync, and the keys they use can too: when a host starts syncing, SSHelter asks once per key whether it goes to your other computers (end-to-end encrypted like the hosts; a passphrase is never synced, so a protected key stays protected) or stays on this computer (each other computer then picks its own key once). Your servers are never changed. Passwords stay on each device.
-- **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings. Pick the Stable or Beta update channel in Settings → General.
+- **Auto-update** — signed updates (minisign) delivered from GitHub Releases via the Tauri updater; checks on launch (optional) or on demand from Settings. Pick the Stable or Beta update channel in Settings → Updates. Checks, release notes and download progress stay in this page; automatic checks show a quiet toolbar indicator when a new version is available.
 
 ## Install
 
@@ -47,9 +54,29 @@ Subsequent auto-updates install in-app and don't need this again.
 
 Open **Settings → AI Access**, enable access, and explicitly select each host an AI client may see. The same pane provides a ready-to-copy `codex mcp add` command that registers the installed SSHelter executable as a local stdio MCP server.
 
-The MCP adapter connects to the running SSHelter desktop app over an authenticated `127.0.0.1` bridge. When SSHelter isn't running, the adapter starts it in the background, without a window: the window opens when you open SSHelter (from its menu bar or tray icon, or by launching it again) or when a `run` request needs your approval. Only one SSHelter runs at a time; launching it again brings up the one already running. The adapter exposes three tools: `list_hosts`, `get_effective_config`, and `run`. `run` never executes until the desktop interface approves that exact request, and SSH output is bounded before it is returned to the client.
+In a **Records workspace**, the stdio adapter connects through the OS-authenticated session broker. It can start SSHelter in the background; interactive approval and trust decisions appear in the app when needed. The tools on this work branch are:
 
-MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so the host must already work with a key, agent, or other non-prompting authentication method. SSHelter does not forward passwords or key passphrases to the AI process. This gate controls requests made through SSHelter MCP; it is not an operating-system sandbox and cannot prevent another process running as your user from invoking `ssh` directly.
+| Tool | Behavior |
+| --- | --- |
+| `list_hosts` | List individually AI-approved hosts. |
+| `get_host` | Read sanitized public settings for an AI-approved host. |
+| `ssh_exec` | Execute one bounded command under the user's Ask or Auto-log policy. |
+| `create_host` | Propose public connection settings for explicit approval in SSHelter. Saving never grants AI access or trusts a server key. |
+| `verify_host_key` | Verify an AI-approved host's server fingerprint, with a separate trust window for a new or changed key. |
+
+`create_host` and `verify_host_key` are available in [Beta 12](https://github.com/ysya/sshelter/releases/tag/v1.0.0-12), which also fixes host-key confirmation during background sync and Library setup with retained migration sources. See the [implementation record](docs/2026-10-16-library-mcp-connection-validation.md), [follow-up validation](docs/2026-10-16-beta11-followup-validation.md) and [publication checks](docs/releases/1.0.0-12-validation.md).
+
+After installing a build with these additions, reconnect or restart the MCP client so it fetches the updated tool list.
+
+For example, a client can propose `create_host` with `{"alias":"web","hostname":"server.example.com","user":"deploy","port":22}`. Review the settings in SSHelter before saving. Then separately allow that host in **AI Access** before using `get_host`, `verify_host_key`, or `ssh_exec`. Passwords, private keys, host-key pins, and AI permission grants are not accepted as creation fields.
+
+`verify_host_key` accepts only a host ID or exact alias. Compare the displayed fingerprint with a trusted source and answer in SSHelter; the MCP client cannot supply a trust decision. You can also use **Edit host → Server identity → Verify server fingerprint**. Verification stops before destination login or remote commands, even if the destination's login key is missing. Jump hosts may need their own login credentials. Matching saved fingerprints do not prompt again; a changed destination, route, permission or saved pin requires verification again.
+
+Ask reviews the exact command before execution and can request credentials through SSHelter. Auto-log command execution never prompts for credentials or silently trusts a key; use the separate fingerprint verification flow first. Authentication answers and command output are not retained in the public audit log.
+
+In **Legacy mode**, the adapter retains the authenticated `127.0.0.1` bridge and three tools: `list_hosts`, `get_effective_config`, and `run`. When SSHelter isn't running it starts in the background. A `run` request opens the approval interface and never executes until that exact request is approved; output is bounded before returning to the client.
+
+Legacy MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so the host must already work with a key, agent, or other non-prompting authentication method. SSHelter does not forward passwords or key passphrases to the AI process. This gate controls requests made through SSHelter MCP; it is not an operating-system sandbox and cannot prevent another process running as your user from invoking `ssh` directly.
 
 ## Sync
 
@@ -73,13 +100,21 @@ The button copies `relay/` into a new repository on your GitHub or GitLab accoun
 
 ## Development
 
-Prerequisites: Rust (rustup), Node + pnpm, and platform build deps (macOS: Xcode Command Line Tools; Linux: `libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev`).
+Prerequisites: Rust (mise or rustup), Node + pnpm, and platform build deps (macOS: Xcode Command Line Tools; Linux: `libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev`).
+
+With mise, run `mise install` for the project Rust toolchain; use `mise exec --` before commands if mise is not activated in your shell.
 
 ```bash
 pnpm install            # install JS deps
-pnpm tauri dev          # run the desktop app (Rust + Vite dev server)
+pnpm tauri:dev          # run SSHelter Dev (Rust + Vite dev server)
 pnpm build              # type-check + build the frontend
 ```
+
+Development builds use `org.homelab.sshelter.dev`, the `SSHelter Development` credential service, and a sandbox home under their data directory. They can run beside the installed app. File writes stay inside that directory; updates and launch at login are disabled. Use `pnpm tauri:build:dev` for a release-mode development bundle. A build whose Tauri identifier or product name disagrees with its compiled profile refuses to initialize.
+
+During the records transition, Development refuses legacy system-SSH evaluation, Connect, deploy and MCP execution before spawning OpenSSH. Records connections use the built-in SSH engine. The development agent socket and lock use the shorter app-data `ipc/a` directory.
+
+An ordinary `pnpm tauri build` remains the production profile. Development imports may read selected external sources; they must copy into the sandbox and preserve the originals.
 
 Tests:
 
@@ -90,7 +125,7 @@ cd src-tauri && cargo test   # backend tests
 
 ### Publishing a beta
 
-Betas reach machines whose **Settings → General → Update channel** is **Beta**. In GitHub Actions run **publish beta** with a version `X.Y.Z-N` (numeric suffix only, e.g. `0.16.1-1`) newer than the current release. The workflow creates the prerelease `vX.Y.Z-N`, builds every platform, then points the `updater-beta` release's `latest.json` at it. Stable releases keep going through release-please and are offered on the Beta channel too.
+Betas reach machines whose **Settings → Updates → Release channel** is **Beta**. In GitHub Actions run **publish beta** with a version `X.Y.Z-N` (numeric suffix only, e.g. `0.16.1-1`) newer than the current release. The workflow creates the prerelease `vX.Y.Z-N`, builds every platform, then points the `updater-beta` release's `latest.json` at it. Stable releases keep going through release-please and are offered on the Beta channel too.
 
 If a build leg fails, use **Re-run failed jobs** on that run: it keeps the same inputs and commit, and the manifest job then runs. Never use `build-platform.yml` for a beta: it builds the tag's commit without the beta version stamp and does not update the Beta manifest, so it refuses beta tags. To publish the same version again, delete both the prerelease and its tag first. When the manifest job runs for a republished or rebuilt version, it replaces the channel's copy, so the old signatures do not linger. Machines that already installed that version are not offered it again; publish the next `-N` for them.
 
@@ -103,3 +138,11 @@ To point the Beta channel at a release by hand, run **update beta channel** with
 ## License
 
 [PolyForm Noncommercial](LICENSE) © Frank Sung
+
+## Library sync (development)
+
+Hosts and Groups share one library. Creating or joining sync includes existing records on this device; previously connected devices enable Library sync once from Sync settings. New records then sync automatically, including imported hosts. Keys retain their explicit sharing controls.
+
+The library remains editable offline and queues cached changes for the next connection. Every upload still checks authenticated account format metadata. First-time Group format upgrades need an online check and acknowledgement that older clients have been stopped or updated.
+
+Existing encrypted space chains are retained as transport details. Setup downloads their baselines before including existing records, keeps stable IDs and Group inheritance, and rejects conflicting identities or names without removing the source records. Interrupted setup can resume its original operation.

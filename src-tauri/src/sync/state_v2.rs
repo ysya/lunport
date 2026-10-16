@@ -149,6 +149,37 @@ pub fn sealed_key(kind: &str, id_hash: &str) -> String {
     format!("{kind}:{id_hash}")
 }
 
+/// Authenticated ordering evidence for unsupported public Host/KeySlot records only.
+/// No payload, credential, secret-kind identity or arbitrary future-kind id is persisted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedPublicIdentity {
+    pub id: String,
+    pub version: u64,
+    pub updated_at_ms: u64,
+    pub device_id: String,
+    pub deleted: bool,
+}
+impl VerifiedPublicIdentity {
+    pub(crate) fn is_valid_for(&self, envelope: &Envelope) -> bool {
+        let public_id = match envelope.kind.as_str() {
+            "host" | "group" => {
+                self.id.len() == 16
+                    && self
+                        .id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }
+            "keyslot" => crate::sync::slot_rules::is_slot_id(&self.id),
+            _ => false,
+        };
+        public_id && self.version > 0 && crate::sync::slot_rules::is_slot_id(&self.device_id) && self.deleted == envelope.deleted
+    }
+    pub(crate) fn header(&self, kind: crate::sync::record::RecordKind) -> Record {
+        Record {kind,id:self.id.clone(),version:self.version,updated_at_ms:self.updated_at_ms,device_id:self.device_id.clone(),deleted:self.deleted,payload:serde_json::Value::Null}
+    }
+}
+
 /// 不能以明文保存的記錄(spec §3、§4.4):relay 的密文 envelope 原樣保存(`envelope.seq` = relay 序號)。這台寫出、
 /// 還沒上傳的(例如新 space 的 `spacekey`)`dirty` = true:上傳的就是這份密文,`envelope.seq` 當 base_seq。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -156,6 +187,9 @@ pub struct SealedRecord {
     pub envelope: Envelope,
     #[serde(default)]
     pub dirty: bool,
+    /// Only the typed authenticated merger publishes this optional public header evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_identity: Option<VerifiedPublicIdentity>,
 }
 
 impl SealedRecord {
@@ -172,6 +206,7 @@ impl SealedRecord {
                 deleted: item.deleted,
             },
             dirty: true,
+            public_identity: None,
         })
     }
 

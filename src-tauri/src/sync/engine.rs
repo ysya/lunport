@@ -51,6 +51,16 @@ static ENGINE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
 /// 這個行程是否跑著同步引擎。搬進 space 檔的命令用它拒絕沒有引擎的行程(`migrate::refuse_while_sync_inactive`)。
+/// Legacy entry points must check under their transaction lock, before credentials or files.
+pub(crate) fn legacy_mode_allowed(core:&crate::sync::runtime::SyncCore)->Result<(),AppError>{
+    if core.format != crate::sync::record_runtime::RuntimeFormat::Legacy || core.legacy_paused {
+        return Err(AppError::Other("Legacy SSH operations are unavailable in this workspace; use the records interface.".into()));
+    }
+    if let Some(reason)=&core.save_blocked { return Err(AppError::Other(reason.clone())); }
+    Ok(())
+}
+pub(crate) fn require_legacy(runtime:&crate::sync::runtime::SyncRuntime)->Result<(),AppError>{legacy_mode_allowed(&runtime.core.lock().unwrap())}
+
 pub fn engine_active() -> bool {
     ENGINE_ACTIVE.load(Ordering::SeqCst)
 }
@@ -89,8 +99,20 @@ struct TauriEvents {
     app: AppHandle,
 }
 
+#[cfg(all(test, windows))]
+#[path = "engine_windows_tests.rs"]
+mod windows_tests;
+
 impl SyncEvents for TauriEvents {
     fn status(&self) {
+        if let Ok(status)=crate::sync::record_commands::status(&self.app) { let _=self.app.emit("records://status",&status); }
+        let records={let state=self.app.state::<AppState>();let core=state.sync.core.lock().unwrap();if core.format==crate::sync::record_runtime::RuntimeFormat::Records{core.records.clone()}else{None}};
+        if let Some(records)=records {
+            if let Err(error) = crate::tray::rebuild_record_tray(&self.app,&records) {
+                crate::diagnostics::tauri_error("tray_update_failed", &error);
+            }
+            return;
+        }
         if let Ok(Ok(overview)) = with_env(&self.app, dto::overview) {
             let _ = self.app.emit("sync://status", &overview);
         }
@@ -133,6 +155,8 @@ impl SyncEvents for TauriEvents {
 pub(crate) fn with_env<T>(app: &AppHandle, f: impl FnOnce(&SyncEnv) -> T) -> Result<T, AppError> {
     let state = app.state::<AppState>();
     let events = TauriEvents { app: app.clone() };
+    let noninteractive=crate::sync::env::NonInteractiveKeychain(&OsKeychain);
+    let credentials:&dyn Keychain=if state.background_credentials_only.load(Ordering::SeqCst){&noninteractive}else{&OsKeychain};
     let env = SyncEnv {
         doc: &state.doc,
         backed_up: &state.backed_up,
@@ -141,7 +165,7 @@ pub(crate) fn with_env<T>(app: &AppHandle, f: impl FnOnce(&SyncEnv) -> T) -> Res
         ssh_dir: crate::keys::ssh_dir()?,
         state_path: v1_state::state_path()?,
         home: None,
-        keychain: &OsKeychain,
+        keychain: credentials,
         relays: &HttpRelays,
         events: &events,
         clock: &SystemClock,
@@ -157,7 +181,7 @@ pub fn note_file_written(path: &Path, items: &[Item]) {
         return;
     }
     let Some(app) = APP.get() else { return };
-    let _ = with_env(app, |env| files::note_written(env, path, items));
+    let _ = with_env(app, |env| { require_legacy(env.runtime)?; files::note_written(env, path, items); Ok::<_,AppError>(()) });
 }
 
 /// config 的命令改了主機區塊(改 `IdentityFile`、新增、刪除、改名、搬動、複製……),而且已經放掉 doc 與 backed_up 的鎖之後呼叫:馬上更新 agent 的設定
@@ -171,7 +195,7 @@ pub fn refresh_agent_config() {
         return;
     }
     let Some(app) = APP.get() else { return };
-    match with_env(app, crate::agent::wiring::refresh_env) {
+    match with_env(app, |env| { require_legacy(env.runtime)?; crate::agent::wiring::refresh_env(env) }) {
         Ok(Ok(_)) => {}
         Ok(Err(e)) | Err(e) => eprintln!("[agent] could not update the agent config: {e}"),
     }
@@ -228,8 +252,13 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
             return;
         }
         while rx.try_recv().is_ok() {}
+        if app.state::<AppState>().background_credentials_only.load(Ordering::SeqCst) {
+            wait=Wait::after_round(Instant::now(),crate::sync::relay::IDLE_POLL_INTERVAL,Duration::ZERO);continue;
+        }
         if let Ok(next) = with_env(&app, |env| {
-            let _ = round::sync_once(env);
+            let (format,legacy) = { let core=env.runtime.core.lock().unwrap(); (core.format,core.format == crate::sync::record_runtime::RuntimeFormat::Legacy && !core.legacy_paused && core.save_blocked.is_none()) };
+            if legacy { let _ = round::sync_once(env); }
+            else if format==crate::sync::record_runtime::RuntimeFormat::Records { let _=crate::sync::record_round::sync_once(env); }
             (round::next_delay(env), round::backoff_window(env))
         }) {
             (delay, backoff) = next;
@@ -242,12 +271,16 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
 /// 之後的任何存檔都會把新狀態寫到原路徑,不搬就會蓋掉它。回傳新檔名;搬不動回傳 I/O 錯誤。
 fn set_aside_unreadable_state(path: &Path, timestamp_ms: u64) -> std::io::Result<String> {
     let name = format!("sync-state.unreadable-{timestamp_ms}.json");
-    std::fs::rename(path, path.with_file_name(&name))?;
+    let destination = path.with_file_name(&name);
+    fsutil::check_write_io(path)?;
+    fsutil::check_write_io(&destination)?;
+    std::fs::rename(path, destination)?;
     Ok(name)
 }
 
 /// 狀態檔還留在原路徑時附在說明後面的提示;同一段完整說明也放進 `save_blocked`。
 const STATE_LEFT_IN_PLACE: &str = "; the sync state file was left in place — restart SSHelter to retry";
+pub(crate) const FUTURE_LOCAL_STATE_MESSAGE: &str = "this sync state uses a newer local format";
 
 /// 啟動時 `state_v2::load` 失敗:回傳(要放進 `last_error` 的說明, `save_blocked`)。
 /// - 內容錯誤(`AppError::Other`:讀不懂的 JSON、更新版的格式)→ 搬到旁邊保留,之後照常存新狀態。搬不動 →
@@ -258,6 +291,11 @@ fn unreadable_state_outcome(path: &Path, timestamp_ms: u64, error: &AppError) ->
         let message = format!("{message}{STATE_LEFT_IN_PLACE}");
         (message.clone(), Some(message))
     };
+    let future_version = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64));
+    if let Some(version) = future_version.filter(|version| *version > u64::from(state_v2::STATE_VERSION_V2)) {
+        return left_in_place(format!("{FUTURE_LOCAL_STATE_MESSAGE} (version {version}); update SSHelter before changing sync"));
+    }
     match error {
         AppError::Other(_) => match set_aside_unreadable_state(path, timestamp_ms) {
             Ok(name) => (format!("{error}; the old file was kept as {name}"), None),
@@ -296,6 +334,13 @@ fn startup(loaded: Result<LoadedState, AppError>, keychain: &dyn Keychain, devic
                     Ok(k) => keys = Some(k),
                     // 換碼(更換同步碼的第 7 步,或其他電腦的重新加入)在「狀態已換成新帳戶、keychain 還是舊碼」之間中斷:以暫存的新碼補完。
                     // keychain 還是寫不進去時沿用暫存碼推導的金鑰、保留暫存碼,下次再換 —— 說明是 keychain 的事,不是「離開再加入」。
+                    Err(_) if s.read_only() => {
+                        if let Ok(Some((_, staged_keys))) = account::staged_code_for(keychain, &chain) {
+                            keys = Some(staged_keys);
+                            swap_pending = true;
+                        }
+                        s.last_error = Some(account::READ_ONLY_MESSAGE.to_string());
+                    }
                     Err(message) => match crate::sync::rotation::finish_interrupted_switch(keychain, &chain) {
                         Some(done) => {
                             keys = Some(done.keys);
@@ -343,6 +388,8 @@ fn acquire_engine_lock(dir: &Path) -> Result<File, String> {
 
 /// `acquire_engine_lock` 的本體:最多試 `attempts` 次,兩次之間呼叫 `pause`(測試注入,不必真的等)。
 fn acquire_engine_lock_with(dir: &Path, attempts: u32, mut pause: impl FnMut()) -> Result<File, String> {
+    fsutil::check_write(dir).map_err(|e| engine_lock_error(&e))?;
+    fsutil::check_write(&dir.join(ENGINE_LOCK_FILE)).map_err(|e| engine_lock_error(&e))?;
     fsutil::ensure_dir_secure(dir).map_err(|e| engine_lock_error(&e))?;
     let file = OpenOptions::new()
         .read(true)
@@ -365,65 +412,88 @@ fn acquire_engine_lock_with(dir: &Path, attempts: u32, mut pause: impl FnMut()) 
     }
 }
 
+/// Select the startup snapshot and cross-process lock before credentials or runtime activation.
+fn startup_probe_with_lock(
+    mut probe: impl FnMut() -> crate::sync::record_runtime::StartupProbe,
+    take_lock: impl FnOnce() -> Result<File, String>,
+) -> (crate::sync::record_runtime::StartupProbe, Result<File, String>) {
+    let mut selected = probe();
+    let lock = take_lock();
+    if lock.is_ok() {
+        // The prior owner may finish a save or cutover while this process waits for the lock.
+        // Only the snapshot read under ownership can feed credentials, activation and first save.
+        selected = probe();
+    }
+    (selected, lock)
+}
+
 /// 啟動:取得同步鎖,載入狀態(v2;v1 交給背景執行緒升級),推導帳戶金鑰,開背景執行緒。狀態壞掉不阻擋 app 啟動
 /// (`unreadable_state_outcome`)。拿不到同步鎖的行程只讀一份狀態給 UI 看:不搬狀態檔、不讀 keychain、不開背景
 /// 執行緒、存檔 hook 不動作,`save_blocked` 讓所有會寫狀態的命令一律拒絕。
 pub fn initialize(app: &AppHandle) -> Result<(), AppError> {
+    use crate::sync::record_runtime::{self, StartupProbe};
     let _ = APP.set(app.clone());
     let state = app.state::<AppState>();
-    let lock = fsutil::app_data_root().map_err(|e| engine_lock_error(&e)).and_then(|root| acquire_engine_lock(&root));
-    match lock {
-        Ok(file) => {
-            let _ = ENGINE_LOCK.set(file);
-            ENGINE_ACTIVE.store(true, Ordering::SeqCst);
-        }
-        Err(reason) => {
-            // 檔案屬於持有鎖的那個行程,這裡絕不搬動或改寫它。
-            let mut shown = match v1_state::state_path().and_then(|path| state_v2::load(&path)) {
-                Ok(LoadedState::Current(s)) => *s,
-                Ok(LoadedState::Legacy(v1)) => upgrade::shell_state(&v1),
-                _ => SyncStateV2::fresh(&default_device_name())?,
-            };
-            shown.last_error = Some(reason.clone());
-            let mut core = state.sync.core.lock().unwrap();
-            core.state = Some(shown);
-            core.save_blocked = Some(reason);
-            return Ok(());
-        }
-    }
-    let (loaded, save_blocked) = match v1_state::state_path() {
-        Ok(path) => match state_v2::load(&path) {
-            Ok(loaded) => (Ok(loaded), None),
-            Err(e) => {
-                let (message, blocked) = unreadable_state_outcome(&path, SystemClock.now_ms(), &e);
-                (Err(AppError::Other(message)), blocked)
-            }
+    let (probe, lock) = startup_probe_with_lock(
+        || match v1_state::state_path() {
+            Ok(path) => record_runtime::probe_startup(&path, &default_device_name()),
+            Err(_) => StartupProbe::Blocked {
+                kind: record_runtime::StartupErrorKind::Io,
+                reason: "cannot locate sync state".into(),
+            },
         },
-        Err(e) => (Err(e), None),
-    };
-    let start = startup(loaded, &OsKeychain, &default_device_name())?;
-    {
-        let mut core = state.sync.core.lock().unwrap();
-        core.state = Some(start.state);
-        core.account_keys = start.keys;
-        core.legacy = start.legacy;
-        core.swap_pending = start.swap_pending;
-        core.save_blocked = save_blocked;
-        if start.save_now {
-            if let Ok(path) = v1_state::state_path() {
-                let _ = save_core(&mut core, &path);
-            }
+        || fsutil::app_data_root()
+            .map_err(|e| engine_lock_error(&e))
+            .and_then(|root| acquire_engine_lock(&root)),
+    );
+    match lock {
+        Ok(file) => { let _=ENGINE_LOCK.set(file); ENGINE_ACTIVE.store(true,Ordering::SeqCst); }
+        Err(reason) => {
+            let mut core=state.sync.core.lock().unwrap();record_runtime::activate_probe(&mut core,probe)?;
+            core.save_blocked=Some(reason);return Ok(());
         }
     }
-    let (tx, rx) = mpsc::channel();
-    *WAKER.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(tx);
-    let handle = app.clone();
-    // 背景執行緒一啟動就跑第一輪(spec §6.4、§7.6),不必另外喚醒。
-    std::thread::Builder::new()
-        .name("sshelter-sync".into())
-        .spawn(move || worker_loop(handle, rx))
-        .map_err(AppError::Io)?;
+    let keys = match &probe {
+        StartupProbe::Records{state:records,..} => {
+            Some(read_startup_account_keys(records,&OsKeychain,state.background_credentials_only.load(Ordering::SeqCst)))
+        },
+        _ => None,
+    };
+    {
+        let mut core=state.sync.core.lock().unwrap();record_runtime::activate_probe(&mut core,probe)?;
+        match keys {
+            Some(Ok(keys))=>core.account_keys=keys,
+            Some(Err(_))=>{if let Some(s)=core.records.as_mut(){s.last_error=Some("The sync code is unavailable in this device's credential store.".into());}},
+            None=>{},
+        }
+    }
+    let(tx,rx)=mpsc::channel();*WAKER.get_or_init(||Mutex::new(None)).lock().unwrap()=Some(tx);
+    let handle=app.clone();std::thread::Builder::new().name("sshelter-sync".into()).spawn(move||worker_loop(handle,rx)).map_err(AppError::Io)?;
     Ok(())
+}
+
+/// Explicit Production legacy choice only; startup leaves these bytes and credentials untouched.
+pub(crate) fn resume_legacy(app:&AppHandle)->Result<(),AppError>{
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(|e|AppError::Other(e.into()))?;
+    let state=app.state::<AppState>();let lifecycle=state.sync.lifecycle.lock().unwrap();
+    // with_env only constructs borrowed adapters; pending_migrations only scans bounded files.
+    // Neither reacquires lifecycle, vault, publication, doc, or core (see their definitions).
+    let pending = with_env(app, crate::sync::record_migration::pending_migrations)??;
+    if !pending.is_empty() {
+        return Err(AppError::Other("Finish the pending account migration before reopening the legacy workspace.".into()));
+    }
+    let publication=state.sync.format_publication.lock().unwrap();
+    let loaded={let core=state.sync.core.lock().unwrap();
+        if core.format!=crate::sync::record_runtime::RuntimeFormat::Legacy || core.save_blocked.is_some(){return Err(AppError::Other("legacy workspace is unavailable".into()));}
+        if !core.legacy_paused{return Ok(());}
+        match (&core.state,&core.legacy){(Some(s),None)=>LoadedState::Current(Box::new(s.clone())),(None,Some(s))=>LoadedState::Legacy(Box::new(s.clone())),_=>return Err(AppError::Other("legacy state is unavailable".into()))}
+    };
+    let start=startup(Ok(loaded),&OsKeychain,&default_device_name())?;
+    {let mut core=state.sync.core.lock().unwrap();let generation=core.generation.checked_add(1).ok_or_else(||AppError::Other("sync state generation exhausted".into()))?;
+        core.state=Some(start.state);core.legacy=start.legacy;core.account_keys=start.keys;core.swap_pending=start.swap_pending;core.legacy_paused=false;core.generation=generation;
+        if start.save_now{save_core(&mut core,&v1_state::state_path()?)?;}
+    }
+    drop(publication);drop(lifecycle);crate::agent::start(app);wake();Ok(())
 }
 
 fn default_device_name() -> String {
@@ -456,7 +526,7 @@ async fn run<T: Send + 'static>(
         let state = handle.state::<AppState>();
         state.sync.note_activity(SystemClock.now_ms());
         let guard = lifecycle.then(|| state.sync.lifecycle.lock().unwrap());
-        let result = with_env(&handle, f);
+        let result = with_env(&handle, |env| { require_legacy(env.runtime)?; f(env) });
         drop(guard);
         let _ = with_env(&handle, |env| env.events.status());
         result?
@@ -795,6 +865,33 @@ mod tests {
     const WORDS: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
     #[test]
+    fn legacy_commands_refuse_records_blocked_and_unconfirmed_startup(){
+        let mut core=crate::sync::runtime::SyncCore::default();
+        assert!(legacy_mode_allowed(&core).is_ok());
+        for (format,paused) in [(crate::sync::record_runtime::RuntimeFormat::Records,false),(crate::sync::record_runtime::RuntimeFormat::Blocked,false),(crate::sync::record_runtime::RuntimeFormat::Legacy,true)]{
+            core.format=format;core.legacy_paused=paused;assert!(legacy_mode_allowed(&core).is_err());
+        }
+    }
+    #[test]
+    fn newer_account_startup_keeps_both_keychain_codes_without_promoting_the_swap() {
+        let keychain = MemKeychain::default();
+        let next_words = crate::sync::crypto::generate_mnemonic().unwrap();
+        let next_keys = crate::sync::crypto::derive_account(&next_words).unwrap();
+        keychain.set(MNEMONIC_ACCOUNT, WORDS).unwrap();
+        keychain.set(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT, &next_words).unwrap();
+        let mut state = SyncStateV2::fresh("Box").unwrap();
+        state.account = Some(crate::sync::state_v2::AccountState::new(&next_keys.chain_id));
+        state.account.as_mut().unwrap().remote_schema_version = Some(3);
+        let started = startup(Ok(LoadedState::Current(Box::new(state.clone()))), &keychain, "Box").unwrap();
+        assert_eq!(keychain.entry(MNEMONIC_ACCOUNT).as_deref(), Some(WORDS));
+        assert_eq!(keychain.entry(crate::sync::state_v2::NEXT_MNEMONIC_ACCOUNT).as_deref(), Some(next_words.as_str()));
+        assert_eq!(started.keys.unwrap().chain_id, next_keys.chain_id, "the staged code may authenticate read-only format polling");
+        assert!(started.swap_pending, "the postponed swap remains pending");
+        state.last_error = Some(account::READ_ONLY_MESSAGE.to_string());
+        assert_eq!(started.state, state);
+    }
+
+    #[test]
     fn startup_loads_v2_keys_and_queues_a_joined_v1_state_for_the_upgrade() {
         let keychain = MemKeychain::default();
         keychain.set(MNEMONIC_ACCOUNT, WORDS).unwrap();
@@ -962,6 +1059,57 @@ mod tests {
     }
 
     #[test]
+    fn boundary_unreadable_state_cannot_be_moved_outside_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dev");
+        let path = dir.path().join("production-state.json");
+        std::fs::write(&path, b"keep").unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert_eq!(set_aside_unreadable_state(&path, 123).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        });
+        assert_eq!(std::fs::read(path).unwrap(), b"keep");
+        assert!(!dir.path().join("sync-state.unreadable-123.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_engine_lock_cannot_follow_a_link_to_another_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dev");
+        std::fs::create_dir(&root).unwrap();
+        let outside = dir.path().join("production-lock");
+        std::fs::write(&outside, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(ENGINE_LOCK_FILE)).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: root.clone() }, || {
+            assert!(acquire_engine_lock_with(&root, 1, || {}).is_err());
+        });
+        assert_eq!(std::fs::read(outside).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn future_local_state_is_preserved_and_startup_never_reads_the_keychain() {
+        struct NoCredentials;
+        impl Keychain for NoCredentials {
+            fn get(&self, _: &str) -> Result<Option<String>, AppError> { panic!("future state must not read credentials") }
+            fn set(&self, _: &str, _: &str) -> Result<(), AppError> { panic!("future state must not write credentials") }
+            fn delete(&self, _: &str) -> Result<(), AppError> { panic!("future state must not delete credentials") }
+        }
+        for version in [3, 4] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("sync-state.json");
+            let bytes = serde_json::to_vec(&serde_json::json!({"version": version, "account": {"chain_id": "future-account"}, "records": {"unreadable": "retained"}})).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let error = state_v2::load(&path).unwrap_err();
+            let (message, blocked) = unreadable_state_outcome(&path, 1234, &error);
+            assert!(blocked.is_some(), "newer local formats cannot be replaced by a fresh v2 state");
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "no unreadable archive may be created");
+            let start = startup(Err(AppError::Other(message)), &NoCredentials, "Old client").unwrap();
+            assert!(start.keys.is_none() && start.legacy.is_none() && !start.save_now && !start.swap_pending);
+        }
+    }
+
+    #[test]
     fn an_unreadable_state_file_is_set_aside_instead_of_overwritten() {
         // 只用暫存目錄,絕不碰真正的 app data。
         let dir = tempfile::tempdir().unwrap();
@@ -1023,6 +1171,141 @@ mod tests {
         assert_eq!(pauses, 3);
     }
 
+    fn startup_host(alias: &str) -> crate::sync::records_v3::HostPayload {
+        serde_json::from_value(serde_json::json!({
+            "schema": 2, "alias": alias, "hostname": "startup.invalid", "port": 22,
+            "user": "fixture", "auth": "password", "key_id": null, "jump": [],
+            "keepalive_secs": 30, "keepalive_max_missed": 3, "connect_timeout_secs": 15,
+            "host_key": null, "tags": [], "notes": "", "imported": null
+        }))
+        .unwrap()
+    }
+
+    // The previous owner writes while the real OS lock is held; no timing sleeps or credentials.
+    fn startup_after_holder_write(initial: Option<Vec<u8>>) -> crate::sync::testkit::TestDevice {
+        use crate::sync::testkit::{TestClock, TestDevice};
+        use crate::sync::{
+            record_repository as repo, record_runtime as runtime, records_v3::HostScope,
+        };
+        let relay = crate::sync::fake_relay::FakeRelay::new();
+        let device = TestDevice::new("a", &relay, &TestClock::new());
+        let path = device.env().state_path;
+        let runtime::StartupProbe::Records {
+            state: mut latest, ..
+        } = runtime::probe_startup(&path, "holder-final")
+        else {
+            panic!("temporary missing state")
+        };
+        if let Some(bytes) = initial {
+            if let Ok(crate::sync::records_v3::DecodedState::V3(previous)) =
+                crate::sync::records_v3::decode_state(std::str::from_utf8(&bytes).unwrap())
+            {
+                latest.device_id = previous.device_id;
+            }
+            fsutil::atomic_write(&path, &bytes, 0o600).unwrap();
+        }
+        let latest = repo::create_host(
+            &latest,
+            "0000000000000001",
+            HostScope::Local,
+            startup_host("holder-final"),
+            300,
+        )
+        .unwrap();
+        let root = path.parent().unwrap();
+        let old_process = acquire_engine_lock(root).unwrap();
+        let (probe, lock) = startup_probe_with_lock(
+            || runtime::probe_startup(&path, "contender"),
+            || {
+                acquire_engine_lock_with(root, 2, || {
+                    runtime::save_active(&path, &latest).unwrap();
+                    old_process.unlock().unwrap();
+                })
+            },
+        );
+        let _lock = lock.expect("the contender owns the lock after the holder's final save");
+        runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
+        assert_eq!(
+            device.runtime.core.lock().unwrap().format,
+            runtime::RuntimeFormat::Records,
+            "a completed cutover must select records mode"
+        );
+        runtime::mutate_records(&device.env(), |selected| {
+            repo::create_host(
+                selected,
+                "0000000000000002",
+                HostScope::Local,
+                startup_host("first-save"),
+                400,
+            )
+            .map_err(|error| AppError::Other(error.to_string()))
+        })
+        .unwrap();
+        let runtime::StartupProbe::Records {
+            state: saved,
+            fresh: false,
+        } = runtime::probe_startup(&path, "unused")
+        else {
+            panic!("persisted records")
+        };
+        assert_eq!(
+            saved.device_id, latest.device_id,
+            "do not persist a speculative contender identity"
+        );
+        assert_eq!(
+            repo::get_host(&saved, "0000000000000001")
+                .unwrap()
+                .host
+                .payload
+                .alias,
+            "holder-final",
+            "first save must retain the previous owner's final host"
+        );
+        assert_eq!(saved.device_name, "holder-final");
+        assert_eq!(
+            repo::get_host(&saved, "0000000000000002")
+                .unwrap()
+                .host
+                .payload
+                .alias,
+            "first-save"
+        );
+        device
+    }
+
+    #[test]
+    fn startup_lock_wait_retains_latest_records_through_first_save() {
+        use crate::sync::record_runtime::{probe_startup, StartupProbe};
+        let temp = tempfile::tempdir().unwrap();
+        let StartupProbe::Records { mut state, .. } =
+            probe_startup(&temp.path().join("missing"), "stale")
+        else {
+            panic!("records")
+        };
+        state.device_id = "d".repeat(32);
+        let state = crate::sync::record_repository::create_host(
+            &state,
+            "0000000000000001",
+            crate::sync::records_v3::HostScope::Local,
+            startup_host("stale"),
+            100,
+        )
+        .unwrap();
+        startup_after_holder_write(Some(serde_json::to_vec(&state).unwrap()));
+    }
+
+    #[test]
+    fn startup_lock_wait_recognizes_legacy_to_records_cutover() {
+        startup_after_holder_write(Some(
+            serde_json::to_vec(&SyncStateV2::fresh("legacy").unwrap()).unwrap(),
+        ));
+    }
+
+    #[test]
+    fn startup_lock_wait_retains_newly_created_state_instead_of_speculative_identity() {
+        startup_after_holder_write(None);
+    }
+
     #[test]
     fn a_sync_lock_that_cannot_be_opened_reports_the_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -1033,5 +1316,29 @@ mod tests {
         assert!(message.starts_with("sync is off in this SSHelter process: the sync lock could not be taken ("), "got: {message}");
         assert!(message.ends_with("); restart SSHelter to retry"), "got: {message}");
         assert_eq!(acquire_engine_lock(&not_a_dir).unwrap_err(), message);
+    }
+}
+
+/// Startup must not unlock the OS credential store merely because an MCP adapter started the host.
+fn read_startup_account_keys(records:&crate::sync::records_v3::SyncStateV3,source:&dyn Keychain,background:bool)->Result<Option<crate::sync::crypto::ChainKeys>,AppError>{
+    let noninteractive=crate::sync::env::NonInteractiveKeychain(source);
+    crate::sync::record_runtime::read_account_keys(records,if background{&noninteractive}else{source})
+}
+#[cfg(test)]
+mod noninteractive_startup_tests {
+    use super::*;
+    struct Locked;
+    impl Keychain for Locked {
+        fn get(&self,_:&str)->Result<Option<String>,AppError>{panic!("headless startup must not invoke interactive credential reads")}
+        fn set(&self,_:&str,_:&str)->Result<(),AppError>{panic!()}
+        fn delete(&self,_:&str)->Result<(),AppError>{panic!()}
+    }
+    #[test]
+    fn hidden_host_startup_account_and_vault_reads_fail_closed_without_os_prompts(){
+        let mut records:crate::sync::records_v3::SyncStateV3=serde_json::from_value(serde_json::json!({"version":3,"device_id":"a".repeat(32),"device_name":"fixture","relay_url":"http://127.0.0.1:8787","account":null,"spaces":{},"local":{"hosts":{},"keys":{}},"rotation":null,"relay_features":null,"legacy_v1_backup":null,"phrase_cleanup_pending":false,"migration_gate":null,"shared_writes_blocked":false,"pending_account":null,"notices":[],"last_sync_ms":null,"last_error":null})).unwrap();
+        let phrase=crate::sync::crypto::generate_mnemonic().unwrap();let keys=crate::sync::crypto::derive_account(&phrase).unwrap();records.account=Some(crate::sync::state_v2::AccountState::new(&keys.chain_id));
+        assert!(read_startup_account_keys(&records,&Locked,true).is_err());
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("vault.json");let bytes=br#"{"version":2,"key_account":"vault:key:0123456789abcdef","entries":{"slot":{"nonce":"x","ciphertext":"x"}}}"#;std::fs::write(&path,bytes).unwrap();
+        assert!(crate::vault::store::read_vault(&path,&crate::sync::env::NonInteractiveKeychain(&Locked)).is_err());assert_eq!(std::fs::read(path).unwrap(),bytes);
     }
 }

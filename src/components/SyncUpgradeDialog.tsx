@@ -1,9 +1,10 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useState } from "react";
 
 import { useDismissNotice, useSyncOverview } from "@/lib/sync";
 import { upgradeExplanation, upgradeNotice } from "@/lib/sync-events";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /**
  * The one-time explanation after this computer moved from v1 sync to spaces
@@ -32,12 +33,14 @@ export function SyncUpgradeDialog() {
           <DialogTitle>Sync was upgraded</DialogTitle>
           <DialogDescription>Sync now keeps hosts in spaces: groups of hosts that each computer chooses whether to sync.</DialogDescription>
         </DialogHeader>
+      <TaskDialogBody>
         <ul className="list-disc space-y-1.5 pl-5 text-sm">
           {upgradeExplanation(found.notice).map((line) => (
             <li key={line}>{line}</li>
           ))}
         </ul>
-        <DialogFooter>
+        </TaskDialogBody>
+      <DialogFooter>
           <Button type="button" onClick={close}>
             Got it
           </Button>

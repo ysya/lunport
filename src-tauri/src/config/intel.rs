@@ -19,16 +19,27 @@ use crate::error::AppError;
 /// Run `ssh -G [-F config_path] <alias>` and parse the resolved "keyword value" lines.
 /// `alias` MUST be pre-validated by the caller. `config_path` lets tests point at a temp config
 /// (and the live command passes the loaded main file's path so resolution matches what the user
-/// sees). `ssh -G` does NOT connect — pure resolution.
+/// sees). `ssh -G` does not connect, but may execute Match exec. Development refuses before spawning.
 pub fn effective_config(
     alias: &str,
     config_path: Option<&Path>,
 ) -> Result<Vec<(String, String)>, AppError> {
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(|message| AppError::Other(message.into()))?;
+    effective_config_process(alias, config_path)
+}
+
+/// Tests may exercise Production semantics only with an explicit temporary config.
+#[cfg(test)]
+pub(crate) fn effective_config_in_fixture(alias: &str, path: &Path) -> Result<Vec<(String, String)>, AppError> {
+    effective_config_process(alias, Some(path))
+}
+
+fn effective_config_process(alias: &str, config_path: Option<&Path>) -> Result<Vec<(String, String)>, AppError> {
     let mut cmd = crate::process::background_command("ssh");
     if let Some(path) = config_path {
         cmd.arg("-F").arg(path);
     }
-    cmd.arg("-G").arg(alias);
+    cmd.arg("-G").arg("--").arg(alias);
 
     let output = match crate::process::output(&mut cmd) {
         Ok(o) => o,
@@ -463,6 +474,19 @@ mod tests {
         (doc, dir)
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn development_effective_config_refuses_before_match_exec() {
+        if crate::app_profile::CURRENT != crate::app_profile::AppProfile::Development { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("executed");
+        let config = dir.path().join("config");
+        std::fs::write(&config, format!("Match exec \"touch {}\"\n HostName 127.0.0.1\n", marker.display())).unwrap();
+        let error = effective_config("fixture", Some(&config)).unwrap_err();
+        assert!(error.to_string().contains("Development"));
+        assert!(!marker.exists(), "even config evaluation may execute user commands");
+    }
+
     // ── (a) effective_config ──────────────────────────────────────────────────
     #[test]
     fn effective_config_resolves_keywords() {
@@ -470,7 +494,7 @@ mod tests {
         let path = dir.path().join("config");
         std::fs::write(&path, "Host probe\n HostName 127.0.0.1\n User x\n Port 2200\n").unwrap();
 
-        let result = match effective_config("probe", Some(&path)) {
+        let result = match effective_config_in_fixture("probe", &path) {
             Ok(r) => r,
             Err(AppError::NotFound(m)) if m == "ssh not found" => {
                 eprintln!("ssh not found — skipping effective_config assertions");

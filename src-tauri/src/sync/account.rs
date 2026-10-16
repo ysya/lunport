@@ -68,6 +68,12 @@ pub fn saves_allowed(env: &SyncEnv) -> Result<(), AppError> {
     if core.legacy.is_some() {
         return Err(AppError::Other(crate::sync::runtime::UPGRADING_MESSAGE.to_string()));
     }
+    if let Some(state) = core.state.as_ref() {
+        format_writes_allowed(state)?;
+    }
+    drop(core);
+    check_local_write_paths(env)?;
+    if let Some(doc) = env.doc.lock().unwrap().as_ref() { check_doc_write_paths(doc)?; }
     Ok(())
 }
 
@@ -86,6 +92,29 @@ fn config_loaded(env: &SyncEnv) -> Result<(), AppError> {
     } else {
         Err(AppError::Other(NO_CONFIG_MESSAGE.to_string()))
     }
+}
+
+/// Validate the complete local write set before external side effects.
+pub(crate) fn check_local_write_paths(env: &SyncEnv) -> Result<(), AppError> {
+    crate::fsutil::check_write(&env.state_path)?;
+    crate::fsutil::check_write(&crate::vault::store::vault_path(&env.state_path))?;
+    let doc_lock = env.doc.lock().unwrap();
+    if let Some(doc) = doc_lock.as_ref() { crate::config::include::validate_doc_write_boundaries(doc)?; }
+    Ok(())
+}
+
+pub(crate) fn check_doc_write_paths(doc: &SshConfigDoc) -> Result<(), AppError> {
+    crate::config::include::validate_doc_write_boundaries(doc)?;
+    for file in &doc.files { crate::fsutil::check_backup_write(&file.path)?; }
+    Ok(())
+}
+
+/// Refuse every legacy write once the account's newer format is known.
+pub(crate) fn format_writes_allowed(state: &SyncStateV2) -> Result<(), AppError> {
+    if state.read_only() {
+        return Err(AppError::Other(READ_ONLY_MESSAGE.to_string()));
+    }
+    Ok(())
 }
 
 /// 會改動帳戶結構的動作(space 的建立 / 改名 / 刪除 / 勾選、核准)之前的共同檢查:已加入、有帳戶金鑰、沒有被更換
@@ -252,6 +281,7 @@ pub fn create_account(env: &SyncEnv, device_name: &str) -> Result<String, AppErr
 /// 勾選的 space 檔:先建好檔案、再更新 Include 清單(spec §4.3),然後重載 doc。呼叫端持有 doc 鎖、不持有 core 鎖。
 pub fn add_selected_file(env: &SyncEnv, doc_lock: &mut Option<SshConfigDoc>, file_name: &str) -> Result<(), AppError> {
     let Some(doc) = doc_lock.as_mut() else { return Ok(()) };
+    check_doc_write_paths(doc)?;
     let tokens = {
         let core = env.runtime.core.lock().unwrap();
         let s = core.state.as_ref().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
@@ -297,6 +327,12 @@ pub fn join_account(env: &SyncEnv, words: &str, device_name: &str) -> Result<(),
         Err(e) => return Err(e.into()),
     };
     let AccountMerged { mut section, markers, .. } = merge_account(&AccountState::new(&account_keys.chain_id), &account_keys, &pulled);
+    if section
+        .remote_schema_version
+        .is_some_and(|version| version > crate::sync::record::ACCOUNT_SCHEMA_VERSION)
+    {
+        return Err(AppError::Other(READ_ONLY_MESSAGE.to_string()));
+    }
     if let Some(marker) = markers.first() {
         return Err(AppError::Other(format!(
             "this sync code was changed on {}; enter the new sync code",
@@ -329,6 +365,8 @@ pub(crate) fn keep_files_local(env: &SyncEnv, doc_lock: &mut Option<SshConfigDoc
         *doc_lock = Some(env.load_doc(&main)?);
     }
     let doc = doc_lock.as_mut().expect("loaded above");
+    check_doc_write_paths(doc)?;
+    for file in files { crate::fsutil::check_write(file)?; }
     let mut backed_up = env.backed_up.lock().unwrap();
     let retention = env.retention();
     let result = space_files::keep_files_local(&env.ssh_dir, files, |kept| {
@@ -398,6 +436,10 @@ fn stale_v1_file(ssh_dir: &Path, items: &[Item]) -> Option<PathBuf> {
 /// 備份之後移除一個 ssh 不讀、也沒有人需要的舊檔(`stale_v1_file`)。備份不了就留著不動(同升級:沒有備份絕不移除);移除失敗只留下一個沒有 Include 讀它的檔案,
 /// 不影響離開 —— 兩種都只記到 stderr。
 fn drop_stale_file(path: &Path) {
+    if let Err(e) = crate::fsutil::check_write(path) {
+        eprintln!("[sync] a stale v1 file was left in place: {e}");
+        return;
+    }
     if let Err(e) = crate::sync::upgrade::back_up_first(path) {
         eprintln!("[sync] a stale v1 file was left in place: {e}");
         return;
@@ -566,6 +608,39 @@ pub fn leave_account(env: &SyncEnv, delete_remote: bool) -> Result<(), AppError>
     if let Some(hook) = BEFORE_LEAVE.with(|h| h.borrow_mut().take()) {
         hook();
     }
+    let (generation, initial, keys) = {
+        let core = env.runtime.core.lock().unwrap();
+        (
+            core.generation,
+            core.state.clone(),
+            core.account_keys.clone(),
+        )
+    };
+    check_local_write_paths(env)?;
+    if let Some(doc) = env.doc.lock().unwrap().as_ref() { check_doc_write_paths(doc)?; }
+    if let Some(state) = initial.as_ref() {
+        crate::fsutil::check_write(&space_files::local_dir(&env.ssh_dir))?;
+        for space in state.spaces.values().filter(|space| space.selected) {
+            let source = space_files::space_file_path(&env.ssh_dir, &space.file_name)?;
+            crate::fsutil::check_write(&source)?;
+            crate::fsutil::check_write(&space_files::local_dir(&env.ssh_dir).join(&space.file_name))?;
+        }
+        format_writes_allowed(state)?;
+        // Authenticated deletion must verify the remote gate before canceling rotation or moving files.
+        if delete_remote && state.joined() && state.frozen().is_none() {
+            let keys = keys
+                .as_ref()
+                .ok_or_else(|| AppError::Other(NO_KEYS_MESSAGE.to_string()))?;
+            let relay = env.relay(&state.relay_url)?;
+            match relay.pull(&keys.chain_id, &keys.auth_token, 0) {
+                Ok(pulled) if crate::sync::round::observe_account_format(env, generation, state, keys, &pulled)? => {
+                    return Err(AppError::Other(READ_ONLY_MESSAGE.to_string()));
+                }
+                Ok(_) | Err(RelayError::NotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     // 暫存的新同步碼還找不找得回來:keychain 的讀取可能跳出系統的授權視窗,所以在拿鎖之前讀。更換同步碼只能由持有 lifecycle 鎖的命令開始、離開也全程持有它,
     // 所以這裡看不到更換,拿了鎖之後也不會冒出來;只有背景執行緒會推進或讓出一個已經存在的更換。
     let new_code_gone = match snapshot(env).and_then(|s| s.rotation) {
@@ -581,6 +656,9 @@ pub fn leave_account(env: &SyncEnv, delete_remote: bool) -> Result<(), AppError>
         let mut doc_lock = env.doc.lock().unwrap();
         let (abandon, verdict) = {
             let mut core = env.runtime.core.lock().unwrap();
+            if let Some(state) = core.state.as_ref() {
+                format_writes_allowed(state)?;
+            }
             let abandon = core.save_blocked.is_none() && core.legacy.is_some();
             let verdict = if core.save_blocked.is_none() && core.legacy.is_none() {
                 decide_rotation(&mut core, &env.state_path, new_code_gone)
@@ -642,6 +720,9 @@ pub fn leave_account(env: &SyncEnv, delete_remote: bool) -> Result<(), AppError>
     if let Some(hook) = AFTER_ROTATION_DECISION.with(|h| h.borrow_mut().take()) {
         hook();
     }
+    if let Some(state) = snapshot(env) {
+        format_writes_allowed(&state)?;
+    }
     if cancelled_change {
         // 取消的更換暫存的新同步碼不再有用(同 `cancel_rotation`);離開之後面失敗,也不留著它。
         let _ = env.keychain.delete(NEXT_MNEMONIC_ACCOUNT);
@@ -672,6 +753,9 @@ pub fn leave_account(env: &SyncEnv, delete_remote: bool) -> Result<(), AppError>
             chains.extend(account.chain_deletes.iter().filter_map(|sealed| queued_chain_keys(sealed, &keys)));
             chains.push(keys.clone());
             for chain in &chains {
+                if let Some(state) = snapshot(env) {
+                    format_writes_allowed(&state)?;
+                }
                 // 每刪一條之前都再看一次:刪的期間,同步輪次可能剛拉到更換標記、記下 `frozen` —— 之後的都不刪(標記在最後才刪的
                 // 帳戶 chain 上;舊的 space chain 也許還要讓更換的那一台複製)。
                 if frozen_now() {
@@ -690,12 +774,14 @@ pub fn leave_account(env: &SyncEnv, delete_remote: bool) -> Result<(), AppError>
         let files = {
             let core = env.runtime.core.lock().unwrap();
             match core.state.as_ref() {
-                Some(state) => state
+                Some(state) => {
+                    format_writes_allowed(state)?;
+                    state
                     .spaces
                     .values()
                     .filter(|sp| sp.selected)
                     .map(|sp| space_files::space_file_path(&env.ssh_dir, &sp.file_name))
-                    .collect::<Result<Vec<_>, _>>()?,
+                    .collect::<Result<Vec<_>, _>>()?}
                 None => Vec::new(),
             }
         };
@@ -925,6 +1011,173 @@ mod tests {
         *a.doc.lock().unwrap() = None;
         assert_eq!(create_account(&a.env(), "A").unwrap_err().to_string(), NO_CONFIG_MESSAGE);
         assert!(a.keychain.entry(MNEMONIC_ACCOUNT).is_none(), "nothing reached the keychain");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_account_creation_checks_state_path_before_relay_or_keychain() {
+        let (relay, clock) = (FakeRelay::new(), TestClock::new());
+        let a = TestDevice::new("fresh", &relay, &clock);
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("production-state.json");
+        std::fs::write(&target, b"keep").unwrap();
+        let state_path = a.env().state_path;
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &state_path).unwrap();
+        let before = a.state();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: a.ssh_dir().parent().unwrap().to_path_buf() }, || {
+            assert!(create_account(&a.env(), "Fresh").is_err());
+        });
+        assert_eq!(a.state(), before);
+        assert!(a.keychain.entry(MNEMONIC_ACCOUNT).is_none());
+        assert!(relay.calls().is_empty());
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn leaving_a_newer_format_account_preserves_files_keychain_and_chains() {
+        for delete_remote in [false, true] {
+            let (relay, _clock, a, _b, words, personal) = crate::sync::round::tests::pair();
+            a.save_in_app(&a.space_path(&personal), "Host mine\n");
+            a.runtime
+                .core
+                .lock()
+                .unwrap()
+                .state
+                .as_mut()
+                .unwrap()
+                .account
+                .as_mut()
+                .unwrap()
+                .remote_schema_version = Some(3);
+            let before = a.state();
+            let main = a.main_config();
+            let path = a.space_path(&personal);
+            relay.clear_calls();
+            assert_eq!(
+                leave_account(&a.env(), delete_remote)
+                    .unwrap_err()
+                    .to_string(),
+                READ_ONLY_MESSAGE
+            );
+            assert_eq!(a.state(), before);
+            assert_eq!(a.main_config(), main);
+            assert_eq!(a.read(&path), "Host mine\n");
+            assert_eq!(
+                a.keychain.entry(MNEMONIC_ACCOUNT).as_deref(),
+                Some(words.as_str())
+            );
+            assert!(relay.calls().is_empty());
+        }
+    }
+
+    #[test]
+    fn deleting_an_account_checks_remote_format_before_any_local_side_effect() {
+        let (relay, _clock, a, _b, words, personal) = crate::sync::round::tests::pair();
+        crate::sync::round::tests::publish_newer_account(&relay, &a);
+        let main = a.main_config();
+        let path = a.space_path(&personal);
+        let text = a.read(&path);
+        let mut before = a.state();
+        relay.clear_calls();
+        assert_eq!(
+            leave_account(&a.env(), true).unwrap_err().to_string(),
+            READ_ONLY_MESSAGE
+        );
+        before.account.as_mut().unwrap().remote_schema_version = Some(3);
+        before.last_error = Some(READ_ONLY_MESSAGE.to_string());
+        assert_eq!(a.state(), before);
+        assert_eq!(a.main_config(), main);
+        assert_eq!(a.read(&path), text);
+        assert_eq!(
+            a.keychain.entry(MNEMONIC_ACCOUNT).as_deref(),
+            Some(words.as_str())
+        );
+        assert!(relay.exists(&personal));
+        assert!(relay.exists(&before.account.as_ref().unwrap().chain_id));
+        assert_eq!(
+            relay.calls(),
+            vec![format!(
+                "pull:{}",
+                &before.account.as_ref().unwrap().chain_id[..8]
+            )]
+        );
+    }
+
+    #[test]
+    fn deleting_an_account_aborts_intact_when_format_cannot_be_checked() {
+        let (relay, _clock, a, _b, words, personal) = crate::sync::round::tests::pair();
+        let main = a.main_config();
+        let path = a.space_path(&personal);
+        let before = a.state();
+        relay.set_offline(true);
+        relay.clear_calls();
+        assert!(leave_account(&a.env(), true).is_err());
+        assert_eq!(a.state(), before);
+        assert_eq!(a.main_config(), main);
+        assert!(path.exists());
+        assert_eq!(
+            a.keychain.entry(MNEMONIC_ACCOUNT).as_deref(),
+            Some(words.as_str())
+        );
+        assert!(
+            !relay.calls().iter().any(|c| c.starts_with("delete:")),
+            "unverified deletion cannot be attempted"
+        );
+    }
+
+    #[test]
+    fn leaving_rechecks_the_format_after_its_initial_rotation_decision() {
+        let (_relay, _clock, a, _b, words, personal) = crate::sync::round::tests::pair();
+        let a = std::sync::Arc::new(a);
+        let updater = std::sync::Arc::clone(&a);
+        AFTER_ROTATION_DECISION.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                updater
+                    .runtime
+                    .core
+                    .lock()
+                    .unwrap()
+                    .state
+                    .as_mut()
+                    .unwrap()
+                    .account
+                    .as_mut()
+                    .unwrap()
+                    .remote_schema_version = Some(3);
+            }))
+        });
+        let path = a.space_path(&personal);
+        let main = a.main_config();
+        assert_eq!(
+            leave_account(&a.env(), false).unwrap_err().to_string(),
+            READ_ONLY_MESSAGE
+        );
+        assert!(path.exists());
+        assert_eq!(a.main_config(), main);
+        assert!(a.state().joined());
+        assert_eq!(
+            a.keychain.entry(MNEMONIC_ACCOUNT).as_deref(),
+            Some(words.as_str())
+        );
+    }
+
+    #[test]
+    fn joining_a_newer_format_account_changes_no_local_data() {
+        let (relay, clock, a, _b, words, _personal) = crate::sync::round::tests::pair();
+        crate::sync::round::tests::publish_newer_account(&relay, &a);
+        let newcomer = TestDevice::new("new", &relay, &clock);
+        let before = newcomer.state();
+        let main = newcomer.main_config();
+        assert_eq!(
+            join_account(&newcomer.env(), &words, "New")
+                .unwrap_err()
+                .to_string(),
+            READ_ONLY_MESSAGE
+        );
+        assert_eq!(newcomer.state(), before);
+        assert_eq!(newcomer.main_config(), main);
+        assert!(newcomer.keychain.entry(MNEMONIC_ACCOUNT).is_none());
     }
 
     #[test]

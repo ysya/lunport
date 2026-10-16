@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useState } from "react";
 import {
   CheckCircle2,
@@ -37,7 +38,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
-  DialogContent,
+
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -293,10 +294,12 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
             yet. Continue only if this fingerprint matches the server&rsquo;s.
           </DialogDescription>
         </DialogHeader>
+      <TaskDialogBody>
         <div className="rounded-md border bg-muted/40 p-3 font-mono text-xs break-all">
           {stage.fingerprint}
         </div>
-        <DialogFooter>
+        </TaskDialogBody>
+      <DialogFooter>
           <Button
             type="button"
             variant="outline"
@@ -344,6 +347,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
           app, no terminal needed.
         </DialogDescription>
       </DialogHeader>
+      <TaskDialogBody>
 
       <div className="space-y-4">
         {askpassBlocked && (
@@ -472,6 +476,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
         </div>
       </div>
 
+      </TaskDialogBody>
       <DialogFooter className="items-center gap-2 sm:justify-between">
         <p className="text-xs text-muted-foreground">
           ProxyJump hosts that also need a password are not supported.
@@ -526,11 +531,13 @@ function ResultStage({
             sent.
           </DialogDescription>
         </DialogHeader>
+      <TaskDialogBody>
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs break-all">
           {view.fingerprint}
         </div>
         {/* Deliberately no way to continue past a mismatch. */}
-        <DialogFooter>
+        </TaskDialogBody>
+      <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>
             Close
           </Button>
@@ -549,10 +556,12 @@ function ResultStage({
           </DialogTitle>
           <DialogDescription>{view.message}</DialogDescription>
         </DialogHeader>
+      <TaskDialogBody>
         <p className="text-sm text-muted-foreground">
           Try the terminal-based deploy from the Keychain instead.
         </p>
-        <DialogFooter>
+        </TaskDialogBody>
+      <DialogFooter>
           <Button type="button" variant="outline" onClick={onRetry}>
             Back
           </Button>
@@ -580,6 +589,7 @@ function ResultStage({
         </DialogTitle>
         {detail && <DialogDescription>{detail}</DialogDescription>}
       </DialogHeader>
+      <TaskDialogBody>
       {identityNote && (
         <p className="text-xs text-muted-foreground">{identityNote}</p>
       )}
@@ -602,6 +612,7 @@ function ResultStage({
           </Button>
         </div>
       )}
+      </TaskDialogBody>
       <DialogFooter>
         {text.tone === "err" && (
           <Button type="button" variant="outline" onClick={onRetry}>

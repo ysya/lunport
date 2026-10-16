@@ -72,9 +72,10 @@ describe("pointing a host at one key", () => {
 describe("the launch hint's button", () => {
   it("turns on launch at login, shows the menu bar icon and keeps SSHelter running there", async () => {
     useSettingsStore.setState({ trayVisible: false });
-    const calls = stubBackend(async () => undefined);
+    const calls = stubBackend(async (command) => command === "app_is_development" ? false : undefined);
     await renderHook(new QueryClient(), useTurnOnLaunchAtLogin).mutateAsync();
     expect(calls).toEqual([
+      ["app_is_development", {}],
       ["plugin:autostart|enable", {}],
       ["tray_set_visible", { visible: true }],
       ["app_set_close_to_tray", { enabled: true }],
@@ -84,11 +85,21 @@ describe("the launch hint's button", () => {
 
   it("does not hide the window into the menu bar when the icon can't be shown: nothing would bring the window back", async () => {
     const calls = stubBackend(async (cmd) => {
+      if (cmd === "app_is_development") return false;
       if (cmd === "tray_set_visible") throw "no tray";
     });
     await expect(renderHook(new QueryClient(), useTurnOnLaunchAtLogin).mutateAsync()).rejects.toBe("no tray");
-    expect(calls.map(([cmd]) => cmd)).toEqual(["plugin:autostart|enable", "tray_set_visible"]);
+    expect(calls.map(([cmd]) => cmd)).toEqual(["app_is_development", "plugin:autostart|enable", "tray_set_visible"]);
     expect(useSettingsStore.getState().closeToTray).toBe(false);
     expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Could not turn on launch at login", description: "no tray" })]);
+  });
+});
+
+describe("development profile integrations", () => {
+  it("refuses launch at login before any OS or tray change", async () => {
+    const calls = stubBackend(async (command) => command === "app_is_development" ? true : undefined);
+    const mutation = renderHook(new QueryClient(), useTurnOnLaunchAtLogin);
+    await expect(mutation.mutateAsync()).rejects.toMatch(/development/i);
+    expect(calls.map(([command]) => command)).toEqual(["app_is_development"]);
   });
 });

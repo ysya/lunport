@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useState } from "react";
 import { FilePlus2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -13,7 +14,7 @@ import { useUiStore, type NewFileIntent } from "@/stores/ui";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogContent,
+
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -142,6 +143,7 @@ function NewFileFlow({
           <span className="font-mono">Include</span>.
         </DialogDescription>
       </DialogHeader>
+      <TaskDialogBody>
 
       <div className="space-y-3">
         <div className="space-y-1.5">
@@ -195,6 +197,7 @@ function NewFileFlow({
         )}
       </div>
 
+      </TaskDialogBody>
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onClose}>
           Cancel

@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
@@ -15,7 +16,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { syncConfirmText } from "@/lib/key-slots";
@@ -88,9 +89,11 @@ export function PickKeyDialog({ slot, onClose }: { slot: SyncKeySlotView | null;
             Hosts that use {name} will use the key you pick, on this computer only. SSHelter keeps a copy of it; your file stays where it is.
           </DialogDescription>
         </DialogHeader>
+      <TaskDialogBody>
         {note && <p className="text-sm text-muted-foreground">{note}</p>}
         <KeyChoices keys={keys.data} loading={keys.isLoading} busy={pick.isPending} onChoose={choose} />
-        <DialogFooter>
+        </TaskDialogBody>
+      <DialogFooter>
           <Button type="button" variant="outline" disabled={pick.isPending} onClick={() => void browse()}>
             Browse…
           </Button>
@@ -279,6 +282,7 @@ export function ExportPrivateKeyForm({
         <DialogTitle>Export {revealHidden(name)}?</DialogTitle>
         <DialogDescription>{"Any program can use the exported file without asking, and SSHelter won't keep track of it."}</DialogDescription>
       </DialogHeader>
+      <TaskDialogBody>
       {hasPassphrase === true && <p className="text-sm text-muted-foreground">It stays protected by its passphrase.</p>}
       {hasPassphrase === false && (
         <div className="space-y-3">
@@ -294,6 +298,7 @@ export function ExportPrivateKeyForm({
           )}
         </div>
       )}
+      </TaskDialogBody>
       <DialogFooter>
         <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>
           Cancel

@@ -69,16 +69,18 @@ interface SettingsState {
   /** Root font-size in px (the whole UI is rem-based and scales with it). */
   fontSize: number;
   setFontSize: (px: number) => void;
+  motion: "system" | "reduced";
+  setMotion: (motion: "system" | "reduced") => void;
   /** Show tag chips on sidebar host rows (file grouping only). */
   showHostTags: boolean;
   setShowHostTags: (enabled: boolean) => void;
-  /** alias → last successful connect (epoch ms); drives the ⌘K Recent group. */
+  /** Legacy alias or records:<stable host ID> → last accepted connection launch (epoch ms). */
   recentConnections: Record<string, number>;
   recordConnection: (alias: string) => void;
   /** Check GitHub Releases for a newer build shortly after launch. */
   autoCheckUpdates: boolean;
   setAutoCheckUpdates: (enabled: boolean) => void;
-  /** Update channel: Stable (default) or Beta (prereleases). Read it through `normalizeUpdateChannel`. */
+  /** Update channel (Settings → Updates): Stable (default) or Beta (prereleases). Read it through `normalizeUpdateChannel`. */
   updateChannel: UpdateChannel;
   setUpdateChannel: (channel: UpdateChannel) => void;
   /** Show the menu-bar (tray) icon. Mirrored to the backend via `tray_set_visible`. */
@@ -158,6 +160,8 @@ export const useSettingsStore = create<SettingsState>()(
         }),
       fontSize: DEFAULT_FONT_SIZE,
       setFontSize: (fontSize) => set({ fontSize: clampFontSize(fontSize) }),
+      motion: "system",
+      setMotion: (motion) => set({ motion }),
       showHostTags: true,
       setShowHostTags: (showHostTags) => set({ showHostTags }),
       recentConnections: {},

@@ -16,6 +16,15 @@ use zeroize::Zeroizing;
 
 /// The version of this protocol; `hello` carries it, and the broker refuses another.
 pub const PROTOCOL_VERSION: u32 = 1;
+/// MCP uses version 2; version 1 Connect keeps its original framing.
+pub const MCP_PROTOCOL_VERSION: u32 = 2;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpClientMessage { McpCall { method:String, #[serde(default)] params:serde_json::Value }, Close }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpServerMessage { McpResult { result:Option<serde_json::Value>, error:Option<String> } }
+
 /// A frame whose payload is one JSON message.
 pub const CONTROL: u8 = 1;
 /// A frame whose payload is raw bytes.

@@ -252,9 +252,9 @@ pub fn discover_all(doc: &SshConfigDoc) -> Vec<Suggestion> {
 }
 
 fn read_known_hosts() -> Vec<KnownHostEntry> {
-    let path = match dirs::home_dir() {
-        Some(h) => h.join(".ssh").join("known_hosts"),
-        None => return Vec::new(),
+    let path = match crate::fsutil::home_dir() {
+        Ok(h) => h.join(".ssh").join("known_hosts"),
+        Err(_) => return Vec::new(),
     };
     if !Path::new(&path).exists() {
         return Vec::new();

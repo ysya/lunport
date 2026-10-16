@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useMemo, useState } from "react";
 import { Telescope, FileKey, Network } from "lucide-react";
 
@@ -9,7 +10,8 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogContent,
+  DialogClose,
+  DialogFooter,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -30,7 +32,7 @@ const SOURCE_LABEL: Record<string, string> = {
 export function DiscoverDialog() {
   const [open, setOpen] = useState(false);
   // Lazy: only shell out to discover when the dialog is open.
-  const { data, isLoading, isFetching } = useDiscoverHosts({ enabled: open });
+  const { data, isLoading, isError, refetch } = useDiscoverHosts({ enabled: open });
   const discoverKnownHosts = useSettingsStore((s) => s.discoverKnownHosts);
   const discoverTailscale = useSettingsStore((s) => s.discoverTailscale);
   const allSourcesOff = !discoverKnownHosts && !discoverTailscale;
@@ -80,21 +82,22 @@ export function DiscoverDialog() {
             Tailscale network.
           </DialogDescription>
         </DialogHeader>
+        <TaskDialogBody>
 
         {allSourcesOff ? (
           <p className="py-6 text-center text-sm text-muted-foreground select-none">
-            All discovery sources are disabled. Enable them in Settings → Advanced.
+            All discovery sources are disabled. Enable them in Settings → Discovery & checks.
           </p>
-        ) : isLoading || isFetching ? (
+        ) : isLoading ? (
           <p className="py-6 text-center text-sm text-muted-foreground select-none">
             Scanning…
           </p>
-        ) : suggestions.length === 0 ? (
+        ) : isError ? (<div className="app-task-state" role="alert"><p>Could not discover hosts.</p><Button variant="outline" size="sm" onClick={() => void refetch()}>Retry</Button></div>) : suggestions.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground select-none">
             No candidates found.
           </p>
         ) : (
-          <div className="-mx-1 max-h-[60vh] space-y-4 overflow-y-auto px-1">
+          <div className="-mx-1 space-y-4 overflow-y-auto px-1">
             {[...grouped.entries()].map(([source, list]) => (
               <div key={source}>
                 <span className="section-label flex items-center gap-1.5">
@@ -114,6 +117,8 @@ export function DiscoverDialog() {
             ))}
           </div>
         )}
+              </TaskDialogBody>
+        <DialogFooter><DialogClose asChild><Button variant="outline">Close</Button></DialogClose></DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -136,7 +141,7 @@ function DiscoverRow({ suggestion }: { suggestion: Suggestion }) {
         )}
         <span className="truncate font-mono text-sm">{name}</span>
       </div>
-      <span className="shrink-0 truncate font-mono text-xs text-muted-foreground">
+      <span className="min-w-0 break-all text-right font-mono text-xs text-muted-foreground">
         {host_name}
         {port !== null ? `:${port}` : ""}
       </span>

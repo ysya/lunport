@@ -21,6 +21,7 @@ fn load_recursive(
     visited: &mut HashSet<PathBuf>,
     is_root: bool,
 ) -> Result<(), AppError> {
+    fsutil::check_write(path)?;
     // Canonicalize for cycle detection; fall back to absolute if canonicalize fails (file doesn't
     // exist yet in some edge cases, but we still guard with the raw path).
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -57,6 +58,8 @@ fn load_recursive(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
+
+    validate_include_boundaries(&items, &parent)?;
 
     // Collect Include directives before pushing (so we don't borrow `items` and `files` at once).
     let include_patterns: Vec<String> = items
@@ -100,6 +103,8 @@ fn load_recursive(
                 }
             };
 
+            fsutil::check_write(Path::new(&base_pattern))?;
+
             // Expand wildcards and sort lexically.
             let mut matched_paths: Vec<PathBuf> = match glob::glob(&base_pattern) {
                 Ok(entries) => entries
@@ -125,12 +130,61 @@ fn load_recursive(
 /// `~/.ssh/sshelter/keys/...`):lint 的測試才能在暫存的家目錄裡放一個只有 `.pub` 的插槽,而不碰真正的 `~/.ssh`。
 pub(crate) fn expand_token(token: &str) -> Option<String> {
     #[cfg(test)]
-    if let Some(home) = TEST_HOME.with(|h| h.borrow().clone()) {
-        if let Some(rest) = token.strip_prefix("~/") {
-            return Some(home.join(rest).to_string_lossy().into_owned());
+    let home = TEST_HOME.with(|h| h.borrow().clone()).or_else(|| fsutil::home_dir().ok());
+    #[cfg(not(test))]
+    let home = fsutil::home_dir().ok();
+    shellexpand::full_with_context(
+        token,
+        || home.as_ref().map(|p| p.to_string_lossy()),
+        |name| std::env::var(name).map(Some),
+    ).ok().map(|s| s.into_owned())
+}
+
+pub(crate) fn validate_doc_write_boundaries(doc: &SshConfigDoc) -> Result<(), AppError> {
+    for file in &doc.files {
+        fsutil::check_write(&file.path)?;
+        let parent = file.path.parent().ok_or_else(|| AppError::Other("config has no parent directory".into()))?;
+        validate_include_boundaries(&file.items, parent)?;
+    }
+    Ok(())
+}
+
+/// Editable legacy documents cannot retain an Include that escapes the development profile.
+/// Validate nested directives as well, even when the legacy loader does not follow their scope.
+fn validate_include_boundaries(items: &[Item], parent: &Path) -> Result<(), AppError> {
+    if !fsutil::writes_are_confined() {
+        return Ok(());
+    }
+    for item in items {
+        match item {
+            Item::Directive(d) if d.key == "include" && !d.serializes_as_comment() => {
+                for token in d.value.split_whitespace() {
+                    if token.contains(['\'', '"', '%']) || (token.starts_with('~') && token != "~" && !token.starts_with("~/")) {
+                        return Err(AppError::Other("unsupported Include path in the development profile".into()));
+                    }
+                    let expanded = expand_token(token).ok_or_else(|| AppError::Other("cannot expand Include path in the development profile".into()))?;
+                    let path = Path::new(&expanded);
+                    let pattern = if path.is_absolute() { path.to_path_buf() } else { parent.join(path) };
+                    fsutil::check_write(&pattern)?;
+                    // A wildcard directory may resolve outside even when its final file glob is empty.
+                    for prefix in pattern.ancestors() {
+                        if prefix != pattern && !prefix.to_string_lossy().contains(['*', '?', '[']) {
+                            break;
+                        }
+                        let entries = glob::glob(&prefix.to_string_lossy()).map_err(|_| AppError::Other("invalid Include pattern in the development profile".into()))?;
+                        for entry in entries {
+                            let path = entry.map_err(|e| AppError::Other(format!("cannot check Include path: {e}")))?;
+                            fsutil::check_write(&path)?;
+                        }
+                    }
+                }
+            }
+            Item::Host(h) => validate_include_boundaries(&h.body, parent)?,
+            Item::Match(m) => validate_include_boundaries(&m.body, parent)?,
+            _ => {}
         }
     }
-    shellexpand::full(token).ok().map(|s| s.into_owned())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -170,6 +224,60 @@ pub fn find_host_file_index(doc: &SshConfigDoc, alias: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn boundary_unmatched_include_checks_redirected_wildcard_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        let main = root.join("config");
+        std::fs::write(&main, "Include link*/*.config\n").unwrap();
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(load_doc(&main).is_err());
+        });
+        assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn boundary_legacy_loader_rejects_external_main_and_include_forms() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        std::fs::create_dir(&root).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, "Host external\n").unwrap();
+        let main = root.join("config");
+        let policy = crate::write_policy::WritePolicy::Confined { root: root.clone() };
+        fsutil::with_test_write_policy(policy.clone(), || assert!(load_doc(&outside).is_err()));
+        for token in [outside.display().to_string(), "../outside".into(), "${HOME}/.ssh/config".into(), "~/outside".into(), format!("{}/*", temp.path().join("missing").display())] {
+            std::fs::write(&main, format!("Include {token}\nHost local\n")).unwrap();
+            with_test_home(temp.path(), || fsutil::with_test_write_policy(policy.clone(), || {
+                assert!(load_doc(&main).is_err(), "external token accepted: {token}");
+            }));
+        }
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "Host external\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_legacy_loader_rejects_redirected_and_dangling_includes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        std::fs::create_dir(&root).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, "Host external\n").unwrap();
+        for (name, target) in [("linked", outside), ("dangling", temp.path().join("missing"))] {
+            std::os::unix::fs::symlink(target, root.join(name)).unwrap();
+            let main = root.join("config");
+            std::fs::write(&main, format!("Include {name}\n")).unwrap();
+            fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: root.clone() }, || {
+                assert!(load_doc(&main).is_err(), "redirected token accepted: {name}");
+            });
+        }
+    }
+
 
     const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
 
@@ -346,19 +454,20 @@ mod tests {
     #[test]
     fn with_test_home_restores_the_previous_home_even_when_the_closure_panics() {
         let (outer, inner) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let home_of = |dir: &tempfile::TempDir| dir.path().join("x").to_string_lossy().into_owned();
+        let home_of = |dir: &tempfile::TempDir| dir.path().join("x");
+        let expanded_home = || expand_token("~/x").map(PathBuf::from);
         assert!(TEST_HOME.with(|h| h.borrow().is_none()));
         with_test_home(outer.path(), || {
-            assert_eq!(expand_token("~/x"), Some(home_of(&outer)));
+            assert_eq!(expanded_home(), Some(home_of(&outer)));
             // 巢狀:離開內層(包括 panic)之後回到外層的家目錄。
             let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 with_test_home(inner.path(), || {
-                    assert_eq!(expand_token("~/x"), Some(home_of(&inner)));
+                    assert_eq!(expanded_home(), Some(home_of(&inner)));
                     panic!("the closure panics");
                 })
             }));
             assert!(panicked.is_err());
-            assert_eq!(expand_token("~/x"), Some(home_of(&outer)), "the outer home is back after the panic");
+            assert_eq!(expanded_home(), Some(home_of(&outer)), "the outer home is back after the panic");
         });
         assert!(TEST_HOME.with(|h| h.borrow().is_none()), "and nothing is left over after the outermost call");
     }

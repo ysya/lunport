@@ -29,6 +29,20 @@
 //! - `engine`: Tauri 外殼(同步鎖、啟動、背景執行緒、存檔 hook、commands)
 //! - `fake_relay`、`testkit`(只在測試):記憶體假 relay 與測試裝置
 
+pub mod records_v3;
+pub mod record_repository;
+pub mod record_groups;
+pub mod record_library;
+pub mod record_runtime;
+pub mod record_commands;
+pub mod record_merge;
+pub mod record_import;
+pub mod record_keys;
+pub mod record_account;
+pub mod record_round;
+pub mod record_migration;
+pub mod record_leave;
+pub mod record_rotation;
 pub mod account;
 pub mod approval;
 pub mod crypto;

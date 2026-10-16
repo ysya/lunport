@@ -370,6 +370,20 @@ pub fn connect_argv(program: &std::path::Path, alias: &str, pause_on_error: bool
     argv
 }
 
+/// Stable identity survives alias changes and ambiguous aliases.
+pub fn connect_id_argv(program:&std::path::Path,id:&str,pause_on_error:bool)->Vec<String>{
+    let mut argv=vec![program.to_string_lossy().into_owned(),"connect".into()];
+    if pause_on_error { argv.push(crate::cli::PAUSE_ON_ERROR.into()); }
+    argv.extend(["--id".into(),id.into()]);argv
+}
+pub fn launch_for_id(terminal_id:&str,id:&str,new_tab:bool)->Result<LaunchSpec,AppError>{
+    if !crate::sync::records_v3::is_host_id(id){return Err(AppError::Other("invalid host id".into()));}
+    let exe=std::env::current_exe().map_err(AppError::Io)?;
+    #[cfg(windows)]
+    let exe=connect_program(&exe,cfg!(debug_assertions))?;
+    build_launch_command(terminal_id,&connect_id_argv(&exe,id,closes_after_a_failure(terminal_id)),new_tab)
+}
+
 /// Whether the terminal `terminal_id` closes the window, and the reason of a failed connect with it, when the command ends with an error:
 /// the terminals that run the command as the window's program and close it then (iTerm2, as 0.17.0-10 showed; the Linux emulators and an
 /// unknown `$TERMINAL`, which are taken to). Not Terminal, whose `do script` runs the command in the shell of a new window; not cmd, whose
@@ -435,6 +449,7 @@ pub fn connect_launch(
 ) -> Result<(), AppError> {
     {
         let doc_lock = state.doc.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync)?;
         let doc = doc_lock
             .as_ref()
             .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
@@ -465,6 +480,11 @@ mod tests {
     /// The connect command reaches every terminal as it is: terminals that hand it to a shell (AppleScript's `do script`,
     /// xfce4-terminal) get the executable's path quoted when it has a space in it; the ones that run a program (the other Linux terminals,
     /// wt, cmd) get the argv untouched.
+    #[test]
+    fn a_record_launch_uses_id_even_when_an_alias_is_ambiguous_or_renamed(){
+        let id="0123456789abcdef";
+        for pause in [false,true]{let argv=connect_id_argv(std::path::Path::new("/app/SSHelter"),id,pause);let args=&argv[2..];assert_eq!(crate::cli::parse_args(args).unwrap().host,crate::session::protocol::HostQuery::Id(id.into()));}
+    }
     #[test]
     fn the_connect_command_reaches_every_terminal() {
         let argv = connect_argv(std::path::Path::new("/Users/me/My Apps/SSHelter.app/Contents/MacOS/sshelter"), "web", false);

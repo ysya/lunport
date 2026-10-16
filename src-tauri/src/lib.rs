@@ -1,3 +1,5 @@
+pub mod write_policy;
+pub mod app_profile;
 mod agent;
 pub mod askpass;
 pub mod cli;
@@ -6,14 +8,18 @@ mod config;
 mod connect;
 mod deploy;
 mod discover;
+mod diagnostics;
 mod error;
 mod fsutil;
 pub mod host_start;
 mod ipc;
 mod keys;
 mod known_hosts;
+#[cfg(target_os = "macos")]
+pub mod macos_health;
 pub mod mcp;
 mod process;
+mod quick_connect;
 mod secrets;
 mod session;
 mod settings_io;
@@ -34,7 +40,7 @@ use deploy::{
 };
 use keys::{keys_agent_status, keys_deploy, keys_git_ssh_hint, keys_list, keys_read_public};
 use known_hosts::{known_hosts_list, known_hosts_remove};
-use mcp::{mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
+use mcp::{mcp_set_approval_mode, mcp_resolve_request, mcp_set_enabled, mcp_set_host_allowed, mcp_status};
 use session::hostkey_window::{hostkey_pending, hostkey_resolve};
 use settings_io::{settings_export, settings_import};
 use sync::engine::{
@@ -58,6 +64,16 @@ use updater_channel::{updater_check_beta, updater_install_beta};
 #[tauri::command]
 fn app_platform() -> String {
     std::env::consts::OS.to_string()
+}
+
+#[tauri::command]
+fn app_is_development() -> bool {
+    app_profile::CURRENT == app_profile::AppProfile::Development
+}
+
+#[tauri::command]
+fn app_home_dir() -> Result<String, error::AppError> {
+    Ok(fsutil::home_dir()?.to_string_lossy().into_owned())
 }
 
 /// 設定「關閉視窗時收進系統匣（隱藏）而非結束程式」。
@@ -101,11 +117,36 @@ pub fn starts_hidden(value: Option<&std::ffi::OsStr>) -> bool {
 
 /// Show, unminimize and focus the main window.
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        macos_health::request(app, macos_health::Surface::Main);
+    }
+    #[cfg(not(target_os = "macos"))]
+    show_main_window_now(app);
+}
+
+pub(crate) fn show_main_window_now(app: &tauri::AppHandle) {
+    if app.get_webview_window("main").is_none() {
+        let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else { return; };
+        if let Err(error) = tauri::WebviewWindowBuilder::from_config(app, config).and_then(|w| w.build()) {
+            diagnostics::tauri_error("main_window_create_failed", &error);
+            #[cfg(windows)]
+            diagnostics::show_startup_failure();
+            eprintln!("[window] cannot create main window: {error}");
+            return;
+        }
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/// Only native user activation clears the hidden-host credential gate.
+pub(crate) fn show_main_window_by_user(app: &tauri::AppHandle) {
+    app.state::<state::AppState>().background_credentials_only.store(false, std::sync::atomic::Ordering::SeqCst);
+    show_main_window(app);
 }
 
 /// What a second launch does in the running SSHelter. `args` are the second process's
@@ -121,8 +162,13 @@ fn second_launch_shows_window(args: &[String]) -> bool {
 /// its arguments to this instance.
 #[cfg(desktop)]
 fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
+    #[cfg(target_os = "macos")]
+    if args.get(1).is_some_and(|mode| mode == "--window-diagnostics") {
+        macos_health::request(app, macos_health::Surface::Diagnostics);
+        return;
+    }
     if second_launch_shows_window(&args) {
-        show_main_window(app);
+        show_main_window_by_user(app);
     } else {
         mcp::republish_bridge(app);
         session::app::start(app);
@@ -130,18 +176,39 @@ fn on_second_launch(app: &tauri::AppHandle, args: Vec<String>, _cwd: String) {
 }
 
 fn run_app(host: bool, start_hidden: bool) {
+    diagnostics::install();
+    diagnostics::stage(diagnostics::Stage::Context);
+    let context = tauri::generate_context!();
+    // macOS must check CoreAudio before WKWebView. Windows must catch WebView2 creation
+    // errors explicitly: Tauri's automatic Ready-time creation turns them into a panic.
+    #[cfg(any(target_os = "macos", windows))]
+    let context = {
+        let mut context = context;
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+        }
+        context
+    };
+    app_profile::CURRENT.verify_configuration(
+        &context.config().identifier,
+        context.config().product_name.as_deref(),
+    ).expect("SSHelter profile configuration mismatch");
     let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .manage(macos_health::HealthState::default())
+        .on_web_content_process_terminate(macos_health::web_content_terminated)
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "window-diagnostics" {
+                macos_health::request(app, macos_health::Surface::Diagnostics);
+            }
+        });
     // Only one SSHelter runs at a time: a second launch hands over to the running instance and
     // exits during plugin setup, before any window, the MCP bridge (and its runtime file), the
     // sync engine or the SSH agent starts. It must be the first plugin registered.
-    // Release builds only: a debug build (`tauri dev`) has the same identifier, and would hand
-    // over to the installed SSHelter instead of running next to it.
+    // Each build profile has its own identifier and single-instance namespace.
     #[cfg(desktop)]
-    let builder = if cfg!(debug_assertions) {
-        builder
-    } else {
-        builder.plugin(tauri_plugin_single_instance::init(on_second_launch))
-    };
+    let builder = builder.plugin(tauri_plugin_single_instance::init(on_second_launch));
     let mut builder = builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
@@ -151,38 +218,55 @@ fn run_app(host: bool, start_hidden: bool) {
     // Desktop-only plugins (the crates are desktop-target dependencies).
     #[cfg(desktop)]
     {
+        builder = builder.manage(updater_channel::PendingBetaUpdate::default());
+        if app_profile::CURRENT.allows_os_integrations() {
+            builder = builder
+                .plugin(tauri_plugin_updater::Builder::new().build())
+                .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None));
+        }
         builder = builder
-            .plugin(tauri_plugin_updater::Builder::new().build())
-            // Beta 頻道暫存的更新(`PendingBetaUpdate` 只在桌面平台存在,所以在這裡才 manage)。
-            .manage(updater_channel::PendingBetaUpdate::default())
-            // Launch-at-login. macOS uses a LaunchAgent (no AppleScript); no
-            // extra args are passed to the binary on autostart.
-            .plugin(tauri_plugin_autostart::init(
-                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-                None,
-            ))
             // Global quick-connect hotkey; registration is driven from the
             // frontend (`useGlobalHotkey`) via the JS plugin API.
             .plugin(tauri_plugin_global_shortcut::Builder::new().build());
     }
-    builder
+    diagnostics::stage(diagnostics::Stage::Window);
+    let application = builder
         .manage(state::AppState::default())
+        .manage(tray::TrayState::default())
+        .manage(quick_connect::QuickConnect::default())
         .setup(move |app| {
-            // The main window is created hidden (`"visible": false` in tauri.conf.json), so a
-            // hidden start never flashes it. Any other start shows it before anything else
-            // starts, as when it was created visible.
-            if !start_hidden {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.show()?;
-                }
+            diagnostics::stage(diagnostics::Stage::Setup);
+            app.state::<state::AppState>().background_credentials_only.store(host && start_hidden,std::sync::atomic::Ordering::SeqCst);
+            // Publish the initial native tray before any worker can request an update.
+            // A missing/unavailable notification area must not prevent the main UI from opening.
+            diagnostics::stage(diagnostics::Stage::Tray);
+            if let Err(error) = tray::rebuild_tray(app.handle(), &[]) {
+                diagnostics::tauri_error("tray_initialization_failed", &error);
+                eprintln!("[tray] initial menu unavailable: {error}");
             }
-            mcp::initialize(app.handle(), host)?;
+            diagnostics::stage(diagnostics::Stage::Sync);
             sync::engine::initialize(app.handle())?;
+            diagnostics::stage(diagnostics::Stage::Mcp);
+            mcp::initialize(app.handle(), host)?;
             // SSHelter 的 SSH agent(金鑰保管庫 spec §5.1):開不起來只記在 `AgentRuntime::status`,不擋啟動。
-            agent::start(app.handle());
+            if sync::engine::require_legacy(&app.state::<state::AppState>().sync).is_ok() { agent::start(app.handle()); }
             // The session broker that `sshelter connect` talks to (own-ssh spec §4, §7): a failure is recorded, it does not stop the app.
+            diagnostics::stage(diagnostics::Stage::Broker);
             session::app::start(app.handle());
-            tray::rebuild_tray(app.handle(), &[])?;
+            quick_connect::initialize(app.handle());
+            #[cfg(target_os = "macos")]
+            macos_health::install_diagnostics_menu(app.handle())?;
+            if !start_hidden {
+                #[cfg(target_os = "macos")]
+                if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--window-diagnostics")) {
+                    macos_health::request(app.handle(), macos_health::Surface::Diagnostics);
+                    return Ok(());
+                }
+                #[cfg(windows)]
+                diagnostics::stage(diagnostics::Stage::Window);
+                show_main_window(app.handle());
+            }
+            diagnostics::stage(diagnostics::Stage::Ready);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -194,6 +278,10 @@ fn run_app(host: bool, start_hidden: bool) {
                 return;
             }
             // The host key window (own-ssh spec §10): closing it refuses every key it was asking about.
+            if window.label() == session::auth_window::AUTH_WINDOW {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {window.app_handle().state::<state::AppState>().session.auth_questions.deny_all();}
+                return;
+            }
             if window.label() == session::hostkey_window::HOSTKEY_WINDOW {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
                     window.app_handle().state::<state::AppState>().session.host_keys.deny_all();
@@ -221,9 +309,57 @@ fn run_app(host: bool, start_hidden: bool) {
         })
         .invoke_handler(tauri::generate_handler![
             app_platform,
+            diagnostics::app_open_diagnostics,
+            app_is_development,
+            quick_connect::app_set_global_hotkey,
+            quick_connect::app_take_quick_connect,
+            app_home_dir,
             app_set_close_to_tray,
             updater_check_beta,
             updater_install_beta,
+            sync::record_commands::records_status,
+            sync::record_commands::records_group_create,
+            sync::record_commands::records_group_update,
+            sync::record_commands::records_group_delete,
+            sync::record_commands::records_host_create,
+            sync::record_commands::records_host_update,
+            sync::record_commands::records_host_delete,
+            sync::record_commands::records_host_move,
+            sync::record_commands::records_host_group,
+            sync::record_commands::records_sync_now,
+            sync::record_commands::records_use_legacy,
+            sync::record_commands::records_pause_legacy,
+            sync::record_commands::records_connect,
+            sync::record_commands::records_import_preview,
+            sync::record_commands::records_import_confirm,
+            sync::record_commands::records_import_cancel,
+            sync::record_commands::records_import_resume,
+            sync::record_commands::records_import_pending,
+            sync::record_commands::records_set_relay_url,
+            sync::record_commands::records_account_words,
+            sync::record_commands::records_account_create,
+            sync::record_commands::records_library_preview,
+            sync::record_commands::records_host_verify_key,
+            sync::record_commands::records_library_enable,
+            sync::record_commands::records_account_join,
+            sync::record_commands::records_account_resume,
+            sync::record_commands::records_account_leave,
+            sync::record_commands::records_account_rotate,
+            sync::record_commands::records_space_create,
+            sync::record_commands::records_space_select,
+            sync::record_commands::records_key_import,
+            sync::record_commands::records_key_import_file,
+            sync::record_commands::records_key_generate,
+            sync::record_commands::records_key_download,
+            sync::record_commands::records_key_sync,
+            session::deploy::records_deploy_preview,
+            session::deploy::records_deploy_confirm,
+            session::deploy::records_deploy_cancel,
+            sync::record_commands::records_migration_preview,
+            sync::record_commands::records_migration_confirm,
+            sync::record_commands::records_migration_cancel,
+            sync::record_commands::records_migration_resume,
+            sync::record_commands::records_migration_pending,
             config_load,
             config_list_files,
             config_plan_new_file,
@@ -270,6 +406,9 @@ fn run_app(host: bool, start_hidden: bool) {
             settings_export,
             settings_import,
             mcp_status,
+            mcp_set_approval_mode,
+            session::auth_window::auth_pending,
+            session::auth_window::auth_resolve,
             mcp_set_enabled,
             mcp_set_host_allowed,
             mcp_resolve_request,
@@ -321,14 +460,24 @@ fn run_app(host: bool, start_hidden: bool) {
             hostkey_pending,
             hostkey_resolve,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| match event {
+        .build(context);
+    let application = match application {
+        Ok(app) => app,
+        Err(error) => {
+            diagnostics::tauri_error("gui_build_failed", &error);
+            #[cfg(windows)]
+            if !start_hidden { diagnostics::show_startup_failure(); }
+            eprintln!("[startup] could not build application: {error}");
+            return;
+        }
+    };
+    application.run(|app, event| match event {
             // macOS: clicking SSHelter in the Dock or opening it from Finder while it runs starts
             // no second process; it sends Reopen. Bring back the window, even a hidden one.
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => show_main_window(app),
+            tauri::RunEvent::Reopen { .. } => show_main_window_by_user(app),
             tauri::RunEvent::Exit => {
+                diagnostics::stage(diagnostics::Stage::Exit);
                 mcp::forget_bridge(app);
                 // Quitting ends every session; each terminal is told why (own-ssh spec §4).
                 session::app::quit(app);

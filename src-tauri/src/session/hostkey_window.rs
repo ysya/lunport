@@ -199,40 +199,64 @@ pub struct TauriHostKeySurface {
 
 impl HostKeySurface for TauriHostKeySurface {
     fn changed(&self, pending: &[HostKeyRequest]) {
-        use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-        let new_head = note_head(&mut SHOWN_HEAD.lock().unwrap_or_else(PoisonError::into_inner), pending);
-        if pending.is_empty() {
-            if let Some(window) = self.app.get_webview_window(HOSTKEY_WINDOW) {
-                let _ = window.destroy();
-            }
-            return;
-        }
-        let (window, built) = match self.app.get_webview_window(HOSTKEY_WINDOW) {
-            Some(window) => (Some(window), false),
-            None => match WebviewWindowBuilder::new(&self.app, HOSTKEY_WINDOW, WebviewUrl::App("index.html".into()))
-                .title("SSHelter")
-                .inner_size(480.0, 320.0)
-                .resizable(false)
-                .always_on_top(true)
-                .center()
-                .build()
-            {
-                Ok(window) => (Some(window), true),
-                Err(error) => {
-                    eprintln!("[session] cannot open the host key window: {error}");
-                    (None, false)
+        #[cfg(target_os = "macos")]
+        {
+            use tauri::Manager;
+            if pending.is_empty() {
+                *SHOWN_HEAD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                if let Some(window) = self.app.get_webview_window(HOSTKEY_WINDOW) {
+                    let _ = window.destroy();
                 }
-            },
-        };
-        if let Some(window) = window {
-            if built || new_head {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
+            } else {
+                crate::macos_health::request(&self.app, crate::macos_health::Surface::HostKey);
             }
         }
-        let _ = self.app.emit_to(HOSTKEY_WINDOW, HOSTKEY_EVENT, pending);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = pending;
+            present(&self.app);
+        }
     }
+}
+
+/// Read the current hub after the health check; never replay an expired snapshot.
+pub(crate) fn present(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let pending = app.state::<crate::state::AppState>().session.host_keys.pending();
+
+    use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
+    let new_head = note_head(&mut SHOWN_HEAD.lock().unwrap_or_else(PoisonError::into_inner), &pending);
+    if pending.is_empty() {
+        if let Some(window) = app.get_webview_window(HOSTKEY_WINDOW) {
+            let _ = window.destroy();
+        }
+        return;
+    }
+    let (window, built) = match app.get_webview_window(HOSTKEY_WINDOW) {
+        Some(window) => (Some(window), false),
+        None => match WebviewWindowBuilder::new(app, HOSTKEY_WINDOW, WebviewUrl::App("index.html".into()))
+            .title("SSHelter")
+            .inner_size(480.0, 320.0)
+            .resizable(false)
+            .always_on_top(true)
+            .center()
+            .build()
+        {
+            Ok(window) => (Some(window), true),
+            Err(error) => {
+                eprintln!("[session] cannot open the host key window: {error}");
+                (None, false)
+            }
+        },
+    };
+    if let Some(window) = window {
+        if built || new_head {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }
+    let _ = app.emit_to(HOSTKEY_WINDOW, HOSTKEY_EVENT, &pending);
 }
 
 #[tauri::command]

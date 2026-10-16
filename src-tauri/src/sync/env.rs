@@ -17,6 +17,10 @@ use crate::sync::state_v2::SyncNotice;
 /// OS keychain 的抽象(account 名稱見 `state::MNEMONIC_ACCOUNT`、`state_v2::NEXT_MNEMONIC_ACCOUNT`)。
 pub trait Keychain: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<String>, AppError>;
+    /// Must never unlock, prompt, or fall back to an interactive read. Unknown implementations fail closed.
+    fn get_noninteractive(&self, _account:&str)->Result<Option<String>,AppError> {
+        Err(AppError::Other("needs interaction: this credential source has no verified noninteractive read".into()))
+    }
     fn set(&self, account: &str, secret: &str) -> Result<(), AppError>;
     /// 不存在也算成功(清理路徑要能重複執行)。
     fn delete(&self, account: &str) -> Result<(), AppError>;
@@ -26,6 +30,12 @@ pub trait Keychain: Send + Sync {
 pub struct OsKeychain;
 
 impl Keychain for OsKeychain {
+    #[cfg(windows)]
+    fn get_noninteractive(&self, account:&str)->Result<Option<String>,AppError>{
+        // keyring 4.1.5's Windows native backend calls CredReadW, never CredUI.
+        // https://learn.microsoft.com/windows/win32/api/wincred/nf-wincred-credreadw
+        crate::secrets::get(account)
+    }
     fn get(&self, account: &str) -> Result<Option<String>, AppError> {
         crate::secrets::get(account)
     }
@@ -35,6 +45,15 @@ impl Keychain for OsKeychain {
     fn delete(&self, account: &str) -> Result<(), AppError> {
         crate::secrets::delete(account)
     }
+}
+
+/// A per-call read-only view. In particular, a stale passphrase cannot cause an interactive credential deletion.
+pub struct NonInteractiveKeychain<'a>(pub &'a dyn Keychain);
+impl Keychain for NonInteractiveKeychain<'_> {
+    fn get(&self, account:&str)->Result<Option<String>,AppError>{self.0.get_noninteractive(account)}
+    fn get_noninteractive(&self, account:&str)->Result<Option<String>,AppError>{self.0.get_noninteractive(account)}
+    fn set(&self,_:&str,_:&str)->Result<(),AppError>{Err(AppError::Other("needs interaction: credential writes are disabled".into()))}
+    fn delete(&self,_:&str)->Result<(),AppError>{Err(AppError::Other("needs interaction: credential deletion is disabled".into()))}
 }
 
 pub trait Clock: Send + Sync {

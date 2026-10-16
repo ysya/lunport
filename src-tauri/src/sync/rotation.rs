@@ -176,6 +176,7 @@ fn live_spaces(account: &AccountState, keys: &ChainKeys) -> Vec<SpaceEntry> {
 /// 第 1 步(spec §7.5):relay 要支援凍結 → 產生新同步碼(存 `sync:mnemonic-next`)→ 推導新帳戶 → 為帳戶內**每個**
 /// space(含這台沒勾選的)產生新的 chain id、權杖、金鑰,以新帳戶金鑰加密後寫進 `rotation`。背景執行緒接著做。
 pub fn start_rotation(env: &SyncEnv) -> Result<(), AppError> {
+    saves_allowed(env)?;
     let (s, keys) = {
         let core = env.runtime.core.lock().unwrap();
         let s = core.state.clone().ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
@@ -230,6 +231,7 @@ pub fn start_rotation(env: &SyncEnv) -> Result<(), AppError> {
 /// 取消(spec §7.5):只能在第 3 步之前(還沒寫標記、沒凍結任何東西)。新 chain 在第 5 步才建立,所以這時還沒有要刪的
 /// chain;清掉暫存的同步碼,回到原狀。
 pub fn cancel_rotation(env: &SyncEnv) -> Result<(), AppError> {
+    saves_allowed(env)?;
     mutate(env, |s| match s.rotation.as_ref() {
         None => Err(AppError::Other("the sync code is not being changed".to_string())),
         Some(r) if !r.cancellable() => Err(AppError::Other(NOT_CANCELLABLE_MESSAGE.to_string())),
@@ -294,10 +296,34 @@ fn has_dirty(s: &SyncStateV2) -> bool {
 /// (`note_progress`)。
 pub fn drive_rotation(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: ChainKeys) -> Result<(), AppError> {
     let Some(rotation) = s.rotation.clone() else { return Ok(()) };
+    {
+        let core = env.runtime.core.lock().unwrap();
+        if core.generation != generation || core.state.as_ref().is_none_or(|state| state.rotation.is_none()) {
+            return Ok(());
+        }
+    }
+    if s.read_only() {
+        return crate::sync::round::run_round(env, generation, s, keys, false).map(|_| ());
+    }
+    crate::sync::account::check_local_write_paths(env)?;
     if rotation.paused_until_ms.is_some_and(|until| env.now() < until) {
         return Ok(());
     }
     let relay = env.relay(&s.relay_url)?;
+    if rotation.step != RotationStep::Prepared {
+        let pulled = match relay.pull(
+            &keys.chain_id,
+            &keys.auth_token,
+            s.account.as_ref().expect("joined").cursor_seq,
+        ) {
+            Ok(pulled) => pulled,
+            Err(RelayError::NotFound) if rotation.step == RotationStep::Switching => crate::sync::relay::PullResponse { records: Vec::new(), latest_seq: 0 },
+            Err(error) => return step_failed(env, generation, error.into()),
+        };
+        if crate::sync::round::observe_account_format(env, generation, &s, &keys, &pulled)? {
+            return Ok(());
+        }
+    }
     let stepped = match rotation.step {
         RotationStep::Prepared => return send_local_changes(env, generation, s, keys),
         RotationStep::LocalChangesSent => begin_freezing(env, &s, &keys, &rotation, relay.as_ref()),
@@ -351,6 +377,9 @@ fn send_local_changes(env: &SyncEnv, generation: u64, s: SyncStateV2, keys: Chai
         return yield_to_other_rotation(env, outcome.markers);
     }
     let latest = crate::sync::runtime::snapshot(env).ok_or_else(crate::sync::runtime::superseded)?;
+    if latest.read_only() {
+        return Ok(());
+    }
     let advanced = (outcome.frozen || !has_dirty(&latest))
         && update_rotation(env, |r| {
             let ok = r.step == RotationStep::Prepared;
@@ -850,7 +879,7 @@ pub fn finish_interrupted_switch(keychain: &dyn Keychain, chain_id: &str) -> Opt
 pub fn retry_pending_swap(env: &SyncEnv) {
     let chain = {
         let core = env.runtime.core.lock().unwrap();
-        if !core.swap_pending {
+        if !core.swap_pending || core.save_blocked.is_some() || core.state.as_ref().is_some_and(SyncStateV2::read_only) {
             return;
         }
         core.state.as_ref().and_then(|s| s.account.as_ref()).map(|a| a.chain_id.clone())
@@ -908,6 +937,7 @@ pub fn rejoin_account(env: &SyncEnv, words: &str) -> Result<(), AppError> {
     saves_allowed(env)?;
     let words = crypto::normalize_mnemonic(words)?;
     let s = crate::sync::runtime::snapshot(env).ok_or_else(|| AppError::Other("sync is not initialized".to_string()))?;
+    crate::sync::account::format_writes_allowed(&s)?;
     let old_chain = s.account.as_ref().map(|a| a.chain_id.clone());
     if s.frozen().is_none() {
         return Err(AppError::Other("the sync code of this account has not been changed".to_string()));
@@ -923,6 +953,15 @@ pub fn rejoin_account(env: &SyncEnv, words: &str) -> Result<(), AppError> {
         Err(e) => return Err(e.into()),
     };
     let merged = merge_account(&AccountState::new(&new_account.chain_id), &new_account, &pulled);
+    if merged
+        .section
+        .remote_schema_version
+        .is_some_and(|version| version > crate::sync::record::ACCOUNT_SCHEMA_VERSION)
+    {
+        return Err(AppError::Other(
+            crate::sync::account::READ_ONLY_MESSAGE.to_string(),
+        ));
+    }
     if let Some(marker) = merged.markers.first() {
         return Err(AppError::Other(format!(
             "this sync code was changed as well, on {}; enter the newest sync code",
@@ -1201,7 +1240,7 @@ mod tests {
         relay.set_rate_limited(&old_account, true);
         tick(&a);
         assert_eq!(step(&a), Some(RotationStep::Freezing));
-        assert!(relay.is_frozen(&old_account), "this device froze the account");
+        assert!(!relay.is_frozen(&old_account), "the rate-limited format preflight prevents freezing");
         // 重跑這一步:帳戶上有這台自己的標記,不是別台先更換 —— 接著做完,不能讓給自己、丟掉新同步碼。
         relay.set_rate_limited(&old_account, false);
         finish(&a);
@@ -1256,7 +1295,7 @@ mod tests {
             tick(&a);
             assert_eq!(step(&a), Some(RotationStep::Prepared), "round {round}");
             assert_eq!(a.events.wakes(), wakes, "round {round}: no immediate rerun after a 429");
-            assert_eq!(relay.calls().len(), 1, "round {round}: one rejected batch and nothing else: {:?}", relay.calls());
+            assert_eq!(relay.calls().len(), 2, "round {round}: account preflight then one rejected space batch: {:?}", relay.calls());
         }
         // 背景執行緒等的是退避後的間隔(連續 3 輪:6 分鐘)。
         assert!(next_delay(&a.env()).as_secs() >= 360, "{:?}", next_delay(&a.env()));
@@ -1264,6 +1303,42 @@ mod tests {
         tick(&a);
         assert_eq!(step(&a), Some(RotationStep::LocalChangesSent));
         assert!(a.state().spaces[&personal].records.values().all(|l| !l.dirty));
+    }
+
+    #[test]
+    fn newer_account_format_stops_every_rotation_stage() {
+        for stage in [
+            RotationStep::Prepared,
+            RotationStep::LocalChangesSent,
+            RotationStep::Freezing,
+            RotationStep::Copying,
+            RotationStep::Deleting,
+            RotationStep::Switching,
+        ] {
+            let (relay, _clock, a, _b, words, _personal) = pair();
+            start_rotation(&a.env()).unwrap();
+            {
+                let mut core = a.runtime.core.lock().unwrap();
+                let state = core.state.as_mut().unwrap();
+                state.rotation.as_mut().unwrap().step = stage;
+                state.account.as_mut().unwrap().remote_schema_version = Some(3);
+            }
+            let mut before = a.state();
+            let next_words = a.keychain.entry(NEXT_MNEMONIC_ACCOUNT);
+            let wakes = a.events.wakes();
+            relay.clear_calls();
+            tick(&a);
+            before.last_error = Some(crate::sync::account::READ_ONLY_MESSAGE.to_string());
+            assert_eq!(a.state(), before, "stage {stage:?} must not advance");
+            assert_eq!(a.events.wakes(), wakes);
+            assert_eq!(a.keychain.entry(NEXT_MNEMONIC_ACCOUNT), next_words);
+            assert_eq!(
+                a.keychain.entry(MNEMONIC_ACCOUNT).as_deref(),
+                Some(words.as_str())
+            );
+            let account_call = format!("pull:{}", &before.account.as_ref().unwrap().chain_id[..8]);
+            assert_eq!(relay.calls(), vec![account_call]);
+        }
     }
 
     #[test]
@@ -1498,7 +1573,7 @@ mod tests {
         relay.clear_calls();
         tick(&a);
         assert_eq!(step(&a), Some(RotationStep::LocalChangesSent));
-        assert!(relay.calls().is_empty() && !relay.is_frozen(&old_account), "nothing was written or frozen");
+        assert!(relay.calls().iter().all(|call| call.starts_with("pull:")) && !relay.is_frozen(&old_account), "only the account format was checked; nothing was written or frozen");
         assert_eq!(a.state().last_error.as_deref(), Some(NEXT_CODE_GONE_BEFORE_FREEZE_MESSAGE), "cancel it and start again");
         assert!(!NEXT_CODE_GONE_BEFORE_FREEZE_MESSAGE.contains("restart"), "every round reads the keychain again");
         // 換成不屬於這次更換的碼也一樣。
@@ -1579,6 +1654,36 @@ mod tests {
         fn delete(&self, account: &str) -> Result<(), AppError> {
             self.0.keychain.delete(account)
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boundary_start_rotation_checks_state_path_before_any_credentials_or_relay() {
+        struct Spy<'a> { inner: &'a dyn Keychain, calls: std::sync::atomic::AtomicUsize }
+        impl Keychain for Spy<'_> {
+            fn get(&self, account: &str) -> Result<Option<String>, AppError> { self.calls.fetch_add(1, Ordering::SeqCst); self.inner.get(account) }
+            fn set(&self, account: &str, secret: &str) -> Result<(), AppError> { self.calls.fetch_add(1, Ordering::SeqCst); self.inner.set(account, secret) }
+            fn delete(&self, account: &str) -> Result<(), AppError> { self.calls.fetch_add(1, Ordering::SeqCst); self.inner.delete(account) }
+        }
+        let (relay, _clock, a, _b, _words, _personal) = pair();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("production-state.json");
+        std::fs::write(&sentinel, b"production state sentinel").unwrap();
+        let mut env = a.env();
+        std::fs::remove_file(&env.state_path).unwrap();
+        std::os::unix::fs::symlink(&sentinel, &env.state_path).unwrap();
+        let spy = Spy { inner: env.keychain, calls: Default::default() }; env.keychain = &spy;
+        let before = a.state(); let generation = a.runtime.core.lock().unwrap().generation;
+        relay.clear_calls();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: a.ssh_dir().parent().unwrap().to_path_buf() }, || {
+            assert!(start_rotation(&env).is_err());
+        });
+        assert_eq!(spy.calls.load(Ordering::SeqCst), 0, "path denial must precede every Keychain call");
+        assert!(relay.calls().is_empty());
+        assert_eq!(a.state(), before);
+        assert_eq!(a.runtime.core.lock().unwrap().generation, generation);
+        assert!(a.keychain.entry(NEXT_MNEMONIC_ACCOUNT).is_none());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"production state sentinel");
     }
 
     #[test]

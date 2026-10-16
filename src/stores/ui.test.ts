@@ -75,3 +75,35 @@ describe("the Keychain", () => {
     expect(saved).not.toHaveProperty("moveFailures");
   });
 });
+
+describe("Records Library navigation persistence", () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
+
+  it("restores sidebar, Records groups and layout without persisting the selected host", async () => {
+    let saved: string | null = null;
+    vi.stubGlobal("window", { localStorage: {
+      getItem: () => saved,
+      setItem: (_key: string, value: string) => { saved = value; },
+      removeItem: () => { saved = null; },
+    } });
+    vi.resetModules();
+    const { useUiStore: first } = await import("./ui");
+    first.getState().toggleGroup("/fixture/config");
+    first.getState().toggleRecordGroup("local:group-id");
+    first.getState().toggleLibrarySidebar();
+    first.getState().setHostLayout("grid");
+    first.getState().selectHost("web", "/fixture/config");
+    vi.resetModules();
+    const { useUiStore: restored } = await import("./ui");
+    expect(restored.getState()).toMatchObject({
+      librarySidebarCollapsed: true,
+      collapsedRecordGroups: ["local:group-id"],
+      collapsedGroups: ["/fixture/config"],
+      hostLayout: "grid",
+      selectedAlias: null,
+    });
+    restored.getState().toggleRecordGroup("local:group-id");
+    expect(restored.getState().collapsedGroups).toEqual(["/fixture/config"]);
+    expect(restored.getState().collapsedRecordGroups).toEqual([]);
+  });
+});

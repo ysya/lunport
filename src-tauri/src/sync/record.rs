@@ -23,6 +23,7 @@ pub const SPACE0_SLUG: &str = "synced";
 #[serde(rename_all = "lowercase")]
 pub enum RecordKind {
     Host,
+    Group,
     /// 帳戶 chain:同步的私鑰(id = 插槽 id;祕密,SP3 spec §4.1)。
     Key,
     Password,
@@ -40,6 +41,7 @@ impl RecordKind {
     pub fn as_str(self) -> &'static str {
         match self {
             RecordKind::Host => "host",
+            RecordKind::Group => "group",
             RecordKind::Key => "key",
             RecordKind::Password => "password",
             RecordKind::Device => "device",
@@ -53,6 +55,7 @@ impl RecordKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "host" => Some(RecordKind::Host),
+            "group" => Some(RecordKind::Group),
             "key" => Some(RecordKind::Key),
             "password" => Some(RecordKind::Password),
             "device" => Some(RecordKind::Device),

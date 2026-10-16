@@ -57,6 +57,7 @@ pub(crate) fn current_user_token() -> io::Result<Vec<u64>> {
 /// - 權限用具體的 `FILE_ALL_ACCESS`,不用 `GENERIC_ALL`:含 generic 權限的可繼承 ACE 會被存成兩條(一條 inherit-only、一條
 ///   對應後的有效 ACE),DACL 就不是只有一條。
 pub fn restrict_to_owner(path: &Path, inheritable: bool) -> io::Result<()> {
+    crate::fsutil::check_write_io(path)?;
     let token = current_user_token()?;
     // 路徑先轉好:`last_os_error` 要緊接在失敗的 Win32 呼叫之後讀,中間不能再有別的配置。
     let name = wide(path);

@@ -11,9 +11,9 @@ name: ssh engine
 on:
   push:
     branches: [main, next/own-ssh]
-    paths: ["src-tauri/**", ".github/workflows/test-engine.yml"]
+    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", ".github/workflows/test-engine.yml"]
   pull_request:
-    paths: ["src-tauri/**", ".github/workflows/test-engine.yml"]
+    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", ".github/workflows/test-engine.yml"]
   workflow_dispatch:
 
 permissions:
@@ -25,6 +25,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build
+
   macos:
     runs-on: macos-latest
     timeout-minutes: 45
@@ -50,11 +66,20 @@ jobs:
           ls -l /usr/sbin/sshd
           ssh -V
       # SSHELTER_REQUIRE_OPENSSH=1: a missing sshd is a failure here, not a skipped test.
-      - name: Engine, broker and vault tests
+      - name: Complete safe Rust suite
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- ssh:: session:: cli:: host_start:: vault::"
+        run: "cargo test --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
+
+      - name: Profile selection in the normal library
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: |
+          cargo test --locked --test app_profile_build
+          cargo test --locked --release --test app_profile_build
+          cargo test --locked --release --features development-profile --test app_profile_build
 
   linux:
     # Not ubuntu-latest: the PAM image is ubuntu:24.04, and the package names below were checked against 24.04.
@@ -98,13 +123,22 @@ jobs:
           ssh-keyscan -T 2 -p 2222 127.0.0.1 > /dev/null
           echo "SSHELTER_PAM_PASSWORD=$password" >> "$GITHUB_ENV"
       # The pam tests are skipped here: the next step runs them against the container.
-      - name: Engine, broker and vault tests against a scratch sshd
+      - name: Complete safe Rust suite against a scratch sshd
         # Runs even when the container did not start, so that a first run shows both results.
         if: ${{ !cancelled() }}
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- ssh:: session:: cli:: host_start:: vault:: --skip ssh::engine_tests::login_methods::pam"
+        run: "cargo test --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
+
+      - name: Profile selection in the normal library
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: |
+          cargo test --locked --test app_profile_build
+          cargo test --locked --release --test app_profile_build
+          cargo test --locked --release --features development-profile --test app_profile_build
       # Runs whatever the scratch sshd step came to, so that a first run shows both results.
       - name: Password and keyboard-interactive tests against the container
         if: ${{ !cancelled() }}

@@ -139,7 +139,7 @@ describe("the download tracker", () => {
   });
 });
 
-describe("what the progress toast says", () => {
+describe("what the inline progress panel says", () => {
   it("says it is connecting before the first chunk", () => {
     const view = progressView("0.17.0-4", snapshot({ phase: "connecting", downloaded: 0, total: null, bytesPerSecond: null, secondsLeft: null }));
     expect(view).toEqual({ title: "Downloading v0.17.0-4…", line: "Connecting…", warning: null, fraction: null });

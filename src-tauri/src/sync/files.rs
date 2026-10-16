@@ -113,6 +113,17 @@ pub fn space_path(env: &SyncEnv, file_name: &str) -> Result<PathBuf, AppError> {
     space_files::space_file_path(&env.ssh_dir, file_name)
 }
 
+/// Validate all paths participating in a file transaction before its first effect.
+fn preflight_writes(env: &SyncEnv, doc: &SshConfigDoc, paths: &[PathBuf]) -> Result<(), AppError> {
+    crate::config::include::validate_doc_write_boundaries(doc)?;
+    fsutil::check_write(&env.state_path)?;
+    for path in doc.files.iter().map(|file| &file.path).chain(paths.iter()) {
+        fsutil::check_write(path)?;
+        fsutil::check_backup_write(path)?;
+    }
+    Ok(())
+}
+
 /// 主 config 最頂端的 Include 清單換成 `tokens`,有變才寫檔(spec §4.3)。呼叫端持有 doc 與 backed_up 鎖、**不持有**
 /// core 鎖。
 ///
@@ -126,6 +137,8 @@ pub fn write_include(
     retention: Option<usize>,
     tokens: &[String],
 ) -> Result<(), AppError> {
+    crate::config::include::validate_doc_write_boundaries(doc)?;
+    fsutil::check_backup_write(&doc.files[0].path)?;
     let original = doc.files[0].items.clone();
     if hosts_file::ensure_include(&mut doc.files[0].items, tokens) {
         if let Err(e) = persist_file(doc, 0, backed_up, retention) {
@@ -198,6 +211,8 @@ pub fn prepare_files(env: &SyncEnv) -> Result<Option<Prepared>, AppError> {
         Some(s) if s.joined() => s.spaces.clone(),
         _ => return Ok(None),
     };
+    let paths: Vec<PathBuf> = spaces.values().map(|space| space_path(env, &space.file_name)).collect::<Result<_, _>>()?;
+    preflight_writes(env, doc, &paths)?;
     let mut prepared = Prepared::default();
     for (id, space) in spaces.iter().filter(|(_, s)| s.selected) {
         let path = space_path(env, &space.file_name)?;
@@ -361,6 +376,7 @@ pub fn apply_and_commit_space(
         return Err(superseded());
     }
     let doc = doc_lock.as_mut().ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+    preflight_writes(env, doc, &[path.to_path_buf()])?;
     let idx = doc
         .files
         .iter()
@@ -444,6 +460,9 @@ pub fn apply_and_commit_space(
 /// 還沒跑或檔案違反不變式時不規劃(交給同步輪次),但一樣換 generation。唯一發出的通知是最後的 `events.wake_implicit()`(存檔是順便的喚醒:退避期間不會提早開始
 /// 一輪,spec §6.4):它在呼叫端還持有 doc(與 backed_up)鎖時發出,所以必須是不阻塞的送出(見 `env::SyncEvents`)。
 pub fn note_written(env: &SyncEnv, path: &Path, items: &[Item]) {
+    if fsutil::check_write(path).and_then(|()| fsutil::check_write(&env.state_path)).is_err() {
+        return;
+    }
     if engine_writing() {
         return;
     }
@@ -483,6 +502,46 @@ pub fn note_written(env: &SyncEnv, path: &Path, items: &[Item]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_prepare_refuses_external_main_before_creating_space_file() {
+        use crate::sync::state_v2::AccountState;
+        let d = TestDevice::new("boundary", &FakeRelay::new(), &TestClock::new());
+        let id = "a".repeat(64);
+        let file_name = space_files::space_file_name("Work", &id).unwrap();
+        {
+            let mut core = d.runtime.core.lock().unwrap();
+            let state = core.state.as_mut().unwrap();
+            state.account = Some(AccountState::new(&"b".repeat(64)));
+            state.spaces.insert(id.clone(), SpaceState::new(&file_name));
+        }
+        let root = d.home.path().join("confined");
+        let mut env = d.env();
+        env.ssh_dir = root.join(".ssh");
+        env.state_path = root.join("state.json");
+        let before = d.main_config();
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root }, || {
+            assert!(prepare_files(&env).is_err());
+        });
+        assert!(!space_path(&env, &file_name).unwrap().exists());
+        assert_eq!(d.main_config(), before);
+    }
+
+    #[test]
+    fn boundary_include_refuses_before_mutating_the_document() {
+        let d = TestDevice::new("boundary", &FakeRelay::new(), &TestClock::new());
+        let before = d.main_config();
+        let mut doc = d.doc.lock().unwrap();
+        let doc = doc.as_mut().unwrap();
+        let mut backups = HashSet::new();
+        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: d.home.path().join("different") }, || {
+            assert!(write_include(doc, &mut backups, None, &["~/.ssh/sshelter/work-aaaaaaaa.config".into()]).is_err());
+        });
+        assert!(backups.is_empty());
+        assert_eq!(serialize_items(&doc.files[0].items, doc.files[0].trailing_newline), before);
+        assert_eq!(d.main_config(), before);
+    }
+
     use crate::config::parser::parse_file;
     use crate::sync::fake_relay::FakeRelay;
     use crate::sync::record::{record_key, LocalRecord, Record};

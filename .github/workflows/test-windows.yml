@@ -66,17 +66,45 @@ jobs:
       # (`session::`: its platform-neutral parts and the broker on a named pipe; its socket tests are Unix only), sshelter connect
       # (`cli::`: the arguments, the console layer against a fake console and against real ones, the keys, control events and window
       # size, and run() over a pipe against the broker; the Unix terminal's tests are Unix only), and the terminal launch (`connect::`:
-      # Windows Terminal and cmd run the console helper, or a debug build itself). The rest of the suite runs on macOS; parts of it use
-      # the system keychain.
-      - name: Key slot, vault, agent, engine and broker tests
+      # Windows Terminal and cmd run the console helper, or a debug build itself). All platform-neutral tests also run here; the three real OS credential tests are explicitly excluded.
+      - name: Complete safe Rust suite
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
         # Quoted: an unquoted `vault:: ipc:: agent::` is read as a YAML mapping and the workflow would not load.
         # --locked: the committed Cargo.lock, with russh in it, is what is built.
-        run: "cargo test --locked --lib -- sync::slot_rules sync::slot_files vault:: ipc:: agent:: ssh:: session:: cli:: connect::"
+        run: "cargo test --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
+      - name: Profile selection in the normal library
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: |
+          cargo test --locked --test app_profile_build
+          if ($LASTEXITCODE -ne 0) { throw 'debug profile test failed' }
+          cargo test --locked --release --test app_profile_build
+          if ($LASTEXITCODE -ne 0) { throw 'production profile test failed' }
+          cargo test --locked --release --features development-profile --test app_profile_build
+          if ($LASTEXITCODE -ne 0) { throw 'development release profile test failed' }
+
       # The library and the binary in a debug build, with russh in the dependency graph (the release workflow builds the same graph).
       - name: Build the whole app
         run: cargo build --locked
+
+      # Unit doubles never touch the Rc-backed Win32 tray or its event loop. Restart from
+      # saved synced records, race startup/status/visibility, and check real native menu data
+      # and USER object counts. No production profile, OS credentials or remote relay is used.
+      - name: Synced library startup and concurrent native tray updates
+        timeout-minutes: 5
+        env:
+          SSHELTER_TEST_SYNCED_STATE_OUT: ${{ runner.temp }}/sshelter-synced-startup.json
+        run: cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
+
+      - name: Native crash leaves metadata without suppressing Windows Error Reporting
+        run: cargo test --locked --lib -- --ignored --exact diagnostics::tests::native_exception_leaves_metadata_for_windows_error_reporting --nocapture
+
+      - name: Actual Development GUI startup from a synced library
+        timeout-minutes: 8
+        shell: pwsh
+        run: ../scripts/validate-windows-startup.ps1
 
       # sshelter-cli.exe, the console program a Windows terminal runs for Connect (cli-helper/; the app's builds above never build it):
       # its tests (the relay of arguments and exit codes against a test program, the built helper next to a stand-in sshelter.exe, and
@@ -112,6 +140,7 @@ jobs:
         shell: pwsh
         run: |
           $env:SSHELTER_TEST_PAIR = (Resolve-Path target/debug).Path
+          $env:SSHELTER_TEST_PAIR_PROFILE = 'development'
           cargo test --locked --lib -- --ignored --exact cli::real_console_tests::the_pair_in_a_console_of_its_own --nocapture
           if ($LASTEXITCODE -ne 0) { throw "the pair in a console of its own failed (exit $LASTEXITCODE)" }
           exit 0
