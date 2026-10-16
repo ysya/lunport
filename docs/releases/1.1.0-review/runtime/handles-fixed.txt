@@ -1,0 +1,30 @@
+2026-10-16T21:46:11.1385754Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:11.1397150Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:11.1399589Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:11.7083847Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:11.7095031Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:11.7097354Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:12.3817291Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:12.3831781Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:12.3835224Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:12.9637539Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:12.9649488Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:12.9651858Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:13.5624829Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:13.5635105Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:13.5637013Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:14.1380817Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:14.1390697Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:14.1392705Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:14.6931669Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:14.6941697Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:14.6943593Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:15.2593998Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:15.2604135Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:15.2606562Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:15.8024414Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:15.8034511Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:15.8036777Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
+2026-10-16T21:46:16.3756075Z Runtime handle ownership: 100000 concurrent clones completed; no tray, WebView or sync
+2026-10-16T21:46:16.3766152Z Runtime handle ownership: event loop and helpers cleaned up normally
+2026-10-16T21:46:16.3768467Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2419 filtered out; finished in 0.02s
