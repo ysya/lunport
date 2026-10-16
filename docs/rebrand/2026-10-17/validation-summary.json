@@ -1,0 +1,35 @@
+{
+  "runtimeTestSource": "3ba8084bc28d3aeb285ff6fa1deb3a504aad9b20",
+  "installerSource": "c5cc06b846d301d3e9f7986eb68b446487d5c035",
+  "runtimeCandidateSource": "6d85dfc933cb8a5f9cea7021ac077bb01a038540",
+  "nativeSource": "f634a55efefb2587d29a62b90b4dd306084316d0",
+  "changesSinceFullRuntimeTests": [
+    ".github/workflows/windows-bundle-check.yml",
+    "scripts/validate-windows-rebrand.ps1",
+    "src-tauri/installers/README.md",
+    "src-tauri/installers/main.wxs"
+  ],
+  "passedRuns": {
+    "engine": 38955232734,
+    "windowsFull": 38955232676,
+    "linuxPackages": 38955232638,
+    "relay": 38955232610,
+    "windowsUpgrade": 38962678890,
+    "windowsBundle": 38962133441
+  },
+  "publishedStableUnchanged": {
+    "releaseId": 415202150,
+    "version": "1.0.0",
+    "tagCommit": "be39161f970a0c93dac1eb71fd6d89c6f678e72b",
+    "assetCount": 20,
+    "comparedAssetFields": [
+      "id",
+      "name",
+      "size",
+      "digest"
+    ]
+  },
+  "productionInstalledLocally": false,
+  "newReleasePublished": false,
+  "allRequiredChecksPassed": true
+}
