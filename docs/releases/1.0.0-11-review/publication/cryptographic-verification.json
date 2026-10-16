@@ -1,0 +1,80 @@
+{
+  "version": "1.0.0-11",
+  "verifier": "minisign-verify 0.2.5 (same version as Tauri updater dependency)",
+  "allowLegacySignatures": false,
+  "publicKeySource": "src-tauri/tauri.conf.json",
+  "artifacts": [
+    {
+      "name": "SSHelter-1.0.0-11-1.aarch64.rpm",
+      "bytes": 15203274,
+      "digest": "sha256:8f6094123f4d59bc7a412791162e84b0ea6b7d7e50b9900aa173687fc7a39fd5",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "SSHelter-1.0.0-11-1.x86_64.rpm",
+      "bytes": 14908405,
+      "digest": "sha256:102c415b1ba83ad6dccd69aec4da2fdb5aaced47123827788b5e50210a8b307c",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "SSHelter_1.0.0-11_aarch64.AppImage",
+      "bytes": 90147336,
+      "digest": "sha256:fb9688d841824f62e30c4dbfb43c799f1de0f092b43cc7d47891bc8761439003",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "SSHelter_1.0.0-11_amd64.AppImage",
+      "bytes": 91711992,
+      "digest": "sha256:ad67acc586c8ddd514eabb41e9d7d301a3875457b531f85e756748cf6014892d",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "SSHelter_1.0.0-11_amd64.deb",
+      "bytes": 14908304,
+      "digest": "sha256:f60bcc96150c1fad422b9b0be8f4b1216ad9d93a346319eea0b4d606c128fdd1",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "SSHelter_1.0.0-11_arm64.deb",
+      "bytes": 15203818,
+      "digest": "sha256:cc70c08b65de3b9864254daf0383b0b50e2cde302574d0029ed7885bb154948a",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "SSHelter_1.0.0-11_x64-setup.exe",
+      "bytes": 8698541,
+      "digest": "sha256:629799560c55713b4e7da502f73a6b5f51007deabc304513ae4330ae953a0a59",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "SSHelter_1.0.0-11_x64_en-US.msi",
+      "bytes": 12640256,
+      "digest": "sha256:fa94a4b1ee4e0ca71d3d37ab63064416d6c7b604d398870330621e8e5335a8e0",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "SSHelter_universal.app.tar.gz",
+      "bytes": 25342361,
+      "digest": "sha256:8fdf2ffaacfbc40c10b5b44ed22ed507febbd12cabd5879607521449f2f7c0bd",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    }
+  ]
+}

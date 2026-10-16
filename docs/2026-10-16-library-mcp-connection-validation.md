@@ -1,6 +1,6 @@
 # Library sync、連線編輯器與 MCP 連線設定修補
 
-本輪接續已發布的 Beta 10，工作分支為 `codex/library-sync-host-dialog-fixes`，程式碼凍結提交 `21759b76801fe2be77fc196f1a651a9dfae75cd9`。修補尚未發布成新版 Beta；Beta 10 的安裝包不包含本文件描述的新功能。
+本輪接續已發布的 Beta 10，工作分支為 `codex/library-sync-host-dialog-fixes`，程式碼凍結提交 `21759b76801fe2be77fc196f1a651a9dfae75cd9`。修補已隨 [Beta 11 發布](releases/1.0.0-11-validation.md)，安裝包來源為 `095abce7842d65f7ace4695fa943ac5fab410ed1`，與凍結程式碼間只有文件及收據差異。Beta 10 的安裝包不包含本文件描述的新功能。
 
 ## Library sync
 
@@ -28,7 +28,7 @@
 
 ## MCP 新增連線與指紋
 
-Records 模式現在提供 `list_hosts`、`get_host`、`ssh_exec`、`create_host`、`verify_host_key`；Legacy 三個工具維持既有相容行為。安裝含修補的版本後，需重新連線／重啟 MCP client 以取得新的工具清單；已發布的 Beta 10 尚未包含它們。
+Records 模式現在提供 `list_hosts`、`get_host`、`ssh_exec`、`create_host`、`verify_host_key`；Legacy 三個工具維持既有相容行為。安裝 Beta 11 後，需重新連線／重啟 MCP client 以取得新的工具清單；Beta 10 尚未包含它們。
 
 `create_host` 接受公開連線欄位及既有金鑰／Group／跳板 ID，不接受密碼、私人金鑰、host-key pin 或額外欄位。即使在 Auto-log 也必須在 SSHelter 審核完整設定並明確核准。等待期間取消、停用 MCP、改變模式、儲存目的地或相關設定，都不能套用舊核准；重名仍由 repository 的原子驗證拒絕。儲存只回傳新記錄的公開欄位，不授予 AI 權限、不登入、不信任指紋、不執行命令。
 

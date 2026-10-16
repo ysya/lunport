@@ -1,0 +1,20 @@
+{
+  "sourceCommit": "095abce7842d65f7ace4695fa943ac5fab410ed1",
+  "testedCodeCommit": "21759b76801fe2be77fc196f1a651a9dfae75cd9",
+  "originalHandoffCommit": "654b984a919cf11857b2556a4ac9572bd65ee27f",
+  "sourceContainsTestedCode": true,
+  "sourceContainsOriginalHandoff": true,
+  "changesAfterTestedCode": [
+    "README.md",
+    "docs/2026-10-16-library-mcp-connection-validation.md",
+    "docs/review/library-sync-dialog/local-checks.json",
+    "docs/review/library-sync-dialog/native-final-changed-fingerprint.jpg",
+    "docs/review/library-sync-dialog/native-final-pin-saved.jpg",
+    "docs/review/library-sync-dialog/native-verification.json",
+    "docs/review/library-sync-dialog/windows-ci.json",
+    "docs/review/library-sync-dialog/windows-test-results.json"
+  ],
+  "changesAfterTestedCodeDocumentationOnly": true,
+  "dispatchRef": "codex/library-sync-host-dialog-fixes",
+  "workingTreeCleanBeforeDispatch": true
+}

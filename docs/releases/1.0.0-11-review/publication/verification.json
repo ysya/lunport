@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0-11",
+  "sourceCommit": "095abce7842d65f7ace4695fa943ac5fab410ed1",
+  "prerelease": true,
+  "stable": "v0.16.0",
+  "stableReleaseId": 400974628,
+  "platforms": [
+    "linux-x86_64",
+    "linux-x86_64-appimage",
+    "linux-x86_64-deb",
+    "linux-x86_64-rpm",
+    "linux-aarch64",
+    "linux-aarch64-appimage",
+    "linux-aarch64-deb",
+    "linux-aarch64-rpm",
+    "windows-x86_64",
+    "windows-x86_64-msi",
+    "windows-x86_64-nsis",
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "darwin-aarch64-app",
+    "darwin-x86_64-app"
+  ],
+  "assetCount": 20,
+  "allAssetsUploadedNonempty": true,
+  "channelMatchesRelease": true,
+  "manifestSignaturesMatchUploadedFiles": true
+}
