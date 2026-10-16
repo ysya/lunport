@@ -8,10 +8,10 @@ import { execFileSync } from "node:child_process";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const mark = JSON.parse(await readFile(path.join(root, "src/brand/lunport-mark.json"), "utf8"));
-const symbol = (color) => `<g fill="${color}"><path d="${mark.crescent}"/><path d="${mark.beam}" fill="none" stroke="${color}" stroke-width="${mark.beamWidth}" stroke-linecap="round"/><circle cx="${mark.node.x}" cy="${mark.node.y}" r="${mark.node.radius}"/></g>`;
+const symbol = (colors) => mark.paths.map((d, index) => `<path d="${d}" fill="${colors[index % colors.length]}"/>`).join("");
 const svg = (viewBox, body) => `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="${viewBox}">${body}</svg>\n`;
-const app = svg("0 0 100 100", `<defs><linearGradient id="surface" gradientUnits="userSpaceOnUse" x1="15" y1="5" x2="85" y2="100"><stop stop-color="#263351"/><stop offset="1" stop-color="#10182C"/></linearGradient><linearGradient id="moon" gradientUnits="userSpaceOnUse" x1="25" y1="20" x2="75" y2="80"><stop stop-color="#C5CEFF"/><stop offset=".55" stop-color="#A0BBFF"/><stop offset="1" stop-color="#71DAE5"/></linearGradient></defs><rect x="3" y="3" width="94" height="94" rx="21" fill="url(#surface)"/><rect x="3.5" y="3.5" width="93" height="93" rx="20.5" fill="none" stroke="#B5CAFF" stroke-opacity=".14"/>${symbol("url(#moon)")}`);
-const monochrome = svg("10 12 80 80", symbol("#000"));
+const app = svg("0 0 100 100", `<defs><linearGradient id="surface" gradientUnits="userSpaceOnUse" x1="15" y1="5" x2="85" y2="100"><stop stop-color="#253658"/><stop offset="1" stop-color="#121D33"/></linearGradient></defs><rect x="3" y="3" width="94" height="94" rx="21" fill="url(#surface)"/><rect x="3.5" y="3.5" width="93" height="93" rx="20.5" fill="none" stroke="#B5CAFF" stroke-opacity=".12"/>${symbol(["#C4D7FF", "#86ADFF"])}`);
+const monochrome = svg("16 16 68 68", symbol(["#000"]));
 const iconDir = path.join(root, "src-tauri/icons");
 const cli = path.join(root, "node_modules/@tauri-apps/cli/tauri.js");
 const scratch = await mkdtemp(path.join(tmpdir(), "lunport-icons-"));

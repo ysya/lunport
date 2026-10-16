@@ -1,6 +1,6 @@
 # Lunport
 
-<img src="public/lunport-icon.svg" width="96" height="96" alt="Lunport: a crescent moon connected to a port" />
+<img src="public/lunport-icon.svg" width="96" height="96" alt="Lunport: a folded L and connection port" />
 
 Your SSH workspace. Formerly SSHelter.
 
