@@ -1,0 +1,20 @@
+running 16 tests
+test sync::record_library::tests::setup_establishes_baselines_when_a_background_round_is_already_queued ... ok
+test sync::record_library::tests::offline_format_upgrades_and_observed_account_blocks_never_bypass_the_gate ... ok
+test sync::record_library::tests::grouping_keeps_effective_settings_and_checks_the_reviewed_revision ... ok
+test sync::record_library::tests::failed_child_creation_resumes_without_creating_another_library ... ok
+test sync::record_library::tests::library_failures_distinguish_unavailable_sync_data_from_record_identity_conflicts ... ok
+test sync::record_library::tests::preview_reserves_other_local_names_and_handles_maximum_length_group_names ... ok
+test sync::record_library::tests::changing_group_across_retained_transport_sections_is_one_revision_checked_edit ... ok
+test sync::record_library::tests::ambiguous_destination_preserves_existing_records_without_partial_inclusion ... ok
+test sync::record_library::tests::new_imported_records_are_included_atomically_without_copying_private_keys ... ok
+test sync::record_library::tests::setup_preserves_identity_payload_inheritance_and_needs_explicit_group_upgrade ... ok
+test sync::record_library::tests::reviewed_names_include_both_hosts_and_groups_without_merging_identity_or_inheritance ... ok
+test sync::record_library::tests::stale_or_invalid_name_review_preserves_every_record ... ok
+test sync::record_library::tests::joined_device_reuses_library_and_offline_changes_persist_then_reach_other_device ... ok
+test sync::record_library::tests::joined_device_can_enable_library_after_reviewing_its_duplicate_local_names ... ok
+test sync::record_library::tests::retained_legacy_alias_sources_do_not_block_library_opt_in_on_either_device ... ok
+test sync::record_library::tests::library_inclusion_still_rejects_unknown_sources_and_legacy_aliases_shadowing_typed_ids ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 2588 filtered out; finished in 5.57s
+

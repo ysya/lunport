@@ -62,7 +62,7 @@ In a **Records workspace**, the stdio adapter connects through the OS-authentica
 | `create_host` | Propose public connection settings for explicit approval in SSHelter. Saving never grants AI access or trusts a server key. |
 | `verify_host_key` | Verify an AI-approved host's server fingerprint, with a separate trust window for a new or changed key. |
 
-`create_host` and `verify_host_key` are available in [Beta 11](https://github.com/ysya/sshelter/releases/tag/v1.0.0-11). See the [implementation and validation record](docs/2026-10-16-library-mcp-connection-validation.md) and [publication checks](docs/releases/1.0.0-11-validation.md).
+`create_host` and `verify_host_key` are available in [Beta 12](https://github.com/ysya/sshelter/releases/tag/v1.0.0-12), which also fixes host-key confirmation during background sync and Library setup with retained migration sources. See the [implementation record](docs/2026-10-16-library-mcp-connection-validation.md), [follow-up validation](docs/2026-10-16-beta11-followup-validation.md) and [publication checks](docs/releases/1.0.0-12-validation.md).
 
 After installing a build with these additions, reconnect or restart the MCP client so it fetches the updated tool list.
 

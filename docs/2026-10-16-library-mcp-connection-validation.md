@@ -61,3 +61,7 @@ MCP 工具宣告、`structuredContent`／`isError` 與使用者核准遵循現�
 - Beta 10 的 CoreAudio 啟動防護維持原行為；本輪沒有聲稱根除系統音訊死鎖或驗證任何私有 API 根治方式。
 
 [本機檢查收據](review/library-sync-dialog/local-checks.json) 綁定凍結的程式碼提交；後續文件提交不改變該次建置／CI 來源。
+
+## 2026-10-16：Beta 12 後續修補
+
+Beta 11 發布後，使用者回報同意指紋仍因全域同步狀態更新而結束連線，以及同一 chain 的 Library sync 被保留的舊版來源密文阻擋。已修補並隨 [Beta 12 發布](releases/1.0.0-12-validation.md)；[修補與故障注入驗證](2026-10-16-beta11-followup-validation.md) 記錄修補前失敗、實際 OpenSSH 連線、兩裝置同步及安全拒絕案例。macOS 2,594 項及 Windows 2,401 項安全測試通過，四平台產物與 Beta 通道均已核對。正式資料在另一台 Mac，仍待使用者兩平台更新驗收；沒有重建 chain 或重置 vault，CoreAudio 系統根因仍未確定。

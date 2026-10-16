@@ -1,0 +1,9 @@
+test mcp::records::confirmed_pin_tests::native_space_pin_wait_releases_lifecycle_and_revoke_disable_prevent_pin_and_exec ... ok
+test session::record_pin::tests::a_verified_endpoint_can_be_pinned_before_its_login_key_is_installed ... ok
+test session::record_pin::tests::canceled_or_changed_probe_never_commits_an_endpoint_pin ... ok
+test session::record_pin::connect_tests::trusting_an_unknown_or_changed_shared_host_connects_to_openssh_despite_background_sync ... ok
+test sync::record_library::tests::retained_legacy_alias_sources_do_not_block_library_opt_in_on_either_device ... ok
+test sync::record_library::tests::library_inclusion_still_rejects_unknown_sources_and_legacy_aliases_shadowing_typed_ids ... ok
+test sync::record_round::tests::confirmed_pin_survives_a_background_sync_round_without_losing_its_updates ... ok
+test sync::record_round::tests::pin_preparation_rejects_changed_scope_account_endpoint_and_referenced_public_key ... ok
+test result: ok. 2594 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 174.35s

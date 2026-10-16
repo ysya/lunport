@@ -143,3 +143,7 @@ clang -fobjc-arc docs/research/macos-webkit/preferences-probe.m \
 ## 2026-10-16：後續 Library／MCP 修補
 
 Beta 10 發布後回報的 Library sync、連線對話框與 MCP 建立連線／核對指紋另於 `codex/library-sync-host-dialog-fixes` 完成；[實作與驗證](2026-10-16-library-mcp-connection-validation.md) 記錄行為、安全規則及實機收據。此批已隨 [Beta 11 發布](releases/1.0.0-11-validation.md)，四平台建置、Beta 通道與九個 updater 安裝包簽章均已核對；Beta 10 不含這批功能。CoreAudio 啟動防護維持既有設計，仍未聲稱根除系統音訊死鎖。
+
+## 2026-10-16：Beta 12 後續修補
+
+Beta 11 發布後，使用者回報同意指紋仍因全域同步狀態更新而結束連線，以及同一 chain 的 Library sync 被保留的舊版來源密文阻擋。已修補並隨 [Beta 12 發布](releases/1.0.0-12-validation.md)；[修補與故障注入驗證](2026-10-16-beta11-followup-validation.md) 記錄修補前失敗、實際 OpenSSH 連線、兩裝置同步及安全拒絕案例。macOS 2,594 項及 Windows 2,401 項安全測試通過，四平台產物與 Beta 通道均已核對。正式資料在另一台 Mac，仍待使用者兩平台更新驗收；沒有重建 chain 或重置 vault，CoreAudio 系統根因仍未確定。

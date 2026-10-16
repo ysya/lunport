@@ -1,0 +1,741 @@
+{
+  "conclusion": "success",
+  "createdAt": "2026-10-16T02:27:40Z",
+  "databaseId": 38840534319,
+  "headSha": "99fb2ed7a09f0029b5417a56a7b911f4f911bbaa",
+  "jobs": [
+    {
+      "completedAt": "2026-10-16T02:28:00Z",
+      "conclusion": "success",
+      "databaseId": 116779348924,
+      "name": "prepare",
+      "startedAt": "2026-10-16T02:27:45Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T02:27:47Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T02:27:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:27:49Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T02:27:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:27:54Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-node@v4",
+          "number": 3,
+          "startedAt": "2026-10-16T02:27:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:27:54Z",
+          "conclusion": "success",
+          "name": "Check the version",
+          "number": 4,
+          "startedAt": "2026-10-16T02:27:54Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:27:58Z",
+          "conclusion": "success",
+          "name": "Create the prerelease",
+          "number": 5,
+          "startedAt": "2026-10-16T02:27:54Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:27:58Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@v4",
+          "number": 9,
+          "startedAt": "2026-10-16T02:27:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:27:58Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 10,
+          "startedAt": "2026-10-16T02:27:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:27:58Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 11,
+          "startedAt": "2026-10-16T02:27:58Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/sshelter/actions/runs/38840534319/job/116779348924"
+    },
+    {
+      "completedAt": "2026-10-16T02:34:06Z",
+      "conclusion": "success",
+      "databaseId": 116779434936,
+      "name": "build (ubuntu-22.04-arm)",
+      "startedAt": "2026-10-16T02:28:05Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T02:28:08Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T02:28:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:09Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T02:28:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:55Z",
+          "conclusion": "success",
+          "name": "Install Linux dependencies",
+          "number": 3,
+          "startedAt": "2026-10-16T02:28:09Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:56Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 4,
+          "startedAt": "2026-10-16T02:28:55Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:01Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 5,
+          "startedAt": "2026-10-16T02:28:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:01Z",
+          "conclusion": "success",
+          "name": "Stamp the beta version (workspace only)",
+          "number": 6,
+          "startedAt": "2026-10-16T02:29:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:10Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 7,
+          "startedAt": "2026-10-16T02:29:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:20Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 8,
+          "startedAt": "2026-10-16T02:29:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:20Z",
+          "conclusion": "skipped",
+          "name": "Build the console helper (Windows)",
+          "number": 9,
+          "startedAt": "2026-10-16T02:29:20Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:25Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 10,
+          "startedAt": "2026-10-16T02:29:20Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:25Z",
+          "conclusion": "success",
+          "name": "Check the sync relay URL",
+          "number": 11,
+          "startedAt": "2026-10-16T02:29:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:03Z",
+          "conclusion": "success",
+          "name": "Build and upload installers to the prerelease",
+          "number": 12,
+          "startedAt": "2026-10-16T02:29:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:03Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 21,
+          "startedAt": "2026-10-16T02:34:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:03Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 22,
+          "startedAt": "2026-10-16T02:34:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:04Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 23,
+          "startedAt": "2026-10-16T02:34:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:04Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 24,
+          "startedAt": "2026-10-16T02:34:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:04Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 25,
+          "startedAt": "2026-10-16T02:34:04Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/sshelter/actions/runs/38840534319/job/116779434936"
+    },
+    {
+      "completedAt": "2026-10-16T02:36:00Z",
+      "conclusion": "success",
+      "databaseId": 116779434947,
+      "name": "build (macos-latest, --target universal-apple-darwin)",
+      "startedAt": "2026-10-16T02:28:11Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T02:28:19Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T02:28:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:23Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T02:28:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:23Z",
+          "conclusion": "skipped",
+          "name": "Install Linux dependencies",
+          "number": 3,
+          "startedAt": "2026-10-16T02:28:23Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:25Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 4,
+          "startedAt": "2026-10-16T02:28:23Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:32Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 5,
+          "startedAt": "2026-10-16T02:28:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:32Z",
+          "conclusion": "success",
+          "name": "Stamp the beta version (workspace only)",
+          "number": 6,
+          "startedAt": "2026-10-16T02:28:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:43Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 7,
+          "startedAt": "2026-10-16T02:28:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:01Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 8,
+          "startedAt": "2026-10-16T02:28:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:01Z",
+          "conclusion": "skipped",
+          "name": "Build the console helper (Windows)",
+          "number": 9,
+          "startedAt": "2026-10-16T02:29:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:08Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 10,
+          "startedAt": "2026-10-16T02:29:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:08Z",
+          "conclusion": "success",
+          "name": "Check the sync relay URL",
+          "number": 11,
+          "startedAt": "2026-10-16T02:29:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:35:56Z",
+          "conclusion": "success",
+          "name": "Build and upload installers to the prerelease",
+          "number": 12,
+          "startedAt": "2026-10-16T02:29:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:35:56Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 21,
+          "startedAt": "2026-10-16T02:35:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:35:56Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 22,
+          "startedAt": "2026-10-16T02:35:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:35:56Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 23,
+          "startedAt": "2026-10-16T02:35:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:35:57Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 24,
+          "startedAt": "2026-10-16T02:35:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:35:59Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 25,
+          "startedAt": "2026-10-16T02:35:57Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/sshelter/actions/runs/38840534319/job/116779434947"
+    },
+    {
+      "completedAt": "2026-10-16T02:34:22Z",
+      "conclusion": "success",
+      "databaseId": 116779434958,
+      "name": "build (windows-latest, --config '{\"bundle\":{\"externalBin\":[\"binaries/sshelter-cli\"]}}')",
+      "startedAt": "2026-10-16T02:28:04Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T02:28:08Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T02:28:05Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:14Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T02:28:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:14Z",
+          "conclusion": "skipped",
+          "name": "Install Linux dependencies",
+          "number": 3,
+          "startedAt": "2026-10-16T02:28:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:17Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 4,
+          "startedAt": "2026-10-16T02:28:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:30Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 5,
+          "startedAt": "2026-10-16T02:28:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:31Z",
+          "conclusion": "success",
+          "name": "Stamp the beta version (workspace only)",
+          "number": 6,
+          "startedAt": "2026-10-16T02:28:30Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:53Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 7,
+          "startedAt": "2026-10-16T02:28:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:19Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 8,
+          "startedAt": "2026-10-16T02:28:53Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:23Z",
+          "conclusion": "success",
+          "name": "Build the console helper (Windows)",
+          "number": 9,
+          "startedAt": "2026-10-16T02:29:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:31Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 10,
+          "startedAt": "2026-10-16T02:29:23Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:31Z",
+          "conclusion": "success",
+          "name": "Check the sync relay URL",
+          "number": 11,
+          "startedAt": "2026-10-16T02:29:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:17Z",
+          "conclusion": "success",
+          "name": "Build and upload installers to the prerelease",
+          "number": 12,
+          "startedAt": "2026-10-16T02:29:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:17Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 21,
+          "startedAt": "2026-10-16T02:34:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:18Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 22,
+          "startedAt": "2026-10-16T02:34:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:18Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 23,
+          "startedAt": "2026-10-16T02:34:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:20Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 24,
+          "startedAt": "2026-10-16T02:34:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:20Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 25,
+          "startedAt": "2026-10-16T02:34:20Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/sshelter/actions/runs/38840534319/job/116779434958"
+    },
+    {
+      "completedAt": "2026-10-16T02:34:32Z",
+      "conclusion": "success",
+      "databaseId": 116779434969,
+      "name": "build (ubuntu-22.04)",
+      "startedAt": "2026-10-16T02:28:04Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T02:28:06Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T02:28:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:07Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T02:28:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:49Z",
+          "conclusion": "success",
+          "name": "Install Linux dependencies",
+          "number": 3,
+          "startedAt": "2026-10-16T02:28:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:50Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 4,
+          "startedAt": "2026-10-16T02:28:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:53Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 5,
+          "startedAt": "2026-10-16T02:28:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:28:53Z",
+          "conclusion": "success",
+          "name": "Stamp the beta version (workspace only)",
+          "number": 6,
+          "startedAt": "2026-10-16T02:28:53Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:03Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 7,
+          "startedAt": "2026-10-16T02:28:53Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:12Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 8,
+          "startedAt": "2026-10-16T02:29:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:12Z",
+          "conclusion": "skipped",
+          "name": "Build the console helper (Windows)",
+          "number": 9,
+          "startedAt": "2026-10-16T02:29:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:18Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 10,
+          "startedAt": "2026-10-16T02:29:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:29:18Z",
+          "conclusion": "success",
+          "name": "Check the sync relay URL",
+          "number": 11,
+          "startedAt": "2026-10-16T02:29:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:30Z",
+          "conclusion": "success",
+          "name": "Build and upload installers to the prerelease",
+          "number": 12,
+          "startedAt": "2026-10-16T02:29:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:30Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 21,
+          "startedAt": "2026-10-16T02:34:30Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:30Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 22,
+          "startedAt": "2026-10-16T02:34:30Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:30Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 23,
+          "startedAt": "2026-10-16T02:34:30Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:30Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 24,
+          "startedAt": "2026-10-16T02:34:30Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:34:30Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 25,
+          "startedAt": "2026-10-16T02:34:30Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/sshelter/actions/runs/38840534319/job/116779434969"
+    },
+    {
+      "completedAt": "2026-10-16T02:36:15Z",
+      "conclusion": "success",
+      "databaseId": 116781621860,
+      "name": "beta-manifest",
+      "startedAt": "2026-10-16T02:36:03Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T02:36:04Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T02:36:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:36:06Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T02:36:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:36:08Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-node@v4",
+          "number": 3,
+          "startedAt": "2026-10-16T02:36:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:36:12Z",
+          "conclusion": "success",
+          "name": "Update the Beta channel manifest",
+          "number": 4,
+          "startedAt": "2026-10-16T02:36:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:36:12Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@v4",
+          "number": 7,
+          "startedAt": "2026-10-16T02:36:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:36:12Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 8,
+          "startedAt": "2026-10-16T02:36:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T02:36:12Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 9,
+          "startedAt": "2026-10-16T02:36:12Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/sshelter/actions/runs/38840534319/job/116781621860"
+    }
+  ],
+  "status": "completed",
+  "updatedAt": "2026-10-16T02:36:16Z",
+  "url": "https://github.com/ysya/sshelter/actions/runs/38840534319"
+}
