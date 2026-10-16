@@ -13,16 +13,23 @@ name: windows bundle check
 
 on:
   workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: "Reuse this workflow run's unsigned candidate for upgrade-only validation (leave empty to build)"
+        required: false
+        default: ""
   push:
     branches: [next/own-ssh]
     paths: [".github/workflows/windows-bundle-check.yml"]
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   # The job keeps its first id (its Rust cache is keyed by it); it builds and checks both installers now.
   nsis:
+    if: ${{ !inputs.candidate_run_id }}
     name: installers
     runs-on: windows-latest
     timeout-minutes: 90
@@ -71,6 +78,30 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         with:
           args: --verbose --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Record the unsigned candidate source and checksums
+        shell: pwsh
+        run: |
+          $base = (Resolve-Path 'src-tauri/target/release').Path
+          $packages = @(Get-ChildItem "$base/bundle/nsis" -Filter '*-setup.exe') + @(Get-ChildItem "$base/bundle/msi" -Filter '*.msi')
+          if ($packages.Count -ne 2) { throw 'Expected one NSIS and one MSI candidate.' }
+          $files = @($packages | ForEach-Object {
+            @{ path = [IO.Path]::GetRelativePath($base, $_.FullName).Replace('\', '/'); sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
+          })
+          @{ source = $env:GITHUB_SHA; repository = $env:GITHUB_REPOSITORY; files = $files } | ConvertTo-Json -Depth 4 | Set-Content "$base/rebrand-candidate.json"
+
+      - name: Preserve unsigned test installers and generated templates
+        uses: actions/upload-artifact@v4
+        with:
+          name: lunport-rebrand-candidate
+          retention-days: 3
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/rebrand-candidate.json
+            src-tauri/target/release/nsis/**/*.nsi
+            src-tauri/target/release/wix/**/*.wxs
 
       # 7-Zip (on the runner image) reads NSIS installers: every file the installer writes, by the directory it writes it to.
       - name: The NSIS installer holds sshelter-cli.exe next to sshelter.exe
@@ -153,12 +184,6 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_NSIS_DIR=$dir"
           exit 0
 
-      - name: Upgrade published SSHelter 1.0.0 to Lunport
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/validate-windows-rebrand.ps1
-
       # The same two programs in a console of their own, as a terminal runs them (own-ssh spec §7.3), from each installer: the helper
       # started with that console's own buffers as its standard handles, as a shell in the console starts a program, and the GUI
       # sshelter.exe attaching to the helper's console and reading it through the handles it inherits (no step through pipes reaches that).
@@ -180,6 +205,48 @@ jobs:
           }
           exit 0
 
+  upgrade:
+    name: upgrade published 1.0.0
+    needs: nsis
+    if: ${{ always() && (needs.nsis.result == 'success' || inputs.candidate_run_id != '') }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download and verify the matching unsigned candidate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || github.run_id }}
+        run: |
+          $candidateRun = $env:CANDIDATE_RUN_ID
+          if ($candidateRun -notmatch '^[1-9][0-9]*$') { throw 'Invalid candidate workflow run id.' }
+          $run = (& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$candidateRun" | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or $run.name -ne 'windows bundle check') { throw 'Not a Windows bundle-check candidate.' }
+          & gh run download $candidateRun --repo $env:GITHUB_REPOSITORY --name lunport-rebrand-candidate --dir src-tauri/target/release
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot download the unsigned candidate.' }
+          $base = (Resolve-Path 'src-tauri/target/release').Path
+          $candidate = Get-Content "$base/rebrand-candidate.json" -Raw | ConvertFrom-Json
+          if ($candidate.repository -ne $env:GITHUB_REPOSITORY -or $candidate.source -ne $run.head_sha -or $candidate.source -notmatch '^[a-f0-9]{40}$') { throw 'Candidate provenance mismatch.' }
+          $changes = @(& git diff --name-only $candidate.source HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot compare candidate source.' }
+          $unexpected = @($changes | Where-Object { $_ -notmatch '^(docs/|scripts/validate-windows-rebrand\.ps1$|\.github/workflows/windows-bundle-check\.yml$|relay/README\.md$)' })
+          if ($unexpected.Count -ne 0) { throw "Product source differs from the candidate: $($unexpected -join ', ')" }
+          if (@($candidate.files).Count -ne 2) { throw 'Expected exactly two candidate packages.' }
+          foreach ($file in $candidate.files) {
+            if ($file.path -notmatch '^bundle/(nsis|msi)/[^/\\]+\.(exe|msi)$') { throw 'Unexpected candidate path.' }
+            if ((Get-FileHash (Join-Path $base $file.path) -Algorithm SHA256).Hash -ne $file.sha256) { throw 'Candidate package checksum mismatch.' }
+          }
+          Write-Output "Verified unsigned candidate from $($candidate.source)"
+          Get-ChildItem "$base/nsis" -Filter '*.nsi' -Recurse | Select-String '^!define (PRODUCTNAME|MAINBINARYNAME|MAINBINARYSRCPATH|BUNDLEID|MANUKEY|MANUPRODUCTKEY|UNINSTKEY|INSTALLERIDENTITY) '
+          exit 0
+      - name: Upgrade published SSHelter 1.0.0 to Lunport on a clean runner
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/validate-windows-rebrand.ps1
       - name: Show disposable upgrade logs on failure
         if: failure()
         shell: pwsh

@@ -17,6 +17,7 @@ foreach ($name in @('SSHelter_1.0.0_x64-setup.exe', 'SSHelter_1.0.0_x64_en-US.ms
     if ($asset[0].digest -ne "sha256:$hash") { throw "The published digest does not match $name" }
 }
 function Run-Installer([string] $Program, [string] $Arguments) {
+    Write-Output "Running $Program $Arguments"
     $process = Start-Process -FilePath $Program -ArgumentList $Arguments -Wait -PassThru
     if ($process.ExitCode -notin @(0, 3010)) { throw "$Program failed with $($process.ExitCode)" }
 }
@@ -44,11 +45,13 @@ $sentinel = Join-Path $env:LOCALAPPDATA 'org.homelab.sshelter/rebrand-sentinel.t
 New-Item -ItemType Directory -Force (Split-Path $sentinel) | Out-Null
 Set-Content -LiteralPath $sentinel -Value 'disposable nonsecret upgrade fixture' -NoNewline
 $sentinelHash = (Get-FileHash $sentinel -Algorithm SHA256).Hash
-function Check-Installed([string] $Directory) {
+function Check-Installed([string] $Directory, [string] $ProductName = 'Lunport') {
+    Write-Output "Checking $ProductName at $Directory"
+    Get-ChildItem -LiteralPath $Directory -Force | Select-Object Name, Length | Format-Table | Out-Host
     $exe = Join-Path $Directory 'sshelter.exe'
     $helper = Join-Path $Directory 'sshelter-cli.exe'
     if (-not (Test-Path $exe) -or -not (Test-Path $helper)) { throw 'Saved executable/helper path was lost.' }
-    if ((Get-Item $exe).VersionInfo.ProductName -ne 'Lunport') { throw 'The old path does not contain the renamed app.' }
+    if ((Get-Item $exe).VersionInfo.ProductName -ne $ProductName) { throw "The existing path does not contain $ProductName." }
     $said = (& $helper connect 2>&1 | ForEach-Object { "$_" }) -join [Environment]::NewLine
     if ($LASTEXITCODE -ne 2 -or $said -notmatch 'usage: sshelter connect <alias>') { throw 'The existing CLI entry point stopped working.' }
     if ((Get-FileHash $sentinel -Algorithm SHA256).Hash -ne $sentinelHash) { throw 'Existing application data changed.' }
@@ -60,11 +63,13 @@ Run-Installer (Join-Path $scratch 'SSHelter_1.0.0_x64-setup.exe') ("/S /D=$nsisD
 $productKey = 'HKCU:\Software\homelab\SSHelter'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SSHelter'
 if ((Get-Item $productKey).GetValue('') -ne $nsisDir) { throw 'The old NSIS did not register its install directory.' }
+Check-Installed $nsisDir 'SSHelter'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $loginCommand = '"{0}\sshelter.exe"' -f $nsisDir
 New-Item -Path $runKey -Force | Out-Null
 New-ItemProperty -Path $runKey -Name 'SSHelter' -Value $loginCommand -PropertyType String -Force | Out-Null
 Run-Installer $newNsis[0].FullName '/S /UPDATE /NS'
+Write-Output "NSIS registered directory after update: $((Get-Item $productKey).GetValue(''))"
 Check-Installed $nsisDir
 if ((Get-Item $productKey).GetValue('') -ne $nsisDir) { throw 'NSIS moved the existing installation.' }
 if ((Get-ItemProperty $uninstallKey).DisplayName -ne 'Lunport') { throw 'Add/Remove Programs still has the old brand.' }
