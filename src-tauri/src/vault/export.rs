@@ -1,4 +1,4 @@
-//! 匯出私鑰(金鑰保管庫 spec §7.3.2):需要檔案時唯一的出口。內容是保管庫裡的私鑰原文,可選擇加上 passphrase;存到 SSHelter 管理的 `~/.ssh/sshelter/`
+//! 匯出私鑰(金鑰保管庫 spec §7.3.2):需要檔案時唯一的出口。內容是保管庫裡的私鑰原文,可選擇加上 passphrase;存到 Lunport 管理的 `~/.ssh/sshelter/`
 //! 底下會被拒絕。檔案直接寫在使用者選的路徑上(`save_export`),在寫入任何金鑰內容之前就只有擁有者能讀寫。存檔對話框在 `sync::engine::sync_key_export_private`。
 //!
 //! 代價:不是原子的 —— 寫到一半當掉(斷電、被終止)可能留下不完整的檔案,使用者重新匯出即可(寫入失敗時檔案會被移除,不留半把金鑰)。換來的是使用者的資料夾裡
@@ -12,8 +12,8 @@ use zeroize::Zeroizing;
 use crate::error::AppError;
 use crate::vault::material;
 
-/// 要存到 SSHelter 管理的資料夾裡:拒絕(那裡的檔案由 SSHelter 維護,會被改寫或移除)。
-pub const EXPORT_INSIDE_MESSAGE: &str = "Choose a folder outside ~/.ssh/sshelter: SSHelter manages that folder.";
+/// 要存到 Lunport 管理的資料夾裡:拒絕(那裡的檔案由 Lunport 維護,會被改寫或移除)。
+pub const EXPORT_INSIDE_MESSAGE: &str = "Choose a folder outside ~/.ssh/sshelter: Lunport manages that folder.";
 /// 已經有 passphrase 的金鑰不能再加一個(匯出時照原樣,仍是加密的)。
 pub const ALREADY_PROTECTED_MESSAGE: &str = "This key already has a passphrase.";
 /// 目的地已經是一個資料夾:不是能存金鑰的檔案(存檔對話框問過要不要取代檔案,資料夾不能取代)。
@@ -25,7 +25,7 @@ pub fn export_text(private_key: &str, passphrase: Option<&str>) -> Result<Zeroiz
     let Some(passphrase) = passphrase.filter(|p| !p.is_empty()) else {
         return Ok(Zeroizing::new(private_key.to_string()));
     };
-    let key = material::parse(private_key).ok_or_else(|| AppError::Other("SSHelter can't read this key.".to_string()))?;
+    let key = material::parse(private_key).ok_or_else(|| AppError::Other("Lunport can't read this key.".to_string()))?;
     if key.is_encrypted() {
         return Err(AppError::Other(ALREADY_PROTECTED_MESSAGE.to_string()));
     }
@@ -48,7 +48,7 @@ pub fn check_destination(path: &Path, home: &Path) -> Result<(), AppError> {
 
 /// 把匯出的內容寫到使用者選的 `path`:目的地先過 `check_destination`,再由 `write_export` 直接寫成只有擁有者能讀寫的檔案。
 ///
-/// 不用 `slot_files::write_private`(暫存檔 + rename):那是給 SSHelter 自己的資料夾用的,暫存檔會繼承所在資料夾的權限;使用者選的資料夾(`C:\` 底下、共用資料夾……)
+/// 不用 `slot_files::write_private`(暫存檔 + rename):那是給 Lunport 自己的資料夾用的,暫存檔會繼承所在資料夾的權限;使用者選的資料夾(`C:\` 底下、共用資料夾……)
 /// 不一定只有他自己能讀,而 Windows 上整把金鑰寫進去、rename 之後才限縮權限,中間(以及限縮失敗的時候)別的使用者可能讀得到。暫存檔也不該出現在使用者的資料夾裡
 /// (`settings_export` 同樣直接寫使用者選的路徑)。代價是不原子:寫到一半當掉(斷電、被終止)可能留下不完整的檔案,使用者重新匯出即可。
 pub fn save_export(path: &Path, home: &Path, text: &str) -> Result<(), AppError> {
@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(export_text(&test_keys::encrypted(), Some("x")).unwrap_err().to_string(), ALREADY_PROTECTED_MESSAGE);
     }
 
-    /// 不能存到 SSHelter 管理的 `~/.ssh/sshelter/` 底下(包括 `keys/`、`agent/`);其他地方都可以,`~/.ssh` 本身也可以。
+    /// 不能存到 Lunport 管理的 `~/.ssh/sshelter/` 底下(包括 `keys/`、`agent/`);其他地方都可以,`~/.ssh` 本身也可以。
     #[test]
     fn a_file_inside_sshelters_folder_is_refused() {
         let home = tempfile::tempdir().unwrap();
@@ -183,7 +183,7 @@ mod tests {
         }
     }
 
-    /// 存到外面:內容就是匯出的文字,只有擁有者能讀寫(unix 0600);存到 SSHelter 的資料夾:什麼都不寫。
+    /// 存到外面:內容就是匯出的文字,只有擁有者能讀寫(unix 0600);存到 Lunport 的資料夾:什麼都不寫。
     #[test]
     fn an_export_is_written_owner_only_and_never_inside_sshelters_folder() {
         let home = tempfile::tempdir().unwrap();
@@ -201,8 +201,8 @@ mod tests {
         }
     }
 
-    /// 資料夾是 symlink 也一樣:使用者自己的 symlink 指進 SSHelter 的資料夾,或 `~/.ssh` 本身是 symlink(dotfiles 放在別處),實際位置在 `~/.ssh/sshelter/`
-    /// 底下的都拒絕、什麼都不寫;同一個 `~/.ssh` 裡 SSHelter 的資料夾以外的地方照常可以存。
+    /// 資料夾是 symlink 也一樣:使用者自己的 symlink 指進 Lunport 的資料夾,或 `~/.ssh` 本身是 symlink(dotfiles 放在別處),實際位置在 `~/.ssh/sshelter/`
+    /// 底下的都拒絕、什麼都不寫;同一個 `~/.ssh` 裡 Lunport 的資料夾以外的地方照常可以存。
     #[cfg(unix)]
     #[test]
     fn a_symlink_into_sshelters_folder_does_not_get_around_the_refusal() {

@@ -878,9 +878,9 @@ const PAIR_TEST: &str = "cli::real_console_tests::the_pair_in_a_console_of_its_o
 /// standard handles; a release build is a GUI program, which attaches to the helper's console first). Each case runs in a child with a
 /// console of its own, which reads what the console's screen shows once the pair has ended:
 /// - `sshelter-cli.exe connect`: the usage on the console, and 2;
-/// - `sshelter-cli.exe connect web` while SSHelter's session pipe exists and another owner made it (the Administrators group: the CI
+/// - `sshelter-cli.exe connect web` while Lunport's session pipe exists and another owner made it (the Administrators group: the CI
 ///   runner is elevated): the refusal on the console, and 1. On the way the pair attached to the console, read its standard handles as a
-///   console (`Tty::new`) and refused the pipe in the broker's connect (it did open that very pipe), and it started no SSHelter;
+///   console (`Tty::new`) and refused the pipe in the broker's connect (it did open that very pipe), and it started no Lunport;
 /// - the pair's helper next to a stand-in `sshelter.exe` (this test binary) that changes the console and is ended from outside, as the NSIS
 ///   installer ends every `sshelter.exe` at an install, an update and an uninstall: once it has ended the helper puts the console's four
 ///   settings back, which the program alone leaves changed, and leaves with its exit code.
@@ -933,13 +933,13 @@ fn pair_case(name: &str) {
             let (code, screen) = run_the_pair(&dir, &["connect", "web"]);
             eprintln!("sshelter-cli.exe connect web ended with {code}; the console shows:\n{screen}");
             let started = sshelters_left();
-            assert!(started.is_empty(), "an SSHelter was started (process ids {started:?}), and is stopped now");
+            assert!(started.is_empty(), "a Lunport was started (process ids {started:?}), and is stopped now");
             assert!(a_client_came(&squatter), r"sshelter.exe did not open \\.\pipe\{name}");
             let label = match profile {
                 crate::app_profile::AppProfile::Production => "session",
                 crate::app_profile::AppProfile::Development => "dev",
             };
-            let refused = format!(r"Another program is using SSHelter's {label} pipe (\\.\pipe\{name})");
+            let refused = format!(r"Another program is using Lunport's {label} pipe (\\.\pipe\{name})");
             assert!(screen.contains(&refused), "the refusal is not on the console:\n{screen}");
             assert_eq!(code, 1);
         }
@@ -1114,7 +1114,7 @@ fn a_client_came(pipe: &OwnedHandle) -> bool {
     }
 }
 
-/// The processes called `sshelter.exe` that are running (their ids). Once the pair has ended, any is an SSHelter it started: each is
+/// The processes called `sshelter.exe` that are running (their ids). Once the pair has ended, any is a Lunport it started: each is
 /// stopped, so that it does not outlive the test.
 fn sshelters_left() -> Vec<u32> {
     use windows_sys::Win32::Foundation::CloseHandle;

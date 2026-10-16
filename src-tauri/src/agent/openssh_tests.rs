@@ -83,7 +83,7 @@ impl AgentHost for TestHost {
 }
 
 /// 工具的路徑。Windows 先用系統內建的 Win32-OpenSSH(`System32\OpenSSH`),沒有才用 PATH 上的:PATH 上 Git for Windows 的 `usr\bin` 也有
-/// ssh-add 與 ssh-keygen,但那是 MSYS2 的版本,說的是 Unix socket,連不上 SSHelter 的 named pipe。其他平台就是 PATH 上的。
+/// ssh-add 與 ssh-keygen,但那是 MSYS2 的版本,說的是 Unix socket,連不上 Lunport 的 named pipe。其他平台就是 PATH 上的。
 fn tool(name: &str) -> std::path::PathBuf {
     #[cfg(windows)]
     {

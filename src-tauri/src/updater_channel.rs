@@ -16,7 +16,7 @@ fn require_updates_allowed() -> Result<(), AppError> {
 }
 
 /// Beta 頻道的更新清單(由 CI 的 scripts/beta-channel.mjs 維護)。
-pub const BETA_ENDPOINT: &str = "https://github.com/ysya/sshelter/releases/download/updater-beta/latest.json";
+pub const BETA_ENDPOINT: &str = "https://github.com/ysya/lunport/releases/download/updater-beta/latest.json";
 
 const NOTHING_PENDING: &str = "no beta update is ready to install; check for updates again";
 
@@ -145,7 +145,7 @@ mod tests {
     fn the_beta_endpoint_is_the_updater_beta_release_manifest() {
         let url = beta_endpoint().unwrap();
         assert_eq!(url.scheme(), "https");
-        assert_eq!(url.as_str(), "https://github.com/ysya/sshelter/releases/download/updater-beta/latest.json");
+        assert_eq!(url.as_str(), "https://github.com/ysya/lunport/releases/download/updater-beta/latest.json");
     }
 
     #[test]

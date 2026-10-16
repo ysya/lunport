@@ -26,7 +26,7 @@ fn parent_of(path: &Path) -> Result<&Path, AppError> {
     path.parent().ok_or_else(|| AppError::Other(format!("no parent dir for {}", path.display())))
 }
 
-/// 確保插槽目錄存在且只有目前使用者能存取。Unix:0700(已存在也改 —— 這是 SSHelter 自己的目錄);Windows:owner-only、
+/// 確保插槽目錄存在且只有目前使用者能存取。Unix:0700(已存在也改 —— 這是 Lunport 自己的目錄);Windows:owner-only、
 /// 不繼承上層、會被子項繼承的 DACL。
 pub fn ensure_keys_dir(dir: &Path) -> Result<(), AppError> {
     crate::fsutil::check_write(dir)?;
@@ -303,7 +303,7 @@ mod tests {
         let dir = home.path().join(".ssh/sshelter/keys");
         ensure_keys_dir(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);
-        // SSHelter 自己的目錄:權限被放寬過也改回 0700。
+        // Lunport 自己的目錄:權限被放寬過也改回 0700。
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         ensure_keys_dir(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);

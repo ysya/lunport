@@ -71,7 +71,7 @@ export interface ImportKeyState {
 }
 
 /**
- * New key (spec §7.5): paste a private key or choose (or drop) a file; for a file, Move into SSHelter or Keep the file too. No hooks:
+ * New key (spec §7.5): paste a private key or choose (or drop) a file; for a file, Move into Lunport or Keep the file too. No hooks:
  * exported for the tests. What comes from the config or the disk (host names, the reason a file can't be added, the file's name) is
  * shown through `revealHidden`.
  */
@@ -100,7 +100,7 @@ export function ImportKeyView({
     <div className="space-y-5">
       <header className="space-y-1">
         <h2 className="app-inspector-title">New key</h2>
-        <p className="text-sm text-muted-foreground">SSHelter keeps the key in its vault. Programs ask before they use it.</p>
+        <p className="text-sm text-muted-foreground">Lunport keeps the key in its vault. Programs ask before they use it.</p>
       </header>
       {choices<"paste" | "file">("Where the key comes from", [["paste", "Paste"], ["file", "From a file"]], state.source, onSource, state.busy)}
       {state.source === "paste" ? (
@@ -135,7 +135,7 @@ export function ImportKeyView({
         <div className="space-y-2">
           {choices<"move" | "keep">(
             "What happens to the file",
-            [["move", "Move into SSHelter"], ["keep", "Keep the file too"]],
+            [["move", "Move into Lunport"], ["keep", "Keep the file too"]],
             state.keepFile ? "keep" : "move",
             (choice) => onKeepFile(choice === "keep"),
             state.busy,
@@ -144,8 +144,8 @@ export function ImportKeyView({
             <p className="text-xs text-muted-foreground">The file stays. Any program can use it without asking.</p>
           ) : (
             <div className="space-y-1 text-xs text-muted-foreground">
-              <p>SSHelter keeps the only copy on this computer and removes the file. Export private key… gets a file back.</p>
-              {preview.hosts.length > 0 && <p>{`${listNames(preview.hosts.map((host) => revealHidden(host)))} will use the key in SSHelter.`}</p>}
+              <p>Lunport keeps the only copy on this computer and removes the file. Export private key… gets a file back.</p>
+              {preview.hosts.length > 0 && <p>{`${listNames(preview.hosts.map((host) => revealHidden(host)))} will use the key in Lunport.`}</p>}
               {preview.default_identity && (
                 <p>{`ssh also tries ~/.ssh/${revealHidden(basename(state.path))} for hosts that don't name a key. After the move, those hosts won't find it.`}</p>
               )}
@@ -158,7 +158,7 @@ export function ImportKeyView({
           Cancel
         </Button>
         <Button type="button" size="sm" className="h-7" disabled={state.busy || !isValidSlotName(state.name) || !ready} onClick={onAdd}>
-          {state.busy ? "Adding…" : "Add to SSHelter"}
+          {state.busy ? "Adding…" : "Add to Lunport"}
         </Button>
       </ActionBar>
     </div>
@@ -196,7 +196,7 @@ export function GenerateKeyView({
     <div className="space-y-5">
       <header className="space-y-1">
         <h2 className="app-inspector-title">Generate key</h2>
-        <p className="text-sm text-muted-foreground">A new key made in SSHelter. It exists only in SSHelter until you export it.</p>
+        <p className="text-sm text-muted-foreground">A new key made in Lunport. It exists only in Lunport until you export it.</p>
       </header>
       {choices<KeyAlgorithm>("Key type", KEY_TYPES.map((t): [KeyAlgorithm, string] => [t.algorithm, t.label]), state.algorithm, onAlgorithm, state.busy)}
       {state.algorithm.startsWith("rsa") && <p className="text-xs text-muted-foreground">An RSA key takes a few seconds to make.</p>}
@@ -242,7 +242,7 @@ function addedName(overview: SyncOverview, slotId: string, typed: string): strin
 }
 
 /**
- * Add the pasted key or the chosen file (New key's "Add to SSHelter"), and tell the user how it went. Resolves to the new key's slot
+ * Add the pasted key or the chosen file (New key's "Add to Lunport"), and tell the user how it went. Resolves to the new key's slot
  * id, or to null when nothing was added: after a toast said why, or with no toast when a file form has no file chosen (nothing is
  * sent then). Plain calls, not mutations: the key text must not stay in TanStack's cache. Exported for the tests.
  */
@@ -251,20 +251,20 @@ export async function submitImport(queryClient: QueryClient, state: ImportKeySta
     if (state.source === "paste") {
       const result = await importKeyText(state.name, state.text);
       applyNewKey(queryClient, result.overview);
-      toast.success(`${addedName(result.overview, result.slot_id, state.name)} is in SSHelter`);
+      toast.success(`${addedName(result.overview, result.slot_id, state.name)} is in Lunport`);
       return result.slot_id;
     }
     if (state.path === null) return null;
     const result = await importKeyFile(state.name, state.path, state.keepFile);
     applyNewKey(queryClient, result.overview);
     const note = importedNote(result, state.path, state.keepFile);
-    toast.success(`${addedName(result.overview, result.slot_id, state.name)} is in SSHelter`, note ? { description: note } : undefined);
+    toast.success(`${addedName(result.overview, result.slot_id, state.name)} is in Lunport`, note ? { description: note } : undefined);
     // Hosts now pointing at a key only on this computer: the Sync key dialog asks about the synced ones (spec §4.3). A move that
     // stopped halfway lists the hosts it did switch.
     if (result.rewritten_hosts.length > 0) useUiStore.getState().setKeySetup({ aliases: result.rewritten_hosts, reason: "saved" });
     return result.slot_id;
   } catch (error) {
-    // The message can name a key or a host from elsewhere ("This key is already in SSHelter as {name}.").
+    // The message can name a key or a host from elsewhere ("This key is already in Lunport as {name}.").
     toast.error("Could not add the key", { description: revealHidden(errorMessage(error)) });
     return null;
   }
@@ -291,7 +291,7 @@ export async function submitGenerate(queryClient: QueryClient, state: GenerateKe
 }
 
 /**
- * Whether "Add to SSHelter" has to ask first (spec §7.5): a chosen file that would be moved is removed, so the user confirms it. Keep
+ * Whether "Add to Lunport" has to ask first (spec §7.5): a chosen file that would be moved is removed, so the user confirms it. Keep
  * the file too and a pasted key remove no file and are added at once. Exported for the tests.
  */
 export function needsMoveConfirm(state: ImportKeyState): boolean {
@@ -300,7 +300,7 @@ export function needsMoveConfirm(state: ImportKeyState): boolean {
 
 /**
  * What the New key form's buttons do, apart from React (spec §7.5). `state` is the form as last drawn, `update` merges into it, and
- * `show` is told the slot id of the key once it was added. "Add to SSHelter" opens the Move confirm for a Move and adds anything else at
+ * `show` is told the slot id of the key once it was added. "Add to Lunport" opens the Move confirm for a Move and adds anything else at
  * once; nothing is sent until the user confirms, and Cancel leaves the form exactly as it was. Exported for the tests.
  */
 export function importActions({

@@ -1,5 +1,5 @@
 //! SSH key management: scan ~/.ssh for keypairs, agent status, public-key reads, and
-//! `ssh-copy-id` deployment via the user's terminal. New keys are made inside SSHelter
+//! `ssh-copy-id` deployment via the user's terminal. New keys are made inside Lunport
 //! (`sync::local_keys`), not here.
 //!
 //! Security model (same as `connect.rs`): the WebView has NO shell permission — all IO/exec
@@ -285,7 +285,7 @@ pub fn hosts_using(doc: &crate::config::model::SshConfigDoc, home: &Path, key_pa
     out.into_iter().collect()
 }
 
-/// Git for Windows ships its own `ssh`, which can't open named pipes, so it can't reach SSHelter's agent (key vault
+/// Git for Windows ships its own `ssh`, which can't open named pipes, so it can't reach Lunport's agent (key vault
 /// spec §10). Git has to use Windows' own OpenSSH instead.
 pub const GIT_SSH_COMMAND: &str = "C:/Windows/System32/OpenSSH/ssh.exe";
 
@@ -333,7 +333,7 @@ pub fn keys_list(state: tauri::State<crate::state::AppState>) -> Result<Vec<KeyI
 
 /// The command the Keychain suggests on Windows when Git would use its own ssh (key vault spec §10); `None` on other
 /// systems, when git isn't installed, or when `core.sshCommand` already points at Windows' OpenSSH. The Keychain shows it
-/// only while this computer has keys in SSHelter. Never changes git's settings.
+/// only while this computer has keys in Lunport. Never changes git's settings.
 #[tauri::command(async)]
 pub fn keys_git_ssh_hint() -> Option<String> {
     if !cfg!(target_os = "windows") {

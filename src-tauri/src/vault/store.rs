@@ -139,7 +139,7 @@ pub enum VaultError {
     KeyMissing,
     /// 讀不懂、或有項目卻缺它的 keychain 帳戶裡的金鑰的保管庫檔:已搬到同一個資料夾的 `kept_as`(搬不動是 None),之後從空的保管庫開始(spec §4.1、§11)。
     Unreadable { kept_as: Option<String>, reason: String },
-    /// 更新版 SSHelter 寫的格式:原地不動,保管庫停用。
+    /// 更新版 Lunport 寫的格式:原地不動,保管庫停用。
     Newer { version: u32 },
     Other(AppError),
 }
@@ -152,7 +152,7 @@ impl std::fmt::Display for VaultError {
                 write!(f, "the vault file was unreadable ({reason}); it was kept as {name}")
             }
             VaultError::Unreadable { kept_as: None, reason } => write!(f, "the vault file is unreadable ({reason})"),
-            VaultError::Newer { version } => write!(f, "the vault was written by a newer SSHelter (format {version})"),
+            VaultError::Newer { version } => write!(f, "the vault was written by a newer Lunport (format {version})"),
             VaultError::Other(e) => write!(f, "{e}"),
         }
     }
@@ -505,7 +505,7 @@ pub fn with_vault<T>(
     f(&mut vault)
 }
 
-/// 保管庫檔裡每一筆的 id(插槽 id,與 retired 項目)。不讀 keychain、不搬任何檔案:同步的每一輪用它確認「只在 SSHelter」的插槽還在保管庫裡(金鑰保管庫 spec §11)。
+/// 保管庫檔裡每一筆的 id(插槽 id,與 retired 項目)。不讀 keychain、不搬任何檔案:同步的每一輪用它確認「只在 Lunport」的插槽還在保管庫裡(金鑰保管庫 spec §11)。
 /// 檔案不存在 → 空的;讀不懂 → `Unreadable { kept_as: None, .. }`;更新版的格式 → `Newer`。
 pub fn stored_ids(path: &Path) -> Result<BTreeSet<String>, VaultError> {
     let bytes = match std::fs::read(path) {
@@ -848,7 +848,7 @@ mod tests {
         assert_eq!(current.get(&"b".repeat(32)).unwrap().unwrap().private_key, test_keys::plain());
     }
 
-    /// 計畫 1 寫的保管庫檔(沒有 `key_account`,第 1 版)照舊開得了,再存東西也不改帳戶與版本:舊版 SSHelter 還讀得懂它。
+    /// 計畫 1 寫的保管庫檔(沒有 `key_account`,第 1 版)照舊開得了,再存東西也不改帳戶與版本:舊版 Lunport 還讀得懂它。
     #[test]
     fn a_plan_1_vault_keeps_its_format() {
         let dir = tempfile::tempdir().unwrap();
@@ -1040,7 +1040,7 @@ mod tests {
 
         std::fs::write(&path, br#"{"version": 99, "entries": {}}"#).unwrap();
         assert!(matches!(Vault::open(&path, &keychain, 79), Err(VaultError::Newer { version: 99 })));
-        assert!(path.exists(), "a file from a newer SSHelter is never moved");
+        assert!(path.exists(), "a file from a newer Lunport is never moved");
     }
 
     #[test]

@@ -50,7 +50,7 @@ pub fn public_key_data(public_key_line: &str) -> Option<KeyData> {
 }
 
 /// agent 簽得了這種金鑰嗎:Ed25519、ECDSA、RSA。`sk-*`(FIDO 安全金鑰,簽章要靠硬體)與 DSA 不行。這是唯一的規則:agent 列出金鑰、比對簽章請求
-/// (`agent::broker`),和「Only in SSHelter」收不收這把金鑰(`sync::slots::set_delivery`)都看它 —— 簽不了的金鑰不列出,也不搬進保管庫。
+/// (`agent::broker`),和「Only in Lunport」收不收這把金鑰(`sync::slots::set_delivery`)都看它 —— 簽不了的金鑰不列出,也不搬進保管庫。
 pub fn agent_can_sign(data: &KeyData) -> bool {
     matches!(data.algorithm(), Algorithm::Ed25519 | Algorithm::Ecdsa { .. } | Algorithm::Rsa { .. })
 }
@@ -63,7 +63,7 @@ pub fn is_encrypted(private_key: &str) -> bool {
 }
 
 /// agent 讀得懂這把私鑰嗎(`open` 不回 `Unreadable`)?`inspect_private_key`(同步讀標頭用的)只看標頭與公鑰段,`ssh-key` 另外會挑剔其他欄位
-/// (例如不是 UTF-8 的 comment):讀不懂的金鑰搬進保管庫之後 agent 打不開它,所以「Only in SSHelter」先用它擋下(`sync::slots::set_delivery`)。
+/// (例如不是 UTF-8 的 comment):讀不懂的金鑰搬進保管庫之後 agent 打不開它,所以「Only in Lunport」先用它擋下(`sync::slots::set_delivery`)。
 /// 要 passphrase(`NeedsPassphrase`)與加密方式解不開(`UnsupportedCipher`,有自己的訊息)都是解析成功,算讀得懂。
 pub fn agent_can_read(private_key: &str) -> bool {
     !matches!(open(private_key, None), Err(OpenError::Unreadable))
@@ -79,7 +79,7 @@ fn unsupported_cipher_of(key: &PrivateKey) -> Option<String> {
 }
 
 /// 私鑰原文的加密方式 agent 解不開(例如 `3des-cbc`)就回傳它的名稱;沒有加密、解得開,或讀不懂(那是 `open` 要回報的 `Unreadable`)都是 None。
-/// 不必 passphrase,也不解密:「Only in SSHelter」用它在搬進保管庫之前拒絕這把金鑰。
+/// 不必 passphrase,也不解密:「Only in Lunport」用它在搬進保管庫之前拒絕這把金鑰。
 pub fn unsupported_cipher(private_key: &str) -> Option<String> {
     PrivateKey::from_openssh(private_key).ok().and_then(|key| unsupported_cipher_of(&key))
 }

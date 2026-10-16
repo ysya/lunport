@@ -37,7 +37,7 @@ const two = keyCandidate({
     { alias: "db", space_name: "Work", value: "\"/home/f/.ssh/id_mac\"", locked: null },
   ],
 });
-const LOCK = "This host has more than one copy; SSHelter changes it once only one copy is left.";
+const LOCK = "This host has more than one copy; Lunport changes it once only one copy is left.";
 
 describe("which keys the dialog asks about", () => {
   it("asks about keys without a slot that would rewrite at least one of the given hosts", () => {
@@ -101,13 +101,13 @@ describe("a key slot kept from the previous sync account", () => {
     expect(keptNote(keyCandidate())).toBeNull();
   });
 
-  it("says where a kept key in SSHelter comes from", () => {
+  it("says where a kept key in Lunport comes from", () => {
     const kept = { id: "3fa2c1d90123456789abcdef01234567", file_name: "laptop-3fa2c1d9", synced_copy: false, in_vault: true, local_only: true };
     expect(keptNote(keyCandidate({ kept_slot: kept }))).toBe(
-      "This key is only on this computer, in SSHelter. Its hosts keep using ~/.ssh/sshelter/keys/laptop-3fa2c1d9.",
+      "This key is only on this computer, in Lunport. Its hosts keep using ~/.ssh/sshelter/keys/laptop-3fa2c1d9.",
     );
     expect(keptNote(keyCandidate({ kept_slot: { ...kept, local_only: false } }))).toBe(
-      "From your previous sync account, in SSHelter on this computer. Its hosts keep using ~/.ssh/sshelter/keys/laptop-3fa2c1d9.",
+      "From your previous sync account, in Lunport on this computer. Its hosts keep using ~/.ssh/sshelter/keys/laptop-3fa2c1d9.",
     );
   });
 
@@ -229,7 +229,7 @@ describe("a slot row", () => {
           ],
         }),
       ),
-    ).toBe(`${SPOOFED_NAME_SHOWN}: in SSHelter · FRANK-DESKTOP: its own key file · OLD-LAPTOP: a synced file`);
+    ).toBe(`${SPOOFED_NAME_SHOWN}: in Lunport · FRANK-DESKTOP: its own key file · OLD-LAPTOP: a synced file`);
     expect(deviceLine(keySlot())).toBeNull();
   });
 
@@ -289,7 +289,7 @@ describe("the once-per-computer setup prompt", () => {
 });
 
 describe("a vault row's actions", () => {
-  it("offers Change… and Use the synced key: the key it replaces stays in SSHelter", () => {
+  it("offers Change… and Use the synced key: the key it replaces stays in Lunport", () => {
     const actions = slotActions(keySlot({ in_vault: true, status: { kind: "synced_available", file: "/f" } }));
     expect(actions.pick).toBe("change");
     expect(actions.useSynced).toBe(true);
@@ -299,8 +299,8 @@ describe("a vault row's actions", () => {
 });
 
 describe("the line that says where the key is", () => {
-  it("says SSHelter, a file for now, or nothing", () => {
-    expect(whereLine(keySlot({ in_vault: true }))).toBe("In SSHelter — programs ask before they use it");
+  it("says Lunport, a file for now, or nothing", () => {
+    expect(whereLine(keySlot({ in_vault: true }))).toBe("In Lunport — programs ask before they use it");
     expect(whereLine(keySlot({ file_for_now: true }))).toBe("File for now — any program can use it without asking");
     expect(whereLine(keySlot())).toBeNull();
   });

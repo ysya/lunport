@@ -3,7 +3,7 @@
 /**
  * 帳戶裡沒有、這台留著的插槽(`KeyCandidate.kept_slot`;`kept_lookup`),用到它的主機在同步的 space 裡 —— 要不要放進這個帳戶由使用者在這裡決定。兩種:
  * 之前的帳戶留下的插槽(離開帳戶之後建立或加入了另一個帳戶,`~/.ssh/sshelter-local/` 裡用到它的主機又被搬進新帳戶的 space;新帳戶裡沒有它,
- * N1:不會自己寫進去),與只在這台的金鑰(`local_only`:New key 或 Generate key 加進 SSHelter 的,不在任何帳戶裡)。
+ * N1:不會自己寫進去),與只在這台的金鑰(`local_only`:New key 或 Generate key 加進 Lunport 的,不在任何帳戶裡)。
  */
 export type KeptSlot = { 
 /**

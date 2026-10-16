@@ -85,7 +85,7 @@ export function slotFileOfValue(value: string): string | null {
 /**
  * The lines the setup rewrites. A new slot's id is only known once it exists, so its file name ends in "…". A slot kept from
  * the previous sync account, or a key only on this computer, goes in as it is: its full file name, and hosts that already use
- * it aren't rewritten. For a key in SSHelter's vault that is every host (it has no key file other hosts could use), so no lines.
+ * it aren't rewritten. For a key in Lunport's vault that is every host (it has no key file other hosts could use), so no lines.
  */
 export function rewrittenLines(k: KeyCandidate, name: string): string[] {
   const hosts = k.hosts.filter((h) => h.locked === null);
@@ -106,8 +106,8 @@ export function keptNote(k: KeyCandidate): string | null {
   const kept = k.kept_slot;
   if (kept === null) return null;
   const hosts = `Its hosts keep using ~/.ssh/sshelter/keys/${kept.file_name}.`;
-  if (kept.local_only) return `This key is only on this computer, in SSHelter. ${hosts}`;
-  if (kept.in_vault) return `From your previous sync account, in SSHelter on this computer. ${hosts}`;
+  if (kept.local_only) return `This key is only on this computer, in Lunport. ${hosts}`;
+  if (kept.in_vault) return `From your previous sync account, in Lunport on this computer. ${hosts}`;
   return kept.synced_copy
     ? `This computer's copy, synced to it in your previous sync account. ${hosts}`
     : `From your previous sync account. ${hosts}`;
@@ -228,7 +228,7 @@ export function slotActions(slot: SyncKeySlotView): SlotActions {
 
 /** Where this computer keeps the slot's key (key vault spec §4.3, §11); null for a key it serves some other way or doesn't have. */
 export function whereLine(slot: SyncKeySlotView): string | null {
-  if (slot.in_vault) return "In SSHelter — programs ask before they use it";
+  if (slot.in_vault) return "In Lunport — programs ask before they use it";
   if (slot.file_for_now) return "File for now — any program can use it without asking";
   return null;
 }
@@ -237,11 +237,11 @@ export function hostsLine(slot: SyncKeySlotView): string | null {
   return slot.hosts.length === 0 ? null : `Used by ${listNames(slot.hosts)}`;
 }
 
-/** The other computers' slots (spec §7.3): in SSHelter, a synced file (an older build, or no vault there), or their own key file. Their names come from those computers. */
+/** The other computers' slots (spec §7.3): in Lunport, a synced file (an older build, or no vault there), or their own key file. Their names come from those computers. */
 export function deviceLine(slot: SyncKeySlotView): string | null {
   if (slot.devices.length === 0) return null;
   return slot.devices
-    .map((d) => `${revealHidden(d.name)}: ${d.in_vault ? "in SSHelter" : d.synced_copy ? "a synced file" : "its own key file"}`)
+    .map((d) => `${revealHidden(d.name)}: ${d.in_vault ? "in Lunport" : d.synced_copy ? "a synced file" : "its own key file"}`)
     .join(" · ");
 }
 

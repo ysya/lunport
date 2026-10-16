@@ -67,7 +67,7 @@ impl ByteQueue {
     }
 
     fn notice(bytes: u64) -> Vec<u8> {
-        format!("\r\n[SSHelter dropped {bytes} bytes of output because the terminal fell behind]\r\n").into_bytes()
+        format!("\r\n[Lunport dropped {bytes} bytes of output because the terminal fell behind]\r\n").into_bytes()
     }
 
     /// Queues `chunk` after the others: merged into the last chunk while that stays within `MERGE_LIMIT`, else as a chunk of its own.
@@ -386,7 +386,7 @@ mod tests {
             match queue.read_until(&mut buf, Some(Instant::now())) {
                 QueueRead::Bytes(count) => assert_eq!(
                     std::str::from_utf8(&buf[..count]).unwrap(),
-                    "\r\n[SSHelter dropped 6 bytes of output because the terminal fell behind]\r\n"
+                    "\r\n[Lunport dropped 6 bytes of output because the terminal fell behind]\r\n"
                 ),
                 other => panic!("the gap must be announced without waiting for more output, got {other:?}"),
             }
@@ -432,7 +432,7 @@ mod tests {
             assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Bytes(6), "the reader catches up");
             assert!(queue.push(b"DD".to_vec()));
             let rest = String::from_utf8(read_all(&queue)).unwrap();
-            assert_eq!(rest, "\r\n[SSHelter dropped 10 bytes of output because the terminal fell behind]\r\nDD");
+            assert_eq!(rest, "\r\n[Lunport dropped 10 bytes of output because the terminal fell behind]\r\nDD");
             assert!(queue.push(b"EE".to_vec()));
             assert_eq!(read_all(&queue), b"EE", "the gap is announced once");
         });
@@ -457,7 +457,7 @@ mod tests {
                     QueueRead::Timeout => panic!("a closed queue must not time out"),
                 }
             }
-            assert_eq!(String::from_utf8(all).unwrap(), "1234\r\n[SSHelter dropped 4 bytes of output because the terminal fell behind]\r\n");
+            assert_eq!(String::from_utf8(all).unwrap(), "1234\r\n[Lunport dropped 4 bytes of output because the terminal fell behind]\r\n");
             assert_eq!(queue.read_until(&mut buf, soon()), QueueRead::Closed);
         });
     }

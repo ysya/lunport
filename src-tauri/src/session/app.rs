@@ -27,7 +27,7 @@ pub enum BrokerStatus {
     #[default]
     NotStarted,
     Running,
-    /// Another SSHelter holds the broker's lock (a debug build next to the installed app).
+    /// Another Lunport holds the broker's lock (a debug build next to the installed app).
     OtherInstance,
     Failed(String),
 }
@@ -35,7 +35,7 @@ pub enum BrokerStatus {
 /// How long a connect waits for the window to load the SSH config before reading it itself (as the MCP bridge waits).
 const DOC_WAIT: Duration = Duration::from_secs(5);
 
-/// The vault key `key_id` as the sync state lists it: a key "Only in SSHelter", named as the agent names it (the slot's name, else its
+/// The vault key `key_id` as the sync state lists it: a key "Only in Lunport", named as the agent names it (the slot's name, else its
 /// file name). `None` for a slot whose key is not in the vault.
 pub fn vault_key_in(state: &SyncStateV2, key_id: &str) -> Option<VaultKey> {
     let local = state.key_slots.get(key_id)?;
@@ -65,7 +65,7 @@ pub fn hides_on_close(close_to_tray: bool, host_keep_alive: bool, sessions: bool
     close_to_tray || host_keep_alive || sessions
 }
 
-/// The vault through the app's state: which keys are "Only in SSHelter" (the sync state) and their private halves (the vault file).
+/// The vault through the app's state: which keys are "Only in Lunport" (the sync state) and their private halves (the vault file).
 struct AppKeyStore {
     app: tauri::AppHandle,
 }
@@ -172,7 +172,7 @@ fn directory(app: &tauri::AppHandle) -> Result<SshConfigDirectory, AppError> {
 }
 
 /// Builds the broker and starts its listener, unless it listens already: at the app's start (`setup`), and when a client found nobody
-/// listening and started SSHelter, which handed over to this instance (`on_second_launch`, which can come before `setup`'s start). What
+/// listening and started Lunport, which handed over to this instance (`on_second_launch`, which can come before `setup`'s start). What
 /// happened is recorded in `AppState::session`; nothing stops the app. The status stays locked from the look to the record, so two
 /// starts at once listen once, and the second does not record `OtherInstance` (a second listener would find the lock held by this very
 /// process). Locks: the status, then the broker (`listen`), never the other way.
@@ -189,7 +189,7 @@ pub fn start(app: &tauri::AppHandle) {
     *status = now;
 }
 
-/// Whether `start` has a listener to start: not when the broker listens already; after a failure, or while another SSHelter held the
+/// Whether `start` has a listener to start: not when the broker listens already; after a failure, or while another Lunport held the
 /// lock, it tries again.
 fn needs_start(status: &BrokerStatus) -> bool {
     !matches!(status, BrokerStatus::Running)

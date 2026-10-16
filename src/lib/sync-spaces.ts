@@ -122,7 +122,7 @@ export function structureLock(o: SyncOverview): string | null {
         ? "Wait for the new sync code to be in place, or cancel the change first."
         : "Wait for the new sync code to be in place first.";
     case "read_only":
-      return "Update SSHelter first: this sync account uses a newer format.";
+      return "Update Lunport first: this sync account uses a newer format.";
   }
 }
 

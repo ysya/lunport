@@ -15,7 +15,7 @@ $priorConfig = $env:TAURI_CONFIG
 try {
     # Cargo-only CI normally embeds the Production config. Explicitly select the same identity
     # as tauri.dev.conf.json for this debug GUI; app_profile verifies it before creating Tauri.
-    $env:TAURI_CONFIG = '{"identifier":"org.homelab.sshelter.dev","productName":"SSHelter Dev","app":{"windows":[{"label":"main","title":"SSHelter Dev","width":1100,"height":720,"visible":false}]}}'
+    $env:TAURI_CONFIG = '{"identifier":"org.homelab.sshelter.dev","productName":"Lunport Dev","app":{"windows":[{"label":"main","title":"Lunport Dev","width":1100,"height":720,"visible":false}]}}'
     cargo build --locked --features development-profile
     if ($LASTEXITCODE -ne 0) { throw 'Development GUI build failed.' }
 } finally {
@@ -58,7 +58,7 @@ try {
                 throw 'Startup diagnostics recorded a native initialization failure.'
             }
             $setupReady = [bool]($events | Where-Object { $_.event -eq 'startup_stage' -and $_.stage -eq 'ready' })
-            if ($setupReady -and $process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq 'SSHelter Dev') {
+            if ($setupReady -and $process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq 'Lunport Dev') {
                 $ready = $true
                 break
             }

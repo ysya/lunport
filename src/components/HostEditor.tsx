@@ -1048,8 +1048,8 @@ function FieldControl({ def, control, register, setValue }: FieldControlProps) {
     );
   }
 
-  // IdentityFile gets picker affordances (keys in SSHelter, detected ~/.ssh keys,
-  // a file dialog) and a note when it names a key in SSHelter.
+  // IdentityFile gets picker affordances (keys in Lunport, detected ~/.ssh keys,
+  // a file dialog) and a note when it names a key in Lunport.
   if (def.keyword === "IdentityFile") {
     return (
       <IdentityFileRow
@@ -1078,7 +1078,7 @@ function FieldControl({ def, control, register, setValue }: FieldControlProps) {
 
 /**
  * The IdentityFile row: the field with its pickers, and, when it names a key
- * in SSHelter, the note that SSHelter must run for ssh to use it (key vault
+ * in Lunport, the note that Lunport must run for ssh to use it (key vault
  * spec §11). A component of its own so the hooks run unconditionally. Exported
  * for the tests.
  */
@@ -1105,7 +1105,7 @@ export function IdentityFileRow({
 
 /**
  * IdentityFile input with three pick affordances: a dropdown of the keys in
- * SSHelter (the ones this computer has, by their slot path) and of the private
+ * Lunport (the ones this computer has, by their slot path) and of the private
  * keys detected in ~/.ssh (fetched lazily when the menu opens), and a native
  * file dialog for anything else. All write through setValue so the form
  * dirties and saves exactly like hand-typed text, which stays possible. What is
@@ -1166,7 +1166,7 @@ function IdentityFileControl({
           {sshelterKeys.length > 0 && (
             <>
               <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
-                Keys in SSHelter
+                Keys in Lunport
               </DropdownMenuLabel>
               {sshelterKeys.map((s) => (
                 <DropdownMenuItem

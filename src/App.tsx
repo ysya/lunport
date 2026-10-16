@@ -94,7 +94,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
   const handleReload = () =>
     reload.mutate(undefined, {
       onSuccess: () => {
-        // Re-read everything from disk (in case the file was edited outside SSHelter).
+        // Re-read everything from disk (in case the file was edited outside Lunport).
         queryClient.invalidateQueries({ queryKey: ["config"] });
         toast.success("Reloaded from disk");
       },
@@ -134,7 +134,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
           <div className="pointer-events-none flex items-center gap-2">
             <Terminal className="size-4 text-muted-foreground" />
             <div className="flex items-baseline gap-1.5">
-              <h1 className="text-[0.8125rem] font-semibold tracking-tight">SSHelter</h1>
+              <h1 className="text-[0.8125rem] font-semibold tracking-tight">Lunport</h1>
               <span className="font-mono text-[0.6875rem] text-muted-foreground/80 tabular-nums">
                 {isLoading ? "loading…" : `${hostCount} ${hostCount === 1 ? "host" : "hosts"}`}
               </span>

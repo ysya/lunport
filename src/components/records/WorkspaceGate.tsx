@@ -45,7 +45,7 @@ export function WorkspaceGate({
             ? "Your existing workspace"
             : status || error
               ? "Workspace unavailable"
-              : "SSHelter"}
+              : "Lunport"}
         </h1>
         <p className="text-sm text-muted-foreground whitespace-pre-wrap">
           {revealHidden(message)}

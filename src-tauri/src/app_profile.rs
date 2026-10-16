@@ -68,15 +68,24 @@ impl AppProfile {
 
     pub const fn product_name(self) -> &'static str {
         match self {
-            Self::Production => "SSHelter",
-            Self::Development => "SSHelter Dev",
+            Self::Production => "Lunport",
+            Self::Development => "Lunport Dev",
         }
     }
 
+    /// Persisted credential identities survive display-name changes.
     pub const fn keychain_service(self) -> &'static str {
         match self {
             Self::Production => "SSHelter",
             Self::Development => "SSHelter Development",
+        }
+    }
+
+    /// Keep existing launch-at-login entries addressable after the Lunport rename.
+    pub const fn autostart_name(self) -> &'static str {
+        match self {
+            Self::Production => "SSHelter",
+            Self::Development => "SSHelter Dev",
         }
     }
 
@@ -150,10 +159,12 @@ mod tests {
         let dev = AppProfile::Development;
         assert_eq!(prod.identifier(), "org.homelab.sshelter");
         assert_eq!(dev.identifier(), "org.homelab.sshelter.dev");
-        assert_eq!(prod.product_name(), "SSHelter");
-        assert_eq!(dev.product_name(), "SSHelter Dev");
+        assert_eq!(prod.product_name(), "Lunport");
+        assert_eq!(dev.product_name(), "Lunport Dev");
         assert_eq!(prod.keychain_service(), "SSHelter");
         assert_eq!(dev.keychain_service(), "SSHelter Development");
+        assert_eq!(prod.autostart_name(), "SSHelter");
+        assert_eq!(dev.autostart_name(), "SSHelter Dev");
         assert_eq!(prod.pipe_role(IpcRole::Agent), "agent");
         assert_eq!(prod.pipe_role(IpcRole::Session), "session");
         assert_eq!(dev.pipe_role(IpcRole::Agent), "dev-agent");
@@ -203,6 +214,22 @@ mod tests {
 #[cfg(test)]
 mod configuration_tests {
     use super::*;
+    #[test]
+    fn shipped_configurations_use_the_new_brand_with_the_existing_profile_identity() {
+        for (profile, source) in [
+            (AppProfile::Production, include_str!("../tauri.conf.json")),
+            (AppProfile::Development, include_str!("../tauri.dev.conf.json")),
+        ] {
+            let config: serde_json::Value = serde_json::from_str(source).unwrap();
+            profile.verify_configuration(
+                config["identifier"].as_str().unwrap(),
+                config["productName"].as_str(),
+            ).unwrap();
+            assert_eq!(config["app"]["windows"][0]["title"], profile.product_name());
+            assert!(profile.verify_configuration(profile.identifier(), Some(profile.autostart_name())).is_err());
+        }
+    }
+
     #[test]
     fn a_profile_mismatch_is_rejected_before_initialization() {
         for profile in [AppProfile::Production, AppProfile::Development] {

@@ -172,3 +172,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "the pair from $image in a console of its own failed (exit $LASTEXITCODE)" }
           }
           exit 0
+
+      - name: Upgrade published SSHelter 1.0.0 to Lunport
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/validate-windows-rebrand.ps1

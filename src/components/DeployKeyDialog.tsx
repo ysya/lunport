@@ -175,7 +175,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
   const keychainMissing = preflight.data ? !preflight.data.keychainAvailable : false;
 
   // A key handed over by the Keychain's Export to host wins over any inference, and the deploy then points the host at it
-  // (key vault spec §7.3.1). It may be a key in SSHelter, whose .pub `keys_list` doesn't list.
+  // (key vault spec §7.3.1). It may be a key in Lunport, whose .pub `keys_list` doesn't list.
   const initialPub = useUiStore((s) => s.deployKeyInitialPub);
   const initialName = useUiStore((s) => s.deployKeyInitialName);
   const attach = initialPub !== null;

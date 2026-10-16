@@ -99,8 +99,8 @@ describe("the explanation shown in place of the editor", () => {
 
   it("says it has not read the sync state, and lists the copies without placing any, while the spaces are not known", () => {
     const html = renderToStaticMarkup(<CopiesPanel note={copiesNote("web", [main, lab], labelOf, new Map(), false)} />);
-    expect(html).toContain("SSHelter has not read which spaces this computer syncs");
-    expect(html).toContain("Until it can, SSHelter leaves all of them alone.");
+    expect(html).toContain("Lunport has not read which spaces this computer syncs");
+    expect(html).toContain("Until it can, Lunport leaves all of them alone.");
     const [only, ...rest] = lists(html);
     expect(rest).toEqual([]);
     expect(only.tag).toBe("ul");
@@ -149,7 +149,7 @@ describe("the pane for a name with several copies, wired to the queries", () => 
 
   it("claims nothing about the copies until the sync overview is read", () => {
     const html = pane({ overviewKnown: false });
-    expect(html).toContain("SSHelter has not read which spaces this computer syncs");
+    expect(html).toContain("Lunport has not read which spaces this computer syncs");
     expect(html).not.toContain("synced space");
     expect(html).not.toContain("Keep this copy as");
   });

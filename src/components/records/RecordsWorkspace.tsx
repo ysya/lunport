@@ -276,7 +276,7 @@ export function RecordsWorkspace({
         </Button>
         <span className="library-app-name">
           <Terminal className="size-4" />
-          SSHelter
+          Lunport
         </span>
         <button
           type="button"

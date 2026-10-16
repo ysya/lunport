@@ -72,7 +72,7 @@ describe("CLI", () => {
     dirs.push(dir);
     mkdirSync(join(dir, "src-tauri"));
     writeFileSync(join(dir, "package.json"), '{"name":"sshelter","version":"0.16.0"}\n');
-    writeFileSync(join(dir, "src-tauri", "tauri.conf.json"), '{"productName":"SSHelter","version":"0.16.0"}\n');
+    writeFileSync(join(dir, "src-tauri", "tauri.conf.json"), '{"productName":"Lunport","version":"0.16.0"}\n');
     writeFileSync(join(dir, "src-tauri", "Cargo.toml"), CARGO);
     return dir;
   }

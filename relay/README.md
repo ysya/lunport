@@ -8,7 +8,7 @@ ciphertext. It never sees recovery phrases, host names, keys or passwords.
 One click, on the free Workers plan. It covers a few computers syncing a handful of spaces; Cloudflare's free daily
 limits (100,000 Durable Object requests and 100,000 rows written) are the ceiling.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/sshelter/tree/main/relay)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/lunport/tree/main/relay)
 
 The button copies this directory into a new repository on your GitHub or GitLab account and deploys it with
 Workers Builds; every push to that repository redeploys it. Later changes to `relay/` here do not reach your

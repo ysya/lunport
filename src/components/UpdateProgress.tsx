@@ -30,7 +30,7 @@ export function UpdateProgress({ view }: { view: ProgressView }) {
         <>
           {/* Read out once when the warning appears; the visible one counts up every second. */}
           <span role="status" className="sr-only">
-            The download may have stalled. Restart SSHelter to try again.
+            The download may have stalled. Restart Lunport to try again.
           </span>
           <p className="text-amber-700 dark:text-amber-400" aria-hidden="true">
             {view.warning}

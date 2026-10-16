@@ -54,12 +54,12 @@ const chosenFile = (overrides: Partial<ImportKeyState> = {}, previewed: Partial<
 describe("New key", () => {
   it("says what it does, and adds a pasted key once there is text and a valid name", () => {
     const empty = importHtml(importState());
-    expect(text(empty)).toContain("SSHelter keeps the key in its vault. Programs ask before they use it.");
-    expect(buttonTag(empty, "Add to SSHelter")).toContain(DISABLED);
-    expect(buttonTag(importHtml(importState({ text: "-----BEGIN OPENSSH PRIVATE KEY-----" })), "Add to SSHelter")).not.toContain(DISABLED);
+    expect(text(empty)).toContain("Lunport keeps the key in its vault. Programs ask before they use it.");
+    expect(buttonTag(empty, "Add to Lunport")).toContain(DISABLED);
+    expect(buttonTag(importHtml(importState({ text: "-----BEGIN OPENSSH PRIVATE KEY-----" })), "Add to Lunport")).not.toContain(DISABLED);
     const badName = importHtml(importState({ text: "x", name: "my key" }));
     expect(text(badName)).toContain("Use letters, digits, '.', '_' or '-'; start with a letter or digit; don't end with .pub.");
-    expect(buttonTag(badName, "Add to SSHelter")).toContain(DISABLED);
+    expect(buttonTag(badName, "Add to Lunport")).toContain(DISABLED);
   });
 
   it("switches between Paste and From a file", () => {
@@ -75,10 +75,10 @@ describe("New key", () => {
     const file = importState({ source: "file", path: "/home/f/.ssh/id_ed25519", preview: preview({ hosts: ["web", "db"], default_identity: true }) });
     const moving = text(importHtml(file));
     for (const part of [
-      "Move into SSHelter",
+      "Move into Lunport",
       "Keep the file too",
-      "SSHelter keeps the only copy on this computer and removes the file. Export private key… gets a file back.",
-      "web and db will use the key in SSHelter.",
+      "Lunport keeps the only copy on this computer and removes the file. Export private key… gets a file back.",
+      "web and db will use the key in Lunport.",
       "ssh also tries ~/.ssh/id_ed25519 for hosts that don't name a key. After the move, those hosts won't find it.",
     ]) {
       expect(moving).toContain(part);
@@ -89,14 +89,14 @@ describe("New key", () => {
   it("shows why a file can't be added, and doesn't add it", () => {
     const html = importHtml(importState({ source: "file", path: "/tmp/x", preview: preview({ problem: "This file isn't a private key." }) }));
     expect(text(html)).toContain("This file isn't a private key.");
-    expect(buttonTag(html, "Add to SSHelter")).toContain(DISABLED);
+    expect(buttonTag(html, "Add to Lunport")).toContain(DISABLED);
   });
 
   it("waits for the preview of a chosen file before it adds it", () => {
     const waiting = importHtml(importState({ source: "file", path: "/home/f/.ssh/id_work", preview: null }));
     expect(text(waiting)).toContain("/home/f/.ssh/id_work");
-    expect(buttonTag(waiting, "Add to SSHelter")).toContain(DISABLED);
-    expect(buttonTag(importHtml(chosenFile()), "Add to SSHelter")).not.toContain(DISABLED);
+    expect(buttonTag(waiting, "Add to Lunport")).toContain(DISABLED);
+    expect(buttonTag(importHtml(chosenFile()), "Add to Lunport")).not.toContain(DISABLED);
   });
 
   it("shows the key's type and fingerprint once a file is previewed", () => {
@@ -112,7 +112,7 @@ describe("New key", () => {
       onCancel: () => asked.push("cancel"),
     });
     // In drawing order: the file, what happens to it, then Cancel and Add.
-    const pressed = ["Choose a file…", "Move into SSHelter", "Keep the file too", "Cancel", "Add to SSHelter"];
+    const pressed = ["Choose a file…", "Move into Lunport", "Keep the file too", "Cancel", "Add to Lunport"];
     for (const b of buttonsIn(tree)) if (pressed.includes(textIn(b))) b.props.onClick!();
     expect(asked).toEqual(["choose", "move", "keep", "cancel", "add"]);
   });
@@ -121,13 +121,13 @@ describe("New key", () => {
     const file = chosenFile();
     expect(buttonTag(importHtml(file), "From a file")).toContain('aria-pressed="true"');
     expect(buttonTag(importHtml(file), "Paste")).toContain('aria-pressed="false"');
-    expect(buttonTag(importHtml(file), "Move into SSHelter")).toContain('aria-pressed="true"');
+    expect(buttonTag(importHtml(file), "Move into Lunport")).toContain('aria-pressed="true"');
     expect(buttonTag(importHtml({ ...file, keepFile: true }), "Keep the file too")).toContain('aria-pressed="true"');
   });
 
   it("turns everything off while a key is being added", () => {
     const html = importHtml(chosenFile({ busy: true }));
-    for (const label of ["Paste", "From a file", "Choose a file…", "Move into SSHelter", "Keep the file too", "Cancel", "Adding…"]) {
+    for (const label of ["Paste", "From a file", "Choose a file…", "Move into Lunport", "Keep the file too", "Cancel", "Adding…"]) {
       expect(buttonTag(html, label), label).toContain(DISABLED);
     }
   });
@@ -152,7 +152,7 @@ describe("New key and what comes from the config or the disk", () => {
     );
     expect(html).not.toMatch(HIDDEN_CHARS);
     const t = text(html);
-    expect(t).toContain(`${SPOOFED_NAME_SHOWN} and db will use the key in SSHelter.`);
+    expect(t).toContain(`${SPOOFED_NAME_SHOWN} and db will use the key in Lunport.`);
     expect(t).toContain(`ssh also tries ~/.ssh/${SPOOFED_NAME_SHOWN} for hosts that don't name a key.`);
     // The path itself, the host and the default file.
     expect(t.split(SPOOFED_NAME_SHOWN).length - 1).toBe(3);
@@ -160,13 +160,13 @@ describe("New key and what comes from the config or the disk", () => {
 
   it("shows a wildcard or a negated pattern as it is: either can be the first pattern of a block", () => {
     const t = text(importHtml(chosenFile({}, { hosts: ["*", "!staging", "web"] })));
-    expect(t).toContain("*, !staging and web will use the key in SSHelter.");
+    expect(t).toContain("*, !staging and web will use the key in Lunport.");
   });
 
-  it("reveals hidden characters in why a file can't be added: it can name a key already in SSHelter", () => {
-    const html = importHtml(chosenFile({}, { problem: `This key is already in SSHelter as ${SPOOFED_NAME}.` }));
+  it("reveals hidden characters in why a file can't be added: it can name a key already in Lunport", () => {
+    const html = importHtml(chosenFile({}, { problem: `This key is already in Lunport as ${SPOOFED_NAME}.` }));
     expect(html).not.toMatch(HIDDEN_CHARS);
-    expect(text(html)).toContain(`This key is already in SSHelter as ${SPOOFED_NAME_SHOWN}.`);
+    expect(text(html)).toContain(`This key is already in Lunport as ${SPOOFED_NAME_SHOWN}.`);
   });
 
   it("reveals hidden characters in the key's type", () => {
@@ -214,7 +214,7 @@ describe("Generate key", () => {
 
   it("says what it makes, and asks only for a name and a passphrase: the key's name is also its comment", () => {
     const t = text(generateHtml(generateState()));
-    expect(t).toContain("A new key made in SSHelter. It exists only in SSHelter until you export it.");
+    expect(t).toContain("A new key made in Lunport. It exists only in Lunport until you export it.");
     expect(t).toContain("Name");
     expect(t).toContain("Passphrase (optional)");
     expect(t).not.toContain("Comment");
@@ -277,7 +277,7 @@ describe("adding and generating a key", () => {
     const queryClient = new QueryClient();
     expect(await submitImport(queryClient, importState({ text: KEY_TEXT, name: "laptop" }))).toBe("s");
     expect(calls).toEqual([["sync_key_import_text", { name: "laptop", text: KEY_TEXT }]]);
-    expect(toasts()).toEqual([{ title: "laptop is in SSHelter", description: undefined }]);
+    expect(toasts()).toEqual([{ title: "laptop is in Lunport", description: undefined }]);
     expect(queryClient.getQueryData(syncOverviewKey)).toEqual(added().overview);
     expect(useUiStore.getState().keySetup).toBeNull();
     // TanStack's caches keep what a query or a mutation was given and answered: the key text must be in neither.
@@ -289,7 +289,7 @@ describe("adding and generating a key", () => {
     const calls = stubBackend(async () => added({ rewritten_hosts: ["web", "db"], removed_file: true }));
     expect(await submitImport(new QueryClient(), chosenFile({ name: "work" }))).toBe("s");
     expect(calls).toEqual([["sync_key_import_file", { name: "work", path: "/home/f/.ssh/id_work", keepFile: false }]]);
-    expect(toasts()).toEqual([{ title: "work is in SSHelter", description: "Removed /home/f/.ssh/id_work." }]);
+    expect(toasts()).toEqual([{ title: "work is in Lunport", description: "Removed /home/f/.ssh/id_work." }]);
     expect(useUiStore.getState().keySetup).toEqual({ aliases: ["web", "db"], reason: "saved" });
   });
 
@@ -297,7 +297,7 @@ describe("adding and generating a key", () => {
     const calls = stubBackend(async () => added());
     expect(await submitImport(new QueryClient(), chosenFile({ name: "work", keepFile: true }))).toBe("s");
     expect(calls).toEqual([["sync_key_import_file", { name: "work", path: "/home/f/.ssh/id_work", keepFile: true }]]);
-    expect(toasts()).toEqual([{ title: "work is in SSHelter", description: "The file stays: any program can use it without asking." }]);
+    expect(toasts()).toEqual([{ title: "work is in Lunport", description: "The file stays: any program can use it without asking." }]);
     expect(useUiStore.getState().keySetup).toBeNull();
   });
 
@@ -305,7 +305,7 @@ describe("adding and generating a key", () => {
     const reason = (hosts: string) => `The file stays: ${hosts} are in a space that hasn't finished its first sync.`;
     stubBackend(async () => added({ file_kept: reason(`${SPOOFED_NAME} and db`) }));
     expect(await submitImport(new QueryClient(), chosenFile({ name: "work" }))).toBe("s");
-    expect(toasts()).toEqual([{ title: "work is in SSHelter", description: reason(`${SPOOFED_NAME_SHOWN} and db`) }]);
+    expect(toasts()).toEqual([{ title: "work is in Lunport", description: reason(`${SPOOFED_NAME_SHOWN} and db`) }]);
   });
 
   it("still asks about the hosts a move did switch before it stopped", async () => {
@@ -316,17 +316,17 @@ describe("adding and generating a key", () => {
 
   it("says why a key couldn't be added, with hidden characters revealed, and changes nothing", async () => {
     stubBackend(async () => {
-      throw `This key is already in SSHelter as ${SPOOFED_NAME}.`;
+      throw `This key is already in Lunport as ${SPOOFED_NAME}.`;
     });
     const queryClient = new QueryClient();
     expect(await submitImport(queryClient, importState({ text: KEY_TEXT, name: "laptop" }))).toBeNull();
-    expect(toasts()).toEqual([{ title: "Could not add the key", description: `This key is already in SSHelter as ${SPOOFED_NAME_SHOWN}.` }]);
+    expect(toasts()).toEqual([{ title: "Could not add the key", description: `This key is already in Lunport as ${SPOOFED_NAME_SHOWN}.` }]);
     expect(queryClient.getQueryData(syncOverviewKey)).toBeUndefined();
     expect(useUiStore.getState().keySetup).toBeNull();
   });
 
   it("shows the backend's message when a move is refused because the config changed on disk", async () => {
-    const refusal = "Your SSH config changed on disk since SSHelter loaded it. Reload it, then try again.";
+    const refusal = "Your SSH config changed on disk since Lunport loaded it. Reload it, then try again.";
     stubBackend(async () => {
       throw new Error(refusal);
     });
@@ -341,8 +341,8 @@ describe("adding and generating a key", () => {
     expect(await submitImport(new QueryClient(), importState({ text: KEY_TEXT, name: "typed" }))).toBe("s");
     expect(await submitImport(new QueryClient(), chosenFile({ name: "typed", keepFile: true }))).toBe("s");
     expect(toasts()).toEqual([
-      { title: `${SPOOFED_NAME_SHOWN} is in SSHelter`, description: undefined },
-      { title: `${SPOOFED_NAME_SHOWN} is in SSHelter`, description: "The file stays: any program can use it without asking." },
+      { title: `${SPOOFED_NAME_SHOWN} is in Lunport`, description: undefined },
+      { title: `${SPOOFED_NAME_SHOWN} is in Lunport`, description: "The file stays: any program can use it without asking." },
     ]);
   });
 
@@ -386,7 +386,7 @@ describe("adding and generating a key", () => {
     expect(await submitGenerate(new QueryClient(), generateState())).toBeNull();
     expect(toasts()).toEqual([{ title: "Could not generate the key", description: "no room for the key" }]);
   });
-  describe("pressing Add to SSHelter", () => {
+  describe("pressing Add to Lunport", () => {
     /** The pane without React: the form's state in a box, and its handlers made again after every change, as a render makes them. */
     function pane(initial: ImportKeyState, show?: (slotId: string) => void) {
       const box = { state: initial, shown: [] as string[] };
@@ -415,7 +415,7 @@ describe("adding and generating a key", () => {
       await form.press("confirm");
       expect(form.box.state.asking).toBe(false);
       expect(calls).toEqual([["sync_key_import_file", { name: "work", path: "/home/f/.ssh/id_work", keepFile: false }]]);
-      expect(toasts()).toEqual([{ title: "work is in SSHelter", description: "Removed /home/f/.ssh/id_work." }]);
+      expect(toasts()).toEqual([{ title: "work is in Lunport", description: "Removed /home/f/.ssh/id_work." }]);
       expect(form.box.shown).toEqual(["s"]);
     });
 
@@ -508,11 +508,11 @@ describe("adding and generating a key", () => {
       answer(added());
       await sending;
       expect(useUiStore.getState().keychainSelection).toBe(elsewhere);
-      expect(toasts()).toEqual([{ title: "id_work is in SSHelter", description: "The file stays: any program can use it without asking." }]);
+      expect(toasts()).toEqual([{ title: "id_work is in Lunport", description: "The file stays: any program can use it without asking." }]);
     });
 
     it("comes back to the same filled form when a confirmed Move is refused, and says why", async () => {
-      const refusal = "Your SSH config changed on disk since SSHelter loaded it. Reload it, then try again.";
+      const refusal = "Your SSH config changed on disk since Lunport loaded it. Reload it, then try again.";
       stubBackend(async () => {
         throw new Error(refusal);
       });

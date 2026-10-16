@@ -1,4 +1,4 @@
-//! 這台自己加進 SSHelter 的金鑰(金鑰保管庫 spec §7.5「New key」「Generate key」、§4.3「沒加入同步帳戶也能用」):貼上的、檔案的、
+//! 這台自己加進 Lunport 的金鑰(金鑰保管庫 spec §7.5「New key」「Generate key」、§4.3「沒加入同步帳戶也能用」):貼上的、檔案的、
 //! 從 `~/.ssh` 匯入的、在這裡產生的。都放進這台的保管庫,插槽目錄只放 `.pub`,記成只在這台的金鑰(`LocalSlot::local_only`),不寫任何帳戶記錄;
 //! 之後同步的主機用到它時,由 SP3 的 Sync key 對話框收編(`slot_setup::adopt_slot`)。
 
@@ -27,27 +27,27 @@ use crate::vault::store::{vault_path, EntryOrigin, VaultEntry};
 #[cfg(test)]
 use crate::vault::store::with_vault;
 
-pub const MANAGED_FILE_MESSAGE: &str = "SSHelter already manages this file.";
+pub const MANAGED_FILE_MESSAGE: &str = "Lunport already manages this file.";
 pub const NOT_A_KEY_FILE_MESSAGE: &str = "This file isn't a private key.";
 
 /// Move 留下原檔的原因(`file_kept`;主機改不了的兩個原因帶著主機名稱,在 `point_hosts_at` 組),照 `point_hosts_at` 判斷的先後:沒有載入 config、載入之後 config 在磁碟上變了、
 /// 不在 Host 區塊裡的 `IdentityFile` 指到它、解析不了的 `IdentityFile` 可能指到它、它是符號連結。
-pub const NO_CONFIG_MESSAGE: &str = "The file stays: SSHelter couldn't check which hosts use it (no config loaded).";
-pub const CONFIG_CHANGED_MESSAGE: &str = "The file stays: your SSH config changed on disk since SSHelter loaded it.";
-pub const OUTSIDE_A_HOST_BLOCK_MESSAGE: &str = "The file stays: an IdentityFile outside a Host block names it, and SSHelter only switches hosts.";
-pub const UNRESOLVED_MESSAGE: &str = "The file stays: an IdentityFile SSHelter can't resolve (a token, a variable or a relative path) may name it.";
-pub const LINK_MESSAGE: &str = "The file stays: it's a link to another file, so SSHelter didn't remove either.";
+pub const NO_CONFIG_MESSAGE: &str = "The file stays: Lunport couldn't check which hosts use it (no config loaded).";
+pub const CONFIG_CHANGED_MESSAGE: &str = "The file stays: your SSH config changed on disk since Lunport loaded it.";
+pub const OUTSIDE_A_HOST_BLOCK_MESSAGE: &str = "The file stays: an IdentityFile outside a Host block names it, and Lunport only switches hosts.";
+pub const UNRESOLVED_MESSAGE: &str = "The file stays: an IdentityFile Lunport can't resolve (a token, a variable or a relative path) may name it.";
+pub const LINK_MESSAGE: &str = "The file stays: it's a link to another file, so Lunport didn't remove either.";
 /// 主機都改好之後、移除之前再讀一次原檔,已經不是加進來的那把金鑰(`move_file`)。保管庫那一份讀不回來、原檔讀不了的原因帶著錯誤,在 `move_file` 組。
-pub const CHANGED_MESSAGE: &str = "The file stays: it changed while SSHelter was adding it.";
-/// 保管庫裡讀回來的那一筆不是加進來的那把金鑰(或沒有那一筆):`The file stays: SSHelter couldn't confirm its copy in the vault ({error}).` 的 `{error}`。
+pub const CHANGED_MESSAGE: &str = "The file stays: it changed while Lunport was adding it.";
+/// 保管庫裡讀回來的那一筆不是加進來的那把金鑰(或沒有那一筆):`The file stays: Lunport couldn't confirm its copy in the vault ({error}).` 的 `{error}`。
 const MISMATCH: &str = "it doesn't match";
 /// 同一件事在 Move 動手之前就看到了(`import_file`):載入的 config 和磁碟上的不一樣,什麼都沒加,重新載入之後再來一次。
-pub const RELOAD_FIRST_MESSAGE: &str = "Your SSH config changed on disk since SSHelter loaded it. Reload it, then try again.";
+pub const RELOAD_FIRST_MESSAGE: &str = "Your SSH config changed on disk since Lunport loaded it. Reload it, then try again.";
 
-/// 貼上的文字 agent 用不了(`refusal_for`):`slots::agent_refusal` 的那兩句說「so it stays as a file」,選的檔案確實留著;貼上的沒有檔案,改說 SSHelter 收不了它。
+/// 貼上的文字 agent 用不了(`refusal_for`):`slots::agent_refusal` 的那兩句說「so it stays as a file」,選的檔案確實留著;貼上的沒有檔案,改說 Lunport 收不了它。
 pub const PASTED_KEY_TYPE_MESSAGE: &str =
-    "SSHelter's agent can't use this kind of key (for example a security key or a DSA key), so SSHelter can't keep it.";
-pub const PASTED_KEY_UNREADABLE_MESSAGE: &str = "SSHelter's agent can't read this key, so SSHelter can't keep it.";
+    "Lunport's agent can't use this kind of key (for example a security key or a DSA key), so Lunport can't keep it.";
+pub const PASTED_KEY_UNREADABLE_MESSAGE: &str = "Lunport's agent can't read this key, so Lunport can't keep it.";
 
 /// 貼上的文字最多收這麼多(私鑰本身的上限是 16 KiB,`inspect_private_key`)。
 const MAX_PASTE_BYTES: usize = 64 * 1024;
@@ -78,12 +78,12 @@ pub(crate) fn bad_name(name: &str) -> AppError {
     ))
 }
 
-/// 插槽的名稱(給「已經在 SSHelter」的訊息):payload 的名稱,沒有就用插槽檔名。
+/// 插槽的名稱(給「已經在 Lunport」的訊息):payload 的名稱,沒有就用插槽檔名。
 fn slot_name(local: &LocalSlot) -> String {
     local.payload.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| local.file_name.clone())
 }
 
-/// 已經在 SSHelter 的同一把金鑰(同指紋)的名稱:這台保管庫裡的(`SlotSource::Vault`)、插槽裡放著同步來的副本的(`SlotSource::SyncedCopy`;帳戶裡已經沒有那個插槽、
+/// 已經在 Lunport 的同一把金鑰(同指紋)的名稱:這台保管庫裡的(`SlotSource::Vault`)、插槽裡放著同步來的副本的(`SlotSource::SyncedCopy`;帳戶裡已經沒有那個插槽、
 /// 或根本沒有帳戶的時候,副本還在),或帳戶裡記著這個指紋、還在的插槽。只看狀態、不讀檔案;經連結拿著這把金鑰的插槽要讀它連到的檔案,另由 `already_linked` 看
 /// (兩者合起來是 `already_held`)。保管庫裡那一筆確定不見了的記錄,加的時候先由 `fate` 認出來、放回去(`lost_record`),不走到這裡。
 pub fn already_in_sshelter(state: &SyncStateV2, fingerprint: &str) -> Option<String> {
@@ -97,7 +97,7 @@ pub fn already_in_sshelter(state: &SyncStateV2, fingerprint: &str) -> Option<Str
     })
 }
 
-/// 插槽經連結(`SlotSource::Linked`;例如還是「File for now」、連到使用者的 `~/.ssh/id_x` 的 `own` 插槽)拿著的金鑰,也算已經在 SSHelter:連到的檔案現在的指紋
+/// 插槽經連結(`SlotSource::Linked`;例如還是「File for now」、連到使用者的 `~/.ssh/id_x` 的 `own` 插槽)拿著的金鑰,也算已經在 Lunport:連到的檔案現在的指紋
 /// (`slots::local_key_fingerprint`:OpenSSH 格式從私鑰的公開段讀,其他格式讀旁邊的 `.pub`,都不需要 passphrase)等於 `fingerprint`;或使用者選的是檔案(`file`)、而它正是
 /// 某個插槽連到的(`slot_setup::same_file`),不論內容 —— 把它再加進來、Move 掉,那個插槽的連結就指著一個不見的檔案。連到的檔案現在讀不到(不見了、被換成不是私鑰的東西)
 /// 就不算:那個插槽現在沒有拿著任何金鑰。收起來的連結(`LocalSlot::parked`)照算,記錄還指著那個檔案。要讀檔案(讀之前先確認它是不超過 64 KiB 的私鑰檔),
@@ -111,14 +111,14 @@ pub fn already_linked(state: &SyncStateV2, fingerprint: &str, file: Option<&Path
     })
 }
 
-/// 這把金鑰(`fingerprint`)已經在 SSHelter 的哪個插槽裡:這台保管庫裡的、帳戶裡同步的(`already_in_sshelter`),或經連結拿著它的(`already_linked`)。
+/// 這把金鑰(`fingerprint`)已經在 Lunport 的哪個插槽裡:這台保管庫裡的、帳戶裡同步的(`already_in_sshelter`),或經連結拿著它的(`already_linked`)。
 /// `file` = 使用者選的金鑰檔(貼上的文字沒有)。
 fn already_held(state: &SyncStateV2, fingerprint: &str, file: Option<&Path>) -> Option<String> {
     already_in_sshelter(state, fingerprint).or_else(|| already_linked(state, fingerprint, file))
 }
 
 fn already_message(name: &str) -> String {
-    format!("This key is already in SSHelter as {name}.")
+    format!("This key is already in Lunport as {name}.")
 }
 
 /// agent 用不了這把金鑰的原因(`slots::agent_refusal`),照金鑰從哪裡來說:選的檔案(`picked`)照原句(它說檔案留著,檔案確實留著);貼上的文字沒有檔案,
@@ -157,7 +157,7 @@ enum Fate {
     New,
     /// 放回保管庫那一筆不見了的記錄(`lost_record`):插槽 id、記錄。
     Restore(String, LocalSlot),
-    /// 已經在 SSHelter:不加,說它叫什麼。
+    /// 已經在 Lunport:不加,說它叫什麼。
     Held(String),
 }
 
@@ -165,7 +165,7 @@ enum Fate {
 /// - 選的檔案正是某個插槽連到的(`linked_to`)→ 已經在。保管庫裡有一筆不見了的同一把也一樣:放回去之後 Move 會移除這個檔案,那個插槽的連結就指著不見的檔案
 ///   (`names_the_key` 認不出指到插槽路徑的主機)。貼上它、或選它的另一份就放得回去。
 /// - 保管庫裡那一筆確定不見了的同一把(`lost_record`)→ 放回去。
-/// - 其他已經在 SSHelter 的(`already_held`)→ 已經在。
+/// - 其他已經在 Lunport 的(`already_held`)→ 已經在。
 /// - 都不是 → 新的。
 fn fate(state: &SyncStateV2, fingerprint: &str, picked: Option<&Path>, vault: &dyn VaultKeys) -> Fate {
     if let Some(name) = picked.and_then(|picked| linked_to(state, picked)) {
@@ -180,7 +180,7 @@ fn fate(state: &SyncStateV2, fingerprint: &str, picked: Option<&Path>, vault: &d
     }
 }
 
-/// 把一把私鑰(OpenSSH 格式原文;有 passphrase 的照原樣)加進 SSHelter,成為只在這台的金鑰。回傳新插槽的 id。
+/// 把一把私鑰(OpenSSH 格式原文;有 passphrase 的照原樣)加進 Lunport,成為只在這台的金鑰。回傳新插槽的 id。
 /// 先檢查(格式、agent 用得了、沒有同一把 —— 保管庫裡的、帳戶裡同步的、經連結拿著的,見 `fate` —— 、名稱、插槽路徑空著),再依序放:保管庫 → `.pub` → 狀態;
 /// 後面失敗就收回前面放的。保管庫裡那一筆確定不見了的同一把金鑰不加新的,放回那筆記錄(`restore_into`),回傳那筆記錄的 id。不需要帳戶;狀態存不進去的行程
 /// (`save_blocked`)在動任何東西之前就拒絕(`local_snapshot`)。
@@ -189,7 +189,7 @@ pub fn add_key(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin) -> Re
     add_key_from(env, &transaction, name, text, origin, None).map(|added| added.slot_id)
 }
 
-/// `add_key`,多一個 `picked` = 使用者選的金鑰檔(`import_file`):那個檔案正是某個插槽連到的,也算已經在 SSHelter(`fate`)。回傳插槽 id 與插槽檔名。
+/// `add_key`,多一個 `picked` = 使用者選的金鑰檔(`import_file`):那個檔案正是某個插槽連到的,也算已經在 Lunport(`fate`)。回傳插槽 id 與插槽檔名。
 /// 放回不見了的那筆記錄時不用打的名稱(也不檢查它):記錄的名稱不變。
 fn add_key_from(env: &SyncEnv, transaction: &MaterialTransaction<'_>, name: &str, text: &str, origin: EntryOrigin, picked: Option<&Path>) -> Result<Added, AppError> {
     let (state, home) = local_snapshot(env)?;
@@ -228,7 +228,7 @@ fn add_key_from(env: &SyncEnv, transaction: &MaterialTransaction<'_>, name: &str
     let take_back = || {
         let _ = std::fs::remove_file(public_path(&path));
         if let Err(e) = transaction.with_vault(env, |vault| vault.remove(&id)) {
-            eprintln!("[keys] a key that couldn't be added is still in SSHelter's vault: {e}");
+            eprintln!("[keys] a key that couldn't be added is still in Lunport's vault: {e}");
         }
     };
     if let Err(e) = slot_files::ensure_keys_dir(&keys_dir).and_then(|()| slot_files::write_public(&path, &facts.public_key)) {
@@ -326,7 +326,7 @@ fn restore_into_in(env: &SyncEnv, transaction: &MaterialTransaction<'_>, home: &
         if !recorded {
             let _ = std::fs::remove_file(public_path(&path));
             if let Err(e) = transaction.with_vault(env, |vault| vault.remove(slot_id)) {
-                eprintln!("[keys] a key that couldn't be put back is still in SSHelter's vault: {e}");
+                eprintln!("[keys] a key that couldn't be put back is still in Lunport's vault: {e}");
             }
         }
         return Err(e);
@@ -346,7 +346,7 @@ pub fn import_text(env: &SyncEnv, name: &str, text: &str) -> Result<String, AppE
 }
 
 /// 使用者選的金鑰檔(檔案對話框、拖放、`~/.ssh` 的「Import」):絕對路徑、私鑰檔(`slot_setup::is_private_key_file`:一般檔案、不超過 64 KiB)、
-/// 不在 SSHelter 管的 `~/.ssh/sshelter/` 底下(插槽自己的檔案用「Move」)。
+/// 不在 Lunport 管的 `~/.ssh/sshelter/` 底下(插槽自己的檔案用「Move」)。
 fn key_file(path: &str, home: &Path) -> Result<PathBuf, AppError> {
     let path = PathBuf::from(path);
     let managed = home.join(".ssh").join("sshelter");
@@ -409,7 +409,7 @@ pub fn preview_file(env: &SyncEnv, path: &str) -> Result<KeyFilePreview, AppErro
     Ok(preview)
 }
 
-/// 「New key」→ From a file(與 `~/.ssh` 的「Import」)。`keep_file` = 「Keep the file too」:原檔與主機都不動。否則「Move into SSHelter」(`move_file`):
+/// 「New key」→ From a file(與 `~/.ssh` 的「Import」)。`keep_file` = 「Keep the file too」:原檔與主機都不動。否則「Move into Lunport」(`move_file`):
 /// 先核對保管庫裡的那一份,`IdentityFile` 指到這個檔案的主機改指到新的插槽(`point_hosts_at`),全部改好、再讀一次原檔還是這把金鑰,才移除原檔(只有私鑰檔;
 /// 旁邊的 `.pub` 留著)。還有東西指著它、或它是符號連結(`point_hosts_at` 列的原因),或保管庫那一份核對不了,就一台都不改、原檔留著:金鑰照樣加進來了,
 /// `file_kept` 說明原因。這個檔案正是某個插槽連到的(`fate`)則根本不加。
@@ -456,7 +456,7 @@ fn import_file_with(
     Ok(imported)
 }
 
-/// 「Move into SSHelter」在金鑰加進來(`added`)之後的步驟(spec §7.5「匯入並核對指紋之後,移除原檔」),依序:
+/// 「Move into Lunport」在金鑰加進來(`added`)之後的步驟(spec §7.5「匯入並核對指紋之後,移除原檔」),依序:
 /// - 讀回保管庫裡這個插槽的那一筆、核對指紋(`confirm_in_vault`)。讀不了、或不是這把金鑰 → 一台主機都不改、原檔留著(金鑰照樣加進來了)。
 /// - 指到原檔 `key` 的主機改指到插槽(`point_hosts_at`),全部改好才往下。
 /// - 移除之前再讀一次原檔、核對指紋(`still_the_key`)。讀不了、或已經是別的內容(加的時候被換掉了)→ 原檔留著。已經改好的主機不改回來:它們用的是上面核對過的
@@ -474,7 +474,7 @@ fn move_file_in(
 ) -> ImportedKey {
     let mut imported = ImportedKey { slot_id: added.slot_id.clone(), rewritten_hosts: Vec::new(), removed_file: false, file_kept: None };
     if let Err(error) = confirm_in_vault(env, transaction, &added.slot_id, &added.fingerprint) {
-        imported.file_kept = Some(format!("The file stays: SSHelter couldn't confirm its copy in the vault ({error})."));
+        imported.file_kept = Some(format!("The file stays: Lunport couldn't confirm its copy in the vault ({error})."));
         return imported;
     }
     match point_hosts_at_in(env, home, key, &added.file_name, persist, changed) {
@@ -503,7 +503,7 @@ fn move_file_in(
     imported
 }
 
-/// 保管庫裡插槽 `slot_id` 的那一筆就是 `fingerprint` 這把金鑰(Move 移除原檔之前,`move_file`)。不是的話回原因(`The file stays: SSHelter couldn't confirm its
+/// 保管庫裡插槽 `slot_id` 的那一筆就是 `fingerprint` 這把金鑰(Move 移除原檔之前,`move_file`)。不是的話回原因(`The file stays: Lunport couldn't confirm its
 /// copy in the vault ({error}).` 的 `{error}`):保管庫讀不了 → 保管庫自己的錯誤;沒有那一筆、讀不懂、或是另一把 → `MISMATCH`。
 fn confirm_in_vault(env: &SyncEnv, transaction: &MaterialTransaction<'_>, slot_id: &str, fingerprint: &str) -> Result<(), String> {
     let entry = transaction.with_vault(env, |vault| vault.get(slot_id)).map_err(|e| e.to_string())?;
@@ -521,7 +521,7 @@ fn still_the_key(key: &Path, fingerprint: &str) -> std::io::Result<bool> {
     Ok(inspect_private_key(&text).is_ok_and(|facts| facts.fingerprint == fingerprint))
 }
 
-/// 「Generate key」:在 SSHelter 裡產生一把金鑰(`vault::generate`),加進來成為只在這台的金鑰(來源記成產生的)。名稱先檢查:產生 RSA 要幾秒,
+/// 「Generate key」:在 Lunport 裡產生一把金鑰(`vault::generate`),加進來成為只在這台的金鑰(來源記成產生的)。名稱先檢查:產生 RSA 要幾秒,
 /// 不要白做。
 pub fn generate_key(
     env: &SyncEnv,
@@ -806,7 +806,7 @@ fn switch_and_save(
     Saved { switched: hosts_in(&files), failed: None }
 }
 
-/// 「Move into SSHelter」:載入的每個 config 檔裡,生效的 `IdentityFile` 指到 `key` 的主機改指到插槽 `slot_file`。全有或全無 —— 下面任何一個原因成立,就一台都不改、
+/// 「Move into Lunport」:載入的每個 config 檔裡,生效的 `IdentityFile` 指到 `key` 的主機改指到插槽 `slot_file`。全有或全無 —— 下面任何一個原因成立,就一台都不改、
 /// 回 `Err`(原因),原檔留著(原因在改寫之前就全部看完;依這個順序,同時有好幾個就說最前面的):
 /// - 沒有載入 config(`NO_CONFIG_MESSAGE`):看不出哪些主機用到這個檔案,不能當成沒有。
 /// - 載入之後 config 在磁碟上變了(`CONFIG_CHANGED_MESSAGE`,`config_changed`):`import_file` 已經先擋過一次(那時什麼都還沒加),這裡是動手前的最後一次確認,在 doc 鎖裡。
@@ -852,7 +852,7 @@ fn point_hosts_at_in(
             }
         }
         if !locked.is_empty() {
-            return Err(Kept::because(format!("The file stays: {} have more than one copy, so SSHelter didn't change them.", names(&locked))));
+            return Err(Kept::because(format!("The file stays: {} have more than one copy, so Lunport didn't change them.", names(&locked))));
         }
         if !not_ready.is_empty() {
             return Err(Kept::because(format!("The file stays: {} are in a space that hasn't finished its first sync.", names(&not_ready))));
@@ -1003,18 +1003,18 @@ mod tests {
         assert_eq!(vault_entry(&d, &id).unwrap().private_key, test_keys::encrypted());
     }
 
-    /// 不是私鑰的文字、agent 用不了的金鑰、不合規的名稱:拒絕,什麼都不寫。貼上的文字沒有檔案:agent 用不了就說 SSHelter 收不了它(不說「留在檔案」)。
+    /// 不是私鑰的文字、agent 用不了的金鑰、不合規的名稱:拒絕,什麼都不寫。貼上的文字沒有檔案:agent 用不了就說 Lunport 收不了它(不說「留在檔案」)。
     #[test]
     fn what_cant_go_into_the_vault_is_refused_and_nothing_is_written() {
         let d = device("# main\n");
         let before = d.state();
         let refused = |name: &str, text: &str| import_text(&d.env(), name, text).unwrap_err().to_string();
-        assert_eq!(refused("laptop", "hello"), "This isn't an OpenSSH private key SSHelter can read.");
+        assert_eq!(refused("laptop", "hello"), "This isn't an OpenSSH private key Lunport can read.");
         assert_eq!(
             refused("sk", &test_keys::security_key()),
-            "SSHelter's agent can't use this kind of key (for example a security key or a DSA key), so SSHelter can't keep it."
+            "Lunport's agent can't use this kind of key (for example a security key or a DSA key), so Lunport can't keep it."
         );
-        assert_eq!(refused("odd", &test_keys::unreadable_comment()), "SSHelter's agent can't read this key, so SSHelter can't keep it.");
+        assert_eq!(refused("odd", &test_keys::unreadable_comment()), "Lunport's agent can't read this key, so Lunport can't keep it.");
         assert_eq!(refused("old", &test_keys::encrypted_with_3des_label()), VAULT_KEY_CIPHER_MESSAGE, "this one names no file");
         assert_eq!(
             refused("my key", &test_keys::plain()),
@@ -1042,11 +1042,11 @@ mod tests {
     fn the_same_key_twice_is_refused_with_its_name() {
         let d = device("# main\n");
         import_text(&d.env(), "laptop", &test_keys::plain()).unwrap();
-        assert_eq!(import_text(&d.env(), "again", &test_keys::plain()).unwrap_err().to_string(), "This key is already in SSHelter as laptop.");
+        assert_eq!(import_text(&d.env(), "again", &test_keys::plain()).unwrap_err().to_string(), "This key is already in Lunport as laptop.");
 
         let (_relay, _clock, a, _b, _words, _personal) = pair();
         create_slot_on(&a, SlotMode::Synced, &test_keys::ecdsa(), "id_ec");
-        assert_eq!(import_text(&a.env(), "copy", &test_keys::ecdsa()).unwrap_err().to_string(), "This key is already in SSHelter as id_ec.");
+        assert_eq!(import_text(&a.env(), "copy", &test_keys::ecdsa()).unwrap_err().to_string(), "This key is already in Lunport as id_ec.");
     }
 
     /// 在帳戶裡加進來的金鑰也不寫任何帳戶記錄。
@@ -1092,7 +1092,7 @@ mod tests {
         assert!(d.main_config().contains("IdentityFile ~/.ssh/id_work"));
     }
 
-    /// Move into SSHelter:用到這個檔案的主機改指到新的插槽,原檔移除,`.pub` 留著。
+    /// Move into Lunport:用到這個檔案的主機改指到新的插槽,原檔移除,`.pub` 留著。
     #[test]
     fn moving_switches_the_hosts_then_removes_the_file() {
         let d = device("Host web\n  IdentityFile ~/.ssh/id_work\nHost db\n  User me\n");
@@ -1119,7 +1119,7 @@ mod tests {
         assert!(file.exists());
         assert!(!imported.removed_file);
         assert!(imported.rewritten_hosts.is_empty());
-        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: web have more than one copy, so SSHelter didn't change them."));
+        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: web have more than one copy, so Lunport didn't change them."));
         assert!(d.main_config().contains("IdentityFile ~/.ssh/id_work"));
         assert!(d.state().key_slots.contains_key(&imported.slot_id));
     }
@@ -1141,7 +1141,7 @@ mod tests {
         assert_eq!(imported.file_kept.as_deref(), Some("The file stays: web are in a space that hasn't finished its first sync."));
     }
 
-    /// SSHelter 自己管的檔案(插槽目錄裡的)不從這裡加:插槽的檔案用 Move。
+    /// Lunport 自己管的檔案(插槽目錄裡的)不從這裡加:插槽的檔案用 Move。
     #[test]
     fn a_file_sshelter_manages_is_refused() {
         let d = device("# main\n");
@@ -1169,7 +1169,7 @@ mod tests {
 
         import_text(&d.env(), "laptop", &test_keys::plain()).unwrap();
         let again = preview_file(&d.env(), &file.display().to_string()).unwrap();
-        assert_eq!(again.problem.as_deref(), Some("This key is already in SSHelter as laptop."));
+        assert_eq!(again.problem.as_deref(), Some("This key is already in Lunport as laptop."));
     }
 
     // ── 計畫沒有逐字列出的情形:收回、全有或全無、寫檔失敗、預覽的原因 ───────────────────────────────────────────
@@ -1228,7 +1228,7 @@ mod tests {
         assert!(public_path(&d.home.path().join(SLOT_DIR).join(&local.file_name)).exists(), "and so is the .pub");
     }
 
-    /// 加不進去的金鑰(名稱不合規、已經在 SSHelter),它的檔案與用到它的主機一個都不動,也不說成功。
+    /// 加不進去的金鑰(名稱不合規、已經在 Lunport),它的檔案與用到它的主機一個都不動,也不說成功。
     #[test]
     fn a_file_that_cant_be_added_is_left_alone_with_its_hosts() {
         let main = "Host web\n  IdentityFile ~/.ssh/id_work\n";
@@ -1238,7 +1238,7 @@ mod tests {
 
         assert_eq!(import_file(&d.env(), "my key", &path, false).unwrap_err().to_string(), bad_name("my key").to_string());
         import_text(&d.env(), "laptop", &test_keys::plain()).unwrap();
-        assert_eq!(import_file(&d.env(), "work", &path, false).unwrap_err().to_string(), "This key is already in SSHelter as laptop.");
+        assert_eq!(import_file(&d.env(), "work", &path, false).unwrap_err().to_string(), "This key is already in Lunport as laptop.");
 
         assert!(file.exists());
         assert_eq!(d.main_config(), main);
@@ -1251,7 +1251,7 @@ mod tests {
     #[test]
     fn a_paste_that_is_too_large_is_refused() {
         let d = device("# main\n");
-        let message = "This key is larger than 16 KiB, which SSHelter's vault doesn't take.";
+        let message = "This key is larger than 16 KiB, which Lunport's vault doesn't take.";
         assert_eq!(import_text(&d.env(), "big", &"a".repeat(64 * 1024 + 1)).unwrap_err().to_string(), message);
         assert_eq!(import_text(&d.env(), "big", &format!("{}\n{}\n", test_keys::BEGIN, "a".repeat(20 * 1024))).unwrap_err().to_string(), message);
         assert!(slot_dir_files(&d).is_empty());
@@ -1268,7 +1268,7 @@ mod tests {
 
         assert!(file.exists());
         assert!(imported.rewritten_hosts.is_empty());
-        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: db have more than one copy, so SSHelter didn't change them."));
+        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: db have more than one copy, so Lunport didn't change them."));
         assert_eq!(d.main_config(), main, "web wasn't switched either");
         assert!(d.events.applied.lock().unwrap().is_empty());
     }
@@ -1279,7 +1279,7 @@ mod tests {
         let d = device("Host db\n  IdentityFile ~/.ssh/id_work\n  IdentityFile ~/.ssh/id_work\nHost db\n  IdentityFile ~/.ssh/id_work\n");
         let file = key_file(&d, "id_work", &test_keys::plain());
         let imported = import_file(&d.env(), "work", &file.display().to_string(), false).unwrap();
-        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: db have more than one copy, so SSHelter didn't change them."));
+        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: db have more than one copy, so Lunport didn't change them."));
     }
 
     /// Move 改的是載入的每一個 config 檔裡的主機(Include 進來的也是),別把金鑰的主機不動;改完的主機走 agent:`agent/config` 跟著更新,並通知畫面重讀 config。
@@ -1329,7 +1329,7 @@ mod tests {
         let edited = "Host web\n  IdentityFile ~/.ssh/id_work\nHost newbox\n  IdentityFile ~/.ssh/id_work\n";
         d.write_externally(&d.main_path(), edited);
         let kept = point_hosts_at(&d.env(), d.home.path(), &file, "work-3fa2c1d9", persist).unwrap_err();
-        assert_eq!(kept.reason, "The file stays: your SSH config changed on disk since SSHelter loaded it.");
+        assert_eq!(kept.reason, "The file stays: your SSH config changed on disk since Lunport loaded it.");
         assert!(kept.switched.is_empty());
         assert_eq!(d.main_config(), edited, "nothing of ours was written");
         assert!(d.events.applied.lock().unwrap().is_empty(), "nothing changed, so nothing was announced");
@@ -1338,7 +1338,7 @@ mod tests {
         let file = key_file(&d, "id_work", &test_keys::plain());
         d.write_externally(&d.main_path(), "Host db\n  HostName 10.0.0.2\nHost newbox\n  IdentityFile ~/.ssh/id_work\n");
         let kept = point_hosts_at(&d.env(), d.home.path(), &file, "work-3fa2c1d9", persist).unwrap_err();
-        assert_eq!(kept.reason, "The file stays: your SSH config changed on disk since SSHelter loaded it.");
+        assert_eq!(kept.reason, "The file stays: your SSH config changed on disk since Lunport loaded it.");
     }
 
     /// 寫檔到一半失敗(第二個檔案存不成):第一個檔案已經存好 —— 它的主機改指到新的插槽了,`rewritten_hosts` 列它們(畫面要問同步的那些)、agent 設定跟著更新;
@@ -1362,7 +1362,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(attempts, vec![0, 1], "the first file was saved, the second one refused");
-        assert_eq!(imported.rewritten_hosts, vec!["web".to_string()], "the host in the saved file now uses the key in SSHelter");
+        assert_eq!(imported.rewritten_hosts, vec!["web".to_string()], "the host in the saved file now uses the key in Lunport");
         assert_eq!(imported.file_kept.as_deref(), Some("The file stays: db couldn't be switched (disk full)."));
         assert!(!imported.removed_file && file.exists());
         assert!(d.state().key_slots.contains_key(&imported.slot_id), "the key was added all the same");
@@ -1390,7 +1390,7 @@ mod tests {
         assert!(!crate::agent::wiring::agent_config_path(d.home.path()).exists(), "no host was switched, so the agent has nothing to serve");
     }
 
-    /// 預覽說明加不進去的原因:不是私鑰的檔案、SSHelter 自己管的檔案、舊式 PEM、agent 用不了的金鑰。讀得出來的部分(指紋、類型)照樣給。
+    /// 預覽說明加不進去的原因:不是私鑰的檔案、Lunport 自己管的檔案、舊式 PEM、agent 用不了的金鑰。讀得出來的部分(指紋、類型)照樣給。
     #[test]
     fn the_preview_explains_why_a_file_cant_be_added() {
         let d = device("# main\n");
@@ -1425,7 +1425,7 @@ mod tests {
 
     // ── Move 不刪還有東西指著的檔案(修正第 1 輪):沒載入 config、不在 Host 區塊裡的 `IdentityFile`、連結、插槽連到的檔案 ──────────────
 
-    const OUTSIDE_A_HOST_BLOCK: &str = "The file stays: an IdentityFile outside a Host block names it, and SSHelter only switches hosts.";
+    const OUTSIDE_A_HOST_BLOCK: &str = "The file stays: an IdentityFile outside a Host block names it, and Lunport only switches hosts.";
 
     /// 選 `id_work`、Move(不留檔案)。回傳(裝置、檔案、結果)。
     fn move_id_work(d: &TestDevice) -> (std::path::PathBuf, ImportedKey) {
@@ -1452,7 +1452,7 @@ mod tests {
         let d = device(main);
         *d.doc.lock().unwrap() = None;
         let (file, imported) = move_id_work(&d);
-        assert_kept(&d, &file, &imported, "The file stays: SSHelter couldn't check which hosts use it (no config loaded).", main);
+        assert_kept(&d, &file, &imported, "The file stays: Lunport couldn't check which hosts use it (no config loaded).", main);
     }
 
     /// 檔案最上層的 `IdentityFile`(不在任何 Host 區塊裡)指到這個檔案:Move 只改主機,改不了它 —— 一台都不改(連同樣指到這個檔案的 Host 區塊也不改),原檔留著。
@@ -1515,7 +1515,7 @@ mod tests {
         let main = "IdentityFile ~/.ssh/id_work\nHost web\n  IdentityFile ~/.ssh/id_work\nHost web\n  User me\n";
         let d = device(main);
         let (file, imported) = move_id_work(&d);
-        assert_kept(&d, &file, &imported, "The file stays: web have more than one copy, so SSHelter didn't change them.", main);
+        assert_kept(&d, &file, &imported, "The file stays: web have more than one copy, so Lunport didn't change them.", main);
 
         let (_relay, _clock, a, _b, _words, personal) = pair();
         let space_text = "IdentityFile ~/.ssh/id_work\nHost web\n  IdentityFile ~/.ssh/id_work\n";
@@ -1542,7 +1542,7 @@ mod tests {
         let file = key_file(&d, "id_work", &test_keys::plain());
         d.write_externally(&d.main_path(), &format!("{main}# edited elsewhere\n"));
         let kept = point_hosts_at(&d.env(), d.home.path(), &file, "work-3fa2c1d9", persist).unwrap_err();
-        assert_eq!(kept.reason, "The file stays: your SSH config changed on disk since SSHelter loaded it.");
+        assert_eq!(kept.reason, "The file stays: your SSH config changed on disk since Lunport loaded it.");
 
         // 不在 Host 區塊裡的 `IdentityFile` 排在解析不了的之前。
         let main = "IdentityFile ~/.ssh/id_work\nHost web\n  IdentityFile ~/.ssh/%h\n";
@@ -1584,7 +1584,7 @@ mod tests {
         assert!(config.contains("Host other\n  IdentityFile ~/.ssh/id_other\n"), "{config}");
     }
 
-    /// 經連結拿著這把金鑰的插槽(這裡是 `own`、還是「File for now」連到 `~/.ssh/id_x`)也是「已經在 SSHelter」:貼上、從檔案(Move 或 Keep)、同一把金鑰的另一個檔案,
+    /// 經連結拿著這把金鑰的插槽(這裡是 `own`、還是「File for now」連到 `~/.ssh/id_x`)也是「已經在 Lunport」:貼上、從檔案(Move 或 Keep)、同一把金鑰的另一個檔案,
     /// 都以插槽的名稱拒絕,什麼都不寫,原檔不動。
     #[test]
     fn a_key_a_slot_holds_through_a_link_is_already_in_sshelter() {
@@ -1600,9 +1600,9 @@ mod tests {
             files
         };
         let folder = sorted_folder();
-        let message = "This key is already in SSHelter as id_x.";
+        let message = "This key is already in Lunport as id_x.";
 
-        assert_eq!(import_file(&a.env(), "work", &path, false).unwrap_err().to_string(), message, "Move into SSHelter");
+        assert_eq!(import_file(&a.env(), "work", &path, false).unwrap_err().to_string(), message, "Move into Lunport");
         assert_eq!(import_file(&a.env(), "work", &path, true).unwrap_err().to_string(), message, "Keep the file too");
         assert_eq!(import_file(&a.env(), "work", &copy.display().to_string(), false).unwrap_err().to_string(), message, "the same key in another file");
         assert_eq!(import_text(&a.env(), "again", &test_keys::plain()).unwrap_err().to_string(), message, "paste");
@@ -1697,7 +1697,7 @@ mod tests {
         let link = d.ssh_dir().join("id_work");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let imported = import_file(&d.env(), "work", &link.display().to_string(), false).unwrap();
-        assert_kept(&d, &link, &imported, "The file stays: it's a link to another file, so SSHelter didn't remove either.", main);
+        assert_kept(&d, &link, &imported, "The file stays: it's a link to another file, so Lunport didn't remove either.", main);
         assert!(target.exists(), "and so does what it links to");
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
 
@@ -1712,8 +1712,8 @@ mod tests {
 
     // ── 修正第 2 輪:載入之後在外面改過的 config、解析不了的 `IdentityFile`、同一把金鑰的同步副本 ───────────────────────
 
-    const RELOAD_FIRST: &str = "Your SSH config changed on disk since SSHelter loaded it. Reload it, then try again.";
-    const UNRESOLVED: &str = "The file stays: an IdentityFile SSHelter can't resolve (a token, a variable or a relative path) may name it.";
+    const RELOAD_FIRST: &str = "Your SSH config changed on disk since Lunport loaded it. Reload it, then try again.";
+    const UNRESOLVED: &str = "The file stays: an IdentityFile Lunport can't resolve (a token, a variable or a relative path) may name it.";
 
     /// 什麼都沒加:狀態沒變,插槽目錄和保管庫檔都沒被建立。
     fn assert_nothing_added(d: &TestDevice, state_before: &crate::sync::state_v2::SyncStateV2) {
@@ -1722,7 +1722,7 @@ mod tests {
         assert!(!crate::vault::store::vault_path(&d.env().state_path).exists(), "the vault wasn't even opened for writing");
     }
 
-    /// 別的編輯器在 SSHelter 載入之後加了一台主機、指到這個檔案,畫面還沒重新載入:載入的 config 裡沒有主機指到它,Move 看不到它也沒有檔案要寫(`persist_file` 的衝突檢查
+    /// 別的編輯器在 Lunport 載入之後加了一台主機、指到這個檔案,畫面還沒重新載入:載入的 config 裡沒有主機指到它,Move 看不到它也沒有檔案要寫(`persist_file` 的衝突檢查
     /// 只護著 Move 自己寫的檔案),刪掉檔案那一台就壞了。載入的 config 和磁碟上的不一樣就在動任何東西之前拒絕(什麼都沒加),重新載入之後再來一次就看得到它。
     #[test]
     fn an_edit_made_outside_sshelter_that_names_the_file_stops_the_move() {
@@ -1862,7 +1862,7 @@ mod tests {
         assert!(d.main_config().contains("# IdentityFile ~/.ssh/%h\n"), "written as a comment: {}", d.main_config());
     }
 
-    /// 插槽裡放著同步來的副本(`SlotSource::SyncedCopy`),不在帳戶還在的插槽裡(這裡沒有帳戶):同一把金鑰也算已經在 SSHelter。
+    /// 插槽裡放著同步來的副本(`SlotSource::SyncedCopy`),不在帳戶還在的插槽裡(這裡沒有帳戶):同一把金鑰也算已經在 Lunport。
     #[test]
     fn a_synced_copy_in_a_slot_is_already_in_sshelter() {
         let d = device("# main\n");
@@ -1896,7 +1896,7 @@ mod tests {
         .unwrap();
         let before = d.state();
 
-        assert_eq!(import_text(&d.env(), "again", &test_keys::plain()).unwrap_err().to_string(), "This key is already in SSHelter as old.");
+        assert_eq!(import_text(&d.env(), "again", &test_keys::plain()).unwrap_err().to_string(), "This key is already in Lunport as old.");
         assert_eq!(already_in_sshelter(&before, test_keys::PLAIN_FINGERPRINT).as_deref(), Some("old"));
         assert_eq!(already_in_sshelter(&before, test_keys::ECDSA_FINGERPRINT), None, "another key");
         assert_nothing_added(&d, &before);
@@ -2057,7 +2057,7 @@ mod tests {
         assert_eq!(preview.fingerprint.as_deref(), Some(test_keys::PLAIN_FINGERPRINT));
     }
 
-    /// 保管庫讀不了(這裡是更新版 SSHelter 寫的格式,`holds` 是 None):看不出那一筆是不是真的不見了,照舊說它已經在 SSHelter —— 什麼都不寫,保管庫檔不動。
+    /// 保管庫讀不了(這裡是更新版 Lunport 寫的格式,`holds` 是 None):看不出那一筆是不是真的不見了,照舊說它已經在 Lunport —— 什麼都不寫,保管庫檔不動。
     #[test]
     fn a_lost_key_isnt_put_back_while_the_vault_cant_be_read() {
         let d = device("# main\n");
@@ -2068,7 +2068,7 @@ mod tests {
         let export = key_file(&d, "laptop_export", &test_keys::plain());
         let path = export.display().to_string();
         let before = d.state();
-        let message = "This key is already in SSHelter as laptop.";
+        let message = "This key is already in Lunport as laptop.";
 
         assert_eq!(import_text(&d.env(), "again", &test_keys::plain()).unwrap_err().to_string(), message);
         assert_eq!(import_file(&d.env(), "again", &path, true).unwrap_err().to_string(), message);
@@ -2077,7 +2077,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&vault_file).unwrap(), newer, "the vault file is left alone");
     }
 
-    /// 保管庫裡那一筆還在:照舊說它已經在 SSHelter,不再放一次。
+    /// 保管庫裡那一筆還在:照舊說它已經在 Lunport,不再放一次。
     #[test]
     fn a_key_still_in_the_vault_is_refused_not_put_back() {
         let d = device("# main\n");
@@ -2086,7 +2086,7 @@ mod tests {
         let export = key_file(&d, "laptop_export", &test_keys::plain());
         let path = export.display().to_string();
         let before = d.state();
-        let message = "This key is already in SSHelter as laptop.";
+        let message = "This key is already in Lunport as laptop.";
 
         assert_eq!(import_text(&d.env(), "again", &test_keys::plain()).unwrap_err().to_string(), message);
         assert_eq!(import_file(&d.env(), "again", &path, true).unwrap_err().to_string(), message);
@@ -2175,7 +2175,7 @@ mod tests {
     #[test]
     fn a_move_whose_copy_in_the_vault_doesnt_match_keeps_the_file() {
         let main = "Host web\n  IdentityFile ~/.ssh/id_work\n";
-        let reason = "The file stays: SSHelter couldn't confirm its copy in the vault (it doesn't match).";
+        let reason = "The file stays: Lunport couldn't confirm its copy in the vault (it doesn't match).";
         let d = device(main);
         let (file, added) = added_id_work(&d);
         put_in_vault(&d, &added.slot_id, &test_keys::ecdsa());
@@ -2199,7 +2199,7 @@ mod tests {
         d.keychain.fail_reads.store(true, std::sync::atomic::Ordering::SeqCst);
         let imported = move_file(&d.env(), d.home.path(), &file, &added, crate::config::commands::persist_file);
         d.keychain.fail_reads.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert_kept(&d, &file, &imported, "The file stays: SSHelter couldn't confirm its copy in the vault (keychain error: locked).", main);
+        assert_kept(&d, &file, &imported, "The file stays: Lunport couldn't confirm its copy in the vault (keychain error: locked).", main);
     }
 
     /// 改好主機之後、移除原檔之前,原檔被換成另一把金鑰(別的程式在這時寫了它):留著它現在的樣子,說它變了。已經改好的主機不改回來 —— 它們用的是核對過的
@@ -2215,7 +2215,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: it changed while SSHelter was adding it."));
+        assert_eq!(imported.file_kept.as_deref(), Some("The file stays: it changed while Lunport was adding it."));
         assert!(!imported.removed_file);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), test_keys::ecdsa(), "the file stays as it is now");
         assert_eq!(imported.rewritten_hosts, vec!["web".to_string()], "web was switched");

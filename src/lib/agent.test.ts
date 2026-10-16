@@ -239,7 +239,7 @@ describe("the pending list feed", () => {
 
 describe("the agent problem line", () => {
   it("says why hosts on vault keys can't connect", () => {
-    expect(agentProblemText({ kind: "not_running", reason: "path too long" })).toBe("SSHelter's agent isn't running: path too long");
-    expect(agentProblemText({ kind: "include_missing" })).toBe("Hosts that use keys in SSHelter can't reach its agent.");
+    expect(agentProblemText({ kind: "not_running", reason: "path too long" })).toBe("Lunport's agent isn't running: path too long");
+    expect(agentProblemText({ kind: "include_missing" })).toBe("Hosts that use keys in Lunport can't reach its agent.");
   });
 });

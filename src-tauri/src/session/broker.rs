@@ -40,7 +40,7 @@ pub const QUIT_WAIT: Duration = SETTLE.saturating_add(Duration::from_secs(2));
 
 /// The sentence a client is told when the app quits under its session (spec §4).
 pub fn quit_reason(alias: &str) -> String {
-    format!("SSHelter quit, so the connection to {alias} was closed.")
+    format!("Lunport quit, so the connection to {alias} was closed.")
 }
 
 /// Where a session is: asking the client what the login needs and connecting, or open (its shell is being opened, or is open).
@@ -61,7 +61,7 @@ pub struct SessionInfo {
     /// `None` until the connect has looked the host up, unless the client asked for the host by its id.
     pub host_id: Option<HostId>,
     pub state: SessionState,
-    /// Who asked for it: the process chain of the client, outermost first, without SSHelter's own executable (spec §7.2); `None` when it
+    /// Who asked for it: the process chain of the client, outermost first, without Lunport's own executable (spec §7.2); `None` when it
     /// could not be told. Recorded now, shown from phase 2 on.
     pub requested_by: Option<Vec<String>>,
     /// When the client asked for the shell.
@@ -208,7 +208,7 @@ impl Broker {
 
     /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. Waits up to `wait` for the table to
     /// empty, which is when every client has been told: the app exits when this returns, so a client that was not told by then hears
-    /// nothing (its terminal says "The connection to SSHelter ended."). The app gives it `QUIT_WAIT`.
+    /// nothing (its terminal says "The connection to Lunport ended."). The app gives it `QUIT_WAIT`.
     ///
     /// A session that is still being connected is cancelled at once; its client is told, its connection closed, and then the session
     /// leaves the table, on a thread of its own. Nothing waits for what the session's own thread is doing (a question, the host key
@@ -220,7 +220,7 @@ impl Broker {
     /// A shell that is still being opened when the app quits cannot be hurried: `Session::shell` is a blocking engine call as well, and
     /// the shell is closed, and its client told, once the engine is through with it. If that takes longer than `wait` (it may take
     /// longer than `QUIT_WAIT`), `end_all` returns first, the app exits, and the connection of that client ends without a word: its
-    /// terminal says "The connection to SSHelter ended." instead of why.
+    /// terminal says "The connection to Lunport ended." instead of why.
     pub fn end_all(self: &Arc<Broker>, wait: Duration) {
         let (connecting, open) = {
             let mut table = locked(&self.table);
@@ -292,10 +292,10 @@ impl Broker {
             First::Silent => return,
             First::Control(payload) => match decode::<ClientMessage>(&payload) {
                 Ok(ClientMessage::OpenShell { host, pty }) => (host, pty),
-                Ok(ClientMessage::Exec {}) => return refuse(kinds::UNSUPPORTED, "Running a command through SSHelter's sessions is not supported yet."),
-                Ok(_) | Err(_) => return refuse(kinds::PROTOCOL, "SSHelter expected open_shell."),
+                Ok(ClientMessage::Exec {}) => return refuse(kinds::UNSUPPORTED, "Running a command through Lunport's sessions is not supported yet."),
+                Ok(_) | Err(_) => return refuse(kinds::PROTOCOL, "Lunport expected open_shell."),
             },
-            First::Data | First::Broken => return refuse(kinds::PROTOCOL, "SSHelter expected open_shell."),
+            First::Data | First::Broken => return refuse(kinds::PROTOCOL, "Lunport expected open_shell."),
         };
         let _ = set_read_timeout(&reader, None);
         let owner = Arc::new(ConnectionOwner::new(Arc::clone(&link)));
@@ -328,7 +328,7 @@ impl Broker {
                     Ok(ClientMessage::WindowChange { cols, rows }) => control.resize(cols, rows),
                     Ok(ClientMessage::Answer { question_id, value, cancel: cancelled }) => owner.answer(&question_id, value.map(Zeroizing::new), cancelled),
                     Ok(ClientMessage::Close) => break,
-                    Ok(_) | Err(_) => refuse(kinds::PROTOCOL, "SSHelter did not expect that message."),
+                    Ok(_) | Err(_) => refuse(kinds::PROTOCOL, "Lunport did not expect that message."),
                 },
                 Ok(None) | Err(_) => break,
             }
@@ -374,7 +374,7 @@ impl Broker {
     /// connection and takes the entry out, and the client is not told both.
     fn could_not_start(&self, conn: &Conn) {
         if self.claim(conn.id) {
-            could_not_open(conn.link.as_ref(), kinds::CONNECT, "SSHelter could not start the session.");
+            could_not_open(conn.link.as_ref(), kinds::CONNECT, "Lunport could not start the session.");
         }
         self.forget(conn.id);
     }
@@ -552,7 +552,7 @@ fn hello_version(payload: &[u8]) -> Option<u64> {
 /// Reads the first message of a connection, which has to be the `hello` of `sshelter connect` in this protocol version. Anything else is
 /// refused by name with an `error` event (spec §7.2), and `false` comes back: the connection is closed, and nothing was started. The
 /// version is looked at first: a client of another version may say hello in ways this version cannot read, and what helps its user then
-/// is to be told to quit SSHelter and open it again, whoever the client says it is.
+/// is to be told to quit Lunport and open it again, whoever the client says it is.
 enum Greeting {Connect,Mcp(Option<serde_json::Value>),Refused}
 fn greet(reader: &mut Stream, link: &dyn ClientLink) -> Greeting {
     let refuse = |kind: &str, text: String| {
@@ -561,18 +561,18 @@ fn greet(reader: &mut Stream, link: &dyn ClientLink) -> Greeting {
     };
     match first_frame(reader) {
         First::Silent => Greeting::Refused,
-        First::Broken => refuse(kinds::PROTOCOL, "SSHelter could not read the first message.".to_string()),
+        First::Broken => refuse(kinds::PROTOCOL, "Lunport could not read the first message.".to_string()),
         First::Data => refuse(kinds::PROTOCOL, "The first message must be hello.".to_string()),
         First::Control(payload) => {
             if let Ok(ClientMessage::Hello {client:ClientKind::Mcp,version:super::protocol::MCP_PROTOCOL_VERSION,client_info})=decode::<ClientMessage>(&payload) {return Greeting::Mcp(client_info);}
             if let Some(version) = hello_version(&payload).filter(|version| *version != u64::from(PROTOCOL_VERSION)) {
-                let text = format!("This sshelter speaks protocol {version} and the SSHelter that is running speaks {PROTOCOL_VERSION}. Quit SSHelter and open it again.");
+                let text = format!("This sshelter speaks protocol {version} and the Lunport that is running speaks {PROTOCOL_VERSION}. Quit Lunport and open it again.");
                 return refuse(kinds::PROTOCOL, text);
             }
             match decode::<ClientMessage>(&payload) {
                 Ok(ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, .. }) => Greeting::Connect,
-                Ok(ClientMessage::Hello { client: ClientKind::Mcp, .. }) => refuse(kinds::UNSUPPORTED, "The MCP adapter cannot use SSHelter's sessions yet.".to_string()),
-                Ok(ClientMessage::Hello { .. }) | Err(_) => refuse(kinds::PROTOCOL, "SSHelter could not read the first message.".to_string()),
+                Ok(ClientMessage::Hello { client: ClientKind::Mcp, .. }) => refuse(kinds::UNSUPPORTED, "The MCP adapter cannot use Lunport's sessions yet.".to_string()),
+                Ok(ClientMessage::Hello { .. }) | Err(_) => refuse(kinds::PROTOCOL, "Lunport could not read the first message.".to_string()),
                 Ok(_) => refuse(kinds::PROTOCOL, "The first message must be hello.".to_string()),
             }
         }
@@ -791,13 +791,13 @@ impl Owner for ConnectionOwner {
     }
 }
 
-/// The process chain without SSHelter's own executable: `sshelter connect` is SSHelter, and the person's program is what started it.
+/// The process chain without Lunport's own executable: `sshelter connect` is Lunport, and the person's program is what started it.
 pub fn without_own_executable(chain: Vec<ProcInfo>, own: Option<&Path>) -> Vec<ProcInfo> {
     let Some(own) = own else { return chain };
     chain.into_iter().filter(|process| process.path.as_deref().map(Path::new) != Some(own)).collect()
 }
 
-/// Who connected (spec §7.2): the peer's process chain, without SSHelter's own executable, named as `ipc::peer` names programs.
+/// Who connected (spec §7.2): the peer's process chain, without Lunport's own executable, named as `ipc::peer` names programs.
 pub fn requester_of(pid: Option<u32>) -> Option<Vec<String>> {
     let own = std::env::current_exe().ok().map(|path| std::fs::canonicalize(&path).unwrap_or(path));
     let chain = without_own_executable(peer::process_chain(pid?), own.as_deref());
@@ -1010,7 +1010,7 @@ mod tests {
         client.open("web");
         match client.next_message() {
             ServerMessage::Question(question) => {
-                assert_eq!((question.kind, question.text.as_str(), question.echo, question.deadline_ms), (QuestionKind::HostKeyNotice, "Waiting for you to confirm web's host key in SSHelter.", false, None));
+                assert_eq!((question.kind, question.text.as_str(), question.echo, question.deadline_ms), (QuestionKind::HostKeyNotice, "Waiting for you to confirm web's host key in Lunport.", false, None));
             }
             other => panic!("expected the notice, got {other:?}"),
         }
@@ -1070,12 +1070,12 @@ mod tests {
         let error = |kind: &str, text: &str| vec![ServerMessage::Event(Event::Error { kind: kind.into(), text: text.into() })];
         assert_eq!(
             refused(&[ClientMessage::Hello { client: ClientKind::Connect, version: 2, client_info: None }]),
-            error(kinds::PROTOCOL, "This sshelter speaks protocol 2 and the SSHelter that is running speaks 1. Quit SSHelter and open it again.")
+            error(kinds::PROTOCOL, "This sshelter speaks protocol 2 and the Lunport that is running speaks 1. Quit Lunport and open it again.")
         );
-        assert_eq!(refused(&[ClientMessage::Hello { client: ClientKind::Mcp, version: PROTOCOL_VERSION, client_info: None }]), error(kinds::UNSUPPORTED, "The MCP adapter cannot use SSHelter's sessions yet."));
+        assert_eq!(refused(&[ClientMessage::Hello { client: ClientKind::Mcp, version: PROTOCOL_VERSION, client_info: None }]), error(kinds::UNSUPPORTED, "The MCP adapter cannot use Lunport's sessions yet."));
         assert_eq!(
             refused(&[ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, client_info: None }, ClientMessage::Exec {}]),
-            error(kinds::UNSUPPORTED, "Running a command through SSHelter's sessions is not supported yet.")
+            error(kinds::UNSUPPORTED, "Running a command through Lunport's sessions is not supported yet.")
         );
         assert_eq!(refused(&[ClientMessage::Close]), error(kinds::PROTOCOL, "The first message must be hello."));
         assert!(world.engine.events().is_empty(), "nothing was connected");
@@ -1173,7 +1173,7 @@ mod tests {
         world.broker.end_all(Duration::from_secs(10));
         assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
         assert!(!world.broker.has_sessions());
-        assert_eq!(client.rest().1, [ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to web was closed.".into() }), no_status()]);
+        assert_eq!(client.rest().1, [ServerMessage::Event(Event::Disconnected { reason: "Lunport quit, so the connection to web was closed.".into() }), no_status()]);
     }
 
     /// The whole way with the real engine: a client asks the broker for a shell on a scratch OpenSSH, the host key is confirmed in the
@@ -1218,8 +1218,8 @@ mod tests {
     #[test]
     fn the_requester_chain_leaves_out_sshelters_own_executable() {
         let process = |pid: u32, path: &str| ProcInfo { pid, ppid: pid + 1, path: Some(path.into()), argv: vec![path.into()] };
-        let own = Path::new("/Applications/SSHelter.app/Contents/MacOS/sshelter");
-        let chain = vec![process(10, "/Applications/SSHelter.app/Contents/MacOS/sshelter"), process(11, "/bin/zsh"), process(12, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal")];
+        let own = Path::new("/Applications/Lunport.app/Contents/MacOS/sshelter");
+        let chain = vec![process(10, "/Applications/Lunport.app/Contents/MacOS/sshelter"), process(11, "/bin/zsh"), process(12, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal")];
         let kept = without_own_executable(chain, Some(own));
         assert_eq!(kept.iter().map(|process| process.pid).collect::<Vec<_>>(), [11, 12]);
         assert_eq!(without_own_executable(vec![process(10, "/usr/bin/ssh")], None).len(), 1, "nothing to leave out when the own path is unknown");
@@ -1248,7 +1248,7 @@ mod tests {
     }
 
     fn quit_sentence() -> ServerMessage {
-        ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to web was closed.".into() })
+        ServerMessage::Event(Event::Disconnected { reason: "Lunport quit, so the connection to web was closed.".into() })
     }
 
     /// What a client has been told, and can read at once, when `end_all` is done with it: the quit sentence and `exited`, and the
@@ -1563,10 +1563,10 @@ mod tests {
     fn what_ends_a_session_is_handed_to_the_link_as_one_piece() {
         let link = CallRecorder::default();
         say_quit(&link, "web");
-        could_not_open(&link, kinds::CONNECT, "SSHelter could not start the session.");
+        could_not_open(&link, kinds::CONNECT, "Lunport could not start the session.");
         assert_eq!(
             *locked(&link.calls),
-            [vec![quit_sentence(), no_status()], vec![ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]]
+            [vec![quit_sentence(), no_status()], vec![ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "Lunport could not start the session.".into() }), no_status()]]
         );
     }
 
@@ -1655,15 +1655,15 @@ mod tests {
     fn a_first_message_the_broker_cannot_use_is_answered_before_the_connection_closes() {
         let world = world(FakeEngine::new());
         let error = |kind: &str, text: &str| vec![ServerMessage::Event(Event::Error { kind: kind.into(), text: text.into() })];
-        let other_version = error(kinds::PROTOCOL, "This sshelter speaks protocol 2 and the SSHelter that is running speaks 1. Quit SSHelter and open it again.");
-        let unreadable = error(kinds::PROTOCOL, "SSHelter could not read the first message.");
+        let other_version = error(kinds::PROTOCOL, "This sshelter speaks protocol 2 and the Lunport that is running speaks 1. Quit Lunport and open it again.");
+        let unreadable = error(kinds::PROTOCOL, "Lunport could not read the first message.");
         let not_hello = error(kinds::PROTOCOL, "The first message must be hello.");
-        let not_open_shell = error(kinds::PROTOCOL, "SSHelter expected open_shell.");
+        let not_open_shell = error(kinds::PROTOCOL, "Lunport expected open_shell.");
         let hello = br#"{"type":"hello","client":"connect","version":1}"#;
         // What the client writes, as frames (type, payload), and what it must be told.
         let cases: Vec<(&str, Vec<(u8, &[u8])>, Vec<ServerMessage>)> = vec![
             ("a client kind this version does not know, of another version", vec![(CONTROL, br#"{"type":"hello","client":"agent","version":2}"#)], other_version.clone()),
-            ("an mcp client of an unsupported version", vec![(CONTROL, br#"{"type":"hello","client":"mcp","version":3}"#)], error(kinds::PROTOCOL, "This sshelter speaks protocol 3 and the SSHelter that is running speaks 1. Quit SSHelter and open it again.")),
+            ("an mcp client of an unsupported version", vec![(CONTROL, br#"{"type":"hello","client":"mcp","version":3}"#)], error(kinds::PROTOCOL, "This sshelter speaks protocol 3 and the Lunport that is running speaks 1. Quit Lunport and open it again.")),
             ("a hello without a version", vec![(CONTROL, br#"{"type":"hello","client":"connect"}"#)], unreadable.clone()),
             ("text that is not JSON", vec![(CONTROL, b"hello?")], unreadable.clone()),
             ("a frame of a type there is not", vec![(3, b"x")], unreadable.clone()),
@@ -1753,7 +1753,7 @@ mod tests {
     fn a_session_that_could_not_be_started_is_an_error_and_an_exit_without_a_status() {
         let (mut ours, theirs) = UnixStream::pair().unwrap();
         ours.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        could_not_open(&FrameLink::new(theirs), kinds::CONNECT, "SSHelter could not start the session.");
+        could_not_open(&FrameLink::new(theirs), kinds::CONNECT, "Lunport could not start the session.");
         let mut told = Vec::new();
         while let Some(Frame::Control(payload)) = read_frame(&mut ours).unwrap() {
             told.push(decode::<ServerMessage>(&payload).unwrap());
@@ -1761,7 +1761,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(told, [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]);
+        assert_eq!(told, [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "Lunport could not start the session.".into() }), no_status()]);
     }
 
     /// Texts a server chose can be larger than a frame (1 MiB): the text of a failure to connect, of a shell that cannot be opened and of a
@@ -1844,7 +1844,7 @@ mod tests {
         drop(conn);
         assert_eq!(
             written_to(&mut client),
-            [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "SSHelter could not start the session.".into() }), no_status()]
+            [ServerMessage::Event(Event::Error { kind: kinds::CONNECT.into(), text: "Lunport could not start the session.".into() }), no_status()]
         );
 
         let (conn, mut client) = conn_on_a_socket_pair(2);
@@ -1903,7 +1903,7 @@ mod tests {
     }
 
     /// Plan 1b-1 review, Task 11 Minor 9: who asked for a session is worked out once, when the connection is accepted, from the pid of the
-    /// peer (spec §7.2): its process chain without SSHelter's own executable. A client of this test is this process.
+    /// peer (spec §7.2): its process chain without Lunport's own executable. A client of this test is this process.
     #[test]
     fn a_session_records_who_asked_for_it_from_the_pid_of_the_peer() {
         let world = world(FakeEngine::new());
@@ -1972,7 +1972,7 @@ mod tests {
         broker.end_all(Duration::from_secs(10));
         assert_eq!(
             client.rest().1,
-            [ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to lab was closed.".into() }), no_status()]
+            [ServerMessage::Event(Event::Disconnected { reason: "Lunport quit, so the connection to lab was closed.".into() }), no_status()]
         );
         assert!(!broker.has_sessions());
     }
@@ -2120,7 +2120,7 @@ mod windows_tests {
     }
 
     fn quit_sentence() -> ServerMessage {
-        ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to web was closed.".into() })
+        ServerMessage::Event(Event::Disconnected { reason: "Lunport quit, so the connection to web was closed.".into() })
     }
 
     /// Plan 1b-3 Task 1: a whole session over the pipe. The broker reads its client on one thread while the session writes to it from

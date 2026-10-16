@@ -220,7 +220,7 @@ impl FakeDirectory {
     /// The pins, or the failure the real store gives when its file cannot be read.
     fn readable_pins(&self) -> Result<MutexGuard<'_, HashMap<HostId, PinnedKey>>, DirectoryError> {
         if self.unreadable_pins {
-            return Err(DirectoryError::Failed("SSHelter cannot read its pinned host keys in host-pins.json (the file is damaged).".to_string()));
+            return Err(DirectoryError::Failed("Lunport cannot read its pinned host keys in host-pins.json (the file is damaged).".to_string()));
         }
         Ok(locked(&self.pins))
     }
@@ -331,7 +331,7 @@ pub enum Decision {
     Refuse,
 }
 
-/// SSHelter's host key window, scripted: each question takes the next decision (none left: `Refuse`). A cancelled wait is a refusal.
+/// Lunport's host key window, scripted: each question takes the next decision (none left: `Refuse`). A cancelled wait is a refusal.
 #[derive(Default)]
 pub struct FakeConfirmer {
     decisions: Mutex<VecDeque<Decision>>,

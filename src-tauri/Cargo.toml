@@ -1,7 +1,7 @@
 [package]
 name = "sshelter"
 version = "1.0.0"
-description = "SSHelter — a cross-platform desktop manager for your local OpenSSH config, keys, agent, and known_hosts."
+description = "Lunport — a cross-platform desktop manager for your local OpenSSH config, keys, agent, and known_hosts."
 authors = ["Frank Sung"]
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 edition = "2021"
@@ -67,7 +67,7 @@ ts-rs = "10"
 mockito = "1"
 
 # Desktop-only plugins (autostart and global shortcuts have no mobile support).
-# single-instance: a second launch hands its arguments to the running SSHelter and exits (lib.rs).
+# single-instance: a second launch hands its arguments to the running Lunport and exits (lib.rs).
 # `~2.4.5` on purpose: 2.5.x requires tauri 2.12, and a caret requirement makes cargo upgrade tauri
 # (and its runtime crates) past the 2.11 that @tauri-apps/api is on. Move both to 2.12 together.
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]

@@ -1,7 +1,7 @@
 //! The local IPC endpoint on Windows: a named pipe per role, `\\.\pipe\sshelter-<role>-<the first 16 hex digits of the SHA-256 of the
 //! user's SID string>` (the key vault's `sshelter-agent-…`, its spec §4.4 and §5.1; the session broker's `sshelter-session-…`, own-ssh
 //! spec §4). Every instance's DACL grants the current user alone and remote clients are refused; the first instance carries
-//! `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name another program holds is not served (spec §11; another SSHelter is stopped before that, by
+//! `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name another program holds is not served (spec §11; another Lunport is stopped before that, by
 //! `server::take_lock`). Only std and windows-sys.
 //!
 //! Both ends of a connection are a `PipeStream`, and its handle is in overlapped mode. A handle in synchronous mode serializes all I/O on
@@ -187,8 +187,8 @@ fn pipe_owner(pipe: &OwnedHandle) -> Option<Vec<u8>> {
     }
 }
 
-/// Whether the user owns a pipe whose owner `connect` read (`None`: it could not be read). Only such a pipe is SSHelter's: `OwnerOnly`
-/// makes the user the owner of SSHelter's pipes, and no other program can make the user the owner of its own (that takes the user's
+/// Whether the user owns a pipe whose owner `connect` read (`None`: it could not be read). Only such a pipe is Lunport's: `OwnerOnly`
+/// makes the user the owner of Lunport's pipes, and no other program can make the user the owner of its own (that takes the user's
 /// token, or a privilege that already rules the computer).
 fn served_by_user(owner: Option<&[u8]>, user: &[u8]) -> bool {
     owner == Some(user)
@@ -203,7 +203,7 @@ fn role_in(name: &str) -> &str {
 
 /// Why `connect` refused the pipe `name`: another program made it.
 fn not_sshelters(name: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, format!(r"Another program is using SSHelter's {} pipe (\\.\pipe\{name})", role_in(name)))
+    io::Error::new(io::ErrorKind::PermissionDenied, format!(r"Another program is using Lunport's {} pipe (\\.\pipe\{name})", role_in(name)))
 }
 
 fn wide_pipe_path(name: &str) -> Vec<u16> {
@@ -458,7 +458,7 @@ impl std::fmt::Debug for PipeStream {
 
 /// Connects to `\\.\pipe\<name>` as a client. No pipe of that name: `NotFound`, at once (nobody serves it). Every instance busy (each one
 /// serves a client, and the server has not made the next one yet): waits for one with `WaitNamedPipeW`, `busy_wait` in all, and then
-/// `TimedOut`. A pipe the user does not own is not SSHelter's: `PermissionDenied` ("Another program is using SSHelter's … pipe"), and
+/// `TimedOut`. A pipe the user does not own is not Lunport's: `PermissionDenied` ("Another program is using Lunport's … pipe"), and
 /// nothing was written to it. The server is given the client's identity only, not a token it could act as.
 pub fn connect(name: &str, busy_wait: Duration) -> io::Result<PipeStream> {
     let path = wide_pipe_path(name);
@@ -480,7 +480,7 @@ pub fn connect(name: &str, busy_wait: Duration) -> io::Result<PipeStream> {
         if handle != INVALID_HANDLE_VALUE {
             // SAFETY: a fresh handle that nothing else owns.
             let pipe = unsafe { OwnedHandle::from_raw_handle(handle as _) };
-            // The name comes from the user's SID, which is no secret: any local program can make a pipe of that name while SSHelter does
+            // The name comes from the user's SID, which is no secret: any local program can make a pipe of that name while Lunport does
             // not serve it (unlike the socket, which lives in a directory only the user can enter). Refused, it is closed unused.
             if !served_by_user(pipe_owner(&pipe).as_deref(), &user_sid_bytes()?) {
                 return Err(not_sshelters(name));
@@ -529,9 +529,9 @@ fn create_instance(path: &[u16], security: &OwnerOnly, first: bool, max_instance
 /// `what` names the pipe (`agent`, `session`).
 fn first_instance_error(e: io::Error, what: &str) -> AppError {
     if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
-        AppError::Other(format!("Another program is using SSHelter's {what} pipe ({e})"))
+        AppError::Other(format!("Another program is using Lunport's {what} pipe ({e})"))
     } else {
-        AppError::Other(format!("Can't create SSHelter's {what} pipe ({e})"))
+        AppError::Other(format!("Can't create Lunport's {what} pipe ({e})"))
     }
 }
 
@@ -565,7 +565,7 @@ pub(crate) fn accept(pipe: &OwnedHandle) -> io::Result<Option<u32>> {
 }
 
 /// Takes the lock in `dir`, opens `\\.\pipe\<name>` and hands every connection, as a `PipeStream`, to `handle` on a thread of its own
-/// (`dispatch`). The listener's own thread is named `thread` (`sshelter-agent`, `sshelter-session`). Another SSHelter holds the lock →
+/// (`dispatch`). The listener's own thread is named `thread` (`sshelter-agent`, `sshelter-session`). Another Lunport holds the lock →
 /// `OtherInstance`; the name is held by another program (or the pipe cannot be made) → an error.
 pub fn listen(dir: &Path, name: &str, thread: &str, handle: Handler) -> Result<Started, AppError> {
     // What the messages call this pipe: `agent`, `session`.
@@ -686,9 +686,9 @@ mod tests {
     fn only_access_denied_is_reported_as_a_taken_name() {
         use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
         let taken = first_instance_error(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32), "agent").to_string();
-        assert!(taken.contains("Another program is using SSHelter's agent pipe"), "{taken}");
+        assert!(taken.contains("Another program is using Lunport's agent pipe"), "{taken}");
         let other = first_instance_error(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32), "agent").to_string();
-        assert!(other.starts_with("Can't create SSHelter's agent pipe ("), "{other}");
+        assert!(other.starts_with("Can't create Lunport's agent pipe ("), "{other}");
         assert!(!other.contains("Another program"), "{other}");
     }
 
@@ -847,7 +847,7 @@ mod tests {
         drop((first, client, only, second));
     }
 
-    /// Fix round 1 (security): only a pipe the user owns is SSHelter's; one of another owner, or one whose owner cannot be read, is not,
+    /// Fix round 1 (security): only a pipe the user owns is Lunport's; one of another owner, or one whose owner cannot be read, is not,
     /// and the refusal says which pipe another program is using.
     #[test]
     fn only_a_pipe_the_user_owns_is_sshelters() {
@@ -860,12 +860,12 @@ mod tests {
         assert!(!served_by_user(None, &user), "an owner that could not be read");
         let refused = not_sshelters("sshelter-session-0123456789abcdef");
         assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(refused.to_string(), r"Another program is using SSHelter's session pipe (\\.\pipe\sshelter-session-0123456789abcdef)");
+        assert_eq!(refused.to_string(), r"Another program is using Lunport's session pipe (\\.\pipe\sshelter-session-0123456789abcdef)");
         assert_eq!((role_in("sshelter-agent"), role_in("sshelter-agent-0123456789abcdef")), ("agent", "agent"));
     }
 
     /// Fix round 1 (security): the pipe's name comes from the user's SID, which is no secret, and any local program can make a pipe of
-    /// that name while SSHelter does not serve it. `connect` takes a pipe only if the user owns it, and says why it refuses one.
+    /// that name while Lunport does not serve it. `connect` takes a pipe only if the user owns it, and says why it refuses one.
     #[test]
     fn connect_refuses_a_pipe_another_owner_made() {
         let name = fresh_name("session-squat");
@@ -877,13 +877,13 @@ mod tests {
             eprintln!("skipped: this process cannot make the Administrators group the owner of a pipe (it is not elevated)");
             return;
         };
-        let error = connect(&name, Duration::from_secs(5)).expect_err("a pipe the user does not own is not SSHelter's");
+        let error = connect(&name, Duration::from_secs(5)).expect_err("a pipe the user does not own is not Lunport's");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
-        assert!(error.to_string().contains("Another program is using SSHelter's session pipe"), "{error}");
+        assert!(error.to_string().contains("Another program is using Lunport's session pipe"), "{error}");
     }
 
-    /// Fix round 1: the pipes a listener makes are the user's, also when SSHelter runs elevated, where its objects would otherwise be
-    /// owned by the Administrators group (an elevated administrator's default owner), and `connect` would refuse SSHelter's own pipe.
+    /// Fix round 1: the pipes a listener makes are the user's, also when Lunport runs elevated, where its objects would otherwise be
+    /// owned by the Administrators group (an elevated administrator's default owner), and `connect` would refuse Lunport's own pipe.
     #[test]
     fn a_listener_makes_its_pipes_the_users_own() {
         let (client, _server, _dir) = connected();

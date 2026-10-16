@@ -59,7 +59,7 @@ describe("the relay deploy link", () => {
   it("starts Cloudflare's deploy flow for this repository's relay folder", () => {
     const target = new URL(RELAY_DEPLOY_URL);
     expect(target.origin).toBe("https://deploy.workers.cloudflare.com");
-    expect(target.searchParams.get("url")).toBe("https://github.com/ysya/sshelter/tree/main/relay");
+    expect(target.searchParams.get("url")).toBe("https://github.com/ysya/lunport/tree/main/relay");
   });
 
   it("is the same link as the README buttons", () => {
@@ -88,7 +88,7 @@ describe("the relay deploy link", () => {
 
 describe("the relay update guide link", () => {
   it("points at the relay README's \"Updating your relay\" section", () => {
-    expect(RELAY_UPDATE_URL).toBe("https://github.com/ysya/sshelter/blob/main/relay/README.md#updating-your-relay");
+    expect(RELAY_UPDATE_URL).toBe("https://github.com/ysya/lunport/blob/main/relay/README.md#updating-your-relay");
     // GitHub derives the anchor from the heading: keep the heading where the link expects it.
     expect(readFileSync("relay/README.md", "utf8")).toMatch(/^## Updating your relay$/m);
     expect(readFileSync("README.md", "utf8")).toContain("relay/README.md#updating-your-relay");
@@ -178,7 +178,7 @@ describe("a failed key slot command", () => {
   });
 
   it("leaves an ordinary message as it is", async () => {
-    const inTheWay = "A file SSHelter didn't create is in the way: /home/f/.ssh/sshelter/keys/id_mac-3fa2c1d9. Move it, then sync again.";
+    const inTheWay = "A file Lunport didn't create is in the way: /home/f/.ssh/sshelter/keys/id_mac-3fa2c1d9. Move it, then sync again.";
     stubBackend(async () => {
       throw inTheWay;
     });
@@ -205,13 +205,13 @@ describe("a failed key slot command", () => {
 
   it("asks the backend to move the key and says what could not be moved", async () => {
     const calls = stubBackend(async () => {
-      throw "The key in SSHelter's vault doesn't match this slot.";
+      throw "The key in Lunport's vault doesn't match this slot.";
     });
     const { mutateAsync } = renderHook(new QueryClient(), useKeySetDelivery);
-    await expect(mutateAsync({ slotId: "s", vault: false })).rejects.toBe("The key in SSHelter's vault doesn't match this slot.");
+    await expect(mutateAsync({ slotId: "s", vault: false })).rejects.toBe("The key in Lunport's vault doesn't match this slot.");
     expect(calls).toEqual([["sync_key_set_delivery", { slotId: "s", vault: false }]]);
     expect(toast.getToasts()).toEqual([
-      expect.objectContaining({ title: "Could not change where the key is kept", description: "The key in SSHelter's vault doesn't match this slot." }),
+      expect.objectContaining({ title: "Could not change where the key is kept", description: "The key in Lunport's vault doesn't match this slot." }),
     ]);
   });
 
@@ -357,18 +357,18 @@ describe("Move and Export private key", () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(syncOverviewKey, overview());
     await expect(renderHook(queryClient, useKeyMoveAllIntoVault).mutateAsync()).rejects.toBe("boom");
-    expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Could not move the keys into SSHelter", description: "boom" })]);
+    expect(toast.getToasts()).toEqual([expect.objectContaining({ title: "Could not move the keys into Lunport", description: "boom" })]);
     expect(queryClient.getQueryState(syncOverviewKey)?.isInvalidated).toBe(true);
   });
 
   it("a failed Move shows the backend's message with hidden characters revealed: it can name a key from another computer", async () => {
-    const refusal = (name: string) => `Could not move ${name}: SSHelter's vault is not available.`;
+    const refusal = (name: string) => `Could not move ${name}: Lunport's vault is not available.`;
     stubBackend(async () => {
       throw refusal(SPOOFED_NAME);
     });
     await expect(renderHook(new QueryClient(), useKeyMoveAllIntoVault).mutateAsync()).rejects.toBe(refusal(SPOOFED_NAME));
     expect(toast.getToasts()).toEqual([
-      expect.objectContaining({ title: "Could not move the keys into SSHelter", description: refusal(SPOOFED_NAME_SHOWN) }),
+      expect.objectContaining({ title: "Could not move the keys into Lunport", description: refusal(SPOOFED_NAME_SHOWN) }),
     ]);
   });
 

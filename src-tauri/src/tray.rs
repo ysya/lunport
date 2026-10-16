@@ -287,7 +287,7 @@ fn publish_menu(app: &tauri::AppHandle, items: Vec<RecordTrayItem>) -> tauri::Re
         builder = builder.item(item);
     }
 
-    builder = builder.separator().text("open", "Open SSHelter");
+    builder = builder.separator().text("open", "Open Lunport");
     #[cfg(target_os = "macos")]
     {
         builder = builder.text("window-diagnostics", "Window Diagnostics…");

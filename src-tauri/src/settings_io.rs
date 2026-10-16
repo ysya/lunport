@@ -7,7 +7,7 @@ use crate::error::AppError;
 use tauri_plugin_dialog::DialogExt;
 
 /// Hard cap for imported settings files — anything bigger is certainly not an
-/// SSHelter settings envelope (the real one is a few KB).
+/// Lunport settings envelope (the real one is a few KB).
 const MAX_IMPORT_BYTES: u64 = 1024 * 1024; // 1 MB
 
 /// Read a file as UTF-8, refusing anything larger than `max` bytes.
@@ -39,7 +39,7 @@ pub async fn settings_export(
     let picked = app
         .dialog()
         .file()
-        .set_file_name("sshelter-settings.json")
+        .set_file_name("lunport-settings.json")
         .add_filter("JSON", &["json"])
         .blocking_save_file();
     let Some(file_path) = picked else {

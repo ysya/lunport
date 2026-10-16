@@ -18,7 +18,7 @@ use crate::sync::state_v2::{self, SyncStateV2};
 /// 被搶先(generation 變了)的輪次或提交:不是錯誤,呼叫端丟棄本輪。
 pub const SUPERSEDED: &str = "sync round superseded by a newer sync state";
 /// v1 升級完成之前(`SyncCore::legacy`)不寫狀態檔、不接受會改狀態的命令:磁碟上還是 v1 的狀態檔。
-pub const UPGRADING_MESSAGE: &str = "SSHelter is upgrading sync on this device; try again in a moment";
+pub const UPGRADING_MESSAGE: &str = "Lunport is upgrading sync on this device; try again in a moment";
 
 /// generation / 狀態 / 金鑰永遠一起快照、一起替換。
 /// - `account_keys`:由 keychain 的同步碼推導(`derive_account`);space 的金鑰每次從帳戶的 `spacekey` 密文解開,不另存。

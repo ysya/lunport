@@ -10,7 +10,7 @@ import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 
 /**
- * SSHelter's SSH agent (key vault spec §5.3, §7.4): the approval window's requests and answers. Names come from other
+ * Lunport's SSH agent (key vault spec §5.3, §7.4): the approval window's requests and answers. Names come from other
  * programs and servers, so every one of them is shown through `revealHidden`.
  */
 
@@ -169,8 +169,8 @@ export function useFixAgentInclude() {
 export function agentProblemText(problem: AgentProblem): string {
   switch (problem.kind) {
     case "not_running":
-      return `SSHelter's agent isn't running: ${problem.reason}`;
+      return `Lunport's agent isn't running: ${problem.reason}`;
     case "include_missing":
-      return "Hosts that use keys in SSHelter can't reach its agent.";
+      return "Hosts that use keys in Lunport can't reach its agent.";
   }
 }

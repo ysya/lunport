@@ -40,10 +40,10 @@ export function errorMessage(error: unknown): string {
 }
 
 /** Cloudflare's one-click deploy of this repository's relay/ folder — the README buttons' link. */
-export const RELAY_DEPLOY_URL = "https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/sshelter/tree/main/relay";
+export const RELAY_DEPLOY_URL = "https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/lunport/tree/main/relay";
 
 /** The relay README's "Updating your relay" section — linked wherever the app says the relay can be updated. */
-export const RELAY_UPDATE_URL = "https://github.com/ysya/sshelter/blob/main/relay/README.md#updating-your-relay";
+export const RELAY_UPDATE_URL = "https://github.com/ysya/lunport/blob/main/relay/README.md#updating-your-relay";
 
 async function openInBrowser(url: string): Promise<void> {
   try {
@@ -413,19 +413,19 @@ export function useKeyDeleteCopy(failure = "Could not delete the copy") {
   return useOverviewMutation("sync_key_delete_copy", failure, keyArgs.slot);
 }
 
-/** It moves the private key between the slot file and SSHelter's vault before the state changes: re-read everything on failure. */
+/** It moves the private key between the slot file and Lunport's vault before the state changes: re-read everything on failure. */
 export function useKeySetDelivery() {
   return useOverviewMutation("sync_key_set_delivery", "Could not change where the key is kept", keyArgs.delivery, true);
 }
 
 /**
- * Move (key vault spec §8): every key this computer still serves as a file goes into SSHelter's vault. It moves what it can and
+ * Move (key vault spec §8): every key this computer still serves as a file goes into Lunport's vault. It moves what it can and
  * answers with the ones it couldn't, which the caller shows. A failed call re-reads everything: some keys may have moved.
  */
 export function useKeyMoveAllIntoVault() {
   return useOverviewCommand<void, MoveIntoVaultResult>(
     "sync_key_move_all_into_vault",
-    "Could not move the keys into SSHelter",
+    "Could not move the keys into Lunport",
     noArgs,
     true,
     (result) => result.overview,
@@ -442,14 +442,14 @@ export function exportPrivateKey(slotId: string, passphrase: string | null): Pro
 }
 
 /**
- * New key (key vault spec §7.5): add a pasted private key to SSHelter. Like `exportPrivateKey`, these are plain calls, not
+ * New key (key vault spec §7.5): add a pasted private key to Lunport. Like `exportPrivateKey`, these are plain calls, not
  * mutations: the key text and a passphrase must not stay in TanStack's cache.
  */
 export function importKeyText(name: string, text: string): Promise<NewKeyResult> {
   return tauriInvoke<NewKeyResult>("sync_key_import_text", { name, text });
 }
 
-/** New key from a file, or Import from ~/.ssh: `keepFile` = "Keep the file too", otherwise "Move into SSHelter". */
+/** New key from a file, or Import from ~/.ssh: `keepFile` = "Keep the file too", otherwise "Move into Lunport". */
 export function importKeyFile(name: string, path: string, keepFile: boolean): Promise<ImportResult> {
   return tauriInvoke<ImportResult>("sync_key_import_file", { name, path, keepFile });
 }

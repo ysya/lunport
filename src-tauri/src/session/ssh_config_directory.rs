@@ -1,6 +1,6 @@
 //! TEMPORARY: plan 1c deletes this file, when host records (spec §5.1) replace the ssh_config blocks. Until then it is the broker's
 //! `HostDirectory` over the data the app has today, read-only: the hosts are the `Host` patterns of the app's ssh_config, their settings
-//! come from `ssh -G` (no connection), a host's key is the vault key ("Only in SSHelter") that its first matching `IdentityFile` names
+//! come from `ssh -G` (no connection), a host's key is the vault key ("Only in Lunport") that its first matching `IdentityFile` names
 //! (the SP3 slot rules), a password is the keychain's `host:<alias>`, and pins live in `host-pins.json` (`pins.rs`). A host id is its
 //! alias here. Never written: `~/.ssh` (spec §1). Never read: `~/.ssh/known_hosts`.
 //!
@@ -9,7 +9,7 @@
 //! (`effective_config(alias, None)`), and not only the file the app has loaded (the hosts are the `Host` patterns of that one). `ssh -G`
 //! runs the `Match exec` commands of those files and waits for them, so the source has a deadline (`Sources::effective`, `ssh_g.rs`).
 //!
-//! What it cannot give the broker, and says so: a `ProxyCommand`, a key in a file instead of the vault (SSHelter's own client signs with
+//! What it cannot give the broker, and says so: a `ProxyCommand`, a key in a file instead of the vault (Lunport's own client signs with
 //! vault keys only), and a `ProxyJump` that is anything but a chain of saved hosts, each one as it is saved.
 //!
 //! A host names a key file when an `IdentityFile` value that `ssh -G` prints is not a vault slot. It names no key when `ssh -G` prints
@@ -159,12 +159,12 @@ fn seconds(value: Option<&str>) -> Option<std::time::Duration> {
 
 /// The hop of the saved host `alias` from its `ssh -G` settings. `key_id` is the vault key its `IdentityFile`s name, if any;
 /// `password_saved` says whether the keychain holds its password. Keepalive: the host's `ServerAliveInterval` when it sets one, else
-/// SSHelter's default (spec §5.1: 30 s; OpenSSH's own default is off); a dead link is given up after `ServerAliveCountMax` more.
+/// Lunport's default (spec §5.1: 30 s; OpenSSH's own default is off); a dead link is given up after `ServerAliveCountMax` more.
 pub fn hop_from_effective(alias: &str, pairs: &[(String, String)], key_id: Option<String>, password_saved: bool) -> Result<Hop, DirectoryError> {
     let hostname = value(pairs, "hostname").filter(|hostname| !hostname.is_empty()).unwrap_or(alias);
     let port = match value(pairs, "port") {
         None => 22,
-        Some(port) => port.parse::<u16>().map_err(|_| DirectoryError::Unsupported(format!("{alias} has a port SSHelter cannot use ({port}).")))?,
+        Some(port) => port.parse::<u16>().map_err(|_| DirectoryError::Unsupported(format!("{alias} has a port Lunport cannot use ({port}).")))?,
     };
     let user = value(pairs, "user").unwrap_or_default();
     let auth = match key_id {
@@ -173,7 +173,7 @@ pub fn hop_from_effective(alias: &str, pairs: &[(String, String)], key_id: Optio
             let identity_files: Vec<&str> = pairs.iter().filter(|(key, _)| key == "identityfile").map(|(_, value)| value.as_str()).collect();
             if let Some(file) = named_key_file(&identity_files) {
                 return Err(DirectoryError::Unsupported(format!(
-                    "{alias} logs in with the key file {file}, which SSHelter's own SSH client cannot use. Put the key in SSHelter (Keychain, Only in SSHelter) to connect with it."
+                    "{alias} logs in with the key file {file}, which Lunport's own SSH client cannot use. Put the key in Lunport (Keychain, Only in Lunport) to connect with it."
                 )));
             }
             // No key: a saved password is tried first; without one, keyboard-interactive comes first, and the broker asks for a password
@@ -195,7 +195,7 @@ pub fn hop_from_effective(alias: &str, pairs: &[(String, String)], key_id: Optio
     Ok(hop)
 }
 
-/// The vault key ("Only in SSHelter" slot) that the first of `identity_files` (`ssh -G`'s values, in order) names, if any. Copied from
+/// The vault key ("Only in Lunport" slot) that the first of `identity_files` (`ssh -G`'s values, in order) names, if any. Copied from
 /// the one-shot key channel that plan 1b-2 deleted (`agent/oneshot.rs`).
 pub fn vault_slot_of(identity_files: &[String], state: &SyncStateV2, home: &Path) -> Option<String> {
     identity_files.iter().find_map(|value| {
@@ -244,7 +244,7 @@ impl SshConfigDirectory {
 
     /// The settings of the saved host `alias`, from `ssh -G`.
     fn settings(&self, alias: &str) -> Result<Vec<(String, String)>, DirectoryError> {
-        (self.sources.effective)(alias).map_err(|error| DirectoryError::Failed(format!("SSHelter cannot read the settings of {alias}: {error}")))
+        (self.sources.effective)(alias).map_err(|error| DirectoryError::Failed(format!("Lunport cannot read the settings of {alias}: {error}")))
     }
 
     /// The hop of the saved host `alias` alone, jump hosts left out: its address and login from its `ssh -G` settings, its key (a vault
@@ -278,7 +278,7 @@ impl SshConfigDirectory {
         path.push(alias.to_string());
         let pairs = self.settings(alias)?;
         if value(&pairs, "proxycommand").is_some_and(|command| !command.trim().is_empty() && !command.trim().eq_ignore_ascii_case("none")) {
-            return Err(DirectoryError::Unsupported(format!("{alias} uses ProxyCommand, which SSHelter's own SSH client does not support.")));
+            return Err(DirectoryError::Unsupported(format!("{alias} uses ProxyCommand, which Lunport's own SSH client does not support.")));
         }
         let jumps = parse_proxy_jump(value(&pairs, "proxyjump").unwrap_or_default()).map_err(|error| DirectoryError::Unsupported(format!("{alias}: {error}.")))?;
         let mut hops: Vec<Hop> = Vec::new();
@@ -322,7 +322,7 @@ impl HostDirectory for SshConfigDirectory {
         let alias = match query {
             HostQuery::Alias(alias) | HostQuery::Id(alias) => alias.as_str(),
         };
-        let doc = (self.sources.doc)().map_err(|error| DirectoryError::Failed(format!("SSHelter cannot read your SSH config: {error}")))?;
+        let doc = (self.sources.doc)().map_err(|error| DirectoryError::Failed(format!("Lunport cannot read your SSH config: {error}")))?;
         self.check_saved(&doc, alias)?;
         Ok(Target { hops: self.hops(&doc, alias, &mut Vec::new())? })
     }
@@ -387,7 +387,7 @@ mod tests {
     fn a_hop_takes_its_address_user_and_timeouts_from_ssh_g_and_the_spec_defaults_otherwise() {
         let hop = hop_from_effective("web", &pairs(&format!("hostname web.example.com\nport 2222\nuser deploy\nconnecttimeout none\nserveraliveinterval 0\nserveralivecountmax 3\n{NO_KEY}")), None, true).unwrap();
         assert_eq!((hop.id.as_str(), hop.alias.as_str(), hop.hostname.as_str(), hop.port, hop.user.as_str()), ("web", "web", "web.example.com", 2222, "deploy"));
-        assert_eq!((hop.connect_timeout, hop.keepalive_every, hop.keepalive_max_missed), (Duration::from_secs(15), Duration::from_secs(30), 3), "OpenSSH's 'off' keepalive becomes SSHelter's default");
+        assert_eq!((hop.connect_timeout, hop.keepalive_every, hop.keepalive_max_missed), (Duration::from_secs(15), Duration::from_secs(30), 3), "OpenSSH's 'off' keepalive becomes Lunport's default");
         assert_eq!(hop.auth, AuthMethod::Password, "no key, a saved password: the password goes first");
         assert!(hop.nodelay && hop.pinned.is_none());
 
@@ -403,7 +403,7 @@ mod tests {
         let error = hop_from_effective("old", &pairs("hostname old\nuser me\nidentityfile ~/.ssh/work_key\n"), None, true).unwrap_err();
         assert_eq!(
             error,
-            DirectoryError::Unsupported("old logs in with the key file ~/.ssh/work_key, which SSHelter's own SSH client cannot use. Put the key in SSHelter (Keychain, Only in SSHelter) to connect with it.".into())
+            DirectoryError::Unsupported("old logs in with the key file ~/.ssh/work_key, which Lunport's own SSH client cannot use. Put the key in Lunport (Keychain, Only in Lunport) to connect with it.".into())
         );
         assert!(matches!(hop_from_effective("x", &pairs("hostname x\nport 99999\n"), None, false), Err(DirectoryError::Unsupported(_))));
     }
@@ -429,13 +429,13 @@ mod tests {
     /// The sentence for a host that logs in with a key file of its own.
     fn key_file_refusal(alias: &str, file: &str) -> DirectoryError {
         DirectoryError::Unsupported(format!(
-            "{alias} logs in with the key file {file}, which SSHelter's own SSH client cannot use. Put the key in SSHelter (Keychain, Only in SSHelter) to connect with it."
+            "{alias} logs in with the key file {file}, which Lunport's own SSH client cannot use. Put the key in Lunport (Keychain, Only in Lunport) to connect with it."
         ))
     }
 
     /// `ssh -G` lists the default key files for a host that names no `IdentityFile`, and only for such a host: one that names
     /// `~/.ssh/id_ed25519` itself gets exactly that line back, and it logs in with that file. Judging a file by its name would send such a
-    /// host to keyboard-interactive, instead of saying that its key is a file and not in SSHelter.
+    /// host to keyboard-interactive, instead of saying that its key is a file and not in Lunport.
     #[test]
     fn a_host_that_names_one_default_named_key_file_logs_in_with_a_key_file_and_is_refused() {
         for name in ["id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk", "id_xmss"] {
@@ -581,7 +581,7 @@ mod tests {
         let refused = |alias: &str| directory.resolve(&HostQuery::Alias(alias.into())).unwrap_err().to_string();
         assert_eq!(refused("mail"), "No saved host is called mail.");
         assert_eq!(refused("-oProxyCommand=evil"), "No saved host is called -oProxyCommand=evil.");
-        assert_eq!(refused("pc"), "pc uses ProxyCommand, which SSHelter's own SSH client does not support.");
+        assert_eq!(refused("pc"), "pc uses ProxyCommand, which Lunport's own SSH client does not support.");
         assert_eq!(refused("outside"), "outside jumps through gate.example.org, which is not a saved host.");
         assert_eq!(refused("loop1"), "The jump hosts go round in a circle: loop1 → loop2 → loop1.");
     }
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(aliases("later-lost"), Ok(["a", "lost", "later-lost"].map(String::from).to_vec()));
         assert_eq!(aliases("later-loop"), Ok(["a", "loop1", "later-loop"].map(String::from).to_vec()), "loop1's own loop is never followed");
         // As the first jump host, each is reached the way it is saved.
-        assert_eq!(aliases("first-c"), unsupported("c uses ProxyCommand, which SSHelter's own SSH client does not support."));
+        assert_eq!(aliases("first-c"), unsupported("c uses ProxyCommand, which Lunport's own SSH client does not support."));
         assert_eq!(aliases("first-lost"), unsupported("lost jumps through gate.example.org, which is not a saved host."));
         assert_eq!(aliases("first-loop"), unsupported("The jump hosts go round in a circle: first-loop → loop1 → loop2 → loop1."));
     }

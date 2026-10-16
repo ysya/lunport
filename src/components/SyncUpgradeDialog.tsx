@@ -10,7 +10,7 @@ import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } fr
  * The one-time explanation after this computer moved from v1 sync to spaces
  * (spec §8). The backend keeps the `upgraded` notice — across restarts — until it is
  * dismissed, so closing sends the dismiss; but the dialog closes first and never
- * waits for the answer. When the backend refuses (a second SSHelter process never
+ * waits for the answer. When the backend refuses (a second Lunport process never
  * saves state), the error toast says so, the app stays usable, and the dialog
  * comes back on the next launch.
  */

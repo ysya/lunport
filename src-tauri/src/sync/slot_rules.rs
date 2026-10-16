@@ -70,7 +70,7 @@ pub struct DeviceSlot {
     pub slot_id: String,
     pub fingerprint: Option<String>,
     pub synced_copy: bool,
-    /// 這台的金鑰在 SSHelter 的保管庫裡(`SlotSource::Vault`;金鑰保管庫 spec §7.3,別台的明細寫「in SSHelter」)。只在 true 時寫出:
+    /// 這台的金鑰在 Lunport 的保管庫裡(`SlotSource::Vault`;金鑰保管庫 spec §7.3,別台的明細寫「in Lunport」)。只在 true 時寫出:
     /// 其他插槽的 `device` 記錄和 SP3 寫的一樣。SP3 讀到會略過這個欄位;它寫的記錄沒有這個欄位 → false。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_vault: bool,
@@ -653,7 +653,7 @@ pub(crate) mod test_keys {
     }
 
     /// 沒有加密的 `sk-ssh-ed25519@openssh.com` 私鑰檔,照 OpenSSH 的 `openssh-key-v1` 格式手工組出來(私鑰段:公鑰、application、flags、key handle、
-    /// reserved、comment,補到 8 的倍數)。`inspect_private_key` 讀得懂,但 SSHelter 的 agent 簽不了這種金鑰。
+    /// reserved、comment,補到 8 的倍數)。`inspect_private_key` 讀得懂,但 Lunport 的 agent 簽不了這種金鑰。
     pub fn security_key() -> String {
         let mut public = Vec::new();
         put_string(&mut public, b"sk-ssh-ed25519@openssh.com");
