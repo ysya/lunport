@@ -37,6 +37,8 @@ const channel = read('channel/latest.json');
 validateManifest(manifest, tag);
 validateManifest(channel, tag);
 assert.equal(canonicalJson(manifest), canonicalJson(channel));
+assert.equal(canonicalJson(manifest), canonicalJson(read('stable-manifest.json')));
+assert.equal(canonicalJson(channel), canonicalJson(read('beta-manifest.json')));
 assert.equal(canonicalJson(manifest), canonicalJson(read('legacy-stable.json')),
   'existing SSHelter Stable endpoint does not offer this release');
 assert.equal(canonicalJson(channel), canonicalJson(read('legacy-beta.json')),
