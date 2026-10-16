@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Bot,
+  Info,
   Copy,
   FolderCog,
   Monitor,
@@ -30,6 +31,7 @@ import { useHostsQuery, useLoadConfig, usePlatform, useTerminals, useIsDevelopme
 import { tauriInvoke } from "@/lib/ipc";
 import { useUpdaterState, updateInProgress } from "@/lib/updater";
 import { UpdatesPane } from "@/components/UpdatesPane";
+import { AboutPane } from "@/components/AboutPane";
 import { copyText } from "@/lib/clipboard";
 import { isImeKey } from "@/lib/ime";
 import {
@@ -102,6 +104,7 @@ export function SettingsCategoryPane({
 }) {
   if (category === "general") return <GeneralPane />;
   if (category === "updates") return <UpdatesPane />;
+  if (category === "about") return <AboutPane />;
   if (category === "appearance") return <AppearancePane />;
   if (category === "connection") return <ConnectionPane />;
   if (category === "files") return <>
@@ -155,7 +158,7 @@ const TERMINAL_DEFAULT = "__default__";
 /** Sentinel for "keep all backups" (backupRetention = null). */
 const RETENTION_ALL = "__all__";
 
-const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: TerminalSquare, files: FolderCog, ai: Bot, sync: RefreshCw, updates: RefreshCw, advanced: SlidersHorizontal };
+const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: TerminalSquare, files: FolderCog, ai: Bot, sync: RefreshCw, updates: RefreshCw, advanced: SlidersHorizontal, about: Info };
 
 /**
  * The Settings window (⌘,): a System-Settings-style sidebar + detail layout.

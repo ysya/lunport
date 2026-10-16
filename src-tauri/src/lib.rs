@@ -1,5 +1,7 @@
 pub mod write_policy;
 pub mod app_profile;
+#[cfg(target_os = "macos")]
+mod about;
 mod agent;
 pub mod askpass;
 pub mod cli;
@@ -196,6 +198,7 @@ fn run_app(host: bool, start_hidden: bool) {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder
+        .menu(about::menu)
         .manage(macos_health::HealthState::default())
         .on_web_content_process_terminate(macos_health::web_content_terminated)
         .on_menu_event(|app, event| {
