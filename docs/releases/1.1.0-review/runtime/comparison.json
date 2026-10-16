@@ -29,5 +29,13 @@
     "filtered": 10,
     "requireOpenSSH": true
   },
-  "fullPlatformChecks": "pending; see final release validation record"
+  "fullPlatformChecks": "pending; see final release validation record",
+  "trayBaseline": {
+    "commit": "e977a03317a90a5203e00bc572bb61f4207348ef",
+    "run": 38970871083,
+    "job": 117208648350,
+    "processesPassed": 9,
+    "failedProcess": 10,
+    "diagnostic": "0xc0000374 STATUS_HEAP_CORRUPTION"
+  }
 }

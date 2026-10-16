@@ -3,6 +3,8 @@
 ## [1.1.0](https://github.com/ysya/lunport/compare/v1.0.0...v1.1.0) (2026-10-16)
 
 
+Lunport is the new name for SSHelter, with a simple Folded L mark, consistent About and Settings branding, and refreshed product documentation. Existing hosts, keys, sync data, credentials and command-line integrations retain their established identities. Windows runtime ownership is repaired to prevent intermittent native cleanup crashes.
+
 ### Features
 
 * complete Lunport About and product documentation ([e977a03](https://github.com/ysya/lunport/commit/e977a03317a90a5203e00bc572bb61f4207348ef))
