@@ -139,22 +139,20 @@ fn fail_closed(env: &SyncEnv, chain: &str, url: &str, gate: &AccountGate, schema
 /// Publication owns publication -> core only, and never waits for vault/doc while holding it.
 pub fn fresh_account_gate(env: &SyncEnv) -> Result<FreshAccountProof, AppError> {
     preflight(env)?;
-    let (snapshot, generation) = crate::sync::record_runtime::snapshot(env)?;
-    let prepared = prepare_account_gate(env, env.keychain, snapshot, generation)?;
-    publish_prepared_account_gate(env, prepared, None)
+    let (snapshot, _) = crate::sync::record_runtime::snapshot(env)?;
+    let prepared = prepare_account_gate(env, env.keychain, snapshot)?;
+    publish_prepared_account_gate(env, prepared)
 }
 /// Credential and network work only. This phase must not publish account state or own lifecycle.
 pub(crate) struct PreparedAccountGate {
     snapshot: crate::sync::records_v3::SyncStateV3,
     keys: ChainKeys,
     pulled: crate::sync::relay::PullResponse,
-    pub generation: u64,
 }
 pub(crate) fn prepare_account_gate(
     env: &SyncEnv,
     credentials: &dyn crate::sync::env::Keychain,
     snapshot: crate::sync::records_v3::SyncStateV3,
-    generation: u64,
 ) -> Result<PreparedAccountGate, AppError> {
     let keys = read_keys_from(credentials, &snapshot)?;
     let relay = env.relay(&snapshot.relay_url)?;
@@ -163,14 +161,13 @@ pub(crate) fn prepare_account_gate(
         snapshot,
         keys,
         pulled,
-        generation,
     })
 }
-/// Local publication only; callers establish lifecycle/generation before entering this phase.
+/// Local publication only: merge into current state of the same account. Callers bind any
+/// operation-specific approval to its own route/key identity before their subsequent write.
 pub(crate) fn publish_prepared_account_gate(
     env: &SyncEnv,
     prepared: PreparedAccountGate,
-    expected_generation: Option<u64>,
 ) -> Result<FreshAccountProof, AppError> {
     let PreparedAccountGate {
         snapshot,
@@ -221,12 +218,7 @@ pub(crate) fn publish_prepared_account_gate(
         publish_gate(&mut next, &gate, observed);
         Ok(next)
     };
-    let result = match expected_generation {
-        Some(generation) => {
-            crate::sync::record_runtime::mutate_records_at_generation(env, generation, transform)
-        }
-        None => crate::sync::record_runtime::mutate_records(env, transform),
-    };
+    let result = crate::sync::record_runtime::mutate_records(env, transform);
     if let Err(e) = result {
         if gate != AccountGate::Compatible && !crate::sync::runtime::is_superseded(&e) {
             fail_closed(env, &keys.chain_id, &snapshot.relay_url, &gate, observed);

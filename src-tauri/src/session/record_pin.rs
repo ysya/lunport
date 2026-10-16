@@ -42,6 +42,23 @@ fn identity(state: &SyncStateV3, id: &str) -> Result<PinIdentity, AppError> {
     Ok((route, keys))
 }
 
+fn require_approved_identity(
+    current: &SyncStateV3,
+    captured: &SyncStateV3,
+    id: &str,
+    approved: &PinIdentity,
+) -> Result<(), AppError> {
+    if current.device_id != captured.device_id
+        || current.relay_url != captured.relay_url
+        || current.account.as_ref().map(|a| &a.chain_id)
+            != captured.account.as_ref().map(|a| &a.chain_id)
+        || &identity(current, id)? != approved
+    {
+        return Err(failed("The confirmed route or key changed; connect again."));
+    }
+    Ok(())
+}
+
 pub(crate) fn confirm(
     env: &SyncEnv,
     hop: &HopRef,
@@ -52,10 +69,10 @@ pub(crate) fn confirm(
     guard: &(dyn Fn() -> Result<(), DirectoryError> + Sync),
 ) -> Result<(), AppError> {
     live(cancel)?;
-    let (captured, generation) = {
+    let captured = {
         let _lifecycle = env.runtime.lifecycle.lock().unwrap();
         record_round::preflight(env)?;
-        record_runtime::snapshot(env)?
+        record_runtime::snapshot(env)?.0
     };
     let host = repo::get_host(&captured, hop.id.as_str()).map_err(failed)?;
     if host.group_error.is_some()
@@ -87,60 +104,52 @@ pub(crate) fn confirm(
             env,
             credentials,
             captured.clone(),
-            generation,
         )?)
     } else {
         None
     };
     guard().map_err(failed)?;
     live(cancel)?;
+    let pinned_at_ms = env.now();
     {
         let _lifecycle = env.runtime.lifecycle.lock().unwrap();
         record_round::require_no_pending_migration(env)?;
-        let (current, current_generation) = record_runtime::snapshot(env)?;
-        // Conservative: even an unrelated intervening generation requires new review/preparation.
-        if current_generation != generation
-            || current != captured
-            || prepared
-                .as_ref()
-                .is_some_and(|p| p.generation != generation)
-        {
-            return Err(crate::sync::runtime::superseded());
-        }
+        let (current, _) = record_runtime::snapshot(env)?;
+        require_approved_identity(&current, &captured, hop.id.as_str(), &approved)?;
         live(cancel)?;
         if let Some(prepared) = prepared {
-            record_round::publish_prepared_account_gate(env, prepared, Some(generation))?
-                .ensure_compatible()?;
+            // A background pull/upload receipt may advance generation without changing this
+            // approval. Merge the authenticated account proof into current state, then check
+            // the exact route, key authority and prior pin again in the atomic pin transaction.
+            record_round::publish_prepared_account_gate(env, prepared)?.ensure_compatible()?;
         }
-        // Publication can change account availability/key authority. Re-read purely; no caller callbacks here.
+        // No caller guards or credential/network IO under publication/core. Validate and pin against
+        // the same latest state: unrelated sync receipts must neither fail nor be overwritten.
         let _publication = env.runtime.format_publication.lock().unwrap();
-        let (current, current_generation) = record_runtime::snapshot(env)?;
-        if current.device_id != captured.device_id
-            || current.relay_url != captured.relay_url
-            || current.account.as_ref().map(|a| &a.chain_id)
-                != captured.account.as_ref().map(|a| &a.chain_id)
-            || identity(&current, hop.id.as_str())? != approved
-        {
-            return Err(failed("The confirmed route or key changed; connect again."));
-        }
-        let candidate = repo::pin_host_key(
-            &current,
-            hop.id.as_str(),
-            &repo::HostEndpoint {
-                hostname: hop.hostname.clone(),
-                port: hop.port,
-            },
-            expected,
-            super::record_directory::stored(key),
-            env.now(),
-        )
-        .map_err(failed)?;
-        live(cancel)?;
-        record_runtime::commit_candidate(env, current_generation, candidate)?;
+        record_runtime::mutate_records(env, |current| {
+            require_approved_identity(current, &captured, hop.id.as_str(), &approved)?;
+            live(cancel)?;
+            repo::pin_host_key(
+                current,
+                hop.id.as_str(),
+                &repo::HostEndpoint {
+                    hostname: hop.hostname.clone(),
+                    port: hop.port,
+                },
+                expected,
+                super::record_directory::stored(key),
+                pinned_at_ms,
+            )
+            .map_err(failed)
+        })?;
     }
     env.events.wake();
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+#[path = "record_pin_connect_tests.rs"]
+mod connect_tests;
 
 #[cfg(test)]
 mod tests {
