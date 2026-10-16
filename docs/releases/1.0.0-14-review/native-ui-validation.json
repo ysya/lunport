@@ -1,0 +1,43 @@
+{
+  "source": "eed6881db0aab51420bb45b16247df58dcd7e221",
+  "profile": "development",
+  "version": "0.16.0 (repository debug bundle; CI stamps Beta version)",
+  "pid": 9721,
+  "nativeViewport": [
+    1100,
+    720
+  ],
+  "fontSizes": [
+    15,
+    17
+  ],
+  "motion": [
+    "system",
+    "reduced"
+  ],
+  "sidebarOpenClose": true,
+  "detailsOpenCloseAndFocusReturn": true,
+  "hostEditorAndSettingsVisible": true,
+  "radixSelectUnmountedAfterReduced": true,
+  "preferencesRestored": {
+    "theme": "system",
+    "fontSize": 15,
+    "motion": "system"
+  },
+  "normalExitLogged": true,
+  "startupStages": [
+    "bootstrap",
+    "context",
+    "window",
+    "setup",
+    "tray",
+    "sync",
+    "mcp",
+    "broker",
+    "ready",
+    "exit"
+  ],
+  "productionGuiLaunched": false,
+  "newSyncChainCreated": false,
+  "serverConnectionRequested": false
+}

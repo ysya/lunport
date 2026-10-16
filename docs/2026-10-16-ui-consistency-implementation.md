@@ -45,9 +45,10 @@
 - 第二批瀏覽器操作：主機草稿 Keep editing／Discard 的焦點還原、Group 選用設定開合、匯入預覽與未選金鑰的完成結果、同步建立及保存代碼、名稱衝突審閱與續作完成。
 - 詳情欄在 System／Reduced 下關閉與重開，主機與金鑰都只有一個開啟的詳情欄；800×560、17px、dark／Reduced 下，單欄返回焦點、編輯器操作列及橫向邊界正常。
 - 獨立視窗瀏覽器尺寸：HostKey 480×320、Authentication 480×360、AgentApproval 460×340；按鈕保持可見，較長的指紋內容可捲動。
+- Beta 14 發布前另完成 macOS Development 原生 bundle／WebView 檢查：1100×720、15／17px、System／Reduced、側欄、詳情返回焦點、編輯器、設定及正常退出。macOS／Linux／Windows 的固定來源 CI 通過；Windows 原生啟動檢查使用 placeholder 前端，並不代表完整 React 畫面驗收。詳見[Beta 14 驗證](releases/1.0.0-14-validation.md)。
 
 ## 後續工作
 
 這兩批沒有完成整份改版規格。Legacy 周邊頁面、設定各分類的細部整理、部署等次要流程的全面視覺驗收，以及完整跨平台原生驗收，仍依原規格的後續工作包進行。詳情欄已有雙向內容轉場；欄位寬度在選取／關閉時仍立即切換，以免與手動調寬或單欄焦點返回互相干擾。
 
-目前的畫面驗證來自假資料瀏覽器入口，尚不能替代 macOS WebView、Windows 與 Linux 的原生驗收，也未進行真實伺服器連線或同步操作。
+主要畫面矩陣來自假資料瀏覽器入口，並補上 macOS Development WebView 檢查；Windows 與 Linux 的逐畫面原生視覺驗收仍待完成，也未透過這些介面執行真實伺服器連線或同步操作。
