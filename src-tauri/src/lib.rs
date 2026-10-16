@@ -129,6 +129,9 @@ pub(crate) fn show_main_window_now(app: &tauri::AppHandle) {
     if app.get_webview_window("main").is_none() {
         let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else { return; };
         if let Err(error) = tauri::WebviewWindowBuilder::from_config(app, config).and_then(|w| w.build()) {
+            diagnostics::tauri_error("main_window_create_failed", &error);
+            #[cfg(windows)]
+            diagnostics::show_startup_failure();
             eprintln!("[window] cannot create main window: {error}");
             return;
         }
@@ -176,9 +179,9 @@ fn run_app(host: bool, start_hidden: bool) {
     diagnostics::install();
     diagnostics::stage(diagnostics::Stage::Context);
     let context = tauri::generate_context!();
-    // macOS must not create even a hidden WKWebView before the CoreAudio check.
-    // Other platforms retain Tauri's existing automatic window creation.
-    #[cfg(target_os = "macos")]
+    // macOS must check CoreAudio before WKWebView. Windows must catch WebView2 creation
+    // errors explicitly: Tauri's automatic Ready-time creation turns them into a panic.
+    #[cfg(any(target_os = "macos", windows))]
     let context = {
         let mut context = context;
         for window in &mut context.config_mut().app.windows {
@@ -259,6 +262,8 @@ fn run_app(host: bool, start_hidden: bool) {
                     macos_health::request(app.handle(), macos_health::Surface::Diagnostics);
                     return Ok(());
                 }
+                #[cfg(windows)]
+                diagnostics::stage(diagnostics::Stage::Window);
                 show_main_window(app.handle());
             }
             diagnostics::stage(diagnostics::Stage::Ready);
