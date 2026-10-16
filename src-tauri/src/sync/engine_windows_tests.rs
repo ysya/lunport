@@ -6,6 +6,7 @@ use std::sync::Arc;
 #[test]
 #[ignore = "requires a Windows desktop and its own native event loop; run separately in CI"]
 fn synced_library_startup_and_concurrent_tray_updates() {
+    let _native_fault_trace = NativeFaultTrace::install();
     let device = crate::sync::testkit::synced_library_fixture();
     let config_before = std::fs::read(device.main_path()).unwrap();
     let state_before = std::fs::read(&device.env().state_path).unwrap();
@@ -48,12 +49,14 @@ fn synced_library_startup_and_concurrent_tray_updates() {
                 }
             });
             std::thread::spawn(move || {
+                eprintln!("native tray stage: exercise");
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     exercise(&handle, &fixture)
                 }));
                 let code = if outcome.is_ok() { 0 } else { 1 };
                 let _ = stop_tx.send(());
                 let _ = done_tx.send(outcome);
+                eprintln!("native tray stage: exit requested ({code})");
                 handle.exit(code);
             });
             // Race the first background status with the same initial publication used by setup.
@@ -63,6 +66,7 @@ fn synced_library_startup_and_concurrent_tray_updates() {
         .build(context)
         .unwrap();
     assert_eq!(app.run_return(|_, _| {}), 0);
+    eprintln!("native tray stage: event loop returned");
     if let Err(panic) = done_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
         std::panic::resume_unwind(panic);
     }
@@ -109,6 +113,7 @@ fn exercise(app: &AppHandle, device: &crate::sync::testkit::TestDevice) {
     for worker in workers {
         worker.join().unwrap();
     }
+    eprintln!("native tray stage: concurrent status and visibility complete");
     assert_eq!(
         crate::tray::test_publications(app),
         before,
@@ -124,6 +129,7 @@ fn exercise(app: &AppHandle, device: &crate::sync::testkit::TestDevice) {
     })
     .unwrap();
     events.status();
+    eprintln!("native tray stage: renamed menu published");
     assert_eq!(crate::tray::test_publications(app), before + 1);
     crate::tray::test_assert_menu(app, "renamed");
     let user_after = user_objects(app);
@@ -132,6 +138,45 @@ fn exercise(app: &AppHandle, device: &crate::sync::testkit::TestDevice) {
         "USER objects grew from {user_before} to {user_after}"
     );
     println!("Windows native startup: 17 synced hosts + inherited Group; 10 transport rounds; 300 concurrent status/visibility pairs; menu publications {before} -> {}; USER objects {user_before} -> {user_after}; SSH config unchanged", crate::tray::test_publications(app));
+}
+
+// Test-process diagnostics only. Capture symbolized native-fault stacks on the disposable
+// Windows runner without memory dumps or any change to production exception handling.
+struct NativeFaultTrace(*mut std::ffi::c_void);
+impl NativeFaultTrace {
+    fn install() -> Self {
+        use windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler;
+        let handle = unsafe { AddVectoredExceptionHandler(1, Some(trace_native_fault)) };
+        assert!(!handle.is_null(), "native test fault tracing must install");
+        Self(handle)
+    }
+}
+impl Drop for NativeFaultTrace {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Diagnostics::Debug::RemoveVectoredExceptionHandler(self.0);
+        }
+    }
+}
+unsafe extern "system" fn trace_native_fault(
+    info: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS,
+) -> i32 {
+    use windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_CONTINUE_SEARCH;
+    static LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !info.is_null() && !unsafe { (*info).ExceptionRecord }.is_null() {
+        let exception = unsafe { &*(*info).ExceptionRecord };
+        if matches!(exception.ExceptionCode as u32, 0xc000001d | 0xc0000005)
+            && !LOGGING.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            eprintln!(
+                "native tray exception: code=0x{:08x}, address={:p}\n{}",
+                exception.ExceptionCode as u32,
+                exception.ExceptionAddress,
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+    }
+    EXCEPTION_CONTINUE_SEARCH
 }
 
 fn user_objects(app: &AppHandle) -> u32 {
