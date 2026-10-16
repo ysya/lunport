@@ -117,6 +117,176 @@ fn setup_establishes_baselines_when_a_background_round_is_already_queued() {
         HostScope::Space { .. }
     ));
 }
+
+fn retained_source(
+    d: &TestDevice,
+    keys: &ChainKeys,
+    id: &str,
+    payload: serde_json::Value,
+) -> String {
+    use crate::sync::relay::RelayApi;
+    use crate::sync::{record::Record, record_merge};
+    let sid = record_account::create_space(&d.env(), "Imported legacy space").unwrap();
+    let s = state(d);
+    let child = record_merge::space_keys(s.account.as_ref().unwrap(), keys, &sid)
+        .unwrap()
+        .unwrap();
+    let row = Record {
+        kind: RecordKind::Host,
+        id: id.into(),
+        version: 1,
+        updated_at_ms: 1,
+        device_id: s.device_id,
+        deleted: false,
+        payload,
+    };
+    d.relay
+        .push(
+            &sid,
+            &child.auth_token,
+            &[record_merge::encode_record(&child, &row, 0).unwrap()],
+        )
+        .unwrap();
+    sid
+}
+
+#[test]
+fn retained_legacy_alias_sources_do_not_block_library_opt_in_on_either_device() {
+    let relay = FakeRelay::new();
+    let a = device(&relay);
+    add(&a, true);
+    let created = record_account::create_account(&a.env(), "first").unwrap();
+    let keys = crypto::derive_account(&created.code).unwrap();
+    let old_space = retained_source(
+        &a,
+        &keys,
+        "legacy-alias",
+        json!({"schema":1,"text":"Host legacy-alias\n HostName legacy.test\n"}),
+    );
+    let preview = prepare(&a.env()).unwrap();
+    assert!(preview.conflicts.is_empty());
+    let retained = state(&a).spaces[&old_space].sealed.clone();
+    assert_eq!(retained.len(), 1);
+    // The exemption requires successful authenticated decryption of these exact bytes.
+    let mut corrupt = state(&a);
+    let envelope = &mut corrupt
+        .spaces
+        .get_mut(&old_space)
+        .unwrap()
+        .sealed
+        .values_mut()
+        .next()
+        .unwrap()
+        .envelope;
+    use base64::Engine as _;
+    let mut ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(&envelope.ciphertext)
+        .unwrap();
+    ciphertext[0] ^= 1;
+    envelope.ciphertext = base64::engine::general_purpose::STANDARD.encode(ciphertext);
+    assert_eq!(
+        review::preview(&corrupt, Some(&keys)).unwrap_err().code,
+        "sync_data_unavailable"
+    );
+    enable(&a.env(), true).unwrap();
+    record_round::sync_once(&a.env()).unwrap();
+    assert_eq!(state(&a).spaces[&old_space].sealed, retained);
+    assert!(matches!(
+        repo::get_host(&state(&a), HOST).unwrap().host.scope,
+        HostScope::Space { .. }
+    ));
+    let b = device(&relay);
+    record_runtime::mutate_records(&b.env(), |s| {
+        repo::create_host(
+            s,
+            "0000000000000003",
+            HostScope::Local,
+            host("personal"),
+            50,
+        )
+        .map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    record_account::join_account(&b.env(), &created.code, "second").unwrap();
+    enable(&b.env(), true).unwrap();
+    record_round::sync_once(&b.env()).unwrap();
+    record_round::sync_once(&a.env()).unwrap();
+    for d in [&a, &b] {
+        let saved = state(d);
+        assert!(enabled(&saved));
+        assert_eq!(repo::list_hosts(&saved).unwrap().len(), 2);
+        assert_eq!(
+            saved.spaces[&old_space].sealed, retained,
+            "keep migration evidence encrypted and unchanged"
+        );
+        assert_eq!(
+            repo::get_host(&saved, HOST).unwrap().effective_payload.user,
+            "deploy"
+        );
+        assert!(
+            !serde_json::to_string(&saved)
+                .unwrap()
+                .contains("Host legacy-alias"),
+            "legacy source text must stay encrypted"
+        );
+    }
+    // Future imports still use the same atomic inclusion path after opt-in.
+    record_runtime::mutate_records(&a.env(), |s| {
+        repo::create_host(
+            s,
+            "0000000000000004",
+            HostScope::Local,
+            host("later-import"),
+            100,
+        )
+        .map_err(|e| AppError::Other(e.to_string()))
+    })
+    .unwrap();
+    assert!(matches!(
+        repo::get_host(&state(&a), "0000000000000004")
+            .unwrap()
+            .host
+            .scope,
+        HostScope::Space { .. }
+    ));
+    assert_eq!(state(&a).spaces[&old_space].sealed, retained);
+}
+
+#[test]
+fn library_inclusion_still_rejects_unknown_sources_and_legacy_aliases_shadowing_typed_ids() {
+    for (alias, payload) in [
+        (
+            "future",
+            json!({"schema":99,"text":"synthetic secret sentinel"}),
+        ),
+        (
+            "extended",
+            json!({"schema":1,"text":"synthetic secret sentinel","extra":true}),
+        ),
+        (
+            HOST,
+            json!({"schema":1,"text":"Host old\n HostName legacy.test\n"}),
+        ),
+    ] {
+        let relay = FakeRelay::new();
+        let d = device(&relay);
+        add(&d, false);
+        let created = record_account::create_account(&d.env(), "first").unwrap();
+        let keys = crypto::derive_account(&created.code).unwrap();
+        let sid = retained_source(&d, &keys, alias, payload);
+        let local = state(&d).local;
+        let error = prepare(&d.env()).unwrap_err();
+        assert_eq!(error.code, "sync_data_unavailable");
+        assert!(!error.message.contains("synthetic secret sentinel"));
+        assert_eq!(state(&d).local, local);
+        assert!(!enabled(&state(&d)));
+        let sealed = state(&d).spaces[&sid].sealed.clone();
+        assert_eq!(sealed.len(), 1);
+        assert!(enable(&d.env(), false).is_err());
+        assert_eq!(state(&d).spaces[&sid].sealed, sealed);
+        assert_eq!(state(&d).local, local);
+    }
+}
 #[test]
 fn joined_device_reuses_library_and_offline_changes_persist_then_reach_other_device() {
     let relay = FakeRelay::new();
@@ -484,7 +654,7 @@ fn preview_reserves_other_local_names_and_handles_maximum_length_group_names() {
         .unwrap()
         .record
         .payload["name"] = name.into();
-    let preview = review::preview(&s).unwrap();
+    let preview = review::preview(&s, None).unwrap();
     assert!(preview
         .conflicts
         .iter()
@@ -500,7 +670,7 @@ fn library_failures_distinguish_unavailable_sync_data_from_record_identity_confl
     let id = space_id(&s).unwrap();
     s.spaces.get_mut(&id).unwrap().baseline_established = false;
     assert_eq!(
-        review::preview(&s).unwrap_err().code,
+        review::preview(&s, None).unwrap_err().code,
         "sync_data_unavailable"
     );
     s.spaces.get_mut(&id).unwrap().baseline_established = true;
@@ -508,7 +678,10 @@ fn library_failures_distinguish_unavailable_sync_data_from_record_identity_confl
     s.local
         .hosts
         .insert(record_key(RecordKind::Host, HOST), remote);
-    assert_eq!(review::preview(&s).unwrap_err().code, "identity_conflict");
+    assert_eq!(
+        review::preview(&s, None).unwrap_err().code,
+        "identity_conflict"
+    );
     let failure = review::LibraryFailure::from(AppError::Other("secret relay body".into()));
     assert!(!failure.message.contains("secret relay body"));
     assert_eq!(
