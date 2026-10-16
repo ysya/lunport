@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useMemo, useState } from "react";
 import { FilePlus2, Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -15,7 +16,7 @@ import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogClose,
-  DialogContent,
+
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -151,6 +152,7 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
               Create a new SSH host block in the chosen config file.
             </DialogDescription>
           </DialogHeader>
+      <TaskDialogBody>
 
           <div className="space-y-4 py-4">
             <div className="space-y-1.5">
@@ -234,7 +236,8 @@ export function AddHostDialog({ variant = "icon" }: AddHostDialogProps) {
             </div>
           </div>
 
-          <DialogFooter>
+          </TaskDialogBody>
+      <DialogFooter>
             <DialogClose asChild>
               <Button type="button" variant="outline">
                 Cancel

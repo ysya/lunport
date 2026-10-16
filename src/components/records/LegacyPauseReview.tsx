@@ -1,3 +1,5 @@
+import { TaskDialogBody } from "@/components/app/TaskDialog";
+import { ActionBar } from "@/components/app/Workflow";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -18,11 +20,10 @@ export function LegacyPauseReview({
 }) {
   return (
     <section
-      role="alertdialog"
       aria-label="Pause for migration"
-      className="mx-auto max-w-lg space-y-4 rounded-md border bg-background p-6"
+      className="app-task-review"
     >
-      <h1 className="text-lg font-semibold">Pause for migration</h1>
+      <TaskDialogBody><h1 className="app-inspector-title">Pause for migration</h1>
       <p className="text-sm text-muted-foreground">
         Save your editor changes first. Pausing stops legacy writers and opens
         the migration landing without changing the saved workspace.
@@ -40,14 +41,15 @@ export function LegacyPauseReview({
           {error}
         </p>
       )}
-      <div className="flex gap-2">
+      </TaskDialogBody>
+      <ActionBar className="app-editor-action-bar">
+        <Button autoFocus variant="outline" disabled={busy} onClick={cancel}>
+          Keep editing
+        </Button>
         <Button disabled={busy || !saved} onClick={confirm}>
           Pause legacy workspace
         </Button>
-        <Button variant="outline" disabled={busy} onClick={cancel}>
-          Keep editing
-        </Button>
-      </div>
+      </ActionBar>
     </section>
   );
 }

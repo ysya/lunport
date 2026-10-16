@@ -6,7 +6,7 @@ import type { SyncSpaceView } from "@/bindings/SyncSpaceView";
 
 /*
  * Test builders for the sync bindings: a joined, healthy, up-to-date state that
- * each test bends with overrides. Only `*.test.ts` files import this module.
+ * each test bends with overrides. Only tests and the development browser preview import this module.
  */
 
 export const NOW = Date.UTC(2026, 9, 2, 12, 0, 0);

@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -8,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ActionBar } from "@/components/app/Workflow";
 import {
   Dialog,
-  DialogContent,
+  DialogHeader,
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
@@ -22,6 +23,7 @@ import {
   type LifecycleDraft,
 } from "./account-lifecycle-actions";
 export type LifecycleReviewProps = {
+  error?: string | null;
   mode: "leave" | "rotate";
   consent: boolean;
   busy: boolean;
@@ -40,10 +42,12 @@ export function AccountLifecycleReview({
   setDeviceName,
   confirm,
   cancel,
+  error,
 }: LifecycleReviewProps) {
   const leaving = mode === "leave";
   return (
-    <section className="space-y-4">
+    <section className="app-task-review">
+      <TaskDialogBody>
       <p className="text-sm text-muted-foreground">
         {leaving
           ? "Synced hosts and Groups are kept on this device with new IDs and updated jump references. Existing hosts, keys and passwords stay on this device. Missing or invalid selected spaces must be resolved first. The remote account remains retained; leaving does not delete its data or export private key files."
@@ -70,7 +74,9 @@ export function AccountLifecycleReview({
             : "I understand that devices must rejoin and the old code still reads historical data."}
         </span>
       </Label>
-      <ActionBar label="Account review actions">
+      {error && <p role="alert" className="app-task-error text-sm text-destructive">{revealHidden(error)}</p>}
+      </TaskDialogBody>
+      <ActionBar label="Account review actions" className="app-editor-action-bar">
         <Button variant="outline" disabled={busy} onClick={cancel}>
           Cancel
         </Button>
@@ -271,15 +277,16 @@ export function RecordsAccountLifecyclePanel({
             if (state.busy) event.preventDefault();
           }}
         >
-          <DialogTitle>
+          <DialogHeader><DialogTitle>
             {state.mode === "leave" ? "Leave sync account" : "Rotate sync code"}
           </DialogTitle>
           <DialogDescription>
             Review what will be retained before confirming.
-          </DialogDescription>
+          </DialogDescription></DialogHeader>
           {state.mode && (
             <AccountLifecycleReview
               mode={state.mode}
+              error={state.error}
               consent={state.consent}
               busy={blocked}
               deviceName={state.deviceName}
@@ -288,11 +295,6 @@ export function RecordsAccountLifecyclePanel({
               confirm={() => void submit()}
               cancel={reset}
             />
-          )}
-          {state.error && (
-            <p role="alert" className="text-sm text-destructive">
-              {revealHidden(state.error)}
-            </p>
           )}
         </DialogContent>
       </Dialog>

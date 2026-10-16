@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
 import { toast } from "sonner";
@@ -6,7 +7,7 @@ import type { KeyCandidate } from "@/bindings/KeyCandidate";
 import type { UnsupportedIdentity } from "@/bindings/UnsupportedIdentity";
 import { TONE_TEXT } from "@/components/sync-primitives";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { isImeKey } from "@/lib/ime";
 import {
@@ -180,6 +181,7 @@ export function SyncKeyDialog() {
           <DialogTitle>Keys used by synced hosts</DialogTitle>
           <DialogDescription>Choose for each key whether it goes to your other computers. Your servers aren't changed.</DialogDescription>
         </DialogHeader>
+      <TaskDialogBody>
         <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
           {ask.map((candidate) => (
             <KeySetupRow
@@ -196,7 +198,8 @@ export function SyncKeyDialog() {
           ))}
         </div>
         <UnsupportedList items={candidates.data?.unsupported ?? []} />
-        <DialogFooter>
+        </TaskDialogBody>
+      <DialogFooter>
           <Button type="button" variant="outline" disabled={busy} onClick={close}>
             {later ? "Later" : "Close"}
           </Button>

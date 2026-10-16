@@ -1,3 +1,5 @@
+import { Dialog, DialogTitle } from "@/components/ui/dialog";
+import { TaskDialogContent } from "@/components/app/TaskDialog";
 import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -115,7 +117,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
   return (
     <TooltipProvider delayDuration={300}>
       {/* Root: the ONLY fixed-height container; never scrolls. */}
-      <div className="app-shell flex h-screen flex-col overflow-hidden">
+      <div className="app-shell flex h-screen flex-col overflow-hidden" style={{ "--legacy-sidebar-width": `${sidebarWidth}rem` } as React.CSSProperties}>
         {/*
          * Native toolbar = window drag region. On macOS the content sits under
          * the Overlay title bar, so pad the left so the wordmark clears the
@@ -125,7 +127,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
         <header
           data-tauri-drag-region
           className={cn(
-            "app-toolbar relative z-20 flex h-11 shrink-0 items-center gap-3 border-b pr-2.5",
+            "app-toolbar relative z-20 flex min-h-[3.2rem] shrink-0 items-center gap-3 border-b pr-2.5",
             isMac ? "pl-[78px]" : "pl-3",
           )}
         >
@@ -227,7 +229,6 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
               <TooltipContent>Settings (⌘,)</TooltipContent>
             </Tooltip>
 
-            <Button variant="outline" size="sm" onClick={requestMigrationPause}>Pause for migration</Button>
             <AddHostDialog />
           </div>
         </header>
@@ -254,6 +255,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
                 </div> : <HostList hosts={hosts} isLoading={isLoading} />}
               </div>
             )}
+            <div className="shrink-0 space-y-2 border-t p-3"><p className="text-xs text-muted-foreground">OpenSSH files · Legacy workspace</p><Button variant="outline" size="sm" className="w-full" onClick={requestMigrationPause}>Pause for migration</Button></div>
           </aside>
           <SidebarResizeHandle sidebarRef={sidebarRef} />
 
@@ -270,7 +272,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
               keychain={sidebarView === "keychain"}
               hosts={
                 selectedAlias ? (
-                  <div className="mx-auto max-w-[720px] space-y-5 px-6 py-5 pb-24">
+                  <div className="app-legacy-editor space-y-5 pb-24">
                     <DriftBanner />
                     {copies ? <DuplicateCopies alias={selectedAlias} copies={copies} /> : <HostEditor alias={selectedAlias} />}
                   </div>
@@ -398,21 +400,12 @@ function App() {
           </>
         )}
       />
-      {pauseOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/90 p-8">
-          <LegacyPauseReview
-            saved={savedEdits}
-            busy={pausing}
-            setSaved={setSavedEdits}
-            error={pauseError}
-            confirm={() => void pauseForMigration()}
-            cancel={() => {
-              setPauseOpen(false);
-              setSavedEdits(false);
-            }}
-          />
-        </div>
-      )}
+      <Dialog open={pauseOpen} onOpenChange={(open) => { if (!pausing) { setPauseOpen(open); if (!open) setSavedEdits(false); } }}>
+        <TaskDialogContent role="alertdialog" className="sm:max-w-xl" aria-describedby={undefined} showCloseButton={!pausing} onEscapeKeyDown={(event) => { if (pausing) event.preventDefault(); }}>
+          <DialogTitle className="sr-only">Pause for migration</DialogTitle>
+          <LegacyPauseReview saved={savedEdits} busy={pausing} setSaved={setSavedEdits} error={pauseError} confirm={() => void pauseForMigration()} cancel={() => { setPauseOpen(false); setSavedEdits(false); }} />
+        </TaskDialogContent>
+      </Dialog>
       {migrationOpen && (
         <div className="app-shell fixed inset-0 z-50 overflow-y-auto pt-11">
           <RecordsMigrationPanel onClose={() => setMigrationOpen(false)} />

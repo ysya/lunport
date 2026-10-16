@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { toast } from "sonner";
@@ -8,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
-  DialogContent,
+  DialogClose,
+  DialogFooter,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -29,7 +31,7 @@ export interface FileViewDialogProps {
  * No syntax highlighting in v1 — a future nicety.
  */
 export function FileViewDialog({ path, label, onOpenChange }: FileViewDialogProps) {
-  const { data, isLoading, isError } = useFileText(path);
+  const { data, isLoading, isError, refetch } = useFileText(path);
   const [copied, setCopied] = useState(false);
 
   const onCopy = async () => {
@@ -63,10 +65,11 @@ export function FileViewDialog({ path, label, onOpenChange }: FileViewDialogProp
               {copied ? "Copied" : "Copy"}
             </Button>
           </div>
-          <DialogDescription className="truncate font-mono text-xs" title={path ?? undefined}>
+          <DialogDescription className="break-all font-mono text-xs" title={path ?? undefined}>
             {path}
           </DialogDescription>
         </DialogHeader>
+        <TaskDialogBody>
 
         <div className="settings-group">
           {isLoading ? (
@@ -76,15 +79,15 @@ export function FileViewDialog({ path, label, onOpenChange }: FileViewDialogProp
               <Skeleton className="h-3 w-3/5" />
             </div>
           ) : isError ? (
-            <p className="px-3.5 py-3 text-sm text-muted-foreground">
-              Could not read this file.
-            </p>
+            <div role="alert" className="app-task-state"><p>Could not read this file.</p><Button variant="outline" size="sm" onClick={() => void refetch()}>Retry</Button></div>
           ) : (
-            <pre className="max-h-[60vh] overflow-auto px-3.5 py-3 font-mono text-xs leading-relaxed whitespace-pre text-muted-foreground select-text">
+            <pre className="overflow-auto px-3.5 py-3 font-mono text-xs leading-relaxed whitespace-pre text-muted-foreground select-text">
               {data}
             </pre>
           )}
         </div>
+              </TaskDialogBody>
+        <DialogFooter><DialogClose asChild><Button variant="outline">Close</Button></DialogClose></DialogFooter>
       </DialogContent>
     </Dialog>
   );

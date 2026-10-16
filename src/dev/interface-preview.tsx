@@ -1,4 +1,6 @@
 /** Development-only Vite entry. No native backend, real hosts, keys, or relay requests. */
+import App from "@/App";
+import { legacyPreviewRead } from "./legacy-fixtures";
 import React, { useState } from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -33,6 +35,8 @@ else {
     keys: [{ id: keyId, authority: "local", synced: false, status: "available", public: { schema: 1, name: "Work key", public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoOnlyDoNotUse work@example.com", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", key_type: "ed25519", has_passphrase: false, created_at_ms: 1, origin_device_id: "d".repeat(32) } }, { id: "b".repeat(32), authority: "account", synced: true, public: null, status: "needs_material" }],
   });
   const scenario = new URLSearchParams(window.location.search).get("scenario");
+  const failure = new URLSearchParams(window.location.search).get("failure");
+  let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
   if (scenario === "sync-review") overview = { ...overview, account: { chain_id: "c".repeat(64), device_name: "Example laptop" } };
   if (scenario === "sync-pending") overview = { ...overview, shared_writes_blocked: true, pending_account: { id: "fixture-setup", kind: "join_account", phase: "publishing" } };
   const updateOverview = (patch: Partial<RecordOverview>) => {
@@ -61,7 +65,11 @@ else {
       transformCallback: (callback: unknown) => { const id = callbackId++; callbacks.set(id, callback); return id; },
       unregisterCallback: (id: number) => callbacks.delete(id),
       invoke: async (command: string, args: Record<string, unknown> = {}) => {
-        if (command === "records_status") return { format: "records", legacy_paused: false, blocked_reason: null, overview };
+        if (command === failure) throw new Error("Disposable fixture read failure. Retry after changing the preview scenario.");
+        if (command === "config_load" && args.path === "/fixture/slow-config") await new Promise((resolve) => setTimeout(resolve, 1500));
+        const fixture = legacyPreviewRead(command, args);
+        if (fixture.handled) return fixture.value;
+        if (command === "records_status") return { format: scenario === "legacy" ? "legacy" : "records", legacy_paused: false, blocked_reason: null, overview };
         if (command === "app_platform") return "macos";
         if (command === "app_is_development") return true;
         if (command === "app_home_dir") return "/fixture";
@@ -103,7 +111,10 @@ else {
           if (review?.token !== "fixture-library-review") throw new Error("Review the fixture library first.");
           return includeFixtureLibrary(review.renames);
         }
-        if (command === "mcp_status") return { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: null };
+        if (command === "mcp_status") return mcp;
+        if (command === "mcp_set_enabled") return mcp = { ...mcp, enabled: args.enabled === true };
+        if (command === "mcp_set_host_allowed") return mcp = { ...mcp, allowed_hosts: args.allowed ? [...new Set([...mcp.allowed_hosts, String(args.alias)])] : mcp.allowed_hosts.filter((id) => id !== args.alias) };
+        if (command === "mcp_set_approval_mode") return mcp = { ...mcp, approval_mode: String(args.approvalMode) };
         if (command === "records_key_generate") {
           overview = { ...overview, generation: String(Number(overview.generation) + 1), keys: [...overview.keys, { ...overview.keys[0], id: String(overview.keys.length + 10).padStart(32, "0"), public: { ...overview.keys[0].public!, name: String(args.name) } }] };
           return overview;
@@ -119,6 +130,7 @@ else {
     useApplyTheme();
     const status = useRecordsStatus();
     const [answer, setAnswer] = useState("");
+    if (scenario === "legacy") return <App />;
     if (scenario === "hostkey" || scenario === "hostkey-changed") return <HostKeyCard
       request={{ id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null }}
       busy={false} onAnswer={() => {}}

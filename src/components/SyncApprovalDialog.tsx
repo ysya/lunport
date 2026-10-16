@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
@@ -36,7 +37,7 @@ import { structureLock } from "@/lib/sync-spaces";
 import { useUiStore } from "@/stores/ui";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /**
  * Shown in logical order, left to right, whatever the characters are: right-to-left
@@ -216,7 +217,7 @@ function ApprovalReview({
         <DialogTitle>Review synced hosts</DialogTitle>
         <DialogDescription>{REVIEW_INTRO}</DialogDescription>
       </DialogHeader>
-
+      <TaskDialogBody>
       {above.lock && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-300">
           Approving and rejecting are off right now. {above.lock}
@@ -247,7 +248,7 @@ function ApprovalReview({
       ) : views.length === 0 ? (
         <p className="text-sm text-muted-foreground">Nothing is waiting for your approval.</p>
       ) : (
-        <div className="max-h-[55vh] space-y-4 overflow-y-auto pr-1">
+        <div className="space-y-4 overflow-y-auto pr-1">
           {groups.map((g) => (
             <section key={g.spaceId} className="space-y-2">
               <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{revealHidden(g.spaceName)}</p>
@@ -274,6 +275,7 @@ function ApprovalReview({
         </div>
       )}
 
+      </TaskDialogBody>
       <ReviewFooter
         count={listing ? views.length : 0}
         busy={busy}

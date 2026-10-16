@@ -347,10 +347,9 @@
   .section-label {
     padding-inline: 0.625rem;
     padding-bottom: 0.25rem;
-    font-size: 0.6875rem; /* ~11px */
+    font-size: 0.8rem;
     font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    letter-spacing: 0;
     color: var(--muted-foreground);
     user-select: none;
     -webkit-user-select: none;
@@ -390,7 +389,7 @@
     }
   }
   .animate-row-enter {
-    animation: row-enter 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: row-enter var(--motion-content) var(--ease-enter) both;
   }
   /* Slide-up for the sticky save bar. */
   @keyframes save-bar-enter {
@@ -404,7 +403,7 @@
     }
   }
   .animate-save-bar {
-    animation: save-bar-enter 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: save-bar-enter var(--motion-content) var(--ease-enter) both;
   }
   @media (prefers-reduced-motion: reduce) {
     .animate-row-enter,

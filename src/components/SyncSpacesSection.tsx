@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useState, type ReactNode } from "react";
 import { FolderInput, Loader2, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -32,7 +33,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
   AlertDialog,
@@ -226,6 +227,7 @@ function SpaceNameForm({
             : "Every computer that syncs this space renames its file to match."}
         </DialogDescription>
       </DialogHeader>
+      <TaskDialogBody>
       <Input
         autoFocus
         value={name}
@@ -239,6 +241,7 @@ function SpaceNameForm({
         className="h-8"
       />
       {name.trim() !== "" && error && <p className="text-xs text-destructive">{error}</p>}
+      </TaskDialogBody>
       <DialogFooter>
         <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>
           Cancel
@@ -437,6 +440,7 @@ function ChooseSpacesForm({
           Each space you choose gets its own file in ~/.ssh/sshelter and syncs from now on. You can change this any time under Settings → Sync → Spaces.
         </DialogDescription>
       </DialogHeader>
+      <TaskDialogBody>
       {candidates.length === 0 ? (
         <p className="text-sm text-muted-foreground">This sync account has no spaces yet. Create one under Spaces.</p>
       ) : (
@@ -453,6 +457,7 @@ function ChooseSpacesForm({
         </div>
       )}
       {lock && <p className={cn("text-sm", TONE_TEXT.warning)}>{lock}</p>}
+      </TaskDialogBody>
       <DialogFooter>
         <Button type="button" variant="outline" disabled={busy} onClick={() => onClose([])}>
           Not now

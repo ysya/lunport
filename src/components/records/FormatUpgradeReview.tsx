@@ -1,7 +1,8 @@
+import { TaskDialogContent as DialogContent } from "@/components/app/TaskDialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogContent,
+  DialogHeader,
   DialogTitle,
   DialogDescription,
   DialogFooter,
@@ -25,12 +26,12 @@ export function FormatUpgradeReview({
       }}
     >
       <DialogContent>
-        <DialogTitle>Enable Groups and inheritance</DialogTitle>
+        <DialogHeader><DialogTitle>Enable Groups and inheritance</DialogTitle>
         <DialogDescription>
           This upgrades the saved format and creates a local backup. Other
           devices must use a compatible version before shared changes sync.
           Confirm all other clients are updated or stopped.
-        </DialogDescription>
+        </DialogDescription></DialogHeader>
         <DialogFooter>
           <Button autoFocus variant="outline" disabled={busy} onClick={cancel}>
             Keep editing

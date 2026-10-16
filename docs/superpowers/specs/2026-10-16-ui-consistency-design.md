@@ -1,6 +1,6 @@
 # SSHelter 全介面一致性改版規劃
 
-日期：2026 年 10 月 16 日。狀態：設計提案，供後續實作使用。
+日期：2026 年 10 月 16 日。狀態：設計基準與分批實作規劃；各批完成狀態及驗證限制見[實作紀錄](../../2026-10-16-ui-consistency-implementation.md)。
 
 SSHelter 的介面應收斂成一套安靜、緊湊、可預期的 SSH 桌面工作環境。沿用已確認的中性灰表面與節制藍色，讓主機、金鑰、同步、匯入、設定與授權共用明確的版型和操作規則。這次改版的核心是統一資訊層級、位置、行為與動態回饋，讓使用者切換功能時不必重新理解介面。
 
@@ -122,7 +122,7 @@ Groups 與 Tags 是篩選和組織方式，不和 Keys 混成同一層的產品�
 
 ### 偏好設定
 
-Settings 保留獨立 modal，讓偏好設定與目前主機工作維持清楚關係。使用同一表面、文字、導覽選取和表單元件。寬度目標為 760px 並受視窗安全邊界限制，取代目前較窄的設定內容；分類欄約 168px。高度依視窗限制，只有內容區捲動。
+Settings 保留獨立 modal，讓偏好設定與目前主機工作維持清楚關係。使用同一表面、文字、導覽選取和表單元件。第三批將最大寬度調整為 62rem（15px 基準約 930px），分類欄 12.75rem，並保留視窗安全邊界。高度不超過 45rem 或視窗扣除 3rem；內容與分類各自捲動，標頭與生效說明固定。
 
 一般切換類偏好維持即時生效；文字或複合設定需要提交時，顯示清楚的儲存範圍。不要在同一區塊混用自動儲存和隱藏的 Save 行為。
 
@@ -361,3 +361,50 @@ Reduced 下直接完成位移、縮放、寬高變化和箭頭旋轉；必要的
 本輪採用的方向是中性桌面工作區、列表優先、可選詳情、單一同步目的地、四種共用版型與統一動態規則。保留現有主要導覽、快捷鍵、深淺主題及文字大小偏好；新增側欄與群組的開合能力和 Reduced 動態偏好。預覽畫面的資料均為示意。
 
 後續實作包含頁面與元件重構、樣式整理及必要的 UI 偏好，不延伸到 SSH 引擎、資料格式或同步協定改版。需要不同的資料展示時，先由現有 overview 衍生，若確實缺少欄位，再單獨定義後端契約。這樣可逐包比對視覺和互動結果，也保留清楚的回退邊界。
+
+## 第三批：設定架構與 Legacy 全面收尾
+
+Beta 14 已完成主要 Records 工作區。本批延伸同一套版型至仍可到達的 Legacy、設定及次要畫面，並重新整理設定的資訊架構；不另外建立一套 Legacy 設計系統。
+
+### 設定的型態與分類
+
+保留獨立 modal：設定是跨工作區的偏好工具，關閉後應回到原來的主機、草稿與選取。改用有明確工作區識別的設定視窗，導覽分組、內容標題及搜尋固定，只有內容捲動；小視窗收斂為水平分類。搜尋涵蓋實際設定與同義關鍵字，結果顯示所屬分類並帶到相關區塊。
+
+| 分組 | Records | Legacy | 內容與生效方式 |
+| --- | --- | --- | --- |
+| Application | General | General | 啟動、關閉、系統整合與快捷鍵；立即生效，系統整合由 OS 狀態確認 |
+| Application | Appearance | Appearance | 主題、字級、動態與標籤；立即生效 |
+| Application | Connections | Connections | 終端機與新分頁；立即生效，停用項目解釋原因 |
+| Workspace | Local data | Files & backups | Records 提供現有 Import／Sync 的唯一流程入口；Legacy 保留 config path 與備份保留數。偏好 JSON 匯入／匯出集中於此 |
+| Workspace | AI access | AI access | 啟用與連線、命令審閱方式、可搜尋的主機權限、近期活動；Auto-log 保留風險確認 |
+| Workspace | 不另設 Sync 分類 | Sync | Records 使用工作區 Sync；Legacy 的既有 space 管理仍留設定 |
+| Maintenance | Updates | Updates | 目前版本、通道、進度、release notes；沿用現有更新生命週期 |
+| Maintenance | Diagnostics | Discovery & checks | 共同診斷 log；Records 顯示工作區能力，Legacy 放探索來源、外部變更、lint 規則 |
+
+布林值使用 switch，互斥的小型選項使用可鍵盤操作的單選控制，多個選項使用 select，檔案路徑使用有標籤的輸入與明確 Apply。唯讀資訊呈現為文字，不以 disabled select 偽裝可設定。即時設定不出現多餘 Save；尚未套用的 config path 切頁時保留草稿，關閉前提示。匯入偏好仍先驗證再確認覆寫。
+
+設定列在內容變窄或字級增大時轉為上下排列，控制項不擠壓說明；說明和控制項有可及性關聯。分類切換保持穩定的標題位置，搜尋跳轉要帶入正確焦點與捲動；關閉還原來源焦點。
+
+### Legacy 與次要畫面覆蓋表
+
+| 表面 | 檔案／入口 | 統一處理 |
+| --- | --- | --- |
+| Legacy 工作區 | App、HostList、HostEditor、HostIntelligence | 共用頁首、留白、章節、操作列；保留 master/detail 與草稿。檔案／標籤群組使用共用 Disclosure |
+| Legacy Keychain | KeyDetail、NewKey、KeychainList | 頁首、資產詳情、表單與操作層級；金鑰檔案搬移／分享／私鑰匯出確認不變 |
+| 檔案與診斷工具 | KnownHosts、BackupHistory、FileView、Discover、Lint | 共用 Task dialog 的標頭、工具列、可捲動內容、狀態與關閉列；讀取錯誤提供重試，不把錯誤當空資料 |
+| 新增與檔案編輯 | AddHost、NewConfigFile、Duplicate、AddHostForKey | 共用表單與固定操作列，窄視窗仍可提交或取消 |
+| 公鑰部署 | Legacy DeployKey、Records DeployKey、ExportToHost | 目標／預覽／執行／結果採相同結構，完整目的地與指紋可讀；既有授權、取消與未知結果語意保留 |
+| Legacy 同步輔助 | SyncPane、Migration、Upgrade、Approval、SyncKey、KeysNeeded | 設定章節與共用審閱／視窗骨架；不合併各種同意範圍、token 或部分完成結果 |
+| MCP 決策 | McpApprovalDialog | 共用標頭、審閱內容和固定決策列，Deny 初始焦點、延時啟用、過期與逐請求身分維持 |
+| 確認浮層 | ShadowFix、keychain dialogs、AlertDialog | 共用字級、留白、可捲動長內容及可見底部操作；危險操作維持明確對象 |
+
+### 執行與驗收順序
+
+1. 先建立設定的導覽／搜尋索引和共用設定列，完成 Records／Legacy 的分類邊界；搜尋不能洩漏另一模式的不可用設定。
+2. 設定的各 pane 重新歸位，移除重複的跳轉分類、唯讀假控制項與空泛 Advanced。AI 主機清單補搜尋、數量及可取得的完整 ID／Group。
+3. 共用 Task dialog 支援固定標頭／操作與單一內容捲動，逐個替換上表工具、表單與輔助流程。loading／error／empty／success 採相同規則。
+4. Legacy 工作區與 Keychain 接上共用頁首、章節、操作列與 disclosure，保留現有連線與檔案管理行為。
+5. 擴充 development-only 假資料入口，覆蓋設定兩模式、Legacy 與次要流程。檢查 light／dark、13／15／17px、800×560／1100×720／1440×900，以及 System／Reduced、鍵盤搜尋跳轉、關閉焦點和長內容。
+6. TypeScript、production build、受影響 Vitest 及完整前端測試；確認 production 不含預覽入口。macOS 原生檢查可用環境；Windows／Linux 人工逐畫面驗收另行明確記錄，不以瀏覽器取代。
+
+這一批完成後，覆蓋表須逐項標示實作與驗證結果；未實際驗證的平台及流程不得標成完成。改動範圍限前端組合、可及性、樣式與 UI 草稿，不改 SSH 引擎、資料格式、同步協定或授權模型。

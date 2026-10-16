@@ -97,7 +97,7 @@ export function UpdatesPane() {
   return (
     <div className="space-y-5">
       <div className="flex items-center gap-3">
-        <div className="grid size-11 shrink-0 place-items-center rounded-xl border bg-primary/5 text-primary">
+        <div className="app-editor-symbol">
           <Terminal className="size-5" />
         </div>
         <div>
@@ -207,7 +207,7 @@ export function UpdateStatusCard({
   return (
     <section
       aria-label="Software update"
-      className="overflow-hidden rounded-xl border bg-muted/25"
+      className="app-notice overflow-hidden p-0"
     >
       <div className="space-y-3 p-4">
         <div className="flex items-start gap-2.5">

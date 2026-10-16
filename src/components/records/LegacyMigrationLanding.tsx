@@ -15,7 +15,7 @@ export function LegacyMigrationLanding({
   return (
     <div className="app-shell flex h-screen items-center justify-center overflow-y-auto p-8">
       <div className="max-w-lg space-y-4 text-center">
-        <h1 className="text-xl font-semibold">Your existing workspace</h1>
+        <h1 className="app-inspector-title">Your existing workspace</h1>
         <p className="text-sm text-muted-foreground">
           Review the saved workspace before switching to records. You can
           preview migration without opening the legacy configuration editor.
@@ -29,7 +29,7 @@ export function LegacyMigrationLanding({
           Using the existing workspace enables its SSH configuration editor and
           sync behavior.
         </p>
-        <div className="flex justify-center gap-2">
+        <div className="flex flex-wrap justify-center gap-2">
           <Button variant="outline" disabled={busy} onClick={useLegacy}>
             Use existing SSH configuration
           </Button>

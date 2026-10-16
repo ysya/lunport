@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/app/Disclosure";
 import { useState } from "react";
 import { ChevronRight, Search } from "lucide-react";
 
@@ -127,17 +128,18 @@ export function KeychainListView({
         </section>
         <section className="space-y-0.5">
           <div className="flex items-center justify-between gap-2 px-1">
-            <button type="button" className="section-label flex min-w-0 items-center gap-1 px-0" aria-expanded={showFiles} onClick={onToggleFiles}>
+            <button type="button" className="section-label flex min-w-0 items-center gap-1 px-0" aria-expanded={showFiles} aria-controls="legacy-key-files" onClick={onToggleFiles}>
               <ChevronRight className={cn("size-3 shrink-0 transition-transform", showFiles && "rotate-90")} aria-hidden />
               <span className="truncate">Other key files in ~/.ssh</span>
             </button>
           </div>
-          {showFiles &&
-            (files.length > 0 ? (
+          <Disclosure open={showFiles} id="legacy-key-files">
+            {files.length > 0 ? (
               files.map((f) => fileRow(f, selection?.kind === "file" && selection.path === f.private_path, () => onSelect({ kind: "file", path: f.private_path })))
             ) : (
               <p className="px-1 py-2 text-xs text-muted-foreground">{searching ? "No key files match." : "No other key files."}</p>
-            ))}
+            )}
+          </Disclosure>
         </section>
       </div>
     </div>
