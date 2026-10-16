@@ -11,7 +11,7 @@
 
 ## 本機診斷
 
-- GUI 入口在 Tauri context 建立前安裝 logger。app.log 為 JSON Lines，記錄時間、版號、profile、平台、啟動階段與固定錯誤分類；同步起訖／失敗、tray 錯誤、GUI build 失敗與 Rust panic 都有事件。panic 記錄編譯程式位置與 backtrace，省略 payload。一般錯誤不序列化 Display 字串；IO 只記 error kind／OS code。不能從 `operation_failed` 的分類反推完整 relay 錯誤。
+- GUI 入口在 Tauri context 建立前安裝 logger。app.log 為 JSON Lines，記錄時間、PID、版號、profile、平台、啟動階段與固定錯誤分類；同步起訖／失敗、tray 錯誤、GUI build 失敗與 Rust panic 都有事件。panic 記錄編譯程式位置與 backtrace，省略 payload。一般錯誤不序列化 Display 字串；IO 只記 error kind／OS code。不能從 `operation_failed` 的分類反推完整 relay 錯誤。
 - 不記錄 hosts、Groups、SSH／MCP 命令、連線結果、環境變數、密碼、私鑰或同步碼，不上傳任何 log。backtrace 可能含編譯時的程式來源路徑。
 - 每個 log 檔 256 KiB 上限，保留目前檔及 `.1`、`.2` 兩代，單筆事件最多 32 KiB。重啟接續保留紀錄，正常退出有 exit 階段。Unix 新檔 0600／目錄 0700，拒絕 log symlink 及 Windows 最終檔案／診斷目錄 reparse point；無法寫 log 不阻止啟動。
 - Windows 另預先開啟 native-crash.log。未處理原生例外 filter 只以固定 buffer／Win32 WriteFile 記錄例外代碼、位址與階段編號，不配置 heap、不取得 mutex、不寫記憶體 dump。會轉交原有 filter，或回傳 EXCEPTION_CONTINUE_SEARCH，保留 Windows 原本的處理。原生 filter 可能被其他 runtime 覆寫；fast-fail、kill、嚴重 stack 損壞與 WebView2 子程序 crash 不保證可捕捉。[Windows 官方限制](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setunhandledexceptionfilter)。
@@ -28,5 +28,6 @@
 - 拋出含敏感字串的 disposable child panic，確認失敗狀態、setup 階段與程式位置／backtrace 保存，payload 不在 log，下一次寫入不抹除舊紀錄。
 - Windows 獨立原生事件迴圈從儲存的 17 hosts＋繼承 Group／已啟用 Library 資料重建 runtime；實際 native tray、10 次 transport round、3 個並行 status／visibility workers 共 300 組呼叫；檢查相同選單不重建、改名可更新實際 Win32 選單、只有一個 tray resource、USER objects 有界、SSH config 不變。此測試不建立 WebView2，不能冒充正式 GUI／特定機器的人工驗收。
 - Windows disposable child 透過 RaiseException 注入自訂例外，核對退出代碼與 native-crash.log；只在該 child 使用 WER_NO_UI，產品不關閉 Windows Error Reporting。
+- CI-only PowerShell smoke 額外啟動真正的 Development exe 與 WebView2，讀取上述已同步 state（不匯出 MemKeychain），檢查 PID 對應 ready／exit log、原生視窗、背景更新後仍存活及正常關閉。拒絕覆蓋既有 Development state，且限定 disposable GitHub runner。此 CI 的 frontend 為 placeholder，驗證的是 bootstrap／WebView2 建立，並非 React 繪圖或正式 Windows 實機驗收。
 
 測試結果與 Beta 發布收據待本次驗證完成後補齊。仍需回報機器實際更新後驗收；若繼續閃退，應保留 app.log／native-crash.log 與 Windows Application Error／WER 的模組及例外資料，不重建 chain、重置 vault 或刪除 sync-state.json。

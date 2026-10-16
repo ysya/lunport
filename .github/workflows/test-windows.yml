@@ -94,10 +94,17 @@ jobs:
       # and USER object counts. No production profile, OS credentials or remote relay is used.
       - name: Synced library startup and concurrent native tray updates
         timeout-minutes: 5
+        env:
+          SSHELTER_TEST_SYNCED_STATE_OUT: ${{ runner.temp }}/sshelter-synced-startup.json
         run: cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
 
       - name: Native crash leaves metadata without suppressing Windows Error Reporting
         run: cargo test --locked --lib -- --ignored --exact diagnostics::tests::native_exception_leaves_metadata_for_windows_error_reporting --nocapture
+
+      - name: Actual Development GUI startup from a synced library
+        timeout-minutes: 8
+        shell: pwsh
+        run: ../scripts/validate-windows-startup.ps1
 
       # sshelter-cli.exe, the console program a Windows terminal runs for Connect (cli-helper/; the app's builds above never build it):
       # its tests (the relay of arguments and exit codes against a test program, the built helper next to a stand-in sshelter.exe, and

@@ -9,6 +9,21 @@ use crate::sync::{
 use serde_json::json;
 const HOST: &str = "0000000000000001";
 const GROUP: &str = "0000000000000002";
+#[test]
+fn synced_grouped_library_restarts_from_durable_state_without_touching_ssh_config() {
+    let device = crate::sync::testkit::synced_library_fixture();
+    let config = std::fs::read(device.main_path()).unwrap();
+    let bytes = std::fs::read(&device.env().state_path).unwrap();
+    let record_runtime::StartupProbe::Records { state, fresh } = record_runtime::probe_startup(&device.env().state_path, "restart") else { panic!("saved library must reopen") };
+    assert!(!fresh);
+    assert!(enabled(&state));
+    let hosts = repo::list_hosts(&state).unwrap();
+    assert_eq!(hosts.len(), 17);
+    assert_eq!(record_groups::list_groups(&state).unwrap().len(), 1);
+    assert!(hosts.iter().all(|host| matches!(host.host.scope, HostScope::Space { .. }) && host.effective_payload.user == "ops"));
+    assert_eq!(std::fs::read(&device.env().state_path).unwrap(), bytes);
+    assert_eq!(std::fs::read(device.main_path()).unwrap(), config);
+}
 fn device(relay: &std::sync::Arc<FakeRelay>) -> TestDevice {
     let d = TestDevice::new("library", relay, &TestClock::new());
     let env = d.env();

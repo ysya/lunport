@@ -27,6 +27,36 @@ use crate::sync::state_v2::{AccountState, SpaceState, SyncNotice, SyncStateV2};
 /// 測試裡的 relay URL(假 relay 不看它,只拒絕空字串)。
 pub const RELAY_URL: &str = "https://relay.test";
 
+/// A real opted-in account, grouped library and durable state for native startup regressions.
+/// Only the encrypted/public state may be exported; credentials stay in MemKeychain.
+pub(crate) fn synced_library_fixture() -> Arc<TestDevice> {
+    use crate::sync::{record_account, record_groups, record_library, record_repository as repo, record_round, record_runtime, records_v3::*};
+    let relay = FakeRelay::new();
+    let device = Arc::new(TestDevice::new("native-startup", &relay, &TestClock::new()));
+    let env = device.env();
+    let probe = record_runtime::probe_startup(&env.state_path, "native-startup");
+    record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
+    record_account::create_account(&env, "native-startup").unwrap();
+    record_runtime::mutate_records(&env, |state| {
+        let mut next = record_groups::create_group(
+            state, "ffffffffffffffff", HostScope::Local,
+            serde_json::from_value(serde_json::json!({"schema":1,"name":"Synced Group","defaults":{"user":"ops"}})).unwrap(),
+            true, 10,
+        ).map_err(|e| AppError::Other(e.to_string()))?;
+        for i in 1..=17 {
+            next = repo::create_host(
+                &next, &format!("{i:016x}"), HostScope::Local,
+                serde_json::from_value(serde_json::json!({"schema":3,"alias":format!("host-{i}"),"hostname":"fixture.invalid","auth":"password","group_id":"ffffffffffffffff","inherit":["user"]})).unwrap(),
+                11,
+            ).map_err(|e| AppError::Other(e.to_string()))?;
+        }
+        Ok(next)
+    }).unwrap();
+    record_library::enable(&env, true).unwrap();
+    record_round::sync_once(&env).unwrap();
+    device
+}
+
 /// 每讀一次就前進 1 ms 的時鐘:多台裝置的時間戳因此嚴格依呼叫順序遞增,LWW 的結果可預期。
 pub struct TestClock(AtomicU64);
 
