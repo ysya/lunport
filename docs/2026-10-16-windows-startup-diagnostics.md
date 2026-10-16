@@ -8,6 +8,7 @@
 - 初始 tray 現在先於背景 worker 建立。整次 lookup、建構、安裝、visibility 與 native handle drop 放在事件迴圈的一次主執行緒工作中，跨執行緒只傳公開選單資料。相同 ID／標籤／enabled 清單不重建；主機或可連線狀態改變仍更新。原生 tray 初始化失敗不再阻擋主視窗啟動。
 - 鎖定 muda 0.19.3 的相容 patch，包含 [Windows dangling pointer 修正](https://github.com/tauri-apps/muda/pull/363)。此上游修正的 window-menubar 情境與 SSHelter tray 啟動競態不同，**沒有把上游 issue 當作這台電腦已證實的 crash 根因**。
 - 不改變 Records、SSH config、pin 核准、既有 session、草稿或金鑰授權規則。Records 編輯／同步仍只保存 SSHelter 資料，Legacy 工作區仍有其原本的 SSH config 編輯行為。
+- Tauri 2.11.2 在事件迴圈 Ready 時自動建立設定中的 WebView；失敗會 panic，並不由外層 `.build()` 的 Result 處理。Windows 現在與 macOS 一樣停用該自動建立（Windows 不執行 CoreAudio 檢查），由既有主視窗入口明確建立，錯誤分類／backtrace 與原生提示取代這個 panic 路徑。背景 host 不建立主視窗；稍後 user activation 可再次嘗試，broker 與 runtime 資料不重設。其他 Rust panic／原生例外仍可能結束 process，由 log 提供診斷，未宣稱所有 crash 都可恢復。
 
 ## 本機診斷
 
