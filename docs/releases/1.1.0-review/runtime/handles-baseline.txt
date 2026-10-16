@@ -1,0 +1,4 @@
+2026-10-16T21:49:09.1448083Z thread '<unnamed>' (2424) panicked at /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library\alloc\src\rc.rs:3781:13:
+2026-10-16T21:49:09.1449504Z unsafe precondition(s) violated: hint::assert_unchecked must never be called when the condition is false
+2026-10-16T21:49:09.3970182Z   process didn't exit successfully: `D:\a\lunport\lunport\src-tauri\target\debug\deps\sshelter_lib-34283a22b40154ba.exe --ignored --exact sync::engine::windows_tests::concurrent_app_handles_preserve_native_event_loop --nocapture` (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)
+2026-10-16T21:49:09.6410059Z      | native handles attempt 1 failed (exit -1073740791)

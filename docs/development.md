@@ -37,11 +37,13 @@ node scripts/generate-brand-icons.mjs
 
 Use Lunport for visible product copy and `ysya/lunport` for current repository links. Bundle IDs, credential services, executable names, MCP registration, SSH paths and persisted storage keys intentionally retain their SSHelter identities. See [installer compatibility](../src-tauri/installers/README.md) before changing any of them. Historical releases, validation records and signatures retain their original names.
 
+The 2.11.2 runtime has a narrow [context ownership patch](../src-tauri/vendor/tauri-runtime-wry/LUNPORT_PATCH.md). Preserve its provenance and run the handle-only, native tray and actual GUI regressions before updating or removing it. The patch keeps worker handle clones from copying a non-atomic native event-loop reference count.
+
 ## Release workflow
 
 Stable releases use release-please. A push to `main` opens or updates a release PR; merging that PR creates the version tag and GitHub Release, then builds the platform installers and updater assets. Review the version, changelog and checks before merging a release PR. An ordinary feature or documentation merge does not itself publish an installer.
 
-When publishing the first Lunport release, update the release-status notes in README and the user guide, and make `Lunport.app` the primary macOS installation example. Keep the SSHelter 1.0.0 release and its assets intact. Resolve the [observed Windows native tray instability](2026-10-17-lunport-about-docs.md#ci) before publishing the next release; the baseline comparison is not a fix.
+For each release, check the README, user guide and installer names against the actual packages and verify both update channels. Historical SSHelter releases and their assets remain intact. Native runtime changes require a failing baseline reproduction, repaired regression checks and full platform validation before publication.
 
 For a beta, run **publish beta** in GitHub Actions with a new `X.Y.Z-N` version, using a numeric suffix. The workflow stamps the version, creates the prerelease, builds the platforms and updates the `updater-beta` manifest. Beta-channel devices can receive Stable releases too.
 
