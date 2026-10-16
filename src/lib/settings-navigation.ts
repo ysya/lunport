@@ -19,6 +19,7 @@ export function settingsDestinations(mode: SettingsMode): SettingsDestination[] 
     ...(mode === "legacy" ? [{ id: "sync" as const, label: "Sync", description: "Manage encrypted spaces and devices.", group: "Workspace" as const }] : []),
     { id: "updates", label: "Updates", description: "Installed version, release channel and update status.", group: "Maintenance" },
     { id: "advanced", label: mode === "records" ? "Diagnostics" : "Discovery & checks", description: mode === "records" ? "Local diagnostic logs and workspace capabilities." : "Discovery sources, external changes and config checks.", group: "Maintenance" },
+    { id: "about", label: "About", description: "Lunport, project links and license.", group: "Maintenance" },
   ];
 }
 
@@ -45,6 +46,7 @@ const SEARCH_ENTRIES: SearchEntry[] = [
   { category: "sync", title: "Sync", detail: "Relay, device, encrypted spaces, key sharing and recovery", section: "", modes: ["legacy"] },
   { category: "updates", title: "Software update", detail: "Installed version, check, download, install and restart", section: "" },
   { category: "updates", title: "Update preferences", detail: "Stable or Beta release channel and automatic checks", section: "Update preferences" },
+  { category: "about", title: "About Lunport", detail: "Your SSH workspace, version, GitHub, release notes, support, license and Frank Sung", section: "" },
   { category: "advanced", title: "Diagnostic logs", detail: "Open local startup and error logs", section: "Diagnostic logs" },
   { category: "advanced", title: "Workspace capabilities", detail: "Built-in SSH engine, local data and AI access boundaries", section: "Workspace capabilities", modes: ["records"] },
   { category: "advanced", title: "Discovery sources", detail: "Discover known_hosts and Tailscale candidates", section: "Discovery sources", modes: ["legacy"] },

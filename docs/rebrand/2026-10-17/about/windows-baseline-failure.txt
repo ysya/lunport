@@ -1,0 +1,12 @@
+2026-10-16T21:19:42.5247685Z   ref: e83e6580e05fdc56e8425d10959c49791529dbf6
+2026-10-16T21:19:45.8915270Z [command]"C:\Program Files\Git\bin\git.exe" -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin e83e6580e05fdc56e8425d10959c49791529dbf6
+2026-10-16T21:19:47.6754484Z  * branch            e83e6580e05fdc56e8425d10959c49791529dbf6 -> FETCH_HEAD
+2026-10-16T21:19:47.7482696Z [command]"C:\Program Files\Git\bin\git.exe" checkout --progress --force e83e6580e05fdc56e8425d10959c49791529dbf6
+2026-10-16T21:19:47.9946592Z Note: switching to 'e83e6580e05fdc56e8425d10959c49791529dbf6'.
+2026-10-16T21:19:47.9951476Z HEAD is now at e83e658 feat: rebrand app as Lunport with Folded L icons
+2026-10-16T21:19:48.0841259Z e83e6580e05fdc56e8425d10959c49791529dbf6
+2026-10-16T21:20:14.2343718Z e83e6580e05fdc56e8425d10959c49791529dbf6
+2026-10-16T21:25:36.7882617Z native tray stage: exercise
+2026-10-16T21:25:37.8059816Z native tray exception: code=0xc0000005, address=0x7ff67d9206e5
+2026-10-16T21:25:38.8102069Z   11: tao::platform_impl::platform::event_loop::runner::EventLoopRunner<enum2$<tauri_runtime_wry::Message<enum2$<tauri::EventLoopMessage> > > >::reset_runner<enum2$<tauri_runtime_wry::Message<enum2$<tauri::EventLoopMessage> > > >
+2026-10-16T21:25:39.0116204Z      | native tray attempt 1 failed (exit -1073741819)

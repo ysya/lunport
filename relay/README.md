@@ -1,7 +1,10 @@
 # Lunport sync relay
 
-Zero-knowledge relay for Lunport's sync chain: one Durable Object per chain, storing only
-ciphertext. It never sees recovery phrases, host names, keys or passwords.
+Encrypted relay for [Lunport](../README.md), your SSH workspace. It carries library changes
+between devices: hosts, Groups and explicitly shared keys. Each chain has one Durable Object,
+storing only ciphertext. It never sees sync codes, host names, private keys or passwords.
+
+See the [user guide](../docs/usage.md#sync-your-library) for setting up devices in the app.
 
 ## Self-host
 

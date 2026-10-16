@@ -1,0 +1,9 @@
+{
+  "name": "Lunport",
+  "tagline": "Your SSH workspace.",
+  "description": "Keep your hosts, keys and Groups together. Connect from your terminal and bring your library to your other devices with encrypted sync.",
+  "repository": "https://github.com/ysya/lunport",
+  "author": "Frank Sung",
+  "copyright": "Copyright © 2026 Frank Sung",
+  "license": "PolyForm Noncommercial 1.0.0"
+}

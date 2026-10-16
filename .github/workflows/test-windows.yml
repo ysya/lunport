@@ -24,6 +24,15 @@ on:
   pull_request:
     paths: ["src-tauri/**", ".github/workflows/test-windows.yml"]
   workflow_dispatch:
+    inputs:
+      native_probe:
+        description: Compare only the native tray regression on the candidate and a baseline
+        type: boolean
+        default: false
+      baseline_ref:
+        description: Baseline commit or ref in this repository for native_probe
+        type: string
+        default: main
 
 permissions:
   contents: read
@@ -35,6 +44,7 @@ concurrency:
 
 jobs:
   slots:
+    if: ${{ !inputs.native_probe }}
     runs-on: windows-latest
     timeout-minutes: 45
     defaults:
@@ -214,3 +224,41 @@ jobs:
         if: failure()
         shell: pwsh
         run: Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 40 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
+
+  native-probe:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_probe }}
+    name: Native tray probe (${{ matrix.source }})
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [baseline, candidate]
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.source == 'baseline' && inputs.baseline_ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+      - name: Record source and prepare placeholder frontend
+        shell: pwsh
+        run: |
+          git rev-parse HEAD
+          New-Item -ItemType Directory -Force ../dist | Out-Null
+          Set-Content -Path ../dist/index.html -Value '<!doctype html>'
+      - name: Compile the native test without running other suites
+        run: cargo test --locked --lib --no-run
+      - name: Ten independent native tray processes
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 10; $attempt++) {
+            Write-Output "Native tray attempt $attempt/10"
+            cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
+            if ($LASTEXITCODE -ne 0) { throw "native tray attempt $attempt failed (exit $LASTEXITCODE)" }
+          }

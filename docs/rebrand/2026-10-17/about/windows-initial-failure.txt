@@ -1,0 +1,38 @@
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:52.8694876Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:55.0387653Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:55.0642799Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:55.0648687Z Windows native startup: 17 synced hosts + inherited Group; 10 transport rounds; 300 concurrent status/visibility pairs; menu publications 2 -> 3; USER objects 10 -> 10; SSH config unchanged
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:55.0650338Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:55.0650977Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:55.0670153Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:57.6738359Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:59.6831618Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:59.7099589Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:59.7104056Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:59.7106302Z Windows native startup: 17 synced hosts + inherited Group; 10 transport rounds; 300 concurrent status/visibility pairs; menu publications 2 -> 3; USER objects 10 -> 10; SSH config unchanged
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:59.7107544Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:12:59.7125464Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:01.7258033Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:03.7218846Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:03.7536240Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:03.7539787Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:03.7541745Z Windows native startup: 17 synced hosts + inherited Group; 10 transport rounds; 300 concurrent status/visibility pairs; menu publications 2 -> 3; USER objects 10 -> 10; SSH config unchanged
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:03.7543410Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:03.7561069Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:06.0674369Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:08.3206114Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:08.3718149Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:08.3722410Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:08.3724208Z Windows native startup: 17 synced hosts + inherited Group; 10 transport rounds; 300 concurrent status/visibility pairs; menu publications 2 -> 3; USER objects 10 -> 10; SSH config unchanged
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:08.3725723Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:08.3742122Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:10.7934144Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:13.0494815Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:13.0959245Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:13.0964999Z Windows native startup: 17 synced hosts + inherited Group; 10 transport rounds; 300 concurrent status/visibility pairs; menu publications 2 -> 3; USER objects 10 -> 10; SSH config unchanged
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:13.0966377Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:13.0967207Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:13.0984600Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:13.1009487Z native tray exception: code=0xc0000374, address=0x7ff9e4cf7c65
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:16.0734662Z   process didn't exit successfully: `D:\a\lunport\lunport\src-tauri\target\debug\deps\sshelter_lib-34283a22b40154ba.exe --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture` (exit code: 0xc0000374, STATUS_HEAP_CORRUPTION)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T21:13:20.2240961Z ^[[31;1m^[[0m^[[36;1m^[[36;1m^[[0m^[[36;1m^[[0m^[[36;1m^[[31;1m^[[31;1m^[[36;1m     | ^[[31;1mnative tray attempt 5 failed (exit -1073740940)^[[0m
