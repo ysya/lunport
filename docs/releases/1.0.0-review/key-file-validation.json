@@ -1,0 +1,58 @@
+{
+  "checkedAt": "2026-10-16T16:05:44.805175+00:00",
+  "baseCommit": "869a455dc726d0868ae21bc4164ef0758b52097b",
+  "sourceSHA256": {
+    "src-tauri/src/lib.rs": "2a8acb1a51dd5fc18aad5903cd779b5155d31c85296374f688f87eef64a4139e",
+    "src-tauri/src/sync/record_commands.rs": "70c2d444c35734fb859bdb10f6fe17130aab0d2783d7d2c43081f38834a7fa44",
+    "src-tauri/src/sync/record_import.rs": "8f221dc6b0780618b080044fdd893556210c1e355f0fd18dbcb9a8341c2ccd02",
+    "src-tauri/src/sync/record_keys.rs": "082d415eeefdbaa88d932139acf925875f319c8123c7d1a29fb501e4b6835c61",
+    "src-tauri/src/sync/record_keys_tests.rs": "8d807db1436efe5bb4e08e789b2400a44d7c6ede5d0539d32fa50965c7f489b4",
+    "src/components/records/KeysPanel.tsx": "d42b129a9fca30d5605e646218a044d5f2be9d90085cc3013f67f73770f1f790",
+    "src/components/records/panel-actions.test.ts": "9ffc20dbb7ab7d6d879e6e0a1fcc89253132c60e87562e5b750879b430564bcb",
+    "src/components/records/panel-actions.ts": "f4f3aaac6e2c87c163238e6010856c9f6351341f475b413db57419969c8d46bf",
+    "src/dev/interface-preview.tsx": "8bf5ebdeca6d1ec96242c540eb29a6f0e558debdfe445e24bd7d8a5133ff2c70",
+    "src/lib/records.ts": "d4e9517b932ef7cd94c8beb288cc88761c33052b79a1585edf817997716c56dd",
+    "src/components/records/KeyImportFields.tsx": "5063162c8ec0871fa70848d57d3bce9ff6e0d7968ee1f8a59655de4403a42d7a",
+    "src/components/records/key-import-fields.test.tsx": "d9480e153d0cfd78f742ed8274999436606e21e469848d90832f6f7a1130cd5b"
+  },
+  "typescript": "passed",
+  "frontendTests": {
+    "files": 84,
+    "tests": 1071,
+    "result": "passed"
+  },
+  "recordKeyRustTests": {
+    "passed": 19,
+    "failed": 0
+  },
+  "productionBuild": "passed",
+  "existingChunkSizeWarning": true,
+  "macOSDevelopmentBundle": "passed",
+  "browser": {
+    "fileDefault": true,
+    "selectedPathAndName": true,
+    "sourceSwitchRetainsDraft": true,
+    "inactiveSourceBlocksSubmission": true,
+    "fixtureImportCompletes": true,
+    "triggerFocusRestored": true
+  },
+  "macOSNative": {
+    "origin": "tauri://localhost",
+    "profile": "Development",
+    "nativeOpenDialog": true,
+    "cancelKeepsForm": true,
+    "extensionlessPrivateKeySelected": true,
+    "disposableKeyImported": true,
+    "sourceFileUnchanged": true,
+    "sourceSHA256": "2fb9e9b936bb9e6321f3057e13927408ce45a4d1551b080658d6be23714e6e48",
+    "sourceBytes": 432,
+    "result": "disposable_import_validation / Local key / This device only",
+    "reopenClearsDraft": true,
+    "completionFocusRestored": true,
+    "quit": "App quit observed",
+    "fixtureRetainedInDevelopmentVault": true
+  },
+  "windowsLinuxManualVisualAcceptance": false,
+  "productionGuiInstalledOrLaunched": false,
+  "developmentFixturesExcluded": true
+}

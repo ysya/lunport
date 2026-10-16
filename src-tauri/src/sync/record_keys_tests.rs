@@ -70,6 +70,69 @@ fn local_key_import_binds_public_private_and_encryption_identity_without_plainte
     }
 }
 #[test]
+fn chosen_private_key_files_are_copied_locally_without_changing_the_source() {
+    for text in [test_keys::plain(), test_keys::encrypted()] {
+        let device = device();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("id_work");
+        fs::write(&source, &text).unwrap();
+        let receipt = import_local_file(&device.env(), "work", &source).unwrap();
+        assert_eq!(fs::read_to_string(&source).unwrap(), text);
+        let state = device.runtime.core.lock().unwrap().records.clone().unwrap();
+        assert!(state.account.is_none());
+        assert_eq!(state.local.keys.len(), 1);
+        assert_eq!(state.local.keys[&receipt.key_id].public, receipt.public);
+        let vault = read_vault(&vault_path(&device.env().state_path), &device.keychain).unwrap();
+        let entry = vault.get(&receipt.key_id).unwrap().unwrap();
+        assert_eq!(entry.private_key, text);
+        assert_eq!(entry.origin, EntryOrigin::Imported);
+        for rendered in [serde_json::to_string(&state).unwrap(), format!("{receipt:?}")] {
+            assert!(!rendered.contains(text.lines().nth(1).unwrap()));
+            assert!(!rendered.contains("BEGIN OPENSSH PRIVATE KEY"));
+        }
+    }
+}
+#[test]
+fn invalid_file_sources_never_publish_key_material_or_echo_their_contents() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let public = source_dir.path().join("id_work.pub");
+    let invalid = source_dir.path().join("invalid");
+    let oversized = source_dir.path().join("oversized");
+    let binary = source_dir.path().join("binary");
+    fs::write(&public, crate::vault::material::parse(&test_keys::plain()).unwrap().public_key().to_openssh().unwrap()).unwrap();
+    fs::write(&invalid, "PRIVATE_SENTINEL is not a key").unwrap();
+    fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+    fs::File::create(&oversized).unwrap().set_len(super::super::record_import::MAX_PRIVATE_SOURCE_BYTES + 1).unwrap();
+    for source in [
+        std::path::PathBuf::from("relative_key"),
+        source_dir.path().join("missing"),
+        source_dir.path().to_path_buf(),
+        public, invalid, oversized, binary,
+    ] {
+        let device = device();
+        let error = import_local_file(&device.env(), "work", &source).unwrap_err();
+        assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
+        assert!(!vault_path(&device.env().state_path).exists());
+        assert!(!device.env().state_path.parent().unwrap().join("imports").exists());
+        assert!(device.runtime.core.lock().unwrap().records.as_ref().unwrap().local.keys.is_empty());
+    }
+    assert_eq!(fs::read_to_string(source_dir.path().join("invalid")).unwrap(), "PRIVATE_SENTINEL is not a key");
+}
+#[cfg(unix)]
+#[test]
+fn choosing_a_symlink_copies_the_key_and_keeps_both_link_and_target() {
+    let device = device();
+    let source_dir = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("id_work");
+    let link = source_dir.path().join("key-link");
+    let text = test_keys::plain();
+    fs::write(&source, &text).unwrap();
+    std::os::unix::fs::symlink(&source, &link).unwrap();
+    import_local_file(&device.env(), "work", &link).unwrap();
+    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_to_string(&source).unwrap(), text);
+}
+#[test]
 fn local_generation_seals_material_and_keeps_passphrase_out_of_journals_and_state() {
     let device = device();
     let receipt = generate_local(

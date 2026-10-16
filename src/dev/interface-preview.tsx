@@ -78,7 +78,7 @@ else {
         if (command === "plugin:event|unlisten" || ["tray_set_visible", "app_set_close_to_tray", "config_set_backup_retention", "app_set_global_hotkey"].includes(command)) return;
         if (command === "app_take_quick_connect" || command === "plugin:autostart|is_enabled") return false;
         if (command === "records_import_pending" || command === "records_migration_pending") return [];
-        if (command === "plugin:dialog|open") return "/fixture/config";
+        if (command === "plugin:dialog|open") return String((args.options as { title?: string } | undefined)?.title ?? "").includes("private key") ? "/fixture/id_work" : "/fixture/config";
         if (command === "records_import_preview") {
           reviewedImport = importPreview({
             candidates: [
@@ -115,7 +115,7 @@ else {
         if (command === "mcp_set_enabled") return mcp = { ...mcp, enabled: args.enabled === true };
         if (command === "mcp_set_host_allowed") return mcp = { ...mcp, allowed_hosts: args.allowed ? [...new Set([...mcp.allowed_hosts, String(args.alias)])] : mcp.allowed_hosts.filter((id) => id !== args.alias) };
         if (command === "mcp_set_approval_mode") return mcp = { ...mcp, approval_mode: String(args.approvalMode) };
-        if (command === "records_key_generate") {
+        if (command === "records_key_generate" || command === "records_key_import" || command === "records_key_import_file") {
           overview = { ...overview, generation: String(Number(overview.generation) + 1), keys: [...overview.keys, { ...overview.keys[0], id: String(overview.keys.length + 10).padStart(32, "0"), public: { ...overview.keys[0].public!, name: String(args.name) } }] };
           return overview;
         }
