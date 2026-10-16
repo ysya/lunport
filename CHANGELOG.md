@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/ysya/lunport/compare/v1.0.0...v1.1.0) (2026-10-16)
+
+
+### Features
+
+* complete Lunport About and product documentation ([e977a03](https://github.com/ysya/lunport/commit/e977a03317a90a5203e00bc572bb61f4207348ef))
+* rebrand app as Lunport with Folded L icons ([e83e658](https://github.com/ysya/lunport/commit/e83e6580e05fdc56e8425d10959c49791529dbf6))
+
+
+### Bug Fixes
+
+* **windows:** prevent concurrent runtime handle ownership races ([d54853a](https://github.com/ysya/lunport/commit/d54853a08cf0a07d6c450ccc25db393b4e1712dc))
+
 ## [1.0.0](https://github.com/ysya/sshelter/compare/v0.16.0...v1.0.0) (2026-10-16)
 
 
