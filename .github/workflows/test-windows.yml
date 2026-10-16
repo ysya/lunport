@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       native_probe:
-        description: Compare only the native tray regression on the candidate and a baseline
+        description: Compare a native regression on the candidate and a baseline
         type: boolean
         default: false
       baseline_ref:
@@ -44,7 +44,7 @@ permissions:
 
 # A push to next/own-ssh with a pull request open would run the workflow twice; a newer run replaces the one in progress.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}-${{ inputs.native_probe && format('native-{0}', inputs.probe_kind || 'tray') || 'full' }}
   cancel-in-progress: true
 
 jobs:
@@ -103,6 +103,9 @@ jobs:
       # The library and the binary in a debug build, with russh in the dependency graph (the release workflow builds the same graph).
       - name: Build the whole app
         run: cargo build --locked
+
+      - name: Concurrent AppHandle ownership and native loop cleanup
+        run: cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::concurrent_app_handles_preserve_native_event_loop --nocapture
 
       # Unit doubles never touch the Rc-backed Win32 tray or its event loop. Restart from
       # saved synced records, race startup/status/visibility, and check real native menu data
@@ -232,7 +235,7 @@ jobs:
 
   native-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_probe }}
-    name: Native tray probe (${{ matrix.source }})
+    name: Native ${{ inputs.probe_kind || 'tray' }} probe (${{ matrix.source }})
     runs-on: windows-latest
     timeout-minutes: 25
     strategy:
@@ -258,7 +261,7 @@ jobs:
           Set-Content -Path ../dist/index.html -Value '<!doctype html>'
       - name: Compile the native test without running other suites
         run: cargo test --locked --lib --no-run
-      - name: Ten independent native tray processes
+      - name: Ten independent native processes
         timeout-minutes: 5
         shell: pwsh
         env:
@@ -274,7 +277,7 @@ jobs:
             throw 'The selected source does not contain the requested native regression.'
           }
           for ($attempt = 1; $attempt -le 10; $attempt++) {
-            Write-Output "Native tray attempt $attempt/10"
+            Write-Output "Native $env:PROBE_KIND attempt $attempt/10"
             cargo test --locked --lib -- --ignored --exact $testName --nocapture
-            if ($LASTEXITCODE -ne 0) { throw "native tray attempt $attempt failed (exit $LASTEXITCODE)" }
+            if ($LASTEXITCODE -ne 0) { throw "native $env:PROBE_KIND attempt $attempt failed (exit $LASTEXITCODE)" }
           }

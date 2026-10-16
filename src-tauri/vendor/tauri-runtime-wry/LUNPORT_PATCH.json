@@ -1,0 +1,20 @@
+{
+  "crate": "tauri-runtime-wry",
+  "version": "2.11.2",
+  "upstream": "https://github.com/tauri-apps/tauri",
+  "archive_sha256": "b83849ee63ecb27a8e8d0fe51915ca215076914aca43f96db1179f0f415f6cd9",
+  "vcs": {
+    "git": {
+      "sha1": "499df79be65ef8c0670abc0207cd9e37b55d8491"
+    },
+    "path_in_vcs": "crates/tauri-runtime-wry"
+  },
+  "changed_files": [
+    "src/lib.rs"
+  ],
+  "omitted_packaging_files": [
+    ".cargo-ok",
+    ".cargo-checksum.json",
+    "Cargo.lock"
+  ]
+}
