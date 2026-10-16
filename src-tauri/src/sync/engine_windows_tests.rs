@@ -1,33 +1,19 @@
 //! Real Win32 tray/event-loop regression. No WebView, real credentials or remote relay.
 use super::*;
-use crate::sync::{
-    record_groups, record_library, record_repository as repo, record_runtime, records_v3::*,
-};
+use crate::sync::{record_repository as repo, record_runtime};
 use std::sync::Arc;
 
 #[test]
 #[ignore = "requires a Windows desktop and its own native event loop; run separately in CI"]
 fn synced_library_startup_and_concurrent_tray_updates() {
-    let device = crate::sync::record_round::tests::pin_fixture();
-    record_runtime::mutate_records(&device.env(), |state| {
-        let mut next = record_groups::create_group(
-            state, "ffffffffffffffff", HostScope::Local,
-            serde_json::from_value(serde_json::json!({"schema":1,"name":"Synced Group","defaults":{"user":"ops"}})).unwrap(),
-            true, 10,
-        ).map_err(|e| AppError::Other(e.to_string()))?;
-        for i in 2..=17 {
-            next = repo::create_host(
-                &next, &format!("{i:016x}"), HostScope::Local,
-                serde_json::from_value(serde_json::json!({"schema":3,"alias":format!("host-{i} 雲端"),"hostname":"fixture.invalid","auth":"password","group_id":"ffffffffffffffff","inherit":["user"]})).unwrap(),
-                11,
-            ).map_err(|e| AppError::Other(e.to_string()))?;
-        }
-        Ok(next)
-    }).unwrap();
-    record_library::enable(&device.env(), true).unwrap();
-    crate::sync::record_round::sync_once(&device.env()).unwrap();
+    let device = crate::sync::testkit::synced_library_fixture();
     let config_before = std::fs::read(device.main_path()).unwrap();
     let state_before = std::fs::read(&device.env().state_path).unwrap();
+    // The CI-only GUI smoke script starts the real Development executable from this public,
+    // encrypted fixture. Never export the in-memory credential store alongside it.
+    if let Some(path) = std::env::var_os("SSHELTER_TEST_SYNCED_STATE_OUT") {
+        std::fs::write(path, &state_before).unwrap();
+    }
 
     // Restart from the saved, grouped, opted-in library rather than a synthetic menu alone.
     let app_state = AppState::default();

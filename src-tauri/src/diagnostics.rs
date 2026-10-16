@@ -56,6 +56,7 @@ struct Logger {
 #[derive(Serialize)]
 struct Event<'a> {
     timestamp_ms: u128,
+    pid: u32,
     app_version: &'static str,
     profile: &'static str,
     platform: &'static str,
@@ -286,6 +287,7 @@ impl Logger {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis(),
+            pid: std::process::id(),
             app_version: env!("CARGO_PKG_VERSION"),
             profile: match crate::app_profile::CURRENT {
                 crate::app_profile::AppProfile::Production => "production",
