@@ -289,6 +289,10 @@ export async function importRecordKey(
 ): Promise<RecordOverview> {
   return tauriInvoke("records_key_import", { name, privateText });
 }
+/** Only the selected path crosses IPC; native code copies the key and preserves the source file. */
+export async function importRecordKeyFile(name: string, path: string): Promise<RecordOverview> {
+  return tauriInvoke("records_key_import_file", { name, path });
+}
 export async function generateRecordKey(name: string): Promise<RecordOverview> {
   return tauriInvoke("records_key_generate", { name });
 }

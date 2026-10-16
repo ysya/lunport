@@ -895,6 +895,23 @@ pub async fn records_key_import(
     .map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
+pub async fn records_key_import_file(
+    app: AppHandle,
+    name: String,
+    path: String,
+) -> Result<RecordOverview, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::sync::engine::with_env(&app, |env| {
+            crate::sync::record_keys::import_local_file(env, &name, std::path::Path::new(&path))?;
+            let result = overview(env)?;
+            env.events.status();
+            Ok(result)
+        })?
+    })
+    .await
+    .map_err(crate::sync::engine::join_error)?
+}
+#[tauri::command]
 pub async fn records_key_generate(
     app: AppHandle,
     name: String,

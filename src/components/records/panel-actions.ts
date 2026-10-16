@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import {
   applyRecordOverview,
   importRecordKey,
+  importRecordKeyFile,
   generateRecordKey,
   createRecordAccount,
   joinRecordAccount,
@@ -14,6 +15,8 @@ import { isValidSlotName } from "@/lib/key-slots";
 import { confirmedCopyIds } from "./editor";
 export type KeyDraft = {
   name: string;
+  source: "file" | "paste";
+  path: string | null;
   privateText: string;
   busy: boolean;
   error: string | null;
@@ -27,7 +30,10 @@ export type AccountDraft = {
   error: string | null;
 };
 export function clearKeyDraft(): KeyDraft {
-  return { name: "", privateText: "", busy: false, error: null };
+  return { name: "", source: "file", path: null, privateText: "", busy: false, error: null };
+}
+export function hasKeyImportSource(state: KeyDraft): boolean {
+  return state.source === "file" ? !!state.path?.trim() : !!state.privateText.trim();
 }
 export function clearAccountDraft(): AccountDraft {
   return {
@@ -49,22 +55,24 @@ export async function submitKeyDraft(
   if (
     state.busy ||
     !isValidSlotName(state.name) ||
-    (!generate && !state.privateText.trim())
+    (!generate && !hasKeyImportSource(state))
   )
     return false;
   update({ busy: true, error: null });
   try {
     const overview = generate
       ? await generateRecordKey(state.name)
-      : await importRecordKey(state.name, state.privateText);
-    update({ privateText: "", name: "" });
+      : state.source === "file"
+        ? await importRecordKeyFile(state.name, state.path!)
+        : await importRecordKey(state.name, state.privateText);
+    update({ privateText: "", name: "", path: null });
     applyRecordOverview(client, overview);
     return true;
   } catch {
     update({
       error: generate
         ? "Could not generate the key. Retry when the workspace is available."
-        : "Could not import the key. Check the private key and workspace, then retry.",
+        : "Could not import the key. Choose a readable OpenSSH private key (up to 1 MiB) and retry. Public keys, PuTTY and PEM formats are not supported.",
     });
     return false;
   } finally {

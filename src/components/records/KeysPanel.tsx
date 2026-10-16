@@ -1,10 +1,11 @@
 import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { open } from "@tauri-apps/plugin-dialog";
 import { KeyRound, Search, Plus, Upload, ArrowUpRight, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/app/PageHeader";
 import { DetailPresence } from "@/components/app/DetailPresence";
@@ -12,7 +13,9 @@ import { applyRecordOverview, downloadRecordKey, setRecordKeySync, type RecordOv
 import { revealHidden } from "@/lib/sync-approvals";
 import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
-import { clearKeyDraft, submitKeyDraft } from "./panel-actions";
+import { clearKeyDraft, hasKeyImportSource, submitKeyDraft } from "./panel-actions";
+import { basename } from "@/lib/utils";
+import { KeyImportFields } from "./KeyImportFields";
 import { RecordField } from "./form";
 import { DetailPane } from "./DetailPane";
 import { RecordsDeployKeyDialog } from "./DeployKeyDialog";
@@ -39,7 +42,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   const reset = () => { setDraft(clearKeyDraft()); setMode(null); setDiscarding(false); };
   const requestClose = () => {
     if (draft.busy || inFlight.current) return;
-    if (draft.name || draft.privateText) setDiscarding(true);
+    if (draft.name || draft.privateText || draft.path) setDiscarding(true);
     else reset();
   };
   const submit = async () => {
@@ -48,6 +51,23 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
     try {
       if (await submitKeyDraft(client, draft, update, mode === "generate")) reset();
     } finally { inFlight.current = false; }
+  };
+  const chooseFile = async () => {
+    if (inFlight.current || draft.busy) return;
+    inFlight.current = true;
+    update({ busy: true, error: null });
+    try {
+      const path = await open({ multiple: false, directory: false, title: "Choose an OpenSSH private key" });
+      if (typeof path === "string") setDraft((current) => ({
+        ...current, path, source: "file",
+        name: current.name || (isValidSlotName(basename(path)) ? basename(path) : ""),
+      }));
+    } catch {
+      update({ error: "Could not open the file picker. Try again or paste the private key." });
+    } finally {
+      inFlight.current = false;
+      update({ busy: false });
+    }
   };
   const publicAction = async (action: () => Promise<void>) => {
     if (inFlight.current) return;
@@ -251,11 +271,12 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
       <Dialog open={mode !== null} onOpenChange={(open) => { if (!open) requestClose(); }}>
         <DialogContent
           className="sm:max-w-lg"
+          showCloseButton={!draft.busy}
           onEscapeKeyDown={(event) => { if (draft.busy) event.preventDefault(); }}
 
           onCloseAutoFocus={(event) => { event.preventDefault(); editorTrigger.current?.focus(); }}
         >
-          <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+          <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <DialogHeader>
               <DialogTitle>
                 {mode === "import" ? "Import private key" : "Generate Ed25519 key"}
@@ -264,7 +285,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
                 {mode === "import" ? "Copy a private key into this device’s vault. The source key stays in place." : "Create an Ed25519 key in this device’s vault. It stays here until you choose to sync it."}
               </DialogDescription>
             </DialogHeader>
-            <fieldset disabled={draft.busy} className="space-y-4">
+            <TaskDialogBody><fieldset disabled={draft.busy} className="space-y-4">
               <RecordField label="Key name">
                 <Input
                   ref={nameInput}
@@ -274,24 +295,16 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
                   onChange={(event) => update({ name: event.target.value })}
                 />
               </RecordField>
-              {mode === "import" && <RecordField label="Private key">
-                <Textarea
-                  value={draft.privateText}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="min-h-40 max-h-64 font-mono text-xs"
-                  onChange={(event) => update({ privateText: event.target.value })}
-                />
-              </RecordField>}
+              {mode === "import" && <KeyImportFields draft={draft} update={update} choose={chooseFile} />}
               {draft.error && <p role="alert" className="app-task-error">
                 {draft.error}
               </p>}
-            </fieldset>
+            </fieldset></TaskDialogBody>
             <DialogFooter>
               <Button type="button" variant="outline" disabled={draft.busy} onClick={requestClose}>Cancel</Button>
               <Button
                 type="submit"
-                disabled={draft.busy || !isValidSlotName(draft.name) || (mode === "import" && !draft.privateText.trim())}
+                disabled={draft.busy || !isValidSlotName(draft.name) || (mode === "import" && !hasKeyImportSource(draft))}
               >
                 {draft.busy ? "Working…" : mode === "import" ? "Import key" : "Generate"}
               </Button>
@@ -309,7 +322,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
         >
           <AlertDialogHeader>
             <AlertDialogTitle>Discard key draft?</AlertDialogTitle>
-            <AlertDialogDescription>Your unsaved key name and private key input will be cleared.</AlertDialogDescription>
+            <AlertDialogDescription>Your unsaved key name, file selection and private key input will be cleared. The source file stays in place.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Keep editing</AlertDialogCancel>

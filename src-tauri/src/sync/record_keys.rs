@@ -65,6 +65,25 @@ pub fn import_local(
         public,
     })
 }
+/// An explicitly chosen file is copied into the Local vault. Its private bytes stay in Rust;
+/// the source is never changed, and the same format and publication checks as Paste apply.
+pub fn import_local_file(
+    env: &SyncEnv,
+    name: &str,
+    path: &std::path::Path,
+) -> Result<LocalKeyReceipt, AppError> {
+    if !crate::sync::slot_rules::valid_slot_name(name) {
+        return Err(AppError::Other("local key name is not valid".into()));
+    }
+    let bytes = super::record_import::bounded_read(
+        path,
+        super::record_import::MAX_PRIVATE_SOURCE_BYTES,
+    )?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        AppError::Other("selected file is not readable OpenSSH private key material".into())
+    })?;
+    import_local(env, name, Zeroizing::new(text.to_owned()), EntryOrigin::Imported)
+}
 /// Generation stays in memory; the normal explicit Local publication path stores the result.
 pub fn generate_local(
     env: &SyncEnv,

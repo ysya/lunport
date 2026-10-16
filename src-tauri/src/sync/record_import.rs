@@ -310,7 +310,7 @@ fn is_vault_account(account: &str) -> bool {
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             })
 }
-fn bounded_read(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>, AppError> {
+pub(super) fn bounded_read(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if !path.is_absolute() {
         return Err(failure("import source must be an explicit absolute path"));
     }

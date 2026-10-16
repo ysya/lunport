@@ -9,6 +9,7 @@ import {
   submitImportConsent,
   submitKeyDraft,
   resumeImport,
+  type KeyDraft,
 } from "./panel-actions";
 import { importPreview, recordOverview, recordsStatus } from "./fixtures";
 afterEach(() => vi.unstubAllGlobals());
@@ -30,9 +31,10 @@ describe("secret form boundary", () => {
     const calls = stubBackend(async () =>
       recordOverview({ generation: "9007199254740994" }),
     );
-    let state = {
+    let state: KeyDraft = {
       ...clearKeyDraft(),
       name: "work",
+      source: "paste" as const,
       privateText: "PRIVATE fixture text",
     };
     const update = (patch: Partial<typeof state>) => {
@@ -54,9 +56,10 @@ describe("secret form boundary", () => {
     stubBackend(async () => {
       throw "PRIVATE fixture text could not parse";
     });
-    let state = {
+    let state: KeyDraft = {
       ...clearKeyDraft(),
       name: "work",
+      source: "paste" as const,
       privateText: "PRIVATE fixture text",
     };
     const update = (patch: Partial<typeof state>) => {
@@ -178,6 +181,32 @@ describe("secret form boundary", () => {
     };
     expect(await submitKeyDraft(cache, state, update, true)).toBe(true);
     expect(calls).toEqual([["records_key_generate", { name: "new_key" }]]);
+  });
+  it("imports the selected file by path, ignores inactive pasted text and clears both drafts on success", async () => {
+    const cache = client();
+    const calls = stubBackend(async () => recordOverview());
+    let state: KeyDraft = { ...clearKeyDraft(), name: "work", path: "/fixture/id_work", privateText: "INACTIVE_PRIVATE_SENTINEL" };
+    const update = (patch: Partial<typeof state>) => { state = { ...state, ...patch }; };
+    expect(await submitKeyDraft(cache, state, update)).toBe(true);
+    expect(calls).toEqual([["records_key_import_file", { name: "work", path: "/fixture/id_work" }]]);
+    expect(state).toMatchObject({ privateText: "", path: null, name: "", busy: false });
+    expect(cache.getMutationCache().getAll()).toEqual([]);
+    expect(cacheText(cache)).not.toContain("INACTIVE_PRIVATE_SENTINEL");
+    expect(cacheText(cache)).not.toContain("/fixture/id_work");
+  });
+  it("requires the active source and keeps a failed file selection without echoing backend details", async () => {
+    const cache = client();
+    const calls = stubBackend(async () => { throw "PRIVATE_SENTINEL file read failed"; });
+    let state = { ...clearKeyDraft(), name: "work", privateText: "inactive pasted text" };
+    const update = (patch: Partial<typeof state>) => { state = { ...state, ...patch }; };
+    expect(await submitKeyDraft(cache, state, update)).toBe(false);
+    expect(calls).toEqual([]);
+    state.path = "/fixture/id_work";
+    expect(await submitKeyDraft(cache, state, update)).toBe(false);
+    expect(state.path).toBe("/fixture/id_work");
+    expect(state.busy).toBe(false);
+    expect(state.error).not.toContain("PRIVATE_SENTINEL");
+    expect(cacheText(cache)).not.toContain("PRIVATE_SENTINEL");
   });
 });
 describe("reviewed file import", () => {
