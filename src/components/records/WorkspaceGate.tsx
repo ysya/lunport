@@ -40,7 +40,7 @@ export function WorkspaceGate({
   return (
     <div className="app-shell flex h-screen items-center justify-center p-8">
       <div className="max-w-md space-y-4 text-center">
-        <h1 className="text-xl font-semibold">
+        <h1 className="app-inspector-title">
           {paused
             ? "Your existing workspace"
             : status || error

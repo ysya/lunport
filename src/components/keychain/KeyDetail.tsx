@@ -108,7 +108,7 @@ export function SlotKeyDetailView({
   return (
     <div className="space-y-5">
       <header className="space-y-2">
-        <h2 className="truncate font-mono text-lg font-semibold">{revealHidden(slot.name)}</h2>
+        <h2 className="app-inspector-title">{revealHidden(slot.name)}</h2>
         <div className="flex flex-wrap items-center gap-1.5">
           {slotBadges(slot).map((b) => (
             <Badge key={b.label} variant="outline" className={BADGE_CLASS[b.tone]}>
@@ -174,7 +174,7 @@ export function FileKeyDetailView({
   return (
     <div className="space-y-5">
       <header className="space-y-2">
-        <h2 className="truncate font-mono text-lg font-semibold">{revealHidden(file.name)}</h2>
+        <h2 className="app-inspector-title">{revealHidden(file.name)}</h2>
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant="outline">
             {file.key_type}

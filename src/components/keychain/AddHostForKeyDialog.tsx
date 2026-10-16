@@ -1,10 +1,11 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useMemo, useState } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import type { HostFieldChange } from "@/bindings/HostFieldChange";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -64,6 +65,7 @@ export function AddHostForKeyView({
         <DialogTitle>{`Add a host for ${revealHidden(target.name)}`}</DialogTitle>
         <DialogDescription>{`The new host uses this key: IdentityFile ${revealHidden(target.value)}`}</DialogDescription>
       </DialogHeader>
+      <TaskDialogBody>
       <div className="space-y-3">
         <div className="space-y-1.5">
           <Label htmlFor="key-host-alias">Host</Label>
@@ -94,6 +96,7 @@ export function AddHostForKeyView({
           </Select>
         </div>
       </div>
+      </TaskDialogBody>
       <DialogFooter>
         <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>
           Cancel

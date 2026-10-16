@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
@@ -10,7 +11,7 @@ import { revealHidden } from "@/lib/sync-approvals";
 import { McpAttribution } from "./McpAttribution";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+  Dialog,  DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 
 export type McpApprovalCardViewProps = {
@@ -38,7 +39,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
             : "SSHelter will run this command once. Review the complete command and resolved target; the MCP client cannot approve it."}
         </DialogDescription>
       </DialogHeader>
-      <div className="min-h-0 space-y-3 overflow-y-auto break-all">
+      <TaskDialogBody className="break-all">
         <div className="space-y-1 rounded-lg border bg-muted/30 px-3 py-2 text-xs">
           <p>Host: {revealHidden(request.alias)} · {proposal ? "New record · AI access remains off" : `ID: ${request.host_id ?? "Legacy alias"}`}</p>
           <p>Resolved: {endpoint}</p>
@@ -56,7 +57,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
           </dl>
         ) : <div className="space-y-1.5">
           <p className="text-xs font-medium text-muted-foreground">Remote command</p>
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-zinc-950 p-3 font-mono text-xs leading-relaxed text-zinc-100">
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/40 p-3 font-mono text-xs leading-relaxed text-foreground">
             {request.command}
           </pre>
         </div>}
@@ -64,7 +65,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
           {proposal ? "Only public connection information is saved. Passwords and private keys are not accepted. Requests expire after 120 seconds; changed settings require fresh approval." : "Review pipes, redirects and nested shell syntax. Requests expire after 120 seconds; changed targets require fresh approval."}
         </p>
         {expired && <p role="alert" className="text-xs text-destructive">This request expired. Ask the client to start a fresh request.</p>}
-      </div>
+      </TaskDialogBody>
       <DialogFooter>
         <Button autoFocus ref={deny} variant="outline" disabled={busy} onClick={() => onAnswer(false)}>Deny</Button>
         <Button disabled={busy || !armed || expired} onClick={() => onAnswer(true)}>{busy ? "Sending…" : proposal ? "Add host" : "Allow once"}</Button>

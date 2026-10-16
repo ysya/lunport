@@ -44,10 +44,12 @@ const props = (overrides: Partial<Props> = {}): Props => ({
 const list = (overrides: Partial<Props> = {}) => renderToStaticMarkup(KeychainListView(props(overrides)));
 
 describe("the Keychain's list", () => {
-  it("lists the keys in SSHelter with their badges, and the other key files once they are opened", () => {
+  it("lists vault keys and keeps other key files non-interactive until opened", () => {
     const t = text(list());
     for (const part of ["In SSHelter", "id_mac", "Synced", "ssh-ed25519", "Other key files in ~/.ssh"]) expect(t).toContain(part);
-    expect(t).not.toContain("id_ed25519");
+    const closedGroup = list().match(/<div(?=[^>]*id="legacy-key-files")[^>]*>/)?.[0] ?? "";
+    expect(closedGroup).toContain('inert=""');
+    expect(closedGroup).toContain('aria-hidden="true"');
     expect(text(list({ filesOpen: true }))).toContain("id_ed25519");
   });
 

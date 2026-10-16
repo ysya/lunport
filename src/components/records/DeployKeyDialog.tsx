@@ -1,6 +1,8 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
+import { WorkflowSteps } from "@/components/app/Workflow";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cancelRecordDeploy, confirmRecordDeploy, previewRecordDeploy, type RecordDeployPreview, type RecordDeployResult, type RecordOverview } from "@/lib/records";
 import { deploymentMessage } from "@/lib/records-deploy";
 import { revealHidden } from "@/lib/sync-approvals";
@@ -77,12 +79,12 @@ export function RecordsDeployContent({ overview, hostId, preview, authorized, ph
 }) {
   const running = phase === "running" || phase === "canceling";
   const busy = phase !== "idle";
-  return <div className="flex min-h-0 max-h-[calc(100dvh-4rem)] flex-col gap-4 overflow-hidden">
+  return <div className="flex min-h-0 flex-col overflow-hidden">
       <DialogHeader className="shrink-0">
         <DialogTitle>Deploy public key</DialogTitle>
         <DialogDescription>Install a public key in a saved host's remote account. The account must have a POSIX shell and standard POSIX utilities. Remote Windows installation is unsupported; Windows clients can deploy to POSIX hosts.</DialogDescription>
       </DialogHeader>
-      <section aria-label="Deployment details" className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+      <TaskDialogBody aria-label="Deployment details"><WorkflowSteps steps={["Target", "Review", "Result"]} current={result ? 2 : preview ? 1 : 0} complete={!!result} />
       <RecordField label="Saved target">
         <select className={selectClass} value={hostId} disabled={busy} onChange={(event) => onHostChange(event.target.value)}>
           <option value="">Choose a saved host</option>
@@ -98,8 +100,8 @@ export function RecordsDeployContent({ overview, hostId, preview, authorized, ph
         <div><p className="text-xs text-muted-foreground">Connection route</p><ol className="list-decimal space-y-1 pl-5 text-xs">{preview.route.map((hop, i) => <li className="break-all" key={i}>{revealHidden(hop)}</li>)}</ol></div>
         <p className="text-xs text-muted-foreground">Writes only this public key to ~/.ssh/authorized_keys. Existing entries and key restrictions are preserved. Saved host authentication settings and AI Access permissions remain unchanged.</p>
       </section>}
-      </section>
-      <footer aria-label="Deployment actions" className="shrink-0 space-y-3 border-t pt-3">
+      </TaskDialogBody>
+      <footer aria-label="Deployment actions" className="app-deploy-footer shrink-0 space-y-3 border-t px-6 py-4">
       {preview && !result && !error && <label className="flex items-start gap-2 text-sm">
         <input type="checkbox" className="mt-1" checked={authorized} disabled={busy} onChange={(event) => onAuthorize(event.target.checked)} />
         <span>I am authorized to install this public key on the account and destination shown above.</span>

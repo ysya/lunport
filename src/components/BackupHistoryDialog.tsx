@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useMemo, useState } from "react";
 import { History } from "lucide-react";
 import { toast } from "sonner";
@@ -10,7 +11,8 @@ import { relativeTime, sortBackupsByNewest } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogContent,
+  DialogClose,
+  DialogFooter,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -37,7 +39,7 @@ import {
 export function BackupHistoryDialog() {
   const [open, setOpen] = useState(false);
   // Lazy: only list backups once the dialog is open.
-  const { data, isLoading, isFetching } = useBackups({ enabled: open });
+  const { data, isLoading, isError, refetch } = useBackups({ enabled: open });
   const restore = useRestoreBackup();
 
   const backups = useMemo(() => sortBackupsByNewest(data ?? []), [data]);
@@ -80,17 +82,18 @@ export function BackupHistoryDialog() {
             Snapshots taken before edits. Restoring overwrites the live file.
           </DialogDescription>
         </DialogHeader>
+        <TaskDialogBody>
 
-        {isLoading || isFetching ? (
+        {isLoading ? (
           <p className="py-6 text-center text-sm text-muted-foreground select-none">
             Loading backups…
           </p>
-        ) : backups.length === 0 ? (
+        ) : isError ? (<div className="app-task-state" role="alert"><p>Could not read backups.</p><Button variant="outline" size="sm" onClick={() => void refetch()}>Retry</Button></div>) : backups.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground select-none">
             No backups yet.
           </p>
         ) : (
-          <div className="-mx-1 max-h-[60vh] overflow-y-auto px-1">
+          <div className="-mx-1 overflow-y-auto px-1">
             <div className="settings-group">
               {backups.map((b, i) => (
                 <BackupRow
@@ -103,6 +106,8 @@ export function BackupHistoryDialog() {
             </div>
           </div>
         )}
+              </TaskDialogBody>
+        <DialogFooter><DialogClose asChild><Button variant="outline">Close</Button></DialogClose></DialogFooter>
       </DialogContent>
     </Dialog>
   );

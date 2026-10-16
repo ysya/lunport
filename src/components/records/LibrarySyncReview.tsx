@@ -1,7 +1,8 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import type { LibrarySyncPreview, LibraryRename } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { RecordField } from "./form";
@@ -26,7 +27,7 @@ export function LibrarySyncReview({ preview, renames, setRenames, busy, error, c
   }, [busy]);
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !busy) cancel(); }}>
-      <DialogContent ref={content} className="library-sync-review sm:max-w-xl" showCloseButton={false}
+      <DialogContent ref={content} className="sm:max-w-xl" showCloseButton={false}
         onOpenAutoFocus={(event) => {
           const input = content.current?.querySelector<HTMLInputElement>("input:not(:disabled)");
           if (input) { event.preventDefault(); input.focus(); focused.current = true; }
@@ -41,7 +42,7 @@ export function LibrarySyncReview({ preview, renames, setRenames, busy, error, c
               : "The latest library has no name conflicts. You can include the records now."}
           </DialogDescription>
         </DialogHeader>
-        <div className="library-sync-review-body">
+        <TaskDialogBody>
           <p className="text-sm text-muted-foreground">
             {preview.local_hosts} hosts · {preview.local_groups} Groups to include.
             Synced records stay unchanged. Host aliases are also used by CLI Connect.
@@ -59,7 +60,7 @@ export function LibrarySyncReview({ preview, renames, setRenames, busy, error, c
             ))}
           </fieldset>
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        </div>
+        </TaskDialogBody>
         <DialogFooter>
           {error && <Button variant="outline" disabled={busy} onClick={refresh}>Refresh review</Button>}
           <Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button>

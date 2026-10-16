@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useMemo, useState } from "react";
 import { ShieldEllipsis, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -11,7 +12,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
-  DialogContent,
+  DialogClose,
+  DialogFooter,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -44,7 +46,7 @@ export function KnownHostsDialog() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   // Lazy: only read known_hosts while the dialog is open.
-  const { data, isLoading, isFetching } = useKnownHosts({ enabled: open });
+  const { data, isLoading, isError, refetch } = useKnownHosts({ enabled: open });
   const remove = useRemoveKnownHosts();
 
   const entries = data ?? [];
@@ -102,6 +104,7 @@ export function KnownHostsDialog() {
             entry when a server was reinstalled and its key changed.
           </DialogDescription>
         </DialogHeader>
+        <TaskDialogBody>
 
         <Input
           value={query}
@@ -114,11 +117,11 @@ export function KnownHostsDialog() {
           className="h-8 font-mono text-sm"
         />
 
-        {isLoading || isFetching ? (
+        {isLoading ? (
           <p className="py-6 text-center text-sm text-muted-foreground select-none">
             Reading known_hosts…
           </p>
-        ) : entries.length === 0 ? (
+        ) : isError ? (<div className="app-task-state" role="alert"><p>Could not read known hosts.</p><Button variant="outline" size="sm" onClick={() => void refetch()}>Retry</Button></div>) : entries.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground select-none">
             No entries — <span className="font-mono">known_hosts</span> is empty or missing.
           </p>
@@ -127,7 +130,7 @@ export function KnownHostsDialog() {
             No entries match “{query}”.
           </p>
         ) : (
-          <div className="-mx-1 max-h-[52vh] overflow-y-auto px-1">
+          <div className="-mx-1 overflow-y-auto px-1">
             <div className="settings-group">
               {filtered.map((e) => (
                 <KnownHostRow
@@ -140,6 +143,8 @@ export function KnownHostsDialog() {
             </div>
           </div>
         )}
+              </TaskDialogBody>
+        <DialogFooter><DialogClose asChild><Button variant="outline">Close</Button></DialogClose></DialogFooter>
       </DialogContent>
     </Dialog>
   );

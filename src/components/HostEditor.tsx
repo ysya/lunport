@@ -1,3 +1,5 @@
+import { ActionBar } from "@/components/app/Workflow";
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   useForm,
@@ -102,7 +104,7 @@ import {
 import {
   Dialog,
   DialogClose,
-  DialogContent,
+
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -336,7 +338,7 @@ function HostEditorForm({
       {/*
        * Editor header — alias as the host identity with patterns/source below.
        */}
-      <div className="group flex items-start justify-between gap-3 select-none">
+      <div className="app-page-header group select-none">
         <HostHeaderTitle detail={detail} />
         <HostActions detail={detail} removing={removing} onRemove={onRemove} />
       </div>
@@ -487,13 +489,7 @@ function HostEditorForm({
 
       {/* Sticky save bar: appears only when the option form is dirty. */}
       {isDirty && (
-        <div className="animate-save-bar fixed inset-x-0 bottom-0 left-64 z-30 border-t bg-background/85 backdrop-blur-md">
-          <div className="flex items-center justify-between gap-3 px-6 py-2.5 select-none">
-            <span className="flex items-center gap-2 text-sm text-muted-foreground">
-              <span className="size-1.5 rounded-full bg-primary" aria-hidden />
-              Unsaved changes
-            </span>
-            <div className="flex items-center gap-2">
+        <ActionBar className="app-legacy-save-bar animate-save-bar" hint="Unsaved changes">
               <Button
                 type="button"
                 variant="ghost"
@@ -507,9 +503,7 @@ function HostEditorForm({
               <Button type="submit" size="sm" className="h-7" form="host-editor-form" disabled={!isDirty || saving}>
                 <Save className="size-4" /> {saving ? "Saving…" : "Save"}
               </Button>
-            </div>
-          </div>
-        </div>
+        </ActionBar>
       )}
     </div>
   );
@@ -759,6 +753,7 @@ function HostActions({
                 the alias changes.
               </DialogDescription>
             </DialogHeader>
+      <TaskDialogBody>
             <div className="space-y-1.5 py-4">
               <Label htmlFor="duplicate-alias">New alias</Label>
               <Input
@@ -769,7 +764,8 @@ function HostActions({
                 className="font-mono"
               />
             </div>
-            <DialogFooter>
+            </TaskDialogBody>
+      <DialogFooter>
               <DialogClose asChild>
                 <Button type="button" variant="outline">
                   Cancel
@@ -889,7 +885,7 @@ function HostHeaderTitle({ detail }: { detail: HostDetail }) {
   return (
     <div className="min-w-0 space-y-1">
       <div className="flex items-center gap-0.5">
-        <h2 className="truncate text-[0.9375rem] font-semibold tracking-tight">
+        <h2 className="app-inspector-title">
           {detail.alias}
         </h2>
         <Button

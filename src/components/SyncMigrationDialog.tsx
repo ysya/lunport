@@ -1,3 +1,4 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -31,7 +32,7 @@ import { useUiStore } from "@/stores/ui";
 import { basename } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ShadowFixDialog } from "@/components/ShadowFixDialog";
 
@@ -202,6 +203,7 @@ function MigrationFlow({ requested, setBusy, onClose }: { requested: string | nu
           blocks (like <span className="font-mono">Host *</span>) earlier in that file.
         </DialogDescription>
       </DialogHeader>
+      <TaskDialogBody>
 
       <div className="flex items-center gap-2 text-sm">
         <span className="shrink-0 text-muted-foreground">Move into</span>
@@ -323,6 +325,7 @@ function MigrationFlow({ requested, setBusy, onClose }: { requested: string | nu
 
       <ShadowFixDialog fix={fix} onClose={() => setFix(null)} />
 
+      </TaskDialogBody>
       <DialogFooter>
         <Button type="button" variant="outline" disabled={pending} onClick={onClose}>
           Close
