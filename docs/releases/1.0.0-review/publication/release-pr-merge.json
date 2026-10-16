@@ -1,0 +1,17 @@
+{
+  "candidateCommit": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+  "returncode": 0,
+  "stdout": "",
+  "stderr": "",
+  "attemptedAt": "2026-10-16T17:19:11.566002+00:00",
+  "sourceCommit": "be39161f970a0c93dac1eb71fd6d89c6f678e72b",
+  "sourceTree": "adf45b51822a6dac816aa9aa524ac33b78a68785",
+  "mergedPr": {
+    "mergeCommit": {
+      "oid": "be39161f970a0c93dac1eb71fd6d89c6f678e72b"
+    },
+    "mergedAt": "2026-10-16T17:19:10Z",
+    "state": "MERGED",
+    "url": "https://github.com/ysya/sshelter/pull/19"
+  }
+}

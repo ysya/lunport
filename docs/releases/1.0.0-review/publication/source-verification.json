@@ -1,0 +1,27 @@
+{
+  "sourceCommit": "be39161f970a0c93dac1eb71fd6d89c6f678e72b",
+  "sourceTree": "adf45b51822a6dac816aa9aa524ac33b78a68785",
+  "candidateCommit": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+  "candidateTree": "adf45b51822a6dac816aa9aa524ac33b78a68785",
+  "releaseTreeMatchesTestedCandidate": true,
+  "requiredChecks": [
+    {
+      "name": "engine-ci",
+      "runId": 38936233129,
+      "headSha": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+      "conclusion": "success"
+    },
+    {
+      "name": "windows-ci",
+      "runId": 38936232958,
+      "headSha": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+      "conclusion": "success"
+    },
+    {
+      "name": "windows-bundle-ci",
+      "runId": 38936309701,
+      "headSha": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+      "conclusion": "success"
+    }
+  ]
+}

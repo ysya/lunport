@@ -1,0 +1,9 @@
+{
+  "branch": "codex/stable100-native-tray-diagnostic",
+  "localCandidate": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+  "diagnosticCommit": "444b560bd35d6c63e796d35e39e37f9b4d4315a3",
+  "runId": 38935078503,
+  "url": "https://github.com/ysya/sshelter/actions/runs/38935078503",
+  "purpose": "30 native tray processes with joined helper teardown; product code unchanged",
+  "publishesNothing": true
+}

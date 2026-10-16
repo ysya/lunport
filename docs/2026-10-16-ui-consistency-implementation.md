@@ -51,7 +51,7 @@
 
 ## 開發預覽
 
-啟動既有 Vite 開發伺服器後，開啟 `/dev-preview.html`。入口使用真實的 RecordsWorkspace 與假資料 adapter，可操作側欄、搜尋、主機與金鑰詳情、設定、假資料金鑰產生、匯入及同步建立流程。檔案選擇只回傳 `/fixture/config`，同步代碼明確標示 DEMO ONLY。
+啟動既有 Vite 開發伺服器後，開啟 `/dev-preview.html`。入口使用真實的 RecordsWorkspace 與假資料 adapter，可操作側欄、搜尋、主機與金鑰詳情、設定、假資料金鑰產生、匯入及同步建立流程。SSH config 選檔只回傳 `/fixture/config`，私鑰選檔只回傳 `/fixture/id_work`，均不讀取真實檔案；同步代碼明確標示 DEMO ONLY。
 
 額外情境：`?scenario=sync-review`、`sync-pending`、`hostkey`、`hostkey-changed`、`authentication`、`authentication-expired`、`approval`。獨立視窗情境只渲染正式元件及示範問題，回答不會呼叫 native backend。
 
@@ -78,6 +78,13 @@
 - 第三批 macOS Development bundle 可啟動，實際 WebView 的搜尋跳轉、分類切換、15／17px、System／Reduced、選單卸載、關閉後返回 Settings 焦點均通過；偏好還原為 System theme／15px／System motion，正常退出。未在原生環境切入 Legacy 或執行遠端操作。
 - [第三批驗收收據與截圖](ui-review/2026-10-16-settings-legacy/validation.json)，[macOS 原生設定畫面](ui-review/2026-10-16-settings-legacy/macos-native-local-data.jpg)。
 - 第三批已發布為 [Beta 15](https://github.com/ysya/sshelter/releases/tag/v1.0.0-15)。固定來源的 macOS／Linux／Windows CI 及六個發布工作全部通過；9 份更新套件的 SHA-256、updater 簽章及竄改拒絕檢查成功，Beta 通道已更新，Stable 維持 `0.16.0`。完整產物與驗證限制見[Beta 15 驗證](releases/1.0.0-15-validation.md)。
+
+## 正式版 1.0.0：金鑰選檔
+
+- Records 的 Import private key 新增 From a file／Paste key，預設系統選檔，支援無副檔名及既有支援的加密 OpenSSH 私鑰；名稱可由檔名帶入。只提交目前來源，保留取消、草稿、busy、失敗重試及完成焦點。
+- 金鑰新增／匯入接上 Task dialog 的固定標頭、單一捲動內容與操作列。Rust 複製到本機 vault，原檔保持不變；同步仍須明確開啟。
+- 本機 TypeScript、production build、84 檔／1,071 案例與 19 項 record-key Rust 測試通過。macOS Development 實際系統選檔、取消、無副檔名匯入、來源 hash 不變、草稿清除與正常退出均通過。
+- [Stable 1.0.0](https://github.com/ysya/sshelter/releases/tag/v1.0.0) 已發布。固定候選的前端／macOS／Linux／Windows CI、NSIS／MSI 檢查及六個發布工作全部成功；9 份完整更新包的 SHA-256、簽章與竄改拒絕檢查通過，Stable／Beta 通道均更新到 1.0.0。見[正式版驗證與限制](releases/1.0.0-validation.md)。
 
 ## 後續工作
 

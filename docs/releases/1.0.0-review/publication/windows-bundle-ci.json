@@ -1,0 +1,163 @@
+{
+  "conclusion": "success",
+  "headSha": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+  "jobs": [
+    {
+      "completedAt": "2026-10-16T17:11:04Z",
+      "conclusion": "success",
+      "databaseId": 117092591846,
+      "name": "installers",
+      "startedAt": "2026-10-16T17:00:18Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T17:00:21Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T17:00:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:00:27Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T17:00:21Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:00:29Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 3,
+          "startedAt": "2026-10-16T17:00:27Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:00:45Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 4,
+          "startedAt": "2026-10-16T17:00:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:01:16Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 5,
+          "startedAt": "2026-10-16T17:00:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:01:48Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 6,
+          "startedAt": "2026-10-16T17:01:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:01:55Z",
+          "conclusion": "success",
+          "name": "Build the console helper (Windows)",
+          "number": 7,
+          "startedAt": "2026-10-16T17:01:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:02:03Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 8,
+          "startedAt": "2026-10-16T17:01:55Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:07:02Z",
+          "conclusion": "success",
+          "name": "Build the installers",
+          "number": 9,
+          "startedAt": "2026-10-16T17:02:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:07:03Z",
+          "conclusion": "success",
+          "name": "The NSIS installer holds sshelter-cli.exe next to sshelter.exe",
+          "number": 10,
+          "startedAt": "2026-10-16T17:07:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:07:04Z",
+          "conclusion": "success",
+          "name": "The MSI holds sshelter-cli.exe next to sshelter.exe",
+          "number": 11,
+          "startedAt": "2026-10-16T17:07:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:07:13Z",
+          "conclusion": "success",
+          "name": "The installers' two programs run sshelter connect",
+          "number": 12,
+          "startedAt": "2026-10-16T17:07:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:11:01Z",
+          "conclusion": "success",
+          "name": "The installers' two programs in a console of their own",
+          "number": 13,
+          "startedAt": "2026-10-16T17:07:13Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:11:01Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 23,
+          "startedAt": "2026-10-16T17:11:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:11:01Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 24,
+          "startedAt": "2026-10-16T17:11:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:11:01Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 25,
+          "startedAt": "2026-10-16T17:11:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:11:04Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 26,
+          "startedAt": "2026-10-16T17:11:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T17:11:04Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 27,
+          "startedAt": "2026-10-16T17:11:04Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/sshelter/actions/runs/38936309701/job/117092591846"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/ysya/sshelter/actions/runs/38936309701"
+}

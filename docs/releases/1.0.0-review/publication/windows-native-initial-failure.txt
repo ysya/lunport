@@ -1,0 +1,3 @@
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:28:49.1295669Z running 1 test
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:28:51.5804588Z   process didn't exit successfully: `D:\a\sshelter\sshelter\src-tauri\target\debug\deps\sshelter_lib-34283a22b40154ba.exe --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture` (exit code: 0xc000001d, STATUS_ILLEGAL_INSTRUCTION)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:28:51.6914734Z ##[error]Process completed with exit code 1.

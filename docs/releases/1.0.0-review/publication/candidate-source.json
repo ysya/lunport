@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "candidateCommit": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+  "candidateTree": "adf45b51822a6dac816aa9aa524ac33b78a68785",
+  "integrationCommit": "5247798db7fa20795ecdfbba6625a670225cfba7",
+  "keyFileRuntimeCommit": "3efe6046fe78750e137bd57e20854ccfee3d505a",
+  "candidateChanges": [
+    ".github/workflows/test-windows.yml",
+    ".release-please-manifest.json",
+    "CHANGELOG.md",
+    "package.json",
+    "scripts/validate-windows-startup.ps1",
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/src/sync/engine_windows_tests.rs",
+    "src-tauri/tauri.conf.json"
+  ],
+  "validatedKeyFileSourceFilesStillMatch": true,
+  "cargoLockedMetadataVersion": "1.0.0",
+  "initialVersionedCandidate": "2618736f6ab2f4080e120287356b4760f8aafa91",
+  "changesAfterInitialCandidate": [
+    ".github/workflows/test-windows.yml",
+    "scripts/validate-windows-startup.ps1",
+    "src-tauri/src/sync/engine_windows_tests.rs"
+  ],
+  "productCodeUnchangedAfterInitialCandidate": true,
+  "nativeWorkerFixProofRun": 38935078503
+}

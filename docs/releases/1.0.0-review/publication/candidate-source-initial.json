@@ -1,0 +1,17 @@
+{
+  "version": "1.0.0",
+  "candidateCommit": "2618736f6ab2f4080e120287356b4760f8aafa91",
+  "candidateTree": "3412d184e8a7a25399b08452143f71ffc9c50ebf",
+  "integrationCommit": "5247798db7fa20795ecdfbba6625a670225cfba7",
+  "keyFileRuntimeCommit": "3efe6046fe78750e137bd57e20854ccfee3d505a",
+  "candidateChanges": [
+    ".release-please-manifest.json",
+    "CHANGELOG.md",
+    "package.json",
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/tauri.conf.json"
+  ],
+  "validatedKeyFileSourceFilesStillMatch": true,
+  "cargoLockedMetadataVersion": "1.0.0"
+}

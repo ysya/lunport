@@ -1,0 +1,9 @@
+{
+  "runId": 38935078503,
+  "diagnosticCommit": "444b560bd35d6c63e796d35e39e37f9b4d4315a3",
+  "localCandidate": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+  "nativeProcessesPassed": 30,
+  "joinedBeforeCleanup": 30,
+  "eventLoopsReturned": 30,
+  "productCodeChanged": false
+}

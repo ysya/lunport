@@ -1,0 +1,42 @@
+slots	Complete safe Rust suite	2026-10-16T17:08:23.6545363Z test result: ok. 2406 passed; 0 failed; 3 ignored; 0 measured; 9 filtered out; finished in 283.58s
+slots	Profile selection in the normal library	2026-10-16T17:09:47.5633282Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	Profile selection in the normal library	2026-10-16T17:10:47.7045681Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	Profile selection in the normal library	2026-10-16T17:11:46.9381585Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:13:00.8747401Z Native tray attempt 1/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:50.3005817Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:50.3063062Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.71s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:50.3253781Z Native tray attempt 2/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:53.7478993Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:53.7540683Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.52s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:53.7729565Z Native tray attempt 3/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:57.2285089Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:57.2344065Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.62s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:14:57.2498165Z Native tray attempt 4/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:00.5469471Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:00.5528361Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.52s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:00.5694384Z Native tray attempt 5/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:03.8570064Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:03.8628622Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.52s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:03.8789470Z Native tray attempt 6/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:07.1526749Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:07.1582882Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.50s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:07.1744067Z Native tray attempt 7/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:10.4622408Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:10.4683265Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.52s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:10.4843474Z Native tray attempt 8/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:13.8234433Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:13.8300513Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.55s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:13.8459904Z Native tray attempt 9/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:17.1354815Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:17.1412549Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.52s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:17.1575518Z Native tray attempt 10/10
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:20.8951645Z native tray stage: test helpers joined before cleanup
+slots	Synced library startup and concurrent native tray updates	2026-10-16T17:15:20.9016694Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.93s
+slots	Native crash leaves metadata without suppressing Windows Error Reporting	2026-10-16T17:15:22.2940571Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 0.05s
+slots	Actual Development GUI startup from a synced library	2026-10-16T17:16:42.4724577Z Actual Windows Development GUI: synced 17-host/Group fixture, WebView2 HWND, background status and normal shutdown passed. No credential fixture or production workspace was used.
+slots	The console helper's tests	2026-10-16T17:16:44.1822841Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	The console helper's tests	2026-10-16T17:16:44.1952166Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper's tests	2026-10-16T17:16:44.3584306Z test result: ok. 3 passed
+slots	The console helper's tests	2026-10-16T17:16:45.3969053Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper and sshelter.exe in a console of their own	2026-10-16T17:16:48.5605669Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 1.19s
+slots	The engine against the runner's OpenSSH server	2026-10-16T17:16:57.2642566Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 0.25s

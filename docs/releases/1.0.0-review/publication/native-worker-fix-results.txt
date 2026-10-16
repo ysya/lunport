@@ -1,0 +1,91 @@
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:51:54.7137923Z   Write-Output "Diagnostic native tray attempt $attempt/30"
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:51:55.0963972Z Diagnostic native tray attempt 1/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:54:21.9703572Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:54:21.9760976Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.36s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:54:22.0039589Z Diagnostic native tray attempt 2/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:20.3430140Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:20.3490029Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.47s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:20.3692838Z Diagnostic native tray attempt 3/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:24.4958991Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:24.5020388Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 3.25s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:24.5238577Z Diagnostic native tray attempt 4/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:27.7112434Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:27.7169269Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.36s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:27.7357626Z Diagnostic native tray attempt 5/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:30.8504423Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:30.8566344Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.29s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:30.8744614Z Diagnostic native tray attempt 6/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:34.0362368Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:34.0426986Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.31s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:34.0610739Z Diagnostic native tray attempt 7/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:37.2496589Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:37.2553541Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.37s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:37.2729657Z Diagnostic native tray attempt 8/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:40.4385233Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:40.4445775Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.33s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:40.4630429Z Diagnostic native tray attempt 9/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:43.6745808Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:43.6808598Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.40s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:43.6977579Z Diagnostic native tray attempt 10/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:47.0926807Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:47.0987732Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.59s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:47.1196992Z Diagnostic native tray attempt 11/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:50.3216405Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:50.3278010Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.30s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:50.3445373Z Diagnostic native tray attempt 12/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:53.4929606Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:53.4990551Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.35s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:53.5174631Z Diagnostic native tray attempt 13/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:56.6833470Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:56.6894868Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.35s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:56.7072616Z Diagnostic native tray attempt 14/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:59.9064362Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:59.9124741Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.31s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:56:59.9316196Z Diagnostic native tray attempt 15/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:03.1714010Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:03.1779125Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.40s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:03.1974925Z Diagnostic native tray attempt 16/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:06.3897738Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:06.3958212Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.36s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:06.4144080Z Diagnostic native tray attempt 17/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:09.6320773Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:09.6374772Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.38s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:09.6560183Z Diagnostic native tray attempt 18/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:13.6342546Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:13.6468442Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 3.12s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:13.6675360Z Diagnostic native tray attempt 19/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:25.7735431Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:25.7869814Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 11.25s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:25.8038613Z Diagnostic native tray attempt 20/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:29.7596149Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:29.7654385Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 3.13s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:29.7835824Z Diagnostic native tray attempt 21/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:33.6835889Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:33.6894085Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 3.09s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:33.7065513Z Diagnostic native tray attempt 22/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:36.7969369Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:36.8027014Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.28s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:36.8190822Z Diagnostic native tray attempt 23/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:39.9035543Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:39.9094934Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.28s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:39.9274174Z Diagnostic native tray attempt 24/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:42.9888683Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:42.9950609Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.27s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:43.0143815Z Diagnostic native tray attempt 25/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:46.1095120Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:46.1147779Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.31s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:46.1317541Z Diagnostic native tray attempt 26/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:49.2627949Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:49.2685871Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.33s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:49.2852559Z Diagnostic native tray attempt 27/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:52.4296090Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:52.4352767Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.34s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:52.4538422Z Diagnostic native tray attempt 28/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:55.5832679Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:55.5891423Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.31s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:55.6071543Z Diagnostic native tray attempt 29/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:58.7479758Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:58.7541726Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.34s
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:57:58.7726656Z Diagnostic native tray attempt 30/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:58:02.0778594Z native tray stage: test helpers joined before cleanup
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:58:02.0843161Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2417 filtered out; finished in 2.47s

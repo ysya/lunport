@@ -1,0 +1,49 @@
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:41:39.1912330Z Diagnostic native tray attempt 1/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:43:52.9842496Z native tray stage: exercise
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:43:55.4965977Z native tray stage: concurrent status and visibility complete
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:43:55.5361547Z native tray stage: renamed menu published
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:43:55.5368054Z native tray stage: exit requested (0)
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:43:55.5385515Z native tray stage: event loop returned
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:43:55.6267386Z Diagnostic native tray attempt 2/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:42.9096531Z native tray stage: exercise
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:44.6644630Z native tray stage: concurrent status and visibility complete
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:44.7096851Z native tray stage: renamed menu published
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:44.7103387Z native tray stage: exit requested (0)
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:44.7123869Z native tray stage: event loop returned
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:44.7356357Z Diagnostic native tray attempt 3/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:46.6651588Z native tray stage: exercise
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:48.4613968Z native tray stage: concurrent status and visibility complete
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:48.4789174Z native tray stage: renamed menu published
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:48.4793681Z native tray stage: exit requested (0)
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:48.4810511Z native tray stage: event loop returned
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:48.5036347Z Diagnostic native tray attempt 4/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:50.3714080Z native tray stage: exercise
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:52.1599326Z native tray stage: concurrent status and visibility complete
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:52.2007123Z native tray stage: renamed menu published
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:52.2014184Z native tray stage: exit requested (0)
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:52.2034594Z native tray stage: event loop returned
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:52.2296660Z Diagnostic native tray attempt 5/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:54.1528223Z native tray stage: exercise
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:55.8295395Z native tray stage: concurrent status and visibility complete
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:55.8453516Z native tray stage: renamed menu published
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:55.8459654Z native tray stage: exit requested (0)
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:55.8477306Z native tray stage: event loop returned
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:55.8700886Z Diagnostic native tray attempt 6/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:57.6095874Z native tray stage: exercise
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:59.4300556Z native tray stage: concurrent status and visibility complete
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:59.4703775Z native tray stage: renamed menu published
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:59.4706995Z native tray stage: exit requested (0)
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:59.4722580Z native tray stage: event loop returned
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:45:59.4940657Z Diagnostic native tray attempt 7/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:01.4418228Z native tray stage: exercise
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:03.2055051Z native tray stage: concurrent status and visibility complete
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:03.2277848Z native tray stage: renamed menu published
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:03.2285087Z native tray stage: exit requested (0)
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:03.2300312Z native tray stage: event loop returned
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:03.2529981Z Diagnostic native tray attempt 8/30
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:05.1268291Z native tray stage: exercise
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:06.7955373Z native tray stage: concurrent status and visibility complete
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:06.8142173Z native tray stage: renamed menu published
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:06.8148051Z native tray stage: exit requested (0)
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:06.8160509Z native tray stage: event loop returned
+slots	Repeat isolated native tray test and capture native-fault stacks	2026-10-16T16:46:07.0513079Z   process didn't exit successfully: `D:\a\sshelter\sshelter\src-tauri\target\debug\deps\sshelter_lib-34283a22b40154ba.exe --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture` (exit code: 0xc0000374, STATUS_HEAP_CORRUPTION)

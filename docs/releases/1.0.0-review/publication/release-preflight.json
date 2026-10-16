@@ -1,0 +1,91 @@
+{
+  "candidateCommit": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+  "candidateTree": "adf45b51822a6dac816aa9aa524ac33b78a68785",
+  "mainBeforeMerge": "5247798db7fa20795ecdfbba6625a670225cfba7",
+  "requiredChecks": [
+    {
+      "name": "engine-ci",
+      "runId": 38936233129,
+      "headSha": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+      "conclusion": "success"
+    },
+    {
+      "name": "windows-ci",
+      "runId": 38936232958,
+      "headSha": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+      "conclusion": "success"
+    },
+    {
+      "name": "windows-bundle-ci",
+      "runId": 38936309701,
+      "headSha": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+      "conclusion": "success"
+    }
+  ],
+  "releasePr": {
+    "baseRefOid": "5247798db7fa20795ecdfbba6625a670225cfba7",
+    "files": [
+      {
+        "path": ".github/workflows/test-windows.yml",
+        "additions": 6,
+        "deletions": 1,
+        "changeType": "MODIFIED"
+      },
+      {
+        "path": ".release-please-manifest.json",
+        "additions": 1,
+        "deletions": 1,
+        "changeType": "MODIFIED"
+      },
+      {
+        "path": "CHANGELOG.md",
+        "additions": 288,
+        "deletions": 0,
+        "changeType": "MODIFIED"
+      },
+      {
+        "path": "package.json",
+        "additions": 1,
+        "deletions": 1,
+        "changeType": "MODIFIED"
+      },
+      {
+        "path": "scripts/validate-windows-startup.ps1",
+        "additions": 16,
+        "deletions": 6,
+        "changeType": "MODIFIED"
+      },
+      {
+        "path": "src-tauri/Cargo.lock",
+        "additions": 1,
+        "deletions": 1,
+        "changeType": "MODIFIED"
+      },
+      {
+        "path": "src-tauri/Cargo.toml",
+        "additions": 1,
+        "deletions": 1,
+        "changeType": "MODIFIED"
+      },
+      {
+        "path": "src-tauri/src/sync/engine_windows_tests.rs",
+        "additions": 76,
+        "deletions": 3,
+        "changeType": "MODIFIED"
+      },
+      {
+        "path": "src-tauri/tauri.conf.json",
+        "additions": 1,
+        "deletions": 1,
+        "changeType": "MODIFIED"
+      }
+    ],
+    "headRefOid": "574101545432201fe4be309ff4464d0d9d0a7c1d",
+    "mergeStateStatus": "CLEAN",
+    "mergeable": "MERGEABLE",
+    "state": "OPEN",
+    "title": "chore(main): release 1.0.0",
+    "url": "https://github.com/ysya/sshelter/pull/19"
+  },
+  "verifiedAt": "2026-10-16T17:19:07.953696+00:00"
+}

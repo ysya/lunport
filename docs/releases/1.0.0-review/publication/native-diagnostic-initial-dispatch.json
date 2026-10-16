@@ -1,0 +1,9 @@
+{
+  "branch": "codex/stable100-native-tray-diagnostic",
+  "runtimeSource": "efe387dd6c5b0ddcd371183bcf93e7f3352ec5ae",
+  "diagnosticCommit": "73d1e3f75757b365612e9aa323e2f57c939ee050",
+  "runId": 38933753623,
+  "url": "https://github.com/ysya/sshelter/actions/runs/38933753623",
+  "onlyWorkflowChanged": true,
+  "publishesNothing": true
+}

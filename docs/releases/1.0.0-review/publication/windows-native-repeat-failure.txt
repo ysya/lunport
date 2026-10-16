@@ -1,0 +1,22 @@
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:16.8317181Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:19.0001069Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:19.0849000Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:19.0852341Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:19.0866642Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:22.4830477Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:24.3611221Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:24.3828022Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:24.3831343Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:24.3846591Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:26.3468615Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:28.6080017Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:28.6802471Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:28.6805575Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:28.6820751Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:31.8043950Z native tray stage: exercise
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:39.0285368Z native tray stage: concurrent status and visibility complete
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:39.3898967Z native tray stage: renamed menu published
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:39.3904030Z native tray stage: exit requested (0)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:39.3915865Z native tray stage: event loop returned
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:40.7487533Z   process didn't exit successfully: `D:\a\sshelter\sshelter\src-tauri\target\debug\deps\sshelter_lib-34283a22b40154ba.exe --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture` (exit code: 0xc0000374, STATUS_HEAP_CORRUPTION)
+slots	Synced library startup and concurrent native tray updates	2026-10-16T16:56:45.3680589Z      | native tray attempt 4 failed (exit -1073740940)
