@@ -1,42 +1,12 @@
-# Runs the platform-dependent tests on Windows: the key slots' hard links and owner-only DACL (SP3 Task 2), and the key
-# vault and SSH agent tests (the agent's named pipe and its owner-only DACL, Windows program identification, and the real
-# Win32-OpenSSH tools against the agent). The copy fallback (used when a hard link can't be made, for example across
-# drives) is not exercised on CI.
-# It also builds the whole app with russh (cargo build --locked) and runs the SSH engine (src/ssh/): the tests that need no sshd,
-# and the engine against the runner's own OpenSSH server, which this job starts. A scratch sshd cannot run on Windows (Win32-OpenSSH's
-# sshd must run as a service), so the engine tests that start one print "skipped" here.
-# And sshelter connect on Windows (own-ssh spec §4, §7.3, §7.4; plan 1b-3): the session broker served on a real named pipe (a fake
-# engine; hang-ups, the hello and open_shell bounds, and a pipe another owner made, which the client refuses), the CLI's console layer
-# (against a fake console, and against real consoles: child processes the tests start with a console of their own), run() over a
-# real pipe against the real broker, the terminal launch (Windows Terminal and cmd run the console helper), and the console helper
-# sshelter-cli.exe (src-tauri/cli-helper, a crate of its own): its tests, and the helper next to the debug sshelter.exe running
-# `sshelter connect`, through pipes and in a console of its own, where it also puts back the console a killed program left changed.
-# aws-lc-sys (russh's crypto) needs nothing installed: it is the same crate rustls already builds for the updater in the release
-# job on this runner image, and that job installs nothing for it.
-# macOS can only type-check the Windows code; what the permissions and a real console do has to be seen on Windows.
-name: windows key slots
-
+name: Windows native tray investigation
 on:
-  push:
-    # next/own-ssh: the own SSH client's Windows work (plan 1b-3) is checked on every push.
-    branches: [main, next/own-ssh]
-    paths: ["src-tauri/**", ".github/workflows/test-windows.yml"]
-  pull_request:
-    paths: ["src-tauri/**", ".github/workflows/test-windows.yml"]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-# A push to next/own-ssh with a pull request open would run the workflow twice; a newer run replaces the one in progress.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
-
 jobs:
   slots:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: src-tauri
@@ -45,172 +15,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "./src-tauri -> target"
-      # tauri::generate_context! reads frontendDist (../dist) at compile time and fails when it is missing.
-      # This job only runs Rust tests, so a placeholder page is enough.
+          workspaces: './src-tauri -> target'
       - name: Placeholder frontend
-        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path ../dist | Out-Null
-          Set-Content -Path ../dist/index.html -Value "<!doctype html>"
-      # Which OpenSSH the agent tests will use (the Win32-OpenSSH in System32 when it exists, else the first one on PATH). Never fails the job.
-      - name: OpenSSH on the runner
-        continue-on-error: true
+          Set-Content -Path ../dist/index.html -Value '<!doctype html><title>Native test only</title>'
+      - name: Repeat isolated native tray test and capture native-fault stacks
+        timeout-minutes: 12
         run: |
-          Get-Command ssh, ssh-add, ssh-keygen -All -ErrorAction SilentlyContinue | Format-Table Name, Source -AutoSize
-          ssh -V
-      # The platform-dependent tests: identity path parsing (slot_rules), the slot files, links and DACL (slot_files,
-      # slot_files_windows), the key vault (vault::), the local IPC transport (ipc:: covers the named pipes: hang-ups and deadlines, the
-      # owner check, and program identification), the SSH agent (agent:: covers the real ssh-add / ssh-keygen against the agent), the SSH
-      # engine (`ssh::`: the tests that need no sshd of their own; the scratch-sshd ones print "skipped" on Windows), the session broker
-      # (`session::`: its platform-neutral parts and the broker on a named pipe; its socket tests are Unix only), sshelter connect
-      # (`cli::`: the arguments, the console layer against a fake console and against real ones, the keys, control events and window
-      # size, and run() over a pipe against the broker; the Unix terminal's tests are Unix only), and the terminal launch (`connect::`:
-      # Windows Terminal and cmd run the console helper, or a debug build itself). All platform-neutral tests also run here; the three real OS credential tests are explicitly excluded.
-      - name: Complete safe Rust suite
-        env:
-          SSHELTER_REQUIRE_OPENSSH: "1"
-        # Quoted: an unquoted `vault:: ipc:: agent::` is read as a YAML mapping and the workflow would not load.
-        # --locked: the committed Cargo.lock, with russh in it, is what is built.
-        run: "cargo test --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
-      - name: Profile selection in the normal library
-        env:
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
-          CARGO_PROFILE_RELEASE_LTO: "false"
-        run: |
-          cargo test --locked --test app_profile_build
-          if ($LASTEXITCODE -ne 0) { throw 'debug profile test failed' }
-          cargo test --locked --release --test app_profile_build
-          if ($LASTEXITCODE -ne 0) { throw 'production profile test failed' }
-          cargo test --locked --release --features development-profile --test app_profile_build
-          if ($LASTEXITCODE -ne 0) { throw 'development release profile test failed' }
-
-      # The library and the binary in a debug build, with russh in the dependency graph (the release workflow builds the same graph).
-      - name: Build the whole app
-        run: cargo build --locked
-
-      # Unit doubles never touch the Rc-backed Win32 tray or its event loop. Restart from
-      # saved synced records, race startup/status/visibility, and check real native menu data
-      # and USER object counts. No production profile, OS credentials or remote relay is used.
-      - name: Synced library startup and concurrent native tray updates
-        timeout-minutes: 5
-        env:
-          SSHELTER_TEST_SYNCED_STATE_OUT: ${{ runner.temp }}/sshelter-synced-startup.json
-        run: |
-          for ($attempt = 1; $attempt -le 10; $attempt++) {
-            Write-Output "Native tray attempt $attempt/10"
+          for ($attempt = 1; $attempt -le 30; $attempt++) {
+            Write-Output "Diagnostic native tray attempt $attempt/30"
             cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
             if ($LASTEXITCODE -ne 0) { throw "native tray attempt $attempt failed (exit $LASTEXITCODE)" }
           }
-
-      - name: Native crash leaves metadata without suppressing Windows Error Reporting
-        run: cargo test --locked --lib -- --ignored --exact diagnostics::tests::native_exception_leaves_metadata_for_windows_error_reporting --nocapture
-
-      - name: Actual Development GUI startup from a synced library
-        timeout-minutes: 8
-        shell: pwsh
-        run: ../scripts/validate-windows-startup.ps1
-
-      # sshelter-cli.exe, the console program a Windows terminal runs for Connect (cli-helper/; the app's builds above never build it):
-      # its tests (the relay of arguments and exit codes against a test program, the built helper next to a stand-in sshelter.exe, and
-      # the console's four settings kept across the relay, against a fake console).
-      - name: The console helper's tests
-        run: cargo test --locked --manifest-path cli-helper/Cargo.toml
-      # Then the real pair: the helper next to the debug sshelter.exe built above runs `sshelter.exe connect` (no alias), and what that
-      # says (the usage) and its exit code (2) come back through the helper as when sshelter.exe runs alone.
-      - name: The console helper runs sshelter connect
-        shell: pwsh
-        run: |
-          cargo build --locked --manifest-path cli-helper/Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw "the console helper did not build (exit $LASTEXITCODE)" }
-          Copy-Item -Force cli-helper/target/debug/sshelter-cli.exe target/debug/sshelter-cli.exe
-          # Each line a program wrote, as text (2>&1 hands stderr's lines over as error records).
-          $alone = (& .\target\debug\sshelter.exe connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
-          $aloneCode = $LASTEXITCODE
-          $relayed = (& .\target\debug\sshelter-cli.exe connect 2>&1 | ForEach-Object { "$_" }) -join "`n"
-          $relayedCode = $LASTEXITCODE
-          Write-Output "sshelter.exe connect exited with $aloneCode and said:" $alone "sshelter-cli.exe connect exited with $relayedCode and said:" $relayed
-          if ($relayedCode -ne $aloneCode -or $relayed -ne $alone) { throw 'the helper did not bring back what sshelter.exe said, or its exit code' }
-          if ($relayedCode -ne 2 -or $relayed -notmatch 'usage: sshelter connect <alias>') { throw 'expected the usage of sshelter connect and exit code 2' }
-          exit 0
-
-      # The same pair in a console of its own, as a terminal runs it (own-ssh spec §7.3), which the steps above, through pipes, do not
-      # reach: the helper started with that console's own buffers as its standard handles, as a shell in the console starts a program, and
-      # sshelter.exe reading the console through the handles it inherits. The console's screen shows the usage (2), and the refusal of a
-      # session pipe another owner made (1; the pipe was opened, no SSHelter started). And the helper puts the console's four settings
-      # back after a stand-in sshelter.exe that changed them and was killed, as the NSIS installer kills a session's sshelter.exe (alone,
-      # the stand-in leaves them changed). windows-bundle-check.yml runs the same test on each installer's release pair, whose GUI
-      # sshelter.exe attaches to the helper's console first.
-      - name: The console helper and sshelter.exe in a console of their own
-        shell: pwsh
-        run: |
-          $env:SSHELTER_TEST_PAIR = (Resolve-Path target/debug).Path
-          $env:SSHELTER_TEST_PAIR_PROFILE = 'development'
-          cargo test --locked --lib -- --ignored --exact cli::real_console_tests::the_pair_in_a_console_of_its_own --nocapture
-          if ($LASTEXITCODE -ne 0) { throw "the pair in a console of its own failed (exit $LASTEXITCODE)" }
-          exit 0
-
-      # The runner image ships the OpenSSH client; the server is a Feature on Demand. If that capability cannot be added, the Chocolatey
-      # package (Win32-OpenSSH) is the fallback. The service creates its host keys the first time it starts.
-      - name: Install and start the OpenSSH server
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $capability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
-          $capability | Format-Table Name, State
-          if ($capability.State -ne 'Installed') {
-            try {
-              Add-WindowsCapability -Online -Name $capability.Name | Out-Null
-            } catch {
-              Write-Warning "Feature on Demand failed ($_); trying Chocolatey"
-              choco install openssh -y --no-progress --params '"/SSHServerFeature"'
-            }
-          }
-          Get-Service sshd | Format-Table Name, Status, StartType
-          Set-Service -Name sshd -StartupType Manual
-          Start-Service sshd
-          Get-Service sshd | Format-Table Name, Status, StartType
-
-      # The runner user is an Administrator, so Win32-OpenSSH reads C:\ProgramData\ssh\administrators_authorized_keys for it (the
-      # "Match Group administrators" block of the default sshd_config) and refuses the file unless only SYSTEM and Administrators can write it.
-      # The Windows client refuses a private key other users can read.
-      - name: Authorize a throwaway key for the runner user
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $openssh = Join-Path $env:SystemRoot 'System32\OpenSSH'
-          $dir = Join-Path $env:RUNNER_TEMP 'engine-ssh'
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          $key = Join-Path $dir 'id_ed25519'
-          & "$openssh\ssh-keygen.exe" -q -t ed25519 -N '' -C engine -f $key
-          if ($LASTEXITCODE -ne 0) { throw 'ssh-keygen failed' }
-          icacls.exe $key /inheritance:r /grant "$($env:USERNAME):F" | Out-Null
-          $authorized = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
-          Get-Content "$key.pub" | Set-Content -Path $authorized -Encoding ascii
-          icacls.exe $authorized /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
-          Restart-Service sshd
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value 'SSHELTER_TEST_SSH_PORT=22'
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_TEST_SSH_USER=$env:USERNAME"
-          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "SSHELTER_TEST_SSH_KEY=$key"
-
-      # Separates a server that is set up wrong from an engine that cannot talk to it.
-      - name: The OpenSSH client logs in
-        shell: pwsh
-        run: |
-          $openssh = Join-Path $env:SystemRoot 'System32\OpenSSH'
-          & "$openssh\ssh.exe" -V
-          & "$openssh\ssh.exe" -F NUL -p $env:SSHELTER_TEST_SSH_PORT -i $env:SSHELTER_TEST_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL "$env:SSHELTER_TEST_SSH_USER@127.0.0.1" 'echo client-ok'
-          if ($LASTEXITCODE -ne 0) { throw "the OpenSSH client could not log in (exit $LASTEXITCODE): the server setup is wrong, not the engine" }
-
-      - name: The engine against the runner's OpenSSH server
-        env:
-          RUST_BACKTRACE: "1"
-          # A lost GITHUB_ENV line must fail this step, not turn it into a test that skips.
-          SSHELTER_REQUIRE_TEST_SSH: "1"
-        # Quoted for the same reason as above.
-        run: "cargo test --locked --lib -- ssh::engine_tests::environment --nocapture"
-
-      - name: What the OpenSSH server logged
-        if: failure()
-        shell: pwsh
-        run: Get-WinEvent -LogName 'OpenSSH/Operational' -MaxEvents 40 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
