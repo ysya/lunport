@@ -1,0 +1,13 @@
+slots	Complete safe Rust suite	2026-10-15T04:02:14.4841889Z test result: ok. 2359 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 240.33s
+slots	Profile selection in the normal library	2026-10-15T04:03:20.5002985Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	Profile selection in the normal library	2026-10-15T04:04:14.1344419Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+slots	Profile selection in the normal library	2026-10-15T04:05:05.1609165Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	The console helper's tests	2026-10-15T04:06:14.6113289Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	The console helper's tests	2026-10-15T04:06:14.6233472Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper's tests	2026-10-15T04:06:14.7469496Z test result: ok. 3 passed
+slots	The console helper's tests	2026-10-15T04:06:14.8712574Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper runs sshelter connect	2026-10-15T04:06:15.4885926Z sshelter.exe connect exited with 2 and said:
+slots	The console helper runs sshelter connect	2026-10-15T04:06:15.4889359Z sshelter-cli.exe connect exited with 2 and said:
+slots	The console helper and sshelter.exe in a console of their own	2026-10-15T04:07:40.9720449Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2368 filtered out; finished in 1.16s
+slots	The OpenSSH client logs in	2026-10-15T04:07:48.8592097Z client-ok
+slots	The engine against the runner's OpenSSH server	2026-10-15T04:07:50.5667835Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2368 filtered out; finished in 0.21s

@@ -1,7 +1,17 @@
-import { useEffect, useRef } from "react";
+import { Dialog, DialogTitle } from "@/components/ui/dialog";
+import { TaskDialogContent } from "@/components/app/TaskDialog";
+import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Bot, KeyRound, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
+
+import { useRecordsStatus, recordsStatusKey, useLegacyWorkspace } from "@/lib/records";
+import { WorkspaceGate } from "@/components/records/WorkspaceGate";
+import { RecordsWorkspace } from "@/components/records/RecordsWorkspace";
+import { RecordsMigrationPanel } from "@/components/records/MigrationPanel";
+import { LegacyMigrationLanding } from "@/components/records/LegacyMigrationLanding";
+import { LegacyPauseReview } from "@/components/records/LegacyPauseReview";
+import { pauseLegacyForMigration } from "@/components/records/migration-actions";
 
 import { useHostsQuery, usePlatform, useLoadConfig } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
@@ -31,6 +41,7 @@ import { SyncUpgradeDialog } from "@/components/SyncUpgradeDialog";
 import { SyncApprovalDialog } from "@/components/SyncApprovalDialog";
 import { SyncKeyDialog } from "@/components/SyncKeyDialog";
 import { KeysNeededDialog } from "@/components/KeysNeededDialog";
+import { UpdateIndicator } from "@/components/UpdatesPane";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
@@ -56,8 +67,7 @@ import {
  * Config is loaded on mount via `useHostsQuery` (a single `config_load` that
  * yields files + hosts). Errors are surfaced as a toast.
  */
-function App() {
-  useApplyTheme();
+function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => void }) {
   // Re-send persisted tray/close-to-tray/retention prefs (backend resets each launch).
   useSyncBackendSettings();
   // OS-level quick-connect hotkey (⌥⌘K / Ctrl+Alt+K) — registered when enabled.
@@ -94,14 +104,6 @@ function App() {
   const mcpStatus = useMcpStatus(2_000);
   const pendingMcp = mcpStatus.data?.pending.length ?? 0;
 
-  useEffect(() => {
-    if (isError) {
-      toast.error("Failed to load SSH config", {
-        description: typeof error === "string" ? error : String(error),
-      });
-    }
-  }, [isError, error]);
-
   const hosts = data?.hosts ?? [];
   // Wildcard-only blocks (`Host *`) are config defaults, not hosts — keep them
   // out of every user-facing count.
@@ -115,7 +117,7 @@ function App() {
   return (
     <TooltipProvider delayDuration={300}>
       {/* Root: the ONLY fixed-height container; never scrolls. */}
-      <div className="app-shell flex h-screen flex-col overflow-hidden">
+      <div className="app-shell flex h-screen flex-col overflow-hidden" style={{ "--legacy-sidebar-width": `${sidebarWidth}rem` } as React.CSSProperties}>
         {/*
          * Native toolbar = window drag region. On macOS the content sits under
          * the Overlay title bar, so pad the left so the wordmark clears the
@@ -125,7 +127,7 @@ function App() {
         <header
           data-tauri-drag-region
           className={cn(
-            "app-toolbar relative z-20 flex h-11 shrink-0 items-center gap-3 border-b pr-2.5",
+            "app-toolbar relative z-20 flex min-h-[3.2rem] shrink-0 items-center gap-3 border-b pr-2.5",
             isMac ? "pl-[78px]" : "pl-3",
           )}
         >
@@ -140,6 +142,7 @@ function App() {
           </div>
 
           <div className="ml-auto flex items-center gap-1">
+            <UpdateIndicator />
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -244,9 +247,15 @@ function App() {
             ) : (
               // HostList fills its parent (`h-full`): this wrapper is the room left under the switch.
               <div className="flex min-h-0 flex-1 flex-col">
-                <HostList hosts={hosts} isLoading={isLoading} />
+                {isError ? <div role="alert" className="m-3 space-y-3 rounded-lg border border-destructive/30 p-3 text-sm">
+                  <p className="font-medium">Could not load SSH config</p>
+                  <p className="break-words text-xs text-muted-foreground">{String(error)}</p>
+                  <Button size="sm" variant="outline" disabled={reload.isPending} onClick={handleReload}>Retry</Button>
+                  <Button size="sm" variant="ghost" onClick={() => { setSettingsCategory("files"); setSettingsOpen(true); }}>Config settings</Button>
+                </div> : <HostList hosts={hosts} isLoading={isLoading} />}
               </div>
             )}
+            <div className="shrink-0 space-y-2 border-t p-3"><p className="text-xs text-muted-foreground">OpenSSH files · Legacy workspace</p><Button variant="outline" size="sm" className="w-full" onClick={requestMigrationPause}>Pause for migration</Button></div>
           </aside>
           <SidebarResizeHandle sidebarRef={sidebarRef} />
 
@@ -263,7 +272,7 @@ function App() {
               keychain={sidebarView === "keychain"}
               hosts={
                 selectedAlias ? (
-                  <div className="mx-auto max-w-[720px] space-y-5 px-6 py-5 pb-24">
+                  <div className="app-legacy-editor space-y-5 pb-24">
                     <DriftBanner />
                     {copies ? <DuplicateCopies alias={selectedAlias} copies={copies} /> : <HostEditor alias={selectedAlias} />}
                   </div>
@@ -286,7 +295,6 @@ function App() {
         <SyncKeyDialog />
         <KeysNeededDialog />
         <McpApprovalDialog />
-        <Toaster />
       </div>
     </TooltipProvider>
   );
@@ -306,6 +314,105 @@ function EmptySelection() {
         </p>
       </div>
     </div>
+  );
+}
+
+function App() {
+  useApplyTheme();
+  const status = useRecordsStatus();
+  const client = useQueryClient();
+  const [resuming, setResuming] = useState(false);
+  const [migrationOpen, setMigrationOpen] = useState(false);
+  const [pauseOpen, setPauseOpen] = useState(false);
+  const [savedEdits, setSavedEdits] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [pauseError, setPauseError] = useState<string | null>(null);
+  const pauseInFlight = useRef(false);
+  const resumeInFlight = useRef(false);
+  const chooseLegacy = async () => {
+    if (resumeInFlight.current) return;
+    resumeInFlight.current = true;
+    setResuming(true);
+    try {
+      await useLegacyWorkspace();
+      await client.cancelQueries({ queryKey: recordsStatusKey });
+      await client.invalidateQueries({ queryKey: recordsStatusKey });
+    } catch {
+      toast.error(
+        "Could not open the existing workspace. Retry when workspace status is available.",
+      );
+    } finally {
+      resumeInFlight.current = false;
+      setResuming(false);
+    }
+  };
+  const pauseForMigration = async () => {
+    if (pauseInFlight.current || !savedEdits) return;
+    pauseInFlight.current = true;
+    setPausing(true);
+    setPauseError(null);
+    try {
+      if (await pauseLegacyForMigration(client, savedEdits)) {
+        setPauseOpen(false);
+        setSavedEdits(false);
+      }
+    } catch {
+      setPauseError(
+        "Could not pause the workspace. Save your edits and retry.",
+      );
+    } finally {
+      pauseInFlight.current = false;
+      setPausing(false);
+    }
+  };
+  return (
+    <>
+      <WorkspaceGate
+        status={status.data}
+        resuming={resuming}
+        error={status.isError}
+        retry={() => void status.refetch()}
+        useLegacy={() => void chooseLegacy()}
+        legacy={() => (
+          <LegacyApp
+            requestMigrationPause={() => {
+              setPauseError(null);
+              setSavedEdits(false);
+              setPauseOpen(true);
+            }}
+          />
+        )}
+        pausedLegacy={() => (
+          <LegacyMigrationLanding
+            busy={resuming}
+            useLegacy={() => void chooseLegacy()}
+            retry={() => void status.refetch()}
+            previewMigration={() => setMigrationOpen(true)}
+          />
+        )}
+        records={() => (
+          <>
+            <RecordsWorkspace
+              overview={status.data!.overview!}
+              reload={() => void status.refetch()}
+            />
+            <McpApprovalDialog />
+          </>
+        )}
+      />
+      <Dialog open={pauseOpen} onOpenChange={(open) => { if (!pausing) { setPauseOpen(open); if (!open) setSavedEdits(false); } }}>
+        <TaskDialogContent role="alertdialog" className="sm:max-w-xl" aria-describedby={undefined} showCloseButton={!pausing} onEscapeKeyDown={(event) => { if (pausing) event.preventDefault(); }}>
+          <DialogTitle className="sr-only">Pause for migration</DialogTitle>
+          <LegacyPauseReview saved={savedEdits} busy={pausing} setSaved={setSavedEdits} error={pauseError} confirm={() => void pauseForMigration()} cancel={() => { setPauseOpen(false); setSavedEdits(false); }} />
+        </TaskDialogContent>
+      </Dialog>
+      {migrationOpen && (
+        <div className="app-shell fixed inset-0 z-50 overflow-y-auto pt-11">
+          <RecordsMigrationPanel onClose={() => setMigrationOpen(false)} />
+        </div>
+      )}
+      <Toaster />
+    </>
   );
 }
 

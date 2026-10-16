@@ -1,0 +1,67 @@
+{
+  "version": "1.0.0-10",
+  "notes": "",
+  "pub_date": "2026-10-15T22:36:34.923Z",
+  "platforms": {
+    "linux-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlFTSVhXRkdSZC9iNHdkQ1hLSXdyNXZEQWZDeW83NkhDZWExaGZvZStGRENYMUNML0JNTVZ5ZUJuMVVsMGdGalB5OGlhRHl0WmVxRjRJMklLMFNzb0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzMzI3CWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfYWFyY2g2NC5BcHBJbWFnZQpWd2cvNGJRZ3ZFY1h1ZTliY2NVVGRhTFg1MmxZL0E2em9Gc29zdkc2dTlYNGcyUWdSeVdWcGg4RjBqaC9KeXlYcW5RK05PMXNEQkgrTXRqZHdoTUlEUT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_aarch64.AppImage"
+    },
+    "linux-aarch64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlFTSVhXRkdSZC9iNHdkQ1hLSXdyNXZEQWZDeW83NkhDZWExaGZvZStGRENYMUNML0JNTVZ5ZUJuMVVsMGdGalB5OGlhRHl0WmVxRjRJMklLMFNzb0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzMzI3CWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfYWFyY2g2NC5BcHBJbWFnZQpWd2cvNGJRZ3ZFY1h1ZTliY2NVVGRhTFg1MmxZL0E2em9Gc29zdkc2dTlYNGcyUWdSeVdWcGg4RjBqaC9KeXlYcW5RK05PMXNEQkgrTXRqZHdoTUlEUT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_aarch64.AppImage"
+    },
+    "linux-aarch64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlNDSWM1OERiUFFRaTdHdUdEeDdleDViLzl4RFlkd1hNbVZkdzJTU3B3WUlET09VMmo3VkpTQ3dZdTdnTWZsM250Mnc0MU4yRENqYW1Gc21iMHJGc2c0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzMzI3CWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfYXJtNjQuZGViClkxK3Jnd2dMdS9mNXR4Yk1zeTNVMy93VTRzUXpON01QUnN2aGMzUDZFMEVTZ00wZUVmN0FaV1RSOS9CeENBWm9jN09OZ2RXUzFWVlE3cXNHOUUvZ0RBPT0K",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_arm64.deb"
+    },
+    "linux-aarch64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlhUaWtxTFJ1MU44Q1BOYXptZk02RWtPQjBvTytycXJDUGJCOHlXVnVwMmZITWJFV2h3Y0xNbnVhTXJBclJwTytIVFFnTGpkMEJhbUFLRDJkZk9Tcmd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzMzI3CWZpbGU6U1NIZWx0ZXItMS4wLjAtMTAtMS5hYXJjaDY0LnJwbQpXVzNCNlNzam92QkYrQlhETGJONlNXdmhoajFkUEN2NXp3TllWUjIrQ010TnZkQStMcWMzTy8xZW5iQkltOTBLU0FQR3B0cElwNHhzSm1ucGtiMGZDUT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter-1.0.0-10-1.aarch64.rpm"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmZVNWdWWFg0UDRlSk1DWkRBcThXL2M0bzZDVXpYUlphZ3VQZFRxZ21ZWXBtM3crVE13YnVuTlpmdFhsSjM3REUxd25nSmtXM1NtVEYrazEzNmRkUUFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNDExCWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfYW1kNjQuQXBwSW1hZ2UKdFFGMWM4V3VYY21ldzRuOUNhb1pCUmU3N1RNUVp4MEdQdzBsbkpqeVZnTnFPTFJiMHk3ak1XR2ViRUlkSWdMNWQvUTcxdHJpSUtlWWR5N1lxdFNzQUE9PQo=",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmZVNWdWWFg0UDRlSk1DWkRBcThXL2M0bzZDVXpYUlphZ3VQZFRxZ21ZWXBtM3crVE13YnVuTlpmdFhsSjM3REUxd25nSmtXM1NtVEYrazEzNmRkUUFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNDExCWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfYW1kNjQuQXBwSW1hZ2UKdFFGMWM4V3VYY21ldzRuOUNhb1pCUmU3N1RNUVp4MEdQdzBsbkpqeVZnTnFPTFJiMHk3ak1XR2ViRUlkSWdMNWQvUTcxdHJpSUtlWWR5N1lxdFNzQUE9PQo=",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_amd64.AppImage"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmJNeGZLdE1SZVlKUWlnY0kxd2lCekdkVmZOMk1GTUF1OHVoa2RzNi9pNDR3aWkzS0JYWng3a1R1V2tyUVRpdzVWWnFsQXcwWEhCMEEwbmh6VXpTMVFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNDExCWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfYW1kNjQuZGViCnF2bzlxQnNBaWxIaVV5QkU0UG0wUmYxTGp4Q3dLWnhsMllDSE9VSlRyZHVpbWRaOVpJU0N6WW0xbHZiQ1pDbmlJSWFjYjltZzNiVlN2Q0ZmOTd3cEJ3PT0K",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_amd64.deb"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlFqV1V0bW5VY2lTblNWcEdlaENGZXk0cjVNQ3BPMm1Sd2pFZ25uSVR3ek15UGU1Y0t4UTlwQjdQbEd3OUQrK2d1WlFjYURWbTdDdnlHOGdGZnpjZXd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNDExCWZpbGU6U1NIZWx0ZXItMS4wLjAtMTAtMS54ODZfNjQucnBtCklLcXBKZVF5WGRUY3ZzWDl1S0pYclhySTBIeGVBZFdBeTArTktPL3VaYlQ3YWhMNnhyT3Q3SVFyREhRNUxCcHN0bUxJTEJoMFQ4UG93YSswQVI1ZEFBPT0K",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter-1.0.0-10-1.x86_64.rpm"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmROWCtBQTl4ajdxdFM1alFxSDduOU53RHhxbjZEN3p5UGM3Q3BrUU1qZmZ0bVBuaVBqMC9DSElRWFhKUGxLVXJCVVpuYm1VQUlIQmQxUFlObkRCQVF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNTMxCWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfeDY0X2VuLVVTLm1zaQpjVzl0VXdjcW1lanp4YmhPcWRqOWdsdnZRbXhheG5RaXJZL2Zzc09wNlI5ZVFJeGRwTlRqVm45SHZSVlNTSk1yZlJQamlCTk9DZjhmNUpuQy80Y1FBQT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_x64_en-US.msi"
+    },
+    "windows-x86_64-msi": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmROWCtBQTl4ajdxdFM1alFxSDduOU53RHhxbjZEN3p5UGM3Q3BrUU1qZmZ0bVBuaVBqMC9DSElRWFhKUGxLVXJCVVpuYm1VQUlIQmQxUFlObkRCQVF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNTMxCWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfeDY0X2VuLVVTLm1zaQpjVzl0VXdjcW1lanp4YmhPcWRqOWdsdnZRbXhheG5RaXJZL2Zzc09wNlI5ZVFJeGRwTlRqVm45SHZSVlNTSk1yZlJQamlCTk9DZjhmNUpuQy80Y1FBQT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_x64_en-US.msi"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlF3SXhBeHFneld1MlZXSW1lK0pmOU1UK2NFZzFFang5MTQ4Y3VzUmVaZU5UR0NJTXRLeHp4dlpWWUg2YjlsWVVPbUxhdGxOR25kMXM1YU5VcTQ2d0F3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNTMxCWZpbGU6U1NIZWx0ZXJfMS4wLjAtMTBfeDY0LXNldHVwLmV4ZQpyTnpWSzVtVW9QSWJ0anZLSUVnMVdmYThUMVFGdU5QZDhuL29YdzVKNWZ0cWRVRTkvYk1WTzI4VlNDSTA3YkpWcWV6dmlhWG9kK2g1OUxvWm9KK21BZz09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_1.0.0-10_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmV6ZDdFaEhVd1czSFVNelBuVk5VUXQ0TE9HSmVOZnFsN0ZhVEpjV0d3bHkzOHJqYktUdnp1dHBpZThXQnR3SnIwRjc5a0pSU1pockJETmNBQjUyendBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNzg4CWZpbGU6U1NIZWx0ZXIuYXBwLnRhci5negp5ZVR4dVdWU1kwZmc4T3F2M1N0OTZWQkMvUmV3MFg5TU05dzk4VS9JdTNpbndGMDk1cWZKSFNacklQblhyMlhiaEVVazhGNGVKc2hTT2szc1VtUTREQT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_universal.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmV6ZDdFaEhVd1czSFVNelBuVk5VUXQ0TE9HSmVOZnFsN0ZhVEpjV0d3bHkzOHJqYktUdnp1dHBpZThXQnR3SnIwRjc5a0pSU1pockJETmNBQjUyendBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNzg4CWZpbGU6U1NIZWx0ZXIuYXBwLnRhci5negp5ZVR4dVdWU1kwZmc4T3F2M1N0OTZWQkMvUmV3MFg5TU05dzk4VS9JdTNpbndGMDk1cWZKSFNacklQblhyMlhiaEVVazhGNGVKc2hTT2szc1VtUTREQT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_universal.app.tar.gz"
+    },
+    "darwin-aarch64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmV6ZDdFaEhVd1czSFVNelBuVk5VUXQ0TE9HSmVOZnFsN0ZhVEpjV0d3bHkzOHJqYktUdnp1dHBpZThXQnR3SnIwRjc5a0pSU1pockJETmNBQjUyendBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNzg4CWZpbGU6U1NIZWx0ZXIuYXBwLnRhci5negp5ZVR4dVdWU1kwZmc4T3F2M1N0OTZWQkMvUmV3MFg5TU05dzk4VS9JdTNpbndGMDk1cWZKSFNacklQblhyMlhiaEVVazhGNGVKc2hTT2szc1VtUTREQT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_universal.app.tar.gz"
+    },
+    "darwin-x86_64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZmV6ZDdFaEhVd1czSFVNelBuVk5VUXQ0TE9HSmVOZnFsN0ZhVEpjV0d3bHkzOHJqYktUdnp1dHBpZThXQnR3SnIwRjc5a0pSU1pockJETmNBQjUyendBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMTAzNzg4CWZpbGU6U1NIZWx0ZXIuYXBwLnRhci5negp5ZVR4dVdWU1kwZmc4T3F2M1N0OTZWQkMvUmV3MFg5TU05dzk4VS9JdTNpbndGMDk1cWZKSFNacklQblhyMlhiaEVVazhGNGVKc2hTT2szc1VtUTREQT09Cg==",
+      "url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-10/SSHelter_universal.app.tar.gz"
+    }
+  }
+}

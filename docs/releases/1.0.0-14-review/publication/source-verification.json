@@ -1,0 +1,18 @@
+{
+  "sourceCommit": "eed6881db0aab51420bb45b16247df58dcd7e221",
+  "branch": "codex/library-sync-host-dialog-fixes",
+  "remoteHeadBeforeDispatch": "eed6881db0aab51420bb45b16247df58dcd7e221",
+  "requiredChecks": [
+    {
+      "run": 38904457311,
+      "headSha": "eed6881db0aab51420bb45b16247df58dcd7e221",
+      "conclusion": "success"
+    },
+    {
+      "run": 38904461111,
+      "headSha": "eed6881db0aab51420bb45b16247df58dcd7e221",
+      "conclusion": "success"
+    }
+  ],
+  "verifiedAt": "2026-10-16T13:16:14.652978+00:00"
+}

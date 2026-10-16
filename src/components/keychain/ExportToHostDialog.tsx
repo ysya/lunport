@@ -1,10 +1,11 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import type { HostSummary } from "@/bindings/HostSummary";
 import { Button } from "@/components/ui/button";
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { isWildcardOnly } from "@/lib/host-display";
 import { useDeployKey, useHostsQuery, usePlatform } from "@/lib/queries";
 import { revealHidden } from "@/lib/sync-approvals";
@@ -47,6 +48,7 @@ export function ExportToHostView({
         <DialogTitle>Export {revealHidden(name)} to a host</DialogTitle>
         <DialogDescription>{"Adds the public key to the host's authorized_keys, then sets the host to use this key."}</DialogDescription>
       </DialogHeader>
+      <TaskDialogBody>
       {terminal && (
         <div className="flex gap-1" role="group" aria-label="How to export">
           {(["app", "terminal"] as const).map((m) => (
@@ -74,6 +76,7 @@ export function ExportToHostView({
           ))}
         </CommandList>
       </Command>
+      </TaskDialogBody>
     </>
   );
 }

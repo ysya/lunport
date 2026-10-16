@@ -5,6 +5,7 @@ import type { MoveFailure } from "@/bindings/MoveFailure";
 import type { KeySetupRequest } from "@/lib/key-slots";
 import type { KeychainSelection } from "@/lib/keychain";
 import { DEFAULT_SIDEBAR_WIDTH, clampSidebarWidth } from "@/lib/sidebar-width";
+import { DEFAULT_HOST_PREVIEW_WIDTH, clampHostPreviewWidth } from "@/lib/host-preview-width";
 
 /** What the New-config-file dialog should do after the file exists. */
 export type NewFileIntent =
@@ -20,6 +21,7 @@ export const UI_STORAGE_KEY = "sshelter-ui";
 
 export type SettingsCategory =
   | "general"
+  | "updates"
   | "appearance"
   | "connection"
   | "files"
@@ -52,6 +54,13 @@ interface UiState {
   /** Full source_file paths of collapsed sidebar groups (persisted). */
   collapsedGroups: string[];
   toggleGroup: (file: string) => void;
+  /** Records Library navigation; intentionally separate from legacy file groups. */
+  librarySidebarCollapsed: boolean;
+  toggleLibrarySidebar: () => void;
+  collapsedRecordGroups: string[];
+  toggleRecordGroup: (id: string) => void;
+  hostLayout: "list" | "grid";
+  setHostLayout: (layout: "list" | "grid") => void;
   /**
    * Sidebar file-scope filter: a full source_file path to show ONLY that file's
    * hosts, or null for the grouped "All files" view (persisted).
@@ -64,6 +73,9 @@ interface UiState {
   /** Sidebar width in rem, set by dragging its edge (persisted; see lib/sidebar-width). */
   sidebarWidth: number;
   setSidebarWidth: (width: number) => void;
+  /** Preferred Connection details width in CSS pixels; viewport limits never overwrite it. */
+  hostPreviewWidth: number;
+  setHostPreviewWidth: (width: number) => void;
   /** The sidebar's Hosts | Keychain switch (persisted, like its width). */
   sidebarView: SidebarView;
   setSidebarView: (view: SidebarView) => void;
@@ -144,6 +156,16 @@ export const useUiStore = create<UiState>()(
       search: "",
       setSearch: (search) => set({ search }),
       collapsedGroups: [],
+      librarySidebarCollapsed: false,
+      toggleLibrarySidebar: () => set((s) => ({ librarySidebarCollapsed: !s.librarySidebarCollapsed })),
+      collapsedRecordGroups: [],
+      toggleRecordGroup: (id) => set((s) => ({
+        collapsedRecordGroups: s.collapsedRecordGroups.includes(id)
+          ? s.collapsedRecordGroups.filter((value) => value !== id)
+          : [...s.collapsedRecordGroups, id],
+      })),
+      hostLayout: "list",
+      setHostLayout: (hostLayout) => set({ hostLayout }),
       toggleGroup: (file) =>
         set((s) => ({
           collapsedGroups: s.collapsedGroups.includes(file)
@@ -156,6 +178,8 @@ export const useUiStore = create<UiState>()(
       setGroupMode: (groupMode) => set({ groupMode }),
       sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
       setSidebarWidth: (width) => set({ sidebarWidth: clampSidebarWidth(width) }),
+      hostPreviewWidth: DEFAULT_HOST_PREVIEW_WIDTH,
+      setHostPreviewWidth: (width) => set({ hostPreviewWidth: clampHostPreviewWidth(width) }),
       sidebarView: "hosts",
       setSidebarView: (sidebarView) => set({ sidebarView }),
       keychainSelection: null,
@@ -196,9 +220,13 @@ export const useUiStore = create<UiState>()(
       // else is session-only.
       partialize: (s) => ({
         collapsedGroups: s.collapsedGroups,
+        librarySidebarCollapsed: s.librarySidebarCollapsed,
+        collapsedRecordGroups: s.collapsedRecordGroups,
+        hostLayout: s.hostLayout,
         fileScope: s.fileScope,
         groupMode: s.groupMode,
         sidebarWidth: s.sidebarWidth,
+        hostPreviewWidth: s.hostPreviewWidth,
         sidebarView: s.sidebarView,
         launchHintDismissed: s.launchHintDismissed,
       }),

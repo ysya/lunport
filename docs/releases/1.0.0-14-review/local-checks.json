@@ -1,0 +1,19 @@
+{
+  "source": "eed6881db0aab51420bb45b16247df58dcd7e221",
+  "frontend": {
+    "files": 82,
+    "passed": 1063,
+    "failed": 0
+  },
+  "publicationScripts": {
+    "passed": 46,
+    "failed": 0,
+    "runner": "vitest (also included in complete frontend suite)"
+  },
+  "typescript": "passed",
+  "vite": "passed (existing chunk size warning)",
+  "productionFixturesExcluded": true,
+  "macosDevelopmentBundle": "passed",
+  "nativeUiReceipt": "native-ui-validation.json",
+  "runtimeFilesCleanAfterFreeze": true
+}

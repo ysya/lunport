@@ -1,0 +1,17 @@
+{
+  "artifact": "SSHelter_universal.app.tar.gz",
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "version": "1.0.0-15",
+  "identifier": "org.homelab.sshelter",
+  "command": "SSHelter.app/Contents/MacOS/sshelter --check-window-health",
+  "exitCode": 0,
+  "elapsedWallMs": 980,
+  "stdout": "Profile: Production; CoreAudio: Ok(()); elapsed_ms=14. This does not prove GPU rendering health.\n",
+  "stderr": "",
+  "installed": false,
+  "productionGuiLaunched": false,
+  "gpuRenderingVerified": false
+}

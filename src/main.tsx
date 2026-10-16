@@ -4,8 +4,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import App from "./App";
 import AgentApprovalWindow from "./components/AgentApprovalWindow";
+import AuthenticationWindow from "./components/AuthenticationWindow";
 import HostKeyWindow from "./components/HostKeyWindow";
 import "./index.css";
+import { applyInitialMotionPreference } from "./lib/theme";
+
+applyInitialMotionPreference();
 
 const queryClient = new QueryClient();
 
@@ -24,6 +28,7 @@ const windowLabel = (() => {
 
 function Root() {
   if (windowLabel === "approval") return <AgentApprovalWindow />;
+  if (windowLabel === "authentication") return <AuthenticationWindow />;
   if (windowLabel === "hostkey") return <HostKeyWindow />;
   return <App />;
 }

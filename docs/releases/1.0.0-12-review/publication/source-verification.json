@@ -1,0 +1,8 @@
+{
+  "sourceCommit": "99fb2ed7a09f0029b5417a56a7b911f4f911bbaa",
+  "testedCodeCommit": "99fb2ed7a09f0029b5417a56a7b911f4f911bbaa",
+  "sourceContainsOriginalHandoff": true,
+  "dispatchRef": "codex/library-sync-host-dialog-fixes",
+  "publicationRun": 38840534319,
+  "codeChangesCommittedBeforeDispatch": true
+}

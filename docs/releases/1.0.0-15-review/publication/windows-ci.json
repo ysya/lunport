@@ -1,0 +1,203 @@
+{
+  "conclusion": "success",
+  "headSha": "e739770955c8a37e040198da1b04e8600a80a749",
+  "jobs": [
+    {
+      "completedAt": "2026-10-16T15:30:49Z",
+      "conclusion": "success",
+      "databaseId": 117045137344,
+      "name": "slots",
+      "startedAt": "2026-10-16T15:14:47Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-16T15:14:49Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-16T15:14:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:14:56Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-16T15:14:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:15:26Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "number": 3,
+          "startedAt": "2026-10-16T15:14:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:16:13Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-10-16T15:15:26Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:16:14Z",
+          "conclusion": "success",
+          "name": "Placeholder frontend",
+          "number": 5,
+          "startedAt": "2026-10-16T15:16:13Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:16:15Z",
+          "conclusion": "success",
+          "name": "OpenSSH on the runner",
+          "number": 6,
+          "startedAt": "2026-10-16T15:16:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:22:45Z",
+          "conclusion": "success",
+          "name": "Complete safe Rust suite",
+          "number": 7,
+          "startedAt": "2026-10-16T15:16:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:26:00Z",
+          "conclusion": "success",
+          "name": "Profile selection in the normal library",
+          "number": 8,
+          "startedAt": "2026-10-16T15:22:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:27:10Z",
+          "conclusion": "success",
+          "name": "Build the whole app",
+          "number": 9,
+          "startedAt": "2026-10-16T15:26:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:29:01Z",
+          "conclusion": "success",
+          "name": "Synced library startup and concurrent native tray updates",
+          "number": 10,
+          "startedAt": "2026-10-16T15:27:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:29:03Z",
+          "conclusion": "success",
+          "name": "Native crash leaves metadata without suppressing Windows Error Reporting",
+          "number": 11,
+          "startedAt": "2026-10-16T15:29:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:25Z",
+          "conclusion": "success",
+          "name": "Actual Development GUI startup from a synced library",
+          "number": 12,
+          "startedAt": "2026-10-16T15:29:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:28Z",
+          "conclusion": "success",
+          "name": "The console helper's tests",
+          "number": 13,
+          "startedAt": "2026-10-16T15:30:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:28Z",
+          "conclusion": "success",
+          "name": "The console helper runs sshelter connect",
+          "number": 14,
+          "startedAt": "2026-10-16T15:30:28Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:31Z",
+          "conclusion": "success",
+          "name": "The console helper and sshelter.exe in a console of their own",
+          "number": 15,
+          "startedAt": "2026-10-16T15:30:28Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:35Z",
+          "conclusion": "success",
+          "name": "Install and start the OpenSSH server",
+          "number": 16,
+          "startedAt": "2026-10-16T15:30:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:36Z",
+          "conclusion": "success",
+          "name": "Authorize a throwaway key for the runner user",
+          "number": 17,
+          "startedAt": "2026-10-16T15:30:35Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:37Z",
+          "conclusion": "success",
+          "name": "The OpenSSH client logs in",
+          "number": 18,
+          "startedAt": "2026-10-16T15:30:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:39Z",
+          "conclusion": "success",
+          "name": "The engine against the runner's OpenSSH server",
+          "number": 19,
+          "startedAt": "2026-10-16T15:30:37Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:39Z",
+          "conclusion": "skipped",
+          "name": "What the OpenSSH server logged",
+          "number": 20,
+          "startedAt": "2026-10-16T15:30:39Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:43Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 39,
+          "startedAt": "2026-10-16T15:30:39Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:46Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 40,
+          "startedAt": "2026-10-16T15:30:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-16T15:30:47Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 41,
+          "startedAt": "2026-10-16T15:30:46Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/sshelter/actions/runs/38922336453/job/117045137344"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/ysya/sshelter/actions/runs/38922336453"
+}

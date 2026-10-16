@@ -8,16 +8,90 @@ use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 
+/// Validate a write against the immutable build profile (injected only by unit fixtures).
+pub(crate) fn check_write(path: &Path) -> Result<(), AppError> {
+    check_write_io(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            AppError::ForbiddenPath(path.display().to_string())
+        } else {
+            AppError::Io(error)
+        }
+    })
+}
+
+pub(crate) fn check_write_io(path: &Path) -> std::io::Result<()> {
+    current_write_policy()?.check(path)
+}
+
+pub(crate) fn writes_are_confined() -> bool {
+    matches!(
+        current_write_policy(),
+        Ok(crate::write_policy::WritePolicy::Confined { .. })
+    )
+}
+
+fn current_write_policy() -> std::io::Result<crate::write_policy::WritePolicy> {
+    #[cfg(test)]
+    {
+        Ok(TEST_WRITE_POLICY.with(|policy| policy.borrow().clone()))
+    }
+    #[cfg(not(test))]
+    {
+        match crate::app_profile::CURRENT {
+            crate::app_profile::AppProfile::Production => {
+                Ok(crate::write_policy::WritePolicy::Unrestricted)
+            }
+            crate::app_profile::AppProfile::Development => {
+                Ok(crate::write_policy::WritePolicy::Confined {
+                    root: app_data_root()
+                        .map_err(|error| std::io::Error::other(error.to_string()))?,
+                })
+            }
+        }
+    }
+}
+
+pub(crate) fn home_dir() -> Result<PathBuf, AppError> {
+    match crate::app_profile::CURRENT {
+        crate::app_profile::AppProfile::Production => dirs::home_dir()
+            .ok_or_else(|| AppError::Other("cannot determine home directory".into())),
+        crate::app_profile::AppProfile::Development => Ok(app_data_root()?.join("sandbox-home")),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_WRITE_POLICY: std::cell::RefCell<crate::write_policy::WritePolicy> = const {
+        std::cell::RefCell::new(crate::write_policy::WritePolicy::Unrestricted)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_write_policy<T>(
+    policy: crate::write_policy::WritePolicy,
+    f: impl FnOnce() -> T,
+) -> T {
+    struct Restore(crate::write_policy::WritePolicy);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_WRITE_POLICY.with(|policy| *policy.borrow_mut() = self.0.clone());
+        }
+    }
+    let _restore = Restore(TEST_WRITE_POLICY.with(|value| value.replace(policy)));
+    f()
+}
+
 /// 應用程式本機資料根目錄(MCP policy、sync state 等皆放這裡)。
 pub fn app_data_root() -> Result<PathBuf, AppError> {
     dirs::data_local_dir()
         .ok_or_else(|| AppError::Other("cannot determine local data directory".to_string()))
-        .map(|p| p.join("org.homelab.sshelter"))
+        .map(|p| p.join(crate::app_profile::CURRENT.identifier()))
 }
 
 /// 確保目錄存在，且（unix）權限為 0700。不存在才建立。
 /// 僅在「建立時」設定權限；既有目錄的權限刻意不改動（避免動到使用者既有的 ~/.ssh）。
 pub fn ensure_dir_secure(dir: &Path) -> Result<(), AppError> {
+    check_write(dir)?;
     if !dir.exists() {
         fs::create_dir_all(dir)?;
         #[cfg(unix)]
@@ -33,6 +107,7 @@ pub fn ensure_dir_secure(dir: &Path) -> Result<(), AppError> {
 /// `mode` 為 unix 權限（如 config 用 0o600、known_hosts 用 0o644）。
 /// 注意：rename 會取代 `path` 這個路徑項本身；若 `path` 是 symlink，連結會被實體檔取代（而非寫入其指向的目標）。
 pub fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<(), AppError> {
+    check_write(path)?;
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Other(format!("no parent dir for {}", path.display())))?;
@@ -76,12 +151,16 @@ pub fn backups_root() -> Result<PathBuf, AppError> {
     #[cfg(test)]
     let root = test_backups_root().to_path_buf();
     #[cfg(not(test))]
-    let root = dirs::data_dir()
-        .ok_or_else(|| {
-            AppError::Other("cannot determine user data directory for backups".to_string())
-        })?
-        .join("org.homelab.sshelter")
-        .join("backups");
+    let root = if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Development {
+        app_data_root()?.join("backups")
+    } else {
+        dirs::data_dir()
+            .ok_or_else(|| {
+                AppError::Other("cannot determine user data directory for backups".to_string())
+            })?
+            .join("org.homelab.sshelter")
+            .join("backups")
+    };
     Ok(root)
 }
 
@@ -99,9 +178,10 @@ pub(crate) fn test_backups_root() -> &'static Path {
 /// root / prefix），例如 `/Users/frank/.ssh/config.d/leg.config` 的備份放在
 /// `<root>/Users/frank/.ssh/config.d/`。
 ///
-/// 此映射可逆：備份檔的隱含目標 = `/` + 備份父目錄相對 root 的路徑 + 檔名解析出的 `<name>`
-/// （見 `commands::resolve_restore_target`）。`.`/`..` 成分做字典式正規化，且 `..` 只會
-/// pop 已 push 的相對成分 —— 永遠不可能逃逸出 backups_root。
+/// Restore matches each managed target's canonical backup directory and file name;
+/// dropping a Windows drive prefix makes this mapping unsuitable for path inversion.
+/// Dot components are normalized lexically, and parent components only pop existing
+/// relative components, so the result cannot escape backups_root.
 pub fn backup_dir_for(target: &Path) -> Result<PathBuf, AppError> {
     let parent = target
         .parent()
@@ -126,6 +206,29 @@ pub fn backup_dir_for(target: &Path) -> Result<PathBuf, AppError> {
     Ok(backups_root()?.join(rel))
 }
 
+/// Preflight every existing candidate before a caller changes its document or vault.
+/// A future timestamped destination has the same checked parent; existing links must not
+/// redirect it before `backup` gets to choose its timestamp.
+pub(crate) fn check_backup_write(target: &Path) -> Result<(), AppError> {
+    if !writes_are_confined() { return Ok(()); }
+    let dir = backup_dir_for(target)?;
+    check_write(&dir)?;
+    let filename = target.file_name().and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::Other("backup target has no file name".into()))?;
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_str().is_some_and(|name| backup_millis_for(name, filename).is_some()) {
+            check_write(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// 若 `path` 存在，複製成 `<mirror dir>/<filename>.<unix_millis>.bak` 並回傳備份路徑；
 /// 不存在則回 None。在每個 session 第一次寫入 live 檔案前呼叫。
 /// 備份一律寫進 `backups_root()` 下的鏡像目錄（見 `backup_dir_for`），絕不寫在目標旁邊
@@ -134,6 +237,7 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>, AppError> {
     if !path.exists() {
         return Ok(None);
     }
+    check_backup_write(path)?;
     let millis = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|e| AppError::Other(e.to_string()))?
@@ -146,8 +250,10 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>, AppError> {
     name.push(format!(".{millis}.bak"));
 
     let dir = backup_dir_for(path)?;
-    fs::create_dir_all(&dir)?;
     let backup_path = dir.join(name);
+    check_write(&dir)?;
+    check_write(&backup_path)?;
+    fs::create_dir_all(&dir)?;
 
     fs::copy(path, &backup_path)?;
     Ok(Some(backup_path))
@@ -182,6 +288,7 @@ pub fn prune_backups(target: &Path, keep: usize) -> Result<usize, AppError> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| AppError::Other(format!("no file name for {}", target.display())))?;
     let dir = backup_dir_for(target)?;
+    check_write(&dir)?;
 
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
@@ -210,9 +317,13 @@ pub fn prune_backups(target: &Path, keep: usize) -> Result<usize, AppError> {
     backups.sort_by_key(|b| std::cmp::Reverse(b.0));
     let mut deleted = 0;
     for (_, path) in backups.into_iter().skip(keep) {
+        check_write(&path)?;
         match fs::remove_file(&path) {
             Ok(()) => deleted += 1,
-            Err(e) => eprintln!("[fsutil] prune_backups: failed to delete {}: {e}", path.display()),
+            Err(e) => eprintln!(
+                "[fsutil] prune_backups: failed to delete {}: {e}",
+                path.display()
+            ),
         }
     }
     Ok(deleted)
@@ -237,7 +348,10 @@ pub struct Fingerprint {
 pub fn fingerprint_of(bytes: &[u8]) -> Fingerprint {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    Fingerprint { mtime_ms: 0, sha256: hex_lower(&hasher.finalize()) }
+    Fingerprint {
+        mtime_ms: 0,
+        sha256: hex_lower(&hasher.finalize()),
+    }
 }
 
 pub fn file_fingerprint(path: &Path) -> Result<Fingerprint, AppError> {
@@ -352,7 +466,11 @@ mod tests {
         assert_eq!(b.parent().unwrap(), mirror);
         assert!(mirror.starts_with(backups_root().unwrap()));
         // …and NEVER next to the live file (glob Includes would read it as config).
-        assert_eq!(bak_count_in(dir.path()), 0, "no .bak may sit next to the live file");
+        assert_eq!(
+            bak_count_in(dir.path()),
+            0,
+            "no .bak may sit next to the live file"
+        );
     }
 
     #[test]
@@ -417,7 +535,7 @@ mod tests {
         fs::write(mirror.join("config.abc.bak"), b"x").unwrap(); // non-digit millis
         fs::write(mirror.join("config.123.bak.txt"), b"x").unwrap(); // wrong suffix
         fs::write(mirror.join("config.bak"), b"x").unwrap(); // no millis segment
-        // Real backups: keep=0 → all real ones deleted, decoys intact.
+                                                             // Real backups: keep=0 → all real ones deleted, decoys intact.
         fs::write(mirror.join("config.100.bak"), b"x").unwrap();
         fs::write(mirror.join("config.200.bak"), b"x").unwrap();
 
@@ -473,9 +591,15 @@ mod tests {
         fs::write(&p, b"v1").unwrap();
         let stand_in = fingerprint_of(b"v1");
         assert_eq!(stand_in.sha256, file_fingerprint(&p).unwrap().sha256);
-        assert!(!has_changed(&p, &stand_in).unwrap(), "same content: not changed");
+        assert!(
+            !has_changed(&p, &stand_in).unwrap(),
+            "same content: not changed"
+        );
         fs::write(&p, b"v2").unwrap();
-        assert!(has_changed(&p, &stand_in).unwrap(), "someone else wrote it afterwards: changed");
+        assert!(
+            has_changed(&p, &stand_in).unwrap(),
+            "someone else wrote it afterwards: changed"
+        );
     }
 
     #[test]
@@ -487,5 +611,81 @@ mod tests {
         assert!(!has_changed(&p, &snap).unwrap());
         fs::write(&p, b"v2").unwrap();
         assert!(has_changed(&p, &snap).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod profile_boundary_tests {
+    use super::*;
+    use crate::write_policy::WritePolicy;
+
+    #[test]
+    fn confined_atomic_write_preserves_an_outside_file_and_creates_no_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"keep").unwrap();
+        with_test_write_policy(WritePolicy::Confined { root }, || {
+            assert!(atomic_write(&outside, b"changed", 0o600).is_err());
+            assert!(ensure_dir_secure(&temp.path().join("outside-parent/nested")).is_err());
+        });
+        assert_eq!(fs::read(outside).unwrap(), b"keep");
+        assert!(!temp.path().join("outside-parent").exists());
+    }
+
+    #[test]
+    fn confined_backup_and_prune_preserve_an_outside_mirror() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("config");
+        fs::write(&target, b"keep").unwrap();
+        let dir = backup_dir_for(&target).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let sentinel = dir.join("config.1.bak");
+        fs::write(&sentinel, b"backup").unwrap();
+        with_test_write_policy(
+            WritePolicy::Confined {
+                root: temp.path().join("dev"),
+            },
+            || {
+                assert!(backup(&target).is_err());
+                assert!(prune_backups(&target, 0).is_err());
+            },
+        );
+        assert_eq!(fs::read(sentinel).unwrap(), b"backup");
+        assert_eq!(fs::read(target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_scoped_policy_is_restored_even_when_the_fixture_unwinds() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        with_test_write_policy(WritePolicy::Confined { root: root.clone() }, || assert!(writes_are_confined()));
+        let caught = std::panic::catch_unwind(|| {
+            with_test_write_policy(WritePolicy::Confined { root }, || {
+                assert!(writes_are_confined());
+                panic!("fixture unwind");
+            })
+        });
+        assert!(caught.is_err());
+        assert!(!writes_are_confined());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod backup_boundary_tests {
+    use super::*;
+    #[test]
+    fn backup_preflight_refuses_an_existing_redirected_candidate_without_changing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("config");
+        let dir = backup_dir_for(&target).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("config.1.bak")).unwrap();
+        with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: test_backups_root().to_path_buf() }, || {
+            assert!(check_backup_write(&target).is_err());
+        });
+        assert_eq!(fs::read(outside).unwrap(), b"keep");
     }
 }

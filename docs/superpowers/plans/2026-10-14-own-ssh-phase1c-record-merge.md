@@ -1,0 +1,10 @@
+# Pure typed record merge and receipt primitives
+
+Standing authorization under the active-runtime plan. Owned new record_merge.rs and tests only. Main registration belongs to root after GREEN. No files/network/Keychain/vault writer calls in the module, and no legacy decoder edits.
+
+1. Isolated scratch harness uses real crypto, record LWW and typed validators with transport/state shells. Add failing typed account/space merge, schema4 freeze, pending/invalid migration marker, old opaque retention, tombstone, relation conflict and receipt tests before implementation.
+2. Implement safe transient decode/encode wrappers: zeroize plaintext buffers and decrypted secret JSON values; fixed diagnostic codes never contain decrypted payloads. Authentication binds record kind/id and tombstone flag to the envelope. Unknown/schema/malformed stays encrypted and never becomes deletion.
+3. Account pre-scan conservative max authenticated future schema before any cache/cursor changes. Winning supported Meta uses Record LWW across cached+pulled; pending/invalid migration and unsupported account return exact old section. Common migration marker type owned by root. Fresh schema3 without marker is compatible; schema2 requires explicit migration.
+4. Validate pull since/baseline/watermark/row identity before advancing. Preserve typed shape-valid hosts even with relation conflicts for NeedsReview. Public schema2 keyslots become metadata; secret kinds stay sealed with transient LWW only; schema1 Own keyslots/alias hosts remain opaque.
+5. Outgoing requires account compatibility and baseline. Public dirty records encoded, dirty sealed secrets forwarded. Exact full-public-revision and ciphertext snapshots protect receipts including deviceId/payload/deleted/seq; accepted rows apply even when later push error/freeze, never cursor advancement.
+6. Focused scratch GREEN; report API/root registration; focused main checks once authorized, exact-path conventional commit with shared index flock. No full suite parallel.

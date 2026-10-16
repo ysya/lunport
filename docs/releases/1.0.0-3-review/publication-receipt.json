@@ -1,0 +1,207 @@
+{
+  "observed_at_utc": "2026-10-15T04:35:03.871665+00:00",
+  "release_url": "https://github.com/ysya/sshelter/releases/tag/v1.0.0-3",
+  "workflow_url": "https://github.com/ysya/sshelter/actions/runs/38680461866",
+  "release_source": "d1642a8b5c57dc9eb1f8e23d5c36645d5082e056",
+  "runtime_source": "30c4a4c689b86a95bb17b8cc4fae90bb3469b686",
+  "verification": {
+    "version": "1.0.0-3",
+    "sourceCommit": "d1642a8b5c57dc9eb1f8e23d5c36645d5082e056",
+    "prerelease": true,
+    "stable": "v0.16.0",
+    "stableReleaseId": 400974628,
+    "platforms": [
+      "linux-aarch64",
+      "linux-aarch64-appimage",
+      "linux-aarch64-deb",
+      "linux-aarch64-rpm",
+      "linux-x86_64",
+      "linux-x86_64-appimage",
+      "linux-x86_64-deb",
+      "linux-x86_64-rpm",
+      "windows-x86_64",
+      "windows-x86_64-msi",
+      "windows-x86_64-nsis",
+      "darwin-aarch64",
+      "darwin-x86_64",
+      "darwin-aarch64-app",
+      "darwin-x86_64-app"
+    ],
+    "assetCount": 20,
+    "allAssetsUploadedNonempty": true,
+    "channelMatchesRelease": true,
+    "manifestSignaturesMatchUploadedFiles": true
+  },
+  "stable_before": {
+    "id": 400974628,
+    "tag_name": "v0.16.0",
+    "prerelease": false
+  },
+  "stable_after": {
+    "id": 400974628,
+    "tag_name": "v0.16.0",
+    "prerelease": false
+  },
+  "jobs": [
+    {
+      "name": "prepare",
+      "conclusion": "success",
+      "url": "https://github.com/ysya/sshelter/actions/runs/38680461866/job/116243592239"
+    },
+    {
+      "name": "build (windows-latest, --config '{\"bundle\":{\"externalBin\":[\"binaries/sshelter-cli\"]}}')",
+      "conclusion": "success",
+      "url": "https://github.com/ysya/sshelter/actions/runs/38680461866/job/116243672407"
+    },
+    {
+      "name": "build (ubuntu-22.04-arm)",
+      "conclusion": "success",
+      "url": "https://github.com/ysya/sshelter/actions/runs/38680461866/job/116243672410"
+    },
+    {
+      "name": "build (macos-latest, --target universal-apple-darwin)",
+      "conclusion": "success",
+      "url": "https://github.com/ysya/sshelter/actions/runs/38680461866/job/116243672431"
+    },
+    {
+      "name": "build (ubuntu-22.04)",
+      "conclusion": "success",
+      "url": "https://github.com/ysya/sshelter/actions/runs/38680461866/job/116243672520"
+    },
+    {
+      "name": "beta-manifest",
+      "conclusion": "success",
+      "url": "https://github.com/ysya/sshelter/actions/runs/38680461866/job/116248722574"
+    }
+  ],
+  "assets": [
+    {
+      "name": "latest.json",
+      "size": 8796,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/latest.json"
+    },
+    {
+      "name": "SSHelter-1.0.0-3-1.aarch64.rpm",
+      "size": 15027000,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter-1.0.0-3-1.aarch64.rpm"
+    },
+    {
+      "name": "SSHelter-1.0.0-3-1.aarch64.rpm.sig",
+      "size": 420,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter-1.0.0-3-1.aarch64.rpm.sig"
+    },
+    {
+      "name": "SSHelter-1.0.0-3-1.x86_64.rpm",
+      "size": 14720925,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter-1.0.0-3-1.x86_64.rpm"
+    },
+    {
+      "name": "SSHelter-1.0.0-3-1.x86_64.rpm.sig",
+      "size": 420,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter-1.0.0-3-1.x86_64.rpm.sig"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_aarch64.AppImage",
+      "size": 89983496,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_aarch64.AppImage"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_aarch64.AppImage.sig",
+      "size": 424,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_aarch64.AppImage.sig"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_amd64.AppImage",
+      "size": 91597304,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_amd64.AppImage"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_amd64.AppImage.sig",
+      "size": 424,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_amd64.AppImage.sig"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_amd64.deb",
+      "size": 14721276,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_amd64.deb"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_amd64.deb.sig",
+      "size": 416,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_amd64.deb.sig"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_arm64.deb",
+      "size": 15026642,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_arm64.deb"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_arm64.deb.sig",
+      "size": 416,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_arm64.deb.sig"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_universal.dmg",
+      "size": 24357504,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_universal.dmg"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_x64-setup.exe",
+      "size": 8531368,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_x64-setup.exe"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_x64-setup.exe.sig",
+      "size": 420,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_x64-setup.exe.sig"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_x64_en-US.msi",
+      "size": 12423168,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_x64_en-US.msi"
+    },
+    {
+      "name": "SSHelter_1.0.0-3_x64_en-US.msi.sig",
+      "size": 420,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_1.0.0-3_x64_en-US.msi.sig"
+    },
+    {
+      "name": "SSHelter_universal.app.tar.gz",
+      "size": 24995972,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_universal.app.tar.gz"
+    },
+    {
+      "name": "SSHelter_universal.app.tar.gz.sig",
+      "size": 408,
+      "state": "uploaded",
+      "browser_download_url": "https://github.com/ysya/sshelter/releases/download/v1.0.0-3/SSHelter_universal.app.tar.gz.sig"
+    }
+  ],
+  "release_notes_match_dispatched_source": true,
+  "canonical_manifest_sha256": "50425e21e2e0415bcc6373ddfc60f5af3edf0a8bb6f73bc5b69833d3f4d1d69d",
+  "limits": [
+    "Metadata and signature-file coherence; not independent cryptographic verification of every installer.",
+    "No installed-app, real-user-host, native Windows popup or real credential acceptance."
+  ],
+  "built_in_relay": false,
+  "built_in_relay_evidence": "publication-build-summary.txt"
+}

@@ -1,0 +1,35 @@
+{
+  "id": 3,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "{\n  \"ai_access_allowed\": false,\n  \"host\": {\n    \"alias\": \"mcp-fingerprint-fixture\",\n    \"auth\": \"key\",\n    \"group_path\": [],\n    \"hostname\": \"127.0.0.1\",\n    \"id\": \"e1119028558e01fd\",\n    \"inherited_from\": {},\n    \"jump_ids\": [],\n    \"key_id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n    \"port\": 56738,\n    \"scope\": {\n      \"kind\": \"local\"\n    },\n    \"tags\": [\n      \"disposable-fixture\"\n    ],\n    \"user\": \"ysya\"\n  },\n  \"message\": \"Host saved. Creating a host does not grant AI access or trust its server key; allow the host separately in SSHelter AI Access.\"\n}",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "ai_access_allowed": false,
+      "host": {
+        "alias": "mcp-fingerprint-fixture",
+        "auth": "key",
+        "group_path": [],
+        "hostname": "127.0.0.1",
+        "id": "e1119028558e01fd",
+        "inherited_from": {},
+        "jump_ids": [],
+        "key_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "port": 56738,
+        "scope": {
+          "kind": "local"
+        },
+        "tags": [
+          "disposable-fixture"
+        ],
+        "user": "ysya"
+      },
+      "message": "Host saved. Creating a host does not grant AI access or trust its server key; allow the host separately in SSHelter AI Access."
+    }
+  }
+}

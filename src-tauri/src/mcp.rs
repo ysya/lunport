@@ -1,12 +1,10 @@
-//! MCP stdio adapter and the authenticated loopback bridge to SSHelter's desktop UI.
+//! MCP stdio adapter backed by the OS-authenticated session IPC broker.
 //!
-//! The `--mcp` process never owns credentials and never executes SSH. It speaks
-//! newline-delimited MCP JSON-RPC over stdin/stdout and forwards tool calls to the
-//! running desktop app. The app owns host policy, native approval, execution, and
-//! the audit trail. A random token in a mode-0600 runtime file authenticates the
-//! loopback bridge; this protects against unrelated local users, not a malicious
-//! process running as the same OS account.
+//! The adapter owns no credentials and executes no SSH. Records tools use protocol 2
+//! on the session socket or named pipe. The token-authenticated loopback transport
+//! is retained only after the broker explicitly confirms Legacy workspace mode.
 
+use crate::session::deadline::InteractionDeadline;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -28,18 +26,41 @@ use crate::error::AppError;
 use crate::fsutil;
 use crate::state::AppState;
 
+pub(crate) mod records;
+mod adapter;
+mod management;
+pub use records::RequestContext;
+
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_BRIDGE_LINE: u64 = 1_048_576;
 const MAX_COMMAND_BYTES: usize = 16_384;
 const MAX_STREAM_BYTES: usize = 65_536;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
-const MAX_RECENT_AUDIT: usize = 100;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct McpPolicy {
     enabled: bool,
     #[serde(default)]
     allowed_hosts: BTreeSet<String>,
+    #[serde(default)]
+    approval_mode: ApprovalMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub enum ApprovalMode { #[default] Ask, AutoLog }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct McpClientInfo { pub name: Option<String>, pub title: Option<String>, pub version: Option<String> }
+impl McpClientInfo {
+    pub fn sanitize(value: Option<&Value>) -> Self {
+        let field = |key| value.and_then(|v|v.get(key)).and_then(Value::as_str).map(|s| s.chars().filter(|c|!c.is_control() && !crate::session::auth::is_deceptive_format(*c)).take(100).collect());
+        Self { name:field("name"), title:field("title"), version:field("version") }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,10 +70,18 @@ struct RuntimeInfo {
     pid: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct McpPendingRequest {
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional = nullable))]
+    pub host_proposal: Option<McpHostProposal>,
+    #[serde(default)] pub host_id: Option<String>,
+    #[serde(default)] pub route: Vec<String>,
+    #[serde(default)] pub requested_by: Vec<String>,
+    #[serde(default)] pub requester_id: Option<String>,
+    #[serde(default)] pub client_info: McpClientInfo,
     pub id: String,
     pub alias: String,
     pub command: String,
@@ -63,15 +92,27 @@ pub struct McpPendingRequest {
     pub requested_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct McpAuditEntry {
+    #[serde(default)] pub client: String,
+    #[serde(default)] pub host_id: Option<String>,
+    #[serde(default)] pub ended: Option<String>,
+    #[serde(default)] pub signal: Option<String>,
+    #[serde(default)] pub mode: ApprovalMode,
+    #[serde(default)] pub requested_by: Vec<String>,
+    #[serde(default)] pub requester_id: Option<String>,
+    #[serde(default)] pub client_info: McpClientInfo,
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "number"))]
+    pub at_ms: u64,
     pub id: String,
     pub alias: String,
     pub command: String,
     pub outcome: String,
-    pub exit_code: Option<i32>,
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub exit_code: Option<i64>,
     pub detail: Option<String>,
     #[cfg_attr(test, ts(type = "number"))]
     pub completed_at_ms: u64,
@@ -81,6 +122,10 @@ pub struct McpAuditEntry {
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct McpStatus {
+    pub noninteractive_credentials_supported: bool,
+    pub noninteractive_credentials_notice: String,
+    pub approval_mode: ApprovalMode,
+    pub audit_error: Option<String>,
     pub enabled: bool,
     pub bridge_active: bool,
     pub allowed_hosts: Vec<String>,
@@ -92,8 +137,16 @@ pub struct McpStatus {
 }
 
 struct PendingApproval {
+    deadline: InteractionDeadline,
     request: McpPendingRequest,
     decision: mpsc::SyncSender<ApprovalDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
+pub struct McpHostProposal {
+    pub settings: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +154,7 @@ enum ApprovalDecision {
     Allow,
     Deny,
     Cancel,
+    TimedOut,
 }
 
 #[derive(Default)]
@@ -112,11 +166,14 @@ struct CancellationState {
 /// Runtime state shared by Tauri commands and loopback bridge workers.
 pub struct McpRuntime {
     policy: Mutex<McpPolicy>,
+    audit: Mutex<records::AuditLog>,
+    records_active:Mutex<HashMap<String,(String,crate::session::connect::CancelToken)>>,
     pending: Mutex<HashMap<String, PendingApproval>>,
     recent: Mutex<VecDeque<McpAuditEntry>>,
     cancellations: Mutex<CancellationState>,
     /// This instance's bridge (port, token, pid): what it wrote to `mcp-runtime.json`.
     bridge: Mutex<Option<RuntimeInfo>>,
+    bridge_start: Mutex<()>,
     bridge_active: AtomicBool,
     pub keep_alive: AtomicBool,
     next_request_id: AtomicU64,
@@ -127,16 +184,27 @@ impl Default for McpRuntime {
     fn default() -> Self {
         Self {
             policy: Mutex::new(McpPolicy::default()),
+            audit: Mutex::new(records::AuditLog::default()),
+            records_active:Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             recent: Mutex::new(VecDeque::new()),
             cancellations: Mutex::new(CancellationState::default()),
             bridge: Mutex::new(None),
+            bridge_start: Mutex::new(()),
             bridge_active: AtomicBool::new(false),
             keep_alive: AtomicBool::new(false),
             next_request_id: AtomicU64::new(1),
             last_client_at_ms: AtomicU64::new(0),
         }
     }
+}
+
+const AUDIT_READ_LIMIT: u64 = 32 * 1024 * 1024;
+
+fn read_audit_bytes(reader: impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(AUDIT_READ_LIMIT + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 impl McpRuntime {
@@ -150,9 +218,13 @@ impl McpRuntime {
             .map(|p| p.request.clone())
             .collect();
         pending.sort_by_key(|p| p.requested_at_ms);
-        let recent = self.recent.lock().unwrap().iter().cloned().collect();
+        let recent = self.recent.lock().unwrap().iter().take(10).cloned().collect();
         let last = self.last_client_at_ms.load(Ordering::Relaxed);
         McpStatus {
+            noninteractive_credentials_supported: cfg!(windows),
+            noninteractive_credentials_notice: if cfg!(windows) { "Windows stored credentials support noninteractive Auto-log reads. Missing or locked credentials still require Ask." } else { "This platform cannot guarantee noninteractive credential reads. Credential-dependent requests require Ask." }.into(),
+            approval_mode: policy.approval_mode,
+            audit_error: self.audit.lock().unwrap().error.clone(),
             enabled: policy.enabled,
             bridge_active: self.bridge_active.load(Ordering::Relaxed),
             allowed_hosts: policy.allowed_hosts.into_iter().collect(),
@@ -165,12 +237,99 @@ impl McpRuntime {
         }
     }
 
-    fn record(&self, entry: McpAuditEntry) {
+    pub(crate) fn record(&self, entry: McpAuditEntry) {
+        let _ = self.record_result(entry);
+    }
+    fn record_result(&self, mut entry: McpAuditEntry) -> Option<String> {
+        entry.detail = None;
+        if entry.at_ms == 0 { entry.at_ms = entry.completed_at_ms; }
+        if entry.client.is_empty() { entry.client = "mcp".into(); }
+        let mut audit = self.audit.lock().unwrap();
         let mut recent = self.recent.lock().unwrap();
         recent.push_front(entry);
-        recent.truncate(MAX_RECENT_AUDIT);
+        recent.truncate(1000);
+        let result = audit.path.as_ref().map(|path| {
+            let mut bytes = Vec::new();
+            for item in recent.iter().rev() {
+                let mut item = item.clone();
+                item.detail = None;
+                serde_json::to_writer(&mut bytes, &item).map_err(|_| "Cannot encode session log".to_string())?;
+                bytes.push(b'\n');
+            }
+            fsutil::atomic_write(path, &bytes, 0o600).map_err(|_| "Session log could not be saved; completed execution was not retried.".to_string())
+        }).transpose();
+        let error = result.err();
+        if let Some(error) = &error { audit.error = Some(error.clone()); }
+        error
+    }
+    /// Returns this request's persistence result while holding the audit serialization lock.
+    pub(crate) fn record_deployment(&self, entry: McpAuditEntry) -> Option<String> {
+        self.record_result(entry)
+    }
+    fn load_audit(&self,path:PathBuf) {
+        let mut audit=self.audit.lock().unwrap();audit.path=Some(path.clone());
+        match std::fs::File::open(&path).and_then(read_audit_bytes) {
+            Ok(bytes) if bytes.len() as u64 <= AUDIT_READ_LIMIT=>{
+                let mut entries=VecDeque::new();let lines=bytes.split(|b|*b==b'\n').collect::<Vec<_>>();
+                for (i,line) in lines.iter().enumerate(){if line.is_empty(){continue;}match serde_json::from_slice::<McpAuditEntry>(line){Ok(mut entry)=>{entry.detail=None;entries.push_front(entry);entries.truncate(1000);},Err(_)=>{audit.error=Some(if i==lines.len()-1 && !bytes.ends_with(b"\n"){"Partial trailing session-log entry was ignored."}else{"Session log contains a corrupt entry; valid entries were retained."}.into());}}}
+                *self.recent.lock().unwrap()=entries;
+            }
+            Ok(_)=>audit.error=Some("Session log exceeds the 32 MiB read limit.".into()),
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
+            Err(_)=>audit.error=Some("Session log could not be read.".into()),
+        }
     }
 
+    fn resolve_approval(&self, request_id: &str, allow: bool) -> Result<(), AppError> {
+        let mut waiting = self.pending.lock().unwrap();
+        let pending = waiting
+            .remove(request_id)
+            .ok_or_else(|| AppError::NotFound("MCP request already resolved or expired".into()))?;
+        if pending.deadline.expired() {
+            let _ = pending.decision.try_send(ApprovalDecision::TimedOut);
+            return Err(AppError::NotFound(
+                "MCP request already resolved or expired".into(),
+            ));
+        }
+        pending
+            .decision
+            .try_send(if allow {
+                ApprovalDecision::Allow
+            } else {
+                ApprovalDecision::Deny
+            })
+            .map_err(|_| AppError::Other("MCP client disconnected".into()))
+    }
+    fn wait_approval(
+        &self,
+        request: &McpPendingRequest,
+        cancel: &crate::session::connect::CancelToken,
+        timeout: Duration,
+        publish: impl FnOnce(),
+    ) -> ApprovalDecision {
+        if cancel.is_cancelled() {
+            return ApprovalDecision::Cancel;
+        }
+        let deadline = InteractionDeadline::after(timeout);
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.pending.lock().unwrap().insert(
+            request.id.clone(),
+            PendingApproval {
+                deadline,
+                request: request.clone(),
+                decision: tx,
+            },
+        );
+        publish();
+        let decision = receive_approval(&rx, cancel, deadline, &|| {
+            (Instant::now(), SystemTime::now())
+        });
+        self.pending.lock().unwrap().remove(&request.id);
+        decision
+    }
+    fn cancel_records(&self,host:Option<&str>){
+        for (id,cancel) in self.records_active.lock().unwrap().values(){if host.is_none_or(|h|h==id){cancel.cancel();}}
+    }
     fn deny_all_pending(&self) {
         let pending: Vec<_> = self
             .pending
@@ -273,8 +432,9 @@ pub fn initialize(app: &AppHandle, keep_alive: bool) -> Result<(), AppError> {
     let state = app.state::<AppState>();
     // A corrupt policy must fail closed without preventing SSHelter from opening.
     *state.mcp.policy.lock().unwrap() = load_policy().unwrap_or_default();
+    state.mcp.load_audit(fsutil::app_data_root()?.join("session-log.jsonl"));
     state.mcp.keep_alive.store(keep_alive, Ordering::Relaxed);
-    start_bridge(app.clone())
+    Ok(())
 }
 
 fn random_token() -> Result<String, AppError> {
@@ -282,6 +442,12 @@ fn random_token() -> Result<String, AppError> {
     getrandom::fill(&mut bytes)
         .map_err(|e| AppError::Other(format!("cannot create MCP bridge token: {e}")))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+pub(super) fn ensure_legacy_bridge(app:&AppHandle)->Result<(),String>{
+    let state=app.state::<AppState>();let _start=state.mcp.bridge_start.lock().unwrap();
+    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
+    if !state.mcp.bridge_active.load(Ordering::Relaxed){start_bridge(app.clone()).map_err(|e|e.to_string())?;}Ok(())
 }
 
 fn start_bridge(app: AppHandle) -> Result<(), AppError> {
@@ -356,6 +522,7 @@ pub fn forget_bridge(app: &AppHandle) {
 }
 
 fn remove_runtime_file_if_owned(path: &Path, pid: u32) -> std::io::Result<bool> {
+    crate::fsutil::check_write_io(path)?;
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -501,6 +668,8 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
         .last_client_at_ms
         .store(unix_ms(), Ordering::Relaxed);
 
+    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
+
     if envelope.method == "ping" {
         return Ok(json!({ "status": "ok" }));
     }
@@ -516,6 +685,8 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
 
     match envelope.method.as_str() {
         "list_hosts" => {
+            let _lifecycle=state.sync.lifecycle.lock().unwrap();
+            crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
             let doc = wait_for_loaded_doc(&state)?;
             let hosts: Vec<_> = host_summaries(&doc)
                 .into_iter()
@@ -524,6 +695,8 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
             Ok(json!({ "hosts": hosts }))
         }
         "get_effective_config" => {
+            let _lifecycle=state.sync.lifecycle.lock().unwrap();
+            crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
             let alias = string_param(&envelope.params, "alias")?;
             ensure_allowed(&policy, alias)?;
             let doc = wait_for_loaded_doc(&state)?;
@@ -548,6 +721,21 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
     }
 }
 
+/// MCP sees endpoint and routing metadata, never notes or arbitrary imported directive values.
+#[cfg(test)]
+fn record_host_metadata(host: &crate::sync::records_v3::HostRecord) -> Value {
+    json!({
+        "id": host.id,
+        "scope": host.scope,
+        "alias": host.payload.alias,
+        "hostname": host.payload.hostname,
+        "port": host.payload.port,
+        "user": host.payload.user,
+        "jump_ids": host.payload.jump,
+        "auth": host.payload.auth,
+        "key_id": host.payload.key_id,
+    })
+}
 fn string_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {
     params
         .get(key)
@@ -577,10 +765,32 @@ fn ensure_allowed(policy: &McpPolicy, alias: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+fn ensure_record_allowed(policy: &McpPolicy, host: &crate::sync::records_v3::HostRecord) -> Result<(), String> {
+    ensure_allowed(policy, &host.id)
+}
+
+fn change_host_permission(
+    policy: &Mutex<McpPolicy>,
+    target: &str,
+    allowed: bool,
+    validate: impl FnOnce() -> Result<(), AppError>,
+    persist: impl FnOnce(&McpPolicy) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if allowed { validate()?; }
+    let mut policy = policy.lock().unwrap();
+    let mut next = policy.clone();
+    if allowed { next.allowed_hosts.insert(target.into()); }
+    else { next.allowed_hosts.remove(target); }
+    persist(&next)?;
+    *policy = next;
+    Ok(())
+}
+
 fn display_safe_command(command: &str) -> bool {
     !command.is_empty()
         && command.len() <= MAX_COMMAND_BYTES
-        && !command.contains('\0')
+        && !command.chars().any(|c|(c.is_control() && c != '\n' && c != '\t') || crate::session::auth::is_deceptive_format(c))
         && !command.chars().any(|c| {
             matches!(
                 c,
@@ -603,6 +813,13 @@ fn run_approved(
     policy: &McpPolicy,
     params: &Value,
 ) -> Result<Value, String> {
+    let _lifecycle=state.sync.lifecycle.lock().unwrap();
+    if state.sync.core.lock().unwrap().records.is_some() {
+        return Err("MCP remote command execution is not available in the records workspace yet".into());
+    }
+    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
+    drop(_lifecycle);
     let alias = string_param(params, "alias")?.to_string();
     let command = string_param(params, "command")?.to_string();
     if !display_safe_command(&command) {
@@ -668,11 +885,14 @@ fn run_approved(
         user: identity.1,
         port: identity.2,
         requested_at_ms: unix_ms(),
+        ..Default::default()
     };
+    let deadline=InteractionDeadline::after(APPROVAL_TIMEOUT);
     let (tx, rx) = mpsc::sync_channel(1);
     state.mcp.pending.lock().unwrap().insert(
         id.clone(),
         PendingApproval {
+            deadline,
             request: request.clone(),
             decision: tx,
         },
@@ -689,7 +909,9 @@ fn run_approved(
     crate::show_main_window(app);
     let _ = app.emit("mcp://approval-requested", &request);
 
-    let approved = match rx.recv_timeout(APPROVAL_TIMEOUT) {
+    let decision=rx.recv_timeout(deadline.remaining());
+    let decision=if deadline.expired(){Ok(ApprovalDecision::TimedOut)}else{decision};
+    let approved = match decision {
         Ok(ApprovalDecision::Allow) => true,
         Ok(ApprovalDecision::Deny) => false,
         Ok(ApprovalDecision::Cancel) => {
@@ -702,10 +924,11 @@ fn run_approved(
                 exit_code: None,
                 detail: Some("MCP client canceled or disconnected".to_string()),
                 completed_at_ms: unix_ms(),
+                ..Default::default()
             });
             return Err("MCP request was canceled".to_string());
         }
-        Err(_) => {
+        Ok(ApprovalDecision::TimedOut) | Err(_) => {
             state.mcp.pending.lock().unwrap().remove(&id);
             state.mcp.record(McpAuditEntry {
                 id: id.clone(),
@@ -715,6 +938,7 @@ fn run_approved(
                 exit_code: None,
                 detail: Some("No decision within 120 seconds".to_string()),
                 completed_at_ms: unix_ms(),
+                ..Default::default()
             });
             return Err("SSHelter approval timed out".to_string());
         }
@@ -729,10 +953,14 @@ fn run_approved(
             exit_code: None,
             detail: None,
             completed_at_ms: unix_ms(),
+            ..Default::default()
         });
         return Err("Denied in SSHelter".to_string());
     }
 
+    crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
+    let current=state.mcp.policy.lock().unwrap().clone();
+    if !current.enabled{return Err("MCP access was disabled".into());}ensure_allowed(&current,&alias)?;
     match execute_ssh(
         &alias,
         &command,
@@ -747,9 +975,10 @@ fn run_approved(
                     alias,
                     command,
                     outcome: "canceled".to_string(),
-                    exit_code: output.exit_code,
+                    exit_code: output.exit_code.map(i64::from),
                     detail: Some("MCP client canceled or disconnected".to_string()),
                     completed_at_ms: unix_ms(),
+                ..Default::default()
                 });
                 return Err("MCP request was canceled".to_string());
             }
@@ -758,11 +987,12 @@ fn run_approved(
                 alias,
                 command,
                 outcome: "allowed".to_string(),
-                exit_code: output.exit_code,
+                exit_code: output.exit_code.map(i64::from),
                 detail: output
                     .timed_out
                     .then(|| "SSH command timed out".to_string()),
                 completed_at_ms: unix_ms(),
+                ..Default::default()
             });
             serde_json::to_value(output).map_err(|e| e.to_string())
         }
@@ -775,6 +1005,7 @@ fn run_approved(
                 exit_code: None,
                 detail: Some(error.clone()),
                 completed_at_ms: unix_ms(),
+                ..Default::default()
             });
             Err(error)
         }
@@ -819,6 +1050,7 @@ fn execute_ssh(
     timeout_seconds: u64,
     canceled: &AtomicBool,
 ) -> Result<RunOutput, String> {
+    crate::app_profile::CURRENT.require_legacy_ssh().map_err(str::to_string)?;
     let mut command = crate::process::background_command("ssh");
     if let Some(path) = config_path {
         command.arg("-F").arg(path);
@@ -900,7 +1132,23 @@ fn execute_ssh(
 
 #[tauri::command]
 pub fn mcp_status(state: tauri::State<AppState>) -> McpStatus {
-    state.mcp.status()
+    status_for(&state)
+}
+fn status_for(state:&AppState)->McpStatus{
+    let mut status=state.mcp.status();
+    if state.sync.core.lock().unwrap().format==crate::sync::record_runtime::RuntimeFormat::Records {status.bridge_active=matches!(*state.session.status.lock().unwrap(),crate::session::app::BrokerStatus::Running);}
+    status
+}
+
+fn change_approval_mode(policy:&Mutex<McpPolicy>,mode:ApprovalMode,acknowledged:bool,persist:impl FnOnce(&McpPolicy)->Result<(),AppError>)->Result<(),AppError>{
+    let mut current=policy.lock().unwrap();
+    if mode==ApprovalMode::AutoLog && current.approval_mode!=mode && !acknowledged{return Err(AppError::Other("Confirm the risk of allowing AI commands without per-command approval.".into()));}
+    let mut next=current.clone();next.approval_mode=mode;persist(&next)?;*current=next;Ok(())
+}
+#[tauri::command]
+pub fn mcp_set_approval_mode(state:tauri::State<AppState>,approval_mode:ApprovalMode,risk_acknowledged:bool)->Result<McpStatus,AppError>{
+    change_approval_mode(&state.mcp.policy,approval_mode,risk_acknowledged,save_policy)?;
+    state.mcp.cancel_records(None);state.mcp.deny_all_pending();Ok(status_for(&state))
 }
 
 #[tauri::command]
@@ -917,9 +1165,10 @@ pub fn mcp_set_enabled(
         next
     };
     if !snapshot.enabled {
+        state.mcp.cancel_records(None);
         state.mcp.deny_all_pending();
     }
-    Ok(state.mcp.status())
+    Ok(status_for(&state))
 }
 
 #[tauri::command]
@@ -928,25 +1177,24 @@ pub fn mcp_set_host_allowed(
     alias: String,
     allowed: bool,
 ) -> Result<McpStatus, AppError> {
-    if allowed {
-        let doc = state.doc.lock().unwrap();
-        let doc = doc
-            .as_ref()
-            .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
-        validate_alias(doc, &alias)?;
-    }
-    {
-        let mut policy = state.mcp.policy.lock().unwrap();
-        let mut next = policy.clone();
-        if allowed {
-            next.allowed_hosts.insert(alias.clone());
+    change_host_permission(&state.mcp.policy, &alias, allowed, || {
+        let _lifecycle = state.sync.lifecycle.lock().unwrap();
+        let records = state.sync.core.lock().unwrap().records.clone();
+        if let Some(records) = records {
+            crate::sync::record_repository::get_host(&records, &alias)
+                .map_err(|error| AppError::Other(error.to_string()))?;
         } else {
-            next.allowed_hosts.remove(&alias);
+            crate::sync::engine::require_legacy(&state.sync)?;
+            let doc = state.doc.lock().unwrap();
+            let doc = doc
+                .as_ref()
+                .ok_or_else(|| AppError::Other("no config loaded".to_string()))?;
+            validate_alias(doc, &alias)?;
         }
-        save_policy(&next)?;
-        *policy = next;
-    }
+        Ok(())
+    }, save_policy)?;
     if !allowed {
+        state.mcp.cancel_records(Some(&alias));
         let denied: Vec<_> = {
             let mut pending = state.mcp.pending.lock().unwrap();
             let ids: Vec<_> = pending
@@ -962,7 +1210,7 @@ pub fn mcp_set_host_allowed(
             let _ = request.decision.send(ApprovalDecision::Deny);
         }
     }
-    Ok(state.mcp.status())
+    Ok(status_for(&state))
 }
 
 #[tauri::command]
@@ -971,101 +1219,73 @@ pub fn mcp_resolve_request(
     request_id: String,
     allow: bool,
 ) -> Result<(), AppError> {
-    let pending = state
-        .mcp
-        .pending
-        .lock()
-        .unwrap()
-        .remove(&request_id)
-        .ok_or_else(|| AppError::NotFound("MCP request already resolved or expired".to_string()))?;
-    pending
-        .decision
-        .send(if allow {
-            ApprovalDecision::Allow
-        } else {
-            ApprovalDecision::Deny
-        })
-        .map_err(|_| AppError::Other("MCP client disconnected".to_string()))
+    state.mcp.resolve_approval(&request_id,allow)
 }
 
+fn receive_approval(
+    rx: &mpsc::Receiver<ApprovalDecision>,
+    cancel: &crate::session::connect::CancelToken,
+    deadline: InteractionDeadline,
+    now: &dyn Fn() -> (Instant, SystemTime),
+) -> ApprovalDecision {
+    loop {
+        if cancel.is_cancelled() {
+            return ApprovalDecision::Cancel;
+        }
+        let (monotonic, utc) = now();
+        let left = deadline.remaining_at(monotonic, utc);
+        if left.is_zero() {
+            return ApprovalDecision::TimedOut;
+        }
+        match rx.recv_timeout(left.min(Duration::from_millis(50))) {
+            Ok(decision) => {
+                let (monotonic, utc) = now();
+                return if deadline.remaining_at(monotonic, utc).is_zero() {
+                    ApprovalDecision::TimedOut
+                } else if cancel.is_cancelled() {
+                    ApprovalDecision::Cancel
+                } else {
+                    decision
+                };
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return ApprovalDecision::Cancel,
+            Err(_) => {}
+        }
+    }
+}
 // ─── stdio MCP adapter ───────────────────────────────────────────────────────
 
 /// Run the headless MCP stdio adapter. Only JSON-RPC is written to stdout.
 pub fn run_stdio() {
-    let active_calls = Arc::new(Mutex::new(HashMap::<String, String>::new()));
-    let next_call_id = AtomicU64::new(1);
-    let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(line) if !line.trim().is_empty() => line,
-            Ok(_) => continue,
-            Err(_) => break,
-        };
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message)
-                if message.get("method").and_then(Value::as_str) == Some("tools/call")
-                    && message.get("id").is_some() =>
-            {
-                let id = message.get("id").cloned().unwrap_or(Value::Null);
-                let key = rpc_id_key(&id);
-                let internal_id = format!(
-                    "mcp-adapter-{}-{}",
-                    std::process::id(),
-                    next_call_id.fetch_add(1, Ordering::Relaxed)
-                );
-                active_calls
-                    .lock()
-                    .unwrap()
-                    .insert(key.clone(), internal_id.clone());
-                let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-                let calls = active_calls.clone();
-                let _ = thread::Builder::new()
-                    .name("sshelter-mcp-tool-call".to_string())
-                    .spawn(move || {
-                        let result = call_tool(&params, Some(&internal_id));
-                        let response = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-                        let _ = write_mcp_response(&response);
-                        calls.lock().unwrap().remove(&key);
-                    });
-                None
-            }
-            Ok(message)
-                if message.get("method").and_then(Value::as_str)
-                    == Some("notifications/cancelled") =>
-            {
-                if let Some(request_id) = message
-                    .pointer("/params/requestId")
-                    .map(rpc_id_key)
-                    .and_then(|key| active_calls.lock().unwrap().get(&key).cloned())
-                {
-                    let _ = thread::Builder::new()
-                        .name("sshelter-mcp-cancel".to_string())
-                        .spawn(move || {
-                            let _ = bridge_call("cancel", json!({ "request_id": request_id }));
-                        });
-                }
-                None
-            }
-            Ok(message) => handle_mcp_message(message),
-            Err(e) => Some(jsonrpc_error(
-                Value::Null,
-                -32700,
-                format!("Parse error: {e}"),
-            )),
-        };
-        if let Some(response) = response {
-            if !write_mcp_response(&response) {
-                break;
-            }
+    let active=Arc::new(Mutex::new(HashMap::<String,(String,Arc<adapter::Call>)>::new()));
+    let next=AtomicU64::new(1);let mut info=McpClientInfo::default();let mut workers:Vec<thread::JoinHandle<()>>=Vec::new();
+    let stdin=std::io::stdin();let mut input=stdin.lock();
+    loop {
+        let mut i=0;while i<workers.len(){if workers[i].is_finished(){let _=workers.swap_remove(i).join();}else{i+=1;}}
+        let mut line=String::new();match input.by_ref().take(MAX_BRIDGE_LINE+1).read_line(&mut line){Ok(0)|Err(_)=>break,Ok(n) if n as u64>MAX_BRIDGE_LINE=>break,_=>{}}
+        if line.trim().is_empty(){continue;}
+        let message=match serde_json::from_str::<Value>(&line){Ok(v)=>v,Err(_)=>{if !write_mcp_response(&jsonrpc_error(Value::Null,-32700,"Parse error".into())){break;}continue;}};
+        let method=message.get("method").and_then(Value::as_str).unwrap_or_default();
+        if method=="initialize"{info=McpClientInfo::sanitize(message.pointer("/params/clientInfo"));}
+        if method=="notifications/cancelled" {
+            let found=message.pointer("/params/requestId").and_then(|id|active.lock().unwrap().get(&rpc_id_key(id)).cloned());
+            if let Some((id,call))=found{call.cancel(&id);}continue;
         }
+        if method=="tools/call" && message.get("id").is_some() {
+            let rpc=message["id"].clone();let key=rpc_id_key(&rpc);let id=format!("adapter-{}-{}",std::process::id(),next.fetch_add(1,Ordering::Relaxed));
+            let call=match adapter::insert(&active,key.clone(),id.clone()){Ok(c)=>c,Err(e)=>{let _=write_mcp_response(&jsonrpc_error(rpc,-32600,e));continue;}};
+            let params=message.get("params").cloned().unwrap_or_else(||json!({}));let active=active.clone();let info=info.clone();
+            let worker=thread::spawn(move||{let result=adapter::tool(&params,&id,&info,&call);let renamed=result.pointer("/content/0/text").and_then(Value::as_str)==Some("run was renamed to ssh_exec");let response=if renamed{jsonrpc_error(rpc,-32601,"run was renamed to ssh_exec".into())}else{json!({"jsonrpc":"2.0","id":rpc,"result":result})};if !write_mcp_response(&response){call.cancel(&id);}active.lock().unwrap().remove(&key);});
+            workers.retain(|w:&thread::JoinHandle<()>|!w.is_finished());workers.push(worker);continue;
+        }
+        if method=="tools/list" && message.get("id").is_some(){
+            let mode=adapter::ipc_call("mode",json!({}),&info,&adapter::Call::default());
+            let response=match mode {Ok(v)=>json!({"jsonrpc":"2.0","id":message["id"],"result":{"tools":tools_for_mode(v["mode"].as_str().unwrap_or("legacy"))}}),Err(e)=>jsonrpc_error(message["id"].clone(),-32000,e)};
+            if !write_mcp_response(&response){break;}continue;
+        }
+        if let Some(response)=handle_mcp_message(message){if !write_mcp_response(&response){break;}}
     }
-
-    // EOF normally means the MCP client is shutting down. Best-effort cancel
-    // every request before this adapter process exits.
-    let pending: Vec<_> = active_calls.lock().unwrap().values().cloned().collect();
-    for request_id in pending {
-        let _ = bridge_call("cancel", json!({ "request_id": request_id }));
-    }
+    let calls:Vec<_>=active.lock().unwrap().values().cloned().collect();for(id,call)in calls{call.cancel(&id);}for worker in workers{let _=worker.join();}
 }
 
 fn write_mcp_response(response: &Value) -> bool {
@@ -1095,7 +1315,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "sshelter", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "SSHelter exposes only hosts explicitly allowed in its AI Access settings. Every run request requires an Allow once decision in the SSHelter desktop UI. Never ask for or send passwords, passphrases, private keys, or secrets in command arguments."
+                "instructions": "Existing hosts are exposed only when individually allowed in SSHelter AI Access. Records create_host always needs native human approval and never grants AI access. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log never silently trusts keys or requests credentials. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -1139,7 +1359,7 @@ fn tool_definitions() -> Value {
             "description": "Resolve non-secret connection settings for an AI-approved host.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "alias": { "type": "string", "description": "Exact SSHelter host alias" } },
+                "properties": { "alias": { "type": "string", "description": "Stable host ID returned by list_hosts in a records workspace, or an exact unambiguous host alias" } },
                 "required": ["alias"],
                 "additionalProperties": false
             },
@@ -1162,6 +1382,17 @@ fn tool_definitions() -> Value {
             "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true }
         }
     ])
+}
+
+fn tools_for_mode(mode: &str) -> Value {
+    let mut tools = tool_definitions();
+    if mode == "records" {
+        tools[1]["name"] = json!("get_host");
+        tools[2]["name"] = json!("ssh_exec");
+        tools[2]["description"] = json!("Run a remote command under the current SSHelter Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.");
+        tools.as_array_mut().unwrap().extend(management::tool_definitions());
+    }
+    tools
 }
 
 fn call_tool(params: &Value, request_id: Option<&str>) -> Value {
@@ -1292,6 +1523,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auto_log_requires_explicit_risk_acknowledgement_and_persistence_before_replacement(){
+        let policy=Mutex::new(McpPolicy::default());
+        assert!(change_approval_mode(&policy,ApprovalMode::AutoLog,false,|_|panic!("unacknowledged mode never persists")).is_err());
+        assert_eq!(policy.lock().unwrap().approval_mode,ApprovalMode::Ask);
+        assert!(change_approval_mode(&policy,ApprovalMode::AutoLog,true,|_|Err(AppError::Other("disk full".into()))).is_err());
+        assert_eq!(policy.lock().unwrap().approval_mode,ApprovalMode::Ask);
+        change_approval_mode(&policy,ApprovalMode::AutoLog,true,|_|Ok(())).unwrap();
+        change_approval_mode(&policy,ApprovalMode::Ask,false,|_|Ok(())).unwrap();
+        assert_eq!(policy.lock().unwrap().approval_mode,ApprovalMode::Ask);
+    }
+
+    #[test]
+    fn records_policy_defaults_to_ask_and_rejects_control_commands() {
+        let policy: McpPolicy = serde_json::from_str(r#"{"enabled":true,"allowed_hosts":["id-web"]}"#).unwrap();
+        assert_eq!(serde_json::to_value(policy).unwrap()["approval_mode"], "ask");
+        assert!(!display_safe_command("echo hello\rhidden"));
+        assert!(!display_safe_command("echo \u{200f}hidden"));
+    }
+
+    #[test]
+    fn revoking_a_host_does_not_wait_for_an_active_run_lifecycle_lock() {
+        let lifecycle = Mutex::new(());
+        let _active_run = lifecycle.lock().unwrap();
+        let policy = Mutex::new(McpPolicy { enabled: true, allowed_hosts: BTreeSet::from(["web".into()]), approval_mode: ApprovalMode::Ask });
+        change_host_permission(&policy, "web", false, || {
+            let _guard = lifecycle.try_lock().map_err(|_| AppError::Other("an active run owns lifecycle".into()))?;
+            Ok(())
+        }, |_| Ok(())).unwrap();
+        assert!(!policy.lock().unwrap().allowed_hosts.contains("web"));
+    }
+
+    #[test]
+    fn records_allowlist_does_not_inherit_a_legacy_alias_grant() {
+        let host: crate::sync::records_v3::HostRecord = serde_json::from_value(json!({"id":"0123456789abcdef","scope":{"kind":"local"},"payload":{"schema":2,"alias":"web","hostname":"fixture.invalid","auth":"password"}})).unwrap();
+        let mut policy = McpPolicy::default();
+        policy.allowed_hosts.insert("web".into());
+        assert!(ensure_record_allowed(&policy, &host).is_err());
+        policy.allowed_hosts.insert(host.id.clone());
+        assert!(ensure_record_allowed(&policy, &host).is_ok());
+    }
+
+    #[test]
+    fn record_metadata_does_not_expose_notes_or_imported_directive_values(){
+        let host:crate::sync::records_v3::HostRecord=serde_json::from_value(json!({"id":"0123456789abcdef","scope":{"kind":"local"},"payload":{"schema":2,"alias":"web","hostname":"example.test","auth":"password","notes":"private-note-sentinel","imported":{"source":"private-source-sentinel","at_ms":1,"unsupported":[{"keyword":"setenv","value":"private-env-sentinel","requires_review":true}]}}})).unwrap();
+        let result=record_host_metadata(&host).to_string();
+        for private in ["private-note-sentinel","private-source-sentinel","private-env-sentinel"] {assert!(!result.contains(private));}
+        assert_eq!(record_host_metadata(&host)["hostname"],"example.test");
+    }
+    #[test]
+    fn development_mcp_execution_is_refused_before_spawning() {
+        if crate::app_profile::CURRENT != crate::app_profile::AppProfile::Development { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("nonexistent");
+        let canceled = AtomicBool::new(false);
+        let error = execute_ssh("fixture", "true", Some(&config), 1, &canceled).err().expect("Development must refuse before opening a config or spawning ssh");
+        assert!(error.contains("Development"), "{error}");
+        assert!(!config.exists());
+    }
+
+    #[test]
     fn rejects_bidi_control_characters_in_commands() {
         assert!(display_safe_command("sudo systemctl status runner"));
         assert!(!display_safe_command("echo safe\u{202e}txt"));
@@ -1344,6 +1635,18 @@ mod tests {
     }
 
     #[test]
+    fn a_confined_profile_does_not_remove_an_owned_runtime_file_outside_its_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.json");
+        let bytes = runtime_json(4242);
+        std::fs::write(&path, &bytes).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(remove_runtime_file_if_owned(&path, 4242).is_err());
+        });
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
     fn runtime_file_names_only_the_process_it_was_written_for() {
         assert!(runtime_file_names(&runtime_json(4242), 4242));
         assert!(!runtime_file_names(&runtime_json(4242), 4243));
@@ -1371,3 +1674,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mcp/deployment_audit_tests.rs"]
+pub(crate) mod deployment_audit_tests;

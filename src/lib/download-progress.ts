@@ -12,7 +12,7 @@ export type DownloadEvent = PluginDownloadEvent | UpdateDownloadEvent;
 
 /** The speed is the average over about this long: it follows a change within seconds without jumping per chunk. */
 export const SPEED_WINDOW_MS = 3_000;
-/** No data for this long and the toast says the download may have stalled. */
+/** No data for this long and the update panel says the download may have stalled. */
 export const STALL_AFTER_MS = 10_000;
 /** Less data history than this gives no meaningful speed. */
 const MIN_SPEED_SPAN_MS = 1_000;
@@ -125,7 +125,7 @@ function idleFor(ms: number): string {
   return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min`;
 }
 
-/** What the progress toast shows. */
+/** What the inline progress panel shows. */
 export interface ProgressView {
   title: string;
   /** The bytes, the speed and the time left, or what is happening. */

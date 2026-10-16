@@ -1,0 +1,412 @@
+{
+  "scope": "Settings, Legacy and secondary UI consistency",
+  "data": "Disposable browser fixtures; native Development profile",
+  "browserMatrix": [
+    {
+      "viewport": [
+        800,
+        560
+      ],
+      "font": 17,
+      "theme": "dark",
+      "motion": "reduced",
+      "coverage": "Records settings, six Legacy dialogs and long Records deployment review"
+    },
+    {
+      "viewport": [
+        1100,
+        720
+      ],
+      "font": 15,
+      "theme": "light",
+      "motion": "system",
+      "coverage": "Eight Legacy categories, editor/save bar, Keychain and forms"
+    },
+    {
+      "viewport": [
+        1440,
+        900
+      ],
+      "font": 13,
+      "theme": "light",
+      "motion": "system",
+      "coverage": "Settings Local data layout"
+    }
+  ],
+  "recordsSettings": [
+    {
+      "category": "General",
+      "contentWidth": 541,
+      "legacyPathMounted": false,
+      "scrollWidth": 541,
+      "title": "General",
+      "viewportOverflow": false
+    },
+    {
+      "category": "Appearance",
+      "contentWidth": 541,
+      "legacyPathMounted": false,
+      "scrollWidth": 541,
+      "title": "Appearance",
+      "viewportOverflow": false
+    },
+    {
+      "category": "Connections",
+      "contentWidth": 541,
+      "legacyPathMounted": false,
+      "scrollWidth": 541,
+      "title": "Connections",
+      "viewportOverflow": false
+    },
+    {
+      "category": "Local data",
+      "contentWidth": 541,
+      "legacyPathMounted": false,
+      "scrollWidth": 541,
+      "title": "Local data",
+      "viewportOverflow": false
+    },
+    {
+      "category": "AI access",
+      "contentWidth": 541,
+      "legacyPathMounted": false,
+      "scrollWidth": 541,
+      "title": "AI access",
+      "viewportOverflow": false
+    },
+    {
+      "category": "Updates",
+      "contentWidth": 541,
+      "legacyPathMounted": false,
+      "scrollWidth": 541,
+      "title": "Updates",
+      "viewportOverflow": false
+    },
+    {
+      "category": "Diagnostics",
+      "contentWidth": 541,
+      "legacyPathMounted": false,
+      "scrollWidth": 541,
+      "title": "Diagnostics",
+      "viewportOverflow": false
+    }
+  ],
+  "legacySettings": [
+    {
+      "category": "General",
+      "scrollWidth": 731,
+      "title": "General",
+      "viewportOverflow": false,
+      "width": 731
+    },
+    {
+      "category": "Appearance",
+      "scrollWidth": 731,
+      "title": "Appearance",
+      "viewportOverflow": false,
+      "width": 731
+    },
+    {
+      "category": "Connections",
+      "scrollWidth": 731,
+      "title": "Connections",
+      "viewportOverflow": false,
+      "width": 731
+    },
+    {
+      "category": "Files & backups",
+      "scrollWidth": 731,
+      "title": "Files & backups",
+      "viewportOverflow": false,
+      "width": 731
+    },
+    {
+      "category": "AI access",
+      "scrollWidth": 731,
+      "title": "AI access",
+      "viewportOverflow": false,
+      "width": 731
+    },
+    {
+      "category": "Sync",
+      "scrollWidth": 731,
+      "title": "Sync",
+      "viewportOverflow": false,
+      "width": 731
+    },
+    {
+      "category": "Updates",
+      "scrollWidth": 731,
+      "title": "Updates",
+      "viewportOverflow": false,
+      "width": 731
+    },
+    {
+      "category": "Discovery & checks",
+      "scrollWidth": 731,
+      "title": "Discovery & checks",
+      "viewportOverflow": false,
+      "width": 731
+    }
+  ],
+  "secondaryDialogs": [
+    {
+      "tool": "Known hosts",
+      "bodyHeight": 339,
+      "bodyScrollHeight": 1125,
+      "dialog": {
+        "bottom": 543,
+        "height": 526,
+        "left": 128,
+        "right": 672,
+        "top": 17,
+        "width": 544,
+        "x": 128,
+        "y": 17
+      },
+      "footer": {
+        "bottom": 543,
+        "height": 69,
+        "left": 128,
+        "right": 672,
+        "top": 474,
+        "width": 544,
+        "x": 128,
+        "y": 474
+      },
+      "overflow": false,
+      "title": "Known hosts"
+    },
+    {
+      "tool": "Backup history",
+      "bodyHeight": 360,
+      "bodyScrollHeight": 1074,
+      "dialog": {
+        "bottom": 543,
+        "height": 526,
+        "left": 162,
+        "right": 638,
+        "top": 17,
+        "width": 476,
+        "x": 162,
+        "y": 17
+      },
+      "footer": {
+        "bottom": 543,
+        "height": 69,
+        "left": 162,
+        "right": 638,
+        "top": 474,
+        "width": 476,
+        "x": 162,
+        "y": 474
+      },
+      "overflow": false,
+      "title": "Backup history"
+    },
+    {
+      "tool": "Discover hosts",
+      "bodyHeight": 180,
+      "bodyScrollHeight": 180,
+      "dialog": {
+        "bottom": 453.078125,
+        "height": 346.15625,
+        "left": 162,
+        "right": 638,
+        "top": 106.921875,
+        "width": 476,
+        "x": 162,
+        "y": 106.921875
+      },
+      "footer": {
+        "bottom": 453.078125,
+        "height": 69,
+        "left": 162,
+        "right": 638,
+        "top": 384.078125,
+        "width": 476,
+        "x": 162,
+        "y": 384.078125
+      },
+      "overflow": false,
+      "title": "Discover hosts"
+    },
+    {
+      "tool": "Config lint \u2014 0 errors, 1 warning",
+      "bodyHeight": 125,
+      "bodyScrollHeight": 125,
+      "dialog": {
+        "bottom": 425.3203125,
+        "height": 290.640625,
+        "left": 162,
+        "right": 638,
+        "top": 134.6796875,
+        "width": 476,
+        "x": 162,
+        "y": 134.6796875
+      },
+      "footer": {
+        "bottom": 425.3203125,
+        "height": 69,
+        "left": 162,
+        "right": 638,
+        "top": 356.3203125,
+        "width": 476,
+        "x": 162,
+        "y": 356.3203125
+      },
+      "overflow": false,
+      "title": "Config lint"
+    },
+    {
+      "tool": "View file /fixture/.ssh/config",
+      "bodyHeight": 133,
+      "bodyScrollHeight": 133,
+      "dialog": {
+        "bottom": 429.5,
+        "height": 299,
+        "left": 43,
+        "right": 757,
+        "top": 130.5,
+        "width": 714,
+        "x": 43,
+        "y": 130.5
+      },
+      "footer": {
+        "bottom": 429.5,
+        "height": 69,
+        "left": 43,
+        "right": 757,
+        "top": 360.5,
+        "width": 714,
+        "x": 43,
+        "y": 360.5
+      },
+      "overflow": false,
+      "title": "config"
+    },
+    {
+      "tool": "New host",
+      "bodyHeight": 329,
+      "bodyScrollHeight": 329,
+      "dialog": {
+        "bottom": 538.1875,
+        "height": 516.375,
+        "left": 196,
+        "right": 604,
+        "top": 21.8125,
+        "width": 408,
+        "x": 196,
+        "y": 21.8125
+      },
+      "footer": {
+        "bottom": 538.1875,
+        "height": 69,
+        "left": 196,
+        "right": 604,
+        "top": 469.1875,
+        "width": 408,
+        "x": 196,
+        "y": 469.1875
+      },
+      "overflow": false,
+      "title": "New host"
+    }
+  ],
+  "errorStates": [
+    {
+      "command": "known_hosts_list",
+      "alertVisible": true,
+      "retryVisible": true
+    },
+    {
+      "command": "config_list_backups",
+      "alertVisible": true,
+      "retryVisible": true
+    },
+    {
+      "command": "discover_hosts",
+      "alertVisible": true,
+      "retryVisible": true
+    },
+    {
+      "command": "config_lint",
+      "alertVisible": true,
+      "retryVisible": true
+    },
+    {
+      "command": "config_read_file",
+      "alertVisible": true,
+      "retryVisible": true
+    }
+  ],
+  "configDraftRetainedAcrossCategoryAndSearch": true,
+  "keepEditingRestoredConfigPathFocus": true,
+  "configLoadCloseGuard": {
+    "loadingVisible": true,
+    "settingsStillOpen": true,
+    "closeButtons": 0
+  },
+  "legacySyncRelayDraftRetainedAcrossCategories": true,
+  "legacyCollapsedGroupsImmediatelyInert": true,
+  "keychainOtherFilesUseSameDisclosure": true,
+  "legacySaveBar": {
+    "sidebarRight": 345,
+    "saveBarLeft": 345,
+    "bottom": 720
+  },
+  "deployment": {
+    "routeHops": 16,
+    "confirmationInitiallyDisabled": true,
+    "actionsWithinViewport": true,
+    "remoteOperationPerformed": false
+  },
+  "native": {
+    "platform": "macos",
+    "profile": "development",
+    "viewport": [
+      1100,
+      720
+    ],
+    "fonts": [
+      15,
+      17
+    ],
+    "motion": [
+      "system",
+      "reduced"
+    ],
+    "searchJumpFocusedSection": true,
+    "settingsCloseRestoredOriginFocus": true,
+    "preferencesRestored": {
+      "theme": "system",
+      "fontSize": 15,
+      "motion": "system"
+    },
+    "legacyNativeUiTested": false,
+    "normalExitLogged": true,
+    "finalBundleSmokeCheck": true,
+    "latestProcess": {
+      "pid": 26660,
+      "stages": [
+        "context",
+        "window",
+        "setup",
+        "tray",
+        "sync",
+        "mcp",
+        "broker",
+        "ready",
+        "exit"
+      ]
+    }
+  },
+  "manualWindowsLinuxUi": false,
+  "serverConnectionsOrSyncCreation": false,
+  "browserPreferencesRestored": {
+    "theme": "light",
+    "fontSize": 15,
+    "motion": "system"
+  },
+  "viewportOverrideReset": true
+}

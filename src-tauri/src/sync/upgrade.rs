@@ -169,6 +169,7 @@ fn read_if_exists(path: &Path) -> Result<Option<String>, AppError> {
 
 /// 移除檔案;本來就不在也算成功。
 fn remove_if_exists(path: &Path) -> Result<(), AppError> {
+    fsutil::check_write(path)?;
     #[cfg(test)]
     if TEST_HOOKS.with(|h| std::mem::take(&mut h.borrow_mut().fail_removal)) {
         return Err(AppError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected: the file could not be removed")));
@@ -378,8 +379,37 @@ fn refresh_doc_after_failure(env: &SyncEnv, mut doc_lock: MutexGuard<'_, Option<
 /// 每小時 20 次的建立額度(chain 本來就在也一樣),所以先讀、只建立不在的 chain。使用者自己放在 `~/.ssh/sshelter/`、被我們的 Include 列著的檔案
 /// (v1 只有 `hosts.config` 那個 token 是我們的)改成本機檔案(`SyncNotice::Upgraded::moved_files`),不會被新清單收走。
 pub fn upgrade_v1(env: &SyncEnv, v1: &LegacyState) -> Result<bool, AppError> {
-    if env.doc.lock().unwrap().is_none() {
-        return Ok(false);
+    {
+        let loaded = env.doc.lock().unwrap();
+        let Some(doc) = loaded.as_ref() else { return Ok(false) };
+        // Reject escaped files before consulting Keychain or creating/upgrading relay chains.
+        for path in [&env.ssh_dir, &env.state_path, &env.state_path.with_file_name(state_v2::LEGACY_BACKUP_FILE),
+                     &hosts_file::managed_path(&env.ssh_dir), &env.ssh_dir.join(KEPT_FILE), &space_files::local_dir(&env.ssh_dir)] {
+            fsutil::check_write(path)?;
+        }
+        crate::config::include::validate_doc_write_boundaries(doc)?;
+        for path in doc.files.iter().map(|file| file.path.clone()).chain([
+            hosts_file::managed_path(&env.ssh_dir), env.ssh_dir.join(KEPT_FILE)
+        ]) {
+            fsutil::check_backup_write(&path)?;
+        }
+        if fsutil::writes_are_confined() {
+            for dir in [space_files::spaces_dir(&env.ssh_dir), space_files::local_dir(&env.ssh_dir)] {
+                fsutil::check_write(&dir)?;
+                match std::fs::read_dir(&dir) {
+                    Ok(entries) => for entry in entries {
+                        let entry = entry?;
+                        if entry.file_name().to_string_lossy().ends_with(".config") {
+                            fsutil::check_write(&entry.path())?;
+                            fsutil::check_backup_write(&entry.path())?;
+                        }
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            crate::config::include::load_doc(&doc.files[0].path)?;
+        }
     }
     // 升級開始時的 generation:之後使用者離開(放棄升級會換 generation、清掉 legacy)就停下,不再動檔案、也不換狀態。
     let generation = env.runtime.core.lock().unwrap().generation;
@@ -669,6 +699,23 @@ pub fn upgrade_v1(env: &SyncEnv, v1: &LegacyState) -> Result<bool, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_legacy_upgrade_refuses_before_keychain_or_relay() {
+        let (relay, clock) = (FakeRelay::new(), TestClock::new());
+        let (d, v1) = v1_device("a", &relay, &clock, "Host web\n");
+        let before = d.main_config();
+        let state = std::fs::read(&d.env().state_path).unwrap();
+        d.keychain.fail_reads.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: d.home.path().join("different") }, || {
+            upgrade_v1(&d.env(), &v1).unwrap_err()
+        });
+        assert!(matches!(error, AppError::ForbiddenPath(_)), "must deny before querying keychain: {error}");
+        assert_eq!(d.main_config(), before);
+        assert_eq!(std::fs::read(&d.env().state_path).unwrap(), state);
+        assert!(d.runtime.core.lock().unwrap().legacy.is_some());
+    }
+
     use crate::sync::account::{create_account, leave_account, BEFORE_LEAVE};
     use crate::sync::env::Keychain;
     use crate::sync::fake_relay::FakeRelay;

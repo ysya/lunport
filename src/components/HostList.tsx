@@ -1,3 +1,4 @@
+import { Disclosure } from "@/components/app/Disclosure";
 import {
   useEffect,
   useMemo,
@@ -1233,6 +1234,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                       onClick={() => toggleGroup(section.file)}
                       className="sidebar-sticky-header sticky top-0 z-10 flex w-full items-center justify-between rounded-sm px-2 py-1.5 select-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none cursor-default"
                       aria-expanded={!isCollapsed}
+                      aria-controls={`legacy-group-${section.file}`}
                     >
                       <span className="flex min-w-0 items-center gap-1">
                         <ChevronRight
@@ -1242,7 +1244,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                           )}
                           aria-hidden
                         />
-                        <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+                        <span className="truncate text-xs font-medium text-muted-foreground">
                           {section.name}
                         </span>
                       </span>
@@ -1325,6 +1327,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                                     : `${section.file} (double-click to rename)`
                               }
                               aria-expanded={!isCollapsed}
+                      aria-controls={`legacy-group-${section.file}`}
                             >
                               <span className="flex min-w-0 items-center gap-1">
                                 <ChevronRight
@@ -1334,7 +1337,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                                   )}
                                   aria-hidden
                                 />
-                                <span className="truncate text-[0.6875rem] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+                                <span className="truncate text-xs font-medium text-muted-foreground">
                                   {section.name}
                                 </span>
                                 {spaceName && (
@@ -1396,7 +1399,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                         </ContextMenuContent>
                       </ContextMenu>
                     ))}
-                  {!isCollapsed && (
+                  <Disclosure open={!isCollapsed} id={`legacy-group-${section.file}`}>
                     <>
                       {section.defaults.length > 0 && (
                         <>
@@ -1471,7 +1474,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                         </ul>
                       )}
                     </>
-                  )}
+                  </Disclosure>
                 </div>
               );
             })

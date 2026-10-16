@@ -1,0 +1,47 @@
+# Windows Beta 12 啟動閃退後續
+
+使用者已確認原本 Library sync 失敗的電腦更新後可成功同步；另一台 Windows 的 Beta 12 在開啟時直接退出，並非按 Sync 才退出。所提供的 10000／10010 為事件識別碼，尚無事件來源、SSHelter 例外代碼、故障模組或 crash dump，不能以此確認特定根因。
+
+## 已確認的程式路徑與修補
+
+- 原本 setup 在啟動背景同步與 broker 後才建立初始 tray；背景 Records status 同時會取得／建立原生 tray。Tauri 2.11.2 的 `tray_by_id`／`TrayIcon::clone` 會在呼叫執行緒複製 tray-icon 0.23.1 的 `Rc<RefCell<_>>`。原本 background status 與 visibility command 的 native handle 複製／釋放會跨執行緒，不能僅因 `set_menu` 內部派送到主執行緒就視為整段安全。
+- 初始 tray 現在先於背景 worker 建立。整次 lookup、建構、安裝、visibility 與 native handle drop 放在事件迴圈的一次主執行緒工作中，跨執行緒只傳公開選單資料。相同 ID／標籤／enabled 清單不重建；主機或可連線狀態改變仍更新。原生 tray 初始化失敗不再阻擋主視窗啟動。
+- 鎖定 muda 0.19.3 的相容 patch，包含 [Windows dangling pointer 修正](https://github.com/tauri-apps/muda/pull/363)。此上游修正的 window-menubar 情境與 SSHelter tray 啟動競態不同，**沒有把上游 issue 當作這台電腦已證實的 crash 根因**。
+- 不改變 Records、SSH config、pin 核准、既有 session、草稿或金鑰授權規則。Records 編輯／同步仍只保存 SSHelter 資料，Legacy 工作區仍有其原本的 SSH config 編輯行為。
+- Tauri 2.11.2 在事件迴圈 Ready 時自動建立設定中的 WebView；失敗會 panic，並不由外層 `.build()` 的 Result 處理。Windows 現在與 macOS 一樣停用該自動建立（Windows 不執行 CoreAudio 檢查），由既有主視窗入口明確建立，錯誤分類／backtrace 與原生提示取代這個 panic 路徑。背景 host 不建立主視窗；稍後 user activation 可再次嘗試，broker 與 runtime 資料不重設。其他 Rust panic／原生例外仍可能結束 process，由 log 提供診斷，未宣稱所有 crash 都可恢復。
+
+## 本機診斷
+
+- GUI 入口在 Tauri context 建立前安裝 logger。app.log 為 JSON Lines，記錄時間、PID、版號、profile、平台、啟動階段與固定錯誤分類；同步起訖／失敗、tray 錯誤、GUI build 失敗與 Rust panic 都有事件。panic 記錄編譯程式位置與 backtrace，省略 payload。一般錯誤不序列化 Display 字串；IO 只記 error kind／OS code。不能從 `operation_failed` 的分類反推完整 relay 錯誤。
+- 不記錄 hosts、Groups、SSH／MCP 命令、連線結果、環境變數、密碼、私鑰或同步碼，不上傳任何 log。backtrace 可能含編譯時的程式來源路徑。
+- 每個 log 檔 256 KiB 上限，保留目前檔及 `.1`、`.2` 兩代，單筆事件最多 32 KiB。重啟接續保留紀錄，正常退出有 exit 階段。Unix 新檔 0600／目錄 0700，拒絕 log symlink 及 Windows 最終檔案／診斷目錄 reparse point；無法寫 log 不阻止啟動。
+- Windows 另預先開啟 native-crash.log。未處理原生例外 filter 只以固定 buffer／Win32 WriteFile 記錄例外代碼、位址與階段編號，不配置 heap、不取得 mutex、不寫記憶體 dump。會轉交原有 filter，或回傳 EXCEPTION_CONTINUE_SEARCH，保留 Windows 原本的處理。原生 filter 可能被其他 runtime 覆寫；fast-fail、kill、嚴重 stack 損壞與 WebView2 子程序 crash 不保證可捕捉。[Windows 官方限制](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setunhandledexceptionfilter)。
+- Windows 的一般 GUI build error 顯示不依賴 WebView2 的原生提示與 log 路徑；背景 client-started host 不彈出此提示。`ready` 僅表示 setup 已完成，**不是 WebView／GPU 正常繪圖的證明**。
+- 設定 → General → Data → Diagnostic logs → Open logs 可開啟目前 profile 的診斷資料夾。
+
+正式 Windows：`%LOCALAPPDATA%\org.homelab.sshelter\diagnostics`；Development 使用 `org.homelab.sshelter.dev`。Mac 使用 `~/Library/Application Support/<identifier>/diagnostics`。ASKPASS、CLI connect、MCP stdio 與 CoreAudio child 不經過 GUI logger 安裝，不會為 log 啟動 WebView 或解鎖憑證。
+
+## 驗證
+
+本次加入：
+
+- 連續寫入跨越兩次以上輪替，逐行驗證 JSON、檔案上限與 Unix 權限；symlink 目標 config 保留原內容。
+- 拋出含敏感字串的 disposable child panic，確認失敗狀態、setup 階段與程式位置／backtrace 保存，payload 不在 log，下一次寫入不抹除舊紀錄。
+- Windows 獨立原生事件迴圈從儲存的 17 hosts＋繼承 Group／已啟用 Library 資料重建 runtime；實際 native tray、10 次 transport round、3 個並行 status／visibility workers 共 300 組呼叫；檢查相同選單不重建、改名可更新實際 Win32 選單、只有一個 tray resource、USER objects 有界、SSH config 不變。此測試不建立 WebView2，不能冒充正式 GUI／特定機器的人工驗收。
+- Windows disposable child 透過 RaiseException 注入自訂例外，核對退出代碼與 native-crash.log；只在該 child 使用 WER_NO_UI，產品不關閉 Windows Error Reporting。
+- CI-only PowerShell smoke 額外啟動真正的 Development exe 與 WebView2，讀取上述已同步 state（不匯出 MemKeychain），檢查 PID 對應 ready／exit log、原生視窗、背景更新後仍存活及正常關閉。拒絕覆蓋既有 Development state，且限定 disposable GitHub runner。此 CI 的 frontend 為 placeholder，驗證的是 bootstrap／WebView2 建立，並非 React 繪圖或正式 Windows 實機驗收。
+
+## 最終來源與結果
+
+凍結來源：`3d39718e085bf3d7db14cc28515d713a4df22c09`，工作分支 `codex/library-sync-host-dialog-fixes`。後續驗證文件提交不改變安裝包來源。
+
+- macOS complete safe Rust：2,597 passed、0 failed、10 filtered，168.82 秒；略過既有 OS Keychain 與 PAM 測試，要求實際 OpenSSH 工具。
+- 前端 81 檔／1,060 tests 通過；TypeScript、Vite 及 Development app bundle 成功。Clippy `--lib --tests` 成功，97 項既有 lib-test 警告（含 50 重複），修改的產品程式碼無 Clippy 診斷。
+- [Windows CI 38886319832](https://github.com/ysya/sshelter/actions/runs/38886319832) 對凍結來源整體成功：2,404 passed、0 failed、3 ignored、9 filtered，219.12 秒；三種 profile 各 3 passed，app／CLI helper、真實 console 及 OpenSSH client／engine 成功。
+- Windows 原生 tray 額外測試 1 passed：17 hosts＋Group、10 rounds、300 組並行 status／visibility，選單僅在初始、首次 Records 與改名時發布（2 → 3），USER objects 10 → 10、只有一個 tray resource，SSH config 不變。原生故障 child 額外 1 passed（0.04 秒），確認例外代碼與階段保存。真正 Development exe 的 WebView2 HWND、背景狀態與正常退出驗證成功。
+- 本機最終來源的 Development app 原生 UI 已操作：Open logs 打開正確 Development 資料夾，tray 顯示切換恢復原值，正常退出留下 PID 對應 exit log；沒有啟動正式 GUI。
+- [本機收據](review/beta13/local-checks.json)、[Windows 測試輸出](review/beta13/windows-test-results.txt)、[CI metadata](review/beta13/windows-ci.json)、[Development log 收據](review/beta13/development-log-validation.json)、[UI 截圖](review/beta13/diagnostics-ui.png)。
+
+初次 Windows CI 因新診斷的 Win32 System Kernel feature 未啟用而編譯失敗，已修正；兩次中間來源驗證隨後續來源更新取消，沒有將它們視為成功。最終來源的必要測試通過後才啟動 Beta 發布；CI 快取收尾與打包可並行，不省略任何必要測試。
+
+[Beta 13 已發布](releases/1.0.0-13-validation.md)，四平台／15 項 Beta manifest／九個套件簽章均已核對，Stable 維持 v0.16.0。仍需回報機器實際更新後驗收；若繼續閃退，應保留 app.log／native-crash.log 與 Windows Application Error／WER 的模組及例外資料，不重建 chain、重置 vault 或刪除 sync-state.json。macOS CoreAudio 防護仍只避免可偵測的啟動前故障變成無提示黑畫面，沒有根除系統音訊死鎖。

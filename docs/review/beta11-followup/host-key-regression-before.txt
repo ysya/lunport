@@ -1,0 +1,15 @@
+running 1 test
+
+thread 'sync::record_round::tests::confirmed_pin_survives_a_background_sync_round_without_losing_its_updates' (11070424) panicked at src/sync/record_round_tests.rs:1283:100:
+called `Result::unwrap()` on an `Err` value: Other("sync round superseded by a newer sync state")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test sync::record_round::tests::confirmed_pin_survives_a_background_sync_round_without_losing_its_updates ... FAILED
+
+failures:
+
+failures:
+    sync::record_round::tests::confirmed_pin_survives_a_background_sync_round_without_losing_its_updates
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2600 filtered out; finished in 0.17s
+
+error: test failed, to rerun pass `--lib`

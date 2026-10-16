@@ -54,8 +54,7 @@ pub struct AgentStatus {
 
 /// The user's ~/.ssh directory. Errors if the home dir is unknown.
 pub fn ssh_dir() -> Result<PathBuf, AppError> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))?;
+    let home = crate::fsutil::home_dir()?;
     Ok(home.join(".ssh"))
 }
 

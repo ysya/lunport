@@ -1,0 +1,12 @@
+slots	Complete safe Rust suite	2026-10-16T15:22:44.8885341Z test result: ok. 2404 passed; 0 failed; 3 ignored; 0 measured; 9 filtered out; finished in 256.88s
+slots	Profile selection in the normal library	2026-10-16T15:23:55.0727701Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	Profile selection in the normal library	2026-10-16T15:25:02.3874938Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	Profile selection in the normal library	2026-10-16T15:26:00.2603363Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	Synced library startup and concurrent native tray updates	2026-10-16T15:29:01.5488935Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2415 filtered out; finished in 2.36s
+slots	Native crash leaves metadata without suppressing Windows Error Reporting	2026-10-16T15:29:02.8688753Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2415 filtered out; finished in 0.04s
+slots	The console helper's tests	2026-10-16T15:30:26.5290527Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	The console helper's tests	2026-10-16T15:30:26.5412386Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper's tests	2026-10-16T15:30:26.7318199Z test result: ok. 3 passed
+slots	The console helper's tests	2026-10-16T15:30:27.9602490Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	The console helper and sshelter.exe in a console of their own	2026-10-16T15:30:31.1155081Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2415 filtered out; finished in 1.20s
+slots	The engine against the runner's OpenSSH server	2026-10-16T15:30:38.9429934Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2415 filtered out; finished in 0.23s

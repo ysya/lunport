@@ -1,0 +1,70 @@
+{
+  "source_commit": "21759b76801fe2be77fc196f1a651a9dfae75cd9",
+  "run_id": 38826962440,
+  "workflow_conclusion": "success",
+  "test_results": [
+    {
+      "step": "Complete safe Rust suite",
+      "passed": 2398,
+      "failed": 0,
+      "ignored": 1,
+      "filtered": 9
+    },
+    {
+      "step": "Profile selection in the normal library",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    {
+      "step": "Profile selection in the normal library",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    {
+      "step": "Profile selection in the normal library",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    {
+      "step": "The console helper's tests",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    {
+      "step": "The console helper's tests",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    {
+      "step": "The console helper's tests",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0
+    },
+    {
+      "step": "The console helper and sshelter.exe in a console of their own",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 2407
+    },
+    {
+      "step": "The engine against the runner's OpenSSH server",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 2407
+    }
+  ]
+}

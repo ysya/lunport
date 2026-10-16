@@ -1,0 +1,10 @@
+slots	Complete safe Rust suite	2026-10-16T02:20:15.8269321Z test result: ok. 2401 passed; 0 failed; 1 ignored; 0 measured; 9 filtered out; finished in 199.19s
+slots	Profile selection in the normal library	2026-10-16T02:21:28.9492960Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	Profile selection in the normal library	2026-10-16T02:22:29.4281264Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	Profile selection in the normal library	2026-10-16T02:23:41.3025896Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper's tests	2026-10-16T02:24:54.9927320Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+slots	The console helper's tests	2026-10-16T02:24:55.0041282Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper's tests	2026-10-16T02:24:55.1251334Z test result: ok. 3 passed
+slots	The console helper's tests	2026-10-16T02:24:55.3004579Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+slots	The console helper and sshelter.exe in a console of their own	2026-10-16T02:26:40.5367828Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2410 filtered out; finished in 1.14s
+slots	The engine against the runner's OpenSSH server	2026-10-16T02:26:49.6082396Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2410 filtered out; finished in 0.24s

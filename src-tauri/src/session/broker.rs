@@ -78,6 +78,7 @@ struct Conn {
     owner: Arc<ConnectionOwner>,
     control: Arc<ShellControl>,
     cancel: CancelToken,
+    requester_id:Option<String>,
 }
 
 /// Who has given the client of a session that was still being connected the outcome of the connect. Whoever comes second leaves it
@@ -104,10 +105,15 @@ struct Table {
     entries: BTreeMap<u64, Entry>,
     /// `end_all` has started: the app is quitting, and no session is started any more.
     quitting: bool,
+    mcp: BTreeMap<u64, CancelToken>,
+    deployments: BTreeMap<u64, CancelToken>,
 }
 
 /// The broker. One per app; its handler serves the IPC socket.
+pub type McpHandler = Arc<dyn Fn(&Connector<'_>, &str, &serde_json::Value, crate::mcp::RequestContext, &CancelToken) -> Result<serde_json::Value,String> + Send + Sync>;
 pub struct Broker {
+    mcp: Mutex<Option<McpHandler>>,
+    audit:Mutex<Option<Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>>>,
     engine: Arc<dyn SshEngine>,
     directory: Arc<dyn HostDirectory>,
     keys: Arc<dyn KeyStore>,
@@ -119,6 +125,14 @@ pub struct Broker {
     /// Notified whenever a session leaves the table (`end_all` waits on it).
     changed: Condvar,
     next_id: AtomicU64,
+}
+
+pub(crate) struct DeploymentRegistration<'a> { broker: &'a Broker, id: u64 }
+impl Drop for DeploymentRegistration<'_> {
+    fn drop(&mut self) {
+        locked(&self.broker.table).deployments.remove(&self.id);
+        self.broker.changed.notify_all();
+    }
 }
 
 impl Broker {
@@ -142,6 +156,8 @@ impl Broker {
         hello_wait: Duration,
     ) -> Arc<Broker> {
         Arc::new(Broker {
+            mcp: Mutex::new(None),
+            audit:Mutex::new(None),
             engine,
             directory,
             keys,
@@ -153,6 +169,24 @@ impl Broker {
             next_id: AtomicU64::new(0),
         })
     }
+
+    /// Human deployment reuses the same directory, key store and host-key policy without MCP grants.
+    /// Clone the broker out of AppState before calling; the returned connector borrows only this broker.
+    pub fn connector(&self) -> Connector<'_> {
+        Connector {engine:self.engine.as_ref(),directory:self.directory.as_ref(),keys:self.keys.as_ref(),keychain:self.keychain.as_ref(),confirmer:self.confirmer.as_ref()}
+    }
+
+    /// Human deployments participate in the same quit barrier, without consulting MCP policy.
+    pub(crate) fn register_deployment(&self, cancel: CancelToken) -> Result<DeploymentRegistration<'_>, String> {
+        let mut table = locked(&self.table);
+        if table.quitting { cancel.cancel(); return Err("The application is quitting.".into()); }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        table.deployments.insert(id, cancel);
+        Ok(DeploymentRegistration { broker: self, id })
+    }
+
+    pub fn set_audit(&self,callback:Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>){*locked(&self.audit)=Some(callback);}
+    pub fn set_mcp_handler(&self, handler:McpHandler) { *locked(&self.mcp)=Some(handler); }
 
     /// The IPC server's handler: each connection is served on the thread the server gives it.
     pub fn handler(self: &Arc<Broker>) -> Handler {
@@ -168,7 +202,8 @@ impl Broker {
     /// Whether any client has a session, one that is still being connected (it is at a question, or at the host key window) as much as
     /// one that is open.
     pub fn has_sessions(&self) -> bool {
-        !locked(&self.table).entries.is_empty()
+        let table=locked(&self.table);
+        !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty()
     }
 
     /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. Waits up to `wait` for the table to
@@ -190,6 +225,8 @@ impl Broker {
         let (connecting, open) = {
             let mut table = locked(&self.table);
             table.quitting = true;
+            for cancel in table.mcp.values() {cancel.cancel();}
+            for cancel in table.deployments.values() {cancel.cancel();}
             let (mut connecting, mut open) = (Vec::new(), Vec::new());
             for entry in table.entries.values_mut() {
                 match entry.info.state {
@@ -222,7 +259,7 @@ impl Broker {
         }
         let deadline = Instant::now() + wait;
         let mut table = locked(&self.table);
-        while !table.entries.is_empty() {
+        while !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -242,8 +279,10 @@ impl Broker {
         // `hello`, then `open_shell`, each within a short time (a connection is one of 64 and costs a thread); from then on no read timeout
         // (an idle shell is not a dead client).
         let _ = set_read_timeout(&reader, Some(self.hello_wait));
-        if !greet(&mut reader, link.as_ref()) {
-            return;
+        match greet(&mut reader, link.as_ref()) {
+            Greeting::Connect => {},
+            Greeting::Mcp(info) => return self.serve_mcp(reader, link, pid, info),
+            Greeting::Refused => return,
         }
         // The time is for each message (spec §7.2): `open_shell` has all of it again. (A socket's read timeout is per read already; a
         // pipe's bound is one deadline, which this sets again.)
@@ -265,7 +304,7 @@ impl Broker {
         control.resize(pty.cols, pty.rows);
         let Ok(closer) = reader.try_clone() else { return };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let conn = Conn { id, link: Arc::clone(&link), closer: Arc::new(closer), owner: Arc::clone(&owner), control: Arc::clone(&control), cancel: cancel.clone() };
+        let conn = Conn { id, link: Arc::clone(&link), closer: Arc::new(closer), owner: Arc::clone(&owner), control: Arc::clone(&control), cancel: cancel.clone(), requester_id:crate::mcp::RequestContext::from_peer(pid,None).requester_id };
         // From here on the session is in the table, whatever it is doing, so that the app sees it and can end it.
         if !self.enter(&conn, &host, requested_by) {
             return say_quit(link.as_ref(), &host.to_string());
@@ -299,6 +338,35 @@ impl Broker {
         owner.gone();
         control.owner_gone();
         let _ = worker.join();
+    }
+
+    fn serve_mcp(self:&Arc<Self>, mut reader:Stream, link:Arc<FrameLink>, pid:Option<u32>, info:Option<serde_json::Value>) {
+        use super::protocol::{McpClientMessage, McpServerMessage};
+        let response=|result:Result<serde_json::Value,String>|{
+            let (result,error)=match result {Ok(v)=>(Some(v),None),Err(e)=>(None,Some(e))};
+            let _=write_control(&mut locked(&link.writer).stream,&McpServerMessage::McpResult{result,error});
+        };
+        let Some(handler)=locked(&self.mcp).clone() else {response(Err("MCP is unavailable in this broker.".into()));return;};
+        let (method,params)=match first_frame(&mut reader) {First::Control(p)=>match decode::<McpClientMessage>(&p){Ok(McpClientMessage::McpCall{method,params})=>(method,params),_=>return},_=>return};
+        let cancel=CancelToken::default(); let id=self.next_id.fetch_add(1,Ordering::SeqCst)+1;
+        { let mut table=locked(&self.table);if table.quitting||table.mcp.len()>=16{drop(table);response(Err("MCP broker is busy or quitting.".into()));return;}table.mcp.insert(id,cancel.clone()); }
+        let _=set_read_timeout(&reader,None);
+        let Ok(closer)=reader.try_clone() else {locked(&self.table).mcp.remove(&id);self.changed.notify_all();return;};
+        let broker=self.clone(); let worker_cancel=cancel.clone();
+        let worker=std::thread::Builder::new().name("sshelter-mcp-session".into()).spawn(move||{
+            struct Leaving<'a>{broker:&'a Broker,id:u64,closer:Stream}
+            impl Drop for Leaving<'_>{fn drop(&mut self){hang_up(&self.closer);locked(&self.broker.table).mcp.remove(&self.id);self.broker.changed.notify_all();}}
+            let _leave=Leaving{broker:&broker,id,closer};
+            let connector=broker.connector();
+            let mut context=crate::mcp::RequestContext::from_peer(pid,info.as_ref());context.id=format!("mcp-session-{id}");
+            let output=handler(&connector,&method,&params,context,&worker_cancel);
+            let (result,error)=match output{Ok(v)=>(Some(v),None),Err(e)=>(None,Some(e))};
+            let _=write_control(&mut locked(&link.writer).stream,&McpServerMessage::McpResult{result,error});
+        });
+        if let Ok(worker)=worker {
+            // Only Close is accepted. Answers, PID and authentication material never come from an MCP client.
+            let _=read_frame(&mut reader);cancel.cancel();let _=worker.join();
+        } else {cancel.cancel();locked(&self.table).mcp.remove(&id);self.changed.notify_all();}
     }
 
     /// The thread for the session could not be started: its client is told so, and then the session leaves the table and its connection
@@ -384,16 +452,15 @@ impl Broker {
     /// The session thread: connects, then runs the shell. A failure is told to the client (unless it is gone) as an error and an exit
     /// without a status.
     fn run_session(&self, conn: &Conn, host: &HostQuery, pty: Pty) {
-        let connector = Connector {
-            engine: self.engine.as_ref(),
-            directory: self.directory.as_ref(),
-            keys: self.keys.as_ref(),
-            keychain: self.keychain.as_ref(),
-            confirmer: self.confirmer.as_ref(),
-        };
+        let info=locked(&self.table).entries.get(&conn.id).map(|e|e.info.clone());
+        let log=ConnectLog{callback:locked(&self.audit).clone(),entry:Mutex::new(crate::mcp::McpAuditEntry{
+            id:format!("connect-{}",conn.id),client:"connect".into(),alias:host.to_string(),host_id:info.as_ref().and_then(|i|i.host_id.as_ref().map(|h|h.as_str().into())),requested_by:info.and_then(|i|i.requested_by).unwrap_or_else(||vec!["Unknown".into()]),requester_id:conn.requester_id.clone(),outcome:"error".into(),..Default::default()
+        })};
+        let connector = self.connector();
         let connected = match connector.connect(host, conn.owner.as_ref(), &conn.cancel) {
             Ok(connected) => connected,
             Err(failure) => {
+                if failure.kind==CANCELLED || conn.cancel.is_cancelled(){let mut entry=locked(&log.entry);entry.outcome="canceled".into();entry.ended=Some("canceled".into());}
                 if failure.kind != CANCELLED && !conn.control.is_gone() && self.claim(conn.id) {
                     let failure = conn.owner.failure_told(failure);
                     could_not_open(conn.link.as_ref(), &failure.kind, &failure.text);
@@ -402,12 +469,29 @@ impl Broker {
             }
         };
         let Some(destination) = connected.target.hops.last() else { return };
+        {let mut entry=locked(&log.entry);entry.alias=destination.alias.clone();entry.host_id=Some(destination.id.as_str().into());entry.outcome="allowed".into();}
         if !self.promote(conn.id, destination) {
             connected.session.close();
             return;
         }
-        run_shell(connected, pty, conn.link.as_ref(), &conn.control, &conn.id.to_string());
+        run_shell(connected, pty, &AuditLink{inner:conn.link.as_ref(),log:&log}, &conn.control, &conn.id.to_string());
+        if conn.cancel.is_cancelled(){let mut e=locked(&log.entry);if e.exit_code.is_none() && e.signal.is_none(){e.outcome="canceled".into();e.ended=Some("canceled".into());}}
     }
+}
+
+/// Captures only public terminal status; terminal bytes and authentication never enter the log.
+struct ConnectLog {callback:Option<Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>>,entry:Mutex<crate::mcp::McpAuditEntry>}
+impl Drop for ConnectLog {fn drop(&mut self){if let Some(callback)=&self.callback{let mut entry=locked(&self.entry).clone();entry.at_ms=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;entry.completed_at_ms=entry.at_ms;callback(entry);}}}
+struct AuditLink<'a>{inner:&'a dyn ClientLink,log:&'a ConnectLog}
+impl ClientLink for AuditLink<'_>{
+    fn send(&self,message:&ServerMessage)->std::io::Result<()>{self.send_all(std::slice::from_ref(message))}
+    fn send_all(&self,messages:&[ServerMessage])->std::io::Result<()>{
+        for m in messages {match m{
+            ServerMessage::Exited{code,signal}=>{let mut e=locked(&self.log.entry);e.exit_code=code.map(i64::from);e.signal=signal.clone();e.ended=Some(if code.is_some(){"exited"}else if signal.is_some(){"signaled"}else{"disconnected"}.into());},
+            ServerMessage::Event(Event::Error{..})=>locked(&self.log.entry).outcome="error".into(),_=>{}
+        }}self.inner.send_all(messages)
+    }
+    fn send_data(&self,bytes:&[u8])->std::io::Result<()>{self.inner.send_data(bytes)}
 }
 
 /// What becomes of a session whichever way its thread ends, a panic included (the thread unwinds through this): it leaves the table, its
@@ -469,22 +553,24 @@ fn hello_version(payload: &[u8]) -> Option<u64> {
 /// refused by name with an `error` event (spec §7.2), and `false` comes back: the connection is closed, and nothing was started. The
 /// version is looked at first: a client of another version may say hello in ways this version cannot read, and what helps its user then
 /// is to be told to quit SSHelter and open it again, whoever the client says it is.
-fn greet(reader: &mut Stream, link: &dyn ClientLink) -> bool {
+enum Greeting {Connect,Mcp(Option<serde_json::Value>),Refused}
+fn greet(reader: &mut Stream, link: &dyn ClientLink) -> Greeting {
     let refuse = |kind: &str, text: String| {
         let _ = tell(link, ServerMessage::Event(Event::Error { kind: kind.to_string(), text }));
-        false
+        Greeting::Refused
     };
     match first_frame(reader) {
-        First::Silent => false,
+        First::Silent => Greeting::Refused,
         First::Broken => refuse(kinds::PROTOCOL, "SSHelter could not read the first message.".to_string()),
         First::Data => refuse(kinds::PROTOCOL, "The first message must be hello.".to_string()),
         First::Control(payload) => {
+            if let Ok(ClientMessage::Hello {client:ClientKind::Mcp,version:super::protocol::MCP_PROTOCOL_VERSION,client_info})=decode::<ClientMessage>(&payload) {return Greeting::Mcp(client_info);}
             if let Some(version) = hello_version(&payload).filter(|version| *version != u64::from(PROTOCOL_VERSION)) {
                 let text = format!("This sshelter speaks protocol {version} and the SSHelter that is running speaks {PROTOCOL_VERSION}. Quit SSHelter and open it again.");
                 return refuse(kinds::PROTOCOL, text);
             }
             match decode::<ClientMessage>(&payload) {
-                Ok(ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, .. }) => true,
+                Ok(ClientMessage::Hello { client: ClientKind::Connect, version: PROTOCOL_VERSION, .. }) => Greeting::Connect,
                 Ok(ClientMessage::Hello { client: ClientKind::Mcp, .. }) => refuse(kinds::UNSUPPORTED, "The MCP adapter cannot use SSHelter's sessions yet.".to_string()),
                 Ok(ClientMessage::Hello { .. }) | Err(_) => refuse(kinds::PROTOCOL, "SSHelter could not read the first message.".to_string()),
                 Ok(_) => refuse(kinds::PROTOCOL, "The first message must be hello.".to_string()),
@@ -996,6 +1082,13 @@ mod tests {
     }
 
     #[test]
+    fn connect_audit_preserves_exit_status_without_terminal_output(){
+        let world=world(FakeEngine::new());let entries=Arc::new(Mutex::new(Vec::new()));let recorded=entries.clone();world.broker.set_audit(Arc::new(move|e|recorded.lock().unwrap().push(e)));
+        let mut client=Client::connect(&world.sock);client.open("web");assert!(matches!(client.next_message(),ServerMessage::Opened{..}));remote(&world).print(b"CONNECT_OUTPUT_SENTINEL");remote(&world).end(Exit::Code(7));client.rest();
+        crate::ssh::testing::eventually("connect audit completion",5,||!entries.lock().unwrap().is_empty());let entries=entries.lock().unwrap();assert_eq!(entries.len(),1);let e=&entries[0];assert_eq!(e.client,"connect");assert_eq!(e.command,"");assert_eq!(e.host_id.as_deref(),Some("id-web"));assert_eq!(e.exit_code,Some(7));assert_eq!(e.ended.as_deref(),Some("exited"));assert_eq!(e.outcome,"allowed");assert!(!serde_json::to_string(e).unwrap().contains("CONNECT_OUTPUT_SENTINEL"));
+    }
+
+    #[test]
     fn a_session_is_listed_while_it_runs() {
         let world = world(FakeEngine::new());
         let mut client = Client::connect(&world.sock);
@@ -1317,6 +1410,7 @@ mod tests {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let link = Arc::new(FrameLink::new(theirs.try_clone().unwrap()));
         let conn = Conn {
+            requester_id:None,
             id,
             link: Arc::clone(&link),
             closer: Arc::new(theirs),
@@ -1569,7 +1663,7 @@ mod tests {
         // What the client writes, as frames (type, payload), and what it must be told.
         let cases: Vec<(&str, Vec<(u8, &[u8])>, Vec<ServerMessage>)> = vec![
             ("a client kind this version does not know, of another version", vec![(CONTROL, br#"{"type":"hello","client":"agent","version":2}"#)], other_version.clone()),
-            ("an mcp client of another version: the version is what to tell", vec![(CONTROL, br#"{"type":"hello","client":"mcp","version":2}"#)], other_version.clone()),
+            ("an mcp client of an unsupported version", vec![(CONTROL, br#"{"type":"hello","client":"mcp","version":3}"#)], error(kinds::PROTOCOL, "This sshelter speaks protocol 3 and the SSHelter that is running speaks 1. Quit SSHelter and open it again.")),
             ("a hello without a version", vec![(CONTROL, br#"{"type":"hello","client":"connect"}"#)], unreadable.clone()),
             ("text that is not JSON", vec![(CONTROL, b"hello?")], unreadable.clone()),
             ("a frame of a type there is not", vec![(3, b"x")], unreadable.clone()),

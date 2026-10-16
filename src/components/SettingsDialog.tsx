@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import type { ComponentType } from "react";
+import { auditRows } from "@/lib/mcp-audit-rows";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -11,12 +11,13 @@ import {
   RefreshCw,
   Settings2,
   SlidersHorizontal,
+  Search,
+  ArrowRight,
   Sun,
   SunMoon,
   TerminalSquare,
 } from "lucide-react";
 
-import { getVersion } from "@tauri-apps/api/app";
 import {
   disable as autostartDisable,
   enable as autostartEnable,
@@ -25,9 +26,10 @@ import {
 
 import { useUiStore, type SettingsCategory } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
-import { useHostsQuery, useLoadConfig, usePlatform, useTerminals } from "@/lib/queries";
+import { useHostsQuery, useLoadConfig, usePlatform, useTerminals, useIsDevelopment } from "@/lib/queries";
 import { tauriInvoke } from "@/lib/ipc";
-import { checkForUpdates } from "@/lib/updater";
+import { useUpdaterState, updateInProgress } from "@/lib/updater";
+import { UpdatesPane } from "@/components/UpdatesPane";
 import { copyText } from "@/lib/clipboard";
 import { isImeKey } from "@/lib/ime";
 import {
@@ -39,11 +41,9 @@ import {
 import {
   FONT_SIZE_OPTIONS,
   LINT_RULES,
-  normalizeUpdateChannel,
   quickConnectLabel,
   terminalSupportsNewTab,
   type ThemePref,
-  type UpdateChannel,
 } from "@/lib/settings-logic";
 import { cn } from "@/lib/utils";
 import { isWildcardOnly } from "@/lib/host-display";
@@ -51,9 +51,10 @@ import {
   useMcpStatus,
   useSetMcpEnabled,
   useSetMcpHostAllowed,
+  useSetMcpApprovalMode,
 } from "@/lib/mcp";
 
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -75,28 +76,86 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { searchSettings, settingsDestinations, type SettingsMode } from "@/lib/settings-navigation";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 import { SyncPane } from "@/components/SyncPane";
+import { revealHidden } from "@/lib/sync-approvals";
+import { chooseMcpMode } from "@/lib/mcp-flow";
+import { McpAttribution } from "@/components/McpAttribution";
+import { groupPath } from "@/components/records/group-tree";
+import type { RecordOverview } from "@/lib/records";
+
+export function SettingsCategoryPane({
+  category,
+  recordOverview,
+  onOpenImport,
+  onOpenSync,
+  onConfigDirtyChange,
+  onConfigBusyChange,
+}: {
+  onConfigDirtyChange?: (dirty: boolean) => void;
+  onConfigBusyChange?: (busy: boolean) => void;
+  category: SettingsCategory;
+  recordOverview?: RecordOverview;
+  onOpenImport?: () => void;
+  onOpenSync?: () => void;
+}) {
+  if (category === "general") return <GeneralPane />;
+  if (category === "updates") return <UpdatesPane />;
+  if (category === "appearance") return <AppearancePane />;
+  if (category === "connection") return <ConnectionPane />;
+  if (category === "files") return <>
+    {recordOverview ? <Section title="Library & workspace tools" description="Hosts and keys stay in this local library unless you explicitly share them. Import copies selected entries and leaves the source files in place.">
+      <SettingsGroup>
+        <SettingsRow label="Import SSH configuration" description="Review hosts and keys before adding them to the library."><Button variant="outline" size="sm" onClick={onOpenImport}>Open import…</Button></SettingsRow>
+        <SettingsRow label="Library sync" description="Manage your relay, devices and shared library in the Sync workspace."><Button variant="outline" size="sm" onClick={onOpenSync}>Open sync</Button></SettingsRow>
+      </SettingsGroup>
+    </Section> : <FilesPane onDirtyChange={onConfigDirtyChange} onBusyChange={onConfigBusyChange} />}
+    <PreferencesDataPane />
+  </>;
+  if (category === "ai")
+    return recordOverview ? (
+      <McpPane
+        records
+        hosts={recordOverview.hosts.map((host) => ({
+          id: host.id,
+          alias: revealHidden(host.payload.alias),
+          hostname: revealHidden(host.effective_payload.hostname),
+          user: revealHidden(host.effective_payload.user),
+          port: host.effective_payload.port,
+          groupPath: revealHidden(groupPath(recordOverview, host.payload.group_id, host.scope)),
+        }))}
+      />
+    ) : (
+      <LegacyMcpPane />
+    );
+  if (category === "sync")
+    return recordOverview ? (
+      <Section
+        title="Sync chain"
+        description="Manage your relay, sync code and shared spaces in the Sync workspace."
+      >
+        <Button variant="outline" onClick={onOpenSync}>
+          Open sync workspace
+        </Button>
+      </Section>
+    ) : (
+      <SyncPane />
+    );
+  return <>
+    <DiagnosticsPane />
+    {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses SSHelter's built-in SSH engine. Hosts and keys stay local unless you explicitly share them into a sync chain.">
+      <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect individually allowed hosts and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Group defaults never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.</p>
+    </Section> : <AdvancedPane />}
+  </>;
+}
 
 /** Radix Select values must be non-empty; this sentinel round-trips to `null`. */
 const TERMINAL_DEFAULT = "__default__";
 /** Sentinel for "keep all backups" (backupRetention = null). */
 const RETENTION_ALL = "__all__";
 
-const CATEGORIES: {
-  id: SettingsCategory;
-  label: string;
-  icon: ComponentType<{ className?: string }>;
-  badge?: string;
-}[] = [
-  { id: "general", label: "General", icon: Settings2 },
-  { id: "appearance", label: "Appearance", icon: SunMoon },
-  { id: "connection", label: "Connection", icon: TerminalSquare },
-  { id: "files", label: "Files & Backups", icon: FolderCog },
-  { id: "ai", label: "AI Access", icon: Bot },
-  { id: "sync", label: "Sync", icon: RefreshCw, badge: "Beta" },
-  { id: "advanced", label: "Advanced", icon: SlidersHorizontal },
-];
+const CATEGORY_ICONS = { general: Settings2, appearance: SunMoon, connection: TerminalSquare, files: FolderCog, ai: Bot, sync: RefreshCw, updates: RefreshCw, advanced: SlidersHorizontal };
 
 /**
  * The Settings window (⌘,): a System-Settings-style sidebar + detail layout.
@@ -106,7 +165,13 @@ const CATEGORIES: {
  * `useSyncBackendSettings`. Open state lives in the UI store so the toolbar
  * gear, the ⌘K palette, and the ⌘, shortcut can all drive it.
  */
-export function SettingsDialog() {
+export function SettingsDialog({ recordOverview, onOpenImport, onOpenSync }: {
+  recordOverview?: RecordOverview;
+  onOpenImport?: () => void;
+  onOpenSync?: () => void;
+} = {}) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const open = useUiStore((s) => s.settingsOpen);
   const setOpen = useUiStore((s) => s.setSettingsOpen);
   const category = useUiStore((s) => s.settingsCategory);
@@ -124,67 +189,120 @@ export function SettingsDialog() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [setOpen]);
 
-  const active = CATEGORIES.find((c) => c.id === category) ?? CATEGORIES[0];
+  const updatePhase = useUpdaterState((state) => state.phase);
+  const updateAttention = updatePhase === "available" || updateInProgress(updatePhase);
+  const mode: SettingsMode = recordOverview ? "records" : "legacy";
+  const categories = settingsDestinations(mode);
+  const active = categories.find((item) => item.id === category) ?? categories.find((item) => item.id === "files")!;
+  const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [target, setTarget] = useState<string | null>(null);
+  const [filesVisited, setFilesVisited] = useState(false);
+  const [syncVisited, setSyncVisited] = useState(false);
+  const [configDirty, setConfigDirty] = useState(false);
+  const [configBusy, setConfigBusy] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const results = searchSettings(search, mode);
+  const searching = search.trim().length > 0;
 
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-2xl">
-        <div className="flex h-[480px] max-h-[80vh]">
-          {/* Sidebar — category list. */}
-          <aside className="flex w-44 shrink-0 flex-col gap-0.5 border-r bg-muted/40 p-2">
-            <DialogTitle className="px-2 pt-1 pb-2 text-sm font-semibold select-none">
-              Settings
-            </DialogTitle>
-            <nav aria-label="Settings categories" className="flex flex-col gap-0.5">
-              {CATEGORIES.map((c) => {
-                const Icon = c.icon;
-                const isActive = c.id === category;
-                return (
-                  <button
-                    key={c.id}
-                    type="button"
-                    onClick={() => setCategory(c.id)}
-                    aria-current={isActive ? "true" : undefined}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors select-none cursor-default",
-                      "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
-                      isActive
-                        ? "bg-primary/12 text-foreground"
-                        : "text-muted-foreground hover:bg-muted/70 hover:text-foreground",
-                    )}
-                  >
-                    <Icon className="size-4 shrink-0" />
-                    {c.label}
-                    {c.badge && (
-                      <Badge variant="outline" className="ml-auto h-4 px-1 text-[10px] font-normal">
-                        {c.badge}
-                      </Badge>
-                    )}
-                  </button>
-                );
-              })}
+  useEffect(() => {
+    if (open && active.id === "files") setFilesVisited(true);
+    if (open && active.id === "sync") setSyncVisited(true);
+  }, [open, active.id]);
+  useEffect(() => {
+    if (!open) { setSearch(""); setFilesVisited(false); setSyncVisited(false); setConfigDirty(false); setConfigBusy(false); setConfirmClose(false); }
+  }, [open]);
+  useEffect(() => {
+    if (!open || searching) return;
+    const frame = requestAnimationFrame(() => {
+      if (target) {
+        const section = contentRef.current?.querySelector<HTMLElement>(`#${target}`);
+        section?.scrollIntoView({ block: "start", behavior: "instant" });
+        section?.focus({ preventScroll: true });
+      } else scrollRef.current?.scrollTo({ top: 0 });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active.id, open, searching, target]);
+  const close = (next: boolean) => {
+    if (!next && configBusy) return;
+    if (!next && configDirty) setConfirmClose(true);
+    else setOpen(next);
+  };
+  const navigate = (next: SettingsCategory) => { setSearch(""); setTarget(null); setCategory(next); };
+  const jump = (next: SettingsCategory, anchor: string | null) => { navigate(next); setTarget(anchor ?? "settings-category-title"); };
+
+  return <>
+    <Dialog open={open} onOpenChange={close}>
+      <DialogContent ref={contentRef} className="app-shell settings-dialog" showCloseButton={!configBusy}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); event.stopPropagation(); searchRef.current?.focus(); }
+        }}
+        onOpenAutoFocus={(event) => {
+          const origin = document.activeElement;
+          returnFocusRef.current = origin instanceof HTMLElement && origin !== document.body && !contentRef.current?.contains(origin) ? origin : null;
+          const activeButton = contentRef.current?.querySelector<HTMLButtonElement>('button[aria-current="page"]');
+          if (activeButton) { event.preventDefault(); activeButton.focus(); }
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const origin = returnFocusRef.current;
+          if (origin?.isConnected) origin.focus();
+          else document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')?.focus();
+        }}>
+        <header className="settings-window-header">
+          <div><DialogTitle>Settings</DialogTitle><DialogDescription>{recordOverview ? "Records library" : "OpenSSH files"} · Preferences for this installation</DialogDescription></div>
+        </header>
+        <div className="settings-layout">
+          <aside className="settings-navigation">
+            <div className="settings-search"><Search className="size-3.5" aria-hidden="true" /><Input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search settings…" aria-label="Search settings" onKeyDown={(event) => {
+              if (isImeKey(event)) return;
+              if (event.key === "Escape" && search) { event.preventDefault(); event.stopPropagation(); setSearch(""); }
+              if (event.key === "Enter" && results[0]) { event.preventDefault(); jump(results[0].category, results[0].target); }
+            }} /></div>
+            <nav aria-label="Settings categories" onKeyDown={(event) => {
+              if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+              const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+              const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+              if (current < 0) return;
+              event.preventDefault();
+              const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+              buttons[next]?.focus();
+            }}>
+              {(["Application", "Workspace", "Maintenance"] as const).map((group) => <div className="settings-nav-group" key={group}>
+                <p>{group}</p>
+                {categories.filter((item) => item.group === group).map((item) => {
+                  const Icon = CATEGORY_ICONS[item.id];
+                  return <button key={item.id} type="button" aria-current={!searching && active.id === item.id ? "page" : undefined} onClick={() => navigate(item.id)}>
+                    <Icon className="size-4 shrink-0" aria-hidden="true" /><span>{item.label}</span>
+                    {item.id === "updates" && updateAttention && <span aria-label="Update needs attention" className="ml-auto size-1.5 shrink-0 rounded-full bg-primary" />}
+                  </button>;
+                })}
+              </div>)}
             </nav>
           </aside>
-
-          {/* Detail pane — scrollable. */}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <header className="shrink-0 border-b px-5 py-3 select-none">
-              <h2 className="text-sm font-semibold">{active.label}</h2>
-            </header>
-            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
-              {category === "general" && <GeneralPane />}
-              {category === "appearance" && <AppearancePane />}
-              {category === "connection" && <ConnectionPane />}
-              {category === "files" && <FilesPane />}
-              {category === "ai" && <McpPane />}
-              {category === "sync" && <SyncPane />}
-              {category === "advanced" && <AdvancedPane />}
+          <div className="settings-detail">
+            <header className="settings-category-header"><h2 id="settings-category-title" tabIndex={-1}>{searching ? "Search results" : active.label}</h2><p>{searching ? `${results.length} matching sections` : active.description}</p></header>
+            <div className="settings-content" ref={scrollRef}>
+              {(filesVisited || active.id === "files") && <div hidden={searching || active.id !== "files"} className="settings-pane"><SettingsCategoryPane category="files" recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenSync={onOpenSync} onConfigDirtyChange={setConfigDirty} onConfigBusyChange={setConfigBusy} /></div>}
+              {!recordOverview && (syncVisited || active.id === "sync") && <div hidden={searching || active.id !== "sync"} className="settings-pane"><SettingsCategoryPane category="sync" /></div>}
+              {searching ? <div className="settings-results">
+                {results.length ? results.map((result) => <button key={`${result.category}-${result.title}`} type="button" onClick={() => jump(result.category, result.target)}>
+                  <span><small>{result.categoryLabel}</small><strong>{result.title}</strong><span>{result.detail}</span></span><ArrowRight className="size-4 shrink-0" aria-hidden="true" />
+                </button>) : <div className="app-empty-state"><h2>No matching settings</h2><p>Try a preference name such as “theme”, “terminal” or “logs”.</p><Button variant="outline" size="sm" onClick={() => { setSearch(""); searchRef.current?.focus(); }}>Clear search</Button></div>}
+              </div> : <>
+                {active.id !== "files" && active.id !== "sync" && <div className="settings-pane" key={active.id}><SettingsCategoryPane category={active.id} recordOverview={recordOverview} onOpenImport={onOpenImport} onOpenSync={onOpenSync} /></div>}
+              </>}
             </div>
           </div>
         </div>
+        <footer className="settings-window-footer">{configBusy ? <span role="status">Loading SSH configuration… Keep this window open until loading finishes.</span> : "Switches and selections apply immediately. Use Apply or Save where shown; imports require confirmation."}</footer>
       </DialogContent>
     </Dialog>
-  );
+    <AlertDialog open={confirmClose} onOpenChange={setConfirmClose}>
+      <AlertDialogContent onCloseAutoFocus={(event) => { if (open && configDirty) { event.preventDefault(); setCategory("files"); requestAnimationFrame(() => contentRef.current?.querySelector<HTMLInputElement>('input[aria-label="Config file path"]')?.focus()); } }}><AlertDialogHeader><AlertDialogTitle>Discard the config path draft?</AlertDialogTitle><AlertDialogDescription>The new path has not been applied. Your current SSH configuration stays loaded.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep editing</AlertDialogCancel><AlertDialogAction onClick={() => { setConfirmClose(false); setOpen(false); }}>Discard draft</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+    </AlertDialog>
+  </>;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -198,43 +316,22 @@ function GeneralPane() {
   const setCloseToTray = useSettingsStore((s) => s.setCloseToTray);
   const globalHotkey = useSettingsStore((s) => s.globalHotkey);
   const setGlobalHotkey = useSettingsStore((s) => s.setGlobalHotkey);
-  const autoCheckUpdates = useSettingsStore((s) => s.autoCheckUpdates);
-  const setAutoCheckUpdates = useSettingsStore((s) => s.setAutoCheckUpdates);
-  const updateChannel = normalizeUpdateChannel(useSettingsStore((s) => s.updateChannel));
-  const setUpdateChannel = useSettingsStore((s) => s.setUpdateChannel);
   const platform = usePlatform();
-  const [checking, setChecking] = useState(false);
-  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const { data: isDevelopment } = useIsDevelopment();
+  const integrationsAllowed = isDevelopment === false;
   // Launch-at-login reflects the OS state (NOT a persisted flag): queried
   // fresh every time this pane mounts; null = still loading → switch disabled.
   const [launchAtLogin, setLaunchAtLogin] = useState<boolean | null>(null);
-  // A validated-but-unconfirmed settings import (drives the overwrite AlertDialog).
-  const [pendingImport, setPendingImport] = useState<SettingsEnvelope | null>(null);
 
   useEffect(() => {
-    getVersion().then(setAppVersion).catch(() => setAppVersion(null));
+    if (!integrationsAllowed) return;
     autostartIsEnabled()
       .then(setLaunchAtLogin)
       .catch((e) => {
         setLaunchAtLogin(null);
         console.warn("[settings] autostart state query failed:", e);
       });
-  }, []);
-
-  const onCheckNow = async () => {
-    setChecking(true);
-    try {
-      await checkForUpdates({ silent: false });
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  const onChannelChange = (channel: UpdateChannel) => {
-    setUpdateChannel(channel);
-    // Switching to Beta checks right away so the user learns whether a beta is available.
-    if (channel === "beta") void onCheckNow();
-  };
+  }, [integrationsAllowed]);
 
   const onTray = (visible: boolean) => {
     setTrayVisible(visible);
@@ -264,6 +361,78 @@ function GeneralPane() {
     }
   };
 
+
+  return (
+    <>
+      <Section title="Startup & window">
+        <SettingsGroup>
+          <SettingsRow id="set-tray" label={platform.data === "macos" ? "Show menu bar icon" : "Show system tray icon"}>
+            <Switch id="set-tray" checked={trayVisible} onCheckedChange={onTray} />
+          </SettingsRow>
+          <SettingsRow
+            id="set-close-to-tray"
+            label="Keep running when the window closes"
+          >
+            <Switch
+              id="set-close-to-tray"
+              checked={closeToTray}
+              onCheckedChange={onCloseToTray}
+            />
+          </SettingsRow>
+          <SettingsRow
+            id="set-launch-login"
+            label="Launch at login"
+            description={!integrationsAllowed ? "OS startup integration is unavailable in development builds." : "Reflects your system startup settings."}
+          >
+            <Switch
+              id="set-launch-login"
+              checked={launchAtLogin === true}
+              disabled={!integrationsAllowed || launchAtLogin === null}
+              onCheckedChange={onLaunchAtLogin}
+            />
+          </SettingsRow>
+        </SettingsGroup>
+      </Section>
+
+      <Section
+        title="Quick connect"
+        description="Brings SSHelter to the front with the command palette open, from any app."
+      >
+        <SettingsGroup>
+          <SettingsRow id="set-global-hotkey" label="Global quick-connect hotkey">
+            <div className="flex items-center gap-2.5">
+              <kbd className="rounded-sm border bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                {quickConnectLabel(platform.data)}
+              </kbd>
+              <Switch
+                id="set-global-hotkey"
+                checked={globalHotkey}
+                onCheckedChange={setGlobalHotkey}
+              />
+            </div>
+          </SettingsRow>
+        </SettingsGroup>
+      </Section>
+
+      <Section
+        title="Language"
+        description="More languages are planned. SSH keywords always stay in English."
+      >
+        <SettingsGroup>
+          <SettingsRow label="Language">
+            <span className="text-sm text-muted-foreground">English</span>
+          </SettingsRow>
+        </SettingsGroup>
+      </Section>
+
+
+    </>
+  );
+}
+
+function PreferencesDataPane() {
+  // A validated-but-unconfirmed settings import (drives the overwrite AlertDialog).
+  const [pendingImport, setPendingImport] = useState<SettingsEnvelope | null>(null);
   const onExport = async () => {
     try {
       const path = await exportSettings();
@@ -297,124 +466,9 @@ function GeneralPane() {
     }
   };
 
-  return (
-    <>
-      <Section title="Menu bar">
-        <SettingsGroup>
-          <SettingsRow id="set-tray" label="Show menu bar icon">
-            <Switch id="set-tray" checked={trayVisible} onCheckedChange={onTray} />
-          </SettingsRow>
-          <SettingsRow
-            id="set-close-to-tray"
-            label="Keep running in menu bar when window closes"
-          >
-            <Switch
-              id="set-close-to-tray"
-              checked={closeToTray}
-              onCheckedChange={onCloseToTray}
-            />
-          </SettingsRow>
-          <SettingsRow
-            id="set-launch-login"
-            label="Launch at login"
-            description="Reflects the system Login Items state."
-          >
-            <Switch
-              id="set-launch-login"
-              checked={launchAtLogin === true}
-              disabled={launchAtLogin === null}
-              onCheckedChange={onLaunchAtLogin}
-            />
-          </SettingsRow>
-        </SettingsGroup>
-      </Section>
-
+  return <>
       <Section
-        title="Quick connect"
-        description="Brings SSHelter to the front with the command palette open, from any app."
-      >
-        <SettingsGroup>
-          <SettingsRow id="set-global-hotkey" label="Global quick-connect hotkey">
-            <div className="flex items-center gap-2.5">
-              <kbd className="rounded-sm border bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
-                {quickConnectLabel(platform.data)}
-              </kbd>
-              <Switch
-                id="set-global-hotkey"
-                checked={globalHotkey}
-                onCheckedChange={setGlobalHotkey}
-              />
-            </div>
-          </SettingsRow>
-        </SettingsGroup>
-      </Section>
-
-      <Section title="Updates">
-        <SettingsGroup>
-          <SettingsRow
-            id="set-auto-update"
-            label="Check for updates automatically"
-            description="Checks GitHub Releases at launch, every few hours, and when the window regains focus."
-          >
-            <Switch
-              id="set-auto-update"
-              checked={autoCheckUpdates}
-              onCheckedChange={setAutoCheckUpdates}
-            />
-          </SettingsRow>
-          <SettingsRow
-            id="set-update-channel"
-            label="Update channel"
-            description="Beta gets preview builds earlier and may be less stable. Switching back to Stable keeps your current version until a newer stable release is out."
-          >
-            <Select value={updateChannel} onValueChange={(value) => onChannelChange(normalizeUpdateChannel(value))}>
-              <SelectTrigger id="set-update-channel" className="h-7 w-[10rem] text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="stable">Stable</SelectItem>
-                <SelectItem value="beta">Beta</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingsRow>
-          <SettingsRow
-            label="Version"
-            description={appVersion ? `SSHelter ${appVersion}` : undefined}
-          >
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="h-7"
-              onClick={onCheckNow}
-              disabled={checking}
-            >
-              {checking ? "Checking…" : "Check now"}
-            </Button>
-          </SettingsRow>
-        </SettingsGroup>
-      </Section>
-
-      <Section
-        title="Language"
-        description="More languages are planned. SSH keywords always stay in English."
-      >
-        <SettingsGroup>
-          <SettingsRow label="Language">
-            <Select value="en" disabled>
-              <SelectTrigger className="h-7 w-[10rem] text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="en">English</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingsRow>
-        </SettingsGroup>
-      </Section>
-
-      <Section
-        title="Data"
+        title="Preferences transfer"
         description="Preferences only — your SSH config, keys, and hosts are never included."
       >
         <SettingsGroup>
@@ -470,8 +524,22 @@ function GeneralPane() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </>
-  );
+  </>;
+}
+
+function DiagnosticsPane() {
+  return <Section title="Diagnostic logs" description="Local diagnostics for troubleshooting this installation."><SettingsGroup>
+          <SettingsRow
+            label="Diagnostic logs"
+            description="Local startup and error logs. Hosts, credentials and sync codes are excluded."
+          >
+            <Button type="button" variant="secondary" size="sm" className="h-7"
+              onClick={() => tauriInvoke<void>("app_open_diagnostics").catch(() => toast.error("Could not open diagnostic logs"))}>
+              Open logs
+            </Button>
+          </SettingsRow>
+
+  </SettingsGroup></Section>;
 }
 
 function AppearancePane() {
@@ -481,9 +549,11 @@ function AppearancePane() {
   const setFontSize = useSettingsStore((s) => s.setFontSize);
   const showHostTags = useSettingsStore((s) => s.showHostTags);
   const setShowHostTags = useSettingsStore((s) => s.setShowHostTags);
+  const motion = useSettingsStore((s) => s.motion);
+  const setMotion = useSettingsStore((s) => s.setMotion);
   return (
     <Section
-      title="Appearance"
+      title="Display"
       description="“System” follows your OS light/dark preference. Text size scales the whole interface."
     >
       <SettingsGroup>
@@ -495,7 +565,7 @@ function AppearancePane() {
             value={String(fontSize)}
             onValueChange={(v) => setFontSize(Number(v))}
           >
-            <SelectTrigger id="set-font-size" className="h-7 w-[10rem] text-sm">
+            <SelectTrigger id="set-font-size" className="settings-select">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -510,10 +580,19 @@ function AppearancePane() {
             </SelectContent>
           </Select>
         </SettingsRow>
+        <SettingsRow id="set-motion" label="Motion" description="System follows your OS preference for reduced motion.">
+          <Select value={motion === "reduced" ? "reduced" : "system"} onValueChange={(value) => setMotion(value === "reduced" ? "reduced" : "system")}>
+            <SelectTrigger id="set-motion" className="settings-select"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="system">System</SelectItem>
+              <SelectItem value="reduced">Reduced</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
         <SettingsRow
           id="set-show-host-tags"
           label="Show tags in host list"
-          description="Tag chips on sidebar rows when grouping by file."
+          description="Show tags alongside hosts in the list."
         >
           <Switch
             id="set-show-host-tags"
@@ -537,16 +616,16 @@ function ConnectionPane() {
 
   return (
     <Section
-      title="Connection"
+      title="Terminal"
       description="Where SSHelter opens a connection. “System default” uses your OS default terminal (or the first detected)."
     >
       <SettingsGroup>
-        <SettingsRow label="Default terminal">
+        <SettingsRow id="set-terminal" label="Default terminal">
           <Select
             value={terminalId ?? TERMINAL_DEFAULT}
             onValueChange={(v) => setTerminalId(v === TERMINAL_DEFAULT ? null : v)}
           >
-            <SelectTrigger className="h-7 w-[11rem] text-sm">
+            <SelectTrigger id="set-terminal" className="settings-select">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -580,7 +659,7 @@ function ConnectionPane() {
   );
 }
 
-function FilesPane() {
+function FilesPane({ onDirtyChange, onBusyChange }: { onDirtyChange?: (dirty: boolean) => void; onBusyChange?: (busy: boolean) => void }) {
   const configPath = useSettingsStore((s) => s.configPath);
   const setConfigPath = useSettingsStore((s) => s.setConfigPath);
   const backupRetention = useSettingsStore((s) => s.backupRetention);
@@ -591,11 +670,15 @@ function FilesPane() {
 
   const [draft, setDraft] = useState(configPath ?? "");
   useEffect(() => setDraft(configPath ?? ""), [configPath]);
+  const dirty = (draft.trim() || "") !== (configPath ?? "");
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => { onBusyChange?.(loadConfig.isPending); }, [loadConfig.isPending, onBusyChange]);
 
   // Persist only on a SUCCESSFUL load so a broken path never sticks: on error
   // the old working document (and persisted path) stay intact and the
   // existing "Failed to load config" toast fires from useLoadConfig.
   const applyPath = () => {
+    if (loadConfig.isPending) return;
     const next = draft.trim() === "" ? null : draft.trim();
     loadConfig.mutate(next, {
       onSuccess: () => {
@@ -655,12 +738,12 @@ function FilesPane() {
         description="A backup is written before every change. Older backups beyond the limit are pruned."
       >
         <SettingsGroup>
-          <SettingsRow label="Backup retention">
+          <SettingsRow id="set-backup-retention" label="Backup retention">
             <Select
               value={backupRetention === null ? RETENTION_ALL : String(backupRetention)}
               onValueChange={onRetention}
             >
-              <SelectTrigger className="h-7 w-[10rem] text-sm">
+              <SelectTrigger id="set-backup-retention" className="settings-select">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -684,14 +767,32 @@ function shellQuoted(value: string, platform: string | undefined): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function McpPane() {
+function LegacyMcpPane() {
+  const query = useHostsQuery();
+  return <McpPane hosts={(query.data?.hosts ?? []).filter(host => !isWildcardOnly(host)).map(host => ({ id: host.alias, alias: host.alias, hostname: host.hostname, user: host.user }))} />;
+}
+
+export function McpPane({ hosts, records = false }: {
+  hosts: Array<{id: string; alias: string; hostname: string | null; user: string | null; port?: number; groupPath?: string}>;
+  records?: boolean;
+}) {
   const status = useMcpStatus(2_000);
-  const hostsQuery = useHostsQuery();
   const platform = usePlatform();
   const setEnabled = useSetMcpEnabled();
   const setHostAllowed = useSetMcpHostAllowed();
+  const setMode = useSetMcpApprovalMode();
+  const [riskOpen, setRiskOpen] = useState(false);
+  const [riskAcknowledged, setRiskAcknowledged] = useState(false);
+  const applyMode = (approvalMode: "ask" | "auto_log", riskAcknowledged: boolean) =>
+    setMode.mutate({ approvalMode, riskAcknowledged }, {
+      onSuccess: () => {
+        setRiskOpen(false);
+        setRiskAcknowledged(false);
+      },
+    });
   const allowed = new Set(status.data?.allowed_hosts ?? []);
-  const hosts = (hostsQuery.data?.hosts ?? []).filter((host) => !isWildcardOnly(host));
+  const [hostSearch, setHostSearch] = useState("");
+  const matchingHosts = hosts.filter((host) => `${host.alias} ${host.hostname ?? ""} ${host.user ?? ""} ${host.id} ${host.groupPath ?? ""}`.toLowerCase().includes(hostSearch.trim().toLowerCase()));
   const setupCommand = status.data
     ? `codex mcp add sshelter -- ${shellQuoted(status.data.executable, platform.data)} --mcp`
     : "";
@@ -709,9 +810,10 @@ function McpPane() {
     <>
       <Section
         title="MCP access"
-        description="Let local AI clients request SSH actions through SSHelter. Remote commands always require an Allow once decision here."
+        description={records ? "AI clients can propose new connections for your review. Existing hosts require individual permission before inspection, fingerprint verification or command execution." : "Let local AI clients request SSH actions through SSHelter. Remote commands require an Allow once decision here."}
       >
         <SettingsGroup>
+          {status.isError && <div role="alert" className="space-y-2 p-3"><p className="text-sm text-destructive">AI access status is unavailable.</p><Button size="sm" variant="outline" onClick={() => void status.refetch()}>Retry</Button></div>}
           <SettingsRow
             id="set-mcp-enabled"
             label="Enable AI access"
@@ -720,12 +822,12 @@ function McpPane() {
             <Switch
               id="set-mcp-enabled"
               checked={status.data?.enabled === true}
-              disabled={status.isLoading || setEnabled.isPending}
+              disabled={!status.data || status.isError || setEnabled.isPending}
               onCheckedChange={(enabled) => setEnabled.mutate(enabled)}
             />
           </SettingsRow>
           <SettingsRow
-            label="Local approval bridge"
+            label={records ? "Local MCP broker" : "Local approval bridge"}
             description={
               status.data?.last_client_at_ms
                 ? `Last MCP activity ${new Date(status.data.last_client_at_ms).toLocaleString()}`
@@ -738,6 +840,80 @@ function McpPane() {
           </SettingsRow>
         </SettingsGroup>
       </Section>
+
+      {records ? (
+        <Section
+          title="Command approval"
+          description="Ask reviews each complete command before execution. Switching mode cancels active requests."
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant={status.data?.approval_mode === "ask" ? "secondary" : "outline"}
+              aria-pressed={status.data?.approval_mode === "ask"}
+              disabled={!status.data || setMode.isPending}
+              onClick={() => {
+                setRiskOpen(false);
+                setRiskAcknowledged(false);
+                chooseMcpMode("ask", false, applyMode);
+              }}
+            >Ask</Button>
+            <Button
+              variant={status.data?.approval_mode === "auto_log" ? "secondary" : "outline"}
+              aria-pressed={status.data?.approval_mode === "auto_log"}
+              disabled={!status.data || setMode.isPending || status.data.approval_mode === "auto_log"}
+              onClick={() => {
+                setRiskAcknowledged(false);
+                if (chooseMcpMode("auto_log", false, applyMode)) setRiskOpen(true);
+              }}
+            >Auto-log</Button>
+          </div>
+          <p className="mt-2 break-words text-xs text-muted-foreground">
+            {status.data?.noninteractive_credentials_notice}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Auto-log command execution never opens authentication or trust windows. Use Verify server fingerprint in the host editor, or the separate MCP verify_host_key tool, to review a server key. Missing credentials or 2FA require Ask.
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            If background sync remains unavailable after a hidden launch, open SSHelter from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
+          </p>
+        </Section>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Legacy uses Ask: each command requires Allow once. Auto-log is available in Records workspaces.
+        </p>
+      )}
+      <AlertDialog
+        open={riskOpen}
+        onOpenChange={open => {
+          setRiskOpen(open);
+          if (!open) setRiskAcknowledged(false);
+        }}
+      >
+        <AlertDialogContent onEscapeKeyDown={event => { if (setMode.isPending) event.preventDefault(); }}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Allow commands without review?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Auto-log lets local MCP clients execute arbitrary shell commands on every individually allowed host without asking you first. Commands can delete files, change services or send data elsewhere. The audit records public metadata, not command output; logging cannot undo an action.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={riskAcknowledged}
+              disabled={setMode.isPending}
+              onChange={event => setRiskAcknowledged(event.target.checked)}
+            />
+            I understand that allowed hosts can be changed or lose data without a per-command review.
+          </label>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={setMode.isPending}>Cancel</AlertDialogCancel>
+            <Button
+              disabled={!riskAcknowledged || setMode.isPending}
+              onClick={() => chooseMcpMode("auto_log", riskAcknowledged, applyMode)}
+            >{setMode.isPending ? "Applying…" : "Enable Auto-log"}</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Section
         title="Connect Codex"
@@ -763,62 +939,58 @@ function McpPane() {
 
       <Section
         title="Allowed hosts"
-        description="Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."
+        description={records ? "Select individual host IDs. Groups and inherited settings never grant access; Legacy alias permissions do not apply." : "Only explicitly selected aliases are visible to MCP clients. SSH config tags do not grant access."}
       >
-        <SettingsGroup>
+        <div className="mb-3 space-y-2"><Input type="search" value={hostSearch} onChange={(event) => setHostSearch(event.target.value)} placeholder="Search hosts, destinations or IDs…" aria-label="Search AI host permissions" /><p className="text-xs text-muted-foreground" role="status">{matchingHosts.length} of {hosts.length} hosts · {hosts.filter((host) => allowed.has(host.id)).length} allowed</p></div>
+        <div className="[&_label]:break-all [&_p]:break-all"><SettingsGroup>
           {hosts.length === 0 ? (
             <p className="px-3 py-3 text-sm text-muted-foreground">No SSH hosts loaded.</p>
-          ) : (
-            hosts.map((host) => (
+          ) : matchingHosts.length === 0 ? <p className="p-3 text-sm text-muted-foreground">No hosts match this search.</p> : (
+            matchingHosts.map((host) => (
               <SettingsRow
-                key={host.alias}
-                id={`mcp-host-${host.alias}`}
+                key={host.id}
+                id={`mcp-host-${host.id}`}
                 label={host.alias}
-                description={
-                  host.hostname
-                    ? `${host.user ? `${host.user}@` : ""}${host.hostname}`
-                    : "Uses the alias as its destination."
-                }
+                description={`${host.hostname ? `${host.user ? `${host.user}@` : ""}${host.hostname}${host.port ? `:${host.port}` : ""}` : "Uses the alias as its destination."}${records ? ` · ID: ${host.id} · Group: ${host.groupPath || "Ungrouped"}` : ""}`}
                 mono
               >
                 <Switch
-                  id={`mcp-host-${host.alias}`}
-                  checked={allowed.has(host.alias)}
-                  disabled={setHostAllowed.isPending}
+                  id={`mcp-host-${host.id}`}
+                  checked={allowed.has(host.id)}
+                  disabled={!status.data || setHostAllowed.isPending}
                   onCheckedChange={(value) =>
-                    setHostAllowed.mutate({ alias: host.alias, allowed: value })
+                    setHostAllowed.mutate({ alias: host.id, allowed: value })
                   }
                 />
               </SettingsRow>
             ))
           )}
-        </SettingsGroup>
+        </SettingsGroup></div>
       </Section>
 
       <Section
-        title="Recent decisions"
-        description="This session-only log records the decision and exit status, not SSH credentials."
+        title="Recent activity"
+        description="Latest 10 public audit entries, retained across restarts. Authorization does not mean command success. Output and authentication answers are never logged."
       >
+        {status.data?.audit_error && <p role="alert" className="mb-2 break-words text-xs text-destructive">Audit persistence error: {status.data.audit_error}. Completed commands are not retried.</p>}
+        {status.isError && <p role="alert" className="mb-2 text-xs text-destructive">AI access status is unavailable. Retry after the app reconnects.</p>}
         <SettingsGroup>
           {(status.data?.recent.length ?? 0) === 0 ? (
             <p className="px-3 py-3 text-sm text-muted-foreground">No AI commands yet.</p>
           ) : (
-            status.data?.recent.slice(0, 10).map((entry) => (
-              <div key={entry.id} className="space-y-1 px-3 py-2">
+            auditRows(status.data?.recent ?? []).map(({ entry, key }) => (
+              <div key={key} className="space-y-1 px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="font-mono text-xs">{entry.alias}</span>
-                  <Badge
-                    variant={entry.outcome === "allowed" ? "secondary" : "outline"}
-                    className={cn(
-                      entry.outcome === "allowed" &&
-                        "text-emerald-700 dark:text-emerald-300",
-                      entry.outcome !== "allowed" && "text-amber-700 dark:text-amber-300",
-                    )}
-                  >
-                    {entry.outcome.split("_").join(" ")}
-                    {entry.exit_code !== null ? ` · ${entry.exit_code}` : ""}
-                  </Badge>
+                  <span className="min-w-0 break-all font-mono text-xs">{revealHidden(entry.alias)}</span>
+                  <span className="break-words text-xs">{entry.client} · {entry.mode} · {entry.outcome.split("_").join(" ")}</span>
                 </div>
+                <p className="break-all text-xs text-muted-foreground">
+                  ID: {entry.host_id ?? "Unknown"}
+                  {entry.outcome.startsWith("host_")
+                    ? " · Connection management · No remote command"
+                    : ` · Ended: ${entry.ended ?? "unknown"} · Exit: ${entry.exit_code ?? "unknown"} · Signal: ${entry.signal ?? "none reported"}`}
+                </p>
+                <McpAttribution requestedBy={entry.requested_by} requesterId={entry.requester_id} clientInfo={entry.client_info} />
                 <p className="truncate font-mono text-xs text-muted-foreground" title={entry.command}>
                   {entry.command}
                 </p>
@@ -886,13 +1058,13 @@ function AdvancedPane() {
               onCheckedChange={setDriftAutoCheck}
             />
           </SettingsRow>
-          <SettingsRow label="Check every">
+          <SettingsRow id="set-drift-interval" label="Check every">
             <Select
               value={String(driftIntervalSec)}
               onValueChange={(v) => setDriftIntervalSec(Number(v))}
               disabled={!driftAutoCheck}
             >
-              <SelectTrigger className="h-7 w-[8rem] text-sm">
+              <SelectTrigger id="set-drift-interval" className="settings-select">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -949,6 +1121,14 @@ function ThemeSegmented({
     <div
       role="radiogroup"
       aria-label="Theme"
+      onKeyDown={(event) => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const current = THEME_OPTIONS.findIndex((option) => option.value === value);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? THEME_OPTIONS.length - 1 : (current + (["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : -1) + THEME_OPTIONS.length) % THEME_OPTIONS.length;
+        onChange(THEME_OPTIONS[next].value);
+        event.currentTarget.querySelectorAll<HTMLButtonElement>('button')[next]?.focus();
+      }}
       className="flex items-center gap-0.5 rounded-md bg-muted p-0.5"
     >
       {THEME_OPTIONS.map((opt) => {
@@ -959,6 +1139,7 @@ function ThemeSegmented({
             key={opt.value}
             type="button"
             role="radio"
+            tabIndex={active ? 0 : -1}
             aria-checked={active}
             onClick={() => onChange(opt.value)}
             className={cn(

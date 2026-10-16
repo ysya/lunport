@@ -11,7 +11,7 @@ use crate::config::model::{Directive, Item, SshConfigDoc};
 use crate::error::AppError;
 use crate::sync::dto::KeyFilePreview;
 use crate::sync::env::SyncEnv;
-use crate::sync::runtime::mutate;
+use crate::sync::runtime::{mutate, MaterialTransaction};
 use crate::sync::slot_files;
 use crate::sync::slot_rules::{
     default_slot_name, inspect_private_key, new_slot_id, public_path, resolve_identity_value, slot_file_name, slot_value, unquote, valid_slot_name,
@@ -19,11 +19,13 @@ use crate::sync::slot_rules::{
 };
 use crate::sync::slot_setup::{home_of, is_private_key_file, same_file};
 use crate::sync::slots::{
-    agent_refusal, in_the_way_message, live_slots, local_key_fingerprint, local_snapshot, not_found, refresh_agent, vault_unreadable_message, EnvVault,
+    agent_refusal, in_the_way_message, live_slots, local_key_fingerprint, local_snapshot, not_found, refresh_agent, vault_unreadable_message, EnvVault, TransactionVault,
     VaultKeys, VAULT_KEY_TYPE_MESSAGE, VAULT_KEY_UNREADABLE_MESSAGE,
 };
 use crate::sync::state_v2::{LocalSlot, SlotSource, SyncStateV2};
-use crate::vault::store::{vault_path, with_vault, EntryOrigin, VaultEntry};
+use crate::vault::store::{vault_path, EntryOrigin, VaultEntry};
+#[cfg(test)]
+use crate::vault::store::with_vault;
 
 pub const MANAGED_FILE_MESSAGE: &str = "SSHelter already manages this file.";
 pub const NOT_A_KEY_FILE_MESSAGE: &str = "This file isn't a private key.";
@@ -183,19 +185,20 @@ fn fate(state: &SyncStateV2, fingerprint: &str, picked: Option<&Path>, vault: &d
 /// 後面失敗就收回前面放的。保管庫裡那一筆確定不見了的同一把金鑰不加新的,放回那筆記錄(`restore_into`),回傳那筆記錄的 id。不需要帳戶;狀態存不進去的行程
 /// (`save_blocked`)在動任何東西之前就拒絕(`local_snapshot`)。
 pub fn add_key(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin) -> Result<String, AppError> {
-    add_key_from(env, name, text, origin, None).map(|added| added.slot_id)
+    let transaction = MaterialTransaction::begin(env)?;
+    add_key_from(env, &transaction, name, text, origin, None).map(|added| added.slot_id)
 }
 
 /// `add_key`,多一個 `picked` = 使用者選的金鑰檔(`import_file`):那個檔案正是某個插槽連到的,也算已經在 SSHelter(`fate`)。回傳插槽 id 與插槽檔名。
 /// 放回不見了的那筆記錄時不用打的名稱(也不檢查它):記錄的名稱不變。
-fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, picked: Option<&Path>) -> Result<Added, AppError> {
+fn add_key_from(env: &SyncEnv, transaction: &MaterialTransaction<'_>, name: &str, text: &str, origin: EntryOrigin, picked: Option<&Path>) -> Result<Added, AppError> {
     let (state, home) = local_snapshot(env)?;
     let facts = inspect_private_key(text).map_err(|e| AppError::Other(vault_unreadable_message(e).to_string()))?;
     if let Some(message) = agent_refusal(text, &facts) {
         return Err(AppError::Other(refusal_for(message, picked).to_string()));
     }
-    match fate(&state, &facts.fingerprint, picked, &EnvVault { env }) {
-        Fate::Restore(slot_id, local) => return restore_into(env, &home, &slot_id, &local, text, &facts),
+    match fate(&state, &facts.fingerprint, picked, &TransactionVault { env, transaction }) {
+        Fate::Restore(slot_id, local) => return restore_into_in(env, transaction, &home, &slot_id, &local, text, &facts),
         Fate::Held(existing) => return Err(AppError::Other(already_message(&existing))),
         Fate::New => {}
     }
@@ -211,6 +214,9 @@ fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, pick
     }
     let now = env.now();
     let vault_file = vault_path(&env.state_path);
+    for target in [&env.state_path, &vault_file, &keys_dir, &path, &public_path(&path)] {
+        crate::fsutil::check_write(target)?;
+    }
     let entry = VaultEntry {
         private_key: text.to_string(),
         public_key: facts.public_key.clone(),
@@ -218,10 +224,10 @@ fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, pick
         origin,
         added_at_ms: now,
     };
-    with_vault(env.runtime, &vault_file, env.keychain, now, |vault| vault.put(env.keychain, &id, &entry))?;
+    transaction.with_vault(env, |vault| vault.put(env.keychain, &id, &entry))?;
     let take_back = || {
         let _ = std::fs::remove_file(public_path(&path));
-        if let Err(e) = with_vault(env.runtime, &vault_file, env.keychain, now, |vault| vault.remove(&id)) {
+        if let Err(e) = transaction.with_vault(env, |vault| vault.remove(&id)) {
             eprintln!("[keys] a key that couldn't be added is still in SSHelter's vault: {e}");
         }
     };
@@ -280,9 +286,12 @@ fn add_key_from(env: &SyncEnv, name: &str, text: &str, origin: EntryOrigin, pick
 /// - 經 `mutate` 清掉錯誤。記錄要還是這把金鑰在保管庫的那一筆;來源照放回去的這一份重記 —— 匯出時可能加了 passphrase,記錄說有,agent 才會問。
 /// `.pub` 寫不進去不收回放回去的那一筆:記錄要的正是它,下一次同步嘗試補寫 `.pub`、清掉錯誤。記錄提交不成時也一樣,記錄還在就不收回;記錄在這之間不見了
 /// (例如同時按了 Delete key…)才收回剛放的那一筆與 `.pub`,不留下沒有記錄用到的東西。
-fn restore_into(env: &SyncEnv, home: &Path, slot_id: &str, local: &LocalSlot, text: &str, facts: &KeyFacts) -> Result<Added, AppError> {
+fn restore_into_in(env: &SyncEnv, transaction: &MaterialTransaction<'_>, home: &Path, slot_id: &str, local: &LocalSlot, text: &str, facts: &KeyFacts) -> Result<Added, AppError> {
     let keys_dir = home.join(SLOT_DIR);
     let path = keys_dir.join(&local.file_name);
+    for target in [&env.state_path, &vault_path(&env.state_path), &keys_dir, &path, &public_path(&path)] {
+        crate::fsutil::check_write(target)?;
+    }
     if slot_files::occupied(&path) {
         return Err(AppError::Other(in_the_way_message(&path)));
     }
@@ -293,7 +302,7 @@ fn restore_into(env: &SyncEnv, home: &Path, slot_id: &str, local: &LocalSlot, te
         origin: EntryOrigin::Imported,
         added_at_ms: env.now(),
     };
-    EnvVault { env }.restore(slot_id, &entry)?;
+    TransactionVault { env, transaction }.restore(slot_id, &entry)?;
     let public_ok = std::fs::read_to_string(public_path(&path)).is_ok_and(|current| current.trim() == facts.public_key.trim());
     if !public_ok {
         slot_files::ensure_keys_dir(&keys_dir).and_then(|()| slot_files::write_public(&path, &facts.public_key))?;
@@ -316,7 +325,7 @@ fn restore_into(env: &SyncEnv, home: &Path, slot_id: &str, local: &LocalSlot, te
         let recorded = env.runtime.core.lock().unwrap().state.as_ref().is_some_and(|s| s.key_slots.contains_key(slot_id));
         if !recorded {
             let _ = std::fs::remove_file(public_path(&path));
-            if let Err(e) = with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.remove(slot_id)) {
+            if let Err(e) = transaction.with_vault(env, |vault| vault.remove(slot_id)) {
                 eprintln!("[keys] a key that couldn't be put back is still in SSHelter's vault: {e}");
             }
         }
@@ -419,17 +428,32 @@ fn import_file_with(
     keep_file: bool,
     persist: impl FnMut(&mut SshConfigDoc, usize, &mut HashSet<PathBuf>, Option<usize>) -> Result<(), AppError>,
 ) -> Result<ImportedKey, AppError> {
+    let transaction = MaterialTransaction::begin(env)?;
     let home = home_of(env)?;
     let key = key_file(path, &home)?;
+    if !keep_file {
+        crate::fsutil::check_write(&key)?;
+        if let Some(doc) = env.doc.lock().unwrap().as_ref() {
+            crate::config::include::validate_doc_write_boundaries(doc)?;
+            for file in &doc.files {
+                crate::fsutil::check_backup_write(&file.path)?;
+            }
+        }
+    }
     if !keep_file && env.doc.lock().unwrap().as_ref().is_some_and(config_changed) {
         return Err(AppError::Other(RELOAD_FIRST_MESSAGE.to_string()));
     }
     let text = Zeroizing::new(std::fs::read_to_string(&key)?);
-    let added = add_key_from(env, name, &text, EntryOrigin::Imported, Some(&key))?;
+    let added = add_key_from(env, &transaction, name, &text, EntryOrigin::Imported, Some(&key))?;
     if keep_file {
         return Ok(ImportedKey { slot_id: added.slot_id, rewritten_hosts: Vec::new(), removed_file: false, file_kept: None });
     }
-    Ok(move_file(env, &home, &key, &added, persist))
+    let mut changed = false;
+    let imported = move_file_in(env, &transaction, &home, &key, &added, persist, &mut changed);
+    drop(transaction);
+    if changed { env.events.applied(0); }
+    if !imported.rewritten_hosts.is_empty() { refresh_agent(env); }
+    Ok(imported)
 }
 
 /// 「Move into SSHelter」在金鑰加進來(`added`)之後的步驟(spec §7.5「匯入並核對指紋之後,移除原檔」),依序:
@@ -439,19 +463,21 @@ fn import_file_with(
 ///   保管庫那一份。
 /// - 移除原檔(只有私鑰檔;旁邊的 `.pub` 留著)。
 /// `persist` 同 `import_file_with`。
-fn move_file(
+fn move_file_in(
     env: &SyncEnv,
+    transaction: &MaterialTransaction<'_>,
     home: &Path,
     key: &Path,
     added: &Added,
     persist: impl FnMut(&mut SshConfigDoc, usize, &mut HashSet<PathBuf>, Option<usize>) -> Result<(), AppError>,
+    changed: &mut bool,
 ) -> ImportedKey {
     let mut imported = ImportedKey { slot_id: added.slot_id.clone(), rewritten_hosts: Vec::new(), removed_file: false, file_kept: None };
-    if let Err(error) = confirm_in_vault(env, &added.slot_id, &added.fingerprint) {
+    if let Err(error) = confirm_in_vault(env, transaction, &added.slot_id, &added.fingerprint) {
         imported.file_kept = Some(format!("The file stays: SSHelter couldn't confirm its copy in the vault ({error})."));
         return imported;
     }
-    match point_hosts_at(env, home, key, &added.file_name, persist) {
+    match point_hosts_at_in(env, home, key, &added.file_name, persist, changed) {
         Ok(rewritten) => imported.rewritten_hosts = rewritten,
         Err(kept) => {
             imported.rewritten_hosts = kept.switched;
@@ -479,8 +505,8 @@ fn move_file(
 
 /// 保管庫裡插槽 `slot_id` 的那一筆就是 `fingerprint` 這把金鑰(Move 移除原檔之前,`move_file`)。不是的話回原因(`The file stays: SSHelter couldn't confirm its
 /// copy in the vault ({error}).` 的 `{error}`):保管庫讀不了 → 保管庫自己的錯誤;沒有那一筆、讀不懂、或是另一把 → `MISMATCH`。
-fn confirm_in_vault(env: &SyncEnv, slot_id: &str, fingerprint: &str) -> Result<(), String> {
-    let entry = with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.get(slot_id)).map_err(|e| e.to_string())?;
+fn confirm_in_vault(env: &SyncEnv, transaction: &MaterialTransaction<'_>, slot_id: &str, fingerprint: &str) -> Result<(), String> {
+    let entry = transaction.with_vault(env, |vault| vault.get(slot_id)).map_err(|e| e.to_string())?;
     let same = entry.is_some_and(|entry| inspect_private_key(&entry.private_key).is_ok_and(|facts| facts.fingerprint == fingerprint));
     if same {
         Ok(())
@@ -794,12 +820,13 @@ fn switch_and_save(
 /// 之後就更新 agent 的設定(那些主機改走 agent)。成功回傳改了的主機(依出現順序、不重複)。存檔的動作由 `persist` 給(同 `persist_file`;測試用它讓某個檔案存不成)。
 /// 鎖:先拿 doc、backed_up,勾選的 space 在持有 doc 鎖時才取(短暫拿 core 鎖,同 `slot_setup::rewrite_hosts`:第一輪的旗標在 doc 鎖裡改,取了清單之後才有人退回
 /// 基線輪的話,改寫就白費了);存檔 hook 只拿 core。
-fn point_hosts_at(
+fn point_hosts_at_in(
     env: &SyncEnv,
     home: &Path,
     key: &Path,
     slot_file: &str,
     mut persist: impl FnMut(&mut SshConfigDoc, usize, &mut HashSet<PathBuf>, Option<usize>) -> Result<(), AppError>,
+    notify_changed: &mut bool,
 ) -> Result<Vec<String>, Kept> {
     let result = {
         let mut doc_lock = env.doc.lock().unwrap();
@@ -855,22 +882,71 @@ fn point_hosts_at(
         Ok(hosts) => !hosts.is_empty(),
         Err(_) => true,
     };
-    if changed {
-        env.events.applied(0);
-    }
-    let switched_any = match &result {
-        Ok(hosts) => !hosts.is_empty(),
-        Err(kept) => !kept.switched.is_empty(),
-    };
-    if switched_any {
-        refresh_agent(env);
-    }
+    *notify_changed |= changed;
+    result
+}
+
+#[cfg(test)]
+fn restore_into(env: &SyncEnv, home: &Path, slot_id: &str, local: &LocalSlot, text: &str, facts: &KeyFacts) -> Result<Added, AppError> {
+    let transaction = MaterialTransaction::begin(env)?;
+    restore_into_in(env, &transaction, home, slot_id, local, text, facts)
+}
+
+#[cfg(test)]
+fn move_file(env: &SyncEnv, home: &Path, key: &Path, added: &Added, persist: impl FnMut(&mut SshConfigDoc, usize, &mut HashSet<PathBuf>, Option<usize>) -> Result<(), AppError>) -> ImportedKey {
+    let transaction = MaterialTransaction::begin(env).unwrap();
+    let mut changed = false;
+    let imported = move_file_in(env, &transaction, home, key, added, persist, &mut changed);
+    drop(transaction);
+    if changed { env.events.applied(0); }
+    if !imported.rewritten_hosts.is_empty() { refresh_agent(env); }
+    imported
+}
+
+#[cfg(test)]
+fn point_hosts_at(env: &SyncEnv, home: &Path, key: &Path, slot_file: &str, persist: impl FnMut(&mut SshConfigDoc, usize, &mut HashSet<PathBuf>, Option<usize>) -> Result<(), AppError>) -> Result<Vec<String>, Kept> {
+    let mut changed = false;
+    let result = point_hosts_at_in(env, home, key, slot_file, persist, &mut changed);
+    if changed { env.events.applied(0); }
+    if match &result { Ok(hosts) => !hosts.is_empty(), Err(kept) => !kept.switched.is_empty() } { refresh_agent(env); }
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_external_key_move_refuses_before_vault_or_state_changes() {
+        let d = device("# main\n");
+        let external = tempfile::tempdir().unwrap();
+        let key = external.path().join("key");
+        std::fs::write(&key, test_keys::plain()).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: d.home.path().to_path_buf() }, || {
+            assert!(import_file(&d.env(), "external", key.to_str().unwrap(), false).is_err());
+        });
+        assert_eq!(std::fs::read_to_string(key).unwrap(), test_keys::plain());
+        assert!(d.state().key_slots.is_empty());
+        assert!(!vault_path(&d.env().state_path).exists());
+        assert!(slot_dir_files(&d).is_empty());
+        assert_eq!(d.main_config(), "# main\n");
+    }
+
+    #[test]
+    fn boundary_external_key_copy_is_read_only_at_source() {
+        let d = device("# main\n");
+        let external = tempfile::tempdir().unwrap();
+        let key = external.path().join("key");
+        std::fs::write(&key, test_keys::plain()).unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: d.home.path().to_path_buf() }, || {
+            let result = import_file(&d.env(), "external", key.to_str().unwrap(), true).unwrap();
+            assert!(!result.removed_file);
+            assert!(vault_entry(&d, &result.slot_id).is_some());
+        });
+        assert_eq!(std::fs::read_to_string(key).unwrap(), test_keys::plain());
+        assert_eq!(d.main_config(), "# main\n");
+    }
+
     use crate::sync::dto::SlotStatusView;
     use crate::sync::fake_relay::FakeRelay;
     use crate::sync::round::tests::{pair, settle};

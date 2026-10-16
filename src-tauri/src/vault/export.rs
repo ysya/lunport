@@ -52,6 +52,7 @@ pub fn check_destination(path: &Path, home: &Path) -> Result<(), AppError> {
 /// 不一定只有他自己能讀,而 Windows 上整把金鑰寫進去、rename 之後才限縮權限,中間(以及限縮失敗的時候)別的使用者可能讀得到。暫存檔也不該出現在使用者的資料夾裡
 /// (`settings_export` 同樣直接寫使用者選的路徑)。代價是不原子:寫到一半當掉(斷電、被終止)可能留下不完整的檔案,使用者重新匯出即可。
 pub fn save_export(path: &Path, home: &Path, text: &str) -> Result<(), AppError> {
+    crate::fsutil::check_write(path)?;
     check_destination(path, home)?;
     write_export(path, text.as_bytes())
 }
@@ -60,6 +61,7 @@ pub fn save_export(path: &Path, home: &Path, text: &str) -> Result<(), AppError>
 /// 路徑上已經有東西(存檔對話框問過要不要取代):資料夾拒絕(`EXPORT_FOLDER_MESSAGE`),其他的 —— 檔案、symlink —— 先移除。換掉的是這個名字本身,不會跟著 symlink 寫到別處;
 /// 資料夾不能寫的時候,移除舊檔會先失敗,舊檔原封不動。再由 `create_owner_only` 建立新檔案、寫入、`sync_all`;建立之後任何一步失敗,檔案都被移除、回傳原本的錯誤。
 fn write_export(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    crate::fsutil::check_write(path)?;
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => return Err(AppError::Other(EXPORT_FOLDER_MESSAGE.to_string())),
         Ok(_) => std::fs::remove_file(path)?,
@@ -79,6 +81,7 @@ fn write_export(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
 /// - 權限在第一個位元組寫進去之前就到位,`fill` 拿到的是空檔案。
 /// 只有這裡自己建出來的檔案才會被移除:開檔失敗(例如路徑上已經有東西)什麼都不動。
 fn create_owner_only(path: &Path, fill: impl FnOnce(&mut std::fs::File) -> Result<(), AppError>) -> Result<(), AppError> {
+    crate::fsutil::check_write(path)?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -113,6 +116,21 @@ fn restrict_then_fill(path: &Path, file: &mut std::fs::File, fill: impl FnOnce(&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_export_refuses_external_overwrite_and_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("existing");
+        let fresh = temp.path().join("fresh");
+        std::fs::write(&existing, b"keep").unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            assert!(save_export(&existing, temp.path(), "KEY").is_err());
+            assert!(save_export(&fresh, temp.path(), "KEY").is_err());
+        });
+        assert_eq!(std::fs::read(existing).unwrap(), b"keep");
+        assert!(!fresh.exists());
+    }
+
     use crate::sync::slot_rules::test_keys;
 
     #[test]

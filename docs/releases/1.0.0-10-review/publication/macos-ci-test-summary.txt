@@ -1,0 +1,4 @@
+macos	Complete safe Rust suite	2026-10-15T22:26:30.3911520Z test result: ok. 2566 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 200.59s
+macos	Profile selection in the normal library	2026-10-15T22:27:13.6807620Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+macos	Profile selection in the normal library	2026-10-15T22:30:27.2553040Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+macos	Profile selection in the normal library	2026-10-15T22:31:25.5393700Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

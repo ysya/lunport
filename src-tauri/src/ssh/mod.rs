@@ -25,9 +25,10 @@ pub(crate) use types::{
     AuthMethod, DisconnectKind, DisconnectReason, Exit, Hop, HopRef, HostId, HostKey, HostKeyVerdict, Prompt, Pty, RsaHash, Secret, Signature, Target,
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_KEEPALIVE_EVERY,
 };
-// What only the tests name through `crate::ssh`.
+// Execution types shared by Records MCP and the human deployment integration.
+pub(crate) use types::{Ended, ExecResult};
 #[cfg(test)]
-pub(crate) use types::{Ended, ExecResult, Phase};
+pub(crate) use types::Phase;
 
 #[cfg(test)]
 mod tests {

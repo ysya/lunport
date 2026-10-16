@@ -39,6 +39,8 @@ pub(crate) enum SpawnLocks<G> {
     /// Another client kept `mcp-spawn.lock` past the deadline: it may be stopped in the middle
     /// of a start (its AI CLI or its terminal suspended, for example).
     Busy,
+    /// The development write policy refused the lock; starting without it is unsafe.
+    Denied(String),
 }
 
 /// Return what `answering` finds (a bridge, a socket) once it answers. If nothing does, take the
@@ -61,6 +63,7 @@ pub(crate) fn ensure_started<T, G>(
     let _locks = match lock() {
         SpawnLocks::Held(locks) => locks,
         SpawnLocks::Busy => return answering().ok_or_else(|| no_answer.to_string()),
+        SpawnLocks::Denied(reason) => return Err(reason),
     };
     if let Some(found) = answering() {
         return Ok(found);
@@ -103,6 +106,7 @@ fn take_spawn_locks_at(
     match file {
         FileLock::Held(file) => SpawnLocks::Held((calls, Some(file))),
         FileLock::Busy => SpawnLocks::Busy,
+        FileLock::Denied(reason) => SpawnLocks::Denied(reason),
         FileLock::Unavailable(reason) => {
             eprintln!("[host] starting SSHelter without mcp-spawn.lock: {reason}");
             SpawnLocks::Held((calls, None))
@@ -122,11 +126,15 @@ enum FileLock {
     Busy,
     /// It can't be opened or locked here.
     Unavailable(String),
+    Denied(String),
 }
 
 /// Open `path`, creating it and its directory, and take an exclusive lock on it, trying until
 /// `deadline`.
 fn lock_file_until(path: &Path, deadline: Instant) -> FileLock {
+    if let Err(error) = fsutil::check_write(path) {
+        return FileLock::Denied(error.to_string());
+    }
     let opened = path
         .parent()
         .map_or(Ok(()), fsutil::ensure_dir_secure)
@@ -309,7 +317,7 @@ mod tests {
         match lock {
             FileLock::Held(file) => file,
             FileLock::Busy => panic!("busy"),
-            FileLock::Unavailable(e) => panic!("{e}"),
+            FileLock::Unavailable(e) | FileLock::Denied(e) => panic!("{e}"),
         }
     }
 
@@ -404,5 +412,22 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(group, pid);
         assert_ne!(group, ours);
+    }
+}
+
+#[cfg(test)]
+mod profile_boundary_tests {
+    use super::*;
+    #[test]
+    fn a_profile_denial_never_starts_the_app_or_creates_an_outside_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("outside/lock");
+        let mut starts = 0;
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().join("dev") }, || {
+            let result: Result<(), String> = ensure_started(|| None, || take_spawn_locks_at(Ok(path.clone()), Instant::now()), || { starts += 1; Ok(()) }, Duration::ZERO, "no answer");
+            assert!(result.is_err());
+        });
+        assert_eq!(starts, 0);
+        assert!(!temp.path().join("outside").exists());
     }
 }

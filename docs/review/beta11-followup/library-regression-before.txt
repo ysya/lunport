@@ -1,0 +1,15 @@
+running 1 test
+
+thread 'sync::record_library::tests::retained_legacy_alias_sources_do_not_block_library_opt_in_on_either_device' (11114591) panicked at src/sync/record_library/tests.rs:143:37:
+called `Result::unwrap()` on an `Err` value: LibraryFailure { code: "sync_data_unavailable", message: "Some library data has not been downloaded or cannot be read. Finish syncing or update SSHelter, then retry. Existing records have been kept." }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test sync::record_library::tests::retained_legacy_alias_sources_do_not_block_library_opt_in_on_either_device ... FAILED
+
+failures:
+
+failures:
+    sync::record_library::tests::retained_legacy_alias_sources_do_not_block_library_opt_in_on_either_device
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2602 filtered out; finished in 0.52s
+
+error: test failed, to rerun pass `--lib`

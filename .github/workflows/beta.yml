@@ -1,6 +1,6 @@
 name: publish beta
 
-# Publishes a beta for the Beta update channel (Settings → General → Update channel):
+# Publishes a beta for the Beta update channel (Settings → Updates → Release channel):
 #  1. `prepare` checks the version (X.Y.Z-N, newer than the current release) and creates the
 #     GitHub prerelease v<version> on this commit. Prereleases never become "latest", so the
 #     Stable channel (releases/latest/download/latest.json) never offers them.
@@ -72,7 +72,7 @@ jobs:
           fi
           gh release create "v$VERSION" --prerelease --target "$GITHUB_SHA" \
             --title "v$VERSION (beta)" \
-            --notes "${NOTES:-Beta build for the Beta update channel (Settings → General → Update channel).}"
+            --notes "${NOTES:-Beta build for the Beta update channel (Settings → Updates → Release channel).}"
           echo "tag_name=v$VERSION" >> "$GITHUB_OUTPUT"
 
   build:

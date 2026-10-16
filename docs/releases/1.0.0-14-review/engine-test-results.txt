@@ -1,0 +1,9 @@
+macos	Complete safe Rust suite	2026-10-16T13:03:20.8157160Z test result: ok. 2597 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 102.13s
+macos	Profile selection in the normal library	2026-10-16T13:03:42.2134130Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+macos	Profile selection in the normal library	2026-10-16T13:04:56.1502040Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+macos	Profile selection in the normal library	2026-10-16T13:05:15.9906310Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Complete safe Rust suite against a scratch sshd	2026-10-16T13:06:25.6472781Z test result: ok. 2592 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 128.99s
+linux	Profile selection in the normal library	2026-10-16T13:07:01.2139685Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Profile selection in the normal library	2026-10-16T13:09:48.5789732Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Profile selection in the normal library	2026-10-16T13:10:21.0314889Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Password and keyboard-interactive tests against the container	2026-10-16T13:11:18.5002371Z test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 2595 filtered out; finished in 4.65s

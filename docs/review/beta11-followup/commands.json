@@ -1,0 +1,9 @@
+{
+  "sourceCommit": "99fb2ed7a09f0029b5417a56a7b911f4f911bbaa",
+  "localSafeSuite": "SSHELTER_REQUIRE_OPENSSH=1 cargo test --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam",
+  "targetedLibrary": "cargo test --locked --lib sync::record_library:: -- --nocapture",
+  "targetedOpenSsh": "SSHELTER_REQUIRE_OPENSSH=1 cargo test --locked --lib session::record_pin::connect_tests:: -- --nocapture",
+  "clippy": "cargo clippy --locked --lib --tests",
+  "windowsRun": 38839305132,
+  "windowsSourceCommit": "99fb2ed7a09f0029b5417a56a7b911f4f911bbaa"
+}

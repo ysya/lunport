@@ -6,7 +6,7 @@
 use std::fmt;
 
 use super::protocol::HostQuery;
-use crate::ssh::{HostId, HostKey, Target};
+use crate::ssh::{HostId, HostKey, HopRef, Target};
 
 /// A pinned host key and when it was pinned (milliseconds since the Unix epoch).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +60,18 @@ pub trait HostDirectory: Send + Sync {
     /// jump host): the broker keeps what it knows about a hop (typed passwords, cancels, the pin policy) by host id, so a chain has one hop
     /// per id.
     fn resolve(&self, query: &HostQuery) -> Result<Target, DirectoryError>;
+    /// Public resolution for approval and noninteractive connections. Implementations must not read private material here.
+    fn resolve_public(&self, query:&HostQuery)->Result<Target,DirectoryError>{self.resolve(query)}
+
+    /// Handshake-only identity verification must not require destination login credentials.
+    /// Jump hosts still require their normal credentials to reach the destination.
+    fn resolve_host_key(&self, query: &HostQuery) -> Result<Target, DirectoryError> {
+        let mut target = self.resolve_public(query)?;
+        if let Some(last) = target.hops.last_mut() {
+            last.auth = crate::ssh::AuthMethod::Interactive;
+        }
+        Ok(target)
+    }
 
     /// The key pinned for `host`, if any. An error reading the pins is `Err`, never "nothing pinned": a host that was pinned must not
     /// look new because a file could not be read.
@@ -73,6 +85,39 @@ pub trait HostDirectory: Send + Sync {
     /// already is); otherwise nothing is written and the call fails.
     fn replace_pin(&self, host: &HostId, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError>;
 
+    /// Record IDs survive endpoint edits; pin reads and writes must use the endpoint that connected.
+    /// Legacy adapters encode endpoint identity in their IDs and keep their existing contract.
+    fn pinned_for(&self, hop: &HopRef) -> Result<Option<PinnedKey>, DirectoryError> {
+        self.pinned(&hop.id)
+    }
+    fn pin_for(&self, hop: &HopRef, key: &HostKey) -> Result<(), DirectoryError> {
+        self.pin(&hop.id, key)
+    }
+    fn replace_pin_for(&self, hop: &HopRef, previous: &HostKey, key: &HostKey) -> Result<(), DirectoryError> {
+        self.replace_pin(&hop.id, previous, key)
+    }
+
+    /// A native trust decision. Records adapters may prepare credentials/relay outside lifecycle,
+    /// then revalidate cancellation and the public snapshot before committing the pin.
+    fn pin_confirmed(
+        &self,
+        hop: &HopRef,
+        previous: Option<&HostKey>,
+        key: &HostKey,
+        cancel: &super::connect::CancelToken,
+        guard: &(dyn Fn() -> Result<(), DirectoryError> + Sync),
+    ) -> Result<(), DirectoryError> {
+        guard()?;
+        if cancel.is_cancelled() {
+            return Err(DirectoryError::Failed(
+                "The connection was cancelled.".into(),
+            ));
+        }
+        match previous {
+            Some(previous) => self.replace_pin_for(hop, previous, key),
+            None => self.pin_for(hop, key),
+        }
+    }
     /// The keychain account of the saved password of `host` (spec §5.5: `host:<host id>`).
     fn password_account(&self, host: &HostId) -> String;
 }

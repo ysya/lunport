@@ -124,11 +124,27 @@ pub fn plan_new_file(
     home: Option<&Path>,
 ) -> Result<NewFilePlan, AppError> {
     validate_file_name(name)?;
+    crate::fsutil::check_write(main_dir)?;
 
     let mut families: Vec<(String, GlobFamily)> = Vec::new();
     for value in include_patterns {
         for token in value.split_whitespace() {
-            if let Some(f) = glob_family(token, main_dir, home) {
+            let expanded;
+            let family_token = if crate::fsutil::writes_are_confined() {
+                expanded = shellexpand::env(token).map_err(|_| AppError::Other("cannot expand Include path in the development profile".into()))?.into_owned();
+                let path = if let Some(rest) = expanded.strip_prefix("~/") {
+                    home.ok_or_else(|| AppError::Other("cannot determine profile home".into()))?.join(rest)
+                } else if expanded == "~" {
+                    home.ok_or_else(|| AppError::Other("cannot determine profile home".into()))?.to_path_buf()
+                } else if Path::new(&expanded).is_absolute() {
+                    PathBuf::from(&expanded)
+                } else {
+                    main_dir.join(&expanded)
+                };
+                crate::fsutil::check_write(&path)?;
+                expanded.as_str()
+            } else { token };
+            if let Some(f) = glob_family(family_token, main_dir, home) {
                 families.push((token.to_string(), f));
             }
         }
@@ -142,8 +158,10 @@ pub fn plan_new_file(
     if let Some((token, family)) = picked {
         let final_name = family_name(family, name);
         validate_file_name(&final_name)?;
+        let path = family.dir.join(&final_name);
+        crate::fsutil::check_write(&path)?;
         return Ok(NewFilePlan {
-            path: family.dir.join(&final_name).to_string_lossy().into_owned(),
+            path: path.to_string_lossy().into_owned(),
             covered_by: Some(token.clone()),
             include_value: None,
             final_name,
@@ -152,6 +170,7 @@ pub fn plan_new_file(
     }
 
     let path = main_dir.join(name);
+    crate::fsutil::check_write(&path)?;
     let include_value = match home {
         Some(h) if main_dir.starts_with(h) => format!(
             "~/{}",
@@ -188,6 +207,27 @@ pub fn include_insert_index(items: &[Item]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn boundary_new_file_plan_refuses_an_environment_expansion_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: temp.path().to_path_buf() }, || {
+            assert!(plan_new_file("new", temp.path(), &["${HOME}/.ssh/*.config".into()], Some(temp.path())).is_err());
+        });
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn boundary_new_file_plan_refuses_an_external_glob_family() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dev");
+        let outside = temp.path().join("external");
+        crate::fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: root.clone() }, || {
+            assert!(plan_new_file("new", &root, &[format!("{}/*", outside.display())], Some(&root)).is_err());
+        });
+        assert!(!outside.exists());
+        assert!(!root.exists());
+    }
+
     use crate::config::model::{Directive, HostBlock};
 
     fn pat(values: &[&str]) -> Vec<String> {
@@ -207,14 +247,19 @@ mod tests {
 
     #[test]
     fn directory_glob_covers_any_name() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["~/.ssh/config.d/*"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
-        assert_eq!(plan.path, "/home/f/.ssh/config.d/work");
+        assert_eq!(
+            PathBuf::from(&plan.path),
+            main_dir.join("config.d").join("work")
+        );
         assert_eq!(plan.covered_by.as_deref(), Some("~/.ssh/config.d/*"));
         assert_eq!(plan.include_value, None);
         assert_eq!(plan.final_name, "work");
@@ -222,24 +267,31 @@ mod tests {
 
     #[test]
     fn suffix_glob_appends_the_suffix() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["conf.d/*.conf"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.final_name, "work.conf");
-        assert_eq!(plan.path, "/home/f/.ssh/conf.d/work.conf");
+        assert_eq!(
+            PathBuf::from(&plan.path),
+            main_dir.join("conf.d").join("work.conf")
+        );
     }
 
     #[test]
     fn name_already_matching_the_suffix_is_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work.conf",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["conf.d/*.conf"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.final_name, "work.conf");
@@ -248,37 +300,46 @@ mod tests {
     #[test]
     fn fixed_file_includes_are_not_families() {
         // `Include ~/.orbstack/ssh/config` 是固定檔,不是可建檔家族 → 落到插入。
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["~/.orbstack/ssh/config"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.covered_by, None);
-        assert_eq!(plan.path, "/home/f/.ssh/work");
-        assert_eq!(plan.include_value.as_deref(), Some("~/.ssh/work"));
+        let expected = main_dir.join("work");
+        assert_eq!(PathBuf::from(&plan.path), expected);
+        let include_value = plan.include_value.as_deref().unwrap();
+        assert!(include_value.starts_with("~/"));
+        let expanded = crate::config::include::with_test_home(home.path(), || {
+            crate::config::include::expand_token(include_value).map(PathBuf::from)
+        });
+        assert_eq!(expanded, Some(expected));
     }
 
     #[test]
     fn non_home_main_dir_gets_an_absolute_include_value() {
-        let plan = plan_new_file(
-            "work",
-            Path::new("/etc/opt/ssh"),
-            &[],
-            Some(Path::new("/home/f")),
-        )
-        .unwrap();
-        assert_eq!(plan.include_value.as_deref(), Some("/etc/opt/ssh/work"));
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        let main_dir = fixture.path().join("external").join("ssh");
+        let plan = plan_new_file("work", &main_dir, &[], Some(&home)).unwrap();
+        let include_path = PathBuf::from(plan.include_value.unwrap());
+        assert!(include_path.is_absolute());
+        assert_eq!(include_path, main_dir.join("work"));
     }
 
     #[test]
     fn multi_token_pattern_values_are_split() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
+            &main_dir,
             &pat(&["~/.orbstack/ssh/config ~/.ssh/config.d/*"]),
-            Some(Path::new("/home/f")),
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.covered_by.as_deref(), Some("~/.ssh/config.d/*"));
@@ -286,11 +347,16 @@ mod tests {
 
     #[test]
     fn prefers_a_family_under_the_main_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let main_dir = home.path().join(".ssh");
         let plan = plan_new_file(
             "work",
-            Path::new("/home/f/.ssh"),
-            &pat(&["/srv/shared/*", "~/.ssh/config.d/*"]),
-            Some(Path::new("/home/f")),
+            &main_dir,
+            &[
+                home.path().join("shared").join("*").to_string_lossy().into_owned(),
+                "~/.ssh/config.d/*".into(),
+            ],
+            Some(home.path()),
         )
         .unwrap();
         assert_eq!(plan.covered_by.as_deref(), Some("~/.ssh/config.d/*"));

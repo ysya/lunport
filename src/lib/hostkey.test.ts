@@ -10,8 +10,8 @@ import {
   hostKeyBody,
   hostKeyButtons,
   hostKeyTitle,
+  hostKeyEndpoint,
   pendingFeed,
-  pinnedOn,
   TRUST_ARM_DELAY_MS,
 } from "@/lib/hostkey";
 import { stubEventBus } from "./event-bus-fixture";
@@ -29,39 +29,59 @@ function request(over: Partial<HostKeyRequest> = {}): HostKeyRequest {
   };
 }
 
-const changed = request({ changed: { fingerprint: "SHA256:old", pinned_at_ms: 1_700_000_000_000 } });
+const changed = request({
+  changed: { fingerprint: "SHA256:old", pinned_at_ms: 1_700_000_000_000 },
+});
 
-describe("host key texts (spec §14, word for word)", () => {
+describe("host key presentation", () => {
   it("asks about a key SSHelter has not seen", () => {
-    expect(hostKeyTitle(request())).toBe("Is this web?");
+    expect(hostKeyTitle(request())).toBe("Verify server identity");
     expect(hostKeyBody(request())).toBe(
-      "web.example.com:22 presented the key ssh-ed25519 SHA256:9Q3QMhBJBcoUNE88XYEQbCPlcFByPPyVPJ6enJtQ+ew. SSHelter has not seen it before. Connect only if the fingerprint matches what the server's administrator gave you.",
+      "This server is new to SSHelter. Compare its fingerprint with a trusted source before connecting.",
     );
-    expect(hostKeyButtons(request())).toEqual({ refuse: "Cancel", trust: "Trust this key" });
+    expect(hostKeyButtons(request())).toEqual({
+      refuse: "Cancel",
+      trust: "Trust this key",
+    });
   });
 
   it("warns about a key that changed", () => {
-    expect(hostKeyTitle(changed)).toBe("web's host key changed");
+    expect(hostKeyTitle(changed)).toBe("Server identity changed");
     expect(hostKeyBody(changed)).toBe(
-      `The key web.example.com:22 presented does not match the one SSHelter pinned on ${pinnedOn(1_700_000_000_000)}. Someone could be intercepting the connection. Refuse unless you know the server's key was reinstalled.`,
+      "This key differs from the saved identity. The connection may be intercepted. Refuse unless you have verified why the server's key changed.",
     );
-    expect(hostKeyButtons(changed)).toEqual({ refuse: "Refuse", trust: "Accept new key" });
+    expect(hostKeyButtons(changed)).toEqual({
+      refuse: "Refuse",
+      trust: "Accept new key",
+    });
   });
 
   it("shows hidden characters in names instead of rendering them", () => {
-    expect(hostKeyTitle(request({ alias: "we‮b" }))).toBe("Is this we⟨U+202E⟩b?");
-    expect(hostKeyBody(request({ hostname: "evil\u0007.example.com" }))).toContain("evil⟨U+0007⟩.example.com:22");
+    expect(
+      hostKeyEndpoint(request({ hostname: "evil\u0007.example.com" })),
+    ).toBe("evil⟨U+0007⟩.example.com:22");
+    expect(hostKeyEndpoint(request({ hostname: "2001:db8::1" }))).toBe(
+      "[2001:db8::1]:22",
+    );
   });
 });
 
 describe("host key answers", () => {
   it("carries the fingerprint the window showed", () => {
-    expect(buildHostKeyAnswer(request(), true)).toEqual({ trust: true, fingerprint: request().fingerprint });
-    expect(buildHostKeyAnswer(changed, false)).toEqual({ trust: false, fingerprint: changed.fingerprint });
+    expect(buildHostKeyAnswer(request(), true)).toEqual({
+      trust: true,
+      fingerprint: request().fingerprint,
+    });
+    expect(buildHostKeyAnswer(changed, false)).toEqual({
+      trust: false,
+      fingerprint: changed.fingerprint,
+    });
   });
 
   it("says which answer was rejected without saying the answer", () => {
-    expect(answerRejectedMessage("hostkey-3", new Error("gone"))).toBe("[hostkey] the answer to hostkey-3 was rejected: gone");
+    expect(answerRejectedMessage("hostkey-3", new Error("gone"))).toBe(
+      "[hostkey] the answer to hostkey-3 was rejected: gone",
+    );
   });
 });
 
@@ -95,7 +115,9 @@ describe("following the pending list", () => {
   // A change emitted between the fetch's answer and the listener's registration would be lost, and the window would show a list
   // that is no longer pending: the listener is registered first, and the fetch comes after it.
   it("registers the listener before it fetches", async () => {
-    const bus = stubEventBus({ answer: (cmd) => (cmd === "hostkey_pending" ? [request()] : undefined) });
+    const bus = stubEventBus({
+      answer: (cmd) => (cmd === "hostkey_pending" ? [request()] : undefined),
+    });
     const lists: HostKeyRequest[][] = [];
     const stop = followPending((list) => lists.push(list));
     await vi.waitFor(() => expect(lists).toEqual([[request()]]));

@@ -351,8 +351,8 @@ Connect 按鈕、指令面板、托盤的快速連線:沿用 `connect.rs` 的 `d
 - 切到 `auto_log` 的確認:標題 `Let AI run commands without asking?`;內容 `AI can run commands on the hosts in your AI allowed list without asking first. Every command is logged. Keys in SSHelter still ask the first time they are used.`;按鈕 `Cancel`、`Let AI run without asking`。
 - AI Access 的核准模式單選:標籤 `Approval`,選項 `Ask before every command`、`Run without asking, keep a log`。
 - 核准視窗與 log:`Requested by` + 名稱鏈(` → ` 連接,每段經 `revealHidden`);認不出來 `an unknown program`;clientInfo 一行 `{name} {version} (self-reported)`。
-- 主機金鑰確認視窗:標題 `Is this {alias}?`;內容 `{hostname}:{port} presented the key {algorithm} {fingerprint}. SSHelter has not seen it before. Connect only if the fingerprint matches what the server's administrator gave you.`;按鈕 `Cancel`、`Trust this key`。
-- 主機金鑰不符:標題 `{alias}'s host key changed`;內容 `The key {hostname}:{port} presented does not match the one SSHelter pinned on {pinned_at}. Someone could be intercepting the connection. Refuse unless you know the server's key was reinstalled.`;按鈕 `Refuse`、`Accept new key`。
+- 主機金鑰確認視窗(1.0.0-2 介面修訂):標題 `Verify server identity`，另列 alias、server endpoint、key type 與可複製的完整 fingerprint；提示 `This server is new to SSHelter. Compare its fingerprint with a trusted source before connecting.`；按鈕 `Cancel`、`Trust this key`，預設焦點為 Cancel。
+- 主機金鑰不符(1.0.0-2 介面修訂):標題 `Server identity changed`，顯示完整的新 fingerprint、舊 fingerprint 與釘住時間；提示 `This key differs from the saved identity. The connection may be intercepted. Refuse unless you have verified why the server's key changed.`；按鈕 `Refuse`、`Accept new key`，預設焦點為 Refuse。延遲啟用與所見 fingerprint 綁定維持原有安全語意。
 - 其餘字串在各期的計畫裡定,寫進介面前先對照本節。
 
 ## 15. 查證紀錄(2026-10-10)

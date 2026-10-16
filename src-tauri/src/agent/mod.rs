@@ -36,12 +36,20 @@ pub fn agent_dir(home: &Path) -> PathBuf {
 pub fn identity_agent_value() -> Result<String, AppError> {
     #[cfg(windows)]
     {
-        Ok(format!("//./pipe/{}", pipe_windows::pipe_name_for("agent")?))
+        Ok(format!("//./pipe/{}", pipe_windows::pipe_name_for(crate::app_profile::CURRENT.pipe_role(crate::app_profile::IpcRole::Agent))?))
     }
     #[cfg(not(windows))]
     {
-        Ok(SOCKET_VALUE.to_string())
+        if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Development {
+            Ok(runtime_agent_dir()?.join("sock").to_string_lossy().into_owned())
+        } else {
+            Ok(SOCKET_VALUE.to_string())
+        }
     }
+}
+
+fn runtime_agent_dir() -> Result<PathBuf, AppError> {
+    Ok(crate::app_profile::CURRENT.agent_ipc_dir(&crate::fsutil::home_dir()?, &crate::fsutil::app_data_root()?))
 }
 
 /// agent 有沒有在提供(spec §11)。
@@ -73,12 +81,15 @@ impl broker::AgentHost for AppAgentHost {
     fn keys(&self) -> Vec<broker::VaultKey> {
         let state = self.app.state::<AppState>();
         let core = state.sync.core.lock().unwrap();
+        if crate::sync::engine::legacy_mode_allowed(&core).is_err(){return Vec::new();}
         core.state.as_ref().map(broker::vault_keys).unwrap_or_default()
     }
 
     /// 使用者按了允許,金鑰卻拿不出來(keychain 鎖著、保管庫讀不懂)時回錯誤;原因由 broker 記(`refused`,帶插槽 id),這裡不再記一次。
     fn private_key(&self, slot_id: &str) -> Result<Option<Zeroizing<String>>, AppError> {
         crate::sync::engine::with_env(&self.app, |env| {
+            let _lifecycle=env.runtime.lifecycle.lock().unwrap();
+            crate::sync::engine::require_legacy(env.runtime)?;
             with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| vault.get(slot_id))
                 .map(|entry| entry.map(|entry| Zeroizing::new(entry.private_key.clone())))
                 .map_err(AppError::from)
@@ -88,6 +99,8 @@ impl broker::AgentHost for AppAgentHost {
 
     fn settings(&self) -> AgentSettings {
         let result = crate::sync::engine::with_env(&self.app, |env| {
+            let _lifecycle=env.runtime.lifecycle.lock().unwrap();
+            crate::sync::engine::require_legacy(env.runtime)?;
             with_vault(env.runtime, &vault_path(&env.state_path), env.keychain, env.now(), |vault| Ok(vault.settings().clone()))
                 .map_err(AppError::from)
         })
@@ -104,6 +117,9 @@ impl broker::AgentHost for AppAgentHost {
     }
 
     fn host_name(&self, host_key: &KeyData) -> Option<String> {
+        let state=self.app.state::<AppState>();
+        let _lifecycle=state.sync.lifecycle.lock().unwrap();
+        crate::sync::engine::require_legacy(&state.sync).ok()?;
         host_name_in_files(&known_hosts_files(), host_key)
     }
 
@@ -169,9 +185,7 @@ pub fn start(app: &tauri::AppHandle) {
 }
 
 fn listen(app: &tauri::AppHandle) -> Result<server::Started, AppError> {
-    let ssh_dir = crate::keys::ssh_dir()?;
-    let home = ssh_dir.parent().ok_or_else(|| AppError::Other("cannot determine home directory".to_string()))?;
-    let dir = agent_dir(home);
+    let dir = runtime_agent_dir()?;
     let app = app.clone();
     let handle: server::Handler = std::sync::Arc::new(move |mut stream, pid| {
         let program = pid.and_then(|pid| peer::identify(&peer::process_chain(pid)));
@@ -188,7 +202,7 @@ fn listen(app: &tauri::AppHandle) -> Result<server::Started, AppError> {
     }
     #[cfg(windows)]
     {
-        pipe_windows::listen(&dir, &pipe_windows::pipe_name_for("agent")?, "sshelter-agent", handle)
+        pipe_windows::listen(&dir, &pipe_windows::pipe_name_for(crate::app_profile::CURRENT.pipe_role(crate::app_profile::IpcRole::Agent))?, "sshelter-agent", handle)
     }
 }
 
@@ -297,5 +311,21 @@ mod tests {
         assert_eq!(name(&[&missing, &first, &system]).as_deref(), Some("web"), "the bad bytes hide nothing, and the earlier file wins");
         assert_eq!(name(&[&other_key, &system]).as_deref(), Some("lab"), "a file that does not know the key is passed over");
         assert_eq!(name(&[&missing, &other_key]), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod profile_endpoint_tests {
+    #[test]
+    fn listener_and_identity_agent_share_the_compact_runtime_directory() {
+        let value = super::identity_agent_value().unwrap();
+        match crate::app_profile::CURRENT {
+            crate::app_profile::AppProfile::Development => {
+                let dir = super::runtime_agent_dir().unwrap();
+                assert_eq!(value, dir.join("sock").to_string_lossy());
+                assert_eq!(dir, crate::fsutil::app_data_root().unwrap().join("ipc/a"));
+            }
+            crate::app_profile::AppProfile::Production => assert_eq!(value, super::SOCKET_VALUE),
+        }
     }
 }

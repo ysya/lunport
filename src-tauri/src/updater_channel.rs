@@ -10,6 +10,11 @@ use tauri::{ipc::Channel, AppHandle, Url};
 
 use crate::error::AppError;
 
+fn require_updates_allowed() -> Result<(), AppError> {
+    if crate::app_profile::CURRENT.allows_os_integrations() { Ok(()) }
+    else { Err(AppError::Other("updates are disabled in the development profile".into())) }
+}
+
 /// Beta 頻道的更新清單(由 CI 的 scripts/beta-channel.mjs 維護)。
 pub const BETA_ENDPOINT: &str = "https://github.com/ysya/sshelter/releases/download/updater-beta/latest.json";
 
@@ -84,6 +89,7 @@ fn plugin_error(e: tauri_plugin_updater::Error) -> AppError {
 /// 檢查 Beta 頻道:有較新版本就暫存起來(覆寫先前的暫存)並回傳摘要;沒有就清掉暫存、回傳 None。
 #[tauri::command]
 pub async fn updater_check_beta(app: AppHandle) -> Result<Option<UpdateInfo>, AppError> {
+    require_updates_allowed()?;
     #[cfg(desktop)]
     {
         use tauri::Manager;
@@ -111,6 +117,7 @@ pub async fn updater_check_beta(app: AppHandle) -> Result<Option<UpdateInfo>, Ap
 /// 重開 app 由前端 `relaunch()` 負責。
 #[tauri::command]
 pub async fn updater_install_beta(app: AppHandle, on_event: Channel<UpdateDownloadEvent>) -> Result<(), AppError> {
+    require_updates_allowed()?;
     #[cfg(desktop)]
     {
         use tauri::Manager;

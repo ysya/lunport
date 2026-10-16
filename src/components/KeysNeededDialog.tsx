@@ -1,9 +1,10 @@
+import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components/app/TaskDialog";
 import { useEffect, useRef, useState } from "react";
 
 import type { SyncKeySlotView } from "@/bindings/SyncKeySlotView";
 import { PickKeyDialog } from "@/components/keychain/dialogs";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { finishedKeysNeededNotice, hostsLine, keysNeededNoticeIndex, slotsNeedingKey } from "@/lib/key-slots";
 import { useDismissNotice, useSyncOverview } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
@@ -49,6 +50,7 @@ export function KeysNeededDialog() {
               Synced hosts on this computer use keys that stay on your other computers. Pick a key on this computer for each, or do it later in Keychain.
             </DialogDescription>
           </DialogHeader>
+      <TaskDialogBody>
           <div className="settings-group max-h-[40vh] overflow-y-auto">
             {slots.map((slot) => (
               <div key={slot.id} className="flex items-center justify-between gap-3 px-3 py-2">
@@ -62,7 +64,8 @@ export function KeysNeededDialog() {
               </div>
             ))}
           </div>
-          <DialogFooter>
+          </TaskDialogBody>
+      <DialogFooter>
             <Button type="button" disabled={dismiss.isPending} onClick={done}>
               Done
             </Button>

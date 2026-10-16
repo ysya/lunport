@@ -1,31 +1,25 @@
 import type { Channel } from "@tauri-apps/api/core";
-import { isValidElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
-
 import { type DownloadEvent, STALL_AFTER_MS } from "@/lib/download-progress";
 import type { UpdateChannel } from "@/lib/settings-logic";
 import { useSettingsStore } from "@/stores/settings";
-import { PROGRESS_REFRESH_MS, checkForUpdates } from "./updater";
+import { useUiStore } from "@/stores/ui";
+import {
+  PROGRESS_REFRESH_MS,
+  checkForUpdates,
+  installAvailableUpdate,
+  restartAfterUpdate,
+  useUpdaterState,
+} from "./updater";
 
-/**
- * The real settings store, the real sonner and the real updater/process plugins, with only the
- * edges stubbed: the backend and `requestAnimationFrame`, which sonner's `toast.dismiss(id)` calls
- * and Node lacks. `toast.getToasts()` lists what is on screen; dismissed ids drop out at once.
- *
- * Every command, whether `tauriInvoke` sends it or a plugin does (`check()`, `downloadAndInstall()`,
- * `relaunch()`), ends in `window.__TAURI_INTERNALS__.invoke`: that one function is the backend. It
- * logs each command name, in order, and answers from `answers` laid over DEFAULT_ANSWERS (a
- * function answers lazily, with the command's arguments, so a test can hold a reply back). A command
- * nobody listed rejects.
- */
 const DEFAULT_ANSWERS: Record<string, unknown> = {
   "plugin:updater|check": null,
   "plugin:updater|download_and_install": undefined,
   "plugin:process|restart": undefined,
   updater_check_beta: null,
   updater_install_beta: undefined,
+  "plugin:resources|close": undefined,
 };
 
 function stubBackend(answers: Record<string, unknown> = {}): string[] {
@@ -46,32 +40,6 @@ function stubBackend(answers: Record<string, unknown> = {}): string[] {
   return calls;
 }
 
-const PROMPT_TITLE = "Update available: v";
-
-/** Versions of the "Update available" prompts currently on screen. */
-function promptedVersions(): string[] {
-  return toast
-    .getToasts()
-    .flatMap((t) =>
-      "title" in t && typeof t.title === "string" && t.title.startsWith(PROMPT_TITLE)
-        ? [t.title.slice(PROMPT_TITLE.length)]
-        : [],
-    );
-}
-
-/** Press the on-screen prompt's "Install & restart" button, as the Toaster would. */
-function pressInstall(): void {
-  const prompt = toast
-    .getToasts()
-    .find((t) => "title" in t && typeof t.title === "string" && t.title.startsWith(PROMPT_TITLE));
-  const action = prompt && "action" in prompt ? prompt.action : undefined;
-  if (!action || typeof action !== "object" || !("onClick" in action)) {
-    throw new Error("no update prompt with an install button is on screen");
-  }
-  action.onClick(undefined as never); // the handler ignores the click event
-}
-
-/** What `updater_check_beta` answers when a beta is available. */
 const BETA_FOUND = { version: "0.16.1-1", body: null };
 
 /** What `plugin:updater|check` answers when a stable update is available (the plugin wraps it in an `Update`). */
@@ -84,143 +52,15 @@ const STABLE_FOUND = {
   rawJson: {},
 };
 
-beforeEach(() => {
-  vi.stubGlobal("requestAnimationFrame", (callback: () => void) => {
-    callback();
-    return 0;
-  });
-  useSettingsStore.setState(useSettingsStore.getInitialState(), true);
-});
-
-afterEach(() => {
-  for (const t of toast.getToasts()) toast.dismiss(t.id);
-  vi.unstubAllGlobals();
-});
-
-describe("each channel talks only to its own backend", () => {
-  it("defaults to Stable, so existing installs keep the pre-channel path until they opt in", () => {
-    expect(useSettingsStore.getInitialState().updateChannel).toBe("stable");
-  });
-
-  it("Stable checks and installs through the updater plugin and never reaches the Beta commands", async () => {
-    const calls = stubBackend({ "plugin:updater|check": STABLE_FOUND });
-
-    await checkForUpdates({ silent: false }); // default settings: the channel was never chosen
-    expect(calls).toEqual(["plugin:updater|check"]);
-    expect(promptedVersions()).toEqual(["0.16.1"]);
-
-    pressInstall();
-    await vi.waitFor(() => expect(calls).toContain("plugin:process|restart"));
-
-    expect(calls.filter((cmd) => cmd.startsWith("updater_"))).toEqual([]); // the Beta commands
-    expect(calls).toEqual(["plugin:updater|check", "plugin:updater|download_and_install", "plugin:process|restart"]);
-  });
-
-  it("Beta checks and installs through the backend commands and never reaches the updater plugin", async () => {
-    const calls = stubBackend({ updater_check_beta: BETA_FOUND });
-    useSettingsStore.setState({ updateChannel: "beta" });
-
-    await checkForUpdates({ silent: false });
-    expect(calls).toEqual(["updater_check_beta"]);
-    expect(promptedVersions()).toEqual(["0.16.1-1"]);
-
-    pressInstall();
-    await vi.waitFor(() => expect(calls).toContain("plugin:process|restart"));
-
-    expect(calls.filter((cmd) => cmd.startsWith("plugin:updater|"))).toEqual([]);
-    expect(calls).toEqual(["updater_check_beta", "updater_install_beta", "plugin:process|restart"]);
-  });
-});
-
-describe("update prompts follow the selected channel", () => {
-  it("drops a Beta result that arrives after the user switched back to Stable", async () => {
-    let deliver!: (answer: unknown) => void;
-    stubBackend({ updater_check_beta: () => new Promise((resolve) => (deliver = resolve)) });
-    useSettingsStore.setState({ updateChannel: "beta" });
-
-    const inFlight = checkForUpdates({ silent: false });
-    useSettingsStore.setState({ updateChannel: "stable" });
-    deliver(BETA_FOUND);
-    await inFlight;
-
-    expect(promptedVersions()).toEqual([]);
-  });
-
-  it("shows nothing when a manual check loses the race, not even 'up to date'", async () => {
-    let deliver!: (answer: unknown) => void;
-    stubBackend({ "plugin:updater|check": () => new Promise((resolve) => (deliver = resolve)) });
-
-    const inFlight = checkForUpdates({ silent: false }); // Stable: the default channel
-    useSettingsStore.setState({ updateChannel: "beta" });
-    deliver(null); // the plugin's "no update" answer
-    await inFlight;
-
-    expect(toast.getToasts()).toEqual([]);
-  });
-
-  it("retires the visible prompt when the channel changes", async () => {
-    stubBackend({ updater_check_beta: BETA_FOUND });
-    useSettingsStore.setState({ updateChannel: "beta" });
-    await checkForUpdates({ silent: false });
-    expect(promptedVersions()).toEqual(["0.16.1-1"]);
-
-    useSettingsStore.setState({ updateChannel: "stable" });
-
-    expect(promptedVersions()).toEqual([]);
-  });
-
-  it("keeps the prompt when an unrelated setting changes", async () => {
-    stubBackend({ updater_check_beta: BETA_FOUND });
-    useSettingsStore.setState({ updateChannel: "beta" });
-    await checkForUpdates({ silent: false });
-
-    useSettingsStore.setState({ fontSize: 16 });
-
-    expect(promptedVersions()).toEqual(["0.16.1-1"]);
-  });
-
-  // A settings import or a newer build can leave any string here, and only "beta" means Beta, so
-  // moving between "stable" and such a value is not a channel change.
-  it.each([
-    ["stable", "nightly"],
-    ["nightly", "stable"],
-  ])("keeps the prompt when the channel goes from %s to %s, both of which mean Stable", async (from, to) => {
-    stubBackend({ "plugin:updater|check": STABLE_FOUND });
-    useSettingsStore.setState({ updateChannel: from as UpdateChannel });
-    await checkForUpdates({ silent: false });
-    expect(promptedVersions()).toEqual(["0.16.1"]);
-
-    useSettingsStore.setState({ updateChannel: to as UpdateChannel });
-
-    expect(promptedVersions()).toEqual(["0.16.1"]);
-  });
-});
-
-/** The install's toast (the prompt aside): its title and the text its description shows (not screen-reader-only text). */
-function installToast(): { title: string; text: string } {
-  const shown = toast
-    .getToasts()
-    .flatMap((t) => ("title" in t && typeof t.title === "string" && !t.title.startsWith(PROMPT_TITLE) ? [t] : []));
-  if (shown.length !== 1) throw new Error(`expected one install toast, found ${shown.length}`);
-  const [{ title, description }] = shown;
-  const text = isValidElement(description)
-    ? renderToStaticMarkup(description)
-        .replace(/<span class="sr-only">.*?<\/span>/g, "")
-        .replace(/<[^>]*>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-    : typeof description === "string"
-      ? description
-      : "";
-  return { title: title as string, text };
-}
-
-/** Ends every held install (and held check), so a test that fails halfway does not leave the next ones blocked. */
 const pendingInstalls: (() => void)[] = [];
 
 /** An install command that stays open until the test ends it, and hands over the channel its progress goes through. */
 function heldInstall() {
-  const held: { channel?: Channel<DownloadEvent>; finish: () => void; fail: (error: Error) => void } = {
+  const held: {
+    channel?: Channel<DownloadEvent>;
+    finish: () => void;
+    fail: (error: Error) => void;
+  } = {
     finish: () => {},
     fail: () => {},
   };
@@ -233,144 +73,368 @@ function heldInstall() {
     });
   };
   const send = (event: DownloadEvent) => {
-    if (!held.channel) throw new Error("the install command got no progress channel");
+    if (!held.channel)
+      throw new Error("the install command got no progress channel");
     held.channel.onmessage(event);
   };
   return { held, reply, send };
 }
 
-describe("installing shows the download's progress", () => {
-  // The toast refreshes on an interval and times the download with performance.now(): both are faked, so a test
-  // steps through time. Promises and sonner's own timers stay real.
-  beforeEach(() => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
-  });
-  afterEach(async () => {
-    for (const finish of pendingInstalls.splice(0)) finish();
-    await new Promise((resolve) => setTimeout(resolve, 0)); // let those installs restart before the stubs go
-    vi.useRealTimers();
-  });
+beforeEach(() => {
+  stubBackend();
+  useUpdaterState.setState(useUpdaterState.getInitialState(), true);
+  useSettingsStore.setState({ updateChannel: "beta" });
+  useSettingsStore.setState(useSettingsStore.getInitialState(), true);
+  useUiStore.setState({ settingsOpen: false, settingsCategory: "general" });
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+});
+afterEach(async () => {
+  for (const finish of pendingInstalls.splice(0)) finish();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(toast.getToasts()).toEqual([]);
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+const state = () => useUpdaterState.getState();
+const withoutCleanup = (calls: string[]) =>
+  calls.filter((command) => command !== "plugin:resources|close");
 
+describe("inline checks and channel isolation", () => {
+  it("defaults to Stable and stores a manual up-to-date result without a notification", async () => {
+    expect(useSettingsStore.getState().updateChannel).toBe("stable");
+    await checkForUpdates({ silent: false });
+    expect(state()).toMatchObject({
+      phase: "current",
+      channel: "stable",
+      version: null,
+    });
+    expect(state().checkedAt).toEqual(expect.any(Number));
+  });
   it.each([
-    { channel: "stable", found: { "plugin:updater|check": STABLE_FOUND }, command: "plugin:updater|download_and_install", version: "0.16.1" },
-    { channel: "beta", found: { updater_check_beta: BETA_FOUND }, command: "updater_install_beta", version: "0.16.1-1" },
-  ] as const)("$channel: from connecting, through the bytes from its channel, to installing and restarting", async ({ channel, found, command, version }) => {
-    const install = heldInstall();
-    const calls = stubBackend({ ...found, [command]: install.reply });
-    useSettingsStore.setState({ updateChannel: channel });
-    await checkForUpdates({ silent: false });
-    pressInstall();
-
-    expect(installToast()).toEqual({ title: `Downloading v${version}…`, text: "Connecting…" });
-
-    install.send({ event: "Started", data: { contentLength: 4_000_000 } });
-    // The bytes appear with the next refresh, so the first chunk does not flash "0 B of 4.0 MB" before it.
-    expect(installToast().text).toBe("Connecting…");
-    install.send({ event: "Progress", data: { chunkLength: 1_000_000 } });
-    vi.advanceTimersByTime(PROGRESS_REFRESH_MS);
-    expect(installToast()).toEqual({ title: `Downloading v${version}…`, text: "1.0 MB of 4.0 MB" });
-
-    install.send({ event: "Progress", data: { chunkLength: 3_000_000 } });
-    install.send({ event: "Finished" });
-    expect(installToast()).toEqual({ title: `Installing v${version}…`, text: "4.0 MB downloaded" });
-
-    install.held.finish();
-    await vi.waitFor(() => expect(calls).toContain("plugin:process|restart"));
-    expect(installToast()).toEqual({ title: "Update installed — restarting…", text: "" });
-
-    // Nothing after the install brings the progress back.
-    install.send({ event: "Finished" });
-    vi.advanceTimersByTime(STALL_AFTER_MS);
-    expect(installToast()).toEqual({ title: "Update installed — restarting…", text: "" });
+    {
+      channel: "stable",
+      found: { "plugin:updater|check": STABLE_FOUND },
+      commands: [
+        "plugin:updater|check",
+        "plugin:updater|download_and_install",
+        "plugin:process|restart",
+      ],
+      version: "0.16.1",
+    },
+    {
+      channel: "beta",
+      found: { updater_check_beta: BETA_FOUND },
+      commands: [
+        "updater_check_beta",
+        "updater_install_beta",
+        "plugin:process|restart",
+      ],
+      version: "0.16.1-1",
+    },
+  ] as const)(
+    "$channel uses only its own signed-update backend",
+    async ({ channel, found, commands, version }) => {
+      const calls = stubBackend(found);
+      useSettingsStore.setState({ updateChannel: channel });
+      await checkForUpdates({ silent: false });
+      expect(state()).toMatchObject({ phase: "available", channel, version });
+      await installAvailableUpdate();
+      expect(withoutCleanup(calls)).toEqual(commands);
+      expect(state().phase).toBe("restarting");
+    },
+  );
+  it("an automatic discovery never opens Settings or a toast", async () => {
+    stubBackend({ updater_check_beta: BETA_FOUND });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    await checkForUpdates({ silent: true });
+    await checkForUpdates({ silent: true });
+    expect(state()).toMatchObject({
+      phase: "available",
+      version: BETA_FOUND.version,
+    });
+    expect(useUiStore.getState().settingsOpen).toBe(false);
   });
-
-  it("says when no data has arrived for a while", async () => {
-    const install = heldInstall();
-    const calls = stubBackend({ "plugin:updater|check": STABLE_FOUND, "plugin:updater|download_and_install": install.reply });
-    await checkForUpdates({ silent: false });
-    pressInstall();
-
-    install.send({ event: "Started", data: { contentLength: 4_000_000 } });
-    install.send({ event: "Progress", data: { chunkLength: 1_000_000 } });
-    vi.advanceTimersByTime(STALL_AFTER_MS);
-
-    expect(installToast().text).toBe(
-      "1.0 MB of 4.0 MB · 0 B/s No data for 10 s — the download may have stalled. Restart SSHelter to try again.",
-    );
-    install.held.finish();
-    await vi.waitFor(() => expect(calls).toContain("plugin:process|restart"));
-  });
-
-  it("prompts for nothing while an update installs, so a second download cannot start", async () => {
-    const install = heldInstall();
-    const calls = stubBackend({ updater_check_beta: BETA_FOUND, updater_install_beta: install.reply });
+  it.each([false, true])(
+    "keeps check failures inline (silent=%s)",
+    async (silent) => {
+      stubBackend({
+        "plugin:updater|check": () => {
+          throw new Error("offline");
+        },
+      });
+      await checkForUpdates({ silent });
+      expect(state()).toMatchObject({
+        phase: "error",
+        errorStage: "check",
+        error: "offline",
+      });
+    },
+  );
+  it.each([BETA_FOUND, null])(
+    "drops old-channel results, including up-to-date replies",
+    async (reply) => {
+      let deliver!: (answer: unknown) => void;
+      stubBackend({
+        updater_check_beta: () =>
+          new Promise((resolve) => {
+            deliver = resolve;
+            pendingInstalls.push(() => resolve(null));
+          }),
+      });
+      useSettingsStore.setState({ updateChannel: "beta" });
+      const checking = checkForUpdates({ silent: false });
+      useSettingsStore.setState({ updateChannel: "stable" });
+      deliver(reply);
+      await checking;
+      expect(state()).toMatchObject({
+        phase: "idle",
+        channel: "stable",
+        version: null,
+      });
+    },
+  );
+  it("retires an available installer on channel changes", async () => {
+    const calls = stubBackend({ updater_check_beta: BETA_FOUND });
     useSettingsStore.setState({ updateChannel: "beta" });
     await checkForUpdates({ silent: false });
-    pressInstall();
-    toast.dismiss("sshelter-update"); // the Toaster closes a prompt when its button is pressed
-
-    await checkForUpdates({ silent: false }); // e.g. Settings → Check for updates after the stall warning
-
-    expect(calls.filter((cmd) => cmd === "updater_check_beta")).toHaveLength(1);
-    expect(promptedVersions()).toEqual([]);
-    install.held.finish();
-    await vi.waitFor(() => expect(calls).toContain("plugin:process|restart"));
+    useSettingsStore.setState({ updateChannel: "stable" });
+    await installAvailableUpdate();
+    expect(calls).toEqual(["updater_check_beta"]);
+    expect(state().phase).toBe("idle");
   });
+  it.each([
+    ["stable", "nightly"],
+    ["nightly", "stable"],
+  ])(
+    "ignores unrelated settings and normalized %s → %s changes",
+    async (from, to) => {
+      stubBackend({ "plugin:updater|check": STABLE_FOUND });
+      useSettingsStore.setState({ updateChannel: from as UpdateChannel });
+      await checkForUpdates({ silent: false });
+      useSettingsStore.setState({
+        fontSize: 16,
+        updateChannel: to as UpdateChannel,
+      });
+      expect(state()).toMatchObject({
+        phase: "available",
+        version: STABLE_FOUND.version,
+      });
+    },
+  );
+  it("deduplicates simultaneous automatic and manual checks", async () => {
+    let deliver!: (answer: unknown) => void;
+    const calls = stubBackend({
+      "plugin:updater|check": () =>
+        new Promise((resolve) => {
+          deliver = resolve;
+          pendingInstalls.push(() => resolve(null));
+        }),
+    });
+    const automatic = checkForUpdates({ silent: true });
+    const manual = checkForUpdates({ silent: false });
+    expect(state().phase).toBe("checking");
+    deliver(STABLE_FOUND);
+    await Promise.all([automatic, manual]);
+    expect(calls).toEqual(["plugin:updater|check"]);
+    expect(state().phase).toBe("available");
+  });
+  it("queues a new channel behind an old check without overlapping backend requests", async () => {
+    let deliver!: (answer: unknown) => void;
+    const calls = stubBackend({
+      "plugin:updater|check": () =>
+        new Promise((resolve) => {
+          deliver = resolve;
+          pendingInstalls.push(() => resolve(null));
+        }),
+      updater_check_beta: BETA_FOUND,
+    });
+    const stable = checkForUpdates({ silent: false });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    const beta = checkForUpdates({ silent: false });
+    expect(calls).toEqual(["plugin:updater|check"]);
+    deliver(null);
+    await Promise.all([stable, beta]);
+    expect(calls).toEqual(["plugin:updater|check", "updater_check_beta"]);
+    expect(state()).toMatchObject({ phase: "available", channel: "beta" });
+  });
+  it("drops a stale reply even when the user switched away and back", async () => {
+    let deliver!: (answer: unknown) => void;
+    stubBackend({
+      updater_check_beta: () =>
+        new Promise((resolve) => {
+          deliver = resolve;
+          pendingInstalls.push(() => resolve(null));
+        }),
+    });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    const checking = checkForUpdates({ silent: false });
+    useSettingsStore.setState({ updateChannel: "stable" });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    deliver(BETA_FOUND);
+    await checking;
+    expect(state().phase).toBe("idle");
+  });
+});
 
-  it("starts one download when Install is pressed twice", async () => {
+describe("inline installation state", () => {
+  beforeEach(() =>
+    vi.useFakeTimers({
+      toFake: ["setInterval", "clearInterval", "performance"],
+    }),
+  );
+  it.each([
+    {
+      channel: "stable",
+      found: { "plugin:updater|check": STABLE_FOUND },
+      command: "plugin:updater|download_and_install",
+      version: "0.16.1",
+    },
+    {
+      channel: "beta",
+      found: { updater_check_beta: BETA_FOUND },
+      command: "updater_install_beta",
+      version: "0.16.1-1",
+    },
+  ] as const)(
+    "$channel keeps progress through download, install and restart and ignores late events",
+    async ({ channel, found, command, version }) => {
+      const install = heldInstall();
+      const calls = stubBackend({ ...found, [command]: install.reply });
+      useSettingsStore.setState({ updateChannel: channel });
+      await checkForUpdates({ silent: false });
+      const installing = installAvailableUpdate();
+      expect(state()).toMatchObject({
+        phase: "installing",
+        progress: { title: `Downloading v${version}…`, line: "Connecting…" },
+      });
+      install.send({ event: "Started", data: { contentLength: 4_000_000 } });
+      install.send({ event: "Progress", data: { chunkLength: 1_000_000 } });
+      vi.advanceTimersByTime(PROGRESS_REFRESH_MS);
+      expect(state().progress).toMatchObject({
+        line: "1.0 MB of 4.0 MB",
+        fraction: 0.25,
+      });
+      install.send({ event: "Progress", data: { chunkLength: 3_000_000 } });
+      install.send({ event: "Finished" });
+      expect(state().progress).toMatchObject({
+        title: `Installing v${version}…`,
+        fraction: 1,
+      });
+      install.held.finish();
+      await installing;
+      expect(calls).toContain("plugin:process|restart");
+      install.send({ event: "Finished" });
+      vi.advanceTimersByTime(STALL_AFTER_MS);
+      expect(state()).toMatchObject({ phase: "restarting", progress: null });
+    },
+  );
+  it("shows stalled downloads and blocks duplicate installs and checks", async () => {
     const install = heldInstall();
-    const calls = stubBackend({ "plugin:updater|check": STABLE_FOUND, "plugin:updater|download_and_install": install.reply });
+    const calls = stubBackend({
+      updater_check_beta: BETA_FOUND,
+      updater_install_beta: install.reply,
+    });
+    useSettingsStore.setState({ updateChannel: "beta" });
     await checkForUpdates({ silent: false });
-
-    pressInstall();
-    pressInstall(); // a double click can land before the Toaster removes the prompt
-
-    expect(calls.filter((cmd) => cmd === "plugin:updater|download_and_install")).toHaveLength(1);
+    const installing = installAvailableUpdate();
+    await installAvailableUpdate();
+    await checkForUpdates({ silent: false });
+    install.send({ event: "Started", data: { contentLength: 4_000_000 } });
+    install.send({ event: "Progress", data: { chunkLength: 1_000_000 } });
+    vi.advanceTimersByTime(STALL_AFTER_MS);
+    expect(state().progress?.warning).toContain("No data for 10 s");
+    expect(calls).toEqual(["updater_check_beta", "updater_install_beta"]);
+    install.held.finish();
+    await installing;
   });
-
-  it("drops the result of a check that comes back after Install was pressed", async () => {
-    const install = heldInstall();
+  it("prevents installation while a newer check is pending", async () => {
     let deliver!: (answer: unknown) => void;
     let checks = 0;
-    stubBackend({
+    const calls = stubBackend({
       updater_check_beta: () =>
         ++checks === 1
           ? BETA_FOUND
           : new Promise((resolve) => {
               deliver = resolve;
-              pendingInstalls.push(() => resolve(null)); // a held check would keep the next tests from checking
+              pendingInstalls.push(() => resolve(null));
             }),
+    });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    await checkForUpdates({ silent: false });
+    const checking = checkForUpdates({ silent: false });
+    await installAvailableUpdate();
+    expect(calls).toEqual(["updater_check_beta", "updater_check_beta"]);
+    deliver(BETA_FOUND);
+    await checking;
+    expect(state().phase).toBe("available");
+  });
+  it("stops failed progress and requires a fresh check before retrying installation", async () => {
+    const install = heldInstall();
+    const calls = stubBackend({
+      updater_check_beta: BETA_FOUND,
       updater_install_beta: install.reply,
     });
     useSettingsStore.setState({ updateChannel: "beta" });
     await checkForUpdates({ silent: false });
-
-    const inFlight = checkForUpdates({ silent: false }); // a manual check, still running
-    pressInstall(); // meanwhile, Install on the prompt already on screen
-    toast.dismiss("sshelter-update");
-    deliver(BETA_FOUND);
-    await inFlight;
-
-    expect(promptedVersions()).toEqual([]);
+    const installing = installAvailableUpdate();
+    install.held.fail(new Error("connection reset"));
+    await installing;
+    vi.advanceTimersByTime(STALL_AFTER_MS);
+    expect(state()).toMatchObject({
+      phase: "error",
+      errorStage: "install",
+      error: "connection reset",
+      progress: null,
+    });
+    await installAvailableUpdate();
+    expect(calls.filter((c) => c === "updater_install_beta")).toHaveLength(1);
+    await checkForUpdates({ silent: false });
+    expect(state().phase).toBe("available");
+    expect(calls.filter((c) => c === "updater_check_beta")).toHaveLength(2);
   });
-
-  it("replaces the progress with the error when the download fails", async () => {
-    const install = heldInstall();
-    stubBackend({ updater_check_beta: BETA_FOUND, updater_install_beta: install.reply });
+  it("retries a failed restart without downloading or installing again", async () => {
+    let attempts = 0;
+    const calls = stubBackend({
+      updater_check_beta: BETA_FOUND,
+      "plugin:process|restart": () => {
+        if (++attempts === 1) throw new Error("restart denied");
+      },
+    });
     useSettingsStore.setState({ updateChannel: "beta" });
     await checkForUpdates({ silent: false });
-    pressInstall();
-
-    install.send({ event: "Started", data: { contentLength: null } });
-    install.held.fail(new Error("connection reset"));
-    await vi.waitFor(() => expect(installToast().title).toBe("Update failed"));
-    vi.advanceTimersByTime(STALL_AFTER_MS);
-
-    expect(installToast()).toEqual({ title: "Update failed", text: "Error: connection reset" });
-
-    // The failed install no longer holds back the next check.
-    toast.dismiss("sshelter-update");
+    await installAvailableUpdate();
+    expect(state()).toMatchObject({
+      phase: "restart_required",
+      error: "restart denied",
+    });
     await checkForUpdates({ silent: false });
-    expect(promptedVersions()).toEqual(["0.16.1-1"]);
+    await restartAfterUpdate();
+    expect(calls).toEqual([
+      "updater_check_beta",
+      "updater_install_beta",
+      "plugin:process|restart",
+      "plugin:process|restart",
+    ]);
+  });
+  it("keeps the active install visible when imported settings change the preferred channel", async () => {
+    const install = heldInstall();
+    const calls = stubBackend({
+      updater_check_beta: BETA_FOUND,
+      updater_install_beta: install.reply,
+    });
+    useSettingsStore.setState({ updateChannel: "beta" });
+    await checkForUpdates({ silent: false });
+    const installing = installAvailableUpdate();
+    useSettingsStore.setState({ updateChannel: "stable" });
+    expect(state()).toMatchObject({
+      phase: "installing",
+      channel: "beta",
+      version: BETA_FOUND.version,
+    });
+    await checkForUpdates({ silent: false });
+    install.held.finish();
+    await installing;
+    expect(calls).not.toContain("plugin:updater|check");
   });
 });

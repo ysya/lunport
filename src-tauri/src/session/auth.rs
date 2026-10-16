@@ -62,6 +62,7 @@ pub trait KeyStore: Send + Sync {
     fn key(&self, key_id: &str) -> Option<VaultKey>;
     /// The private key as the vault stores it: OpenSSH text, passphrase-protected when the key has a passphrase.
     fn private_text(&self, key_id: &str) -> Result<Option<Zeroizing<String>>, String>;
+    fn private_text_noninteractive(&self,_key_id:&str)->Result<Option<Zeroizing<String>>,String>{Err("needs interaction: noninteractive vault access is unavailable".into())}
 }
 
 /// How a question to the person ended.
@@ -82,6 +83,8 @@ pub trait Owner: Send + Sync {
     /// been through `printable` already, and the real `(user@alias) ` is in front of every line of a server's prompt, so the owner shows
     /// it as it is.
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply;
+    /// Trusted hop attribution is supplied separately from server-controlled prompt text.
+    fn ask_at(&self, hop:&HopRef, kind:QuestionKind,text:&str,echo:bool,deadline:Option<Instant>)->Reply{let _=hop;self.ask(kind,text,echo,deadline)}
     /// Shows that the host key waits for the person in SSHelter's window (spec §11); no answer.
     fn host_key_notice(&self, text: &str);
     /// Shows the server's banner (already through `printable`).
@@ -101,7 +104,7 @@ pub fn printable(text: &str) -> String {
 /// embeddings and overrides (U+202A to U+202E) and isolates (U+2066 to U+2069) make text read in another order than it is written (as in
 /// the "Trojan Source" attacks on source code: after U+202E the characters `drowssap` are shown as `password`). Some terminals may break
 /// the line at U+2028 and U+2029, the line and paragraph separators; only a line feed may end a line here.
-fn is_deceptive_format(c: char) -> bool {
+pub(crate) fn is_deceptive_format(c: char) -> bool {
     matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
@@ -218,7 +221,17 @@ impl<'a> BrokerAuth<'a> {
             let Some(text) = self.keys.private_text(key_id).map_err(|error| format!("SSHelter cannot read the key {} from its vault ({error}).", key.name))? else {
                 continue;
             };
+            let mismatch = || format!("SSHelter refused the key {}: its private key does not match its saved public key.", label(&key.name));
+            let identity = material::public_key_data(&key.public_key).ok_or_else(mismatch)?;
+            // The public half is readable even while the private half is encrypted. Refuse
+            // inconsistent metadata before any passphrase prompt or stale-passphrase cleanup.
+            if material::parse(&text).is_some_and(|private| private.public_key().key_data() != &identity) {
+                return Err(mismatch());
+            }
             let material = self.open(hop, key_id, &key, &text)?;
+            if material.key_data() != identity {
+                return Err(mismatch());
+            }
             locked(&self.opened).insert(key_id.clone(), (material, key.public_key));
         }
         Ok(())
@@ -247,7 +260,7 @@ impl<'a> BrokerAuth<'a> {
         }
         let mut text_of_question = format!("Enter the passphrase for the key {}: ", label(&key.name));
         for _ in 0..PASSPHRASE_ATTEMPTS {
-            let passphrase = match self.owner.ask(QuestionKind::Passphrase, &text_of_question, false, Some(deadline_after(prompt_wait(hop)))) {
+            let passphrase = match self.owner.ask_at(&hop.reference(), QuestionKind::Passphrase, &text_of_question, false, Some(deadline_after(prompt_wait(hop)))) {
                 Reply::Answer(passphrase) => passphrase,
                 Reply::Cancelled | Reply::Gone => return Err(abandoned("the passphrase was not given")),
                 Reply::TimedOut => return Err(abandoned("the passphrase prompt timed out")),
@@ -321,7 +334,7 @@ impl AuthSource for BrokerAuth<'_> {
         }
         let wait = locked(&self.password_first).get(&hop.id).copied();
         let wait = wait.filter(|_| !self.cancelled(&hop.id))?;
-        match self.owner.ask(QuestionKind::Password, &format!("{}@{}'s password: ", label(&hop.user), label(&hop.alias)), false, Some(deadline_after(wait))) {
+        match self.owner.ask_at(hop, QuestionKind::Password, &format!("{}@{}'s password: ", label(&hop.user), label(&hop.alias)), false, Some(deadline_after(wait))) {
             Reply::Answer(password) => {
                 locked(&self.typed).insert(hop.id.clone(), password.clone());
                 locked(&self.gave).insert(hop.id.clone(), PasswordSource::Typed);
@@ -347,7 +360,7 @@ impl AuthSource for BrokerAuth<'_> {
         let mut answers = Vec::with_capacity(prompts.len());
         for prompt in prompts {
             let text = shown_prompt(hop, &prompt.text);
-            match self.owner.ask(QuestionKind::Interactive, &text, prompt.echo, Some(deadline)) {
+            match self.owner.ask_at(hop, QuestionKind::Interactive, &text, prompt.echo, Some(deadline)) {
                 Reply::Answer(answer) => answers.push(answer),
                 // As in `password`: remembered however the prompt ended; the answers given so far are dropped with the round.
                 Reply::Cancelled | Reply::TimedOut | Reply::Gone => {
@@ -410,6 +423,44 @@ mod tests {
         assert_eq!(policy.check(&other, &key(test_keys::PLAIN_PUBLIC)), HostKeyVerdict::Unknown);
         policy.pin(&other.id, key(test_keys::ECDSA_PUBLIC));
         assert_eq!(policy.check(&other, &key(test_keys::ECDSA_PUBLIC)), HostKeyVerdict::Pinned);
+    }
+
+    struct InconsistentKeys { public: String }
+    impl KeyStore for InconsistentKeys {
+        fn key(&self, _: &str) -> Option<VaultKey> { Some(VaultKey { name: "fixture".into(), public_key: self.public.clone() }) }
+        fn private_text(&self, _: &str) -> Result<Option<Zeroizing<String>>, String> {
+            Ok(Some(Zeroizing::new(test_keys::plain())))
+        }
+    }
+
+    #[test]
+    fn mismatched_or_malformed_public_identity_never_offers_or_signs_a_private_key() {
+        for public in [test_keys::ECDSA_PUBLIC, "unreadable public identity"] {
+            let keys = InconsistentKeys { public: public.into() };
+            let keychain = MemKeychain::default();
+            let directory = FakeDirectory::new();
+            let owner = FakeOwner::default();
+            let auth = BrokerAuth::new(&keys, &keychain, &owner, &directory);
+            let error = auth.unlock(&target(AuthMethod::Key { key_id: "fixture".into() })).unwrap_err();
+            assert!(error.contains("does not match"));
+            assert!(!error.contains(&test_keys::plain()));
+            assert_eq!(auth.public_key("fixture"), None);
+            assert!(matches!(auth.sign("fixture", b"challenge", None), Err(AuthError::KeyUnavailable(_))));
+            assert!(owner.asked().is_empty());
+        }
+    }
+
+    #[test]
+    fn public_key_comments_do_not_change_the_material_identity() {
+        let parsed = ssh_key::PublicKey::from_openssh(test_keys::PLAIN_PUBLIC).unwrap();
+        let keys = InconsistentKeys { public: format!("{} {} different-comment", parsed.algorithm(), parsed.to_openssh().unwrap().split_whitespace().nth(1).unwrap()) };
+        let keychain = MemKeychain::default();
+        let directory = FakeDirectory::new();
+        let owner = FakeOwner::default();
+        let auth = BrokerAuth::new(&keys, &keychain, &owner, &directory);
+        auth.unlock(&target(AuthMethod::Key { key_id: "fixture".into() })).unwrap();
+        assert!(auth.public_key("fixture").is_some());
+        assert!(auth.sign("fixture", b"challenge", None).is_ok());
     }
 
     #[test]

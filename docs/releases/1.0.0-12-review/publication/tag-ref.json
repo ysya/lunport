@@ -1,0 +1,10 @@
+{
+  "ref": "refs/tags/v1.0.0-12",
+  "node_id": "REF_kwDOS1hiiLNyZWZzL3RhZ3MvdjEuMC4wLTEy",
+  "url": "https://api.github.com/repos/ysya/sshelter/git/refs/tags/v1.0.0-12",
+  "object": {
+    "sha": "99fb2ed7a09f0029b5417a56a7b911f4f911bbaa",
+    "type": "commit",
+    "url": "https://api.github.com/repos/ysya/sshelter/git/commits/99fb2ed7a09f0029b5417a56a7b911f4f911bbaa"
+  }
+}

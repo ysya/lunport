@@ -1,0 +1,13 @@
+This beta adds reviewed library inclusion and MCP connection setup, and fixes the connection editor layout.
+
+- Library sync now distinguishes download, unavailable-data, identity and naming errors. Review and explicitly rename conflicting local host aliases or Group names before including the library. Existing IDs, routes, keys and cloud records are preserved; stale reviews must be refreshed.
+- The host editor uses one header, a fixed action bar and one scrolling form, with consistent field sizing and draft protection. Create a new host before connecting.
+- Records MCP adds `create_host`: review public connection settings in SSHelter before saving, including in Auto-log mode. Creating a host does not grant AI access, trust a fingerprint or log in.
+- Records MCP adds `verify_host_key`, also available from a saved host's Server identity section. Unknown or changed fingerprints require an explicit decision in SSHelter. Verification stops before destination login, works without the destination login key and rejects a superseded trust decision. Existing Auto-log `ssh_exec` remains non-interactive and never silently trusts a key.
+- Reconnect or restart your MCP client after updating to refresh its tools list.
+
+Validation: 1,060 frontend tests; 2,590 macOS safe Rust tests; 2,398 Windows safe Rust tests, plus profile, console and real OpenSSH checks. Development WKWebView and actual MCP stdio were exercised against a disposable loopback SSH server, including cancel, trust and changed-key replacement without destination login.
+
+Remaining validation: the original production sync state was not available, and Windows WebView2 visual interaction still needs device acceptance. The macOS CoreAudio startup guard from Beta 10 is retained; it prevents detectable pre-WebView failures from becoming an unexplained black window, but does not claim to cure the system audio deadlock or all GPU stalls.
+
+Published to the Beta update channel. Stable remains v0.16.0.

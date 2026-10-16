@@ -1,0 +1,55 @@
+{
+  "sourceCommit": "99fb2ed7a09f0029b5417a56a7b911f4f911bbaa",
+  "macosSafeRustSuite": {
+    "passed": 2594,
+    "failed": 0,
+    "ignored": 0,
+    "filtered": 10,
+    "seconds": 174.35,
+    "requiredOpenSsh": true,
+    "status": "success"
+  },
+  "librarySuite": {
+    "passed": 16,
+    "failed": 0
+  },
+  "realOpenSshRegression": {
+    "passed": 1,
+    "scenarios": [
+      "unknown fingerprint",
+      "changed fingerprint",
+      "background sync during pin preparation",
+      "actual destination login and exec",
+      "reconnect without repeated trust prompt"
+    ],
+    "scriptedHumanDecision": true,
+    "realNativeWindowExercised": false
+  },
+  "clippy": {
+    "command": "cargo clippy --locked --lib --tests",
+    "status": "success",
+    "warningsInChangedProductionCode": 0
+  },
+  "windowsRun": 38839305132,
+  "windows": {
+    "sourceCommit": "99fb2ed7a09f0029b5417a56a7b911f4f911bbaa",
+    "run": 38839305132,
+    "conclusion": "success",
+    "safeSuite": {
+      "passed": 2401,
+      "failed": 0,
+      "ignored": 1,
+      "filtered": 9,
+      "seconds": 199.19
+    },
+    "profiles": [
+      3,
+      3,
+      3
+    ],
+    "appBuild": true,
+    "cliHelperTests": 8,
+    "realConsoleCheck": true,
+    "realOpenSshClientAndEngine": true
+  }
+}

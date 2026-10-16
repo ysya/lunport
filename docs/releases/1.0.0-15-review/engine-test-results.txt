@@ -1,0 +1,11 @@
+macos	Complete safe Rust suite	2026-10-16T15:21:31.3893180Z test result: ok. 2597 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 213.98s
+macos	Profile selection in the normal library	2026-10-16T15:22:40.6304100Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+macos	Profile selection in the normal library	2026-10-16T15:24:06.1053670Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+macos	Profile selection in the normal library	2026-10-16T15:25:17.5381340Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Complete safe Rust suite against a scratch sshd	2026-10-16T15:19:25.0160408Z test result: ok. 2592 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 122.44s
+linux	Profile selection in the normal library	2026-10-16T15:19:56.3931606Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Profile selection in the normal library	2026-10-16T15:20:26.2666190Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+linux	Profile selection in the normal library	2026-10-16T15:20:59.5461322Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+linux	Password and keyboard-interactive tests against the container	2026-10-16T15:21:50.2333021Z test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 2595 filtered out; finished in 5.31s
+frontend	Run pnpm test	2026-10-16T15:15:16.4479750Z ^[[2m Test Files ^[[22m ^[[1m^[[32m83 passed^[[39m^[[22m^[[90m (83)^[[39m
+frontend	Run pnpm test	2026-10-16T15:15:16.4488307Z ^[[2m      Tests ^[[22m ^[[1m^[[32m1066 passed^[[39m^[[22m^[[90m (1066)^[[39m

@@ -1,0 +1,58 @@
+{
+  "runtimeSource": "3d39718e085bf3d7db14cc28515d713a4df22c09",
+  "macosSafeRust": {
+    "passed": 2597,
+    "failed": 0,
+    "filtered": 10,
+    "durationSeconds": 168.82
+  },
+  "diagnosticsTargeted": {
+    "passed": 2,
+    "failed": 0,
+    "durationSeconds": 0.09
+  },
+  "frontend": {
+    "files": 81,
+    "passed": 1060,
+    "failed": 0
+  },
+  "tsc": "passed",
+  "vite": "passed (existing chunk size warning)",
+  "clippy": "passed (97 existing lib-test warnings, 50 duplicate; none in changed production paths)",
+  "developmentBundle": "passed on release source (native UI and normal exit verified)",
+  "windowsRun": 38886319832,
+  "windowsStatus": "success",
+  "groupedLibraryRestart": {
+    "passed": 1,
+    "durationSeconds": 0.57
+  },
+  "windowsNativeTray": "passed (run 38886319832)",
+  "windowsNativeCrashInjection": "passed (run 38886319832)",
+  "windowsNativeGui": "passed (real Development executable and WebView2 from the synced fixture, normal shutdown)",
+  "windowsSafeRust": {
+    "passed": 2404,
+    "failed": 0,
+    "ignored": 3,
+    "filtered": 9,
+    "durationSeconds": 219.12
+  },
+  "windowsNativeTrayDetails": {
+    "hosts": 17,
+    "rounds": 10,
+    "concurrentStatusVisibilityPairs": 300,
+    "publicationsBeforeRename": 2,
+    "publicationsAfterRename": 3,
+    "userObjectsBefore": 10,
+    "userObjectsAfter": 10
+  },
+  "release": {
+    "version": "1.0.0-13",
+    "run": 38888685242,
+    "allJobsPassed": true,
+    "assetCount": 20,
+    "platformKeys": 15,
+    "updaterSignaturesVerified": 9,
+    "tamperedCopiesRejected": 9,
+    "stableUnchanged": "v0.16.0"
+  }
+}

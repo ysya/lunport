@@ -1,0 +1,8 @@
+{
+  "sourceCommit": "3d39718e085bf3d7db14cc28515d713a4df22c09",
+  "branch": "codex/library-sync-host-dialog-fixes",
+  "handoffAncestor": "654b984a919cf11857b2556a4ac9572bd65ee27f",
+  "releaseVersion": "1.0.0-13",
+  "windowsRun": 38886319832,
+  "runtimeWorkingTreeClean": true
+}
