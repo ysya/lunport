@@ -52,9 +52,29 @@ Subsequent auto-updates install in-app and don't need this again.
 
 Open **Settings → AI Access**, enable access, and explicitly select each host an AI client may see. The same pane provides a ready-to-copy `codex mcp add` command that registers the installed SSHelter executable as a local stdio MCP server.
 
-The MCP adapter connects to the running SSHelter desktop app over an authenticated `127.0.0.1` bridge. When SSHelter isn't running, the adapter starts it in the background, without a window: the window opens when you open SSHelter (from its menu bar or tray icon, or by launching it again) or when a `run` request needs your approval. Only one SSHelter runs at a time; launching it again brings up the one already running. The adapter exposes three tools: `list_hosts`, `get_effective_config`, and `run`. `run` never executes until the desktop interface approves that exact request, and SSH output is bounded before it is returned to the client.
+In a **Records workspace**, the stdio adapter connects through the OS-authenticated session broker. It can start SSHelter in the background; interactive approval and trust decisions appear in the app when needed. The tools on this work branch are:
 
-MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so the host must already work with a key, agent, or other non-prompting authentication method. SSHelter does not forward passwords or key passphrases to the AI process. This gate controls requests made through SSHelter MCP; it is not an operating-system sandbox and cannot prevent another process running as your user from invoking `ssh` directly.
+| Tool | Behavior |
+| --- | --- |
+| `list_hosts` | List individually AI-approved hosts. |
+| `get_host` | Read sanitized public settings for an AI-approved host. |
+| `ssh_exec` | Execute one bounded command under the user's Ask or Auto-log policy. |
+| `create_host` | Propose public connection settings for explicit approval in SSHelter. Saving never grants AI access or trusts a server key. |
+| `verify_host_key` | Verify an AI-approved host's server fingerprint, with a separate trust window for a new or changed key. |
+
+`create_host` and `verify_host_key` are new on this branch and **are not included in the published Beta 10**. See the [implementation and validation record](docs/2026-10-16-library-mcp-connection-validation.md).
+
+After installing a build with these additions, reconnect or restart the MCP client so it fetches the updated tool list.
+
+For example, a client can propose `create_host` with `{"alias":"web","hostname":"server.example.com","user":"deploy","port":22}`. Review the settings in SSHelter before saving. Then separately allow that host in **AI Access** before using `get_host`, `verify_host_key`, or `ssh_exec`. Passwords, private keys, host-key pins, and AI permission grants are not accepted as creation fields.
+
+`verify_host_key` accepts only a host ID or exact alias. Compare the displayed fingerprint with a trusted source and answer in SSHelter; the MCP client cannot supply a trust decision. You can also use **Edit host → Server identity → Verify server fingerprint**. Verification stops before destination login or remote commands, even if the destination's login key is missing. Jump hosts may need their own login credentials. Matching saved fingerprints do not prompt again; a changed destination, route, permission or saved pin requires verification again.
+
+Ask reviews the exact command before execution and can request credentials through SSHelter. Auto-log command execution never prompts for credentials or silently trusts a key; use the separate fingerprint verification flow first. Authentication answers and command output are not retained in the public audit log.
+
+In **Legacy mode**, the adapter retains the authenticated `127.0.0.1` bridge and three tools: `list_hosts`, `get_effective_config`, and `run`. When SSHelter isn't running it starts in the background. A `run` request opens the approval interface and never executes until that exact request is approved; output is bounded before returning to the client.
+
+Legacy MCP execution uses non-interactive OpenSSH authentication (`BatchMode=yes`), so the host must already work with a key, agent, or other non-prompting authentication method. SSHelter does not forward passwords or key passphrases to the AI process. This gate controls requests made through SSHelter MCP; it is not an operating-system sandbox and cannot prevent another process running as your user from invoking `ssh` directly.
 
 ## Sync
 
