@@ -1,5 +1,7 @@
 # Lunport
 
+<img src="public/lunport-icon.svg" width="96" height="96" alt="Lunport: a crescent moon connected to a port" />
+
 Your SSH workspace. Formerly SSHelter.
 
 The Lunport rename is being prepared for the next release. The latest published Stable is **SSHelter 1.0.0**; its tag, installers and updater signatures retain their original names.

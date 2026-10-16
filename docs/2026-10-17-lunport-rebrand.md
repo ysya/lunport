@@ -10,6 +10,8 @@
 - Production／Development 的 Tauri product name 及視窗標題分別為 Lunport／Lunport Dev；HTML title、套件說明及目前 README 同步更新。
 - 新匯出的偏好檔預設名稱為 lunport-settings.json，匯入仍接受既有設定 envelope。
 - 目前使用的 GitHub、relay 部署及更新通道連結改用 ysya/lunport。歷史發布收據保持原貌。
+- 新標誌採月牙與連線節點，app icon 使用深藍底與月光藍漸層；Records、Legacy 及開啟工作區畫面共享同一份符號，顏色隨介面主題調整。favicon、macOS ICNS、Windows ICO／Store 圖示及 Linux PNG 同步更新。
+- macOS 選單列使用獨立的透明單色圖示，避免 app icon 的底色變成方塊；Windows／Linux 托盤使用彩色 app icon。原始幾何位於 src/brand/lunport-mark.json，執行 node scripts/generate-brand-icons.mjs 可由專案鎖定的 Tauri CLI 重建所有平台圖示。
 
 ## 既有使用者的相容性
 

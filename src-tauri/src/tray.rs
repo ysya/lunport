@@ -306,12 +306,17 @@ fn publish_menu(app: &tauri::AppHandle, items: Vec<RecordTrayItem>) -> tauri::Re
     if let Some(tray) = app.tray_by_id("main-tray") {
         tray.set_menu(Some(menu))?;
     } else {
+        // macOS templates use alpha only; the app icon's rounded background
+        // would otherwise become a solid square in the menu bar.
+        #[cfg(target_os = "macos")]
+        let tray_icon = tauri::include_image!("icons/tray.png");
+        #[cfg(not(target_os = "macos"))]
+        let tray_icon = app
+            .default_window_icon()
+            .cloned()
+            .expect("default window icon must be configured");
         let mut tray_builder = TrayIconBuilder::with_id("main-tray")
-            .icon(
-                app.default_window_icon()
-                    .cloned()
-                    .expect("default window icon must be configured"),
-            )
+            .icon(tray_icon)
             .menu(&menu)
             .show_menu_on_left_click(true)
             .on_menu_event(on_menu_event);

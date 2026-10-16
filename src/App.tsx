@@ -3,7 +3,8 @@ import { TaskDialogContent } from "@/components/app/TaskDialog";
 import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Bot, KeyRound, RotateCw, Settings, Terminal, ServerCog } from "lucide-react";
+import { Bot, KeyRound, RotateCw, Settings, ServerCog } from "lucide-react";
+import { BrandMark } from "@/components/app/BrandMark";
 
 import { useRecordsStatus, recordsStatusKey, useLegacyWorkspace } from "@/lib/records";
 import { WorkspaceGate } from "@/components/records/WorkspaceGate";
@@ -132,7 +133,7 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
           )}
         >
           <div className="pointer-events-none flex items-center gap-2">
-            <Terminal className="size-4 text-muted-foreground" />
+            <BrandMark className="size-5 text-primary" />
             <div className="flex items-baseline gap-1.5">
               <h1 className="text-[0.8125rem] font-semibold tracking-tight">Lunport</h1>
               <span className="font-mono text-[0.6875rem] text-muted-foreground/80 tabular-nums">

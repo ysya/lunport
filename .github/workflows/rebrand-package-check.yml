@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "src-tauri/tauri*.json"
+      - "src-tauri/icons/**"
       - "src-tauri/installers/**"
       - "scripts/validate-linux-rebrand.py"
       - ".github/workflows/rebrand-package-check.yml"

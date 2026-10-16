@@ -69,7 +69,7 @@ jobs:
       - name: Build the installers
         uses: tauri-apps/tauri-action@v0
         with:
-          args: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          args: --verbose --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       # 7-Zip (on the runner image) reads NSIS installers: every file the installer writes, by the directory it writes it to.
       - name: The NSIS installer holds sshelter-cli.exe next to sshelter.exe
