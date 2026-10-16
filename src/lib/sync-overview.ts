@@ -46,7 +46,7 @@ export interface StatusLine {
  * source). Every other error is shown as it comes.
  */
 export const SWAP_PENDING_MESSAGE =
-  "the keychain did not accept the new sync code yet; SSHelter keeps the new code and retries, and syncing continues meanwhile";
+  "the keychain did not accept the new sync code yet; Lunport keeps the new code and retries, and syncing continues meanwhile";
 export const CHANGE_CANNOT_FINISH_MESSAGE =
   "the new sync code is missing from the keychain, so this sync code change can never finish and the old sync account can no longer be joined — leave the sync account on this computer, then create a new sync account on one computer; the other computers leave the old account and join the new one";
 
@@ -65,7 +65,7 @@ export function statusLine(o: SyncOverview, now: number): StatusLine {
     return { badge: "Changing code", tone: o.last_error === CHANGE_CANNOT_FINISH_MESSAGE ? "error" : "busy", text: `${step} — ${o.last_error}` };
   }
   if (o.read_only) {
-    return { badge: "Read-only", tone: "warning", text: "This sync account uses a newer format — update SSHelter to keep syncing" };
+    return { badge: "Read-only", tone: "warning", text: "This sync account uses a newer format — update Lunport to keep syncing" };
   }
   // The new sync code is in use; only saving it to the keychain is still being retried.
   if (o.last_error === SWAP_PENDING_MESSAGE) return { badge: "Saving code", tone: "busy", text: o.last_error };
@@ -116,7 +116,7 @@ export function changeCodeBlocker(o: SyncOverview): { reason: string; updateRela
     case "rotating":
       return block("The sync code is being changed.");
     case "read_only":
-      return block("Update SSHelter first: this sync account uses a newer format.");
+      return block("Update Lunport first: this sync account uses a newer format.");
     case null:
       return o.relay && !o.relay.freeze ? block("Your relay can't change the sync code yet — update the relay first.", true) : null;
   }
@@ -198,7 +198,7 @@ export function leaveRotationNote(o: SyncOverview): string | null {
   if (!o.rotation) return null;
   return o.rotation.cancellable
     ? "A sync code change is in progress. Leaving cancels it first: nothing on the relay is frozen yet."
-    : "A sync code change is in progress and can no longer be cancelled, so SSHelter lets this computer leave only if the change can never finish (its new sync code is gone from the keychain). Otherwise, let it finish first.";
+    : "A sync code change is in progress and can no longer be cancelled, so Lunport lets this computer leave only if the change can never finish (its new sync code is gone from the keychain). Otherwise, let it finish first.";
 }
 
 /**
@@ -250,10 +250,10 @@ export function shownCodeNote(o: SyncOverview): string | null {
     : "This is the old sync code, and it no longer works: the old sync data is frozen. The new sync code is shown when the change finishes.";
 }
 
-/** The "Files SSHelter doesn't use" row: one file or several, in the right grammar. */
+/** The "Files Lunport doesn't use" row: one file or several, in the right grammar. */
 export function strayFilesNote(files: readonly string[]): string {
   const one = files.length === 1;
-  return `ssh doesn't read ${files.join(", ")} in ~/.ssh/sshelter: ${one ? "it is" : "they are"} not in SSHelter's Include line. SSHelter leaves ${one ? "it" : "them"} alone — copy any host you still need into your SSH config before deleting ${one ? "it" : "them"}.`;
+  return `ssh doesn't read ${files.join(", ")} in ~/.ssh/sshelter: ${one ? "it is" : "they are"} not in Lunport's Include line. Lunport leaves ${one ? "it" : "them"} alone — copy any host you still need into your SSH config before deleting ${one ? "it" : "them"}.`;
 }
 
 /** Notices that stay true after this computer left the account: where its files went, and what was deleted elsewhere. */
@@ -263,7 +263,7 @@ const TRUE_AFTER_LEAVING = new Set<SyncNotice["kind"]>(["left_account", "space_d
  * Notices for the pane, with the index `sync_dismiss_notice` needs. The upgrade and the keys notice have their own
  * dialogs (the slots that need a key have their own row).
  * The backend keeps notices when this computer leaves, but most of them are about the account it
- * left: "SSHelter renames the space's file on the next sync" and "Show the new sync code" are not
+ * left: "Lunport renames the space's file on the next sync" and "Show the new sync code" are not
  * true any more. Without an account only the notices that stay true read as they were; the others
  * keep their title and say what they were about, and the pane lets the user dismiss them.
  */

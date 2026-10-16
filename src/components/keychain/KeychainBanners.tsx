@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 
-/** Why ssh can't reach SSHelter's agent (key vault spec §6, §11), with Fix when the Include line was removed. Exported for the tests. */
+/** Why ssh can't reach Lunport's agent (key vault spec §6, §11), with Fix when the Include line was removed. Exported for the tests. */
 export function AgentProblemLine({ problem, busy, onFix }: { problem: AgentProblem; busy: boolean; onFix: () => void }) {
   return (
     <div className="flex items-center justify-between gap-3 px-1">
@@ -75,7 +75,7 @@ export function KeychainBannersView({
       )}
       {launchHint && (
         <div className={BANNER}>
-          <p className="text-xs">Keys in SSHelter work only while SSHelter is running.</p>
+          <p className="text-xs">Keys in Lunport work only while Lunport is running.</p>
           <div className="flex flex-wrap gap-1">
             <Button type="button" size="sm" className="h-6 px-2 text-xs" disabled={busy} onClick={onLaunch}>
               Turn on launch at login
@@ -88,7 +88,7 @@ export function KeychainBannersView({
       )}
       {gitHint !== null && (
         <div className={BANNER}>
-          <p className="text-xs">{"Git for Windows uses its own ssh, which can't reach SSHelter's agent. Run this once:"}</p>
+          <p className="text-xs">{"Git for Windows uses its own ssh, which can't reach Lunport's agent. Run this once:"}</p>
           <code className="block font-mono text-[0.6875rem] break-all">{gitHint}</code>
           <Button type="button" size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={onCopyGit}>
             Copy
@@ -112,9 +112,9 @@ export async function moveAndReport(move: () => Promise<MoveIntoVaultResult>, on
     return;
   }
   onMoveFailures(failed);
-  if (failed.length === 0) toast.success("Moved into SSHelter");
+  if (failed.length === 0) toast.success("Moved into Lunport");
   else
-    toast.error(`${plural(failed.length, "key")} couldn't move into SSHelter`, {
+    toast.error(`${plural(failed.length, "key")} couldn't move into Lunport`, {
       description: failed.map((f) => `${revealHidden(f.name)}: ${revealHidden(f.message)}`).join("\n"),
     });
 }
@@ -141,10 +141,10 @@ export function KeychainBannersFor({
   onMoveFailures: (failures: MoveFailure[]) => void;
 }) {
   const overview = useSyncOverview();
-  // Not only while joined: keys kept in SSHelter after leaving the account still need the agent, launch at login and Move.
+  // Not only while joined: keys kept in Lunport after leaving the account still need the agent, launch at login and Move.
   const slots = overview.data?.key_slots ?? [];
   const anyInVault = slots.some((s) => s.in_vault);
-  // SSHelter's agent matters only once a key is in SSHelter: nothing is asked before.
+  // Lunport's agent matters only once a key is in Lunport: nothing is asked before.
   const problemQuery = useAgentProblem(anyInVault);
   const fix = useFixAgentInclude();
   const move = useKeyMoveAllIntoVault();
@@ -177,7 +177,7 @@ export function KeychainBannersFor({
       onLaunch={() =>
         // The promise, not `mutate`'s callback, for the same reason as Move (`moveAndReport`); the hook shows a failure.
         void turnOn.mutateAsync().then(
-          () => toast.success("SSHelter now opens at login and keeps running in the menu bar when its window closes."),
+          () => toast.success("Lunport now opens at login and keeps running in the menu bar when its window closes."),
           () => {},
         )
       }

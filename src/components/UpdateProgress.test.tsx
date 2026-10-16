@@ -14,7 +14,7 @@ describe("UpdateProgress", () => {
     title: "Downloading v1.0.0…",
     line: "1.0 MB of 4.0 MB · 0 B/s",
     warning:
-      "No data for 12 s — the download may have stalled. Restart SSHelter to try again.",
+      "No data for 12 s — the download may have stalled. Restart Lunport to try again.",
     fraction: 0.25,
   };
 
@@ -25,7 +25,7 @@ describe("UpdateProgress", () => {
     );
     expect(html).toMatch(/<p[^>]*aria-hidden="true"[^>]*>No data for 12 s — /);
     expect(html).toContain(
-      '<span role="status" class="sr-only">The download may have stalled. Restart SSHelter to try again.</span>',
+      '<span role="status" class="sr-only">The download may have stalled. Restart Lunport to try again.</span>',
     );
   });
 

@@ -46,7 +46,7 @@ devices: Array<SlotDeviceView>,
  */
 in_account: boolean, 
 /**
- * 這台只在 SSHelter(私鑰在保管庫,經 agent 提供;金鑰保管庫 spec §4.3)。
+ * 這台只在 Lunport(私鑰在保管庫,經 agent 提供;金鑰保管庫 spec §4.3)。
  */
 in_vault: boolean, 
 /**
@@ -60,11 +60,11 @@ file_for_now: boolean,
  */
 vault_has_passphrase: boolean | null, 
 /**
- * 這台自己加進 SSHelter、不在任何帳戶的金鑰(`LocalSlot::local_only`;畫面標「This computer only」)。
+ * 這台自己加進 Lunport、不在任何帳戶的金鑰(`LocalSlot::local_only`;畫面標「This computer only」)。
  */
 local_only: boolean, 
 /**
- * 插槽建立的時間(`KeySlotPayload::created_at_ms`;只在這台的金鑰 = 加進 SSHelter 的時間)。
+ * 插槽建立的時間(`KeySlotPayload::created_at_ms`;只在這台的金鑰 = 加進 Lunport 的時間)。
  */
 created_at_ms: number, 
 /**

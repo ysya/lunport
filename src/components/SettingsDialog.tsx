@@ -144,7 +144,7 @@ export function SettingsCategoryPane({
     );
   return <>
     <DiagnosticsPane />
-    {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses SSHelter's built-in SSH engine. Hosts and keys stay local unless you explicitly share them into a sync chain.">
+    {recordOverview ? <Section title="Workspace capabilities" description="This workspace uses Lunport's built-in SSH engine. Hosts and keys stay local unless you explicitly share them into a sync chain.">
       <p className="text-sm leading-relaxed text-muted-foreground">MCP can inspect individually allowed hosts and execute SSH commands with Ask approval or explicitly acknowledged Auto-log. Group defaults never grant AI access. MCP authentication is request-scoped and Auto-log never prompts or trusts a new server.</p>
     </Section> : <AdvancedPane />}
   </>;
@@ -396,7 +396,7 @@ function GeneralPane() {
 
       <Section
         title="Quick connect"
-        description="Brings SSHelter to the front with the command palette open, from any app."
+        description="Brings Lunport to the front with the command palette open, from any app."
       >
         <SettingsGroup>
           <SettingsRow id="set-global-hotkey" label="Global quick-connect hotkey">
@@ -514,7 +514,7 @@ function PreferencesDataPane() {
           <AlertDialogHeader>
             <AlertDialogTitle>Replace all settings?</AlertDialogTitle>
             <AlertDialogDescription>
-              Importing replaces every SSHelter preference with the contents of
+              Importing replaces every Lunport preference with the contents of
               the selected file. Your SSH config files are not affected.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -617,7 +617,7 @@ function ConnectionPane() {
   return (
     <Section
       title="Terminal"
-      description="Where SSHelter opens a connection. “System default” uses your OS default terminal (or the first detected)."
+      description="Where Lunport opens a connection. “System default” uses your OS default terminal (or the first detected)."
     >
       <SettingsGroup>
         <SettingsRow id="set-terminal" label="Default terminal">
@@ -703,7 +703,7 @@ function FilesPane({ onDirtyChange, onBusyChange }: { onDirtyChange?: (dirty: bo
     <>
       <Section
         title="Config file"
-        description="The ssh_config file SSHelter edits. Leave empty for ~/.ssh/config."
+        description="The ssh_config file Lunport edits. Leave empty for ~/.ssh/config."
       >
         <SettingsGroup>
           <div className="flex items-center gap-1.5 px-3 py-2">
@@ -810,7 +810,7 @@ export function McpPane({ hosts, records = false }: {
     <>
       <Section
         title="MCP access"
-        description={records ? "AI clients can propose new connections for your review. Existing hosts require individual permission before inspection, fingerprint verification or command execution." : "Let local AI clients request SSH actions through SSHelter. Remote commands require an Allow once decision here."}
+        description={records ? "AI clients can propose new connections for your review. Existing hosts require individual permission before inspection, fingerprint verification or command execution." : "Let local AI clients request SSH actions through Lunport. Remote commands require an Allow once decision here."}
       >
         <SettingsGroup>
           {status.isError && <div role="alert" className="space-y-2 p-3"><p className="text-sm text-destructive">AI access status is unavailable.</p><Button size="sm" variant="outline" onClick={() => void status.refetch()}>Retry</Button></div>}
@@ -874,7 +874,7 @@ export function McpPane({ hosts, records = false }: {
             Auto-log command execution never opens authentication or trust windows. Use Verify server fingerprint in the host editor, or the separate MCP verify_host_key tool, to review a server key. Missing credentials or 2FA require Ask.
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            If background sync remains unavailable after a hidden launch, open SSHelter from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
+            If background sync remains unavailable after a hidden launch, open Lunport from the tray or launch the app normally, then retry. MCP approval does not activate background sync.
           </p>
         </Section>
       ) : (
@@ -917,7 +917,7 @@ export function McpPane({ hosts, records = false }: {
 
       <Section
         title="Connect Codex"
-        description="Run this once in a terminal. Codex will launch or reconnect to the SSHelter approval center when needed."
+        description="Run this once in a terminal. Codex will launch or reconnect to the Lunport approval center when needed."
       >
         <div className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2">
           <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap px-1 font-mono text-xs">
@@ -1001,7 +1001,7 @@ export function McpPane({ hosts, records = false }: {
       </Section>
 
       <p className="text-xs text-muted-foreground">
-        This controls requests made through SSHelter MCP. It cannot prevent software running as
+        This controls requests made through Lunport MCP. It cannot prevent software running as
         your OS account from invoking another SSH client directly.
       </p>
     </>
@@ -1048,7 +1048,7 @@ function AdvancedPane() {
 
       <Section
         title="External changes"
-        description="SSHelter always re-checks when the window regains focus."
+        description="Lunport always re-checks when the window regains focus."
       >
         <SettingsGroup>
           <SettingsRow id="set-drift-auto" label="Check for external changes automatically">

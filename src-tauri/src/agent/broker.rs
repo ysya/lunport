@@ -29,7 +29,7 @@ pub fn passphrase_account(slot_id: &str) -> String {
     format!("vault:passphrase:{slot_id}")
 }
 
-/// 這台只在 SSHelter 的一把金鑰(同步狀態裡 `SlotSource::Vault` 的插槽):列出金鑰、比對簽章請求都不必開保管庫。
+/// 這台只在 Lunport 的一把金鑰(同步狀態裡 `SlotSource::Vault` 的插槽):列出金鑰、比對簽章請求都不必開保管庫。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultKey {
     pub slot_id: String,
@@ -40,7 +40,7 @@ pub struct VaultKey {
     pub has_passphrase: bool,
 }
 
-/// 同步狀態裡這台只在 SSHelter 的金鑰(依插槽 id)。
+/// 同步狀態裡這台只在 Lunport 的金鑰(依插槽 id)。
 pub fn vault_keys(state: &SyncStateV2) -> Vec<VaultKey> {
     state
         .key_slots
@@ -89,7 +89,7 @@ pub fn host_name_in(known_hosts: &str, host_key: &KeyData) -> Option<String> {
 
 /// agent 與外界的邊界(production:`agent::AppAgentHost`;測試:替身)。
 pub trait AgentHost: Send + Sync {
-    /// 這台只在 SSHelter 的金鑰。
+    /// 這台只在 Lunport 的金鑰。
     fn keys(&self) -> Vec<VaultKey>;
     /// 保管庫裡這把金鑰的私鑰原文(有 passphrase 的仍是加密狀態)。
     fn private_key(&self, slot_id: &str) -> Result<Option<Zeroizing<String>>, AppError>;
@@ -169,7 +169,7 @@ impl Drop for First<'_> {
 }
 
 /// agent 在記憶體裡的狀態(`AgentRuntime::broker`):記住的核准、解開的私鑰、正在問的請求。到期的由 `expire` 丟掉(執行期每分鐘呼叫一次),
-/// 螢幕鎖定(Plan 3)時 `clear`;SSHelter 結束時跟著行程消失。
+/// 螢幕鎖定(Plan 3)時 `clear`;Lunport 結束時跟著行程消失。
 #[derive(Default)]
 pub struct Broker {
     approvals: Mutex<ApprovalCache>,
@@ -264,7 +264,7 @@ impl Ask<'_> {
 }
 
 impl Broker {
-    /// 列出的金鑰:這台只在 SSHelter 的金鑰(而且是 agent 簽得了的種類);一次性通道只列它那一把。列出不必核准(公鑰不是祕密)。
+    /// 列出的金鑰:這台只在 Lunport 的金鑰(而且是 agent 簽得了的種類);一次性通道只列它那一把。列出不必核准(公鑰不是祕密)。
     pub fn identities(&self, host: &dyn AgentHost, grant: Option<&Grant>) -> Vec<(KeyData, String)> {
         host.keys()
             .into_iter()
@@ -475,7 +475,7 @@ impl Broker {
         None
     }
 
-    /// 這個插槽在記憶體裡解開的私鑰,限請求指名的這把(`key`)。插槽放的金鑰換過(Keep a file → 另一把金鑰 → Only in SSHelter,插槽 id 沒變)時,
+    /// 這個插槽在記憶體裡解開的私鑰,限請求指名的這把(`key`)。插槽放的金鑰換過(Keep a file → 另一把金鑰 → Only in Lunport,插槽 id 沒變)時,
     /// 這個插槽的舊項目已經不是它的金鑰:丟掉、回傳 None,不拿舊的擋住新的(`names` 會拒絕它,`needs_passphrase` 也會因為它而不問新金鑰的 passphrase)。
     fn cached(&self, slot_id: &str, key: &KeyData, now_ms: u64) -> Option<Arc<Material>> {
         let mut unlocked = self.unlocked.lock().unwrap();
@@ -1332,7 +1332,7 @@ mod tests {
         broker.clear();
     }
 
-    // 插槽放的金鑰換過(Keep a file → 另一把金鑰 → Only in SSHelter,插槽 id 沒變)與 Connect 的授權依插槽 id 找金鑰。
+    // 插槽放的金鑰換過(Keep a file → 另一把金鑰 → Only in Lunport,插槽 id 沒變)與 Connect 的授權依插槽 id 找金鑰。
 
     /// 把 `ENC_ID` 這個插槽換成沒有 passphrase 的 RSA 金鑰:記錄(公鑰、指紋)與保管庫裡的私鑰都換了,插槽 id 不變。
     fn swap_in_the_rsa_key(host: &mut FakeHost) {

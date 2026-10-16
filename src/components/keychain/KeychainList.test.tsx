@@ -46,7 +46,7 @@ const list = (overrides: Partial<Props> = {}) => renderToStaticMarkup(KeychainLi
 describe("the Keychain's list", () => {
   it("lists vault keys and keeps other key files non-interactive until opened", () => {
     const t = text(list());
-    for (const part of ["In SSHelter", "id_mac", "Synced", "ssh-ed25519", "Other key files in ~/.ssh"]) expect(t).toContain(part);
+    for (const part of ["In Lunport", "id_mac", "Synced", "ssh-ed25519", "Other key files in ~/.ssh"]) expect(t).toContain(part);
     const closedGroup = list().match(/<div(?=[^>]*id="legacy-key-files")[^>]*>/)?.[0] ?? "";
     expect(closedGroup).toContain('inert=""');
     expect(closedGroup).toContain('aria-hidden="true"');
@@ -64,7 +64,7 @@ describe("the Keychain's list", () => {
 
   it("says where keys come from while there are none, and when nothing matches a search", () => {
     const empty = text(list({ slots: [] }));
-    expect(empty).toContain("No keys in SSHelter yet");
+    expect(empty).toContain("No keys in Lunport yet");
     expect(empty).toContain("Add one with New key or Generate key. Keys used by synced hosts appear here too.");
     expect(text(list({ slots: [], files: [], query: "zzz" }))).toContain("No keys match.");
   });
@@ -115,7 +115,7 @@ describe("the Keychain's list", () => {
   it("says on a row why the last Move couldn't move its key", () => {
     const slot = keySlot({ file_for_now: true });
     expect(list({ slots: [slot], moveFailures: [{ slot_id: slot.id, name: "id_mac", message: "boom" }] })).toContain(
-      'title="Couldn&#x27;t move into SSHelter: boom"',
+      'title="Couldn&#x27;t move into Lunport: boom"',
     );
   });
 
@@ -131,7 +131,7 @@ describe("the Keychain's list", () => {
     expect(html).not.toMatch(HIDDEN_CHARS);
     // The key type is shown in the row (the markup's text); the reason is in the row's tooltip (an attribute).
     expect(text(html)).toContain(SPOOFED_NAME_SHOWN);
-    expect(html).toContain(`title="Couldn&#x27;t move into SSHelter: The key ${SPOOFED_NAME_SHOWN} is gone."`);
+    expect(html).toContain(`title="Couldn&#x27;t move into Lunport: The key ${SPOOFED_NAME_SHOWN} is gone."`);
   });
 });
 
@@ -150,10 +150,10 @@ describe("the Keychain without a sync account", () => {
     );
   };
 
-  it("still lists the keys this computer keeps in SSHelter, for example after leaving the account", () => {
+  it("still lists the keys this computer keeps in Lunport, for example after leaving the account", () => {
     const t = render([keySlot({ in_account: false, in_vault: true })]);
     expect(t).toContain("id_mac");
     expect(t).toContain("Not in your sync account");
-    expect(t).not.toContain("No keys in SSHelter yet");
+    expect(t).not.toContain("No keys in Lunport yet");
   });
 });

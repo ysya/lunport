@@ -53,7 +53,7 @@ export interface MigrationGroup {
  * shares any name with a host in any space is left out: in the same space the
  * backend refuses it, and in another space it would make a second copy of the name
  * (ssh applies both and takes each setting from the first one that sets it, and
- * SSHelter then edits that name by neither copy) — and right after joining these are
+ * Lunport then edits that name by neither copy) — and right after joining these are
  * exactly the local copies of hosts the account already has (the duplicates list
  * offers to rename or remove them). Hosts the
  * backend can never move (`unmovable`, from `sync_unmovable_hosts`: an `Include`,

@@ -577,7 +577,7 @@ export function RecordHostEditor({
             {state.payload.host_key ? (
               <p className="select-text break-all font-mono">{revealHidden(state.payload.host_key.fingerprint)}</p>
             ) : <p className="text-muted-foreground">No server key has been verified yet.</p>}
-            <p className="text-muted-foreground">Compare the server fingerprint in SSHelter before login. No remote command is run. Changing the hostname or port clears the saved pin.</p>
+            <p className="text-muted-foreground">Compare the server fingerprint in Lunport before login. No remote command is run. Changing the hostname or port clears the saved pin.</p>
             <Button size="sm" variant="outline" disabled={busy || state.dirty || state.unavailable || sharedBlocked || !!preview.error} onClick={() => run(async () => {
               const result = await verifyRecordHostKey(state.id!);
               accept(result.overview);

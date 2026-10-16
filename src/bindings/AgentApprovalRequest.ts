@@ -21,6 +21,6 @@ rememberable: boolean, remember_minutes: number, needs_passphrase: boolean,
  */
 passphrase_error: string | null, 
 /**
- * 已經核准,只需要 passphrase:從 SSHelter 按 Connect(spec §5.6),或剛允許了、記住的 passphrase 卻不對、或上一次輸入的不對。
+ * 已經核准,只需要 passphrase:從 Lunport 按 Connect(spec §5.6),或剛允許了、記住的 passphrase 卻不對、或上一次輸入的不對。
  */
 preapproved: boolean, };

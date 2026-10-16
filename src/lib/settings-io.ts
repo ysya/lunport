@@ -26,12 +26,12 @@ export function parseSettingsEnvelope(text: string): SettingsEnvelope {
     throw new Error("The file is not valid JSON.");
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("The file is not an SSHelter settings export.");
+    throw new Error("The file is not a Lunport settings export.");
   }
   const envelope = parsed as Record<string, unknown>;
   const state = envelope.state;
   if (typeof state !== "object" || state === null || Array.isArray(state)) {
-    throw new Error("The file is not an SSHelter settings export (missing settings data).");
+    throw new Error("The file is not a Lunport settings export (missing settings data).");
   }
   const version = envelope.version;
   if (version !== undefined && typeof version !== "number") {
@@ -39,7 +39,7 @@ export function parseSettingsEnvelope(text: string): SettingsEnvelope {
   }
   if (typeof version === "number" && version > SETTINGS_VERSION) {
     throw new Error(
-      `The file was exported by a newer SSHelter (settings version ${version}; this build supports ${SETTINGS_VERSION}).`,
+      `The file was exported by a newer Lunport (settings version ${version}; this build supports ${SETTINGS_VERSION}).`,
     );
   }
   return { state: state as Record<string, unknown>, version: version as number | undefined };

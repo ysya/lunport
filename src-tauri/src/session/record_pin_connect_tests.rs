@@ -151,7 +151,7 @@ fn trusting_an_unknown_or_changed_shared_host_connects_to_openssh_despite_backgr
         assert_eq!(confirmer.asked()[0].changed.is_some(), changed_key);
         assert_eq!(
             owner.notices.lock().unwrap().as_slice(),
-            ["Waiting for you to confirm web's host key in SSHelter."]
+            ["Waiting for you to confirm web's host key in Lunport."]
         );
         let current = record_runtime::snapshot(&device.env()).unwrap().0;
         assert_eq!(

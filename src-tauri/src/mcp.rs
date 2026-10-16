@@ -232,7 +232,7 @@ impl McpRuntime {
             recent,
             executable: std::env::current_exe()
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "SSHelter".to_string()),
+                .unwrap_or_else(|_| "sshelter".to_string()),
             last_client_at_ms: (last != 0).then_some(last),
         }
     }
@@ -430,7 +430,7 @@ fn save_policy(policy: &McpPolicy) -> Result<(), AppError> {
 /// Load policy and start the authenticated local bridge for a desktop app instance.
 pub fn initialize(app: &AppHandle, keep_alive: bool) -> Result<(), AppError> {
     let state = app.state::<AppState>();
-    // A corrupt policy must fail closed without preventing SSHelter from opening.
+    // A corrupt policy must fail closed without preventing Lunport from opening.
     *state.mcp.policy.lock().unwrap() = load_policy().unwrap_or_default();
     state.mcp.load_audit(fsutil::app_data_root()?.join("session-log.jsonl"));
     state.mcp.keep_alive.store(keep_alive, Ordering::Relaxed);
@@ -477,7 +477,7 @@ fn start_bridge(app: AppHandle) -> Result<(), AppError> {
                             .spawn(move || handle_bridge_connection(app, stream));
                     }
                     // A failed accept (a connection aborted before it was accepted, no free file
-                    // descriptors) does not end the bridge: only one SSHelter runs, so no other
+                    // descriptors) does not end the bridge: only one Lunport runs, so no other
                     // instance would take over.
                     Err(_) => thread::sleep(Duration::from_millis(100)),
                 }
@@ -680,7 +680,7 @@ fn dispatch_bridge(app: &AppHandle, envelope: BridgeEnvelope) -> Result<Value, S
 
     let policy = state.mcp.policy.lock().unwrap().clone();
     if !policy.enabled {
-        return Err("MCP access is disabled in SSHelter Settings → AI Access".to_string());
+        return Err("MCP access is disabled in Lunport Settings → AI Access".to_string());
     }
 
     match envelope.method.as_str() {
@@ -940,7 +940,7 @@ fn run_approved(
                 completed_at_ms: unix_ms(),
                 ..Default::default()
             });
-            return Err("SSHelter approval timed out".to_string());
+            return Err("Lunport approval timed out".to_string());
         }
     };
     state.mcp.pending.lock().unwrap().remove(&id);
@@ -955,7 +955,7 @@ fn run_approved(
             completed_at_ms: unix_ms(),
             ..Default::default()
         });
-        return Err("Denied in SSHelter".to_string());
+        return Err("Denied in Lunport".to_string());
     }
 
     crate::sync::engine::require_legacy(&state.sync).map_err(|e|e.to_string())?;
@@ -1315,7 +1315,7 @@ fn handle_mcp_message(message: Value) -> Option<Value> {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "sshelter", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Existing hosts are exposed only when individually allowed in SSHelter AI Access. Records create_host always needs native human approval and never grants AI access. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log never silently trusts keys or requests credentials. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
+                "instructions": "Existing hosts are exposed only when individually allowed in Lunport AI Access. Records create_host always needs native human approval and never grants AI access. verify_host_key requests native human review of a new or changed server fingerprint without destination login. ssh_exec follows Ask or Auto-log; Auto-log never silently trusts keys or requests credentials. Never ask for or send passwords, passphrases, private keys or secrets in tool arguments."
             }
         })),
         "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
@@ -1349,7 +1349,7 @@ fn tool_definitions() -> Value {
         {
             "name": "list_hosts",
             "title": "List AI-approved SSH hosts",
-            "description": "List only SSH hosts that the user explicitly allowed in SSHelter's AI Access interface.",
+            "description": "List only SSH hosts that the user explicitly allowed in Lunport's AI Access interface.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
         },
@@ -1368,11 +1368,11 @@ fn tool_definitions() -> Value {
         {
             "name": "run",
             "title": "Run an approved SSH command",
-            "description": "Ask the user to approve one exact remote command in SSHelter, then run it over SSH. The request is denied if the UI does not approve it.",
+            "description": "Ask the user to approve one exact remote command in Lunport, then run it over SSH. The request is denied if the UI does not approve it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "alias": { "type": "string", "description": "Exact AI-approved SSHelter host alias" },
+                    "alias": { "type": "string", "description": "Exact AI-approved Lunport host alias" },
                     "command": { "type": "string", "description": "Exact remote shell command shown to the user for approval" },
                     "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300, "default": 60 }
                 },
@@ -1389,7 +1389,7 @@ fn tools_for_mode(mode: &str) -> Value {
     if mode == "records" {
         tools[1]["name"] = json!("get_host");
         tools[2]["name"] = json!("ssh_exec");
-        tools[2]["description"] = json!("Run a remote command under the current SSHelter Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.");
+        tools[2]["description"] = json!("Run a remote command under the current Lunport Ask or Auto-log policy. For an untrusted server key, use verify_host_key for native human review first.");
         tools.as_array_mut().unwrap().extend(management::tool_definitions());
     }
     tools
@@ -1451,7 +1451,7 @@ fn send_to_runtime(
         &(Ipv4Addr::LOCALHOST, info.port).into(),
         Duration::from_secs(2),
     )
-    .map_err(|e| format!("cannot connect to SSHelter desktop: {e}"))?;
+    .map_err(|e| format!("cannot connect to Lunport desktop: {e}"))?;
     stream
         .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
@@ -1471,33 +1471,33 @@ fn send_to_runtime(
     BufReader::new(stream)
         .take(MAX_BRIDGE_LINE + 1)
         .read_line(&mut line)
-        .map_err(|e| format!("cannot read SSHelter response: {e}"))?;
+        .map_err(|e| format!("cannot read Lunport response: {e}"))?;
     if line.len() as u64 > MAX_BRIDGE_LINE {
-        return Err("SSHelter response is too large".to_string());
+        return Err("Lunport response is too large".to_string());
     }
     let response: BridgeResponse =
-        serde_json::from_str(&line).map_err(|e| format!("invalid SSHelter response: {e}"))?;
+        serde_json::from_str(&line).map_err(|e| format!("invalid Lunport response: {e}"))?;
     if response.ok {
         Ok(response.result.unwrap_or(Value::Null))
     } else {
         Err(response
             .error
-            .unwrap_or_else(|| "SSHelter rejected the request".to_string()))
+            .unwrap_or_else(|| "Lunport rejected the request".to_string()))
     }
 }
 
-/// How long a tool call may wait for SSHelter's answer: an approval (up to 120 s) and then the
+/// How long a tool call may wait for Lunport's answer: an approval (up to 120 s) and then the
 /// SSH command (up to 300 s).
 const CALL_TIMEOUT: Duration = Duration::from_secs(430);
 /// How long a ping may wait for its answer. A bridge answers at once; the port in a stale runtime
 /// file may belong to another program by now, and a ping must not hang on it while holding the
 /// spawn locks.
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
-/// Only one SSHelter runs: an open SSHelter whose bridge doesn't answer is not replaced.
+/// Only one Lunport runs: an open Lunport whose bridge doesn't answer is not replaced.
 const NO_ANSWER: &str =
-    "SSHelter didn't answer within 12 seconds. If it is open, quit it and open it again.";
+    "Lunport didn't answer within 12 seconds. If it is open, quit it and open it again.";
 
-/// The bridge of a running SSHelter, started in the background first if none answers
+/// The bridge of a running Lunport, started in the background first if none answers
 /// (`host_start`, shared with `sshelter connect`).
 fn ensure_desktop_bridge() -> Result<RuntimeInfo, String> {
     use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};

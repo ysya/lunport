@@ -71,7 +71,7 @@ export function sshPathValue(path: string): string {
 
 /**
  * The IdentityFile value the host editor writes for a key the user picked: a key file by its path (from the list of ~/.ssh keys or
- * the file dialog, so `toTildeSshPath`) or a key in SSHelter by its slot path (a `~/` value already, which stays as it is), quoted
+ * the file dialog, so `toTildeSshPath`) or a key in Lunport by its slot path (a `~/` value already, which stays as it is), quoted
  * when it has whitespace (`sshPathValue`).
  */
 export function pickedIdentityFile(path: string, home: string | null): string {

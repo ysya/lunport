@@ -13,21 +13,34 @@ name: windows bundle check
 
 on:
   workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: "Reuse this workflow run's unsigned candidate for upgrade-only validation (leave empty to build)"
+        required: false
+        default: ""
+      repackage_run_id:
+        description: "Repackage verified runtime binaries from this candidate when only installer templates changed"
+        required: false
+        default: ""
   push:
     branches: [next/own-ssh]
     paths: [".github/workflows/windows-bundle-check.yml"]
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   # The job keeps its first id (its Rust cache is keyed by it); it builds and checks both installers now.
   nsis:
+    if: ${{ !inputs.candidate_run_id }}
     name: installers
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -47,9 +60,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          cache-on-failure: true
 
       # As in beta.yml (its comment says why it is built this way).
       - name: Build the console helper (Windows)
+        if: ${{ !inputs.repackage_run_id }}
         shell: bash
         env:
           RUSTFLAGS: -C target-feature=+crt-static
@@ -67,9 +82,92 @@ jobs:
       # and no cmd metacharacter: tauri-action runs pnpm.cmd, that is cmd /d /s /c after cross-spawn's escaping, so they must never get a
       # Windows path or any of % & ^ | < > ( ).
       - name: Build the installers
+        if: ${{ !inputs.repackage_run_id }}
         uses: tauri-apps/tauri-action@v0
         with:
-          args: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          args: --verbose --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Restore verified runtime binaries for installer-only changes
+        if: ${{ inputs.repackage_run_id != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.repackage_run_id }}
+        run: |
+          $candidateRun = $env:CANDIDATE_RUN_ID
+          if ($candidateRun -notmatch '^[1-9][0-9]*$') { throw 'Invalid candidate workflow run id.' }
+          $run = (& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$candidateRun" | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or $run.name -ne 'windows bundle check') { throw 'Not a Windows bundle-check candidate.' }
+          $scratch = Join-Path $env:RUNNER_TEMP 'lunport-repackage'
+          & gh run download $candidateRun --repo $env:GITHUB_REPOSITORY --name lunport-rebrand-candidate --dir $scratch
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot download the unsigned candidate.' }
+          $candidate = Get-Content "$scratch/rebrand-candidate.json" -Raw | ConvertFrom-Json
+          if ($candidate.repository -ne $env:GITHUB_REPOSITORY -or $candidate.source -ne $run.head_sha -or $candidate.source -notmatch '^[a-f0-9]{40}$') { throw 'Candidate provenance mismatch.' }
+          $changes = @(& git diff --name-only $candidate.source HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot compare candidate source.' }
+          $unexpected = @($changes | Where-Object { $_ -notmatch '^(src-tauri/installers/|docs/|scripts/validate-windows-rebrand\.ps1$|\.github/workflows/windows-bundle-check\.yml$|relay/README\.md$)' })
+          if ($unexpected.Count -ne 0) { throw "Runtime source differs from the candidate: $($unexpected -join ', ')" }
+          if (@($candidate.files).Count -ne 2) { throw 'Expected exactly two candidate packages.' }
+          foreach ($file in $candidate.files) {
+            if ($file.path -notmatch '^bundle/(nsis|msi)/[^/\\]+\.(exe|msi)$') { throw 'Unexpected candidate path.' }
+            if ((Get-FileHash (Join-Path $scratch $file.path) -Algorithm SHA256).Hash -ne $file.sha256) { throw 'Candidate package checksum mismatch.' }
+          }
+          $nsis = @($candidate.files | Where-Object { $_.path.StartsWith('bundle/nsis/') })
+          if ($nsis.Count -ne 1) { throw 'Expected one verified NSIS payload.' }
+          $payload = Join-Path $scratch 'payload'
+          & 7z e (Join-Path $scratch $nsis[0].path) "-o$payload" sshelter.exe sshelter-cli.exe -r -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot extract the verified runtime pair.' }
+          New-Item -ItemType Directory -Force src-tauri/target/release, src-tauri/binaries | Out-Null
+          Copy-Item "$payload/sshelter.exe" src-tauri/target/release/sshelter.exe -Force
+          Copy-Item "$payload/sshelter-cli.exe" src-tauri/binaries/sshelter-cli-x86_64-pc-windows-msvc.exe -Force
+          $runtimeSource = if ($candidate.runtimeSource) { $candidate.runtimeSource } else { $candidate.source }
+          Add-Content $env:GITHUB_ENV "LUNPORT_RUNTIME_SOURCE=$runtimeSource"
+          Write-Output "Verified unchanged runtime from $runtimeSource; only installer and validation sources may differ."
+          exit 0
+
+      - name: Repackage the verified runtime with the current installer templates
+        if: ${{ inputs.repackage_run_id != '' }}
+        shell: pwsh
+        run: |
+          pnpm build
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
+          node node_modules/@tauri-apps/cli/tauri.js bundle --verbose --bundles nsis,msi --config '{"bundle":{"externalBin":["binaries/sshelter-cli"],"createUpdaterArtifacts":false}}'
+          if ($LASTEXITCODE -ne 0) { throw 'Installer-only packaging failed.' }
+
+      - name: Record the unsigned candidate source and checksums
+        shell: pwsh
+        run: |
+          $base = (Resolve-Path 'src-tauri/target/release').Path
+          $wix = @(Get-ChildItem "$base/wix" -Filter 'main.wxs' -Recurse)
+          if ($wix.Count -ne 1) { throw 'Expected one rendered WiX template.' }
+          $rendered = Get-Content $wix[0].FullName -Raw
+          if ($rendered -match '\{\{') { throw 'Unexpanded Handlebars expression in the rendered WiX template.' }
+          [xml] $xml = $rendered
+          $searches = $xml.SelectNodes("//*[local-name()='RegistrySearch' and starts-with(@Id, 'PrevInstallDir')]")
+          if ($searches.Count -ne 2) { throw 'Expected both previous-directory searches.' }
+          foreach ($search in $searches) {
+            if ($search.GetAttribute('Key') -ne 'Software\homelab\$(var.InstallerIdentity)') { throw 'The rendered WiX search does not use the legacy registry namespace.' }
+          }
+          $packages = @(Get-ChildItem "$base/bundle/nsis" -Filter '*-setup.exe') + @(Get-ChildItem "$base/bundle/msi" -Filter '*.msi')
+          if ($packages.Count -ne 2) { throw 'Expected one NSIS and one MSI candidate.' }
+          $files = @($packages | ForEach-Object {
+            @{ path = [IO.Path]::GetRelativePath($base, $_.FullName).Replace('\', '/'); sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash }
+          })
+          $runtimeSource = if ($env:LUNPORT_RUNTIME_SOURCE) { $env:LUNPORT_RUNTIME_SOURCE } else { $env:GITHUB_SHA }
+          @{ source = $env:GITHUB_SHA; runtimeSource = $runtimeSource; repository = $env:GITHUB_REPOSITORY; files = $files } | ConvertTo-Json -Depth 4 | Set-Content "$base/rebrand-candidate.json"
+
+      - name: Preserve unsigned test installers and generated templates
+        uses: actions/upload-artifact@v4
+        with:
+          name: lunport-rebrand-candidate
+          retention-days: 3
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/rebrand-candidate.json
+            src-tauri/target/release/nsis/**/*.nsi
+            src-tauri/target/release/wix/**/*.wxs
 
       # 7-Zip (on the runner image) reads NSIS installers: every file the installer writes, by the directory it writes it to.
       - name: The NSIS installer holds sshelter-cli.exe next to sshelter.exe
@@ -172,3 +270,58 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "the pair from $image in a console of its own failed (exit $LASTEXITCODE)" }
           }
           exit 0
+
+  upgrade:
+    name: upgrade published 1.0.0
+    needs: nsis
+    if: ${{ always() && (needs.nsis.result == 'success' || inputs.candidate_run_id != '') }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download and verify the matching unsigned candidate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || github.run_id }}
+        run: |
+          $candidateRun = $env:CANDIDATE_RUN_ID
+          if ($candidateRun -notmatch '^[1-9][0-9]*$') { throw 'Invalid candidate workflow run id.' }
+          $run = (& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$candidateRun" | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or $run.name -ne 'windows bundle check') { throw 'Not a Windows bundle-check candidate.' }
+          & gh run download $candidateRun --repo $env:GITHUB_REPOSITORY --name lunport-rebrand-candidate --dir src-tauri/target/release
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot download the unsigned candidate.' }
+          $base = (Resolve-Path 'src-tauri/target/release').Path
+          $candidate = Get-Content "$base/rebrand-candidate.json" -Raw | ConvertFrom-Json
+          if ($candidate.repository -ne $env:GITHUB_REPOSITORY -or $candidate.source -ne $run.head_sha -or $candidate.source -notmatch '^[a-f0-9]{40}$') { throw 'Candidate provenance mismatch.' }
+          $changes = @(& git diff --name-only $candidate.source HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot compare candidate source.' }
+          $unexpected = @($changes | Where-Object { $_ -notmatch '^(docs/|scripts/validate-windows-rebrand\.ps1$|\.github/workflows/windows-bundle-check\.yml$|relay/README\.md$)' })
+          if ($unexpected.Count -ne 0) { throw "Product source differs from the candidate: $($unexpected -join ', ')" }
+          if (@($candidate.files).Count -ne 2) { throw 'Expected exactly two candidate packages.' }
+          foreach ($file in $candidate.files) {
+            if ($file.path -notmatch '^bundle/(nsis|msi)/[^/\\]+\.(exe|msi)$') { throw 'Unexpected candidate path.' }
+            if ((Get-FileHash (Join-Path $base $file.path) -Algorithm SHA256).Hash -ne $file.sha256) { throw 'Candidate package checksum mismatch.' }
+          }
+          Write-Output "Verified unsigned candidate from $($candidate.source)"
+          Get-ChildItem "$base/nsis" -Filter '*.nsi' -Recurse | Select-String '^!define (PRODUCTNAME|MAINBINARYNAME|MAINBINARYSRCPATH|BUNDLEID|MANUKEY|MANUPRODUCTKEY|UNINSTKEY|INSTALLERIDENTITY) '
+          exit 0
+      - name: Upgrade published SSHelter 1.0.0 to Lunport on a clean runner
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/validate-windows-rebrand.ps1
+      - name: Show disposable upgrade logs on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP 'lunport-upgrade'
+          if (Test-Path $scratch) {
+            Get-ChildItem $scratch -Filter '*.log' | ForEach-Object {
+              Write-Output $_.Name
+              Select-String -Path $_.FullName -Pattern 'INSTALLDIR|InstallDir|FindRelatedProducts|RemoveExistingProducts|Component: Path|Component: RegistryEntries'
+              Get-Content $_.FullName -Tail 100
+            }
+          }

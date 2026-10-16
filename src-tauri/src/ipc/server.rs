@@ -1,5 +1,5 @@
 //! agent 的端點(金鑰保管庫 spec §4.4、§5.1):Unix socket,或 Windows 的 named pipe(`pipe_windows`)。一個使用者只有一個 agent:先拿到
-//! `<agent 目錄>/lock` 的 SSHelter 提供,持有到行程結束(當掉也由系統釋放),另一個 SSHelter 不開、什麼都不碰。每條連線一條執行緒(同 MCP bridge)。
+//! `<agent 目錄>/lock` 的 Lunport 提供,持有到行程結束(當掉也由系統釋放),另一個 Lunport 不開、什麼都不碰。每條連線一條執行緒(同 MCP bridge)。
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
@@ -26,11 +26,11 @@ pub type Handler = Arc<dyn Fn(Stream, Option<u32>) + Send + Sync>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Started {
     Running,
-    /// 另一個 SSHelter 已經在提供 agent。
+    /// 另一個 Lunport 已經在提供 agent。
     OtherInstance,
 }
 
-/// 拿 `dir/lock` 的鎖;別的 SSHelter 拿著 → None。`dir` 一併建好(只有目前使用者能存取)。
+/// 拿 `dir/lock` 的鎖;別的 Lunport 拿著 → None。`dir` 一併建好(只有目前使用者能存取)。
 pub(crate) fn take_lock(dir: &Path) -> Result<Option<File>, AppError> {
     crate::fsutil::check_write(dir)?;
     crate::fsutil::check_write(&dir.join("lock"))?;
@@ -88,7 +88,7 @@ pub(crate) fn check_socket_path(sock: &Path) -> Result<(), AppError> {
 }
 
 /// 在 `dir` 開 `sock`(agent 的 `~/.ssh/sshelter/agent`,或 broker 的 `<app data>/ipc`),接受同一使用者的連線,每條交給 `handle`。
-/// 另一個 SSHelter 已經在提供 → `OtherInstance`;沒人接聽的舊 `sock`(上次當掉留下的)由拿到鎖的這一個換掉。
+/// 另一個 Lunport 已經在提供 → `OtherInstance`;沒人接聽的舊 `sock`(上次當掉留下的)由拿到鎖的這一個換掉。
 #[cfg(unix)]
 pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
     use std::os::unix::fs::PermissionsExt;
@@ -106,7 +106,7 @@ pub fn listen_unix(dir: &Path, handle: Handler) -> Result<Started, AppError> {
         Err(e) => return Err(e.into()),
     }
     // 建 socket 與接受連線都在 `without_spawns` 裡:macOS 的 socket 建好之後才另外設 CLOEXEC,中間 spawn 出去的子程序會一直握著它,
-    // SSHelter 結束之後 ssh 連得上卻沒人回應(見 `crate::process`)。
+    // Lunport 結束之後 ssh 連得上卻沒人回應(見 `crate::process`)。
     let listener = crate::process::without_spawns(|| UnixListener::bind(&sock))?;
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     // 等連線時不拿鎖(`wait_for_connection`),有連線了才在鎖裡 accept;所以 listener 是 nonblocking,沒接到就回去等。
@@ -291,7 +291,7 @@ mod tests {
         assert!(!agent.exists(), "nothing was created");
     }
 
-    /// 鎖持有到拿著它的 `File` 放掉(行程死掉時由系統放掉,同一個效果);放掉之後下一個 SSHelter 拿得到。整段在 `without_spawns` 裡:鎖檔有
+    /// 鎖持有到拿著它的 `File` 放掉(行程死掉時由系統放掉,同一個效果);放掉之後下一個 Lunport 拿得到。整段在 `without_spawns` 裡:鎖檔有
     /// CLOEXEC,但開著的時候 spawn 出去的子程序在換成新程式之前也握著它,鎖要到那時才放(見 `crate::process`)。
     #[test]
     fn the_lock_is_held_until_its_holder_lets_go() {

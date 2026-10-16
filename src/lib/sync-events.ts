@@ -34,7 +34,7 @@ type UpgradedNotice = Extract<SyncNotice, { kind: "upgraded" }>;
 export function upgradeExplanation(notice: UpgradedNotice): string[] {
   const lines = [
     "Your synced hosts moved into a space named “Synced”, unless another computer had already renamed or deleted it. Rename it or add more spaces in Settings → Sync; each computer chooses which spaces it syncs.",
-    "Update SSHelter on your other computers too. Until they are updated, they don't see changes made here.",
+    "Update Lunport on your other computers too. Until they are updated, they don't see changes made here.",
   ];
   if (notice.kept_file && notice.kept_hosts.length > 0) {
     // Why a host stayed is the backend's business (a setting synced hosts can't
@@ -78,7 +78,7 @@ export function noticeMessage(notice: SyncNotice): SyncMessage {
     case "rename_blocked":
       return {
         title: `The file of “${revealHidden(notice.name)}” keeps its old name`,
-        description: `${notice.file_name} already exists in ~/.ssh/sshelter, so SSHelter did not overwrite it. Move that file away; SSHelter renames the space's file on the next sync.`,
+        description: `${notice.file_name} already exists in ~/.ssh/sshelter, so Lunport did not overwrite it. Move that file away; Lunport renames the space's file on the next sync.`,
       };
     case "left_account":
       // Not only after leaving: also after a sync code change or a rejoin (spaces the new

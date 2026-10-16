@@ -161,7 +161,7 @@ impl HopShared {
 pub(crate) const MAX_BANNER_BYTES: usize = 64 * 1024;
 
 /// The one line that ends the banner text when the server sent more than `MAX_BANNER_BYTES`.
-pub(crate) const BANNER_CUT_NOTICE: &str = "[SSHelter: the rest of the server's banner was dropped.]\n";
+pub(crate) const BANNER_CUT_NOTICE: &str = "[Lunport: the rest of the server's banner was dropped.]\n";
 
 /// The banner text of one hop's login: what has arrived and has not been handed to the auth source yet, within `MAX_BANNER_BYTES`. The
 /// banners that arrive between two deliveries are joined into one text, in the order they came, the way OpenSSH writes them one after the
@@ -787,7 +787,7 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
                     break 'key Step::Skipped;
                 };
                 let Ok(public) = PublicKey::from_openssh(&line) else {
-                    reasons.push(format!("The key {key_id} is not a public key SSHelter can use."));
+                    reasons.push(format!("The key {key_id} is not a public key Lunport can use."));
                     break 'key Step::Skipped;
                 };
                 let hash = if public.algorithm().is_rsa() {
@@ -796,7 +796,7 @@ async fn authenticate(hop: &Hop, handle: &mut Handle<EngineHandler>, shared: &Ho
                         RsaChoice::Use(hash) => Some(hash),
                         RsaChoice::Sha1Only => {
                             tried.push(method.clone());
-                            reasons.push("The server accepts RSA keys only with SHA-1 signatures, which SSHelter does not make.".to_string());
+                            reasons.push("The server accepts RSA keys only with SHA-1 signatures, which Lunport does not make.".to_string());
                             break 'key Step::Skipped;
                         }
                     }

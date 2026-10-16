@@ -70,7 +70,7 @@ pub struct KeyCandidate {
 
 /// 帳戶裡沒有、這台留著的插槽(`KeyCandidate.kept_slot`;`kept_lookup`),用到它的主機在同步的 space 裡 —— 要不要放進這個帳戶由使用者在這裡決定。兩種:
 /// 之前的帳戶留下的插槽(離開帳戶之後建立或加入了另一個帳戶,`~/.ssh/sshelter-local/` 裡用到它的主機又被搬進新帳戶的 space;新帳戶裡沒有它,
-/// N1:不會自己寫進去),與只在這台的金鑰(`local_only`:New key 或 Generate key 加進 SSHelter 的,不在任何帳戶裡)。
+/// N1:不會自己寫進去),與只在這台的金鑰(`local_only`:New key 或 Generate key 加進 Lunport 的,不在任何帳戶裡)。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
@@ -128,7 +128,7 @@ pub struct KeyChoice {
     pub decision: KeyDecision,
 }
 
-pub const LOCKED_REASON: &str = "This host has more than one copy; SSHelter changes it once only one copy is left.";
+pub const LOCKED_REASON: &str = "This host has more than one copy; Lunport changes it once only one copy is left.";
 
 /// 已經有插槽的金鑰收到「Sync key」或「Keep on this computer」(`setup_keys`)。
 pub const ALREADY_SET_UP_MESSAGE: &str = "This key already has a key slot, so no second one was made.";
@@ -617,7 +617,7 @@ pub fn setup_keys(env: &SyncEnv, active: bool, choices: Vec<KeyChoice>) -> Resul
     Ok(rewritten)
 }
 
-/// 這一次設定建立的金鑰放進保管庫(金鑰保管庫 spec §4.3:金鑰一律在 SSHelter)。主機已經改指到插槽,插槽這時是連到原檔的連結;搬不進去的留著連結
+/// 這一次設定建立的金鑰放進保管庫(金鑰保管庫 spec §4.3:金鑰一律在 Lunport)。主機已經改指到插槽,插槽這時是連到原檔的連結;搬不進去的留著連結
 /// (「File for now」,「Move」再試),原因只記到 stderr。你的原檔不動。沿用的、就地放進帳戶的插槽不碰(`Planned::created`;見 `setup_keys`)。
 fn move_set_up_slots_into_vault(env: &SyncEnv, transaction: &MaterialTransaction<'_>, planned: &[Planned]) -> usize {
     let ids: Vec<String> = {
@@ -669,7 +669,7 @@ fn rewrite_hosts(env: &SyncEnv, home: &Path, planned: &[Planned]) -> Result<Vec<
 }
 
 /// 把一個空著的插槽路徑連到 `source`,再從那把金鑰自己寫 `<slot>.pub`(`slots::write_linked_public`)。插槽路徑上已經有東西 —— 沒有任何
-/// 記錄說它是 SSHelter 放的(spec §4.2:只有本機狀態記錄是 SSHelter 放的東西才可以被取代;`slot_files::link` 會原子地取代路徑上
+/// 記錄說它是 Lunport 放的(spec §4.2:只有本機狀態記錄是 Lunport 放的東西才可以被取代;`slot_files::link` 會原子地取代路徑上
 /// 原本的任何東西)—— 就不連結,回 `in_the_way_message`。`.pub` 寫不進去就把剛放的連結收回。回傳連結的種類。
 fn link_free_slot(keys_dir: &Path, slot_path: &Path, source: &Path) -> Result<LinkKind, AppError> {
     if slot_files::occupied(slot_path) {
@@ -855,13 +855,13 @@ fn take_back_vault_landing(env: &SyncEnv, transaction: &MaterialTransaction<'_>,
     }
     if entry_was_free {
         if let Err(e) = transaction.with_vault(env, |vault| vault.remove(slot_id)) {
-            eprintln!("[sync] a key that couldn't be set up is still in SSHelter's vault: {e}");
+            eprintln!("[sync] a key that couldn't be set up is still in Lunport's vault: {e}");
         }
     }
 }
 
 /// 這台握著的插槽(`reuse_slot` 的捷徑:什麼都不動、直接改寫主機)放的金鑰,現在是不是真的在插槽路徑 `<keys_dir>/<file>` 上:記錄的檔名就是 `file`
-/// (帳戶裡改了名的話,這筆記錄說的是舊路徑,下一輪才從頭來過),連到的原檔還在(`Linked`),同步來的副本還在(`SyncedCopy`),只在 SSHelter 的
+/// (帳戶裡改了名的話,這筆記錄說的是舊路徑,下一輪才從頭來過),連到的原檔還在(`Linked`),同步來的副本還在(`SyncedCopy`),只在 Lunport 的
 /// 插槽旁的 `.pub` 還在(`Vault`:`ssh` 據它向 agent 要私鑰)。不是的話回 `source_gone_message`(沒有金鑰的那個路徑):改寫主機只會讓一台能連線
 /// 的主機改指到沒有金鑰的插槽。
 fn held_in_place(held: &LocalSlot, file: &str, keys_dir: &Path) -> Result<(), AppError> {
@@ -888,7 +888,7 @@ fn held_in_place(held: &LocalSlot, file: &str, keys_dir: &Path) -> Result<(), Ap
 /// 提交的 core 臨界區裡先確認帳戶(`account_still_ready`),再確認掃描之後那筆記錄沒變:還在、檔名與來源相同、連結沒有收起來、仍不是在這個帳戶學到的、
 /// 帳戶裡仍沒有這個 id 的記錄(還在的或 tombstone)、檔名仍沒有別的插槽在用(不分大小寫)—— 任何一項變了就什麼都不寫,回 `KEPT_CHANGED_MESSAGE`。
 /// 帳戶記錄先寫 `key`(會失敗的先做),再寫 `keyslot`(來源裝置是這台、時間是現在)。本機記錄換上新的 payload、記成在這個帳戶學到的,同意上傳的是
-/// 剛上傳的那把(Keep 沒有),不再是只在這台的金鑰(`local_only`)。`keyslot` 的建立時間:只在這台的金鑰沿用它進到 SSHelter 的時間(`scanned` 的 payload;
+/// 剛上傳的那把(Keep 沒有),不再是只在這台的金鑰(`local_only`)。`keyslot` 的建立時間:只在這台的金鑰沿用它進到 Lunport 的時間(`scanned` 的 payload;
 /// Keychain 的 Created 說的是這個),之前的帳戶留下的插槽是現在。同步來的副本,與之前的帳戶同步來、搬進保管庫的金鑰(保管庫那一筆的來源是 `Synced`),標成之前的
 /// 帳戶的(`copy_from_another_account`:位元組不是從這個帳戶收到的)。來源、插槽檔與連結都不動。回傳插槽檔名。
 fn adopt_slot(
@@ -958,7 +958,7 @@ fn adopt_slot(
             name: name.clone(),
             mode: if sync { SlotMode::Synced } else { SlotMode::Own },
             origin_device_id: device_id.clone(),
-            // 只在這台的金鑰記的是它進到 SSHelter 的時間;之前的帳戶留下的插槽是放進這個帳戶的現在。
+            // 只在這台的金鑰記的是它進到 Lunport 的時間;之前的帳戶留下的插槽是放進這個帳戶的現在。
             created_at_ms: if scanned.local_only { scanned.payload.as_ref().map_or(now, |p| p.created_at_ms) } else { now },
             public_key: facts.map(|f| f.public_key.clone()),
             fingerprint: facts.map(|f| f.fingerprint.clone()),
@@ -2684,7 +2684,7 @@ mod tests {
     }
 
     /// 只在這台的金鑰被同步的主機用到:設定流程問它(候選的路徑是插槽,資料從記錄來),Keep on this computer 把它就地放進帳戶、不上傳私鑰。
-    /// 帳戶記的建立時間仍是它進到 SSHelter 的時候(Keychain 的 Created 說的是這個),不是答覆的時候。
+    /// 帳戶記的建立時間仍是它進到 Lunport 的時候(Keychain 的 Created 說的是這個),不是答覆的時候。
     #[test]
     fn a_key_only_on_this_computer_used_by_a_synced_host_is_offered_and_kept_without_uploading() {
         let (d, personal) = device("# main\n");
@@ -2710,7 +2710,7 @@ mod tests {
         assert!(matches!(local.source, Some(SlotSource::Vault { .. })));
         assert_eq!(crate::sync::slots::slot(d.state().account.as_ref().unwrap(), &id).map(|p| p.mode), Some(SlotMode::Own));
         assert!(!account_has_key(&d, &id), "Keep on this computer never uploads the key");
-        assert_eq!(local.payload.as_ref().map(|p| p.created_at_ms), Some(came_in), "the record keeps the time the key came into SSHelter");
+        assert_eq!(local.payload.as_ref().map(|p| p.created_at_ms), Some(came_in), "the record keeps the time the key came into Lunport");
         assert_eq!(slot(d.state().account.as_ref().unwrap(), &id).map(|p| p.created_at_ms), Some(came_in), "and so does the account's");
     }
 
@@ -2733,7 +2733,7 @@ mod tests {
         assert!(matches!(b.state().key_slots[&id].source, Some(SlotSource::Vault { .. })));
         assert_eq!(crate::sync::slots::tests::vault_entry(&b, &id).map(|e| e.private_key.clone()), Some(test_keys::plain()));
         let theirs = slot(b.state().account.as_ref().unwrap(), &id).expect("the slot reached the other computer");
-        assert_eq!((theirs.mode, theirs.created_at_ms), (SlotMode::Synced, came_in), "the account says when the key came into SSHelter");
+        assert_eq!((theirs.mode, theirs.created_at_ms), (SlotMode::Synced, came_in), "the account says when the key came into Lunport");
     }
 
     /// 保管庫裡那一筆不見了的金鑰不提供(Sync 讀不到它)。
@@ -2767,7 +2767,7 @@ mod tests {
     }
 
     /// 之前的帳戶留下、金鑰在保管庫裡的插槽(B 落地同步來的金鑰時直接放進保管庫,來源記成 Synced):設定流程照樣問,Keep 把它就地放進新帳戶,
-    /// 記成之前的帳戶同步來的(之後補寫 `key` 只認這台的同意)。建立時間照舊是放進帳戶的時候(只在這台的金鑰才保留進到 SSHelter 的時間)。
+    /// 記成之前的帳戶同步來的(之後補寫 `key` 只認這台的同意)。建立時間照舊是放進帳戶的時候(只在這台的金鑰才保留進到 Lunport 的時間)。
     #[test]
     fn a_previous_accounts_key_in_the_vault_is_offered_and_kept_as_that_accounts_copy() {
         let k = kept_in_the_vault_after_a_move();
@@ -3125,7 +3125,7 @@ mod tests {
         crate::sync::slots::tests::assert_landed_in_the_vault(&t.a, &t.theirs, &t.their_file(), &test_keys::plain(), test_keys::PLAIN_PUBLIC);
     }
 
-    /// 只在這台的金鑰,主機在同步的 space 裡(「搬進 SSHelter」把主機切到只在這台的插槽就是這樣):主機的編輯先上傳了,帳戶裡還沒有那個插槽的任何記錄,
+    /// 只在這台的金鑰,主機在同步的 space 裡(「搬進 Lunport」把主機切到只在這台的插槽就是這樣):主機的編輯先上傳了,帳戶裡還沒有那個插槽的任何記錄,
     /// 另一台收到主機、沒有插槽。A 在對話框選了 Keep on this computer 之後,另一台收到的是 `own` 插槽的記錄:沒有私鑰,保管庫與插槽目錄裡都沒有金鑰。
     #[test]
     fn keeping_a_key_only_on_this_computer_gives_the_other_computer_an_own_slot_without_the_key() {

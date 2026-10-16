@@ -1,6 +1,6 @@
 //! SSH_ASKPASS helper 模式。
 //!
-//! SSHelter 的執行檔會被 ssh 以 `SSH_ASKPASS` 再次啟動；`main()` 偵測到 `SSHELTER_ASKPASS=1`
+//! Lunport 的執行檔會被 ssh 以 `SSH_ASKPASS` 再次啟動；`main()` 偵測到 `SSHELTER_ASKPASS=1`
 //! 就呼叫 `run()`，完全不初始化 GUI。ssh 把提示文字當作 argv[1] 傳進來。
 //!
 //! 安全性：`SSH_ASKPASS_REQUIRE=force` 會讓「所有」提示都走這裡，包含 host key 驗證。

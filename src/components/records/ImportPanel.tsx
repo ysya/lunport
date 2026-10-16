@@ -83,7 +83,7 @@ export function ImportReview({
         </FormSection>
       )}
       {refs.length > 0 && (
-        <FormSection title="Optional key copies" description="Choose each private key to copy into SSHelter. Source files remain in place. Hosts with missing keys can be saved and completed later.">
+        <FormSection title="Optional key copies" description="Choose each private key to copy into Lunport. Source files remain in place. Hosts with missing keys can be saved and completed later.">
           {refs.map((reference) => (
             <div key={reference.key_id} className="space-y-1">
               <Label className="flex items-center gap-2">

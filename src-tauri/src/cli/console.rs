@@ -5,7 +5,7 @@
 //!
 //! A console has four settings the program changes: the input's mode, the output's mode, and the input's and the output's code page.
 //! All four are read at the start, and nothing is changed until the console is taken over (`Tty::take_over`, once every way out can
-//! put it back): a program ended the default way before that, by Ctrl-C while SSHelter starts, leaves the console as it was. The
+//! put it back): a program ended the default way before that, by Ctrl-C while Lunport starts, leaves the console as it was. The
 //! take-over sets the output to take virtual terminal sequences, and UTF-8. Each `Mode` then sets the input's mode and the output's,
 //! always from the modes of the start: raw mode gives the output xterm's line endings (a line feed that does not return the carriage),
 //! as OpenSSH's raw mode turns a Unix terminal's `OPOST` off; the other modes keep the line endings of the start, so the CLI's own lines
@@ -123,7 +123,7 @@ pub trait ConsoleApi: Send + Sync {
 const READ_END_WAIT: Duration = Duration::from_millis(500);
 
 /// The reads of the keys, and the changes of mode they must not span (the module's doc): a change ends the read in progress (`pause`)
-/// and holds the next one back until the new mode is set. Nothing is read in cooked mode: what is typed while SSHelter connects stays in the
+/// and holds the next one back until the new mode is set. Nothing is read in cooked mode: what is typed while Lunport connects stays in the
 /// console, where the shell gets it once raw mode is set (OpenSSH's typeahead), and where a question's flush throws it away. At a
 /// question one line is read; once it was (or Ctrl-C ended it), the next read waits for the next mode, and the keys typed meanwhile wait
 /// in the console.
@@ -977,7 +977,7 @@ mod tests {
 
     /// Spec §7.3: at the start the four settings are only read, the input first (input that is not a console is refused before anything
     /// else is asked). Nothing is changed before the take-over, so nothing is put back before it either, whichever way out: a Ctrl-C that
-    /// ends the program the default way while SSHelter starts leaves the console as it was. The watchdog still gets its hold.
+    /// ends the program the default way while Lunport starts leaves the console as it was. The watchdog still gets its hold.
     #[test]
     fn a_new_tty_only_reads_the_console_and_puts_nothing_back() {
         let read = Setting::ALL.map(Call::Get);
@@ -1403,7 +1403,7 @@ mod tests {
         (KeysRead::Read, Some((text.to_string(), mode)))
     }
 
-    /// Nothing is read in cooked mode (while SSHelter connects): what is typed stays in the console, and raw mode reads it, for the shell.
+    /// Nothing is read in cooked mode (while Lunport connects): what is typed stays in the console, and raw mode reads it, for the shell.
     /// No read was in progress at the change, so none was ended.
     #[test]
     fn nothing_is_read_in_cooked_mode_and_raw_mode_reads_what_was_typed_before() {

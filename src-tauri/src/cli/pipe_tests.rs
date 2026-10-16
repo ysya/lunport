@@ -51,7 +51,7 @@ impl Shared {
 
 struct Setup {
     engine: Arc<FakeEngine>,
-    /// The broker the run talks to (`end_all`: SSHelter quits).
+    /// The broker the run talks to (`end_all`: Lunport quits).
     broker: Arc<Broker>,
     console: Arc<FakeConsole>,
     stdout: Shared,
@@ -187,7 +187,7 @@ fn a_question_is_asked_on_the_console_and_the_answer_gets_in() {
     assert!(restored, "the console is as it was");
 }
 
-/// Final wave (F11): SSHelter quits while a hidden question waits for its answer. The console layer ends the question's line read with an
+/// Final wave (F11): Lunport quits while a hidden question waits for its answer. The console layer ends the question's line read with an
 /// Enter of its own, on which a real console moves to the next line (`QUESTION_READ_ENDS_ITS_LINE`): the reason follows the prompt with no
 /// line break of the CLI's own (this fake console has no cursor). A console that refuses that Enter leaves the question's line read going,
 /// and its prompt the last line: the CLI starts the next line itself before the reason.
@@ -205,7 +205,7 @@ fn an_end_under_a_question_starts_the_reason_on_a_line_of_its_own_when_the_conso
         setup.broker.end_all(Duration::from_secs(5));
         let (code, restored, setup) = finish(setup);
         let line_break = if refused { "\n" } else { "" };
-        let said = format!("deploy@web's password: {line_break}SSHelter quit, so the connection to web was closed.\n");
+        let said = format!("deploy@web's password: {line_break}Lunport quit, so the connection to web was closed.\n");
         assert_eq!((code, setup.stderr.text()), (255, said), "the console refused the Enter: {refused}");
         assert!(restored, "the console is as it was");
     }

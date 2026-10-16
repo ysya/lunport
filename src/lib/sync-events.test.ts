@@ -48,7 +48,7 @@ describe("notices", () => {
   it("explain the v1 upgrade once, with the hosts that stayed local and the user's own files that moved", () => {
     expect(upgradeExplanation(upgraded)).toEqual([
       "Your synced hosts moved into a space named “Synced”, unless another computer had already renamed or deleted it. Rename it or add more spaces in Settings → Sync; each computer chooses which spaces it syncs.",
-      "Update SSHelter on your other computers too. Until they are updated, they don't see changes made here.",
+      "Update Lunport on your other computers too. Until they are updated, they don't see changes made here.",
     ]);
     expect(upgradeExplanation(kept)[2]).toBe(
       "jump and lab could not move into a space, so they stay on this computer in /home/f/.ssh/sshelter-v1-kept.config, where ssh keeps reading them.",
@@ -81,7 +81,7 @@ describe("notices", () => {
     expect(noticeMessage({ kind: "rename_blocked", space_id: "a", name: "Work", file_name: "work-3fa2c1d9.config" })).toEqual({
       title: "The file of “Work” keeps its old name",
       description:
-        "work-3fa2c1d9.config already exists in ~/.ssh/sshelter, so SSHelter did not overwrite it. Move that file away; SSHelter renames the space's file on the next sync.",
+        "work-3fa2c1d9.config already exists in ~/.ssh/sshelter, so Lunport did not overwrite it. Move that file away; Lunport renames the space's file on the next sync.",
     });
     expect(noticeMessage({ kind: "left_account", kept_files: ["/home/f/.ssh/sshelter-local/personal-3fa2c1d9.config"] })).toEqual({
       title: "Your synced files are now local files",

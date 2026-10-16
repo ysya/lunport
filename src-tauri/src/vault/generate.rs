@@ -1,4 +1,4 @@
-//! 在 SSHelter 裡產生金鑰(金鑰保管庫 spec §7.5「Generate key」):Ed25519(預設)、RSA 3072/4096、ECDSA P-256,可加 passphrase。
+//! 在 Lunport 裡產生金鑰(金鑰保管庫 spec §7.5「Generate key」):Ed25519(預設)、RSA 3072/4096、ECDSA P-256,可加 passphrase。
 //! 用 `ssh-key` 產生(不跑 `ssh-keygen`),私鑰直接交給保管庫,不寫任何檔案。
 
 use rand_core::OsRng;

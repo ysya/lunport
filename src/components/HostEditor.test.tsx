@@ -10,7 +10,7 @@ import { IdentityFileRow } from "./HostEditor";
 import { HIDDEN_CHARS } from "./keychain/test-markup";
 
 const SLOT_VALUE = "~/.ssh/sshelter/keys/id_mac-3fa2c1d9";
-const NOTE = "is in SSHelter: ssh can use it only while SSHelter is running.";
+const NOTE = "is in Lunport: ssh can use it only while Lunport is running.";
 
 type Values = { firstClass: Record<string, string>; advanced: { keyword: string; value: string }[] };
 
@@ -30,7 +30,7 @@ function row(value: string, slots: SyncKeySlotView[]): string {
 }
 
 describe("the host editor's IdentityFile row", () => {
-  it("says under the field that a key in SSHelter needs SSHelter running", () => {
+  it("says under the field that a key in Lunport needs Lunport running", () => {
     const html = row(SLOT_VALUE, [keySlot({ name: "id_mac", in_vault: true })]);
     expect(html).toContain(`>IdentityFile</label>`);
     expect(html).toContain(`<p class="basis-full text-xs text-muted-foreground">id_mac ${NOTE}</p>`);

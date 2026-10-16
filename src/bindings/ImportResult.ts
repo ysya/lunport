@@ -2,7 +2,7 @@
 import type { SyncOverview } from "./SyncOverview";
 
 /**
- * 從檔案加進 SSHelter 之後(`local_keys::import_file`):改指到新插槽的主機、原檔移除了沒、Move 卻留下原檔的原因。
+ * 從檔案加進 Lunport 之後(`local_keys::import_file`):改指到新插槽的主機、原檔移除了沒、Move 卻留下原檔的原因。
  */
 export type ImportResult = { overview: SyncOverview, slot_id: string, 
 /**

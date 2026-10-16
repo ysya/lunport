@@ -97,9 +97,9 @@ pub(crate) fn request(app: &tauri::AppHandle, surface: Surface) {
         drop(queue);
         deny_interactions(app);
         // Queue a native alert without waiting on the event thread.
-        let message = format!("Cannot start the window health check: {error}. Open SSHelter again to retry. Existing SSH sessions keep running.");
+        let message = format!("Cannot start the window health check: {error}. Open Lunport again to retry. Existing SSH sessions keep running.");
         let _ = app.run_on_main_thread(move || {
-            appkit_alert("SSHelter — Window unavailable", &message, &["OK"]);
+            appkit_alert("Lunport — Window unavailable", &message, &["OK"]);
         });
     }
 }
@@ -144,8 +144,8 @@ fn worker(app: &tauri::AppHandle) {
                 Err(error) => {
                     let detail = error.to_string();
                     loop {
-                        let answer = native_dialog(app, "SSHelter — System audio unavailable", &format!(
-                        "The macOS audio service did not pass the window safety check ({detail}). SSHelter has paused this window to avoid an unexplained black screen.\n\nExisting SSH sessions and background services keep running. No key or host is approved by this check.\n\nRestore system audio, then choose Retry. Diagnostics explains how to collect evidence. Keep Running dismisses this attempt and refuses pending authentication/key approvals; open SSHelter again to retry."
+                        let answer = native_dialog(app, "Lunport — System audio unavailable", &format!(
+                        "The macOS audio service did not pass the window safety check ({detail}). Lunport has paused this window to avoid an unexplained black screen.\n\nExisting SSH sessions and background services keep running. No key or host is approved by this check.\n\nRestore system audio, then choose Retry. Diagnostics explains how to collect evidence. Keep Running dismisses this attempt and refuses pending authentication/key approvals; open Lunport again to retry."
                     ), &["Retry", "Diagnostics", "Keep Running"]);
                         match answer {
                             0 => {
@@ -227,7 +227,7 @@ fn deny_pending(state: &crate::state::AppState) {
 
 fn diagnostics(app: &tauri::AppHandle, result: &str) {
     let report = format!(
-        "SSHelter window health\nProfile: {:?}\nArchitecture: {}\nTime: {:?}\nProbe deadline: {} ms\nResult: {result}\n\nIn Activity Monitor, sample coreaudiod and the SSHelter WebKit GPU process while the fault is present. Record the macOS version and recent sleep/wake or audio-device changes. Samples may contain private data; review before sharing.\n\nIf system audio is unavailable, save work in other apps and restart macOS, or ask your administrator to restore the audio service. SSHelter does not restart system services. After audio recovers, use Retry or Open SSHelter.\n\nFor a window that stays black while audio responds, keep SSH clients connected and collect a screenshot and GPU sample. A page-load event or heartbeat does not prove drawing. No automatic reload or app restart is attempted. Reloading or quitting can lose unsaved edits.\n\nThe original cause of an audio-service deadlock is unknown; this check cannot identify a driver or cure the deadlock.",
+        "Lunport window health\nProfile: {:?}\nArchitecture: {}\nTime: {:?}\nProbe deadline: {} ms\nResult: {result}\n\nIn Activity Monitor, sample coreaudiod and the Lunport WebKit GPU process while the fault is present. Record the macOS version and recent sleep/wake or audio-device changes. Samples may contain private data; review before sharing.\n\nIf system audio is unavailable, save work in other apps and restart macOS, or ask your administrator to restore the audio service. Lunport does not restart system services. After audio recovers, use Retry or Open Lunport.\n\nFor a window that stays black while audio responds, keep SSH clients connected and collect a screenshot and GPU sample. A page-load event or heartbeat does not prove drawing. No automatic reload or app restart is attempted. Reloading or quitting can lose unsaved edits.\n\nThe original cause of an audio-service deadlock is unknown; this check cannot identify a driver or cure the deadlock.",
         crate::app_profile::CURRENT, std::env::consts::ARCH, SystemTime::now(), PROBE_LIMIT.as_millis()
     );
     let saved = (|| -> Result<_, crate::error::AppError> {
@@ -242,7 +242,7 @@ fn diagnostics(app: &tauri::AppHandle, result: &str) {
         .unwrap_or_else(|e| format!("\n\nCould not save report: {e}"));
     native_dialog(
         app,
-        "SSHelter — Window Diagnostics",
+        "Lunport — Window Diagnostics",
         &format!("{report}{path}"),
         &["OK"],
     );
@@ -268,9 +268,9 @@ fn termination_notice(app: &tauri::AppHandle, label: String) {
         .contains(&label);
     let reload = native_dialog(
         app,
-        "SSHelter — Web content stopped",
+        "Lunport — Web content stopped",
         if already_reloaded {
-            "Web content stopped again. This window has already used its one recovery reload. Collect Window Diagnostics from the tray. Existing SSH sessions keep running; save available work before restarting SSHelter."
+            "Web content stopped again. This window has already used its one recovery reload. Collect Window Diagnostics from the tray. Existing SSH sessions keep running; save available work before restarting Lunport."
         } else {
             "Web content stopped. Existing SSH sessions keep running. Reloading may discard unsaved edits in this window. Pending authentication/key questions are never approved automatically. Reload is available once per window during this app run; if the view stays black, collect Window Diagnostics from the tray."
         },

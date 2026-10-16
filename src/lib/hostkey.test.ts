@@ -34,10 +34,10 @@ const changed = request({
 });
 
 describe("host key presentation", () => {
-  it("asks about a key SSHelter has not seen", () => {
+  it("asks about a key Lunport has not seen", () => {
     expect(hostKeyTitle(request())).toBe("Verify server identity");
     expect(hostKeyBody(request())).toBe(
-      "This server is new to SSHelter. Compare its fingerprint with a trusted source before connecting.",
+      "This server is new to Lunport. Compare its fingerprint with a trusted source before connecting.",
     );
     expect(hostKeyButtons(request())).toEqual({
       refuse: "Cancel",

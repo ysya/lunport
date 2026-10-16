@@ -7,7 +7,7 @@ import { errorMessage } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
 
 /**
- * The host key window of SSHelter's own SSH client (own-ssh spec §10, §14): a host key is confirmed here, never in a terminal. The
+ * The host key window of Lunport's own SSH client (own-ssh spec §10, §14): a host key is confirmed here, never in a terminal. The
  * Security semantics follow spec §14. The compact structured presentation was revised in beta 1.0.0-2. Names come from the user's
  * hosts and the server, so they are shown through `revealHidden`.
  */
@@ -49,7 +49,7 @@ export function hostKeyTitle(r: HostKeyRequest): string {
 
 export function hostKeyBody(r: HostKeyRequest): string {
   if (r.changed === null) {
-    return "This server is new to SSHelter. Compare its fingerprint with a trusted source before connecting.";
+    return "This server is new to Lunport. Compare its fingerprint with a trusted source before connecting.";
   }
   return "This key differs from the saved identity. The connection may be intercepted. Refuse unless you have verified why the server's key changed.";
 }

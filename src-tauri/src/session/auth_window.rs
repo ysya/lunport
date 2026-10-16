@@ -271,7 +271,7 @@ pub(crate) fn present(app: &tauri::AppHandle) {
             AUTH_WINDOW,
             WebviewUrl::App("index.html".into()),
         )
-        .title("SSHelter — Authentication")
+        .title("Lunport — Authentication")
         .inner_size(480.0, 360.0)
         .resizable(true)
         .always_on_top(true)

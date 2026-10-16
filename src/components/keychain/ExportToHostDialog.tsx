@@ -13,7 +13,7 @@ import { useLastNonNull } from "@/lib/use-last-non-null";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 
-/** The key Export to host exports: its name, its public key file, and whether it is a key in SSHelter. */
+/** The key Export to host exports: its name, its public key file, and whether it is a key in Lunport. */
 export interface ExportTarget {
   name: string;
   publicPath: string;
@@ -84,7 +84,7 @@ export function ExportToHostView({
 /**
  * Export to host. In the app, the deploy dialog takes over: it deploys, then points the host at the key. In Terminal, ssh-copy-id
  * runs and the host's settings stay as they are. It is offered only for a key file, and not on Windows (no ssh-copy-id there).
- * ssh-copy-id refuses a .pub whose private key file isn't next to it, and a key in SSHelter has no such file.
+ * ssh-copy-id refuses a .pub whose private key file isn't next to it, and a key in Lunport has no such file.
  */
 export function ExportToHostDialog({ target, onClose }: { target: ExportTarget | null; onClose: () => void }) {
   const [mode, setMode] = useState<ExportMode>("app");

@@ -750,7 +750,7 @@ pub(crate) fn dispatch(
     validate_method(method)?;
     let policy = state.mcp.policy.lock().unwrap().clone();
     if !policy.enabled {
-        return Err("MCP access is disabled in SSHelter Settings → AI Access".into());
+        return Err("MCP access is disabled in Lunport Settings → AI Access".into());
     }
     state
         .mcp

@@ -1,4 +1,4 @@
-//! `sshelter-cli.exe`: the console program Windows terminals run to reach SSHelter (own-ssh spec §7.3, §7.4).
+//! `sshelter-cli.exe`: the console program Windows terminals run to reach Lunport (own-ssh spec §7.3, §7.4).
 //!
 //! Release `sshelter.exe` is a GUI program (`windows_subsystem = "windows"`): a shell does not wait for it, and a Windows Terminal tab
 //! gives it no console. The helper is a console program, so the terminal gives it a console and waits for it. It runs the
@@ -16,7 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
-/// SSHelter's own executable, which the helper runs from its own directory.
+/// Lunport's own executable, which the helper runs from its own directory.
 pub const TARGET: &str = "sshelter.exe";
 
 /// What the helper says outside Windows, where it has nothing to do.

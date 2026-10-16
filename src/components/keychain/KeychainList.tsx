@@ -22,14 +22,14 @@ const ROW =
 const ACTIVE = "bg-primary/12 hover:bg-primary/15";
 const SMALL_BADGE = "h-4 px-1.5 text-[0.625rem]";
 
-/** A row of "In SSHelter". A plain function, so a test sees the button in the tree. */
+/** A row of "In Lunport". A plain function, so a test sees the button in the tree. */
 function slotRow(slot: SyncKeySlotView, active: boolean, failure: string | null, onSelect: () => void) {
   return (
     <button
       key={slot.id}
       type="button"
       aria-current={active ? "true" : undefined}
-      title={failure ? `Couldn't move into SSHelter: ${revealHidden(failure)}` : undefined}
+      title={failure ? `Couldn't move into Lunport: ${revealHidden(failure)}` : undefined}
       className={cn(ROW, active && ACTIVE)}
       onClick={onSelect}
     >
@@ -64,7 +64,7 @@ function fileRow(file: KeyInfo, active: boolean, onSelect: () => void) {
 }
 
 /**
- * The Keychain's list (key vault spec §7.2): a search, "In SSHelter", then "Other key files in ~/.ssh" (closed until opened, or
+ * The Keychain's list (key vault spec §7.2): a search, "In Lunport", then "Other key files in ~/.ssh" (closed until opened, or
  * while searching). `slots` and `files` arrive filtered and in order (`keychainSlots`, `otherKeyFiles`). No hooks: exported for
  * the tests.
  */
@@ -105,7 +105,7 @@ export function KeychainListView({
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-2">
         <section className="space-y-0.5">
           <div className="flex flex-wrap items-center justify-between gap-x-2 px-1">
-            <h3 className="section-label px-0">In SSHelter</h3>
+            <h3 className="section-label px-0">In Lunport</h3>
             <div className="flex shrink-0 items-center">
               <Button type="button" size="sm" variant="ghost" className="h-6 shrink-0 px-1.5 text-xs" onClick={() => onNew("import")}>
                 New key
@@ -121,7 +121,7 @@ export function KeychainListView({
             <p className="px-1 py-2 text-xs text-muted-foreground">No keys match.</p>
           ) : (
             <div className="space-y-0.5 px-1 py-2 text-xs">
-              <p className="font-medium">No keys in SSHelter yet</p>
+              <p className="font-medium">No keys in Lunport yet</p>
               <p className="text-muted-foreground">Add one with New key or Generate key. Keys used by synced hosts appear here too.</p>
             </div>
           )}
@@ -155,7 +155,7 @@ export function KeychainList() {
   const moveFailures = useUiStore((s) => s.moveFailures);
   const [query, setQuery] = useState("");
   const [filesOpen, setFilesOpen] = useState(false);
-  // Not only while joined: after leaving the account this computer keeps its keys in SSHelter (the backend lists them).
+  // Not only while joined: after leaving the account this computer keeps its keys in Lunport (the backend lists them).
   const slots = overview.data?.key_slots ?? [];
   const files = keys.data ?? [];
   return (

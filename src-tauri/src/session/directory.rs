@@ -22,8 +22,8 @@ pub enum DirectoryError {
     NotFound(String),
     /// Several saved hosts have this alias; the client has to name one by its id (spec §7.1).
     Ambiguous(String),
-    /// The host is saved, but SSHelter's own client cannot connect to it as it is saved: it uses a ProxyCommand, or its key is not in
-    /// SSHelter, or its chain of jump hosts loops, includes a host that is not saved, names one host twice, has more than five jump hosts
+    /// The host is saved, but Lunport's own client cannot connect to it as it is saved: it uses a ProxyCommand, or its key is not in
+    /// Lunport, or its chain of jump hosts loops, includes a host that is not saved, names one host twice, has more than five jump hosts
     /// in all, or would give two endpoints one host id.
     Unsupported(String),
     /// Reading the saved hosts or the pins, or writing a pin, failed.
@@ -141,7 +141,7 @@ pub enum PinDecision {
 pub fn decide_pin(host: &HostId, pinned: Option<&str>, key: &HostKey) -> PinDecision {
     match pinned {
         Some(pinned) if pinned == key.fingerprint => PinDecision::AlreadyPinned,
-        Some(_) => PinDecision::Refuse(format!("SSHelter did not pin the key of {host}: another key was pinned for it in the meantime.")),
+        Some(_) => PinDecision::Refuse(format!("Lunport did not pin the key of {host}: another key was pinned for it in the meantime.")),
         None => PinDecision::Write,
     }
 }
@@ -152,7 +152,7 @@ pub fn decide_replace(host: &HostId, pinned: Option<&str>, previous: &HostKey, k
     match pinned {
         Some(pinned) if pinned == key.fingerprint => PinDecision::AlreadyPinned,
         Some(pinned) if pinned == previous.fingerprint => PinDecision::Write,
-        _ => PinDecision::Refuse(format!("SSHelter did not replace the key of {host}: the pinned key is not the one you were shown.")),
+        _ => PinDecision::Refuse(format!("Lunport did not replace the key of {host}: the pinned key is not the one you were shown.")),
     }
 }
 
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(decide_pin(&web, Some(&first.fingerprint), &first), PinDecision::AlreadyPinned);
         assert_eq!(
             decide_pin(&web, Some(&first.fingerprint), &second),
-            PinDecision::Refuse("SSHelter did not pin the key of web: another key was pinned for it in the meantime.".to_string())
+            PinDecision::Refuse("Lunport did not pin the key of web: another key was pinned for it in the meantime.".to_string())
         );
     }
 
@@ -181,7 +181,7 @@ mod tests {
     fn replacing_writes_only_from_the_key_that_was_shown_as_pinned_and_a_key_that_is_pinned_already_is_fine() {
         let web = HostId::from("web");
         let (old, new, other) = (key(test_keys::PLAIN_PUBLIC), key(test_keys::ECDSA_PUBLIC), key(test_keys::RSA_PUBLIC));
-        let refused = PinDecision::Refuse("SSHelter did not replace the key of web: the pinned key is not the one you were shown.".to_string());
+        let refused = PinDecision::Refuse("Lunport did not replace the key of web: the pinned key is not the one you were shown.".to_string());
         assert_eq!(decide_replace(&web, Some(&old.fingerprint), &old, &new), PinDecision::Write);
         assert_eq!(decide_replace(&web, Some(&new.fingerprint), &old, &new), PinDecision::AlreadyPinned, "the replace was made already");
         assert_eq!(decide_replace(&web, Some(&new.fingerprint), &other, &new), PinDecision::AlreadyPinned, "the key asked for wins over `previous`");

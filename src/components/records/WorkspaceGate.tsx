@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { RecordsStatus } from "@/lib/records";
 import { Button } from "@/components/ui/button";
+import { BrandMark } from "@/components/app/BrandMark";
 import { revealHidden } from "@/lib/sync-approvals";
 export function WorkspaceGate({
   status,
@@ -40,12 +41,13 @@ export function WorkspaceGate({
   return (
     <div className="app-shell flex h-screen items-center justify-center p-8">
       <div className="max-w-md space-y-4 text-center">
+        <BrandMark className="mx-auto h-12 w-14 text-primary" />
         <h1 className="app-inspector-title">
           {paused
             ? "Your existing workspace"
             : status || error
               ? "Workspace unavailable"
-              : "SSHelter"}
+              : "Lunport"}
         </h1>
         <p className="text-sm text-muted-foreground whitespace-pre-wrap">
           {revealHidden(message)}

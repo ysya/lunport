@@ -50,7 +50,7 @@ describe("a key's row", () => {
       keyCandidate({
         hosts: [
           { alias: "web", space_name: "Personal", value: "~/.ssh/id_mac", locked: null },
-          { alias: "api", space_name: "Personal", value: "~/.ssh/id_mac", locked: "This host has more than one copy; SSHelter changes it once only one copy is left." },
+          { alias: "api", space_name: "Personal", value: "~/.ssh/id_mac", locked: "This host has more than one copy; Lunport changes it once only one copy is left." },
         ],
       }),
     );
@@ -104,7 +104,7 @@ describe("a key slot kept from the previous sync account", () => {
   });
 });
 
-describe("a key in SSHelter that a synced host uses", () => {
+describe("a key in Lunport that a synced host uses", () => {
   const FILE = "laptop-3fa2c1d9";
   const inSshelter = (local_only: boolean) =>
     keyCandidate({
@@ -119,10 +119,10 @@ describe("a key in SSHelter that a synced host uses", () => {
     const t = text(html);
     expect(html).not.toContain(">Rename<");
     expect(t).toContain("web uses laptop.");
-    expect(t).toContain(`This key is only on this computer, in SSHelter. Its hosts keep using ~/.ssh/sshelter/keys/${FILE}.`);
+    expect(t).toContain(`This key is only on this computer, in Lunport. Its hosts keep using ~/.ssh/sshelter/keys/${FILE}.`);
     expect(t).not.toContain("IdentityFile");
     for (const label of ["Sync key", "Keep on this computer"]) expect(buttonTag(html, label)).not.toContain(DISABLED);
-    expect(text(row(inSshelter(false)))).toContain(`From your previous sync account, in SSHelter on this computer. Its hosts keep using ~/.ssh/sshelter/keys/${FILE}.`);
+    expect(text(row(inSshelter(false)))).toContain(`From your previous sync account, in Lunport on this computer. Its hosts keep using ~/.ssh/sshelter/keys/${FILE}.`);
   });
 });
 

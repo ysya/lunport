@@ -122,7 +122,7 @@ fn a_reader_that_stops_reading_does_not_hold_up_the_connection_and_the_gap_is_an
     assert!(started.elapsed() < Duration::from_secs(5), "the connection was held up: {:?}", started.elapsed());
 
     let probe = ShellProbe::start(shell);
-    probe.wait_for_text(20, "SSHelter dropped").expect("the stream announces the gap once the reader is back");
+    probe.wait_for_text(20, "Lunport dropped").expect("the stream announces the gap once the reader is back");
     let text = probe.text();
     assert!(text.contains("bytes of output because the terminal fell behind"), "{}", &text[text.len().saturating_sub(300)..]);
     probe.shell.close();

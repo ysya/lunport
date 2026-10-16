@@ -274,7 +274,7 @@ fn prepare_library(env: &SyncEnv) -> Result<(), LibraryFailure> {
         let proof = crate::sync::record_round::fresh_account_gate(env).map_err(|_| LibraryFailure::new(
             "account_check", "Could not verify the sync chain. Check relay access and the sync code stored on this device, then retry. Existing records have been kept."))?;
         proof.ensure_compatible().map_err(|_| LibraryFailure::new(
-            "account_review", "The sync chain is paused or uses an incompatible format. Finish pending setup or update SSHelter before enabling library sync."))
+            "account_review", "The sync chain is paused or uses an incompatible format. Finish pending setup or update Lunport before enabling library sync."))
     };
     check_account()?;
     let (state, _) = record_runtime::snapshot(env)?;
@@ -298,7 +298,7 @@ fn prepare_library(env: &SyncEnv) -> Result<(), LibraryFailure> {
     if report.review_required
         || report.gate != Some(crate::sync::record_merge::AccountGate::Compatible)
     {
-        return Err(LibraryFailure::new("sync_data_unavailable", "Some sync data needs review or could not be read. Finish syncing or update SSHelter, then retry. Existing records have been kept."));
+        return Err(LibraryFailure::new("sync_data_unavailable", "Some sync data needs review or could not be read. Finish syncing or update Lunport, then retry. Existing records have been kept."));
     }
     Ok(())
 }

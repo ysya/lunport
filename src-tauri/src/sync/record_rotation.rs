@@ -412,7 +412,7 @@ fn store(env: &SyncEnv, mut op: PendingAccountOperation, accepted: bool) -> Resu
             });
         if future {
             n.last_error =
-                Some("a pending rotation account uses a newer format; update SSHelter".into());
+                Some("a pending rotation account uses a newer format; update Lunport".into());
             if n.account.is_some() {
                 n.shared_writes_blocked = true;
             }
@@ -769,7 +769,7 @@ fn target_proof(
         }
         retain_blocked_gate(env, op)?;
         return Err(error(
-            "destination format or marker prevents rotation; update SSHelter if it is newer",
+            "destination format or marker prevents rotation; update Lunport if it is newer",
         ));
     }
     complete_transport(

@@ -1,6 +1,6 @@
-# SSHelter sync relay
+# Lunport sync relay
 
-Zero-knowledge relay for SSHelter's sync chain: one Durable Object per chain, storing only
+Zero-knowledge relay for Lunport's sync chain: one Durable Object per chain, storing only
 ciphertext. It never sees recovery phrases, host names, keys or passwords.
 
 ## Self-host
@@ -8,7 +8,7 @@ ciphertext. It never sees recovery phrases, host names, keys or passwords.
 One click, on the free Workers plan. It covers a few computers syncing a handful of spaces; Cloudflare's free daily
 limits (100,000 Durable Object requests and 100,000 rows written) are the ceiling.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/sshelter/tree/main/relay)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ysya/lunport/tree/main/relay)
 
 The button copies this directory into a new repository on your GitHub or GitLab account and deploys it with
 Workers Builds; every push to that repository redeploys it. Later changes to `relay/` here do not reach your
@@ -19,7 +19,7 @@ copy by themselves. Or deploy from a checkout:
     npx wrangler login
     npx wrangler deploy
 
-Then point SSHelter at your Worker URL: Settings → Sync → Relay URL. The app only accepts
+Then point Lunport at your Worker URL: Settings → Sync → Relay URL. The app only accepts
 `https://` relays (plain `http://` is allowed for `localhost` / `127.0.0.1` during development).
 
 ## Self-host with Docker Compose
@@ -39,7 +39,7 @@ Then enter `https://relay.example.com` in Settings → Sync → Relay URL on eve
 `git pull && docker compose up -d --build`. For a consistent backup of the `relay-data` volume, stop the `relay`
 service first.
 
-- **No public domain?** SSHelter only accepts `https://` relays, so a bare LAN address does not work. A tunnel that gives you
+- **No public domain?** Lunport only accepts `https://` relays, so a bare LAN address does not work. A tunnel that gives you
   an HTTPS address, such as Cloudflare Tunnel or `tailscale serve`, does. Treat it as a reverse proxy (next point).
 - **Your own reverse proxy instead of Caddy**:
   - Give the `relay` service a port that only the proxy can reach, for example `127.0.0.1:8080:8080`.
@@ -53,10 +53,10 @@ service first.
 
 ## Updating your relay
 
-SSHelter tells you in *Settings → Sync* when your relay is missing something the app can use.
+Lunport tells you in *Settings → Sync* when your relay is missing something the app can use.
 
 - **Deployed with the button (GitHub):** in your relay repository, open *Actions → Update relay → Run workflow*. It
-  opens a pull request that brings the relay up to the latest SSHelter release (or the tag, branch or commit you enter),
+  opens a pull request that brings the relay up to the latest Lunport release (or the tag, branch or commit you enter),
   runs its tests, and lists removed files and any Durable Object or migration change. Merge it and Cloudflare deploys it
   with the same Worker name, so the URL and the stored chains stay the same. Set the repository variable `AUTO_UPDATE`
   to `true` for a weekly check.

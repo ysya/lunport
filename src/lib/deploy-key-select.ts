@@ -38,7 +38,7 @@ export interface KeyOption {
 
 /**
  * The keys the deploy dialog offers: the ~/.ssh keys that have a .pub, and first the key the Keychain handed over when it isn't
- * one of them. That is a key in SSHelter, whose .pub is in the slot directory, which `keys_list` doesn't scan. It goes under
+ * one of them. That is a key in Lunport, whose .pub is in the slot directory, which `keys_list` doesn't scan. It goes under
  * `handedOverName` (the slot's name), or else its file name.
  */
 export function keyOptions(keys: readonly KeyInfo[], handedOver: string | null, handedOverName: string | null): KeyOption[] {

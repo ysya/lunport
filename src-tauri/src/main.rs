@@ -17,7 +17,7 @@ fn main() {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--check-window-health")) {
         std::process::exit(sshelter_lib::macos_health::check_from_terminal());
     }
-    // 用戶端（MCP adapter、`sshelter connect`）在背景啟動 SSHelter 時設 SSHELTER_START_HIDDEN=1，主視窗先不顯示。
+    // 用戶端（MCP adapter、`sshelter connect`）在背景啟動 Lunport 時設 SSHELTER_START_HIDDEN=1，主視窗先不顯示。
     // 讀完就從環境移除，趁行程還只有這一個執行緒（Tauri 還沒啟動，edition 2021 的 remove_var 不需要 unsafe）：
     // 重新啟動（例如更新的「Install & restart」）沿用同樣的參數與這個環境，要帶著視窗回來。
     let start_hidden =

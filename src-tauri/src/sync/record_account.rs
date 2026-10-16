@@ -315,7 +315,7 @@ fn gate_error(gate: &AccountGate) -> AppError {
         AccountGate::NeedsMigration { .. } => {
             "this account needs explicit migration before joining records mode"
         }
-        AccountGate::NeedsUpdate { .. } => "this account uses a newer format; update SSHelter",
+        AccountGate::NeedsUpdate { .. } => "this account uses a newer format; update Lunport",
         AccountGate::MigrationPending(_) => "this account migration is still being published",
         _ => "this record account is not writable",
     })

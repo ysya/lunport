@@ -185,7 +185,7 @@ function NewFileFlow({
               </p>
             ) : (
               <p className="text-muted-foreground">
-                SSHelter will add{" "}
+                Lunport will add{" "}
                 <span className="font-mono">
                   Include {planned.includeValue}
                 </span>{" "}

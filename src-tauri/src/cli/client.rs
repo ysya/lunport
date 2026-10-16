@@ -126,7 +126,7 @@ fn cancel(question_id: String) -> Action {
 pub struct Request {
     pub host: HostQuery,
     /// `--pause-on-error`: when the connection fails before the shell opens, the reason stays on the terminal under `PAUSE_PROMPT` and the
-    /// program exits once Enter is pressed. SSHelter's Connect gives it to a terminal that runs the command as its window's program, which
+    /// program exits once Enter is pressed. Lunport's Connect gives it to a terminal that runs the command as its window's program, which
     /// would close the window, and the reason with it, as the program ends (spec §7.4).
     pub pause_on_error: bool,
 }
@@ -150,7 +150,7 @@ const PAUSE_MODE: Mode = Mode::Prompt { echo: false };
 const THREAD_FAILED: &str = "sshelter: an internal error stopped this session.";
 
 /// What is said when the broker sent a control message this CLI cannot read (`Input::Unreadable`).
-const UNREADABLE: &str = "SSHelter sent a message this version of sshelter cannot read. Quit SSHelter and open it again.";
+const UNREADABLE: &str = "Lunport sent a message this version of sshelter cannot read. Quit Lunport and open it again.";
 
 /// What the person typed before the shell opened is kept for it (as OpenSSH's typeahead reaches the shell), up to this many bytes.
 const TYPEAHEAD_LIMIT: usize = 64 * 1024;
@@ -238,7 +238,7 @@ impl Client {
             Input::Message(message) => self.message(message),
             Input::Output(bytes) => vec![Action::Stdout(bytes)],
             Input::Closed => {
-                let reason = self.reason.take().unwrap_or_else(|| "The connection to SSHelter ended.".to_string());
+                let reason = self.reason.take().unwrap_or_else(|| "The connection to Lunport ended.".to_string());
                 self.finish(false, Some(reason), 255)
             }
             // The broker sees the stream end when the program exits: no `close` is needed.
@@ -413,7 +413,7 @@ impl Client {
             Phase::Asking { .. } => !QUESTION_READ_ENDS_ITS_LINE,
             Phase::Connecting | Phase::Pausing { .. } | Phase::Ended => false,
         };
-        // What was typed for a question and not sent (a part of a password, or of a code) was meant for SSHelter: it is thrown away with
+        // What was typed for a question and not sent (a part of a password, or of a code) was meant for Lunport: it is thrown away with
         // what the terminal holds, as readpassphrase does, or the shell that gets the terminal next reads it, shows it on its line and
         // keeps it in its history. Outside a question what is typed is the shell's, and stays.
         let at_a_question = matches!(self.phase, Phase::Asking { .. });
@@ -597,8 +597,8 @@ mod tests {
     fn the_host_key_notice_and_a_banner_are_printed_and_need_no_answer() {
         let mut client = started();
         assert_eq!(
-            client.handle(question("q1", QuestionKind::HostKeyNotice, "Waiting for you to confirm web's host key in SSHelter.", false)),
-            [Action::Stderr("Waiting for you to confirm web's host key in SSHelter.\n".into())]
+            client.handle(question("q1", QuestionKind::HostKeyNotice, "Waiting for you to confirm web's host key in Lunport.", false)),
+            [Action::Stderr("Waiting for you to confirm web's host key in Lunport.\n".into())]
         );
         assert_eq!(client.handle(Input::Message(ServerMessage::Event(Event::Banner { text: "Authorized use only.".into() }))), [Action::Stderr("Authorized use only.\n".into())]);
     }
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn the_broker_going_away_or_a_signal_ends_the_program_with_the_terminal_put_back() {
         let mut client = opened();
-        assert_eq!(client.handle(Input::Closed), [Action::Mode(Mode::Cooked, false), Action::Stderr("\nThe connection to SSHelter ended.\n".into()), Action::Exit(255)]);
+        assert_eq!(client.handle(Input::Closed), [Action::Mode(Mode::Cooked, false), Action::Stderr("\nThe connection to Lunport ended.\n".into()), Action::Exit(255)]);
         let mut client = opened();
         assert_eq!(client.handle(Input::Stop(signal::TERM)), [Action::Mode(Mode::Cooked, false), Action::Send(ClientMessage::Close), Action::Exit(128 + signal::TERM)]);
         let mut client = started();
@@ -683,7 +683,7 @@ mod tests {
     /// instead of going on without it.
     #[test]
     fn a_message_the_cli_cannot_read_ends_the_session_with_a_sentence() {
-        const SENTENCE: &str = "SSHelter sent a message this version of sshelter cannot read. Quit SSHelter and open it again.";
+        const SENTENCE: &str = "Lunport sent a message this version of sshelter cannot read. Quit Lunport and open it again.";
         assert_eq!(started().handle(Input::Unreadable), [Action::Mode(Mode::Cooked, false), Action::Stderr(format!("{SENTENCE}\n")), Action::Exit(255)]);
         assert_eq!(
             opened().handle(Input::Unreadable),
@@ -692,7 +692,7 @@ mod tests {
         );
     }
 
-    /// A client started with `--pause-on-error` (SSHelter's Connect, in a terminal that closes its window with the program).
+    /// A client started with `--pause-on-error` (Lunport's Connect, in a terminal that closes its window with the program).
     fn pausing() -> Client {
         Client::start(Request { host: HostQuery::Alias("web".into()), pause_on_error: true }, "xterm-256color".into(), (80, 24)).0
     }
@@ -755,7 +755,7 @@ mod tests {
             [
                 Action::Mode(Mode::Cooked, false),
                 Action::Send(ClientMessage::Close),
-                Action::Stderr("The connection to SSHelter ended.\n".into()),
+                Action::Stderr("The connection to Lunport ended.\n".into()),
                 Action::Mode(Mode::Prompt { echo: false }, true),
                 Action::Stderr(PAUSE_PROMPT.into()),
             ]
@@ -1045,7 +1045,7 @@ mod tests {
         client.handle(question("q1", QuestionKind::Password, "deploy@web's password: ", false));
         assert_eq!(
             client.handle(Input::Closed),
-            joined(vec![vec![Action::Mode(Mode::Cooked, true)], under_a_question("The connection to SSHelter ended."), vec![Action::Exit(255)]])
+            joined(vec![vec![Action::Mode(Mode::Cooked, true)], under_a_question("The connection to Lunport ended."), vec![Action::Exit(255)]])
         );
     }
 
@@ -1058,7 +1058,7 @@ mod tests {
         inputs.into_iter().map(|input| client.handle(input)).last().unwrap()
     }
 
-    /// What was typed at a question and not sent yet (a part of a password: no Enter yet) was meant for SSHelter. However the session ends
+    /// What was typed at a question and not sent yet (a part of a password: no Enter yet) was meant for Lunport. However the session ends
     /// under the question, the terminal is put back with what it holds thrown away, as readpassphrase does: otherwise the shell that gets
     /// the terminal next reads it, shows it on its line and keeps it in its history (measured with bash 5 and zsh 5.9). One case for each
     /// way the program ends; the questions that show what is typed, and those asked in the open shell, the same.
@@ -1073,7 +1073,7 @@ mod tests {
             ("SIGHUP, or the terminal went away", || vec![Input::Stop(signal::HUP)], vec![Action::Send(ClientMessage::Close), Action::Exit(129)]),
             ("SIGQUIT", || vec![Input::Stop(signal::QUIT)], vec![Action::Send(ClientMessage::Close), Action::Exit(131)]),
             ("a thread of the program failed", || vec![Input::Failed], joined(vec![vec![Action::Send(ClientMessage::Close)], on_its_own_line(THREAD_FAILED), vec![Action::Exit(255)]])),
-            ("the broker went away", || vec![Input::Closed], joined(vec![on_its_own_line("The connection to SSHelter ended."), vec![Action::Exit(255)]])),
+            ("the broker went away", || vec![Input::Closed], joined(vec![on_its_own_line("The connection to Lunport ended."), vec![Action::Exit(255)]])),
             ("the broker ended the session", || vec![exited()], vec![Action::Exit(255)]),
             ("the broker's error, then the end", || vec![error(kinds::AUTH, ABANDONED), exited()], joined(vec![on_its_own_line(ABANDONED), vec![Action::Exit(255)]])),
             ("the connection was lost", || vec![event(Event::Disconnected { reason: LOST.into() }), exited()], joined(vec![on_its_own_line(LOST), vec![Action::Exit(255)]])),

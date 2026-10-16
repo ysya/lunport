@@ -340,9 +340,9 @@ pub(crate) fn app_open_diagnostics(app: tauri::AppHandle) -> Result<(), crate::e
 #[cfg(windows)]
 pub(crate) fn show_startup_failure() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
-    let message = format!("SSHelter could not start its interface.\n\nPlease open %LOCALAPPDATA%\\{}\\diagnostics and include app.log when reporting this problem.\n\nThe logs do not include your hosts, passwords, keys or sync code.", crate::app_profile::CURRENT.identifier());
+    let message = format!("Lunport could not start its interface.\n\nPlease open %LOCALAPPDATA%\\{}\\diagnostics and include app.log when reporting this problem.\n\nThe logs do not include your hosts, passwords, keys or sync code.", crate::app_profile::CURRENT.identifier());
     let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-    let title: Vec<u16> = "SSHelter startup error"
+    let title: Vec<u16> = "Lunport startup error"
         .encode_utf16()
         .chain(Some(0))
         .collect();

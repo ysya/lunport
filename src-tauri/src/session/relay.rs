@@ -333,7 +333,7 @@ fn ending(exit: Option<Exit>, quit: Option<String>, session: &dyn Session, targe
     match exit {
         Some(Exit::Code(code)) => vec![ServerMessage::Exited { code: Some(code), signal: None }],
         Some(Exit::Signal(signal)) => vec![ServerMessage::Exited { code: None, signal: Some(signal) }],
-        Some(Exit::Refused(why)) => explained(Event::Error { kind: kinds::SHELL.to_string(), text: format!("SSHelter could not open a shell on {alias}: {why}.") }),
+        Some(Exit::Refused(why)) => explained(Event::Error { kind: kinds::SHELL.to_string(), text: format!("Lunport could not open a shell on {alias}: {why}.") }),
         Some(Exit::Disconnected) | None => {
             let reason = match quit {
                 Some(reason) => reason,
@@ -357,7 +357,7 @@ fn no_shell(error: &SessionError, session: &dyn Session, target: &Target, alias:
         SessionError::Timeout => "the connection did not take the request in time".to_string(),
         SessionError::Channel(text) => format!("SSH error: {text}"),
     };
-    let text = format!("SSHelter could not open a shell on {alias}: {}.", why.trim_end_matches('.'));
+    let text = format!("Lunport could not open a shell on {alias}: {}.", why.trim_end_matches('.'));
     vec![ServerMessage::Event(Event::Error { kind: kinds::SHELL.to_string(), text }), no_status]
 }
 
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(
             &running.link.split().1[1..],
             [
-                ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "SSHelter could not open a shell on web: the server refused to allocate a terminal (PTY).".into() }),
+                ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "Lunport could not open a shell on web: the server refused to allocate a terminal (PTY).".into() }),
                 ServerMessage::Exited { code: None, signal: None },
             ]
         );
@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(
             failing.link.split().1,
             [
-                ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "SSHelter could not open a shell on web: SSH error: channel open refused.".into() }),
+                ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "Lunport could not open a shell on web: SSH error: channel open refused.".into() }),
                 ServerMessage::Exited { code: None, signal: None },
             ]
         );
@@ -739,12 +739,12 @@ mod tests {
     fn quitting_the_app_ends_the_shell_and_tells_the_client_why() {
         let mut running = start(FakeEngine::new(), ShellControl::with_settle(Duration::from_millis(100)));
         running.wait_for_shell().print(b"$ ");
-        running.control.end("SSHelter quit, so the connection to web was closed.");
+        running.control.end("Lunport quit, so the connection to web was closed.");
         running.finish();
         assert_eq!(
             &running.link.split().1[1..],
             [
-                ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to web was closed.".into() }),
+                ServerMessage::Event(Event::Disconnected { reason: "Lunport quit, so the connection to web was closed.".into() }),
                 ServerMessage::Exited { code: None, signal: None },
             ]
         );
@@ -783,7 +783,7 @@ mod tests {
         failing.finish();
         assert_eq!(
             failing.link.split().1[0],
-            ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "SSHelter could not open a shell on web: SSH error: refused ?[2J?]0;x?.".into() })
+            ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "Lunport could not open a shell on web: SSH error: refused ?[2J?]0;x?.".into() })
         );
 
         // A refused terminal or shell: the reason the engine gives.
@@ -792,17 +792,17 @@ mod tests {
         refusing.finish();
         assert_eq!(
             refusing.link.split().1[1],
-            ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "SSHelter could not open a shell on web: refused ?[2J?]0;x?.".into() })
+            ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "Lunport could not open a shell on web: refused ?[2J?]0;x?.".into() })
         );
 
         // The sentence for the app quitting carries the alias of the host, which the person's configuration wrote.
         let mut quitting = start(FakeEngine::new(), ShellControl::with_settle(Duration::from_millis(100)));
         quitting.wait_for_shell().print(b"$ ");
-        quitting.control.end(&format!("SSHelter quit, so the connection to {escape} was closed."));
+        quitting.control.end(&format!("Lunport quit, so the connection to {escape} was closed."));
         quitting.finish();
         assert_eq!(
             quitting.link.split().1[1],
-            ServerMessage::Event(Event::Disconnected { reason: "SSHelter quit, so the connection to ?[2J?]0;x? was closed.".into() })
+            ServerMessage::Event(Event::Disconnected { reason: "Lunport quit, so the connection to ?[2J?]0;x? was closed.".into() })
         );
     }
 
@@ -818,7 +818,7 @@ mod tests {
         assert_eq!(lost.link.calls(), [1, 2], "`opened`, then the explanation and `exited` together");
 
         let control = ShellControl::with_settle(Duration::from_millis(100));
-        control.end("SSHelter quit, so the connection to web was closed.");
+        control.end("Lunport quit, so the connection to web was closed.");
         let mut ended = start(FakeEngine::new(), control);
         ended.finish();
         assert_eq!(ended.link.calls(), [2], "the app ended the session before its shell opened");
@@ -870,7 +870,7 @@ mod tests {
         assert_eq!(signal_name(&"A".repeat(SIGNAL_NAME_MAX)), "A".repeat(SIGNAL_NAME_MAX), "up to the limit it passes");
     }
 
-    const QUIT: &str = "SSHelter quit, so the connection to web was closed.";
+    const QUIT: &str = "Lunport quit, so the connection to web was closed.";
 
     fn quit_messages() -> [ServerMessage; 2] {
         [ServerMessage::Event(Event::Disconnected { reason: QUIT.into() }), ServerMessage::Exited { code: None, signal: None }]
@@ -1041,7 +1041,7 @@ mod tests {
         assert_eq!(
             slow.link.split().1,
             [
-                ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "SSHelter could not open a shell on web: the connection did not take the request in time.".into() }),
+                ServerMessage::Event(Event::Error { kind: kinds::SHELL.into(), text: "Lunport could not open a shell on web: the connection did not take the request in time.".into() }),
                 ServerMessage::Exited { code: None, signal: None },
             ]
         );

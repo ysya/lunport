@@ -34,9 +34,9 @@ use crate::session::protocol::HostQuery;
 use client::{Request, PAUSE_PROMPT};
 
 /// What `sshelter connect` prints when the app does not answer after it was started (spec §7.3, §11).
-pub const NOT_STARTED: &str = "SSHelter did not start within 12 seconds.";
+pub const NOT_STARTED: &str = "Lunport did not start within 12 seconds.";
 
-/// The flag of `Request::pause_on_error`, before the host: SSHelter's Connect gives it to a terminal that closes its window with the
+/// The flag of `Request::pause_on_error`, before the host: Lunport's Connect gives it to a terminal that closes its window with the
 /// program (spec §7.4). It is not in the usage, which is for people.
 pub const PAUSE_ON_ERROR: &str = "--pause-on-error";
 
@@ -60,7 +60,7 @@ pub fn parse_args(args: &[String]) -> Result<Request, String> {
     Ok(Request { host, pause_on_error })
 }
 
-/// `--pause-on-error` before the session: throws away what was typed while the CLI waited for SSHelter (`discard`: a line typed then must
+/// `--pause-on-error` before the session: throws away what was typed while the CLI waited for Lunport (`discard`: a line typed then must
 /// not end the wait before its prompt was seen), then waits for Enter on `input` (standard input, the terminal as it was: its own line
 /// editing, echo on), a line's end. The end of input and a failed read end the wait too (a terminal that went away; no standard input;
 /// a standard input another program left non-blocking, which Connect's new window never has). No signal is taken over yet: Ctrl-C and a
@@ -102,7 +102,7 @@ pub fn term_from(value: Option<std::ffi::OsString>) -> String {
 
 /// `sshelter connect <arguments>`: returns the exit code (main.rs exits with it). Started before anything of Tauri. The order is fixed:
 /// the arguments are looked at first (the usage, and 2), then the terminal (`sshelter connect needs a terminal.`, and 1), and only then is
-/// SSHelter reached, or started.
+/// Lunport reached, or started.
 #[cfg(unix)]
 pub fn run_connect(args: &[OsString]) -> i32 {
     let request = match texts(args).and_then(|args| parse_args(&args)) {
@@ -123,7 +123,7 @@ pub fn run_connect(args: &[OsString]) -> i32 {
     session(request, term, Arc::new(terminal::StdinTermios), reach_broker, signals, wait, &mut std::io::stderr())
 }
 
-/// The connection to the broker, at `<app data>/ipc/sock` (found without the app): if nothing answers there SSHelter is started, hidden,
+/// The connection to the broker, at `<app data>/ipc/sock` (found without the app): if nothing answers there Lunport is started, hidden,
 /// under the same locks as the MCP adapter's start, and waited for.
 #[cfg(unix)]
 pub(crate) fn reach_broker() -> Result<UnixStream, String> {
@@ -136,9 +136,9 @@ pub(crate) fn reach_broker() -> Result<UnixStream, String> {
     ensure_started(|| UnixStream::connect(&socket).ok(), take_spawn_locks, start_host, START_WAIT, NOT_STARTED)
 }
 
-/// One session on the terminal `api`; `reach` finds the broker, starting SSHelter if it must, and `signals` takes over the signals
+/// One session on the terminal `api`; `reach` finds the broker, starting Lunport if it must, and `signals` takes over the signals
 /// (`run::signal_thread`). The terminal comes first: a program that has none must not start the app just to say so. Writes what the CLI
-/// says before the session to `stderr` (the terminal's); with `--pause-on-error`, SSHelter that cannot be reached is said and then
+/// says before the session to `stderr` (the terminal's); with `--pause-on-error`, Lunport that cannot be reached is said and then
 /// `wait` waits for Enter (`wait_for_enter`).
 #[cfg(unix)]
 fn session(
@@ -201,7 +201,7 @@ fn own_writer<W: std::io::Write + std::os::fd::AsFd + std::os::fd::AsRawFd + Sen
 /// steps in it: the arguments first (the usage, and 2); then the console of the process that started this one is attached when this
 /// one has none (a release build is a GUI program; attaching sets the process's control handlers aside, so none is installed before),
 /// and only then are the console's buffers looked up (`StdConsole::new`: a GUI program's standard handles are usually not valid before
-/// the attach); then the console check (`sshelter connect needs a terminal.`, and 1), and SSHelter reached, or started. The console is
+/// the attach); then the console check (`sshelter connect needs a terminal.`, and 1), and Lunport reached, or started. The console is
 /// changed only once every way out can put it back (`session`).
 #[cfg(windows)]
 pub fn run_connect(args: &[OsString]) -> i32 {
@@ -239,9 +239,9 @@ pub fn run_connect(args: &[OsString]) -> i32 {
 #[cfg(windows)]
 const PIPE_BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The connection to the broker, on its named pipe (found without the app, spec §4): if nobody serves it SSHelter is started, hidden,
+/// The connection to the broker, on its named pipe (found without the app, spec §4): if nobody serves it Lunport is started, hidden,
 /// under the same locks as the MCP adapter's start, and waited for, as on Unix. A pipe of that name that is not the user's own is not
-/// SSHelter's (another program made it): it is said so, and SSHelter is not started for it, nor is anything said to it.
+/// Lunport's (another program made it): it is said so, and Lunport is not started for it, nor is anything said to it.
 #[cfg(windows)]
 pub(crate) fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, String> {
     use crate::host_start::{ensure_started, start_host, take_spawn_locks, START_WAIT};
@@ -249,7 +249,7 @@ pub(crate) fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, Str
     let answering = || match crate::ipc::pipe_windows::connect(&name, PIPE_BUSY_WAIT) {
         Ok(stream) => Some(Ok(stream)),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Some(Err(refused(&error))),
-        // Nobody serves the pipe, or every instance stayed busy: SSHelter is started (one that runs already takes over the start).
+        // Nobody serves the pipe, or every instance stayed busy: Lunport is started (one that runs already takes over the start).
         Err(_) => None,
     };
     ensure_started(answering, take_spawn_locks, start_host, START_WAIT, NOT_STARTED)?
@@ -261,16 +261,16 @@ pub(crate) fn reach_broker() -> Result<crate::ipc::pipe_windows::PipeStream, Str
 fn refused(error: &std::io::Error) -> String {
     match error.raw_os_error() {
         None => error.to_string(),
-        Some(_) => format!("sshelter: cannot connect to SSHelter ({error})"),
+        Some(_) => format!("sshelter: cannot connect to Lunport ({error})"),
     }
 }
 
-/// One session on the console `api`; `reach` finds the broker, starting SSHelter if it must, `control_events` takes the console's control
+/// One session on the console `api`; `reach` finds the broker, starting Lunport if it must, `control_events` takes the console's control
 /// events over (`inputs_windows::take_over_control_events`), and `outputs` gives the terminal's standard output and error. The console
 /// comes first: a program that has none must not start the app just to say so. Then every way out of the program is put in place (the
 /// panic hook's restore, the watchdog, the control events) before the console is changed at all (`Tty::take_over`): until then a Ctrl-C
 /// ends the program the default way, and the console is as it was. Writes what the CLI says before the session to `stderr`; with
-/// `--pause-on-error`, SSHelter that cannot be reached is said and then `wait` waits for Enter (`wait_for_enter`), the console as it was.
+/// `--pause-on-error`, Lunport that cannot be reached is said and then `wait` waits for Enter (`wait_for_enter`), the console as it was.
 #[cfg(windows)]
 #[allow(clippy::too_many_arguments)]
 fn session(
@@ -365,7 +365,7 @@ mod tests {
         }
     }
 
-    /// SSHelter's Connect puts `--pause-on-error` before the host (spec §7.4); the usage, which is for people, does not show it.
+    /// Lunport's Connect puts `--pause-on-error` before the host (spec §7.4); the usage, which is for people, does not show it.
     #[test]
     fn pause_on_error_comes_before_the_host() {
         assert_eq!(parse_args(&args(&["--pause-on-error", "web"])), Ok(Request { host: HostQuery::Alias("web".into()), pause_on_error: true }));
@@ -391,7 +391,7 @@ mod tests {
         wait_for_enter(|| {}, Failing);
     }
 
-    /// What was typed while the CLI waited for SSHelter is thrown away before the wait reads: a line typed then ("is it stuck?") does not
+    /// What was typed while the CLI waited for Lunport is thrown away before the wait reads: a line typed then ("is it stuck?") does not
     /// end the wait the moment its prompt appears; the Enter typed after it does.
     #[test]
     fn the_wait_for_enter_throws_away_what_was_typed_before_it() {
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(term_from(None), "xterm-256color");
     }
 
-    /// Wrong arguments are the first thing looked at: the usage and 2, before a terminal is asked for or SSHelter is reached.
+    /// Wrong arguments are the first thing looked at: the usage and 2, before a terminal is asked for or Lunport is reached.
     #[cfg(unix)]
     #[test]
     fn wrong_arguments_exit_2_before_anything_else() {
@@ -474,7 +474,7 @@ mod tests {
         }
 
         fn session_on(api: Arc<dyn TermiosApi>, reach: impl FnOnce() -> Result<UnixStream, String>) -> (i32, String) {
-            let signals = |_, _, _, _| -> io::Result<()> { panic!("the signals are not taken over before SSHelter answers") };
+            let signals = |_, _, _, _| -> io::Result<()> { panic!("the signals are not taken over before Lunport answers") };
             session_with(api, reach, signals)
         }
 
@@ -510,45 +510,45 @@ mod tests {
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
             theirs.set_nonblocking(true).unwrap();
             let read = std::io::Read::read(&mut &theirs, &mut [0u8; 64]);
-            assert!(!matches!(read, Ok(count) if count > 0), "nothing was asked of SSHelter: {read:?}");
+            assert!(!matches!(read, Ok(count) if count > 0), "nothing was asked of Lunport: {read:?}");
         }
 
-        /// Without a terminal on standard input the CLI says so and ends with 1 (spec §7.3), and it does so before it reaches SSHelter, let
+        /// Without a terminal on standard input the CLI says so and ends with 1 (spec §7.3), and it does so before it reaches Lunport, let
         /// alone starts it: a program that cannot talk to a terminal must not launch the app just to say that.
         #[test]
         fn without_a_terminal_the_cli_says_so_before_it_reaches_or_starts_sshelter() {
-            let reach = || -> Result<UnixStream, String> { panic!("SSHelter must not be reached, let alone started, without a terminal") };
+            let reach = || -> Result<UnixStream, String> { panic!("Lunport must not be reached, let alone started, without a terminal") };
             assert_eq!(session_on(Arc::new(NotATerminal), reach), (1, "sshelter connect needs a terminal.\n".to_string()));
         }
 
-        /// Spec §11: when nothing answers after SSHelter was started, the sentence and 1; the terminal was never changed.
+        /// Spec §11: when nothing answers after Lunport was started, the sentence and 1; the terminal was never changed.
         #[test]
         fn when_nothing_answers_the_cli_says_sshelter_did_not_start_and_leaves_the_terminal_alone() {
             let terminal = FakeTermios::new();
-            assert_eq!(session_on(terminal.clone(), || Err(NOT_STARTED.to_string())), (1, "SSHelter did not start within 12 seconds.\n".to_string()));
+            assert_eq!(session_on(terminal.clone(), || Err(NOT_STARTED.to_string())), (1, "Lunport did not start within 12 seconds.\n".to_string()));
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
         }
 
-        /// Spec §7.3, `--pause-on-error`: SSHelter that cannot be reached is said, the prompt follows, and the program waits for Enter
+        /// Spec §7.3, `--pause-on-error`: Lunport that cannot be reached is said, the prompt follows, and the program waits for Enter
         /// (once) before it ends with 1; the terminal is left as it was, with its own line editing for that Enter. Without a terminal there
         /// is nothing to wait on: the sentence, and 1.
         #[test]
         fn with_pause_on_error_sshelter_that_cannot_be_reached_is_said_and_waits_for_enter() {
             let terminal = FakeTermios::new();
             let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
-            let signals = |_, _, _, _| -> io::Result<()> { panic!("the signals are not taken over before SSHelter answers") };
+            let signals = |_, _, _, _| -> io::Result<()> { panic!("the signals are not taken over before Lunport answers") };
             let mut waits = 0;
             let said = session_asked(request.clone(), terminal.clone(), || Err(NOT_STARTED.to_string()), signals, || waits += 1);
-            assert_eq!(said, (1, "SSHelter did not start within 12 seconds.\nPress Enter to exit.".to_string()));
+            assert_eq!(said, (1, "Lunport did not start within 12 seconds.\nPress Enter to exit.".to_string()));
             assert_eq!(waits, 1);
             assert!(terminal.sets.lock().unwrap().is_empty(), "the terminal was not changed");
-            let reach = || -> Result<UnixStream, String> { panic!("SSHelter must not be reached, let alone started, without a terminal") };
+            let reach = || -> Result<UnixStream, String> { panic!("Lunport must not be reached, let alone started, without a terminal") };
             let wait = || panic!("nothing to wait on without a terminal");
             assert_eq!(session_asked(request, Arc::new(NotATerminal), reach, signals, wait), (1, "sshelter connect needs a terminal.\n".to_string()));
         }
 
         /// The CLI's own setup failing (its signals cannot be taken over) is said and ends with 1 at once, `--pause-on-error` or not:
-        /// the pause is for SSHelter's answer, and the terminal was not changed.
+        /// the pause is for Lunport's answer, and the terminal was not changed.
         #[test]
         fn with_pause_on_error_the_clis_own_setup_failing_does_not_wait() {
             let terminal = FakeTermios::new();
@@ -575,7 +575,7 @@ mod tests {
         use crate::ipc::pipe_windows::{self, PipeStream};
         use crate::ipc::server::{Handler, Started};
 
-        /// A connection to a pipe of the test's own, whose server end is kept open (in SSHelter's place: nothing is said to it here).
+        /// A connection to a pipe of the test's own, whose server end is kept open (in Lunport's place: nothing is said to it here).
         fn a_pipe() -> (PipeStream, tempfile::TempDir) {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let dir = tempfile::tempdir().unwrap();
@@ -608,41 +608,41 @@ mod tests {
             (code, String::from_utf8(said).unwrap())
         }
 
-        /// Spec §7.3: input that is not a console is said, with 1, before SSHelter is reached, let alone started.
+        /// Spec §7.3: input that is not a console is said, with 1, before Lunport is reached, let alone started.
         #[test]
         fn without_a_console_the_cli_says_so_before_it_reaches_or_starts_sshelter() {
             let console = FakeConsole::new();
             console.fail(|call| *call == Call::Get(Setting::InputMode));
-            let reach = || -> Result<PipeStream, String> { panic!("SSHelter must not be reached, let alone started, without a console") };
+            let reach = || -> Result<PipeStream, String> { panic!("Lunport must not be reached, let alone started, without a console") };
             let events = |_| -> io::Result<()> { panic!("nothing is taken over without a console") };
             assert_eq!(session_with(console, reach, events), (1, "sshelter connect needs a terminal.\n".to_string()));
         }
 
-        /// Spec §11: when nothing answers after SSHelter was started, the sentence and 1; the console was never changed.
+        /// Spec §11: when nothing answers after Lunport was started, the sentence and 1; the console was never changed.
         #[test]
         fn when_nothing_answers_the_cli_says_sshelter_did_not_start_and_leaves_the_console_alone() {
             let console = FakeConsole::new();
-            let events = |_| -> io::Result<()> { panic!("nothing is taken over before SSHelter answers") };
-            assert_eq!(session_with(console.clone(), || Err(NOT_STARTED.to_string()), events), (1, "SSHelter did not start within 12 seconds.\n".to_string()));
+            let events = |_| -> io::Result<()> { panic!("nothing is taken over before Lunport answers") };
+            assert_eq!(session_with(console.clone(), || Err(NOT_STARTED.to_string()), events), (1, "Lunport did not start within 12 seconds.\n".to_string()));
             assert!(console.changes().is_empty(), "the console was not changed");
         }
 
-        /// Spec §7.3, `--pause-on-error`: SSHelter that cannot be reached is said, the prompt follows, and the program waits for Enter
+        /// Spec §7.3, `--pause-on-error`: Lunport that cannot be reached is said, the prompt follows, and the program waits for Enter
         /// (once), the console as it was (its own line editing), before it ends with 1.
         #[test]
         fn with_pause_on_error_sshelter_that_cannot_be_reached_is_said_and_waits_for_enter() {
             let console = FakeConsole::new();
             let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
-            let events = |_| -> io::Result<()> { panic!("nothing is taken over before SSHelter answers") };
+            let events = |_| -> io::Result<()> { panic!("nothing is taken over before Lunport answers") };
             let mut waits = 0;
             let said = session_asked(request, console.clone(), || Err(NOT_STARTED.to_string()), events, || waits += 1);
-            assert_eq!(said, (1, "SSHelter did not start within 12 seconds.\nPress Enter to exit.".to_string()));
+            assert_eq!(said, (1, "Lunport did not start within 12 seconds.\nPress Enter to exit.".to_string()));
             assert_eq!(waits, 1);
             assert!(console.changes().is_empty(), "the console was not changed");
         }
 
         /// The CLI's own setup failing (the control events cannot be taken over; a console without virtual terminal sequences) is said and
-        /// ends with 1 at once, `--pause-on-error` or not: the pause is for SSHelter's answer.
+        /// ends with 1 at once, `--pause-on-error` or not: the pause is for Lunport's answer.
         #[test]
         fn with_pause_on_error_the_clis_own_setup_failing_does_not_wait() {
             let request = Request { host: HostQuery::Alias("web".into()), pause_on_error: true };
@@ -696,14 +696,14 @@ mod tests {
         }
     }
 
-    /// Windows: a broker's pipe another program made is refused with `connect`'s own sentence; one the system refuses (an SSHelter that
+    /// Windows: a broker's pipe another program made is refused with `connect`'s own sentence; one the system refuses (a Lunport that
     /// runs elevated makes a pipe a program that does not cannot open) with the system's reason.
     #[test]
     fn a_pipe_that_cannot_be_used_is_said_why() {
-        let squatted = std::io::Error::new(std::io::ErrorKind::PermissionDenied, r"Another program is using SSHelter's session pipe (\\.\pipe\x)");
-        assert_eq!(refused(&squatted), r"Another program is using SSHelter's session pipe (\\.\pipe\x)");
+        let squatted = std::io::Error::new(std::io::ErrorKind::PermissionDenied, r"Another program is using Lunport's session pipe (\\.\pipe\x)");
+        assert_eq!(refused(&squatted), r"Another program is using Lunport's session pipe (\\.\pipe\x)");
         let denied = std::io::Error::from_raw_os_error(5);
-        assert!(refused(&denied).starts_with("sshelter: cannot connect to SSHelter ("), "{}", refused(&denied));
+        assert!(refused(&denied).starts_with("sshelter: cannot connect to Lunport ("), "{}", refused(&denied));
     }
 
     /// Spec §11: the sentence, exactly, when the app does not answer.
@@ -721,6 +721,6 @@ mod tests {
             std::time::Duration::ZERO,
             NOT_STARTED,
         );
-        assert_eq!((result, starts), (Err("SSHelter did not start within 12 seconds.".to_string()), 1));
+        assert_eq!((result, starts), (Err("Lunport did not start within 12 seconds.".to_string()), 1));
     }
 }

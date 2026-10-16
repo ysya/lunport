@@ -85,7 +85,7 @@ pub trait Owner: Send + Sync {
     fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply;
     /// Trusted hop attribution is supplied separately from server-controlled prompt text.
     fn ask_at(&self, hop:&HopRef, kind:QuestionKind,text:&str,echo:bool,deadline:Option<Instant>)->Reply{let _=hop;self.ask(kind,text,echo,deadline)}
-    /// Shows that the host key waits for the person in SSHelter's window (spec §11); no answer.
+    /// Shows that the host key waits for the person in Lunport's window (spec §11); no answer.
     fn host_key_notice(&self, text: &str);
     /// Shows the server's banner (already through `printable`).
     fn banner(&self, text: &str);
@@ -218,10 +218,10 @@ impl<'a> BrokerAuth<'a> {
                 continue;
             }
             let Some(key) = self.keys.key(key_id) else { continue };
-            let Some(text) = self.keys.private_text(key_id).map_err(|error| format!("SSHelter cannot read the key {} from its vault ({error}).", key.name))? else {
+            let Some(text) = self.keys.private_text(key_id).map_err(|error| format!("Lunport cannot read the key {} from its vault ({error}).", key.name))? else {
                 continue;
             };
-            let mismatch = || format!("SSHelter refused the key {}: its private key does not match its saved public key.", label(&key.name));
+            let mismatch = || format!("Lunport refused the key {}: its private key does not match its saved public key.", label(&key.name));
             let identity = material::public_key_data(&key.public_key).ok_or_else(mismatch)?;
             // The public half is readable even while the private half is encrypted. Refuse
             // inconsistent metadata before any passphrase prompt or stale-passphrase cleanup.
@@ -242,8 +242,8 @@ impl<'a> BrokerAuth<'a> {
         match material::open(text, None) {
             Ok(material) => return Ok(material),
             Err(OpenError::NeedsPassphrase) => {}
-            Err(OpenError::UnsupportedCipher(cipher)) => return Err(format!("The key {} is encrypted with {cipher}, which SSHelter cannot open.", key.name)),
-            Err(OpenError::Unreadable | OpenError::WrongPassphrase) => return Err(format!("The key {} in SSHelter's vault cannot be read.", key.name)),
+            Err(OpenError::UnsupportedCipher(cipher)) => return Err(format!("The key {} is encrypted with {cipher}, which Lunport cannot open.", key.name)),
+            Err(OpenError::Unreadable | OpenError::WrongPassphrase) => return Err(format!("The key {} in Lunport's vault cannot be read.", key.name)),
         }
         let account = passphrase_account(key_id);
         if let Ok(Some(saved)) = self.keychain.get(&account) {
@@ -268,7 +268,7 @@ impl<'a> BrokerAuth<'a> {
             match material::open(text, Some(&passphrase)) {
                 Ok(material) => return Ok(material),
                 Err(OpenError::WrongPassphrase) => text_of_question = format!("That passphrase didn't work. Enter the passphrase for the key {}: ", label(&key.name)),
-                Err(_) => return Err(format!("The key {} in SSHelter's vault cannot be read.", key.name)),
+                Err(_) => return Err(format!("The key {} in Lunport's vault cannot be read.", key.name)),
             }
         }
         Err(abandoned("the passphrase was wrong three times"))

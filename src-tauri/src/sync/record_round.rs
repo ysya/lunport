@@ -37,7 +37,7 @@ fn gate_message(gate: &AccountGate) -> &'static str {
     match gate {
         AccountGate::Compatible => "",
         AccountGate::NeedsMigration { .. } => "this account needs an explicit record migration",
-        AccountGate::NeedsUpdate { .. } => "this account uses a newer format; update SSHelter",
+        AccountGate::NeedsUpdate { .. } => "this account uses a newer format; update Lunport",
         AccountGate::MigrationPending(_) => "account migration is still being published",
         AccountGate::InvalidMigration => "the account migration marker is invalid or unavailable",
         AccountGate::InvalidPull => "the relay returned inconsistent record transport metadata",

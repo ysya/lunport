@@ -99,10 +99,10 @@ describe("a space's name, which another computer chose", () => {
   });
 });
 
-describe("files SSHelter doesn't use", () => {
+describe("files Lunport doesn't use", () => {
   it("speaks of one file in the singular and of several in the plural", () => {
-    expect(text(pane(overview({ stray_files: ["hosts.config"] })))).toContain("hosts.config in ~/.ssh/sshelter: it is not in SSHelter's Include line.");
-    expect(text(pane(overview({ stray_files: ["a.config", "b.config"] })))).toContain("they are not in SSHelter's Include line.");
+    expect(text(pane(overview({ stray_files: ["hosts.config"] })))).toContain("hosts.config in ~/.ssh/sshelter: it is not in Lunport's Include line.");
+    expect(text(pane(overview({ stray_files: ["a.config", "b.config"] })))).toContain("they are not in Lunport's Include line.");
   });
 });
 

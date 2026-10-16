@@ -47,7 +47,7 @@ describe("updates stay in the update page", () => {
     });
     expect(html).toContain("Version 1.0.0-8 is available");
     expect(html).toContain("Install and restart");
-    expect(html).toContain("Installing restarts SSHelter and ends active SSH sessions.");
+    expect(html).toContain("Installing restarts Lunport and ends active SSH sessions.");
     expect(html).toContain("What’s new in");
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>");
@@ -85,7 +85,7 @@ describe("updates stay in the update page", () => {
       error: "Restart denied",
     });
     expect(html).toContain("The update is installed.");
-    expect(html).toContain("Restart SSHelter</button>");
+    expect(html).toContain("Restart Lunport</button>");
     expect(html).not.toContain("Try again");
     expect(html).not.toContain("Install and restart");
   });

@@ -32,7 +32,7 @@ import { useUiStore } from "@/stores/ui";
 /**
  * One key's row: the hosts that use it, the question, what changes, and the two answers. A slot that is already on this
  * computer goes in under its own name: no Rename, and a note says where it came from (kept from the previous sync account, or
- * a key in SSHelter's vault: only on this computer, or kept from the previous account). Exported for the markup tests.
+ * a key in Lunport's vault: only on this computer, or kept from the previous account). Exported for the markup tests.
  */
 export function KeySetupRow({
   candidate,
@@ -102,7 +102,7 @@ export function KeySetupRow({
   );
 }
 
-/** Values SSHelter can't set up by itself (spec §5). Exported for the markup tests. */
+/** Values Lunport can't set up by itself (spec §5). Exported for the markup tests. */
 export function UnsupportedList({ items }: { items: UnsupportedIdentity[] }) {
   if (items.length === 0) return null;
   return (

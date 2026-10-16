@@ -385,7 +385,7 @@ fn baseline_account(
         .and_then(|(r, _)| r.payload.get("schema_version").and_then(Value::as_u64))
         .unwrap_or(0);
     if schema > 3 {
-        return Err(failure("account uses a newer format; update SSHelter"));
+        return Err(failure("account uses a newer format; update Lunport"));
     }
     if actual.as_ref().is_some_and(|(r, _)| r.deleted) || (schema == 0 && !pull.records.is_empty())
     {

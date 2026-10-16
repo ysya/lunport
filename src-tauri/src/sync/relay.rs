@@ -457,7 +457,7 @@ impl RelayApi for RelayClient {
             200 => {
                 let wire: WireInfo = read_json(resp)?;
                 if wire.relay != "sshelter-relay" {
-                    return Err(RelayError::BadResponse("this server is not an SSHelter relay".to_string()));
+                    return Err(RelayError::BadResponse("this server is not a Lunport relay".to_string()));
                 }
                 Ok(RelayInfo { version: Some(wire.version), features: wire.features })
             }

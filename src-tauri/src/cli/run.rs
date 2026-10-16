@@ -83,7 +83,7 @@ pub fn run(stream: Stream, request: impl Into<Request>, term: String, tty: &mut 
     let (stdout, mut stderr) = (stdout.into(), stderr.into());
     let size = tty.size().unwrap_or((80, 24));
     let Ok(reader) = stream.try_clone() else {
-        let _ = stderr.write_whole(b"The connection to SSHelter failed.\n");
+        let _ = stderr.write_whole(b"The connection to Lunport failed.\n");
         return 255;
     };
     let terminal = TerminalWriter::start(stdout, stderr, &inputs);
@@ -2502,7 +2502,7 @@ mod tests {
         hand.open();
         write_frame(&mut hand.broker, CONTROL, br#"{"type":"teleport"}"#).unwrap();
         assert_eq!(hand.ends_within(Duration::from_secs(5)), (255, true));
-        assert_eq!(stderr.text(), "\nSSHelter sent a message this version of sshelter cannot read. Quit SSHelter and open it again.\n");
+        assert_eq!(stderr.text(), "\nLunport sent a message this version of sshelter cannot read. Quit Lunport and open it again.\n");
     }
 
     /// A terminal whose descriptor another program left non-blocking: a write that would block says so (`WouldBlock`) instead of waiting,
@@ -2656,7 +2656,7 @@ mod tests {
         buf[..count].to_vec()
     }
 
-    /// What was typed at a question and not sent (`hunt`: a part of a password, no Enter yet) was meant for SSHelter. When the session
+    /// What was typed at a question and not sent (`hunt`: a part of a password, no Enter yet) was meant for Lunport. When the session
     /// ends under the question (here the broker ends it, as when the question's deadline passes), the terminal is put back with what it
     /// holds thrown away, as readpassphrase does: the shell that gets the terminal next would read it, show it on its line and keep it in
     /// its history (measured with bash 5 and zsh 5.9). The real terminal calls, on a pty.

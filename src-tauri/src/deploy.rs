@@ -201,12 +201,12 @@ fn classify_denied_password(stderr: &str) -> DeployOutcome {
     if stderr.contains("[sshelter-askpass] refused:") {
         return DeployOutcome::Other {
             message: "ssh asked for something other than this host's password; \
-                      SSHelter refused to auto-answer it"
+                      Lunport refused to auto-answer it"
                 .to_string(),
         };
     }
     DeployOutcome::Other {
-        message: "ssh never asked SSHelter for the password — the local OpenSSH \
+        message: "ssh never asked Lunport for the password — the local OpenSSH \
                   likely cannot run askpass automation"
             .to_string(),
     }
@@ -446,7 +446,7 @@ fn require_legacy_deploy() -> Result<(), AppError> {
 
 /// in-app 部署要求「載入的設定檔就是 ssh 預設會讀的那一份」。
 ///
-/// 使用者可以把 SSHelter 指向任意 config 路徑，但部署跑的 `ssh <alias>` 永遠讀
+/// 使用者可以把 Lunport 指向任意 config 路徑，但部署跑的 `ssh <alias>` 永遠讀
 /// `~/.ssh/config`。兩者不同時，我們對這個 alias 的一切推理（跳板、endpoint、認證方式）
 /// 都可能來自一份 ssh 根本不會讀的檔案 —— 與拒絕跳板同一個理由：無法保證我們推理的設定
 /// 就是 ssh 會用的設定，就不該把使用者的密碼送出去。
@@ -465,7 +465,7 @@ fn require_default_config_root(state: &tauri::State<crate::state::AppState>) -> 
         || loaded == default;
     if !same {
         return Err(AppError::Other(format!(
-            "in-app deploy needs the default config ({}); SSHelter is currently viewing {}",
+            "in-app deploy needs the default config ({}); Lunport is currently viewing {}",
             default.display(),
             loaded.display()
         )));

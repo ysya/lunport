@@ -153,7 +153,7 @@ pub struct SyncKeySlotView {
     /// 帳戶裡還有這個插槽。false = 帳戶裡已經沒有(被刪除,或離開之後建立、加入了別的帳戶),這台還留著它的檔案:同步、挑金鑰這些動作都不適用,
     /// 只能刪除沒有主機用到的副本。
     pub in_account: bool,
-    /// 這台只在 SSHelter(私鑰在保管庫,經 agent 提供;金鑰保管庫 spec §4.3)。
+    /// 這台只在 Lunport(私鑰在保管庫,經 agent 提供;金鑰保管庫 spec §4.3)。
     pub in_vault: bool,
     /// 這台用的是檔案(SP3 的連結或同步來的副本):更新前留下的,或保管庫用不了時暫時落地的(金鑰保管庫 spec §4.3、§11)。畫面標「File for now」,
     /// 「Move」把它搬進保管庫。agent 永遠放不下的金鑰(安全金鑰與 DSA、解不開的加密方式、讀不懂的、舊式 PEM)不算:它們只能留在檔案,不標、Move 也不碰;
@@ -161,9 +161,9 @@ pub struct SyncKeySlotView {
     pub file_for_now: bool,
     /// 這台保管庫裡的這把金鑰有沒有 passphrase(`SlotSource::Vault`);金鑰不在保管庫 → None。「Export private key…」只在沒有時提供加一個。
     pub vault_has_passphrase: Option<bool>,
-    /// 這台自己加進 SSHelter、不在任何帳戶的金鑰(`LocalSlot::local_only`;畫面標「This computer only」)。
+    /// 這台自己加進 Lunport、不在任何帳戶的金鑰(`LocalSlot::local_only`;畫面標「This computer only」)。
     pub local_only: bool,
-    /// 插槽建立的時間(`KeySlotPayload::created_at_ms`;只在這台的金鑰 = 加進 SSHelter 的時間)。
+    /// 插槽建立的時間(`KeySlotPayload::created_at_ms`;只在這台的金鑰 = 加進 Lunport 的時間)。
     #[cfg_attr(test, ts(type = "number"))]
     pub created_at_ms: u64,
     /// 這台還是檔案、而且永遠搬不進保管庫的原因(`slots::move_refusal`);其他 None。
@@ -199,7 +199,7 @@ pub struct SlotDeviceView {
     pub name: String,
     pub fingerprint: Option<String>,
     pub synced_copy: bool,
-    /// 那台的金鑰在 SSHelter 的保管庫裡(那台是 2a 以後的版本)。
+    /// 那台的金鑰在 Lunport 的保管庫裡(那台是 2a 以後的版本)。
     pub in_vault: bool,
 }
 
@@ -231,7 +231,7 @@ pub struct NewKeyResult {
     pub slot_id: String,
 }
 
-/// 從檔案加進 SSHelter 之後(`local_keys::import_file`):改指到新插槽的主機、原檔移除了沒、Move 卻留下原檔的原因。
+/// 從檔案加進 Lunport 之後(`local_keys::import_file`):改指到新插槽的主機、原檔移除了沒、Move 卻留下原檔的原因。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
@@ -255,7 +255,7 @@ pub struct KeyFilePreview {
     pub fingerprint: Option<String>,
     pub key_type: Option<String>,
     pub has_passphrase: Option<bool>,
-    /// Move into SSHelter 會改的主機:每一個 `IdentityFile` 指到這個檔案的 Host 區塊(萬用字元的 Host 也算),名稱是區塊的第一個 pattern,依出現順序、不重複。
+    /// Move into Lunport 會改的主機:每一個 `IdentityFile` 指到這個檔案的 Host 區塊(萬用字元的 Host 也算),名稱是區塊的第一個 pattern,依出現順序、不重複。
     /// 來自 config,畫面以 `revealHidden` 顯示。
     pub hosts: Vec<String>,
     /// 檔案是 `ssh` 沒寫 `IdentityFile` 時會試的 `~/.ssh/id_*`(移走之後那些主機找不到它)。

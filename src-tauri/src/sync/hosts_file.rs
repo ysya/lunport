@@ -40,7 +40,7 @@ fn has_our_token(item: &Item) -> bool {
     enabled_include(item).is_some_and(|d| d.value.split_whitespace().any(is_our_include_token))
 }
 
-/// 同步 Include 的位置:前導註解/空行與 SSHelter agent 的 Include(`agent::wiring`,必須是第一行)之後、其他任何項目(既有 Include、全域指令、Host/Match)之前。
+/// 同步 Include 的位置:前導註解/空行與 Lunport agent 的 Include(`agent::wiring`,必須是第一行)之後、其他任何項目(既有 Include、全域指令、Host/Match)之前。
 /// 刻意不用 `newfile::include_insert_index`(它插在最後一個 Include **之後**):ssh 是
 /// first-obtained-wins,同步檔必須是第一個被讀到的定義(agent 的 Include 除外:它排在最前面,spec §6),spec §10 的遮蔽承諾才成立。
 fn sync_include_index(items: &[Item]) -> usize {
@@ -266,16 +266,16 @@ impl Forbidden {
     pub fn describe(&self) -> String {
         match self {
             Forbidden::Include => "an Include line".to_string(),
-            Forbidden::QuotedKeyword => "a quoted keyword (OpenSSH reads it differently from SSHelter)".to_string(),
+            Forbidden::QuotedKeyword => "a quoted keyword (OpenSSH reads it differently from Lunport)".to_string(),
             Forbidden::LeadingEquals => "a line starting with '=' (OpenSSH reads the next word as its keyword)".to_string(),
             Forbidden::UnsafeValue(keyword) => format!("a {keyword} value with characters ssh would pass to a shell"),
             Forbidden::InvisibleCharacter => {
-                "a line with a non-ASCII space or control character, or an invisible formatting character (OpenSSH would read something other than what SSHelter shows)".to_string()
+                "a line with a non-ASCII space or control character, or an invisible formatting character (OpenSSH would read something other than what Lunport shows)".to_string()
             }
             Forbidden::StrayCharacter => {
                 "a command with a combining mark or symbol where a word starts (it could disguise where a shell comment begins)".to_string()
             }
-            Forbidden::MisreadHeader(keyword) => format!("a {keyword} line that OpenSSH reads differently from SSHelter"),
+            Forbidden::MisreadHeader(keyword) => format!("a {keyword} line that OpenSSH reads differently from Lunport"),
         }
     }
 }
@@ -779,7 +779,7 @@ mod tests {
         assert_eq!(serialize_items(&items, true), format!("# main\n\nInclude {HOME} {WORK}\nInclude ~/.ssh/other.config\nHost a\n"));
     }
 
-    /// SSHelter 的 agent Include(`agent::wiring`,金鑰保管庫 spec §6)是第一行:同步的 Include 排在它後面 —— 前導註解與空行之後、其他任何項目之前 ——
+    /// Lunport 的 agent Include(`agent::wiring`,金鑰保管庫 spec §6)是第一行:同步的 Include 排在它後面 —— 前導註解與空行之後、其他任何項目之前 ——
     /// 清單換了或清空也不動它;它在子目錄裡,不是同步的 token。
     #[test]
     fn ensure_include_goes_after_the_agent_include_and_leaves_it_alone() {
@@ -1113,7 +1113,7 @@ mod tests {
         );
         assert_eq!(
             validate_host_text("web", "Host web\n  ForwardAgent no\u{a0}\n").unwrap_err().to_string(),
-            "synced record for 'web' contains a line with a non-ASCII space or control character, or an invisible formatting character (OpenSSH would read something other than what SSHelter shows), which synced hosts cannot use"
+            "synced record for 'web' contains a line with a non-ASCII space or control character, or an invisible formatting character (OpenSSH would read something other than what Lunport shows), which synced hosts cannot use"
         );
         assert_eq!(
             validate_host_text("web", "Host web\n  ProxyCommand nc %h %p;\u{301}#x\n").unwrap_err().to_string(),
@@ -1142,7 +1142,7 @@ mod tests {
             ("web\\", "Host web\\ x\n  User a\n"),
         ] {
             let error = validate_host_text(alias, text).expect_err(text).to_string();
-            assert!(error.contains("contains a Host line that OpenSSH reads differently from SSHelter"), "{text:?}: {error}");
+            assert!(error.contains("contains a Host line that OpenSSH reads differently from Lunport"), "{text:?}: {error}");
             assert!(!error.contains("attacker") && !error.contains('#'), "the line is never echoed: {error}");
             let (mut items, _) = parse_file("Host db\n");
             assert!(apply_host_text(&mut items, alias, text).is_err(), "{text:?}");

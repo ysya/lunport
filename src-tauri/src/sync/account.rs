@@ -26,14 +26,14 @@ use crate::sync::state_v2::{AccountState, RelayFeatures, SealedRecord, SpaceStat
 pub const DEFAULT_SPACE_NAME: &str = "Personal";
 pub const NO_ACCOUNT_MESSAGE: &str = "no sync account matches this sync code (check the words and the relay URL)";
 pub const OLD_FORMAT_MESSAGE: &str =
-    "this sync code still uses the previous sync format: update SSHelter on a device that already syncs with it, let it upgrade, then join again";
+    "this sync code still uses the previous sync format: update Lunport on a device that already syncs with it, let it upgrade, then join again";
 pub const NOT_JOINED_MESSAGE: &str = "join or create a sync account first";
-pub const NO_KEYS_MESSAGE: &str = "the sync code is not available on this device; unlock the keychain and restart SSHelter";
+pub const NO_KEYS_MESSAGE: &str = "the sync code is not available on this device; unlock the keychain and restart Lunport";
 pub const FROZEN_MESSAGE: &str = "the sync code was changed on another device; enter the new sync code first";
 pub const ROTATING_MESSAGE: &str = "finish or cancel changing the sync code first";
-pub const READ_ONLY_MESSAGE: &str = "this sync account uses a newer format; update SSHelter to keep syncing";
+pub const READ_ONLY_MESSAGE: &str = "this sync account uses a newer format; update Lunport to keep syncing";
 const NO_CONFIG_MESSAGE: &str =
-    "SSHelter could not load your SSH config — create it (an empty ~/.ssh/config is fine) and reload, then try again";
+    "Lunport could not load your SSH config — create it (an empty ~/.ssh/config is fine) and reload, then try again";
 const NO_RELAY_MESSAGE: &str = "enter a relay URL first (Settings → Sync → Relay URL) — this build has no built-in relay";
 const OTHER_ACCOUNT_MESSAGE: &str = "the sync code in the keychain belongs to a different sync account; leave and join again";
 const LEAVE_ROTATING_MESSAGE: &str =
@@ -151,7 +151,7 @@ pub fn account_keys_from_keychain(read: Result<Option<String>, AppError>, chain_
             Ok(keys)
         }
         Ok(None) => Err("the sync code is missing from the keychain; leave and join again".to_string()),
-        Err(e) => Err(format!("could not read the sync code from the keychain ({e}); unlock the keychain and restart SSHelter")),
+        Err(e) => Err(format!("could not read the sync code from the keychain ({e}); unlock the keychain and restart Lunport")),
     }
 }
 
@@ -1533,7 +1533,7 @@ mod tests {
             "the sync code is missing from the keychain; leave and join again"
         );
         let locked = account_keys_from_keychain(Err(AppError::Other("keychain error: locked".into())), &chain).unwrap_err();
-        assert!(locked.ends_with("unlock the keychain and restart SSHelter"), "{locked}");
+        assert!(locked.ends_with("unlock the keychain and restart Lunport"), "{locked}");
         let broken = account_keys_from_keychain(Ok(Some("zebra sunshine".into())), &chain).unwrap_err();
         assert!(!broken.contains("zebra"));
         assert_eq!(account_keys_from_keychain(Ok(Some(WORDS.to_string())), &"cd".repeat(32)).unwrap_err(), OTHER_ACCOUNT_MESSAGE);
@@ -1780,7 +1780,7 @@ mod tests {
             for _ in 0..5 {
                 let _ = sync_once(&a.env());
             }
-            // 每一輪都重讀 keychain,卻再也讀不到:停在這一步;說明講的是實情(不是「重啟 SSHelter」)。
+            // 每一輪都重讀 keychain,卻再也讀不到:停在這一步;說明講的是實情(不是「重啟 Lunport」)。
             let s = a.state();
             assert_eq!(s.rotation.as_ref().map(|r| r.step), Some(RotationStep::Copying));
             assert_eq!(s.last_error.as_deref(), Some(NEXT_CODE_GONE_AFTER_FREEZE_MESSAGE));

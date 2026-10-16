@@ -73,7 +73,7 @@ fn the_exit_code_comes_back() {
 #[cfg(windows)]
 fn the_built_helper_runs_the_sshelter_exe_beside_it() {
     let scratch = Scratch::new("installed");
-    let dir = scratch.0.join("Program Files").join("SSHelter");
+    let dir = scratch.0.join("Program Files").join("Lunport");
     std::fs::create_dir_all(&dir).unwrap();
     let helper = dir.join("sshelter-cli.exe");
     std::fs::copy(env!("CARGO_BIN_EXE_sshelter-cli"), &helper).unwrap();

@@ -743,8 +743,8 @@ export function useReadPublicKey() {
 }
 
 /**
- * The command the Keychain suggests on Windows so Git uses Windows' OpenSSH, which can reach SSHelter's agent (key vault spec
- * §10); null when it isn't needed. Under ["keys"], so a refresh of the key list asks again. Ask only on Windows with a key in SSHelter.
+ * The command the Keychain suggests on Windows so Git uses Windows' OpenSSH, which can reach Lunport's agent (key vault spec
+ * §10); null when it isn't needed. Under ["keys"], so a refresh of the key list asks again. Ask only on Windows with a key in Lunport.
  */
 export function useGitSshHint(enabled: boolean) {
   return useQuery<string | null>({
@@ -785,14 +785,14 @@ export function useSetIdentityFile() {
 
 export const launchAtLoginKey = ["app", "launchAtLogin"] as const;
 
-/** Whether SSHelter opens at login. The OS is the source of truth; Settings → General reads it again when it opens. */
+/** Whether Lunport opens at login. The OS is the source of truth; Settings → General reads it again when it opens. */
 export function useLaunchAtLogin(enabled: boolean) {
   const { data: isDevelopment } = useIsDevelopment();
   return useQuery<boolean>({ queryKey: launchAtLoginKey, queryFn: () => autostartIsEnabled(), enabled: enabled && isDevelopment === false });
 }
 
 /**
- * The Keychain's launch hint (key vault spec §5.7): keys in SSHelter work only while it runs, so SSHelter opens at login and keeps
+ * The Keychain's launch hint (key vault spec §5.7): keys in Lunport work only while it runs, so Lunport opens at login and keeps
  * running in the menu bar when its window closes (three settings of Settings → General: Launch at login, Show menu bar icon, Keep
  * running in menu bar). The icon comes before close-to-tray: once the window hides on close, the menu bar item is the only way
  * back to it, so a failure to show the icon leaves close-to-tray off.

@@ -1,4 +1,4 @@
-//! SSHelter 的 SSH agent(key roadmap 第 2 階段 spec §5)。
+//! Lunport 的 SSH agent(key roadmap 第 2 階段 spec §5)。
 pub mod approval;
 pub mod broker;
 #[cfg(test)]
@@ -58,7 +58,7 @@ pub enum AgentStatus {
     #[default]
     NotStarted,
     Running,
-    /// 另一個 SSHelter 在提供。
+    /// 另一個 Lunport 在提供。
     OtherInstance,
     /// 開不起來(路徑太長、權限、pipe 名稱被佔)。
     Failed(String),
@@ -164,8 +164,8 @@ fn host_name_in_files(files: &[PathBuf], host_key: &KeyData) -> Option<String> {
         .find_map(|bytes| broker::host_name_in(&String::from_utf8_lossy(&bytes), host_key))
 }
 
-/// 開 agent(SSHelter 的視窗程式啟動時,含 `--mcp-host`;`--mcp` 的 stdio 轉接不建 Tauri,不會到這裡)。開不起來只記下原因(spec §11),
-/// SSHelter 其他功能照常。
+/// 開 agent(Lunport 的視窗程式啟動時,含 `--mcp-host`;`--mcp` 的 stdio 轉接不建 Tauri,不會到這裡)。開不起來只記下原因(spec §11),
+/// Lunport 其他功能照常。
 pub fn start(app: &tauri::AppHandle) {
     // 記住的核准與解開的私鑰到期就丟掉(spec §5.5),不等下一個請求;agent 開不起來也照做(Connect 的一次性通道仍會用到 broker)。
     let janitor = app.clone();
@@ -218,7 +218,7 @@ pub enum AgentProblem {
     IncludeMissing,
 }
 
-/// 要顯示的提示:agent 開不起來優先,其次是 Include 不見了。另一個 SSHelter 在提供不算問題。
+/// 要顯示的提示:agent 開不起來優先,其次是 Include 不見了。另一個 Lunport 在提供不算問題。
 pub fn problem(status: &AgentStatus, wiring: wiring::WiringStatus) -> Option<AgentProblem> {
     if let AgentStatus::Failed(reason) = status {
         return Some(AgentProblem::NotRunning { reason: reason.clone() });

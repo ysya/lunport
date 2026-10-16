@@ -32,8 +32,8 @@ impl From<RepositoryError> for LibraryFailure {
             RepositoryError::Validation(RecordValidationError::DuplicateId(_)) => Self::new("identity_conflict", "A local record and synced record share an identity. They have been kept separately; review the conflicting records before including the library."),
             RepositoryError::SpaceUnavailable(reason) => Self::new("sync_data_unavailable", match reason.as_str() {
                 "Finish downloading the library before including existing records" => "Library setup is waiting for a complete download of every selected sync space. Finish syncing, then retry. Existing records have been kept.",
-                "Some synced record identities cannot be read" => "A synced host or Group has an unreadable or unsupported identity. Update SSHelter on the devices in this chain and retry. Existing records and encrypted source data have been kept.",
-                _ => "Some library data has not been downloaded or cannot be read. Finish syncing or update SSHelter, then retry. Existing records have been kept.",
+                "Some synced record identities cannot be read" => "A synced host or Group has an unreadable or unsupported identity. Update Lunport on the devices in this chain and retry. Existing records and encrypted source data have been kept.",
+                _ => "Some library data has not been downloaded or cannot be read. Finish syncing or update Lunport, then retry. Existing records have been kept.",
             }),
             RepositoryError::Group(_) => Self::new("group_conflict", "Group names or relationships conflict. Choose unique names under each parent and review unavailable parent Groups, then retry. Existing records have been kept."),
             _ => Self::new("record_validation", "A host or Group needs review before it can be included. Check its fields, Group and jump-host references. Existing records have been kept."),

@@ -13,7 +13,7 @@ import { revealHidden } from "@/lib/sync-approvals";
 
 /**
  * What the Keychain's main pane shows: a key slot (by id), a key file in ~/.ssh (by its private path), or the New key / Generate key
- * form (New key with a file already chosen, from a key file's "Import into SSHelter…").
+ * form (New key with a file already chosen, from a key file's "Import into Lunport…").
  */
 export type KeychainSelection =
   | { kind: "slot"; id: string }
@@ -63,7 +63,7 @@ export function formatDay(ms: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** The detail's "Passphrase": the key in SSHelter's, else the synced key's; null when unknown. */
+/** The detail's "Passphrase": the key in Lunport's, else the synced key's; null when unknown. */
 export function passphraseFact(slot: SyncKeySlotView): string | null {
   const has = slot.vault_has_passphrase ?? slot.has_passphrase;
   return has === null ? null : has ? "Yes" : "No";
@@ -75,7 +75,7 @@ function matches(query: string, fields: (string | null)[]): boolean {
   return q === "" || fields.some((f) => f !== null && f.toLowerCase().includes(q));
 }
 
-/** "In SSHelter" (spec §7.2): the slots matching the search (name, type, fingerprint), the ones needing attention first, then by name. */
+/** "In Lunport" (spec §7.2): the slots matching the search (name, type, fingerprint), the ones needing attention first, then by name. */
 export function keychainSlots(slots: readonly SyncKeySlotView[], query: string): SyncKeySlotView[] {
   return slots
     .filter((s) => matches(query, [s.name, s.key_type, slotFingerprint(s)]))
@@ -91,7 +91,7 @@ function sameFile(a: string, b: string): boolean {
 
 /**
  * "Other key files in ~/.ssh" (spec §7.2): the key files no slot serves as a file on this computer, matching the search. A file a
- * slot only copied into SSHelter is the user's own again, so it is listed.
+ * slot only copied into Lunport is the user's own again, so it is listed.
  */
 export function otherKeyFiles(keys: readonly KeyInfo[], slots: readonly SyncKeySlotView[], query: string): KeyInfo[] {
   const served = slots.flatMap((s) => (!s.in_vault && "file" in s.status ? [s.status.file] : []));
@@ -104,11 +104,11 @@ export function moveCount(slots: readonly SyncKeySlotView[]): number {
 }
 
 export function moveBannerText(n: number): string {
-  return `${plural(n, "key")} can move into SSHelter`;
+  return `${plural(n, "key")} can move into Lunport`;
 }
 
 /**
- * The launch hint (spec §5.7): keys in SSHelter work only while SSHelter runs. Shown once this computer has a key in SSHelter
+ * The launch hint (spec §5.7): keys in Lunport work only while Lunport runs. Shown once this computer has a key in Lunport
  * while neither launch at login nor keeping running in the menu bar is on, until it is dismissed. `launchAtLogin` is null
  * until the OS answers.
  */
@@ -126,7 +126,7 @@ export function keyNameOfPath(value: string): string {
  * What Export to host does to the host (spec §7.3.1): "{host} will use {key} instead of {old keys}". The old keys are the host's
  * own IdentityFile lines that name another key. Null when the host already uses only this key, and while `home` isn't known:
  * without it a `~/` or `%d/` value can't be matched against `keyPath`, so a host already on this key would read "{host} will use
- * {key} instead of {key}". `keyPath` is the key's private path (for a key in SSHelter, its slot path). Every name is shown through
+ * {key} instead of {key}". `keyPath` is the key's private path (for a key in Lunport, its slot path). Every name is shown through
  * `revealHidden`.
  */
 export function attachText(host: string, key: string, identityFiles: readonly string[], keyPath: string, home: string | null): string | null {
@@ -157,15 +157,15 @@ export function hostAliasProblem(alias: string, existing: ReadonlySet<string>): 
   return null;
 }
 
-/** The keys in SSHelter the host editor offers for IdentityFile (spec §7.5): the ones this computer has, by name. */
+/** The keys in Lunport the host editor offers for IdentityFile (spec §7.5): the ones this computer has, by name. */
 export function pickableSlots(slots: readonly SyncKeySlotView[]): SyncKeySlotView[] {
   return slots.filter(hasKeyHere).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-/** The note under a host's IdentityFile when it names a key in SSHelter (spec §11): ssh can use it only while SSHelter runs. */
+/** The note under a host's IdentityFile when it names a key in Lunport (spec §11): ssh can use it only while Lunport runs. */
 export function sshelterKeyNote(value: string, slots: readonly SyncKeySlotView[]): string | null {
   const file = slotFileOfValue(value);
   if (file === null) return null;
   const slot = slots.find((s) => s.in_vault && slotFileOfValue(s.value) === file);
-  return slot ? `${revealHidden(slot.name)} is in SSHelter: ssh can use it only while SSHelter is running.` : null;
+  return slot ? `${revealHidden(slot.name)} is in Lunport: ssh can use it only while Lunport is running.` : null;
 }

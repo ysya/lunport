@@ -238,7 +238,7 @@ impl SealedRecord {
 pub struct LocalSlot {
     /// 插槽檔名(`<name>-<插槽 id 前 8>`)。
     pub file_name: String,
-    /// 插槽裡放的是什麼(只在 SSHelter 的金鑰:私鑰在保管庫,插槽裡只有 `.pub`);None = 這台還沒有它的金鑰。
+    /// 插槽裡放的是什麼(只在 Lunport 的金鑰:私鑰在保管庫,插槽裡只有 `.pub`);None = 這台還沒有它的金鑰。
     #[serde(default)]
     pub source: Option<SlotSource>,
     /// 最近一次維護這個插槽的錯誤(給使用者看;只有路徑與原因,不含金鑰內容)。
@@ -286,7 +286,7 @@ pub struct LocalSlot {
     /// `Synced`、而且這個旗標是 false 的才不必這台的同意。false = 不是。
     #[serde(default)]
     pub copy_from_another_account: bool,
-    /// 這台自己加進 SSHelter、不在任何帳戶裡的金鑰(金鑰保管庫 spec §4.3「This computer only」:New key 匯入或 Generate key 產生的)。
+    /// 這台自己加進 Lunport、不在任何帳戶裡的金鑰(金鑰保管庫 spec §4.3「This computer only」:New key 匯入或 Generate key 產生的)。
     /// 收編進帳戶時清掉(`slot_setup::adopt_slot`)。帳戶的 `device.slots` 不列它:只在這台的金鑰不告訴帳戶。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub local_only: bool,
@@ -300,7 +300,7 @@ pub enum SlotSource {
     Linked { path: String, link: LinkKind, fingerprint: Option<String>, origin: bool },
     /// 同步來的私鑰(檔案就在插槽裡)。
     SyncedCopy { fingerprint: String },
-    /// 只在 SSHelter(金鑰保管庫 spec §4.3):私鑰在保管庫(`vault.json`),插槽目錄只放 `.pub`,插槽路徑本身沒有檔案;`ssh` 經 SSHelter 的
+    /// 只在 Lunport(金鑰保管庫 spec §4.3):私鑰在保管庫(`vault.json`),插槽目錄只放 `.pub`,插槽路徑本身沒有檔案;`ssh` 經 Lunport 的
     /// agent 取用。`public_key` 用來在每一輪重寫 `.pub`(不必開保管庫),`has_passphrase` 給畫面說明。
     Vault { fingerprint: String, public_key: String, has_passphrase: bool },
 }
@@ -566,7 +566,7 @@ pub fn load(path: &Path) -> Result<LoadedState, AppError> {
         1 => serde_json::from_slice(&bytes).map(|s| LoadedState::Legacy(Box::new(s))).map_err(unreadable),
         STATE_VERSION_V2 => serde_json::from_slice(&bytes).map(|s| LoadedState::Current(Box::new(s))).map_err(unreadable),
         v if v > STATE_VERSION_V2 => Err(AppError::Other(format!(
-            "sync state was written by a newer SSHelter (version {v}); update the app"
+            "sync state was written by a newer Lunport (version {v}); update the app"
         ))),
         v => Err(AppError::Other(format!("sync state has an unknown version ({v})"))),
     }

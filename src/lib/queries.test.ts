@@ -70,7 +70,7 @@ describe("pointing a host at one key", () => {
 });
 
 describe("the launch hint's button", () => {
-  it("turns on launch at login, shows the menu bar icon and keeps SSHelter running there", async () => {
+  it("turns on launch at login, shows the menu bar icon and keeps Lunport running there", async () => {
     useSettingsStore.setState({ trayVisible: false });
     const calls = stubBackend(async (command) => command === "app_is_development" ? false : undefined);
     await renderHook(new QueryClient(), useTurnOnLaunchAtLogin).mutateAsync();

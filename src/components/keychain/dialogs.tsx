@@ -86,7 +86,7 @@ export function PickKeyDialog({ slot, onClose }: { slot: SyncKeySlotView | null;
         <DialogHeader>
           <DialogTitle>Pick a key on this computer</DialogTitle>
           <DialogDescription>
-            Hosts that use {name} will use the key you pick, on this computer only. SSHelter keeps a copy of it; your file stays where it is.
+            Hosts that use {name} will use the key you pick, on this computer only. Lunport keeps a copy of it; your file stays where it is.
           </DialogDescription>
         </DialogHeader>
       <TaskDialogBody>
@@ -139,7 +139,7 @@ export function SyncKeyConfirm({
 
 /**
  * The confirm before this computer's copy of a key is deleted. It says nothing about the original key: for a copy whose
- * original was replaced or removed, this copy may be the last one. A key kept only in SSHelter says that the vault entry
+ * original was replaced or removed, this copy may be the last one. A key kept only in Lunport says that the vault entry
  * is what goes, and that it may be the last copy. No hooks: exported for the tests.
  */
 export function DeleteCopyConfirm({
@@ -160,7 +160,7 @@ export function DeleteCopyConfirm({
           <AlertDialogTitle>Delete this copy?</AlertDialogTitle>
           <AlertDialogDescription>
             {slot?.in_vault
-              ? `The key ${revealHidden(slot.name)} kept in SSHelter on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`
+              ? `The key ${revealHidden(slot.name)} kept in Lunport on this computer is deleted. If it is your only copy, it is gone. Other computers aren't affected.`
               : `The copy of ${slot ? revealHidden(slot.name) : ""} on this computer is deleted. Other computers aren't affected.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -192,7 +192,7 @@ export function DeleteKeyConfirm({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>{`Delete ${slot ? revealHidden(slot.name) : ""}?`}</AlertDialogTitle>
-          <AlertDialogDescription>{"SSHelter removes this key from this computer. It's the only copy unless you exported one."}</AlertDialogDescription>
+          <AlertDialogDescription>{"Lunport removes this key from this computer. It's the only copy unless you exported one."}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
@@ -206,7 +206,7 @@ export function DeleteKeyConfirm({
 }
 
 /**
- * The confirm before New key's "Add to SSHelter" moves a key file (spec §7.5): a Move removes the original, so the vault holds the
+ * The confirm before New key's "Add to Lunport" moves a key file (spec §7.5): a Move removes the original, so the vault holds the
  * only copy of the key on this computer. `path` is the file that goes (it stays set while the dialog closes). Its name and path come
  * from the disk, so both are shown through `revealHidden`, and both may break anywhere (like other paths): a long one has no space
  * to wrap at. No hooks: exported for the tests.
@@ -229,15 +229,15 @@ export function MoveKeyConfirm({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Move <span className="break-all">{name}</span> into SSHelter?
+            Move <span className="break-all">{name}</span> into Lunport?
           </AlertDialogTitle>
           <AlertDialogDescription>
-            SSHelter keeps the only copy of this key on this computer and removes <span className="break-all">{shownPath}</span>. Export private key… gets a file back.
+            Lunport keeps the only copy of this key on this computer and removes <span className="break-all">{shownPath}</span>. Export private key… gets a file back.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onConfirm}>Move into SSHelter</AlertDialogAction>
+          <AlertDialogAction onClick={onConfirm}>Move into Lunport</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
@@ -246,7 +246,7 @@ export function MoveKeyConfirm({
 
 /** What happens to the key a pick replaces on this computer (key vault spec §4.3); null when there is none to keep. */
 export function replacedKeyNote(slot: SyncKeySlotView): string | null {
-  if (slot.in_vault) return "SSHelter keeps the key it replaces.";
+  if (slot.in_vault) return "Lunport keeps the key it replaces.";
   return slot.status.kind === "ready" && slot.status.synced_copy ? "The synced copy on this computer is kept as a .previous file." : null;
 }
 
@@ -266,7 +266,7 @@ export function ExportPrivateKeyForm({
   onCancel,
 }: {
   name: string;
-  /** The key in SSHelter has a passphrase (`SyncKeySlotView.vault_has_passphrase`). */
+  /** The key in Lunport has a passphrase (`SyncKeySlotView.vault_has_passphrase`). */
   hasPassphrase: boolean | null;
   passphrase: string;
   repeat: string;
@@ -280,7 +280,7 @@ export function ExportPrivateKeyForm({
     <>
       <DialogHeader>
         <DialogTitle>Export {revealHidden(name)}?</DialogTitle>
-        <DialogDescription>{"Any program can use the exported file without asking, and SSHelter won't keep track of it."}</DialogDescription>
+        <DialogDescription>{"Any program can use the exported file without asking, and Lunport won't keep track of it."}</DialogDescription>
       </DialogHeader>
       <TaskDialogBody>
       {hasPassphrase === true && <p className="text-sm text-muted-foreground">It stays protected by its passphrase.</p>}

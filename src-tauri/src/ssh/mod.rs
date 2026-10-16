@@ -1,4 +1,4 @@
-//! SSHelter's own SSH engine (own-ssh spec §4, §6): the interface the broker, the CLI and the MCP adapter use (`SshEngine`, `Session`,
+//! Lunport's own SSH engine (own-ssh spec §4, §6): the interface the broker, the CLI and the MCP adapter use (`SshEngine`, `Session`,
 //! `ShellChannel`, `HostKeyPolicy`, `AuthSource`), a fake for their tests, and the russh-backed engine behind the interface.
 //!
 //! russh is imported by exactly one file, `russh_engine.rs`; a test below keeps it that way. Swapping the engine later means replacing

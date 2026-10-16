@@ -55,9 +55,9 @@ impl fmt::Display for ConnectError {
             ConnectError::HostKeyUnknown { hop, .. } => write!(f, "The host key of {} has not been confirmed yet.", hop.alias),
             ConnectError::HostKeyMismatch { hop, .. } => write!(f, "The host key of {} changed. Connection refused.", hop.alias),
             ConnectError::NoCommonHostKeyAlgorithm { hop, ours, theirs } => {
-                write!(f, "Could not agree on a host key algorithm with {}: the server offers {}, SSHelter accepts {}.", hop.alias, theirs.join(", "), ours.join(", "))?;
+                write!(f, "Could not agree on a host key algorithm with {}: the server offers {}, Lunport accepts {}.", hop.alias, theirs.join(", "), ours.join(", "))?;
                 if theirs.iter().any(|name| name == "ssh-rsa") && !ours.iter().any(|name| name == "ssh-rsa") {
-                    write!(f, " SSHelter does not use ssh-rsa (SHA-1).")?;
+                    write!(f, " Lunport does not use ssh-rsa (SHA-1).")?;
                 }
                 Ok(())
             }
@@ -174,12 +174,12 @@ mod tests {
         let error = ConnectError::AuthFailed {
             hop: hop(),
             tried: vec![AuthMethod::Key { key_id: "k1".into() }],
-            reason: "The server only accepts RSA keys signed with SHA-1, which SSHelter does not do.".into(),
+            reason: "The server only accepts RSA keys signed with SHA-1, which Lunport does not do.".into(),
             password_wanted: false,
         };
         assert_eq!(
             error.to_string(),
-            "Authentication failed for deploy@web (tried: publickey). The server only accepts RSA keys signed with SHA-1, which SSHelter does not do."
+            "Authentication failed for deploy@web (tried: publickey). The server only accepts RSA keys signed with SHA-1, which Lunport does not do."
         );
 
         let nothing_tried =
@@ -200,11 +200,11 @@ mod tests {
     #[test]
     fn no_common_algorithm_names_both_lists_and_explains_ssh_rsa() {
         let plain = ConnectError::NoCommonHostKeyAlgorithm { hop: hop(), ours: vec!["ssh-ed25519".into()], theirs: vec!["ssh-dss".into()] };
-        assert_eq!(plain.to_string(), "Could not agree on a host key algorithm with web: the server offers ssh-dss, SSHelter accepts ssh-ed25519.");
+        assert_eq!(plain.to_string(), "Could not agree on a host key algorithm with web: the server offers ssh-dss, Lunport accepts ssh-ed25519.");
         let legacy = ConnectError::NoCommonHostKeyAlgorithm { hop: hop(), ours: vec!["ssh-ed25519".into(), "rsa-sha2-512".into()], theirs: vec!["ssh-rsa".into()] };
         assert_eq!(
             legacy.to_string(),
-            "Could not agree on a host key algorithm with web: the server offers ssh-rsa, SSHelter accepts ssh-ed25519, rsa-sha2-512. SSHelter does not use ssh-rsa (SHA-1)."
+            "Could not agree on a host key algorithm with web: the server offers ssh-rsa, Lunport accepts ssh-ed25519, rsa-sha2-512. Lunport does not use ssh-rsa (SHA-1)."
         );
     }
 

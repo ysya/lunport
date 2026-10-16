@@ -138,7 +138,7 @@ pub fn write_data(writer: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
 /// Reads a control message. The error text never quotes the payload: serde's messages can include the value it choked on, and an
 /// `answer` carries a password.
 pub fn decode<T: DeserializeOwned>(payload: &[u8]) -> Result<T, String> {
-    serde_json::from_slice(payload).map_err(|_| "a control message SSHelter does not understand".to_string())
+    serde_json::from_slice(payload).map_err(|_| "a control message Lunport does not understand".to_string())
 }
 
 /// Who is connecting.
@@ -416,11 +416,11 @@ mod tests {
                 ServerMessage::Question(Question { question_id: "q1".into(), kind: QuestionKind::Password, text: "deploy@web's password: ".into(), echo: false, deadline_ms: Some(60_000) }),
             ),
             (
-                r#"{"type":"question","question_id":"q2","kind":"host_key_notice","text":"Waiting for you to confirm web's host key in SSHelter.","echo":false,"deadline_ms":null}"#,
+                r#"{"type":"question","question_id":"q2","kind":"host_key_notice","text":"Waiting for you to confirm web's host key in Lunport.","echo":false,"deadline_ms":null}"#,
                 ServerMessage::Question(Question {
                     question_id: "q2".into(),
                     kind: QuestionKind::HostKeyNotice,
-                    text: "Waiting for you to confirm web's host key in SSHelter.".into(),
+                    text: "Waiting for you to confirm web's host key in Lunport.".into(),
                     echo: false,
                     deadline_ms: None,
                 }),
@@ -447,7 +447,7 @@ mod tests {
         // serde's own text for this one would quote the value it choked on: `invalid type: string "hunter2", expected a boolean`.
         let error = decode::<ClientMessage>(br#"{"type":"answer","question_id":"q1","value":"hunter2","cancel":"hunter2"}"#).unwrap_err();
         assert!(!error.contains("hunter2"), "{error}");
-        assert_eq!(error, "a control message SSHelter does not understand");
+        assert_eq!(error, "a control message Lunport does not understand");
     }
 
     /// A frame's payload can be a password (an answer, or keystrokes): its debug form does not show it. `Frame` derives `Debug`, and the
@@ -515,8 +515,8 @@ mod tests {
     fn json_that_is_not_a_message_does_not_decode() {
         for json in [&b"{}"[..], b"[]", br#""x""#, br#"{"type":1}"#] {
             let shown = String::from_utf8_lossy(json);
-            assert_eq!(decode::<ClientMessage>(json), Err("a control message SSHelter does not understand".to_string()), "{shown}");
-            assert_eq!(decode::<ServerMessage>(json), Err("a control message SSHelter does not understand".to_string()), "{shown}");
+            assert_eq!(decode::<ClientMessage>(json), Err("a control message Lunport does not understand".to_string()), "{shown}");
+            assert_eq!(decode::<ServerMessage>(json), Err("a control message Lunport does not understand".to_string()), "{shown}");
         }
     }
 }

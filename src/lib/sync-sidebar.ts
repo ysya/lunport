@@ -156,10 +156,10 @@ function placesOf(copies: readonly NameCopy[], labelOf: (file: string) => string
 
 /**
  * Why the actions that find a host by its name (edit, rename, move, remove, drag) are off on every
- * row of an alias with several copies: SSHelter cannot tell which copy they would change.
+ * row of an alias with several copies: Lunport cannot tell which copy they would change.
  */
 export function ambiguityReason(alias: string, copies: readonly NameCopy[], labelOf: (file: string) => string): string {
-  return `${alias} is defined in ${placesOf(copies, labelOf)}, so SSHelter can't tell which copy this would change. Select the host to see how to fix that.`;
+  return `${alias} is defined in ${placesOf(copies, labelOf)}, so Lunport can't tell which copy this would change. Select the host to see how to fix that.`;
 }
 
 /** One copy in the editor pane's explanation. */
@@ -187,7 +187,7 @@ export interface CopiesNote {
   groups: CopiesGroup[];
   /** How ssh combines them (`SSH_COMBINES`). */
   combine: string;
-  /** What SSHelter does not do, and when the name can be edited again. */
+  /** What Lunport does not do, and when the name can be edited again. */
   fix: string;
 }
 
@@ -213,10 +213,10 @@ export function copiesNote(
     return {
       title,
       unknown:
-        "SSHelter has not read which spaces this computer syncs, so it can't tell whether one of these copies is synced, or which one ssh reads first.",
+        "Lunport has not read which spaces this computer syncs, so it can't tell whether one of these copies is synced, or which one ssh reads first.",
       groups: [{ heading: "The copies:", ordered: false, copies: copies.map((copy) => ({ label: labelOf(copy.file), file: copy.file, detail: null, how: null })) }],
       combine,
-      fix: "Until it can, SSHelter leaves all of them alone. If this stays, Settings → Sync shows why.",
+      fix: "Until it can, Lunport leaves all of them alone. If this stays, Settings → Sync shows why.",
     };
   }
   const line = (copy: NameCopy): CopyLine => ({
@@ -250,13 +250,13 @@ export function copiesNote(
     unknown: null,
     groups,
     combine,
-    fix: `SSHelter edits, renames, moves and removes a host by its name, so it can't tell which copy you mean and leaves all of them alone. Once only one copy is left, ${alias} can be edited again.`,
+    fix: `Lunport edits, renames, moves and removes a host by its name, so it can't tell which copy you mean and leaves all of them alone. Once only one copy is left, ${alias} can be edited again.`,
   };
 }
 
 /** What the deploy result says instead of writing `IdentityFile` into the first copy of a host that has several. */
 export function identityFileNote(alias: string, value: string): string {
-  return `${alias} is defined in more than one place, so SSHelter did not edit it. Once only one copy is left, add “IdentityFile ${value}” to it so that ssh offers this key.`;
+  return `${alias} is defined in more than one place, so Lunport did not edit it. Once only one copy is left, add “IdentityFile ${value}” to it so that ssh offers this key.`;
 }
 
 /** One fix of a copy that ssh reads second (the sidebar's row menu and the wizard's list), addressed by file. */

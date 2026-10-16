@@ -88,7 +88,7 @@ pub(super) fn ipc_on(
                 error: None,
             }) => Ok(v),
             Ok(McpServerMessage::McpResult { error: Some(e), .. }) => Err(e),
-            _ => Err("Session IPC protocol mismatch; restart SSHelter.".into()),
+            _ => Err("Session IPC protocol mismatch; restart Lunport.".into()),
         }
     })();
     call.stream.lock().unwrap().take();
@@ -118,7 +118,7 @@ pub(super) fn tool(params: &Value, id: &str, info: &McpClientInfo, call: &Call) 
         .is_some_and(|e| e == "legacy_transport_required")
     {
         if matches!(name, "create_host" | "verify_host_key") {
-            return tool_error("This tool requires a Records workspace in the current SSHelter version.".into());
+            return tool_error("This tool requires a Records workspace in the current Lunport version.".into());
         }
         call.legacy.store(true, Ordering::SeqCst);
         if call.cancel.is_cancelled() {

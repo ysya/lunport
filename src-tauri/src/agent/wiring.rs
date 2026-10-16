@@ -1,7 +1,7 @@
-//! `ssh` 怎麼找到 SSHelter 的 agent(金鑰保管庫 spec §6):`~/.ssh/sshelter/agent/config` 只列用到「只在 SSHelter」插槽的主機,
+//! `ssh` 怎麼找到 Lunport 的 agent(金鑰保管庫 spec §6):`~/.ssh/sshelter/agent/config` 只列用到「只在 Lunport」插槽的主機,
 //! 每個 Host 區塊設 `IdentityAgent` 與 `IdentitiesOnly yes`;`~/.ssh/config` 的第一行 Include 它(ssh_config 取第一個符合的值)。
 //! 這個檔案在子目錄裡:同步把 `~/.ssh/sshelter/<名稱>.config` 當成 space 檔,子目錄裡的不碰(`hosts_file::is_our_include_token`)。
-//! SSHelter 讀取 config 時略過它(`config::include::load_recursive`),主機清單才不會重複。
+//! Lunport 讀取 config 時略過它(`config::include::load_recursive`),主機清單才不會重複。
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ pub fn is_agent_include(item: &Item) -> bool {
     matches!(item, Item::Directive(d) if lists_agent_token(d))
 }
 
-/// 用到「只在 SSHelter」插槽(`vault_files` 是插槽檔名)的 Host 區塊的 pattern,依出現順序,重複的只留一次。註解掉的 Host 與 `IdentityFile`
+/// 用到「只在 Lunport」插槽(`vault_files` 是插槽檔名)的 Host 區塊的 pattern,依出現順序,重複的只留一次。註解掉的 Host 與 `IdentityFile`
 /// 不算;`Match` 區塊不支援(spec §6)。
 pub fn vault_host_patterns(doc: &SshConfigDoc, vault_files: &BTreeSet<String>, home: &Path) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
@@ -171,10 +171,10 @@ pub fn ensure_include_first(items: &mut Vec<Item>, trailing_newline: &mut bool) 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WiringStatus {
-    /// 這台沒有任何主機用到只在 SSHelter 的金鑰,也從沒寫過 `agent/config`。
+    /// 這台沒有任何主機用到只在 Lunport 的金鑰,也從沒寫過 `agent/config`。
     NotNeeded,
     Ready,
-    /// 有主機用到只在 SSHelter 的金鑰(或 `agent/config` 已經在),`ssh` 卻接不到 agent:`~/.ssh/config` 沒有它的 Include(使用者拿掉了,或第一次一直放不進去 ——
+    /// 有主機用到只在 Lunport 的金鑰(或 `agent/config` 已經在),`ssh` 卻接不到 agent:`~/.ssh/config` 沒有它的 Include(使用者拿掉了,或第一次一直放不進去 ——
     /// `agent/config` 要等 Include 放好才寫,還不存在),或載入的不是預設的 config。使用者拿掉的不自動加回(spec §6、§11),由 Fix 補上(`fix_env`)。
     IncludeMissing,
 }
@@ -289,7 +289,7 @@ pub fn refresh_env(env: &SyncEnv) -> Result<WiringStatus, AppError> {
     Err(error)
 }
 
-/// 這台的 `ssh` 接不接得到 agent(畫面提示用;spec §6、§11):沒有主機用到只在 SSHelter 的金鑰、也從沒寫過 `agent/config` → NotNeeded;`agent/config` 在、主 config
+/// 這台的 `ssh` 接不接得到 agent(畫面提示用;spec §6、§11):沒有主機用到只在 Lunport 的金鑰、也從沒寫過 `agent/config` → NotNeeded;`agent/config` 在、主 config
 /// 是預設的 `~/.ssh/config` 而且有 agent 的 Include → Ready;其他 → IncludeMissing:使用者拿掉了 Include,第一次一直加不進去(`agent/config` 要等 Include 放好才寫),
 /// `agent/config` 被刪了(Include 指到不存在的檔案,什麼都接不到),或載入的不是預設的 config。
 pub fn status(doc: &SshConfigDoc, home: &Path, vault_files: &BTreeSet<String>) -> WiringStatus {
@@ -313,7 +313,7 @@ pub fn restore_include(
 ) -> Result<(), AppError> {
     let default_root = home.join(".ssh").join("config");
     if doc.files.first().map(|f| f.path.as_path()) != Some(default_root.as_path()) {
-        return Err(AppError::Other("SSHelter isn't using ~/.ssh/config, so it can't add the line there.".to_string()));
+        return Err(AppError::Other("Lunport isn't using ~/.ssh/config, so it can't add the line there.".to_string()));
     }
     put_include_first(doc, backed_up, retention)
 }
@@ -747,7 +747,7 @@ mod tests {
         }
     }
 
-    /// 只在 SSHelter 的插槽記錄(檔名 `file`)。
+    /// 只在 Lunport 的插槽記錄(檔名 `file`)。
     fn vault_slot(file: &str) -> crate::sync::state_v2::LocalSlot {
         use crate::sync::state_v2::{LocalSlot, SlotSource};
         LocalSlot {
@@ -827,7 +827,7 @@ mod tests {
         use crate::sync::fake_relay::FakeRelay;
         use crate::sync::testkit::{TestClock, TestDevice};
         let d = TestDevice::with_main_config("a", &FakeRelay::new(), &TestClock::new(), WEB);
-        // 這台還沒有只在 SSHelter 的插槽。測試拿著 core 鎖,讓 refresh_env 停在要讀插槽檔名的那一刻。
+        // 這台還沒有只在 Lunport 的插槽。測試拿著 core 鎖,讓 refresh_env 停在要讀插槽檔名的那一刻。
         let mut core = d.runtime.core.lock().unwrap();
         let status = std::thread::scope(|scope| {
             let refresh = scope.spawn(|| refresh_env(&d.env()));
@@ -1000,7 +1000,7 @@ mod tests {
         std::fs::write(&other, WEB).unwrap();
         *d.doc.lock().unwrap() = Some(d.env().load_doc(&other).unwrap());
         let error = fix_env(&d.env()).unwrap_err();
-        assert_eq!(error.to_string(), "SSHelter isn't using ~/.ssh/config, so it can't add the line there.");
+        assert_eq!(error.to_string(), "Lunport isn't using ~/.ssh/config, so it can't add the line there.");
         assert_eq!(read(&other), WEB);
         assert!(!agent_config_path(d.home.path()).exists());
 

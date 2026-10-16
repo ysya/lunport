@@ -1,0 +1,45 @@
+name: rebrand package check
+
+on:
+  pull_request:
+    paths:
+      - "src-tauri/tauri*.json"
+      - "src-tauri/icons/**"
+      - "src-tauri/installers/**"
+      - "scripts/validate-linux-rebrand.py"
+      - ".github/workflows/rebrand-package-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bundle and package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils rpm
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+      - run: pnpm install --frozen-lockfile
+      - name: Build unsigned DEB and RPM without publishing
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: --bundles deb,rpm --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Replace published SSHelter packages with Lunport
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/validate-linux-rebrand.py
