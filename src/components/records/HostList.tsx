@@ -179,6 +179,12 @@ export function RecordHostList({
               Group settings
             </Button>
           )}
+          {importHosts && (
+            <Button variant="outline" size="sm" onClick={importHosts} disabled={disabled}>
+              <Upload className="size-3.5" />
+              Import hosts
+            </Button>
+          )}
           {create && (
             <Button
               className="library-create"
@@ -189,7 +195,7 @@ export function RecordHostList({
               New host
             </Button>
           )}
-          {(createGroup || importHosts) && (
+          {createGroup && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -205,12 +211,6 @@ export function RecordHostList({
                   <DropdownMenuItem disabled={disabled} onSelect={createGroup}>
                     <FolderPlus />
                     New group
-                  </DropdownMenuItem>
-                )}
-                {importHosts && (
-                  <DropdownMenuItem onSelect={importHosts}>
-                    <Upload />
-                    Import hosts
                   </DropdownMenuItem>
                 )}
               </DropdownMenuContent>

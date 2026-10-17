@@ -263,60 +263,15 @@ export function RecordsWorkspace({
     "System default terminal";
   const shortcut = platform.data === "macos" ? "⌘ K" : "Ctrl K";
   return (
-    <div className="app-shell library-shell flex h-screen flex-col overflow-hidden">
-      <header
-        data-tauri-drag-region
-        className={cn(
-          "library-titlebar",
-          platform.data === "macos" && "is-macos",
-        )}
-      >
-        <Button type="button" variant="ghost" size="icon" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-expanded={!sidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID} onClick={toggleSidebar}>
-          {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
-        </Button>
-        <span className="library-app-name">
-          <BrandMark className="size-5" />
-          Lunport
-        </span>
-        <button
-          type="button"
-          className="library-quick-connect"
-          onClick={() => setPaletteOpen(true)}
-        >
-          <Search className="size-3.5" />
-          <span>Quick connect</span>
-          <kbd>{shortcut}</kbd>
-        </button>
-        <UpdateIndicator />
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label="Workspace menu">
-              <MoreHorizontal className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={reload}>
-              <RotateCw />
-              Refresh workspace
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={toggleTheme}>
-              <SunMoon />
-              Toggle theme
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => openSettings("ai")}>
-              <Bot />
-              AI access (MCP)
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => openSettings("general")}>
-              <Settings />
-              Settings
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </header>
-      <div className="flex min-h-0 flex-1">
+    <div className={cn("app-shell library-shell flex h-screen overflow-hidden", platform.data === "macos" && "is-macos")}
+      data-sidebar-collapsed={sidebarCollapsed}>
+      <div className="library-sidebar">
+        <header className="library-sidebar-header" data-tauri-drag-region>
+          <span className="library-app-name">
+            <BrandMark className="size-5" />
+            <span>Lunport</span>
+          </span>
+        </header>
         <LibraryNavigation
           overview={overview}
           panel={panel}
@@ -324,188 +279,239 @@ export function RecordsWorkspace({
           navigate={setPanel}
           changeFilter={changeFilter}
           createGroup={createGroup}
-          settings={() => openSettings("general")}
         />
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {overview.shared_writes_blocked && (
-            <p role="status" className="library-notice">
-              {syncActive
-                ? "Setting up sync… Your saved records are kept while this finishes."
-                : overview.pending_account
-                  ? "Sync setup is incomplete. Resume setup to continue."
-                  : "Shared changes are paused. Review sync settings to continue."}
+      </div>
+      <div className="library-workspace-column flex min-h-0 min-w-0 flex-1 flex-col">
+        <header
+          data-tauri-drag-region
+          className="library-titlebar"
+        >
+          <Button type="button" variant="ghost" size="icon" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!sidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID} onClick={toggleSidebar}>
+            {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+          </Button>
+          <button
+            type="button"
+            className="library-quick-connect"
+            onClick={() => setPaletteOpen(true)}
+          >
+            <Search className="size-3.5" />
+            <span>Quick connect</span>
+            <kbd>{shortcut}</kbd>
+          </button>
+          <div className="library-titlebar-actions">
+            <UpdateIndicator />
+            <Button type="button" variant="ghost" size="sm" title="Sync settings"
+              aria-label="Sync settings" aria-current={panel === "account" ? "page" : undefined} onClick={() => setPanel("account")}>
+              <Cloud className="size-4" />
+              Sync
+            </Button>
+            <Button type="button" variant="ghost" size="icon-sm" title="Settings"
+              aria-label="Settings" onClick={() => openSettings("general")}>
+              <Settings className="size-4" />
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label="Workspace menu">
+                  <MoreHorizontal className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={reload}>
+                  <RotateCw />
+                  Refresh workspace
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={toggleTheme}>
+                  <SunMoon />
+                  Toggle theme
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => openSettings("ai")}>
+                  <Bot />
+                  AI access (MCP)
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </header>
+        {overview.shared_writes_blocked && (
+          <p role="status" className="library-notice">
+            {syncActive
+              ? "Setting up sync… Your saved records are kept while this finishes."
+              : overview.pending_account
+                ? "Sync setup is incomplete. Resume setup to continue."
+                : "Shared changes are paused. Review sync settings to continue."}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setPanel("account")}
+            >
+              Review sync
+              <ArrowUpRight className="size-3.5" />
+            </Button>
+          </p>
+        )}
+        {!syncActive &&
+          overview.account &&
+          (!overview.library_enabled ||
+            [...overview.hosts, ...overview.groups].some(
+              (row) => row.scope.kind === "local",
+            )) && (
+            <div role="status" className="library-notice">
+              <span>
+                {overview.library_enabled
+                  ? "Some records need review before they can sync."
+                  : "Include your existing hosts and Groups in library sync."}
+              </span>
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setPanel("account")}
               >
-                Review sync
+                Review setup
                 <ArrowUpRight className="size-3.5" />
               </Button>
-            </p>
+            </div>
           )}
-          {!syncActive &&
-            overview.account &&
-            (!overview.library_enabled ||
-              [...overview.hosts, ...overview.groups].some(
-                (row) => row.scope.kind === "local",
-              )) && (
-              <div role="status" className="library-notice">
-                <span>
-                  {overview.library_enabled
-                    ? "Some records need review before they can sync."
-                    : "Include your existing hosts and Groups in library sync."}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setPanel("account")}
-                >
-                  Review setup
-                  <ArrowUpRight className="size-3.5" />
-                </Button>
-              </div>
-            )}
-          <div
-            className="library-detail-layout flex min-h-0 flex-1"
-            data-inspecting={panel === "hosts" && !!inspected}
+        <div
+          className="library-detail-layout flex min-h-0 flex-1"
+          data-inspecting={panel === "hosts" && !!inspected}
+        >
+          <main
+            hidden={panel !== "hosts"}
+            className="library-main min-h-0 min-w-0 flex-1"
+            aria-label="Hosts workspace"
           >
+            <RecordHostList
+              overview={overview}
+              selectedId={inspectedId}
+              select={setInspectedId}
+              edit={editHost}
+              selectGroup={(id) => requestSelection({ kind: "group", id })}
+              create={createHost}
+              createGroup={createGroup}
+              disabled={editorBusy}
+              organizeDisabled={dirty || editorBusy}
+              accept={accept}
+              onBusy={setEditorBusy}
+              expand={() => setInspectedId(null)}
+              connect={(id) => void connect(id)}
+              connectingId={connectingId}
+              filter={filter}
+              changeFilter={changeFilter}
+              searchShortcut={platform.data === "macos" ? "⌘ F" : "Ctrl F"}
+              importHosts={() => setPanel("import")}
+            />
+          </main>
+          {panel === "hosts" && <DetailPresence>{inspected ? (
+            <HostPreview
+              host={inspected}
+              overview={overview}
+              connect={() => void connect(inspected.id)}
+              edit={() => editHost(inspected.id)}
+              close={() => {
+                const previousId = inspectedId;
+                setInspectedId(null);
+                requestAnimationFrame(() => {
+                  const target = document.querySelector<HTMLElement>(`[data-host-id="${CSS.escape(previousId ?? "")}"]`);
+                  (target ?? document.getElementById(SEARCH_INPUT_ID))?.focus();
+                });
+              }}
+              busy={editorBusy || !!connectingId}
+            />
+          ) : null}</DetailPresence>}
+          {panel !== "hosts" && (
             <main
-              hidden={panel !== "hosts"}
-              className="library-main min-h-0 min-w-0 flex-1"
-              aria-label="Hosts workspace"
+              key={panel}
+              className={cn("library-tools-main app-main min-h-0 min-w-0 flex-1", panel === "keys" ? "flex flex-col overflow-hidden" : "overflow-y-auto")}
+              aria-label="Workspace content"
             >
-              <RecordHostList
-                overview={overview}
-                selectedId={inspectedId}
-                select={setInspectedId}
-                edit={editHost}
-                selectGroup={(id) => requestSelection({ kind: "group", id })}
-                create={createHost}
-                createGroup={createGroup}
-                disabled={editorBusy}
-                organizeDisabled={dirty || editorBusy}
-                accept={accept}
-                onBusy={setEditorBusy}
-                expand={() => setInspectedId(null)}
-                connect={(id) => void connect(id)}
-                connectingId={connectingId}
-                filter={filter}
-                changeFilter={changeFilter}
-                searchShortcut={platform.data === "macos" ? "⌘ F" : "Ctrl F"}
-                importHosts={() => setPanel("import")}
-              />
+              {panel === "keys" && <RecordsKeysPanel overview={overview} />}
+              {panel === "account" && (
+                <RecordsAccountPanel
+                  overview={overview}
+                  onBusyChange={setAccountBusy}
+                />
+              )}
+              {panel === "import" && <RecordsImportPanel />}
             </main>
-            {panel === "hosts" && <DetailPresence>{inspected ? (
-              <HostPreview
-                host={inspected}
-                overview={overview}
-                connect={() => void connect(inspected.id)}
-                edit={() => editHost(inspected.id)}
-                close={() => {
-                  const previousId = inspectedId;
-                  setInspectedId(null);
-                  requestAnimationFrame(() => {
-                    const target = document.querySelector<HTMLElement>(`[data-host-id="${CSS.escape(previousId ?? "")}"]`);
-                    (target ?? document.getElementById(SEARCH_INPUT_ID))?.focus();
-                  });
-                }}
-                busy={editorBusy || !!connectingId}
-              />
-            ) : null}</DetailPresence>}
-            {panel !== "hosts" && (
-              <main
-                key={panel}
-                className={cn("library-tools-main app-main min-h-0 min-w-0 flex-1", panel === "keys" ? "flex flex-col overflow-hidden" : "overflow-y-auto")}
-                aria-label="Workspace content"
-              >
-                {panel === "keys" && <RecordsKeysPanel overview={overview} />}
-                {panel === "account" && (
-                  <RecordsAccountPanel
-                    overview={overview}
-                    onBusyChange={setAccountBusy}
-                  />
-                )}
-                {panel === "import" && <RecordsImportPanel />}
-              </main>
-            )}
-          </div>
-          <footer className="library-statusbar">
-            <button
-              type="button"
-              className="library-sync-link"
-              aria-label="Sync status and settings"
-              onClick={() => setPanel("account")}
-            >
-              <Cloud className="size-3.5" />
-              <RecordSyncStatus
-                connected={!!overview.account && overview.library_enabled}
-                pending={!!overview.pending_account}
-                pendingChanges={overview.pending_changes}
-                lastSyncMs={overview.last_sync_ms}
-                error={error ?? overview.last_error}
-                syncing={syncActive}
-              />
-            </button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="library-sync-now"
-              disabled={syncActive}
-              onClick={
-                overview.library_enabled ? sync : () => setPanel("account")
-              }
-            >
-              {syncActive
-                ? "Syncing…"
-                : overview.library_enabled
-                  ? "Sync now"
-                  : "Set up sync"}
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="library-terminal-options"
-                  aria-label="Connection options"
-                >
-                  <Terminal className="size-3.5" />
-                  <span>{terminalName}</span>
-                  <ChevronDown className="size-3" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-64">
-                <DropdownMenuLabel>Open connections in</DropdownMenuLabel>
-                <DropdownMenuRadioGroup
-                  value={terminalId ?? ""}
-                  onValueChange={(value) => setTerminalId(value || null)}
-                >
-                  <DropdownMenuRadioItem value="">
-                    System default terminal
-                  </DropdownMenuRadioItem>
-                  {terminals.data?.map((terminal) => (
-                    <DropdownMenuRadioItem
-                      key={terminal.id}
-                      value={terminal.id}
-                    >
-                      {terminal.label}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuCheckboxItem
-                  checked={preferNewTab}
-                  disabled={
-                    !terminalSupportsNewTab(terminalId, terminals.data ?? [])
-                  }
-                  onCheckedChange={setNewTab}
-                >
-                  Open in a new tab
-                </DropdownMenuCheckboxItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </footer>
+          )}
         </div>
+        <footer className="library-statusbar">
+          <button
+            type="button"
+            className="library-sync-link"
+            aria-label="Sync status and settings"
+            onClick={() => setPanel("account")}
+          >
+            <Cloud className="size-3.5" />
+            <RecordSyncStatus
+              connected={!!overview.account && overview.library_enabled}
+              pending={!!overview.pending_account}
+              pendingChanges={overview.pending_changes}
+              lastSyncMs={overview.last_sync_ms}
+              error={error ?? overview.last_error}
+              syncing={syncActive}
+            />
+          </button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="library-sync-now"
+            disabled={syncActive}
+            onClick={
+              overview.library_enabled ? sync : () => setPanel("account")
+            }
+          >
+            {syncActive
+              ? "Syncing…"
+              : overview.library_enabled
+                ? "Sync now"
+                : "Set up sync"}
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="library-terminal-options"
+                aria-label="Connection options"
+              >
+                <Terminal className="size-3.5" />
+                <span>{terminalName}</span>
+                <ChevronDown className="size-3" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-64">
+              <DropdownMenuLabel>Open connections in</DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={terminalId ?? ""}
+                onValueChange={(value) => setTerminalId(value || null)}
+              >
+                <DropdownMenuRadioItem value="">
+                  System default terminal
+                </DropdownMenuRadioItem>
+                {terminals.data?.map((terminal) => (
+                  <DropdownMenuRadioItem
+                    key={terminal.id}
+                    value={terminal.id}
+                  >
+                    {terminal.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuCheckboxItem
+                checked={preferNewTab}
+                disabled={
+                  !terminalSupportsNewTab(terminalId, terminals.data ?? [])
+                }
+                onCheckedChange={setNewTab}
+              >
+                Open in a new tab
+              </DropdownMenuCheckboxItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </footer>
       </div>
       <Dialog
         open={selection.kind !== "none"}
