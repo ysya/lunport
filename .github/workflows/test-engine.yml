@@ -142,6 +142,10 @@ jobs:
           cargo test --locked --test app_profile_build
           cargo test --locked --release --test app_profile_build
           cargo test --locked --release --features development-profile --test app_profile_build
+      - name: Group ordering remains compatible with the published 1.2.0 client
+        run: |
+          git fetch --depth=1 origin tag v1.2.0
+          bash ../scripts/validate-group-order-compat.sh
       # Runs whatever the scratch sshd step came to, so that a first run shows both results.
       - name: Password and keyboard-interactive tests against the container
         if: ${{ !cancelled() }}

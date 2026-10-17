@@ -8,6 +8,16 @@ A new installation opens a Records workspace without requiring an SSH config or 
 
 Groups provide shared connection defaults and can contain other Groups. Host overrides remain explicit. The full-height sidebar is reserved for Library navigation; use tags, Recent and Needs attention to find connections, or open the command palette with **⌘K / Ctrl+K**. **Import hosts** sits beside **New host** in the host list. **Settings** opens from the upper-right toolbar or **⌘, / Ctrl+,** and provides search across the preferences available in your workspace.
 
+Drag a Group row within its current level to reorder it. Its **⋯** menu also offers **Move up / Move down**; with the Group focused, use **Alt+↑ / Alt+↓** (Option on macOS). **Groups → ⋯ → Sort groups by name** restores name sorting. Sorting preserves nesting and connection defaults, and newly added Groups follow manually ordered peers. With an account, order syncs to your computers; concurrent offline reorders converge through the existing sync rules. Older 1.2.0 clients continue using name sorting while retaining the additional encrypted metadata.
+
+## Server identities and connection checks
+
+Open **Settings → Connections → Known hosts**, or choose **Manage identity…** in a host's connection details. **Lunport identities** shows the saved address, key type, fingerprint, verification time and originating device. You can copy a fingerprint, verify it again, or forget it after reviewing the confirmation. Forgetting a shared host's identity syncs to your other computers; its host settings and login keys remain saved. The next connection requires a new trust decision.
+
+The **OpenSSH known_hosts** tab manages this computer's `~/.ssh/known_hosts`. Search by host, fingerprint or key type; hashed names remain hidden. Removing an entry first saves a backup and checks that the complete displayed line is still current. Changes in this tab apply to OpenSSH's local file. Lunport's SSH client uses the separate identities shown in the first tab.
+
+In a host's connection details, **Check port** performs a manual TCP reachability check with a three-second limit and displays the result, connection time and check time. A reachable port confirms TCP connectivity; server identity and login are verified separately. Timeout, refused connection and name-resolution errors describe that check rather than declaring a host offline. For jump-host routes, use **Verify fingerprint** to check through the configured route; that flow may request jump-host credentials.
+
 ## Connect in your terminal
 
 Choose a terminal in **Settings → Connections**; individual hosts can override that choice. A connection opens in the terminal while Lunport's built-in SSH engine handles authentication and server identity. New or changed server fingerprints require a decision in Lunport. Check fingerprints against a trusted source before accepting them.

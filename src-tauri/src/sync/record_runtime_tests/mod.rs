@@ -64,6 +64,98 @@ fn a_fresh_records_workspace_can_save_when_its_data_directory_does_not_exist() {
     }
 }
 #[test]
+fn navigation_upgrade_retains_the_exact_previous_v4_state_once() {
+    use sha2::{Digest, Sha256};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let mut previous = state();
+    previous.version = 4;
+    save_active(&path, &previous).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let mut next = previous;
+    next.version = crate::sync::records_v3::NAVIGATION_STATE_VERSION;
+    next.local.group_order = vec!["0000000000000001".into()];
+    save_active(&path, &next).unwrap();
+    let backup = path.with_file_name(format!(
+        "sync-state-v4-{:x}.backup.json",
+        Sha256::digest(&bytes)
+    ));
+    assert_eq!(fs::read(&backup).unwrap(), bytes);
+    next.local.group_order.clear();
+    save_active(&path, &next).unwrap();
+    assert_eq!(fs::read(&backup).unwrap(), bytes);
+    assert_eq!(names(temp.path()).len(), 2);
+}
+#[test]
+fn received_navigation_metadata_promotes_the_local_decoder_before_publication() {
+    use crate::sync::{
+        crypto::ChainKeys,
+        record::{record_key, LocalRecord, Record, RecordKind},
+        state_v2::AccountState,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sync-state.json");
+    let mut previous = state();
+    previous.version = 4;
+    previous.account = Some(AccountState::new(&ChainKeys::generate().unwrap().chain_id));
+    save_active(&path, &previous).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let mut core = crate::sync::runtime::SyncCore::default();
+    activate_probe(
+        &mut core,
+        StartupProbe::Records {
+            state: Box::new(previous.clone()),
+            fresh: false,
+        },
+    )
+    .unwrap();
+    let mut candidate = previous;
+    let record = Record {
+        kind: RecordKind::Meta,
+        id: crate::sync::group_order::RECORD_ID.into(),
+        version: 1,
+        updated_at_ms: 1,
+        device_id: candidate.device_id.clone(),
+        deleted: false,
+        payload: serde_json::json!({"schema":1,"ids":[]}),
+    };
+    candidate.account.as_mut().unwrap().records.insert(
+        record_key(record.kind, &record.id),
+        LocalRecord {
+            record,
+            seq: 0,
+            dirty: false,
+        },
+    );
+    persist_candidate(&mut core, &path, candidate).unwrap();
+    assert_eq!(
+        core.records.as_ref().unwrap().version,
+        crate::sync::records_v3::NAVIGATION_STATE_VERSION
+    );
+    let backups: Vec<_> = fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|p| {
+            p.file_name()
+                .to_string_lossy()
+                .starts_with("sync-state-v4-")
+        })
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(fs::read(backups[0].path()).unwrap(), bytes);
+    let StartupProbe::Records {
+        state: reopened, ..
+    } = probe_startup(&path, "unused")
+    else {
+        panic!("new decoder")
+    };
+    assert_eq!(
+        reopened.version,
+        crate::sync::records_v3::NAVIGATION_STATE_VERSION
+    );
+}
+
+#[test]
 fn legacy_v1_and_v2_probe_retains_original_bytes_without_upgrade_or_rename() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sync-state.json");
@@ -159,7 +251,7 @@ fn invalid_state_save_preserves_existing_bytes_and_creates_no_other_files() {
     let path = temp.path().join("sync-state.json");
     fs::write(&path, b"source").unwrap();
     let mut invalid = state();
-    invalid.version = 5;
+    invalid.version = crate::sync::records_v3::NAVIGATION_STATE_VERSION + 1;
     assert!(save_active(&path, &invalid).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"source");
     assert_eq!(names(temp.path()), vec!["sync-state.json"]);

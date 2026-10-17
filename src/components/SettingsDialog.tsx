@@ -86,6 +86,7 @@ import { chooseMcpMode } from "@/lib/mcp-flow";
 import { McpAttribution } from "@/components/McpAttribution";
 import { groupPath } from "@/components/records/group-tree";
 import type { RecordOverview } from "@/lib/records";
+import { KnownHostsManager } from "@/components/records/KnownHostsManager";
 
 export function SettingsCategoryPane({
   category,
@@ -106,7 +107,7 @@ export function SettingsCategoryPane({
   if (category === "updates") return <UpdatesPane />;
   if (category === "about") return <AboutPane />;
   if (category === "appearance") return <AppearancePane />;
-  if (category === "connection") return <ConnectionPane />;
+  if (category === "connection") return <ConnectionPane recordOverview={recordOverview} />;
   if (category === "files") return <>
     {recordOverview ? <Section title="Library & workspace tools" description="Hosts and keys stay in this local library unless you explicitly share them. Import copies selected entries and leaves the source files in place.">
       <SettingsGroup>
@@ -608,7 +609,7 @@ function AppearancePane() {
   );
 }
 
-function ConnectionPane() {
+function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
   const terminalId = useSettingsStore((s) => s.terminalId);
   const setTerminalId = useSettingsStore((s) => s.setTerminalId);
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
@@ -618,7 +619,7 @@ function ConnectionPane() {
   const supportsNewTab = terminalSupportsNewTab(terminalId, terminals.data ?? []);
 
   return (
-    <Section
+    <><Section
       title="Terminal"
       description="Where Lunport opens a connection. “System default” uses your OS default terminal (or the first detected)."
     >
@@ -659,6 +660,9 @@ function ConnectionPane() {
         </SettingsRow>
       </SettingsGroup>
     </Section>
+    {recordOverview && <Section title="Known hosts" description="Inspect trusted server fingerprints and manage local OpenSSH host keys.">
+      <SettingsGroup><SettingsRow label="Saved server identities" description="Review fingerprints, verify a server again, or forget an old identity."><KnownHostsManager overview={recordOverview} /></SettingsRow></SettingsGroup>
+    </Section>}</>
   );
 }
 

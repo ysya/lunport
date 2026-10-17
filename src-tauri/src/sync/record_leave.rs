@@ -360,12 +360,13 @@ fn ensure_latest(env: &SyncEnv, op: &PendingAccountOperation) -> Result<(), AppE
         .as_ref()
         .filter(|p| p.id == op.id)
         .ok_or_else(crate::sync::runtime::superseded)?;
-    if s.account
-        .as_ref()
-        .is_some_and(|a| a.remote_schema_version.is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA))
-        || p.prepared_account
-            .remote_schema_version
+    if s.account.as_ref().is_some_and(|a| {
+        a.remote_schema_version
             .is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA)
+    }) || p
+        .prepared_account
+        .remote_schema_version
+        .is_some_and(|v| v > records_v3::ACCOUNT_SCHEMA)
         || records_v3::account_migration_pending(&s)
     {
         return Err(error(
@@ -765,6 +766,22 @@ pub(crate) fn resume_locked(env: &SyncEnv) -> Result<(), AppError> {
                 .map_err(|_| error("preserved inheritance needs review"))?;
             records_v3::validate_hosts(&effective)
                 .map_err(|_| error("latest local routes conflict with preservation plan"))?;
+            let order = crate::sync::group_order::view(latest).ids;
+            n.local.group_order = order
+                .into_iter()
+                .map(|id| {
+                    op.leave
+                        .as_ref()
+                        .unwrap()
+                        .groups
+                        .iter()
+                        .find(|g| g.source_group_id == id)
+                        .map_or(id.clone(), |g| g.local_group_id.clone())
+                })
+                .collect();
+            if !n.local.group_order.is_empty() {
+                n.version = n.version.max(records_v3::NAVIGATION_STATE_VERSION);
+            }
             n.account = None;
             n.spaces.clear();
             n.rotation = None;

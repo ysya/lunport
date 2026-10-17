@@ -718,7 +718,8 @@ fn group_leave_preserves_nested_defaults_parent_membership_and_jump_remaps() {
         let child=serde_json::from_value(json!({"schema":1,"name":"Child","parent_id":"0000000000000031","defaults":{"port":2222}})).unwrap();
         let s=crate::sync::record_groups::create_group(&s,"0000000000000032",scope.clone(),child,false,101).unwrap();
         let h=crate::sync::record_repository::get_host(&s,B).unwrap();let mut p=h.host.payload;p.schema=3;p.group_id=Some("0000000000000032".into());p.inherit=vec![records_v3::InheritedField::User,records_v3::InheritedField::Port,records_v3::InheritedField::Jump];
-        Ok(crate::sync::record_repository::update_host(&s,B,&h.revision,p,102).unwrap())
+        let s = crate::sync::record_repository::update_host(&s,B,&h.revision,p,102).unwrap();
+        Ok(crate::sync::group_order::set(&s,&[],None,vec!["0000000000000032".into(),"0000000000000031".into()],103).unwrap())
     }).unwrap();
     record_round::sync_once(&d.env()).unwrap();
     let result = leave_account(&d.env()).unwrap();
@@ -745,6 +746,17 @@ fn group_leave_preserves_nested_defaults_parent_membership_and_jump_remaps() {
     assert!(groups.iter().all(|g| g.group.scope == HostScope::Local
         && g.group.id != "0000000000000031"
         && g.group.id != "0000000000000032"));
+    let child = groups
+        .iter()
+        .find(|g| g.group.payload.parent_id.is_some())
+        .unwrap();
+    assert_eq!(
+        crate::sync::group_order::view(&s).ids,
+        vec![
+            child.group.id.clone(),
+            child.group.payload.parent_id.clone().unwrap()
+        ]
+    );
     assert!(groups
         .iter()
         .any(|g| Some(&g.group.id) == h.host.payload.group_id.as_ref()

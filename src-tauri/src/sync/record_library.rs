@@ -223,6 +223,7 @@ pub(crate) fn include_existing(
         );
     }
     crate::sync::record_groups::validate_groups(&next, &scope)?;
+    crate::sync::group_order::publish_local(&mut next, keys, now)?;
     repo::validate_transition(state, &next)?;
     crate::sync::records_v3::validate_state(&next)?;
     Ok(next)
