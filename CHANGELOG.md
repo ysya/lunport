@@ -2,6 +2,16 @@
 
 ## [1.5.0](https://github.com/ysya/lunport/compare/v1.4.0...v1.5.0) (2026-10-17)
 
+SSH password questions now appear in Lunport. Host Details can save, replace or remove a password in this device's system credential store. One-time answers are not saved automatically, and saved passwords are not included in library sync or exports.
+
+Host and Key Vault details open as an overlay, preserving the collection's width and scroll position. Narrow windows keep the catalog in place, and the inspector supports resizing, keyboard focus and Escape behavior.
+
+macOS protected credentials now use a fixed **Lunport Credential Helper** that ordinary App updates retain. The helper authenticates Lunport before accessing credentials, and Lunport verifies the helper before sending an account or password. A missing or damaged helper is restored from the signed App.
+
+### First macOS upgrade
+
+Each existing protected Keychain item may ask for authorization once when it is first used by **Lunport Credential Helper**. Choose **Always Allow** to retain that helper's permission. Existing passwords, keys and library data do not need to be recreated. A deliberate helper update or changed Keychain policy may still require authorization. Builds retain the project signing certificate and are not Apple-notarized.
+
 
 ### Features
 
