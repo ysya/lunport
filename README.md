@@ -2,11 +2,11 @@
   <img src="public/lunport-icon.svg" width="96" height="96" alt="Lunport Folded L icon" />
   <h1>Lunport</h1>
   <p><strong>Your SSH workspace.</strong></p>
-  <p>Keep your hosts, keys and Groups together.<br />Connect from your terminal. Bring your library to your other devices with encrypted sync.</p>
+  <p>Keep your hosts, keys and Groups together.<br />Connect from your terminal. Give AI agents controlled SSH access through MCP.<br />Bring your library to your other devices with encrypted sync.</p>
   <p><a href="https://github.com/ysya/lunport/releases/latest">Download</a> · <a href="docs/usage.md">User guide</a> · <a href="docs/development.md">Development</a> · <a href="https://github.com/ysya/lunport/issues">Issues</a></p>
 </div>
 
-Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly named **SSHelter**. It combines a local host library, a private-key vault and a built-in SSH engine with optional encrypted sync and AI access.
+Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly named **SSHelter**. It combines a local host library, a private-key vault and a built-in SSH engine with optional encrypted sync and controlled AI access through a built-in **MCP (Model Context Protocol) server**.
 
 > **Upgrading from SSHelter:** Lunport continues the same project with a new name and Folded L icon. Existing data, credentials and command-line integrations keep their established identities. Historical [SSHelter 1.0.0](https://github.com/ysya/lunport/releases/tag/v1.0.0) installers retain their original names; use [Releases](https://github.com/ysya/lunport/releases/latest) for the current Stable.
 
@@ -16,7 +16,7 @@ Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly na
 - **Your terminal, Lunport's SSH engine** — open sessions in your preferred terminal, verify server fingerprints and enter passwords or authentication codes in Lunport. Save host passwords in this device's system credential store when desired. Jump hosts use `ProxyJump`.
 - **Keys in one place** — generate keys or import an OpenSSH private key with the system file picker or by pasting. Imports copy into the local vault and preserve the source file. Key sharing has separate controls.
 - **Encrypted library sync** — connect your computers with a private 24-word code. Hosts and Groups travel together; passwords stay on each device, and private keys sync only when explicitly shared. The relay stores ciphertext and can be self-hosted.
-- **AI access you control** — allow individual hosts for local MCP clients. Review proposed connections, verify fingerprints in the app, and choose Ask or explicitly acknowledged Auto-log for remote commands.
+- **AI access through MCP** — allow individual hosts for local MCP clients. Review proposed connections, verify fingerprints in the app, and choose Ask or explicitly acknowledged Auto-log for remote commands.
 - **A home for existing OpenSSH setups** — Legacy mode edits your local SSH configuration while preserving comments, ordering and unknown directives. Migration into the Records library requires an explicit review.
 - **Consistent preferences** — searchable settings, six built-in color palettes with independent light/dark/system modes, reduced motion, an animated collapsible sidebar and signed Stable/Beta updates. **Settings → About** collects the installed version, project links and license.
 
