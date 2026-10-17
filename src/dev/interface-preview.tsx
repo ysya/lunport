@@ -36,6 +36,11 @@ else {
   });
   const scenario = new URLSearchParams(window.location.search).get("scenario");
   const failure = new URLSearchParams(window.location.search).get("failure");
+  if (scenario === "vault") overview.keys = Array.from({ length: 25 }, (_, index) => ({ ...overview.keys[0], id: (index + 1).toString(16).padStart(32, "0"), public: { ...overview.keys[0].public!, name: index === 0 ? "Work key" : `Infrastructure key ${index + 1}` } }));
+  // Disposable in-memory credentials only; no OS store or remote SSH is used here.
+  const passwords = new Map<string, string>();
+  let passwordSaveFailed = false;
+  if (scenario === "password" || scenario === "password-save-retry") overview.hosts = overview.hosts.map((host, index) => ({ ...host, payload: { ...host.payload, alias: ["production-web", "database-replica", "bastion"][index] }, effective_payload: { ...host.effective_payload, alias: ["production-web", "database-replica", "bastion"][index] } }));
   let mcp = { enabled: false, bridge_active: true, approval_mode: "ask", allowed_hosts: [] as string[], pending: [], recent: [], audit_error: null, executable: "/fixture/sshelter", last_client_at_ms: null, noninteractive_credentials_supported: false, noninteractive_credentials_notice: "Ask is required for interactive credentials." };
   if (scenario === "sync-review") overview = { ...overview, account: { chain_id: "c".repeat(64), device_name: "Example laptop" } };
   if (scenario === "sync-pending") overview = { ...overview, shared_writes_blocked: true, pending_account: { id: "fixture-setup", kind: "join_account", phase: "publishing" } };
@@ -66,6 +71,18 @@ else {
       unregisterCallback: (id: number) => callbacks.delete(id),
       invoke: async (command: string, args: Record<string, unknown> = {}) => {
         if (command === failure) throw new Error("Disposable fixture read failure. Retry after changing the preview scenario.");
+        if (command === "secrets_has") return passwords.has(String(args.alias));
+        if (command === "secrets_set") {
+          if (scenario === "password-save-retry" && !passwordSaveFailed) { passwordSaveFailed = true; throw new Error("Disposable credential-store failure"); }
+          passwords.set(String(args.alias), String(args.password)); return;
+        }
+        if (command === "secrets_delete") { passwords.delete(String(args.alias)); return; }
+        if (command === "records_host_create") {
+          const id = String(overview.hosts.length + 1).padStart(16, "0");
+          return updateOverview({ hosts: [...overview.hosts, hostView({ id, scope: args.scope as RecordOverview["hosts"][number]["scope"], payload: args.payload as RecordOverview["hosts"][number]["payload"] })] });
+        }
+        if (command === "records_host_update") return updateOverview({ hosts: overview.hosts.map(host => host.id !== args.id ? host : hostView({ ...host, payload: args.payload as typeof host.payload, revision: { ...host.revision, version: String(BigInt(host.revision.version) + 1n) } })) });
+        if (command === "records_key_rename") return updateOverview({ keys: overview.keys.map(key => key.id === args.keyId && key.public ? { ...key, public: { ...key.public, name: String(args.name) } } : key) });
         if (command === "config_load" && args.path === "/fixture/slow-config") await new Promise((resolve) => setTimeout(resolve, 1500));
         const fixture = legacyPreviewRead(command, args);
         if (fixture.handled) return fixture.value;

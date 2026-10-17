@@ -220,6 +220,16 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
         slot.clone().expect("the broker was just built")
     };
     broker.set_audit({let app=app.clone();Arc::new(move |entry|app.state::<AppState>().mcp.record(entry))});
+    broker.set_authentication_owner({
+        let app = app.clone();
+        let hub = Arc::clone(&app.state::<AppState>().session.auth_questions);
+        Arc::new(move |id, cancel| Arc::new(super::auth_window::NativeOwner {
+            hub: Arc::clone(&hub),
+            surface: Arc::new(super::auth_window::TauriAuthSurface { app: app.clone() }),
+            request_id: format!("terminal-{id}"),
+            cancel,
+        }))
+    });
     broker.set_mcp_handler({let app=app.clone();Arc::new(move |connector,method,params,context,cancel|crate::mcp::records::dispatch(&app,connector,method,params,context,cancel))});
     let dir = match crate::fsutil::app_data_root() {
         Ok(root) => super::ipc_dir(&root),

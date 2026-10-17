@@ -557,7 +557,8 @@ export function RecordsWorkspace({
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             const origin = editorOrigin.current;
-            (origin?.isConnected ? origin : document.getElementById(SEARCH_INPUT_ID))?.focus();
+            const detailClose = document.querySelector<HTMLElement>('.library-host-preview[data-state="open"] button[aria-label="Close details"]');
+            (detailClose ?? (origin?.isConnected ? origin : document.getElementById(SEARCH_INPUT_ID)))?.focus();
           }}
         >
           {!isGroupEditor && (

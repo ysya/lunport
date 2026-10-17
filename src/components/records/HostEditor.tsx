@@ -39,6 +39,7 @@ import {
   previewHostDraft,
 } from "./inheritance";
 import { FormatUpgradeReview } from "./FormatUpgradeReview";
+import { HostPasswordField, saveHostPassword, type PasswordChange } from "./HostPasswordField";
 export function RecordHostEditor({
   host,
   hostId,
@@ -85,15 +86,22 @@ export function RecordHostEditor({
           },
   );
   const [busy, setBusy] = useState(false);
+  const [passwordChange, setPasswordChange] = useState<PasswordChange>(null);
+  const dirty = state.dirty || passwordChange !== null;
+  const currentHost = state.id ? selectHost(overview.hosts, state.id) : host;
   const [askingUpgrade, setAskingUpgrade] = useState(false);
   const [askingDelete, setAskingDelete] = useState(false);
   const inFlight = useRef(false);
   useEffect(() => {
-    setState((current) => refreshEditor(current, host));
-  }, [host]);
+    setState((current) => {
+      const refreshed = refreshEditor(current, currentHost);
+      // A record refresh after creation must not erase a credential-store failure.
+      return passwordChange && current.error ? { ...refreshed, error: current.error } : refreshed;
+    });
+  }, [currentHost]);
   useEffect(() => {
-    onDirty(state.dirty);
-  }, [state.dirty, onDirty]);
+    onDirty(dirty);
+  }, [dirty, onDirty]);
   const patch = (values: Partial<HostPayload>) =>
     setState((current) => changeEditor(current, values));
   const sharedBlocked =
@@ -121,6 +129,7 @@ export function RecordHostEditor({
   };
   const save = (confirmed?: boolean) => {
     if (
+      (state.dirty || state.id === null) &&
       (state.payload.group_id || state.payload.inherit?.length) &&
       requiresFormatUpgrade(overview, state.scope) &&
       confirmed !== true
@@ -129,7 +138,7 @@ export function RecordHostEditor({
       return;
     }
     return run(async () => {
-      const result = await submitEditor(state, confirmed);
+      const result = state.id && !state.dirty ? overview : await submitEditor(state, confirmed);
       const accepted = accept(result);
       const oldIds = new Set(overview.hosts.map((value) => value.id));
       const created = result.hosts.filter(
@@ -142,6 +151,14 @@ export function RecordHostEditor({
       const saved = id ? selectHost(accepted.hosts, id) : null;
       if (saved) setState(beginEditor(saved));
       setAskingUpgrade(false);
+      if (passwordChange) {
+        if (!id || !saved) {
+          setState(current => ({ ...current, unavailable: true }));
+          throw new Error("The host was saved, but its identity is unavailable. Reopen the host to save its password.");
+        }
+        await saveHostPassword(id, passwordChange);
+        setPasswordChange(null);
+      }
       onSaved(id);
     });
   };
@@ -159,7 +176,8 @@ export function RecordHostEditor({
       setAskingDelete(false);
       onDeleted();
     });
-  const preview = previewHostDraft(overview, state.scope, state.payload, host);
+  const preview = previewHostDraft(overview, state.scope, state.payload, currentHost);
+  useEffect(() => { setPasswordChange(null); }, [preview.payload.auth]);
   const inherits = (field: InheritedField) =>
     state.payload.inherit?.includes(field) ?? false;
   const visible = { ...state.payload };
@@ -216,7 +234,7 @@ export function RecordHostEditor({
             {" · "}
             {!state.id
               ? "Not saved yet"
-              : state.dirty
+              : dirty
                 ? "Unsaved changes"
                 : "Saved"}
           </p>
@@ -263,7 +281,7 @@ export function RecordHostEditor({
               size="sm"
               className="ml-3"
               disabled={busy || !host}
-              onClick={() => setState(beginEditor(host))}
+              onClick={() => { setState(beginEditor(currentHost)); setPasswordChange(null); }}
             >
               Reload saved settings
             </Button>
@@ -272,14 +290,6 @@ export function RecordHostEditor({
         {sharedBlocked && (
           <p role="status" className="text-sm text-destructive">
             Sync changes are paused while account data is reviewed.
-          </p>
-        )}
-        {state.error && (
-          <p
-            role="alert"
-            className="text-sm text-destructive whitespace-pre-wrap"
-          >
-            {state.error}
           </p>
         )}
         {preview.error && (
@@ -415,10 +425,10 @@ export function RecordHostEditor({
                 </RecordField>
               )}
             {visible.auth === "password" && (
-              <p className="text-xs text-muted-foreground">
-                Passwords are requested in the terminal when needed and stay on this
-                device.
-              </p>
+              <HostPasswordField hostId={state.id} change={passwordChange} onChange={change => {
+                setPasswordChange(change);
+                setState(current => ({ ...current, error: null }));
+              }} />
             )}
           </FormSection>
           <details
@@ -624,20 +634,21 @@ export function RecordHostEditor({
           </details>
         )}
       </div>
+      {state.error && <p role="alert" className="mx-5 mb-3 shrink-0 text-xs text-destructive whitespace-pre-wrap">{state.error}</p>}
       <ActionBar className="app-editor-action-bar" label="Host editor actions" hint={
         <span role="status">
-          {state.dirty
+          {dirty
             ? "Unsaved changes"
             : state.id
               ? "Saved to your library"
               : "Save this host before connecting."}
         </span>
       }>
-          {state.dirty && state.id && (
+          {dirty && state.id && (
             <Button
               variant="ghost"
-              disabled={busy || !host}
-              onClick={() => setState(beginEditor(host))}
+              disabled={busy || !currentHost}
+              onClick={() => { setState(beginEditor(currentHost)); setPasswordChange(null); }}
             >
               Discard changes
             </Button>
@@ -651,7 +662,8 @@ export function RecordHostEditor({
             disabled={
               busy ||
               sharedBlocked ||
-              (!state.dirty && state.id !== null) ||
+              (!dirty && state.id !== null) ||
+              (passwordChange?.kind === "set" && passwordChange.value.length === 0) ||
               editorProblem(state) !== null
             }
             onClick={() => save()}
@@ -663,11 +675,11 @@ export function RecordHostEditor({
               variant="outline"
               disabled={
                 busy ||
-                state.dirty ||
+                dirty ||
                 state.unavailable ||
-                !host ||
-                host.readiness.kind !== "ready" ||
-                !!host.group_error ||
+                !currentHost ||
+                currentHost.readiness.kind !== "ready" ||
+                !!currentHost.group_error ||
                 !!preview.error
               }
               onClick={() =>

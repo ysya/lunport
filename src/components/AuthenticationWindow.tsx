@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { KeyRound } from "lucide-react";
+import { Eye, EyeOff, KeyRound } from "lucide-react";
 import { DecisionLayout } from "@/components/app/DecisionLayout";
 
 import type { AuthRequest } from "@/bindings/AuthRequest";
@@ -39,10 +39,13 @@ export function AuthenticationCardView({
 }: AuthenticationCardViewProps) {
   const cancel = useRef<HTMLButtonElement>(null);
   const answerId = useId();
+  const [shown, setShown] = useState(false);
+  useEffect(() => { setShown(false); }, [request.id]);
   useEffect(() => { cancel.current?.focus(); }, [request.id]);
   const expired = remainingMs <= 0;
   const inactive = expired || abandoned;
   const cannotSubmit = busy || !armed || inactive;
+  const answerLabel = request.kind === "password" ? "Password" : request.kind === "passphrase" ? "Key passphrase" : "Authentication answer";
 
   return (
     <DecisionLayout
@@ -63,11 +66,12 @@ export function AuthenticationCardView({
           </p>
         ) : (
           <>
-          <Label htmlFor={answerId}>Authentication answer</Label>
+          <Label htmlFor={answerId}>{answerLabel}</Label>
+          <div className="flex gap-2">
           <Input
             id={answerId}
-            aria-label="Authentication answer"
-            type={request.echo ? "text" : "password"}
+            aria-label={answerLabel}
+            type={request.echo || shown ? "text" : "password"}
             value={answer}
             autoComplete="off"
             autoCorrect="off"
@@ -81,6 +85,9 @@ export function AuthenticationCardView({
               if (!event.nativeEvent.isComposing && !cannotSubmit) onAnswer(answer);
             }}
           />
+          {!request.echo && <Button variant="outline" size="icon" aria-label={shown ? "Hide answer" : "Show answer"} aria-pressed={shown} disabled={busy} onClick={() => setShown(value => !value)}>{shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button>}
+          </div>
+          {request.kind === "password" && <p className="text-muted-foreground">Used for this connection only. Save a password for this device in the host’s settings.</p>}
           </>
         )}
         {error && <p role="alert" className="text-destructive">{error}</p>}
