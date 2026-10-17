@@ -20,6 +20,8 @@ The command-line entry point remains `sshelter connect <host>` through the renam
 
 Open **Keys → Import private key → From a file** to choose a supported OpenSSH private key with the system picker. You can also paste it. Lunport copies the key into its encrypted local vault and preserves the original file. Passphrase-protected keys retain their protection.
 
+To change a key's name, select it in **Keys**, choose **Rename**, and save the new name. The key ID, fingerprint, private material and host references stay the same. Account key names sync to your other devices; a conflicting or deleted key must be resolved before renaming.
+
 Generating a key, importing it, or adding a host does not by itself enable private-key sync. Review each key's sharing controls separately. Passwords and key passphrases are not synced. Stopping key sync does not erase copies already held by other devices.
 
 Lunport's SSH agent provides vault keys to compatible local SSH clients while the app is running and asks before a program uses a key. Keep the app running, or enable launch at login when you need that integration. Exporting a private key creates an ordinary key file outside the vault; other programs can then use that copy independently.
