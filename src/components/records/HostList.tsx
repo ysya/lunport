@@ -367,7 +367,7 @@ export function RecordHostList({
               <span>Connection</span>
             </div>
           )}
-          <div className="library-host-grid" data-layout={layout}>
+          <div className="library-host-grid" data-layout={layout} data-selecting={selecting}>
             {hosts.map((host, index) => {
               const ambiguous = (counts.get(host.id) ?? 0) > 1;
               const blocked =
@@ -386,7 +386,9 @@ export function RecordHostList({
               const address = layout === "grid"
                 ? `${endpointHost}:${host.effective_payload.port}${user ? ` · ${user}` : ""}`
                 : target;
-              const tags = showTags ? host.payload.tags.slice(0, 3) : [];
+              const tags = showTags ? host.payload.tags : [];
+              const visibleTags = tags.slice(0, layout === "grid" ? 1 : 3);
+              const moreTags = layout === "grid" ? tags.slice(1) : [];
               return (
                 <HostContextMenu
                   key={host.id + ":" + index}
@@ -470,11 +472,20 @@ export function RecordHostList({
                           )}
                           {tags.length > 0 && (
                             <span className="library-host-tags">
-                              {tags.map((tag) => (
+                              {visibleTags.map((tag) => (
                                 <span key={tag} title={revealHidden(tag)}>
                                   {revealHidden(tag)}
                                 </span>
                               ))}
+                              {moreTags.length > 0 && (
+                                <span
+                                  className="library-host-more-tags"
+                                  title={moreTags.map(revealHidden).join(", ")}
+                                  aria-label={`${moreTags.length} more tags: ${moreTags.map(revealHidden).join(", ")}`}
+                                >
+                                  +{moreTags.length}
+                                </span>
+                              )}
                             </span>
                           )}
                         </span>
