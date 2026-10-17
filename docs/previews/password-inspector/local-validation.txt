@@ -1,0 +1,13 @@
+Baseline source: main at 68698e94d2010d631ae7f06a312399c806b3e5c4, instrumented with the new desktop prompt test and an unused owner setter (the connect call still used ConnectionOwner).
+
+Desktop password must appear in the App, not the terminal
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2632 filtered out; finished in 3.01s
+
+Broker:
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 2589 filtered out; finished in 3.08s
+
+Native authentication:
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2634 filtered out; finished in 0.18s
+
+CI-safe Rust suite:
+test result: ok. 2625 passed; 0 failed; 1 ignored; 0 measured; 10 filtered out; finished in 175.23s

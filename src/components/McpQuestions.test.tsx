@@ -97,6 +97,14 @@ describe("native authentication rendering", () => {
     expect(renderAuth()).toContain('autoComplete="off"');
   });
 
+  it("labels password prompts and explains the one-time answer without offering to save an unverified password", () => {
+    const html = renderAuth({ request: { ...question, kind: "password" } });
+    expect(html).toContain('aria-label="Password"');
+    expect(html).toContain("Used for this connection only");
+    expect(html).toContain('aria-label="Show answer"');
+    expect(html).not.toContain("Remember password");
+  });
+
   it("removes answer inputs on expiry or abandoned retry and holds Submit until armed", () => {
     expect(renderAuth({ remainingMs: 0 })).not.toContain("<input");
     expect(renderAuth({ abandoned: true, answer: "must not render" })).not.toContain("must not render");

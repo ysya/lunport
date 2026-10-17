@@ -166,7 +166,14 @@ fn directory(app: &tauri::AppHandle) -> Result<SshConfigDirectory, AppError> {
             let core = state.sync.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             core.state.as_ref().and_then(|state| vault_slot_of(identity_files, state, &home))
         }),
-        password_saved: Box::new(|host| OsKeychain.get(&crate::secrets::host_account(host.as_str())).ok().flatten().is_some_and(|password| !password.is_empty())),
+        password_saved: Box::new(|host| {
+            let account = crate::secrets::host_account(host.as_str());
+            // Route selection needs presence only; the connector reads protected data when login needs it.
+            #[cfg(target_os = "macos")]
+            { crate::secrets::contains(&account).unwrap_or(false) }
+            #[cfg(not(target_os = "macos"))]
+            { OsKeychain.get(&account).ok().flatten().is_some_and(|password| !password.is_empty()) }
+        }),
     };
     Ok(SshConfigDirectory::new(sources, pins))
 }
@@ -220,6 +227,16 @@ fn listen(app: &tauri::AppHandle) -> BrokerStatus {
         slot.clone().expect("the broker was just built")
     };
     broker.set_audit({let app=app.clone();Arc::new(move |entry|app.state::<AppState>().mcp.record(entry))});
+    broker.set_authentication_owner({
+        let app = app.clone();
+        let hub = Arc::clone(&app.state::<AppState>().session.auth_questions);
+        Arc::new(move |id, cancel| Arc::new(super::auth_window::NativeOwner {
+            hub: Arc::clone(&hub),
+            surface: Arc::new(super::auth_window::TauriAuthSurface { app: app.clone() }),
+            request_id: format!("terminal-{id}"),
+            cancel,
+        }))
+    });
     broker.set_mcp_handler({let app=app.clone();Arc::new(move |connector,method,params,context,cancel|crate::mcp::records::dispatch(&app,connector,method,params,context,cancel))});
     let dir = match crate::fsutil::app_data_root() {
         Ok(root) => super::ipc_dir(&root),

@@ -20,6 +20,19 @@ export function DetailPane({ itemId, title, label, close, children }: {
   const limit = hostPreviewLimit(available);
   const width = Math.min(preferredWidth, limit);
   const previous = useRef({ itemId: "", compact: false });
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    if (!open) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
+      event.preventDefault();
+      closeRef.current();
+    };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, [open]);
   useEffect(() => {
     const parent = pane.current?.parentElement;
     if (!parent) return;
@@ -31,9 +44,18 @@ export function DetailPane({ itemId, title, label, close, children }: {
   }, []);
   useEffect(() => {
     const singlePane = compact || window.matchMedia("(max-width: 820px)").matches;
-    if (open && singlePane && (!previous.current.compact || previous.current.itemId !== itemId)) closeButton.current?.focus();
+    if (open && (previous.current.itemId !== itemId || (singlePane && !previous.current.compact))) closeButton.current?.focus();
     previous.current = { itemId, compact: singlePane };
   }, [itemId, compact, available, open]);
+  useEffect(() => {
+    const main = pane.current?.parentElement?.querySelector<HTMLElement>(":scope > .library-main");
+    if (!main) return;
+    const media = window.matchMedia("(max-width: 820px)");
+    const update = () => { main.inert = open && (compact || media.matches || width >= available); };
+    update();
+    media.addEventListener("change", update);
+    return () => { main.inert = false; media.removeEventListener("change", update); };
+  }, [compact, open, width, available]);
   return (
     <aside
       ref={pane}

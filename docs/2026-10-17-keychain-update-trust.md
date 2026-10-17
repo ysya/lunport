@@ -1,5 +1,7 @@
 # Keychain authorization across macOS updates
 
+**2026-10-18 correction:** The stable-signature tests below did not cover an existing item's separate `cdhash` partition restriction. Their successful fresh-item result does not guarantee that Always Allow survives an update for all existing items. See the [partition follow-up and fixed-helper implementation](2026-10-18-keychain-partition-followup.md).
+
 The published 1.1.0 archive had an arm64 linker ad-hoc signature and an unsigned Intel executable. Those builds lack a stable code requirement that Keychain can recognize across updates. Separately, `secrets_has` read the password merely to show whether it existed.
 
 Release downloads now share the project certificate pinned in [the signing policy](../src-tauri/signing/README.md). Its SHA-256 is `6bce9f14c85274ab36911c91c48e52249e49089afee80e6465b54ab6f4174830`. On the tested runner, both architectures use the same designated requirement:
