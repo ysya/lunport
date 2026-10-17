@@ -1,4 +1,4 @@
-name: update beta channel
+name: Recovery - Beta manifest (manual)
 
 # Manual recovery: points the Beta update channel (the `latest.json` on the `updater-beta`
 # prerelease) at an EXISTING release by tag. The `beta-manifest` jobs of release.yml and beta.yml

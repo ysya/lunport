@@ -1,4 +1,4 @@
-name: build-platform
+name: Recovery - Release platform (manual)
 
 # Manual fallback: rebuild ONE platform's installers and attach them to an
 # EXISTING release (by tag). Used when a single matrix leg of the release

@@ -1,7 +1,7 @@
-name: macOS Keychain identity
+name: CI - macOS credentials
 on:
   pull_request:
-    paths: ["scripts/*macos*", "src-tauri/signing/**", "src-tauri/src/macos_credential*", "src-tauri/src/secrets.rs", "src-tauri/build.rs", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
+    paths: ["scripts/*macos*", "scripts/ci-changes*.mjs", "src-tauri/signing/**", "!src-tauri/signing/**/*.md", "src-tauri/src/macos_credential*", "src-tauri/src/secrets.rs", "src-tauri/build.rs", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   workflow_dispatch:
     inputs:
       identity_only:
@@ -18,8 +18,29 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}-${{ github.event_name }}-${{ inputs.freeze_helper || false }}
   cancel-in-progress: true
 jobs:
+  changes:
+    name: Select credential checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      credentials: ${{ steps.select.outputs.credentials }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-changes.mjs
+
   helper-rust:
-    if: inputs.identity_only != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    name: Frozen helper and Rust transport
+    needs: changes
+    if: needs.changes.outputs.credentials == 'true' && inputs.identity_only != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -28,6 +49,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+      - name: Placeholder frontend for the native metadata probe
+        run: |
+          mkdir -p dist
+          echo '<!doctype html>' > dist/index.html
+      - name: Native metadata in a disposable keychain
+        run: bash scripts/validate-macos-keychain.sh --with-rust
       - name: Prepare the pinned signing identity
         env:
           LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
@@ -42,6 +69,9 @@ jobs:
         run: bash scripts/macos-signing.sh cleanup
 
   helper:
+    name: Helper authorization protocol
+    needs: changes
+    if: needs.changes.outputs.credentials == 'true' && inputs.identity_only != true
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -50,6 +80,7 @@ jobs:
         run: bash scripts/validate-macos-helper.sh
 
   helper-candidate:
+    name: Generate helper candidate (manual)
     if: github.event_name == 'workflow_dispatch' && inputs.freeze_helper == true
     needs: helper
     runs-on: macos-latest
@@ -75,6 +106,10 @@ jobs:
         run: bash scripts/macos-signing.sh cleanup
 
   identity:
+    name: Keychain partition regression
+    # The full helper job already includes this probe with the Rust metadata test.
+    needs: changes
+    if: needs.changes.outputs.credentials == 'true' && (inputs.identity_only == true || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository))
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
@@ -83,7 +118,9 @@ jobs:
         run: bash scripts/validate-macos-keychain.sh
 
   signed-bundle:
-    if: inputs.identity_only != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    name: Signed universal app and updater
+    needs: changes
+    if: needs.changes.outputs.credentials == 'true' && inputs.identity_only != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: macos-latest
     timeout-minutes: 45
     steps:

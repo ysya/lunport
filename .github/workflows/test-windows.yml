@@ -14,15 +14,11 @@
 # aws-lc-sys (russh's crypto) needs nothing installed: it is the same crate rustls already builds for the updater in the release
 # job on this runner image, and that job installs nothing for it.
 # macOS can only type-check the Windows code; what the permissions and a real console do has to be seen on Windows.
-name: windows key slots
+name: CI - Windows
 
 on:
-  push:
-    # next/own-ssh: the own SSH client's Windows work (plan 1b-3) is checked on every push.
-    branches: [main, next/own-ssh]
-    paths: ["src-tauri/**", ".github/workflows/test-windows.yml"]
   pull_request:
-    paths: ["src-tauri/**", ".github/workflows/test-windows.yml"]
+    paths: ["src-tauri/**", "scripts/ci-changes*.mjs", "scripts/set-app-version.mjs", "scripts/beta-channel.mjs", "scripts/validate-windows-startup.ps1", ".github/workflows/test-windows.yml"]
   workflow_dispatch:
     inputs:
       native_probe:
@@ -42,14 +38,36 @@ on:
 permissions:
   contents: read
 
-# A push to next/own-ssh with a pull request open would run the workflow twice; a newer run replaces the one in progress.
+# Superseded PR checks are cancelled; native stress probes remain an explicit dispatch.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}-${{ inputs.native_probe && format('native-{0}', inputs.probe_kind || 'tray') || 'full' }}
   cancel-in-progress: true
 
 jobs:
-  slots:
+  changes:
+    name: Select Windows checks
     if: ${{ !inputs.native_probe }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      native: ${{ steps.select.outputs.native }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-changes.mjs
+
+  slots:
+    name: Rust, SSH and native smoke (Windows)
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     defaults:
@@ -110,16 +128,11 @@ jobs:
       # Unit doubles never touch the Rc-backed Win32 tray or its event loop. Restart from
       # saved synced records, race startup/status/visibility, and check real native menu data
       # and USER object counts. No production profile, OS credentials or remote relay is used.
-      - name: Synced library startup and concurrent native tray updates
+      - name: Native tray smoke (one process)
         timeout-minutes: 5
         env:
           SSHELTER_TEST_SYNCED_STATE_OUT: ${{ runner.temp }}/sshelter-synced-startup.json
-        run: |
-          for ($attempt = 1; $attempt -le 10; $attempt++) {
-            Write-Output "Native tray attempt $attempt/10"
-            cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
-            if ($LASTEXITCODE -ne 0) { throw "native tray attempt $attempt failed (exit $LASTEXITCODE)" }
-          }
+        run: cargo test --locked --lib -- --ignored --exact sync::engine::windows_tests::synced_library_startup_and_concurrent_tray_updates --nocapture
 
       - name: Native crash leaves metadata without suppressing Windows Error Reporting
         run: cargo test --locked --lib -- --ignored --exact diagnostics::tests::native_exception_leaves_metadata_for_windows_error_reporting --nocapture

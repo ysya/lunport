@@ -1,4 +1,4 @@
-name: publish beta
+name: Release - Beta (manual)
 
 # Publishes a beta for the Beta update channel (Settings → Updates → Release channel):
 #  1. `prepare` checks the version (X.Y.Z-N, newer than the current release) and creates the
