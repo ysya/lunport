@@ -87,7 +87,10 @@
   padding: 0.75rem 0.6rem;
   background: var(--library-nav);
 }
-.library-navigation[data-collapsed="true"] .library-nav-item { gap: 0; justify-content: center; }
+.library-navigation[data-collapsed="true"] .library-nav-item {
+  gap: 0;
+  padding-inline-start: calc((var(--navigation-rail-width) - 2.2rem) / 2);
+}
 .library-navigation[data-collapsed="true"] :is(.library-nav-label, .library-nav-count) { width: 0; min-width: 0; flex: 0; margin: 0; }
 .library-navigation > nav { flex-shrink: 0; }
 .library-navigation .library-workspace-label { padding-block: 0.1rem; min-height: 1.5rem; }
@@ -145,7 +148,7 @@
   font-size: 0.85rem;
   color: var(--foreground);
   overflow: hidden;
-  transition: background-color var(--motion-fast) var(--ease-enter), color var(--motion-fast) var(--ease-enter);
+  transition: background-color var(--motion-fast) var(--ease-enter), color var(--motion-fast) var(--ease-enter), padding-inline-start var(--motion-layout) var(--ease-enter);
 }
 .library-nav-item svg {
   flex-shrink: 0;
