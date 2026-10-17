@@ -38,46 +38,18 @@ static int transfer(int fd, void *buffer, size_t length, int writing) {
 static OSStatus grant(SecKeychainItemRef item, const char *helper) {
   SecAccessRef access = NULL;
   SecTrustedApplicationRef app = NULL;
-  SecStaticCodeRef code = NULL;
-  CFDictionaryRef info = NULL;
-  CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)helper, strlen(helper), false);
   OSStatus status = SecKeychainItemCopyAccess(item, &access);
   if (!status) status = SecTrustedApplicationCreateFromPath(helper, &app);
-  if (!status) status = SecStaticCodeCreateWithPath(url, 0, &code);
-  if (!status) status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info);
-  CFArrayRef acls = NULL;
-  if (!status) status = SecAccessCopyACLList(access, &acls);
+  CFArrayRef acls = status ? NULL : SecAccessCopyMatchingACLList(access, kSecACLAuthorizationDecrypt);
+  if (!status && (!acls || !CFArrayGetCount(acls))) status = errSecParam;
   for (CFIndex i = 0; !status && i < CFArrayGetCount(acls); i++) {
     SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(acls, i);
     CFArrayRef applications = NULL;
     CFStringRef description = NULL;
     SecKeychainPromptSelector selector = 0;
     status = SecACLCopyContents(acl, &applications, &description, &selector);
-    CFArrayRef authorizations = SecACLCopyAuthorizations(acl);
-    if (!status && CFArrayContainsValue(authorizations, CFRangeMake(0, CFArrayGetCount(authorizations)), kSecACLAuthorizationPartitionID)) {
-      CFDataRef hash = CFDictionaryGetValue(info, kSecCodeInfoUnique);
-      char text[128] = "cdhash:";
-      for (CFIndex j = 0; j < CFDataGetLength(hash); j++) snprintf(text + 7 + 2*j, 3, "%02x", CFDataGetBytePtr(hash)[j]);
-      CFStringRef partition = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);
-      // Preserve the writer's existing partition as well as adding the helper.
-      char existing[4096];
-      if (!CFStringGetCString(description, existing, sizeof(existing), kCFStringEncodingUTF8)) return errSecParam;
-      size_t n = strlen(existing) / 2;
-      UInt8 bytes[2048];
-      for (size_t j = 0; j < n; j++) { unsigned value; if (sscanf(existing + 2*j, "%2x", &value) != 1) return errSecParam; bytes[j] = value; }
-      CFDataRef encoded = CFDataCreate(NULL, bytes, n);
-      CFMutableDictionaryRef plist = (CFMutableDictionaryRef)CFPropertyListCreateWithData(NULL, encoded, kCFPropertyListMutableContainers, NULL, NULL);
-      CFRelease(encoded);
-      if (!plist) return errSecParam;
-      CFMutableArrayRef partitions = (CFMutableArrayRef)CFDictionaryGetValue(plist, CFSTR("Partitions"));
-      CFArrayAppendValue(partitions, partition);
-      CFDataRef xml = CFPropertyListCreateData(NULL, plist, kCFPropertyListXMLFormat_v1_0, 0, NULL);
-      char *hex = calloc(2 * CFDataGetLength(xml) + 1, 1);
-      for (CFIndex j = 0; j < CFDataGetLength(xml); j++) snprintf(hex + 2*j, 3, "%02x", CFDataGetBytePtr(xml)[j]);
-      CFStringRef replacement = CFStringCreateWithCString(NULL, hex, kCFStringEncodingUTF8);
-      status = SecACLSetContents(acl, applications, replacement, selector);
-      free(hex); CFRelease(replacement); CFRelease(xml); CFRelease(plist); CFRelease(partition);
-    } else if (!status && applications) {
+    if (!status && !applications) status = errSecParam;
+    if (!status) {
       CFMutableArrayRef trusted = CFArrayCreateMutableCopy(NULL, 0, applications);
       CFArrayAppendValue(trusted, app);
       status = SecACLSetContents(acl, trusted, description, selector);
@@ -85,17 +57,11 @@ static OSStatus grant(SecKeychainItemRef item, const char *helper) {
     }
     if (applications) CFRelease(applications);
     if (description) CFRelease(description);
-    if (authorizations) CFRelease(authorizations);
   }
-  const char *password = getenv("LUNPORT_CI_HELPER_KEYCHAIN_PASSWORD");
-  if (!status && !password) status = errSecParam;
-  if (!status) status = SecKeychainItemSetAccessWithPassword(item, access, (UInt32)strlen(password), password);
+  if (!status) status = SecKeychainItemSetAccess(item, access);
   if (acls) CFRelease(acls);
-  if (info) CFRelease(info);
-  if (code) CFRelease(code);
   if (app) CFRelease(app);
   if (access) CFRelease(access);
-  CFRelease(url);
   return status;
 }
 

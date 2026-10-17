@@ -81,15 +81,15 @@ helper_before="$(shasum -a 256 "$probe/helper" | awk '{print $1}')"
 "$probe/client-2" get "$probe/helper" "$account-new"
 "$probe/client-2" replace "$probe/helper" "$account-new"
 "$probe/client-1" contains "$probe/helper" "$account-new"
-# Exercise a deliberate old-item grant with the known disposable keychain
-# password, never automation of the user's OS authorization dialog. The modern
+# Exercise a deliberate old-item trusted-application grant, never automation
+# of the user's OS authorization dialog. The modern
 # login-keychain partition/upgrade path is exercised separately above and below.
 security default-keychain -d user -s "$keychain"
 "$probe/client-1" legacy-create "$probe/helper" "$account-legacy"
 "$probe/client-1" contains "$probe/helper" "$account-legacy"
 "$probe/client-1" denied "$probe/helper" "$account-legacy"
 "$probe/client-1" legacy-verify "$probe/helper" "$account-legacy"
-LUNPORT_CI_HELPER_KEYCHAIN_PASSWORD="$password" "$probe/client-1" legacy-grant "$probe/helper" "$account-legacy"
+"$probe/client-1" legacy-grant "$probe/helper" "$account-legacy"
 "$probe/client-1" get "$probe/helper" "$account-legacy"
 "$probe/client-2" get "$probe/helper" "$account-legacy"
 "$probe/client-1" legacy-verify "$probe/helper" "$account-legacy"
