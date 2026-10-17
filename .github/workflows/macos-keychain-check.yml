@@ -42,6 +42,8 @@ jobs:
           LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
           LUNPORT_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LUNPORT_MACOS_CERTIFICATE_PASSWORD }}
         run: bash scripts/macos-signing.sh prepare
+      - name: Exercise the production verifier before the full build
+        run: bash scripts/validate-macos-signing.sh
       - name: Build and verify the actual release bundles without publishing
         uses: tauri-apps/tauri-action@v0
         env:

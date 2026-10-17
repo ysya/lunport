@@ -37,7 +37,7 @@ verify() {
   executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
   lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64 arm64
   for architecture in x86_64 arm64; do
-    codesign --display --arch "$architecture" --extract-certificates "$scratch/$architecture-" "$app"
+    codesign --display --arch "$architecture" --extract-certificates="$scratch/$architecture-" "$app"
     actual="$(fingerprint "$scratch/$architecture-0" DER)"
     [[ "$actual" == "$expected" ]] || { rm -rf "$scratch"; echo 'App signing certificate differs from the repository pin.' >&2; return 1; }
     requirement="$(codesign --display --arch "$architecture" --requirements - "$app" 2>/dev/null)"
