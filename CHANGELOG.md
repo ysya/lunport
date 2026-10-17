@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/ysya/lunport/compare/v1.2.0...v1.3.0) (2026-10-17)
+
+
+### Features
+
+* **library:** sync group order and manage known hosts ([2a0726a](https://github.com/ysya/lunport/commit/2a0726a36fe220a8c93dba50361c7e1b6c45527a))
+* **library:** sync group order and manage server identities ([be5bdaa](https://github.com/ysya/lunport/commit/be5bdaa06e6eba832b0e0ee4b61335015df7ef4f))
+
 ## [1.2.0](https://github.com/ysya/lunport/compare/v1.1.0...v1.2.0) (2026-10-17)
 
 macOS now uses a fixed project signing identity. When upgrading from an older unsigned build, existing Keychain items may ask for authorization once; choose **Always Allow** to retain that permission across later updates. This is a project certificate, not Apple Developer ID or notarization.
