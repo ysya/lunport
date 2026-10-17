@@ -32,12 +32,36 @@ The signing policy and download documentation now distinguish stable code requir
 
 The local Legacy SSH directory suite passes all 28 tests. The native result above validates the identity/partition probe; it does not substitute for the separate signed-bundle build or the PR's full platform checks.
 
-## Decision before a structural fix
+## Authorized fixed helper implementation
 
-**A. Apple Developer ID distribution signing — recommended.** Configure a Developer ID Application certificate in CI and verify its Team ID in both universal architectures. This keeps the existing credential architecture. Moving from the project certificate can require an initial authorization for existing items; subsequent releases can retain the Apple-verified Team ID. It requires an Apple developer account and its signing identity, which the user previously did not have. This work should begin only after that identity is available and authorized.
+The user approved implementation and verification of the fixed helper on 2026-10-18. Apple Developer ID remains a possible future distribution choice, but this implementation uses the existing pinned project certificate.
 
-**B. A fixed credential helper — an architectural alternative to evaluate.** Install an immutable, narrowly scoped credential helper outside the replaceable App bundle. Ordinary App updates retain exactly that helper binary, so the Keychain caller's hash stays fixed. The helper would validate each client as the same user and a valid Lunport executable with the pinned certificate and bundle identifier, using an authenticated local IPC connection. Its operations would be limited to Lunport's credential service, with no secret logging. Existing items would need a deliberate initial authorization/migration to that helper. Updating the helper itself could require authorization again.
+Production macOS `secrets::get/set/delete` now launch a one-request helper. Development, Windows and Linux keep their existing isolated/native stores. Metadata-only presence checks still read no password. Credentials retain their existing service (`SSHelter`), accounts and values. Production never edits an ACL, removes a partition restriction, copies credentials into a file, or falls back to direct App access after a helper failure.
 
-Before implementation, this alternative needs a concrete IPC/peer-validation design, lifecycle and installer behavior, recovery when the helper is missing, compatibility with existing credentials, and an isolated migration/upgrade/unauthorized-client test suite. Failure must preserve original entries and leave the existing explicit OS authorization path available. This is a proposal, not an implemented guarantee.
+### Frozen artifact and lifecycle
 
-The repository's `Agent.md` says **“Ask before making architectural changes.”** The helper alternative therefore needs the user's approval before integration. Neither option is silently enabled by the diagnostic/test changes in this follow-up.
+The universal helper is embedded as data in the App, so bundle signing cannot alter its signature. The reviewed artifact came from [the isolated candidate build](https://github.com/ysya/lunport/actions/runs/39075922311) at `9f8a9ee57e238b19d07932708274d416c2cbf6d3`. Its SHA-256 is `6d74a63293b153fccae754e1c4d38449e5cc26065738fae7d0cfc64dcddf2178`; the manifest records source SHA-256 and each architecture's code hash. Only public signed executable data is committed; no private signing material is embedded.
+
+First protected use installs those bytes at `~/Library/Application Support/org.homelab.sshelter/credential-helper/v1/Lunport Credential Helper`. Ordinary App updates leave a matching file and inode intact. Missing/corrupt regular files are restored atomically from the signed App. Installation rejects symlinks, unexpected owners, shared writable directories and hard-linked executable files. There is no launch agent, daemon, network port or permanent listener. Each helper exits after one operation, and both ends have bounded timeouts and cleanup.
+
+Normal release builds verify and reuse this artifact. They never run the candidate build script. Changing the frozen source or bytes fails verification. A necessary helper security update must use a deliberate new version with a new authorization/migration plan; it can require macOS authorization again.
+
+### Authenticated channel
+
+The App creates an anonymous Unix socket pair and launches the helper without inherited environment configuration. Before reading the request, the helper obtains the caller's kernel audit token and verifies its UID, direct parent process, pinned certificate, production bundle identifier and live code validity. It requires hardened runtime and rejects debugging or entitlements permitting library/unsigned-code injection.
+
+The helper sends a public greeting first. Before sending even the account name, the App checks the live child's audit token, expected PID, pinned certificate, helper identifier and one of the exact frozen architecture code hashes. This closes the gap between checking an installation path and executing it. A replaced executable receives no request or password. The release verifier checks that both App architectures meet the helper's signing/runtime requirements.
+
+The versioned binary protocol accepts only get/set/delete/metadata operations in the fixed service, bounds account/data lengths, and rejects extra or malformed input. Secrets never enter command arguments, environment variables, logs, settings or sync. Response/input buffers are cleared when possible; no password cache is introduced.
+
+### Existing items and first authorization
+
+The first use of each existing protected item can show the normal macOS dialog for **Lunport Credential Helper**. Choosing **Always Allow** authorizes that fixed helper. Denial, cancellation or a locked Keychain preserves the item and returns an actionable error. New items are created with the helper as their owner, including its fixed partition hash. Subsequent App builds use the same helper identity. Locking or changing Keychain policies still retains normal macOS behavior.
+
+The automated native suite proves that pre-approval access is denied without obtaining data and that the original App can still read the unchanged item. It separately creates an already-approved legacy fixture and proves both App builds can read it via the same helper. Modern login-keychain fixtures must contain the helper's exact partition hash and remain readable across different App builds. The suite does **not** automate the real Always Allow dialog; that interactive step remains a manual installation check.
+
+### Validation
+
+- [Isolated native helper suite and candidate build](https://github.com/ysya/lunport/actions/runs/39075922311): modern partition ownership, App upgrade, pre/post-approval legacy fixtures, denied ad-hoc/wrong-ID/unhardened/unsafe-entitlement clients, forged helper, malformed/bounded protocol, and cleanup passed with authentication UI disabled.
+- Local installer/input/manifest tests: four passed; the native production-transport test is ignored locally because it requires a disposable runner and a production-signed test executable.
+- A separate CI job signs that Rust test executable with the pinned identity and exercises the actual App transport and frozen helper, including missing/corrupt-file recovery. The signed universal App/updater build and platform checks remain required before publication.

@@ -19,14 +19,14 @@ cat > "$app/Contents/Info.plist" <<'EOF'
 EOF
 clang -arch arm64 -arch x86_64 -Wno-deprecated-declarations scripts/macos-keychain-probe.c \
   -framework Security -framework CoreFoundation -o "$app/Contents/MacOS/sshelter"
-codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none "$app"
+codesign --force --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp=none "$app"
 bash scripts/macos-signing.sh verify "$app"
 keychain="$RUNNER_TEMP/lunport-project-signing/signing.keychain-db"
 account="lunport-ci-project-upgrade-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 "$app/Contents/MacOS/sshelter" write "$keychain" 'SSHelter Development' "$account"
 clang -arch arm64 -arch x86_64 -Wno-deprecated-declarations '-DPROBE_VERSION="2"' scripts/macos-keychain-probe.c \
   -framework Security -framework CoreFoundation -o "$app/Contents/MacOS/sshelter"
-codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none "$app"
+codesign --force --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp=none "$app"
 bash scripts/macos-signing.sh verify "$app"
 "$app/Contents/MacOS/sshelter" read "$keychain" 'SSHelter Development' "$account"
 codesign --force --sign - "$app"

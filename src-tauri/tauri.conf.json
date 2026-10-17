@@ -45,6 +45,9 @@
       "icons/icon.ico"
     ],
     "shortDescription": "Lunport — Your SSH workspace",
+    "macOS": {
+      "hardenedRuntime": true
+    },
     "windows": {
       "wix": {
         "upgradeCode": "d00b09d3-45df-5130-b6d5-52034e820843",

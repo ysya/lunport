@@ -30,7 +30,7 @@ Choose an installer from [Releases](https://github.com/ysya/lunport/releases/lat
 | Windows x64 | `.exe` installer |
 | Linux x64 or ARM64 | `.AppImage`, `.deb` or `.rpm` for your architecture |
 
-**macOS:** builds use a fixed project signing certificate, keeping their designated requirement stable. This is not an Apple Developer ID; builds are not yet notarized. A self-signed certificate does not guarantee Keychain authorization across updates: items restricted to a particular build's `cdhash` can request authorization again even after **Always Allow**. See the [Keychain follow-up](docs/2026-10-18-keychain-partition-followup.md). Drag Lunport into Applications and, if Gatekeeper blocks it, run:
+**macOS:** builds use a fixed project signing certificate and a fixed **Lunport Credential Helper** for protected credentials. Ordinary App updates retain the same helper. The first use of existing credentials can require **Always Allow** for the helper; a deliberate helper update or changed Keychain policy can require authorization again. See the [Keychain details](docs/2026-10-18-keychain-partition-followup.md). This is not an Apple Developer ID; builds are not yet notarized. Drag Lunport into Applications and, if Gatekeeper blocks it, run:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Lunport.app

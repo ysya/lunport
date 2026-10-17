@@ -34,3 +34,4 @@ for arch in ['arm64','x86_64']:
 (output/'credential-helper-v1.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(json.dumps(manifest,indent=2))
 PY
+python3 "$repo_dir/scripts/verify-macos-credential-helper.py" "$output"

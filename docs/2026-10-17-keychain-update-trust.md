@@ -1,6 +1,6 @@
 # Keychain authorization across macOS updates
 
-**2026-10-18 correction:** The stable-signature tests below did not cover an existing item's separate `cdhash` partition restriction. Their successful fresh-item result does not guarantee that Always Allow survives an update for all existing items. See the [partition follow-up and next-step options](2026-10-18-keychain-partition-followup.md).
+**2026-10-18 correction:** The stable-signature tests below did not cover an existing item's separate `cdhash` partition restriction. Their successful fresh-item result does not guarantee that Always Allow survives an update for all existing items. See the [partition follow-up and fixed-helper implementation](2026-10-18-keychain-partition-followup.md).
 
 The published 1.1.0 archive had an arm64 linker ad-hoc signature and an unsigned Intel executable. Those builds lack a stable code requirement that Keychain can recognize across updates. Separately, `secrets_has` read the password merely to show whether it existed.
 

@@ -5,6 +5,11 @@ fn main() {
         println!("cargo:rerun-if-changed=src/native_alert.m");
         cc::Build::new().file("src/native_alert.m").flag("-fobjc-arc").compile("sshelter_native_alert");
         println!("cargo:rustc-link-lib=framework=AppKit");
+        println!("cargo:rerun-if-changed=src/macos_credential_peer.c");
+        cc::Build::new().file("src/macos_credential_peer.c").compile("lunport_credential_peer");
+        println!("cargo:rustc-link-lib=framework=Security");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=bsm");
     }
     if target_os != "windows" || target_env != "msvc" {
         tauri_build::build();

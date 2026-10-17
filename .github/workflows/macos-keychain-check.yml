@@ -1,7 +1,7 @@
 name: macOS Keychain identity
 on:
   pull_request:
-    paths: ["scripts/*macos*", "src-tauri/signing/**", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
+    paths: ["scripts/*macos*", "src-tauri/signing/**", "src-tauri/src/macos_credential*", "src-tauri/src/secrets.rs", "src-tauri/build.rs", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   workflow_dispatch:
     inputs:
       identity_only:
@@ -18,6 +18,29 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}-${{ github.event_name }}-${{ inputs.freeze_helper || false }}
   cancel-in-progress: true
 jobs:
+  helper-rust:
+    if: inputs.identity_only != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+      - name: Prepare the pinned signing identity
+        env:
+          LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
+          LUNPORT_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LUNPORT_MACOS_CERTIFICATE_PASSWORD }}
+        run: bash scripts/macos-signing.sh prepare
+      - name: Verify exact frozen artifact with two production-signed client builds
+        run: bash scripts/validate-macos-frozen-helper.sh src-tauri/signing
+      - name: Exercise production Rust transport, installer and recovery against the frozen helper
+        run: bash scripts/validate-macos-helper-rust.sh
+      - name: Remove the temporary signing keychain
+        if: always()
+        run: bash scripts/macos-signing.sh cleanup
+
   helper:
     runs-on: macos-latest
     timeout-minutes: 10
@@ -40,6 +63,8 @@ jobs:
         run: bash scripts/macos-signing.sh prepare
       - name: Build a frozen universal helper candidate
         run: bash scripts/build-macos-credential-helper.sh
+      - name: Verify the exact signed production helper with both client builds
+        run: bash scripts/validate-macos-frozen-helper.sh "$RUNNER_TEMP/lunport-credential-helper-v1-candidate"
       - uses: actions/upload-artifact@v4
         with:
           name: lunport-credential-helper-v1-candidate

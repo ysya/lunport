@@ -35,12 +35,24 @@ verify() {
   leaf_sha1="$(/usr/bin/openssl x509 -in "$public_certificate" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
   local executable
   executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-  lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64 arm64
   for architecture in x86_64 arm64; do
+    lipo "$app/Contents/MacOS/$executable" -verify_arch "$architecture"
     codesign --display --arch "$architecture" --extract-certificates="$scratch/$architecture-" "$app"
     actual="$(fingerprint "$scratch/$architecture-0" DER)"
     [[ "$actual" == "$expected" ]] || { rm -rf "$scratch"; echo 'App signing certificate differs from the repository pin.' >&2; return 1; }
     requirement="$(codesign --display --arch "$architecture" --requirements - "$app" 2>/dev/null)"
+    # The fixed credential helper rejects clients that permit code injection.
+    python3 - "$app" "$architecture" <<'PY'
+import plistlib, re, subprocess, sys
+app, architecture = sys.argv[1:]
+details = subprocess.check_output(['codesign','--display','--verbose=4','--arch',architecture,app],stderr=subprocess.STDOUT,text=True)
+flags = re.search(r'flags=0x([a-fA-F0-9]+)',details)
+assert flags and int(flags[1],16)&0x10000, 'App requires hardened runtime for credential-helper authentication'
+entitlements = subprocess.run(['codesign','--display','--arch',architecture,'--entitlements',':-',app],capture_output=True,check=True).stdout
+values = plistlib.loads(entitlements) if entitlements.strip() else {}
+for forbidden in ['com.apple.security.get-task-allow','com.apple.security.cs.disable-library-validation','com.apple.security.cs.allow-dyld-environment-variables','com.apple.security.cs.allow-unsigned-executable-memory']:
+    assert not values.get(forbidden), 'App entitlement is incompatible with the credential helper: '+forbidden
+PY
     printf 'Designated requirement (%s): %s\n' "$architecture" "$requirement"
     # macOS may spell a self-signed certificate as leaf or root; both refer to
     # the same pinned certificate. Neither depends on a per-build hash or trust store.
