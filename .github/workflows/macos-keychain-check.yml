@@ -2,12 +2,15 @@ name: macOS Keychain identity
 on:
   push:
     branches: [codex/keychain-update-trust]
-    paths: ["scripts/macos-keychain-probe.c", "scripts/validate-macos-keychain.sh", ".github/workflows/macos-keychain-check.yml"]
+    paths: ["scripts/*macos*", "src-tauri/signing/**", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   pull_request:
-    paths: ["scripts/macos-keychain-probe.c", "scripts/validate-macos-keychain.sh", ".github/workflows/macos-keychain-check.yml"]
+    paths: ["scripts/*macos*", "src-tauri/signing/**", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 jobs:
   identity:
     runs-on: macos-latest
@@ -16,3 +19,42 @@ jobs:
       - uses: actions/checkout@v4
       - name: Upgrade between differently built executables with a stable signer
         run: bash scripts/validate-macos-keychain.sh
+
+  signed-bundle:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare the fixed macOS signing identity
+        env:
+          LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
+          LUNPORT_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LUNPORT_MACOS_CERTIFICATE_PASSWORD }}
+        run: bash scripts/macos-signing.sh prepare
+      - name: Build and verify the actual release bundles without publishing
+        uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          args: --target universal-apple-darwin
+          tauriScript: bash scripts/build-macos-release.sh
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: signed-macos-[bundle]-[arch]
+      - name: Remove the temporary macOS signing keychain
+        if: always()
+        run: bash scripts/macos-signing.sh cleanup
