@@ -8,6 +8,7 @@ pub mod cli;
 mod sync;
 mod config;
 mod connect;
+mod connection_probe;
 mod deploy;
 mod discover;
 mod diagnostics;
@@ -324,6 +325,7 @@ fn run_app(host: bool, start_hidden: bool) {
             updater_install_beta,
             sync::record_commands::records_status,
             sync::record_commands::records_group_create,
+            sync::record_commands::records_group_order,
             sync::record_commands::records_group_update,
             sync::record_commands::records_group_delete,
             sync::record_commands::records_host_create,
@@ -335,6 +337,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::record_commands::records_use_legacy,
             sync::record_commands::records_pause_legacy,
             sync::record_commands::records_connect,
+            connection_probe::records_host_probe,
             sync::record_commands::records_import_preview,
             sync::record_commands::records_import_confirm,
             sync::record_commands::records_import_cancel,
@@ -345,6 +348,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::record_commands::records_account_create,
             sync::record_commands::records_library_preview,
             sync::record_commands::records_host_verify_key,
+            sync::record_commands::records_host_forget_key,
             sync::record_commands::records_library_enable,
             sync::record_commands::records_account_join,
             sync::record_commands::records_account_resume,

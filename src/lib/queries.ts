@@ -591,10 +591,10 @@ export function useRemoveKnownHosts() {
   return useMutation<
     number,
     unknown,
-    { lineIndices: number[]; expectedHosts: string[] }
+    { lineIndices: number[]; expectedHosts: string[]; expectedLineHashes: string[] }
   >({
-    mutationFn: ({ lineIndices, expectedHosts }) =>
-      tauriInvoke<number>("known_hosts_remove", { lineIndices, expectedHosts }),
+    mutationFn: ({ lineIndices, expectedHosts, expectedLineHashes }) =>
+      tauriInvoke<number>("known_hosts_remove", { lineIndices, expectedHosts, expectedLineHashes }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.knownHosts });
     },

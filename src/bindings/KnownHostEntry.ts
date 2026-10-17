@@ -4,16 +4,20 @@
  * One known_hosts entry for the UI. `line_index` addresses the file line (stable as long as the
  * file is unchanged — guarded by the expected-hosts check on removal).
  */
-export type KnownHostEntry = { line_index: number, 
+export type KnownHostEntry = {
+/**
+ * Digest of the complete displayed line, including key and marker; never a private key.
+ */
+line_hash: string, line_index: number,
 /**
  * First field verbatim: comma-joined host names, or the `|1|…` hash for hashed entries.
  */
-hosts: string, key_type: string, 
+hosts: string, key_type: string,
 /**
  * `SHA256:<base64-no-padding>` of the key blob (OpenSSH format); None if the blob is not
  * valid base64.
  */
-fingerprint_sha256: string | null, hashed: boolean, 
+fingerprint_sha256: string | null, hashed: boolean,
 /**
  * `@revoked` / `@cert-authority` when present.
  */

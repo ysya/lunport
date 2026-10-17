@@ -32,6 +32,7 @@
 pub mod records_v3;
 pub mod record_repository;
 pub mod record_groups;
+pub mod group_order;
 pub mod record_library;
 pub mod record_runtime;
 pub mod record_commands;

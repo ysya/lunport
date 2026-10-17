@@ -86,6 +86,8 @@ pub fn parse_lines(text: &str) -> Vec<RawLine<'_>> {
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export, export_to = "../../src/bindings/"))]
 pub struct KnownHostEntry {
+    /// Digest of the complete displayed line, including key and marker; never a private key.
+    pub line_hash: String,
     pub line_index: u32,
     /// First field verbatim: comma-joined host names, or the `|1|…` hash for hashed entries.
     pub hosts: String,
@@ -113,9 +115,11 @@ pub fn fingerprint_sha256(key_base64: &str) -> Option<String> {
 
 /// known_hosts text → UI entries.
 pub fn list_entries(text: &str) -> Vec<KnownHostEntry> {
+    let hashes: Vec<_> = text.lines().map(line_hash).collect();
     parse_lines(text)
         .into_iter()
         .map(|raw| KnownHostEntry {
+            line_hash: hashes[raw.line_index as usize].clone(),
             line_index: raw.line_index,
             hosts: raw.hosts.to_string(),
             key_type: raw.key_type.to_string(),
@@ -124,6 +128,12 @@ pub fn list_entries(text: &str) -> Vec<KnownHostEntry> {
             marker: raw.marker.map(str::to_string),
         })
         .collect()
+}
+fn line_hash(line: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(line.trim_end_matches(['\r', '\n']).as_bytes())
+    )
 }
 
 // ─── Lossless line removal ────────────────────────────────────────────────────
@@ -187,6 +197,7 @@ fn remove_from_file(
     line_indices: &[u32],
     expected_hosts: &[String],
     retention: Option<usize>,
+    expected_line_hashes: Option<&[String]>,
 ) -> Result<u32, AppError> {
     fsutil::check_write(path)?;
     let text = match std::fs::read_to_string(path) {
@@ -200,6 +211,20 @@ fn remove_from_file(
         Err(e) => return Err(e.into()),
     };
     let new_text = remove_lines(&text, line_indices, expected_hosts)?;
+    if let Some(expected) = expected_line_hashes {
+        let lines: Vec<_> = text.lines().collect();
+        if expected.len() != line_indices.len()
+            || line_indices.iter().zip(expected).any(|(index, hash)| {
+                lines
+                    .get(*index as usize)
+                    .is_none_or(|line| line_hash(line) != *hash)
+            })
+        {
+            return Err(AppError::Conflict(
+                "The displayed host key changed on disk — reload before removing it.".into(),
+            ));
+        }
+    }
 
     fsutil::backup(path)?;
     if let Some(keep) = retention {
@@ -262,6 +287,7 @@ pub fn known_hosts_remove(
     state: tauri::State<crate::state::AppState>,
     line_indices: Vec<u32>,
     expected_hosts: Vec<String>,
+    expected_line_hashes: Option<Vec<String>>,
 ) -> Result<u32, AppError> {
     let retention = *state.backup_retention.lock().unwrap();
     remove_from_file(
@@ -269,6 +295,7 @@ pub fn known_hosts_remove(
         &line_indices,
         &expected_hosts,
         retention,
+        expected_line_hashes.as_deref(),
     )
 }
 
@@ -453,7 +480,7 @@ malformed-only-two fields
         std::fs::write(&path, SAMPLE).unwrap();
 
         let removed =
-            remove_from_file(&path, &[0], &["github.com".to_string()], None).unwrap();
+            remove_from_file(&path, &[0], &["github.com".to_string()], None, None).unwrap();
         assert_eq!(removed, 1);
 
         // Live file: targeted line gone, everything else intact.
@@ -485,7 +512,7 @@ malformed-only-two fields
         let path = dir.path().join("known_hosts");
         std::fs::write(&path, SAMPLE).unwrap();
 
-        let res = remove_from_file(&path, &[0], &["stale.example".to_string()], None);
+        let res = remove_from_file(&path, &[0], &["stale.example".to_string()], None, None);
         assert!(matches!(res, Err(AppError::Conflict(_))), "got {res:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SAMPLE);
         // Validation happens BEFORE backup: no backup for a refused removal.
@@ -497,10 +524,33 @@ malformed-only-two fields
     }
 
     #[test]
+    fn displayed_key_hash_guards_replacements_with_the_same_host_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let original = "web ssh-ed25519 QUJD\n# retained\n";
+        let entries = list_entries(original);
+        let changed = "web ssh-ed25519 REVG\n# retained\n";
+        std::fs::write(&path, changed).unwrap();
+        let result = remove_from_file(
+            &path,
+            &[0],
+            &["web".into()],
+            None,
+            Some(&[entries[0].line_hash.clone()]),
+        );
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), changed);
+        assert_eq!(
+            list_entries(original.replace('\n', "\r\n").as_str())[0].line_hash,
+            entries[0].line_hash
+        );
+    }
+
+    #[test]
     fn remove_from_file_missing_file_is_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("known_hosts");
-        let res = remove_from_file(&path, &[0], &["x".to_string()], None);
+        let res = remove_from_file(&path, &[0], &["x".to_string()], None, None);
         assert!(matches!(res, Err(AppError::Conflict(_))), "got {res:?}");
     }
 }
@@ -518,9 +568,14 @@ mod profile_boundary_tests {
         std::fs::create_dir_all(&mirror).unwrap();
         let kept = mirror.join("known_hosts.1.bak");
         std::fs::write(&kept, b"backup").unwrap();
-        fsutil::with_test_write_policy(crate::write_policy::WritePolicy::Confined { root: fsutil::test_backups_root().to_path_buf() }, || {
-            assert!(remove_from_file(&path, &[0], &["web".into()], Some(0)).is_err());
-        });
+        fsutil::with_test_write_policy(
+            crate::write_policy::WritePolicy::Confined {
+                root: fsutil::test_backups_root().to_path_buf(),
+            },
+            || {
+                assert!(remove_from_file(&path, &[0], &["web".into()], Some(0), None).is_err());
+            },
+        );
         assert_eq!(std::fs::read(kept).unwrap(), b"backup");
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }

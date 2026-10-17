@@ -49,6 +49,8 @@ pub struct SyncStateV3 {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalState {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub groups: BTreeMap<String, LocalRecord>,
     #[serde(default)]
@@ -115,7 +117,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
         2 => serde_json::from_str(text)
             .map(DecodedState::V2)
             .map_err(state_decode_error),
-        STATE_VERSION | GROUP_STATE_VERSION => {
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -196,7 +198,10 @@ pub fn account_writes_blocked(state: &SyncStateV3) -> bool {
 }
 
 pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> {
-    if !matches!(state.version, STATE_VERSION | GROUP_STATE_VERSION) {
+    if !matches!(
+        state.version,
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION
+    ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
             found: state.version,
@@ -249,6 +254,15 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             prepared.spaces.insert(id.clone(), space.clone());
         }
         validate_state(&prepared)?;
+    }
+    if !crate::sync::group_order::valid_ids(&state.local.group_order)
+        || !state.local.group_order.is_empty() && state.version < NAVIGATION_STATE_VERSION
+    {
+        return Err(state_invalid(
+            "group_order",
+            "local",
+            "invalid navigation format",
+        ));
     }
     read_hosts(&state.local.hosts, HostScope::Local)?;
     for (key, row) in &state.local.groups {
@@ -323,6 +337,15 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                 RecordKind::KeySlot => {
                     decode_keyslot(record)?;
                 }
+                RecordKind::Meta if record.id == crate::sync::group_order::RECORD_ID => {
+                    if crate::sync::group_order::decode(record).is_none() {
+                        return Err(state_invalid(
+                            "group_order",
+                            &record.id,
+                            "invalid navigation metadata",
+                        ));
+                    }
+                }
                 RecordKind::Meta if record.id == ACCOUNT_META_ID && !record.deleted => {
                     let meta: MetaPayload = serde_json::from_value(record.payload.clone())
                         .map_err(state_decode_error)?;
@@ -396,7 +419,7 @@ fn validate_sealed(
             if !hint.is_valid_for(&record.envelope)
                 || !matches!(
                     (account, record.envelope.kind.as_str()),
-                    (true, "keyslot") | (false, "host" | "group")
+                    (true, "keyslot" | "meta") | (false, "host" | "group")
                 )
             {
                 return Err(state_invalid(

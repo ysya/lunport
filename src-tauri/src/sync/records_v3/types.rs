@@ -7,6 +7,7 @@ pub const MIN_ACCOUNT_SCHEMA: u32 = 3;
 pub const GROUP_SCHEMA: u32 = 1;
 pub const GROUPED_HOST_SCHEMA: u32 = 3;
 pub const GROUP_STATE_VERSION: u32 = 4;
+pub const NAVIGATION_STATE_VERSION: u32 = 5;
 pub const STATE_VERSION: u32 = 3;
 pub const MAX_JUMPS: usize = 5;
 

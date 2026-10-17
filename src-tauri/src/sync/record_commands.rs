@@ -104,6 +104,7 @@ pub struct RecordOverview {
     relay_url: String,
     hosts: Vec<HostView>,
     groups: Vec<GroupView>,
+    group_order: GroupOrderView,
     format_upgrade_required: bool,
     shared_format_upgrade_required: bool,
     keys: Vec<KeyView>,
@@ -116,6 +117,13 @@ pub struct RecordOverview {
     library_enabled: bool,
     library_scope: Option<HostScope>,
     pending_changes: usize,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct GroupOrderView {
+    ids: Vec<String>,
+    revision: Option<RevisionToken>,
+    blocked: bool,
+    sync_enabled: bool,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordStatus {
@@ -260,6 +268,16 @@ pub fn overview_from(
                 group_error: g.group_error,
             })
             .collect(),
+        group_order: {
+            let order = crate::sync::group_order::view(state);
+            GroupOrderView {
+                ids: order.ids,
+                revision: order.revision.map(Into::into),
+                blocked: order.blocked
+                    || crate::sync::group_order::blocked_by_opaque(state, account_keys),
+                sync_enabled: state.account.is_some(),
+            }
+        },
         format_upgrade_required: state.version < 4,
         shared_format_upgrade_required: state.account.as_ref().is_some_and(|a| {
             a.records
@@ -397,6 +415,56 @@ async fn edit(
     .await
     .map_err(crate::sync::engine::join_error)?
 }
+#[tauri::command]
+pub async fn records_group_order(
+    app: AppHandle,
+    expected_ids: Vec<String>,
+    revision: Option<RevisionToken>,
+    ids: Vec<String>,
+) -> Result<RecordOverview, AppError> {
+    let revision = revision.map(|r| r.revision()).transpose()?;
+    let account_keys = crate::sync::engine::with_env(&app, |env| {
+        env.runtime.core.lock().unwrap().account_keys.clone()
+    })?;
+    edit(app, move |state, now| {
+        if crate::sync::group_order::blocked_by_opaque(state, account_keys.as_ref()) {
+            return Err(AppError::Other(
+                "The synced group order cannot be read yet. Review Sync before reordering.".into(),
+            ));
+        }
+        crate::sync::group_order::set(state, &expected_ids, revision.as_ref(), ids.clone(), now)
+            .map_err(|e| match e {
+                repo::RepositoryError::ReadOnlyAccount => AppError::Other(
+                    "Group ordering is paused. Review Sync and app updates before trying again."
+                        .into(),
+                ),
+                _ => AppError::Other(
+                    "The group list or its order changed. Refresh the library and try again."
+                        .into(),
+                ),
+            })
+    })
+    .await
+}
+#[tauri::command]
+pub async fn records_host_forget_key(
+    app: AppHandle,
+    id: String,
+    revision: RevisionToken,
+    hostname: String,
+    port: u16,
+    expected_pin: crate::sync::records_v3::StoredHostKey,
+) -> Result<RecordOverview, AppError> {
+    let revision = revision.revision()?;
+    edit(app, move |state, now| {
+        repo::forget_host_key(state, &id, &revision, &repo::HostEndpoint { hostname:hostname.clone(), port }, &expected_pin, now).map_err(|e| match e {
+            repo::RepositoryError::RevisionConflict {..} | repo::RepositoryError::EndpointChanged(_) | repo::RepositoryError::PinConflict(_) => AppError::Other("This host or its fingerprint changed. Reload the library and review the current identity before removing it.".into()),
+            repo::RepositoryError::ReadOnlyAccount => AppError::Other("Shared changes are paused. Review Sync before removing this identity.".into()),
+            other => error(other),
+        })
+    }).await
+}
+
 #[tauri::command]
 pub async fn records_group_create(
     app: AppHandle,

@@ -118,6 +118,12 @@ export type RecordOverview = {
   generation: string;
   group_deletion_token: string;
   groups: RecordGroupView[];
+  group_order?: {
+    ids: string[];
+    revision: RecordRevision | null;
+    blocked: boolean;
+    sync_enabled: boolean;
+  };
   format_upgrade_required: boolean;
   shared_format_upgrade_required: boolean;
   hosts: RecordHostView[];
@@ -547,6 +553,26 @@ export async function createRecordGroup(
     payload,
     upgradeConfirmed,
   });
+}
+export function setRecordGroupOrder(
+  order: NonNullable<RecordOverview["group_order"]>,
+  ids: string[],
+): Promise<RecordOverview> {
+  return tauriInvoke("records_group_order", { expectedIds: order.ids, revision: order.revision, ids });
+}
+export function forgetRecordHostKey(host: RecordHostView): Promise<RecordOverview> {
+  return tauriInvoke("records_host_forget_key", {
+    id: host.id, revision: host.revision, hostname: host.effective_payload.hostname,
+    port: host.effective_payload.port, expectedPin: host.payload.host_key,
+  });
+}
+export type ConnectionProbe = {
+  host_id: string; hostname: string; port: number;
+  status: "reachable" | "refused" | "timed_out" | "dns_failed" | "failed" | "requires_jump" | "settings_changed";
+  latency_ms: number | null; elapsed_ms: number; checked_at_ms: number;
+};
+export function probeRecordHost(hostId: string): Promise<ConnectionProbe> {
+  return tauriInvoke("records_host_probe", {hostId});
 }
 export async function updateRecordGroup(
   id: string,

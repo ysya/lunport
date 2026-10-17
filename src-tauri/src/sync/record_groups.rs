@@ -231,7 +231,7 @@ pub fn require_host_format(
     scope: &HostScope,
 ) -> Result<(), RepositoryError> {
     if p.schema == GROUPED_HOST_SCHEMA {
-        if s.version != GROUP_STATE_VERSION {
+        if s.version < GROUP_STATE_VERSION {
             return Err(RepositoryError::UpgradeConfirmationRequired);
         }
         if matches!(scope, HostScope::Space { .. }) && !account_group_enabled(s) {
@@ -264,10 +264,10 @@ pub(crate) fn promote(
     now: u64,
 ) -> Result<(), RepositoryError> {
     let shared = matches!(scope, HostScope::Space { .. });
-    if (s.version != GROUP_STATE_VERSION || shared && !account_group_enabled(s)) && !confirmed {
+    if (s.version < GROUP_STATE_VERSION || shared && !account_group_enabled(s)) && !confirmed {
         return Err(RepositoryError::UpgradeConfirmationRequired);
     }
-    s.version = GROUP_STATE_VERSION;
+    s.version = s.version.max(GROUP_STATE_VERSION);
     if shared && !account_group_enabled(s) {
         let key = record_key(RecordKind::Meta, ACCOUNT_META_ID);
         let old = s
