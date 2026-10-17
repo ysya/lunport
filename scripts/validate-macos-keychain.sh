@@ -40,6 +40,8 @@ security unlock-keychain -p "$keychain_password" "$keychain"
 security set-keychain-settings -lut 3600 "$keychain"
 security import "$probe_dir/identity.p12" -k "$keychain" -P "$keychain_password" -T /usr/bin/codesign
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+security list-keychains -d user -s "$keychain"
+security find-identity -p codesigning "$keychain"
 identity="$(/usr/bin/openssl x509 -in "$probe_dir/certificate.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
 for version in 1 2; do
   clang -Wno-deprecated-declarations "-DPROBE_VERSION=\"$version\"" "$repo_dir/scripts/macos-keychain-probe.c" \
