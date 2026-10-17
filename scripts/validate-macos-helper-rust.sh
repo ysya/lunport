@@ -13,5 +13,10 @@ assert len(matches)==1, 'expected one native library test executable'
 print(matches[0])
 PY
 )"
-codesign --force --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp=none --identifier org.homelab.sshelter "$test_binary"
-"$test_binary" --ignored --exact secrets::macos_helper::tests::native_frozen_transport_probe --test-threads=1 --nocapture
+# Keep a production-authorized test executable out of the reusable Cargo cache.
+signed_probe="${RUNNER_TEMP}/lunport-helper-rust-signed-probe"
+trap 'rm -f "$signed_probe"' EXIT
+cp "$test_binary" "$signed_probe"
+chmod 700 "$signed_probe"
+codesign --force --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp=none --identifier org.homelab.sshelter "$signed_probe"
+"$signed_probe" --ignored --exact secrets::macos_helper::tests::native_frozen_transport_probe --test-threads=1 --nocapture
