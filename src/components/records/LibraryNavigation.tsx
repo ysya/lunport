@@ -1,7 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 import {
-  Clock3, Cloud, Folder, FolderOpen, Hash, KeyRound, Plus,
-  Settings2, Upload, AlertCircle, Server, ChevronRight,
+  Clock3, Folder, FolderOpen, Hash, KeyRound, Plus,
+  AlertCircle, Server, ChevronRight,
 } from "lucide-react";
 import type { RecordOverview } from "@/lib/records";
 import { cn } from "@/lib/utils";
@@ -105,10 +105,10 @@ function GroupNavigationItem({ node, overview, filter, activePanel, choose }: {
   );
 }
 
-export function LibraryNavigation({ overview, panel, filter, navigate, changeFilter, createGroup, settings }: {
+export function LibraryNavigation({ overview, panel, filter, navigate, changeFilter, createGroup }: {
   overview: RecordOverview; panel: WorkspacePanel; filter: LibraryFilter;
   navigate: (panel: WorkspacePanel) => void; changeFilter: (filter: LibraryFilter) => void;
-  createGroup: () => void; settings: () => void;
+  createGroup: () => void;
 }) {
   const collapsed = useUiStore((s) => s.librarySidebarCollapsed);
   const choose = (next: LibraryFilter) => { changeFilter(next); navigate("hosts"); };
@@ -181,11 +181,6 @@ export function LibraryNavigation({ overview, panel, filter, navigate, changeFil
             </nav>
           </>}
         </div>
-        <nav aria-label="Library tools" className="library-nav-tools space-y-1">
-          {row("Import hosts", <Upload className="size-4" />, panel === "import", () => navigate("import"))}
-          {row("Sync", <Cloud className="size-4" />, panel === "account", () => navigate("account"))}
-          {row("Settings", <Settings2 className="size-4" />, false, settings)}
-        </nav>
       </aside>
     </TooltipProvider>
   );

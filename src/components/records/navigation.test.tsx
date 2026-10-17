@@ -24,7 +24,6 @@ function navigation() {
     navigate={vi.fn()}
     changeFilter={vi.fn()}
     createGroup={vi.fn()}
-    settings={vi.fn()}
   />);
 }
 
@@ -44,6 +43,6 @@ describe("Records navigation controls", () => {
     expect(html).toContain('data-collapsed="true"');
     expect(html).toContain('aria-label="All hosts (1)"');
     expect(html).toMatch(/class="library-nav-collections[^\"]*" inert="" aria-hidden="true"/);
-    expect(html).toContain('aria-label="Settings"');
+    expect(html).not.toContain('aria-label="Settings"');
   });
 });
