@@ -33,38 +33,8 @@ static int transfer(int fd, void *buffer, size_t length, int writing) {
   return 1;
 }
 
-// Only this disposable fixture writer changes ACLs, to simulate the user's
-// one-time Always Allow grant. Production helper code never changes an ACL.
-static OSStatus grant(SecKeychainItemRef item, const char *helper) {
-  SecAccessRef access = NULL;
-  SecTrustedApplicationRef app = NULL;
-  OSStatus status = SecKeychainItemCopyAccess(item, &access);
-  if (!status) status = SecTrustedApplicationCreateFromPath(helper, &app);
-  CFArrayRef acls = status ? NULL : SecAccessCopyMatchingACLList(access, kSecACLAuthorizationDecrypt);
-  if (!status && (!acls || !CFArrayGetCount(acls))) status = errSecParam;
-  for (CFIndex i = 0; !status && i < CFArrayGetCount(acls); i++) {
-    SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(acls, i);
-    CFArrayRef applications = NULL;
-    CFStringRef description = NULL;
-    SecKeychainPromptSelector selector = 0;
-    status = SecACLCopyContents(acl, &applications, &description, &selector);
-    if (!status && !applications) status = errSecParam;
-    if (!status) {
-      CFMutableArrayRef trusted = CFArrayCreateMutableCopy(NULL, 0, applications);
-      CFArrayAppendValue(trusted, app);
-      status = SecACLSetContents(acl, trusted, description, selector);
-      CFRelease(trusted);
-    }
-    if (applications) CFRelease(applications);
-    if (description) CFRelease(description);
-  }
-  if (!status) status = SecKeychainItemSetAccess(item, access);
-  if (acls) CFRelease(acls);
-  if (app) CFRelease(app);
-  if (access) CFRelease(access);
-  return status;
-}
-
+// The granted fixture models the state after the user approves the helper.
+// No automated test claims to click or bypass the real OS authorization dialog.
 static int legacy(const char *mode, const char *helper, const char *account) {
   SecKeychainRef keychain = NULL;
   OSStatus status = SecKeychainCopyDomainDefault(kSecPreferencesDomainUser, &keychain);
@@ -72,20 +42,34 @@ static int legacy(const char *mode, const char *helper, const char *account) {
   SecKeychainItemRef item = NULL;
   UInt32 length = 0;
   void *data = NULL;
-  if (!strcmp(mode, "legacy-create")) {
+  if (!strcmp(mode, "legacy-create") || !strcmp(mode, "legacy-create-granted")) {
     CFStringRef a = CFStringCreateWithCString(NULL, account, kCFStringEncodingUTF8);
     CFDataRef value = CFDataCreate(NULL, (const UInt8 *)fixture, sizeof(fixture)-1);
     const void *keys[] = {kSecClass,kSecAttrService,kSecAttrAccount,kSecValueData,kSecUseKeychain};
     const void *values[] = {kSecClassGenericPassword,CFSTR(LUNPORT_CREDENTIAL_SERVICE),a,value,keychain};
     CFDictionaryRef attrs = CFDictionaryCreate(NULL,keys,values,5,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-    status = SecItemAdd(attrs,NULL);
-    CFRelease(attrs); CFRelease(value); CFRelease(a);
+    CFMutableDictionaryRef attributes = CFDictionaryCreateMutableCopy(NULL,0,attrs);
+    SecAccessRef access = NULL;
+    SecTrustedApplicationRef self = NULL, approved = NULL;
+    if (!strcmp(mode,"legacy-create-granted")) {
+      status = SecTrustedApplicationCreateFromPath(NULL,&self);
+      if (!status) status = SecTrustedApplicationCreateFromPath(helper,&approved);
+      const void *apps[] = {self,approved};
+      CFArrayRef trusted = status ? NULL : CFArrayCreate(NULL,apps,2,&kCFTypeArrayCallBacks);
+      if (!status) status = SecAccessCreate(CFSTR("public-helper-upgrade-fixture"),trusted,&access);
+      if (!status) CFDictionarySetValue(attributes,kSecAttrAccess,access);
+      if (trusted) CFRelease(trusted);
+    }
+    if (!status) status = SecItemAdd(attributes,NULL);
+    if (access) CFRelease(access);
+    if (self) CFRelease(self);
+    if (approved) CFRelease(approved);
+    CFRelease(attributes); CFRelease(attrs); CFRelease(value); CFRelease(a);
   } else {
     int verify = !strcmp(mode,"legacy-verify");
     status = SecKeychainFindGenericPassword(keychain, sizeof(LUNPORT_CREDENTIAL_SERVICE)-1,LUNPORT_CREDENTIAL_SERVICE,
       (UInt32)strlen(account),account,verify?&length:NULL,verify?&data:NULL,&item);
     if (!status && verify && (length != sizeof(fixture)-1 || memcmp(data,fixture,length))) status = errSecDecode;
-    if (!status && !strcmp(mode,"legacy-grant")) status = grant(item,helper);
     if (!status && !strcmp(mode,"legacy-delete")) status = SecKeychainItemDelete(item);
   }
   if (item) CFRelease(item);

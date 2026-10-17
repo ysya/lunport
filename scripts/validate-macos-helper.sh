@@ -13,6 +13,7 @@ cleanup() {
   if [[ -x "$probe/client-1" ]]; then
     security default-keychain -d user -s "$keychain" || true
     "$probe/client-1" legacy-delete "$probe/helper" "$account-legacy" || true
+    "$probe/client-1" legacy-delete "$probe/helper" "$account-granted" || true
     security default-keychain -d user -s "$original_default" || true
     "$probe/client-1" delete "$probe/helper" "$account-new" || true
   fi
@@ -78,21 +79,32 @@ if cmp -s "$probe/client-1" "$probe/client-2"; then echo 'Client builds must dif
 helper_before="$(shasum -a 256 "$probe/helper" | awk '{print $1}')"
 
 "$probe/client-1" set "$probe/helper" "$account-new"
+clang -Wno-deprecated-declarations "$repo_dir/scripts/macos-keychain-probe.c" -framework Security -framework CoreFoundation -o "$probe/metadata"
+"$probe/metadata" partition "$original_default" 'SSHelter Development' "$account-new" > "$probe/partition.txt"
+python3 - "$probe/partition.txt" "$helper_hash" <<'PY'
+import pathlib, plistlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+assert 'partition ACL count: 1' in text, 'modern fixture must exercise a partition ACL'
+encoded = next(line.removeprefix('partition: ') for line in text.splitlines() if line.startswith('partition: '))
+partitions = plistlib.loads(bytes.fromhex(encoded))['Partitions']
+assert 'cdhash:'+sys.argv[2] in partitions, 'the Keychain owner must be the frozen helper'
+print('Modern item partition matches the immutable helper code hash.')
+PY
 "$probe/client-2" get "$probe/helper" "$account-new"
 "$probe/client-2" replace "$probe/helper" "$account-new"
 "$probe/client-1" contains "$probe/helper" "$account-new"
-# Exercise a deliberate old-item trusted-application grant, never automation
-# of the user's OS authorization dialog. The modern
-# login-keychain partition/upgrade path is exercised separately above and below.
+# Model pre-approval (denied, unchanged) and post-approval legacy items separately.
+# The interactive OS grant itself remains an explicit manual check, never an ACL
+# bypass in production. Modern partition upgrades are checked independently.
 security default-keychain -d user -s "$keychain"
 "$probe/client-1" legacy-create "$probe/helper" "$account-legacy"
 "$probe/client-1" contains "$probe/helper" "$account-legacy"
 "$probe/client-1" denied "$probe/helper" "$account-legacy"
 "$probe/client-1" legacy-verify "$probe/helper" "$account-legacy"
-"$probe/client-1" legacy-grant "$probe/helper" "$account-legacy"
-"$probe/client-1" get "$probe/helper" "$account-legacy"
-"$probe/client-2" get "$probe/helper" "$account-legacy"
-"$probe/client-1" legacy-verify "$probe/helper" "$account-legacy"
+"$probe/client-1" legacy-create-granted "$probe/helper" "$account-granted"
+"$probe/client-1" get "$probe/helper" "$account-granted"
+"$probe/client-2" get "$probe/helper" "$account-granted"
+"$probe/client-1" legacy-verify "$probe/helper" "$account-granted"
 security default-keychain -d user -s "$original_default"
 
 for malformed in bad-op bad-magic oversized truncated; do
@@ -123,4 +135,4 @@ done
 "$probe/client-2" missing "$probe/helper" "$account-new"
 "$probe/client-2" delete "$probe/helper" "$account-new" # Idempotent deletion maps not-found in the App.
 [[ "$(shasum -a 256 "$probe/helper" | awk '{print $1}')" == "$helper_before" ]]
-echo 'Modern partition-protected upgrade, deliberate legacy ACL grant, denied clients and bounded protocol passed without authentication UI.'
+echo 'Modern partition-protected upgrade, pre/post-approval legacy fixtures, denied clients and bounded protocol passed without authentication UI.'
