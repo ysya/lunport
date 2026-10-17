@@ -6,7 +6,9 @@ repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 artifact="${1:?Frozen artifact directory required}"
 python3 "$repo_dir/scripts/verify-macos-credential-helper.py" "$artifact"
 probe="$(mktemp -d "${RUNNER_TEMP}/lunport-frozen-client.XXXXXX")"
-helper="$artifact/credential-helper-v1.bin"
+helper="$probe/Lunport Credential Helper"
+cp "$artifact/credential-helper-v1.bin" "$helper"
+chmod 700 "$helper"
 account="lunport-ci-helper-frozen-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 cleanup() {
   if [[ -x "$probe/client-1" ]]; then "$probe/client-1" delete "$helper" "$account" || true; fi
