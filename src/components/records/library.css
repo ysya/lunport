@@ -383,6 +383,8 @@
   gap: 0.9rem;
 }
 .library-host-card {
+  display: grid;
+  grid-template-rows: 1fr auto;
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--library-line);
