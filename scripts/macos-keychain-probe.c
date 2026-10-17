@@ -31,9 +31,10 @@ int main(int argc, char **argv) {
     CFRelease(item);
     if (status != errSecSuccess) return 72;
     CFArrayRef acls = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationPartitionID);
-    if (!acls) { CFRelease(access); return 73; }
-    printf("partition ACL count: %ld\n", (long)CFArrayGetCount(acls));
-    for (CFIndex i = 0; i < CFArrayGetCount(acls); i++) {
+    // SecAccess returns NULL when no matching ACL exists (the old fresh-item fixture).
+    CFIndex count = acls ? CFArrayGetCount(acls) : 0;
+    printf("partition ACL count: %ld\n", (long)count);
+    for (CFIndex i = 0; i < count; i++) {
       CFArrayRef applications = NULL;
       CFStringRef description = NULL;
       SecKeychainPromptSelector selector = 0;
@@ -45,7 +46,7 @@ int main(int argc, char **argv) {
       if (applications) CFRelease(applications);
       CFRelease(description);
     }
-    CFRelease(acls);
+    if (acls) CFRelease(acls);
     CFRelease(access);
   } else {
     UInt32 length = 0;
