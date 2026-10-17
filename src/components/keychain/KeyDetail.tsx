@@ -28,7 +28,7 @@ export type KeyAction = "copy" | "exportHost" | "addHost" | "exportPrivate" | "m
 
 export const BADGE_CLASS: Record<KeyBadge["tone"], string> = {
   plain: "",
-  warning: "border-amber-500/40 text-amber-700 dark:text-amber-400",
+  warning: "border-warning/40 text-warning",
   error: "border-destructive/40 text-destructive",
 };
 

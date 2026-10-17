@@ -15,6 +15,7 @@ describe("settings mode boundaries and navigation", () => {
     expect(searchSettings("drift", "legacy")[0].category).toBe("advanced");
   });
   it("finds real preference sections using all query words and supports blank search", () => {
+    expect(searchSettings("catppuccin", "records")[0].target).toBe("settings-color-theme");
     expect(searchSettings(" FONT  size ", "records")[0].target).toBe("settings-display");
     expect(searchSettings("export JSON", "legacy")[0].target).toBe("settings-preferences-transfer");
     expect(searchSettings("Auto-log", "legacy")).toEqual([]);

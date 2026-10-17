@@ -18,7 +18,7 @@ Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly na
 - **Encrypted library sync** — connect your computers with a private 24-word code. Hosts and Groups travel together; passwords stay on each device, and private keys sync only when explicitly shared. The relay stores ciphertext and can be self-hosted.
 - **AI access you control** — allow individual hosts for local MCP clients. Review proposed connections, verify fingerprints in the app, and choose Ask or explicitly acknowledged Auto-log for remote commands.
 - **A home for existing OpenSSH setups** — Legacy mode edits your local SSH configuration while preserving comments, ordering and unknown directives. Migration into the Records library requires an explicit review.
-- **Consistent preferences** — searchable settings, light/dark/system themes, reduced motion, an animated collapsible sidebar and signed Stable/Beta updates. **Settings → About** collects the installed version, project links and license.
+- **Consistent preferences** — searchable settings, six built-in color palettes with independent light/dark/system modes, reduced motion, an animated collapsible sidebar and signed Stable/Beta updates. **Settings → About** collects the installed version, project links and license.
 
 ## Install
 

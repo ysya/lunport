@@ -1,0 +1,159 @@
+{
+  "paletteChecks": [
+    {
+      "background": "rgb(246, 247, 249)",
+      "checked": "lunport",
+      "foreground": "rgb(32, 36, 43)",
+      "mode": "",
+      "overflow": false,
+      "palette": "lunport"
+    },
+    {
+      "background": "rgb(236, 239, 244)",
+      "checked": "nord",
+      "foreground": "rgb(46, 52, 64)",
+      "mode": "",
+      "overflow": false,
+      "palette": "nord"
+    },
+    {
+      "background": "rgb(255, 251, 235)",
+      "checked": "dracula",
+      "foreground": "rgb(31, 31, 31)",
+      "mode": "",
+      "overflow": false,
+      "palette": "dracula"
+    },
+    {
+      "background": "rgb(239, 241, 245)",
+      "checked": "catppuccin",
+      "foreground": "rgb(76, 79, 105)",
+      "mode": "",
+      "overflow": false,
+      "palette": "catppuccin"
+    },
+    {
+      "background": "rgb(225, 226, 231)",
+      "checked": "tokyo-night",
+      "foreground": "rgb(52, 59, 89)",
+      "mode": "",
+      "overflow": false,
+      "palette": "tokyo-night"
+    },
+    {
+      "background": "rgb(253, 246, 227)",
+      "checked": "solarized",
+      "foreground": "rgb(7, 54, 66)",
+      "mode": "",
+      "overflow": false,
+      "palette": "solarized"
+    },
+    {
+      "background": "rgb(17, 18, 20)",
+      "checked": "lunport",
+      "foreground": "rgb(238, 240, 244)",
+      "mode": "dark",
+      "overflow": false,
+      "palette": "lunport"
+    },
+    {
+      "background": "rgb(46, 52, 64)",
+      "checked": "nord",
+      "foreground": "rgb(236, 239, 244)",
+      "mode": "dark",
+      "overflow": false,
+      "palette": "nord"
+    },
+    {
+      "background": "rgb(40, 42, 54)",
+      "checked": "dracula",
+      "foreground": "rgb(248, 248, 242)",
+      "mode": "dark",
+      "overflow": false,
+      "palette": "dracula"
+    },
+    {
+      "background": "rgb(30, 30, 46)",
+      "checked": "catppuccin",
+      "foreground": "rgb(205, 214, 244)",
+      "mode": "dark",
+      "overflow": false,
+      "palette": "catppuccin"
+    },
+    {
+      "background": "rgb(26, 27, 38)",
+      "checked": "tokyo-night",
+      "foreground": "rgb(192, 202, 245)",
+      "mode": "dark",
+      "overflow": false,
+      "palette": "tokyo-night"
+    },
+    {
+      "background": "rgb(0, 43, 54)",
+      "checked": "solarized",
+      "foreground": "rgb(238, 232, 213)",
+      "mode": "dark",
+      "overflow": false,
+      "palette": "solarized"
+    }
+  ],
+  "minimumWindow": {
+    "choices": [
+      {
+        "overflow": false,
+        "width": 153
+      },
+      {
+        "overflow": false,
+        "width": 153
+      },
+      {
+        "overflow": false,
+        "width": 153
+      },
+      {
+        "overflow": false,
+        "width": 153
+      },
+      {
+        "overflow": false,
+        "width": 153
+      },
+      {
+        "overflow": false,
+        "width": 153
+      }
+    ],
+    "dialogBounds": {
+      "bottom": 534.5,
+      "height": 509,
+      "left": 17,
+      "right": 783,
+      "top": 25.5,
+      "width": 766,
+      "x": 17,
+      "y": 25.5
+    },
+    "dialogOverflow": false,
+    "font": "17px",
+    "palette": "solarized",
+    "paneOverflow": false,
+    "viewport": [
+      800,
+      560
+    ]
+  },
+  "keyboard": {
+    "from": "nord",
+    "key": "ArrowRight",
+    "selected": "dracula"
+  },
+  "persistence": {
+    "beforeReload": "nord",
+    "afterReload": "nord"
+  },
+  "lightPortal": {
+    "background": "rgb(253, 246, 227)",
+    "foreground": "rgb(7, 54, 66)"
+  }
+}

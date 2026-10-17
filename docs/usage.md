@@ -6,9 +6,15 @@ Lunport is your SSH workspace for hosts, keys and Groups, formerly named SSHelte
 
 A new installation opens a Records workspace without requiring an SSH config or an existing data directory. The first save creates the local library. Add a host with its hostname, username and port, or use **Import** to review entries from OpenSSH files. Import copies the selected data and preserves the sources.
 
-Groups provide shared connection defaults and can contain other Groups. Host overrides remain explicit. The full-height sidebar is reserved for Library navigation; use tags, Recent and Needs attention to find connections, or open the command palette with **⌘K / Ctrl+K**. **Import hosts** sits beside **New host** in the host list. **Settings** opens from the upper-right toolbar or **⌘, / Ctrl+,** and provides search across the preferences available in your workspace.
+Groups provide shared connection defaults and can contain other Groups. Host overrides remain explicit. The full-height sidebar is reserved for Library navigation; use tags, Recent and Needs attention to find connections, or open the command palette with **⌘K / Ctrl+K**. Use the **⋯** menu beside **New host** for **Import hosts** or **New group**. **Settings** opens from the upper-right toolbar or **⌘, / Ctrl+,** and provides search across the preferences available in your workspace.
 
 Drag a Group row within its current level to reorder it. Its **⋯** menu also offers **Move up / Move down**; with the Group focused, use **Alt+↑ / Alt+↓** (Option on macOS). **Groups → ⋯ → Sort groups by name** restores name sorting. Sorting preserves nesting and connection defaults, and newly added Groups follow manually ordered peers. With an account, order syncs to your computers; concurrent offline reorders converge through the existing sync rules. Older 1.2.0 clients continue using name sorting while retaining the additional encrypted metadata.
+
+## Appearance and color themes
+
+Open **Settings → Appearance → Color theme** to choose Lunport, Nord, Dracula, Catppuccin, Tokyo Night or Solarized. The miniature previews follow the selected **System / Light / Dark** mode. Selections apply immediately and are remembered on this installation; the original Lunport palette remains the default. Settings search also finds themes by name.
+
+Each preset covers the workspace, sidebar, cards, dialogs and status colors. Dracula uses Alucard in light mode; Catppuccin uses Latte/Mocha, and Tokyo Night uses Day/Night. Surface roles and status colors are adapted for interface text contrast. **Theme credits** includes palette sources and licenses. External terminals such as iTerm2 and Terminal keep their own color preferences.
 
 ## Server identities and connection checks
 
