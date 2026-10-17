@@ -11,9 +11,9 @@ name: ssh engine
 on:
   push:
     branches: [main, next/own-ssh]
-    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", ".github/workflows/test-engine.yml"]
+    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", "scripts/macos-keychain-probe.c", "scripts/validate-macos-keychain.sh", ".github/workflows/test-engine.yml"]
   pull_request:
-    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", ".github/workflows/test-engine.yml"]
+    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", "scripts/macos-keychain-probe.c", "scripts/validate-macos-keychain.sh", ".github/workflows/test-engine.yml"]
   workflow_dispatch:
 
 permissions:

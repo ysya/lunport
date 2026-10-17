@@ -1,8 +1,5 @@
 name: macOS Keychain identity
 on:
-  push:
-    branches: [codex/keychain-update-trust]
-    paths: ["scripts/*macos*", "src-tauri/signing/**", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   pull_request:
     paths: ["scripts/*macos*", "src-tauri/signing/**", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   workflow_dispatch:

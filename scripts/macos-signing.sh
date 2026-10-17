@@ -35,7 +35,7 @@ verify() {
   leaf_sha1="$(/usr/bin/openssl x509 -in "$public_certificate" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
   local executable
   executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-  lipo -verify_arch x86_64 arm64 "$app/Contents/MacOS/$executable"
+  lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64 arm64
   for architecture in x86_64 arm64; do
     codesign --display --arch "$architecture" --extract-certificates "$scratch/$architecture-" "$app"
     actual="$(fingerprint "$scratch/$architecture-0" DER)"
