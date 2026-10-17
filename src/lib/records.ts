@@ -296,6 +296,9 @@ export async function importRecordKeyFile(name: string, path: string): Promise<R
 export async function generateRecordKey(name: string): Promise<RecordOverview> {
   return tauriInvoke("records_key_generate", { name });
 }
+export async function renameRecordKey(keyId: string, expected: KeySlotPayload, name: string): Promise<RecordOverview> {
+  return tauriInvoke("records_key_rename", { keyId, expected, name });
+}
 export async function createRecordAccount(
   deviceName: string,
   upgradeConfirmed?: boolean,
