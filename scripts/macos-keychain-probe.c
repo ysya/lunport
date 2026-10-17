@@ -21,6 +21,19 @@ int main(int argc, char **argv) {
     status = SecKeychainAddGenericPassword(keychain, (UInt32)strlen(service), service,
       (UInt32)strlen(account), account, sizeof(fixture) - 1, fixture, NULL);
     if (status != errSecSuccess) { fprintf(stderr, "fixture creation: %d\n", (int)status); return 67; }
+  } else if (strcmp(mode, "write-modern") == 0) {
+    CFStringRef service_string = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+    CFStringRef account_string = CFStringCreateWithCString(NULL, account, kCFStringEncodingUTF8);
+    CFDataRef secret = CFDataCreate(NULL, (const UInt8 *)fixture, sizeof(fixture) - 1);
+    const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount, kSecValueData, kSecUseKeychain };
+    const void *values[] = { kSecClassGenericPassword, service_string, account_string, secret, keychain };
+    CFDictionaryRef attributes = CFDictionaryCreate(NULL, keys, values, 5, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    status = SecItemAdd(attributes, NULL);
+    CFRelease(attributes);
+    CFRelease(secret);
+    CFRelease(account_string);
+    CFRelease(service_string);
+    if (status != errSecSuccess) { fprintf(stderr, "modern fixture creation: %d\n", (int)status); return 76; }
   } else if (strcmp(mode, "partition") == 0) {
     SecKeychainItemRef item = NULL;
     SecAccessRef access = NULL;

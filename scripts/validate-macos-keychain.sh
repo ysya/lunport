@@ -72,11 +72,11 @@ hash1="$(codesign --display --verbose=4 "$probe_dir/version-1" 2>&1 | sed -n 's/
 hash2="$(codesign --display --verbose=4 "$probe_dir/version-2" 2>&1 | sed -n 's/^CDHash=//p')"
 [[ -n "$hash1" && -n "$hash2" && "$hash1" != "$hash2" ]] || { echo 'Expected distinct executable cdhashes.' >&2; exit 1; }
 cp "$probe_dir/version-1" "$probe_dir/current"
-"$probe_dir/current" write "$keychain" "$service" "$partition_account"
-"$probe_dir/current" partition "$keychain" "$service" "$partition_account"
-security set-generic-password-partition-list -a "$partition_account" -s "$service" \
-  -S "cdhash:$hash1" -k "$keychain_password" "$keychain" >/dev/null
-"$probe_dir/current" partition "$keychain" "$service" "$partition_account"
+# SecItemAdd creates the modern integrity/partition ACL absent from the legacy add API.
+"$probe_dir/current" write-modern "$keychain" "$service" "$partition_account"
+"$probe_dir/current" partition "$keychain" "$service" "$partition_account" > "$probe_dir/partition.txt"
+cat "$probe_dir/partition.txt"
+grep -Eq 'partition ACL count: [1-9][0-9]*$' "$probe_dir/partition.txt"
 "$probe_dir/current" read "$keychain" "$service" "$partition_account"
 cp "$probe_dir/version-2" "$probe_dir/current"
 "$probe_dir/current" denied "$keychain" "$service" "$partition_account"
