@@ -2,6 +2,12 @@
 
 ## [1.3.0](https://github.com/ysya/lunport/compare/v1.2.0...v1.3.0) (2026-10-17)
 
+Arrange Groups by dragging, using the row menu, or pressing Alt/Option + Up/Down. Ordering syncs across devices and can be reset to name sorting. Existing 1.2.0 clients continue syncing and display Groups by name.
+
+Manage saved server identities and the local OpenSSH known_hosts file from **Settings → Connections → Known hosts**, or open the manager from host details. Host details also offer **Check port**, a manual TCP reachability check with latency and a three-second deadline.
+
+The first local state upgrade saves the exact previous state in `sync-state-v<version>-<sha256>.backup.json`. Restoring an older app binary requires restoring that backup. Existing macOS project signing and updater identities remain unchanged.
+
 
 ### Features
 
