@@ -123,15 +123,8 @@ export function RecordHostList({
             } as const
           )[filter.kind];
   const counts = new Map<string, number>();
-  const usersByEndpoint = new Map<string, Set<string>>();
-  for (const host of overview.hosts) {
+  for (const host of overview.hosts)
     counts.set(host.id, (counts.get(host.id) ?? 0) + 1);
-    const { hostname, port, user } = host.effective_payload;
-    const endpoint = JSON.stringify([hostname, port]);
-    const users = usersByEndpoint.get(endpoint) ?? new Set<string>();
-    users.add(user);
-    usersByEndpoint.set(endpoint, users);
-  }
   const toggle = (id: string) =>
     setChecked((current) => {
       const next = new Set(current);
@@ -352,11 +345,7 @@ export function RecordHostList({
                 ? `[${target}]`
                 : target;
               const port = host.effective_payload.port;
-              const endpoint = port === 22 ? target : `${endpointHost}:${port}`;
-              const needsUser = (usersByEndpoint.get(JSON.stringify([
-                host.effective_payload.hostname, port,
-              ]))?.size ?? 0) > 1;
-              const address = needsUser ? `${user || "Default user"} · ${endpoint}` : endpoint;
+              const connection = user ? `SSH · ${user}` : "SSH";
               const warningLabel = ambiguous
                 ? "Conflicting host ID"
                 : host.group_error
@@ -422,7 +411,7 @@ export function RecordHostList({
                         <strong title={name}>{name}</strong>
                       </span>
                       <span className="library-host-secondary">
-                        <span className="library-host-address" title={`${user || "Default user"} · ${endpointHost}:${port}`}>{address}</span>
+                        <span className="library-host-connection" title={`${connection}${user ? "" : " · OS username"} · ${endpointHost}:${port}`}>{connection}</span>
                         {blocked && (
                           <span className="library-host-warning" title={warningLabel} aria-label={warningLabel}>
                             <TriangleAlert className="size-3 shrink-0" aria-hidden="true" />
