@@ -6,7 +6,7 @@ Lunport is your SSH workspace for hosts, keys and Groups, formerly named SSHelte
 
 A new installation opens a Records workspace without requiring an SSH config or an existing data directory. The first save creates the local library. Add a host with its hostname, username and port, or use **Import** to review entries from OpenSSH files. Import copies the selected data and preserves the sources.
 
-Groups provide shared connection defaults and can contain other Groups. Host overrides remain explicit. Use tags, Recent and Needs attention to find connections, or open the command palette with **⌘K / Ctrl+K**. Settings opens with **⌘, / Ctrl+,** and provides search across the preferences available in your workspace.
+Groups provide shared connection defaults and can contain other Groups. Host overrides remain explicit. The full-height sidebar is reserved for Library navigation; use tags, Recent and Needs attention to find connections, or open the command palette with **⌘K / Ctrl+K**. **Import hosts** sits beside **New host** in the host list. **Settings** opens from the upper-right toolbar or **⌘, / Ctrl+,** and provides search across the preferences available in your workspace.
 
 ## Connect in your terminal
 
@@ -26,7 +26,7 @@ Lunport's SSH agent provides vault keys to compatible local SSH clients while th
 
 ## Sync your library
 
-Open **Sync** in the Records sidebar, or **Settings → Local data → Open sync**. Enter and save your HTTPS relay URL if one is not built into the app. Create a sync chain on the first computer, save its **24-word sync code**, and choose **Join with sync code** on the others. Anyone holding the code can access and change the encrypted library, so keep it in a password manager.
+Open **Sync** in the upper-right toolbar, or **Settings → Local data → Open sync**. Enter and save your HTTPS relay URL if one is not built into the app. Create a sync chain on the first computer, save its **24-word sync code**, and choose **Join with sync code** on the others. Anyone holding the code can access and change the encrypted library, so keep it in a password manager.
 
 Creating or joining includes existing hosts and Groups on that device. Previously connected devices enable **Library sync** once from the Sync workspace. Review any naming conflicts and the acknowledgement for a shared Group-format upgrade; update or stop older clients before approving that upgrade. Setup preserves source records and can resume after an interruption.
 
