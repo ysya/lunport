@@ -1,0 +1,4 @@
+untrusted comment: signature from tauri secret key
+RUTDB8UzowoufSFXKWh/g60gewFP3IfT1i7vNQo4U5I3nKnEibftH01ucqUBl3+qBpP4Nl6DMEsNxAIh81EQX0UNmcUErgwvuQM=
+trusted comment: timestamp:1792271625	file:Lunport_1.4.0_amd64.AppImage
+3/dUW8nvS9VVtsXIbalRkNXJKMjy+3lZcMJIGl773UFyvfOrCXZ/ZQgdFDZggVvzAHRc83siw1Hfkl4j672HDQ==

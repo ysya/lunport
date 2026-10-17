@@ -1,0 +1,26 @@
+{
+  "candidate": "1780fdf1a0270f145cd3106aec5a06ff34225055",
+  "versionFields": {
+    "package": "1.4.0",
+    "tauri": "1.4.0",
+    "manifest": "1.4.0",
+    "cargo": "1.4.0",
+    "cargoLock": "1.4.0"
+  },
+  "bundleIdentity": "org.homelab.sshelter",
+  "updaterConfigurationUnchanged": true,
+  "dependenciesUnchanged": true,
+  "nativeChangesOnlyVersionMetadata": [
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/tauri.conf.json"
+  ],
+  "unchangedPinsSha256": {
+    "src-tauri/signing/macos-project.pem": "ace62ee67aa6f1ed66fbffbbea79d16f0fc1c6d4779b06bf105100ece74c9de8",
+    "src-tauri/icons/icon.icns": "cee35c729a1db8b59ec04f5e5f23a770c9bc23bd227fc7867cb8aa21a62edcb5",
+    "pnpm-lock.yaml": "d4d9aa93530f0d2c82ceb4acc7e1a1b11852a5261f81f88132067a0d383f5130"
+  },
+  "releaseSourceCommit": "2e091fab86a6b86ba91462b1a9039e83959ffc71",
+  "candidateTreeEqualsReleaseTree": true,
+  "tree": "5b240ae4eec44a2a5f2d60a90be62bde253f97c4"
+}

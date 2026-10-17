@@ -1,0 +1,4 @@
+untrusted comment: signature from tauri secret key
+RUTDB8UzowoufTHyoFgpvpQKXSvGSueyJD7PoU171cQBHd7/VYZkRasRClllu2qLWf4Iurw33TBUp0MgM9vcnYpboS0ysK5QVAs=
+trusted comment: timestamp:1792271625	file:Lunport_1.4.0_amd64.deb
+wNsxsbwr5BtgG4P6N6TJXjPsK6vq7P98iaFMdiyrP25TaocjLCbrZmJ7iXle5zcXihsvxWYuxg0ELcMqEqayBA==

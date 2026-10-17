@@ -1,0 +1,67 @@
+{
+  "version": "1.4.0",
+  "notes": "",
+  "pub_date": "2026-10-17T21:15:07.276Z",
+  "platforms": {
+    "linux-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlNNVlBvdFBxUVBDeGkxN04zOHBOd1FZd3dlRU9tVzE4NVF2NlUySExiNU9QRTV2RVFuVFJ3WGd3clRQWllNM00wQzg0RDBlR1lybm13MHlMVG0rYWdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjAyCWZpbGU6THVucG9ydF8xLjQuMF9hYXJjaDY0LkFwcEltYWdlCllYL1oyemRsdkswSzIyQlFKYjlSdkVldHJxTkJRWjFlcXNMTFFMMmpXa3NMRjdBNU9IVEI2eFlLaS8veGhneVpib0t5bzFsOFlIeE1VMUJ0TXhHZkJRPT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_aarch64.AppImage"
+    },
+    "linux-aarch64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlNNVlBvdFBxUVBDeGkxN04zOHBOd1FZd3dlRU9tVzE4NVF2NlUySExiNU9QRTV2RVFuVFJ3WGd3clRQWllNM00wQzg0RDBlR1lybm13MHlMVG0rYWdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjAyCWZpbGU6THVucG9ydF8xLjQuMF9hYXJjaDY0LkFwcEltYWdlCllYL1oyemRsdkswSzIyQlFKYjlSdkVldHJxTkJRWjFlcXNMTFFMMmpXa3NMRjdBNU9IVEI2eFlLaS8veGhneVpib0t5bzFsOFlIeE1VMUJ0TXhHZkJRPT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_aarch64.AppImage"
+    },
+    "linux-aarch64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlNJVlhKRnNEV2hzUHh0OFdIOU56YkltL3lXSExwVlM5c3dGdnlGa2lIM3EwSG45Ujgxa01kaVVvNFIzV1V3dW1hZVBkdWdNS29MbXhpWXpHZkdGbXcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjAyCWZpbGU6THVucG9ydF8xLjQuMF9hcm02NC5kZWIKZXI2MnluN2NQQ0V0aGozUW53NmFrQkFBaGsxWjdHVmdhTEpEcmpMQ1lvdDd6aU13SnpjUkQwRkJCOE9RR283RUk3UCsrNVZUNEFHcGx3TG5Kb1NhQ2c9PQo=",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_arm64.deb"
+    },
+    "linux-aarch64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlhvR0VzU3VUckVGS0JhemRGMmI4Y3hPS3JkK1poMk0xRURuS3libFRjV3FLNjVwZUdjMjFsVHZHS09sbHcxdGFKdEpzSDQzYnhXNWYwZ0Jidk53QkFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjAyCWZpbGU6THVucG9ydC0xLjQuMC0xLmFhcmNoNjQucnBtCjU2UmEvRlg5aHVrUUo5bXNUbm9lL3N1SGlqUm1pZDB0Y2U5ZGNKS25XQmFmQWdrbDBZbjZYYW5WSElmV0NFclJneWFOTTlwRzlpcUx2R0N6dWxpWkR3PT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport-1.4.0-1.aarch64.rpm"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlNGWEtXaC9nNjBnZXdGUDNJZlQxaTd2TlFvNFU1STNuS25FaWJmdEgwMXVjcVVCbDMrcUJwUDRObDZETUVzTnhBSWg4MUVRWDBVTm1jVUVyZ3d2dVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjI1CWZpbGU6THVucG9ydF8xLjQuMF9hbWQ2NC5BcHBJbWFnZQozL2RVVzhudlM5VlZ0c1hJYmFsUmtOWEpLTWp5KzNsWmNNSklHbDc3M1VGeXZmT3JDWFovWlFnZEZEWmdnVnZ6QUhSYzgzc2l3MUhma2w0ajY3MkhEUT09Cg==",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_amd64.AppImage"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlNGWEtXaC9nNjBnZXdGUDNJZlQxaTd2TlFvNFU1STNuS25FaWJmdEgwMXVjcVVCbDMrcUJwUDRObDZETUVzTnhBSWg4MUVRWDBVTm1jVUVyZ3d2dVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjI1CWZpbGU6THVucG9ydF8xLjQuMF9hbWQ2NC5BcHBJbWFnZQozL2RVVzhudlM5VlZ0c1hJYmFsUmtOWEpLTWp5KzNsWmNNSklHbDc3M1VGeXZmT3JDWFovWlFnZEZEWmdnVnZ6QUhSYzgzc2l3MUhma2w0ajY3MkhEUT09Cg==",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_amd64.AppImage"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlRIeW9GZ3B2cFFLWFN2R1N1ZXlKRDdQb1UxNzFjUUJIZDcvVllaa1Jhc1JDbGxsdTJxTFdmNEl1cnczM1RCVXAwTWdNOXZjbllwYm9TMHlzSzVRVkFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjI1CWZpbGU6THVucG9ydF8xLjQuMF9hbWQ2NC5kZWIKd05zeHNid3I1QnRnRzRQNk42VEpYalBzSzZ2cTdQOThpYUZNZGl5clAyNVRhb2NqTENiclptSjdpWGxlNXpjWGloc3Z4V1l1eGcwRUxjTXFFcWF5QkE9PQo=",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_amd64.deb"
+    },
+    "linux-x86_64-rpm": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZlcwTXFEb2tJR05QWlJIUjNNU2FTWW5qMW9qTmM0ZTVNQWh1aFZHa05GS3dIYWRNY3V1VFZtellXcHRGamE2U05QSjgwd2ZsZWJob2JJTlcxbytMVXdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjI1CWZpbGU6THVucG9ydC0xLjQuMC0xLng4Nl82NC5ycG0KYzdXMW80eFozTk1YRS9zWVhtQmNoSlBTTzJsQ3ZEQStIWlFYQ2M3QTRDTnN1akhyUHAxM0tpMlBFaWsyQzhHTjZzN3ZVQmNZdEVMSis4K1N2M2VsRGc9PQo=",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport-1.4.0-1.x86_64.rpm"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZllRZUcwMXh5YXc0WlZZVlRESEFHRlZOWWRLMU5IRHJzYXdqK0xHZXZvN3c0Z3kyVFZVblNhaWRMZXladm80QytKZUFKN0FMSjUwOSttZjlGaVkvcHdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjkxCWZpbGU6THVucG9ydF8xLjQuMF94NjRfZW4tVVMubXNpCnFidVRlOEE2Uk1Udk5hUzd6ZUdTdkR5clF3UTFDOWE2VVo2cFpNUmxzeFpERDJvTm9od1hIZXlYWlJSZU05TllnbHVWVi93UjE0US9zU2hHWWRTeURRPT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_x64_en-US.msi"
+    },
+    "windows-x86_64-msi": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZllRZUcwMXh5YXc0WlZZVlRESEFHRlZOWWRLMU5IRHJzYXdqK0xHZXZvN3c0Z3kyVFZVblNhaWRMZXladm80QytKZUFKN0FMSjUwOSttZjlGaVkvcHdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjkxCWZpbGU6THVucG9ydF8xLjQuMF94NjRfZW4tVVMubXNpCnFidVRlOEE2Uk1Udk5hUzd6ZUdTdkR5clF3UTFDOWE2VVo2cFpNUmxzeFpERDJvTm9od1hIZXlYWlJSZU05TllnbHVWVi93UjE0US9zU2hHWWRTeURRPT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_x64_en-US.msi"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZldhYmQ3QzR3M2NuRGY1VGdDTlZBL1VsNzVZWFJtbTVkemorQmplTHlvRVVVK3JmaVZZUXJXd2c1cnFDZXFJbmZZaXovdVdXdFA4aFlCcjlQczZ1N0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNjkxCWZpbGU6THVucG9ydF8xLjQuMF94NjQtc2V0dXAuZXhlCk1DNW9GZVc2Uy9pWEdLWi93Zm9pYmZTZEFwVHpHMDkxTkZ0Ly9qbFZaVExiRHhCS2dXQVJIVDUvVXVMc1lBL0gzWmt2dTRrZlZnSThKRnlyQjdETEJ3PT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_1.4.0_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZllUZ2RKOXZlN20yVjErNnR1ZmNVOC93Z3hWODZHUTdTSjBWNTFtb3BkQW1rZ09MYUl0SzhGaE5URDhrb0NGTlZMLzRGNDFEaW5FMmJ5ZjZwaVFDRkFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNzAwCWZpbGU6THVucG9ydC5hcHAudGFyLmd6CjVyVHQ2a3NSTGMxYkx0eGJHb3ZjOGVBTi9NbmgxczlEQ2FtUXR1ci9ER1ViK08rZHg4WVJPekdPVDFONDdyNEN4Nk9DWngzMXJkalprRlFFRmNJY0JRPT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_universal.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZllUZ2RKOXZlN20yVjErNnR1ZmNVOC93Z3hWODZHUTdTSjBWNTFtb3BkQW1rZ09MYUl0SzhGaE5URDhrb0NGTlZMLzRGNDFEaW5FMmJ5ZjZwaVFDRkFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNzAwCWZpbGU6THVucG9ydC5hcHAudGFyLmd6CjVyVHQ2a3NSTGMxYkx0eGJHb3ZjOGVBTi9NbmgxczlEQ2FtUXR1ci9ER1ViK08rZHg4WVJPekdPVDFONDdyNEN4Nk9DWngzMXJkalprRlFFRmNJY0JRPT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_universal.app.tar.gz"
+    },
+    "darwin-aarch64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZllUZ2RKOXZlN20yVjErNnR1ZmNVOC93Z3hWODZHUTdTSjBWNTFtb3BkQW1rZ09MYUl0SzhGaE5URDhrb0NGTlZMLzRGNDFEaW5FMmJ5ZjZwaVFDRkFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNzAwCWZpbGU6THVucG9ydC5hcHAudGFyLmd6CjVyVHQ2a3NSTGMxYkx0eGJHb3ZjOGVBTi9NbmgxczlEQ2FtUXR1ci9ER1ViK08rZHg4WVJPekdPVDFONDdyNEN4Nk9DWngzMXJkalprRlFFRmNJY0JRPT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_universal.app.tar.gz"
+    },
+    "darwin-x86_64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUREI4VXpvd291ZllUZ2RKOXZlN20yVjErNnR1ZmNVOC93Z3hWODZHUTdTSjBWNTFtb3BkQW1rZ09MYUl0SzhGaE5URDhrb0NGTlZMLzRGNDFEaW5FMmJ5ZjZwaVFDRkFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMjcxNzAwCWZpbGU6THVucG9ydC5hcHAudGFyLmd6CjVyVHQ2a3NSTGMxYkx0eGJHb3ZjOGVBTi9NbmgxczlEQ2FtUXR1ci9ER1ViK08rZHg4WVJPekdPVDFONDdyNEN4Nk9DWngzMXJkalprRlFFRmNJY0JRPT0K",
+      "url": "https://github.com/ysya/lunport/releases/download/v1.4.0/Lunport_universal.app.tar.gz"
+    }
+  }
+}

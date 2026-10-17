@@ -1,0 +1,730 @@
+{
+  "conclusion": "success",
+  "headSha": "2e091fab86a6b86ba91462b1a9039e83959ffc71",
+  "jobs": [
+    {
+      "completedAt": "2026-10-17T21:07:42Z",
+      "conclusion": "success",
+      "databaseId": 117504270620,
+      "name": "release-please",
+      "startedAt": "2026-10-17T21:07:30Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-17T21:07:31Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-17T21:07:30Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:07:40Z",
+          "conclusion": "success",
+          "name": "Run googleapis/release-please-action@v4",
+          "number": 2,
+          "startedAt": "2026-10-17T21:07:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:07:40Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 3,
+          "startedAt": "2026-10-17T21:07:40Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/lunport/actions/runs/39069600318/job/117504270620"
+    },
+    {
+      "completedAt": "2026-10-17T21:13:34Z",
+      "conclusion": "success",
+      "databaseId": 117504325343,
+      "name": "build (ubuntu-22.04-arm)",
+      "startedAt": "2026-10-17T21:07:47Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-17T21:07:50Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-17T21:07:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:07:51Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-17T21:07:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:40Z",
+          "conclusion": "success",
+          "name": "Install Linux dependencies",
+          "number": 3,
+          "startedAt": "2026-10-17T21:07:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:40Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 4,
+          "startedAt": "2026-10-17T21:08:40Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:46Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 5,
+          "startedAt": "2026-10-17T21:08:40Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:52Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 6,
+          "startedAt": "2026-10-17T21:08:46Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:03Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 7,
+          "startedAt": "2026-10-17T21:08:52Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:03Z",
+          "conclusion": "skipped",
+          "name": "Build the console helper (Windows)",
+          "number": 8,
+          "startedAt": "2026-10-17T21:09:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:07Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 9,
+          "startedAt": "2026-10-17T21:09:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:07Z",
+          "conclusion": "success",
+          "name": "Check the sync relay URL",
+          "number": 10,
+          "startedAt": "2026-10-17T21:09:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:07Z",
+          "conclusion": "skipped",
+          "name": "Prepare the fixed macOS signing identity",
+          "number": 11,
+          "startedAt": "2026-10-17T21:09:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:32Z",
+          "conclusion": "success",
+          "name": "Build and upload installers to the release",
+          "number": 12,
+          "startedAt": "2026-10-17T21:09:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:32Z",
+          "conclusion": "skipped",
+          "name": "Remove the temporary macOS signing keychain",
+          "number": 13,
+          "startedAt": "2026-10-17T21:13:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:32Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 23,
+          "startedAt": "2026-10-17T21:13:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:32Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 24,
+          "startedAt": "2026-10-17T21:13:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:32Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 25,
+          "startedAt": "2026-10-17T21:13:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:32Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 26,
+          "startedAt": "2026-10-17T21:13:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:32Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 27,
+          "startedAt": "2026-10-17T21:13:32Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/lunport/actions/runs/39069600318/job/117504325343"
+    },
+    {
+      "completedAt": "2026-10-17T21:15:01Z",
+      "conclusion": "success",
+      "databaseId": 117504325348,
+      "name": "build (windows-latest, --config '{\"bundle\":{\"externalBin\":[\"binaries/sshelter-cli\"]}}')",
+      "startedAt": "2026-10-17T21:07:45Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-17T21:07:47Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-17T21:07:46Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:07:53Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-17T21:07:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:07:53Z",
+          "conclusion": "skipped",
+          "name": "Install Linux dependencies",
+          "number": 3,
+          "startedAt": "2026-10-17T21:07:53Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:07:56Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 4,
+          "startedAt": "2026-10-17T21:07:53Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:10Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 5,
+          "startedAt": "2026-10-17T21:07:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:31Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 6,
+          "startedAt": "2026-10-17T21:08:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:04Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 7,
+          "startedAt": "2026-10-17T21:08:31Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:08Z",
+          "conclusion": "success",
+          "name": "Build the console helper (Windows)",
+          "number": 8,
+          "startedAt": "2026-10-17T21:09:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:16Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 9,
+          "startedAt": "2026-10-17T21:09:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:16Z",
+          "conclusion": "success",
+          "name": "Check the sync relay URL",
+          "number": 10,
+          "startedAt": "2026-10-17T21:09:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:09:16Z",
+          "conclusion": "skipped",
+          "name": "Prepare the fixed macOS signing identity",
+          "number": 11,
+          "startedAt": "2026-10-17T21:09:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:14:56Z",
+          "conclusion": "success",
+          "name": "Build and upload installers to the release",
+          "number": 12,
+          "startedAt": "2026-10-17T21:09:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:14:56Z",
+          "conclusion": "skipped",
+          "name": "Remove the temporary macOS signing keychain",
+          "number": 13,
+          "startedAt": "2026-10-17T21:14:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:14:56Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 23,
+          "startedAt": "2026-10-17T21:14:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:14:56Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 24,
+          "startedAt": "2026-10-17T21:14:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:14:57Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 25,
+          "startedAt": "2026-10-17T21:14:56Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:00Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 26,
+          "startedAt": "2026-10-17T21:14:57Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:00Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 27,
+          "startedAt": "2026-10-17T21:15:00Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/lunport/actions/runs/39069600318/job/117504325348"
+    },
+    {
+      "completedAt": "2026-10-17T21:14:02Z",
+      "conclusion": "success",
+      "databaseId": 117504325408,
+      "name": "build (ubuntu-22.04)",
+      "startedAt": "2026-10-17T21:07:46Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-17T21:07:49Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-17T21:07:46Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:07:51Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-17T21:07:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:18Z",
+          "conclusion": "success",
+          "name": "Install Linux dependencies",
+          "number": 3,
+          "startedAt": "2026-10-17T21:07:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:19Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 4,
+          "startedAt": "2026-10-17T21:08:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:27Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 5,
+          "startedAt": "2026-10-17T21:08:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:36Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 6,
+          "startedAt": "2026-10-17T21:08:27Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:49Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 7,
+          "startedAt": "2026-10-17T21:08:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:49Z",
+          "conclusion": "skipped",
+          "name": "Build the console helper (Windows)",
+          "number": 8,
+          "startedAt": "2026-10-17T21:08:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:55Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 9,
+          "startedAt": "2026-10-17T21:08:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:55Z",
+          "conclusion": "success",
+          "name": "Check the sync relay URL",
+          "number": 10,
+          "startedAt": "2026-10-17T21:08:55Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:55Z",
+          "conclusion": "skipped",
+          "name": "Prepare the fixed macOS signing identity",
+          "number": 11,
+          "startedAt": "2026-10-17T21:08:55Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:58Z",
+          "conclusion": "success",
+          "name": "Build and upload installers to the release",
+          "number": 12,
+          "startedAt": "2026-10-17T21:08:55Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:58Z",
+          "conclusion": "skipped",
+          "name": "Remove the temporary macOS signing keychain",
+          "number": 13,
+          "startedAt": "2026-10-17T21:13:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:58Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 23,
+          "startedAt": "2026-10-17T21:13:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:58Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 24,
+          "startedAt": "2026-10-17T21:13:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:58Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 25,
+          "startedAt": "2026-10-17T21:13:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:58Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 26,
+          "startedAt": "2026-10-17T21:13:58Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:13:58Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 27,
+          "startedAt": "2026-10-17T21:13:58Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/lunport/actions/runs/39069600318/job/117504325408"
+    },
+    {
+      "completedAt": "2026-10-17T21:15:13Z",
+      "conclusion": "success",
+      "databaseId": 117504325442,
+      "name": "build (macos-latest, --target universal-apple-darwin)",
+      "startedAt": "2026-10-17T21:07:53Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-17T21:07:57Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-17T21:07:53Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:00Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-17T21:07:57Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:00Z",
+          "conclusion": "skipped",
+          "name": "Install Linux dependencies",
+          "number": 3,
+          "startedAt": "2026-10-17T21:08:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:01Z",
+          "conclusion": "success",
+          "name": "Setup pnpm",
+          "number": 4,
+          "startedAt": "2026-10-17T21:08:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:06Z",
+          "conclusion": "success",
+          "name": "Setup Node",
+          "number": 5,
+          "startedAt": "2026-10-17T21:08:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:16Z",
+          "conclusion": "success",
+          "name": "Install Rust stable",
+          "number": 6,
+          "startedAt": "2026-10-17T21:08:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:34Z",
+          "conclusion": "success",
+          "name": "Rust cache",
+          "number": 7,
+          "startedAt": "2026-10-17T21:08:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:34Z",
+          "conclusion": "skipped",
+          "name": "Build the console helper (Windows)",
+          "number": 8,
+          "startedAt": "2026-10-17T21:08:34Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:43Z",
+          "conclusion": "success",
+          "name": "Install frontend dependencies",
+          "number": 9,
+          "startedAt": "2026-10-17T21:08:34Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:43Z",
+          "conclusion": "success",
+          "name": "Check the sync relay URL",
+          "number": 10,
+          "startedAt": "2026-10-17T21:08:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:08:43Z",
+          "conclusion": "success",
+          "name": "Prepare the fixed macOS signing identity",
+          "number": 11,
+          "startedAt": "2026-10-17T21:08:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:09Z",
+          "conclusion": "success",
+          "name": "Build and upload installers to the release",
+          "number": 12,
+          "startedAt": "2026-10-17T21:08:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:09Z",
+          "conclusion": "success",
+          "name": "Remove the temporary macOS signing keychain",
+          "number": 13,
+          "startedAt": "2026-10-17T21:15:09Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:10Z",
+          "conclusion": "success",
+          "name": "Post Rust cache",
+          "number": 23,
+          "startedAt": "2026-10-17T21:15:09Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:10Z",
+          "conclusion": "success",
+          "name": "Post Setup Node",
+          "number": 24,
+          "startedAt": "2026-10-17T21:15:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:10Z",
+          "conclusion": "success",
+          "name": "Post Setup pnpm",
+          "number": 25,
+          "startedAt": "2026-10-17T21:15:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:11Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 26,
+          "startedAt": "2026-10-17T21:15:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:11Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 27,
+          "startedAt": "2026-10-17T21:15:11Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/lunport/actions/runs/39069600318/job/117504325442"
+    },
+    {
+      "completedAt": "2026-10-17T21:15:27Z",
+      "conclusion": "success",
+      "databaseId": 117505897897,
+      "name": "beta-manifest",
+      "startedAt": "2026-10-17T21:15:16Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-17T21:15:17Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-17T21:15:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:20Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-17T21:15:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:21Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-node@v4",
+          "number": 3,
+          "startedAt": "2026-10-17T21:15:20Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:24Z",
+          "conclusion": "success",
+          "name": "Update the Beta channel manifest",
+          "number": 4,
+          "startedAt": "2026-10-17T21:15:21Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:25Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@v4",
+          "number": 7,
+          "startedAt": "2026-10-17T21:15:24Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:25Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 8,
+          "startedAt": "2026-10-17T21:15:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-17T21:15:25Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 9,
+          "startedAt": "2026-10-17T21:15:25Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/ysya/lunport/actions/runs/39069600318/job/117505897897"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/ysya/lunport/actions/runs/39069600318"
+}
