@@ -1,0 +1,30 @@
+{
+  "version": "1.5.0",
+  "bundleIdentifier": "org.homelab.sshelter",
+  "executable": "sshelter",
+  "architectures": {
+    "x86_64": {
+      "signatureVerified": true,
+      "certificateSha256": "6bce9f14c85274ab36911c91c48e52249e49089afee80e6465b54ab6f4174830",
+      "designatedRequirement": "identifier \"org.homelab.sshelter\" and certificate root = H\"a346b47b8dccb4faeac8aec1ea997535809aeec9\"",
+      "hardenedRuntime": true,
+      "embeddedFrozenHelperMatches": true
+    },
+    "arm64": {
+      "signatureVerified": true,
+      "certificateSha256": "6bce9f14c85274ab36911c91c48e52249e49089afee80e6465b54ab6f4174830",
+      "designatedRequirement": "identifier \"org.homelab.sshelter\" and certificate root = H\"a346b47b8dccb4faeac8aec1ea997535809aeec9\"",
+      "hardenedRuntime": true,
+      "embeddedFrozenHelperMatches": true
+    }
+  },
+  "frozenHelperSha256": "6d74a63293b153fccae754e1c4d38449e5cc26065738fae7d0cfc64dcddf2178",
+  "frozenHelperCodeHashes": {
+    "arm64": "b81014e67d632acee792ce51572884d585544241",
+    "x86_64": "dd91d3bea5c08b4e639fb3b0944fdb43520b2127"
+  },
+  "foldedLIconMatchesSource": true,
+  "installedOrLaunched": false,
+  "personalKeychainReadOrChanged": false,
+  "interactiveFirstApproval": "manual installation check; automated pre/post-approval and preservation fixtures passed"
+}

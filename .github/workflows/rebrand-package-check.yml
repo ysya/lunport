@@ -1,4 +1,4 @@
-name: rebrand package check
+name: Packages - Linux upgrade
 
 on:
   pull_request:
@@ -7,14 +7,41 @@ on:
       - "src-tauri/icons/**"
       - "src-tauri/installers/**"
       - "scripts/validate-linux-rebrand.py"
+      - "scripts/ci-changes*.mjs"
       - ".github/workflows/rebrand-package-check.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    name: Select package checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      packages: ${{ steps.select.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-changes.mjs
+
   linux:
+    name: DEB and RPM upgrade compatibility
+    needs: changes
+    if: needs.changes.outputs.packages == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:

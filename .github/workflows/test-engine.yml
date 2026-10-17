@@ -6,26 +6,49 @@
 # aws-lc-sys (russh's crypto, the same crate rustls already pulls in for the updater) is built by its build script with the runner's C
 # compiler: clang on macOS, gcc on ubuntu-24.04. The release workflow already builds it on both through rustls, so nothing is installed
 # for it here.
-name: ssh engine
+name: CI - App
 
 on:
-  push:
-    branches: [main, next/own-ssh]
-    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", "scripts/macos-keychain-probe.c", "scripts/validate-macos-keychain.sh", ".github/workflows/test-engine.yml"]
   pull_request:
-    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", "scripts/macos-keychain-probe.c", "scripts/validate-macos-keychain.sh", ".github/workflows/test-engine.yml"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A push to next/own-ssh with a pull request open would run the workflow twice; a newer run replaces the one in progress.
+# PRs are checked before merge; merging does not repeat the same full suites.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Policy, versions and workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      frontend: ${{ steps.select.outputs.frontend }}
+      native: ${{ steps.select.outputs.native }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - run: node --test scripts/ci-changes.test-node.mjs
+      - name: Select checks and verify version consistency
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-changes.mjs
+      - name: Lint all application workflows
+        run: docker run --rm -v "$GITHUB_WORKSPACE:/repo" -w /repo rhysd/actionlint:1.7.12 -shellcheck='' -color
+
   frontend:
+    name: Frontend tests and build
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -42,6 +65,9 @@ jobs:
       - run: pnpm build
 
   macos:
+    name: Rust and SSH (macOS)
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: macos-latest
     timeout-minutes: 45
     defaults:
@@ -97,10 +123,10 @@ jobs:
           cargo test --locked --release --test app_profile_build
           cargo test --locked --release --features development-profile --test app_profile_build
 
-      - name: Keychain metadata and update authorization in an isolated keychain
-        run: bash ../scripts/validate-macos-keychain.sh --with-rust
-
   linux:
+    name: Rust, SSH and PAM (Linux)
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     # Not ubuntu-latest: the PAM image is ubuntu:24.04, and the package names below were checked against 24.04.
     runs-on: ubuntu-24.04
     timeout-minutes: 45

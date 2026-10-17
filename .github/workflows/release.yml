@@ -1,4 +1,4 @@
-name: release
+name: Release - Stable
 
 # How releasing works:
 #  1. Every push to `main` runs release-please, which opens/updates a "release" PR that bumps
