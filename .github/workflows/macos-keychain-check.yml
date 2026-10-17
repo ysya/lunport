@@ -15,7 +15,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}-${{ github.event_name }}-${{ inputs.freeze_helper || false }}
   cancel-in-progress: true
 jobs:
   helper:

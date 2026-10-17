@@ -7,12 +7,16 @@ repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 probe="$(mktemp -d "${RUNNER_TEMP}/lunport-helper.XXXXXX")"
 keychain="$probe/signing.keychain-db"
 account="lunport-ci-helper-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+original_default="$(security default-keychain -d user | sed 's/^ *"//; s/"$//')"
 security list-keychains -d user > "$probe/search-list.txt"
 cleanup() {
   if [[ -x "$probe/client-1" ]]; then
+    security default-keychain -d user -s "$keychain" || true
     "$probe/client-1" legacy-delete "$probe/helper" "$account-legacy" || true
+    security default-keychain -d user -s "$original_default" || true
     "$probe/client-1" delete "$probe/helper" "$account-new" || true
   fi
+  security default-keychain -d user -s "$original_default" || true
   local previous=() line
   while IFS= read -r line; do line="${line#*\"}"; line="${line%\"*}"; previous+=("$line"); done < "$probe/search-list.txt"
   security list-keychains -d user -s "${previous[@]}" || true
@@ -77,15 +81,19 @@ helper_before="$(shasum -a 256 "$probe/helper" | awk '{print $1}')"
 "$probe/client-2" get "$probe/helper" "$account-new"
 "$probe/client-2" replace "$probe/helper" "$account-new"
 "$probe/client-1" contains "$probe/helper" "$account-new"
-# Existing App-owned item must remain protected until a one-time user grant.
+# Exercise a deliberate old-item grant with the known disposable keychain
+# password, never automation of the user's OS authorization dialog. The modern
+# login-keychain partition/upgrade path is exercised separately above and below.
+security default-keychain -d user -s "$keychain"
 "$probe/client-1" legacy-create "$probe/helper" "$account-legacy"
 "$probe/client-1" contains "$probe/helper" "$account-legacy"
 "$probe/client-1" denied "$probe/helper" "$account-legacy"
 "$probe/client-1" legacy-verify "$probe/helper" "$account-legacy"
-"$probe/client-1" legacy-grant "$probe/helper" "$account-legacy"
+LUNPORT_CI_HELPER_KEYCHAIN_PASSWORD="$password" "$probe/client-1" legacy-grant "$probe/helper" "$account-legacy"
 "$probe/client-1" get "$probe/helper" "$account-legacy"
 "$probe/client-2" get "$probe/helper" "$account-legacy"
 "$probe/client-1" legacy-verify "$probe/helper" "$account-legacy"
+security default-keychain -d user -s "$original_default"
 
 for malformed in bad-op bad-magic oversized truncated; do
   "$probe/client-2" "$malformed" "$probe/helper" "$account-new"
@@ -115,4 +123,4 @@ done
 "$probe/client-2" missing "$probe/helper" "$account-new"
 "$probe/client-2" delete "$probe/helper" "$account-new" # Idempotent deletion maps not-found in the App.
 [[ "$(shasum -a 256 "$probe/helper" | awk '{print $1}')" == "$helper_before" ]]
-echo 'Fixed helper upgrade, explicit fixture migration, denied clients and bounded protocol passed without authentication UI.'
+echo 'Modern partition-protected upgrade, deliberate legacy ACL grant, denied clients and bounded protocol passed without authentication UI.'

@@ -87,7 +87,9 @@ static OSStatus grant(SecKeychainItemRef item, const char *helper) {
     if (description) CFRelease(description);
     if (authorizations) CFRelease(authorizations);
   }
-  if (!status) status = SecKeychainItemSetAccess(item, access);
+  const char *password = getenv("LUNPORT_CI_HELPER_KEYCHAIN_PASSWORD");
+  if (!status && !password) status = errSecParam;
+  if (!status) status = SecKeychainItemSetAccessWithPassword(item, access, (UInt32)strlen(password), password);
   if (acls) CFRelease(acls);
   if (info) CFRelease(info);
   if (code) CFRelease(code);
@@ -124,6 +126,7 @@ static int legacy(const char *mode, const char *helper, const char *account) {
   if (data) SecKeychainItemFreeContent(NULL,data);
   CFRelease(keychain);
   if (status) fprintf(stderr,"fixture %s: %d\n",mode,(int)status);
+  else printf("client %s: %s passed\n",CLIENT_VERSION,mode);
   return status ? 82 : 0;
 }
 
