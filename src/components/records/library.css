@@ -98,7 +98,22 @@
 .library-nav-label, .library-nav-count, .library-workspace-label, .library-nav-collections { transition: opacity var(--motion-feedback) var(--ease-enter), visibility 0s; }
 .library-navigation[data-collapsed="true"] :is(.library-nav-label, .library-nav-count, .library-workspace-label, .library-nav-collections) { opacity: 0; visibility: hidden; transition: opacity var(--motion-feedback) var(--ease-enter), visibility 0s var(--motion-feedback); }
 .library-navigation[data-collapsed="true"] .library-nav-collections { overflow: hidden; }
-.library-group-navigation-row { display: flex; align-items: center; min-width: 0; }
+.library-group-navigation-row { display: flex; align-items: center; min-width: 0; position: relative; }
+.library-group-navigation-row[data-reorderable="true"] .library-nav-item { cursor: grab; user-select: none; touch-action: none; }
+.library-group-navigation-row.is-dragging { opacity: 0.5; }
+.library-group-navigation-row.group-drop-before::before,
+.library-group-navigation-row.group-drop-after::after { content: ""; position: absolute; left: 1.1rem; right: 0; height: 2px; background: var(--primary); pointer-events: none; border-radius: 2px; z-index: 1; }
+.library-group-navigation-row.group-drop-before::before { top: 0; }
+.library-group-navigation-row.group-drop-after::after { bottom: 0; }
+.library-group-actions { position: absolute; right: 0; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 1.5rem; height: 1.75rem; color: var(--muted-foreground); border-radius: 0.3rem; opacity: 0; transition: opacity var(--motion-fast); }
+.library-group-navigation-row:hover .library-nav-count,
+.library-group-navigation-row:focus-within .library-nav-count,
+.library-group-navigation-row:has(.library-group-actions[data-state="open"]) .library-nav-count { opacity: 0; }
+.library-group-navigation-row:hover .library-group-actions,
+.library-group-navigation-row:focus-within .library-group-actions,
+.library-group-actions[data-state="open"] { opacity: 1; }
+.library-group-actions:hover { background: var(--accent); color: var(--foreground); }
+.library-group-actions:disabled { cursor: default; }
 .library-group-navigation-row > [data-slot="tooltip-trigger"] { min-width: 0; flex: 1; }
 .library-group-disclosure, .library-group-disclosure-spacer { display: grid; width: 1.1rem; flex: 0 0 1.1rem; min-height: 2rem; place-items: center; }
 .library-group-disclosure { border-radius: 0.25rem; color: var(--muted-foreground); }

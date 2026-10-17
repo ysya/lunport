@@ -47,6 +47,7 @@ import {
   applyRecordOverview,
   recordsStatusKey,
   syncRecordsNow,
+  setRecordGroupOrder,
   type RecordOverview,
   type HostScope,
   type RecordsStatus,
@@ -105,6 +106,7 @@ export function RecordsWorkspace({
     selection.kind === "group" || selection.kind === "new_group";
   const [syncing, setSyncing] = useState(false);
   const [accountBusy, setAccountBusy] = useState(false);
+  const [reordering, setReordering] = useState(false);
   const syncActive = syncing || accountBusy || !!overview.syncing;
   const [error, setError] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
@@ -279,6 +281,22 @@ export function RecordsWorkspace({
           navigate={setPanel}
           changeFilter={changeFilter}
           createGroup={createGroup}
+          reordering={reordering}
+          reorder={(ids) => {
+            if (reordering) return;
+            setReordering(true);
+            const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            const order = overview.group_order ?? { ids: [], revision: null, blocked: false, sync_enabled: false };
+            void setRecordGroupOrder(order, ids).then((incoming) => {
+              accept(incoming);
+              requestAnimationFrame(() => {
+                if (origin?.isConnected && document.activeElement === document.body) origin.focus({preventScroll:true});
+              });
+            }).catch((error: unknown) => {
+              toast.error("Could not reorder groups", { description: error instanceof Error ? error.message : String(error) });
+              reload();
+            }).finally(() => setReordering(false));
+          }}
         />
       </div>
       <div className="library-workspace-column flex min-h-0 min-w-0 flex-1 flex-col">

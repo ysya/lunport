@@ -11,6 +11,8 @@ import { revealHidden } from "@/lib/sync-approvals";
 import { groupPath } from "./group-tree";
 import { readinessLabel } from "./HostList";
 import { DetailPane } from "./DetailPane";
+import { KnownHostsManager } from "./KnownHostsManager";
+import { ConnectionCheck } from "./ConnectionCheck";
 
 export function HostPreview({
   host,
@@ -103,6 +105,7 @@ export function HostPreview({
             </p>
           )}
         </div>
+        <ConnectionCheck host={host} />
         {!!host.payload.tags.length && (
           <div className="library-preview-section">
             <h3>Tags</h3>
@@ -121,15 +124,16 @@ export function HostPreview({
             </p>
           </div>
         )}
-        {payload.host_key && (
+        {(
           <div className="library-preview-section">
             <h3>
               <ShieldCheck className="size-3.5" />
-              Host key saved
+              Server identity
             </h3>
             <p className="text-xs text-muted-foreground">
-              The server’s identity is checked again when connecting.
+              {payload.host_key ? "The saved identity is checked again when connecting." : "No server key has been verified yet."}
             </p>
+            <KnownHostsManager overview={overview} hostId={host.id} trigger={<Button variant="outline" size="sm" className="mt-3">Manage identity…</Button>} />
           </div>
         )}
     </DetailPane>

@@ -97,7 +97,10 @@ pub(crate) fn invalid(field: &'static str, id: &str, reason: &str) -> Repository
     .into()
 }
 fn validate_header(state: &SyncStateV3) -> Result<(), RepositoryError> {
-    if !matches!(state.version, STATE_VERSION | GROUP_STATE_VERSION) {
+    if !matches!(
+        state.version,
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION
+    ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
             found: state.version,
@@ -872,6 +875,42 @@ fn same_pin(left: &StoredHostKey, right: &StoredHostKey) -> bool {
     left.algorithm == right.algorithm
         && left.public_key == right.public_key
         && left.fingerprint == right.fingerprint
+}
+/// Forget only the identity displayed by the user, leaving connection settings and keys intact.
+pub fn forget_host_key(
+    state: &SyncStateV3,
+    id: &str,
+    expected: &RecordRevision,
+    endpoint: &HostEndpoint,
+    pin: &StoredHostKey,
+    now_ms: u64,
+) -> Result<SyncStateV3, RepositoryError> {
+    let host = checked_host(state, id, expected)?;
+    if host.effective_payload.hostname != endpoint.hostname
+        || host.effective_payload.port != endpoint.port
+    {
+        return Err(RepositoryError::EndpointChanged(id.into()));
+    }
+    if host.host.payload.host_key.as_ref() != Some(pin) {
+        return Err(RepositoryError::PinConflict(id.into()));
+    }
+    let mut payload = host.host.payload.clone();
+    payload.host_key = None;
+    let key = record_key(RecordKind::Host, id);
+    let previous = &records(state, &host.host.scope)[&key];
+    let record = ordered_record(
+        state,
+        id,
+        serde_json::to_value(payload).unwrap(),
+        false,
+        now_ms,
+        &[&previous.record],
+    )?;
+    let mut next = state.clone();
+    records_mut(&mut next, &host.host.scope)
+        .insert(key, cached(record, previous.seq, &host.host.scope));
+    validate_transition(state, &next)?;
+    Ok(next)
 }
 /// Compare endpoint and prior public key identity under SyncCore's lock; never write on conflict.
 pub fn pin_host_key(

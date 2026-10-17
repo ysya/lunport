@@ -69,8 +69,24 @@ jobs:
       - name: Complete safe Rust suite
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
-        # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
+        # CLI tests exercise process-group signals. Isolate their session from the Actions worker
+        # and retain a bounded diagnostic if a runner stops making progress.
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          command = [
+              "cargo", "test", "--locked", "--lib", "--",
+              "--skip", "secrets::tests::round_trip_set_get_delete",
+              "--skip", "askpass::tests::env_secret_takes_priority_over_keychain",
+              "--skip", "askpass::tests::missing_account_and_no_env_yields_none",
+              "--skip", "ssh::engine_tests::login_methods::pam",
+          ]
+          try:
+              subprocess.run(command, check=True, start_new_session=True, timeout=900)
+          except subprocess.TimeoutExpired:
+              subprocess.run(["ps", "-axo", "pid,ppid,pgid,state,etime,comm"], check=False)
+              raise
+          PY
 
       - name: Profile selection in the normal library
         env:
@@ -142,6 +158,10 @@ jobs:
           cargo test --locked --test app_profile_build
           cargo test --locked --release --test app_profile_build
           cargo test --locked --release --features development-profile --test app_profile_build
+      - name: Group ordering remains compatible with the published 1.2.0 client
+        run: |
+          git fetch --depth=1 origin tag v1.2.0
+          bash ../scripts/validate-group-order-compat.sh
       # Runs whatever the scratch sshd step came to, so that a first run shows both results.
       - name: Password and keyboard-interactive tests against the container
         if: ${{ !cancelled() }}
