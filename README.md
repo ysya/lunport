@@ -13,7 +13,7 @@ Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly na
 ## A workspace for your connections
 
 - **Hosts and Groups** — organize connections with nested Groups, shared defaults and tags. Search the library, revisit recent hosts and connect from the command palette.
-- **Your terminal, Lunport's SSH engine** — open sessions in your preferred terminal, verify server fingerprints and use stored keys or request-scoped credentials. Jump hosts use `ProxyJump`.
+- **Your terminal, Lunport's SSH engine** — open sessions in your preferred terminal, verify server fingerprints and enter passwords or authentication codes in Lunport. Save host passwords in this device's system credential store when desired. Jump hosts use `ProxyJump`.
 - **Keys in one place** — generate keys or import an OpenSSH private key with the system file picker or by pasting. Imports copy into the local vault and preserve the source file. Key sharing has separate controls.
 - **Encrypted library sync** — connect your computers with a private 24-word code. Hosts and Groups travel together; passwords stay on each device, and private keys sync only when explicitly shared. The relay stores ciphertext and can be self-hosted.
 - **AI access you control** — allow individual hosts for local MCP clients. Review proposed connections, verify fingerprints in the app, and choose Ask or explicitly acknowledged Auto-log for remote commands.
@@ -30,7 +30,7 @@ Choose an installer from [Releases](https://github.com/ysya/lunport/releases/lat
 | Windows x64 | `.exe` installer |
 | Linux x64 or ARM64 | `.AppImage`, `.deb` or `.rpm` for your architecture |
 
-**macOS:** builds use a fixed project signing certificate to preserve Keychain authorization across updates. This is not an Apple Developer ID; builds are not yet notarized. When upgrading from an older unsigned build, macOS may ask once per existing Keychain item; choose **Always Allow** for Lunport to remember that authorization. Drag Lunport into Applications and, if Gatekeeper blocks it, run:
+**macOS:** builds use a fixed project signing certificate and a fixed **Lunport Credential Helper** for protected credentials. Ordinary App updates retain the same helper. The first use of existing credentials can require **Always Allow** for the helper; a deliberate helper update or changed Keychain policy can require authorization again. See the [Keychain details](docs/2026-10-18-keychain-partition-followup.md). This is not an Apple Developer ID; builds are not yet notarized. Drag Lunport into Applications and, if Gatekeeper blocks it, run:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Lunport.app

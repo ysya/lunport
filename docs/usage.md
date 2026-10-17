@@ -8,6 +8,8 @@ A new installation opens a Records workspace without requiring an SSH config or 
 
 Groups provide shared connection defaults and can contain other Groups. Host overrides remain explicit. The full-height sidebar is reserved for Library navigation; use tags, Recent and Needs attention to find connections, or open the command palette with **⌘K / Ctrl+K**. Use the **⋯** menu beside **New host** for **Import hosts** or **New group**. **Settings** opens from the upper-right toolbar or **⌘, / Ctrl+,** and provides search across the preferences available in your workspace.
 
+Host and key details open over the right side of the workspace, keeping the catalog width and scroll position unchanged. Drag the detail divider to resize it on wide windows. **Escape** or **Close details** returns to the selected item; narrow windows show details across the workspace without rebuilding the collection.
+
 Drag a Group row within its current level to reorder it. Its **⋯** menu also offers **Move up / Move down**; with the Group focused, use **Alt+↑ / Alt+↓** (Option on macOS). **Groups → ⋯ → Sort groups by name** restores name sorting. Sorting preserves nesting and connection defaults, and newly added Groups follow manually ordered peers. With an account, order syncs to your computers; concurrent offline reorders converge through the existing sync rules. Older 1.2.0 clients continue using name sorting while retaining the additional encrypted metadata.
 
 ## Appearance and color themes
@@ -28,7 +30,11 @@ In a host's connection details, **Check port** performs a manual TCP reachabilit
 
 Choose a terminal in **Settings → Connections**; individual hosts can override that choice. A connection opens in the terminal while Lunport's built-in SSH engine handles authentication and server identity. New or changed server fingerprints require a decision in Lunport. Check fingerprints against a trusted source before accepting them.
 
-Use a key from the local vault, a saved password or an interactive authentication prompt. Passphrases and two-factor codes are requested for the connection. The SSH engine supports `ProxyJump`; `ProxyCommand` connections are not supported. It signs with keys kept in Lunport, so an external `IdentityFile` must be imported or moved into the vault before this engine can use it. A host relying on an implicit `~/.ssh/id_*` key must select its key explicitly.
+Use a key from the local vault, a saved password or an interactive authentication prompt. Passwords, key passphrases and two-factor codes appear in Lunport’s **SSH authentication** window, with the requesting host and username. Answers apply to the current connection; cancelling or closing the terminal abandons its questions. Shell input continues in your preferred terminal.
+
+In the Records host editor, choose **Authentication → Password**. Leave the password unset to enter it in Lunport when connecting, or choose **Save password on this device**, enter it and save the host. Saved passwords use the system credential store and never sync. The editor shows saved status without reading or revealing the saved password; **Replace password** and **Remove saved password** take effect when you save changes. If credential storage fails after creating the host, retry **Save changes** without creating another host.
+
+The SSH engine supports `ProxyJump`; `ProxyCommand` connections are not supported. It signs with keys kept in Lunport, so an external `IdentityFile` must be imported or moved into the vault before this engine can use it. A host relying on an implicit `~/.ssh/id_*` key must select its key explicitly.
 
 The command-line entry point remains `sshelter connect <host>` through the rename. Windows terminals use `sshelter-cli.exe`, installed beside `sshelter.exe`. Saved MCP commands keep working with these executable names.
 

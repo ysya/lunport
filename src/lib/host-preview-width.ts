@@ -16,10 +16,10 @@ export function hostPreviewNeedsCompact(available: number): boolean {
   return Number.isFinite(available) && available < 2 * MIN_HOST_PREVIEW_WIDTH;
 }
 
-/** Reserve list space without modifying the user's saved preferred width. */
+/** An overlay never takes space away from the catalog. */
 export function hostPreviewLimit(available: number): number {
   if (!Number.isFinite(available)) return MAX_HOST_PREVIEW_WIDTH;
-  return clampHostPreviewWidth(Math.floor(available - 320));
+  return clampHostPreviewWidth(Math.floor(available));
 }
 
 export function hostPreviewWidthAfterDrag(

@@ -21,6 +21,55 @@ int main(int argc, char **argv) {
     status = SecKeychainAddGenericPassword(keychain, (UInt32)strlen(service), service,
       (UInt32)strlen(account), account, sizeof(fixture) - 1, fixture, NULL);
     if (status != errSecSuccess) { fprintf(stderr, "fixture creation: %d\n", (int)status); return 67; }
+  } else if (strcmp(mode, "write-modern") == 0) {
+    CFStringRef service_string = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+    CFStringRef account_string = CFStringCreateWithCString(NULL, account, kCFStringEncodingUTF8);
+    CFDataRef secret = CFDataCreate(NULL, (const UInt8 *)fixture, sizeof(fixture) - 1);
+    const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount, kSecValueData, kSecUseKeychain };
+    const void *values[] = { kSecClassGenericPassword, service_string, account_string, secret, keychain };
+    CFDictionaryRef attributes = CFDictionaryCreate(NULL, keys, values, 5, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    status = SecItemAdd(attributes, NULL);
+    CFRelease(attributes);
+    CFRelease(secret);
+    CFRelease(account_string);
+    CFRelease(service_string);
+    if (status != errSecSuccess) { fprintf(stderr, "modern fixture creation: %d\n", (int)status); return 76; }
+  } else if (strcmp(mode, "delete") == 0) {
+    SecKeychainItemRef item = NULL;
+    status = SecKeychainFindGenericPassword(keychain, (UInt32)strlen(service), service,
+      (UInt32)strlen(account), account, NULL, NULL, &item);
+    if (status == errSecSuccess) {
+      status = SecKeychainItemDelete(item);
+      CFRelease(item);
+    }
+    if (status != errSecSuccess && status != errSecItemNotFound) return 77;
+  } else if (strcmp(mode, "partition") == 0) {
+    SecKeychainItemRef item = NULL;
+    SecAccessRef access = NULL;
+    status = SecKeychainFindGenericPassword(keychain, (UInt32)strlen(service), service,
+      (UInt32)strlen(account), account, NULL, NULL, &item);
+    if (status != errSecSuccess) return 71;
+    status = SecKeychainItemCopyAccess(item, &access);
+    CFRelease(item);
+    if (status != errSecSuccess) return 72;
+    CFArrayRef acls = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationPartitionID);
+    // SecAccess returns NULL when no matching ACL exists (the old fresh-item fixture).
+    CFIndex count = acls ? CFArrayGetCount(acls) : 0;
+    printf("partition ACL count: %ld\n", (long)count);
+    for (CFIndex i = 0; i < count; i++) {
+      CFArrayRef applications = NULL;
+      CFStringRef description = NULL;
+      SecKeychainPromptSelector selector = 0;
+      status = SecACLCopyContents((SecACLRef)CFArrayGetValueAtIndex(acls, i), &applications, &description, &selector);
+      if (status != errSecSuccess) return 74;
+      char text[1024];
+      if (!description || !CFStringGetCString(description, text, sizeof(text), kCFStringEncodingUTF8)) return 75;
+      printf("partition: %s\n", text);
+      if (applications) CFRelease(applications);
+      CFRelease(description);
+    }
+    if (acls) CFRelease(acls);
+    CFRelease(access);
   } else {
     UInt32 length = 0;
     void *data = NULL;

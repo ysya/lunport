@@ -5,6 +5,10 @@
 
 use crate::error::AppError;
 
+#[cfg(target_os = "macos")]
+#[path = "macos_credential_helper.rs"]
+mod macos_helper;
+
 /// keychain 的 service 名稱，全 app 固定。
 pub const SERVICE: &str = crate::app_profile::CURRENT.keychain_service();
 
@@ -40,6 +44,10 @@ fn map_err(e: keyring::Error) -> AppError {
 pub fn get(account: &str) -> Result<Option<String>, AppError> {
     #[cfg(target_os = "macos")]
     let _access = access_guard();
+    #[cfg(target_os = "macos")]
+    if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Production {
+        return macos_helper::get(account);
+    }
     let entry = keyring::Entry::new(SERVICE, account).map_err(map_err)?;
     match entry.get_password() {
         Ok(secret) => Ok(Some(secret)),
@@ -87,6 +95,10 @@ pub fn contains(account: &str) -> Result<bool, AppError> {
 pub fn set(account: &str, secret: &str) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     let _access = access_guard();
+    #[cfg(target_os = "macos")]
+    if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Production {
+        return macos_helper::set(account, secret);
+    }
     let entry = keyring::Entry::new(SERVICE, account).map_err(map_err)?;
     entry.set_password(secret).map_err(map_err)
 }
@@ -95,6 +107,10 @@ pub fn set(account: &str, secret: &str) -> Result<(), AppError> {
 pub fn delete(account: &str) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     let _access = access_guard();
+    #[cfg(target_os = "macos")]
+    if crate::app_profile::CURRENT == crate::app_profile::AppProfile::Production {
+        return macos_helper::delete(account);
+    }
     let entry = keyring::Entry::new(SERVICE, account).map_err(map_err)?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),

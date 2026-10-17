@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { buttonTag, DISABLED, text } from "@/components/keychain/test-markup";
 import { RecordHostEditor } from "./HostEditor";
@@ -14,6 +14,16 @@ import {
   importPreview,
   recordOverview,
 } from "./fixtures";
+vi.mock("react", async (original) => {
+  const actual = await original<typeof import("react")>();
+  return { ...actual, useState: vi.fn(actual.useState) };
+});
+// Render the selected state for the existing action/consent assertions below.
+// The real collection now starts closed; its default state is tested separately.
+function SelectedKeysPanel(props: Parameters<typeof RecordsKeysPanel>[0]) {
+  vi.mocked(useState).mockReturnValueOnce([props.overview.keys[0]?.id ?? null, vi.fn()]);
+  return <RecordsKeysPanel {...props} />;
+}
 const render = (node: ReactNode) =>
   renderToStaticMarkup(
     <QueryClientProvider client={new QueryClient()}>
@@ -178,6 +188,11 @@ describe("explicit import consent and key/account controls", () => {
     expect(text(html)).toContain("/fixture/config:8");
     expect(text(html)).toContain("Unresolved key path");
   });
+  it("opens the vault without automatically covering the collection", () => {
+    const html = render(<RecordsKeysPanel overview={recordOverview({ keys: [{ id: "a".repeat(32), authority: "local", synced: false, public: null, status: "available" }] })} />);
+    expect(html).not.toContain("<aside");
+    expect(html).toContain('aria-pressed="false"');
+  });
   it("offers an explicit synced-key download and refuses conflicting material", () => {
     const key = {
       id: "a".repeat(32),
@@ -187,11 +202,11 @@ describe("explicit import consent and key/account controls", () => {
       status: "needs_material" as const,
     };
     const html = render(
-      <RecordsKeysPanel overview={recordOverview({ keys: [key] })} />,
+      <SelectedKeysPanel overview={recordOverview({ keys: [key] })} />,
     );
     expect(text(html)).toContain("Download synced key");
     const conflict = render(
-      <RecordsKeysPanel
+      <SelectedKeysPanel
         overview={recordOverview({ keys: [{ ...key, status: "conflict" }] })}
       />,
     );
@@ -207,7 +222,7 @@ describe("explicit import consent and key/account controls", () => {
       status: "available" as const,
     };
     const html = render(
-      <RecordsKeysPanel
+      <SelectedKeysPanel
         overview={recordOverview({
           keys: [key],
           account: { chain_id: "b".repeat(64), device_name: "Laptop" },
@@ -228,7 +243,7 @@ describe("explicit import consent and key/account controls", () => {
       status: "available" as const,
     };
     const html = render(
-      <RecordsKeysPanel
+      <SelectedKeysPanel
         overview={recordOverview({
           keys: [key],
           account: { chain_id: "b".repeat(64), device_name: "Laptop" },
@@ -247,7 +262,7 @@ describe("explicit import consent and key/account controls", () => {
       status: "available" as const,
     };
     const html = render(
-      <RecordsKeysPanel
+      <SelectedKeysPanel
         overview={recordOverview({
           keys: [key],
           account: { chain_id: "b".repeat(64), device_name: "Laptop" },

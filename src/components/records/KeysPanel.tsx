@@ -25,7 +25,7 @@ export const GENERATE_KEY_BUTTON_ID = "records-generate-key";
 
 export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   const client = useQueryClient();
-  const [selectedId, setSelectedId] = useState<string | null>(overview.keys[0]?.id ?? null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [deployKeyId, setDeployKeyId] = useState<string | null>(null);
   const [mode, setMode] = useState<"import" | "generate" | null>(null);
@@ -242,12 +242,12 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
             <div>
               <dt>Sharing</dt>
               <dd>
-                {typeof key.synced !== "boolean" ? "Sync state unavailable" : key.synced ? "Sync enabled" : "Sync disabled"}
+                {typeof key.synced !== "boolean" ? "Sync state unavailable" : key.synced ? "Sync enabled" : key.authority === "local" ? "This device only" : "Sync disabled"}
               </dd>
             </div>
           </dl>
           {key.status === "available" && <p className="mt-3 text-muted-foreground">Private key availability is checked when connecting.</p>}
-          <p className="mt-3 text-muted-foreground">Sync changes may be waiting for the relay.</p>
+          {key.authority === "account" && <p className="mt-3 text-muted-foreground">Sync changes may be waiting for the relay.</p>}
           {key.status === "available" && overview.account && <Button
             className="mt-3"
             size="sm"

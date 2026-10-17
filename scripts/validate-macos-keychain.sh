@@ -10,6 +10,9 @@ echo "::add-mask::$keychain_password"
 original_default="$(security default-keychain -d user | sed 's/^ *"//; s/"$//')"
 security list-keychains -d user > "$probe_dir/search-list.txt"
 cleanup() {
+  if [[ -x "$probe_dir/version-1" && -n "${partition_account:-}" ]]; then
+    "$probe_dir/version-1" delete "$original_default" 'SSHelter Development' "$partition_account" || true
+  fi
   security default-keychain -d user -s "$original_default" || true
   local previous=()
   while IFS= read -r line; do line="${line#*\"}"; line="${line%\"*}"; previous+=("$line"); done < "$probe_dir/search-list.txt"
@@ -64,9 +67,28 @@ cp "$probe_dir/version-2" "$probe_dir/current"
 cp "$probe_dir/version-2" "$probe_dir/unrelated"
 codesign --force --sign - --identifier org.homelab.sshelter "$probe_dir/unrelated"
 "$probe_dir/unrelated" denied "$keychain" "$service" "$account"
+
+# Existing login-keychain items can carry a separate cdhash partition gate.
+# A stable designated requirement alone does not satisfy that gate after a rebuild.
+partition_account="$account-partition"
+hash1="$(codesign --display --verbose=4 "$probe_dir/version-1" 2>&1 | sed -n 's/^CDHash=//p')"
+hash2="$(codesign --display --verbose=4 "$probe_dir/version-2" 2>&1 | sed -n 's/^CDHash=//p')"
+[[ -n "$hash1" && -n "$hash2" && "$hash1" != "$hash2" ]] || { echo 'Expected distinct executable cdhashes.' >&2; exit 1; }
+cp "$probe_dir/version-1" "$probe_dir/current"
+# A newly created test keychain has no partition ACLs. Use one uniquely named
+# public fixture in the disposable runner's existing login keychain instead.
+# No user machine may run this script (the guard above is mandatory).
+"$probe_dir/current" write-modern "$original_default" "$service" "$partition_account"
+"$probe_dir/current" partition "$original_default" "$service" "$partition_account" > "$probe_dir/partition.txt"
+cat "$probe_dir/partition.txt"
+grep -Eq 'partition ACL count: [1-9][0-9]*$' "$probe_dir/partition.txt"
+"$probe_dir/current" read "$original_default" "$service" "$partition_account"
+cp "$probe_dir/version-2" "$probe_dir/current"
+"$probe_dir/current" denied "$original_default" "$service" "$partition_account"
+echo 'Reproduced: a cdhash-restricted existing item rejects a rebuilt executable with the same certificate and designated requirement.'
 if [[ ${1:-} == --with-rust ]]; then
   security default-keychain -d user -s "$keychain"
   SSHELTER_CI_KEYCHAIN_PROBE_ACCOUNT="$account" cargo test --locked --manifest-path "$repo_dir/src-tauri/Cargo.toml" --lib -- \
     --ignored --exact secrets::tests::native_metadata_probe --nocapture
 fi
-echo 'Stable certificate: changed executable retained access; unrelated signer denied; no user trust settings changed.'
+echo 'Unrestricted fixture retained stable-signer access; cdhash-restricted fixture needs new authorization; unrelated signer denied.'

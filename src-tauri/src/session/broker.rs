@@ -111,8 +111,10 @@ struct Table {
 
 /// The broker. One per app; its handler serves the IPC socket.
 pub type McpHandler = Arc<dyn Fn(&Connector<'_>, &str, &serde_json::Value, crate::mcp::RequestContext, &CancelToken) -> Result<serde_json::Value,String> + Send + Sync>;
+type AuthenticationOwnerFactory = Arc<dyn Fn(u64, CancelToken) -> Arc<dyn Owner> + Send + Sync>;
 pub struct Broker {
     mcp: Mutex<Option<McpHandler>>,
+    authentication_owner: Mutex<Option<AuthenticationOwnerFactory>>,
     audit:Mutex<Option<Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>>>,
     engine: Arc<dyn SshEngine>,
     directory: Arc<dyn HostDirectory>,
@@ -157,6 +159,7 @@ impl Broker {
     ) -> Arc<Broker> {
         Arc::new(Broker {
             mcp: Mutex::new(None),
+            authentication_owner: Mutex::new(None),
             audit:Mutex::new(None),
             engine,
             directory,
@@ -187,6 +190,10 @@ impl Broker {
 
     pub fn set_audit(&self,callback:Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>){*locked(&self.audit)=Some(callback);}
     pub fn set_mcp_handler(&self, handler:McpHandler) { *locked(&self.mcp)=Some(handler); }
+    /// Desktop sessions use the same native questions as deployment; standalone brokers retain terminal prompts.
+    pub fn set_authentication_owner(&self, factory: AuthenticationOwnerFactory) {
+        *locked(&self.authentication_owner) = Some(factory);
+    }
 
     /// The IPC server's handler: each connection is served on the thread the server gives it.
     pub fn handler(self: &Arc<Broker>) -> Handler {
@@ -457,11 +464,17 @@ impl Broker {
             id:format!("connect-{}",conn.id),client:"connect".into(),alias:host.to_string(),host_id:info.as_ref().and_then(|i|i.host_id.as_ref().map(|h|h.as_str().into())),requested_by:info.and_then(|i|i.requested_by).unwrap_or_else(||vec!["Unknown".into()]),requester_id:conn.requester_id.clone(),outcome:"error".into(),..Default::default()
         })};
         let connector = self.connector();
-        let connected = match connector.connect(host, conn.owner.as_ref(), &conn.cancel) {
+        let factory = locked(&self.authentication_owner).clone();
+        let owner = SessionOwner {
+            terminal: conn.owner.as_ref(),
+            authentication: factory.map(|factory| factory(conn.id, conn.cancel.clone())),
+        };
+        let connected = match connector.connect(host, &owner, &conn.cancel) {
             Ok(connected) => connected,
             Err(failure) => {
                 if failure.kind==CANCELLED || conn.cancel.is_cancelled(){let mut entry=locked(&log.entry);entry.outcome="canceled".into();entry.ended=Some("canceled".into());}
-                if failure.kind != CANCELLED && !conn.control.is_gone() && self.claim(conn.id) {
+                // Cancelling a native question leaves the terminal connected: it still needs an exit.
+                if (failure.kind != CANCELLED || !conn.cancel.is_cancelled()) && !conn.control.is_gone() && self.claim(conn.id) {
                     let failure = conn.owner.failure_told(failure);
                     could_not_open(conn.link.as_ref(), &failure.kind, &failure.text);
                 }
@@ -477,6 +490,34 @@ impl Broker {
         run_shell(connected, pty, &AuditLink{inner:conn.link.as_ref(),log:&log}, &conn.control, &conn.id.to_string());
         if conn.cancel.is_cancelled(){let mut e=locked(&log.entry);if e.exit_code.is_none() && e.signal.is_none(){e.outcome="canceled".into();e.ended=Some("canceled".into());}}
     }
+}
+
+/// Native questions keep trusted hop context and cancellation; public notices still reach the terminal.
+struct SessionOwner<'a> {
+    terminal: &'a dyn Owner,
+    authentication: Option<Arc<dyn Owner>>,
+}
+impl Owner for SessionOwner<'_> {
+    fn ask(&self, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
+        match &self.authentication {
+            Some(owner) => {
+                self.terminal.host_key_notice("Waiting for you to complete SSH authentication in Lunport.");
+                owner.ask(kind, text, echo, deadline)
+            }
+            None => self.terminal.ask(kind, text, echo, deadline),
+        }
+    }
+    fn ask_at(&self, hop: &crate::ssh::HopRef, kind: QuestionKind, text: &str, echo: bool, deadline: Option<Instant>) -> Reply {
+        match &self.authentication {
+            Some(owner) => {
+                self.terminal.host_key_notice("Waiting for you to complete SSH authentication in Lunport.");
+                owner.ask_at(hop, kind, text, echo, deadline)
+            }
+            None => self.terminal.ask_at(hop, kind, text, echo, deadline),
+        }
+    }
+    fn host_key_notice(&self, text: &str) { self.terminal.host_key_notice(text); }
+    fn banner(&self, text: &str) { self.terminal.banner(text); }
 }
 
 /// Captures only public terminal status; terminal bytes and authentication never enter the log.
@@ -1030,6 +1071,111 @@ mod tests {
         assert!((55_000..=60_000).contains(&deadline_ms), "{deadline_ms}");
         client.answer(&question.question_id, Some("right"));
         assert_eq!(client.next_message(), ServerMessage::Opened { session_id: "1".into() });
+    }
+
+    fn desktop_password_world(engine: FakeEngine) -> (World, Arc<crate::session::auth_window::AuthHub>) {
+        use crate::session::auth_window::{AuthHub, AuthRequest, AuthSurface, NativeOwner};
+        struct Surface;
+        impl AuthSurface for Surface { fn changed(&self, _: &[AuthRequest]) {} }
+        let world = world_with(engine, pinned_web(), Arc::new(FakeConfirmer::default()), MemKeychain::default());
+        let hub = Arc::new(AuthHub::default());
+        world.broker.set_authentication_owner({ let hub = Arc::clone(&hub); Arc::new(move |id, cancel| Arc::new(NativeOwner {
+            hub: Arc::clone(&hub), surface: Arc::new(Surface), request_id: format!("terminal-{id}"), cancel,
+        })) });
+        (world, hub)
+    }
+
+    fn desktop_question(hub: &crate::session::auth_window::AuthHub) -> crate::session::auth_window::AuthRequest {
+        let end = Instant::now() + Duration::from_secs(3);
+        while hub.pending().is_empty() && Instant::now() < end { std::thread::sleep(Duration::from_millis(5)); }
+        hub.pending().into_iter().next().expect("a fresh App question")
+    }
+
+    #[test]
+    fn desktop_password_is_answered_in_the_app_with_trusted_hop_context() {
+        let (world, hub) = desktop_password_world(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right"))));
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        let end = Instant::now() + Duration::from_secs(3);
+        while hub.pending().is_empty() && Instant::now() < end { std::thread::sleep(Duration::from_millis(5)); }
+        let pending = hub.pending();
+        if pending.is_empty() { drop(client); panic!("Desktop password must appear in the App, not the terminal"); }
+        let question = &pending[0];
+        assert_eq!(question.request_id, "terminal-1");
+        assert_eq!(question.kind, "password");
+        assert!(!question.echo);
+        let hop = question.hop.as_ref().expect("trusted host attribution");
+        assert_eq!((hop.host_id.as_str(), hop.alias.as_str(), hop.user.as_str()), ("id-web", "web", "deploy"));
+        hub.resolve(&question.id, Some(Zeroizing::new("right".into()))).unwrap();
+        loop {
+            match client.next_message() {
+                ServerMessage::Opened { .. } => break,
+                ServerMessage::Question(q) => assert_eq!(q.kind, QuestionKind::HostKeyNotice, "no secret question is sent to the terminal"),
+                ServerMessage::Event(Event::Banner { .. }) => {},
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(hub.pending().is_empty());
+        assert!(world.broker.keychain.get("host:id-web").unwrap().is_none(), "one-time answers are not saved");
+    }
+
+    #[test]
+    fn desktop_password_retries_use_fresh_questions_and_do_not_persist_rejected_answers() {
+        let (world, hub) = desktop_password_world(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right"))).with_banner("Authorized use only."));
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        let first = desktop_question(&hub);
+        hub.resolve(&first.id, Some(Zeroizing::new("wrong".into()))).unwrap();
+        let retry = desktop_question(&hub);
+        assert_ne!(retry.id, first.id);
+        assert_eq!(retry.hop.as_ref().unwrap().host_id, first.hop.as_ref().unwrap().host_id);
+        assert!(world.broker.keychain.get("host:id-web").unwrap().is_none());
+        hub.resolve(&retry.id, Some(Zeroizing::new("right".into()))).unwrap();
+        let mut banner = false;
+        loop {
+            match client.next_message() {
+                ServerMessage::Opened { .. } => break,
+                ServerMessage::Question(q) => assert_eq!(q.kind, QuestionKind::HostKeyNotice),
+                ServerMessage::Event(Event::Banner { text }) => { if text == "Authorized use only." { banner = true; } },
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(banner, "server banners remain in the terminal");
+        assert!(hub.pending().is_empty());
+    }
+
+    #[test]
+    fn desktop_password_is_cancelled_when_the_terminal_disappears_or_the_app_answer_is_cancelled() {
+        for terminal_gone in [true, false] {
+            let (world, hub) = desktop_password_world(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right"))));
+            let mut client = Client::connect(&world.sock);
+            client.open("web");
+            let question = desktop_question(&hub);
+            if terminal_gone { drop(client); }
+            else {
+                hub.resolve(&question.id, None).unwrap();
+                let (_, messages) = client.rest();
+                assert!(messages.iter().any(|message| matches!(message, ServerMessage::Event(Event::Error { kind, .. }) if kind == kinds::AUTH || kind == CANCELLED)));
+                assert!(messages.iter().any(|message| matches!(message, ServerMessage::Exited { code: None, .. })));
+            }
+            crate::ssh::testing::eventually("native question and session to be forgotten", 3, || hub.pending().is_empty() && world.broker.sessions().is_empty());
+            assert!(hub.resolve(&question.id, Some(Zeroizing::new("late".into()))).is_err());
+            assert!(world.engine.shells().is_empty());
+            assert!(world.broker.keychain.get("host:id-web").unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn an_unavailable_native_question_exits_the_waiting_terminal() {
+        use crate::session::testing::FakeOwner;
+        let directory = FakeDirectory::new().with_host("web", AuthMethod::Key { key_id: "k-plain".into() }).with_pin("web", default_server_key());
+        let world = world_with(FakeEngine::new().with_login(FakeLogin::Server(FakeMethods::password("right"))), directory, Arc::new(FakeConfirmer::default()), MemKeychain::default());
+        world.broker.set_authentication_owner(Arc::new(|_, _| Arc::new(FakeOwner::answering(vec![Reply::Gone]))));
+        let mut client = Client::connect(&world.sock);
+        client.open("web");
+        let (_, messages) = client.rest();
+        assert!(messages.iter().any(|message| matches!(message, ServerMessage::Exited { code: None, .. })));
+        assert!(!messages.iter().any(|message| matches!(message, ServerMessage::Opened { .. })));
     }
 
     #[test]

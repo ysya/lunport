@@ -22,14 +22,14 @@ describe("connection details width policy", () => {
     expect(hostPreviewNeedsCompact(900)).toBe(false);
     expect(hostPreviewNeedsCompact(Infinity)).toBe(false);
   });
-  it("reserves list space while keeping the preferred width independent", () => {
-    expect(hostPreviewLimit(800)).toBe(480);
-    expect(hostPreviewLimit(897.5)).toBe(577);
+  it("caps the overlay at the workspace without reserving or resizing list space", () => {
+    expect(hostPreviewLimit(800)).toBe(640);
+    expect(hostPreviewLimit(897.5)).toBe(640);
     expect(hostPreviewLimit(1600)).toBe(640);
-    expect(hostPreviewLimit(600)).toBe(320);
+    expect(hostPreviewLimit(600)).toBe(600);
     expect(hostPreviewLimit(NaN)).toBe(640);
     const preferred = 600;
-    expect(Math.min(preferred, hostPreviewLimit(800))).toBe(480);
+    expect(Math.min(preferred, hostPreviewLimit(800))).toBe(600);
     expect(Math.min(preferred, hostPreviewLimit(1600))).toBe(600);
   });
   it("grows the right pane when its left divider moves left and respects available space", () => {
