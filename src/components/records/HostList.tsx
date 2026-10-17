@@ -7,6 +7,7 @@ import {
   FolderPlus,
   LayoutGrid,
   List,
+  LoaderCircle,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -379,6 +380,13 @@ export function RecordHostList({
               const name = revealHidden(host.payload.alias);
               const target = revealHidden(host.effective_payload.hostname);
               const user = revealHidden(host.effective_payload.user);
+              const endpointHost = target.includes(":") && !target.startsWith("[")
+                ? `[${target}]`
+                : target;
+              const address = layout === "grid"
+                ? `${endpointHost}:${host.effective_payload.port}${user ? ` · ${user}` : ""}`
+                : target;
+              const tags = showTags ? host.payload.tags.slice(0, 3) : [];
               return (
                 <HostContextMenu
                   key={host.id + ":" + index}
@@ -439,49 +447,66 @@ export function RecordHostList({
                       </span>
                       <span className="library-host-identity">
                         <strong title={name}>{name}</strong>
-                        <span className="library-host-address" title={target}>
-                          {target}
+                        <span className="library-host-address" title={address}>
+                          {address}
                         </span>
                       </span>
-                      <span className="library-host-meta">
-                        <span className="library-host-user">
-                          {user || "Default user"}
-                          <span>:{host.effective_payload.port}</span>
-                        </span>
-                        {showTags && !!host.payload.tags.length && (
-                          <span className="library-host-tags">
-                            {host.payload.tags.slice(0, 3).map((tag) => (
-                              <span key={tag}>{revealHidden(tag)}</span>
-                            ))}
-                          </span>
-                        )}
-                      </span>
-                      {blocked && (
-                        <span className="library-host-warning">
-                          {ambiguous
-                            ? "Conflicting host ID"
-                            : host.group_error
-                              ? "Needs review"
-                              : readinessLabel[host.readiness.kind]}
+                      {(layout === "list" || blocked || tags.length > 0) && (
+                        <span className="library-host-meta">
+                          {layout === "list" && (
+                            <span className="library-host-user">
+                              {user || "Default user"}
+                              <span>:{host.effective_payload.port}</span>
+                            </span>
+                          )}
+                          {blocked && (
+                            <span className="library-host-warning">
+                              {ambiguous
+                                ? "Conflicting host ID"
+                                : host.group_error
+                                  ? "Needs review"
+                                  : readinessLabel[host.readiness.kind]}
+                            </span>
+                          )}
+                          {tags.length > 0 && (
+                            <span className="library-host-tags">
+                              {tags.map((tag) => (
+                                <span key={tag} title={revealHidden(tag)}>
+                                  {revealHidden(tag)}
+                                </span>
+                              ))}
+                            </span>
+                          )}
                         </span>
                       )}
                     </button>
-                    {!selecting && (
+                    {!selecting && (connect || edit) && (
                       <div className="library-host-actions">
-                        <span className="library-protocol">SSH</span>
                         {connect && (
                           <Button
                             variant="ghost"
-                            size="sm"
+                            size={layout === "grid" ? "icon-sm" : "sm"}
                             aria-label={"Connect to " + name}
+                            aria-busy={connectingId === host.id}
+                            title={
+                              connectingId === host.id
+                                ? "Opening…"
+                                : "Connect to " + name
+                            }
                             disabled={disabled || !!connectingId || blocked}
                             onClick={(e) => {
                               e.stopPropagation();
                               connectHost(host);
                             }}
                           >
-                            {connectingId === host.id ? "Opening…" : "Connect"}
-                            <ArrowUpRight className="size-3.5" />
+                            {layout === "list" && (
+                              connectingId === host.id ? "Opening…" : "Connect"
+                            )}
+                            {connectingId === host.id ? (
+                              <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
+                            ) : (
+                              <ArrowUpRight className="size-3.5" />
+                            )}
                           </Button>
                         )}
                         {edit && (
@@ -489,6 +514,7 @@ export function RecordHostList({
                             variant="ghost"
                             size="icon-sm"
                             aria-label={"Edit " + name}
+                            title={"Edit " + name}
                             disabled={disabled || ambiguous}
                             onClick={(e) => {
                               e.stopPropagation();
