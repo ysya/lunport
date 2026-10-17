@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/ysya/lunport/compare/v1.3.0...v1.4.0) (2026-10-17)
+
+
+### Features
+
+* **ui:** simplify host cards and add selectable color themes ([#36](https://github.com/ysya/lunport/issues/36)) ([71e55dd](https://github.com/ysya/lunport/commit/71e55dd18a5ad0cc184d39517a8cd29e53859e79))
+
 ## [1.3.0](https://github.com/ysya/lunport/compare/v1.2.0...v1.3.0) (2026-10-17)
 
 Arrange Groups by dragging, using the row menu, or pressing Alt/Option + Up/Down. Ordering syncs across devices and can be reset to name sorting. Existing 1.2.0 clients continue syncing and display Groups by name.
