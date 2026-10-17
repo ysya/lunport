@@ -10,6 +10,9 @@ echo "::add-mask::$keychain_password"
 original_default="$(security default-keychain -d user | sed 's/^ *"//; s/"$//')"
 security list-keychains -d user > "$probe_dir/search-list.txt"
 cleanup() {
+  if [[ -x "$probe_dir/version-1" && -n "${partition_account:-}" ]]; then
+    "$probe_dir/version-1" delete "$original_default" 'SSHelter Development' "$partition_account" || true
+  fi
   security default-keychain -d user -s "$original_default" || true
   local previous=()
   while IFS= read -r line; do line="${line#*\"}"; line="${line%\"*}"; previous+=("$line"); done < "$probe_dir/search-list.txt"
@@ -72,14 +75,16 @@ hash1="$(codesign --display --verbose=4 "$probe_dir/version-1" 2>&1 | sed -n 's/
 hash2="$(codesign --display --verbose=4 "$probe_dir/version-2" 2>&1 | sed -n 's/^CDHash=//p')"
 [[ -n "$hash1" && -n "$hash2" && "$hash1" != "$hash2" ]] || { echo 'Expected distinct executable cdhashes.' >&2; exit 1; }
 cp "$probe_dir/version-1" "$probe_dir/current"
-# SecItemAdd creates the modern integrity/partition ACL absent from the legacy add API.
-"$probe_dir/current" write-modern "$keychain" "$service" "$partition_account"
-"$probe_dir/current" partition "$keychain" "$service" "$partition_account" > "$probe_dir/partition.txt"
+# A newly created test keychain has no partition ACLs. Use one uniquely named
+# public fixture in the disposable runner's existing login keychain instead.
+# No user machine may run this script (the guard above is mandatory).
+"$probe_dir/current" write-modern "$original_default" "$service" "$partition_account"
+"$probe_dir/current" partition "$original_default" "$service" "$partition_account" > "$probe_dir/partition.txt"
 cat "$probe_dir/partition.txt"
 grep -Eq 'partition ACL count: [1-9][0-9]*$' "$probe_dir/partition.txt"
-"$probe_dir/current" read "$keychain" "$service" "$partition_account"
+"$probe_dir/current" read "$original_default" "$service" "$partition_account"
 cp "$probe_dir/version-2" "$probe_dir/current"
-"$probe_dir/current" denied "$keychain" "$service" "$partition_account"
+"$probe_dir/current" denied "$original_default" "$service" "$partition_account"
 echo 'Reproduced: a cdhash-restricted existing item rejects a rebuilt executable with the same certificate and designated requirement.'
 if [[ ${1:-} == --with-rust ]]; then
   security default-keychain -d user -s "$keychain"

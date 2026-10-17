@@ -34,6 +34,15 @@ int main(int argc, char **argv) {
     CFRelease(account_string);
     CFRelease(service_string);
     if (status != errSecSuccess) { fprintf(stderr, "modern fixture creation: %d\n", (int)status); return 76; }
+  } else if (strcmp(mode, "delete") == 0) {
+    SecKeychainItemRef item = NULL;
+    status = SecKeychainFindGenericPassword(keychain, (UInt32)strlen(service), service,
+      (UInt32)strlen(account), account, NULL, NULL, &item);
+    if (status == errSecSuccess) {
+      status = SecKeychainItemDelete(item);
+      CFRelease(item);
+    }
+    if (status != errSecSuccess && status != errSecItemNotFound) return 77;
   } else if (strcmp(mode, "partition") == 0) {
     SecKeychainItemRef item = NULL;
     SecAccessRef access = NULL;
