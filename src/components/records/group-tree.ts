@@ -4,6 +4,7 @@ import type {
   RecordHostView,
   RecordOverview,
 } from "@/lib/records";
+import { groupComparator } from "./group-order";
 export const scopeKey = (scope: HostScope) =>
   scope.kind === "local" ? "local" : `space:${scope.space_id}`;
 export function selectGroup(
@@ -62,14 +63,13 @@ export type ScopeRoot = {
   ungrouped: RecordHostView[];
   diagnostics: Array<{ group: RecordGroupView; error: string }>;
 };
-const byName = (a: RecordGroupView, b: RecordGroupView) =>
-  a.payload.name.localeCompare(b.payload.name) || a.id.localeCompare(b.id);
 const byAlias = (a: RecordHostView, b: RecordHostView) =>
   a.payload.alias.localeCompare(b.payload.alias) || a.id.localeCompare(b.id);
 export function buildRecordTree(
   overview: RecordOverview,
   search = "",
 ): ScopeRoot[] {
+  const byName = groupComparator(overview.group_order?.ids ?? []);
   const scopes: Array<{ scope: HostScope; label: string }> = [
     { scope: { kind: "local" }, label: "Local" },
     ...overview.spaces

@@ -857,7 +857,11 @@ fn group_rotation_preserves_live_and_tombstone_rows_and_effective_values() {
             records_v3::InheritedField::User,
             records_v3::InheritedField::Port,
         ];
-        Ok(crate::sync::record_repository::update_host(&s, B, &h.revision, p, 103).unwrap())
+        let s = crate::sync::record_repository::update_host(&s, B, &h.revision, p, 103).unwrap();
+        Ok(
+            crate::sync::group_order::set(&s, &[], None, vec!["0000000000000031".into()], 104)
+                .unwrap(),
+        )
     })
     .unwrap();
     record_round::sync_once(&d.env()).unwrap();
@@ -879,6 +883,10 @@ fn group_rotation_preserves_live_and_tombstone_rows_and_effective_values() {
         .collect();
     assert_eq!(groups.len(), 2);
     assert_eq!(groups.iter().filter(|r| r.record.deleted).count(), 1);
+    assert_eq!(
+        crate::sync::group_order::view(&after).ids,
+        vec!["0000000000000031"]
+    );
     for g in groups {
         assert_eq!(
             g.record,

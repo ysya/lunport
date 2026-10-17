@@ -1,4 +1,5 @@
 use super::*;
+mod host_key_forget;
 mod key_rename;
 use crate::sync::state_v2::AccountState;
 const ID: &str = "0000000000000001";

@@ -210,7 +210,7 @@ pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
         Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
-    if state.version == crate::sync::records_v3::GROUP_STATE_VERSION && path.exists() {
+    if state.version >= crate::sync::records_v3::GROUP_STATE_VERSION && path.exists() {
         use sha2::{Digest, Sha256};
         let mut options = OpenOptions::new();
         options.read(true);
@@ -227,9 +227,14 @@ pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
         file.take(MAX_STATE_BYTES + 1).read_to_end(&mut source)?;
         let value: serde_json::Value = serde_json::from_slice(&source)
             .map_err(|_| AppError::Other("cannot read format upgrade source".into()))?;
-        if value.get("version").and_then(serde_json::Value::as_u64) == Some(3) {
+        if let Some(source_version) = value
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|v| *v >= 3 && *v < state.version as u64)
+        {
             let digest = format!("{:x}", Sha256::digest(&source));
-            let backup = path.with_file_name(format!("sync-state-v3-{digest}.backup.json"));
+            let backup =
+                path.with_file_name(format!("sync-state-v{source_version}-{digest}.backup.json"));
             match fs::symlink_metadata(&backup) {
                 Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
                     return Err(AppError::Other(
@@ -353,6 +358,9 @@ fn persist_candidate(
         candidate.version = crate::sync::records_v3::GROUP_STATE_VERSION;
     }
     candidate = crate::sync::record_library::include_new_records(candidate, core.account_keys.as_ref());
+    if crate::sync::group_order::has_navigation_data(&candidate) {
+        candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
+    }
     if let Some(before) = core.records.as_ref() {
         candidate = crate::sync::record_groups::invalidate_changed_pins(before, candidate)
             .map_err(|e| AppError::Other(e.to_string()))?;
@@ -416,7 +424,7 @@ pub fn pause_legacy_workspace(env: &crate::sync::env::SyncEnv) -> Result<(), App
 pub fn commit_migration_candidate(
     env: &crate::sync::env::SyncEnv,
     expected_generation: u64,
-    candidate: SyncStateV3,
+    mut candidate: SyncStateV3,
     keys: Option<crate::sync::crypto::ChainKeys>,
 ) -> Result<u64, AppError> {
     let mut doc = env.doc.lock().unwrap();
@@ -444,6 +452,9 @@ pub fn commit_migration_candidate(
     core.generation
         .checked_add(1)
         .ok_or_else(|| AppError::Other("sync state generation exhausted".into()))?;
+    if crate::sync::group_order::has_navigation_data(&candidate) {
+        candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
+    }
     save_active(&env.state_path, &candidate)?;
     activate_probe(
         &mut core,

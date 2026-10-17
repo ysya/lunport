@@ -447,7 +447,7 @@ fn verified_public_identity(
 ) -> Option<crate::sync::state_v2::VerifiedPublicIdentity> {
     if !matches!(
         (account, envelope.kind.as_str()),
-        (true, "keyslot") | (false, "host" | "group")
+        (true, "keyslot" | "meta") | (false, "host" | "group")
     ) {
         return None;
     }
@@ -470,7 +470,9 @@ fn verified_public_identity(
     let actor = fields.get("device_id")?.as_str()?;
     let version = fields.get("version")?.as_u64()?;
     let deleted = fields.get("deleted")?.as_bool()?;
-    let known_id = if account {
+    let known_id = if account && envelope.kind == "meta" {
+        id == crate::sync::group_order::RECORD_ID
+    } else if account {
         is_slot_id(id)
     } else {
         crate::sync::records_v3::is_host_id(id)
@@ -730,6 +732,9 @@ fn valid_public(record: &Record, account: bool, keys: &ChainKeys) -> bool {
     if account {
         match record.kind {
             RecordKind::Meta if record.id == ACCOUNT_META_ID => valid_meta(record).is_ok(),
+            RecordKind::Meta if record.id == crate::sync::group_order::RECORD_ID => {
+                crate::sync::group_order::decode(record).is_some()
+            }
             RecordKind::KeySlot => {
                 decode_keyslot(record).is_ok()
                     && (!record.deleted
@@ -943,6 +948,46 @@ fn merge_rows(
     }
     true
 }
+/// Older clients retain this optional metadata as ciphertext and advance their cursor. Admit it
+/// after upgrading even when the relay has no new rows; preserve unsupported and dirty envelopes.
+fn admit_retained_group_order(
+    section: &mut AccountState,
+    keys: &ChainKeys,
+    conflicts: &mut Vec<String>,
+    diagnostics: &mut Vec<MergeDiagnostic>,
+) -> bool {
+    let hash = crypto::id_hash(keys, "meta", crate::sync::group_order::RECORD_ID);
+    let wire_key = sealed_key("meta", &hash);
+    let Some(retained) = section.sealed.get(&wire_key) else {
+        return true;
+    };
+    if retained.dirty {
+        return true;
+    }
+    let envelope = retained.envelope.clone();
+    if !open_record(keys, &envelope)
+        .is_ok_and(|record| crate::sync::group_order::decode(&record.0).is_some())
+    {
+        section.sealed.get_mut(&wire_key).unwrap().public_identity =
+            verified_public_identity(keys, &envelope, true);
+        return true;
+    }
+    // Remove only this authenticated, supported envelope before comparing with any typed row.
+    // Leaving its identical opaque copy in place would make merge_rows retain it for a decoder.
+    section.sealed.remove(&wire_key);
+    merge_rows(
+        &mut section.records,
+        &mut section.sealed,
+        keys,
+        &PullResponse {
+            records: vec![envelope],
+            latest_seq: section.cursor_seq,
+        },
+        true,
+        conflicts,
+        diagnostics,
+    )
+}
 pub fn merge_account(
     section: &AccountState,
     keys: &ChainKeys,
@@ -964,7 +1009,12 @@ pub fn merge_account(
         out.gate = AccountGate::InvalidPull;
         return out;
     }
-    if !merge_rows(
+    if !admit_retained_group_order(
+        &mut out.section,
+        keys,
+        &mut out.conflicts,
+        &mut out.diagnostics,
+    ) || !merge_rows(
         &mut out.section.records,
         &mut out.section.sealed,
         keys,
