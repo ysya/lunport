@@ -60,8 +60,6 @@ interface UiState {
   toggleLibrarySidebar: () => void;
   collapsedRecordGroups: string[];
   toggleRecordGroup: (id: string) => void;
-  hostLayout: "list" | "grid";
-  setHostLayout: (layout: "list" | "grid") => void;
   /**
    * Sidebar file-scope filter: a full source_file path to show ONLY that file's
    * hosts, or null for the grouped "All files" view (persisted).
@@ -165,8 +163,6 @@ export const useUiStore = create<UiState>()(
           ? s.collapsedRecordGroups.filter((value) => value !== id)
           : [...s.collapsedRecordGroups, id],
       })),
-      hostLayout: "list",
-      setHostLayout: (hostLayout) => set({ hostLayout }),
       toggleGroup: (file) =>
         set((s) => ({
           collapsedGroups: s.collapsedGroups.includes(file)
@@ -223,7 +219,6 @@ export const useUiStore = create<UiState>()(
         collapsedGroups: s.collapsedGroups,
         librarySidebarCollapsed: s.librarySidebarCollapsed,
         collapsedRecordGroups: s.collapsedRecordGroups,
-        hostLayout: s.hostLayout,
         fileScope: s.fileScope,
         groupMode: s.groupMode,
         sidebarWidth: s.sidebarWidth,

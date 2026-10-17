@@ -79,7 +79,7 @@ describe("the Keychain", () => {
 describe("Records Library navigation persistence", () => {
   afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
 
-  it("restores sidebar, Records groups and layout without persisting the selected host", async () => {
+  it("restores sidebar and Records groups without persisting the selected host", async () => {
     let saved: string | null = null;
     vi.stubGlobal("window", { localStorage: {
       getItem: () => saved,
@@ -91,7 +91,6 @@ describe("Records Library navigation persistence", () => {
     first.getState().toggleGroup("/fixture/config");
     first.getState().toggleRecordGroup("local:group-id");
     first.getState().toggleLibrarySidebar();
-    first.getState().setHostLayout("grid");
     first.getState().selectHost("web", "/fixture/config");
     vi.resetModules();
     const { useUiStore: restored } = await import("./ui");
@@ -99,7 +98,6 @@ describe("Records Library navigation persistence", () => {
       librarySidebarCollapsed: true,
       collapsedRecordGroups: ["local:group-id"],
       collapsedGroups: ["/fixture/config"],
-      hostLayout: "grid",
       selectedAlias: null,
     });
     restored.getState().toggleRecordGroup("local:group-id");

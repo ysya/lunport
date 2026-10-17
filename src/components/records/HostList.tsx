@@ -2,11 +2,8 @@ import { useRef, useState } from "react";
 import {
   ArrowUpRight,
   Check,
-  ChevronDown,
   Folder,
   FolderPlus,
-  LayoutGrid,
-  List,
   LoaderCircle,
   MoreHorizontal,
   Pencil,
@@ -19,7 +16,6 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/app/PageHeader";
-import { useUiStore } from "@/stores/ui";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -94,8 +90,6 @@ export function RecordHostList({
   const recent = useSettingsStore((state) => state.recentConnections);
   const [search, setSearch] = useState("");
   const list = useRef<HTMLElement>(null);
-  const layout = useUiStore((s) => s.hostLayout);
-  const setLayout = useUiStore((s) => s.setHostLayout);
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const hosts = libraryHosts(overview, filter, search, recent);
@@ -180,12 +174,6 @@ export function RecordHostList({
               Group settings
             </Button>
           )}
-          {importHosts && (
-            <Button variant="outline" size="sm" onClick={importHosts} disabled={disabled}>
-              <Upload className="size-3.5" />
-              Import hosts
-            </Button>
-          )}
           {create && (
             <Button
               className="library-create"
@@ -196,7 +184,7 @@ export function RecordHostList({
               New host
             </Button>
           )}
-          {createGroup && (
+          {(createGroup || importHosts) && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -204,10 +192,16 @@ export function RecordHostList({
                   size="icon"
                   aria-label="More library actions"
                 >
-                  <ChevronDown className="size-4" />
+                  <MoreHorizontal className="size-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {importHosts && (
+                  <DropdownMenuItem disabled={disabled} onSelect={importHosts}>
+                    <Upload />
+                    Import hosts
+                  </DropdownMenuItem>
+                )}
                 {createGroup && (
                   <DropdownMenuItem disabled={disabled} onSelect={createGroup}>
                     <FolderPlus />
@@ -247,24 +241,6 @@ export function RecordHostList({
           ) : (
             <kbd>{searchShortcut}</kbd>
           )}
-        </div>
-        <div className="library-view-toggle" aria-label="Host view">
-          <button
-            type="button"
-            aria-label="Grid view"
-            aria-pressed={layout === "grid"}
-            onClick={() => setLayout("grid")}
-          >
-            <LayoutGrid className="size-4" />
-          </button>
-          <button
-            type="button"
-            aria-label="List view"
-            aria-pressed={layout === "list"}
-            onClick={() => setLayout("list")}
-          >
-            <List className="size-4" />
-          </button>
         </div>
         {accept && (
           <Button
@@ -352,22 +328,17 @@ export function RecordHostList({
             </div>
           </section>
         )}
-        <section ref={list} tabIndex={-1} aria-label="Saved hosts">
-          <div className="library-section-label">
-            {search.trim() ? "Search results" : "Hosts"}
-            <span>{hosts.length}</span>
-            {search.trim() && connect && (
-              <small>Enter to connect · Click for details</small>
-            )}
-          </div>
-          {layout === "list" && !!hosts.length && (
-            <div className="library-list-head">
+        <section ref={list} tabIndex={-1} aria-label="Saved hosts" className="library-host-section" data-selecting={selecting}>
+          {!!hosts.length && (
+            <div className="library-list-head" aria-hidden="true">
               <span>Name</span>
               <span>Address</span>
-              <span>Connection</span>
+              <span className="library-user-heading">Username</span>
+              <span className="library-status-heading">Status</span>
+              <span className="sr-only">Actions</span>
             </div>
           )}
-          <div className="library-host-grid" data-layout={layout} data-selecting={selecting}>
+          <div className="library-host-list">
             {hosts.map((host, index) => {
               const ambiguous = (counts.get(host.id) ?? 0) > 1;
               const blocked =
@@ -383,12 +354,9 @@ export function RecordHostList({
               const endpointHost = target.includes(":") && !target.startsWith("[")
                 ? `[${target}]`
                 : target;
-              const address = layout === "grid"
-                ? `${endpointHost}:${host.effective_payload.port}${user ? ` · ${user}` : ""}`
-                : target;
+              const address = `${endpointHost}:${host.effective_payload.port}`;
               const tags = showTags ? host.payload.tags : [];
-              const visibleTags = tags.slice(0, layout === "grid" ? 1 : 3);
-              const moreTags = layout === "grid" ? tags.slice(1) : [];
+              const moreTags = tags.slice(1);
               return (
                 <HostContextMenu
                   key={host.id + ":" + index}
@@ -412,7 +380,7 @@ export function RecordHostList({
                     tabIndex={0}
                     aria-label={"Host actions for " + name}
                     className={cn(
-                      "library-host-card",
+                      "library-host-row",
                       active && "is-selected",
                       blocked && "needs-attention",
                     )}
@@ -436,107 +404,89 @@ export function RecordHostList({
                         }
                       }}
                     >
-                      <span className="library-server-icon">
-                        {selecting ? (
-                          checked.has(host.id) ? (
-                            <Check className="size-5" />
+                      {selecting && (
+                        <span className="library-host-checkbox" aria-hidden="true">
+                          {checked.has(host.id) ? (
+                            <Check className="size-4" />
                           ) : (
                             <span className="size-4 rounded border border-current" />
-                          )
-                        ) : (
-                          <Server className="size-5" />
-                        )}
-                      </span>
-                      <span className="library-host-identity">
-                        <strong title={name}>{name}</strong>
-                        <span className="library-host-address" title={address}>
-                          {address}
-                        </span>
-                      </span>
-                      {(layout === "list" || blocked || tags.length > 0) && (
-                        <span className="library-host-meta">
-                          {layout === "list" && (
-                            <span className="library-host-user">
-                              {user || "Default user"}
-                              <span>:{host.effective_payload.port}</span>
-                            </span>
-                          )}
-                          {blocked && (
-                            <span className="library-host-warning">
-                              {ambiguous
-                                ? "Conflicting host ID"
-                                : host.group_error
-                                  ? "Needs review"
-                                  : readinessLabel[host.readiness.kind]}
-                            </span>
-                          )}
-                          {tags.length > 0 && (
-                            <span className="library-host-tags">
-                              {visibleTags.map((tag) => (
-                                <span key={tag} title={revealHidden(tag)}>
-                                  {revealHidden(tag)}
-                                </span>
-                              ))}
-                              {moreTags.length > 0 && (
-                                <span
-                                  className="library-host-more-tags"
-                                  title={moreTags.map(revealHidden).join(", ")}
-                                  aria-label={`${moreTags.length} more tags: ${moreTags.map(revealHidden).join(", ")}`}
-                                >
-                                  +{moreTags.length}
-                                </span>
-                              )}
-                            </span>
                           )}
                         </span>
                       )}
+                      <span className="library-host-identity">
+                        <strong title={name}>{name}</strong>
+                        {tags.length > 0 && (
+                          <span className="library-host-tags">
+                            <span title={revealHidden(tags[0])}>{revealHidden(tags[0])}</span>
+                            {moreTags.length > 0 && (
+                              <span
+                                className="library-host-more-tags"
+                                title={moreTags.map(revealHidden).join(", ")}
+                                aria-label={`${moreTags.length} more tags: ${moreTags.map(revealHidden).join(", ")}`}
+                              >
+                                +{moreTags.length}
+                              </span>
+                            )}
+                          </span>
+                        )}
+                      </span>
+                      <span className="library-host-endpoint" title={`${address} · ${user || "Default user"}`}>
+                        <span className="library-host-address">{address}</span>
+                        <span className="library-host-user-mobile">{user || "Default user"}</span>
+                      </span>
+                      <span className="library-host-user" title={user || "Default user"}>{user || "Default user"}</span>
+                      <span className={cn("library-host-status", blocked && "library-host-warning")}>
+                        {blocked
+                          ? ambiguous
+                            ? "Conflicting host ID"
+                            : host.group_error
+                              ? "Needs review"
+                              : readinessLabel[host.readiness.kind]
+                          : <span aria-label="Ready" className="library-host-ready">—</span>}
+                      </span>
                     </button>
-                    {!selecting && (connect || edit) && (
-                      <div className="library-host-actions">
-                        {connect && (
-                          <Button
-                            variant="ghost"
-                            size={layout === "grid" ? "icon-sm" : "sm"}
-                            aria-label={"Connect to " + name}
-                            aria-busy={connectingId === host.id}
-                            title={
-                              connectingId === host.id
-                                ? "Opening…"
-                                : "Connect to " + name
-                            }
-                            disabled={disabled || !!connectingId || blocked}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              connectHost(host);
-                            }}
-                          >
-                            {layout === "list" && (
-                              connectingId === host.id ? "Opening…" : "Connect"
-                            )}
-                            {connectingId === host.id ? (
-                              <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
-                            ) : (
-                              <ArrowUpRight className="size-3.5" />
-                            )}
-                          </Button>
-                        )}
-                        {edit && (
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            aria-label={"Edit " + name}
-                            title={"Edit " + name}
-                            disabled={disabled || ambiguous}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              edit(host.id);
-                            }}
-                          >
-                            <Pencil className="size-3.5" />
-                          </Button>
-                        )}
-                      </div>
-                    )}
+                    <div className="library-host-actions">
+                      {!selecting && connect && (
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={"Connect to " + name}
+                          aria-busy={connectingId === host.id}
+                          title={
+                            connectingId === host.id
+                              ? "Opening…"
+                              : "Connect to " + name
+                          }
+                          disabled={disabled || !!connectingId || blocked}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            connectHost(host);
+                          }}
+                        >
+                          {connectingId === host.id ? (
+                            <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
+                          ) : (
+                            <ArrowUpRight className="size-3.5" />
+                          )}
+                        </Button>
+                      )}
+                      {!selecting && edit && (
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="library-host-edit"
+                          aria-label={"Edit " + name}
+                          title={"Edit " + name}
+                          disabled={disabled || ambiguous}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            edit(host.id);
+                          }}
+                        >
+                          <Pencil className="size-3.5" />
+                        </Button>
+                      )}
+                    </div>
                   </article>
                 </HostContextMenu>
               );
