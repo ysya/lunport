@@ -1,0 +1,4 @@
+{
+  "version": "1.3.1-1",
+  "notes": "Trial build of the compact host layout from PR #36.\n\n- Denser responsive columns and cards sized to their own content.\n- Connection details together, with Connect and Edit alongside them.\n- Warning text stays visible; tags show a primary label plus an additional-tag count.\n- Repeated server decorations and the separate SSH action footer are removed.\n\nTry this build through Settings \u2192 Updates \u2192 Release channel \u2192 Beta, then check for updates.\n\nAutomated frontend/macOS/Linux checks passed on this exact source. Final density revision is being published for hands-on layout feedback; browser visual validation was interrupted by an extension panel.\n\nSource: 1c59566f1117f8e91929b95ac1c7fecb18c09239\n"
+}

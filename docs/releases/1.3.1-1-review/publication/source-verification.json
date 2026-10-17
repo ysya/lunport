@@ -1,0 +1,13 @@
+{
+  "sourceCommit": "1c59566f1117f8e91929b95ac1c7fecb18c09239",
+  "branch": "codex/fix-host-card-warning-layout",
+  "pullRequest": "https://github.com/ysya/lunport/pull/36",
+  "baseStable": "v1.3.0",
+  "sourceCi": "https://github.com/ysya/lunport/actions/runs/39056765867",
+  "latestDensityVisualReview": "pending hands-on feedback; browser extension interrupted automation",
+  "scope": [
+    "src/components/records/HostList.tsx",
+    "src/components/records/library.css"
+  ],
+  "stableChannelPreserved": true
+}
