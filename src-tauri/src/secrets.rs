@@ -8,6 +8,14 @@ use crate::error::AppError;
 /// keychain 的 service 名稱，全 app 固定。
 pub const SERVICE: &str = crate::app_profile::CURRENT.keychain_service();
 
+// A foreground authorization must finish before another protected request starts.
+// No passwords are cached, and the user's Keychain access controls remain in force.
+#[cfg(target_os = "macos")]
+fn access_guard() -> std::sync::MutexGuard<'static, ()> {
+    static ACCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ACCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 正式項目：使用者勾了「記住密碼」時使用，不會被自動刪除。
 pub fn host_account(alias: &str) -> String {
     format!("host:{alias}")
@@ -30,6 +38,8 @@ fn map_err(e: keyring::Error) -> AppError {
 
 /// 讀取一筆密碼。沒有這筆項目時回 `Ok(None)`（不是錯誤）。
 pub fn get(account: &str) -> Result<Option<String>, AppError> {
+    #[cfg(target_os = "macos")]
+    let _access = access_guard();
     let entry = keyring::Entry::new(SERVICE, account).map_err(map_err)?;
     match entry.get_password() {
         Ok(secret) => Ok(Some(secret)),
@@ -38,14 +48,53 @@ pub fn get(account: &str) -> Result<Option<String>, AppError> {
     }
 }
 
+/// Check whether a saved credential exists without requesting its protected data.
+#[cfg(target_os = "macos")]
+pub fn contains(account: &str) -> Result<bool, AppError> {
+    use security_framework::item::{ItemClass, ItemSearchOptions};
+    use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
+
+    if account.is_empty() {
+        return Err(AppError::Other("keychain account must not be empty".into()));
+    }
+    let _access = access_guard();
+    // Match keyring's apple-native store: the current user's default file keychain.
+    let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
+        .map_err(|err| AppError::Other(format!("keychain metadata error: {err}")))?;
+    let result = ItemSearchOptions::new()
+        .keychains(&[keychain])
+        .class(ItemClass::generic_password())
+        .service(SERVICE)
+        .account(account)
+        .load_attributes(true)
+        .load_data(false)
+        .load_refs(false)
+        .skip_authenticated_items(true)
+        .search();
+    match result {
+        Ok(items) => Ok(!items.is_empty()),
+        Err(err) if err.code() == -25300 => Ok(false), // errSecItemNotFound
+        Err(err) => Err(AppError::Other(format!("keychain metadata error: {err}"))),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn contains(account: &str) -> Result<bool, AppError> {
+    get(account).map(|secret| secret.is_some())
+}
+
 /// 寫入（或覆蓋）一筆密碼。
 pub fn set(account: &str, secret: &str) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    let _access = access_guard();
     let entry = keyring::Entry::new(SERVICE, account).map_err(map_err)?;
     entry.set_password(secret).map_err(map_err)
 }
 
 /// 刪除一筆密碼。項目本來就不存在時視為成功（清理路徑要能重複執行）。
 pub fn delete(account: &str) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    let _access = access_guard();
     let entry = keyring::Entry::new(SERVICE, account).map_err(map_err)?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
@@ -67,6 +116,24 @@ pub fn available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only scripts/validate-macos-keychain.sh may run this, against its disposable CI keychain.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires an isolated CI keychain with a differently signed fixture writer"]
+    fn native_metadata_probe() {
+        use security_framework::os::macos::keychain::SecKeychain;
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(SERVICE, "SSHelter Development");
+        let account = std::env::var("SSHELTER_CI_KEYCHAIN_PROBE_ACCOUNT").unwrap();
+        assert!(account.starts_with("lunport-ci-keychain-"));
+        // This test owns the process; production never disables UI globally.
+        let _no_ui = SecKeychain::disable_user_interaction().unwrap();
+        assert!(contains(&account).unwrap(), "metadata must find an ACL-protected item");
+        assert!(!contains(&format!("{account}-missing")).unwrap());
+        assert!(contains("").is_err());
+        assert!(get(&account).is_err(), "metadata lookup must not grant password access");
+    }
 
     #[test]
     fn accounts_are_namespaced_and_distinct() {

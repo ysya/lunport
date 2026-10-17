@@ -81,6 +81,9 @@ jobs:
           cargo test --locked --release --test app_profile_build
           cargo test --locked --release --features development-profile --test app_profile_build
 
+      - name: Keychain metadata and update authorization in an isolated keychain
+        run: bash ../scripts/validate-macos-keychain.sh --with-rust
+
   linux:
     # Not ubuntu-latest: the PAM image is ubuntu:24.04, and the package names below were checked against 24.04.
     runs-on: ubuntu-24.04
