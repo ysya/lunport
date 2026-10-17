@@ -1,0 +1,105 @@
+{
+  "version": "1.5.0",
+  "sourceCommit": "68b11eb1f9b173edff04790a6abf563018dbf58d",
+  "releaseId": 416128500,
+  "assetCount": 20,
+  "platforms": [
+    "linux-x86_64",
+    "linux-x86_64-appimage",
+    "linux-x86_64-deb",
+    "linux-x86_64-rpm",
+    "linux-aarch64",
+    "linux-aarch64-appimage",
+    "linux-aarch64-deb",
+    "linux-aarch64-rpm",
+    "windows-x86_64",
+    "windows-x86_64-msi",
+    "windows-x86_64-nsis",
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "darwin-aarch64-app",
+    "darwin-x86_64-app"
+  ],
+  "allAssetsUploadedNonempty": true,
+  "allAssetDigestsMatch": true,
+  "stablePointsAtRelease": true,
+  "betaMatchesStable": true,
+  "legacyStableAndBetaEndpointsMatch": true,
+  "historicalReleaseUnchanged": true,
+  "verifier": "minisign-verify 0.2.5 (same version as Tauri updater)",
+  "allowLegacySignatures": false,
+  "artifacts": [
+    {
+      "name": "Lunport-1.5.0-1.aarch64.rpm",
+      "bytes": 15367182,
+      "digest": "sha256:b3a52580cd6202a7e9c5200d30d63e6b4613690d41ef69e671056c8d7550bc8a",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "Lunport-1.5.0-1.x86_64.rpm",
+      "bytes": 15053497,
+      "digest": "sha256:a0867f6c1d4212c4ce672006363c40dfe13401f50c67d63168340867b7180caf",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "Lunport_1.5.0_aarch64.AppImage",
+      "bytes": 90302984,
+      "digest": "sha256:93f5b4c4eddf31fbad1ed6a16b0b362d65bb7d56cd1c7841c514973244acb604",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "Lunport_1.5.0_amd64.AppImage",
+      "bytes": 91904504,
+      "digest": "sha256:d481adc2ef1d0e7f9984b51c8fcb447163beb17406af1f861f2f72daa9dfc6d3",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "Lunport_1.5.0_amd64.deb",
+      "bytes": 15053974,
+      "digest": "sha256:5e249ea9ba4adbf451011652a40e4bc3cbc4862ba3692d8423e75fb0f8530f31",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "Lunport_1.5.0_arm64.deb",
+      "bytes": 15367186,
+      "digest": "sha256:6b9480585da076da3dc9ad42eda76aecaef6bbd8c47b960b6b57e5c97b6a9cee",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "Lunport_1.5.0_x64-setup.exe",
+      "bytes": 8779548,
+      "digest": "sha256:e3700a46b52dcb07ba0fc5c12e527fe99cf3d150892074152543e9ba0e624ad0",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "Lunport_1.5.0_x64_en-US.msi",
+      "bytes": 12722176,
+      "digest": "sha256:4480c988c3621a0dcdc04f2470d234652838103fca550849b04e14b2953f1b82",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    },
+    {
+      "name": "Lunport_universal.app.tar.gz",
+      "bytes": 25716235,
+      "digest": "sha256:58afdf800afe1559bfb987deb4849bfbfc8ceccdc0b2f547252142fa7a135588",
+      "githubDigestMatches": true,
+      "signatureVerified": true,
+      "tamperedCopyRejected": true
+    }
+  ]
+}

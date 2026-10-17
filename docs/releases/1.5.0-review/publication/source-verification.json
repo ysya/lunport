@@ -1,0 +1,21 @@
+{
+  "version": "1.5.0",
+  "testedProductCommit": "0673d3eb4bd13b9acc3962637ff8fcc85f4061e9",
+  "mergedProductCommit": "4360e4c1bc56e3f9a9513dbf4eaf784cdb5ee0ec",
+  "productTreesEqual": true,
+  "releaseCandidateCommit": "ea071fe1d35fcf4e5d2454c167325005bf21aab1",
+  "releaseCandidateTree": "66210f0f43699dd7e19761a5261d43f2f713d0be",
+  "versionOnlyChanges": [
+    ".release-please-manifest.json",
+    "CHANGELOG.md",
+    "package.json",
+    "src-tauri/Cargo.lock",
+    "src-tauri/Cargo.toml",
+    "src-tauri/tauri.conf.json"
+  ],
+  "frozenHelperUnchanged": true,
+  "frozenHelperSha256": "6d74a63293b153fccae754e1c4d38449e5cc26065738fae7d0cfc64dcddf2178",
+  "releaseSourceCommit": "68b11eb1f9b173edff04790a6abf563018dbf58d",
+  "releaseTree": "66210f0f43699dd7e19761a5261d43f2f713d0be",
+  "releaseTreeEqualsTestedCandidate": true
+}
