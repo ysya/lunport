@@ -42,8 +42,10 @@ verify() {
     [[ "$actual" == "$expected" ]] || { rm -rf "$scratch"; echo 'App signing certificate differs from the repository pin.' >&2; return 1; }
     requirement="$(codesign --display --arch "$architecture" --requirements - "$app" 2>/dev/null)"
     printf 'Designated requirement (%s): %s\n' "$architecture" "$requirement"
-    # Bind the identifier and leaf certificate, without a per-build code hash or trust-store requirement.
-    [[ "$requirement" == "designated => identifier \"org.homelab.sshelter\" and certificate leaf = H\"$leaf_sha1\"" ]] || {
+    # macOS may spell a self-signed certificate as leaf or root; both refer to
+    # the same pinned certificate. Neither depends on a per-build hash or trust store.
+    [[ "$requirement" == "designated => identifier \"org.homelab.sshelter\" and certificate leaf = H\"$leaf_sha1\"" ||
+       "$requirement" == "designated => identifier \"org.homelab.sshelter\" and certificate root = H\"$leaf_sha1\"" ]] || {
       rm -rf "$scratch"; echo 'App designated requirement is not the pinned stable identity.' >&2; return 1;
     }
   done
