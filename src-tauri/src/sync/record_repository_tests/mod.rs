@@ -1,4 +1,5 @@
 use super::*;
+mod key_rename;
 use crate::sync::state_v2::AccountState;
 const ID: &str = "0000000000000001";
 const OTHER: &str = "0000000000000002";

@@ -934,6 +934,15 @@ pub async fn records_key_generate(
     .map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
+pub async fn records_key_rename(
+    app: AppHandle,
+    key_id: String,
+    expected: KeySlotPayload,
+    name: String,
+) -> Result<RecordOverview, AppError> {
+    edit(app, move |state, now| repo::rename_key(state, &key_id, &expected, &name, now).map_err(error)).await
+}
+#[tauri::command]
 pub async fn records_key_download(
     app: AppHandle,
     key_id: String,

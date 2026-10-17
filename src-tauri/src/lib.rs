@@ -355,6 +355,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::record_commands::records_key_import,
             sync::record_commands::records_key_import_file,
             sync::record_commands::records_key_generate,
+            sync::record_commands::records_key_rename,
             sync::record_commands::records_key_download,
             sync::record_commands::records_key_sync,
             session::deploy::records_deploy_preview,

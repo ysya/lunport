@@ -516,6 +516,51 @@ pub fn resolve_key(state: &SyncStateV3, id: &str) -> Result<KeyView, RepositoryE
         .ok_or_else(|| RepositoryError::KeyNotFound(id.into()))
 }
 
+/// Rename public metadata only. Stable IDs, vault material and host references are untouched.
+pub fn rename_key(
+    state: &SyncStateV3,
+    id: &str,
+    expected: &KeySlotPayload,
+    name: &str,
+    now_ms: u64,
+) -> Result<SyncStateV3, RepositoryError> {
+    let name = name.trim();
+    if !crate::sync::slot_rules::valid_slot_name(name) {
+        return Err(invalid("name", id, "expected 1–64 letters, numbers, dots, dashes or underscores"));
+    }
+    let key = resolve_key(state, id)?;
+    if matches!(key.status, KeyStatus::Conflict | KeyStatus::Deleted) {
+        return Err(invalid("key", id, "resolve the key conflict or deletion before renaming"));
+    }
+    if key.public.as_ref() != Some(expected) {
+        return Err(invalid("key", id, "key metadata changed; refresh before renaming"));
+    }
+    if key.authority == KeyAuthority::Account && (account_writes_blocked(state) || state.rotation.is_some()) {
+        return Err(RepositoryError::ReadOnlyAccount);
+    }
+    if expected.name == name {
+        return Ok(state.clone());
+    }
+    let mut public = expected.clone();
+    public.name = name.into();
+    validate_keyslot(id, &public)?;
+    let mut next = state.clone();
+    if key.authority == KeyAuthority::Account {
+        let cache_key = record_key(RecordKind::KeySlot, id);
+        let previous = &state.account.as_ref().unwrap().records[&cache_key];
+        let mut record = ordered_record(state, id, serde_json::to_value(&public).unwrap(), false, now_ms, &[&previous.record])?;
+        record.kind = RecordKind::KeySlot;
+        next.account.as_mut().unwrap().records.insert(cache_key, LocalRecord {
+            record, seq: previous.seq, dirty: true,
+        });
+    }
+    // Keep a coherent local copy's label in step with account metadata, including after leaving sync.
+    if let Some(local) = next.local.keys.get_mut(id) {
+        local.public.name = name.into();
+    }
+    Ok(next)
+}
+
 pub(crate) fn ensure_scope(state: &SyncStateV3, scope: &HostScope) -> Result<(), RepositoryError> {
     if let HostScope::Space { space_id } = scope {
         state

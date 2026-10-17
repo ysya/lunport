@@ -1,7 +1,7 @@
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { KeyRound, Search, Plus, Upload, ArrowUpRight, Copy } from "lucide-react";
+import { KeyRound, Search, Plus, Upload, ArrowUpRight, Copy, PencilLine } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
@@ -9,7 +9,7 @@ import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/app/PageHeader";
 import { DetailPresence } from "@/components/app/DetailPresence";
-import { applyRecordOverview, downloadRecordKey, setRecordKeySync, type RecordOverview } from "@/lib/records";
+import { applyRecordOverview, downloadRecordKey, renameRecordKey, setRecordKeySync, type KeySlotPayload, type RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
@@ -32,12 +32,18 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   const [draft, setDraft] = useState(clearKeyDraft);
   const [discarding, setDiscarding] = useState(false);
   const [confirming, setConfirming] = useState<{ id: string; enabled: boolean } | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; expected: KeySlotPayload } | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const collection = useRef<HTMLDivElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
   const editorTrigger = useRef<HTMLButtonElement | null>(null);
+  const renameTrigger = useRef<HTMLButtonElement | null>(null);
+  const renameInput = useRef<HTMLInputElement>(null);
+  const renameHintId = useId();
   const update = (patch: Partial<typeof draft>) => setDraft((current) => ({ ...current, ...patch }));
   const reset = () => { setDraft(clearKeyDraft()); setMode(null); setDiscarding(false); };
   const requestClose = () => {
@@ -76,6 +82,18 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
     try { await action(); }
     catch { setError("The key action could not be completed. Refresh the workspace and retry."); }
     finally { inFlight.current = false; setBusy(false); }
+  };
+  const rename = async () => {
+    if (inFlight.current || !renaming || !isValidSlotName(renameName.trim())) return;
+    inFlight.current = true;
+    setBusy(true); setRenameError(null);
+    try {
+      applyRecordOverview(client, await renameRecordKey(renaming.id, renaming.expected, renameName.trim()));
+      setSearch("");
+      setRenaming(null);
+    } catch {
+      setRenameError("Could not rename this key. It may have changed on another device. Refresh the workspace and try again.");
+    } finally { inFlight.current = false; setBusy(false); }
   };
   const key = overview.keys.find((item) => item.id === selectedId);
   const visible = overview.keys.filter((item) => `${item.public?.name ?? item.id} ${item.public?.fingerprint ?? ""} ${item.public?.key_type ?? ""}`.toLowerCase().includes(search.toLowerCase().trim()));
@@ -184,6 +202,17 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
           {key.status.replace(/_/g, " ")}
         </p>
         <div className="library-preview-buttons flex-wrap">
+          {key.public && (key.status === "available" || key.status === "needs_material") && <Button
+            variant="outline"
+            disabled={busy || draft.busy || (key.authority === "account" && overview.shared_writes_blocked)}
+            onClick={(event) => {
+              renameTrigger.current = event.currentTarget;
+              setRenaming({ id: key.id, expected: key.public! });
+              setRenameName(key.public!.name); setRenameError(null);
+            }}
+          >
+            <PencilLine className="size-3.5" />
+            Rename</Button>}
           {key.status === "available" && key.public && <Button variant="outline" disabled={busy || draft.busy} onClick={() => setDeployKeyId(key.id)}>
             <ArrowUpRight className="size-3.5" />
             Deploy public key</Button>}
@@ -268,6 +297,37 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
           {!overview.hosts.some((host) => host.effective_payload.key_id === key.id) && <p className="text-muted-foreground">No hosts use this key yet.</p>}
         </section>
       </DetailPane> : null}</DetailPresence>
+      <Dialog open={renaming !== null} onOpenChange={(open) => { if (!open && !inFlight.current) setRenaming(null); }}>
+        <DialogContent
+          className="sm:max-w-md"
+          showCloseButton={!busy}
+          onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
+          onOpenAutoFocus={(event) => { event.preventDefault(); renameInput.current?.focus(); renameInput.current?.select(); }}
+          onCloseAutoFocus={(event) => { event.preventDefault(); renameTrigger.current?.focus(); }}
+        >
+          <form onSubmit={(event) => { event.preventDefault(); void rename(); }}>
+            <DialogHeader>
+              <DialogTitle>Rename key</DialogTitle>
+              <DialogDescription>Hosts keep using this key. Synced key names also update on your other devices.</DialogDescription>
+            </DialogHeader>
+            <TaskDialogBody>
+              <RecordField label="Key name">
+                <Input ref={renameInput} value={renameName} maxLength={64} disabled={busy}
+                  aria-describedby={renameHintId}
+                  onChange={(event) => setRenameName(event.target.value)} />
+              </RecordField>
+              <p id={renameHintId} className="mt-2 text-xs text-muted-foreground">Start with a letter or number. Use up to 64 letters, numbers, dots, dashes or underscores; names cannot end in .pub.</p>
+              {renameError && <p role="alert" className="app-task-error mt-3">{renameError}</p>}
+            </TaskDialogBody>
+            <DialogFooter>
+              <Button type="button" variant="outline" disabled={busy} onClick={() => setRenaming(null)}>Cancel</Button>
+              <Button type="submit" disabled={busy || !isValidSlotName(renameName.trim()) || renameName.trim() === renaming?.expected.name}>
+                {busy ? "Saving…" : "Save name"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
       <Dialog open={mode !== null} onOpenChange={(open) => { if (!open) requestClose(); }}>
         <DialogContent
           className="sm:max-w-lg"
