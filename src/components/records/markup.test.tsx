@@ -134,7 +134,8 @@ describe("records host controls", () => {
         select={vi.fn()}
       />,
     );
-    expect(text(conflict)).toContain("Conflicting host ID");
+    expect(text(conflict)).toContain("ID conflict");
+    expect(conflict).toContain('aria-label="Conflicting host ID"');
   });
 });
 describe("explicit import consent and key/account controls", () => {

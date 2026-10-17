@@ -6,11 +6,11 @@ import {
   FolderPlus,
   LoaderCircle,
   MoreHorizontal,
-  Pencil,
   Plus,
   Search,
   Server,
   SlidersHorizontal,
+  TriangleAlert,
   Upload,
   X,
 } from "lucide-react";
@@ -86,7 +86,6 @@ export function RecordHostList({
   importHosts?: () => void;
   searchShortcut?: string;
 }) {
-  const showTags = useSettingsStore((state) => state.showHostTags);
   const recent = useSettingsStore((state) => state.recentConnections);
   const [search, setSearch] = useState("");
   const list = useRef<HTMLElement>(null);
@@ -124,8 +123,15 @@ export function RecordHostList({
             } as const
           )[filter.kind];
   const counts = new Map<string, number>();
-  for (const host of overview.hosts)
+  const usersByEndpoint = new Map<string, Set<string>>();
+  for (const host of overview.hosts) {
     counts.set(host.id, (counts.get(host.id) ?? 0) + 1);
+    const { hostname, port, user } = host.effective_payload;
+    const endpoint = JSON.stringify([hostname, port]);
+    const users = usersByEndpoint.get(endpoint) ?? new Set<string>();
+    users.add(user);
+    usersByEndpoint.set(endpoint, users);
+  }
   const toggle = (id: string) =>
     setChecked((current) => {
       const next = new Set(current);
@@ -329,16 +335,7 @@ export function RecordHostList({
           </section>
         )}
         <section ref={list} tabIndex={-1} aria-label="Saved hosts" className="library-host-section" data-selecting={selecting}>
-          {!!hosts.length && (
-            <div className="library-list-head" aria-hidden="true">
-              <span>Name</span>
-              <span>Address</span>
-              <span className="library-user-heading">Username</span>
-              <span className="library-status-heading">Status</span>
-              <span className="sr-only">Actions</span>
-            </div>
-          )}
-          <div className="library-host-list">
+          <div className="library-host-grid">
             {hosts.map((host, index) => {
               const ambiguous = (counts.get(host.id) ?? 0) > 1;
               const blocked =
@@ -354,9 +351,17 @@ export function RecordHostList({
               const endpointHost = target.includes(":") && !target.startsWith("[")
                 ? `[${target}]`
                 : target;
-              const address = `${endpointHost}:${host.effective_payload.port}`;
-              const tags = showTags ? host.payload.tags : [];
-              const moreTags = tags.slice(1);
+              const port = host.effective_payload.port;
+              const endpoint = port === 22 ? target : `${endpointHost}:${port}`;
+              const needsUser = (usersByEndpoint.get(JSON.stringify([
+                host.effective_payload.hostname, port,
+              ]))?.size ?? 0) > 1;
+              const address = needsUser ? `${user || "Default user"} · ${endpoint}` : endpoint;
+              const warningLabel = ambiguous
+                ? "Conflicting host ID"
+                : host.group_error
+                  ? "Needs review"
+                  : readinessLabel[host.readiness.kind];
               return (
                 <HostContextMenu
                   key={host.id + ":" + index}
@@ -380,7 +385,7 @@ export function RecordHostList({
                     tabIndex={0}
                     aria-label={"Host actions for " + name}
                     className={cn(
-                      "library-host-row",
+                      "library-host-card",
                       active && "is-selected",
                       blocked && "needs-attention",
                     )}
@@ -415,34 +420,15 @@ export function RecordHostList({
                       )}
                       <span className="library-host-identity">
                         <strong title={name}>{name}</strong>
-                        {tags.length > 0 && (
-                          <span className="library-host-tags">
-                            <span title={revealHidden(tags[0])}>{revealHidden(tags[0])}</span>
-                            {moreTags.length > 0 && (
-                              <span
-                                className="library-host-more-tags"
-                                title={moreTags.map(revealHidden).join(", ")}
-                                aria-label={`${moreTags.length} more tags: ${moreTags.map(revealHidden).join(", ")}`}
-                              >
-                                +{moreTags.length}
-                              </span>
-                            )}
+                      </span>
+                      <span className="library-host-secondary">
+                        <span className="library-host-address" title={`${user || "Default user"} · ${endpointHost}:${port}`}>{address}</span>
+                        {blocked && (
+                          <span className="library-host-warning" title={warningLabel} aria-label={warningLabel}>
+                            <TriangleAlert className="size-3 shrink-0" aria-hidden="true" />
+                            {ambiguous ? "ID conflict" : warningLabel}
                           </span>
                         )}
-                      </span>
-                      <span className="library-host-endpoint" title={`${address} · ${user || "Default user"}`}>
-                        <span className="library-host-address">{address}</span>
-                        <span className="library-host-user-mobile">{user || "Default user"}</span>
-                      </span>
-                      <span className="library-host-user" title={user || "Default user"}>{user || "Default user"}</span>
-                      <span className={cn("library-host-status", blocked && "library-host-warning")}>
-                        {blocked
-                          ? ambiguous
-                            ? "Conflicting host ID"
-                            : host.group_error
-                              ? "Needs review"
-                              : readinessLabel[host.readiness.kind]
-                          : <span aria-label="Ready" className="library-host-ready">—</span>}
                       </span>
                     </button>
                     <div className="library-host-actions">
@@ -450,6 +436,7 @@ export function RecordHostList({
                         <Button
                           variant="ghost"
                           size="icon-sm"
+                          className="library-host-connect"
                           aria-label={"Connect to " + name}
                           aria-busy={connectingId === host.id}
                           title={
@@ -468,22 +455,6 @@ export function RecordHostList({
                           ) : (
                             <ArrowUpRight className="size-3.5" />
                           )}
-                        </Button>
-                      )}
-                      {!selecting && edit && (
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="library-host-edit"
-                          aria-label={"Edit " + name}
-                          title={"Edit " + name}
-                          disabled={disabled || ambiguous}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            edit(host.id);
-                          }}
-                        >
-                          <Pencil className="size-3.5" />
                         </Button>
                       )}
                     </div>
