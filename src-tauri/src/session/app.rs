@@ -166,7 +166,14 @@ fn directory(app: &tauri::AppHandle) -> Result<SshConfigDirectory, AppError> {
             let core = state.sync.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             core.state.as_ref().and_then(|state| vault_slot_of(identity_files, state, &home))
         }),
-        password_saved: Box::new(|host| OsKeychain.get(&crate::secrets::host_account(host.as_str())).ok().flatten().is_some_and(|password| !password.is_empty())),
+        password_saved: Box::new(|host| {
+            let account = crate::secrets::host_account(host.as_str());
+            // Route selection needs presence only; the connector reads protected data when login needs it.
+            #[cfg(target_os = "macos")]
+            { crate::secrets::contains(&account).unwrap_or(false) }
+            #[cfg(not(target_os = "macos"))]
+            { OsKeychain.get(&account).ok().flatten().is_some_and(|password| !password.is_empty()) }
+        }),
     };
     Ok(SshConfigDirectory::new(sources, pins))
 }

@@ -21,6 +21,32 @@ int main(int argc, char **argv) {
     status = SecKeychainAddGenericPassword(keychain, (UInt32)strlen(service), service,
       (UInt32)strlen(account), account, sizeof(fixture) - 1, fixture, NULL);
     if (status != errSecSuccess) { fprintf(stderr, "fixture creation: %d\n", (int)status); return 67; }
+  } else if (strcmp(mode, "partition") == 0) {
+    SecKeychainItemRef item = NULL;
+    SecAccessRef access = NULL;
+    status = SecKeychainFindGenericPassword(keychain, (UInt32)strlen(service), service,
+      (UInt32)strlen(account), account, NULL, NULL, &item);
+    if (status != errSecSuccess) return 71;
+    status = SecKeychainItemCopyAccess(item, &access);
+    CFRelease(item);
+    if (status != errSecSuccess) return 72;
+    CFArrayRef acls = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationPartitionID);
+    if (!acls) { CFRelease(access); return 73; }
+    printf("partition ACL count: %ld\n", (long)CFArrayGetCount(acls));
+    for (CFIndex i = 0; i < CFArrayGetCount(acls); i++) {
+      CFArrayRef applications = NULL;
+      CFStringRef description = NULL;
+      SecKeychainPromptSelector selector = 0;
+      status = SecACLCopyContents((SecACLRef)CFArrayGetValueAtIndex(acls, i), &applications, &description, &selector);
+      if (status != errSecSuccess) return 74;
+      char text[1024];
+      if (!description || !CFStringGetCString(description, text, sizeof(text), kCFStringEncodingUTF8)) return 75;
+      printf("partition: %s\n", text);
+      if (applications) CFRelease(applications);
+      CFRelease(description);
+    }
+    CFRelease(acls);
+    CFRelease(access);
   } else {
     UInt32 length = 0;
     void *data = NULL;

@@ -64,9 +64,26 @@ cp "$probe_dir/version-2" "$probe_dir/current"
 cp "$probe_dir/version-2" "$probe_dir/unrelated"
 codesign --force --sign - --identifier org.homelab.sshelter "$probe_dir/unrelated"
 "$probe_dir/unrelated" denied "$keychain" "$service" "$account"
+
+# Existing login-keychain items can carry a separate cdhash partition gate.
+# A stable designated requirement alone does not satisfy that gate after a rebuild.
+partition_account="$account-partition"
+hash1="$(codesign --display --verbose=4 "$probe_dir/version-1" 2>&1 | sed -n 's/^CDHash=//p')"
+hash2="$(codesign --display --verbose=4 "$probe_dir/version-2" 2>&1 | sed -n 's/^CDHash=//p')"
+[[ -n "$hash1" && -n "$hash2" && "$hash1" != "$hash2" ]] || { echo 'Expected distinct executable cdhashes.' >&2; exit 1; }
+cp "$probe_dir/version-1" "$probe_dir/current"
+"$probe_dir/current" write "$keychain" "$service" "$partition_account"
+"$probe_dir/current" partition "$keychain" "$service" "$partition_account"
+security set-generic-password-partition-list -a "$partition_account" -s "$service" \
+  -S "cdhash:$hash1" -k "$keychain_password" "$keychain" >/dev/null
+"$probe_dir/current" partition "$keychain" "$service" "$partition_account"
+"$probe_dir/current" read "$keychain" "$service" "$partition_account"
+cp "$probe_dir/version-2" "$probe_dir/current"
+"$probe_dir/current" denied "$keychain" "$service" "$partition_account"
+echo 'Reproduced: a cdhash-restricted existing item rejects a rebuilt executable with the same certificate and designated requirement.'
 if [[ ${1:-} == --with-rust ]]; then
   security default-keychain -d user -s "$keychain"
   SSHELTER_CI_KEYCHAIN_PROBE_ACCOUNT="$account" cargo test --locked --manifest-path "$repo_dir/src-tauri/Cargo.toml" --lib -- \
     --ignored --exact secrets::tests::native_metadata_probe --nocapture
 fi
-echo 'Stable certificate: changed executable retained access; unrelated signer denied; no user trust settings changed.'
+echo 'Unrestricted fixture retained stable-signer access; cdhash-restricted fixture needs new authorization; unrelated signer denied.'

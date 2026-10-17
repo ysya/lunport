@@ -3,6 +3,11 @@ on:
   pull_request:
     paths: ["scripts/*macos*", "src-tauri/signing/**", ".github/workflows/macos-keychain-check.yml", ".github/workflows/release.yml", ".github/workflows/beta.yml"]
   workflow_dispatch:
+    inputs:
+      identity_only:
+        description: Run only the disposable Keychain authorization probes
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -18,7 +23,7 @@ jobs:
         run: bash scripts/validate-macos-keychain.sh
 
   signed-bundle:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: inputs.identity_only != true && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
