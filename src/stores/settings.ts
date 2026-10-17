@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { getColorTheme, type ColorThemeId } from "@/lib/color-themes";
 
 import {
   clampFontSize,
@@ -50,7 +51,9 @@ interface SettingsState {
   /** Theme preference; "system" follows the OS (resolved in `useApplyTheme`). */
   theme: ThemePref;
   setTheme: (theme: ThemePref) => void;
-  /** Palette action: cycle light↔dark based on the currently RESOLVED theme. */
+  colorTheme: ColorThemeId;
+  setColorTheme: (theme: ColorThemeId) => void;
+  /** Palette action: cycle light↔dark based on the currently RESOLVED mode. */
   toggleTheme: () => void;
   /**
    * Preferred terminal id to launch connections into (null = system default /
@@ -141,6 +144,8 @@ export const useSettingsStore = create<SettingsState>()(
     (set) => ({
       theme: legacyTheme(),
       setTheme: (theme) => set({ theme }),
+      colorTheme: "lunport",
+      setColorTheme: (colorTheme) => set({ colorTheme: getColorTheme(colorTheme).id }),
       toggleTheme: () =>
         set((s) => ({
           theme: resolveTheme(s.theme, systemPrefersDark()) === "dark" ? "light" : "dark",

@@ -373,7 +373,7 @@ function DeployKeyFlow({ alias, onClose }: { alias: string; onClose: () => void 
           </p>
         )}
         {preflight.data?.passwordAuthBlocked && (
-          <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+          <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
             This host&rsquo;s config sets{" "}
             <span className="font-mono">PreferredAuthentications</span> without
             password, so the password will never be used. Deploy will fail with
@@ -551,7 +551,7 @@ function ResultStage({
       <>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <TriangleAlert className="size-5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <TriangleAlert className="size-5 shrink-0 text-warning" />
             Could not check the host key
           </DialogTitle>
           <DialogDescription>{view.message}</DialogDescription>
@@ -581,7 +581,7 @@ function ResultStage({
       <DialogHeader>
         <DialogTitle className="flex items-center gap-2">
           {text.tone === "ok" ? (
-            <CheckCircle2 className="size-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <CheckCircle2 className="size-5 shrink-0 text-success" />
           ) : (
             <XCircle className="size-5 shrink-0 text-destructive" />
           )}

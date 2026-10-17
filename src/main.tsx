@@ -7,9 +7,9 @@ import AgentApprovalWindow from "./components/AgentApprovalWindow";
 import AuthenticationWindow from "./components/AuthenticationWindow";
 import HostKeyWindow from "./components/HostKeyWindow";
 import "./index.css";
-import { applyInitialMotionPreference } from "./lib/theme";
+import { applyInitialAppearance } from "./lib/theme";
 
-applyInitialMotionPreference();
+applyInitialAppearance();
 
 const queryClient = new QueryClient();
 

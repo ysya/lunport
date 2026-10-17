@@ -16,6 +16,7 @@
     --font-heading: var(--font-sans);
     --font-sans: ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
     --font-mono: ui-monospace, "SF Mono", "Geist Mono Variable", monospace;
+    --color-success: var(--success);
     --color-warning: var(--warning);
     --color-warning-foreground: var(--warning-foreground);
     --color-sidebar-ring: var(--sidebar-ring);
@@ -59,34 +60,34 @@
 }
 
 /*
- * Neutral surfaces share one palette across the workspace and portaled controls.
- * Blue marks selection, primary actions and keyboard focus; warning/error colors
- * remain semantic. Light and dark themes use separate accessible blue pairs.
+ * The original palette is the fallback. Named themes override the surface and
+ * semantic tokens together, including portaled controls and standalone windows.
  */
 :root {
     color-scheme: light;
     --background: #f6f7f9;
     --foreground: #20242b;
     --card: #ffffff;
-    --card-foreground: #20242b;
+    --card-foreground: var(--foreground);
     --popover: #ffffff;
-    --popover-foreground: #20242b;
+    --popover-foreground: var(--foreground);
     --primary: #1d4ed8;
     --primary-foreground: #ffffff;
-    --secondary: #eceef2;
-    --secondary-foreground: #20242b;
+    --secondary: var(--muted);
+    --secondary-foreground: var(--foreground);
     --muted: #eceef2;
     --muted-foreground: #626a76;
     --accent: #e8ebf0;
-    --accent-foreground: #20242b;
+    --accent-foreground: var(--foreground);
+    --success: #18794e;
     --destructive: #bf303b;
-    --warning: #a16a00;
+    --warning: #936100;
     --warning-foreground: #ffffff;
     --border: #d9dde4;
     --input: #c7cdd7;
     --ring: var(--primary);
     --chart-1: var(--primary);
-    --chart-2: #626a76;
+    --chart-2: var(--muted-foreground);
     --chart-3: #8a8f98;
     --chart-4: #b5b9bf;
     --chart-5: #d6d9dd;
@@ -108,17 +109,18 @@
     --background: #111214;
     --foreground: #eef0f4;
     --card: #1b1d21;
-    --card-foreground: #eef0f4;
+    --card-foreground: var(--foreground);
     --popover: #23252a;
-    --popover-foreground: #eef0f4;
+    --popover-foreground: var(--foreground);
     --primary: #82b1ff;
     --primary-foreground: #10213d;
-    --secondary: #22252b;
-    --secondary-foreground: #eef0f4;
+    --secondary: var(--muted);
+    --secondary-foreground: var(--foreground);
     --muted: #22252b;
     --muted-foreground: #a8aeb8;
     --accent: #2b2e35;
-    --accent-foreground: #eef0f4;
+    --accent-foreground: var(--foreground);
+    --success: #78d6a0;
     --destructive: #ff8087;
     --warning: #ffc533;
     --warning-foreground: #2a2000;
@@ -126,7 +128,7 @@
     --input: #41454f;
     --ring: var(--primary);
     --chart-1: var(--primary);
-    --chart-2: #a8aeb8;
+    --chart-2: var(--muted-foreground);
     --chart-3: #6b7178;
     --chart-4: #4a4d52;
     --chart-5: #34373f;

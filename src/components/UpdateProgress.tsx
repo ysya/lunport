@@ -32,7 +32,7 @@ export function UpdateProgress({ view }: { view: ProgressView }) {
           <span role="status" className="sr-only">
             The download may have stalled. Restart Lunport to try again.
           </span>
-          <p className="text-amber-700 dark:text-amber-400" aria-hidden="true">
+          <p className="text-warning" aria-hidden="true">
             {view.warning}
           </p>
         </>

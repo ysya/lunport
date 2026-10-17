@@ -11,7 +11,7 @@ import { ApprovalCard } from "@/components/AgentApprovalWindow";
 import { AuthenticationCardView } from "@/components/AuthenticationWindow";
 import { groupView, hostPayload, hostView, importPreview, recordOverview } from "@/components/records/fixtures";
 import { recordsStatusKey, useRecordsStatus, type ImportPreviewResult, type RecordOverview } from "@/lib/records";
-import { applyInitialMotionPreference, useApplyTheme } from "@/lib/theme";
+import { applyInitialAppearance, useApplyTheme } from "@/lib/theme";
 import "@/index.css";
 
 const fixtureInstalled = import.meta.hot?.data.interfaceFixtureInstalled === true;
@@ -151,7 +151,7 @@ else {
       <Toaster />
     </>;
   }
-  applyInitialMotionPreference();
+  applyInitialAppearance();
   ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode>
     <QueryClientProvider client={client}>
       <Preview />

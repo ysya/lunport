@@ -133,7 +133,7 @@ function DiscoverRow({ suggestion }: { suggestion: Suggestion }) {
           <span
             className={cn(
               "size-1.5 shrink-0 rounded-full",
-              online ? "bg-emerald-500" : "bg-muted-foreground/40",
+              online ? "bg-success" : "bg-muted-foreground/40",
             )}
             title={online ? "Online" : "Offline"}
             aria-hidden

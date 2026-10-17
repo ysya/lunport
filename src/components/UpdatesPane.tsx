@@ -213,7 +213,7 @@ export function UpdateStatusCard({
         <div className="flex items-start gap-2.5">
           <Icon
             aria-hidden="true"
-            className={`mt-0.5 size-4 shrink-0 ${checking || phase === "installing" || phase === "restarting" ? "motion-safe:animate-spin" : phase === "current" ? "text-emerald-600 dark:text-emerald-400" : phase === "error" ? "text-destructive" : "text-primary"}`}
+            className={`mt-0.5 size-4 shrink-0 ${checking || phase === "installing" || phase === "restarting" ? "motion-safe:animate-spin" : phase === "current" ? "text-success" : phase === "error" ? "text-destructive" : "text-primary"}`}
           />
           <div className="min-w-0 flex-1">
             <p role="status" className="text-sm font-medium leading-snug">

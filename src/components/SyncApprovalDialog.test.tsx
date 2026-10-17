@@ -130,8 +130,8 @@ describe("a held host's card", () => {
 
   it("highlights the Host line of a host that is not in its space yet when it names more than one host", () => {
     const wide = card({ view: { ...view, text: "Host web prod\n  ProxyCommand nc %h 22\n", incoming: { ...view.incoming, host: "web prod" } } });
-    expect(wide).toMatch(/<div class="[^"]*bg-amber-500\/15[^"]*">Host web prod<\/div>/);
-    expect(card()).not.toMatch(/<div class="[^"]*bg-amber-500\/15[^"]*">Host web<\/div>/);
+    expect(wide).toMatch(/<div class="[^"]*bg-warning\/15[^"]*">Host web prod<\/div>/);
+    expect(card()).not.toMatch(/<div class="[^"]*bg-warning\/15[^"]*">Host web<\/div>/);
   });
 
   it("shows the characters that draw nothing instead of drawing nothing", () => {

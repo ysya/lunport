@@ -87,6 +87,7 @@ import { McpAttribution } from "@/components/McpAttribution";
 import { groupPath } from "@/components/records/group-tree";
 import type { RecordOverview } from "@/lib/records";
 import { KnownHostsManager } from "@/components/records/KnownHostsManager";
+import { ColorThemePicker } from "@/components/ColorThemePicker";
 
 export function SettingsCategoryPane({
   category,
@@ -556,14 +557,19 @@ function AppearancePane() {
   const motion = useSettingsStore((s) => s.motion);
   const setMotion = useSettingsStore((s) => s.setMotion);
   return (
-    <Section
-      title="Display"
-      description="“System” follows your OS light/dark preference. Text size scales the whole interface."
-    >
+    <><Section title="Color theme" description="Choose a palette for Lunport. Terminal colors are controlled by your terminal app.">
       <SettingsGroup>
-        <SettingsRow label="Theme">
+        <SettingsRow label="Appearance" description="System follows your OS light or dark mode.">
           <ThemeSegmented value={theme} onChange={setTheme} />
         </SettingsRow>
+      </SettingsGroup>
+      <ColorThemePicker />
+    </Section>
+    <Section
+      title="Display"
+      description="Text size scales the whole interface."
+    >
+      <SettingsGroup>
         <SettingsRow id="set-font-size" label="Text size">
           <Select
             value={String(fontSize)}
@@ -605,7 +611,7 @@ function AppearancePane() {
           />
         </SettingsRow>
       </SettingsGroup>
-    </Section>
+    </Section></>
   );
 }
 
@@ -1127,7 +1133,7 @@ function ThemeSegmented({
   return (
     <div
       role="radiogroup"
-      aria-label="Theme"
+      aria-label="Appearance"
       onKeyDown={(event) => {
         if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
         event.preventDefault();

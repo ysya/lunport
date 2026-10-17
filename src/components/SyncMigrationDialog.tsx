@@ -286,8 +286,8 @@ function MigrationFlow({ requested, setBusy, onClose }: { requested: string | nu
         <p className="text-xs text-destructive">Could not look for hosts defined in more than one file: {errorMessage(duplicates.error)}</p>
       )}
       {dups.length > 0 && (
-        <div className="space-y-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
-          <p className="font-medium text-amber-700 dark:text-amber-400">Hosts defined in more than one file</p>
+        <div className="space-y-1.5 rounded-md border border-warning/40 bg-warning/10 p-3 text-xs">
+          <p className="font-medium text-warning">Hosts defined in more than one file</p>
           <p className="text-muted-foreground">
             {SSH_COMBINES}. Keep this copy under a new name, or remove it so that only the other copy is left:
           </p>

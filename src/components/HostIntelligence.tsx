@@ -101,7 +101,7 @@ function KeyHygieneSection({ alias }: { alias: string }) {
               </span>
               {f.exists ? (
                 <span
-                  className="flex shrink-0 items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
+                  className="flex shrink-0 items-center gap-1 text-xs text-success"
                   title="Key file present"
                 >
                   <CheckCircle2 className="size-4" />
@@ -109,7 +109,7 @@ function KeyHygieneSection({ alias }: { alias: string }) {
                 </span>
               ) : (
                 <span
-                  className="flex shrink-0 items-center gap-1 text-xs text-amber-600 dark:text-amber-400"
+                  className="flex shrink-0 items-center gap-1 text-xs text-warning"
                   title="Key file missing on disk"
                 >
                   <AlertTriangle className="size-4" />
@@ -144,7 +144,7 @@ function JumpChainSection({ alias }: { alias: string }) {
               ) : (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span className="rounded-md bg-amber-500/10 px-2 py-0.5 font-mono text-xs text-amber-600 ring-1 ring-amber-500/30 dark:text-amber-400">
+                    <span className="rounded-md bg-warning/10 px-2 py-0.5 font-mono text-xs text-warning ring-1 ring-warning/30">
                       {node.name}
                     </span>
                   </TooltipTrigger>

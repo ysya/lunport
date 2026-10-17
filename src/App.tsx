@@ -198,11 +198,11 @@ function LegacyApp({ requestMigrationPause }: { requestMigrationPause: () => voi
                   <Bot
                     className={cn(
                       "size-4",
-                      mcpStatus.data?.enabled && "text-emerald-600 dark:text-emerald-400",
+                      mcpStatus.data?.enabled && "text-success",
                     )}
                   />
                   {pendingMcp > 0 && (
-                    <span className="absolute right-0 top-0 size-2 rounded-full bg-amber-500 ring-2 ring-background" />
+                    <span className="absolute right-0 top-0 size-2 rounded-full bg-warning ring-2 ring-background" />
                   )}
                 </Button>
               </TooltipTrigger>

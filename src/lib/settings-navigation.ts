@@ -12,7 +12,7 @@ export type SettingsDestination = {
 export function settingsDestinations(mode: SettingsMode): SettingsDestination[] {
   return [
     { id: "general", label: "General", description: "Startup, window behavior and shortcuts.", group: "Application" },
-    { id: "appearance", label: "Appearance", description: "Theme, text size and motion.", group: "Application" },
+    { id: "appearance", label: "Appearance", description: "Color themes, light and dark mode, text size and motion.", group: "Application" },
     { id: "connection", label: "Connections", description: mode === "records" ? "Terminal preferences and trusted server identities." : "Choose where terminal connections open.", group: "Application" },
     { id: "files", label: mode === "records" ? "Local data" : "Files & backups", description: mode === "records" ? "Your local library, workspace tools and preferences." : "SSH configuration, backups and preferences.", group: "Workspace" },
     { id: "ai", label: "AI access", description: "Connect clients, allow individual hosts and review activity.", group: "Workspace" },
@@ -32,7 +32,8 @@ const SEARCH_ENTRIES: SearchEntry[] = [
   { category: "general", title: "Startup & window", detail: "Menu bar, tray icon, close behavior and launch at login", section: "Startup & window" },
   { category: "general", title: "Quick connect", detail: "Global keyboard hotkey shortcut", section: "Quick connect" },
   { category: "general", title: "Language", detail: "Interface language: English", section: "Language" },
-  { category: "appearance", title: "Display", detail: "System, light or dark theme; text and font size; reduced motion; host tags", section: "Display" },
+  { category: "appearance", title: "Color theme", detail: "Lunport, Nord, Dracula, Catppuccin, Tokyo Night, Solarized; palette colors; system, light or dark mode", section: "Color theme" },
+  { category: "appearance", title: "Display", detail: "Text and font size; reduced motion; host tags", section: "Display" },
   { category: "connection", title: "Terminal", detail: "Default terminal and new tab connections", section: "Terminal" },
   { category: "connection", title: "Known hosts", detail: "Server identities, trusted host fingerprints and OpenSSH known_hosts", section: "Known hosts", modes: ["records"] },
   { category: "files", title: "Library & workspace tools", detail: "Local hosts and keys, import SSH configuration and open Sync", section: "Library & workspace tools", modes: ["records"] },

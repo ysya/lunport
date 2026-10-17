@@ -41,7 +41,7 @@ const SEVERITY_LABEL: Record<string, string> = {
 function severityIcon(sev: string) {
   if (sev === "error") return <CircleAlert className="size-4 text-destructive" />;
   if (sev === "warning")
-    return <TriangleAlert className="size-4 text-amber-600 dark:text-amber-400" />;
+    return <TriangleAlert className="size-4 text-warning" />;
   return <Info className="size-4 text-muted-foreground" />;
 }
 
@@ -93,14 +93,14 @@ export function LintDialog() {
               aria-label={tooltip}
             >
               {total === 0 && !isLoading && !isError ? (
-                <ShieldCheck className="size-4 text-emerald-600 dark:text-emerald-400" />
+                <ShieldCheck className="size-4 text-success" />
               ) : (
                 <ShieldAlert
                   className={cn(
                     "size-4",
                     errorCount > 0
                       ? "text-destructive"
-                      : "text-amber-600 dark:text-amber-400",
+                      : "text-warning",
                   )}
                 />
               )}
@@ -108,7 +108,7 @@ export function LintDialog() {
                 <span
                   className={cn(
                     "absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 text-[0.5625rem] font-semibold tabular-nums text-white",
-                    errorCount > 0 ? "bg-destructive" : "bg-amber-500",
+                    errorCount > 0 ? "bg-destructive" : "bg-warning",
                   )}
                   aria-hidden
                 >
@@ -134,7 +134,7 @@ export function LintDialog() {
 
         {isLoading ? <div className="app-task-state" role="status">Checking configuration…</div> : isError ? <div className="app-task-state" role="alert"><p>Could not check configuration.</p><Button size="sm" variant="outline" onClick={() => void refetch()}>Retry</Button></div> : total === 0 ? (
           <div className="flex flex-col items-center gap-2 py-6 text-center select-none">
-            <ShieldCheck className="size-8 text-emerald-600 dark:text-emerald-400" />
+            <ShieldCheck className="size-8 text-success" />
             <p className="text-sm text-muted-foreground">All clear</p>
           </div>
         ) : (

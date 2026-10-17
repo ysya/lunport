@@ -15,7 +15,7 @@ import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogTitle } fr
 export const TONE_TEXT: Record<Tone, string> = {
   ok: "text-muted-foreground",
   busy: "text-muted-foreground",
-  warning: "text-amber-700 dark:text-amber-400",
+  warning: "text-warning",
   error: "text-destructive",
 };
 

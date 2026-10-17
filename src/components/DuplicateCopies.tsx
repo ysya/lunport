@@ -29,7 +29,7 @@ export function CopiesPanel({ note }: { note: CopiesNote }) {
   return (
     <div className="space-y-4" role="note">
       <div className="flex items-start gap-2.5">
-        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
         <h2 className="text-[0.9375rem] font-semibold tracking-tight">{note.title}</h2>
       </div>
       {note.unknown && <p className="text-sm">{note.unknown}</p>}

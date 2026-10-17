@@ -1,7 +1,23 @@
 import { useEffect } from "react";
 
 import { useSettingsStore } from "@/stores/settings";
-import { clampFontSize, resolveTheme, systemPrefersDark } from "@/lib/settings-logic";
+import { clampFontSize, resolveTheme, systemPrefersDark, type ThemePref } from "@/lib/settings-logic";
+import { applyColorTheme } from "@/lib/color-themes";
+
+function applyAppearance(theme: ThemePref, colorTheme: unknown): void {
+  const resolved = resolveTheme(theme, systemPrefersDark());
+  const root = document.documentElement;
+  root.classList.toggle("dark", resolved === "dark");
+  root.style.colorScheme = resolved;
+  applyColorTheme(root, colorTheme, resolved);
+}
+
+/** Restore colors before React paints, including standalone SSH prompt windows. */
+export function applyInitialAppearance(): void {
+  const { theme, colorTheme } = useSettingsStore.getState();
+  applyAppearance(theme, colorTheme);
+  applyInitialMotionPreference();
+}
 
 /** Apply before React's first paint, including independently opened approval windows. */
 export function applyInitialMotionPreference(): void {
@@ -17,17 +33,13 @@ export function applyInitialMotionPreference(): void {
  */
 export function useApplyTheme(): void {
   const theme = useSettingsStore((s) => s.theme);
+  const colorTheme = useSettingsStore((s) => s.colorTheme);
   const motion = useSettingsStore((s) => s.motion);
 
   useEffect(() => { applyInitialMotionPreference(); }, [motion]);
 
   useEffect(() => {
-    const apply = () => {
-      const resolved = resolveTheme(theme, systemPrefersDark());
-      const root = document.documentElement;
-      root.classList.toggle("dark", resolved === "dark");
-      root.style.colorScheme = resolved;
-    };
+    const apply = () => applyAppearance(theme, colorTheme);
     apply();
 
     // Follow live OS changes only while the preference is "system".
@@ -35,7 +47,7 @@ export function useApplyTheme(): void {
     const mql = window.matchMedia("(prefers-color-scheme: dark)");
     mql.addEventListener("change", apply);
     return () => mql.removeEventListener("change", apply);
-  }, [theme]);
+  }, [theme, colorTheme]);
 
   // Root font-size preference: the entire UI is rem-based, so this scales it
   // proportionally. Overrides the stylesheet's `html { font-size: 15px }`.
