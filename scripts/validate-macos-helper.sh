@@ -48,14 +48,25 @@ while IFS= read -r line; do line="${line#*\"}"; line="${line%\"*}"; previous+=("
 security list-keychains -d user -s "$keychain" "${previous[@]}"
 identity="$(/usr/bin/openssl x509 -in "$probe/certificate.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
 requirement="identifier \"org.homelab.sshelter\" and certificate leaf = H\"$identity\""
+python3 - "$probe/config.h" "$requirement" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text('#define LUNPORT_CLIENT_REQUIREMENT '+json.dumps(sys.argv[2])+'\n#define LUNPORT_CREDENTIAL_SERVICE "SSHelter Development"\n')
+PY
 clang -Wall -Wextra -Werror -Wno-deprecated-declarations \
-  "-DLUNPORT_CLIENT_REQUIREMENT=\"$requirement\"" '-DLUNPORT_CREDENTIAL_SERVICE="SSHelter Development"' \
+  -include "$probe/config.h" \
   "$repo_dir/src-tauri/signing/credential-helper-v1.c" -framework Security -framework CoreFoundation -lbsm -o "$probe/helper"
 codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp=none \
   --identifier org.homelab.sshelter.credential-helper.v1 "$probe/helper"
+helper_hash="$(codesign --display --verbose=4 "$probe/helper" 2>&1 | sed -n 's/^CDHash=//p')"
+python3 - "$probe/config.h" "$identity" "$helper_hash" <<'PY'
+import json, pathlib, sys
+with pathlib.Path(sys.argv[1]).open('a') as file:
+    file.write('#define LUNPORT_HELPER_REQUIREMENT '+json.dumps('identifier "org.homelab.sshelter.credential-helper.v1" and certificate leaf = H"'+sys.argv[2]+'" and cdhash H"'+sys.argv[3]+'"')+'\n')
+PY
 for version in 1 2; do
   clang -Wall -Wextra -Werror -Wno-deprecated-declarations "-DCLIENT_VERSION=\"$version\"" \
-    "$repo_dir/scripts/macos-helper-client.c" -framework Security -framework CoreFoundation -o "$probe/client-$version"
+    -include "$probe/config.h" "$repo_dir/scripts/macos-helper-client.c" "$repo_dir/src-tauri/src/macos_credential_peer.c" \
+    -framework Security -framework CoreFoundation -lbsm -o "$probe/client-$version"
   codesign --force --sign "$identity" --keychain "$keychain" --options runtime --timestamp=none \
     --identifier org.homelab.sshelter "$probe/client-$version"
 done
@@ -79,6 +90,12 @@ helper_before="$(shasum -a 256 "$probe/helper" | awk '{print $1}')"
 for malformed in bad-op bad-magic oversized truncated; do
   "$probe/client-2" "$malformed" "$probe/helper" "$account-new"
 done
+cat > "$probe/forged.c" <<'EOF'
+#include <unistd.h>
+int main(void) { write(1,"LPKC0001",8); char buffer[1]; return read(0,buffer,1) > 0 ? 99 : 0; }
+EOF
+clang "$probe/forged.c" -o "$probe/forged-helper"
+"$probe/client-2" helper-rejected "$probe/forged-helper" "$account-new"
 for variant in adhoc wrong-id unhardened entitlement; do
   cp "$probe/client-2" "$probe/$variant"
   case "$variant" in

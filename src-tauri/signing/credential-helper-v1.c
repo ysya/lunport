@@ -126,6 +126,9 @@ int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
   alarm(300); // Also terminate if the parent disappears during a system dialog.
   if (argc != 1 || !authorized_parent()) return 77;
+  // Writing first lets the parent identify this live helper over LOCAL_PEERTOKEN
+  // and validate its frozen code hash before transmitting any secret.
+  if (!transfer(STDOUT_FILENO, (void *)MAGIC, sizeof(MAGIC), 1)) return 74;
   unsigned char header[18]; // magic, operation, flags, account length, data length
   if (!transfer(STDIN_FILENO, header, sizeof(header), 0) || memcmp(header, MAGIC, 8)) return 64;
   uint32_t account_length, input_length;

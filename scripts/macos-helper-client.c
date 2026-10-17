@@ -18,6 +18,10 @@
 #define LUNPORT_CREDENTIAL_SERVICE "SSHelter Development"
 #endif
 static const char fixture[] = "public-immutable-helper-upgrade-fixture";
+extern int lunport_validate_credential_peer(int fd, int expected_pid, const char *required);
+#ifndef LUNPORT_HELPER_REQUIREMENT
+#define LUNPORT_HELPER_REQUIREMENT "identifier \"org.homelab.sshelter.credential-helper.v1\""
+#endif
 static int transfer(int fd, void *buffer, size_t length, int writing) {
   unsigned char *cursor = buffer;
   while (length) {
@@ -143,6 +147,17 @@ int main(int argc, char **argv) {
     _exit(71);
   }
   close(sockets[1]);
+  unsigned char hello[8];
+  int greeted = transfer(sockets[0],hello,sizeof(hello),0) && !memcmp(hello,"LPKC0001",8);
+  int trusted = greeted && lunport_validate_credential_peer(sockets[0],pid,LUNPORT_HELPER_REQUIREMENT);
+  if (!trusted) {
+    close(sockets[0]); kill(pid,SIGKILL); waitpid(pid,NULL,0);
+    if (!strcmp(mode,"rejected") || !strcmp(mode,"helper-rejected")) {
+      printf("client %s: %s passed before sending any request\n",CLIENT_VERSION,mode); return 0;
+    }
+    fprintf(stderr,"helper authentication failed (hello=%d)\n",greeted); return 79;
+  }
+  if (!strcmp(mode,"helper-rejected")) { close(sockets[0]); kill(pid,SIGKILL); waitpid(pid,NULL,0); return 80; }
   unsigned char header[18] = {'L','P','K','C','0','0','0','1',1,1};
   int writing = !strcmp(mode,"set") || !strcmp(mode,"replace");
   if (writing) header[8] = 2;

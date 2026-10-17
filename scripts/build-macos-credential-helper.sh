@@ -27,6 +27,10 @@ manifest = {"protocol":1,"artifact_sha256":hashlib.sha256((output/'credential-he
             "source_sha256":hashlib.sha256((output/'credential-helper-v1.c').read_bytes()).hexdigest(),
             "source_commit":subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip(),
             "identifier":"org.homelab.sshelter.credential-helper.v1"}
+manifest['cdhashes'] = {}
+for arch in ['arm64','x86_64']:
+    details = subprocess.check_output(['codesign','--display','--verbose=4','--arch',arch,str(output/'credential-helper-v1.bin')],stderr=subprocess.STDOUT,text=True)
+    manifest['cdhashes'][arch] = next(line.removeprefix('CDHash=') for line in details.splitlines() if line.startswith('CDHash='))
 (output/'credential-helper-v1.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(json.dumps(manifest,indent=2))
 PY
