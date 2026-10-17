@@ -11,9 +11,9 @@ name: ssh engine
 on:
   push:
     branches: [main, next/own-ssh]
-    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", ".github/workflows/test-engine.yml"]
+    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", "scripts/macos-keychain-probe.c", "scripts/validate-macos-keychain.sh", ".github/workflows/test-engine.yml"]
   pull_request:
-    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", ".github/workflows/test-engine.yml"]
+    paths: ["src-tauri/**", "src/**", "package.json", "pnpm-lock.yaml", "vite.config.ts", "tsconfig*.json", "scripts/macos-keychain-probe.c", "scripts/validate-macos-keychain.sh", ".github/workflows/test-engine.yml"]
   workflow_dispatch:
 
 permissions:
@@ -80,6 +80,9 @@ jobs:
           cargo test --locked --test app_profile_build
           cargo test --locked --release --test app_profile_build
           cargo test --locked --release --features development-profile --test app_profile_build
+
+      - name: Keychain metadata and update authorization in an isolated keychain
+        run: bash ../scripts/validate-macos-keychain.sh --with-rust
 
   linux:
     # Not ubuntu-latest: the PAM image is ubuntu:24.04, and the package names below were checked against 24.04.

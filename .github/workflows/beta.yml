@@ -169,6 +169,13 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare the fixed macOS signing identity
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
+          LUNPORT_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LUNPORT_MACOS_CERTIFICATE_PASSWORD }}
+        run: bash scripts/macos-signing.sh prepare
+
       - name: Build and upload installers to the prerelease
         uses: tauri-apps/tauri-action@v0
         env:
@@ -185,7 +192,12 @@ jobs:
           # The action only sets this when it creates a release. If it ever updated the flag, this
           # keeps the beta a prerelease, so it can never become "latest" for the Stable channel.
           prerelease: true
+          tauriScript: ${{ startsWith(matrix.platform, 'macos') && 'bash scripts/build-macos-release.sh' || '' }}
           args: ${{ matrix.args }}
+
+      - name: Remove the temporary macOS signing keychain
+        if: always() && startsWith(matrix.platform, 'macos')
+        run: bash scripts/macos-signing.sh cleanup
 
   beta-manifest:
     needs: [prepare, build]
