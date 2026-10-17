@@ -52,8 +52,6 @@ jobs:
         with:
           args: --target universal-apple-darwin
           tauriScript: bash scripts/build-macos-release.sh
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: signed-macos-[bundle]-[arch]
       - name: Remove the temporary macOS signing keychain
         if: always()
         run: bash scripts/macos-signing.sh cleanup
