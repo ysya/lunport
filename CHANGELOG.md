@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/ysya/lunport/compare/v1.4.0...v1.5.0) (2026-10-17)
+
+
+### Features
+
+* complete SSH password entry, stable inspectors and persistent Keychain access ([4360e4c](https://github.com/ysya/lunport/commit/4360e4c1bc56e3f9a9513dbf4eaf784cdb5ee0ec))
+
 ## [1.4.0](https://github.com/ysya/lunport/compare/v1.3.0...v1.4.0) (2026-10-17)
 
 Host cards now use two compact, equal-height lines: the host name, then SSH and its effective username. Short warnings stay aligned; address, port and further details are available in the hint and Host Details. Quick-connect actions appear on hover, focus or selection. Import hosts and New group are available from the menu beside New host.
