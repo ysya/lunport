@@ -8,12 +8,47 @@ on:
         description: Run only the disposable Keychain authorization probes
         type: boolean
         default: false
+      freeze_helper:
+        description: Generate a signed fixed-helper candidate artifact for review (never publishes)
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 jobs:
+  helper:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise immutable helper, one-time migration and client authorization
+        run: bash scripts/validate-macos-helper.sh
+
+  helper-candidate:
+    if: github.event_name == 'workflow_dispatch' && inputs.freeze_helper == true
+    needs: helper
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare the pinned project signing identity
+        env:
+          LUNPORT_MACOS_CERTIFICATE: ${{ secrets.LUNPORT_MACOS_CERTIFICATE }}
+          LUNPORT_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LUNPORT_MACOS_CERTIFICATE_PASSWORD }}
+        run: bash scripts/macos-signing.sh prepare
+      - name: Build a frozen universal helper candidate
+        run: bash scripts/build-macos-credential-helper.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lunport-credential-helper-v1-candidate
+          path: ${{ runner.temp }}/lunport-credential-helper-v1-candidate/
+          if-no-files-found: error
+      - name: Remove the temporary signing keychain
+        if: always()
+        run: bash scripts/macos-signing.sh cleanup
+
   identity:
     runs-on: macos-latest
     timeout-minutes: 10
