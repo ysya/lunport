@@ -8,13 +8,29 @@ Published 1.2.0, 1.3.0 and 1.4.0 bundles have the same project certificate and d
 
 Apple's [securityd client identity implementation](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/clientid.cpp#L187) assigns an Apple-verified Team ID partition to supported Apple distribution/development identities. Other signed code, including the project's self-signed certificate, falls back to `cdhash:<executable hash>`. That hash changes with each executable build, independently of the designated requirement. Apple's older [designated requirement guidance](https://developer.apple.com/library/archive/technotes/tn2206/) does not by itself establish compatibility with a separate partition restriction.
 
-The earlier CI fixture wrote a new item and read it after replacing the executable. It did not explicitly model an existing item restricted to the old build's partition. The extended disposable CI probe now checks both cases: matching certificate/requirement, different executable hashes, successful original-build access, and denied rebuilt access after restricting that fixture to the original hash. Authentication UI stays disabled throughout. This reproduces the mechanism; the affected user's actual item ACLs have not been inspected on this host.
+The earlier CI fixture used a newly created legacy-format keychain without a partition ACL. It therefore could not establish compatibility with the partition gate. The extended probe also creates a synthetic item with `SecItemAdd` in the disposable runner's existing login keychain, requires a nonempty partition ACL, verifies the original executable can read it, then checks that a rebuilt executable with the same certificate and designated requirement is denied. Authentication UI stays disabled throughout, and cleanup deletes only that uniquely named synthetic item.
+
+The [native identity job passed](https://github.com/ysya/lunport/actions/runs/39074293630/job/117518159624) at commit `35b6c1f`. Its relevant output is:
+
+```text
+probe 1: write-modern passed without interaction
+partition ACL count: 1
+probe 1: partition passed without interaction
+probe 1: read passed without interaction
+probe 2: denied passed without interaction
+Reproduced: a cdhash-restricted existing item rejects a rebuilt executable with the same certificate and designated requirement.
+probe 1: delete passed without interaction
+```
+
+This reproduces the mechanism, not the user's exact affected item. A read-only, noninteractive metadata survey on this host found no generic-password items for the exact `SSHelter` service. It read no passwords, printed no account names and changed no access rules. The affected installation's ACLs therefore remain unverified.
 
 ## Bounded change already implemented
 
 Legacy SSH route selection still read the protected password just to choose an authentication method. On macOS this now uses the existing metadata-only presence query. The connector obtains protected data when authentication actually needs it. This removes an unnecessary protected read; it does **not** eliminate partition-related authorization after updates.
 
 The signing policy and download documentation now distinguish stable code requirements from partition authorization. Existing credentials, service/account names and stored access rules are preserved.
+
+The local Legacy SSH directory suite passes all 28 tests. The native result above validates the identity/partition probe; it does not substitute for the separate signed-bundle build or the PR's full platform checks.
 
 ## Decision before a structural fix
 
