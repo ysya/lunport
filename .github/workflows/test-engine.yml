@@ -69,8 +69,24 @@ jobs:
       - name: Complete safe Rust suite
         env:
           SSHELTER_REQUIRE_OPENSSH: "1"
-        # Quoted: an unquoted `ssh::` is read as a YAML mapping and the workflow would not load.
-        run: "cargo test --locked --lib -- --skip secrets::tests::round_trip_set_get_delete --skip askpass::tests::env_secret_takes_priority_over_keychain --skip askpass::tests::missing_account_and_no_env_yields_none --skip ssh::engine_tests::login_methods::pam"
+        # CLI tests exercise process-group signals. Isolate their session from the Actions worker
+        # and retain a bounded diagnostic if a runner stops making progress.
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          command = [
+              "cargo", "test", "--locked", "--lib", "--",
+              "--skip", "secrets::tests::round_trip_set_get_delete",
+              "--skip", "askpass::tests::env_secret_takes_priority_over_keychain",
+              "--skip", "askpass::tests::missing_account_and_no_env_yields_none",
+              "--skip", "ssh::engine_tests::login_methods::pam",
+          ]
+          try:
+              subprocess.run(command, check=True, start_new_session=True, timeout=900)
+          except subprocess.TimeoutExpired:
+              subprocess.run(["ps", "-axo", "pid,ppid,pgid,state,etime,comm"], check=False)
+              raise
+          PY
 
       - name: Profile selection in the normal library
         env:
