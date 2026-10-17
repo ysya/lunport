@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.0](https://github.com/ysya/lunport/compare/v1.1.0...v1.2.0) (2026-10-17)
+
+macOS now uses a fixed project signing identity. When upgrading from an older unsigned build, existing Keychain items may ask for authorization once; choose **Always Allow** to retain that permission across later updates. This is a project certificate, not Apple Developer ID or notarization.
+
+Find **Sync** and **Settings** in the upper-right toolbar, **Import hosts** beside **New host**, and **Rename** in SSH key details.
+
+
+### Features
+
+* **keys:** rename SSH keys from key details ([30f692d](https://github.com/ysya/lunport/commit/30f692d361b2fb13e2a47381765d9761ac240ac9))
+
+
+### Bug Fixes
+
+* **macos:** preserve Keychain authorization across updates ([d8cc0cc](https://github.com/ysya/lunport/commit/d8cc0cc5505a6b59336c2cc97ae7356159fc2aae))
+* **ui:** reserve the full left column for library navigation ([ee75511](https://github.com/ysya/lunport/commit/ee75511c2cf71a4777830d89a73d4c05577df5f7))
+
 ## [1.1.0](https://github.com/ysya/lunport/compare/v1.0.0...v1.1.0) (2026-10-16)
 
 
