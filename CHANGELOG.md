@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0](https://github.com/ysya/lunport/compare/v1.2.0...v1.3.0) (2026-10-17)
+
+Arrange Groups by dragging, using the row menu, or pressing Alt/Option + Up/Down. Ordering syncs across devices and can be reset to name sorting. Existing 1.2.0 clients continue syncing and display Groups by name.
+
+Manage saved server identities and the local OpenSSH known_hosts file from **Settings → Connections → Known hosts**, or open the manager from host details. Host details also offer **Check port**, a manual TCP reachability check with latency and a three-second deadline.
+
+The first local state upgrade saves the exact previous state in `sync-state-v<version>-<sha256>.backup.json`. Restoring an older app binary requires restoring that backup. Existing macOS project signing and updater identities remain unchanged.
+
+
+### Features
+
+* **library:** sync group order and manage known hosts ([2a0726a](https://github.com/ysya/lunport/commit/2a0726a36fe220a8c93dba50361c7e1b6c45527a))
+* **library:** sync group order and manage server identities ([be5bdaa](https://github.com/ysya/lunport/commit/be5bdaa06e6eba832b0e0ee4b61335015df7ef4f))
+
 ## [1.2.0](https://github.com/ysya/lunport/compare/v1.1.0...v1.2.0) (2026-10-17)
 
 macOS now uses a fixed project signing identity. When upgrading from an older unsigned build, existing Keychain items may ask for authorization once; choose **Always Allow** to retain that permission across later updates. This is a project certificate, not Apple Developer ID or notarization.
