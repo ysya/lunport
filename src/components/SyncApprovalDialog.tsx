@@ -219,12 +219,12 @@ function ApprovalReview({
       </DialogHeader>
       <TaskDialogBody>
       {above.lock && (
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-300">
+        <p className="rounded-md border border-warning/40 bg-warning/10 p-2 text-xs text-warning">
           Approving and rejecting are off right now. {above.lock}
         </p>
       )}
       {above.notice && (
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-300">{above.notice}</p>
+        <p className="rounded-md border border-warning/40 bg-warning/10 p-2 text-xs text-warning">{above.notice}</p>
       )}
       {above.newer && (
         <div className="flex items-center justify-between gap-2 rounded-md border p-2 text-xs">
@@ -373,11 +373,11 @@ export function PendingHost({
   onReject: () => void;
 }) {
   return (
-    <div className={cn("space-y-2 rounded-md border p-3", mark && "border-amber-500/60")}>
+    <div className={cn("space-y-2 rounded-md border p-3", mark && "border-warning/60")}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="flex items-center gap-1.5 font-mono text-sm">
-            <ShieldAlert className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <ShieldAlert className="size-3.5 shrink-0 text-warning" aria-hidden />
             <span className={LOGICAL_ORDER}>{revealHidden(view.alias)}</span>
           </p>
           <p className={cn("text-xs text-muted-foreground", LOGICAL_ORDER)}>
@@ -394,7 +394,7 @@ export function PendingHost({
         </div>
       </div>
       {mark && (
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-300">
+        <p className="rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-xs font-medium text-warning">
           {markText(mark)}
         </p>
       )}
@@ -407,7 +407,7 @@ export function PendingHost({
       </ul>
       <pre className="overflow-x-auto rounded-md bg-muted/40 p-2 font-mono text-xs leading-5" aria-label={`Incoming block for ${revealHidden(view.alias)}`}>
         {blockLines(view).map((line, i) => (
-          <div key={i} className={cn(LOGICAL_ORDER, (line.gated || line.scope) && "-mx-1 rounded-sm bg-amber-500/15 px-1 text-amber-800 dark:text-amber-300")}>
+          <div key={i} className={cn(LOGICAL_ORDER, (line.gated || line.scope) && "-mx-1 rounded-sm bg-warning/15 px-1 text-warning")}>
             {line.text || " "}
           </div>
         ))}

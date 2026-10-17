@@ -329,14 +329,14 @@ function HostRow({
         )}
         {shadow && (
           <span
-            className="shrink-0 text-amber-600 dark:text-amber-400"
+            className="shrink-0 text-warning"
             title={shadowTooltip(host.alias, shadow.winner, shadow.inSpace)}
           >
             <TriangleAlert className="size-3" aria-label={`Also in ${shadow.winner}, which ssh reads first`} />
           </span>
         )}
         {missingKey && (
-          <span className="shrink-0 text-amber-600 dark:text-amber-400" title="This host's key isn't on this computer — pick one in Keychain.">
+          <span className="shrink-0 text-warning" title="This host's key isn't on this computer — pick one in Keychain.">
             <KeyRound className="size-3" aria-label="This host's key isn't on this computer" />
           </span>
         )}
@@ -1344,7 +1344,7 @@ export function HostList({ hosts, isLoading }: HostListProps) {
                                   <Cloud className="size-3 shrink-0 text-muted-foreground/70" aria-label="Synced space" />
                                 )}
                                 {spaceProblem && (
-                                  <span className="shrink-0 text-amber-600 dark:text-amber-400" title={spaceProblem}>
+                                  <span className="shrink-0 text-warning" title={spaceProblem}>
                                     <TriangleAlert className="size-3" aria-label={`Problem with ${spaceName}: ${spaceProblem}`} />
                                   </span>
                                 )}

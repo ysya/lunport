@@ -1,0 +1,66 @@
+[
+  {
+    "cardHeights": [
+      63.75
+    ],
+    "columns": "277.188px 277.188px 277.188px 277.188px",
+    "hoverControls": 20,
+    "pageOverflow": false,
+    "warningClipped": false,
+    "warningOutsideCard": false,
+    "width": 1240
+  },
+  {
+    "cardHeights": [
+      63.75
+    ],
+    "columns": "369.375px 369.375px",
+    "hoverControls": 20,
+    "pageOverflow": false,
+    "warningClipped": false,
+    "warningOutsideCard": false,
+    "width": 860
+  },
+  {
+    "cardHeights": [
+      63.75
+    ],
+    "columns": "445.75px",
+    "hoverControls": 20,
+    "pageOverflow": false,
+    "warningClipped": false,
+    "warningOutsideCard": false,
+    "width": 540
+  },
+  {
+    "cardHeights": [
+      63.75
+    ],
+    "columns": "265.75px",
+    "hoverControls": 20,
+    "pageOverflow": false,
+    "warningClipped": false,
+    "warningOutsideCard": false,
+    "width": 360
+  },
+  {
+    "cardHeights": [
+      80.75
+    ],
+    "font": "19px",
+    "pageOverflow": false,
+    "warningClipped": false,
+    "warningsOutside": false,
+    "width": 860
+  },
+  {
+    "cardHeights": [
+      80.75
+    ],
+    "font": "19px",
+    "pageOverflow": false,
+    "warningClipped": false,
+    "warningsOutside": false,
+    "width": 360
+  }
+]

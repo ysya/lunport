@@ -107,7 +107,7 @@ export function RecordsDeployContent({ overview, hostId, preview, authorized, ph
         <span>I am authorized to install this public key on the account and destination shown above.</span>
       </label>}
       {running && <p role="status" className="text-sm">{phase === "canceling" ? "Canceling the connection and remote operation…" : "Connecting and installing… Authentication or server identity questions may open in a separate window."}</p>}
-      {result && <p role="status" className={`text-sm ${["added", "already_present"].includes(result.outcome) && !result.audit_error ? "" : "text-amber-600 dark:text-amber-400"}`}>{deploymentMessage(result)}</p>}
+      {result && <p role="status" className={`text-sm ${["added", "already_present"].includes(result.outcome) && !result.audit_error ? "" : "text-warning"}`}>{deploymentMessage(result)}</p>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="flex flex-wrap justify-end gap-2">
         {running ? <Button variant="outline" disabled={phase === "canceling"} onClick={onCancel}>{phase === "canceling" ? "Canceling…" : "Cancel deployment"}</Button>

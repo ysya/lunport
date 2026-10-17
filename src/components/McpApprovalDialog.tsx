@@ -31,7 +31,7 @@ export function McpApprovalCardView({ request, busy, armed, expired = false, onA
   return (
     <>
       <DialogHeader>
-        <ShieldAlert className="size-5 text-amber-600 dark:text-amber-400" />
+        <ShieldAlert className="size-5 text-warning" />
         <DialogTitle>{proposal ? "Add this SSH host?" : "Allow this AI SSH command?"}</DialogTitle>
         <DialogDescription>
           {proposal
