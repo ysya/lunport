@@ -5850,6 +5850,7 @@ dependencies = [
  "reqwest",
  "rsa 0.9.10",
  "russh",
+ "security-framework",
  "serde",
  "serde_json",
  "sha1 0.10.7",

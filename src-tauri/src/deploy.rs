@@ -837,7 +837,7 @@ pub fn deploy_key(
 
 #[tauri::command(async)]
 pub fn secrets_has(alias: String) -> Result<bool, AppError> {
-    Ok(crate::secrets::get(&crate::secrets::host_account(&alias))?.is_some())
+    crate::secrets::contains(&crate::secrets::host_account(&alias))
 }
 
 #[tauri::command(async)]

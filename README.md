@@ -30,7 +30,7 @@ Choose an installer from [Releases](https://github.com/ysya/lunport/releases/lat
 | Windows x64 | `.exe` installer |
 | Linux x64 or ARM64 | `.AppImage`, `.deb` or `.rpm` for your architecture |
 
-**macOS:** builds are not yet notarized. Drag Lunport into Applications and, if Gatekeeper blocks it, run:
+**macOS:** builds use a fixed project signing certificate to preserve Keychain authorization across updates. This is not an Apple Developer ID; builds are not yet notarized. When upgrading from an older unsigned build, macOS may ask once per existing Keychain item; choose **Always Allow** for Lunport to remember that authorization. Drag Lunport into Applications and, if Gatekeeper blocks it, run:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Lunport.app

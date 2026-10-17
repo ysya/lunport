@@ -23,6 +23,7 @@ src-tauri/binaries/
 *.tauri.key
 *.pkcs8.pem
 TAURI_SIGNING_PRIVATE_KEY*
+.local-signing/
 
 # Logs
 *.log
