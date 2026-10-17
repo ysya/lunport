@@ -1,0 +1,13 @@
+{
+  "accept": "application/json",
+  "userAgent": "tauri-plugin-updater/2.10.1",
+  "queryParametersAdded": false,
+  "reason": "Matches the shipped updater client; GitHub varies the redirect cache by Accept.",
+  "endpoints": [
+    "https://github.com/ysya/lunport/releases/latest/download/latest.json",
+    "https://github.com/ysya/lunport/releases/download/updater-beta/latest.json",
+    "https://github.com/ysya/sshelter/releases/latest/download/latest.json",
+    "https://github.com/ysya/sshelter/releases/download/updater-beta/latest.json",
+    "https://github.com/ysya/lunport/releases/download/updater-beta/latest.json"
+  ]
+}
