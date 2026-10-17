@@ -1,0 +1,23 @@
+{
+  "version": "1.2.0",
+  "artifact": "Lunport_universal.app.tar.gz",
+  "bundleName": "Lunport",
+  "bundleIdentifier": "org.homelab.sshelter",
+  "executable": "sshelter",
+  "architectures": [
+    "x86_64",
+    "arm64"
+  ],
+  "strictDeepAllArchitecturesSignatureVerified": true,
+  "certificateSha256": "6bce9f14c85274ab36911c91c48e52249e49089afee80e6465b54ab6f4174830",
+  "designatedRequirements": {
+    "x86_64": "designated => identifier \"org.homelab.sshelter\" and certificate root = H\"a346b47b8dccb4faeac8aec1ea997535809aeec9\"",
+    "arm64": "designated => identifier \"org.homelab.sshelter\" and certificate root = H\"a346b47b8dccb4faeac8aec1ea997535809aeec9\""
+  },
+  "developerIdSigned": false,
+  "notarized": false,
+  "productionAppLaunched": false,
+  "bundleVersion": "1.2.0",
+  "foldedLIconMatchesSource": true,
+  "iconSha256": "cee35c729a1db8b59ec04f5e5f23a770c9bc23bd227fc7867cb8aa21a62edcb5"
+}
