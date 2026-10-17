@@ -1,6 +1,6 @@
 [package]
 name = "sshelter"
-version = "1.3.0"
+version = "1.4.0"
 description = "Lunport — your SSH workspace for hosts, keys, Groups and encrypted library sync."
 authors = ["Frank Sung"]
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
