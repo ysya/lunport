@@ -37,6 +37,7 @@ pub mod recovery_state;
 pub mod recovery_credentials;
 pub mod recovery_flow;
 pub mod recovery_revalidation;
+mod archive_directory;
 pub mod replacement_archive;
 pub mod replacement;
 pub mod replacement_flow;

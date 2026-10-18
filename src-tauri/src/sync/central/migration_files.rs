@@ -40,7 +40,14 @@ impl Files {
             result.directories.insert("data".into());
             for name in root.names()? {
                 let source = Path::new("data").join(&name);
-                if ["imports", "migrations", "central-recovery-archives"].contains(&name.as_str()) {
+                if [
+                    "imports",
+                    "migrations",
+                    "central-recovery-archives",
+                    "central-source-archives",
+                ]
+                .contains(&name.as_str())
+                {
                     result.walk(&root, &name, &source, 0)?;
                 } else if name == current
                     || name.starts_with("sync-state")
@@ -466,6 +473,10 @@ mod tests {
                 "central-recovery-archives/source.lparch",
                 b"encrypted archive",
             ),
+            (
+                "central-source-archives/old.lpsource",
+                b"retained source archive",
+            ),
             ("legacy-backup", b"legacy"),
         ];
         for (path, value) in files {
@@ -485,7 +496,7 @@ mod tests {
             b"retired private bytes",
         );
         let captured = Files::capture(&env, Some("legacy-backup")).unwrap();
-        assert_eq!(captured.bytes.len(), 11);
+        assert_eq!(captured.bytes.len(), 12);
         for (path, value) in files {
             assert_eq!(
                 captured.bytes[&Path::new("data").join(path)].as_slice(),
