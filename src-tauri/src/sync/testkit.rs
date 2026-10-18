@@ -230,6 +230,7 @@ pub struct Hooks {
     pub before_create: Option<Hook>,
     pub before_pull: Option<Hook>,
     pub before_delete: Option<Hook>,
+    pub before_push: Option<Hook>,
     pub after_push: Option<Hook>,
     pub after_batch: Option<Hook>,
 }
@@ -295,6 +296,7 @@ impl RelayApi for HookedRelay {
         out
     }
     fn push(&self, chain_id: &str, token: &str, items: &[PushItem]) -> Result<PushOutcome, RelayError> {
+        self.run(|h| h.before_push.take());
         let out = self.inner.push(chain_id, token, items);
         self.run(|h| h.after_push.take());
         out

@@ -49,6 +49,8 @@ pub struct SyncCore {
     pub conflict_streak: u32,
     pub failed_rounds: u32,
     pub batch_failures: u32,
+    /// Most recent Records child-pull (HTTP requests, charged batch items), including deferred retries.
+    pub records_pull_cost: (usize, usize),
     pub relay_checked: Option<String>,
     pub rounds: u64,
     pub swap_pending: bool,

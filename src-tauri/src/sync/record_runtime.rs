@@ -365,6 +365,7 @@ fn persist_candidate(
         candidate = crate::sync::record_groups::invalidate_changed_pins(before, candidate)
             .map_err(|e| AppError::Other(e.to_string()))?;
     }
+    crate::sync::record_conflicts::upgrade_state(&mut candidate);
     let generation = core
         .generation
         .checked_add(1)

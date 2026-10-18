@@ -70,7 +70,7 @@ fn host(id: &str, alias: &str, at: u64) -> Record {
         at,
     )
 }
-fn fixture() -> (Arc<TestDevice>, ChainKeys) {
+pub(crate) fn fixture() -> (Arc<TestDevice>, ChainKeys) {
     let relay = FakeRelay::new();
     let device = Arc::new(TestDevice::new("a", &relay, &TestClock::new()));
     let phrase = crypto::generate_mnemonic().unwrap();
@@ -125,7 +125,7 @@ fn fixture() -> (Arc<TestDevice>, ChainKeys) {
     relay.clear_calls();
     (device, keys)
 }
-fn add_space(device: &TestDevice, keys: &ChainKeys, selected: bool) -> ChainKeys {
+pub(crate) fn add_space(device: &TestDevice, keys: &ChainKeys, selected: bool) -> ChainKeys {
     let child = ChainKeys::generate().unwrap();
     device
         .relay
@@ -765,7 +765,7 @@ fn receipt_generation_overflow_does_not_replace_current_state() {
         observed_schema: Some(3),
     };
     d.runtime.core.lock().unwrap().generation = u64::MAX;
-    assert!(receipt_commit(&d.env(), &proof, None, &sent, &pushed).is_err());
+    assert!(receipt_commit(&d.env(), &proof, None, &proof.keys, &sent, &pushed).is_err());
     assert_eq!(state(&d), before);
     assert!(!d.runtime.core.lock().unwrap().unsaved);
 }
@@ -1638,6 +1638,12 @@ fn deferred_records_are_fairly_drained_and_429_preserves_other_cursors_without_m
     let children: Vec<_> = (0..5).map(|_| add_space(&d, &keys, true)).collect();
     d.relay.set_budget(Some(1));
     assert_eq!(sync_once(&d.env()).unwrap().spaces_pulled, 5);
+    assert_eq!(d.runtime.core.lock().unwrap().records_pull_cost, (5, 15));
+    d.runtime.focused.store(true, std::sync::atomic::Ordering::SeqCst);
+    let delay = crate::sync::round::next_delay(&d.env()).as_secs();
+    assert_eq!(delay, 240); // account + five repeated/deferred batches
+    assert!(3600 / delay * 6 * 10 < 1200);
+    assert!(3600 / delay * 15 * 10 < 12000);
     d.relay.clear_calls();
     d.relay.fail_batches_with_429(1);
     let before = state(&d).spaces;
@@ -1651,5 +1657,25 @@ fn deferred_records_are_fairly_drained_and_429_preserves_other_cursors_without_m
     record_runtime::mutate_records(&d.env(), |s| { let mut n=s.clone(); n.relay_features=None; Ok(n) }).unwrap();
     d.relay.clear_calls();
     assert_eq!(sync_once(&d.env()).unwrap().spaces_pulled, children.len());
+    assert!(!d.relay.calls().iter().any(|c| c.starts_with("batch:")));
+}
+
+#[test]
+fn unsupported_batch_is_remembered_and_legacy_http_cost_is_scheduled_with_nat_headroom() {
+    let (d, keys) = fixture();
+    for _ in 0..20 { add_space(&d, &keys, true); }
+    sync_once(&d.env()).unwrap();
+    d.relay.set_legacy(true);
+    d.relay.clear_calls();
+    assert_eq!(sync_once(&d.env()).unwrap().spaces_pulled, 20);
+    assert_eq!(d.relay.calls().iter().filter(|c| c.starts_with("batch:")).count(), 1);
+    d.runtime.focused.store(true, std::sync::atomic::Ordering::SeqCst);
+    let delay = crate::sync::round::next_delay(&d.env()).as_secs();
+    assert_eq!(delay, 40*22); // includes the unsupported probe in this round
+    assert!(3600 / delay * 21 * 10 < 1200);
+    d.relay.clear_calls();
+    sync_once(&d.env()).unwrap();
+    assert_eq!(d.relay.calls().len(), 21);
+    assert_eq!(crate::sync::round::next_delay(&d.env()).as_secs(), 40*21);
     assert!(!d.relay.calls().iter().any(|c| c.starts_with("batch:")));
 }

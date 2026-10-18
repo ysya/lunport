@@ -79,6 +79,9 @@ pub(crate) struct Pulled {
     pub(crate) batch_failed: bool,
     /// 這一輪至少有一次批次查詢成功(呼叫端把 `batch_failures` 歸零)。
     pub(crate) batch_ok: bool,
+    pub(crate) batch_unsupported: bool,
+    pub(crate) requests: usize,
+    pub(crate) pull_units: usize,
 }
 
 /// 批次查詢(spec §6.4):每批 ≤ 64 條;有 `deferred` 時**只**把 deferred 的項目排在最前面立刻再發一批;沒取得的 chain
@@ -93,6 +96,8 @@ pub(crate) fn pull_all(relay: &dyn RelayApi, targets: &[BatchPullItem], mut batc
     while batch && !queue.is_empty() {
         let take = queue.len().min(MAX_BATCH_PULL);
         let chunk: Vec<BatchPullItem> = queue[..take].to_vec();
+        out.requests += 1;
+        out.pull_units += chunk.len();
         match relay.pull_batch(&chunk) {
             Ok(entries) => {
                 out.batch_ok = true;
@@ -135,7 +140,7 @@ pub(crate) fn pull_all(relay: &dyn RelayApi, targets: &[BatchPullItem], mut batc
                     out.fetched.insert(item.chain.clone(), Fetched::Missed);
                 }
             }
-            Err(RelayError::Unsupported(_)) => batch = false,
+            Err(RelayError::Unsupported(_)) => { batch = false; out.batch_unsupported = true; },
             Err(RelayError::Http(code)) if code >= 500 => {
                 out.failed = true;
                 out.batch_failed = true;
@@ -156,6 +161,7 @@ pub(crate) fn pull_all(relay: &dyn RelayApi, targets: &[BatchPullItem], mut batc
             out.fetched.insert(item.chain, Fetched::Missed);
             continue;
         }
+        out.requests += 1;
         let fetched = match relay.pull(&item.chain, &item.token, item.since) {
             Ok(resp) => Fetched::Ok(resp),
             Err(RelayError::NotFound) => Fetched::NotFound,
@@ -197,7 +203,16 @@ pub fn next_delay(env: &SyncEnv) -> Duration {
     );
     // Reserve headroom for ten devices behind one NAT: account proof + batched children,
     // and each child query still consumes the relay's pull budget. Explicit writes may add IO.
-    if records { delay.max(Duration::from_secs(90)).max(Duration::from_secs(4 * (1 + spaces) as u64)) } else { delay }
+    if records {
+        let batch = core.records.as_ref().and_then(|s| s.relay_features.as_ref())
+            .is_some_and(|features| features.supports(FEATURE_PULL_BATCH));
+        let estimated_requests = 1 + if batch { spaces.div_ceil(MAX_BATCH_PULL) } else { spaces };
+        let requests = estimated_requests.max(1 + core.records_pull_cost.0);
+        let pull_units = (1 + spaces).max(core.records_pull_cost.1);
+        delay.max(Duration::from_secs(90))
+            .max(Duration::from_secs(40 * requests as u64))
+            .max(Duration::from_secs(4 * pull_units as u64))
+    } else { delay }
 }
 
 /// 這一輪結束之後,退避還要擋多久:連續被限流、relay 出錯,或 keychain 失敗(`failed_rounds` > 0)之後的 `relay::backoff_delay`(spec §6.4),沒有失敗 → 0。退避期間順便的喚醒

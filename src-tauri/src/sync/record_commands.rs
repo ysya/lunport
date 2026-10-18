@@ -117,6 +117,7 @@ pub struct RecordOverview {
     library_enabled: bool,
     library_scope: Option<HostScope>,
     pending_changes: usize,
+    conflicts: Vec<crate::sync::record_conflicts::ConflictView>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct GroupOrderView {
@@ -253,6 +254,7 @@ pub fn overview_from(
         .collect();
     Ok(RecordOverview {
         syncing: false,
+        conflicts: crate::sync::record_conflicts::views(state)?,
         generation: generation.to_string(),
         group_deletion_token,
         relay_url: state.relay_url.clone(),
@@ -1508,4 +1510,10 @@ mod tests {
             assert!(token_number(value).is_err(), "{value}");
         }
     }
+}
+
+#[tauri::command]
+pub async fn records_conflict_resolve(app: AppHandle, space_id: Option<String>, key: String, token: String, choice: crate::sync::record_conflicts::Resolution, copy_alias: Option<String>) -> Result<RecordOverview, AppError> {
+    tauri::async_runtime::spawn_blocking(move || crate::sync::engine::with_env(&app, |env| crate::sync::record_conflicts::resolve_saved(env, space_id.as_deref(), &key, &token, choice, copy_alias.as_deref()))?)
+        .await.map_err(crate::sync::engine::join_error)?
 }

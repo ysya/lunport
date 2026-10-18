@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 import { text } from "@/components/keychain/test-markup";
 import { RecordSyncStatus } from "./SyncStatus";
 describe("records sync status", () => {
+  it("makes retained conflicts visible ahead of pending changes and last sync", () => {
+    const html = renderToStaticMarkup(<RecordSyncStatus lastSyncMs={1700000000000} error={null} pendingChanges={3} conflicts={2} />);
+    expect(text(html)).toContain("2 saved sync conflicts need review");
+    expect(text(html)).not.toContain("Last sync:");
+  });
   it("shows real activity and retains the previous failure without raising a new alert", () => {
     const html = renderToStaticMarkup(
       <RecordSyncStatus

@@ -511,7 +511,7 @@ mod behavior_tests {
         }
         assert!(decode_state(&String::from_utf8(original).unwrap()).is_ok());
         let mut future = serde_json::to_value(g).unwrap();
-        future["version"] = json!(LOCAL_CREDENTIAL_STATE_VERSION + 1);
+        future["version"] = json!(LOCAL_CONFLICT_STATE_VERSION + 1);
         assert!(decode_state(&future.to_string()).is_err());
         let raw = serde_json::to_value(materialize(&tests::host().payload)).unwrap();
         assert!(raw.get("group_id").is_none());

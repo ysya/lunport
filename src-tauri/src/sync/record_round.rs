@@ -44,6 +44,7 @@ fn gate_message(gate: &AccountGate) -> &'static str {
         AccountGate::MigrationPending(_) => "account migration is still being published",
         AccountGate::InvalidMigration => "the account migration marker is invalid or unavailable",
         AccountGate::InvalidPull => "the relay returned inconsistent record transport metadata",
+        AccountGate::RecoveryFull => "Sync recovery storage is full. Resolve saved conflicts or free space; existing versions have been kept.",
     }
 }
 /// Check the only write boundary in this transport before credential/network callbacks.
@@ -275,6 +276,7 @@ pub(crate) fn receipt_commit(
     env: &SyncEnv,
     proof: &FreshAccountProof,
     space_id: Option<&str>,
+    keys: &ChainKeys,
     sent: &[crate::sync::record_merge::TypedOutgoing],
     pushed: &crate::sync::merge::Pushed,
 ) -> Result<(), AppError> {
@@ -287,16 +289,20 @@ pub(crate) fn receipt_commit(
         return Err(crate::sync::runtime::superseded());
     }
     let mut next = latest.clone();
+    let conflict_result;
     if let Some(id) = space_id {
         let section = next
             .spaces
             .get_mut(id)
             .ok_or_else(crate::sync::runtime::superseded)?;
         *section = crate::sync::record_merge::apply_space_receipts(section, sent, pushed);
+        conflict_result = crate::sync::record_merge::retain_push_conflicts(&mut section.records, &mut section.sealed, &mut section.recovery, keys, false, sent, pushed);
     } else {
         let account = next.account.as_mut().unwrap();
         *account = crate::sync::record_merge::apply_account_receipts(account, sent, pushed);
+        conflict_result = crate::sync::record_merge::retain_push_conflicts(&mut account.records, &mut account.sealed, &mut account.recovery, keys, true, sent, pushed);
     }
+    crate::sync::record_conflicts::upgrade_state(&mut next);
     crate::sync::records_v3::validate_state(&next)
         .map_err(|_| error("cannot retain invalid typed receipts"))?;
     let generation = core
@@ -305,7 +311,8 @@ pub(crate) fn receipt_commit(
         .ok_or_else(|| error("record state generation exhausted"))?;
     core.records = Some(next);
     core.generation = generation;
-    crate::sync::runtime::save_core(&mut core, &env.state_path)
+    crate::sync::runtime::save_core(&mut core, &env.state_path)?;
+    conflict_result
 }
 fn push_section(
     env: &SyncEnv,
@@ -383,7 +390,7 @@ fn push_section(
             "invalid accepted record sequence".into(),
         ));
     }
-    receipt_commit(env, proof, space_id, sent, &pushed)?;
+    receipt_commit(env, proof, space_id, keys, sent, &pushed)?;
     report.pushed += pushed.accepted.len();
     report.conflicts += pushed.conflicts;
     if pushed.frozen {
@@ -493,8 +500,21 @@ fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
         features.supports(crate::sync::relay::FEATURE_PULL_BATCH), failures)?;
     {
         let mut core = env.runtime.core.lock().unwrap();
+        core.records_pull_cost = (pulled_all.requests, pulled_all.pull_units);
         if pulled_all.batch_failed { core.batch_failures = core.batch_failures.saturating_add(1); }
         else if pulled_all.batch_ok { core.batch_failures = 0; }
+    }
+    if !targets.is_empty() && !pulled_all.limited && pulled_all.fetched.values().all(|result| matches!(result, crate::sync::round::Fetched::Missed)) {
+        pulled_all.failed = true;
+    }
+    if pulled_all.batch_unsupported {
+        section_commit(env, &proof, |latest| {
+            let mut next = latest.clone();
+            if let Some(features) = &mut next.relay_features {
+                features.features.retain(|f| f != crate::sync::relay::FEATURE_PULL_BATCH);
+            }
+            Ok(next)
+        })?;
     }
     let stopped = pulled_all.limited || pulled_all.failed;
     for (id, keys, since) in planned {
@@ -565,6 +585,9 @@ fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
             return Ok(report);
         }
     }
+    let (latest, _) = crate::sync::record_runtime::snapshot(env)?;
+    report.conflicts = report.conflicts.max(latest.account.as_ref().map_or(0, |a| a.recovery.conflicts.len())
+        + latest.spaces.values().map(|s| s.recovery.conflicts.len()).sum::<usize>());
     if pulled_all.limited { return Err(crate::sync::relay::RelayError::RateLimited.into()); }
     if pulled_all.failed { return Err(crate::sync::relay::RelayError::Http(503).into()); }
     let now = env.now();

@@ -324,6 +324,7 @@ fn run_app(host: bool, start_hidden: bool) {
             updater_check_beta,
             updater_install_beta,
             sync::record_commands::records_status,
+            sync::record_commands::records_conflict_resolve,
             sync::record_commands::records_group_create,
             sync::record_commands::records_group_order,
             sync::record_commands::records_group_update,

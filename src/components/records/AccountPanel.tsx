@@ -21,6 +21,7 @@ import { clearAccountDraft, submitAccountDraft } from "./panel-actions";
 import { RecordField } from "./form";
 import { RecordsMigrationPanel } from "./MigrationPanel";
 import { RecordsAccountLifecyclePanel } from "./AccountLifecyclePanel";
+import { RecordConflictPanel } from "./ConflictPanel";
 import { LibrarySyncReview } from "./LibrarySyncReview";
 import { librarySyncError, suggestedLibraryRenames } from "./library-sync";
 
@@ -79,7 +80,8 @@ export function RecordsAccountPanel({
   const [relayDirty, setRelayDirty] = useState(false);
   const [settingsBusy, setBusy] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
-  const busy = settingsBusy || lifecycleBusy;
+  const [conflictBusy, setConflictBusy] = useState(false);
+  const busy = settingsBusy || lifecycleBusy || conflictBusy;
   const active = busy || draft.busy || !!overview.syncing;
   useEffect(() => {
     onBusyChange?.(busy || draft.busy);
@@ -190,6 +192,7 @@ export function RecordsAccountPanel({
       {libraryReview && <LibrarySyncReview preview={libraryReview} renames={libraryRenames} setRenames={setLibraryRenames} busy={busy} error={error} confirm={includeReviewedLibrary} refresh={() => prepareLibrary(true)} cancel={() => { setLibraryReview(null); setError(null); }} restoreFocus={() => (libraryTrigger.current ?? libraryHeading.current)?.focus()} />}
       <PageHeader title="Sync" description="Your host library and Groups sync across devices with a private code. Keys have their own sharing controls." />
       <WorkflowSteps steps={["Relay", "Device", "Library sync"]} current={pending ? 1 : overview.account ? 2 : overview.relay_url ? 1 : 0} complete={!!overview.account && overview.library_enabled && !pending && !overview.shared_writes_blocked && !draft.createdWords} />
+      <RecordConflictPanel conflicts={overview.conflicts ?? []} disabled={active || !!overview.pending_account} onBusyChange={setConflictBusy} />
       {draft.createdWords && (
         <section ref={codeRegion} tabIndex={-1} aria-label="Save your sync code" className="app-notice space-y-3 outline-none">
           <h2 className="font-medium">Save your sync code</h2>

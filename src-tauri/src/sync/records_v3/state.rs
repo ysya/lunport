@@ -109,6 +109,8 @@ pub struct SpaceStateV3 {
     pub last_error: Option<String>,
     #[serde(default)]
     pub missing: bool,
+    #[serde(default, skip_serializing_if = "crate::sync::record_conflicts::RecordRecovery::is_empty")]
+    pub recovery: crate::sync::record_conflicts::RecordRecovery,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -133,7 +135,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
         2 => serde_json::from_str(text)
             .map(DecodedState::V2)
             .map_err(state_decode_error),
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION => {
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -219,7 +221,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
     }
     if !matches!(
         state.version,
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -330,6 +332,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
         }
     }
     for (space_id, space) in &state.spaces {
+        validate_recovery(state.version, &space.recovery)?;
         if !is_chain_id(space_id) {
             return Err(state_invalid("space_id", space_id, "expected a chain id"));
         }
@@ -342,6 +345,7 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
         validate_sealed(&space.sealed, false)?;
     }
     if let Some(account) = &state.account {
+        validate_recovery(state.version, &account.recovery)?;
         if !is_chain_id(&account.chain_id) {
             return Err(state_invalid(
                 "chain_id",
@@ -473,6 +477,13 @@ pub fn validate_account_meta(meta: &MetaPayload) -> Result<(), RecordValidationE
             kind: "account",
             found: meta.schema_version,
         });
+    }
+    Ok(())
+}
+
+fn validate_recovery(version: u32, recovery: &crate::sync::record_conflicts::RecordRecovery) -> Result<(), RecordValidationError> {
+    if !recovery.valid() || !recovery.conflicts.is_empty() && version < LOCAL_CONFLICT_STATE_VERSION {
+        return Err(state_invalid("recovery", "state", "invalid or unsupported conflict recovery state"));
     }
     Ok(())
 }

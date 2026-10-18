@@ -109,7 +109,10 @@ export type RecordKeyView = {
   public: KeySlotPayload | null;
   status: "available" | "needs_material" | "conflict" | "deleted";
 };
+export type ConflictVersion = { seq: string; deleted: boolean; record: { kind: string; id: string; updated_at_ms: number; device_id: string; payload: unknown } | null };
+export type RecordConflict = { space_id: string | null; key: string; token: string; label: string; base: ConflictVersion | null; local: ConflictVersion; remote: ConflictVersion[]; can_copy_remote: boolean };
 export type RecordOverview = {
+  conflicts?: RecordConflict[];
   /** Transient transport activity; absent in older backend fixtures. */
   syncing?: boolean;
   library_enabled: boolean;
@@ -627,3 +630,7 @@ export const confirmRecordDeploy = (previewId: string, authorized: boolean) =>
   });
 export const cancelRecordDeploy = (previewId: string) =>
   tauriInvoke<void>("records_deploy_cancel", { previewId });
+
+export async function resolveRecordConflict(conflict: RecordConflict, choice: "local" | "remote" | "copy_remote", copyAlias?: string): Promise<RecordOverview> {
+  return tauriInvoke("records_conflict_resolve", { spaceId: conflict.space_id, key: conflict.key, token: conflict.token, choice, copyAlias: copyAlias ?? null });
+}

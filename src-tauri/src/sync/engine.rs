@@ -208,22 +208,23 @@ struct Wait {
     deadline: Instant,
     /// 退避(連續被限流、relay 出錯,或 keychain 失敗之後,spec §6.4)擋到什麼時候:這之前順便的喚醒(`Wake::Implicit`)不能提早開始一輪。不晚於 `deadline`。
     hold_until: Instant,
+    defer_explicit: bool,
 }
 
 impl Wait {
     /// 啟動:第一輪馬上跑(spec §6.4、§7.6)—— 沒有什麼要先等的。
     fn launch(now: Instant) -> Self {
-        Self { deadline: now, hold_until: now }
+        Self { deadline: now, hold_until: now, defer_explicit: false }
     }
 
     /// 一輪結束之後:`delay` 之後再跑下一輪;`backoff` 是這一輪之後退避還要擋多久(沒有退避 → 0)。
     fn after_round(now: Instant, delay: Duration, backoff: Duration) -> Self {
-        Self { deadline: now + delay, hold_until: now + backoff.min(delay) }
+        Self { deadline: now + delay, hold_until: now + backoff.min(delay), defer_explicit: false }
     }
 
-    /// 在 `now` 收到 `wake`:現在就跑一輪嗎?`Wake::Now` 一律跑;順便的喚醒只在退避結束之後才跑。
+    /// Explicit wakes bypass legacy backoff; Records also defers them until cooldown ends.
     fn runs_on(&self, wake: Wake, now: Instant) -> bool {
-        wake == Wake::Now || now >= self.hold_until
+        (wake == Wake::Now && !self.defer_explicit) || now >= self.hold_until
     }
 }
 
@@ -247,6 +248,7 @@ fn wait_for_round(rx: &Receiver<Wake>, wait: &Wait) -> Result<(), RecvTimeoutErr
 fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
     let (mut delay, mut backoff) = (crate::sync::relay::IDLE_POLL_INTERVAL, Duration::ZERO);
     let mut wait = Wait::launch(Instant::now());
+    let mut records = false;
     loop {
         if wait_for_round(&rx, &wait).is_err() {
             return;
@@ -259,11 +261,14 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
             let (format,legacy) = { let core=env.runtime.core.lock().unwrap(); (core.format,core.format == crate::sync::record_runtime::RuntimeFormat::Legacy && !core.legacy_paused && core.save_blocked.is_none()) };
             if legacy { let _ = round::sync_once(env); }
             else if format==crate::sync::record_runtime::RuntimeFormat::Records { let _=crate::sync::record_round::sync_once(env); }
-            (round::next_delay(env), round::backoff_window(env))
+            (round::next_delay(env), round::backoff_window(env), format == crate::sync::record_runtime::RuntimeFormat::Records)
         }) {
-            (delay, backoff) = next;
+            (delay, backoff, records) = next;
         }
         wait = Wait::after_round(Instant::now(), delay, backoff);
+        // Records Sync now coalesces during a failed round's cooldown. It must not
+        // turn a relay rejection into an unbounded stream of manual retries.
+        wait.defer_explicit = records;
     }
 }
 
@@ -1010,6 +1015,16 @@ mod tests {
         let normal = Wait::after_round(now, second(45), Duration::ZERO);
         assert!(normal.runs_on(Wake::Implicit, now + second(1)) && normal.runs_on(Wake::Now, now + second(1)));
         assert!(Wait::launch(now).runs_on(Wake::Implicit, now));
+    }
+
+    #[test]
+    fn records_sync_now_respects_the_existing_failure_cooldown() {
+        let now = Instant::now();
+        let mut wait = Wait::after_round(now, Duration::from_secs(300), Duration::from_secs(90));
+        wait.defer_explicit = true;
+        assert!(!wait.runs_on(Wake::Now, now + Duration::from_secs(1)));
+        assert!(!wait.runs_on(Wake::Implicit, now + Duration::from_secs(89)));
+        assert!(wait.runs_on(Wake::Now, now + Duration::from_secs(90)));
     }
 
     #[test]

@@ -300,6 +300,7 @@ fn replace_pending(
     }
     let mut next = latest.clone();
     next.pending_account = Some(op);
+    crate::sync::record_conflicts::upgrade_state(&mut next);
     records_v3::validate_state(&next)
         .map_err(|_| failure("cannot retain invalid pending receipt"))?;
     let generation = core
@@ -1013,7 +1014,7 @@ fn publish_current(
         &fresh.keys.auth_token,
         &outgoing,
     );
-    crate::sync::record_round::receipt_commit(env, proof, None, &sent, &pushed)?;
+    crate::sync::record_round::receipt_commit(env, proof, None, &proof.keys, &sent, &pushed)?;
     if pushed.frozen {
         crate::sync::record_round::mark_frozen(env, proof)?;
         return Err(failure("the record account is frozen"));
