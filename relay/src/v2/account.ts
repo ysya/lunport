@@ -665,7 +665,13 @@ export class AccountStore extends DurableObject<Env> {
       const request = node.body.enrollment!,
         registered = observed.registrations[request.device.id];
       if (
-        !validConfirmation(confirmation, request.request_id, next.head) ||
+        !validConfirmation(
+          confirmation,
+          request.request_id,
+          next.head,
+          observed.vaults,
+          observed.epoch,
+        ) ||
         !registered?.request ||
         requestId(registered.request) !== requestId(request) ||
         !(await verifyEnrollment(request, now))

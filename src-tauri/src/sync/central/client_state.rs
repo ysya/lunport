@@ -69,6 +69,8 @@ pub struct State {
     pub highwater: Option<Highwater>,
     pub pending_request: Option<Enrollment>,
     pub personal_vault: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_confirmation: Option<PairingConfirmation>,
     pub recovery_backup_confirmed: bool,
     pub cutover: bool,
     pub library: Option<LibraryApproval>,
@@ -91,6 +93,7 @@ impl State {
             highwater: None,
             pending_request: None,
             personal_vault: None,
+            pairing_confirmation: None,
             recovery_backup_confirmed: false,
             cutover: false,
             library: None,
@@ -125,6 +128,21 @@ impl State {
                 {
                     return Err(invalid());
                 }
+                if let Some(confirmation) = &self.pairing_confirmation {
+                    confirmation.validate_minimums(&chain)?;
+                    if self.personal_vault.as_deref() != Some(confirmation.personal_vault.as_str())
+                        || !proof.nodes.iter().enumerate().any(|(i, node)| {
+                            node.body.action == super::membership::Action::Add
+                                && node.body.enrollment.as_ref().is_some_and(|r| {
+                                    r.request_id == confirmation.request_id
+                                        && r.device == self.device
+                                })
+                                && chain.head_at(i + 1) == Some(confirmation.approved_head.as_str())
+                        })
+                    {
+                        return Err(invalid());
+                    }
+                }
                 if let Some(library) = &self.library {
                     if library.policy != 1
                         || !hex(&library.preview_digest, 64)
@@ -135,7 +153,8 @@ impl State {
                 }
             }
             (None, None, None) => {
-                if self.library.is_some()
+                if self.pairing_confirmation.is_some()
+                    || self.library.is_some()
                     || self.cutover
                     || matches!(
                         self.phase,
@@ -194,6 +213,8 @@ impl State {
         next.highwater = Some(chain.highwater());
         next.proof = Some(proof);
         next.phase = Phase::Enrolled;
+        next.personal_vault = Some(confirmation.personal_vault.clone());
+        next.pairing_confirmation = Some(confirmation.clone());
         next.pending_request = None;
         next.validate()?;
         Ok(next)
@@ -300,6 +321,8 @@ impl State {
             || self.device != next.device
             || self.cutover && !next.cutover
             || next.auth_epoch < self.auth_epoch
+            || self.pairing_confirmation.is_some()
+                && self.pairing_confirmation != next.pairing_confirmation
         {
             return Err(invalid());
         }
@@ -416,7 +439,14 @@ mod tests {
             &first_keys,
         )
         .unwrap();
-        let confirmation = invite.confirm(&previous, &node).unwrap();
+        let confirmation = invite
+            .confirm(
+                &previous,
+                &node,
+                &"c".repeat(64),
+                super::super::pairing::tests::minima(previous.head()),
+            )
+            .unwrap();
         let proof = ControlProof {
             genesis,
             nodes: vec![node],
@@ -434,6 +464,33 @@ mod tests {
         assert_eq!(paired.phase, Phase::Enrolled);
         assert!(!paired.cloud_writes_allowed());
         waiting.verify_transition(&paired).unwrap();
+        assert_eq!(
+            paired.personal_vault.as_deref(),
+            Some(confirmation.personal_vault.as_str())
+        );
+        let restored: State =
+            serde_json::from_str(&serde_json::to_string(&paired).unwrap()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored.pairing_confirmation.as_ref(), Some(&confirmation));
+        let before = super::super::workspace::Workspace::new(restored).unwrap();
+        let mut joined = before.clone();
+        let minimum = &confirmation.minimums[0];
+        joined.replica = Some(
+            super::super::replica::Replica::join(
+                minimum.vault.clone(),
+                minimum.creation_head.clone(),
+                minimum.creation_authorization_epoch.parse().unwrap(),
+                super::super::rekey::Checkpoint {
+                    epoch: minimum.key_epoch.parse().unwrap(),
+                    sequence: minimum.sequence.parse().unwrap(),
+                    history_hash: minimum.history_hash.clone(),
+                },
+            )
+            .unwrap(),
+        );
+        before.verify_transition(&joined).unwrap();
+        joined.replica.as_mut().unwrap().minimum = None;
+        assert!(joined.validate().is_err());
     }
     #[test]
     fn bootstrap_backup_library_confirmation_and_cutover_are_distinct_monotonic_boundaries() {

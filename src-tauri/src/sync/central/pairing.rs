@@ -3,7 +3,7 @@ use super::{
     crypto::{self, DeviceKeys},
     membership::{Action, Device, Enrollment, SignedMembership, TrustAnchor, TrustedMembership},
     trust::{ControlProof, VerifiedChain},
-    wire::{canonical, hex, invalid},
+    wire::{canonical, hex, invalid, number},
 };
 use crate::error::AppError;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -27,7 +27,63 @@ fn request_digest(request: &Enrollment) -> Result<String, AppError> {
         &request.signature,
     ])?))
 }
-fn confirmation_bytes(request: &Enrollment, head: &str) -> Result<Vec<u8>, AppError> {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultMinimum {
+    pub vault: String,
+    pub creation_head: String,
+    pub creation_authorization_epoch: String,
+    pub key_epoch: String,
+    pub sequence: String,
+    pub history_hash: String,
+}
+impl VaultMinimum {
+    fn entry(&self) -> Result<Vec<&str>, AppError> {
+        if !hex(&self.vault, 64)
+            || !hex(&self.creation_head, 64)
+            || !hex(&self.history_hash, 64)
+            || number(&self.key_epoch, false)? > 65
+            || number(&self.sequence, true)? > 16384
+            || self.sequence == "0" && self.history_hash != "0".repeat(64)
+        {
+            return Err(invalid());
+        }
+        number(&self.creation_authorization_epoch, false)?;
+        Ok(vec![
+            &self.vault,
+            &self.creation_head,
+            &self.creation_authorization_epoch,
+            &self.key_epoch,
+            &self.sequence,
+            &self.history_hash,
+        ])
+    }
+}
+fn minimum_bytes(personal: &str, minimums: &[VaultMinimum]) -> Result<Vec<u8>, AppError> {
+    if !hex(personal, 64)
+        || minimums.is_empty()
+        || minimums.len() > 64
+        || !minimums.iter().any(|m| m.vault == personal)
+    {
+        return Err(invalid());
+    }
+    let mut sorted: Vec<_> = minimums.iter().collect();
+    sorted.sort_by(|a, b| a.vault.cmp(&b.vault));
+    if sorted.windows(2).any(|w| w[0].vault == w[1].vault) {
+        return Err(invalid());
+    }
+    let entries = sorted
+        .iter()
+        .map(|m| m.entry())
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_vec(&entries).map_err(|_| invalid())
+}
+fn confirmation_bytes(
+    request: &Enrollment,
+    head: &str,
+    personal: &str,
+    minimums: &[VaultMinimum],
+) -> Result<Vec<u8>, AppError> {
     if !hex(head, 64) {
         return Err(invalid());
     }
@@ -36,14 +92,38 @@ fn confirmation_bytes(request: &Enrollment, head: &str) -> Result<Vec<u8>, AppEr
         &B64.encode(request.canonical()?),
         &request.signature,
         head,
+        personal,
+        &B64.encode(minimum_bytes(personal, minimums)?),
     ])
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairingConfirmation {
     pub request_id: String,
     pub approved_head: String,
+    pub personal_vault: String,
+    pub minimums: Vec<VaultMinimum>,
     pub mac: String,
+}
+impl PairingConfirmation {
+    pub fn validate_minimums(&self, chain: &VerifiedChain) -> Result<(), AppError> {
+        minimum_bytes(&self.personal_vault, &self.minimums)?;
+        if !hex(&self.request_id, 32) {
+            return Err(invalid());
+        }
+        crypto::decode(&self.mac, 32, 32)?;
+        let approved = chain.revision_of(&self.approved_head).ok_or_else(invalid)?;
+        for minimum in &self.minimums {
+            if chain
+                .revision_of(&minimum.creation_head)
+                .ok_or_else(invalid)?
+                > approved
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,12 +229,15 @@ impl PendingPairing {
         mac.update(&confirmation_bytes(
             &self.request,
             &confirmation.approved_head,
+            &confirmation.personal_vault,
+            &confirmation.minimums,
         )?);
         mac.verify_slice(&crypto::decode(&confirmation.mac, 32, 32)?)
             .map_err(|_| {
                 AppError::Other("This device approval does not match your pairing code.".into())
             })?;
         let chain = proof.verify(&anchor(&self.request), None)?;
+        confirmation.validate_minimums(&chain)?;
         let confirmed = proof.nodes.iter().enumerate().any(|(index, node)| {
             node.body.action == Action::Add
                 && node.body.enrollment.as_ref() == Some(&self.request)
@@ -204,6 +287,8 @@ impl PairingInvite {
         &self,
         previous: &TrustedMembership,
         node: &SignedMembership,
+        personal_vault: &str,
+        minimums: Vec<VaultMinimum>,
     ) -> Result<PairingConfirmation, AppError> {
         if previous.anchor() != &anchor(&self.request)
             || node.body.action != Action::Add
@@ -213,20 +298,37 @@ impl PairingInvite {
         }
         let next = previous.apply(node)?;
         let mut mac = HmacSha256::new_from_slice(&self.secret).map_err(|_| invalid())?;
-        mac.update(&confirmation_bytes(&self.request, next.head())?);
+        mac.update(&confirmation_bytes(
+            &self.request,
+            next.head(),
+            personal_vault,
+            &minimums,
+        )?);
         Ok(PairingConfirmation {
             request_id: self.request.request_id.clone(),
             approved_head: next.head().into(),
+            personal_vault: personal_vault.into(),
+            minimums,
             mac: B64.encode(mac.finalize().into_bytes()),
         })
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::membership::Genesis;
     use super::*;
     fn keys(seed: u8) -> DeviceKeys {
         DeviceKeys::decode_secret(&B64.encode([seed; 64])).unwrap()
+    }
+    pub(crate) fn minima(head: &str) -> Vec<VaultMinimum> {
+        vec![VaultMinimum {
+            vault: "c".repeat(64),
+            creation_head: head.into(),
+            creation_authorization_epoch: "2".into(),
+            key_epoch: "1".into(),
+            sequence: "0".into(),
+            history_hash: "0".repeat(64),
+        }]
     }
     #[test]
     fn pairing_tag_matches_an_independent_webcrypto_hmac_vector() {
@@ -246,7 +348,9 @@ mod tests {
             request_id: request.request_id,
             approved_head: "fd334f45161778bffe9874f4729c86896429a6711a2a7806a635f672022e5236"
                 .into(),
-            mac: "Acu8zJlOUAAVgvJWw3l5EKNirF4THJE/TY2sAxEZ1Gs=".into(),
+            personal_vault: "c".repeat(64),
+            minimums: minima(fixture["anchor"]["genesis_hash"].as_str().unwrap()),
+            mac: "lMU7MAygWIlX7jAjm480rzDMSuve+omi0bsDxJN0bT4=".into(),
         };
         assert!(pending.accept(&confirmation, &proof).is_ok());
     }
@@ -288,7 +392,9 @@ mod tests {
             &first,
         )
         .unwrap();
-        let confirmation = invite.confirm(&previous, &node).unwrap();
+        let confirmation = invite
+            .confirm(&previous, &node, &"c".repeat(64), minima(previous.head()))
+            .unwrap();
         let proof = ControlProof {
             genesis: genesis.clone(),
             nodes: vec![node.clone()],
@@ -314,6 +420,16 @@ mod tests {
         assert!(PairingInvite::from_code(&code, pending.request(), &root, 10000000).is_err());
         let mut tampered = confirmation.clone();
         tampered.approved_head = "9".repeat(64);
+        assert!(pending.accept(&tampered, &proof).is_err());
+        tampered = confirmation.clone();
+        tampered.minimums[0].sequence = "1".into();
+        tampered.minimums[0].history_hash = "9".repeat(64);
+        assert!(pending.accept(&tampered, &proof).is_err());
+        tampered = confirmation.clone();
+        tampered.personal_vault = "9".repeat(64);
+        assert!(pending.accept(&tampered, &proof).is_err());
+        tampered = confirmation.clone();
+        tampered.minimums.push(tampered.minimums[0].clone());
         assert!(pending.accept(&tampered, &proof).is_err());
         tampered = confirmation.clone();
         tampered.mac = B64.encode([0; 32]);
@@ -365,7 +481,9 @@ mod tests {
             &first,
         )
         .unwrap();
-        let confirmation = invite.confirm(&previous, &add).unwrap();
+        let confirmation = invite
+            .confirm(&previous, &add, &"c".repeat(64), minima(previous.head()))
+            .unwrap();
         let added = previous.apply(&add).unwrap();
         let revoke = SignedMembership::sign(
             added.proposal(

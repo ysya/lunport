@@ -518,6 +518,19 @@ impl TrustedMembership {
         }
     }
 }
+/// The personal MVP client can infer its expected Vault even when an untrusted registry omits it.
+/// This does not prove latest-data completeness; a missing expected Vault is an availability failure.
+pub fn personal_vault_id(anchor: &TrustAnchor) -> Result<String, AppError> {
+    if !origin(&anchor.origin) || !hex(&anchor.account_id, 64) || !hex(&anchor.genesis_hash, 64) {
+        return Err(invalid());
+    }
+    Ok(crypto::hash(&canonical(&[
+        "lunport-personal-vault-v2",
+        &anchor.origin,
+        &anchor.account_id,
+        &anchor.genesis_hash,
+    ])?))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

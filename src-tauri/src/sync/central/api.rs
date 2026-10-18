@@ -165,6 +165,7 @@ impl Api {
                 "operation-receipts",
                 "paged-history",
                 "signed-rekey",
+                "paired-checkpoints",
             ]
             .iter()
             .all(|feature| info.features.iter().any(|f| f == feature))

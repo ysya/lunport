@@ -56,6 +56,8 @@ pub struct Replica {
     pub creation_head: String,
     pub creation_authorization_epoch: u64,
     pub checkpoint: Checkpoint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<Checkpoint>,
     pub current: BTreeMap<String, Base>,
     pub pending: BTreeMap<String, Pending>,
     pub conflicts: BTreeMap<String, Vec<Conflict>>,
@@ -69,6 +71,7 @@ pub struct Opened {
 pub struct PreparedPage {
     pub next: Replica,
     pub opened: Vec<Opened>,
+    pub publish_baseline: bool,
 }
 impl Receipt {
     fn validate(&self) -> Result<(), AppError> {
@@ -118,9 +121,34 @@ impl Replica {
                 sequence: 0,
                 history_hash: ZERO.into(),
             },
+            minimum: None,
             current: BTreeMap::new(),
             pending: BTreeMap::new(),
             conflicts: BTreeMap::new(),
+        })
+    }
+    pub fn join(
+        vault: String,
+        creation_head: String,
+        creation_authorization_epoch: u64,
+        minimum: Checkpoint,
+    ) -> Result<Self, AppError> {
+        if minimum.epoch == 0
+            || minimum.epoch > 65
+            || minimum.sequence > 16384
+            || !hex(&minimum.history_hash, 64)
+            || minimum.sequence == 0 && minimum.history_hash != ZERO
+        {
+            return Err(invalid());
+        }
+        let mut replica = Self::new(vault, creation_head, creation_authorization_epoch)?;
+        replica.checkpoint.epoch = minimum.epoch;
+        replica.minimum = Some(minimum);
+        Ok(replica)
+    }
+    pub fn baseline_ready(&self) -> bool {
+        self.minimum.as_ref().is_none_or(|m| {
+            m.epoch == self.checkpoint.epoch && self.checkpoint.sequence >= m.sequence
         })
     }
     pub fn validate(&self, chain: &VerifiedChain) -> Result<(), AppError> {
@@ -139,6 +167,17 @@ impl Replica {
             || serde_json::to_vec(self).map_err(|_| invalid())?.len() > CAP
         {
             return Err(invalid());
+        }
+        if let Some(minimum) = &self.minimum {
+            if minimum.epoch != self.checkpoint.epoch
+                || minimum.sequence > 16384
+                || !hex(&minimum.history_hash, 64)
+                || minimum.sequence == 0 && minimum.history_hash != ZERO
+                || minimum.sequence == self.checkpoint.sequence
+                    && minimum.history_hash != self.checkpoint.history_hash
+            {
+                return Err(invalid());
+            }
         }
         let check_envelope = |id: &str, envelope: &RecordEnvelope| -> Result<(), AppError> {
             let h = &envelope.header;
@@ -338,6 +377,9 @@ impl Replica {
         authorization_epoch: u64,
         commits: &[SignedRekey],
     ) -> Result<Vec<RecordEnvelope>, AppError> {
+        if !self.baseline_ready() {
+            return Err(AppError::Other("Wait for the approved device's complete data checkpoint before uploading. Local changes are retained.".into()));
+        }
         self.verify_write_authority(chain, authorization_epoch, minimum_epoch, commits)?;
         let mut candidate = self.clone();
         let mut rows = Vec::new();
@@ -425,6 +467,13 @@ impl Replica {
         {
             return Err(invalid());
         }
+        if self
+            .minimum
+            .as_ref()
+            .is_some_and(|m| advertised.sequence < m.sequence)
+        {
+            return Err(invalid());
+        }
         for p in self.pending.values() {
             if let Some(claim) = &p.claimed {
                 if number(
@@ -475,6 +524,13 @@ impl Replica {
                 &seq.to_string(),
                 &row.digest,
             ])?);
+            if self
+                .minimum
+                .as_ref()
+                .is_some_and(|m| m.sequence == seq && m.history_hash != history_hash)
+            {
+                return Err(invalid());
+            }
             if row.history_hash != history_hash {
                 return Err(invalid());
             }
@@ -558,7 +614,7 @@ impl Replica {
             opened.push(Opened {
                 version: row.clone(),
                 plaintext,
-                publish: !next.pending.contains_key(&h.record_id),
+                publish: next.baseline_ready() && !next.pending.contains_key(&h.record_id),
             });
         }
         if next.checkpoint.sequence == advertised.sequence
@@ -567,7 +623,12 @@ impl Replica {
             return Err(invalid());
         }
         next.validate(chain)?;
-        Ok(PreparedPage { next, opened })
+        let publish_baseline = !self.baseline_ready() && next.baseline_ready();
+        Ok(PreparedPage {
+            next,
+            opened,
+            publish_baseline,
+        })
     }
 }
 #[cfg(test)]
@@ -828,6 +889,62 @@ mod tests {
         assert!(c
             .replica
             .prepare_page(&chain, &c.keys, &[], &checkpoint(&b))
+            .is_err());
+    }
+    #[test]
+    fn a_paired_device_stages_history_until_the_approved_minimum_and_rejects_withholding_or_forks()
+    {
+        let c = case();
+        let chain = c.proof.verify(&c.anchor, None).unwrap();
+        let a = row(
+            crypto::seal_record(&c.keys, &c.signer, c.header.clone(), b"A").unwrap(),
+            1,
+            ZERO,
+        );
+        let mut h = c.header.clone();
+        h.expected_revision = "1".into();
+        h.operation_id = "8".repeat(32);
+        let b = row(
+            crypto::seal_record(&c.keys, &c.signer, h, b"B").unwrap(),
+            2,
+            &a.history_hash,
+        );
+        let mut replica = Replica::join(
+            c.header.vault_id.clone(),
+            chain.current().head().into(),
+            1,
+            checkpoint(&b),
+        )
+        .unwrap();
+        assert!(!replica.baseline_ready());
+        assert!(replica.prepare_send(&chain, 1, 1, &[]).is_err());
+        assert!(replica
+            .prepare_page(&chain, &c.keys, std::slice::from_ref(&a), &checkpoint(&a))
+            .is_err());
+        let page = replica
+            .prepare_page(&chain, &c.keys, std::slice::from_ref(&a), &checkpoint(&b))
+            .unwrap();
+        assert!(!page.opened[0].publish);
+        assert!(!page.publish_baseline);
+        assert!(!page.next.baseline_ready());
+        let ready = page
+            .next
+            .prepare_page(&chain, &c.keys, std::slice::from_ref(&b), &checkpoint(&b))
+            .unwrap();
+        assert!(ready.publish_baseline);
+        assert!(ready.next.baseline_ready());
+        assert_eq!(ready.next.current.len(), 1);
+        let mut wrong = c.header;
+        wrong.expected_revision = "1".into();
+        wrong.operation_id = "9".repeat(32);
+        let fork = row(
+            crypto::seal_record(&c.keys, &c.signer, wrong, b"fork").unwrap(),
+            2,
+            &a.history_hash,
+        );
+        assert!(page
+            .next
+            .prepare_page(&chain, &c.keys, &[fork.clone()], &checkpoint(&fork))
             .is_err());
     }
 }

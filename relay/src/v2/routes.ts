@@ -124,6 +124,7 @@ export async function centralFetch(
               "operation-receipts",
               "paged-history",
               "signed-rekey",
+              "paired-checkpoints",
             ],
             oidc: {
               issuer: config.issuer,

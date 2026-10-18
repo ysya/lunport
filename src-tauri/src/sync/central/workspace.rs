@@ -57,6 +57,27 @@ impl Workspace {
             {
                 return Err(invalid());
             }
+            if let Some(confirmation) = &self.control.pairing_confirmation {
+                let minimum = confirmation
+                    .minimums
+                    .iter()
+                    .find(|m| m.vault == replica.vault)
+                    .ok_or_else(invalid)?;
+                let expected = Checkpoint {
+                    epoch: number(&minimum.key_epoch, false)?,
+                    sequence: number(&minimum.sequence, true)?,
+                    history_hash: minimum.history_hash.clone(),
+                };
+                if replica.creation_head != minimum.creation_head
+                    || replica.creation_authorization_epoch
+                        != number(&minimum.creation_authorization_epoch, false)?
+                    || replica.checkpoint.epoch < expected.epoch
+                    || replica.checkpoint.epoch == expected.epoch
+                        && replica.minimum.as_ref() != Some(&expected)
+                {
+                    return Err(invalid());
+                }
+            }
             let mut revision = chain
                 .revision_of(&replica.creation_head)
                 .ok_or_else(invalid)?;
@@ -122,7 +143,8 @@ impl Workspace {
                     return Err(invalid());
                 }
                 if after.checkpoint.epoch == before.checkpoint.epoch {
-                    if self.epochs != next.epochs
+                    if before.minimum != after.minimum
+                        || self.epochs != next.epochs
                         || after.checkpoint.sequence < before.checkpoint.sequence
                         || after.checkpoint.sequence == before.checkpoint.sequence
                             && after.checkpoint.history_hash != before.checkpoint.history_hash
@@ -150,6 +172,12 @@ impl Workspace {
                     if evidence.source_suffix.len() > 16384 {
                         return Err(invalid());
                     }
+                    if before.minimum.as_ref().is_some_and(|m| {
+                        m.sequence
+                            > number(&evidence.manifest.body.source_sequence, true).unwrap_or(0)
+                    }) {
+                        return Err(invalid());
+                    }
                     let mut claims = std::collections::BTreeMap::new();
                     for pending in before.pending.values() {
                         if let Some(claim) = &pending.claimed {
@@ -172,6 +200,13 @@ impl Workspace {
                     for row in &evidence.source_suffix {
                         extension.append(std::slice::from_ref(row))?;
                         let position = extension.position()?;
+                        if before.minimum.as_ref().is_some_and(|m| {
+                            m.sequence == position.sequence
+                                && m.history_hash != position.history_hash
+                        }) {
+                            return Err(invalid());
+                        }
+
                         if let Some(claim) = claims.remove(&position.sequence) {
                             if claim.digest != row.digest
                                 || claim.history_hash != position.history_hash
@@ -184,6 +219,9 @@ impl Workspace {
                         return Err(invalid());
                     }
                     // Activation publishes the complete signed target checkpoint, before later normal pulls.
+                    if after.minimum.as_ref() != Some(&after.checkpoint) {
+                        return Err(invalid());
+                    }
                     if extension.finish()? != after.checkpoint {
                         return Err(invalid());
                     }
@@ -191,7 +229,15 @@ impl Workspace {
             }
             (Some(_), None) => return Err(invalid()),
             (None, Some(after)) => {
-                if after.checkpoint.epoch != 1 || !next.epochs.is_empty() {
+                if after.checkpoint.sequence != 0
+                    || after.checkpoint.history_hash != "0".repeat(64)
+                    || !after.current.is_empty()
+                {
+                    return Err(invalid());
+                }
+                if next.control.pairing_confirmation.is_none()
+                    && (after.checkpoint.epoch != 1 || !next.epochs.is_empty())
+                {
                     return Err(invalid());
                 }
             }
@@ -202,15 +248,16 @@ impl Workspace {
     pub fn can_upload(&self) -> bool {
         self.control.cloud_writes_allowed()
             && self.replica.as_ref().is_some_and(|r| {
-                self.control.verified_chain().is_ok_and(|chain| {
-                    r.verify_write_authority(
-                        &chain,
-                        self.control.auth_epoch,
-                        r.checkpoint.epoch,
-                        &self.epochs,
-                    )
-                    .is_ok()
-                })
+                r.baseline_ready()
+                    && self.control.verified_chain().is_ok_and(|chain| {
+                        r.verify_write_authority(
+                            &chain,
+                            self.control.auth_epoch,
+                            r.checkpoint.epoch,
+                            &self.epochs,
+                        )
+                        .is_ok()
+                    })
             })
             && self.validate().is_ok()
     }
@@ -405,6 +452,11 @@ pub(crate) mod tests {
         .unwrap();
         let mut staging = before.replica.clone().unwrap();
         staging.checkpoint.epoch = 2;
+        staging.minimum = Some(Checkpoint {
+            epoch: 2,
+            sequence: 2,
+            history_hash: manifest.body.target_history_hash.clone(),
+        });
         let target_checkpoint = Checkpoint {
             epoch: 2,
             sequence: 2,

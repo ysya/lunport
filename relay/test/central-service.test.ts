@@ -240,6 +240,17 @@ async function add(s: Awaited<ReturnType<typeof setup>>) {
         {
           request_id: request.request_id,
           approved_head: "9".repeat(64),
+          personal_vault: s.vault,
+          minimums: [
+            {
+              vault: s.vault,
+              creation_head: s.trusted.head,
+              creation_authorization_epoch: "2",
+              key_epoch: "1",
+              sequence: "0",
+              history_hash: "0".repeat(64),
+            },
+          ],
           mac: base64(new Uint8Array(32).fill(42)),
         },
       )
@@ -252,6 +263,17 @@ async function add(s: Awaited<ReturnType<typeof setup>>) {
     {
       request_id: request.request_id,
       approved_head: next.head,
+      personal_vault: s.vault,
+      minimums: [
+        {
+          vault: s.vault,
+          creation_head: s.trusted.head,
+          creation_authorization_epoch: "2",
+          key_epoch: "1",
+          sequence: "0",
+          history_hash: "0".repeat(64),
+        },
+      ],
       mac: base64(new Uint8Array(32).fill(42)),
     },
   );
