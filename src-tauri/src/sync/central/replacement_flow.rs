@@ -38,7 +38,7 @@ pub struct Progress {
 fn current(env: &SyncEnv) -> Result<Workspace, AppError> {
     OwnerPath::Current.snapshot(env)
 }
-fn check(env: &SyncEnv, generation: &str) -> Result<(), AppError> {
+pub(super) fn check(env: &SyncEnv, generation: &str) -> Result<(), AppError> {
     if env
         .runtime
         .central_replacement_generation
@@ -125,6 +125,7 @@ pub fn status(env: &SyncEnv) -> Result<Progress, AppError> {
 /// Pauses memory-only verification. It never claims to undo an already committed server approval
 /// or local switch. The final publication and cancellation are ordered by the same generation gate.
 pub fn cancel(env: &SyncEnv) {
+    super::recovery_flow::cancel(env);
     env.runtime
         .central_replacement_generation
         .lock()

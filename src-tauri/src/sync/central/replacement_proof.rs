@@ -79,6 +79,34 @@ pub(super) fn recovery_read(
     }
     Ok(())
 }
+/// Pin original-owner floors before the first kit-authorized ciphertext page.
+pub(super) fn pin_recovery_read(
+    owner: &Workspace,
+    read: &mut super::recovery_read::ReadSession,
+    bridges: &[Bridge],
+) -> Result<(), AppError> {
+    if owner
+        .replacement
+        .as_ref()
+        .is_none_or(|i| i.route != Route::RecoveryKit)
+    {
+        return Err(invalid());
+    }
+    let minimums = prefixes(
+        owner,
+        View {
+            before: read.previous_owner(),
+            chain: read.chain(),
+            proof: read.proof(),
+            auth_epoch: read.auth_epoch(),
+            checkpoint: read.checkpoint(),
+            epochs: read.epochs(),
+            replica: read.replica(),
+        },
+        bridges,
+    )?;
+    read.pin_prefixes(minimums)
+}
 struct View<'a> {
     before: &'a Workspace,
     chain: &'a VerifiedChain,

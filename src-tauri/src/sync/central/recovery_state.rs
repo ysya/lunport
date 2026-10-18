@@ -126,8 +126,13 @@ pub enum RecoveryState {
 pub struct PreparedRecovery {
     pub package: Package,
     pub kit: RecoveryKit,
+    // Retain the native completed witness only until protected staging/Core installation finishes.
+    read: VerifiedRecovery,
 }
 impl PreparedRecovery {
+    pub(super) fn read(&self) -> &VerifiedRecovery {
+        &self.read
+    }
     pub fn create(
         read: VerifiedRecovery,
         old_kit: &RecoveryKit,
@@ -205,7 +210,7 @@ impl PreparedRecovery {
             submitted: false,
         };
         package.validate(read.previous_owner())?;
-        Ok(Self { package, kit })
+        Ok(Self { package, kit, read })
     }
 }
 impl Package {

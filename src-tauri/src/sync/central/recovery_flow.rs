@@ -6,6 +6,7 @@ use super::{
     client_state::Phase,
     controller::{self, Session},
     crypto,
+    owner::OwnerPath,
     recovery::{RecoveryKit, RecoveryReadProof, RecoverySeed},
     recovery_credentials,
     recovery_read::{HistoryPage, ReadSession, RecoveryReply},
@@ -16,10 +17,7 @@ use super::{
     wire::invalid,
     workspace::Workspace,
 };
-use crate::{
-    error::AppError,
-    sync::{env::SyncEnv, record_runtime},
-};
+use crate::{error::AppError, sync::env::SyncEnv};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -27,6 +25,9 @@ use std::{
     time::{Duration, Instant},
 };
 pub struct Reading {
+    scope: Scope,
+    source: Option<Workspace>,
+    source_bridge: Option<Work>,
     before: Workspace,
     session: Arc<Session>,
     replacing: Option<Package>,
@@ -70,12 +71,89 @@ fn progress(
         backup_confirmed: false,
     }
 }
-fn workspace(env: &SyncEnv) -> Result<Workspace, AppError> {
-    record_runtime::snapshot(env)?
-        .0
-        .local
-        .central
-        .ok_or_else(invalid)
+/// Native location/session binding. No selector or session is accepted through a public DTO.
+#[derive(Clone)]
+pub(super) struct Scope {
+    path: OwnerPath,
+    session: Option<Arc<Session>>,
+    generation: Option<String>,
+    started: Instant,
+}
+impl Scope {
+    fn current() -> Self {
+        Self {
+            path: OwnerPath::Current,
+            session: None,
+            generation: None,
+            started: Instant::now(),
+        }
+    }
+    pub(super) fn replacement(
+        operation: &str,
+        session: Arc<Session>,
+        generation: &str,
+        started: Instant,
+    ) -> Result<Self, AppError> {
+        if !super::wire::hex(operation, 32) || !super::wire::hex(generation, 32) {
+            return Err(invalid());
+        }
+        Ok(Self {
+            path: OwnerPath::Replacement(operation.into()),
+            session: Some(session),
+            generation: Some(generation.into()),
+            started,
+        })
+    }
+    fn check(&self, env: &SyncEnv) -> Result<(), AppError> {
+        if let Some(generation) = &self.generation {
+            super::replacement_flow::check(env, generation)?;
+        }
+        Ok(())
+    }
+    fn workspace(&self, env: &SyncEnv) -> Result<Workspace, AppError> {
+        if matches!(self.path, OwnerPath::Replacement(_)) {
+            let source = OwnerPath::Current.snapshot(env)?;
+            if source.control.phase == Phase::SignedOut
+                || source
+                    .replacement
+                    .as_ref()
+                    .is_none_or(|i| i.route != super::replacement::Route::RecoveryKit)
+            {
+                return Err(invalid());
+            }
+        }
+        self.path.snapshot(env)
+    }
+    fn session(&self, env: &SyncEnv) -> Result<Arc<Session>, AppError> {
+        self.session
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| controller::context(env))
+    }
+    fn install<T>(
+        &self,
+        env: &SyncEnv,
+        action: impl FnOnce() -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let gate = self
+            .generation
+            .as_ref()
+            .map(|_| env.runtime.central_replacement_generation.lock().unwrap());
+        if let Some(gate) = gate.as_ref() {
+            if gate.as_deref() != self.generation.as_deref() {
+                return Err(crate::sync::runtime::superseded());
+            }
+        }
+        action()
+    }
+    fn publish(&self, env: &SyncEnv, before: &Workspace, next: &Workspace) -> Result<(), AppError> {
+        self.install(env, || self.path.publish(env, before, next))
+    }
+    fn remember_session(&self, env: &SyncEnv, session: Arc<Session>) {
+        if self.path == OwnerPath::Current {
+            env.runtime.core.lock().unwrap().central_session = Some(session);
+        }
+    }
 }
 fn package(owner: &Workspace) -> Result<&super::recovery_state::Package, AppError> {
     match owner.recovery.as_ref() {
@@ -87,18 +165,50 @@ fn count(env: &SyncEnv) {
     let mut core = env.runtime.core.lock().unwrap();
     core.central_poll.requests = core.central_poll.requests.saturating_add(1);
 }
+struct Budget {
+    started: Instant,
+    requests: usize,
+}
+impl Budget {
+    // Reserve two entry-point requests (refresh or selected registration) as well as all
+    // requests counted below. Child and ordinary commands use the same conservative cap.
+    fn new(scope: &Scope) -> Self {
+        Self {
+            started: scope.started,
+            requests: 2,
+        }
+    }
+    fn available(&self) -> bool {
+        self.requests < 32 && self.started.elapsed() < Duration::from_secs(30)
+    }
+    fn charge(&mut self) -> Result<(), AppError> {
+        if !self.available() {
+            return Err(AppError::Other("Continue recovery verification to finish the remaining requests. Saved progress is retained.".into()));
+        }
+        self.requests += 1;
+        Ok(())
+    }
+}
 fn call(
     env: &SyncEnv,
+    budget: &mut Budget,
     action: impl FnOnce() -> Result<Reply, AppError>,
 ) -> Result<Reply, AppError> {
     round::check_cooldown(env)?;
+    budget.charge()?;
     count(env);
     let reply = action()?;
     round::require_success(env, &reply)?;
     Ok(reply)
 }
-fn overview(env: &SyncEnv, api: &Api, session: &Session) -> Result<AccountOverview, AppError> {
+fn overview(
+    env: &SyncEnv,
+    budget: &mut Budget,
+    api: &Api,
+    session: &Session,
+) -> Result<AccountOverview, AppError> {
     round::check_cooldown(env)?;
+    budget.charge()?;
     count(env);
     controller::overview(env, api, session)
 }
@@ -117,23 +227,15 @@ fn check_session(owner: &Workspace, session: &Session) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn publish(env: &SyncEnv, before: &Workspace, next: &Workspace) -> Result<(), AppError> {
-    record_runtime::mutate_records(env, |records| {
-        if records.local.central.as_ref() != Some(before) {
-            return Err(crate::sync::runtime::superseded());
-        }
-        let mut candidate = records.clone();
-        candidate.local.central = Some(next.clone());
-        Ok(candidate)
-    })?;
-    Ok(())
-}
 pub fn status(env: &SyncEnv) -> Result<Progress, AppError> {
+    status_at(env, &Scope::current())
+}
+pub(super) fn status_at(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppError> {
     controller::require_enabled()?;
-    let owner = workspace(env)?;
+    let owner = scope.workspace(env)?;
     match env.runtime.central_recovery_read.try_lock() {
         Ok(read) => {
-            if let Some(r) = read.as_ref() {
+            if let Some(r) = read.as_ref().filter(|r| r.scope.path == scope.path) {
                 return Ok(progress(
                     "reading",
                     Some(&r.operation),
@@ -196,18 +298,38 @@ pub fn revalidate(env: &SyncEnv, encoded_kit: Option<&str>) -> Result<Progress, 
 }
 fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<Progress, AppError> {
     controller::require_enabled()?;
+    let scope = Scope::current();
     if !revalidate {
         controller::refresh(env)?;
     }
+    start_at(env, scope, encoded_kit, revalidate)
+}
+pub(super) fn start_at(
+    env: &SyncEnv,
+    scope: Scope,
+    encoded_kit: Option<&str>,
+    revalidate: bool,
+) -> Result<Progress, AppError> {
+    controller::require_enabled()?;
+    let mut budget = Budget::new(&scope);
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     round::check_cooldown(env)?;
-    let mut before = workspace(env)?;
+    scope.check(env)?;
+    let mut before = scope.workspace(env)?;
+    let source = if matches!(scope.path, OwnerPath::Replacement(_)) {
+        Some(OwnerPath::Current.snapshot(env)?)
+    } else {
+        None
+    };
     let replacing = if revalidate {
         Some(package(&before)?.clone())
     } else {
         None
     };
-    if (!revalidate && before.control.phase != Phase::AwaitingApproval)
+    if (!revalidate
+        && before.control.phase != Phase::AwaitingApproval
+        && !(matches!(scope.path, OwnerPath::Replacement(_))
+            && before.control.phase == Phase::Setup))
         || before.control.anchor.is_some()
         || before.replacement.is_some()
         || (!revalidate && before.recovery.is_some())
@@ -218,11 +340,12 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
     env.runtime
         .central_recovery_cancel
         .store(false, Ordering::SeqCst);
-    let session = controller::context(env)?;
+    let session = scope.session(env)?;
     let api = Api::new(&before.control.profile.origin)?;
-    let session = Arc::new(register(env, &session, &api)?);
+    let session = Arc::new(register(env, &mut budget, &session, &api)?);
     check_session(&before, &session)?;
     let device = session.device.as_ref().ok_or_else(invalid)?;
+    budget.charge()?;
     count(env);
     let info = api.info()?;
     if info.oidc != before.control.profile.oidc
@@ -233,13 +356,13 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
     {
         return Err(invalid());
     }
-    let remote = overview(env, &api, &session)?;
+    let remote = overview(env, &mut budget, &api, &session)?;
     if remote.auth_epoch < before.control.auth_epoch {
         return Err(AppError::Other(
             "Refresh the account checkpoint before recovery. Local data is retained.".into(),
         ));
     }
-    env.runtime.core.lock().unwrap().central_session = Some(Arc::clone(&session));
+    scope.remember_session(env, Arc::clone(&session));
     let proof = remote.proof.as_ref().ok_or_else(invalid)?;
     if let Some(old) = &replacing {
         if old.admission.verify(proof).is_ok() {
@@ -248,7 +371,7 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
             }
             let operation = old.operation.clone();
             drop(lifecycle);
-            return confirm(env, &operation);
+            return confirm_at(env, &scope, &operation);
         }
     }
     if device.device_state != DeviceState::Pending
@@ -293,7 +416,10 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
         (
             supplied.ok_or_else(invalid)?,
             RecoverySeed::generate()?,
-            crypto::random_id(16)?,
+            match &scope.path {
+                OwnerPath::Current => crypto::random_id(16)?,
+                OwnerPath::Replacement(operation) => operation.clone(),
+            },
             None,
         )
     };
@@ -303,6 +429,20 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
         return Err(invalid());
     }
     let chain = proof.verify(old_kit.anchor(), None)?;
+    if let Some(source) = &source {
+        if source
+            .control
+            .anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor != old_kit.anchor())
+            || remote.auth_epoch < source.control.auth_epoch
+        {
+            return Err(invalid());
+        }
+        if let Some(anchor) = &source.control.anchor {
+            proof.verify(anchor, source.control.highwater.as_ref())?;
+        }
+    }
     if remote.vaults.len() != 1 {
         return Err(invalid());
     }
@@ -357,11 +497,11 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
             read_owner = renewed;
             read_owner.recovery = None;
         } else {
-            publish(env, &before, &renewed)?;
+            scope.publish(env, &before, &renewed)?;
             before = renewed;
             read_owner = before.clone();
         }
-        call(env, || {
+        call(env, &mut budget, || {
             api.control(
                 device,
                 Control::Enrollment,
@@ -383,7 +523,7 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
         .as_ref()
         .ok_or_else(invalid)?;
     let read_proof = old_kit.read_proof(&chain, request, remote.auth_epoch, env.now())?;
-    let reply = call(env, || {
+    let reply = call(env, &mut budget, || {
         api.control(
             device,
             Control::RecoveryRead,
@@ -398,6 +538,24 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
     let response: RecoveryReply = reply.decode()?;
     let mut read =
         ReadSession::begin_fresh(&read_owner, &old_kit, proof.clone(), response, env.now())?;
+    let source_bridge = if let Some(source) = &source {
+        if !read.epochs().starts_with(&source.epochs)
+            || !read.epochs().starts_with(&source.observed_epochs)
+        {
+            return Err(invalid());
+        }
+        read.retain_prefix_hashes()?;
+        match super::replacement_proof::minimums(source)? {
+            Some((floors, _, _)) => Some(Work::new(
+                floors[0].clone(),
+                floors.into_iter().skip(1).collect(),
+                read.epochs().len() as u64 + 1,
+            )?),
+            None => None,
+        }
+    } else {
+        None
+    };
     let previous = known
         .as_ref()
         .map(|(known, node, _)| (known.clone(), node.clone()));
@@ -430,6 +588,9 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
     let total = read.total();
     cancelled(env)?;
     *env.runtime.central_recovery_read.lock().unwrap() = Some(Reading {
+        scope: scope.clone(),
+        source,
+        source_bridge,
         before,
         session,
         replacing,
@@ -444,39 +605,83 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
         tail: vec![],
         bridge,
     });
-    let result = advance_locked(env);
+    let result = advance_locked(env, &scope.path, &mut budget);
     if env.runtime.central_recovery_cancel.load(Ordering::SeqCst) {
         env.runtime.central_recovery_read.lock().unwrap().take();
     }
     drop(lifecycle);
     result?;
-    status(env)
+    status_at(env, &scope)
 }
 pub fn advance(env: &SyncEnv) -> Result<Progress, AppError> {
+    advance_at(env, &Scope::current())
+}
+pub(super) fn advance_at(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppError> {
     controller::require_enabled()?;
+    scope.check(env)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
-    let result = advance_locked(env);
+    let mut budget = Budget::new(scope);
+    let result = advance_locked(env, &scope.path, &mut budget);
     if env.runtime.central_recovery_cancel.load(Ordering::SeqCst) {
         env.runtime.central_recovery_read.lock().unwrap().take();
     }
     drop(lifecycle);
     result?;
-    status(env)
+    status_at(env, scope)
 }
-fn advance_locked(env: &SyncEnv) -> Result<(), AppError> {
+fn advance_locked(env: &SyncEnv, path: &OwnerPath, budget: &mut Budget) -> Result<(), AppError> {
     round::check_cooldown(env)?;
-    let started = Instant::now();
     let mut holder = env.runtime.central_recovery_read.lock().unwrap();
     let state = holder.as_mut().ok_or_else(invalid)?;
+    if &state.scope.path != path {
+        return Err(invalid());
+    }
+    state.scope.check(env)?;
     cancelled(env)?;
-    if workspace(env)? != state.before {
+    state.scope.check(env)?;
+    if state.scope.workspace(env)? != state.before {
         return Err(crate::sync::runtime::superseded());
     }
     let session = &state.session;
     check_session(&state.before, session)?;
     let device = session.device.as_ref().ok_or_else(invalid)?;
     let api = Api::new(&state.before.control.profile.origin)?;
-    let mut requests = 0;
+    if let (Some(source), Some(read)) = (&state.source, state.read.as_mut()) {
+        if let Some(work) = state.source_bridge.as_mut() {
+            loop {
+                let Some((epoch, after)) = work.next(read.chain(), read.vault(), read.epochs())?
+                else {
+                    break;
+                };
+                if !budget.available() {
+                    return Ok(());
+                }
+                cancelled(env)?;
+                state.scope.check(env)?;
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct SourcePage {
+                    manifest: SignedRekey,
+                    digests: Vec<SourceDigest>,
+                }
+                let page:SourcePage=call(env,budget,||api.control(device,Control::RecoverySource,&serde_json::json!({"proof":state.proof,"vault":read.vault(),"epoch":epoch.to_string(),"after":after.to_string()})))?.decode()?;
+                work.append(
+                    read.chain(),
+                    read.vault(),
+                    read.epochs(),
+                    &page.manifest,
+                    &page.digests,
+                )?;
+            }
+        }
+        if read.position() == 0 {
+            let bridges = state
+                .source_bridge
+                .as_ref()
+                .map_or(&[][..], |work| work.bridges.as_slice());
+            super::replacement_proof::pin_recovery_read(source, read, bridges)?;
+        }
+    }
     if let (Some(work), Some(read)) = (state.bridge.as_mut(), state.read.as_mut()) {
         loop {
             let next = work.next(read.chain(), read.vault(), read.epochs())?;
@@ -486,17 +691,18 @@ fn advance_locked(env: &SyncEnv) -> Result<(), AppError> {
                 }
                 break;
             };
-            if requests >= 32 || started.elapsed() >= Duration::from_secs(30) {
+            if !budget.available() {
                 return Ok(());
             }
             cancelled(env)?;
+            state.scope.check(env)?;
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct SourcePage {
                 manifest: SignedRekey,
                 digests: Vec<SourceDigest>,
             }
-            let page: SourcePage = call(env, || api.control(device, Control::RecoverySource,
+            let page: SourcePage = call(env, budget, || api.control(device, Control::RecoverySource,
                 &serde_json::json!({"proof":state.proof,"vault":read.vault(),"epoch":epoch.to_string(),"after":after.to_string()})))?.decode()?;
             work.append(
                 read.chain(),
@@ -505,17 +711,14 @@ fn advance_locked(env: &SyncEnv) -> Result<(), AppError> {
                 &page.manifest,
                 &page.digests,
             )?;
-            requests += 1;
         }
     }
 
     if let Some(read) = state.read.as_mut() {
-        while read.position() < read.total()
-            && requests < 32
-            && started.elapsed() < Duration::from_secs(30)
-        {
+        while read.position() < read.total() && budget.available() {
             cancelled(env)?;
-            let page: HistoryPage = call(env, || api.control(device, Control::RecoveryHistory,
+            state.scope.check(env)?;
+            let page: HistoryPage = call(env, budget, || api.control(device, Control::RecoveryHistory,
                 &serde_json::json!({"proof":state.proof,"vault":read.vault(),"since":read.position().to_string()})))?.decode()?;
             let tail = if let Some(work) = &state.bridge {
                 page.records
@@ -535,7 +738,6 @@ fn advance_locked(env: &SyncEnv) -> Result<(), AppError> {
             };
             read.append(page)?;
             state.tail.extend(tail);
-            requests += 1;
         }
         if read.position() != read.total() {
             return Ok(());
@@ -569,31 +771,86 @@ fn advance_locked(env: &SyncEnv) -> Result<(), AppError> {
         });
     }
     cancelled(env)?;
+    state.scope.check(env)?;
     let prepared = state.prepared.as_ref().ok_or_else(invalid)?;
-    if state.replacing.is_some() {
-        let permit =
-            recovery_credentials::stage_rebase(env, &state.before, prepared, &state.old_kit)?;
-        cancelled(env)?;
-        recovery_credentials::install_rebase(env, &state.before, &prepared.package, permit)?;
-    } else {
-        let permit = recovery_credentials::stage(env, &state.before, prepared, &state.old_kit)?;
-        cancelled(env)?;
-        recovery_credentials::install(env, &state.before, &prepared.package, permit)?;
+    if state.source.is_some() {
+        let latest = OwnerPath::Current.snapshot(env)?;
+        let bridges = state
+            .source_bridge
+            .as_ref()
+            .map_or(&[][..], |work| work.bridges.as_slice());
+        super::replacement_proof::recovery_read(&latest, prepared.read(), bridges)?;
     }
-    env.runtime.core.lock().unwrap().central_session = Some(Arc::clone(&state.session));
+    if state.replacing.is_some() {
+        let permit = recovery_credentials::stage_rebase_at(
+            env,
+            &state.scope.path,
+            &state.before,
+            prepared,
+            &state.old_kit,
+        )?;
+        cancelled(env)?;
+        state.scope.check(env)?;
+        state.scope.install(env, || {
+            recovery_credentials::install_rebase_at(
+                env,
+                &state.scope.path,
+                &state.before,
+                &prepared.package,
+                permit,
+            )
+        })?;
+    } else {
+        let permit = recovery_credentials::stage_at(
+            env,
+            &state.scope.path,
+            &state.before,
+            prepared,
+            &state.old_kit,
+        )?;
+        cancelled(env)?;
+        state.scope.check(env)?;
+        state.scope.install(env, || {
+            recovery_credentials::install_at(
+                env,
+                &state.scope.path,
+                &state.before,
+                &prepared.package,
+                permit,
+            )
+        })?;
+    }
+    state
+        .scope
+        .remember_session(env, Arc::clone(&state.session));
     holder.take();
     Ok(())
 }
-fn register(env: &SyncEnv, session: &Session, api: &Api) -> Result<Session, AppError> {
+fn register(
+    env: &SyncEnv,
+    budget: &mut Budget,
+    session: &Session,
+    api: &Api,
+) -> Result<Session, AppError> {
+    budget.charge()?;
     count(env);
     bootstrap::register(env, session, api)
 }
 /// The user confirms the newly revealed kit and understands that prior devices lose cloud access.
 /// Once submitted, retries reuse the exact signed operation; a stale first-send plan is retained.
 pub fn confirm(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
+    confirm_at(env, &Scope::current(), operation)
+}
+pub(super) fn confirm_at(
+    env: &SyncEnv,
+    scope: &Scope,
+    operation: &str,
+) -> Result<Progress, AppError> {
     controller::require_enabled()?;
+    let mut budget = Budget::new(scope);
+    scope.check(env)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
-    let mut before = workspace(env)?;
+    let mut before = scope.workspace(env)?;
     if matches!(before.recovery, Some(RecoveryState::Accepted { .. })) {
         if before
             .recovery
@@ -602,9 +859,9 @@ pub fn confirm(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
         {
             return Err(invalid());
         }
-        recovery_credentials::cleanup(env)?;
+        scope.install(env, || recovery_credentials::cleanup_at(env, &scope.path))?;
         drop(lifecycle);
-        return status(env);
+        return status_at(env, scope);
     }
     let source = package(&before)?;
     if before
@@ -618,10 +875,10 @@ pub fn confirm(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
         return Err(invalid());
     }
     let api = Api::new(&before.control.profile.origin)?;
-    let session = controller::context(env)?;
-    let mut session = register(env, &session, &api)?;
+    let session = scope.session(env)?;
+    let mut session = register(env, &mut budget, &session, &api)?;
     check_session(&before, &session)?;
-    let remote = overview(env, &api, &session)?;
+    let remote = overview(env, &mut budget, &api, &session)?;
     let already_accepted = remote
         .proof
         .as_ref()
@@ -646,8 +903,10 @@ pub fn confirm(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
             if remote.phase != "ready" || remote.barrier.is_some() {
                 return Err(invalid());
             }
-            recovery_credentials::confirm_backup(env, operation)?;
-            before = workspace(env)?;
+            scope.install(env, || {
+                recovery_credentials::confirm_backup_at(env, &scope.path, operation)
+            })?;
+            before = scope.workspace(env)?;
             let source = package(&before)?;
             source.require_first_send(
                 &before,
@@ -661,12 +920,12 @@ pub fn confirm(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
                 Some(RecoveryState::Pending { package }) => package.submitted = true,
                 _ => return Err(invalid()),
             }
-            publish(env, &before, &next)?;
+            scope.publish(env, &before, &next)?;
             before = next;
         }
         let source = package(&before)?;
         let wraps = BTreeMap::from([(source.admission.vault.clone(), source.wraps.clone())]);
-        let response = call(env, || {
+        let response = call(env, &mut budget, || {
             api.control(
                 session.device.as_ref().ok_or_else(invalid)?,
                 Control::Recover,
@@ -676,27 +935,27 @@ pub fn confirm(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
         if ![200, 202].contains(&response.status) {
             return Err(invalid());
         }
-        session = register(env, &session, &api)?;
+        session = register(env, &mut budget, &session, &api)?;
     }
-    let mut remote = overview(env, &api, &session)?;
+    let mut remote = overview(env, &mut budget, &api, &session)?;
     let source = package(&before)?;
     source
         .admission
         .verify(remote.proof.as_ref().ok_or_else(invalid)?)?;
     if remote.phase != "ready" || remote.barrier.is_some() {
-        call(env, || {
+        call(env, &mut budget, || {
             api.control(
                 session.device.as_ref().ok_or_else(invalid)?,
                 Control::ResumeBarrier,
                 &serde_json::json!({}),
             )
         })?;
-        remote = overview(env, &api, &session)?;
+        remote = overview(env, &mut budget, &api, &session)?;
     }
     if remote.phase != "ready" || remote.barrier.is_some() {
-        env.runtime.core.lock().unwrap().central_session = Some(Arc::new(session));
+        scope.remember_session(env, Arc::new(session));
         drop(lifecycle);
-        return status(env);
+        return status_at(env, scope);
     }
     if remote.vaults.len() != 1
         || remote
@@ -714,11 +973,11 @@ pub fn confirm(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
     next.control = next
         .control
         .remember_denials(remote.denied.iter().map(String::as_str))?;
-    publish(env, &before, &next)?;
-    env.runtime.core.lock().unwrap().central_session = Some(Arc::new(session));
-    recovery_credentials::cleanup(env)?;
+    scope.publish(env, &before, &next)?;
+    scope.remember_session(env, Arc::new(session));
+    scope.install(env, || recovery_credentials::cleanup_at(env, &scope.path))?;
     drop(lifecycle);
     env.events.status();
     env.events.wake_implicit();
-    status(env)
+    status_at(env, scope)
 }

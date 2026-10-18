@@ -230,6 +230,24 @@ impl ReadSession {
             baseline,
         })
     }
+    pub(super) fn previous_owner(&self) -> &Workspace {
+        &self.before
+    }
+    pub(super) fn proof(&self) -> &ControlProof {
+        &self.proof
+    }
+    pub(super) fn auth_epoch(&self) -> u64 {
+        self.auth_epoch
+    }
+    pub(super) fn checkpoint(&self) -> &Checkpoint {
+        &self.baseline.target
+    }
+    pub(super) fn replica(&self) -> &Replica {
+        &self.baseline.replica
+    }
+    pub(super) fn retain_prefix_hashes(&mut self) -> Result<(), AppError> {
+        self.baseline.retain_prefix_hashes()
+    }
     pub(super) fn chain(&self) -> &VerifiedChain {
         &self.baseline.chain
     }
