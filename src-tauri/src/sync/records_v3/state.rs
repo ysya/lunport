@@ -60,6 +60,22 @@ pub struct LocalState {
     /// Published atomically with an import overlay; retries preserve subsequent edits/deletions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub import_receipts: BTreeMap<String, LocalImportReceipt>,
+    /// Local human approvals only; never published as synchronized records.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_approvals: BTreeMap<String, CredentialApproval>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialApproval {
+    pub device_id: String,
+    pub scope: HostScope,
+    pub account_id: Option<String>,
+    pub relay_url: Option<String>,
+    pub hostname: String,
+    pub port: u16,
+    pub user: String,
+    pub fingerprint: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,7 +133,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
         2 => serde_json::from_str(text)
             .map(DecodedState::V2)
             .map_err(state_decode_error),
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION => {
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -198,9 +214,12 @@ pub fn account_writes_blocked(state: &SyncStateV3) -> bool {
 }
 
 pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> {
+    if !state.local.credential_approvals.is_empty() && state.version < LOCAL_CREDENTIAL_STATE_VERSION {
+        return Err(state_invalid("credential_approvals", "local", "local credential approvals need state version 6"));
+    }
     if !matches!(
         state.version,
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",

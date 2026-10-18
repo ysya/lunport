@@ -287,7 +287,7 @@ export class IpLimiter extends DurableObject<Env> {
 
   /**
    * 一次呼叫計入多個桶(只寫一次儲存),全部都在上限內才回 true。`cost` 一次計入多筆(批次查詢每項計 1);
-   * 超過上限也照計,與單筆的語意相同。
+   * 首次超限計入並持久保存拒絕狀態;同視窗後續拒絕不再寫入。
    *
    * alarm 只在這次呼叫開了新視窗時才設(計到的桶已過期,包括補上的 { start: 0 } 桶),設在新視窗開始後一小時。
    * 所以 alarm 永遠是「最晚開始的視窗 + 一小時」,其他視窗都開始得更早:alarm 觸發、`deleteAll()` 時沒有還在進行的視窗。
@@ -304,6 +304,11 @@ export class IpLimiter extends DurableObject<Env> {
       request: stored.request ?? { start: 0, count: 0 },
       pull: stored.pull ?? { start: 0, count: 0 },
     };
+    // A blocked bucket is durable until its fixed window expires. Repeated denied
+    // requests must not keep consuming writes (or charge unrelated buckets).
+    if (charges.some(([bucket]) => now - windows[bucket].start < IP_WINDOW_MS && windows[bucket].count > IP_LIMITS[bucket])) {
+      return false;
+    }
     let started = false;
     let allowed = true;
     for (const [bucket, cost] of charges) {
@@ -313,7 +318,7 @@ export class IpLimiter extends DurableObject<Env> {
         w.count = 0;
         started = true;
       }
-      w.count += cost;
+      w.count = Math.min(w.count + cost, IP_LIMITS[bucket] + 1);
       if (w.count > IP_LIMITS[bucket]) allowed = false;
     }
     await this.ctx.storage.put("windows", windows);

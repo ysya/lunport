@@ -9,6 +9,7 @@ pub const GROUPED_HOST_SCHEMA: u32 = 3;
 pub const GROUP_STATE_VERSION: u32 = 4;
 pub const NAVIGATION_STATE_VERSION: u32 = 5;
 pub const STATE_VERSION: u32 = 3;
+pub const LOCAL_CREDENTIAL_STATE_VERSION: u32 = 6;
 pub const MAX_JUMPS: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

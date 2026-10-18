@@ -177,6 +177,8 @@ pub struct BrokerAuth<'a> {
     directory: &'a dyn HostDirectory,
     /// Keys opened for this connect (`unlock`), with their public key lines: the login asks for both and must not wait for the vault.
     opened: Mutex<HashMap<String, (Material, String)>>,
+    /// Bind credential release to the exact server key of this connection attempt.
+    server_keys: Mutex<HashMap<HostId, HostKey>>,
     /// Passwords the person typed, by hop: given again on the reconnects of this connect.
     typed: Mutex<HashMap<HostId, Secret>>,
     /// Hops whose prompt the person cancelled or let run out, or whose client went away: they are not asked again in this connect.
@@ -195,6 +197,7 @@ impl<'a> BrokerAuth<'a> {
             owner,
             directory,
             opened: Mutex::new(HashMap::new()),
+            server_keys: Mutex::new(HashMap::new()),
             typed: Mutex::new(HashMap::new()),
             cancelled: Mutex::new(HashSet::new()),
             gave: Mutex::new(HashMap::new()),
@@ -205,6 +208,7 @@ impl<'a> BrokerAuth<'a> {
     /// The target the next `connect` uses: the engine asks a hop that starts with the password method for its password before it
     /// connects, and only then may a person be asked.
     pub fn prepare(&self, target: &Target) {
+        *locked(&self.server_keys) = target.hops.iter().filter_map(|hop| hop.pinned.clone().map(|key| (hop.id.clone(), key))).collect();
         *locked(&self.password_first) = target.hops.iter().filter(|hop| hop.auth == AuthMethod::Password).map(|hop| (hop.id.clone(), prompt_wait(hop))).collect();
     }
 
@@ -320,6 +324,10 @@ impl AuthSource for BrokerAuth<'_> {
     /// What the person typed in this connect, else the keychain's; a person is asked only for a hop that starts with the password method,
     /// whose password the engine asks for before it connects. A fallback password (after a refused key) never waits for a person.
     fn password(&self, hop: &HopRef) -> Option<Secret> {
+        // Runs before password-first handshakes and during password fallback.
+        // Never prompt for or release a password to an unapproved Records identity.
+        let server_key = locked(&self.server_keys).get(&hop.id).cloned();
+        if !self.directory.password_authorized(hop, server_key.as_ref()).unwrap_or(false) { return None; }
         if let Some(typed) = locked(&self.typed).get(&hop.id) {
             locked(&self.gave).insert(hop.id.clone(), PasswordSource::Typed);
             return Some(typed.clone());

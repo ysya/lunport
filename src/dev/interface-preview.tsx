@@ -153,7 +153,7 @@ else {
     const [answer, setAnswer] = useState("");
     if (scenario === "legacy") return <App />;
     if (scenario === "hostkey" || scenario === "hostkey-changed") return <HostKeyCard
-      request={{ id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null }}
+      request={{ user: "deploy", id: "fixture-hostkey", alias: "Production web", hostname: "web.example.com", port: 22, algorithm: "ssh-ed25519", fingerprint: "SHA256:DemoFingerprintForVisualReviewOnly", changed: scenario === "hostkey-changed" ? { fingerprint: "SHA256:PreviousDemoFingerprintForVisualReviewOnly", pinned_at_ms: 1700000000000 } : null }}
       busy={false} onAnswer={() => {}}
     />;
     if (scenario === "approval") return <ApprovalCard

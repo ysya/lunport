@@ -78,6 +78,7 @@ pub(crate) fn confirm(
     if host.group_error.is_some()
         || host.effective_payload.hostname != hop.hostname
         || host.effective_payload.port != hop.port
+        || (!host.effective_payload.user.is_empty() && host.effective_payload.user != hop.user)
     {
         return Err(failed("The confirmed endpoint changed; connect again."));
     }
@@ -87,7 +88,8 @@ pub(crate) fn confirm(
         .transpose()
         .map_err(failed)?;
     match current.as_ref().map(|p| &p.key) {
-        Some(current) if current != key && previous != Some(current) => {
+        Some(current) if current != key && previous != Some(current)
+            && (previous.is_some() || super::credential_approval::matches(&captured, hop, current)) => {
             return Err(failed("The confirmed host key changed; connect again."))
         }
         None if previous.is_some() => {
@@ -141,6 +143,7 @@ pub(crate) fn confirm(
                 pinned_at_ms,
             )
             .map_err(failed)
+            .and_then(|next| super::credential_approval::approve(next, hop, key).map_err(failed))
         })?;
     }
     env.events.wake();
