@@ -340,6 +340,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::central::commands::central_recovery_status,
             sync::central::commands::central_begin_account_recovery,
             sync::central::commands::central_advance_account_recovery,
+            sync::central::commands::central_revalidate_account_recovery,
             sync::central::commands::central_cancel_account_recovery,
             sync::central::commands::central_reveal_new_recovery,
             sync::central::commands::central_confirm_account_recovery,

@@ -129,6 +129,7 @@ export type CentralRecoveryProgress = {
     | "cleanup_required"
     | "complete";
   operation: string | null;
+  backup_confirmed: boolean;
   verified: number;
   total: number;
   root_fingerprint: string | null;
@@ -148,6 +149,10 @@ export const centralRecoveryStatus = () =>
 // Kit inputs and reveal responses are passed directly; neither belongs in a query/mutation cache.
 export const centralBeginAccountRecovery = (kit: string) =>
   tauriInvoke<CentralRecoveryProgress>("central_begin_account_recovery", {
+    kit,
+  });
+export const centralRevalidateAccountRecovery = (kit: string | null) =>
+  tauriInvoke<CentralRecoveryProgress>("central_revalidate_account_recovery", {
     kit,
   });
 export const centralAdvanceAccountRecovery = () =>

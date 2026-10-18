@@ -769,24 +769,38 @@ export class VaultStore extends DurableObject<Env> {
   sourceProof(actor: Principal, epoch: number, after: number): Response {
     const state = this.load();
     if (!this.allowed(state, actor)) return rpcResponse({ status: 403 });
+    return rpcResponse(this.sourceResult(epoch, after));
+  }
+  recoverySourceForGrant(
+    grant: RecoveryReadGrant,
+    epoch: number,
+    after: number,
+  ): Response {
+    if (!this.recoveryAllowed(this.load(), grant))
+      return rpcResponse({ status: 403 });
+    return rpcResponse(this.sourceResult(epoch, after));
+  }
+  private sourceResult(epoch: number, after: number): Result {
     if (
       !Number.isSafeInteger(epoch) ||
       epoch < 2 ||
+      epoch > 65 ||
       !Number.isSafeInteger(after) ||
-      after < 0
+      after < 0 ||
+      after > 16384
     )
-      return rpcResponse({ status: 400 });
+      return { status: 400 };
     const commit = this.ctx.storage.sql
       .exec<{ manifest: string }>(
         "SELECT manifest FROM rekey_commits WHERE epoch=?",
         epoch,
       )
       .toArray()[0];
-    if (!commit) return rpcResponse({ status: 404 });
+    if (!commit) return { status: 404 };
     const manifest = JSON.parse(commit.manifest) as SignedRekey;
     if (after > safeNumber(manifest.body.source_sequence, true))
-      return rpcResponse({ status: 400 });
-    return rpcResponse({
+      return { status: 400 };
+    return {
       status: 200,
       body: {
         manifest,
@@ -799,7 +813,7 @@ export class VaultStore extends DurableObject<Env> {
           .toArray()
           .map((r) => ({ sequence: String(r.seq), digest: r.digest })),
       },
-    });
+    };
   }
   operationReceipt(actor: Principal, id: string): Response {
     const state = this.load();

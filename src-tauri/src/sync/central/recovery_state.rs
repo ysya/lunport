@@ -96,6 +96,10 @@ impl Admission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Package {
+    #[serde(default)]
+    pub attempt: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revalidation: Option<super::recovery_revalidation::Evidence>,
     pub operation: String,
     pub source_proof: ControlProof,
     pub node: SignedMembership,
@@ -188,6 +192,8 @@ impl PreparedRecovery {
             )?);
         }
         let package = Package {
+            attempt: 0,
+            revalidation: None,
             operation,
             source_proof: read.proof().clone(),
             node,
@@ -209,7 +215,10 @@ impl Package {
         proof
     }
     pub fn validate(&self, owner: &Workspace) -> Result<(), AppError> {
-        if !hex(&self.operation, 32)
+        if self.attempt > MAX_SAFE_INTEGER
+            || self.attempt == 0 && self.revalidation.is_some()
+            || self.attempt > 0 && self.revalidation.is_none()
+            || !hex(&self.operation, 32)
             || owner.control.anchor.is_some()
             || owner.control.cutover
             || owner.control.library.is_some()
@@ -235,6 +244,9 @@ impl Package {
             || !self.replica.baseline_ready()
         {
             return Err(invalid());
+        }
+        if let Some(evidence) = &self.revalidation {
+            evidence.verify(self)?;
         }
         let proof = self.proof();
         let chain = self.admission.verify(&proof)?;
@@ -418,11 +430,14 @@ impl RecoveryState {
                 let mut expected = before.clone();
                 expected.backup_confirmed = next.backup_confirmed;
                 expected.submitted = next.submitted;
-                if &expected != next
-                    || before.backup_confirmed && !next.backup_confirmed
-                    || before.submitted && !next.submitted
-                {
-                    return Err(invalid());
+                if &expected == next {
+                    if before.backup_confirmed && !next.backup_confirmed
+                        || before.submitted && !next.submitted
+                    {
+                        return Err(invalid());
+                    }
+                } else {
+                    super::recovery_revalidation::verify_replacement(before, next)?;
                 }
             }
             (

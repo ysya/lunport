@@ -91,6 +91,7 @@ const paths = new Set([
   "/v2/pull",
   "/v2/recovery/wraps",
   "/v2/recovery/history",
+  "/v2/recovery/source",
   "/v2/recovery/commit",
   "/v2/device-access",
 ]);
@@ -127,6 +128,7 @@ export async function centralFetch(
               "signed-rekey",
               "paired-checkpoints",
               "recovery-history",
+              "recovery-source-proofs",
             ],
             oidc: {
               issuer: config.issuer,
@@ -327,6 +329,29 @@ export async function centralFetch(
           parsed.proof as any,
           parsed.vault,
           since,
+        ),
+      );
+    }
+    case "/v2/recovery/source": {
+      if (
+        !exactObject(parsed, ["proof", "vault", "epoch", "after"]) ||
+        !hex(parsed.vault, 64)
+      )
+        return response({ status: 400 });
+      let epoch: number, after: number;
+      try {
+        epoch = safeNumber(parsed.epoch, false);
+        after = safeNumber(parsed.after, true);
+      } catch {
+        return response({ status: 400 });
+      }
+      return response(
+        await account.recoverySource(
+          actor,
+          parsed.proof as any,
+          parsed.vault,
+          epoch,
+          after,
         ),
       );
     }

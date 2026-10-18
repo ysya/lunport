@@ -271,6 +271,24 @@ describe("signed full-history rekey", () => {
       (await s.child.commitRekey(s.actor, fixture.manifest.body.rotation_id))
         .status,
     ).toBe(200);
+    const recoverySource = await s.child.recoverySourceForGrant(grant, 2, 0);
+    expect(recoverySource.status).toBe(200);
+    expect(await recoverySource.json()).toEqual({
+      manifest: fixture.manifest,
+      digests: fixture.source_rows.map((row) => ({
+        sequence: row.sequence,
+        digest: row.digest,
+      })),
+    });
+    expect(
+      (
+        await s.child.recoverySourceForGrant(
+          { ...grant, head: "0".repeat(64) },
+          2,
+          0,
+        )
+      ).status,
+    ).toBe(403);
     const recovery = await s.child.recoveryForGrant(grant);
     expect(recovery.status).toBe(200);
     expect(await recovery.json()).toMatchObject({

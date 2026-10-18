@@ -549,6 +549,16 @@ export class AccountStore extends DurableObject<Env> {
       !sameDevice(request.device, observed.registrations[actor.device].device)
     )
       return { status: 400 };
+    const previous = observed.registrations[actor.device].request;
+    // A delayed old enrollment must not reinstall the nonce of an abandoned Recover.
+    // Exact response-loss retries remain idempotent; replacements advance signed time.
+    if (
+      previous &&
+      requestId(previous) !== requestId(request) &&
+      safeNumber(request.created_at_ms, false) <=
+        safeNumber(previous.created_at_ms, false)
+    )
+      return { status: 409 };
     return this.ctx.storage.transactionSync(() => {
       const state = this.load();
       if (
@@ -913,6 +923,50 @@ export class AccountStore extends DurableObject<Env> {
     const result = await this.env.VAULT.getByName(
       observed.id + ":" + vault,
     ).recoveryHistoryForGrant(grant, since);
+    if (result.status !== 200) {
+      const status = result.status;
+      await result.body?.cancel();
+      return { status };
+    }
+    const page = await result.json();
+    if (!this.recoveryUnchanged(observed, actor, grant)) return { status: 409 };
+    return { status: 200, body: page };
+  }
+  recoverySource(
+    actor: Principal,
+    proof: RecoveryReadProof,
+    vault: string,
+    epoch: number,
+    after: number,
+  ): Promise<Response> {
+    return rpcCall(() =>
+      this.recoverySourceResult(actor, proof, vault, epoch, after),
+    );
+  }
+  private async recoverySourceResult(
+    actor: Principal,
+    proof: RecoveryReadProof,
+    vault: string,
+    epoch: number,
+    after: number,
+  ): Promise<Result> {
+    if (
+      !hex(vault, 64) ||
+      !Number.isSafeInteger(epoch) ||
+      epoch < 2 ||
+      epoch > 65 ||
+      !Number.isSafeInteger(after) ||
+      after < 0 ||
+      after > 16384
+    )
+      return { status: 400 };
+    const access = await this.recoveryGrant(actor, proof);
+    if ("status" in access) return access;
+    const { observed, grant } = access;
+    if (!observed.vaults[vault]) return { status: 403 };
+    const result = await this.env.VAULT.getByName(
+      observed.id + ":" + vault,
+    ).recoverySourceForGrant(grant, epoch, after);
     if (result.status !== 200) {
       const status = result.status;
       await result.body?.cancel();

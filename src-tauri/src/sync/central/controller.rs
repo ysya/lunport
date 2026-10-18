@@ -111,14 +111,16 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
         error: core.central_user_action.clone(),
     })
 }
-/// A lost Recover reply may leave a verified active API grant ahead of an unanchored
-/// pending owner. Retaining account access never adopts a root or enables cloud writes.
+/// A lost Recover reply or an account-only barrier can leave a fresh API grant ahead
+/// of an unanchored pending owner. This retains account access only: it neither
+/// adopts a root nor bypasses pairing/recovery proofs or the upload gates.
 pub(crate) fn session_epoch_matches(control: &State, epoch: u64, state: DeviceState) -> bool {
     epoch == control.auth_epoch
         || epoch > control.auth_epoch
             && control.anchor.is_none()
             && control.pending_request.is_some()
-            && state == DeviceState::Active
+            && (state == DeviceState::Active
+                || matches!(control.phase, Phase::AwaitingApproval | Phase::SignedOut))
 }
 pub fn checked_config(env: &SyncEnv, service: &str, config: &OidcConfig) -> Result<(), AppError> {
     config.validate()?;

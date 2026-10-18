@@ -29,6 +29,7 @@ const status: CentralStatus = {
 const progress: CentralRecoveryProgress = {
   phase: "backup_required",
   operation: "operation-a",
+  backup_confirmed: false,
   verified: 33,
   total: 33,
   root_fingerprint: "root-a",
@@ -80,6 +81,19 @@ describe("offline recovery consent and reveal boundaries", () => {
     expect(
       recoveryCanConfirm({ ...progress, phase: "submitted" }, true, "root-a"),
     ).toBe(false);
+  });
+  it("retains an acknowledged backup after explicit revalidation", () => {
+    const acknowledged = { ...progress, backup_confirmed: true };
+    expect(recoveryCanConfirm(acknowledged, false, null)).toBe(true);
+    expect(
+      recoveryCanConfirm({ ...acknowledged, phase: "reading" }, false, null),
+    ).toBe(false);
+    const { html } = render({ backup_confirmed: true });
+    expect(buttonTag(html, "Recover account")).not.toContain(DISABLED);
+    expect(text(html)).toContain("without backing it up again");
+    expect(buttonTag(html, "Revalidate recovery")).not.toContain(DISABLED);
+    expect(html).toContain('aria-label="Current recovery kit (optional)"');
+    expect(html).not.toContain('type="checkbox"');
   });
   it("shows submitted recovery as resumable without revealing credentials again", () => {
     const { html } = render({ phase: "submitted" });

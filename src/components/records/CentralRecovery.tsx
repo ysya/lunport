@@ -7,6 +7,7 @@ import {
   centralBeginAccountRecovery,
   centralCancelAccountRecovery,
   centralConfirmAccountRecovery,
+  centralRevalidateAccountRecovery,
   centralRecoveryKey,
   centralRecoveryStatus,
   centralRevealNewRecovery,
@@ -22,10 +23,10 @@ export function recoveryCanConfirm(
 ) {
   return (
     progress.phase === "backup_required" &&
-    saved &&
+    (progress.backup_confirmed ||
+      (saved && revealedRoot === progress.root_fingerprint)) &&
     !!progress.operation &&
-    !!progress.root_fingerprint &&
-    revealedRoot === progress.root_fingerprint
+    !!progress.root_fingerprint
   );
 }
 export function CentralRecovery({
@@ -270,7 +271,9 @@ export function CentralRecovery({
       {progress.phase === "backup_required" && (
         <>
           <p className="text-sm">
-            Save the new recovery kit outside this device before finishing.
+            {progress.backup_confirmed
+              ? "The same new recovery kit is still saved. You can finish recovery without backing it up again."
+              : "Save the new recovery kit outside this device before finishing."}{" "}
             Recovery replaces your old kit and removes cloud access for your
             other devices.
           </p>
@@ -322,16 +325,18 @@ export function CentralRecovery({
               </Button>
             </div>
           )}
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={saved}
-              disabled={blocked || !revealed}
-              onChange={(event) => setSaved(event.target.checked)}
-            />
-            I saved the new recovery kit outside this device and want to revoke
-            my other devices.
-          </label>
+          {!progress.backup_confirmed && (
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={saved}
+                disabled={blocked || !revealed}
+                onChange={(event) => setSaved(event.target.checked)}
+              />
+              I saved the new recovery kit outside this device and want to
+              revoke my other devices.
+            </label>
+          )}
           <Button
             disabled={
               blocked ||
@@ -370,6 +375,40 @@ export function CentralRecovery({
             Resume recovery
           </Button>
         </>
+      )}
+      {(progress.phase === "backup_required" ||
+        progress.phase === "submitted") && (
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            If the account changed or this attempt expired, verify the latest
+            history again. Your saved recovery kit, backup confirmation and
+            local changes are retained. If another device replaced the current
+            kit, enter that current kit below.
+          </p>
+          <Textarea
+            aria-label="Current recovery kit (optional)"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            className="font-mono text-xs"
+            disabled={blocked || !status.has_session}
+          />
+          <Button
+            variant="outline"
+            disabled={blocked || !status.has_session}
+            onClick={() => {
+              const code = input.trim() || null;
+              setInput("");
+              generation.current += 1;
+              setRevealed(null);
+              setSaved(false);
+              void run(() => accept(centralRevalidateAccountRecovery(code)));
+            }}
+          >
+            Revalidate recovery
+          </Button>
+        </div>
       )}
       {progress.phase === "cleanup_required" && (
         <>

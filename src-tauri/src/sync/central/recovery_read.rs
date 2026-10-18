@@ -62,6 +62,7 @@ pub struct ReadSession {
     source: RecoveryVault,
     target: Checkpoint,
     replica: Replica,
+    required_prefixes: Vec<Checkpoint>,
     operations: BTreeSet<String>,
     bytes: usize,
 }
@@ -226,9 +227,34 @@ impl ReadSession {
             source,
             target,
             replica,
+            required_prefixes: vec![],
             operations: BTreeSet::new(),
             bytes: 0,
         })
+    }
+    pub(super) fn chain(&self) -> &VerifiedChain {
+        &self.chain
+    }
+    pub(super) fn epochs(&self) -> &[SignedRekey] {
+        &self.source.commits
+    }
+    pub(super) fn pin_prefixes(&mut self, minimums: Vec<Checkpoint>) -> Result<(), AppError> {
+        if self.position() != 0 || minimums.len() > 4 {
+            return Err(invalid());
+        }
+        for minimum in &minimums {
+            if minimum.epoch != self.target.epoch
+                || minimum.sequence > self.target.sequence
+                || !hex(&minimum.history_hash, 64)
+                || minimum.sequence == 0 && minimum.history_hash != ZERO
+                || minimum.sequence == self.target.sequence
+                    && minimum.history_hash != self.target.history_hash
+            {
+                return Err(invalid());
+            }
+        }
+        self.required_prefixes = minimums;
+        Ok(())
     }
     pub fn total(&self) -> u64 {
         self.target.sequence
@@ -255,6 +281,12 @@ impl ReadSession {
         let mut bytes = self.bytes;
         for opened in prepared.opened {
             let row = &opened.version;
+            if self.required_prefixes.iter().any(|minimum| {
+                minimum.sequence.to_string() == row.sequence
+                    && minimum.history_hash != row.history_hash
+            }) {
+                return Err(invalid());
+            }
             payload::admit(&self.keys, &row.envelope.header, &opened.plaintext)?;
             if !operations.insert(row.envelope.header.operation_id.clone()) {
                 return Err(invalid());
@@ -573,6 +605,107 @@ pub(crate) mod tests {
             session.append(page(&c, rows)).unwrap();
         }
         (session.finish().unwrap(), c.kit, c.identity)
+    }
+    pub(crate) fn revalidation_fixture(
+        rotated: bool,
+    ) -> (Workspace, Workspace, RecoveryKit, RecoveryKit) {
+        use super::super::{
+            recovery_revalidation::{Bridge, Evidence},
+            recovery_state::{PreparedRecovery, RecoveryState},
+        };
+        let mut c = case(1);
+        let mut initial = read(&c).unwrap();
+        initial.append(page(&c, &c.rows)).unwrap();
+        let original = PreparedRecovery::create(
+            initial.finish().unwrap(),
+            &c.kit,
+            &c.identity,
+            RecoverySeed::generate().unwrap(),
+            "c".repeat(32),
+            1000,
+        )
+        .unwrap();
+        let mut old = original.package.clone();
+        old.backup_confirmed = true;
+        old.submitted = true;
+        let mut before = c.before.clone();
+        before.recovery = Some(RecoveryState::Pending {
+            package: Box::new(old.clone()),
+        });
+        before.validate().unwrap();
+        let next = row(&c, 2, &c.rows[0].history_hash, true);
+        c.response.results[0].history_hash = next.history_hash.clone();
+        c.response.results[0].sequence = "2".into();
+        c.rows.push(next);
+        let (rows, bridges) = if rotated {
+            let source_suffix = c
+                .rows
+                .iter()
+                .skip(1)
+                .map(|row| super::super::rekey::SourceDigest {
+                    sequence: row.sequence.clone(),
+                    digest: row.digest.clone(),
+                })
+                .collect();
+            let plan = rotate(&mut c);
+            (
+                plan.rows,
+                vec![Bridge {
+                    epoch: 2,
+                    digests: source_suffix,
+                }],
+            )
+        } else {
+            (c.rows.clone(), vec![])
+        };
+        let pending = PendingPairing::begin(
+            c.kit.anchor(),
+            &c.before.control.device.id,
+            &c.identity,
+            2000,
+        )
+        .unwrap();
+        c.before.control.pending_request = Some(pending.request().clone());
+        let mut session = read(&c).unwrap();
+        for rows in rows.chunks(32) {
+            session.append(page(&c, rows)).unwrap();
+        }
+        let mut replacement = PreparedRecovery::create(
+            session.finish().unwrap(),
+            &c.kit,
+            &c.identity,
+            original.kit.resume_seed(c.kit.anchor()).unwrap(),
+            old.operation.clone(),
+            2000,
+        )
+        .unwrap();
+        replacement.package.attempt = 1;
+        replacement.package.backup_confirmed = old.backup_confirmed;
+        replacement.package.revalidation = Some(Evidence {
+            previous: old.admission.clone(),
+            node: old.node.clone(),
+            bridges,
+            tail: if rotated {
+                vec![]
+            } else {
+                rows.iter()
+                    .skip(1)
+                    .map(|row| super::super::rekey::SourceDigest {
+                        sequence: row.sequence.clone(),
+                        digest: row.digest.clone(),
+                    })
+                    .collect()
+            },
+        });
+        let mut after = c.before;
+        after.recovery = Some(RecoveryState::Pending {
+            package: Box::new(replacement.package),
+        });
+        assert_eq!(
+            original.kit.encode_secret().unwrap().as_str(),
+            replacement.kit.encode_secret().unwrap().as_str()
+        );
+        (before, after, original.kit, c.kit)
     }
     #[test]
     fn full_history_is_required_and_pages_keep_plaintext_inside_native_admission() {

@@ -291,6 +291,20 @@ pub async fn central_begin_account_recovery(
     .map_err(engine::join_error)?
 }
 #[tauri::command]
+pub async fn central_revalidate_account_recovery(
+    app: AppHandle,
+    kit: Option<String>,
+) -> Result<super::recovery_flow::Progress, AppError> {
+    let kit = kit.map(zeroize::Zeroizing::new);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::recovery_flow::revalidate(env, kit.as_deref().map(String::as_str))
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
 pub async fn central_advance_account_recovery(
     app: AppHandle,
 ) -> Result<super::recovery_flow::Progress, AppError> {

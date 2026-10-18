@@ -570,6 +570,89 @@ describe("central device authorization and durable data", () => {
     }
     expect((await s.renew()).response.status).toBe(403);
   });
+  it("fences delayed recovery attempts and cannot reinstall an older enrollment nonce", async () => {
+    const s = await setup(),
+      d = device(6),
+      credential = random(),
+      registered = await s.renew(d, credential),
+      now = Date.now();
+    const enrollment = (created: number): Enrollment => {
+      const request: Enrollment = {
+        origin,
+        account_id: s.actor.account,
+        genesis_hash: s.trusted.anchor.genesis_hash,
+        request_id: random(16),
+        device: d,
+        nonce: random(),
+        created_at_ms: String(created),
+        expires_at_ms: String(now + 600000),
+        signature: "",
+      };
+      request.signature = sign(enrollmentCanonical(request), 6);
+      return request;
+    };
+    const old = enrollment(now - 200),
+      current = enrollment(now - 100);
+    expect((await s.account.enrollment(registered.actor!, old)).status).toBe(
+      204,
+    );
+    const recover = async (request: Enrollment) => {
+      const body: MembershipBody = {
+        origin,
+        account_id: s.actor.account,
+        genesis_hash: s.trusted.anchor.genesis_hash,
+        revision: "1",
+        previous_head: s.trusted.head,
+        author: "recovery",
+        action: "recover",
+        issued_at_ms: String(now),
+        enrollment: request,
+        devices: { [d.id]: d.keys },
+        recovery: device(8).keys,
+      };
+      const node: SignedMembership = {
+        body,
+        signature: sign(membershipCanonical(body), 4),
+      };
+      const next = (await applyMembership(s.trusted, node))!;
+      return {
+        node,
+        wraps: { [s.vault]: await wraps(next, s.vault, 1, d.id, 6) },
+      };
+    };
+    const abandoned = await recover(old);
+    expect(
+      (await s.account.enrollment(registered.actor!, current)).status,
+    ).toBe(204);
+    expect(
+      (await s.account.enrollment(registered.actor!, current)).status,
+    ).toBe(204);
+    expect((await s.account.enrollment(registered.actor!, old)).status).toBe(
+      409,
+    );
+    expect(
+      (await s.account.enrollment(registered.actor!, enrollment(now - 100)))
+        .status,
+    ).toBe(409);
+    expect(
+      (
+        await s.account.recover(
+          registered.actor!,
+          abandoned.node,
+          abandoned.wraps,
+        )
+      ).status,
+    ).toBe(400);
+    expect((await s.account.overview(registered.actor!)).status).toBe(200);
+    const next = await recover(current);
+    expect(
+      (await s.account.recover(registered.actor!, next.node, next.wraps))
+        .status,
+    ).toBe(200);
+    const active = await s.renew(d, credential);
+    expect(active.response.status).toBe(200);
+    expect((await s.account.enrollment(active.actor!, old)).status).toBe(403);
+  });
   it("requires the current kit for pending recovery wraps and bridges to the new kit before enabling the fresh device", async () => {
     const s = await setup(),
       d = device(6),
@@ -1076,6 +1159,59 @@ describe("central device authorization and durable data", () => {
     expect(await recoveryRead.json()).toMatchObject({
       results: [{ epoch: 2, phase: "ready", committed: { manifest } }],
     });
+    expect(
+      (
+        await s.account.recoverySource(
+          pendingGrant.actor!,
+          { ...recoveryProof, signature: base64(new Uint8Array(64)) },
+          s.vault,
+          2,
+          0,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await s.account.recoverySource(
+          pendingGrant.actor!,
+          recoveryProof,
+          random(),
+          2,
+          0,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await s.account.recoverySource(
+          pendingGrant.actor!,
+          recoveryProof,
+          s.vault,
+          66,
+          0,
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await s.account.recoverySource(
+          pendingGrant.actor!,
+          recoveryProof,
+          s.vault,
+          2,
+          1,
+        )
+      ).status,
+    ).toBe(400);
+    const sourceRead = await s.account.recoverySource(
+      pendingGrant.actor!,
+      recoveryProof,
+      s.vault,
+      2,
+      0,
+    );
+    expect(sourceRead.status).toBe(200);
+    expect(await sourceRead.json()).toEqual({ manifest, digests: [] });
     const finished = await s.account.finishRekey(
       actor,
       s.vault,

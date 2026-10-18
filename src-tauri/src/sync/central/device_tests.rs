@@ -26,6 +26,7 @@ struct Account {
     wraps: Vec<WrappedKeys>,
     vault: Option<String>,
     epoch: u64,
+    session_expires_at_ms: Option<u64>,
     history: Vec<super::rekey::Version>,
     pulls: usize,
     recovery_posts: usize,
@@ -103,7 +104,7 @@ impl Service {
             let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();let device:Device=serde_json::from_value(body["device"].clone()).unwrap();
             let mut s=account.lock().unwrap();if s.denied.contains(&device.id){return b"{}".to_vec();}s.devices.insert(device.id.clone(),device.clone());s.sessions.insert(body["session_id"].as_str().unwrap().into(),device.id.clone());
             let active=s.chain().is_some_and(|c|c.current().devices().contains_key(&device.id));
-            json!({"account_id":"a".repeat(64),"account_locator":profile.locator,"device_state":if active {"active"}else{"pending"},"auth_epoch":s.epoch,"expires_at_ms":1700000300000u64}).to_string().into_bytes()
+            json!({"account_id":"a".repeat(64),"account_locator":profile.locator,"device_state":if active {"active"}else{"pending"},"auth_epoch":s.epoch,"expires_at_ms":s.session_expires_at_ms.unwrap_or(1700000300000u64)}).to_string().into_bytes()
         }).create();
         let account = Arc::clone(&state);
         server.mock("GET","/v2/account").with_header("content-type","application/json").with_body_from_request(move|r|{
@@ -271,7 +272,7 @@ fn install_recovery_routes(
     config: &OidcConfig,
 ) {
     server.mock("GET", "/v2/info").with_header("content-type", "application/json")
-        .with_body(json!({"protocol":2,"features":["central-accounts","anchored-membership","exact-revision","operation-receipts","paged-history","signed-rekey","paired-checkpoints","recovery-history"],"oidc":config}).to_string()).create();
+        .with_body(json!({"protocol":2,"features":["central-accounts","anchored-membership","exact-revision","operation-receipts","paged-history","signed-rekey","paired-checkpoints","recovery-history","recovery-source-proofs"],"oidc":config}).to_string()).create();
     let account = Arc::clone(state);
     let barrier = Arc::clone(state);
     server.mock("POST", "/v2/recovery/wraps").with_status_code_from_request(move |_| {let s = barrier.lock().unwrap(); if s.barrier_pending && s.hold_barrier {202} else {200}}).with_header("content-type", "application/json").with_body_from_request(move |request| {
@@ -300,6 +301,31 @@ fn install_recovery_routes(
         let encoded=body.to_string().into_bytes();
         let hook=s.on_pull.take(); drop(s); if let Some(hook)=hook {hook();} encoded
     }).create();
+    let account = Arc::clone(state);
+    server
+        .mock("POST", "/v2/recovery/source")
+        .with_header("content-type", "application/json")
+        .with_body_from_request(move |request| {
+            let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+            let s = account.lock().unwrap();
+            verify_recovery_read(&s, request, &body);
+            let epoch = body["epoch"].as_str().unwrap().parse::<u64>().unwrap();
+            let after = body["after"].as_str().unwrap().parse::<u64>().unwrap();
+            let manifest = s
+                .commits
+                .iter()
+                .find(|m| m.body.to_epoch == epoch.to_string())
+                .unwrap();
+            let digests = s.source_digests[&epoch]
+                .iter()
+                .filter(|d| d.sequence.parse::<u64>().unwrap() > after)
+                .take(256)
+                .collect::<Vec<_>>();
+            json!({"manifest":manifest,"digests":digests})
+                .to_string()
+                .into_bytes()
+        })
+        .create();
     let response = Arc::clone(state);
     let account = Arc::clone(state);
     server
@@ -1750,6 +1776,19 @@ fn recovery_fixture(
     bootstrap::RecoveryReveal,
     super::crypto::VaultKeys,
 ) {
+    let (service, peer, kit, keys, _) = recovery_fixture_with_source(count);
+    (service, peer, kit, keys)
+}
+
+fn recovery_fixture_with_source(
+    count: u64,
+) -> (
+    Service,
+    Arc<TestDevice>,
+    bootstrap::RecoveryReveal,
+    super::crypto::VaultKeys,
+    Arc<TestDevice>,
+) {
     use super::{payload, rekey, wire};
     use crate::sync::records_v3::HostScope;
     let service = Service::new();
@@ -1817,7 +1856,7 @@ fn recovery_fixture(
         });
     }
     service.login(&peer);
-    (service, peer, kit, keys)
+    (service, peer, kit, keys, first)
 }
 
 #[test]
@@ -1874,7 +1913,7 @@ fn offline_kit_recovery_drives_verified_history_backup_lost_reply_restart_barrie
         &controller::context(&peer.env()).unwrap()
     ));
     assert_eq!(
-        recovery_flow::confirm(&peer.env(), &operation)
+        recovery_flow::revalidate(&peer.env(), None)
             .unwrap()
             .phase,
         "submitted"
@@ -2026,4 +2065,217 @@ fn offline_kit_recovery_handles_a_second_loss_before_the_prior_barrier_or_conten
     assert_eq!(state.replica.as_ref().unwrap().checkpoint.epoch, 1);
     assert_eq!(state.control.phase, super::client_state::Phase::Rekey);
     assert_eq!(service.state.lock().unwrap().recovery_posts, 2);
+}
+
+#[test]
+fn offline_kit_recovery_keeps_a_protected_admitted_checkpoint_after_core_save_loss() {
+    use super::{recovery_credentials, recovery_flow};
+    let (service, peer, kit, _) = recovery_fixture(1);
+    let state_path = peer.env().state_path;
+    let retained_path = state_path.with_extension("retained-before-recovery");
+    let original = state_path.clone();
+    let retained = retained_path.clone();
+    service.state.lock().unwrap().on_pull = Some(Box::new(move || {
+        std::fs::rename(&original, &retained).unwrap();
+        std::fs::create_dir(&original).unwrap();
+    }));
+    assert!(recovery_flow::begin(&peer.env(), Some(&kit.kit)).is_err());
+    let records = record_runtime::snapshot(&peer.env()).unwrap().0;
+    let before = records.local.central.as_ref().unwrap();
+    assert!(before.recovery.is_none());
+    let slot = before
+        .control
+        .profile
+        .profile()
+        .unwrap()
+        .slot("recovery-intent");
+    let protected = peer.keychain.entry(&slot).unwrap();
+    let future_kit = serde_json::from_str::<Value>(&protected).unwrap()["new_kit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    recovery_flow::cancel(&peer.env());
+    std::fs::remove_dir(&state_path).unwrap();
+    std::fs::rename(&retained_path, &state_path).unwrap();
+    service.login(&peer);
+    let history = std::mem::take(&mut service.state.lock().unwrap().history);
+    assert!(recovery_flow::begin(&peer.env(), Some(&kit.kit)).is_err());
+    assert_eq!(
+        peer.keychain.entry(&slot).as_deref(),
+        Some(protected.as_str())
+    );
+    assert!(record_runtime::snapshot(&peer.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap()
+        .recovery
+        .is_none());
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
+    service.state.lock().unwrap().history = history;
+    let ready = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    assert_eq!(ready.phase, "backup_required");
+    assert_eq!(
+        recovery_credentials::reveal(&peer.env()).unwrap().kit,
+        future_kit
+    );
+}
+
+
+#[test]
+fn offline_kit_recovery_revalidates_expired_barrier_and_appended_history_without_changing_the_saved_kit() {
+    use super::{recovery_credentials, recovery_flow, recovery_state::RecoveryState};
+    let (service, peer, kit, _) = recovery_fixture(2);
+    let second = service.state.lock().unwrap().history.pop().unwrap();
+    let first = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    let operation = first.operation.unwrap();
+    let future = recovery_credentials::reveal(&peer.env()).unwrap();
+    recovery_credentials::confirm_backup(&peer.env(), &operation).unwrap();
+    let before = record_runtime::snapshot(&peer.env()).unwrap().0.local.central.unwrap();
+    service.state.lock().unwrap().history.push(second);
+    service.state.lock().unwrap().epoch += 1;
+    peer.clock.advance(16 * 60 * 1000);
+    service.state.lock().unwrap().session_expires_at_ms = Some(peer.env().now() + 300000);
+    let local = Arc::clone(&peer);
+    service.state.lock().unwrap().on_pull = Some(Box::new(move || {
+        record_runtime::mutate_records(&local.env(), |records| {
+            let mut next = records.clone(); next.device_name = "local-B-during-revalidation".into(); Ok(next)
+        }).unwrap();
+    }));
+    let ready = recovery_flow::revalidate(&peer.env(), None).unwrap();
+    assert_eq!(ready.operation.as_deref(), Some(operation.as_str()));
+    assert_eq!(ready.phase, "backup_required");
+    assert!(ready.backup_confirmed);
+    assert_eq!(ready.verified, 2);
+    assert_eq!(recovery_credentials::reveal(&peer.env()).unwrap().kit, future.kit);
+    let records = record_runtime::snapshot(&peer.env()).unwrap().0;
+    assert_eq!(records.device_name, "local-B-during-revalidation");
+    let after = records.local.central.unwrap();
+    before.verify_transition(&after).unwrap();
+    match after.recovery.as_ref().unwrap() {
+        RecoveryState::Pending {package} => { assert_eq!(package.attempt, 1); assert!(!package.submitted); }
+        _ => panic!(),
+    }
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
+    assert_eq!(recovery_flow::confirm(&peer.env(), &operation).unwrap().phase, "complete");
+}
+
+#[test]
+fn offline_kit_recovery_revalidates_across_a_committed_epoch_without_old_ciphertext() {
+    use super::{recovery_credentials, recovery_flow, rekey, rotation};
+    let (service, peer, kit, keys, original) = recovery_fixture_with_source(2);
+    let row = service.state.lock().unwrap().history.pop().unwrap();
+    let ready = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    let future = recovery_credentials::reveal(&peer.env()).unwrap();
+    service.state.lock().unwrap().history.push(row);
+    let context = controller::context(&original.env()).unwrap();
+    let identity = context.identity.as_ref().unwrap();
+    {
+        let mut server = service.state.lock().unwrap();
+        server.epoch += 1;
+        let checkpoint = rotation::checkpoint(1, &server.history).unwrap();
+        let plan = rekey::prepare(&server.chain().unwrap(), &identity.id, &identity.keys,
+            server.vault.as_ref().unwrap(), server.epoch, &keys, &checkpoint, &checkpoint, &server.history).unwrap();
+        let source = server.history.iter().map(|r| rekey::SourceDigest { sequence:r.sequence.clone(), digest:r.digest.clone() }).collect();
+        server.source_digests.insert(2, source);
+        server.committed_wraps.insert(2, plan.wraps.clone());
+        server.commits.push(plan.manifest);
+        server.wraps = plan.wraps;
+        server.history = plan.rows;
+        server.key_epoch = 2;
+    }
+    let rebased = recovery_flow::revalidate(&peer.env(), None).unwrap();
+    assert_eq!(rebased.operation, ready.operation);
+    assert_eq!(rebased.verified, 2);
+    assert_eq!(recovery_credentials::reveal(&peer.env()).unwrap().kit, future.kit);
+    let state = record_runtime::snapshot(&peer.env()).unwrap().0;
+    let package = match state.local.central.unwrap().recovery.unwrap() {
+        super::recovery_state::RecoveryState::Pending {package} => package,
+        _ => panic!(),
+    };
+    assert_eq!(package.admission.checkpoint.epoch, 2);
+    assert_eq!(package.revalidation.unwrap().bridges[0].digests.len(), 1);
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
+}
+
+#[test]
+fn offline_kit_recovery_revalidation_preserves_a_stronger_protected_checkpoint_after_core_save_loss() {
+    use super::{recovery_credentials, recovery_flow};
+    let (service, peer, kit, _) = recovery_fixture(3);
+    let rest = service.state.lock().unwrap().history.split_off(1);
+    let ready = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    let future = recovery_credentials::reveal(&peer.env()).unwrap();
+    service.state.lock().unwrap().history.push(rest[0].clone());
+    let state_path = peer.env().state_path;
+    let retained_path = state_path.with_extension("retained-before-rebase");
+    let original = state_path.clone(); let retained = retained_path.clone();
+    service.state.lock().unwrap().on_pull = Some(Box::new(move || {
+        std::fs::rename(&original, &retained).unwrap(); std::fs::create_dir(&original).unwrap();
+    }));
+    assert!(recovery_flow::revalidate(&peer.env(), None).is_err());
+    recovery_flow::cancel(&peer.env());
+    std::fs::remove_dir(&state_path).unwrap(); std::fs::rename(&retained_path, &state_path).unwrap();
+    let owner = record_runtime::snapshot(&peer.env()).unwrap().0.local.central.unwrap();
+    let slot = owner.control.profile.profile().unwrap().slot("recovery-intent");
+    let protected = peer.keychain.entry(&slot).unwrap();
+    service.state.lock().unwrap().history.pop();
+    assert!(recovery_flow::revalidate(&peer.env(), None).is_err());
+    assert_eq!(peer.keychain.entry(&slot).as_deref(), Some(protected.as_str()));
+    assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0.local.central.as_ref(), Some(&owner));
+    service.state.lock().unwrap().history.extend(rest);
+    let next = recovery_flow::revalidate(&peer.env(), None).unwrap();
+    assert_eq!(next.operation, ready.operation);
+    assert_eq!(next.verified, 3);
+    assert_eq!(recovery_credentials::reveal(&peer.env()).unwrap().kit, future.kit);
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
+}
+
+#[test]
+fn offline_kit_recovery_revalidation_requires_the_current_source_kit_but_keeps_its_future_kit() {
+    use super::{recovery_credentials, recovery_flow};
+    let (service, peer, kit, _) = recovery_fixture(1);
+    let ready = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    let future = recovery_credentials::reveal(&peer.env()).unwrap();
+    let other = TestDevice::new("other-recovery", &peer.relay, &peer.clock);
+    service.login(&other);
+    let another = recovery_flow::begin(&other.env(), Some(&kit.kit)).unwrap();
+    let current = recovery_credentials::reveal(&other.env()).unwrap();
+    assert_eq!(recovery_flow::confirm(&other.env(), another.operation.as_deref().unwrap()).unwrap().phase, "complete");
+    let before = record_runtime::snapshot(&peer.env()).unwrap().0;
+    assert!(recovery_flow::revalidate(&peer.env(), None).is_err());
+    assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0, before);
+    assert!(recovery_flow::revalidate(&peer.env(), Some(&kit.kit)).is_err());
+    let next = recovery_flow::revalidate(&peer.env(), Some(&current.kit)).unwrap();
+    assert_eq!(next.operation, ready.operation);
+    assert_eq!(recovery_credentials::reveal(&peer.env()).unwrap().kit, future.kit);
+    assert_eq!(recovery_flow::confirm(&peer.env(), next.operation.as_deref().unwrap()).unwrap().phase, "complete");
+}
+
+
+#[test]
+fn offline_kit_recovery_revalidation_keeps_the_previous_durable_attempt_on_cancel_or_corrupt_history() {
+    use super::{recovery_credentials, recovery_flow};
+    let (service, peer, kit, _) = recovery_fixture(33);
+    let remaining = service.state.lock().unwrap().history.split_off(1);
+    recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    let future = recovery_credentials::reveal(&peer.env()).unwrap();
+    let before = record_runtime::snapshot(&peer.env()).unwrap().0;
+    let slot = before.local.central.as_ref().unwrap().control.profile.profile().unwrap().slot("recovery-intent");
+    let credentials = peer.keychain.entry(&slot);
+    service.state.lock().unwrap().history.extend(remaining);
+    let local = Arc::clone(&peer);
+    service.state.lock().unwrap().on_pull = Some(Box::new(move || recovery_flow::cancel(&local.env())));
+    assert!(recovery_flow::revalidate(&peer.env(), None).is_err());
+    assert_eq!(recovery_flow::status(&peer.env()).unwrap().phase, "backup_required");
+    assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0, before);
+    assert_eq!(peer.keychain.entry(&slot), credentials);
+    service.state.lock().unwrap().recovery_corrupt_after_first = true;
+    assert!(recovery_flow::revalidate(&peer.env(), None).is_err());
+    assert_eq!(recovery_flow::status(&peer.env()).unwrap().phase, "reading");
+    assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0, before);
+    assert_eq!(peer.keychain.entry(&slot), credentials);
+    assert_eq!(recovery_flow::advance(&peer.env()).unwrap().verified, 33);
+    assert_eq!(recovery_credentials::reveal(&peer.env()).unwrap().kit, future.kit);
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
 }
