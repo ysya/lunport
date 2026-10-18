@@ -458,7 +458,7 @@ impl Ledger {
     }
     /// Credentials/keys never validate a cached logical ID merely by being supplied by a caller.
     /// Re-open the retained signed basis and bind its typed identity and semantic digest first.
-    fn verify_native(&self, owner: &Workspace, keys: &VaultKeys) -> Result<(), AppError> {
+    pub(in crate::sync::central) fn verify_native(&self, owner: &Workspace, keys: &VaultKeys) -> Result<(), AppError> {
         let chain = owner.control.verified_chain()?;
         let mut catalog = None;
         let mut storage = BTreeMap::new();
