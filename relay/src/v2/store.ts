@@ -330,6 +330,7 @@ export class VaultStore extends DurableObject<Env> {
   beginMigration(
     actor: Principal,
     manifest: SignedMigration,
+    freshWraps?: WrappedKeys[],
   ): Promise<Response> {
     return rpcCall(async () => {
       const observed = this.load();
@@ -346,6 +347,20 @@ export class VaultStore extends DurableObject<Env> {
         ))
       )
         return { status: 403 };
+      const wraps = freshWraps ?? observed.wraps;
+      if (
+        freshWraps &&
+        !(await completeWraps(
+          observed.trusted,
+          observed.vault,
+          observed.keyEpoch,
+          freshWraps,
+          actor.device,
+        ))
+      )
+        return { status: 403 };
+      if (manifest.body.wraps_digest !== (await wrapsDigest(wraps)))
+        return { status: 409 };
       const digest = await migrationDigest(manifest),
         prior = this.migrationJournal();
       if (prior)
@@ -359,8 +374,6 @@ export class VaultStore extends DurableObject<Env> {
         observed.rekey
       )
         return { status: 409 };
-      if (manifest.body.wraps_digest !== (await wrapsDigest(observed.wraps)))
-        return { status: 409 };
       if (!(await this.migrationSources(manifest))) return { status: 503 };
       return this.ctx.storage.transactionSync(() => {
         const current = this.load();
@@ -368,6 +381,12 @@ export class VaultStore extends DurableObject<Env> {
         if (current.version !== observed.version || this.migrationJournal())
           return { status: 409 };
         this.ctx.storage.sql.exec(SCHEMA);
+        if (freshWraps)
+          this.save({
+            ...current,
+            wraps: freshWraps,
+            version: current.version + 1,
+          });
         this.saveMigration({
           manifest,
           digest,

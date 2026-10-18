@@ -19,7 +19,7 @@ pub struct CheckedPage {
     pub publication: Vec<Change>,
     pub publish_baseline: bool,
 }
-fn current(
+pub(super) fn current(
     replica: &Replica,
     chain: &VerifiedChain,
     keys: &VaultKeys,

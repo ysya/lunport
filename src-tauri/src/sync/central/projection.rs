@@ -88,6 +88,35 @@ impl Plan {
         let changes = library_page::materialize_current(&before, keys)?;
         Self::admitted(before, keys, changes)
     }
+    /// Semantic verification for a proposed initial history. Keeps control pre-cutover;
+    /// this native planning value grants no publication or material authority.
+    pub(super) fn inventory(before: Workspace, keys: &VaultKeys) -> Result<Self, AppError> {
+        before.validate()?;
+        before.require_key_recipients()?;
+        if before.control.cutover
+            || before.control.phase != super::client_state::Phase::Enrolled
+            || before.replacement.is_some()
+            || !before.replacement_archives.is_empty()
+            || before.rotation.is_some()
+            || before.recovery.is_some()
+            || before.bootstrap.is_some()
+        {
+            return Err(super::wire::invalid());
+        }
+        let chain = before.control.verified_chain()?;
+        let replica = before.replica.as_ref().ok_or_else(super::wire::invalid)?;
+        if !replica.baseline_ready() || !replica.pending.is_empty() || !replica.conflicts.is_empty() {
+            return Err(super::wire::invalid());
+        }
+        replica.verify_write_authority(
+            &chain,
+            before.control.auth_epoch,
+            replica.checkpoint.epoch,
+            &before.epochs,
+        )?;
+        let changes = library_page::current(replica, &chain, keys)?;
+        Self::admitted(before, keys, changes)
+    }
     fn admitted(
         before: Workspace,
         keys: &VaultKeys,
