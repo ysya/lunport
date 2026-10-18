@@ -60,3 +60,39 @@ rebuild it. `freeze_helper` remains an explicit candidate-generation operation.
 
 Workflow syntax is checked on every PR with the existing pinned actionlint image.
 The relay's deployed workflow retains its separate shellcheck validation.
+
+## Action versions and runtime
+
+Audited against upstream stable releases on 2026-10-18. Workflows use the
+maintained major tags; `dtolnay/rust-toolchain@stable` deliberately tracks the
+stable Rust channel. The deployed relay workflow follows the same versions.
+
+| Action | Workflow ref | Stable release checked | Action runtime |
+| --- | --- | --- | --- |
+| actions/checkout | v7 | [v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1) | Node 24 |
+| actions/setup-node | v7 | [v7.1.0](https://github.com/actions/setup-node/releases/tag/v7.1.0) | Node 24 |
+| actions/upload-artifact | v7 | [v7.0.2](https://github.com/actions/upload-artifact/releases/tag/v7.0.2) | Node 24 |
+| pnpm/action-setup | v6 | [v6.1.0](https://github.com/pnpm/action-setup/releases/tag/v6.1.0) | Node 24 |
+| googleapis/release-please-action | v5 | [v5.0.0](https://github.com/googleapis/release-please-action/releases/tag/v5.0.0) | Node 24 |
+| tauri-apps/tauri-action | v1 | [action-v1.0.0](https://github.com/tauri-apps/tauri-action/releases/tag/action-v1.0.0) | Node 24 |
+| Swatinem/rust-cache | v2 | [v2.9.2](https://github.com/Swatinem/rust-cache/releases/tag/v2.9.2) | Node 24 |
+| dtolnay/rust-toolchain | stable | stable channel | Composite; no Node runtime |
+| rhysd/actionlint (Docker) | 1.7.12 | [v1.7.12](https://github.com/rhysd/actionlint/releases/tag/v1.7.12) | Container; no Node runtime |
+
+`setup-node`'s `node-version: lts/*` selects Node for project commands; it does not
+change the runtime declared inside another Action. Node 24 Actions require runner
+v2.327.1 or newer; these workflows use GitHub-hosted runners.
+
+Tauri Action v1 uploads to the existing release by **release ID**, bypassing its
+new behavior that edits an existing release's name/body when resolving a tag.
+Stable, Beta and repair workflows retain their existing release metadata. The
+macOS wrapper still verifies the original local archive before upload; v1 adds
+version information to its uploaded name. Updater manifests now use GitHub asset
+API URLs and retain universal macOS entries alongside architecture aliases. The
+shipped Tauri updater downloads with `Accept: application/octet-stream`, and Beta
+promotion accepts these URLs and additional aliases without rewriting signatures.
+Old published releases and their manifests are left intact.
+
+Workflow artifacts explicitly retain ZIP archiving for the existing `gh run
+download` consumers. Windows candidate provenance checks use the workflow file
+path, so display-name changes do not invalidate candidates.
