@@ -1,4 +1,5 @@
 //! Pure dependency-ready ciphertext dispatch. Not session, network or durable publication authority.
+pub(super) mod claims;
 use super::{
     crypto::{self, DeviceKeys, RecordEnvelope, VaultKeys},
     payload::{self, Data, Identity, SharedKeyslot},
@@ -263,4 +264,4 @@ pub(super) fn prepare(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

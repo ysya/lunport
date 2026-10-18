@@ -5,7 +5,7 @@ use crate::sync::central::{
     wire::canonical,
 };
 
-fn fixture() -> (SyncStateV3, VaultKeys, DeviceKeys, String) {
+pub(super) fn fixture() -> (SyncStateV3, VaultKeys, DeviceKeys, String) {
     let (state, keys, signer, context, public, entry) = local_material::tests::fixture(false);
     let id = context.key_id.clone();
     let state = local_material::prepare_new(&state, &keys, &signer, context, public, &entry)
@@ -16,7 +16,7 @@ fn fixture() -> (SyncStateV3, VaultKeys, DeviceKeys, String) {
         .unwrap();
     (state, keys, signer, id)
 }
-fn accept(state: &mut SyncStateV3, keys: &VaultKeys, envelope: RecordEnvelope) {
+pub(super) fn accept(state: &mut SyncStateV3, keys: &VaultKeys, envelope: RecordEnvelope) {
     let owner = state.local.central.as_mut().unwrap();
     let replica = owner.replica.as_ref().unwrap();
     let digest = rekey::envelope_digest(&envelope).unwrap();
