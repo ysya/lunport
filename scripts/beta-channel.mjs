@@ -7,14 +7,15 @@
 //
 //   node scripts/beta-channel.mjs update-manifest <source-tag>
 //     Points the Beta channel (the `latest.json` asset on the `updater-beta` prerelease) at the
-//     source release. The source's latest.json must be complete first: the tag's version, and an
+//     source release. Both manifests use public release downloads rather than REST asset URLs.
+//     The source's latest.json must be complete first: the tag's version, and an
 //     entry for every platform. It is uploaded when it is newer than what the channel offers, or
 //     the same version with different content: rebuilding or republishing a version replaces its
 //     asset signatures, which the channel's old copy would then fail. An older release never moves
 //     beta users backwards. Creates `updater-beta` on first use, and refuses one that is not a
 //     prerelease. Needs GH_TOKEN (and GH_REPO outside a checkout).
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -102,6 +103,26 @@ export function validateManifest(manifest, sourceTag) {
   }
 }
 
+/** Public apps must download release assets without consuming the GitHub REST API quota. */
+export function publicDownloadManifest(manifest, release) {
+  if (manifest.version !== String(release.tag_name).replace(/^v/, "")) {
+    throw new Error("Release metadata does not match the updater version");
+  }
+  const assets = new Map();
+  for (const asset of release.assets ?? []) {
+    assets.set(asset.url, asset);
+    assets.set(asset.browser_download_url, asset);
+  }
+  const platforms = Object.fromEntries(Object.entries(manifest.platforms).map(([platform, entry]) => {
+    const asset = typeof entry?.url === "string" ? assets.get(entry.url) : undefined;
+    if (!asset || !(asset.size > 0) || !asset.browser_download_url?.startsWith("https://github.com/")) {
+      throw new Error(`No public release asset matches ${platform}'s updater URL`);
+    }
+    return [platform, { ...entry, url: asset.browser_download_url }];
+  }));
+  return { ...manifest, platforms };
+}
+
 /**
  * The channel release as `gh release view --json assets,isPrerelease` reports it. It has to stay
  * a prerelease: that is what keeps it out of `releases/latest`, where Stable users read their
@@ -168,8 +189,25 @@ function updateManifest(sourceTag) {
   const sourceDir = join(work, "source");
   const currentDir = join(work, "current");
   gh(["release", "download", sourceTag, "--pattern", MANIFEST, "--dir", sourceDir]);
-  const next = readManifest(join(sourceDir, MANIFEST));
+  const sourceFile = join(sourceDir, MANIFEST);
+  const next = readManifest(sourceFile);
   validateManifest(next.manifest, sourceTag); // before any write, creating the channel included
+  const release = JSON.parse(gh(["api", `repos/{owner}/{repo}/releases/tags/${encodeURIComponent(sourceTag)}`]));
+  const original = readFileSync(sourceFile, "utf8");
+  const publicManifest = publicDownloadManifest(next.manifest, release);
+  if (canonicalJson(next.manifest) !== canonicalJson(publicManifest)) {
+    writeFileSync(sourceFile, JSON.stringify(publicManifest, null, 2) + "\n");
+    try {
+      gh(["release", "upload", sourceTag, sourceFile, "--clobber"]);
+    } catch (error) {
+      writeFileSync(sourceFile, original);
+      try { gh(["release", "upload", sourceTag, sourceFile, "--clobber"]); }
+      catch { console.error(`could not restore ${sourceTag}'s ${MANIFEST}; re-run this job`); }
+      throw error;
+    }
+    next.manifest = publicManifest;
+    console.log(`${sourceTag} updater URLs now use public release downloads (installers and signatures unchanged)`);
+  }
 
   const tags = JSON.parse(gh(["release", "list", "--limit", "1000", "--json", "tagName"])).map((r) => r.tagName);
   let current = null;

@@ -69,6 +69,8 @@ If a build fails, use **Re-run failed jobs** on that run to keep the same source
 
 The **update beta channel** workflow can reconcile the Beta manifest with an existing release. It checks that the release manifest is complete, never moves the channel backwards and leaves an already current channel alone.
 
+Before promoting a release, the channel script maps updater URLs to that release's public download assets and updates its `latest.json` if needed. GitHub REST asset URLs consume an [unauthenticated API quota](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) and can return HTTP 403. This metadata repair preserves versions, platform aliases, installer bytes and signatures; it does not require rebuilding or retagging a release.
+
 The Windows bundle workflow separately validates helper placement and old-version installer upgrades. It supports verified candidate reuse for installer-only diagnostics; see [installer documentation](../src-tauri/installers/README.md). These unsigned CI artifacts are not published releases.
 
 ## License
