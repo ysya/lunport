@@ -6,4 +6,7 @@ pub mod credentials;
 pub mod crypto;
 pub mod membership;
 pub mod oidc;
+pub mod pairing;
+pub mod recovery;
+pub mod trust;
 pub mod wire;

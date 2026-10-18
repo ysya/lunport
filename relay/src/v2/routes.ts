@@ -228,12 +228,13 @@ export async function centralFetch(
         ? response(await account.enrollment(actor, parsed.request as any))
         : response({ status: 400 });
     case "/v2/membership":
-      return exactObject(parsed, ["node", "wraps"])
+      return exactObject(parsed, ["node", "wraps", "confirmation"])
         ? response(
             await account.control(
               actor,
               parsed.node as any,
               parsed.wraps as any,
+              parsed.confirmation as any,
             ),
           )
         : response({ status: 400 });

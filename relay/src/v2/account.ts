@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { validConfirmation, type PairingConfirmation } from "./pairing";
 import type { DeviceProof, Identity, Principal, SessionProof } from "./auth";
 import {
   applyMembership,
@@ -15,6 +16,7 @@ import {
 } from "./membership";
 import {
   base64,
+  exactObject,
   canonical,
   hash,
   hex,
@@ -37,6 +39,7 @@ type Registration = {
   name: string;
   created: number;
   request: Enrollment | null;
+  confirmation: PairingConfirmation | null;
 };
 type Vault = { epoch: number; rekey: boolean };
 type Barrier = {
@@ -126,9 +129,12 @@ export class AccountStore extends DurableObject<Env> {
     actor: Principal,
     node: SignedMembership,
     wraps: Record<string, WrappedKeys[]>,
+    confirmation: PairingConfirmation | null = null,
     now = Date.now(),
   ): Promise<Response> {
-    return rpcCall(() => this.controlResult(actor, node, wraps, now));
+    return rpcCall(() =>
+      this.controlResult(actor, node, wraps, confirmation, now),
+    );
   }
   async createVault(
     actor: Principal,
@@ -196,6 +202,7 @@ export class AccountStore extends DurableObject<Env> {
     if (
       !hex(identity.locator, 64) ||
       !validOrigin(origin) ||
+      !exactObject(device, ["id", "keys"]) ||
       !hex(device?.id, 32) ||
       !validKeys(device.keys) ||
       proof.id !== device.id ||
@@ -266,6 +273,7 @@ export class AccountStore extends DurableObject<Env> {
           name,
           created: now,
           request: null,
+          confirmation: null,
         };
         state.version += 1;
         this.save(state);
@@ -363,6 +371,8 @@ export class AccountStore extends DurableObject<Env> {
         phase: state.pending ? "revocation_pending" : "ready",
         proof: state.proof,
         genesis_hash: state.trusted?.anchor.genesis_hash ?? null,
+        pairing_confirmation:
+          state.registrations[actor.device].confirmation ?? null,
         ...(active
           ? {
               vaults: state.vaults,
@@ -498,6 +508,7 @@ export class AccountStore extends DurableObject<Env> {
     actor: Principal,
     node: SignedMembership,
     wraps: Record<string, WrappedKeys[]>,
+    confirmation: PairingConfirmation | null = null,
     now = Date.now(),
   ): Promise<Result> {
     const observed = this.load();
@@ -548,6 +559,8 @@ export class AccountStore extends DurableObject<Env> {
         return { status: 423 };
       const request = node.body.enrollment!,
         registered = observed.registrations[request.device.id];
+      if (!validConfirmation(confirmation, request.request_id, next.head))
+        return { status: 400 };
       if (
         !registered?.request ||
         requestId(registered.request) !== requestId(request) ||
@@ -564,7 +577,8 @@ export class AccountStore extends DurableObject<Env> {
           !(await completeWraps(next, id, vault.epoch, wraps[id], actor.device))
         )
           return { status: 400 };
-    } else if (!wraps || Object.keys(wraps).length) return { status: 400 };
+    } else if (!wraps || Object.keys(wraps).length || confirmation !== null)
+      return { status: 400 };
     const result = this.ctx.storage.transactionSync(() => {
       const state = this.load();
       if (
@@ -573,6 +587,9 @@ export class AccountStore extends DurableObject<Env> {
         state.pending
       )
         return { status: 409 };
+      if (node.body.enrollment)
+        state.registrations[node.body.enrollment.device.id].confirmation =
+          confirmation;
       state.proof!.nodes.push(node);
       state.trusted = next;
       state.epoch += 1;

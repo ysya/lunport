@@ -40,7 +40,7 @@ getrandom = "0.3"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-clipboard-manager = "2"
-bip39 = { version = "2", features = ["rand"] }
+bip39 = { version = "2", features = ["rand", "zeroize"] }
 hkdf = "0.12"
 hmac = "0.12"
 chacha20poly1305 = "0.10"

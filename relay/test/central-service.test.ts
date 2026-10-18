@@ -226,7 +226,41 @@ async function add(s: Awaited<ReturnType<typeof setup>>) {
         [s.vault]: await wraps(next, s.vault),
       })
     ).status,
+  ).toBe(400);
+  expect(
+    (
+      await s.account.control(
+        s.actor,
+        node,
+        { [s.vault]: await wraps(next, s.vault) },
+        {
+          request_id: request.request_id,
+          approved_head: "9".repeat(64),
+          mac: base64(new Uint8Array(32).fill(42)),
+        },
+      )
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await s.account.control(
+        s.actor,
+        node,
+        { [s.vault]: await wraps(next, s.vault) },
+        {
+          request_id: request.request_id,
+          approved_head: next.head,
+          mac: base64(new Uint8Array(32).fill(42)),
+        },
+      )
+    ).status,
   ).toBe(200);
+  const own = (await s.renew(added, credential)).actor!;
+  const overview = (await (await s.account.overview(own)).json()) as any;
+  expect(overview.pairing_confirmation).toMatchObject({
+    request_id: request.request_id,
+    approved_head: next.head,
+  });
   return {
     added,
     credential,
@@ -243,6 +277,25 @@ describe("central device authorization and durable data", () => {
       secret = random(),
       pending = await s.renew(added, secret);
     expect(await s.account.authorize(pending.proof.session, true)).toBeNull();
+    const extra = device(8),
+      extraProof = (await deviceProof(
+        extra.id,
+        random(),
+        random(16),
+        random(),
+      ))!;
+    expect(
+      (
+        await s.account.register(
+          s.identity,
+          origin,
+          extraProof,
+          { ...extra, private_key: "must not be stored" } as any,
+          "Invalid DTO",
+        )
+      ).status,
+    ).toBe(400);
+
     const proof = (await deviceProof(
       added.id,
       random(),
