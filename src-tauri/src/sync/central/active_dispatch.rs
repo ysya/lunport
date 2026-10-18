@@ -189,7 +189,12 @@ impl Operation {
         // Re-evaluate later edits without publishing their ephemeral capture. Only this operation's
         // already durable sent bytes may reach transport; a later deletion/material change blocks it.
         let captured = super::capture_public(&state, self.context.keys(), self.context.signer())?;
-        let allowed = outbox::prepare(&captured, self.context.keys(), self.context.signer(), None)?;
+        let allowed = outbox::prepare_exact(
+            &captured,
+            self.context.keys(),
+            self.context.signer(),
+            &self.records,
+        )?;
         if self
             .records
             .iter()

@@ -463,3 +463,36 @@ fn notifications_after_rename_and_claims_never_hold_runtime_locks() {
     .unwrap();
     operation.claims(&env, &reply(&operation, &d)).unwrap();
 }
+
+#[test]
+fn a_rotated_large_outbox_checks_its_exact_durable_batch_before_transport() {
+    let (d, _) = fixture();
+    let (mut next, generation) = record_runtime::snapshot(&d.env()).unwrap();
+    for n in 100..141 {
+        next = crate::sync::record_repository::create_host(
+            &next, &format!("{n:016x}"), crate::sync::records_v3::HostScope::Local,
+            serde_json::from_value(serde_json::json!({"schema":2,"alias":format!("host_{n}"),"hostname":"fixture.invalid","auth":"password"})).unwrap(), 900,
+        ).unwrap();
+    }
+    record_runtime::commit_candidate(&d.env(), generation, next).unwrap();
+    let first = prepare(&d.env(), None).unwrap();
+    assert_eq!(first.operation.as_ref().unwrap().records.len(), 32);
+    assert!(first.ready_remaining > 0);
+    let next = prepare(&d.env(), first.cursor.as_deref())
+        .unwrap()
+        .operation
+        .unwrap();
+    assert!(next.records.iter().any(|row| !first
+        .operation
+        .as_ref()
+        .unwrap()
+        .records
+        .contains(row)));
+    let calls = AtomicUsize::new(0);
+    next.with_transport(&d.env(), |_, _, _| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

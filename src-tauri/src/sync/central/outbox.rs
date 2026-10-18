@@ -66,6 +66,23 @@ pub(super) fn prepare(
     signer: &DeviceKeys,
     after: Option<&str>,
 ) -> Result<Prepared, AppError> {
+    prepare_selected(state, keys, signer, after, None)
+}
+pub(super) fn prepare_exact(
+    state: &SyncStateV3,
+    keys: &VaultKeys,
+    signer: &DeviceKeys,
+    records: &[RecordEnvelope],
+) -> Result<Prepared, AppError> {
+    prepare_selected(state, keys, signer, None, Some(records))
+}
+fn prepare_selected(
+    state: &SyncStateV3,
+    keys: &VaultKeys,
+    signer: &DeviceKeys,
+    after: Option<&str>,
+    exact: Option<&[RecordEnvelope]>,
+) -> Result<Prepared, AppError> {
     records_v3::validate_state(state).map_err(|_| invalid())?;
     let before = state.local.central.as_ref().ok_or_else(invalid)?;
     if !before.control.cutover
@@ -248,6 +265,27 @@ pub(super) fn prepare(
             .filter(|id| after.is_some_and(|cursor| id.as_str() <= cursor))
             .cloned(),
     );
+    if let Some(exact) = exact {
+        if exact.is_empty() || exact.len() > 32 {
+            return Err(invalid());
+        }
+        ids = exact
+            .iter()
+            .map(|row| row.header.record_id.clone())
+            .collect();
+        if ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
+            || exact.iter().any(|row| {
+                !eligible.contains(&row.header.record_id)
+                    || replica
+                        .pending
+                        .get(&row.header.record_id)
+                        .and_then(|pending| pending.sent.as_ref())
+                        .is_none_or(|sent| &sent.envelope != row)
+            })
+        {
+            return Err(crate::sync::runtime::superseded());
+        }
+    }
     let mut owner = before.clone();
     let records = owner
         .replica
