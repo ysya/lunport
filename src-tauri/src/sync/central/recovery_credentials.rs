@@ -5,6 +5,7 @@ use super::{
     credentials::Profile,
     crypto,
     membership::SignedMembership,
+    owner::OwnerPath,
     recovery::{RecoveryKit, RecoverySeed},
     recovery_state::{Admission, Package, PreparedRecovery, RecoveryState},
     trust::ControlProof,
@@ -114,16 +115,24 @@ impl Stored {
         self.verify_proof(profile, &package.proof())
     }
 }
-fn load(env: &SyncEnv, profile: &Profile) -> Result<Option<Stored>, AppError> {
+fn slot(owner: &Workspace) -> Result<String, AppError> {
+    owner
+        .control
+        .profile
+        .profile()?
+        .device_slot("recovery-intent", owner.identity_slot.as_deref())
+}
+fn load(env: &SyncEnv, owner: &Workspace) -> Result<Option<Stored>, AppError> {
+    let profile = owner.control.profile.profile()?;
     env.keychain
-        .get(&profile.slot("recovery-intent"))?
+        .get(&slot(owner)?)?
         .map(|value| {
             let encoded = Zeroizing::new(value);
             if encoded.len() > CAP {
                 return Err(invalid());
             }
             let stored: Stored = serde_json::from_str(&encoded).map_err(|_| invalid())?;
-            stored.scope(profile)?;
+            stored.scope(&profile)?;
             Ok(stored)
         })
         .transpose()
@@ -172,6 +181,7 @@ fn verify_staged_source(
 }
 /// No Serialize/Clone. Only successful protected readback mints a publication permit.
 pub struct Permit {
+    path: OwnerPath,
     locator: String,
     operation: String,
     digest: String,
@@ -184,10 +194,19 @@ pub fn stage(
     prepared: &PreparedRecovery,
     old_kit: &RecoveryKit,
 ) -> Result<Permit, AppError> {
+    stage_at(env, &OwnerPath::Current, before, prepared, old_kit)
+}
+pub(super) fn stage_at(
+    env: &SyncEnv,
+    path: &OwnerPath,
+    before: &Workspace,
+    prepared: &PreparedRecovery,
+    old_kit: &RecoveryKit,
+) -> Result<Permit, AppError> {
     if before.recovery.is_some() {
         return Err(invalid());
     }
-    if record_runtime::snapshot(env)?.0.local.central.as_ref() != Some(before) {
+    if path.snapshot(env)? != *before {
         return Err(crate::sync::runtime::superseded());
     }
     let mut candidate_owner = before.clone();
@@ -196,7 +215,7 @@ pub fn stage(
     prepared.package.validate(&candidate_owner)?;
     let profile = before.control.profile.profile()?;
     let stored = stored_for(&profile, &prepared.package, old_kit, &prepared.kit)?;
-    if let Some(previous) = load(env, &profile)? {
+    if let Some(previous) = load(env, before)? {
         if previous.operation != stored.operation
             || previous.new_kit.as_str() != stored.new_kit.as_str()
         {
@@ -217,14 +236,14 @@ pub fn stage(
         }
     }
     let encoded = stored.encode()?;
-    env.keychain
-        .set(&profile.slot("recovery-intent"), &encoded)?;
-    let checked = load(env, &profile)?.ok_or_else(invalid)?;
+    env.keychain.set(&slot(before)?, &encoded)?;
+    let checked = load(env, before)?.ok_or_else(invalid)?;
     checked.verify_package(&profile, &prepared.package)?;
     if checked.encode()?.as_str() != encoded.as_str() {
         return Err(invalid());
     }
     Ok(Permit {
+        path: path.clone(),
         locator: profile.locator,
         operation: prepared.package.operation.clone(),
         digest: digest(&prepared.package)?,
@@ -236,8 +255,18 @@ pub fn install(
     package: &Package,
     permit: Permit,
 ) -> Result<(), AppError> {
+    install_at(env, &OwnerPath::Current, before, package, permit)
+}
+pub(super) fn install_at(
+    env: &SyncEnv,
+    path: &OwnerPath,
+    before: &Workspace,
+    package: &Package,
+    permit: Permit,
+) -> Result<(), AppError> {
     let profile = before.control.profile.profile()?;
-    if permit.locator != profile.locator
+    if &permit.path != path
+        || permit.locator != profile.locator
         || permit.operation != package.operation
         || permit.digest != digest(package)?
         || before.recovery.is_some()
@@ -248,7 +277,7 @@ pub fn install(
     candidate_owner.control.pending_request = package.node.body.enrollment.clone();
     candidate_owner.control.auth_epoch = package.admission.authorization_epoch;
     package.validate(&candidate_owner)?;
-    load(env, &profile)?
+    load(env, before)?
         .ok_or_else(invalid)?
         .verify_package(&profile, package)?;
     let mut next = before.clone();
@@ -258,7 +287,7 @@ pub fn install(
     next.recovery = Some(RecoveryState::Pending {
         package: Box::new(package.clone()),
     });
-    publish(env, before, &next)
+    path.publish(env, before, &next)
 }
 fn publish(env: &SyncEnv, before: &Workspace, next: &Workspace) -> Result<(), AppError> {
     record_runtime::mutate_records(env, |records| {
@@ -287,10 +316,14 @@ fn pending(workspace: &Workspace) -> Result<&Package, AppError> {
 /// A dedicated reveal response. The old kit never leaves native storage.
 pub fn reveal(env: &SyncEnv) -> Result<RecoveryReveal, AppError> {
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-    let before = workspace(env)?;
+    reveal_at(env, &OwnerPath::Current)
+}
+/// Caller owns lifecycle, including when revealing a staged replacement's future kit.
+pub(super) fn reveal_at(env: &SyncEnv, path: &OwnerPath) -> Result<RecoveryReveal, AppError> {
+    let before = path.snapshot(env)?;
     let package = pending(&before)?;
     let profile = before.control.profile.profile()?;
-    let stored = load(env, &profile)?.ok_or_else(invalid)?;
+    let stored = load(env, &before)?.ok_or_else(invalid)?;
     stored.verify_package(&profile, package)?;
     Ok(RecoveryReveal {
         root: package.admission.anchor.genesis_hash.clone(),
@@ -298,12 +331,19 @@ pub fn reveal(env: &SyncEnv) -> Result<RecoveryReveal, AppError> {
     })
 }
 pub fn confirm_backup(env: &SyncEnv, operation: &str) -> Result<(), AppError> {
-    let before = workspace(env)?;
+    confirm_backup_at(env, &OwnerPath::Current, operation)
+}
+pub(super) fn confirm_backup_at(
+    env: &SyncEnv,
+    path: &OwnerPath,
+    operation: &str,
+) -> Result<(), AppError> {
+    let before = path.snapshot(env)?;
     let package = pending(&before)?;
     if package.operation != operation {
         return Err(invalid());
     }
-    load(env, &before.control.profile.profile()?)?
+    load(env, &before)?
         .ok_or_else(invalid)?
         .verify_package(&before.control.profile.profile()?, package)?;
     let mut next = before.clone();
@@ -311,12 +351,12 @@ pub fn confirm_backup(env: &SyncEnv, operation: &str) -> Result<(), AppError> {
         Some(RecoveryState::Pending { package }) => package.backup_confirmed = true,
         _ => return Err(invalid()),
     }
-    publish(env, &before, &next)
+    path.publish(env, &before, &next)
 }
 pub fn verify_pending(env: &SyncEnv, owner: &Workspace) -> Result<(), AppError> {
     let package = pending(owner)?;
     let profile = owner.control.profile.profile()?;
-    match load(env, &profile)? {
+    match load(env, owner)? {
         Some(stored) => stored.verify_package(&profile, package),
         None if package.submitted && package.backup_confirmed => Ok(()),
         None => Err(invalid()),
@@ -324,7 +364,10 @@ pub fn verify_pending(env: &SyncEnv, owner: &Workspace) -> Result<(), AppError> 
 }
 /// Foreground only. Missing-after-delete is an exact retry; failed deletion/readback keeps writes gated.
 pub fn cleanup(env: &SyncEnv) -> Result<(), AppError> {
-    let before = workspace(env)?;
+    cleanup_at(env, &OwnerPath::Current)
+}
+pub(super) fn cleanup_at(env: &SyncEnv, path: &OwnerPath) -> Result<(), AppError> {
+    let before = path.snapshot(env)?;
     let admission = match before.recovery.as_ref() {
         Some(RecoveryState::Accepted {
             admission,
@@ -338,7 +381,7 @@ pub fn cleanup(env: &SyncEnv) -> Result<(), AppError> {
         _ => return Err(invalid()),
     };
     let profile = before.control.profile.profile()?;
-    if let Some(stored) = load(env, &profile)? {
+    if let Some(stored) = load(env, &before)? {
         if &stored.admission != admission
             || before
                 .recovery
@@ -348,12 +391,8 @@ pub fn cleanup(env: &SyncEnv) -> Result<(), AppError> {
             return Err(invalid());
         }
         stored.verify_proof(&profile, before.control.proof.as_ref().ok_or_else(invalid)?)?;
-        env.keychain.delete(&profile.slot("recovery-intent"))?;
-        if env
-            .keychain
-            .get(&profile.slot("recovery-intent"))?
-            .is_some()
-        {
+        env.keychain.delete(&slot(&before)?)?;
+        if env.keychain.get(&slot(&before)?)?.is_some() {
             return Err(invalid());
         }
     }
@@ -365,7 +404,7 @@ pub fn cleanup(env: &SyncEnv) -> Result<(), AppError> {
         }) => *credentials_cleared = true,
         _ => return Err(invalid()),
     }
-    publish(env, &before, &next)
+    path.publish(env, &before, &next)
 }
 /// A crash before Core publication may leave compact protected secrets. Re-read all ciphertext
 /// before building a fresh journal, while retaining the same new kit and operation identity.
@@ -394,7 +433,7 @@ pub fn resume_orphan_with_kit(
         return Err(invalid());
     }
     let profile = before.control.profile.profile()?;
-    let Some(stored) = load(env, &profile)? else {
+    let Some(stored) = load(env, before)? else {
         return Ok(None);
     };
     if stored.admission.anchor.account_id != before.control.account_id {
@@ -435,7 +474,7 @@ pub fn resume_orphan_with_kit(
 /// A protected orphan also reserves this account's recovery path after a failed Core write.
 /// Ordinary login/pairing may retain access, but cannot bypass this pending recovery intent.
 pub fn has_intent(env: &SyncEnv, owner: &Workspace) -> Result<bool, AppError> {
-    let Some(stored) = load(env, &owner.control.profile.profile()?)? else {
+    let Some(stored) = load(env, owner)? else {
         return Ok(false);
     };
     if stored.admission.anchor.account_id != owner.control.account_id
@@ -736,7 +775,7 @@ pub fn rebase_inputs(
     let old = pending(owner)?;
     old.validate(owner)?;
     let profile = owner.control.profile.profile()?;
-    let stored = load(env, &profile)?.ok_or_else(invalid)?;
+    let stored = load(env, owner)?.ok_or_else(invalid)?;
     if stored.operation != old.operation
         || stored.node.body.recovery != old.node.body.recovery
         || stored.admission.device != old.admission.device
@@ -771,6 +810,7 @@ pub fn rebase_inputs(
 }
 /// The new package and the old Core snapshot are both part of the protected publication receipt.
 pub struct RebasePermit {
+    path: OwnerPath,
     locator: String,
     operation: String,
     before: String,
@@ -792,14 +832,23 @@ pub fn stage_rebase(
     prepared: &PreparedRecovery,
     old_kit: &RecoveryKit,
 ) -> Result<RebasePermit, AppError> {
-    if record_runtime::snapshot(env)?.0.local.central.as_ref() != Some(owner) {
+    stage_rebase_at(env, &OwnerPath::Current, owner, prepared, old_kit)
+}
+pub(super) fn stage_rebase_at(
+    env: &SyncEnv,
+    path: &OwnerPath,
+    owner: &Workspace,
+    prepared: &PreparedRecovery,
+    old_kit: &RecoveryKit,
+) -> Result<RebasePermit, AppError> {
+    if path.snapshot(env)? != *owner {
         return Err(crate::sync::runtime::superseded());
     }
     let old = pending(owner)?;
     let next = rebase_owner(owner, &prepared.package);
     owner.verify_transition(&next)?;
     let profile = owner.control.profile.profile()?;
-    let prior = load(env, &profile)?.ok_or_else(invalid)?;
+    let prior = load(env, owner)?.ok_or_else(invalid)?;
     if prior.operation != old.operation
         || prior.admission.anchor != old.admission.anchor
         || prior.admission.device != old.admission.device
@@ -818,14 +867,14 @@ pub fn stage_rebase(
         .check_minimum(&prepared.package, &prior.admission.checkpoint)?;
     let stored = stored_for(&profile, &prepared.package, old_kit, &prepared.kit)?;
     let encoded = stored.encode()?;
-    env.keychain
-        .set(&profile.slot("recovery-intent"), &encoded)?;
-    let checked = load(env, &profile)?.ok_or_else(invalid)?;
+    env.keychain.set(&slot(owner)?, &encoded)?;
+    let checked = load(env, owner)?.ok_or_else(invalid)?;
     checked.verify_package(&profile, &prepared.package)?;
     if checked.encode()?.as_str() != encoded.as_str() {
         return Err(invalid());
     }
     Ok(RebasePermit {
+        path: path.clone(),
         locator: profile.locator,
         operation: old.operation.clone(),
         before: digest(old)?,
@@ -838,18 +887,28 @@ pub fn install_rebase(
     package: &Package,
     permit: RebasePermit,
 ) -> Result<(), AppError> {
+    install_rebase_at(env, &OwnerPath::Current, owner, package, permit)
+}
+pub(super) fn install_rebase_at(
+    env: &SyncEnv,
+    path: &OwnerPath,
+    owner: &Workspace,
+    package: &Package,
+    permit: RebasePermit,
+) -> Result<(), AppError> {
     let profile = owner.control.profile.profile()?;
-    if permit.locator != profile.locator
+    if &permit.path != path
+        || permit.locator != profile.locator
         || permit.operation != package.operation
         || permit.before != digest(pending(owner)?)?
         || permit.after != digest(package)?
     {
         return Err(invalid());
     }
-    load(env, &profile)?
+    load(env, owner)?
         .ok_or_else(invalid)?
         .verify_package(&profile, package)?;
     let next = rebase_owner(owner, package);
     owner.verify_transition(&next)?;
-    publish(env, owner, &next)
+    path.publish(env, owner, &next)
 }

@@ -26,6 +26,8 @@ pub mod recovery_revalidation;
 pub mod replacement_archive;
 pub mod replacement;
 mod replacement_proof;
+pub(crate) mod replacement_publication;
+mod owner;
 pub mod rekey;
 pub mod round;
 pub mod rotation;

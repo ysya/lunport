@@ -194,6 +194,15 @@ pub fn probe_startup(path: &Path, device_name: &str) -> StartupProbe {
 }
 /// Shape validation allows valid remote relationship conflicts to remain available for repair.
 pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
+    save_active_with_replacement(path,state,None)
+}
+struct ReplacementSave<'a> {
+    authority:&'a crate::sync::central::replacement_publication::Authorization,
+    archive:&'a crate::sync::central::replacement_archive::Permit,
+    generation:u64,
+    published:std::cell::Cell<bool>,
+}
+fn save_active_with_replacement(path:&Path,state:&SyncStateV3,replacement:Option<&ReplacementSave<'_>>)->Result<(),AppError>{
     validate_state(state)
         .map_err(|_| AppError::Other("cannot save invalid record state".into()))?;
     let bytes = serde_json::to_vec_pretty(state)
@@ -210,6 +219,7 @@ pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
         Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
+    if replacement.is_some() && !path.exists(){return Err(AppError::Other("The archived source state is missing. Local data and identities are retained.".into()));}
     if path.exists() {
         use sha2::{Digest, Sha256};
         let mut options = OpenOptions::new();
@@ -234,7 +244,11 @@ pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
             }
             let previous: SyncStateV3 = serde_json::from_value(value.clone()).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
             validate_state(&previous).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
-            crate::sync::central::workspace::verify_publication(previous.local.central.as_ref(),state.local.central.as_ref())?;
+            if let Some(replacement)=replacement {
+                replacement.authority.verify_records(&previous,state,replacement.archive,replacement.generation)?;
+            } else {
+                crate::sync::central::workspace::verify_publication(previous.local.central.as_ref(),state.local.central.as_ref())?;
+            }
         }
         if let Some(source_version) = value
             .get("version")
@@ -264,7 +278,57 @@ pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
             }
         }
     }
-    crate::fsutil::atomic_write(path, &bytes, 0o600)
+    if let Some(replacement)=replacement {write_replacement_atomic(path,&bytes,state,replacement)}
+    else {crate::fsutil::atomic_write(path, &bytes, 0o600)}
+}
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplacementWriteStage { FileSync, SourceRecheck, Rename, DirectorySync }
+#[cfg(test)]
+type ReplacementWriteHook = Box<dyn FnMut(ReplacementWriteStage, &Path) -> Result<(), AppError>>;
+#[cfg(test)]
+thread_local! {
+    static REPLACEMENT_WRITE_HOOK: std::cell::RefCell<Option<ReplacementWriteHook>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn with_replacement_write_hook<T>(hook: ReplacementWriteHook, action: impl FnOnce() -> T) -> T {
+    struct Restore(Option<ReplacementWriteHook>);
+    impl Drop for Restore { fn drop(&mut self) { REPLACEMENT_WRITE_HOOK.with(|value| *value.borrow_mut() = self.0.take()); } }
+    let _restore = Restore(REPLACEMENT_WRITE_HOOK.with(|value| value.replace(Some(hook))));
+    action()
+}
+#[cfg(test)]
+fn replacement_write_stage(stage: ReplacementWriteStage, path: &Path) -> Result<(), AppError> {
+    REPLACEMENT_WRITE_HOOK.with(|value| match value.borrow_mut().as_mut() { Some(hook) => hook(stage, path), None => Ok(()) })
+}
+/// The existing app publication gate serializes material transactions. This additionally
+/// rechecks the archived source just before rename; it is not cross-process write exclusion.
+fn write_replacement_atomic(path:&Path,bytes:&[u8],state:&SyncStateV3,replacement:&ReplacementSave<'_>)->Result<(),AppError>{
+    use std::io::Write;
+    crate::fsutil::check_write(path)?;
+    let parent=path.parent().ok_or_else(||AppError::Other("sync state has no parent".into()))?;
+    crate::fsutil::ensure_dir_secure(parent)?;
+    let mut temp=tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;}
+    temp.write_all(bytes)?;
+    #[cfg(test)] replacement_write_stage(ReplacementWriteStage::FileSync,path)?;
+    temp.as_file().sync_all()?;
+    #[cfg(test)] replacement_write_stage(ReplacementWriteStage::SourceRecheck,path)?;
+    let mut options=OpenOptions::new();options.read(true);
+    #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK);}
+    let source=options.open(path)?;
+    if !source.metadata()?.is_file(){return Err(AppError::Other("sync source must be a regular file".into()));}
+    let mut original=Vec::new();source.take(MAX_STATE_BYTES+1).read_to_end(&mut original)?;
+    if original.len() as u64>MAX_STATE_BYTES{return Err(AppError::Other("sync source exceeds the supported limit".into()));}
+    let previous:SyncStateV3=serde_json::from_slice(&original).map_err(|_|AppError::Other("Cannot validate archived source state.".into()))?;
+    validate_state(&previous).map_err(|_|AppError::Other("Cannot validate archived source state.".into()))?;
+    replacement.authority.verify_records(&previous,state,replacement.archive,replacement.generation)?;
+    #[cfg(test)] replacement_write_stage(ReplacementWriteStage::Rename,path)?;
+    temp.persist(path).map_err(|error|AppError::Io(error.error))?;
+    replacement.published.set(true);
+    #[cfg(test)] replacement_write_stage(ReplacementWriteStage::DirectorySync,path)?;
+    #[cfg(unix)] {fs::File::open(parent)?.sync_all()?;}
+    Ok(())
 }
 
 /// Startup only, or after the caller acquires lifecycle/vault/publication before core for migration.
@@ -420,6 +484,33 @@ fn persist_candidate(
     core.records = Some(candidate);
     core.generation = generation;
     core.unsaved = false;
+    Ok(generation)
+}
+/// Consume the only typed exception to ordinary central identity publication. No network,
+/// credential UI, repository material writes or fallback occur while publication/Core are held.
+pub(crate) fn publish_replacement(
+    env:&crate::sync::env::SyncEnv,
+    authority:&crate::sync::central::replacement_publication::Authorization,
+    archive:crate::sync::central::replacement_archive::Permit,
+)->Result<u64,AppError>{
+    let _publication=env.runtime.format_publication.lock().unwrap();
+    let mut core=env.runtime.core.lock().unwrap();writes_allowed(&core)?;
+    let source=active_state(&core)?;
+    archive.verify_source(source,core.generation)?;
+    let candidate=authority.records(source,archive.receipt().clone())?;
+    authority.verify_records(source,&candidate,&archive,core.generation)?;
+    let generation=core.generation.checked_add(1).ok_or_else(||AppError::Other("sync generation exhausted".into()))?;
+    let context=ReplacementSave{authority,archive:&archive,generation:core.generation,published:std::cell::Cell::new(false)};
+    if let Err(error)=save_active_with_replacement(&env.state_path,&candidate,Some(&context)) {
+        if context.published.get(){
+            core.save_blocked=Some("Device replacement reached disk but durability could not be confirmed. Restart Lunport to reload the saved owner; all identities and archives are retained.".into());
+            core.central_session=None;
+        }
+        return Err(error);
+    }
+    if candidate.local.central.as_ref().is_some_and(|owner|owner.control.cutover){core.account_keys=None;}
+    core.records=Some(candidate);core.generation=generation;core.unsaved=false;
+    core.central_session=Some(std::sync::Arc::clone(authority.session()));core.central_poll=Default::default();core.central_user_action=None;
     Ok(generation)
 }
 /// Core only: safe while a caller already owns lifecycle/vault/publication. Never reacquire them here.

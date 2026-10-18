@@ -31,6 +31,8 @@ pub struct Workspace {
     pub identity_slot: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<super::replacement::Intent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replacement_archives: Vec<super::replacement_publication::Archive>,
     pub replica: Option<Replica>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<super::recovery_state::RecoveryState>,
@@ -52,6 +54,7 @@ impl Workspace {
             control,
             identity_slot: None,
             replacement: None,
+            replacement_archives: vec![],
             replica: None,
             recovery: None,
             rotation: None,
@@ -89,6 +92,32 @@ impl Workspace {
             }
         }
         self.control.validate()?;
+        if self.replacement_archives.len() > 64 {
+            return Err(invalid());
+        }
+        let mut archive_operations = BTreeSet::new();
+        let mut previous: Option<&super::replacement_publication::Archive> = None;
+        for archive in &self.replacement_archives {
+            archive.validate(self)?;
+            if let Some(previous) = previous {
+                if archive.previous_selection.as_ref() != Some(&previous.receipt.context.operation)
+                    || archive.receipt.context.device != previous.target
+                {
+                    return Err(invalid());
+                }
+            }
+            previous = Some(archive);
+            if !archive_operations.insert(&archive.receipt.context.operation) {
+                return Err(invalid());
+            }
+        }
+        if self.replacement_archives.last().is_some_and(|archive| {
+            self.identity_slot.as_ref() != Some(&archive.receipt.context.operation)
+                || self.control.device != archive.target
+        }) {
+            return Err(invalid());
+        }
+
         if let Some(recovery) = &self.recovery {
             recovery.validate(self)?;
         }
@@ -336,7 +365,9 @@ impl Workspace {
     pub fn verify_transition(&self, next: &Self) -> Result<(), AppError> {
         next.validate()?;
         self.control.verify_transition(&next.control)?;
-        if self.identity_slot != next.identity_slot {
+        if self.replacement_archives != next.replacement_archives
+            || self.identity_slot != next.identity_slot
+        {
             return Err(invalid());
         }
         if let Some(intent) = &self.replacement {
@@ -508,6 +539,10 @@ impl Workspace {
     }
     pub fn can_upload(&self) -> bool {
         self.replacement.is_none()
+            && !self
+                .replacement_archives
+                .iter()
+                .any(|archive| archive.needs_reconciliation)
             && !self.recovery.as_ref().is_some_and(|r| r.requires_cleanup())
             && self.control.cloud_writes_allowed()
             && self.rotation.is_none()
@@ -539,14 +574,16 @@ pub fn verify_publication(
                 || before.control.cutover
                 || before.recovery.is_some()
                 || before.identity_slot.is_some()
-                || before.replacement.is_some() =>
+                || before.replacement.is_some()
+                || !before.replacement_archives.is_empty() =>
         {
             Err(invalid())
         }
         (None, Some(after))
             if after.recovery.is_some()
                 || after.identity_slot.is_some()
-                || after.replacement.is_some() =>
+                || after.replacement.is_some()
+                || !after.replacement_archives.is_empty() =>
         {
             Err(invalid())
         }

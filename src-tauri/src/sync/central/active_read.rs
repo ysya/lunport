@@ -206,6 +206,12 @@ impl ReadSession {
     }
 }
 impl VerifiedLibrary {
+    pub(super) fn wrap(&self) -> &super::crypto::WrappedKeys {
+        &self.session.baseline.source.wrap
+    }
+    pub(super) fn phase(&self) -> &str {
+        &self.session.baseline.source.phase
+    }
     pub(super) fn verifies_prefix(&self, minimum: &Checkpoint) -> bool {
         self.session.baseline.verifies_prefix(minimum)
     }

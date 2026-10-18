@@ -26,6 +26,11 @@ pub struct Intent {
     pub operation: String,
     pub route: Route,
     pub device: Option<Device>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<Box<Workspace>>,
+    /// Retained when a submitted, backup-confirmed Pending journal becomes Accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_confirmation: Option<super::recovery_state::Admission>,
 }
 impl Intent {
     pub fn validate(&self, owner: &Workspace) -> Result<(), AppError> {
@@ -42,6 +47,68 @@ impl Intent {
                 return Err(invalid());
             }
         }
+        if let Some(candidate) = &self.candidate {
+            // A staged owner cannot contain another intent, publish keys, or change the source root.
+            if candidate.replacement.is_some()
+                || !candidate.replacement_archives.is_empty()
+                || candidate.identity_slot.as_ref() != Some(&self.operation)
+                || self.device.as_ref() != Some(&candidate.control.device)
+                || candidate.control.profile != owner.control.profile
+                || candidate.control.account_id != owner.control.account_id
+                || candidate.control.cutover
+                || candidate.control.library.is_some()
+                || candidate.bootstrap.is_some()
+                || candidate.rotation.is_some()
+                || candidate.replica.as_ref().is_some_and(|replica| {
+                    !replica.pending.is_empty() || !replica.conflicts.is_empty()
+                })
+                || owner.control.anchor.as_ref().is_some_and(|anchor| {
+                    candidate
+                        .control
+                        .anchor
+                        .as_ref()
+                        .is_some_and(|next| next != anchor)
+                })
+            {
+                return Err(invalid());
+            }
+            candidate.validate()?;
+            match (
+                &self.route,
+                &candidate.recovery,
+                &self.recovery_confirmation,
+            ) {
+                (Route::TrustedDevice, None, None) => {}
+                (Route::RecoveryKit, None, None) => {}
+                (
+                    Route::RecoveryKit,
+                    Some(super::recovery_state::RecoveryState::Pending { package }),
+                    None,
+                ) => {
+                    if package.operation != self.operation
+                        || owner
+                            .control
+                            .anchor
+                            .as_ref()
+                            .is_some_and(|anchor| anchor != &package.admission.anchor)
+                    {
+                        return Err(invalid());
+                    }
+                }
+                (
+                    Route::RecoveryKit,
+                    Some(super::recovery_state::RecoveryState::Accepted {
+                        operation,
+                        admission,
+                        ..
+                    }),
+                    Some(confirmed),
+                ) if operation == &self.operation && admission == confirmed => {}
+                _ => return Err(invalid()),
+            }
+        } else if self.recovery_confirmation.is_some() {
+            return Err(invalid());
+        }
         Ok(())
     }
     pub fn verify_transition(&self, next: Option<&Self>) -> Result<(), AppError> {
@@ -51,6 +118,44 @@ impl Intent {
             || self.device.is_some() && self.device != next.device
         {
             return Err(invalid());
+        }
+        match (&self.candidate, &next.candidate) {
+            (Some(before), Some(after)) => before.verify_transition(after)?,
+            (Some(_), None) => return Err(invalid()),
+            (None, Some(after)) => {
+                if after.control.anchor.is_some()
+                    || after.control.proof.is_some()
+                    || after.replica.is_some()
+                    || after.recovery.is_some()
+                    || !after.epochs.is_empty()
+                    || !after.observed_epochs.is_empty()
+                    || !after.own_wraps.is_empty()
+                    || !matches!(
+                        after.control.phase,
+                        super::client_state::Phase::Setup
+                            | super::client_state::Phase::AwaitingApproval
+                    )
+                {
+                    return Err(invalid());
+                }
+            }
+            (None, None) => {}
+        }
+        if self.recovery_confirmation != next.recovery_confirmation {
+            if self.recovery_confirmation.is_some() {
+                return Err(invalid());
+            }
+            let Some(super::recovery_state::RecoveryState::Pending { package }) =
+                self.candidate.as_ref().and_then(|c| c.recovery.as_ref())
+            else {
+                return Err(invalid());
+            };
+            if !package.backup_confirmed
+                || !package.submitted
+                || next.recovery_confirmation.as_ref() != Some(&package.admission)
+            {
+                return Err(invalid());
+            }
         }
         Ok(())
     }
@@ -76,7 +181,8 @@ pub fn prepare(env: &SyncEnv, route: Route) -> Result<Intent, AppError> {
         .local
         .central
         .ok_or_else(invalid)?;
-    if before.bootstrap.is_some()
+    if (before.control.anchor.is_none() && super::recovery_credentials::has_intent(env, &before)?)
+        || before.bootstrap.is_some()
         || before.recovery.as_ref().is_some_and(|r| {
             !matches!(
                 r,
@@ -99,6 +205,8 @@ pub fn prepare(env: &SyncEnv, route: Route) -> Result<Intent, AppError> {
             operation: crypto::random_id(16)?,
             route,
             device: None,
+            candidate: None,
+            recovery_confirmation: None,
         });
         publish(env, &before, &next)?;
         before = next;
@@ -127,6 +235,65 @@ pub fn prepare(env: &SyncEnv, route: Route) -> Result<Intent, AppError> {
     next.replacement.ok_or_else(invalid)
 }
 
+/// Caller owns the existing lifecycle gate and supplies its independently registered new session.
+/// Initialize a staged owner only after exact protected selection/public-device readback.
+pub(super) fn initialize_candidate(
+    env: &SyncEnv,
+    operation: &str,
+    session: &super::controller::Session,
+) -> Result<Workspace, AppError> {
+    let source = record_runtime::snapshot(env)?
+        .0
+        .local
+        .central
+        .ok_or_else(invalid)?;
+    let intent = source.replacement.as_ref().ok_or_else(invalid)?;
+    if intent.operation != operation {
+        return Err(crate::sync::runtime::superseded());
+    }
+    let target = intent.device.as_ref().ok_or_else(invalid)?;
+    let profile = source.control.profile.profile()?;
+    let identity = session.identity.as_ref().ok_or_else(invalid)?;
+    let device = session.device.as_ref().ok_or_else(invalid)?;
+    let stored = DeviceIdentity::load_selected(env.keychain, &profile, Some(operation), true)?;
+    if session.device_access_denied
+        || source.control.denied_devices.contains(&target.id)
+        || session.profile != source.control.profile
+        || &identity.device() != target
+        || stored.device() != identity.device()
+        || stored.credential() != identity.credential()
+        || device.account_id != source.control.account_id
+        || device.expired()
+        || identity.slot(&profile, "device")? != profile.device_slot("device", Some(operation))?
+    {
+        return Err(invalid());
+    }
+    if let Some(candidate) = &intent.candidate {
+        return Ok((**candidate).clone());
+    }
+    if device.device_state != super::api::DeviceState::Pending {
+        return Err(invalid());
+    }
+    let mut candidate = Workspace::new(super::client_state::State::new(
+        source.control.profile.clone(),
+        source.control.account_id.clone(),
+        identity.device(),
+        device.auth_epoch,
+    )?)?;
+    candidate.identity_slot = Some(operation.into());
+    candidate.validate()?;
+    record_runtime::mutate_records(env, |records| {
+        let mut next = records.clone();
+        let current = next.local.central.as_mut().ok_or_else(invalid)?;
+        if current != &source {
+            return Err(crate::sync::runtime::superseded());
+        }
+        current.replacement.as_mut().ok_or_else(invalid)?.candidate =
+            Some(Box::new(candidate.clone()));
+        Ok(next)
+    })?;
+    Ok(candidate)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

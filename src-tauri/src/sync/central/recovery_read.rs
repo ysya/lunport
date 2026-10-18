@@ -862,6 +862,8 @@ pub(crate) mod tests {
             operation: "e".repeat(32),
             route: super::super::replacement::Route::RecoveryKit,
             device: Some(c.before.control.device.clone()),
+            candidate: None,
+            recovery_confirmation: None,
         });
         source.validate().unwrap();
         let (rows, bridges, minimum) = if rotated {

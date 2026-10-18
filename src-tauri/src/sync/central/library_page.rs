@@ -47,6 +47,11 @@ fn current(
 }
 fn publication_allowed(workspace: &Workspace, replica: &Replica, chain: &VerifiedChain) -> bool {
     workspace.replacement.is_none()
+        && workspace.require_key_recipients().is_ok()
+        && !workspace
+            .replacement_archives
+            .iter()
+            .any(|archive| archive.needs_reconciliation)
         && workspace.control.cloud_writes_allowed()
         && replica.baseline_ready()
         && replica
@@ -186,6 +191,8 @@ mod tests {
             operation: "c".repeat(32),
             route: super::super::replacement::Route::RecoveryKit,
             device: None,
+            candidate: None,
+            recovery_confirmation: None,
         });
         ws.validate().unwrap();
         assert!(!ws.can_upload());

@@ -312,7 +312,26 @@ pub fn prepare(
     let name = context.filename()?;
     let existing = dir.read(&name)?;
     let profile = workspace.control.profile.profile()?;
-    let key = archive_key(env, &profile, &context, existing.is_none())?;
+    // Local B produces a new filename. Its absence must not authorize replacing the key
+    // that still protects generation A. Keep an immutable operation-wide key commitment.
+    let marker_name = format!("{operation}-key.sha256");
+    let marker = dir.read(&marker_name)?;
+    let key = archive_key(
+        env,
+        &profile,
+        &context,
+        existing.is_none() && marker.is_none(),
+    )?;
+    let commitment = crypto::hash(key.as_slice());
+    match marker {
+        Some(marker) if marker.as_slice() == commitment.as_bytes() => {}
+        Some(_) => return Err(invalid()),
+        None => dir.publish(&marker_name, commitment.as_bytes())?,
+    }
+    dir.sync()?;
+    if dir.read(&marker_name)?.as_deref() != Some(commitment.as_bytes()) {
+        return Err(invalid());
+    }
     let bytes = match existing {
         Some(bytes) => {
             if decode(&context, &key, &bytes)?.as_slice() != plain.as_slice() {
@@ -638,7 +657,26 @@ mod tests {
         device.keychain.delete(&slot).unwrap();
         assert!(prepare(&device.env(), &owner, &before.0, before.1, &op).is_err());
         assert!(device.keychain.get(&slot).unwrap().is_none());
+        // A later local edit uses a different filename but must never replace A's missing key.
+        assert!(prepare(&device.env(), &owner, &changed, before.1 + 1, &op).is_err());
+        assert!(device.keychain.get(&slot).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
         device.keychain.set(&slot, &original).unwrap();
+        let newer = prepare(&device.env(), &owner, &changed, before.1 + 1, &op).unwrap();
+        assert_eq!(restore(&device.env(), &profile, &newer).unwrap(), changed);
+        assert_eq!(
+            restore(&device.env(), &profile, &receipt).unwrap(),
+            before.0
+        );
+        let marker = path.parent().unwrap().join(format!("{op}-key.sha256"));
+        let marker_bytes = std::fs::read(&marker).unwrap();
+        std::fs::write(&marker, b"invalid marker").unwrap();
+        assert!(prepare(&device.env(), &owner, &changed, before.1 + 1, &op).is_err());
+        assert_eq!(
+            device.keychain.get(&slot).unwrap().as_deref(),
+            Some(original.as_str())
+        );
+        std::fs::write(&marker, &marker_bytes).unwrap();
         let mut corrupt = raw.clone();
         *corrupt.last_mut().unwrap() ^= 1;
         std::fs::write(&path, &corrupt).unwrap();

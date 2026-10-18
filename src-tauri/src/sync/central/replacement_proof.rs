@@ -6,7 +6,7 @@ use super::{
     rekey::{Checkpoint, SignedRekey},
     replacement::Route,
     trust::VerifiedChain,
-    wire::{invalid, number},
+    wire::{hex, invalid, number},
     workspace::Workspace,
 };
 use crate::error::AppError;
@@ -233,23 +233,30 @@ pub(super) fn extend_minimums(
             return Err(invalid());
         }
         for bridge in bridges {
-            let selected;
-            let bridge = if index == 0 {
-                bridge
-            } else {
-                let mut digests = vec![];
-                for row in &bridge.digests {
-                    if number(&row.sequence, false)? > known.sequence {
-                        digests.push(row.clone());
-                    }
+            // One bounded proof may begin before this reader's floor so the same collected
+            // source digests can serve both the target and the original owner.
+            let mut digests = vec![];
+            let mut previous = 0;
+            for row in &bridge.digests {
+                let sequence = number(&row.sequence, false)?;
+                if sequence <= previous || !hex(&row.digest, 64) {
+                    return Err(invalid());
                 }
-                selected = Bridge {
+                previous = sequence;
+                if sequence > known.sequence {
+                    digests.push(row.clone());
+                }
+            }
+            known = finish_bridge(
+                chain,
+                vault,
+                epochs,
+                &known,
+                &Bridge {
                     epoch: bridge.epoch,
                     digests,
-                };
-                &selected
-            };
-            known = finish_bridge(chain, vault, epochs, &known, bridge)?;
+                },
+            )?;
         }
         if !minimums.contains(&known) {
             minimums.push(known);

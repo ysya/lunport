@@ -2398,7 +2398,7 @@ fn active_full_baseline_reads_after_trusted_approval_or_committed_recovery_use_o
         let old=source.replica.as_ref().unwrap().prepare_page(&old_chain,&keys,&rows[..1],&super::rekey::Checkpoint{
             epoch:1,sequence:1,history_hash:rows[0].history_hash.clone()}).unwrap().next;
         source.replica=Some(old);source.replacement=Some(super::replacement::Intent{operation:operation.clone(),
-            route:if recovered{super::replacement::Route::RecoveryKit}else{super::replacement::Route::TrustedDevice},device:Some(selected.device())});
+            route:if recovered{super::replacement::Route::RecoveryKit}else{super::replacement::Route::TrustedDevice},device:Some(selected.device()), candidate: None, recovery_confirmation: None, });
         source.validate().unwrap();
         let mut reader=active_read::ReadSession::begin(&candidate,&selected,verified.proof().clone(),snapshot.clone(),&[]).unwrap();
         super::replacement_proof::pin_active_read(&source,&mut reader,&[]).unwrap();
@@ -2413,4 +2413,204 @@ fn active_full_baseline_reads_after_trusted_approval_or_committed_recovery_use_o
         assert!(super::replacement_proof::active_read(&source,&completed,&[]).is_err());
         assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0,before);
     }
+}
+
+#[test]
+fn staged_replacement_uses_one_core_and_independent_recovery_authorities_through_confirmation_and_cleanup() {
+    use super::{api::{Api,Control},client_state::Phase,credentials::DeviceIdentity,
+        owner::OwnerPath,recovery::{RecoveryKit,RecoverySeed},recovery_credentials,recovery_read::{ReadSession,RecoveryReply},
+        recovery_state::PreparedRecovery,replacement::{self,Route}};
+    use crate::sync::env::Keychain;
+    for fail_after_rename in [false,true] {
+    let service=Service::new();let d=TestDevice::new("replace-same-machine",&FakeRelay::new(),&TestClock::new());
+    service.login(&d);bootstrap::prepare(&d.env()).unwrap();let reveal=bootstrap::reveal(&d.env()).unwrap();
+    bootstrap::confirm(&d.env(),&reveal.root).unwrap();
+    let original=record_runtime::snapshot(&d.env()).unwrap().0;
+    let global=controller::context(&d.env()).unwrap();let profile=global.profile.profile().unwrap();
+    let saved_identity=d.keychain.entry(&profile.slot("device"));
+    let intent=replacement::prepare(&d.env(),Route::RecoveryKit).unwrap();
+    let operation=intent.operation.clone();let path=OwnerPath::Replacement(operation.clone());
+    let selected=DeviceIdentity::load_selected(&d.keychain,&profile,Some(&operation),true).unwrap();
+    let template=controller::Session{profile:global.profile.clone(),identity:Some(Arc::new(selected)),tokens:Arc::clone(&global.tokens),
+        device:None,device_access_denied:false,tokens_started:global.tokens_started};
+    let api=Api::new(&service.server.url()).unwrap();let session=bootstrap::register(&d.env(),&template,&api).unwrap();
+    let _lifecycle=d.runtime.lifecycle.lock().unwrap();
+    let initial=replacement::initialize_candidate(&d.env(),&operation,&session).unwrap();
+    assert_eq!(replacement::initialize_candidate(&d.env(),&operation,&session).unwrap(),initial);
+    assert!(replacement::initialize_candidate(&d.env(),&operation,&global).is_err());
+    assert_eq!(OwnerPath::Current.snapshot(&d.env()).unwrap().control,original.local.central.as_ref().unwrap().control);
+    let identity=session.identity.as_ref().unwrap();let kit=RecoveryKit::parse(&reveal.kit).unwrap();
+    let request=Enrollment::create(kit.anchor(),&identity.id,&identity.keys,d.env().now()).unwrap();
+    let mut awaiting=initial.clone();awaiting.control.phase=Phase::AwaitingApproval;awaiting.control.pending_request=Some(request.clone());
+    path.publish(&d.env(),&initial,&awaiting).unwrap();
+    let response=api.control(session.device.as_ref().unwrap(),Control::Enrollment,&json!({"request":request})).unwrap();assert_eq!(response.status,204);
+    let remote=controller::overview(&d.env(),&api,&session).unwrap();let proof=remote.proof.unwrap();
+    let chain=proof.verify(kit.anchor(),None).unwrap();let read_proof=kit.read_proof(&chain,&request,remote.auth_epoch,d.env().now()).unwrap();
+    let reply:RecoveryReply=api.control(session.device.as_ref().unwrap(),Control::RecoveryRead,&json!({"proof":read_proof})).unwrap().decode().unwrap();
+    let read=ReadSession::begin_fresh(&awaiting,&kit,proof,reply,d.env().now()).unwrap().finish().unwrap();
+    let prepared=PreparedRecovery::create(read,&kit,&identity.keys,RecoverySeed::generate().unwrap(),operation.clone(),d.env().now()).unwrap();
+    d.keychain.set(&profile.slot("recovery-intent"),"retained-original-recovery-authority").unwrap();
+    let permit=recovery_credentials::stage_at(&d.env(),&path,&awaiting,&prepared,&kit).unwrap();
+    assert!(recovery_credentials::install(&d.env(),&awaiting,&prepared.package,permit).is_err());
+    let permit=recovery_credentials::stage_at(&d.env(),&path,&awaiting,&prepared,&kit).unwrap();
+    recovery_credentials::install_at(&d.env(),&path,&awaiting,&prepared.package,permit).unwrap();
+    let shown=recovery_credentials::reveal_at(&d.env(),&path).unwrap();assert_ne!(shown.kit,reveal.kit);
+    let unconfirmed=path.snapshot(&d.env()).unwrap();
+    let premature=prepared.package.accepted(&unconfirmed,prepared.package.proof(),prepared.package.admission.authorization_epoch+1).unwrap();
+    let saved=record_runtime::snapshot(&d.env()).unwrap();
+    assert!(path.publish(&d.env(),&unconfirmed,&premature).is_err());
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap(),saved);
+    recovery_credentials::confirm_backup_at(&d.env(),&path,&operation).unwrap();
+    let before=path.snapshot(&d.env()).unwrap();
+    let premature=prepared.package.accepted(&before,prepared.package.proof(),prepared.package.admission.authorization_epoch+1).unwrap();
+    assert!(path.publish(&d.env(),&before,&premature).is_err());
+    let mut submitted=before.clone();
+    match submitted.recovery.as_mut().unwrap(){super::recovery_state::RecoveryState::Pending{package}=>package.submitted=true,_=>panic!()}
+    path.publish(&d.env(),&before,&submitted).unwrap();
+    let wraps=BTreeMap::from([(prepared.package.admission.vault.clone(),prepared.package.wraps.clone())]);
+    let reply=api.control(session.device.as_ref().unwrap(),Control::Recover,&json!({"node":prepared.package.node,"wraps":wraps})).unwrap();assert_eq!(reply.status,200);
+    let renewed=bootstrap::register(&d.env(),&session,&api).unwrap();let remote=controller::overview(&d.env(),&api,&renewed).unwrap();
+    let accepted=prepared.package.accepted(&submitted,remote.proof.unwrap(),remote.auth_epoch).unwrap();
+    path.publish(&d.env(),&submitted,&accepted).unwrap();
+    recovery_credentials::cleanup_at(&d.env(),&path).unwrap();
+    let staged=path.snapshot(&d.env()).unwrap();staged.require_key_recipients().unwrap();
+    assert!(d.keychain.entry(&profile.device_slot("recovery-intent",Some(&operation)).unwrap()).is_none());
+    assert_eq!(d.keychain.entry(&profile.slot("recovery-intent")).as_deref(),Some("retained-original-recovery-authority"));
+    assert_eq!(d.keychain.entry(&profile.slot("device")),saved_identity);
+    let source=OwnerPath::Current.snapshot(&d.env()).unwrap();
+    assert_eq!(source.control,original.local.central.as_ref().unwrap().control);
+    assert_eq!(source.replica,original.local.central.as_ref().unwrap().replica);
+    assert_eq!(source.replacement.as_ref().unwrap().recovery_confirmation.as_ref(),Some(&prepared.package.admission));
+    assert!(source.require_key_recipients().is_err());
+    // No independent runtime was constructed and no old local record or owner was replaced.
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap().0.local.hosts,original.local.hosts);
+    let (proof,snapshot)={let state=service.state.lock().unwrap();(state.proof.clone().unwrap(),super::active_read::Snapshot{
+        membership_head:state.chain().unwrap().current().head().into(),auth_epoch:state.epoch,vault:super::recovery_read::RecoveryVault{
+            vault:state.vault.clone().unwrap(),epoch:1,phase:"rekey_pending".into(),wrap:state.wraps.iter().find(|w|w.header.recipient==identity.id).unwrap().clone(),
+            committed:None,commits:vec![],sequence:"0".into(),history_hash:"0".repeat(64)}})};
+    let read=super::active_read::ReadSession::begin(&staged,renewed.identity.as_ref().unwrap(),proof,snapshot,&[]).unwrap().finish().unwrap();
+    let authority=super::replacement_publication::Authorization::prepare(&d.env(),Arc::new(renewed),read,vec![],vec![]).unwrap();
+    let (latest,generation)=record_runtime::snapshot(&d.env()).unwrap();
+    let archive=super::replacement_archive::prepare(&d.env(),&_lifecycle,&latest,generation,&operation).unwrap();
+    let manual=authority.records(&latest,archive.receipt().clone()).unwrap();
+    assert!(record_runtime::commit_candidate(&d.env(),generation,manual.clone()).is_err());
+    assert!(record_runtime::save_active(&d.env().state_path,&manual).is_err());
+    let old_owner=original.local.central.as_ref().unwrap();let old_chain=old_owner.control.verified_chain().unwrap();
+    let old_identity=global.identity.as_ref().unwrap();let old_wrap=&old_owner.own_wraps[0];
+    let old_keys=old_wrap.open(&old_identity.keys,&old_wrap.header,&old_identity.keys.public().signing).unwrap();
+    let local_id=super::payload::Identity{kind:"host".into(),id:"0000000000000001".into(),scope:Some(crate::sync::records_v3::HostScope::Local)};
+    let local_data=super::payload::Data::Host(serde_json::from_value(json!({"schema":2,"alias":"unsent-local-B","hostname":"local.invalid","auth":"password"})).unwrap());
+    let local_plain=super::payload::encode(&local_id,&local_data).unwrap();
+    let mut old_replica=old_owner.replica.clone().unwrap();
+    old_replica.enqueue(&old_chain,&old_keys,&old_identity.keys,1,RecordHeader{
+        origin:old_owner.control.profile.origin.clone(),account_id:old_owner.control.account_id.clone(),genesis_hash:old_owner.control.anchor.as_ref().unwrap().genesis_hash.clone(),
+        vault_id:old_replica.vault.clone(),record_id:local_id.opaque(&old_keys).unwrap(),key_epoch:"1".into(),membership_head:old_chain.current().head().into(),author:old_identity.id.clone(),
+        operation_id:crypto::random_id(16).unwrap(),expected_revision:"0".into(),kind:"host".into(),deleted:false},&local_plain).unwrap();
+    record_runtime::mutate_records(&d.env(),|records|{let mut next=records.clone();next.device_name="local-B-after-first-archive".into();next.local.central.as_mut().unwrap().replica=Some(old_replica.clone());Ok(next)}).unwrap();
+    assert!(record_runtime::publish_replacement(&d.env(),&authority,archive).is_err());
+    let (latest,generation)=record_runtime::snapshot(&d.env()).unwrap();
+    assert_eq!(latest.local.central.as_ref().unwrap().control.device,original.local.central.as_ref().unwrap().control.device);
+    // Neither a failed durable write nor an unexpected source file may switch the live owner.
+    let bytes=std::fs::read(&d.env().state_path).unwrap();
+    for failure in [record_runtime::ReplacementWriteStage::FileSync,record_runtime::ReplacementWriteStage::Rename] {
+        let archive=super::replacement_archive::prepare(&d.env(),&_lifecycle,&latest,generation,&operation).unwrap();
+        let result=record_runtime::with_replacement_write_hook(Box::new(move |stage,_| {
+            if stage==failure {Err(crate::error::AppError::Other("injected replacement write failure".into()))}else{Ok(())}
+        }),||record_runtime::publish_replacement(&d.env(),&authority,archive));
+        assert!(result.is_err());assert_eq!(record_runtime::snapshot(&d.env()).unwrap(),(latest.clone(),generation));
+        assert_eq!(std::fs::read(&d.env().state_path).unwrap(),bytes);
+        assert!(d.runtime.core.lock().unwrap().save_blocked.is_none());
+    }
+    let mut external=latest.clone();external.device_name="unexpected disk modification".into();
+    let external_bytes=serde_json::to_vec_pretty(&external).unwrap();let changed_bytes=external_bytes.clone();
+    let archive=super::replacement_archive::prepare(&d.env(),&_lifecycle,&latest,generation,&operation).unwrap();
+    let result=record_runtime::with_replacement_write_hook(Box::new(move |stage,path| {
+        if stage==record_runtime::ReplacementWriteStage::SourceRecheck {crate::fsutil::atomic_write(path,&changed_bytes,0o600)?;}Ok(())
+    }),||record_runtime::publish_replacement(&d.env(),&authority,archive));
+    assert!(result.is_err());assert_eq!(std::fs::read(&d.env().state_path).unwrap(),external_bytes);
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap(),(latest.clone(),generation));
+    crate::fsutil::atomic_write(&d.env().state_path,&bytes,0o600).unwrap();
+    let archive=super::replacement_archive::prepare(&d.env(),&_lifecycle,&latest,generation,&operation).unwrap();
+    let expected=authority.records(&latest,archive.receipt().clone()).unwrap();
+    if fail_after_rename {
+        let result=record_runtime::with_replacement_write_hook(Box::new(|stage,_| {
+            if stage==record_runtime::ReplacementWriteStage::DirectorySync {Err(crate::error::AppError::Other("injected directory sync failure".into()))}else{Ok(())}
+        }),||record_runtime::publish_replacement(&d.env(),&authority,archive));
+        assert!(result.is_err());assert_eq!(record_runtime::snapshot(&d.env()).unwrap(),(latest.clone(),generation));
+        {let core=d.runtime.core.lock().unwrap();assert!(core.save_blocked.is_some());assert!(core.central_session.is_none());}
+        assert!(record_runtime::mutate_records(&d.env(),|records|Ok(records.clone())).is_err());
+        let probe=record_runtime::probe_startup(&d.env().state_path,"durability-restart");
+        record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(),probe).unwrap();
+        assert!(d.runtime.core.lock().unwrap().save_blocked.is_none());
+    } else {
+        drop(archive);authority.publish(&d.env(),&_lifecycle).unwrap();
+        assert_eq!(controller::context(&d.env()).unwrap().identity.as_ref().unwrap().device(),identity.device());
+    }
+    let published=record_runtime::snapshot(&d.env()).unwrap().0;assert_eq!(published,expected);
+    assert_eq!(published.device_name,"local-B-after-first-archive");
+    let current=published.local.central.as_ref().unwrap();assert_eq!(current.control.device,identity.device());
+    assert_eq!(current.identity_slot.as_ref(),Some(&operation));assert!(current.replacement.is_none());
+    assert_eq!(current.replacement_archives.len(),1);assert!(current.control.denied_devices.contains(&original.local.central.as_ref().unwrap().control.device.id));
+    let restored=super::replacement_archive::restore(&d.env(),&profile,&current.replacement_archives[0].receipt).unwrap();
+    assert_eq!(restored,latest);
+    let restored_replica=restored.local.central.as_ref().unwrap().replica.as_ref().unwrap();
+    assert_eq!(restored_replica.pending.len(),1);
+    let draft=&restored_replica.pending.values().next().unwrap().latest;
+    let decrypted=draft.envelope.verify(&old_identity.keys.public().signing).unwrap().open(&old_keys).unwrap();
+    assert_eq!(decrypted.as_slice(),local_plain.as_slice());
+    assert!(current.replacement_archives[0].needs_reconciliation);assert!(!current.can_upload());
+    assert!(current.replica.as_ref().unwrap().pending.is_empty());
+    let retry=super::replacement_archive::prepare(&d.env(),&_lifecycle,&latest,generation,&operation).unwrap();
+    assert!(record_runtime::publish_replacement(&d.env(),&authority,retry).is_err());
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap().0,published);
+    assert_eq!(d.keychain.entry(&profile.slot("device")),saved_identity);
+    let mut discarded=current.clone();discarded.replacement_archives.clear();assert!(current.verify_transition(&discarded).is_err());
+    let mut swapped=current.clone();swapped.identity_slot=None;assert!(current.verify_transition(&swapped).is_err());
+    let probe=record_runtime::probe_startup(&d.env().state_path,"after-replacement");
+    record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(),probe).unwrap();
+    assert_eq!(record_runtime::snapshot(&d.env()).unwrap().0,published);
+    }
+}
+
+#[test]
+fn trusted_replacement_requires_the_protected_oob_secret_and_exact_selected_session() {
+    use super::{api::{Api,Control},credentials::DeviceIdentity,owner::OwnerPath,replacement::{self,Route}};
+    use crate::sync::env::Keychain;
+    let service=Service::new();let relay=FakeRelay::new();let clock=TestClock::new();
+    let d=TestDevice::new("old-owner",&relay,&clock);let trusted=TestDevice::new("trusted",&relay,&clock);
+    service.login(&d);bootstrap::prepare(&d.env()).unwrap();let kit=bootstrap::reveal(&d.env()).unwrap();bootstrap::confirm(&d.env(),&kit.root).unwrap();
+    service.login(&trusted);let code=devices::pairing_code(&trusted.env()).unwrap();devices::approve(&d.env(),&code.code).unwrap();controller::refresh(&trusted.env()).unwrap();
+    let old=controller::context(&d.env()).unwrap();let profile=old.profile.profile().unwrap();let saved=d.keychain.entry(&profile.slot("device"));
+    let intent=replacement::prepare(&d.env(),Route::TrustedDevice).unwrap();let operation=intent.operation.clone();let path=OwnerPath::Replacement(operation.clone());
+    let identity=DeviceIdentity::load_selected(&d.keychain,&profile,Some(&operation),true).unwrap();
+    let template=controller::Session{profile:old.profile.clone(),identity:Some(Arc::new(identity)),tokens:Arc::clone(&old.tokens),device:None,device_access_denied:false,tokens_started:old.tokens_started};
+    let api=Api::new(&service.server.url()).unwrap();let session=bootstrap::register(&d.env(),&template,&api).unwrap();
+    let lifecycle=d.runtime.lifecycle.lock().unwrap();let initial=replacement::initialize_candidate(&d.env(),&operation,&session).unwrap();
+    let source=OwnerPath::Current.snapshot(&d.env()).unwrap();let anchor=source.control.anchor.as_ref().unwrap();let identity=session.identity.as_ref().unwrap();
+    let pairing=super::pairing::PendingPairing::begin(anchor,&identity.id,&identity.keys,d.env().now()).unwrap();
+    let slot=profile.device_slot("pairing",Some(&operation)).unwrap();let secret=pairing.encode_secret().unwrap();d.keychain.set(&slot,&secret).unwrap();
+    let mut awaiting=initial.clone();awaiting.control=initial.control.begin_pairing(&pairing).unwrap();path.publish(&d.env(),&initial,&awaiting).unwrap();
+    let reply=api.control(session.device.as_ref().unwrap(),Control::Enrollment,&json!({"request":pairing.request()})).unwrap();assert_eq!(reply.status,204);
+    devices::approve(&trusted.env(),&pairing.code().unwrap()).unwrap();
+    let renewed=bootstrap::register(&d.env(),&session,&api).unwrap();let remote=controller::overview(&d.env(),&api,&renewed).unwrap();
+    let mut accepted=awaiting.clone();accepted.control=awaiting.control.accept_pairing(&pairing,remote.pairing_confirmation.as_ref().unwrap(),remote.proof.unwrap()).unwrap();
+    accepted.control.auth_epoch=remote.auth_epoch;path.publish(&d.env(),&awaiting,&accepted).unwrap();
+    let read=||{let state=service.state.lock().unwrap();let proof=state.proof.clone().unwrap();let snapshot=super::active_read::Snapshot{
+        membership_head:state.chain().unwrap().current().head().into(),auth_epoch:state.epoch,vault:super::recovery_read::RecoveryVault{
+            vault:state.vault.clone().unwrap(),epoch:1,phase:"ready".into(),wrap:state.wraps.iter().find(|w|w.header.recipient==identity.id).unwrap().clone(),
+            committed:None,commits:vec![],sequence:"0".into(),history_hash:"0".repeat(64)}};
+        super::active_read::ReadSession::begin(&accepted,identity,proof,snapshot,&[]).unwrap().finish().unwrap()};
+    let renewed=Arc::new(renewed);
+    assert!(super::replacement_publication::Authorization::prepare(&d.env(),Arc::clone(&old),read(),vec![],vec![]).is_err());
+    d.keychain.set(&slot,"{}").unwrap();
+    assert!(super::replacement_publication::Authorization::prepare(&d.env(),Arc::clone(&renewed),read(),vec![],vec![]).is_err());
+    assert_eq!(OwnerPath::Current.snapshot(&d.env()).unwrap().control.device,source.control.device);
+    d.keychain.set(&slot,&secret).unwrap();
+    let authority=super::replacement_publication::Authorization::prepare(&d.env(),Arc::clone(&renewed),read(),vec![],vec![]).unwrap();
+    authority.publish(&d.env(),&lifecycle).unwrap();
+    let switched=OwnerPath::Current.snapshot(&d.env()).unwrap();assert_eq!(switched.control.device,identity.device());
+    assert_eq!(switched.control.phase,super::client_state::Phase::Rekey);
+    assert!(switched.control.denied_devices.contains(&source.control.device.id));assert!(switched.require_key_recipients().is_err());
+    assert_eq!(switched.replacement_archives[0].route,Route::TrustedDevice);assert!(!switched.replacement_archives[0].needs_reconciliation);
+    assert_eq!(d.keychain.entry(&profile.slot("device")),saved);
 }
