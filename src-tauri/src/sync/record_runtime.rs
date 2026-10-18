@@ -290,6 +290,7 @@ pub fn activate_probe(
     core.account_keys = None;
     core.central_session = None;
     core.central_user_action = None;
+    core.central_poll = Default::default();
     core.save_blocked = None;
     core.unsaved = false;
     core.swap_pending = false;

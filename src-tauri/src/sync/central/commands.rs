@@ -104,6 +104,7 @@ pub async fn central_refresh(app: AppHandle) -> Result<Status, AppError> {
         engine::with_env(&app, |env| {
             controller::refresh(env)?;
             super::joining::initialize(env)?;
+            super::round::sync_once(env)?;
             controller::status(env)
         })?
     })

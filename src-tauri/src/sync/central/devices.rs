@@ -72,11 +72,12 @@ fn workspace(env: &SyncEnv) -> Result<Workspace, AppError> {
         .ok_or_else(invalid)
 }
 fn checked_remote(
+    env: &SyncEnv,
     api: &Api,
     session: &controller::Session,
     before: &Workspace,
 ) -> Result<AccountOverview, AppError> {
-    let remote = controller::overview(api, session)?;
+    let remote = controller::overview(env, api, session)?;
     if remote.proof.as_ref() != before.control.proof.as_ref()
         || remote.auth_epoch != before.control.auth_epoch
     {
@@ -86,11 +87,12 @@ fn checked_remote(
 }
 pub fn registry(env: &SyncEnv) -> Result<Registry, AppError> {
     controller::require_enabled()?;
+    super::round::check_cooldown(env)?;
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
     let before = workspace(env)?;
     let session = controller::context(env)?;
     let api = Api::new(&before.control.profile.origin)?;
-    let remote = checked_remote(&api, &session, &before)?;
+    let remote = checked_remote(env, &api, &session, &before)?;
     let chain = before.control.verified_chain()?;
     let proof = before.control.proof.as_ref().ok_or_else(invalid)?;
     let mut seen = BTreeMap::from([(
@@ -173,7 +175,7 @@ pub fn approve(env: &SyncEnv, code: &str) -> Result<Status, AppError> {
     let session = controller::context(env)?;
     let identity = session.identity.as_ref().ok_or_else(invalid)?;
     let api = Api::new(&before.control.profile.origin)?;
-    let remote = checked_remote(&api, &session, &before)?;
+    let remote = checked_remote(env, &api, &session, &before)?;
     let chain = before.control.verified_chain()?;
     if remote.phase != "ready"
         || remote.vaults.len() != 1
@@ -283,8 +285,9 @@ pub fn approve(env: &SyncEnv, code: &str) -> Result<Status, AppError> {
             },
         )?);
     }
-    api.control(session.device.as_ref().ok_or_else(invalid)?,Control::Membership,
-        &serde_json::json!({"node":node,"wraps":{&replica.vault:wraps},"confirmation":confirmation}))?.success()?;
+    let reply = api.control(session.device.as_ref().ok_or_else(invalid)?,Control::Membership,
+        &serde_json::json!({"node":node,"wraps":{&replica.vault:wraps},"confirmation":confirmation}))?;
+    super::round::require_success(env, &reply)?;
     drop(lifecycle);
     let status = controller::refresh(env)?;
     if !workspace(env)?

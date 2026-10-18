@@ -157,9 +157,29 @@ impl SyncEvents for TauriEvents {
 /// 以 app 的狀態、OS keychain、HTTP relay 與系統時鐘組出 `SyncEnv`。
 pub(crate) fn with_env<T>(app: &AppHandle, f: impl FnOnce(&SyncEnv) -> T) -> Result<T, AppError> {
     let state = app.state::<AppState>();
+    let noninteractive = crate::sync::env::NonInteractiveKeychain(&OsKeychain);
+    let credentials: &dyn Keychain = if state.background_credentials_only.load(Ordering::SeqCst) {
+        &noninteractive
+    } else {
+        &OsKeychain
+    };
+    with_keychain(app, credentials, f)
+}
+/// Central renewal permits only verified no-UI credential updates. Legacy adapters remain read-only.
+pub(crate) fn with_background_account_env<T>(
+    app: &AppHandle,
+    f: impl FnOnce(&SyncEnv) -> T,
+) -> Result<T, AppError> {
+    let credentials = crate::sync::central::credentials::Background(&OsKeychain);
+    with_keychain(app, &credentials, f)
+}
+fn with_keychain<T>(
+    app: &AppHandle,
+    credentials: &dyn Keychain,
+    f: impl FnOnce(&SyncEnv) -> T,
+) -> Result<T, AppError> {
+    let state = app.state::<AppState>();
     let events = TauriEvents { app: app.clone() };
-    let noninteractive=crate::sync::env::NonInteractiveKeychain(&OsKeychain);
-    let credentials:&dyn Keychain=if state.background_credentials_only.load(Ordering::SeqCst){&noninteractive}else{&OsKeychain};
     let env = SyncEnv {
         doc: &state.doc,
         backed_up: &state.backed_up,
@@ -257,16 +277,59 @@ fn worker_loop(app: AppHandle, rx: Receiver<Wake>) {
             return;
         }
         while rx.try_recv().is_ok() {}
-        if app.state::<AppState>().background_credentials_only.load(Ordering::SeqCst) {
-            wait=Wait::after_round(Instant::now(),crate::sync::relay::IDLE_POLL_INTERVAL,Duration::ZERO);continue;
+        let background_only = app
+            .state::<AppState>()
+            .background_credentials_only
+            .load(Ordering::SeqCst);
+        if !background_only {
+            if let Ok(next) = with_env(&app, |env| {
+                let (format, legacy, cutover) = {
+                    let core = env.runtime.core.lock().unwrap();
+                    (
+                        core.format,
+                        core.format == crate::sync::record_runtime::RuntimeFormat::Legacy
+                            && !core.legacy_paused
+                            && core.save_blocked.is_none(),
+                        core.records
+                            .as_ref()
+                            .and_then(|r| r.local.central.as_ref())
+                            .is_some_and(|w| w.control.cutover),
+                    )
+                };
+                if legacy {
+                    let _ = round::sync_once(env);
+                } else if format == crate::sync::record_runtime::RuntimeFormat::Records && !cutover
+                {
+                    let _ = crate::sync::record_round::sync_once(env);
+                }
+                (
+                    round::next_delay(env),
+                    round::backoff_window(env),
+                    format == crate::sync::record_runtime::RuntimeFormat::Records,
+                )
+            }) {
+                (delay, backoff, records) = next;
+            }
+        } else {
+            delay = crate::sync::relay::IDLE_POLL_INTERVAL;
+            backoff = Duration::ZERO;
+            records = false;
         }
-        if let Ok(next) = with_env(&app, |env| {
-            let (format,legacy) = { let core=env.runtime.core.lock().unwrap(); (core.format,core.format == crate::sync::record_runtime::RuntimeFormat::Legacy && !core.legacy_paused && core.save_blocked.is_none()) };
-            if legacy { let _ = round::sync_once(env); }
-            else if format==crate::sync::record_runtime::RuntimeFormat::Records { let _=crate::sync::record_round::sync_once(env); }
-            (round::next_delay(env), round::backoff_window(env), format == crate::sync::record_runtime::RuntimeFormat::Records)
-        }) {
-            (delay, backoff, records) = next;
+        if let Ok(Some((central_delay, central_backoff))) =
+            with_background_account_env(&app, |env| {
+                if !crate::sync::central::round::configured(env) {
+                    return None;
+                }
+                let _ = crate::sync::central::round::sync_once(env);
+                Some((
+                    crate::sync::central::round::next_delay(env),
+                    crate::sync::central::round::cooldown(env),
+                ))
+            })
+        {
+            delay = delay.max(central_delay);
+            backoff = backoff.max(central_backoff);
+            records = true;
         }
         wait = Wait::after_round(Instant::now(), delay, backoff);
         // Records Sync now coalesces during a failed round's cooldown. It must not

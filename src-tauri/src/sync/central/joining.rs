@@ -22,6 +22,7 @@ struct EpochBundle {
 }
 pub fn initialize(env: &SyncEnv) -> Result<(), AppError> {
     controller::require_enabled()?;
+    super::round::check_cooldown(env)?;
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
     let before = record_runtime::snapshot(env)?
         .0
@@ -39,7 +40,7 @@ pub fn initialize(env: &SyncEnv) -> Result<(), AppError> {
     let session = controller::context(env)?;
     let identity = session.identity.as_ref().ok_or_else(invalid)?;
     let api = Api::new(&before.control.profile.origin)?;
-    let remote = controller::overview(&api, &session)?;
+    let remote = controller::overview(env, &api, &session)?;
     if remote.proof.as_ref() != before.control.proof.as_ref()
         || remote.auth_epoch != before.control.auth_epoch
     {
@@ -81,7 +82,7 @@ pub fn initialize(env: &SyncEnv) -> Result<(), AppError> {
             &minimum.vault,
             VaultResource::EpochWraps { epoch: target },
         )?;
-        reply.success()?;
+        super::round::require_success(env, &reply)?;
         let bundle: EpochBundle = reply.decode()?;
         if number(&bundle.manifest.body.to_epoch, false)? != target {
             return Err(invalid());
@@ -94,7 +95,7 @@ pub fn initialize(env: &SyncEnv) -> Result<(), AppError> {
         &minimum.vault,
         VaultResource::Wrap,
     )?;
-    reply.success()?;
+    super::round::require_success(env, &reply)?;
     let wrap: WrappedKeys = reply.decode()?;
     if number(&wrap.header.key_epoch, false)? != epoch {
         return Err(invalid());

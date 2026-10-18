@@ -17,6 +17,7 @@ pub mod pairing;
 pub mod payload;
 pub mod recovery;
 pub mod rekey;
+pub mod round;
 pub mod replica;
 pub mod trust;
 pub mod wire;

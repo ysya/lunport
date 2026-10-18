@@ -42,6 +42,7 @@ pub struct SyncCore {
     /// Ephemeral native credentials only; the public central state remains in records.local.central.
     pub central_session: Option<std::sync::Arc<crate::sync::central::controller::Session>>,
     pub central_user_action: Option<String>,
+    pub central_poll: crate::sync::central::round::Polling,
     /// Probe-selected legacy sources wait for explicit workspace choice or migration.
     pub legacy_paused: bool,
     pub state: Option<SyncStateV2>,

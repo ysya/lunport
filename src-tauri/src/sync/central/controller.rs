@@ -1,6 +1,6 @@
 //! Native account lifecycle. No access, refresh, device secret or content key is a frontend DTO.
 use super::{
-    api::{AccountOverview, Api, Control, DeviceSession, DeviceState},
+    api::{AccountOverview, Api, Control, DeviceSession, DeviceState, RegistrationOutcome},
     client_state::{Phase, ProfileData, State},
     credentials::{self, DeviceIdentity, Profile, SessionAttempt},
     membership::TrustAnchor,
@@ -138,13 +138,13 @@ fn current_login(env: &SyncEnv, operation: Option<&str>) -> Result<(), AppError>
     }
     Ok(())
 }
-pub fn overview(api: &Api, session: &Session) -> Result<AccountOverview, AppError> {
+pub fn overview(env: &SyncEnv, api: &Api, session: &Session) -> Result<AccountOverview, AppError> {
     let device = session
         .device
         .as_ref()
         .ok_or_else(|| AppError::Other("Sign in or recover this device's account keys.".into()))?;
     let reply = api.account(device)?;
-    reply.success()?;
+    super::round::require_success(env, &reply)?;
     let value: AccountOverview = reply.decode()?;
     value.validate(device)?;
     if value.proof.as_ref().is_some_and(|p| {
@@ -215,7 +215,27 @@ fn establish_tokens(
 ) -> Result<Status, AppError> {
     require_enabled()?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    establish_locked(
+        env, service, config, tokens, started, operation, new_login, false,
+    )?;
+    drop(lifecycle);
+    env.runtime.note_activity(env.now());
+    env.events.status();
+    env.events.wake_implicit();
+    status(env)
+}
+fn establish_locked(
+    env: &SyncEnv,
+    service: &str,
+    config: OidcConfig,
+    tokens: Arc<LoginTokens>,
+    started: Instant,
+    operation: Option<&str>,
+    new_login: bool,
+    resumed: bool,
+) -> Result<(), AppError> {
     if !new_login
+        && !resumed
         && !env
             .runtime
             .core
@@ -277,9 +297,10 @@ fn establish_tokens(
     };
     let mut workspace = previous.clone();
     if let Some(identity) = &session.identity {
+        super::round::check_cooldown(env)?;
         let attempt =
             SessionAttempt::prepare_with_reset(env.keychain, &profile, identity, env.now(), true)?;
-        let registered = api.register(
+        let registered = api.register_outcome(
             &profile,
             identity,
             &attempt,
@@ -287,9 +308,12 @@ fn establish_tokens(
             &snapshot.device_name,
             env.now(),
         );
-        session.device = match registered {
-            Ok(device) => Some(device),
-            Err(error) => return Err(error),
+        session.device = match registered? {
+            RegistrationOutcome::Accepted(device) => Some(device),
+            RegistrationOutcome::Rejected(reply) => {
+                super::round::require_success(env, &reply)?;
+                return Err(invalid());
+            }
         };
         current_login(env, operation)?;
         if previous.as_ref().is_some_and(|w| {
@@ -300,7 +324,7 @@ fn establish_tokens(
         }) {
             return Err(AppError::Other("The service returned a different account for this sign-in. Local trust and data are retained.".into()));
         }
-        let remote = overview(&api, &session)?;
+        let remote = overview(env, &api, &session)?;
         let mut public = match previous.as_ref() {
             Some(w) => w.control.clone(),
             None => State::new(
@@ -354,14 +378,14 @@ fn establish_tokens(
                 struct Request<'a> {
                     request: &'a super::membership::Enrollment,
                 }
-                api.control(
+                let reply = api.control(
                     session.device.as_ref().unwrap(),
                     Control::Enrollment,
                     &Request {
                         request: pending.request(),
                     },
-                )?
-                .success()?;
+                )?;
+                super::round::require_success(env, &reply)?;
                 public = public.begin_pairing(&pending)?;
             } else if public.pending_request.is_some() {
                 if public.phase == Phase::SignedOut {
@@ -412,9 +436,114 @@ fn establish_tokens(
         core.central_user_action = None;
     }
     drop(commit_gate);
+    Ok(())
+}
+/// Resume a saved, already-approved/pairing profile without opening UI or inventing an identity.
+/// Token rotation and opaque registration remain serialized with foreground account operations.
+pub fn resume(env: &SyncEnv, force_session: bool) -> Result<bool, AppError> {
+    if !enabled() {
+        return Ok(false);
+    }
+    let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    if env.runtime.central_login.lock().unwrap().is_some() {
+        return Ok(false);
+    }
+    let (records, _) = record_runtime::snapshot(env)?;
+    let Some(workspace) = records.local.central.as_ref() else {
+        return Ok(false);
+    };
+    if matches!(
+        workspace.control.phase,
+        Phase::SignedOut | Phase::Revoked | Phase::BackupRequired | Phase::Setup
+    ) {
+        return Ok(false);
+    }
+    let existing = env.runtime.core.lock().unwrap().central_session.clone();
+    if existing
+        .as_ref()
+        .is_some_and(|s| s.profile != workspace.control.profile)
+    {
+        return Err(invalid());
+    }
+    let token_margin = std::time::Duration::from_secs(60);
+    if !force_session
+        && existing.as_ref().is_some_and(|s| {
+            s.tokens_started.elapsed().saturating_add(token_margin) < s.tokens.expires_in
+                && s.device.as_ref().is_some_and(|d| {
+                    !d.expired()
+                        && d.auth_epoch == workspace.control.auth_epoch
+                        && d.account_id == workspace.control.account_id
+                })
+                && s.identity
+                    .as_ref()
+                    .is_some_and(|id| id.device() == workspace.control.device)
+        })
+    {
+        return Ok(true);
+    }
+    let background = credentials::Background(env.keychain);
+    let safe_env = SyncEnv {
+        doc: env.doc,
+        backed_up: env.backed_up,
+        retention: env.retention,
+        runtime: env.runtime,
+        ssh_dir: env.ssh_dir.clone(),
+        state_path: env.state_path.clone(),
+        home: env.home.clone(),
+        keychain: &background,
+        relays: env.relays,
+        events: env.events,
+        clock: env.clock,
+        platform: env.platform,
+    };
+    let profile = workspace.control.profile.profile()?;
+    let identity = DeviceIdentity::load(&background, &profile, false)?;
+    if identity.device() != workspace.control.device {
+        return Err(invalid());
+    }
+    let (tokens, started) = match existing {
+        Some(session)
+            if session
+                .tokens_started
+                .elapsed()
+                .saturating_add(token_margin)
+                < session.tokens.expires_in =>
+        {
+            (Arc::clone(&session.tokens), session.tokens_started)
+        }
+        _ => {
+            let http = super::oidc::BoundedHttp::new()?;
+            let tokens = credentials::renew(
+                &background,
+                &profile,
+                &workspace.control.profile.oidc,
+                false,
+                &http,
+            )?;
+            (Arc::new(tokens), Instant::now())
+        }
+    };
+    establish_locked(
+        &safe_env,
+        &profile.origin,
+        workspace.control.profile.oidc.clone(),
+        tokens,
+        started,
+        None,
+        false,
+        true,
+    )?;
+    let ready = env
+        .runtime
+        .core
+        .lock()
+        .unwrap()
+        .central_session
+        .as_ref()
+        .is_some_and(|s| s.device.as_ref().is_some_and(|d| !d.expired()));
     drop(lifecycle);
     env.events.status();
-    status(env)
+    Ok(ready)
 }
 pub fn context(env: &SyncEnv) -> Result<Arc<Session>, AppError> {
     env.runtime

@@ -113,7 +113,7 @@ pub fn prepare(env: &SyncEnv) -> Result<Status, AppError> {
         return Err(invalid());
     }
     let api = Api::new(&session.profile.origin)?;
-    let remote = controller::overview(&api, &session)?;
+    let remote = controller::overview(env, &api, &session)?;
     let intent = match load_intent(env, &session)? {
         Some(intent) => {
             // A crash after persisting the OS intent must resume the same root and kit.
@@ -236,6 +236,7 @@ pub fn reveal(env: &SyncEnv) -> Result<RecoveryReveal, AppError> {
     })
 }
 fn register(env: &SyncEnv, session: &Session, api: &Api) -> Result<Session, AppError> {
+    super::round::check_cooldown(env)?;
     if session
         .tokens_started
         .elapsed()
@@ -249,14 +250,20 @@ fn register(env: &SyncEnv, session: &Session, api: &Api) -> Result<Session, AppE
     let attempt =
         SessionAttempt::prepare_with_reset(env.keychain, &profile, identity, env.now(), true)?;
     let records = record_runtime::snapshot(env)?.0;
-    let device = api.register(
+    let device = match api.register_outcome(
         &profile,
         identity,
         &attempt,
         &session.tokens,
         &records.device_name,
         env.now(),
-    )?;
+    )? {
+        super::api::RegistrationOutcome::Accepted(device) => device,
+        super::api::RegistrationOutcome::Rejected(reply) => {
+            super::round::require_success(env, &reply)?;
+            return Err(invalid());
+        }
+    };
     Ok(Session {
         profile: session.profile.clone(),
         identity: session.identity.clone(),
@@ -318,10 +325,10 @@ pub fn confirm(env: &SyncEnv, expected_root: &str) -> Result<Status, AppError> {
         },
     )?;
     if ![200, 202, 409].contains(&response.status) {
-        response.success()?;
+        super::round::require_success(env, &response)?;
     }
     let session = register(env, &session, &api)?;
-    let mut remote = controller::overview(&api, &session)?;
+    let mut remote = controller::overview(env, &api, &session)?;
     remote.proof.as_ref().ok_or_else(invalid)?.verify(
         before.control.anchor.as_ref().ok_or_else(invalid)?,
         before.control.highwater.as_ref(),
@@ -333,7 +340,7 @@ pub fn confirm(env: &SyncEnv, expected_root: &str) -> Result<Status, AppError> {
             &serde_json::json!({}),
         )?
         .success()?;
-        remote = controller::overview(&api, &session)?;
+        remote = controller::overview(env, &api, &session)?;
     }
     let remote_proof = remote.proof.take().ok_or_else(invalid)?;
     let chain = remote_proof.verify(
@@ -358,7 +365,7 @@ pub fn confirm(env: &SyncEnv, expected_root: &str) -> Result<Status, AppError> {
         vault,
         VaultResource::Wrap,
     )?;
-    reply.success()?;
+    super::round::require_success(env, &reply)?;
     let own: WrappedKeys = reply.decode()?;
     if before.own_wraps.first() != Some(&own) {
         return Err(invalid());
@@ -389,7 +396,9 @@ pub fn confirm(env: &SyncEnv, expected_root: &str) -> Result<Status, AppError> {
         core.central_user_action = None;
     }
     drop(lifecycle);
+    env.runtime.note_activity(env.now());
     env.events.status();
+    env.events.wake_implicit();
     controller::status(env)
 }
 

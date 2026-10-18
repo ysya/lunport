@@ -26,6 +26,10 @@ struct Account {
     wraps: Vec<WrappedKeys>,
     vault: Option<String>,
     epoch: u64,
+    history: Vec<super::rekey::Version>,
+    pulls: usize,
+    reject_pull_once: bool,
+    on_pull: Option<Box<dyn Fn() + Send + Sync>>,
     devices: BTreeMap<String, Device>,
     sessions: BTreeMap<String, String>,
     requests: BTreeMap<String, Enrollment>,
@@ -157,6 +161,21 @@ impl Service {
         server.mock("GET",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/metadata$".into())).with_header("content-type","application/json").with_body_from_request(move |_|{
             let s=account.lock().unwrap();json!({"vault":s.vault,"epoch":1,"membership_head":s.chain().unwrap().current().head(),"authorization_epoch":s.epoch.to_string(),"phase":"ready","sequence":"0","history_hash":"0".repeat(64)}).to_string().into_bytes()
         }).create();
+        let account = Arc::clone(&state);
+        let authorization = Arc::clone(&state);
+        server.mock("GET", mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/records$".into()))
+            .match_query(mockito::Matcher::Any).with_status_code_from_request(move |_| {
+                if std::mem::take(&mut authorization.lock().unwrap().reject_pull_once) {403} else {200}
+            }).with_header("content-type", "application/json")
+            .with_body_from_request(move |r| {
+                let since: u64 = r.path_and_query().split_once("?since=").unwrap().1.parse().unwrap();
+                let mut s = account.lock().unwrap(); s.pulls += 1;
+                let rows: Vec<_> = s.history.iter().filter(|row| row.sequence.parse::<u64>().unwrap() > since).take(32).collect();
+                let body = json!({"records": rows, "sequence": s.history.len().to_string(),
+                    "history_hash": s.history.last().map(|r| r.history_hash.clone()).unwrap_or_else(|| "0".repeat(64)),
+                    "membership_head": s.chain().unwrap().current().head(), "epoch": 1, "phase": "ready"}).to_string().into_bytes();
+                let hook = s.on_pull.take(); drop(s); if let Some(hook) = hook { hook(); } body
+            }).create();
         Self {
             server,
             state,
@@ -187,11 +206,11 @@ impl Service {
 #[test]
 fn two_device_approval_binds_request_and_mac_then_acquires_the_same_keys_without_publishing_a_library(
 ) {
-    let service = Service::new();
+    let mut service = Service::new();
     let relay = FakeRelay::new();
     let clock = TestClock::new();
-    let first = TestDevice::new("first", &relay, &clock);
-    let peer = TestDevice::new("peer", &relay, &clock);
+    let first = Arc::new(TestDevice::new("first", &relay, &clock));
+    let peer = Arc::new(TestDevice::new("peer", &relay, &clock));
     service.login(&first);
     bootstrap::prepare(&first.env()).unwrap();
     let kit = bootstrap::reveal(&first.env()).unwrap();
@@ -293,6 +312,57 @@ fn two_device_approval_binds_request_and_mac_then_acquires_the_same_keys_without
         .unwrap()
         .signature = wrap_signature;
     joining::initialize(&peer.env()).unwrap();
+    // A background opaque-session refresh can use cached access with only no-UI credential calls.
+    struct NoUi<'a>(&'a crate::sync::testkit::MemKeychain);
+    impl crate::sync::env::Keychain for NoUi<'_> {
+        fn get(&self, _: &str) -> Result<Option<String>, crate::error::AppError> {
+            panic!("background opened credential UI");
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), crate::error::AppError> {
+            panic!("background opened credential UI");
+        }
+        fn delete(&self, _: &str) -> Result<(), crate::error::AppError> {
+            panic!("background deleted credentials");
+        }
+        fn get_noninteractive(&self, key: &str) -> Result<Option<String>, crate::error::AppError> {
+            crate::sync::env::Keychain::get(self.0, key)
+        }
+        fn set_noninteractive(&self, key: &str, value: &str) -> Result<(), crate::error::AppError> {
+            crate::sync::env::Keychain::set(self.0, key, value)
+        }
+    }
+    let no_ui = NoUi(&first.keychain);
+    let background_env = crate::sync::env::SyncEnv {
+        keychain: &no_ui,
+        ..first.env()
+    };
+    assert!(controller::resume(&background_env, true).unwrap());
+    let profile = controller::context(&first.env())
+        .unwrap()
+        .profile
+        .profile()
+        .unwrap();
+    let refresh_slot = profile.slot("refresh");
+    let saved_refresh = crate::sync::env::Keychain::get(&first.keychain, &refresh_slot)
+        .unwrap()
+        .unwrap();
+    let mut interrupted: Value = serde_json::from_str(&saved_refresh).unwrap();
+    interrupted["state"] = json!("in_flight");
+    crate::sync::env::Keychain::set(&first.keychain, &refresh_slot, &interrupted.to_string())
+        .unwrap();
+    let cached = first.runtime.core.lock().unwrap().central_session.take();
+    let public_before = record_runtime::snapshot(&first.env()).unwrap();
+    let error = controller::resume(&background_env, true)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("previous credential renewal was interrupted"));
+    assert_eq!(
+        record_runtime::snapshot(&first.env()).unwrap(),
+        public_before
+    );
+    assert!(first.runtime.core.lock().unwrap().central_session.is_none());
+    crate::sync::env::Keychain::set(&first.keychain, &refresh_slot, &saved_refresh).unwrap();
+    first.runtime.core.lock().unwrap().central_session = cached;
     let first_ws = record_runtime::snapshot(&first.env())
         .unwrap()
         .0
@@ -383,4 +453,142 @@ fn two_device_approval_binds_request_and_mac_then_acquires_the_same_keys_without
     assert!(!public.contains("SYNTHETIC ENCRYPTED LIBRARY"));
     assert!(!public.contains(peer_id.credential()));
     assert!(!public.contains(&*peer_id.keys.encode_secret()));
+    stage_ciphertext_checks(
+        &mut service,
+        &first,
+        &peer,
+        &first_keys,
+        &old_id.keys,
+        record.header.clone(),
+    );
+}
+
+fn stage_ciphertext_checks(
+    service: &mut Service,
+    first: &Arc<TestDevice>,
+    peer: &Arc<TestDevice>,
+    keys: &super::crypto::VaultKeys,
+    signer: &super::crypto::DeviceKeys,
+    mut header: RecordHeader,
+) {
+    use super::{payload, rekey, round, wire};
+    use crate::sync::{record_repository as repo, records_v3::HostScope};
+    let id = payload::Identity {
+        kind: "host".into(),
+        id: "0000000000000001".into(),
+        scope: Some(HostScope::Local),
+    };
+    let host = serde_json::from_value(
+        json!({"schema":2,"alias":"remote-staged","hostname":"fixture.invalid","auth":"password"}),
+    )
+    .unwrap();
+    let plain = payload::encode(&id, &payload::Data::Host(host)).unwrap();
+    header.record_id = id.opaque(keys).unwrap();
+    header.operation_id = crypto::random_id(16).unwrap();
+    let envelope = crypto::seal_record(keys, signer, header, &plain).unwrap();
+    let digest = rekey::envelope_digest(&envelope).unwrap();
+    let history_hash = crypto::hash(
+        &wire::canonical(&["lunport-history-v2", &"0".repeat(64), "1", &digest]).unwrap(),
+    );
+    service.state.lock().unwrap().history.push(rekey::Version {
+        revision: "1".into(),
+        sequence: "1".into(),
+        envelope,
+        digest,
+        history_hash,
+    });
+    let local_edit = Arc::clone(first);
+    service.state.lock().unwrap().on_pull = Some(Box::new(move || {
+        record_runtime::mutate_records(&local_edit.env(), |state| {
+            repo::create_host(state, "0000000000000001", HostScope::Local,
+                serde_json::from_value(json!({"schema":2,"alias":"newer-local","hostname":"local.invalid","auth":"password"})).unwrap(), 1)
+                .map_err(|e| crate::error::AppError::Other(e.to_string()))
+        }).unwrap();
+    }));
+    let error = round::sync_once(&first.env()).err().unwrap().to_string();
+    assert_eq!(error, crate::sync::runtime::SUPERSEDED);
+    assert!(round::cooldown(&first.env()).is_zero());
+    let snapshot = record_runtime::snapshot(&first.env()).unwrap().0;
+    assert_eq!(
+        snapshot
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .checkpoint
+            .sequence,
+        0
+    );
+    assert_eq!(
+        snapshot.local.hosts[&crate::sync::record::record_key(
+            crate::sync::record::RecordKind::Host,
+            "0000000000000001"
+        )]
+            .record
+            .payload["alias"],
+        "newer-local"
+    );
+    let report = round::sync_once(&first.env()).unwrap();
+    assert_eq!(report.staged, 1);
+    let snapshot = record_runtime::snapshot(&first.env()).unwrap().0;
+    assert_eq!(
+        snapshot.local.hosts[&crate::sync::record::record_key(
+            crate::sync::record::RecordKind::Host,
+            "0000000000000001"
+        )]
+            .record
+            .payload["alias"],
+        "newer-local"
+    );
+    assert_eq!(snapshot.local.hosts.len(), 1);
+    assert!(!snapshot.local.central.as_ref().unwrap().control.cutover);
+    assert_eq!(round::sync_once(&peer.env()).unwrap().staged, 1);
+    assert!(record_runtime::snapshot(&peer.env())
+        .unwrap()
+        .0
+        .local
+        .hosts
+        .is_empty());
+    // A child authorization barrier may reject an in-flight old grant. Re-register once,
+    // verify the current control state, and retry without changing the library projection.
+    service.state.lock().unwrap().reject_pull_once = true;
+    let retried = round::sync_once(&peer.env()).unwrap();
+    assert_eq!(retried.requests, 2);
+    assert_eq!(retried.staged, 0);
+    assert!(record_runtime::snapshot(&peer.env())
+        .unwrap()
+        .0
+        .local
+        .hosts
+        .is_empty());
+    assert!(!service.state.lock().unwrap().reject_pull_once);
+    let limited = service
+        .server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/records$".into()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_status(429)
+        .with_header("retry-after", "200")
+        .with_body("UNTRUSTED-TOKEN-SENTINEL")
+        .expect(1)
+        .create();
+    let before = record_runtime::snapshot(&first.env()).unwrap();
+    assert!(round::sync_once(&first.env()).is_err());
+    assert!(round::cooldown(&first.env()) > std::time::Duration::from_secs(199));
+    assert_eq!(round::sync_once(&first.env()).unwrap().requests, 0);
+    let sessions = service.state.lock().unwrap().sessions.len();
+    assert!(controller::refresh(&first.env()).is_err());
+    assert_eq!(service.state.lock().unwrap().sessions.len(), sessions);
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap(), before);
+    assert!(!controller::status(&first.env())
+        .unwrap()
+        .error
+        .unwrap()
+        .contains("SENTINEL"));
+    limited.assert();
 }
