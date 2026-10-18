@@ -12,11 +12,12 @@ use crate::{
     error::AppError,
     sync::records_v3::{GroupPayload, HostPayload, HostScope},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Public journal evidence. Raw private material never implements Serialize or Debug.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Receipt {
     pub opaque: String,
     pub kind: String,

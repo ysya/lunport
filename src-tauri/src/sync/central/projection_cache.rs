@@ -119,18 +119,11 @@ impl Cache {
             match &order.scope {
                 HostScope::Local => cache.group_order = order.ids.clone(),
                 HostScope::Space { space_id } => {
-                    let space = cache.spaces.get_mut(space_id).ok_or_else(invalid)?;
-                    let metadata = row(
-                        RecordKind::Meta,
-                        crate::sync::group_order::RECORD_ID,
-                        serde_json::json!({"schema":1,"ids":order.ids}),
-                        catalogue_receipt,
-                        observed,
-                    );
-                    space.records.insert(
-                        record_key(RecordKind::Meta, crate::sync::group_order::RECORD_ID),
-                        metadata,
-                    );
+                    if !cache.spaces.contains_key(space_id) {
+                        return Err(invalid());
+                    }
+                    // Existing Records collection maps accept host/group rows only. The exact
+                    // scoped order remains in the durable central ledger's authenticated catalog.
                 }
             }
         }

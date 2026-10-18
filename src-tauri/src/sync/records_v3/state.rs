@@ -52,6 +52,9 @@ pub struct LocalState {
     /// Public control proofs and ciphertext only; native credentials remain in OS storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub central: Option<crate::sync::central::workspace::Workspace>,
+    /// Accepted public projection bases; contains no private material or credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub central_projection: Option<crate::sync::central::projection_state::Ledger>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -222,6 +225,15 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
     if let Some(central) = &state.local.central {
         if state.version < CENTRAL_STATE_VERSION || central.validate().is_err() {
             return Err(state_invalid("central","local","central state needs schema 8 and a verified anchored replica"));
+        }
+    }
+
+    if let Some(ledger) = &state.local.central_projection {
+        let Some(central) = state.local.central.as_ref() else {
+            return Err(state_invalid("central_projection", "local", "projection requires the anchored central owner"));
+        };
+        if ledger.validate(central).is_err() || state.account.as_ref().map(|a| a.chain_id.as_str()) != Some(ledger.vault.as_str()) {
+            return Err(state_invalid("central_projection", "local", "projection does not match the central vault"));
         }
     }
 

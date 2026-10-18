@@ -244,6 +244,9 @@ fn save_active_with_replacement(path:&Path,state:&SyncStateV3,replacement:Option
             }
             let previous: SyncStateV3 = serde_json::from_value(value.clone()).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
             validate_state(&previous).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
+            if previous.local.central_projection != state.local.central_projection {
+                return Err(AppError::Other("Central library projection needs its verified publication transaction. Original data is retained.".into()));
+            }
             if let Some(replacement)=replacement {
                 replacement.authority.verify_records(&previous,state,replacement.archive,replacement.generation)?;
             } else {
@@ -437,6 +440,11 @@ fn persist_candidate(
         core.records.as_ref().and_then(|s| s.local.central.as_ref()),candidate.local.central.as_ref())?;
     if candidate.local.central.is_some() {
         candidate.version = candidate.version.max(crate::sync::records_v3::CENTRAL_STATE_VERSION);
+    }
+    // Projection receipts are replaced only by their typed publication transaction, never by
+    // an ordinary local edit/account operation (including a stale snapshot without the ledger).
+    if core.records.as_ref().and_then(|s|s.local.central_projection.as_ref()) != candidate.local.central_projection.as_ref() {
+        return Err(AppError::Other("Central library projection needs its verified publication transaction. Local data is retained.".into()));
     }
     let central_cutover = candidate.local.central.as_ref().is_some_and(|c|c.control.cutover);
     if central_cutover && !core.records.as_ref().and_then(|s|s.local.central.as_ref()).is_some_and(|c|c.control.cutover) {
