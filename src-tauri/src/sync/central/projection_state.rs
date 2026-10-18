@@ -32,6 +32,18 @@ pub struct Ledger {
     pub catalog: Catalog,
     pub storage: BTreeMap<String, KeyStorage>,
     pub bases: BTreeMap<String, Basis>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    materials: BTreeMap<String, MaterialReceipt>,
+}
+/// Public evidence for one exact protected material publication. No raw key or passphrase.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MaterialReceipt {
+    operation: String,
+    vault_id: String,
+    public: Receipt,
+    private: Receipt,
+    slot: payload::SharedKeyslot,
 }
 /// Native-only pending public edits. Encrypt before persisting; no frontend/mutation cache.
 pub struct Change {
@@ -91,6 +103,7 @@ impl Ledger {
             checkpoint: plan.checkpoint().clone(),
             catalog,
             storage,
+            materials: BTreeMap::new(),
             bases: plan
                 .receipts()
                 .iter()
@@ -123,6 +136,7 @@ impl Ledger {
             || self.vault != replica.vault
             || self.bases.len() > 4096
             || self.storage.len() > 4096
+            || self.materials.len() > 4096
             || serde_json::to_vec(self).map_err(|_| invalid())?.len() > 32 * 1024 * 1024
         {
             return Err(invalid());
@@ -210,7 +224,126 @@ impl Ledger {
                 return Err(invalid());
             }
         }
+        for (id, receipt) in &self.materials {
+            receipt.slot.validate(id)?;
+            if !hex(&receipt.operation, 32)
+                || !hex(&receipt.vault_id, 32)
+                || receipt.public.kind != "keyslot"
+                || receipt.private.kind != "key"
+                || receipt.public.id != *id
+                || receipt.private.id != *id
+                || receipt.public.deleted
+                || receipt.private.deleted
+                || self.bases.get(&receipt.public.opaque).map(|b| &b.remote)
+                    != Some(&receipt.public)
+                || self.bases.get(&receipt.private.opaque).map(|b| &b.remote)
+                    != Some(&receipt.private)
+                || self.storage.get(id) != Some(&receipt.slot.storage)
+                || !matches!(&receipt.slot.storage, KeyStorage::Managed { .. })
+            {
+                return Err(invalid());
+            }
+            let identity = Identity {
+                kind: "keyslot".into(),
+                id: id.clone(),
+                scope: None,
+            };
+            if crypto::hash(&payload::encode(
+                &identity,
+                &Data::Keyslot(receipt.slot.clone()),
+            )?) != receipt.public.semantic_hash
+            {
+                return Err(invalid());
+            }
+        }
         Ok(())
+    }
+    /// Pure receipt candidate only. The eventual journal writer must prove source/state/session,
+    /// protected vault readback and strict durability before atomically publishing this candidate.
+    pub(in crate::sync::central) fn with_material_readback(
+        &self,
+        plan: &Plan,
+        id: &str,
+        vault_id: &str,
+        operation: &str,
+        entry: &crate::vault::store::VaultEntry,
+    ) -> Result<Self, AppError> {
+        self.validate(plan.before())?;
+        let material = plan.materials().get(id).ok_or_else(invalid)?;
+        if !hex(vault_id, 32)
+            || !hex(operation, 32)
+            || self.checkpoint != *plan.checkpoint()
+            || self
+                .bases
+                .get(&material.public_receipt.opaque)
+                .map(|b| &b.remote)
+                != Some(&material.public_receipt)
+            || self
+                .bases
+                .get(&material.private_receipt.opaque)
+                .map(|b| &b.remote)
+                != Some(&material.private_receipt)
+        {
+            return Err(invalid());
+        }
+        let opened =
+            payload::PrivateMaterial::new(zeroize::Zeroizing::new(entry.private_key.clone()))?;
+        opened.validate_against(id, &material.metadata)?;
+        crate::sync::records_v3::key_material_matches(
+            &material.metadata.public,
+            &entry.public_key,
+            &entry.fingerprint,
+        )
+        .map_err(|_| invalid())?;
+        let mut next = self.clone();
+        next.materials.insert(
+            id.into(),
+            MaterialReceipt {
+                operation: operation.into(),
+                vault_id: vault_id.into(),
+                public: material.public_receipt.clone(),
+                private: material.private_receipt.clone(),
+                slot: material.metadata.clone(),
+            },
+        );
+        next.validate(plan.before())?;
+        Ok(next)
+    }
+    /// Metadata-side readiness only. A consumer must also verify raw material SHA256 on read.
+    pub(crate) fn material_reference(
+        &self,
+        owner: &Workspace,
+        id: &str,
+        local: &crate::sync::records_v3::LocalKeyMetadata,
+        public: &crate::sync::records_v3::KeySlotPayload,
+    ) -> Option<String> {
+        let receipt = self.materials.get(id)?;
+        let replica = owner.replica.as_ref()?;
+        let slot = &receipt.slot.public;
+        if local.vault_id != receipt.vault_id
+            || public.has_passphrase != slot.has_passphrase
+            || public.key_type != slot.key_type
+            || public.fingerprint != slot.fingerprint
+            || crate::vault::material::public_key_data(&public.public_key)
+                != crate::vault::material::public_key_data(&slot.public_key)
+            || local.public.has_passphrase != public.has_passphrase
+        {
+            return None;
+        }
+        for r in [&receipt.public, &receipt.private] {
+            let basis = self.bases.get(&r.opaque)?;
+            if basis.remote != *r
+                || replica.current.get(&r.opaque) != Some(&basis.wire)
+                || replica.pending.contains_key(&r.opaque)
+                || replica.conflicts.contains_key(&r.opaque)
+            {
+                return None;
+            }
+        }
+        match &receipt.slot.storage {
+            KeyStorage::Managed { sha256 } => Some(sha256.clone()),
+            _ => None,
+        }
     }
     /// Credentials/keys never validate a cached logical ID merely by being supplied by a caller.
     /// Re-open the retained signed basis and bind its typed identity and semantic digest first.
@@ -466,6 +599,224 @@ pub(super) mod tests {
             |c| matches!(&c.identity.scope, Some(HostScope::Space { .. }))
                 && matches!(&c.data,Data::Host(h) if h.alias=="remote-scope-local-B")
         ));
+    }
+    fn material_fixture() -> (
+        SyncStateV3,
+        VaultKeys,
+        Plan,
+        String,
+        crate::vault::store::VaultEntry,
+    ) {
+        let (mut state, _, _) = initial();
+        let id = "a".repeat(32);
+        let private = crate::sync::slot_rules::test_keys::plain();
+        let slot = super::super::projection::tests::slot(&private);
+        let entry = crate::vault::store::VaultEntry {
+            private_key: private.clone(),
+            public_key: slot.public.public_key.clone(),
+            fingerprint: slot.public.fingerprint.clone(),
+            origin: crate::vault::store::EntryOrigin::Synced,
+            added_at_ms: 100,
+        };
+        let (ws, keys) = fixture(vec![
+            (
+                Identity {
+                    kind: "meta".into(),
+                    id: "catalog".into(),
+                    scope: None,
+                },
+                Data::Catalog(Catalog {
+                    collections: vec![],
+                    group_orders: vec![],
+                }),
+            ),
+            (
+                Identity {
+                    kind: "keyslot".into(),
+                    id: id.clone(),
+                    scope: None,
+                },
+                Data::Keyslot(slot.clone()),
+            ),
+            (
+                Identity {
+                    kind: "key".into(),
+                    id: id.clone(),
+                    scope: None,
+                },
+                Data::Key(payload::PrivateMaterial::new(zeroize::Zeroizing::new(private)).unwrap()),
+            ),
+        ]);
+        let plan = Plan::current(ws.clone(), &keys).unwrap();
+        let cache = Cache::initial(&plan, 100, &BTreeMap::new()).unwrap();
+        state.local.central = Some(ws);
+        state.account = Some(cache.account);
+        state.spaces = cache.spaces;
+        state.local.hosts = cache.hosts;
+        state.local.groups = cache.groups;
+        state.local.group_order = cache.group_order;
+        state.local.central_projection = None;
+        let ledger = Ledger::initial(&plan, &state, &keys).unwrap();
+        state.local.central_projection = Some(ledger);
+        state.local.keys.insert(
+            id.clone(),
+            records_v3::LocalKeyMetadata {
+                vault_id: "b".repeat(32),
+                public: slot.public,
+            },
+        );
+        (state, keys, plan, id, entry)
+    }
+    #[test]
+    fn an_old_vault_reference_with_the_same_public_key_is_not_activated_without_a_bound_material_receipt(
+    ) {
+        let (mut state, _, plan, id, entry) = material_fixture();
+        let before = crate::sync::record_repository::resolve_key(&state, &id).unwrap();
+        assert_eq!(
+            before.status,
+            crate::sync::record_repository::KeyStatus::NeedsMaterial
+        );
+        assert!(before.vault_id.is_none());
+        let ledger = state.local.central_projection.as_ref().unwrap();
+        state.local.central_projection = Some(
+            ledger
+                .with_material_readback(&plan, &id, &"b".repeat(32), &"c".repeat(32), &entry)
+                .unwrap(),
+        );
+        records_v3::validate_state(&state).unwrap();
+        let key = crate::sync::record_repository::resolve_key(&state, &id).unwrap();
+        assert_eq!(
+            key.status,
+            crate::sync::record_repository::KeyStatus::Available
+        );
+        assert_eq!(
+            key.expected_material_hash,
+            Some(crypto::hash(entry.private_key.as_bytes()))
+        );
+        assert!(crate::session::record_material::matches(&key, &entry));
+        let mut different = entry.clone();
+        let mut same_key = crate::vault::material::parse(&different.private_key).unwrap();
+        same_key.set_comment("different encoding, same SSH public identity");
+        different.private_key = same_key
+            .to_openssh(ssh_key::LineEnding::LF)
+            .unwrap()
+            .to_string();
+        assert!(crate::vault::material::parse(&different.private_key).is_some());
+        let mut legacy_check = key.clone();
+        legacy_check.expected_material_hash = None;
+        assert!(crate::session::record_material::matches(
+            &legacy_check,
+            &different
+        ));
+        assert!(!crate::session::record_material::matches(&key, &different));
+        assert!(state
+            .local
+            .central_projection
+            .as_ref()
+            .unwrap()
+            .with_material_readback(&plan, &id, &"b".repeat(32), &"d".repeat(32), &different)
+            .is_err());
+        let bytes = serde_json::to_string(&state).unwrap();
+        assert!(!bytes.contains("private_key"));
+        let records_v3::DecodedState::V3(restarted) = records_v3::decode_state(&bytes).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            crate::sync::record_repository::resolve_key(&restarted, &id).unwrap(),
+            key
+        );
+    }
+    #[test]
+    fn material_binding_cannot_fall_back_after_slot_deletion_new_local_vault_or_pending_private_change(
+    ) {
+        let (mut state, _, plan, id, entry) = material_fixture();
+        state.local.central_projection = Some(
+            state
+                .local
+                .central_projection
+                .as_ref()
+                .unwrap()
+                .with_material_readback(&plan, &id, &"b".repeat(32), &"c".repeat(32), &entry)
+                .unwrap(),
+        );
+        let mut moved = state.clone();
+        moved.local.keys.get_mut(&id).unwrap().vault_id = "e".repeat(32);
+        assert!(crate::sync::record_repository::resolve_key(&moved, &id)
+            .unwrap()
+            .vault_id
+            .is_none());
+        let mut deleted = state.clone();
+        let row = deleted
+            .account
+            .as_mut()
+            .unwrap()
+            .records
+            .get_mut(&record_key(RecordKind::KeySlot, &id))
+            .unwrap();
+        row.record.deleted = true;
+        row.record.payload = serde_json::Value::Null;
+        assert_eq!(
+            crate::sync::record_repository::resolve_key(&deleted, &id)
+                .unwrap()
+                .status,
+            crate::sync::record_repository::KeyStatus::Deleted
+        );
+        let mut pending = state.clone();
+        let ledger = pending.local.central_projection.as_ref().unwrap();
+        let r = ledger.materials[&id].private.clone();
+        let base = pending
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .current[&r.opaque]
+            .clone();
+        pending
+            .local
+            .central
+            .as_mut()
+            .unwrap()
+            .replica
+            .as_mut()
+            .unwrap()
+            .pending
+            .insert(
+                r.opaque,
+                super::super::replica::Pending {
+                    latest: super::super::replica::Draft {
+                        local_revision: 1,
+                        content_hash: base.content_hash,
+                        envelope: base.version.envelope,
+                    },
+                    sent: None,
+                    claimed: None,
+                },
+            );
+        assert!(crate::sync::record_repository::resolve_key(&pending, &id)
+            .unwrap()
+            .vault_id
+            .is_none());
+        let mut removed = state.clone();
+        removed
+            .account
+            .as_mut()
+            .unwrap()
+            .records
+            .remove(&record_key(RecordKind::KeySlot, &id));
+        assert!(crate::sync::record_repository::resolve_key(&removed, &id)
+            .unwrap()
+            .vault_id
+            .is_none());
+        let mut missing = state;
+        missing.local.central_projection = None;
+        assert!(crate::sync::record_repository::resolve_key(&missing, &id)
+            .unwrap()
+            .vault_id
+            .is_none());
     }
     #[test]
     fn ordinary_state_and_core_writers_cannot_erase_or_reissue_projection_receipts() {

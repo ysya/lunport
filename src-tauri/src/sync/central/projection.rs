@@ -307,7 +307,7 @@ pub(super) mod tests {
             scope: None,
         }
     }
-    fn slot(private: &str) -> SharedKeyslot {
+    pub(in crate::sync::central) fn slot(private: &str) -> SharedKeyslot {
         let key = crate::vault::material::parse(private).unwrap();
         SharedKeyslot {
             public: crate::sync::records_v3::KeySlotPayload {
