@@ -1,7 +1,7 @@
 //! Public proofs are serialized; trusted views can only be constructed against a local anchor.
 use super::{
     crypto::{hash, PublicKeys},
-    membership::{Device, Genesis, SignedMembership, TrustAnchor, TrustedMembership},
+    membership::{Action, Device, Genesis, SignedMembership, TrustAnchor, TrustedMembership},
     wire::{hex, invalid, MAX_SAFE_INTEGER},
 };
 use crate::error::AppError;
@@ -27,6 +27,7 @@ pub struct VerifiedChain {
     current: TrustedMembership,
     heads: Vec<String>,
     views: BTreeMap<String, View>,
+    security_revision: usize,
 }
 impl ControlProof {
     pub fn verify(
@@ -49,7 +50,11 @@ impl ControlProof {
                 recovery: current.recovery().clone(),
             },
         );
-        for node in &self.nodes {
+        let mut security_revision = 0;
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.body.action != Action::Add {
+                security_revision = index + 1;
+            }
             current = current.apply(node)?;
             heads.push(current.head().to_string());
             views.insert(
@@ -76,6 +81,7 @@ impl ControlProof {
             current,
             heads,
             views,
+            security_revision,
         })
     }
 }
@@ -96,6 +102,12 @@ impl VerifiedChain {
     }
     pub fn has_head(&self, head: &str) -> bool {
         self.views.contains_key(head)
+    }
+    pub fn security_revision(&self) -> usize {
+        self.security_revision
+    }
+    pub fn revision_of(&self, head: &str) -> Option<usize> {
+        self.heads.iter().position(|known| known == head)
     }
     pub fn head_at(&self, revision: usize) -> Option<&str> {
         self.heads.get(revision).map(String::as_str)

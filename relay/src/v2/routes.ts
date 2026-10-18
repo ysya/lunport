@@ -99,9 +99,10 @@ export async function centralFetch(
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url),
-    match = /^\/v2\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata)$/.exec(
-      url.pathname,
-    );
+    match =
+      /^\/v2\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata|rekey|rekey\/begin|rekey\/stage|rekey\/commit|rekey\/abort|rekey\/reconcile|rekey\/source|receipt)$/.exec(
+        url.pathname,
+      );
   if (!paths.has(url.pathname) && !match) return response({ status: 404 });
   const limiter = env.IP_LIMIT.getByName(
     "ip:" + (request.headers.get("cf-connecting-ip") ?? "unknown"),
@@ -122,6 +123,7 @@ export async function centralFetch(
               "exact-revision",
               "operation-receipts",
               "paged-history",
+              "signed-rekey",
             ],
             oidc: {
               issuer: config.issuer,
@@ -199,6 +201,29 @@ export async function centralFetch(
   if (match) {
     const vault = env.VAULT.getByName(actor.account + ":" + match[1]);
     if (request.method === "GET") {
+      if (match[2] === "rekey") return vault.rekeyStatus(actor);
+      if (match[2] === "receipt")
+        return vault.operationReceipt(
+          actor,
+          url.searchParams.get("operation") ?? "",
+        );
+      if (match[2] === "rekey/source") {
+        try {
+          return vault.sourceProof(
+            actor,
+            safeNumber(url.searchParams.get("epoch") ?? "", false),
+            safeNumber(url.searchParams.get("after") ?? "0", true),
+          );
+        } catch {
+          return response({ status: 400 });
+        }
+      }
+      if (
+        match[2] !== "metadata" &&
+        match[2] !== "wrap" &&
+        match[2] !== "records"
+      )
+        return response({ status: 405 });
       if (match[2] === "metadata") return response(await vault.metadata(actor));
       if (match[2] === "wrap") return response(await vault.wrap(actor));
       let since: number;
@@ -208,6 +233,50 @@ export async function centralFetch(
         return response({ status: 400 });
       }
       return response(await vault.pull(actor, since));
+    }
+    if (request.method === "POST" && match[2].startsWith("rekey/")) {
+      const parsed = await body(request);
+      if (parsed instanceof Response) return parsed;
+      switch (match[2]) {
+        case "rekey/begin":
+          return exactObject(parsed, ["manifest", "wraps"])
+            ? response(
+                await vault.beginRekey(
+                  actor,
+                  parsed.manifest as any,
+                  parsed.wraps as any,
+                ),
+              )
+            : response({ status: 400 });
+        case "rekey/stage":
+          return exactObject(parsed, ["rotation", "after", "rows"]) &&
+            hex(parsed.rotation, 32)
+            ? response(
+                await vault.stageRekey(
+                  actor,
+                  parsed.rotation as string,
+                  parsed.after as string,
+                  parsed.rows as any,
+                ),
+              )
+            : response({ status: 400 });
+        case "rekey/commit":
+          return exactObject(parsed, ["rotation"]) && hex(parsed.rotation, 32)
+            ? response(
+                await account.finishRekey(actor, match[1], parsed.rotation),
+              )
+            : response({ status: 400 });
+        case "rekey/abort":
+          return exactObject(parsed, ["rotation"]) && hex(parsed.rotation, 32)
+            ? response(await vault.abortRekey(actor, parsed.rotation))
+            : response({ status: 400 });
+        case "rekey/reconcile":
+          return exactObject(parsed, [])
+            ? response(await account.reconcileVault(actor, match[1]))
+            : response({ status: 400 });
+        default:
+          return response({ status: 405 });
+      }
     }
     if (request.method === "POST" && match[2] === "records") {
       const parsed = await body(request);

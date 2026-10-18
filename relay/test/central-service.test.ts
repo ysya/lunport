@@ -31,6 +31,7 @@ import {
   type RecordEnvelope,
   type WrappedKeys,
 } from "../src/v2/protocol";
+import { rekeyCanonical, wrapsDigest, type SignedRekey } from "../src/v2/rekey";
 import { centralFetch } from "../src/v2/routes";
 const origin = "https://relay.test";
 const random = (bytes = 32) =>
@@ -244,20 +245,18 @@ async function add(s: Awaited<ReturnType<typeof setup>>) {
       )
     ).status,
   ).toBe(400);
-  expect(
-    (
-      await s.account.control(
-        s.actor,
-        node,
-        { [s.vault]: await wraps(next, s.vault) },
-        {
-          request_id: request.request_id,
-          approved_head: next.head,
-          mac: base64(new Uint8Array(32).fill(42)),
-        },
-      )
-    ).status,
-  ).toBe(200);
+  const approved = await s.account.control(
+    s.actor,
+    node,
+    { [s.vault]: await wraps(next, s.vault) },
+    {
+      request_id: request.request_id,
+      approved_head: next.head,
+      mac: base64(new Uint8Array(32).fill(42)),
+    },
+  );
+  expect(approved.status).toBe(200);
+  await approved.arrayBuffer();
   const own = (await s.renew(added, credential)).actor!;
   const overview = (await (await s.account.overview(own)).json()) as any;
   expect(overview.pairing_confirmation).toMatchObject({
@@ -761,6 +760,101 @@ describe("central device authorization and durable data", () => {
       ).status,
     ).toBe(423);
     expect((await s.renew(a.added, a.credential)).response.status).toBe(403);
+  });
+  it("reconciles a committed child after registry response loss and preserves a later freeze", async () => {
+    const s = await setup(),
+      a = await add(s);
+    const body: MembershipBody = {
+      ...a.node.body,
+      revision: "2",
+      previous_head: a.trusted.head,
+      action: "revoke",
+      issued_at_ms: String(Date.now()),
+      enrollment: null,
+      devices: { [s.first.id]: s.first.keys },
+    };
+    const node: SignedMembership = {
+      body,
+      signature: sign(membershipCanonical(body)),
+    };
+    const next = (await applyMembership(a.trusted, node))!;
+    const revoked = await s.account.control(a.firstActor, node, {});
+    expect(revoked.status).toBe(200);
+    await revoked.arrayBuffer();
+    const actor = (await s.renew()).actor!,
+      child = env.VAULT.getByName(actor.account + ":" + s.vault);
+    const target = await wraps(next, s.vault, 2);
+    const manifest: SignedRekey = {
+      body: {
+        origin,
+        account_id: actor.account,
+        genesis_hash: next.anchor.genesis_hash,
+        vault_id: s.vault,
+        rotation_id: random(16),
+        authorization_epoch: String(actor.epoch),
+        from_epoch: "1",
+        to_epoch: "2",
+        membership_head: next.head,
+        author: actor.device,
+        source_sequence: "0",
+        source_history_hash: "0".repeat(64),
+        target_history_hash: "0".repeat(64),
+        wraps_digest: await wrapsDigest(target),
+      },
+      signature: "",
+    };
+    manifest.signature = sign(rekeyCanonical(manifest.body));
+    expect((await child.beginRekey(actor, manifest, target)).status).toBe(200);
+    const committed = await child.commitRekey(actor, manifest.body.rotation_id);
+    expect(committed.status).toBe(200);
+    await committed.arrayBuffer();
+    // The child commit succeeded, but no account ACK was saved before the restart.
+    await evictDurableObject(s.account);
+    const finished = await s.account.finishRekey(
+      actor,
+      s.vault,
+      manifest.body.rotation_id,
+    );
+    expect(finished.status).toBe(200);
+    expect(await finished.json()).toMatchObject({
+      registry_pending: false,
+      manifest,
+    });
+    const view = await runInDurableObject(s.account, (_instance, ctx) =>
+      JSON.parse(
+        ctx.storage.sql
+          .exec<{ value: string }>("SELECT value FROM account_state")
+          .one().value,
+      ),
+    );
+    expect(view.vaults[s.vault]).toEqual({ epoch: 2, rekey: false });
+    // Simulate a lost registry ACK again, then a newer cloud-access barrier.
+    await runInDurableObject(s.account, (_instance, ctx) => {
+      const state = JSON.parse(
+        ctx.storage.sql
+          .exec<{ value: string }>("SELECT value FROM account_state")
+          .one().value,
+      );
+      state.vaults[s.vault] = { epoch: 1, rekey: true };
+      ctx.storage.sql.exec(
+        "UPDATE account_state SET value=?",
+        JSON.stringify(state),
+      );
+    });
+    const pending = await s.renew(device(9), random());
+    const freeze = await s.account.revokeAccess(
+      s.identity,
+      pending.actor!.device,
+    );
+    expect(freeze.status).toBe(200);
+    await freeze.arrayBuffer();
+    const fresh = (await s.renew()).actor!;
+    const reconciled = await s.account.reconcileVault(fresh, s.vault);
+    expect(await reconciled.json()).toEqual({ epoch: 2, rekey_pending: true });
+    expect(
+      (await child.push(fresh, [await record(next, s.vault)])).status,
+    ).toBe(423);
+    expect((await s.account.reconcileVault(actor, s.vault)).status).toBe(403);
   });
   it("resumes an interrupted bootstrap barrier after account restart without claiming premature completion", async () => {
     const locator = random(),

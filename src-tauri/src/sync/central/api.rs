@@ -164,6 +164,7 @@ impl Api {
                 "exact-revision",
                 "operation-receipts",
                 "paged-history",
+                "signed-rekey",
             ]
             .iter()
             .all(|feature| info.features.iter().any(|f| f == feature))
@@ -331,6 +332,19 @@ impl Api {
         let suffix = match resource {
             VaultResource::Metadata => "metadata".into(),
             VaultResource::Wrap => "wrap".into(),
+            VaultResource::Rekey => "rekey".into(),
+            VaultResource::SourceProof { epoch, after } => {
+                if epoch < 2 || epoch > super::wire::MAX_SAFE_INTEGER || after > 16384 {
+                    return Err(invalid());
+                }
+                format!("rekey/source?epoch={epoch}&after={after}")
+            }
+            VaultResource::Receipt { operation } => {
+                if !hex(&operation, 32) {
+                    return Err(invalid());
+                }
+                format!("receipt?operation={operation}")
+            }
             VaultResource::Records { since } => {
                 if since > super::wire::MAX_SAFE_INTEGER {
                     return Err(invalid());
@@ -343,6 +357,27 @@ impl Api {
             Method::GET,
             &format!("/v2/vaults/{vault}/{suffix}"),
             None,
+        )
+    }
+    pub fn rekey<T: Serialize>(
+        &self,
+        session: &DeviceSession,
+        vault: &str,
+        action: RekeyAction,
+        body: &T,
+    ) -> Result<Reply, AppError> {
+        if !hex(vault, 64) {
+            return Err(invalid());
+        }
+        let body = Zeroizing::new(serde_json::to_vec(body).map_err(|_| invalid())?);
+        if body.len() > RESPONSE_CAP {
+            return Err(invalid());
+        }
+        self.authenticated(
+            session,
+            Method::POST,
+            &format!("/v2/vaults/{vault}/rekey/{}", action.path()),
+            Some(body),
         )
     }
     pub fn push(
@@ -400,6 +435,27 @@ pub enum VaultResource {
     Metadata,
     Wrap,
     Records { since: u64 },
+    Rekey,
+    SourceProof { epoch: u64, after: u64 },
+    Receipt { operation: String },
+}
+pub enum RekeyAction {
+    Begin,
+    Stage,
+    Commit,
+    Abort,
+    Reconcile,
+}
+impl RekeyAction {
+    fn path(&self) -> &'static str {
+        match self {
+            Self::Begin => "begin",
+            Self::Stage => "stage",
+            Self::Commit => "commit",
+            Self::Abort => "abort",
+            Self::Reconcile => "reconcile",
+        }
+    }
 }
 #[cfg(test)]
 mod tests {

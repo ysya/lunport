@@ -159,6 +159,105 @@ export class AccountStore extends DurableObject<Env> {
   async resume(actor: Principal): Promise<Response> {
     return rpcCall(() => this.resumeResult(actor));
   }
+  /** A child commit and registry acknowledgement are independently retryable across DO crashes. */
+  finishRekey(
+    actor: Principal,
+    vault: string,
+    rotation: string,
+  ): Promise<Response> {
+    return rpcCall(async () => {
+      const state = this.load();
+      if (
+        !this.allowed(state, actor) ||
+        !hex(vault, 64) ||
+        !hex(rotation, 32) ||
+        !state.vaults[vault]
+      )
+        return { status: 403 };
+      if (state.pending) return { status: 423 };
+      const child = this.env.VAULT.getByName(state.id + ":" + vault);
+      const committed = await child.commitRekey(actor, rotation);
+      if (committed.status !== 200) return { status: committed.status };
+      const result = (await committed.json()) as { manifest: unknown };
+      const reconciled = await this.reconcileVaultResult(actor, vault);
+      if (reconciled.status !== 200)
+        return {
+          status: 202,
+          body: { registry_pending: true, manifest: result.manifest },
+        };
+      return {
+        status: 200,
+        body: { registry_pending: false, manifest: result.manifest },
+      };
+    });
+  }
+  reconcileVault(actor: Principal, vault: string): Promise<Response> {
+    return rpcCall(() => this.reconcileVaultResult(actor, vault));
+  }
+  private async reconcileVaultResult(
+    actor: Principal,
+    vault: string,
+  ): Promise<Result> {
+    const observed = this.load();
+    if (
+      !this.allowed(observed, actor) ||
+      !hex(vault, 64) ||
+      !observed.vaults[vault]
+    )
+      return { status: 403 };
+    if (observed.pending) return { status: 423 };
+    // The client never supplies the new epoch or readiness flag. Read the installed child state.
+    let metadata: {
+      vault: string;
+      epoch: number;
+      membership_head: string;
+      authorization_epoch: string;
+      phase: string;
+    };
+    try {
+      const reply = await this.env.VAULT.getByName(
+        observed.id + ":" + vault,
+      ).metadata(actor);
+      if (reply.status !== 200)
+        return { status: 202, body: { registry_pending: true } };
+      metadata = (await reply.json()) as typeof metadata;
+    } catch {
+      return { status: 202, body: { registry_pending: true } };
+    }
+    if (
+      metadata.vault !== vault ||
+      metadata.membership_head !== observed.trusted?.head ||
+      metadata.authorization_epoch !== String(observed.epoch) ||
+      !Number.isSafeInteger(metadata.epoch) ||
+      metadata.epoch < observed.vaults[vault].epoch ||
+      !["ready", "rekey_pending"].includes(metadata.phase)
+    )
+      return { status: 409 };
+    return this.ctx.storage.transactionSync(() => {
+      const state = this.load();
+      if (!this.allowed(state, actor)) return { status: 403 };
+      if (state.version !== observed.version || state.pending)
+        return { status: 409 };
+      const next = {
+        epoch: metadata.epoch,
+        rekey: metadata.phase === "rekey_pending",
+      };
+      // Even a newly frozen child may have committed the preceding rotation before the registry ACK.
+      // Preserve that higher epoch, but keep the next security barrier frozen.
+      if (
+        state.vaults[vault].epoch !== next.epoch ||
+        state.vaults[vault].rekey !== next.rekey
+      ) {
+        state.vaults[vault] = next;
+        state.version += 1;
+        this.save(state);
+      }
+      return {
+        status: 200,
+        body: { epoch: next.epoch, rekey_pending: next.rekey },
+      };
+    });
+  }
   private load(): Account | null {
     if (
       !this.ctx.storage.sql

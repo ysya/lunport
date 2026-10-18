@@ -143,7 +143,7 @@ impl VaultKeys {
         Ok(next)
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordEnvelope {
     pub header: RecordHeader,
@@ -239,7 +239,7 @@ impl VerifiedRecord<'_> {
             .map_err(|_| invalid())
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WrappedKeys {
     pub header: WrapHeader,

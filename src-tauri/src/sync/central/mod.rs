@@ -9,5 +9,6 @@ pub mod membership;
 pub mod oidc;
 pub mod pairing;
 pub mod recovery;
+pub mod rekey;
 pub mod trust;
 pub mod wire;
