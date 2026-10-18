@@ -85,10 +85,21 @@ impl DeviceIdentity {
         profile: &Profile,
         interactive: bool,
     ) -> Result<Self, AppError> {
+        Self::load_selected(keychain, profile, None, interactive)
+    }
+    /// Public state may select only the default slot or an explicit, validated replacement
+    /// operation. It can never turn an arbitrary frontend string into a credential account.
+    pub fn load_selected(
+        keychain: &dyn Keychain,
+        profile: &Profile,
+        replacement: Option<&str>,
+        interactive: bool,
+    ) -> Result<Self, AppError> {
+        let slot = Self::identity_slot(profile, replacement)?;
         let saved = if interactive {
-            keychain.get(&profile.slot("device"))
+            keychain.get(&slot)
         } else {
-            keychain.get_noninteractive(&profile.slot("device"))
+            keychain.get_noninteractive(&slot)
         }?;
         let encoded=Zeroizing::new(saved.ok_or_else(||AppError::Other("This device's account keys are unavailable. Use device approval or your recovery kit; local data is retained.".into()))?);
         Self::decode(&encoded, profile)
@@ -98,7 +109,32 @@ impl DeviceIdentity {
         profile: &Profile,
         interactive: bool,
     ) -> Result<Self, AppError> {
-        let slot = profile.slot("device");
+        Self::load_or_create_slot(keychain, profile, None, interactive)
+    }
+    /// Explicit recovery only: preserve the old/default identity even when missing or corrupt.
+    /// A durable operation ID must be recorded before calling; retry reads the very same slot.
+    pub fn create_replacement(
+        keychain: &dyn Keychain,
+        profile: &Profile,
+        operation: &str,
+    ) -> Result<Self, AppError> {
+        Self::load_or_create_slot(keychain, profile, Some(operation), true)
+    }
+    fn identity_slot(profile: &Profile, replacement: Option<&str>) -> Result<String, AppError> {
+        match replacement {
+            Some(id) if hex(id, 32) => Ok(profile.slot(&format!("device-replacement-{id}"))),
+            Some(_) => Err(invalid()),
+            None => Ok(profile.slot("device")),
+        }
+    }
+    fn load_or_create_slot(
+        keychain: &dyn Keychain,
+        profile: &Profile,
+        replacement: Option<&str>,
+        interactive: bool,
+    ) -> Result<Self, AppError> {
+        let slot = Self::identity_slot(profile, replacement)?;
+
         let saved = if interactive {
             keychain.get(&slot)
         } else {
@@ -496,6 +532,82 @@ mod tests {
         assert_ne!(first.keys.public(), different.keys.public());
         assert!(DeviceIdentity::load_or_create(&memory, &profile, false).is_err());
         assert_eq!(*memory.writes.lock().unwrap(), 2);
+    }
+    #[test]
+    fn explicit_replacement_is_independent_durable_retryable_and_never_overwrites_the_old_slot() {
+        let memory = Memory::default();
+        let profile = profile();
+        let old = DeviceIdentity::load_or_create(&memory, &profile, true).unwrap();
+        let saved = memory.get(&profile.slot("device")).unwrap();
+        let operation = "1".repeat(32);
+        let replacement =
+            DeviceIdentity::create_replacement(&memory, &profile, &operation).unwrap();
+        assert_ne!(replacement.id, old.id);
+        assert_ne!(replacement.keys.public(), old.keys.public());
+        assert_ne!(replacement.credential(), old.credential());
+        let retry = DeviceIdentity::create_replacement(&memory, &profile, &operation).unwrap();
+        assert_eq!(retry.device(), replacement.device());
+        assert_eq!(retry.credential(), replacement.credential());
+        let strict = NoPrompt(&memory, false);
+        let background = Background(&strict);
+        assert_eq!(
+            DeviceIdentity::load_selected(&background, &profile, Some(&operation), false)
+                .unwrap()
+                .device(),
+            replacement.device()
+        );
+        assert!(
+            DeviceIdentity::load_selected(&background, &profile, Some(&"2".repeat(32)), false)
+                .is_err()
+        );
+        assert!(DeviceIdentity::create_replacement(&memory, &profile, "invalid/slot").is_err());
+        assert_eq!(*memory.writes.lock().unwrap(), 2);
+        assert_eq!(memory.get(&profile.slot("device")).unwrap(), saved);
+        let slot = DeviceIdentity::identity_slot(&profile, Some(&operation)).unwrap();
+        memory.set(&slot, "corrupt replacement").unwrap();
+        assert!(DeviceIdentity::create_replacement(&memory, &profile, &operation).is_err());
+        assert_eq!(
+            memory.get(&slot).unwrap().as_deref(),
+            Some("corrupt replacement")
+        );
+        memory
+            .set(&profile.slot("device"), "corrupt old identity")
+            .unwrap();
+        let next = DeviceIdentity::create_replacement(&memory, &profile, &"3".repeat(32)).unwrap();
+        assert_ne!(next.id, replacement.id);
+        assert_eq!(
+            memory.get(&profile.slot("device")).unwrap().as_deref(),
+            Some("corrupt old identity")
+        );
+        assert!(DeviceIdentity::load(&memory, &profile, true).is_err());
+    }
+    #[test]
+    fn replacement_requires_successful_readback_before_its_identity_can_be_used() {
+        struct Lost<'a>(&'a Memory);
+        impl Keychain for Lost<'_> {
+            fn get(&self, key: &str) -> Result<Option<String>, AppError> {
+                self.0.get(key)
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<(), AppError> {
+                panic!("replacement must not delete credentials")
+            }
+        }
+        let memory = Memory::default();
+        let profile = profile();
+        let old = DeviceIdentity::load_or_create(&memory, &profile, true).unwrap();
+        assert!(
+            DeviceIdentity::create_replacement(&Lost(&memory), &profile, &"4".repeat(32)).is_err()
+        );
+        assert_eq!(
+            DeviceIdentity::load(&memory, &profile, true)
+                .unwrap()
+                .device(),
+            old.device()
+        );
+        assert_eq!(*memory.writes.lock().unwrap(), 1);
     }
     #[test]
     fn registration_retries_reuse_a_durable_attempt_until_its_short_lifetime_ends() {
