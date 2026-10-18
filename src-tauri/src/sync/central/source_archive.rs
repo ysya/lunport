@@ -420,15 +420,45 @@ pub(super) fn resume(
 }
 /// Authenticated own output only; no caller can supply a filesystem exclusion list.
 pub(super) struct Outputs {
-    files: [(std::path::PathBuf, Vec<u8>); 2],
+    scope: String,
+    files: Vec<(std::path::PathBuf, Vec<u8>)>,
 }
 impl Outputs {
+    /// Only independently authenticated snapshots from this same operation may be joined.
+    pub fn merge(self, next: Self) -> Result<Self, AppError> {
+        const MAX_OUTPUTS: usize = 256;
+        const MAX_BYTES: usize = 256 * 1024 * 1024;
+        if self.scope != next.scope {
+            return Err(invalid());
+        }
+        let scope = self.scope;
+        let mut files = std::collections::BTreeMap::new();
+        let mut total = 0usize;
+        for (path, bytes) in self.files.into_iter().chain(next.files) {
+            if let Some(known) = files.get(&path) {
+                if known != &bytes {
+                    return Err(invalid());
+                }
+                continue;
+            }
+            total = total.checked_add(bytes.len()).ok_or_else(invalid)?;
+            if files.len() >= MAX_OUTPUTS || total > MAX_BYTES {
+                return Err(invalid());
+            }
+            files.insert(path, bytes);
+        }
+        Ok(Self {
+            scope,
+            files: files.into_iter().collect(),
+        })
+    }
     pub fn files(&self) -> impl Iterator<Item = (&std::path::Path, &[u8])> {
         self.files
             .iter()
             .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
     }
 }
+
 struct Readback {
     plain: Zeroizing<Vec<u8>>,
     outputs: Outputs,
@@ -457,7 +487,8 @@ fn readback(env: &SyncEnv, profile: &Profile, receipt: &Receipt) -> Result<Readb
     Ok(Readback {
         plain,
         outputs: Outputs {
-            files: [(root.join(name), bytes), (root.join(marker_name), marker)],
+            scope: receipt.context.scope()?,
+            files: vec![(root.join(name), bytes), (root.join(marker_name), marker)],
         },
     })
 }
@@ -595,6 +626,69 @@ mod tests {
         .unwrap();
         assert!(original
             .require_unchanged_after_archive(&env, None, &outputs)
+            .is_err());
+    }
+    #[test]
+    fn same_operation_continuations_require_every_authenticated_output_and_cannot_hide_other_operations(
+    ) {
+        let device = device();
+        let env = device.env();
+        let owner = owner();
+        let original = super::super::migration_files::Files::capture(&env, None).unwrap();
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let profile = owner.control.profile.profile().unwrap();
+        let initial = Zeroizing::new(b"original captured sources".to_vec());
+        let first = create(&env, &life, &owner, 0, &initial).unwrap();
+        let continuation = Zeroizing::new(b"durable continuation delta".to_vec());
+        let second = next(&env, &life, &owner, 1, first.receipt(), &continuation).unwrap();
+        let first_outputs = first.outputs(&env, &profile, &initial).unwrap();
+        assert!(original
+            .require_unchanged_after_archive(&env, None, &first_outputs)
+            .is_err());
+        let outputs = first_outputs
+            .merge(second.outputs(&env, &profile, &continuation).unwrap())
+            .unwrap();
+        assert_eq!(outputs.files().count(), 3);
+        original
+            .require_unchanged_after_archive(&env, None, &outputs)
+            .unwrap();
+        let outputs = outputs
+            .merge(first.outputs(&env, &profile, &initial).unwrap())
+            .unwrap();
+        assert_eq!(outputs.files().count(), 3);
+        let other = create(&env, &life, &owner, 1, &initial).unwrap();
+        assert!(outputs
+            .merge(other.outputs(&env, &profile, &initial).unwrap())
+            .is_err());
+    }
+    #[test]
+    fn contradictory_owned_path_bytes_and_oversized_proofs_never_form_an_output_allowance() {
+        let device = device();
+        let env = device.env();
+        let owner = owner();
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let profile = owner.control.profile.profile().unwrap();
+        let plain = Zeroizing::new(b"exact source".to_vec());
+        let archived = create(&env, &life, &owner, 0, &plain).unwrap();
+        let mut changed = archived.outputs(&env, &profile, &plain).unwrap();
+        changed.files[0].1[0] ^= 1;
+        assert!(archived
+            .outputs(&env, &profile, &plain)
+            .unwrap()
+            .merge(changed)
+            .is_err());
+        let mut excessive = archived.outputs(&env, &profile, &plain).unwrap();
+        let pattern = excessive.files[0].clone();
+        for index in 0..256 {
+            excessive.files.push((
+                std::path::PathBuf::from(format!("native-test-{index}")),
+                pattern.1.clone(),
+            ));
+        }
+        assert!(archived
+            .outputs(&env, &profile, &plain)
+            .unwrap()
+            .merge(excessive)
             .is_err());
     }
     #[test]
