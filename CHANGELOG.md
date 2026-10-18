@@ -2,6 +2,12 @@
 
 ## [1.6.0](https://github.com/ysya/lunport/compare/v1.5.0...v1.6.0) (2026-10-18)
 
+Single-click a host card to select it, double-click or press Enter to connect, and use the right-hand pencil to edit. The saved-host editor now slides in from the right without changing the catalog layout. Click outside to close it; unsaved changes still require a Keep editing or Discard changes choice. Connection details, port checks and server identity management remain in the host's context menu.
+
+CI now selects checks by changed area, avoids repeating full suites after merge, and runs the normal Windows tray smoke test once. Repeated native baseline comparisons remain available as a manual workflow.
+
+macOS retains the same fixed credential helper introduced in 1.5.0. When upgrading from an older version, existing protected items may each need one initial Always Allow for Lunport Credential Helper; subsequent ordinary app updates preserve that helper.
+
 
 ### Features
 
