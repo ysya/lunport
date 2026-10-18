@@ -22,6 +22,13 @@ pub(super) struct Files {
 }
 impl Files {
     pub fn capture(env: &SyncEnv, legacy_backup: Option<&str>) -> Result<Self, AppError> {
+        Self::capture_checked(env, legacy_backup, BTreeMap::new())
+    }
+    fn capture_checked(
+        env: &SyncEnv,
+        legacy_backup: Option<&str>,
+        mut owned: BTreeMap<PathBuf, &[u8]>,
+    ) -> Result<Self, AppError> {
         let parent = env.state_path.parent().ok_or_else(invalid)?;
         let current = env
             .state_path
@@ -50,13 +57,13 @@ impl Files {
                 ]
                 .contains(&name.as_str())
                 {
-                    result.walk(&root, &name, &source, 0)?;
+                    result.walk(&root, &name, &source, 0, &mut owned)?;
                 } else if name == current
                     || name.starts_with("sync-state")
                     || name.starts_with("vault")
                     || Some(name.as_str()) == legacy_backup
                 {
-                    result.file(&root, &name, &source)?;
+                    result.file(&root, &name, &source, &mut owned)?;
                 }
             }
             root.unchanged()?;
@@ -74,13 +81,16 @@ impl Files {
                     result.count()?;
                     result.directories.insert("keys".into());
                     for name in root.names()? {
-                        result.walk(&root, &name, &Path::new("keys").join(&name), 0)?;
+                        result.walk(&root, &name, &Path::new("keys").join(&name), 0, &mut owned)?;
                     }
                     root.unchanged()?;
                 }
                 app.unchanged()?;
             }
             ssh.unchanged()?;
+        }
+        if !owned.is_empty() {
+            return Err(crate::sync::runtime::superseded());
         }
         Ok(result)
     }
@@ -97,6 +107,7 @@ impl Files {
         name: &str,
         path: &Path,
         depth: usize,
+        owned: &mut BTreeMap<PathBuf, &[u8]>,
     ) -> Result<(), AppError> {
         if depth > MAX_DEPTH {
             return Err(invalid());
@@ -107,15 +118,28 @@ impl Files {
                 return Err(invalid());
             }
             for name in dir.names()? {
-                self.walk(&dir, &name, &path.join(&name), depth + 1)?;
+                self.walk(&dir, &name, &path.join(&name), depth + 1, owned)?;
             }
             dir.unchanged()?;
             Ok(())
         } else {
-            self.file(parent, name, path)
+            self.file(parent, name, path, owned)
         }
     }
-    fn file(&mut self, parent: &Directory, name: &str, path: &Path) -> Result<(), AppError> {
+    fn file(
+        &mut self,
+        parent: &Directory,
+        name: &str,
+        path: &Path,
+        owned: &mut BTreeMap<PathBuf, &[u8]>,
+    ) -> Result<(), AppError> {
+        if let Some(expected) = owned.remove(path) {
+            let bytes = parent.read(name, expected.len() as u64)?;
+            if bytes.as_slice() != expected {
+                return Err(crate::sync::runtime::superseded());
+            }
+            return Ok(());
+        }
         self.count()?;
         let limit = (MAX_TOTAL_BYTES - self.total).min(MAX_FILE_BYTES);
         let bytes = parent.read(name, limit)?;
@@ -141,20 +165,21 @@ impl Files {
         backup: Option<&str>,
         outputs: &super::source_archive::Outputs,
     ) -> Result<(), AppError> {
-        let latest = Self::capture(env, backup)?;
-        let mut added = 0;
+        let mut fresh = BTreeMap::new();
         for (path, bytes) in outputs.files() {
-            if latest.bytes.get(path).is_none_or(|v| v.as_slice() != bytes) {
-                return Err(crate::sync::runtime::superseded());
-            }
             match self.bytes.get(path) {
                 Some(before) if before.as_slice() == bytes => {}
                 Some(_) => return Err(crate::sync::runtime::superseded()),
-                None => added += 1,
+                None => {
+                    fresh.insert(path.to_owned(), bytes);
+                }
             }
         }
+        // Only authenticated newly owned output bytes use their exact readback size. All original
+        // and unrelated files still pass the ordinary source limits and are compared below.
+        let latest = Self::capture_checked(env, backup, fresh)?;
         let root = Path::new("data/central-source-archives");
-        if latest.bytes.len() != self.bytes.len() + added
+        if latest.bytes.len() != self.bytes.len()
             || self
                 .bytes
                 .iter()
@@ -703,7 +728,12 @@ mod tests {
             entries: 0,
         };
         assert!(constrained
-            .file(&opened, "vault.json", Path::new("data/vault.json"))
+            .file(
+                &opened,
+                "vault.json",
+                Path::new("data/vault.json"),
+                &mut BTreeMap::new()
+            )
             .is_err());
         assert!(constrained.bytes.is_empty());
         write(&root.join("sync-state-new.json"), b"new");

@@ -571,6 +571,33 @@ mod tests {
         assert!(env.runtime.core.lock().unwrap().records.is_none());
     }
     #[test]
+    fn authenticated_large_own_archive_can_revalidate_without_relaxing_other_source_limits() {
+        let device = device();
+        let env = device.env();
+        let owner = owner();
+        let original = super::super::migration_files::Files::capture(&env, None).unwrap();
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let plain = Zeroizing::new(vec![b'Q'; 65 * 1024 * 1024]);
+        let archived = create(&env, &life, &owner, 0, &plain).unwrap();
+        let outputs = archived
+            .outputs(&env, &owner.control.profile.profile().unwrap(), &plain)
+            .unwrap();
+        original
+            .require_unchanged_after_archive(&env, None, &outputs)
+            .unwrap();
+        fs::write(
+            env.state_path
+                .parent()
+                .unwrap()
+                .join("sync-state.unique-input"),
+            b"unique local B",
+        )
+        .unwrap();
+        assert!(original
+            .require_unchanged_after_archive(&env, None, &outputs)
+            .is_err());
+    }
+    #[test]
     fn missing_marker_key_or_both_never_recreates_a_resume_key_or_replaces_an_archive() {
         for missing in ["marker", "key", "both", "blob"] {
             let device = device();
