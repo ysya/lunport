@@ -70,7 +70,11 @@ The relay can run on Cloudflare Workers or your own server with Docker Compose. 
 
 ## AI access through MCP
 
-Open **Settings → AI access**, enable access and choose the individual hosts a client may use. The pane provides the `codex mcp add` command for the installed app. The registration alias remains `sshelter` for compatibility. Reconnect your MCP client after an app update to refresh its tools.
+Open **Settings → AI access**, enable access and choose the individual hosts a client may use. Under **Connect an AI tool**, select Codex, Claude Code, Claude Desktop, Cursor or VS Code and choose **Add**. Codex and Claude settings are backed up before the app saves its entry; Cursor and VS Code open their own installation review. Existing unrelated servers and settings are preserved. Adding a tool does not grant host permissions or change command review.
+
+**Configured** means the settings were saved, not that the client is connected. Start a new Codex or Claude Code session, or quit and reopen Claude Desktop, to load the server. Cursor and VS Code finish installation in their own UI. **Refresh status** checks the local settings again; **Repair setup** can update an existing Lunport entry. A conflicting server name, malformed settings or a managed settings symlink is left untouched, with manual setup available.
+
+For another agent, open **Manual setup & other agents**. Copy or export the JSON `mcpServers` configuration, Codex TOML or VS Code JSON. The same area provides the executable path and `--mcp` argument separately, plus optional Codex/Claude Code terminal commands. These configurations connect a local stdio MCP client on this computer. The server registration alias remains `sshelter` for compatibility.
 
 The Records adapter uses an OS-authenticated local session broker. It can start Lunport in the background; approvals and server trust decisions appear in the app when needed.
 
@@ -128,5 +132,7 @@ git config --global core.sshCommand C:/Windows/System32/OpenSSH/ssh.exe
 ## Updates and help
 
 **Settings → Updates** shows the installed version, release notes, download progress and Stable/Beta channel. Switching from Beta to Stable keeps the installed version until a newer stable version is available. Installing an update restarts the app and ends active sessions.
+
+On macOS, an old `SSHelter.app` installation is renamed to `Lunport.app` when the updated app starts. The old path remains a compatibility link, so existing absolute MCP and CLI commands keep working. An enabled launch-at-login entry is updated to the new path; a disabled entry stays disabled. Credentials and library data retain their existing identity. macOS may request installation permission once. A cancelled or incomplete rename can be retried in **Settings → About → Finish the Lunport rename**, without reinstalling. A conflicting app at the destination is never overwritten.
 
 **Settings → About** contains the Lunport identity, installed version, project, releases, issues and license links. On macOS, **Lunport → About Lunport** also opens the native panel. Local diagnostic logs are available in **Settings → Diagnostics** in Records, or **Discovery & checks** in Legacy.

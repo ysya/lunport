@@ -55,6 +55,10 @@ node scripts/generate-brand-icons.mjs
 
 Use Lunport for visible product copy and `ysya/lunport` for current repository links. Bundle IDs, credential services, executable names, MCP registration, SSH paths and persisted storage keys intentionally retain their SSHelter identities. See [installer compatibility](../src-tauri/installers/README.md) before changing any of them. Historical releases, validation records and signatures retain their original names.
 
+The macOS pre-runtime migration in `macos_install.rs` renames only the running legacy app bundle, preserves its parent and leaves a relative compatibility symlink. It uses no-overwrite moves, a bounded installation lock and a recovery journal. A permission repair uses the same executable's fixed installer-only mode; that mode accepts no destination path and never starts Tauri or reads user credentials. Development can exercise this only inside its existing write sandbox. Login repair changes only an existing `SSHelter` entry whose old command resolves to this installation.
+
+MCP client setup in `mcp_setup.rs` uses the existing stdio adapter and grants no host access. Codex TOML edits preserve comments; Claude JSON edits preserve unrelated values. Existing files are backed up with owner-only permissions, managed symlinks are refused and concurrent changes are checked before replacement. Cursor/VS Code URLs are generated in Rust from a fixed client enum and this installation's command; the WebView receives no new filesystem or general execution capability. Development writes client fixtures only under its sandbox home and does not open external install links. Linux AppImage setup records the persistent AppImage path rather than its temporary inner executable.
+
 The 2.11.2 runtime has a narrow [context ownership patch](../src-tauri/vendor/tauri-runtime-wry/LUNPORT_PATCH.md). Preserve its provenance and run the handle-only, native tray and actual GUI regressions before updating or removing it. The patch keeps worker handle clones from copying a non-atomic native event-loop reference count.
 
 ## Release workflow

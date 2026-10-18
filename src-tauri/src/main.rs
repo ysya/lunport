@@ -8,6 +8,9 @@ fn main() {
         sshelter_lib::askpass::run();
     }
 
+    #[cfg(target_os = "macos")]
+    sshelter_lib::macos_install::handle_installer_mode();
+
     // Internal, disposable CoreAudio child: no Tauri, keychain, broker or GUI initialization.
     #[cfg(target_os = "macos")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--coreaudio-probe")) {
@@ -16,6 +19,10 @@ fn main() {
     #[cfg(target_os = "macos")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--check-window-health")) {
         std::process::exit(sshelter_lib::macos_health::check_from_terminal());
+    }
+    #[cfg(target_os = "macos")]
+    if !matches!(std::env::args_os().nth(1).as_deref().and_then(std::ffi::OsStr::to_str), Some("connect" | "--mcp")) {
+        sshelter_lib::macos_install::prepare_desktop_launch();
     }
     // 用戶端（MCP adapter、`sshelter connect`）在背景啟動 Lunport 時設 SSHELTER_START_HIDDEN=1，主視窗先不顯示。
     // 讀完就從環境移除，趁行程還只有這一個執行緒（Tauri 還沒啟動，edition 2021 的 remove_var 不需要 unsafe）：

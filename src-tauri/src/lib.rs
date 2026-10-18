@@ -20,7 +20,10 @@ mod keys;
 mod known_hosts;
 #[cfg(target_os = "macos")]
 pub mod macos_health;
+#[cfg(target_os = "macos")]
+pub mod macos_install;
 pub mod mcp;
+mod mcp_setup;
 mod process;
 mod quick_connect;
 mod secrets;
@@ -241,6 +244,8 @@ fn run_app(host: bool, start_hidden: bool) {
         .manage(tray::TrayState::default())
         .manage(quick_connect::QuickConnect::default())
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            macos_install::repair_login();
             diagnostics::stage(diagnostics::Stage::Setup);
             app.state::<state::AppState>().background_credentials_only.store(host && start_hidden,std::sync::atomic::Ordering::SeqCst);
             // Publish the initial native tray before any worker can request an update.
@@ -326,6 +331,10 @@ fn run_app(host: bool, start_hidden: bool) {
             app_platform,
             diagnostics::app_open_diagnostics,
             app_is_development,
+            #[cfg(target_os = "macos")]
+            macos_install::app_installation_status,
+            #[cfg(target_os = "macos")]
+            macos_install::app_finish_rename,
             quick_connect::app_set_global_hotkey,
             quick_connect::app_take_quick_connect,
             app_home_dir,
@@ -430,6 +439,9 @@ fn run_app(host: bool, start_hidden: bool) {
             settings_export,
             settings_import,
             mcp_status,
+            mcp_setup::mcp_setup_overview,
+            mcp_setup::mcp_setup_add,
+            mcp_setup::mcp_setup_export,
             mcp_set_approval_mode,
             session::auth_window::auth_pending,
             session::auth_window::auth_resolve,
