@@ -1,4 +1,6 @@
 import { centralFetch } from "./v2/routes";
+import { validScope, sameMigration, type LegacyMigrationScope, type LegacySnapshot, type LegacyGate } from "./legacy-retirement";
+export { LegacyRetirementStore } from "./legacy-retirement";
 export { AccountStore } from "./v2/account";
 export { VaultStore } from "./v2/store";
 import { DurableObject } from "cloudflare:workers";
@@ -51,7 +53,7 @@ export interface PullItem {
 
 type PullEntry =
   | { chain: string; status: "ok"; records: Envelope[]; latestSeq: number }
-  | { chain: string; status: "not_found" | "rate_limited" | "deferred" };
+  | { chain: string; status: "not_found" | "rate_limited" | "deferred" | "unavailable" | "retired" };
 
 type PushResult = { status: "ok"; seq: number } | { status: "conflict"; current: Envelope };
 
@@ -113,6 +115,42 @@ export class ChainStore extends DurableObject<Env> {
     );
   }
 
+  private migrationFenced(): boolean {
+    return this.hasSchema() && this.meta("migration_scope") !== null;
+  }
+
+  /** Logical IDs, rather than deployment-specific object IDs, address the registry. */
+  private async migrationGate(chain: string, tokenHash: string, write: boolean): Promise<LegacyGate> {
+    try {
+      if (!HEX64.test(chain) || !HEX64.test(tokenHash) || !this.env.CHAIN.idFromName(chain).equals(this.ctx.id)) return 503;
+      return await this.env.LEGACY_RETIREMENT.getByName(chain).check(chain, tokenHash, write);
+    } catch { return 503; }
+  }
+
+  /** Private RPC only: a failed acknowledgement leaves the immutable local fence. */
+  async freezeForMigration(chain: string, tokenHash: string, scope: LegacyMigrationScope): Promise<{ status: LegacyGate; snapshot?: LegacySnapshot }> {
+    if (!validScope(scope) || !HEX64.test(chain) || !this.env.CHAIN.idFromName(chain).equals(this.ctx.id)) return { status: 503 };
+    if (!this.authorized(tokenHash)) return { status: 404 };
+    const prior = this.meta("migration_scope");
+    if (prior !== null) {
+      try { const parsed: unknown = JSON.parse(prior); if (!validScope(parsed)) return { status: 503 }; if (!sameMigration(parsed, scope)) return { status: 409 }; }
+      catch { return { status: 503 }; }
+    } else {
+      // No await between authentication and this durable write. In-flight legacy
+      // RPCs recheck this fence after their registry await, before any mutation.
+      this.setMeta("migration_scope", JSON.stringify(scope));
+    }
+    const records = this.ctx.storage.sql.exec<Row>(`SELECT ${ROW_COLUMNS} FROM records ORDER BY id_hash`).toArray().map(toEnvelope);
+    const latestSeq = Number(this.meta("latest_seq") ?? "0");
+    const digest = await sha256Hex(JSON.stringify(["lunport-legacy-snapshot-v1", chain, latestSeq, records]));
+    const snapshot = { latestSeq, count: records.length, digest };
+    try {
+      await this.ctx.storage.deleteAlarm();
+      const status = await this.env.LEGACY_RETIREMENT.getByName(chain).freeze(chain, tokenHash, scope, snapshot);
+      return status === 200 ? { status, snapshot } : { status };
+    } catch { return { status: 503 }; }
+  }
+
   /** 已建立且 token 相符。不存在與不符都回 false(呼叫端一律 404)。 */
   private authorized(tokenHash: string): boolean {
     if (!this.hasSchema()) return false;
@@ -126,8 +164,11 @@ export class ChainStore extends DurableObject<Env> {
   }
 
   /** 204 凍結(冪等)、404 不存在或權杖不符、429 超過每 chain 速率。凍結後 push 一律 409,讀取照常,刪除只清記錄。 */
-  async freeze(tokenHash: string): Promise<204 | 404 | 429> {
+  async freeze(tokenHash: string, chain: string): Promise<204 | 404 | 409 | 410 | 429 | 503> {
+    const gate = await this.migrationGate(chain, tokenHash, true);
+    if (gate !== 200) return gate;
     if (!this.authorized(tokenHash)) return 404;
+    if (this.migrationFenced()) return 409;
     if (this.rateLimited()) return 429;
     this.setMeta("frozen", "1");
     return 204;
@@ -163,16 +204,23 @@ export class ChainStore extends DurableObject<Env> {
    * 吃掉免費方案每天的寫入額度。讀 alarm 不算寫入。
    */
   private async touch(force: boolean): Promise<void> {
+    if (this.migrationFenced()) return;
     const now = Date.now();
     if (!force) {
       const alarm = await this.ctx.storage.getAlarm();
+      if (this.migrationFenced()) return;
       if (alarm !== null && alarm - now >= IDLE_TTL_MS - TOUCH_INTERVAL_MS) return;
     }
     await this.ctx.storage.setAlarm(now + IDLE_TTL_MS);
+    // A migration may have fenced the object while setAlarm was awaiting output.
+    if (this.migrationFenced()) await this.ctx.storage.deleteAlarm();
   }
 
   /** 201 新建、200 已存在、404 token 不符、429 超過每 chain 速率。建鏈的每 IP 限制在 Worker 層。 */
-  async create(tokenHash: string): Promise<201 | 200 | 404 | 429> {
+  async create(tokenHash: string, chain: string): Promise<201 | 200 | 404 | 409 | 410 | 429 | 503> {
+    const gate = await this.migrationGate(chain, tokenHash, true);
+    if (gate !== 200) return gate;
+    if (this.migrationFenced()) return this.authorized(tokenHash) ? 409 : 404;
     if (!this.hasSchema()) {
       // 建鏈那一次也計數,而且要看結果:計數跟著 instance 走、DELETE 不歸零,同一分鐘內刪掉再建也可能超限。
       if (this.rateLimited()) return 429;
@@ -189,21 +237,28 @@ export class ChainStore extends DurableObject<Env> {
     return 200;
   }
 
-  async pull(tokenHash: string, since: number): Promise<{ status: 200 | 404 | 429; body?: { records: Envelope[]; latestSeq: number } }> {
+  async pull(tokenHash: string, since: number, chain: string): Promise<{ status: 200 | 404 | 409 | 410 | 429 | 503; body?: { records: Envelope[]; latestSeq: number } }> {
+    const gate = await this.migrationGate(chain, tokenHash, false);
+    if (gate !== 200) return { status: gate };
     if (!this.authorized(tokenHash)) return { status: 404 };
     if (this.rateLimited()) return { status: 429 };
     const records = this.ctx.storage.sql
       .exec<Row>(`SELECT ${ROW_COLUMNS} FROM records WHERE seq > ? ORDER BY seq`, since)
       .toArray()
       .map(toEnvelope);
+    // Rows and cursor belong to one synchronous SQLite snapshot. A write may
+    // arrive while touch awaits storage; it must remain visible on the next pull.
+    const latestSeq = Number(this.meta("latest_seq") ?? "0");
     await this.touch(false);
-    return { status: 200, body: { records, latestSeq: Number(this.meta("latest_seq") ?? "0") } };
+    return { status: 200, body: { records, latestSeq } };
   }
 
-  async push(tokenHash: string, items: PushItem[]): Promise<{ status: 200 | 404 | 409 | 413 | 429; body?: { results: PushResult[]; latestSeq: number } }> {
+  async push(tokenHash: string, items: PushItem[], chain: string): Promise<{ status: 200 | 404 | 409 | 410 | 413 | 429 | 503; body?: { results: PushResult[]; latestSeq: number } }> {
+    const gate = await this.migrationGate(chain, tokenHash, true);
+    if (gate !== 200) return { status: gate };
     if (!this.authorized(tokenHash)) return { status: 404 };
     if (this.rateLimited()) return { status: 429 };
-    if (this.frozen()) return { status: 409 };
+    if (this.migrationFenced() || this.frozen()) return { status: 409 };
 
     // 1. 先判定每筆是接受還是 conflict —— 不寫入。
     let latest = Number(this.meta("latest_seq") ?? "0");
@@ -257,9 +312,12 @@ export class ChainStore extends DurableObject<Env> {
     return { status: 200, body: { results: plan.map((p) => p.result), latestSeq: latest } };
   }
 
-  async destroy(tokenHash: string): Promise<204 | 404 | 429> {
+  async destroy(tokenHash: string, chain: string): Promise<204 | 404 | 409 | 410 | 429 | 503> {
+    const gate = await this.migrationGate(chain, tokenHash, true);
+    if (gate !== 200) return gate;
     if (!this.authorized(tokenHash)) return 404;
     if (this.rateLimited()) return 429;
+    if (this.migrationFenced()) return 409;
     if (this.frozen()) {
       // 凍結的 chain 只刪記錄:meta(token hash、latest seq、created_at、凍結)與閒置 alarm 都留著,
       // 否則同一個權杖 DELETE 再 PUT 就能重開一條沒凍結的 chain,寫入截止點形同虛設。之後 PUT 回 200、push 仍是 409。
@@ -273,6 +331,7 @@ export class ChainStore extends DurableObject<Env> {
 
   /** 閒置 180 天:整個 chain 清掉(使用者本機資料不受影響)。儲存清空後 DO 會在關閉時消失。 */
   async alarm(): Promise<void> {
+    if (this.migrationFenced()) return;
     await this.ctx.storage.deleteAll();
   }
 }
@@ -400,7 +459,7 @@ async function readBodyCapped(request: Request, maxBytes: number): Promise<strin
 
 const bad = (message: string) => Response.json({ error: message }, { status: 400 });
 const notFound = () => new Response(null, { status: 404 });
-const status = (code: number) => new Response(null, { status: code });
+const status = (code: number) => new Response(null, { status: code, headers: code === 503 ? { "retry-after": "5", "cache-control": "no-store" } : undefined });
 
 /** 每 IP 的限流 DO(Cloudflare 在邊緣覆寫 CF-Connecting-IP,客戶端偽造不了;自架時由 Caddy 覆寫;本機測試自己帶 header)。 */
 function limiterFor(request: Request, env: Env) {
@@ -451,11 +510,11 @@ async function batchPull(request: Request, env: Env): Promise<Response> {
       results.push({ chain: item.chain, status: "deferred" });
       continue;
     }
-    const result = await env.CHAIN.getByName(item.chain).pull(await sha256Hex(item.token), item.since);
+    const result = await env.CHAIN.getByName(item.chain).pull(await sha256Hex(item.token), item.since, item.chain);
     const entry: PullEntry =
       result.status === 200 && result.body
         ? { chain: item.chain, status: "ok", records: result.body.records, latestSeq: result.body.latestSeq }
-        : { chain: item.chain, status: result.status === 429 ? "rate_limited" : "not_found" };
+        : { chain: item.chain, status: result.status === 429 ? "rate_limited" : result.status === 503 ? "unavailable" : result.status === 410 ? "retired" : "not_found" };
     used += JSON.stringify(entry).length;
     results.push(entry);
   }
@@ -486,21 +545,20 @@ export default {
     const stub = env.CHAIN.getByName(chainId);
 
     if (isCreate) {
-      const code = await stub.create(tokenHash);
-      if (code === 404) return notFound();
-      if (code === 429) return status(429);
+      const code = await stub.create(tokenHash, chainId);
+      if (code !== 200 && code !== 201) return status(code);
       return Response.json({}, { status: code });
     }
     if (suffix === undefined && request.method === "DELETE") {
-      return status(await stub.destroy(tokenHash));
+      return status(await stub.destroy(tokenHash, chainId));
     }
     if (freezePath && request.method === "POST") {
-      return status(await stub.freeze(tokenHash));
+      return status(await stub.freeze(tokenHash, chainId));
     }
     if (recordsPath && request.method === "GET") {
       const raw = url.searchParams.get("since") ?? "0";
       if (!/^\d{1,18}$/.test(raw)) return bad("invalid since");
-      const result = await stub.pull(tokenHash, Number(raw));
+      const result = await stub.pull(tokenHash, Number(raw), chainId);
       if (result.status !== 200) return status(result.status);
       return Response.json(result.body);
     }
@@ -521,7 +579,7 @@ export default {
       }
       if (new Set(body.map((i) => i.idHash)).size !== body.length) return bad("duplicate idHash in one push");
       if (body.some((i) => i.ciphertext.length > MAX_RECORD_BYTES)) return status(413);
-      const result = await stub.push(tokenHash, body);
+      const result = await stub.push(tokenHash, body, chainId);
       if (result.status === 409) return Response.json({ status: "frozen" }, { status: 409 });
       if (result.status !== 200) return status(result.status);
       return Response.json(result.body);

@@ -99,6 +99,14 @@ Besides the per-chain endpoints (`PUT`/`DELETE /v1/chains/{id}`, `GET`/`POST /v1
   `201`.
 - `GET /v1/info` — the relay version and features, so the app knows whether this relay needs an update.
 
+## Central migration implementation status
+
+The account service remains an opt-in preview with generic OIDC settings. It does not yet advertise a complete legacy migration capability.
+
+`LegacyRetirementStore` is a separate Durable Object namespace with no expiry, alarm, delete or reset RPC. Every legacy data endpoint checks it and fails closed if it is unavailable. The internal migration freeze preserves its source snapshot and prevents idle cleanup, deletion and recreation; retrying must use the same operation and target. Ordinary `/freeze` continues to support sync-code rotation.
+
+The final retirement transition is not exposed until a central coordinator verifies the target commit. A separate trusted ingress and deployment floor are also required before production migration: restoring an older public Worker can otherwise bypass these checks. Preserve security namespaces and their high-water state when backing up or restoring; an empty replacement registry is not evidence that old sync codes are safe to reuse. The Docker configuration declares the same namespaces but does not establish an independent ingress or rollback protection.
+
 ## Limits
 
 - 64 KiB per record, 1 MiB and 4096 records per chain (tombstones count), 1 MiB per request

@@ -3,6 +3,7 @@
 // Runtime types generated with workerd@1.20260925.1 2026-08-20
 interface __BaseEnv_Env {
 	CHAIN: DurableObjectNamespace<import("./src/index").ChainStore>;
+	LEGACY_RETIREMENT: DurableObjectNamespace<import("./src/index").LegacyRetirementStore>;
 	IP_LIMIT: DurableObjectNamespace<import("./src/index").IpLimiter>;
 	ACCOUNT: DurableObjectNamespace<import("./src/index").AccountStore>;
 	VAULT: DurableObjectNamespace<import("./src/index").VaultStore>;
@@ -10,7 +11,7 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
-		durableNamespaces: "ChainStore" | "IpLimiter" | "AccountStore" | "VaultStore";
+		durableNamespaces: "LegacyRetirementStore" | "ChainStore" | "IpLimiter" | "AccountStore" | "VaultStore";
 	}
 	interface Env extends __BaseEnv_Env {}
 }

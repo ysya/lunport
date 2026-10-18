@@ -8,16 +8,21 @@
     "bindings": [
       { "name": "CHAIN", "class_name": "ChainStore" },
       { "name": "IP_LIMIT", "class_name": "IpLimiter" },
+      { "name": "LEGACY_RETIREMENT", "class_name": "LegacyRetirementStore" },
       { "name": "ACCOUNT", "class_name": "AccountStore" },
-      { "name": "VAULT", "class_name": "VaultStore" },
-    ],
+      { "name": "VAULT", "class_name": "VaultStore" }
+    ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ChainStore", "IpLimiter"] },
     {
       "tag": "v2-central",
-      "new_sqlite_classes": ["AccountStore", "VaultStore"],
+      "new_sqlite_classes": ["AccountStore", "VaultStore"]
     },
+    {
+      "tag": "v3-legacy-fence",
+      "new_sqlite_classes": ["LegacyRetirementStore"]
+    }
   ],
-  "observability": { "enabled": true },
+  "observability": { "enabled": true }
 }
