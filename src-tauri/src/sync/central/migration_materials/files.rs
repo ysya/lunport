@@ -13,11 +13,7 @@ struct SourceMaster<'a> {
 }
 impl Keychain for SourceMaster<'_> {
     fn get(&self, account: &str) -> Result<Option<String>, AppError> {
-        let known = account == store::VAULT_KEY_ACCOUNT
-            || account
-                .strip_prefix(store::VAULT_KEY_ACCOUNT_PREFIX)
-                .is_some_and(|id| hex(id, 16));
-        if !known {
+        if !store::is_vault_key_account(account) {
             return Err(invalid());
         }
         if let Some(import) = self.import {

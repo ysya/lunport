@@ -39,6 +39,7 @@ pub mod recovery_flow;
 pub mod recovery_revalidation;
 mod archive_directory;
 mod source_archive;
+mod inventory_keys;
 pub mod replacement_archive;
 pub mod replacement;
 pub mod replacement_flow;

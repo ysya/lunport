@@ -614,22 +614,18 @@ pub(crate) fn read_vault_image(
     };
     readonly_image(file, Path::new(""), keychain)
 }
+pub(crate) fn is_vault_key_account(account: &str) -> bool {
+    account == VAULT_KEY_ACCOUNT || account.strip_prefix(VAULT_KEY_ACCOUNT_PREFIX).is_some_and(|suffix| {
+        suffix.len() == 16 && suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
 fn readonly_image(
     file: VaultFile,
     path: &Path,
     keychain: &dyn Keychain,
 ) -> Result<ReadOnlyVault, VaultError> {
     let account = file.key_account();
-    let known_account = account == VAULT_KEY_ACCOUNT
-        || account
-            .strip_prefix(VAULT_KEY_ACCOUNT_PREFIX)
-            .is_some_and(|suffix| {
-                suffix.len() == 16
-                    && suffix
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            });
-    if !known_account {
+    if !is_vault_key_account(account) {
         return Err(readonly_vault_error(
             "the vault key account is not recognized",
         ));
