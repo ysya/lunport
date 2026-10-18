@@ -1029,8 +1029,20 @@ pub async fn records_key_rename(
     key_id: String,
     expected: KeySlotPayload,
     name: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
 ) -> Result<RecordOverview, AppError> {
-    edit(app, move |state, now| repo::rename_key(state, &key_id, &expected, &name, now).map_err(error)).await
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::sync::engine::with_env(&app, |env| {
+            if let Some(invocation) = invocation.as_ref() {
+                crate::sync::record_import::central_local::rename(env, invocation, &key_id, &expected, &name)
+            } else {
+                edit_records(env, |state, now| {
+                    crate::sync::record_import::central_local::check_invocation(state, None)?;
+                    repo::rename_key(state, &key_id, &expected, &name, now).map_err(error)
+                })
+            }
+        })?
+    }).await.map_err(crate::sync::engine::join_error)?
 }
 #[tauri::command]
 pub async fn records_key_download(

@@ -27,6 +27,7 @@ mod projection_cache;
 pub mod projection_state;
 mod projection_local;
 mod projection_capture;
+pub(super) use projection_capture::public_candidate as capture_public;
 mod projection_delta;
 pub(super) use projection_delta::Delta as LibraryDelta;
 pub mod recovery;

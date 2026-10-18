@@ -114,7 +114,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
     inFlight.current = true;
     setBusy(true); setRenameError(null);
     try {
-      const result = await renameRecordKey(renaming.id, renaming.expected, renameName.trim());
+      const result = await renameRecordKey(renaming.id, renaming.expected, renameName.trim(), overview.key_scope);
       if (!current() || recordKeyDestinationKey(result) !== destination) return;
       applyRecordOverview(client, result);
       setSearch("");

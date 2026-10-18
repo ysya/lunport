@@ -672,3 +672,129 @@ fn generated_key_recovers_the_exact_original_container_from_the_first_durable_ci
     )
     .is_ok());
 }
+
+#[test]
+fn offline_rename_captures_public_ciphertext_without_changing_private_draft_source_or_vault() {
+    for raw in [test_keys::plain(), test_keys::encrypted()] {
+        let d = fixture();
+        let receipt = create(&d, raw.clone());
+        let before = state(&d);
+        let vault_before = fs::read(store::vault_path(&d.env().state_path)).unwrap();
+        let private_before = before
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .pending
+            .values()
+            .find(|p| p.latest.envelope.header.kind == "key")
+            .unwrap()
+            .clone();
+        rename(
+            &d.env(),
+            &scope(&d),
+            &receipt.key_id,
+            &receipt.public,
+            "renamed_offline",
+        )
+        .unwrap();
+        let after = state(&d);
+        assert_eq!(
+            before.local.central_projection,
+            after.local.central_projection
+        );
+        assert_eq!(
+            vault_before,
+            fs::read(store::vault_path(&d.env().state_path)).unwrap()
+        );
+        let pending = &after
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .pending;
+        assert_eq!(
+            pending
+                .values()
+                .find(|p| p.latest.envelope.header.kind == "key")
+                .unwrap(),
+            &private_before
+        );
+        let context = Context::load(&d.env(), &after).unwrap();
+        let public = &pending
+            .values()
+            .find(|p| p.latest.envelope.header.kind == "keyslot")
+            .unwrap()
+            .latest;
+        let plain = public
+            .envelope
+            .verify(&context.identity.keys.public().signing)
+            .unwrap()
+            .open(&context.keys)
+            .unwrap();
+        let admitted =
+            central::payload::admit(&context.keys, &public.envelope.header, &plain).unwrap();
+        let central::payload::Data::Keyslot(slot) = admitted.data else {
+            panic!("public slot")
+        };
+        assert_eq!(slot.public.name, "renamed_offline");
+        let view = crate::sync::record_repository::resolve_key(&after, &receipt.key_id).unwrap();
+        assert_eq!(
+            view.status,
+            crate::sync::record_repository::KeyStatus::Available
+        );
+        let entry = validate_vault(&store::vault_path(&d.env().state_path), &d.keychain)
+            .unwrap()
+            .get(&receipt.key_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.private_key, raw);
+        assert!(crate::session::record_material::matches(&view, &entry));
+        assert!(d.relay.calls().is_empty());
+        d.runtime.core.lock().unwrap().central_session = Some(expired_session(&d));
+        rename(
+            &d.env(),
+            &scope(&d),
+            &receipt.key_id,
+            &view.public.unwrap(),
+            "renamed_again",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::sync::record_repository::resolve_key(&state(&d), &receipt.key_id)
+                .unwrap()
+                .status,
+            crate::sync::record_repository::KeyStatus::Available
+        );
+    }
+}
+#[test]
+fn rename_failure_or_changed_request_preserves_current_name_and_ciphertext() {
+    for missing_identity in [false, true] {
+        let d = fixture();
+        let receipt = create(&d, test_keys::plain());
+        let before = state(&d);
+        let mut expected = scope(&d);
+        if missing_identity {
+            d.keychain.delete(&selected_slot(&d)).unwrap();
+        } else {
+            expected.generation = "0".into();
+            assert_ne!(expected.generation, scope(&d).generation);
+        }
+        assert!(rename(
+            &d.env(),
+            &expected,
+            &receipt.key_id,
+            &receipt.public,
+            "new_name"
+        )
+        .is_err());
+        assert_eq!(state(&d), before);
+    }
+}

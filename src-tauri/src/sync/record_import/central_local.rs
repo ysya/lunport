@@ -505,6 +505,39 @@ pub(super) fn publish(env: &SyncEnv, j: &Journal, context: &Context) -> Result<(
     step(PublishStep::StateSaved)
 }
 
+/// Capture the public edit before publishing its cache, so a new source's initial public draft
+/// cannot make its still-identical protected material temporarily unavailable.
+pub(crate) fn rename(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    id: &str,
+    expected: &KeySlotPayload,
+    name: &str,
+) -> Result<crate::sync::record_commands::RecordOverview, AppError> {
+    let _life = env.runtime.lifecycle.lock().unwrap();
+    let _vault = env
+        .runtime
+        .vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    let (before, generation) = record_runtime::snapshot(env)?;
+    check_request(&before, generation, Some(invocation))?;
+    let proposed =
+        crate::sync::record_repository::rename_key(&before, id, expected, name, env.now())
+            .map_err(|_| failure("key metadata changed; refresh and retry the rename"))?;
+    if proposed != before {
+        let context = Context::load(env, &before)?;
+        let candidate = central::capture_public(&proposed, &context.keys, &context.identity.keys)?;
+        step(PublishStep::BeforeStateSave)?;
+        context.verify(env, &before)?;
+        record_runtime::commit_candidate(env, generation, candidate)?;
+    }
+    let result = crate::sync::record_commands::overview(env)?;
+    env.events.status();
+    env.events.wake();
+    Ok(result)
+}
 #[cfg(all(test, unix))]
 #[path = "central_local_tests.rs"]
 mod tests;
