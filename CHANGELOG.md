@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.0](https://github.com/ysya/lunport/compare/v1.5.0...v1.6.0) (2026-10-18)
+
+Single-click a host card to select it, double-click or press Enter to connect, and use the right-hand pencil to edit. The saved-host editor now slides in from the right without changing the catalog layout. Click outside to close it; unsaved changes still require a Keep editing or Discard changes choice. Connection details, port checks and server identity management remain in the host's context menu.
+
+CI now selects checks by changed area, avoids repeating full suites after merge, and runs the normal Windows tray smoke test once. Repeated native baseline comparisons remain available as a manual workflow.
+
+macOS retains the same fixed credential helper introduced in 1.5.0. When upgrading from an older version, existing protected items may each need one initial Always Allow for Lunport Credential Helper; subsequent ordinary app updates preserve that helper.
+
+
+### Features
+
+* select host cards, double-click to connect and edit from the right ([#41](https://github.com/ysya/lunport/issues/41)) ([6e92613](https://github.com/ysya/lunport/commit/6e9261319a5a27ce04ed5ad91f57b01b925a58c8))
+
 ## [1.5.0](https://github.com/ysya/lunport/compare/v1.4.0...v1.5.0) (2026-10-17)
 
 SSH password questions now appear in Lunport. Host Details can save, replace or remove a password in this device's system credential store. One-time answers are not saved automatically, and saved passwords are not included in library sync or exports.
