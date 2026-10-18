@@ -40,6 +40,7 @@ impl SourceKey {
 /// This deliberately cannot be serialized, logged or exposed through a command.
 pub(super) struct Sources {
     parent: String,
+    legacy_origin: Option<String>,
     keys: BTreeMap<String, SourceKey>,
     expected: BTreeSet<String>,
 }
@@ -87,6 +88,7 @@ impl Sources {
         }
         let mut result = Self {
             parent: String::new(),
+            legacy_origin: None,
             keys: BTreeMap::new(),
             expected: BTreeSet::new(),
         };
@@ -96,6 +98,17 @@ impl Sources {
             }
             return Ok(result);
         };
+        let relay = reqwest::Url::parse(&state.relay_url).map_err(|_| invalid())?;
+        if !["https", "http"].contains(&relay.scheme())
+            || relay.path() != "/"
+            || relay.query().is_some()
+            || relay.fragment().is_some()
+            || !relay.username().is_empty()
+            || relay.password().is_some()
+        {
+            return Err(invalid());
+        }
+        result.legacy_origin = Some(relay.origin().ascii_serialization());
         let account_keys = account_keys.ok_or_else(invalid)?;
         if account_keys.chain_id != account.chain_id || account.frozen.is_some() {
             return Err(invalid());
@@ -217,6 +230,12 @@ impl Sources {
         }
         Ok(())
     }
+    fn require_service(&self, target: &str) -> Result<(), AppError> {
+        if !self.keys.is_empty() && self.legacy_origin.as_deref() != Some(target) {
+            return Err(AppError::Other("Migrate on the existing relay origin before changing account services. Original data is retained.".into()));
+        }
+        Ok(())
+    }
     pub fn chains(&self) -> Vec<String> {
         self.keys.keys().cloned().collect()
     }
@@ -229,6 +248,7 @@ impl Sources {
         previous: Option<&Progress>,
     ) -> Result<SignedFreeze, AppError> {
         owner.validate()?;
+        self.require_service(&owner.control.profile.origin)?;
         owner.require_key_recipients()?;
         if owner.control.cutover
             || owner.control.phase != Phase::Enrolled
@@ -302,6 +322,7 @@ impl Sources {
         next: &[String],
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         intent.body.canonical()?;
+        self.require_service(&intent.body.origin)?;
         if intent.body.chains != self.chains()
             || intent.body.parent_chain != self.parent
             || next.len() > 8
@@ -579,6 +600,38 @@ mod tests {
                 .insert(row.key(), row);
         }
         assert!(Sources::discover(&state, Some(&parent)).is_err());
+    }
+    #[test]
+    fn legacy_bearers_cannot_be_encoded_for_another_service_or_unsupported_relay_endpoint() {
+        let (mut state, parent) = state();
+        let (owner, signer) = owner();
+        let allowed = Sources::discover(&state, Some(&parent)).unwrap();
+        let intent = allowed
+            .intent(&owner, &signer, &"7".repeat(32), &"8".repeat(64), None)
+            .unwrap();
+        for origin in [
+            "https://other-relay.example",
+            "https://relay.example/another-relay",
+            "https://user@relay.example",
+            "https://relay.example/?source=other",
+            "https://relay.example/#other",
+        ] {
+            state.relay_url = origin.into();
+            if let Ok(source) = Sources::discover(&state, Some(&parent)) {
+                assert!(source
+                    .intent(&owner, &signer, &"7".repeat(32), &"8".repeat(64), None)
+                    .is_err());
+                assert!(source
+                    .freeze_body(&intent, &[parent.chain_id.clone()])
+                    .is_err());
+            }
+        }
+        state.relay_url = "https://RELAY.example:443/".into();
+        let normalized = Sources::discover(&state, Some(&parent)).unwrap();
+        assert!(normalized
+            .intent(&owner, &signer, &"7".repeat(32), &"8".repeat(64), None)
+            .is_ok());
+        assert!(normalized.freeze_body(&intent, &[parent.chain_id]).is_ok());
     }
     #[test]
     fn empty_local_library_has_an_explicit_empty_intent_and_no_legacy_credential() {
