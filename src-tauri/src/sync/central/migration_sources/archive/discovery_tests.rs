@@ -297,7 +297,7 @@ fn discovery_cannot_be_reapplied_or_replace_a_known_child_credential() {
 #[test]
 fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_child_keys() {
     use crate::sync::central::source_package::Package;
-    let (device, mut package, keys, owner, _) =
+    let (device, mut package, keys, owner, raw) =
         crate::sync::central::source_package::tests::fixture();
     let key = package.sources.keys.get(&package.sources.parent).unwrap();
     let parent = Temporary(
@@ -319,10 +319,75 @@ fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_c
         1,
     )
     .unwrap();
-    let response = PullResponse {
-        records: vec![row.envelope],
-        latest_seq: 1,
+    let mut parent_records = vec![row.envelope];
+    let parsed = crate::vault::material::parse(&raw).unwrap();
+    let key_id = "6".repeat(32);
+    let public = crate::sync::records_v3::KeySlotPayload {
+        schema: 2,
+        name: "remote-key".into(),
+        public_key: parsed.public_key().to_openssh().unwrap(),
+        fingerprint: parsed
+            .public_key()
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string(),
+        key_type: parsed.public_key().algorithm().as_str().into(),
+        has_passphrase: true,
+        created_at_ms: 1,
+        origin_device_id: package.state.device_id.clone(),
     };
+    for (kind, id, payload) in [
+        (
+            RecordKind::Space,
+            child_id.clone(),
+            serde_json::to_value(SpacePayload {
+                schema: 1,
+                name: "Previously unseen".into(),
+                slug: "unseen".into(),
+                created_at_ms: 1,
+                previous_id: None,
+            })
+            .unwrap(),
+        ),
+        (
+            RecordKind::KeySlot,
+            key_id.clone(),
+            serde_json::to_value(public).unwrap(),
+        ),
+        (
+            RecordKind::Key,
+            key_id.clone(),
+            json!({"schema":1,"private_key":raw}),
+        ),
+    ] {
+        let record = Record {
+            kind,
+            id,
+            payload,
+            version: 1,
+            updated_at_ms: 1,
+            device_id: package.state.device_id.clone(),
+            deleted: false,
+        };
+        parent_records.push(
+            SealedRecord::seal(&parent.0, &record, parent_records.len() as u64 + 1)
+                .unwrap()
+                .envelope,
+        );
+    }
+    let response = PullResponse {
+        records: parent_records,
+        latest_seq: 4,
+    };
+    let host = Record {
+        kind: RecordKind::Host,
+        id: "1111111111111111".into(),
+        version: 1,
+        updated_at_ms: 1,
+        device_id: package.state.device_id.clone(),
+        deleted: false,
+        payload: json!({"schema":2,"alias":"unseen-host","hostname":"fixture.invalid","auth":"key","key_id":key_id}),
+    };
+    let child_records = vec![SealedRecord::seal(&child, &host, 1).unwrap().envelope];
     let (_, _, signer) = crate::sync::central::migration_history::tests::initial();
     let intent = package
         .sources
@@ -333,7 +398,7 @@ fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_c
             digest: intent.digest().unwrap(),
             intent,
         }],
-        sources: vec![legacy_checkpoint(&parent.0.chain_id, 1, &response.records).unwrap()],
+        sources: vec![legacy_checkpoint(&parent.0.chain_id, 4, &response.records).unwrap()],
         phase: FreezePhase::Frozen,
         next: vec![],
     };
@@ -369,7 +434,7 @@ fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_c
     });
     complete
         .sources
-        .push(legacy_checkpoint(&child_id, 0, &[]).unwrap());
+        .push(legacy_checkpoint(&child_id, 1, &child_records).unwrap());
     complete.sources.sort_by(|a, b| a.chain_id.cmp(&b.chain_id));
     let parent_snapshot = package
         .sources
@@ -381,7 +446,7 @@ fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_c
             &parent.0.chain_id,
             PullResponse {
                 records: snapshot.records().to_vec(),
-                latest_seq: 1,
+                latest_seq: 4,
             },
         )
         .unwrap();
@@ -394,8 +459,8 @@ fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_c
             None,
             &child_id,
             PullResponse {
-                records: vec![],
-                latest_seq: 0,
+                records: child_records,
+                latest_seq: 1,
             },
         )
         .unwrap();
@@ -433,12 +498,19 @@ fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_c
             .iter()
             .filter(|row| row.location.position == Position::Frozen)
             .count(),
-        1
+        5
     );
     inventory.admit_known().unwrap();
-    assert!(restored
+    // The complete set now passes conservative current reconciliation; no source is activated.
+    let before = restored.encode_local().unwrap();
+    let history = restored
         .structured_history(&keys, &BTreeMap::new())
-        .is_err());
+        .unwrap()
+        .into_rows();
+    assert!(history.iter().any(|(_,data)|matches!(data,crate::sync::central::payload::Data::Host(host)if host.alias=="unseen-host")));
+    assert!(history.iter().any(|(_,data)|matches!(data,crate::sync::central::payload::Data::Catalog(catalog)if catalog.collections.iter().any(|c|c.id==child_id))));
+    assert!(history.iter().any(|(id,data)|id.id==key_id && matches!(data,crate::sync::central::payload::Data::Key(private)if private.private()==raw)));
+    assert!(restored.encode_local().unwrap().as_slice() == before.as_slice());
 }
 
 #[test]

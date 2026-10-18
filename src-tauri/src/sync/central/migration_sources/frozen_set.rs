@@ -101,6 +101,13 @@ impl FrozenSet {
         }
         Ok(result)
     }
+    pub fn reconcile(
+        &self,
+        sources: &Sources,
+        state: &SyncStateV3,
+    ) -> Result<super::reconcile::Reconciliation, AppError> {
+        super::reconcile::Reconciliation::from_complete(self.inventory(sources, state)?, state)
+    }
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let mut bytes = Zeroizing::new(Vec::new());
         serde_json::to_writer(&mut *bytes, self).map_err(|_| invalid())?;

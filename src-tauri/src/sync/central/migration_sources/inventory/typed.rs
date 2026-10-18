@@ -104,8 +104,35 @@ pub(in crate::sync::central) struct Known {
     rows: Vec<KnownInput>,
 }
 impl Known {
+    pub(in crate::sync::central::migration_sources) fn rows_mut(&mut self) -> &mut [KnownInput] {
+        &mut self.rows
+    }
     pub fn rows(&self) -> &[KnownInput] {
         &self.rows
+    }
+    pub fn key_inputs(&self) -> Result<Vec<KeyInput>, AppError> {
+        let mut result = vec![];
+        for row in &self.rows {
+            let KnownData::Key(material) = &row.data else {
+                continue;
+            };
+            let material = material
+                .as_ref()
+                .map(|private| PrivateMaterial::new(Zeroizing::new(private.private().into())))
+                .transpose()?;
+            result.push(KeyInput {
+                location: row.location.clone(),
+                id: row.id.clone(),
+                sequence: row.sequence,
+                dirty: row.dirty,
+                deleted: row.deleted,
+                version: row.version,
+                updated_at_ms: row.updated_at_ms,
+                device_id: row.device_id.clone(),
+                material,
+            });
+        }
+        Ok(result)
     }
     pub fn into_keys(self) -> Vec<KeyInput> {
         self.rows

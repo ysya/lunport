@@ -97,11 +97,25 @@ impl Package {
         }
     }
     /// Preserve complete remote inputs alongside this exact captured source, without choosing winners.
-    pub fn with_frozen(mut self, operation: &str, progress: &super::migration_freeze::Progress,
-        minimum: Option<&super::migration_freeze::Known>, snapshots: Vec<FrozenSnapshot>) -> Result<Self, AppError> {
-        if self.frozen.is_some() { return Err(invalid()); }
+    pub fn with_frozen(
+        mut self,
+        operation: &str,
+        progress: &super::migration_freeze::Progress,
+        minimum: Option<&super::migration_freeze::Known>,
+        snapshots: Vec<FrozenSnapshot>,
+    ) -> Result<Self, AppError> {
+        if self.frozen.is_some() {
+            return Err(invalid());
+        }
         drop(self.record_inputs()?);
-        self.frozen = Some(FrozenSet::capture(&self.state, &self.sources, operation, progress, minimum, snapshots)?);
+        self.frozen = Some(FrozenSet::capture(
+            &self.state,
+            &self.sources,
+            operation,
+            progress,
+            minimum,
+            snapshots,
+        )?);
         Ok(self)
     }
     /// Admission always uses the enclosed decryptors. No OS access, writes, activation or consent.
@@ -115,8 +129,25 @@ impl Package {
             &self.state, keys, &self.files, &self.decryptors, references, private_inputs,
         )
     }
-    /// Structured-record history candidate only; other files/frozen sources and consent remain gates.
-    pub fn structured_history(&self, keys: &VaultKeys, references: &BTreeMap<String, KeyStorage>) -> Result<super::migration_library::History, AppError> {
+    /// Structured history candidate; other captured files and explicit consent remain gates.
+    pub fn structured_history(
+        &self,
+        keys: &VaultKeys,
+        references: &BTreeMap<String, KeyStorage>,
+    ) -> Result<super::migration_library::History, AppError> {
+        if let Some(frozen) = &self.frozen {
+            drop(self.record_inputs()?); // Compare the captured state image before deriving a passive candidate.
+            let prepared = frozen.reconcile(&self.sources, &self.state)?.prepare()?;
+            let materials = Materials::from_files_with_key_inputs(
+                &prepared.state,
+                keys,
+                &self.files,
+                &self.decryptors,
+                references,
+                prepared.known.key_inputs()?,
+            )?;
+            return super::migration_library::prepare(&prepared.state, &prepared.known, materials);
+        }
         let known = self.record_inputs()?.admit_known()?;
         let materials = self.materials(keys, references)?;
         super::migration_library::prepare(&self.state, &known, materials)
@@ -129,12 +160,23 @@ impl Package {
         let sources = self.sources.encode_local()?;
         drop(Sources::decode_local(&sources, &self.state)?);
         let decryptors = self.decryptors.encode_local()?;
-        let frozen = self.frozen.as_ref().map(|value| value.encode_local()).transpose()?;
-        if let Some(value) = &self.frozen { drop(value.inventory(&self.sources, &self.state)?); }
+        let frozen = self
+            .frozen
+            .as_ref()
+            .map(|value| value.encode_local())
+            .transpose()?;
+        if let Some(value) = &self.frozen {
+            drop(value.inventory(&self.sources, &self.state)?);
+        }
         let mut sections = vec![
-            self.state_name.as_bytes(), files.as_slice(), sources.as_slice(), decryptors.as_slice(),
+            self.state_name.as_bytes(),
+            files.as_slice(),
+            sources.as_slice(),
+            decryptors.as_slice(),
         ];
-        if let Some(bytes) = &frozen { sections.push(bytes.as_slice()); }
+        if let Some(bytes) = &frozen {
+            sections.push(bytes.as_slice());
+        }
         let length = sections
             .iter()
             .try_fold(8usize, |sum, value| {
@@ -145,7 +187,11 @@ impl Package {
             return Err(invalid());
         }
         let mut out = Zeroizing::new(Vec::with_capacity(length));
-        out.extend_from_slice(if frozen.is_some() { FROZEN_MAGIC } else { MAGIC });
+        out.extend_from_slice(if frozen.is_some() {
+            FROZEN_MAGIC
+        } else {
+            MAGIC
+        });
         for section in sections {
             out.extend_from_slice(&(section.len() as u64).to_be_bytes());
             out.extend_from_slice(section);
@@ -154,7 +200,9 @@ impl Package {
     }
     pub fn decode_local(bytes: &[u8]) -> Result<Self, AppError> {
         let magic = bytes.get(..8);
-        if bytes.len() > MAX_BYTES || ![Some(MAGIC.as_slice()), Some(FROZEN_MAGIC.as_slice())].contains(&magic) {
+        if bytes.len() > MAX_BYTES
+            || ![Some(MAGIC.as_slice()), Some(FROZEN_MAGIC.as_slice())].contains(&magic)
+        {
             return Err(invalid());
         }
         let mut input = &bytes[8..];
@@ -166,11 +214,20 @@ impl Package {
             super::migration_files::MAX_ARCHIVE_BYTES,
         )?)?;
         let state = state(&files, &name)?;
-        let sources = Sources::decode_local(section(&mut input, super::migration_sources::MAX_BOOK_BYTES)?, &state)?;
+        let sources = Sources::decode_local(
+            section(&mut input, super::migration_sources::MAX_BOOK_BYTES)?,
+            &state,
+        )?;
         let decryptors = Snapshot::decode_local(section(&mut input, 2 * 1024 * 1024)?)?;
         let frozen = if magic == Some(FROZEN_MAGIC.as_slice()) {
-            Some(FrozenSet::decode_local(section(&mut input, super::migration_sources::MAX_FROZEN_BYTES)?, &sources, &state)?)
-        } else { None };
+            Some(FrozenSet::decode_local(
+                section(&mut input, super::migration_sources::MAX_FROZEN_BYTES)?,
+                &sources,
+                &state,
+            )?)
+        } else {
+            None
+        };
         if !input.is_empty() {
             return Err(invalid());
         }

@@ -28,6 +28,7 @@ mod inventory;
 pub(super) use inventory::{Inventory, KeyInput, Scope, Position, Known, KnownData, KnownInput};
 mod frozen;
 mod frozen_set;
+mod reconcile;
 pub(super) use frozen::{FrozenSnapshot};
 pub(super) use frozen_set::{FrozenSet, MAX_FROZEN_BYTES};
 struct Temporary(ChainKeys);

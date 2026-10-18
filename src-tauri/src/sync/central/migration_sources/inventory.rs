@@ -20,6 +20,7 @@ pub(in crate::sync::central) enum Position {
     ConflictLocal,
     ConflictRemote,
     Frozen,
+    Retained,
 }
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::sync::central) struct Location {
