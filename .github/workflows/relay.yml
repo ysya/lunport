@@ -25,6 +25,8 @@ jobs:
           node-version: lts/*
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run check:security-config
+      - run: npm run test:security-config
       - run: npm test
 
   # The "Update relay" helper that ships inside relay/.github for deployed copies.

@@ -101,6 +101,8 @@ Besides the per-chain endpoints (`PUT`/`DELETE /v1/chains/{id}`, `GET`/`POST /v1
 
 ## Central migration implementation status
 
+The independent ingress and private-core examples are described in [security/README.md](security/README.md). They remain unrouted and require reviewed provisioning and infrastructure verification.
+
 The account service remains an opt-in preview with generic OIDC settings. It does not yet advertise a complete legacy migration capability.
 
 `LegacyRetirementStore` is a separate Durable Object namespace with no expiry, alarm, delete or reset RPC. Every legacy data endpoint checks it and fails closed if it is unavailable. The internal migration freeze preserves its source snapshot and prevents idle cleanup, deletion and recreation; retrying must use the same operation and target. Ordinary `/freeze` continues to support sync-code rotation.

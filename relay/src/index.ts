@@ -1,9 +1,13 @@
 import { centralFetch } from "./v2/routes";
+import type { Bucket } from "./ip-limit";
+export { IpLimiter } from "./ip-limit";
 import { validScope, sameMigration, type LegacyMigrationScope, type LegacySnapshot, type LegacyGate } from "./legacy-retirement";
 export { LegacyRetirementStore } from "./legacy-retirement";
 export { AccountStore } from "./v2/account";
 export { VaultStore } from "./v2/store";
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { REGISTRY_WITNESS } from "./security/floor";
+export { SecurityFloorStore } from "./security/floor";
 
 const MAX_RECORD_BYTES = 65_536; // 單筆 ciphertext 字元數(嚴格 base64 → 字元 = byte)
 const MAX_CHAIN_BYTES = 1_048_576; // 所有列(含 tombstone)的 ciphertext + nonce 長度總和
@@ -23,7 +27,6 @@ const FEATURES = ["pull-batch", "freeze"] as const;
 const RATE_LIMIT_PER_MINUTE = 120;
 const IDLE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 const TOUCH_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const IP_WINDOW_MS = 60 * 60 * 1000;
 const HEX64 = /^[0-9a-f]{64}$/;
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
@@ -336,63 +339,6 @@ export class ChainStore extends DurableObject<Env> {
   }
 }
 
-type Bucket = "create" | "request" | "pull";
-const IP_LIMITS: Record<Bucket, number> = { create: 20, request: 1200, pull: 12000 };
-type Windows = Record<Bucket, { start: number; count: number }>;
-
-/** 每個來源 IP 一個小 DO:一小時視窗內分桶計數(建鏈、所有請求、批次查詢的 chain 數);最後一個視窗結束後由 alarm 清空自己。 */
-export class IpLimiter extends DurableObject<Env> {
-  /** 單一桶的簡寫,見 `allowMany`。 */
-  async allow(bucket: Bucket, cost = 1): Promise<boolean> {
-    return this.allowMany([[bucket, cost]]);
-  }
-
-  /**
-   * 一次呼叫計入多個桶(只寫一次儲存),全部都在上限內才回 true。`cost` 一次計入多筆(批次查詢每項計 1);
-   * 首次超限計入並持久保存拒絕狀態;同視窗後續拒絕不再寫入。
-   *
-   * alarm 只在這次呼叫開了新視窗時才設(計到的桶已過期,包括補上的 { start: 0 } 桶),設在新視窗開始後一小時。
-   * 所以 alarm 永遠是「最晚開始的視窗 + 一小時」,其他視窗都開始得更早:alarm 觸發、`deleteAll()` 時沒有還在進行的視窗。
-   * 若改成「快到期就往後延」,就可能在某個視窗結束前把它清掉。
-   */
-  async allowMany(charges: Array<[Bucket, number]>): Promise<boolean> {
-    const now = Date.now();
-    const stored = (await this.ctx.storage.get<Partial<Windows>>("windows")) ?? {};
-    // 三個桶一律寫回。缺的桶(0.1.0 的紀錄沒有 pull)補成 { start: 0, count: 0 }:對任何版本都是已過期的視窗,
-    // 沒計到就不開視窗、不動 alarm,計到了就跟過期的桶一樣從頭開始。不能省略:回滾到 0.1.0 時,它的 allow 直接讀
-    // windows[bucket].start、沒有預設值,紀錄裡少了 create 桶,那個 IP 的每個 PUT 都會回 500。
-    const windows: Windows = {
-      create: stored.create ?? { start: 0, count: 0 },
-      request: stored.request ?? { start: 0, count: 0 },
-      pull: stored.pull ?? { start: 0, count: 0 },
-    };
-    // A blocked bucket is durable until its fixed window expires. Repeated denied
-    // requests must not keep consuming writes (or charge unrelated buckets).
-    if (charges.some(([bucket]) => now - windows[bucket].start < IP_WINDOW_MS && windows[bucket].count > IP_LIMITS[bucket])) {
-      return false;
-    }
-    let started = false;
-    let allowed = true;
-    for (const [bucket, cost] of charges) {
-      const w = windows[bucket];
-      if (now - w.start >= IP_WINDOW_MS) {
-        w.start = now;
-        w.count = 0;
-        started = true;
-      }
-      w.count = Math.min(w.count + cost, IP_LIMITS[bucket] + 1);
-      if (w.count > IP_LIMITS[bucket]) allowed = false;
-    }
-    await this.ctx.storage.put("windows", windows);
-    if (started) await this.ctx.storage.setAlarm(now + IP_WINDOW_MS);
-    return allowed;
-  }
-
-  async alarm(): Promise<void> {
-    await this.ctx.storage.deleteAll();
-  }
-}
-
 async function sha256Hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -521,7 +467,7 @@ async function batchPull(request: Request, env: Env): Promise<Response> {
   return Response.json({ results });
 }
 
-export default {
+const backend = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/v2/")) return centralFetch(request,env);
@@ -585,5 +531,37 @@ export default {
       return Response.json(result.body);
     }
     return notFound();
+  },
+} satisfies ExportedHandler<Env>;
+
+// Every future backend revision must preserve this mandatory same-invocation check.
+const BACKEND_SECURITY_FLOOR = 1;
+export class CentralSyncBackend extends WorkerEntrypoint<Env> {
+  async forward(
+    requiredFloor: number,
+    registry: string,
+    request: Request,
+  ): Promise<Response> {
+    try {
+      if (
+        this.env.CENTRAL_PRIVATE_CORE !== "1" ||
+        !Number.isSafeInteger(requiredFloor) ||
+        requiredFloor < 1 ||
+        requiredFloor > BACKEND_SECURITY_FLOOR ||
+        registry !==
+          this.env.LEGACY_RETIREMENT.idFromName(REGISTRY_WITNESS).toString()
+      )
+        return status(503);
+      return await backend.fetch(request, this.env);
+    } catch {
+      return status(503);
+    }
+  }
+}
+export default {
+  fetch(request: Request, env: Env): Promise<Response> | Response {
+    return env.CENTRAL_PRIVATE_CORE === "1"
+      ? status(404)
+      : backend.fetch(request, env);
   },
 } satisfies ExportedHandler<Env>;

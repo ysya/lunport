@@ -8,7 +8,9 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json",
+    "check:security-config": "node security/check-deployment.mjs",
+    "test:security-config": "node --test security/check-deployment.test.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.2.8",
