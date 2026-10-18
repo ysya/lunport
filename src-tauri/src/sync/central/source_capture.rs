@@ -149,9 +149,9 @@ pub(super) fn capture(
     drop(record_inputs);
     let files = Files::capture(env, before.legacy_v1_backup.as_deref())?;
     let observer = Capture::new(&readonly);
-    drop(Materials::from_files(
-        &before, keys, &files, &observer, references,
-    )?.with_key_inputs(&before, keys, private_inputs)?);
+    drop(Materials::from_files_with_key_inputs(
+        &before, keys, &files, &observer, references, private_inputs,
+    )?);
     let decryptors = observer.finish()?;
     let package = Package::assemble(
         &before,
@@ -546,6 +546,91 @@ mod tests {
             assert_eq!(fs::read(&env.state_path).unwrap(),original);assert_eq!(device.runtime.core.lock().unwrap().generation,9);
             assert!(!env.state_path.parent().unwrap().join("central-source-archives").exists());
         }
+    }
+
+    #[test]
+    fn an_authenticated_current_legacy_key_can_supply_a_missing_remote_copy_for_the_passive_plan() {
+        use crate::sync::{
+            record::{record_key, LocalRecord, Record, RecordKind},
+            slot_rules::test_keys,
+            state_v2::SealedRecord,
+        };
+        let (device, keys, _) = fixture(true);
+        let env = device.env();
+        let (mut state, _) = record_runtime::snapshot(&env).unwrap();
+        let parent = Legacy(record_runtime::read_account_keys(&state, env.keychain).unwrap());
+        let raw = test_keys::plain();
+        let parsed = crate::vault::material::parse(&raw).unwrap();
+        let id = "1".repeat(32);
+        let public = crate::sync::records_v3::KeySlotPayload {
+            schema: 2,
+            name: "remote key".into(),
+            public_key: parsed.public_key().to_openssh().unwrap(),
+            fingerprint: parsed
+                .public_key()
+                .fingerprint(ssh_key::HashAlg::Sha256)
+                .to_string(),
+            key_type: parsed.public_key().algorithm().as_str().into(),
+            has_passphrase: false,
+            created_at_ms: 1,
+            origin_device_id: state.device_id.clone(),
+        };
+        let account = state.account.as_mut().unwrap();
+        account.records.insert(
+            record_key(RecordKind::KeySlot, &id),
+            LocalRecord {
+                record: Record {
+                    kind: RecordKind::KeySlot,
+                    id: id.clone(),
+                    version: 1,
+                    updated_at_ms: 1,
+                    device_id: state.device_id.clone(),
+                    deleted: false,
+                    payload: serde_json::to_value(&public).unwrap(),
+                },
+                seq: 1,
+                dirty: false,
+            },
+        );
+        let row = SealedRecord::seal(
+            parent.0.as_ref().unwrap(),
+            &Record {
+                kind: RecordKind::Key,
+                id: id.clone(),
+                version: 1,
+                updated_at_ms: 1,
+                device_id: state.device_id.clone(),
+                deleted: false,
+                payload: serde_json::json!({"schema":1,"private_key":raw}),
+            },
+            0,
+        )
+        .unwrap();
+        account.sealed.insert(row.key(), row);
+        let original = serde_json::to_vec(&state).unwrap();
+        fs::write(&env.state_path, &original).unwrap();
+        device.runtime.core.lock().unwrap().records = Some(state);
+        let vault = fs::read(crate::vault::store::vault_path(&env.state_path)).unwrap();
+        let captured = capture(&env, &keys, &BTreeMap::new()).expect(
+            "current authenticated remote material must be admitted without a local pointer",
+        );
+        let restored = Package::decode_local(&captured.package.encode_local().unwrap()).unwrap();
+        let materials = restored.materials(&keys, &BTreeMap::new()).unwrap();
+        assert_eq!(materials.active.len(), 1);
+        assert_eq!(materials.active[&id].public, public);
+        assert_eq!(materials.retained, 1);
+        assert!(materials.into_history().iter().any(|(logical,data)|logical.id==id && matches!(data,super::super::payload::Data::Key(private) if private.private()==raw)));
+        assert_eq!(fs::read(&env.state_path).unwrap(), original);
+        assert_eq!(
+            fs::read(crate::vault::store::vault_path(&env.state_path)).unwrap(),
+            vault
+        );
+        assert!(record_runtime::snapshot(&env)
+            .unwrap()
+            .0
+            .local
+            .keys
+            .is_empty());
     }
 
 }

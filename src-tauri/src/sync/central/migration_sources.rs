@@ -24,7 +24,7 @@ const MAX_SOURCES: usize = 65;
 mod archive;
 mod records;
 mod inventory;
-pub(super) use inventory::{Inventory, KeyInput, Scope};
+pub(super) use inventory::{Inventory, KeyInput, Scope, Position};
 mod frozen;
 struct Temporary(ChainKeys);
 impl Drop for Temporary {

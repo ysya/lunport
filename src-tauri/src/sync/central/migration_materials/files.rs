@@ -92,6 +92,16 @@ impl Materials {
         keychain: &dyn Keychain,
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Self, AppError> {
+        Self::from_files_with_key_inputs(state, keys, files, keychain, references, vec![])
+    }
+    pub(in crate::sync::central) fn from_files_with_key_inputs(
+        state: &SyncStateV3,
+        keys: &VaultKeys,
+        files: &Files,
+        keychain: &dyn Keychain,
+        references: &BTreeMap<String, KeyStorage>,
+        inputs: Vec<crate::sync::central::migration_sources::KeyInput>,
+    ) -> Result<Self, AppError> {
         let active_path = Path::new("data/vault.json");
         let empty = br#"{"version":1,"entries":{}}"#;
         let active = image(
@@ -102,7 +112,7 @@ impl Materials {
                 .map_or(empty.as_slice(), |v| v.as_slice()),
             keychain,
         )?;
-        let mut result = Self::from_vault(state, keys, &active, references)?;
+        let mut result = Self::from_vault_inputs(state, keys, &active, references, &inputs)?;
         let mut index = raw_index(&result);
         let mut occupied: BTreeSet<_> = result
             .history
@@ -191,7 +201,7 @@ impl Materials {
         {
             return Err(invalid());
         }
-        Ok(result)
+        result.with_key_inputs(state, keys, inputs)
     }
 }
 

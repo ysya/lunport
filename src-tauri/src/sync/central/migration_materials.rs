@@ -61,6 +61,15 @@ impl Materials {
         vault: &ReadOnlyVault,
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Self, AppError> {
+        Self::from_vault_inputs(state, keys, vault, references, &[])
+    }
+    fn from_vault_inputs(
+        state: &SyncStateV3,
+        keys: &VaultKeys,
+        vault: &ReadOnlyVault,
+        references: &BTreeMap<String, KeyStorage>,
+        inputs: &[super::migration_sources::KeyInput],
+    ) -> Result<Self, AppError> {
         records_v3::validate_state(state).map_err(|_| invalid())?;
         if state.local.central_projection.is_some()
             || state
@@ -84,6 +93,15 @@ impl Materials {
             original(&entry)?;
             entries.insert(id, entry);
         }
+        Self::adopt_current(state, &mut entries, inputs)?;
+        Self::from_entries(state, keys, entries, references)
+    }
+    fn from_entries(
+        state: &SyncStateV3,
+        keys: &VaultKeys,
+        entries: BTreeMap<String, VaultEntry>,
+        references: &BTreeMap<String, KeyStorage>,
+    ) -> Result<Self, AppError> {
         let mut public = BTreeMap::new();
         let mut deleted = BTreeSet::new();
         if let Some(account) = &state.account {
