@@ -245,7 +245,8 @@ pub(super) fn status_at(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppErr
         Ok(read) => {
             if let Some(r) = read.as_ref().filter(|r| {
                 r.scope.path == scope.path
-                    && !env.runtime.central_recovery_cancel.load(Ordering::SeqCst)
+                    && (r.scope.path != OwnerPath::Current
+                        || !env.runtime.central_recovery_cancel.load(Ordering::SeqCst))
                     && r.scope.check(env).is_ok()
             }) {
                 return Ok(progress(
@@ -285,16 +286,49 @@ pub(super) fn status_at(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppErr
     Ok(progress("idle", None, 0, 0, None))
 }
 
+/// Caller holds lifecycle. A superseded child may retain only memory after cancellation lost
+/// a try_lock race; never discard an unrelated Current reader from a metadata-only reservation.
+pub(super) fn discard_superseded(env: &SyncEnv, generation: &str) {
+    let mut read = env.runtime.central_recovery_read.lock().unwrap();
+    if read.as_ref().is_some_and(|r| {
+        r.scope
+            .generation
+            .as_deref()
+            .is_some_and(|old| old != generation)
+    }) {
+        read.take();
+    }
+}
+/// Current-owner cancellation cannot clear a newer replacement reader after the old UI unmounts.
 pub fn cancel(env: &SyncEnv) {
     env.runtime
         .central_recovery_cancel
         .store(true, Ordering::SeqCst);
     if let Ok(mut read) = env.runtime.central_recovery_read.try_lock() {
-        read.take();
+        if read
+            .as_ref()
+            .is_some_and(|r| r.scope.path == OwnerPath::Current)
+        {
+            read.take();
+        }
     }
 }
-fn cancelled(env: &SyncEnv) -> Result<(), AppError> {
-    if env.runtime.central_recovery_cancel.load(Ordering::SeqCst) {
+/// The caller invalidates the replacement generation under its gate before releasing this reader.
+pub(super) fn cancel_replacement(env: &SyncEnv) {
+    if let Ok(mut read) = env.runtime.central_recovery_read.try_lock() {
+        if read
+            .as_ref()
+            .is_some_and(|r| matches!(r.scope.path, OwnerPath::Replacement(_)))
+        {
+            read.take();
+        }
+    }
+}
+fn cancelled(env: &SyncEnv, scope: &Scope) -> Result<(), AppError> {
+    scope.check(env)?;
+    if scope.path == OwnerPath::Current
+        && env.runtime.central_recovery_cancel.load(Ordering::SeqCst)
+    {
         Err(AppError::Other("Recovery verification was cancelled. Local data and any saved recovery intent are retained.".into()))
     } else {
         Ok(())
@@ -349,9 +383,11 @@ pub(super) fn start_at(
     {
         return Err(invalid());
     }
-    env.runtime
-        .central_recovery_cancel
-        .store(false, Ordering::SeqCst);
+    if scope.path == OwnerPath::Current {
+        env.runtime
+            .central_recovery_cancel
+            .store(false, Ordering::SeqCst);
+    }
     let session = scope.session(env)?;
     let api = Api::new(&before.control.profile.origin)?;
     let session = Arc::new(register(env, &mut budget, &session, &api)?);
@@ -598,7 +634,7 @@ pub(super) fn start_at(
         return Err(invalid());
     }
     let total = read.total();
-    cancelled(env)?;
+    cancelled(env, &scope)?;
     *env.runtime.central_recovery_read.lock().unwrap() = Some(Reading {
         scope: scope.clone(),
         source,
@@ -617,8 +653,11 @@ pub(super) fn start_at(
         tail: vec![],
         bridge,
     });
-    let result = advance_locked(env, &scope.path, &mut budget);
-    if env.runtime.central_recovery_cancel.load(Ordering::SeqCst) {
+    let result = advance_locked(env, &scope, &mut budget);
+    if (scope.path == OwnerPath::Current
+        && env.runtime.central_recovery_cancel.load(Ordering::SeqCst))
+        || scope.check(env).is_err()
+    {
         env.runtime.central_recovery_read.lock().unwrap().take();
     }
     drop(lifecycle);
@@ -633,23 +672,27 @@ pub(super) fn advance_at(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppEr
     scope.check(env)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     let mut budget = Budget::new(scope);
-    let result = advance_locked(env, &scope.path, &mut budget);
-    if env.runtime.central_recovery_cancel.load(Ordering::SeqCst) {
+    let result = advance_locked(env, scope, &mut budget);
+    if (scope.path == OwnerPath::Current
+        && env.runtime.central_recovery_cancel.load(Ordering::SeqCst))
+        || scope.check(env).is_err()
+    {
         env.runtime.central_recovery_read.lock().unwrap().take();
     }
     drop(lifecycle);
     result?;
     status_at(env, scope)
 }
-fn advance_locked(env: &SyncEnv, path: &OwnerPath, budget: &mut Budget) -> Result<(), AppError> {
+fn advance_locked(env: &SyncEnv, expected: &Scope, budget: &mut Budget) -> Result<(), AppError> {
     round::check_cooldown(env)?;
     let mut holder = env.runtime.central_recovery_read.lock().unwrap();
     let state = holder.as_mut().ok_or_else(invalid)?;
-    if &state.scope.path != path {
+    expected.check(env)?;
+    if state.scope.path != expected.path || state.scope.generation != expected.generation {
         return Err(invalid());
     }
     state.scope.check(env)?;
-    cancelled(env)?;
+    cancelled(env, &state.scope)?;
     state.scope.check(env)?;
     if state.scope.workspace(env)? != state.before {
         return Err(crate::sync::runtime::superseded());
@@ -668,7 +711,7 @@ fn advance_locked(env: &SyncEnv, path: &OwnerPath, budget: &mut Budget) -> Resul
                 if !budget.available() {
                     return Ok(());
                 }
-                cancelled(env)?;
+                cancelled(env, &state.scope)?;
                 state.scope.check(env)?;
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -706,7 +749,7 @@ fn advance_locked(env: &SyncEnv, path: &OwnerPath, budget: &mut Budget) -> Resul
             if !budget.available() {
                 return Ok(());
             }
-            cancelled(env)?;
+            cancelled(env, &state.scope)?;
             state.scope.check(env)?;
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -728,7 +771,7 @@ fn advance_locked(env: &SyncEnv, path: &OwnerPath, budget: &mut Budget) -> Resul
 
     if let Some(read) = state.read.as_mut() {
         while read.position() < read.total() && budget.available() {
-            cancelled(env)?;
+            cancelled(env, &state.scope)?;
             state.scope.check(env)?;
             let page: HistoryPage = call(env, budget, || api.control(device, Control::RecoveryHistory,
                 &serde_json::json!({"proof":state.proof,"vault":read.vault(),"since":read.position().to_string()})))?.decode()?;
@@ -782,7 +825,7 @@ fn advance_locked(env: &SyncEnv, path: &OwnerPath, budget: &mut Budget) -> Resul
             tail: state.tail.clone(),
         });
     }
-    cancelled(env)?;
+    cancelled(env, &state.scope)?;
     state.scope.check(env)?;
     let prepared = state.prepared.as_ref().ok_or_else(invalid)?;
     if state.source.is_some() {
@@ -801,7 +844,7 @@ fn advance_locked(env: &SyncEnv, path: &OwnerPath, budget: &mut Budget) -> Resul
             prepared,
             &state.old_kit,
         )?;
-        cancelled(env)?;
+        cancelled(env, &state.scope)?;
         state.scope.check(env)?;
         state.scope.install(env, || {
             recovery_credentials::install_rebase_at(
@@ -820,7 +863,7 @@ fn advance_locked(env: &SyncEnv, path: &OwnerPath, budget: &mut Budget) -> Resul
             prepared,
             &state.old_kit,
         )?;
-        cancelled(env)?;
+        cancelled(env, &state.scope)?;
         state.scope.check(env)?;
         state.scope.install(env, || {
             recovery_credentials::install_at(
@@ -862,6 +905,7 @@ pub(super) fn confirm_at(
     let mut budget = Budget::new(scope);
     scope.check(env)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    scope.check(env)?;
     let mut before = scope.workspace(env)?;
     if matches!(before.recovery, Some(RecoveryState::Accepted { .. })) {
         if before

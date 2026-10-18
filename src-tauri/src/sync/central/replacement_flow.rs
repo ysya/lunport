@@ -16,7 +16,7 @@ use super::{
     workspace::Workspace,
 };
 use crate::{error::AppError, sync::env::SyncEnv};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 
 pub struct Reading {
@@ -35,6 +35,205 @@ pub struct Progress {
     pub route: Option<Route>,
     pub unresolved_archives: usize,
     pub backup_confirmed: bool,
+}
+/// Public concurrency fence only. This grants no content keys or publication authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Invocation {
+    pub generation: String,
+    pub scope: String,
+    pub route: Route,
+    pub operation: Option<String>,
+}
+fn source_scope(owner: &Workspace) -> Result<String, AppError> {
+    let profile = serde_json::to_string(&owner.control.profile).map_err(|_| invalid())?;
+    Ok(crypto::hash(&super::wire::canonical(&[
+        "lunport-replacement-ui-scope-v1",
+        &profile,
+        &owner.control.account_id,
+        &owner.control.device.id,
+        &owner.control.device.keys.signing,
+        &owner.control.device.keys.encryption,
+        owner
+            .control
+            .anchor
+            .as_ref()
+            .map_or("", |a| a.genesis_hash.as_str()),
+    ])?))
+}
+/// Short metadata-only reservation. OS credentials, durable preparation and network follow only
+/// when the caller still owns this exact invocation. UI reservations are serialized by the client.
+pub fn reserve_invocation(env: &SyncEnv, route: Route) -> Result<Invocation, AppError> {
+    controller::require_enabled()?;
+    let mut gate = env.runtime.central_replacement_generation.lock().unwrap();
+    let owner = current(env)?;
+    if owner.control.phase == Phase::SignedOut
+        || owner.bootstrap.is_some()
+        || owner
+            .recovery
+            .as_ref()
+            .is_some_and(|r| r.requires_cleanup())
+        || owner.replacement.as_ref().is_some_and(|i| i.route != route)
+    {
+        return Err(invalid());
+    }
+    if owner.replacement.is_none() {
+        let reading = env
+            .runtime
+            .central_recovery_read
+            .try_lock()
+            .map_err(|_| invalid())?;
+        if reading.is_some() {
+            return Err(invalid());
+        }
+    }
+    if owner.replacement.is_some() {
+        super::recovery_flow::cancel_replacement(env);
+        if let Ok(mut read) = env.runtime.central_replacement_read.try_lock() {
+            read.take();
+        }
+    }
+    let invocation = Invocation {
+        generation: crypto::random_id(16)?,
+        scope: source_scope(&owner)?,
+        route,
+        operation: owner.replacement.as_ref().map(|i| i.operation.clone()),
+    };
+    *gate = Some(invocation.generation.clone());
+    *env.runtime.central_replacement_ui.lock().unwrap() = Some(invocation.clone());
+    Ok(invocation)
+}
+fn check_invocation(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    operation: Option<&str>,
+) -> Result<(), AppError> {
+    controller::require_enabled()?;
+    if !super::wire::hex(&invocation.generation, 32)
+        || !super::wire::hex(&invocation.scope, 64)
+        || invocation
+            .operation
+            .as_ref()
+            .is_some_and(|o| !super::wire::hex(o, 32))
+    {
+        return Err(invalid());
+    }
+    let gate = env.runtime.central_replacement_generation.lock().unwrap();
+    if gate.as_deref() != Some(invocation.generation.as_str())
+        || env.runtime.central_replacement_ui.lock().unwrap().as_ref() != Some(invocation)
+    {
+        return Err(crate::sync::runtime::superseded());
+    }
+    let owner = current(env)?;
+    if owner.control.phase == Phase::SignedOut || source_scope(&owner)? != invocation.scope {
+        return Err(invalid());
+    }
+    match &owner.replacement {
+        Some(intent)
+            if intent.route == invocation.route
+                && invocation
+                    .operation
+                    .as_ref()
+                    .is_none_or(|o| o == &intent.operation)
+                && operation.is_none_or(|o| o == intent.operation) =>
+        {
+            Ok(())
+        }
+        None if invocation.operation.is_none() && operation.is_none() => Ok(()),
+        _ => Err(invalid()),
+    }
+}
+pub fn cancel_invocation(env: &SyncEnv, invocation: &Invocation) -> Result<Progress, AppError> {
+    controller::require_enabled()?;
+    let mut gate = env.runtime.central_replacement_generation.lock().unwrap();
+    let mut public = env.runtime.central_replacement_ui.lock().unwrap();
+    if gate.as_deref() == Some(invocation.generation.as_str())
+        && public.as_ref() == Some(invocation)
+    {
+        gate.take();
+        public.take();
+        if current(env)?.replacement.is_some() {
+            super::recovery_flow::cancel_replacement(env);
+        }
+        if let Ok(mut read) = env.runtime.central_replacement_read.try_lock() {
+            read.take();
+        }
+    }
+    drop(public);
+    drop(gate);
+    status(env)
+}
+pub fn start_invocation(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    encoded_kit: Option<&str>,
+) -> Result<Progress, AppError> {
+    check_invocation(env, invocation, None)?;
+    match invocation.route {
+        Route::TrustedDevice => begin_trusted_at(env, invocation.generation.clone()),
+        Route::RecoveryKit => begin_recovery_at(env, encoded_kit, invocation.generation.clone()),
+    }
+}
+pub fn continue_invocation(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    operation: &str,
+) -> Result<Progress, AppError> {
+    check_invocation(env, invocation, Some(operation))?;
+    if status(env)?.phase == "recovering" {
+        advance_recovery_at(env, operation, invocation.generation.clone())
+    } else {
+        advance_at(env, operation, &invocation.generation)
+    }
+}
+pub fn revalidate_invocation(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    operation: &str,
+    encoded_kit: Option<&str>,
+) -> Result<Progress, AppError> {
+    check_invocation(env, invocation, Some(operation))?;
+    if invocation.route != Route::RecoveryKit {
+        return Err(invalid());
+    }
+    revalidate_recovery_at(env, operation, encoded_kit, invocation.generation.clone())
+}
+pub fn confirm_invocation(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    operation: &str,
+) -> Result<Progress, AppError> {
+    check_invocation(env, invocation, Some(operation))?;
+    if invocation.route != Route::RecoveryKit {
+        return Err(invalid());
+    }
+    confirm_recovery_at(env, operation, invocation.generation.clone())
+}
+pub fn reveal_pairing_invocation(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    operation: &str,
+) -> Result<PairingReveal, AppError> {
+    check_invocation(env, invocation, Some(operation))?;
+    if invocation.route != Route::TrustedDevice {
+        return Err(invalid());
+    }
+    let shown = pairing_code_at(env, operation, Some(&invocation.generation))?;
+    check_invocation(env, invocation, Some(operation))?;
+    Ok(shown)
+}
+pub fn reveal_kit_invocation(
+    env: &SyncEnv,
+    invocation: &Invocation,
+    operation: &str,
+) -> Result<super::bootstrap::RecoveryReveal, AppError> {
+    check_invocation(env, invocation, Some(operation))?;
+    if invocation.route != Route::RecoveryKit {
+        return Err(invalid());
+    }
+    let shown = recovery_kit_at(env, operation, Some(&invocation.generation))?;
+    check_invocation(env, invocation, Some(operation))?;
+    Ok(shown)
 }
 fn current(env: &SyncEnv) -> Result<Workspace, AppError> {
     OwnerPath::Current.snapshot(env)
@@ -145,16 +344,15 @@ pub fn status(env: &SyncEnv) -> Result<Progress, AppError> {
 /// Pauses memory-only verification. It never claims to undo an already committed server approval
 /// or local switch. The final publication and cancellation are ordered by the same generation gate.
 pub fn cancel(env: &SyncEnv) {
-    super::recovery_flow::cancel(env);
-    env.runtime
-        .central_replacement_generation
-        .lock()
-        .unwrap()
-        .take();
+    let mut gate = env.runtime.central_replacement_generation.lock().unwrap();
+    gate.take();
+    env.runtime.central_replacement_ui.lock().unwrap().take();
+    super::recovery_flow::cancel_replacement(env);
     if let Ok(mut read) = env.runtime.central_replacement_read.try_lock() {
         read.take();
     }
 }
+
 fn count(env: &SyncEnv) {
     let mut core = env.runtime.core.lock().unwrap();
     core.central_poll.requests = core.central_poll.requests.saturating_add(1);
@@ -196,11 +394,15 @@ fn selected_session(
 /// Repeated explicit starts reuse the durable operation and selected OS identity. A pending
 /// approval is harmless to resume; an active flag without its protected OOB proof is rejected.
 pub fn begin_trusted(env: &SyncEnv) -> Result<Progress, AppError> {
+    let generation = crypto::random_id(16)?;
+    *env.runtime.central_replacement_generation.lock().unwrap() = Some(generation.clone());
+    begin_trusted_at(env, generation)
+}
+fn begin_trusted_at(env: &SyncEnv, generation: String) -> Result<Progress, AppError> {
     let started = Instant::now();
     controller::require_enabled()?;
     super::round::check_cooldown(env)?;
-    let generation = crypto::random_id(16)?;
-    *env.runtime.central_replacement_generation.lock().unwrap() = Some(generation.clone());
+    check(env, &generation)?;
     let intent = replacement::prepare(env, Route::TrustedDevice)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     check(env, &generation)?;
@@ -380,6 +582,14 @@ fn begin_recovered_baseline(
     status(env)
 }
 pub fn begin_recovery(env: &SyncEnv, encoded_kit: Option<&str>) -> Result<Progress, AppError> {
+    begin_recovery_at(env, encoded_kit, recovery_generation(env)?)
+}
+fn begin_recovery_at(
+    env: &SyncEnv,
+    encoded_kit: Option<&str>,
+    generation: String,
+) -> Result<Progress, AppError> {
+    check(env, &generation)?;
     let started = Instant::now();
     controller::require_enabled()?;
     super::round::check_cooldown(env)?;
@@ -390,11 +600,17 @@ pub fn begin_recovery(env: &SyncEnv, encoded_kit: Option<&str>) -> Result<Progre
     {
         return Err(invalid());
     }
-    let generation = recovery_generation(env)?;
     let intent = replacement::prepare(env, Route::RecoveryKit)?;
     let operation = intent.operation;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     check(env, &generation)?;
+    {
+        let mut read = env.runtime.central_replacement_read.lock().unwrap();
+        if read.as_ref().is_some_and(|r| r.generation != generation) {
+            read.take();
+        }
+    }
+    super::recovery_flow::discard_superseded(env, &generation);
     let source = current(env)?;
     let session = selected_session(env, &source, &operation)?;
     {
@@ -418,9 +634,6 @@ pub fn begin_recovery(env: &SyncEnv, encoded_kit: Option<&str>) -> Result<Progre
     status(env)
 }
 pub fn advance_recovery(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
-    let started = Instant::now();
-    controller::require_enabled()?;
-    // A continuation may not resurrect a cancelled verification; begin is the explicit resume.
     let generation = env
         .runtime
         .central_replacement_generation
@@ -428,6 +641,15 @@ pub fn advance_recovery(env: &SyncEnv, operation: &str) -> Result<Progress, AppE
         .unwrap()
         .clone()
         .ok_or_else(invalid)?;
+    advance_recovery_at(env, operation, generation)
+}
+fn advance_recovery_at(
+    env: &SyncEnv,
+    operation: &str,
+    generation: String,
+) -> Result<Progress, AppError> {
+    let started = Instant::now();
+    controller::require_enabled()?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     let scope = recovery_scope(env, operation, &generation, started)?;
     drop(lifecycle);
@@ -440,9 +662,16 @@ pub fn revalidate_recovery(
     operation: &str,
     encoded_kit: Option<&str>,
 ) -> Result<Progress, AppError> {
+    revalidate_recovery_at(env, operation, encoded_kit, recovery_generation(env)?)
+}
+fn revalidate_recovery_at(
+    env: &SyncEnv,
+    operation: &str,
+    encoded_kit: Option<&str>,
+    generation: String,
+) -> Result<Progress, AppError> {
     let started = Instant::now();
     controller::require_enabled()?;
-    let generation = recovery_generation(env)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     let scope = recovery_scope(env, operation, &generation, started)?;
     drop(lifecycle);
@@ -454,8 +683,18 @@ pub fn recovery_kit(
     env: &SyncEnv,
     operation: &str,
 ) -> Result<super::bootstrap::RecoveryReveal, AppError> {
+    recovery_kit_at(env, operation, None)
+}
+fn recovery_kit_at(
+    env: &SyncEnv,
+    operation: &str,
+    generation: Option<&str>,
+) -> Result<super::bootstrap::RecoveryReveal, AppError> {
     controller::require_enabled()?;
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+    if let Some(generation) = generation {
+        check(env, generation)?;
+    }
     let source = current(env)?;
     if source.control.phase == Phase::SignedOut
         || source
@@ -468,9 +707,15 @@ pub fn recovery_kit(
     super::recovery_credentials::reveal_at(env, &OwnerPath::Replacement(operation.into()))
 }
 pub fn confirm_recovery(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
+    confirm_recovery_at(env, operation, recovery_generation(env)?)
+}
+fn confirm_recovery_at(
+    env: &SyncEnv,
+    operation: &str,
+    generation: String,
+) -> Result<Progress, AppError> {
     let started = Instant::now();
     controller::require_enabled()?;
-    let generation = recovery_generation(env)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     let scope = recovery_scope(env, operation, &generation, started)?;
     drop(lifecycle);
@@ -484,8 +729,18 @@ pub fn confirm_recovery(env: &SyncEnv, operation: &str) -> Result<Progress, AppE
 }
 /// Dedicated reveal only. Never place this secret in status/events or a query/mutation cache.
 pub fn pairing_code(env: &SyncEnv, operation: &str) -> Result<PairingReveal, AppError> {
+    pairing_code_at(env, operation, None)
+}
+fn pairing_code_at(
+    env: &SyncEnv,
+    operation: &str,
+    generation: Option<&str>,
+) -> Result<PairingReveal, AppError> {
     controller::require_enabled()?;
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+    if let Some(generation) = generation {
+        check(env, generation)?;
+    }
     let source = current(env)?;
     let intent = source.replacement.as_ref().ok_or_else(invalid)?;
     if intent.operation != operation || intent.route != Route::TrustedDevice {
@@ -517,11 +772,22 @@ pub fn pairing_code(env: &SyncEnv, operation: &str) -> Result<PairingReveal, App
     })
 }
 pub fn advance(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
+    let generation = env
+        .runtime
+        .central_replacement_generation
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(invalid)?;
+    advance_at(env, operation, &generation)
+}
+fn advance_at(env: &SyncEnv, operation: &str, generation: &str) -> Result<Progress, AppError> {
     controller::require_enabled()?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    check(env, generation)?;
     let mut holder = env.runtime.central_replacement_read.lock().unwrap();
     let reading = holder.as_mut().ok_or_else(invalid)?;
-    if reading.operation != operation {
+    if reading.operation != operation || reading.generation != generation {
         return Err(invalid());
     }
     check(env, &reading.generation)?;

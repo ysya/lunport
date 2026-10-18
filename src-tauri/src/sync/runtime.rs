@@ -72,6 +72,7 @@ pub struct SyncRuntime {
     pub central_recovery_cancel: AtomicBool,
     pub(crate) central_replacement_read: Mutex<Option<crate::sync::central::replacement_flow::Reading>>,
     pub(crate) central_replacement_generation: Mutex<Option<String>>,
+    pub(crate) central_replacement_ui: Mutex<Option<crate::sync::central::replacement_flow::Invocation>>,
     pub lifecycle: std::sync::Arc<Mutex<()>>,
     /// 保管庫檔(`vault::store`)的寫入互斥:開檔、改動、存檔全程持有(`vault::store::with_vault`)。同步執行緒、命令與 agent 共用。
     pub vault: Mutex<()>,

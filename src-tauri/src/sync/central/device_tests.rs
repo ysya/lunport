@@ -2708,6 +2708,9 @@ fn scoped_kit_replacement_keeps_the_original_owner_until_backup_recovery_and_a_n
             assert!(path.snapshot(&first.env()).unwrap().recovery.is_none());
             *first.runtime.central_replacement_generation.lock().unwrap()=Some(generation.clone());
         }
+        if !interrupted {
+            let local=Arc::clone(&first);service.state.lock().unwrap().on_pull=Some(Box::new(move||recovery_flow::cancel(&local.env())));
+        }
         let ready=recovery_flow::start_at(&first.env(),scope.clone(),Some(&kit.kit),false).unwrap();assert_eq!(ready.phase,"backup_required");assert_eq!(ready.operation.as_deref(),Some(operation.as_str()));
         let shown={let _lifecycle=first.runtime.lifecycle.lock().unwrap();recovery_credentials::reveal_at(&first.env(),&path).unwrap()};assert_ne!(shown.kit,kit.kit);
         assert!(recovery_flow::confirm(&first.env(),&operation).is_err());
@@ -2795,4 +2798,45 @@ fn replacement_recovery_commands_resume_after_lost_reply_barrier_cancel_and_rest
     assert!(first.keychain.get(&profile.slot("device")).unwrap().is_none());
     assert!(first.keychain.get(&profile.device_slot("recovery-intent",Some(&operation)).unwrap()).unwrap().is_none());
     controller::refresh(&first.env()).unwrap();assert_eq!(controller::context(&first.env()).unwrap().identity.as_ref().unwrap().device(),owner.control.device);
+}
+
+#[test]
+fn replacement_ui_invocations_cannot_revive_cancelled_starts_or_control_a_newer_reader() {
+    use super::{replacement_flow as flow,replacement::Route};
+    use crate::sync::env::Keychain;
+    use std::sync::atomic::Ordering;
+    let (service,_peer,kit,_keys,first)=recovery_fixture_with_source(33);super::round::sync_once(&first.env()).unwrap();
+    let profile=controller::context(&first.env()).unwrap().profile.profile().unwrap();
+    first.keychain.delete(&profile.slot("device")).unwrap();controller::refresh(&first.env()).unwrap();
+    let before=record_runtime::snapshot(&first.env()).unwrap();
+    first.keychain.fail_reads.store(true,Ordering::SeqCst);
+    let cancelled=flow::reserve_invocation(&first.env(),Route::RecoveryKit).unwrap();assert!(cancelled.operation.is_none());
+    flow::cancel_invocation(&first.env(),&cancelled).unwrap();
+    assert!(flow::start_invocation(&first.env(),&cancelled,Some(&kit.kit)).is_err());
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap(),before);
+    first.keychain.fail_reads.store(false,Ordering::SeqCst);
+    let current=flow::reserve_invocation(&first.env(),Route::RecoveryKit).unwrap();
+    flow::cancel_invocation(&first.env(),&cancelled).unwrap();
+    assert_eq!(first.runtime.central_replacement_generation.lock().unwrap().as_deref(),Some(current.generation.as_str()));
+    let mut forged=current.clone();forged.route=Route::TrustedDevice;assert!(flow::start_invocation(&first.env(),&forged,None).is_err());
+    let mut forged=current.clone();forged.scope="f".repeat(64);assert!(flow::start_invocation(&first.env(),&forged,None).is_err());
+    let ready=flow::start_invocation(&first.env(),&current,Some(&kit.kit)).unwrap();assert_eq!(ready.phase,"backup_required");let operation=ready.operation.unwrap();
+    let shown=flow::reveal_kit_invocation(&first.env(),&current,&operation).unwrap();
+    flow::cancel_invocation(&first.env(),&current).unwrap();
+    let next=flow::reserve_invocation(&first.env(),Route::RecoveryKit).unwrap();assert_eq!(next.operation.as_deref(),Some(operation.as_str()));
+    let retained=record_runtime::snapshot(&first.env()).unwrap();
+    assert!(flow::confirm_invocation(&first.env(),&current,&operation).is_err());
+    assert!(flow::revalidate_invocation(&first.env(),&current,&operation,None).is_err());
+    assert!(flow::reveal_kit_invocation(&first.env(),&current,&operation).is_err());
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap(),retained);
+    assert_eq!(flow::reveal_kit_invocation(&first.env(),&next,&operation).unwrap().kit,shown.kit);
+    let reading=flow::confirm_invocation(&first.env(),&next,&operation).unwrap();assert_eq!(reading.phase,"reading");
+    let latest=flow::reserve_invocation(&first.env(),Route::RecoveryKit).unwrap();
+    assert_eq!(flow::start_invocation(&first.env(),&latest,None).unwrap().phase,"reading");
+    let pulls=service.state.lock().unwrap().pulls;
+    assert!(flow::continue_invocation(&first.env(),&next,&operation).is_err());
+    flow::cancel_invocation(&first.env(),&next).unwrap();assert_eq!(service.state.lock().unwrap().pulls,pulls);
+    assert_eq!(flow::status(&first.env()).unwrap().verified,0);
+    assert_eq!(flow::continue_invocation(&first.env(),&latest,&operation).unwrap().phase,"complete");
+    assert_eq!(flow::cancel_invocation(&first.env(),&latest).unwrap().phase,"complete");
 }
