@@ -4,9 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { CentralDevices } from "./CentralDevices";
 import { RecordField } from "./form";
 import { revealHidden } from "@/lib/sync-approvals";
 import {
+  centralPairingCode,
   centralStatus,
   centralStatusKey,
   centralSignIn,
@@ -77,6 +79,11 @@ export function CentralAccountPanel({
 }) {
   const [service, setService] = useState(status.service ?? "");
   const [busy, setBusy] = useState(false);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const [pairing, setPairing] = useState<{
+    code: string;
+    expires_at_ms: string;
+  } | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [kit, setKit] = useState<{ root: string; kit: string } | null>(null);
@@ -92,12 +99,13 @@ export function CentralAccountPanel({
     };
   }, []);
   useEffect(() => {
-    onBusyChange?.(busy);
+    onBusyChange?.(busy || deviceBusy);
     return () => onBusyChange?.(false);
-  }, [busy, onBusyChange]);
+  }, [busy, deviceBusy, onBusyChange]);
   useEffect(() => {
     secretGeneration.current += 1;
     setKit(null);
+    setPairing(null);
     setSaved(false);
   }, [status.root_fingerprint, status.phase]);
   useEffect(() => {
@@ -105,6 +113,7 @@ export function CentralAccountPanel({
       if (document.hidden) {
         secretGeneration.current += 1;
         setKit(null);
+        setPairing(null);
         setSaved(false);
       }
     };
@@ -112,7 +121,7 @@ export function CentralAccountPanel({
     return () => document.removeEventListener("visibilitychange", hide);
   }, []);
   const run = async (operation: () => Promise<void>) => {
-    if (inFlight.current || disabled) return;
+    if (inFlight.current || disabled || deviceBusy) return;
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -137,7 +146,7 @@ export function CentralAccountPanel({
     const next = await operation;
     if (mounted.current) update(next);
   };
-  const blocked = busy || disabled;
+  const blocked = busy || deviceBusy || disabled;
   const login = signingIn || status.login_pending;
   const backup = status.phase === "backup_required";
   return (
@@ -206,6 +215,7 @@ export function CentralAccountPanel({
               void run(async () => {
                 secretGeneration.current += 1;
                 setKit(null);
+                setPairing(null);
                 setSaved(false);
                 await updateAfter(centralSignOut());
               })
@@ -215,6 +225,64 @@ export function CentralAccountPanel({
           </Button>
         )}
       </div>
+      {status.phase === "awaiting_approval" && (
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            On a trusted device, open the same account and approve this device
+            using its pairing code.
+          </p>
+          <Button
+            variant="outline"
+            disabled={blocked || !status.has_session}
+            onClick={() =>
+              void run(async () => {
+                const generation = secretGeneration.current;
+                const code = await centralPairingCode();
+                if (
+                  mounted.current &&
+                  generation === secretGeneration.current &&
+                  !document.hidden
+                )
+                  setPairing(code);
+              })
+            }
+          >
+            Show pairing code
+          </Button>
+          {pairing && (
+            <div className="space-y-2">
+              <Textarea
+                aria-label="Device pairing code"
+                readOnly
+                value={pairing.code}
+                autoComplete="off"
+                spellCheck={false}
+                className="font-mono text-xs"
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  secretGeneration.current += 1;
+                  setPairing(null);
+                }}
+              >
+                Hide pairing code
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+      {status.has_session &&
+        status.root_fingerprint &&
+        ["enrolled", "active", "rekey"].includes(status.phase) && (
+          <CentralDevices
+            status={status}
+            disabled={busy || disabled}
+            onBusyChange={setDeviceBusy}
+            update={update}
+          />
+        )}
       {status.needs_recovery && (
         <p className="text-sm">
           Unlock this Vault with an offline recovery kit or approval from a

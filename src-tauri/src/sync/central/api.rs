@@ -114,6 +114,13 @@ impl AccountOverview {
             || !["ready", "revocation_pending"].contains(&self.phase.as_str())
             || self.vaults.len() > 64
             || self.devices.len() > 128
+            || self
+                .devices
+                .iter()
+                .map(|d| &d.device.id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.devices.len()
             || self.denied.len() > 1024
             || self
                 .vaults
@@ -126,6 +133,16 @@ impl AccountOverview {
                     || d.name.chars().any(char::is_control)
                     || !["active", "pending", "revoked"].contains(&d.state.as_str())
                     || d.device.keys.validate().is_err()
+                    || d.request.as_ref().is_some_and(|r| {
+                        r.device != d.device
+                            || r.account_id != self.account_id
+                            || self
+                                .proof
+                                .as_ref()
+                                .is_none_or(|p| r.origin != p.genesis.origin)
+                            || self.genesis_hash.as_ref() != Some(&r.genesis_hash)
+                            || r.verify_signature().is_err()
+                    })
             })
             || self
                 .barrier

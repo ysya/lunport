@@ -15,6 +15,8 @@ export type CentralStatus = {
   account_id: string | null;
   device_id: string | null;
   root_fingerprint: string | null;
+  membership_head: string | null;
+  authorization_epoch: string | null;
   has_session: boolean;
   login_pending: boolean;
   needs_recovery: boolean;
@@ -40,3 +42,30 @@ export const centralRevealRecovery = () =>
   tauriInvoke<{ root: string; kit: string }>("central_reveal_recovery");
 export const centralConfirmRecovery = (root: string) =>
   tauriInvoke<CentralStatus>("central_confirm_recovery", { root });
+
+export type CentralDevice = {
+  id: string;
+  name: string;
+  state: "approved" | "pending" | "revoked" | "access_blocked";
+  fingerprint: string;
+  current: boolean;
+};
+export type CentralDeviceRegistry = {
+  membership_head: string;
+  authorization_epoch: string;
+  devices: CentralDevice[];
+};
+export const centralDevicesKey = (status: CentralStatus) =>
+  [
+    "central-devices",
+    status.account_id,
+    status.device_id,
+    status.membership_head,
+    status.authorization_epoch,
+  ] as const;
+export const centralDevices = () =>
+  tauriInvoke<CentralDeviceRegistry>("central_devices");
+export const centralPairingCode = () =>
+  tauriInvoke<{ code: string; expires_at_ms: string }>("central_pairing_code");
+export const centralApproveDevice = (code: string) =>
+  tauriInvoke<CentralStatus>("central_approve_device", { code });

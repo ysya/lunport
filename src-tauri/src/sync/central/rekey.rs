@@ -289,13 +289,11 @@ pub fn wraps_digest(wraps: &[WrappedKeys]) -> Result<String, AppError> {
 }
 /// A valid individual wrap could belong to a cancelled attempt at the same head/epoch.
 /// Authenticate the complete committed recipient set before adopting its content key.
-pub fn open_committed_keys(
+pub fn verify_committed_wraps(
     chain: &VerifiedChain,
     manifest: &SignedRekey,
     wraps: &[WrappedKeys],
-    recipient: &str,
-    keys: &DeviceKeys,
-) -> Result<VaultKeys, AppError> {
+) -> Result<(), AppError> {
     manifest.verify_historical(chain, &manifest.body.vault_id)?;
     let b = &manifest.body;
     if wraps_digest(wraps)? != b.wraps_digest {
@@ -318,7 +316,6 @@ pub fn open_committed_keys(
     let author = chain
         .author_at(&b.membership_head, &b.author)
         .ok_or_else(invalid)?;
-    let mut own = None;
     for wrap in wraps {
         let h = &wrap.header;
         let public = expected.remove(&h.recipient).ok_or_else(invalid)?;
@@ -334,13 +331,27 @@ pub fn open_committed_keys(
             return Err(invalid());
         }
         wrap.verify_author(&author.signing)?;
-        if h.recipient == recipient {
-            own = Some(wrap);
-        }
     }
-    let own = own.ok_or_else(invalid)?;
+    Ok(())
+}
+pub fn open_committed_keys(
+    chain: &VerifiedChain,
+    manifest: &SignedRekey,
+    wraps: &[WrappedKeys],
+    recipient: &str,
+    keys: &DeviceKeys,
+) -> Result<VaultKeys, AppError> {
+    verify_committed_wraps(chain, manifest, wraps)?;
+    let own = wraps
+        .iter()
+        .find(|w| w.header.recipient == recipient)
+        .ok_or_else(invalid)?;
+    let author = chain
+        .author_at(&manifest.body.membership_head, &manifest.body.author)
+        .ok_or_else(invalid)?;
     own.open(keys, &own.header, &author.signing)
 }
+
 pub fn envelope_digest(envelope: &RecordEnvelope) -> Result<String, AppError> {
     Ok(crypto::hash(&canonical(&[
         "lunport-operation-v2",

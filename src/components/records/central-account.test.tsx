@@ -11,6 +11,8 @@ const base: CentralStatus = {
   account_id: "a".repeat(64),
   device_id: "b".repeat(32),
   root_fingerprint: null,
+  membership_head: null,
+  authorization_epoch: "1",
   has_session: true,
   login_pending: false,
   needs_recovery: false,
@@ -50,4 +52,10 @@ describe("central account setup safety boundaries", () => {
     expect(buttonTag(html, "Cancel sign-in")).not.toContain(DISABLED);
     expect(html).not.toContain("Sign in with browser");
   });
+});
+
+it("shows pairing as an explicit short-lived reveal on the waiting device", () => {
+  const html = render({ phase: "awaiting_approval" });
+  expect(buttonTag(html, "Show pairing code")).not.toContain(DISABLED);
+  expect(html).not.toContain('aria-label="Device pairing code"');
 });

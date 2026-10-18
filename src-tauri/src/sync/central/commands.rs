@@ -78,10 +78,13 @@ pub async fn central_sign_in(app: AppHandle, service: String) -> Result<Status, 
             }
             let _ = engine::with_env(&app, |env| env.events.status());
         }
-        result.map(|mut status| {
-            status.login_pending = false;
-            status
-        })
+        let result = result.and_then(|_| {
+            engine::with_env(&app, |env| {
+                super::joining::initialize(env)?;
+                controller::status(env)
+            })?
+        });
+        result
     })
     .await
     .map_err(engine::join_error)?
@@ -97,9 +100,15 @@ pub fn central_cancel_sign_in(app: AppHandle) -> Result<(), AppError> {
 }
 #[tauri::command]
 pub async fn central_refresh(app: AppHandle) -> Result<Status, AppError> {
-    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, controller::refresh)?)
-        .await
-        .map_err(engine::join_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            controller::refresh(env)?;
+            super::joining::initialize(env)?;
+            controller::status(env)
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
 }
 #[tauri::command]
 pub async fn central_sign_out(app: AppHandle) -> Result<Status, AppError> {
@@ -123,6 +132,32 @@ pub async fn central_reveal_recovery(app: AppHandle) -> Result<RecoveryReveal, A
 pub async fn central_confirm_recovery(app: AppHandle, root: String) -> Result<Status, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         engine::with_env(&app, |env| bootstrap::confirm(env, &root))?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+
+#[tauri::command]
+pub async fn central_pairing_code(
+    app: AppHandle,
+) -> Result<super::devices::PairingReveal, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, super::devices::pairing_code)?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_devices(app: AppHandle) -> Result<super::devices::Registry, AppError> {
+    tauri::async_runtime::spawn_blocking(move || engine::with_env(&app, super::devices::registry)?)
+        .await
+        .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_approve_device(app: AppHandle, code: String) -> Result<Status, AppError> {
+    let code = zeroize::Zeroizing::new(code);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| super::devices::approve(env, &code))?
     })
     .await
     .map_err(engine::join_error)?

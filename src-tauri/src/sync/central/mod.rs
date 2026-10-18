@@ -6,6 +6,8 @@ pub mod bootstrap;
 pub mod client_state;
 pub mod credentials;
 pub mod controller;
+pub mod devices;
+pub mod joining;
 pub mod commands;
 pub mod crypto;
 pub mod membership;
@@ -17,3 +19,6 @@ pub mod replica;
 pub mod trust;
 pub mod wire;
 pub mod workspace;
+
+#[cfg(test)]
+mod device_tests;

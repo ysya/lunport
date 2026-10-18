@@ -36,6 +36,8 @@ pub struct Status {
     pub can_sync: bool,
     pub login_pending: bool,
     pub root_fingerprint: Option<String>,
+    pub membership_head: Option<String>,
+    pub authorization_epoch: Option<String>,
     pub pending: usize,
     pub conflicts: usize,
     pub error: Option<String>,
@@ -73,6 +75,10 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
         root_fingerprint: ws
             .and_then(|w| w.control.anchor.as_ref())
             .map(|a| a.genesis_hash.clone()),
+        membership_head: ws
+            .and_then(|w| w.control.highwater.as_ref())
+            .map(|h| h.head.clone()),
+        authorization_epoch: ws.map(|w| w.control.auth_epoch.to_string()),
         configured: ws.is_some(),
         phase: phase.into(),
         service: ws.map(|w| w.control.profile.origin.clone()),
