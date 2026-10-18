@@ -5,7 +5,7 @@ use super::{
     controller::{self, Status},
     crypto::{self, WrappedKeys},
     membership::{Action, MembershipBody, SignedMembership},
-    pairing::{PairingInvite, PendingPairing, VaultMinimum},
+    pairing::{PairingInvite, VaultMinimum},
     wire::{invalid, number, WrapHeader},
     workspace::Workspace,
 };
@@ -15,7 +15,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 #[derive(Serialize)]
 pub struct PairingReveal {
     pub code: String,
@@ -35,12 +35,17 @@ pub fn pairing_code(env: &SyncEnv) -> Result<PairingReveal, AppError> {
         return Err(invalid());
     }
     let identity = session.identity.as_ref().ok_or_else(invalid)?;
-    let encoded = Zeroizing::new(
-        env.keychain
-            .get(&session.profile.profile()?.slot("pairing"))?
-            .ok_or_else(invalid)?,
-    );
-    let pending = PendingPairing::restore(&encoded, &identity.device())?;
+    let request = before
+        .control
+        .pending_request
+        .as_ref()
+        .ok_or_else(invalid)?;
+    let pending = controller::load_pairing(
+        env,
+        &session.profile.profile()?,
+        identity,
+        &request.request_id,
+    )?;
     if before.control.pending_request.as_ref() != Some(pending.request()) {
         return Err(invalid());
     }

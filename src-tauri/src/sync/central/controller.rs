@@ -166,14 +166,25 @@ fn pending_pairing(
     if let Some(encoded) = env.keychain.get(&slot)? {
         let pending = PendingPairing::restore(&Zeroizing::new(encoded), &identity.device())?;
         let r = pending.request();
+        if r.origin != anchor.origin
+            || r.account_id != anchor.account_id
+            || r.genesis_hash != anchor.genesis_hash
+        {
+            return Err(invalid());
+        }
         if r.verify_live(env.now()).is_ok() {
-            if r.origin != anchor.origin
-                || r.account_id != anchor.account_id
-                || r.genesis_hash != anchor.genesis_hash
-            {
-                return Err(invalid());
-            }
             return Ok(pending);
+        }
+        // An approval of this exact request may have committed after the account snapshot was
+        // read. Preserve its only OOB secret before publishing an expired-request replacement.
+        // One retained entry is sufficient with the single lifecycle owner and server request CAS.
+        let retained = profile.slot("pairing-retained");
+        let encoded = pending.encode_secret()?;
+        env.keychain.set(&retained, &encoded)?;
+        let readback = Zeroizing::new(env.keychain.get(&retained)?.ok_or_else(invalid)?);
+        let verified = PendingPairing::restore(&readback, &identity.device())?;
+        if verified.encode_secret()?.as_str() != encoded.as_str() {
+            return Err(invalid());
         }
     }
     let pending = PendingPairing::begin(anchor, &identity.id, &identity.keys, env.now())?;
@@ -186,6 +197,27 @@ fn pending_pairing(
         return Err(invalid());
     }
     Ok(check)
+}
+pub(super) fn load_pairing(
+    env: &SyncEnv,
+    profile: &Profile,
+    identity: &DeviceIdentity,
+    request: &str,
+) -> Result<PendingPairing, AppError> {
+    if !super::wire::hex(request, 32) {
+        return Err(invalid());
+    }
+    for kind in ["pairing", "pairing-retained"] {
+        if let Some(value) = env.keychain.get(&profile.slot(kind))? {
+            let encoded = Zeroizing::new(value);
+            if let Ok(pending) = PendingPairing::restore(&encoded, &identity.device()) {
+                if pending.request().request_id == request {
+                    return Ok(pending);
+                }
+            }
+        }
+    }
+    Err(AppError::Other("The saved device approval proof is unavailable. Local data is retained; use device recovery.".into()))
 }
 /// A verified ID token supplies issuer/sub; service metadata never supplies a replacement subject.
 /// Caller owns the user-initiated flow; mutations merge only the central section into latest Records.
@@ -403,17 +435,12 @@ fn establish_locked(
                     if public.phase == Phase::SignedOut {
                         public.phase = Phase::AwaitingApproval;
                     }
-                    let encoded = Zeroizing::new(
-                        env.keychain
-                            .get(&profile.slot("pairing"))?
-                            .ok_or_else(invalid)?,
-                    );
-                    let pending = PendingPairing::restore(&encoded, &identity.device())?;
-                    public = public.accept_pairing(
-                        &pending,
-                        remote.pairing_confirmation.as_ref().ok_or_else(invalid)?,
-                        proof,
-                    )?;
+                    let confirmation = remote.pairing_confirmation.as_ref().ok_or_else(invalid)?;
+                    let pending = load_pairing(env, &profile, identity, &confirmation.request_id)?;
+                    if public.pending_request.as_ref() != Some(pending.request()) {
+                        public = public.begin_pairing(&pending)?;
+                    }
+                    public = public.accept_pairing(&pending, confirmation, proof)?;
                 }
             } else if public.pending_request.is_some() {
                 return Err(AppError::Other("The pending account Vault is temporarily unavailable. Keep this device's pairing request and retry.".into()));
@@ -801,5 +828,157 @@ mod tests {
         .is_err());
         assert_eq!(record_runtime::snapshot(&env).unwrap(), before);
         assert!(context(&env).is_err());
+    }
+    #[test]
+    fn renewing_an_expired_pairing_keeps_a_late_committed_approval_usable() {
+        use super::super::{
+            crypto::DeviceKeys,
+            membership::{Action, Genesis, SignedMembership},
+            pairing::{tests::minima, PairingInvite},
+            trust::ControlProof,
+        };
+        let d = device();
+        let env = d.env();
+        let profile =
+            Profile::new("https://relay.test", "https://identity.test", "opaque").unwrap();
+        let identity = DeviceIdentity::load_or_create(env.keychain, &profile, true).unwrap();
+        let first = DeviceKeys::generate().unwrap();
+        let recovery = DeviceKeys::generate().unwrap();
+        let (genesis, anchor) = Genesis::create(
+            &profile.origin,
+            &"a".repeat(64),
+            &"f".repeat(32),
+            &first,
+            &recovery,
+        )
+        .unwrap();
+        let trusted = genesis.trust(&anchor).unwrap();
+        let original = pending_pairing(&env, &profile, &identity, &anchor).unwrap();
+        let invite = PairingInvite::from_code(
+            &original.code().unwrap(),
+            original.request(),
+            &anchor,
+            env.now(),
+        )
+        .unwrap();
+        let mut members = trusted.devices().clone();
+        members.insert(identity.id.clone(), identity.keys.public());
+        let node = SignedMembership::sign(
+            trusted.proposal(
+                &"f".repeat(32),
+                Action::Add,
+                Some(original.request().clone()),
+                members,
+                trusted.recovery().clone(),
+                env.now(),
+            ),
+            &first,
+        )
+        .unwrap();
+        let confirmation = invite
+            .confirm(&trusted, &node, &"c".repeat(64), minima(trusted.head()))
+            .unwrap();
+        let expires = super::super::wire::number(&original.request().expires_at_ms, false).unwrap();
+        d.clock.advance(expires.saturating_sub(env.now()) + 10);
+        let renewed = pending_pairing(&env, &profile, &identity, &anchor).unwrap();
+        assert_ne!(renewed.request().request_id, original.request().request_id);
+        let retained =
+            load_pairing(&env, &profile, &identity, &original.request().request_id).unwrap();
+        assert_eq!(
+            retained.encode_secret().unwrap().as_str(),
+            original.encode_secret().unwrap().as_str()
+        );
+        assert_eq!(
+            load_pairing(&env, &profile, &identity, &renewed.request().request_id)
+                .unwrap()
+                .request(),
+            renewed.request()
+        );
+        let state = State::new(
+            ProfileData {
+                origin: profile.origin.clone(),
+                issuer: profile.issuer.clone(),
+                subject: profile.subject.clone(),
+                locator: profile.locator.clone(),
+                oidc: OidcConfig {
+                    issuer: profile.issuer.clone(),
+                    client_id: "native".into(),
+                    scopes: vec![],
+                    audience: Some("api".into()),
+                },
+            },
+            anchor.account_id.clone(),
+            identity.device(),
+            2,
+        )
+        .unwrap()
+        .begin_pairing(&original)
+        .unwrap();
+        let accepted = state
+            .accept_pairing(
+                &retained,
+                &confirmation,
+                ControlProof {
+                    genesis,
+                    nodes: vec![node],
+                },
+            )
+            .unwrap();
+        assert_eq!(accepted.anchor.as_ref(), Some(&anchor));
+        assert_eq!(accepted.phase, Phase::Enrolled);
+    }
+    #[test]
+    fn failed_retained_pairing_readback_preserves_the_only_original_secret() {
+        use super::super::{crypto::DeviceKeys, membership::Genesis};
+        use crate::sync::env::Keychain;
+        struct Lost<'a> {
+            source: &'a dyn Keychain,
+            retained: String,
+        }
+        impl Keychain for Lost<'_> {
+            fn get(&self, key: &str) -> Result<Option<String>, AppError> {
+                if key == self.retained {
+                    Ok(None)
+                } else {
+                    self.source.get(key)
+                }
+            }
+            fn set(&self, key: &str, value: &str) -> Result<(), AppError> {
+                if key == self.retained {
+                    Ok(())
+                } else {
+                    self.source.set(key, value)
+                }
+            }
+            fn delete(&self, _: &str) -> Result<(), AppError> {
+                panic!("pairing renewal must not delete proof")
+            }
+        }
+        let d = device();
+        let profile =
+            Profile::new("https://relay.test", "https://identity.test", "opaque").unwrap();
+        let identity = DeviceIdentity::load_or_create(&d.keychain, &profile, true).unwrap();
+        let (_, anchor) = Genesis::create(
+            &profile.origin,
+            &"a".repeat(64),
+            &"f".repeat(32),
+            &DeviceKeys::generate().unwrap(),
+            &DeviceKeys::generate().unwrap(),
+        )
+        .unwrap();
+        let original = pending_pairing(&d.env(), &profile, &identity, &anchor).unwrap();
+        let encoded = d.keychain.get(&profile.slot("pairing")).unwrap();
+        let expiry = super::super::wire::number(&original.request().expires_at_ms, false).unwrap();
+        d.clock.advance(expiry.saturating_sub(d.env().now()) + 10);
+        let lost = Lost {
+            source: &d.keychain,
+            retained: profile.slot("pairing-retained"),
+        };
+        let env = SyncEnv {
+            keychain: &lost,
+            ..d.env()
+        };
+        assert!(pending_pairing(&env, &profile, &identity, &anchor).is_err());
+        assert_eq!(d.keychain.get(&profile.slot("pairing")).unwrap(), encoded);
     }
 }
