@@ -49,6 +49,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { DriftBanner } from "@/components/DriftBanner";
 import { McpApprovalDialog } from "@/components/McpApprovalDialog";
+import { InstallationRenameNotice } from "@/components/InstallationRename";
 import { SidebarResizeHandle } from "@/components/SidebarResizeHandle";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
@@ -419,6 +420,7 @@ function App() {
         </div>
       )}
       <Toaster />
+      <InstallationRenameNotice />
     </>
   );
 }
