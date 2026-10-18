@@ -87,6 +87,10 @@ else {
         const fixture = legacyPreviewRead(command, args);
         if (fixture.handled) return fixture.value;
         if (command === "records_status") return { format: scenario === "legacy" ? "legacy" : "records", legacy_paused: false, blocked_reason: null, overview };
+        if (command === "records_connect" && scenario === "host-interactions") {
+          console.info("Fixture connection requested", String(args.hostId));
+          return;
+        }
         if (command === "app_platform") return "macos";
         if (command === "app_is_development") return true;
         if (command === "app_home_dir") return "/fixture";
