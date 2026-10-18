@@ -16,6 +16,8 @@ pub mod library_page;
 pub mod oidc;
 pub mod pairing;
 pub mod payload;
+mod projection;
+mod projection_cache;
 pub mod recovery;
 pub mod recovery_read;
 pub mod active_read;

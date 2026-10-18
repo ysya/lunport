@@ -35,6 +35,9 @@ fn current(
             .author_at(&h.membership_head, &h.author)
             .ok_or_else(invalid)?;
         let plaintext = version.envelope.verify(&author.signing)?.open(keys)?;
+        if super::crypto::hash(&plaintext) != base.content_hash {
+            return Err(invalid());
+        }
         let admitted = payload::admit(keys, h, &plaintext)?;
         if !replica.pending.contains_key(id) {
             publication.push(Change {
