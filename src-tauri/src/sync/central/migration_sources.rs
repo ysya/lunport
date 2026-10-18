@@ -21,6 +21,7 @@ use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 const MAX_SOURCES: usize = 65;
+mod archive;
 
 struct SourceKey {
     token: Zeroizing<String>,
