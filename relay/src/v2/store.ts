@@ -1,5 +1,16 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  freezeCanonical,
+  freezeDigest,
+  sourceOrder,
+  canExtendFreeze,
+  verifyFreeze,
+  frozenManifestMatches,
+  type SignedFreeze,
+  type FreezeJournal,
+} from "./migration-freeze";
+import { validSnapshot } from "../legacy-retirement";
+import {
   migrationCanonical,
   migrationDigest,
   migrationScope,
@@ -33,6 +44,7 @@ import {
   hex,
   recordCanonical,
   safeNumber,
+  verify,
   type RecordEnvelope,
   type WrappedKeys,
 } from "./protocol";
@@ -139,7 +151,8 @@ CREATE TABLE IF NOT EXISTS rekey_commits (epoch INTEGER PRIMARY KEY,rotation_id 
 CREATE TABLE IF NOT EXISTS rekey_source_digests (epoch INTEGER NOT NULL,seq INTEGER NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(epoch,seq));
 CREATE TABLE IF NOT EXISTS migration_journal (id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS migration_versions (seq INTEGER PRIMARY KEY,record_id TEXT NOT NULL,revision INTEGER NOT NULL,operation_id TEXT UNIQUE NOT NULL,envelope TEXT NOT NULL,digest TEXT NOT NULL,history_hash TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS migration_versions_record ON migration_versions(record_id,seq);`;
+CREATE INDEX IF NOT EXISTS migration_versions_record ON migration_versions(record_id,seq);
+CREATE TABLE IF NOT EXISTS migration_freeze (id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);`;
 export async function verifyControl(
   proof: ControlProof,
 ): Promise<TrustedMembership | null> {
@@ -274,7 +287,10 @@ export class VaultStore extends DurableObject<Env> {
     return journal;
   }
   private migrationPending(): boolean {
-    return this.migrationJournal()?.phase === "staging";
+    const migration = this.migrationJournal();
+    return migration
+      ? migration.phase === "staging"
+      : this.freezeJournal() !== null;
   }
   private saveMigration(journal: MigrationJournal): void {
     this.ctx.storage.sql.exec(
@@ -326,6 +342,306 @@ export class VaultStore extends DurableObject<Env> {
       return false;
     }
   }
+  private freezeJournal(): FreezeJournal | null {
+    if (
+      !this.ctx.storage.sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='migration_freeze'",
+        )
+        .toArray().length
+    )
+      return null;
+    const row = this.ctx.storage.sql
+      .exec<{ value: string }>("SELECT value FROM migration_freeze WHERE id=1")
+      .toArray()[0];
+    if (!row) return null;
+    const journal = JSON.parse(row.value) as FreezeJournal;
+    if (
+      !exactObject(journal, ["version", "proof", "sources"]) ||
+      journal.version !== 1 ||
+      !Array.isArray(journal.proof) ||
+      !journal.proof.length ||
+      journal.proof.length > 65 ||
+      !Array.isArray(journal.sources) ||
+      journal.sources.length > 65
+    )
+      throw new Error("Invalid source freeze journal.");
+    for (let index = 0; index < journal.proof.length; index++) {
+      const step = journal.proof[index];
+      if (
+        !exactObject(step, ["intent", "digest"]) ||
+        !exactObject(step.intent, ["body", "signature"]) ||
+        !hex(step.digest, 64)
+      )
+        throw new Error("Invalid source freeze proof.");
+      freezeCanonical(step.intent.body);
+      if (
+        step.intent.body.revision !== String(index + 1) ||
+        (index &&
+          !canExtendFreeze(
+            journal.proof[index - 1].intent,
+            journal.proof[index - 1].digest,
+            step.intent,
+          ))
+      )
+        throw new Error("Invalid source freeze extension.");
+    }
+    const body = journal.proof.at(-1)!.intent.body;
+    let previous = "";
+    for (const source of journal.sources) {
+      if (
+        !exactObject(source, [
+          "chain_id",
+          "sequence",
+          "count",
+          "ciphertext_digest",
+        ]) ||
+        source.chain_id <= previous ||
+        !body.chains.includes(source.chain_id) ||
+        !validSnapshot(migrationSnapshot(source))
+      )
+        throw new Error("Invalid frozen source checkpoint.");
+      previous = source.chain_id;
+    }
+    return journal;
+  }
+  private saveFreeze(journal: FreezeJournal): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO migration_freeze VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value",
+      metadataJson(journal),
+    );
+  }
+  private async verifyFreezeJournal(
+    journal: FreezeJournal,
+    state: VaultState,
+  ): Promise<boolean> {
+    for (const step of journal.proof) {
+      const body = step.intent.body,
+        author = state.trusted.seen_devices[body.author];
+      if (
+        !author ||
+        body.origin !== state.trusted.anchor.origin ||
+        body.account_id !== state.account ||
+        body.genesis_hash !== state.trusted.anchor.genesis_hash ||
+        body.vault_id !== state.vault ||
+        (await freezeDigest(step.intent)) !== step.digest ||
+        !(await verify(
+          author.signing,
+          freezeCanonical(body),
+          step.intent.signature,
+        ))
+      )
+        return false;
+    }
+    return true;
+  }
+  private freezeStatusResult(actor: Principal): Result {
+    const state = this.load();
+    if (!this.allowed(state, actor) || !this.migrationObject(state))
+      return { status: 403 };
+    const journal = this.freezeJournal();
+    if (!journal) return { status: 404 };
+    const latest = journal.proof.at(-1)!,
+      done = new Set(journal.sources.map((source) => source.chain_id));
+    const next = sourceOrder(latest.intent.body)
+      .filter((chain) => !done.has(chain))
+      .slice(0, 8);
+    return {
+      status: 200,
+      body: {
+        proof: journal.proof,
+        sources: journal.sources,
+        phase:
+          done.size === latest.intent.body.chains.length
+            ? "frozen"
+            : "freezing",
+        next,
+      },
+    };
+  }
+  freezeStatus(actor: Principal): Promise<Response> {
+    return rpcCall(async () => {
+      const state = this.load(),
+        journal = this.freezeJournal();
+      if (!this.allowed(state, actor) || !this.migrationObject(state))
+        return { status: 403 };
+      if (!journal) return { status: 404 };
+      if (!(await this.verifyFreezeJournal(journal, state)))
+        return { status: 503 };
+      const current = this.load();
+      if (!this.allowed(current, actor)) return { status: 403 };
+      return current.version === state.version
+        ? this.freezeStatusResult(actor)
+        : { status: 409 };
+    });
+  }
+  /** Ephemeral old bearers authenticate only their legacy chains, never the central account. */
+  freezeSources(
+    actor: Principal,
+    intent: SignedFreeze,
+    credentials: { chain: string; token: string }[],
+  ): Promise<Response> {
+    return rpcCall(async () => {
+      const observed = this.load();
+      if (!this.allowed(observed, actor) || !this.migrationObject(observed))
+        return { status: 403 };
+      if (
+        !(await verifyFreeze(
+          observed.trusted,
+          intent,
+          observed.epoch,
+          observed.keyEpoch,
+          observed.vault,
+          actor.device,
+        ))
+      )
+        return { status: 403 };
+      if (
+        !Array.isArray(credentials) ||
+        credentials.length > 8 ||
+        credentials.some(
+          (value) =>
+            !exactObject(value, ["chain", "token"]) ||
+            !hex(value.chain, 64) ||
+            !hex(value.token, 64),
+        )
+      )
+        return { status: 400 };
+      const digest = await freezeDigest(intent),
+        prior = this.freezeJournal();
+      if (prior && !(await this.verifyFreezeJournal(prior, observed)))
+        return { status: 503 };
+      if (
+        this.migrationJournal() ||
+        observed.sequence !== 0 ||
+        observed.historyHash !== ZERO ||
+        observed.phase !== "ready" ||
+        observed.rekey
+      )
+        return { status: 409 };
+      if (
+        prior
+          ? digest !== prior.proof.at(-1)!.digest &&
+            !canExtendFreeze(
+              prior.proof.at(-1)!.intent,
+              prior.proof.at(-1)!.digest,
+              intent,
+            )
+          : intent.body.revision !== "1"
+      )
+        return { status: 409 };
+      const order = sourceOrder(intent.body),
+        witnessed = new Set(
+          prior?.sources.map((source) => source.chain_id) ?? [],
+        );
+      let last = -1;
+      for (const value of credentials) {
+        const index = order.indexOf(value.chain);
+        if (
+          index <= last ||
+          index < 0 ||
+          order.slice(0, index).some((chain) => !witnessed.has(chain))
+        )
+          return { status: 400 };
+        witnessed.add(value.chain);
+        last = index;
+      }
+      const prepared = this.ctx.storage.transactionSync(() => {
+        const current = this.load(),
+          latest = this.freezeJournal();
+        if (!this.allowed(current, actor)) return 403;
+        if (
+          current.version !== observed.version ||
+          latest?.proof.at(-1)?.digest !== prior?.proof.at(-1)?.digest ||
+          this.migrationJournal()
+        )
+          return 409;
+        if (latest?.proof.at(-1)?.digest !== digest) {
+          this.ctx.storage.sql.exec(SCHEMA);
+          this.saveFreeze({
+            version: 1,
+            proof: [...(latest?.proof ?? []), { intent, digest }],
+            sources: latest?.sources ?? [],
+          });
+          this.save({ ...current, version: current.version + 1 });
+        }
+        return 200;
+      });
+      if (prepared !== 200) return { status: prepared };
+      for (const credential of credentials) {
+        const state = this.load(),
+          journal = this.freezeJournal();
+        if (!this.allowed(state, actor)) return { status: 403 };
+        if (
+          !journal ||
+          journal.proof.at(-1)!.digest !== digest ||
+          this.migrationJournal()
+        )
+          return { status: 409 };
+        if (
+          journal.sources.some((source) => source.chain_id === credential.chain)
+        )
+          continue;
+        const tokenHash = await hash(
+          new TextEncoder().encode(credential.token),
+        );
+        const checked = this.load();
+        if (!this.allowed(checked, actor)) return { status: 403 };
+        let response: { status: number; snapshot?: LegacySnapshot };
+        try {
+          response = await this.env.CHAIN.getByName(
+            credential.chain,
+          ).freezeForMigration(
+            credential.chain,
+            tokenHash,
+            migrationScope(intent.body),
+          );
+        } catch {
+          return { status: 503 };
+        }
+        if (
+          response.status !== 200 ||
+          !response.snapshot ||
+          !validSnapshot(response.snapshot)
+        )
+          return { status: response.status === 200 ? 503 : response.status };
+        const source = {
+          chain_id: credential.chain,
+          sequence: String(response.snapshot.latestSeq),
+          count: String(response.snapshot.count),
+          ciphertext_digest: response.snapshot.digest,
+        };
+        const result = this.ctx.storage.transactionSync(() => {
+          const current = this.load(),
+            latest = this.freezeJournal();
+          if (!this.allowed(current, actor)) return 403;
+          if (
+            !latest ||
+            latest.proof.at(-1)!.digest !== digest ||
+            this.migrationJournal()
+          )
+            return 409;
+          const known = latest.sources.find(
+            (value) => value.chain_id === credential.chain,
+          );
+          if (known)
+            return sameSnapshot(migrationSnapshot(known), response.snapshot!)
+              ? 200
+              : 409;
+          this.saveFreeze({
+            ...latest,
+            sources: [...latest.sources, source].sort((a, b) =>
+              a.chain_id < b.chain_id ? -1 : a.chain_id > b.chain_id ? 1 : 0,
+            ),
+          });
+          this.save({ ...current, version: current.version + 1 });
+          return 200;
+        });
+        if (result !== 200) return { status: result };
+      }
+      return this.freezeStatusResult(actor);
+    });
+  }
   /** Private server primitives; no HTTP route/capability until ingress and native cutover are ready. */
   beginMigration(
     actor: Principal,
@@ -347,6 +663,13 @@ export class VaultStore extends DurableObject<Env> {
         ))
       )
         return { status: 403 };
+      const frozen = this.freezeJournal();
+      if (
+        frozen &&
+        (!(await this.verifyFreezeJournal(frozen, observed)) ||
+          !frozenManifestMatches(frozen, manifest))
+      )
+        return { status: 409 };
       const wraps = freshWraps ?? observed.wraps;
       if (
         freshWraps &&

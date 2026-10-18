@@ -13,6 +13,7 @@ pub mod commands;
 pub mod crypto;
 pub mod membership;
 pub mod migration;
+pub mod migration_freeze;
 mod migration_history;
 pub mod library_page;
 pub mod oidc;

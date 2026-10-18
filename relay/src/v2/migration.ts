@@ -120,7 +120,12 @@ export function migrationCanonical(body: MigrationBody): Uint8Array {
     ...sources,
   ]);
 }
-export function migrationScope(body: MigrationBody): LegacyMigrationScope {
+export function migrationScope(
+  body: Pick<
+    MigrationBody,
+    "origin" | "account_id" | "genesis_hash" | "vault_id" | "migration_id"
+  >,
+): LegacyMigrationScope {
   return {
     operation: body.migration_id,
     origin: body.origin,

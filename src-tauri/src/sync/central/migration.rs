@@ -18,7 +18,7 @@ pub struct Source {
     pub ciphertext_digest: String,
 }
 impl Source {
-    fn canonical(&self) -> Result<Vec<u8>, AppError> {
+    pub(super) fn canonical(&self) -> Result<Vec<u8>, AppError> {
         let count = number(&self.count, true)?;
         if !hex(&self.chain_id, 64)
             || !hex(&self.ciphertext_digest, 64)
