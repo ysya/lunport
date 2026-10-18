@@ -27,8 +27,12 @@ pub struct BootstrapPackage {
 pub struct Workspace {
     pub control: State,
     pub replica: Option<Replica>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<super::rotation::Journal>,
     #[serde(default)]
     pub epochs: Vec<SignedRekey>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_epochs: Vec<SignedRekey>,
     pub last_epoch_acceptance: Option<EpochAcceptance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap: Option<BootstrapPackage>,
@@ -40,7 +44,9 @@ impl Workspace {
         let state = Self {
             control,
             replica: None,
+            rotation: None,
             epochs: vec![],
+            observed_epochs: vec![],
             last_epoch_acceptance: None,
             bootstrap: None,
             own_wraps: vec![],
@@ -50,7 +56,7 @@ impl Workspace {
     }
     pub fn validate(&self) -> Result<(), AppError> {
         self.control.validate()?;
-        if self.epochs.len() > 64 {
+        if self.epochs.len() > 64 || self.observed_epochs.len() > 64 {
             return Err(invalid());
         }
         if self.own_wraps.len() > 65 {
@@ -133,6 +139,9 @@ impl Workspace {
         if let Some(replica) = &self.replica {
             let chain = self.control.verified_chain()?;
             replica.validate(&chain)?;
+            if self.control.phase == Phase::Active && replica.needs_epoch_rebuild {
+                return Err(invalid());
+            }
             if replica.pending.values().any(|p| {
                 p.latest.envelope.header.author != self.control.device.id
                     || p.sent
@@ -192,6 +201,43 @@ impl Workspace {
                 auth = next_auth;
                 sequence = next_sequence;
             }
+            if !self.observed_epochs.is_empty() {
+                if !self.observed_epochs.starts_with(&self.epochs) {
+                    return Err(invalid());
+                }
+                let mut previous_revision = chain
+                    .revision_of(&replica.creation_head)
+                    .ok_or_else(invalid)?;
+                let mut previous_auth = 0;
+                let mut previous_sequence = 0;
+                let mut rotations = BTreeSet::new();
+                for (index, manifest) in self.observed_epochs.iter().enumerate() {
+                    manifest.verify_historical(&chain, &replica.vault)?;
+                    let body = &manifest.body;
+                    let revision = chain
+                        .revision_of(&body.membership_head)
+                        .ok_or_else(invalid)?;
+                    let auth = number(&body.authorization_epoch, false)?;
+                    let sequence = number(&body.source_sequence, true)?;
+                    if number(&body.from_epoch, false)? != index as u64 + 1
+                        || revision < previous_revision
+                        || auth <= previous_auth
+                        || sequence < previous_sequence
+                        || !rotations.insert(&body.rotation_id)
+                    {
+                        return Err(invalid());
+                    }
+                    previous_revision = revision;
+                    previous_auth = auth;
+                    previous_sequence = sequence;
+                }
+                if self.control.phase == Phase::Active
+                    && (self.observed_epochs.len() != self.epochs.len()
+                        || replica.needs_epoch_rebuild)
+                {
+                    return Err(invalid());
+                }
+            }
             if let Some(evidence) = &self.last_epoch_acceptance {
                 if self.epochs.last() != Some(&evidence.manifest) {
                     return Err(invalid());
@@ -234,14 +280,29 @@ impl Workspace {
                     return Err(invalid());
                 }
             }
-        } else if !self.epochs.is_empty() || self.last_epoch_acceptance.is_some() {
+        } else if !self.epochs.is_empty()
+            || !self.observed_epochs.is_empty()
+            || self.last_epoch_acceptance.is_some()
+        {
             return Err(invalid());
+        }
+        if let Some(journal) = &self.rotation {
+            if self.control.phase == Phase::Active {
+                return Err(invalid());
+            }
+            journal.validate(self)?;
         }
         Ok(())
     }
     pub fn verify_transition(&self, next: &Self) -> Result<(), AppError> {
         next.validate()?;
         self.control.verify_transition(&next.control)?;
+        if !next.observed_epochs.starts_with(&self.observed_epochs) {
+            return Err(invalid());
+        }
+        if let Some(journal) = &self.rotation {
+            journal.verify_transition(next.rotation.as_ref(), next)?;
+        }
         if let Some(before) = &self.bootstrap {
             if next.bootstrap.as_ref().is_some_and(|after| {
                 before.wraps != after.wraps || before.submitted && !after.submitted
@@ -264,7 +325,8 @@ impl Workspace {
                     return Err(invalid());
                 }
                 if after.checkpoint.epoch == before.checkpoint.epoch {
-                    if before.minimum != after.minimum
+                    if before.needs_epoch_rebuild != after.needs_epoch_rebuild
+                        || before.minimum != after.minimum
                         || self.epochs != next.epochs
                         || after.checkpoint.sequence < before.checkpoint.sequence
                         || after.checkpoint.sequence == before.checkpoint.sequence
@@ -368,6 +430,8 @@ impl Workspace {
     }
     pub fn can_upload(&self) -> bool {
         self.control.cloud_writes_allowed()
+            && self.rotation.is_none()
+            && (self.observed_epochs.is_empty() || self.observed_epochs.len() == self.epochs.len())
             && self.replica.as_ref().is_some_and(|r| {
                 r.baseline_ready()
                     && self.control.verified_chain().is_ok_and(|chain| {

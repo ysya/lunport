@@ -56,6 +56,8 @@ pub struct Replica {
     pub creation_head: String,
     pub creation_authorization_epoch: u64,
     pub checkpoint: Checkpoint,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_epoch_rebuild: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum: Option<Checkpoint>,
     pub current: BTreeMap<String, Base>,
@@ -121,6 +123,7 @@ impl Replica {
                 sequence: 0,
                 history_hash: ZERO.into(),
             },
+            needs_epoch_rebuild: false,
             minimum: None,
             current: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -147,9 +150,10 @@ impl Replica {
         Ok(replica)
     }
     pub fn baseline_ready(&self) -> bool {
-        self.minimum.as_ref().is_none_or(|m| {
-            m.epoch == self.checkpoint.epoch && self.checkpoint.sequence >= m.sequence
-        })
+        !self.needs_epoch_rebuild
+            && self.minimum.as_ref().is_none_or(|m| {
+                m.epoch == self.checkpoint.epoch && self.checkpoint.sequence >= m.sequence
+            })
     }
     pub fn validate(&self, chain: &VerifiedChain) -> Result<(), AppError> {
         if !hex(&self.vault, 64)

@@ -120,10 +120,11 @@ pub fn sync_once(env: &SyncEnv) -> Result<Report, AppError> {
         return Ok(Report::default());
     }
     let running = Running(&env.runtime.syncing);
-    let outcome = stage(env);
+    let mut report = Report::default();
+    let outcome = stage(env, &mut report);
     drop(running);
     match &outcome {
-        Ok(report) => {
+        Ok(()) => {
             let mut core = env.runtime.core.lock().unwrap();
             core.central_poll.failures = 0;
             core.central_poll.requests = report.requests;
@@ -138,9 +139,12 @@ pub fn sync_once(env: &SyncEnv) -> Result<Report, AppError> {
                 core.central_user_action = None;
             }
         }
-        Err(error) if error.to_string() == crate::sync::runtime::SUPERSEDED => {}
+        Err(error) if error.to_string() == crate::sync::runtime::SUPERSEDED => {
+            env.runtime.core.lock().unwrap().central_poll.requests = report.requests;
+        }
         Err(error) => {
             let mut core = env.runtime.core.lock().unwrap();
+            core.central_poll.requests = report.requests.saturating_add(1).min(32);
             core.central_poll.failures = core.central_poll.failures.saturating_add(1);
             let deadline =
                 Instant::now() + crate::sync::relay::backoff_delay(core.central_poll.failures);
@@ -153,13 +157,12 @@ pub fn sync_once(env: &SyncEnv) -> Result<Report, AppError> {
         }
     }
     env.events.status();
-    if outcome.as_ref().is_ok_and(|report| report.more) {
+    if outcome.is_ok() && report.more {
         env.events.wake();
     }
-    outcome
+    outcome.map(|()| report)
 }
-fn stage(env: &SyncEnv) -> Result<Report, AppError> {
-    let mut report = Report::default();
+fn stage(env: &SyncEnv, report: &mut Report) -> Result<(), AppError> {
     if record_runtime::snapshot(env)?
         .0
         .local
@@ -172,7 +175,7 @@ fn stage(env: &SyncEnv) -> Result<Report, AppError> {
         ));
     }
     if !controller::resume(env, false)? {
-        return Ok(report);
+        return Ok(());
     }
     let start = Instant::now();
     let mut renewed = false;
@@ -181,9 +184,13 @@ fn stage(env: &SyncEnv) -> Result<Report, AppError> {
         let before = records.local.central.as_ref().ok_or_else(invalid)?;
         if matches!(
             before.control.phase,
-            Phase::Rekey | Phase::Revoked | Phase::SignedOut | Phase::BackupRequired | Phase::Setup
+            Phase::Revoked | Phase::SignedOut | Phase::BackupRequired | Phase::Setup
         ) {
-            return Ok(report);
+            return Ok(());
+        }
+        if before.control.phase == Phase::Rekey {
+            report.more = super::rotation_runtime::advance(env, report)?;
+            return Ok(());
         }
         let session = controller::context(env)?;
         let device = session.device.as_ref().ok_or_else(invalid)?;
@@ -197,7 +204,7 @@ fn stage(env: &SyncEnv) -> Result<Report, AppError> {
                 continue;
             }
             require_success(env, &reply)?;
-            return Ok(report);
+            return Ok(());
         }
         if before.replica.is_none() {
             joining::initialize(env)?;
@@ -249,7 +256,7 @@ fn stage(env: &SyncEnv) -> Result<Report, AppError> {
                 .control
                 .phase = Phase::Rekey;
             record_runtime::commit_candidate(env, generation, records)?;
-            return Ok(report);
+            return Ok(());
         }
         if before.control.highwater.as_ref().map(|h| h.head.as_str())
             != Some(page.membership_head.as_str())
@@ -285,7 +292,7 @@ fn stage(env: &SyncEnv) -> Result<Report, AppError> {
         }
         report.more = new < advertised.sequence;
         if !report.more || report.requests >= 32 || start.elapsed() >= Duration::from_secs(30) {
-            return Ok(report);
+            return Ok(());
         }
     }
 }

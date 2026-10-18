@@ -32,7 +32,7 @@ pub fn initialize(env: &SyncEnv) -> Result<(), AppError> {
     if before.replica.is_some() || before.control.pairing_confirmation.is_none() {
         return Ok(());
     }
-    if before.control.phase != Phase::Enrolled {
+    if !matches!(before.control.phase, Phase::Enrolled | Phase::Rekey) {
         return Err(AppError::Other(
             "Vault verification is waiting for account recovery or key rotation.".into(),
         ));
@@ -56,13 +56,9 @@ pub fn initialize(env: &SyncEnv) -> Result<(), AppError> {
     }
     let minimum = &confirmation.minimums[0];
     let epoch = number(&minimum.key_epoch, false)?;
-    if remote
-        .vaults
-        .get(&minimum.vault)
-        .is_none_or(|v| v.epoch != epoch || v.rekey)
-    {
-        // Never discard an authenticated old minimum just because the service advertises a newer epoch.
-        return Err(AppError::Other("The Vault changed after this device was approved. Its saved approval and local data are retained for full history verification.".into()));
+    let current = remote.vaults.get(&minimum.vault).ok_or_else(invalid)?;
+    if current.epoch < epoch {
+        return Err(invalid());
     }
     let chain = before.control.verified_chain()?;
     let mut next = before.clone();
@@ -89,6 +85,17 @@ pub fn initialize(env: &SyncEnv) -> Result<(), AppError> {
         }
         rekey::verify_committed_wraps(&chain, &bundle.manifest, &bundle.wraps)?;
         next.epochs.push(bundle.manifest);
+    }
+    if current.epoch > epoch {
+        // Intermediate ciphertext may already be gone. Keep the authenticated approval minimum
+        // intact; the rotation executor bridges every signed source checkpoint before rebuilding
+        // the latest cache. Do not pin an individual future wrap from a possibly cancelled attempt.
+        next.control.phase = Phase::Rekey;
+        next.validate()?;
+        return publish(env, &before, &next);
+    }
+    if current.rekey {
+        next.control.phase = Phase::Rekey;
     }
     let reply = api.vault(
         session.device.as_ref().ok_or_else(invalid)?,
