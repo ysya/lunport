@@ -314,6 +314,7 @@ pub(super) fn prepare(env: &SyncEnv, after: Option<&str>) -> Result<Batch, AppEr
         cursor: prepared.cursor,
     })
 }
+pub(super) mod apply;
 pub(super) mod pull;
 #[cfg(all(test, unix))]
 mod tests;
