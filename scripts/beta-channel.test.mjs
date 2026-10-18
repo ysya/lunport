@@ -114,6 +114,23 @@ describe("validateManifest", () => {
     expect(() => validateManifest(onlySpecific, "v0.16.0")).not.toThrow();
   });
 
+  it("promotes Tauri Action v1 asset API URLs with universal aliases unchanged", () => {
+    const legacy = latestJson("1.6.0");
+    const manifest = structuredClone(legacy);
+    for (const [index, entry] of Object.values(manifest.platforms).entries()) {
+      entry.url = `https://api.github.com/repos/ysya/lunport/releases/assets/${100 + index}`;
+    }
+    for (const arch of ["universal", "aarch64", "x86_64"]) {
+      manifest.platforms[`darwin-${arch}`] = manifest.platforms["darwin-universal"];
+      manifest.platforms[`darwin-${arch}-app`] = manifest.platforms["darwin-universal"];
+    }
+    const original = structuredClone(manifest);
+    expect(() => validateManifest(manifest, "v1.6.0")).not.toThrow();
+    expect(shouldReplace({ version: "1.6.0", manifest: legacy }, { version: "1.6.0", manifest })).toBe(true);
+    expect(manifest).toEqual(original);
+    expect(manifest.platforms["darwin-universal"].signature).toBe(legacy.platforms["darwin-universal"].signature);
+  });
+
   it("rejects a manifest that carries another version than the tag", () => {
     expect(() => validateManifest(latestJson("0.16.1"), "v0.16.0")).toThrow(/says version "0\.16\.1", expected 0\.16\.0/);
     expect(() => validateManifest(latestJson("0.16.0"), "v0.16.0-1")).toThrow(/expected 0\.16\.0-1/);

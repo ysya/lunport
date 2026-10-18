@@ -33,17 +33,17 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6.1.0
         with:
           version: 11.3.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: pnpm
@@ -78,7 +78,7 @@ jobs:
       # Windows path or any of % & ^ | < > ( ).
       - name: Build the installers
         if: ${{ !inputs.repackage_run_id }}
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         with:
           args: --verbose --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}' --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
@@ -92,7 +92,7 @@ jobs:
           $candidateRun = $env:CANDIDATE_RUN_ID
           if ($candidateRun -notmatch '^[1-9][0-9]*$') { throw 'Invalid candidate workflow run id.' }
           $run = (& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$candidateRun" | ConvertFrom-Json)
-          if ($LASTEXITCODE -ne 0 -or $run.name -ne 'windows bundle check') { throw 'Not a Windows bundle-check candidate.' }
+          if ($LASTEXITCODE -ne 0 -or $run.path -ne '.github/workflows/windows-bundle-check.yml') { throw 'Not a Windows bundle-check candidate.' }
           $scratch = Join-Path $env:RUNNER_TEMP 'lunport-repackage'
           & gh run download $candidateRun --repo $env:GITHUB_REPOSITORY --name lunport-rebrand-candidate --dir $scratch
           if ($LASTEXITCODE -ne 0) { throw 'Cannot download the unsigned candidate.' }
@@ -152,8 +152,9 @@ jobs:
           @{ source = $env:GITHUB_SHA; runtimeSource = $runtimeSource; repository = $env:GITHUB_REPOSITORY; files = $files } | ConvertTo-Json -Depth 4 | Set-Content "$base/rebrand-candidate.json"
 
       - name: Preserve unsigned test installers and generated templates
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
+          archive: true
           name: lunport-rebrand-candidate
           retention-days: 3
           if-no-files-found: error
@@ -273,7 +274,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Download and verify the matching unsigned candidate
@@ -285,7 +286,7 @@ jobs:
           $candidateRun = $env:CANDIDATE_RUN_ID
           if ($candidateRun -notmatch '^[1-9][0-9]*$') { throw 'Invalid candidate workflow run id.' }
           $run = (& gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$candidateRun" | ConvertFrom-Json)
-          if ($LASTEXITCODE -ne 0 -or $run.name -ne 'windows bundle check') { throw 'Not a Windows bundle-check candidate.' }
+          if ($LASTEXITCODE -ne 0 -or $run.path -ne '.github/workflows/windows-bundle-check.yml') { throw 'Not a Windows bundle-check candidate.' }
           & gh run download $candidateRun --repo $env:GITHUB_REPOSITORY --name lunport-rebrand-candidate --dir src-tauri/target/release
           if ($LASTEXITCODE -ne 0) { throw 'Cannot download the unsigned candidate.' }
           $base = (Resolve-Path 'src-tauri/target/release').Path

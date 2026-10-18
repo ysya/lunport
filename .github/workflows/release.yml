@@ -25,7 +25,7 @@ jobs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: rp
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -56,7 +56,7 @@ jobs:
             args: --config '{"bundle":{"externalBin":["binaries/sshelter-cli"]}}'
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Linux dependencies
         if: startsWith(matrix.platform, 'ubuntu')
@@ -66,12 +66,12 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6.1.0
         with:
           version: 11.3.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: pnpm
@@ -126,8 +126,19 @@ jobs:
           LUNPORT_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.LUNPORT_MACOS_CERTIFICATE_PASSWORD }}
         run: bash scripts/macos-signing.sh prepare
 
+      # Supplying releaseId makes tauri-action upload without editing existing release notes.
+      - name: Locate the existing release
+        id: target-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" --jq '.id')"
+          echo "id=$release_id" >> "$GITHUB_OUTPUT"
+
       - name: Build and upload installers to the release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Updater artifact signing (minisign). The key has no password; the
@@ -137,7 +148,8 @@ jobs:
           # Built-in sync relay URL (repository variable; https:// only, checked above). When unset, the release has no built-in relay.
           SSHELTER_RELAY_URL: ${{ vars.SSHELTER_RELAY_URL }}
         with:
-          # The release already exists (created by release-please); attach assets to it by tag.
+          # The release already exists (created by release-please); upload assets by ID without editing its metadata.
+          releaseId: ${{ steps.target-release.outputs.id }}
           tagName: ${{ needs.release-please.outputs.tag_name }}
           # The wrapper verifies the App and updater archive before the action uploads them.
           tauriScript: ${{ startsWith(matrix.platform, 'macos') && 'bash scripts/build-macos-release.sh' || '' }}
@@ -161,9 +173,9 @@ jobs:
       group: updater-beta-manifest
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: lts/*
 
