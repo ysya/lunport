@@ -35,6 +35,9 @@ pub struct Pending {
     pub latest: Draft,
     pub sent: Option<Draft>,
     pub claimed: Option<Receipt>,
+    /// Exact signed-history version of our dispatched edit; a later local B still remains pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed: Option<Base>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -247,6 +250,12 @@ impl Replica {
                     return Err(invalid());
                 }
             }
+            if let Some(confirmed) = &p.confirmed {
+                check_base(id, confirmed)?;
+                if confirmed.version.envelope.header.kind != p.latest.envelope.header.kind {
+                    return Err(invalid());
+                }
+            }
             if let Some(claim) = &p.claimed {
                 claim.matches(p.sent.as_ref().ok_or_else(invalid)?)?;
             }
@@ -332,6 +341,7 @@ impl Replica {
             },
             sent: previous.and_then(|p| p.sent.clone()),
             claimed: previous.and_then(|p| p.claimed.clone()),
+            confirmed: previous.and_then(|p| p.confirmed.clone()),
         };
         let mut candidate = self.clone();
         candidate.pending.insert(id, next);
@@ -590,6 +600,7 @@ impl Replica {
                     }
                     clear = p.latest.local_revision == sent.local_revision
                         && p.latest.content_hash == sent.content_hash;
+                    p.confirmed = Some(remote.clone());
                     p.sent = None;
                     p.claimed = None;
                 } else if content_hash != p.latest.content_hash

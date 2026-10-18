@@ -1210,6 +1210,7 @@ fn native_rotation_resumes_the_same_plan_after_lost_stage_and_commit_responses_a
                     latest: latest.clone(),
                     sent: Some(sent.clone()),
                     claimed: Some(receipt.clone()),
+                    confirmed: None,
                 },
             );
         Ok(records)

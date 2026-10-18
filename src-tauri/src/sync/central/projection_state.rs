@@ -258,6 +258,97 @@ impl Ledger {
         }
         Ok(())
     }
+    pub(in crate::sync::central) fn merge_bases(
+        &self,
+        plan: &Plan,
+        accepted: &BTreeSet<String>,
+        keys: &VaultKeys,
+    ) -> Result<Self, AppError> {
+        self.validate(plan.before())?;
+        self.verify_native(plan.before(), keys)?;
+        // Epoch projection needs an explicit retained-source-key/rekey reconciliation path.
+        if self.checkpoint.epoch != plan.checkpoint().epoch {
+            return Err(invalid());
+        }
+        let mut next = self.clone();
+        next.checkpoint = plan.checkpoint().clone();
+        for opaque in accepted {
+            let remote = plan.receipts().get(opaque).ok_or_else(invalid)?;
+            let wire = plan
+                .before()
+                .replica
+                .as_ref()
+                .ok_or_else(invalid)?
+                .current
+                .get(opaque)
+                .ok_or_else(invalid)?
+                .clone();
+            next.bases.insert(
+                opaque.clone(),
+                Basis {
+                    remote: remote.clone(),
+                    wire,
+                    local_hash: (remote.kind != "key").then(|| remote.semantic_hash.clone()),
+                },
+            );
+            if remote.kind == "keyslot" {
+                next.storage.remove(&remote.id);
+                if let Some(super::projection::PublicRow {
+                    data: super::projection::PublicData::Keyslot(slot),
+                    ..
+                }) = plan.rows().get(opaque)
+                {
+                    next.storage.insert(remote.id.clone(), slot.storage.clone());
+                }
+            }
+            if let Some(super::projection::PublicRow {
+                data: super::projection::PublicData::Catalog(catalog),
+                ..
+            }) = plan.rows().get(opaque)
+            {
+                next.catalog = catalog.clone();
+            }
+        }
+        next.materials.retain(|_, receipt| {
+            next.bases.get(&receipt.public.opaque).map(|b| &b.remote) == Some(&receipt.public)
+                && next.bases.get(&receipt.private.opaque).map(|b| &b.remote)
+                    == Some(&receipt.private)
+        });
+        next.validate(plan.before())?;
+        Ok(next)
+    }
+    pub(in crate::sync::central) fn has_material(&self, id: &str, plan: &Plan) -> bool {
+        self.materials
+            .get(id)
+            .zip(plan.materials().get(id))
+            .is_some_and(|(receipt, material)| {
+                receipt.public == material.public_receipt
+                    && receipt.private == material.private_receipt
+            })
+    }
+    pub(in crate::sync::central) fn verify_source_material(
+        &self,
+        id: &str,
+        local: &crate::sync::records_v3::LocalKeyMetadata,
+        entry: &crate::vault::store::VaultEntry,
+    ) -> Result<(), AppError> {
+        let receipt = self.materials.get(id).ok_or_else(invalid)?;
+        if receipt.vault_id != local.vault_id
+            || receipt.slot.public.has_passphrase != local.public.has_passphrase
+            || receipt.slot.public.key_type != local.public.key_type
+        {
+            return Err(invalid());
+        }
+        crate::sync::records_v3::key_material_matches(
+            &receipt.slot.public,
+            &local.public.public_key,
+            &local.public.fingerprint,
+        )
+        .map_err(|_| invalid())?;
+        let material =
+            payload::PrivateMaterial::new(zeroize::Zeroizing::new(entry.private_key.clone()))?;
+        material.validate_against(id, &receipt.slot)
+    }
     /// Pure receipt candidate only. The eventual journal writer must prove source/state/session,
     /// protected vault readback and strict durability before atomically publishing this candidate.
     pub(in crate::sync::central) fn with_material_readback(
@@ -402,6 +493,41 @@ impl Ledger {
         if state.account.as_ref().map(|a| a.chain_id.as_str()) != Some(self.vault.as_str()) {
             return Err(invalid());
         }
+        let replica = owner.replica.as_ref().ok_or_else(invalid)?;
+        let chain = owner.control.verified_chain()?;
+        let mut pending_identities = BTreeMap::new();
+        for (opaque, pending) in &replica.pending {
+            if let Some(confirmed) = &pending.confirmed {
+                let header = &confirmed.version.envelope.header;
+                let author = chain
+                    .author_at(&header.membership_head, &header.author)
+                    .ok_or_else(invalid)?;
+                let plaintext = confirmed
+                    .version
+                    .envelope
+                    .verify(&author.signing)?
+                    .open(keys)?;
+                if crypto::hash(&plaintext) != confirmed.content_hash {
+                    return Err(invalid());
+                }
+                payload::admit(keys, header, &plaintext)?;
+            }
+            for draft in std::iter::once(&pending.latest).chain(pending.sent.as_ref()) {
+                let header = &draft.envelope.header;
+                let author = chain
+                    .author_at(&header.membership_head, &header.author)
+                    .ok_or_else(invalid)?;
+                let plaintext = draft.envelope.verify(&author.signing)?.open(keys)?;
+                if crypto::hash(&plaintext) != draft.content_hash {
+                    return Err(invalid());
+                }
+                let admitted = payload::admit(keys, header, &plaintext)?;
+                if draft.envelope.header.operation_id == pending.latest.envelope.header.operation_id
+                {
+                    pending_identities.insert(opaque.clone(), admitted.identity);
+                }
+            }
+        }
         let mut seen = BTreeSet::new();
         let mut changes = vec![];
         for (identity, data) in
@@ -428,10 +554,25 @@ impl Ledger {
                 });
             }
         }
+        // Missing cache rows include new local rows that have no accepted remote basis yet.
+        // Keep emitting their tombstone for transport rebasing after an earlier sent-A ACK.
+        for (opaque, identity) in pending_identities {
+            if !seen.contains(&opaque) && identity.kind != "key" {
+                changes.push(Change {
+                    identity,
+                    data: Data::Deleted,
+                    base: self.bases.get(&opaque).map(|basis| basis.remote.clone()),
+                });
+            }
+        }
         // Physical removal is a local deletion, never permission to resurrect a prior remote row.
         for (opaque, basis) in &self.bases {
             let r = &basis.remote;
-            if r.kind != "key" && !seen.contains(opaque) && !r.deleted {
+            if r.kind != "key"
+                && !seen.contains(opaque)
+                && !replica.pending.contains_key(opaque)
+                && !r.deleted
+            {
                 changes.push(Change {
                     identity: Identity {
                         kind: r.kind.clone(),
@@ -600,7 +741,7 @@ pub(super) mod tests {
                 && matches!(&c.data,Data::Host(h) if h.alias=="remote-scope-local-B")
         ));
     }
-    fn material_fixture() -> (
+    pub(in crate::sync::central) fn material_fixture() -> (
         SyncStateV3,
         VaultKeys,
         Plan,
@@ -794,6 +935,7 @@ pub(super) mod tests {
                     },
                     sent: None,
                     claimed: None,
+                    confirmed: None,
                 },
             );
         assert!(crate::sync::record_repository::resolve_key(&pending, &id)

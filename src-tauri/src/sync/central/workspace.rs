@@ -747,6 +747,7 @@ pub(crate) mod tests {
                 latest: sent.clone(),
                 sent: Some(sent),
                 claimed: Some(receipt),
+                confirmed: None,
             },
         );
         before.validate().unwrap();

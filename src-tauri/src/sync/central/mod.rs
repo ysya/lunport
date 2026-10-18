@@ -21,6 +21,7 @@ mod projection_cache;
 pub mod projection_state;
 mod projection_local;
 mod projection_capture;
+mod projection_delta;
 pub mod recovery;
 pub mod recovery_read;
 pub mod active_read;

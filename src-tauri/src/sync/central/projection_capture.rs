@@ -61,7 +61,10 @@ pub fn public_candidate(
         // Remote ciphertext may have advanced while the material/public cache transaction still
         // held A. Keep signed A + encrypted local B + signed C; never silently rebase B over C.
         if let Some(remote) = replica.current.get(&opaque) {
-            let basis = ledger.bases.get(&opaque).map(|basis| &basis.wire);
+            let basis = pending
+                .confirmed
+                .as_ref()
+                .or_else(|| ledger.bases.get(&opaque).map(|basis| &basis.wire));
             if basis != Some(remote) && remote.content_hash != pending.latest.content_hash {
                 let conflict = Conflict {
                     base: basis.cloned(),
@@ -69,7 +72,11 @@ pub fn public_candidate(
                     remote: remote.clone(),
                 };
                 let conflicts = replica.conflicts.entry(opaque).or_default();
-                if !conflicts.contains(&conflict) {
+                if !conflicts.iter().any(|known| {
+                    known.local.local_revision == conflict.local.local_revision
+                        && known.local.content_hash == conflict.local.content_hash
+                        && known.remote == conflict.remote
+                }) {
                     conflicts.push(conflict);
                 }
             }
@@ -81,7 +88,7 @@ pub fn public_candidate(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::{
         crypto,
         projection_state::tests::initial,
@@ -134,7 +141,7 @@ mod tests {
         };
         host.alias
     }
-    fn remote(
+    pub(in crate::sync::central) fn remote(
         state: &SyncStateV3,
         keys: &VaultKeys,
         alias: &str,
@@ -184,7 +191,7 @@ mod tests {
                 .to_string(),
         }
     }
-    fn apply(state: &mut SyncStateV3, keys: &VaultKeys, row: Version) {
+    pub(in crate::sync::central) fn apply(state: &mut SyncStateV3, keys: &VaultKeys, row: Version) {
         let ws = state.local.central.as_mut().unwrap();
         let target = Checkpoint {
             epoch: 1,
@@ -315,6 +322,52 @@ mod tests {
         );
         apply(&mut state, &keys, ack);
         assert_eq!(pending_alias(&state, &keys), "newer-B");
+        assert!(state
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .pending[&id]
+            .confirmed
+            .is_some());
+        state = public_candidate(&state, &keys, &signer()).unwrap();
+        assert!(state
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .conflicts
+            .is_empty());
+        let latest = &state
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .pending[&id]
+            .latest;
+        assert_eq!(
+            latest.envelope.header.expected_revision,
+            state
+                .local
+                .central
+                .as_ref()
+                .unwrap()
+                .replica
+                .as_ref()
+                .unwrap()
+                .current[&id]
+                .version
+                .revision
+        );
         let row = remote(&state, &keys, "C", None);
         apply(&mut state, &keys, row);
         let replica = state
@@ -327,6 +380,157 @@ mod tests {
             .unwrap();
         assert!(!replica.conflicts[&id].is_empty());
         assert_eq!(pending_alias(&state, &keys), "newer-B");
+    }
+    #[test]
+    fn a_created_then_removed_row_replaces_its_unsent_draft_with_a_tombstone() {
+        let (state, keys, _) = initial();
+        let host:crate::sync::records_v3::HostPayload=serde_json::from_value(serde_json::json!({"schema":2,"alias":"new","hostname":"fixture.invalid","auth":"password"})).unwrap();
+        let mut state = crate::sync::record_repository::create_host(
+            &state,
+            "0000000000000008",
+            HostScope::Local,
+            host,
+            100,
+        )
+        .unwrap();
+        state = public_candidate(&state, &keys, &signer()).unwrap();
+        let id = payload::Identity {
+            kind: "host".into(),
+            id: "0000000000000008".into(),
+            scope: Some(HostScope::Local),
+        }
+        .opaque(&keys)
+        .unwrap();
+        state
+            .local
+            .hosts
+            .remove(&record_key(RecordKind::Host, "0000000000000008"));
+        let next = public_candidate(&state, &keys, &signer()).unwrap();
+        let pending = &next
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .pending[&id];
+        assert!(pending.latest.envelope.header.deleted);
+        assert_eq!(pending.latest.local_revision, 2);
+        assert_eq!(public_candidate(&next, &keys, &signer()).unwrap(), next);
+    }
+    #[test]
+    fn removing_a_new_row_while_its_create_is_uncertain_survives_the_create_ack_and_rebases_the_delete(
+    ) {
+        let (state, keys, _) = initial();
+        let host:crate::sync::records_v3::HostPayload=serde_json::from_value(serde_json::json!({"schema":2,"alias":"new","hostname":"fixture.invalid","auth":"password"})).unwrap();
+        let mut state = crate::sync::record_repository::create_host(
+            &state,
+            "0000000000000008",
+            HostScope::Local,
+            host,
+            100,
+        )
+        .unwrap();
+        state = public_candidate(&state, &keys, &signer()).unwrap();
+        let id = payload::Identity {
+            kind: "host".into(),
+            id: "0000000000000008".into(),
+            scope: Some(HostScope::Local),
+        }
+        .opaque(&keys)
+        .unwrap();
+        let p = state
+            .local
+            .central
+            .as_mut()
+            .unwrap()
+            .replica
+            .as_mut()
+            .unwrap()
+            .pending
+            .get_mut(&id)
+            .unwrap();
+        p.sent = Some(p.latest.clone());
+        let sent = p.sent.clone().unwrap();
+        state
+            .local
+            .hosts
+            .remove(&record_key(RecordKind::Host, "0000000000000008"));
+        state = public_candidate(&state, &keys, &signer()).unwrap();
+        let replica = state
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap();
+        let sequence = (replica.checkpoint.sequence + 1).to_string();
+        let digest = rekey::envelope_digest(&sent.envelope).unwrap();
+        let hash = crypto::hash(
+            &canonical(&[
+                "lunport-history-v2",
+                &replica.checkpoint.history_hash,
+                &sequence,
+                &digest,
+            ])
+            .unwrap(),
+        );
+        apply(
+            &mut state,
+            &keys,
+            Version {
+                envelope: sent.envelope,
+                digest,
+                sequence,
+                history_hash: hash,
+                revision: "1".into(),
+            },
+        );
+        state = public_candidate(&state, &keys, &signer()).unwrap();
+        let replica = state
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap();
+        let pending = &replica.pending[&id];
+        assert!(pending.latest.envelope.header.deleted);
+        assert_eq!(pending.latest.envelope.header.expected_revision, "1");
+        assert!(pending.sent.is_none());
+        assert!(pending.confirmed.is_some());
+        assert!(replica.conflicts.is_empty());
+        assert!(state
+            .local
+            .hosts
+            .get(&record_key(RecordKind::Host, "0000000000000008"))
+            .is_none());
+    }
+    #[test]
+    fn a_corrupt_superseded_or_current_pending_hash_blocks_capture_without_erasing_the_draft() {
+        let (mut state, keys, _) = initial();
+        edit(&mut state, "B");
+        state = public_candidate(&state, &keys, &signer()).unwrap();
+        let id = opaque(&state, &keys);
+        state
+            .local
+            .central
+            .as_mut()
+            .unwrap()
+            .replica
+            .as_mut()
+            .unwrap()
+            .pending
+            .get_mut(&id)
+            .unwrap()
+            .latest
+            .content_hash = "e".repeat(64);
+        let before = state.clone();
+        assert!(public_candidate(&state, &keys, &signer()).is_err());
+        assert_eq!(state, before);
     }
     #[test]
     fn unavailable_owner_or_wrong_signer_cannot_capture_or_change_the_source() {

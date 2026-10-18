@@ -25,7 +25,7 @@ pub struct Cache {
     pub group_order: Vec<String>,
     pub key_storage: BTreeMap<String, KeyStorage>,
 }
-fn row(
+pub(super) fn row(
     kind: RecordKind,
     id: &str,
     payload: serde_json::Value,

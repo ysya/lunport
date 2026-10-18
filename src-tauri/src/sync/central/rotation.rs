@@ -438,6 +438,10 @@ pub fn activate(
                 let clear = pending.latest.local_revision == sent.local_revision
                     && pending.latest.content_hash == sent.content_hash;
                 confirmed.insert(id.clone());
+                pending.confirmed = Some(super::replica::Base {
+                    version: version.clone(),
+                    content_hash: hash.clone(),
+                });
                 pending.sent = None;
                 pending.claimed = None;
                 if clear {
