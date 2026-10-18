@@ -77,7 +77,7 @@ impl Context {
         result.validate()?;
         Ok(result)
     }
-    fn matches_owner(&self, owner: &Workspace) -> Result<(), AppError> {
+    pub(super) fn matches_owner(&self, owner: &Workspace) -> Result<(), AppError> {
         Self::owner(owner)?;
         self.validate()?;
         if owner.control.anchor.as_ref() != Some(&self.anchor)

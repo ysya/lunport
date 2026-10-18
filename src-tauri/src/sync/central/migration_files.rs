@@ -10,6 +10,8 @@ const MAX_ENTRIES: usize = 8192;
 const MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024 + 8192;
 const MAX_DEPTH: usize = 8;
+mod archive;
+pub(super) use archive::MAX_ENCODED as MAX_ARCHIVE_BYTES;
 
 pub(super) struct Files {
     // Relative category paths only; preserve raw bytes in native memory until explicit local encryption.
