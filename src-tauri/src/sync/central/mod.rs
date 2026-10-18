@@ -23,6 +23,7 @@ pub mod recovery_credentials;
 pub mod recovery_flow;
 pub mod recovery_revalidation;
 pub mod replacement_archive;
+pub mod replacement;
 pub mod rekey;
 pub mod round;
 pub mod rotation;

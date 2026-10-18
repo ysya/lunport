@@ -29,6 +29,9 @@ pub fn initialize(env: &SyncEnv) -> Result<(), AppError> {
         .local
         .central
         .ok_or_else(invalid)?;
+    if before.replacement.is_some() {
+        return Err(invalid());
+    }
     if before.replica.is_some() || before.control.pairing_confirmation.is_none() {
         return Ok(());
     }

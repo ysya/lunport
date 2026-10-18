@@ -173,7 +173,7 @@ fn pending_pairing(
     identity: &DeviceIdentity,
     anchor: &TrustAnchor,
 ) -> Result<PendingPairing, AppError> {
-    let slot = profile.slot("pairing");
+    let slot = identity.slot(profile, "pairing")?;
     if let Some(encoded) = env.keychain.get(&slot)? {
         let pending = PendingPairing::restore(&Zeroizing::new(encoded), &identity.device())?;
         let r = pending.request();
@@ -189,7 +189,7 @@ fn pending_pairing(
         // An approval of this exact request may have committed after the account snapshot was
         // read. Preserve its only OOB secret before publishing an expired-request replacement.
         // One retained entry is sufficient with the single lifecycle owner and server request CAS.
-        let retained = profile.slot("pairing-retained");
+        let retained = identity.slot(profile, "pairing-retained")?;
         let encoded = pending.encode_secret()?;
         env.keychain.set(&retained, &encoded)?;
         let readback = Zeroizing::new(env.keychain.get(&retained)?.ok_or_else(invalid)?);
@@ -219,7 +219,7 @@ pub(super) fn load_pairing(
         return Err(invalid());
     }
     for kind in ["pairing", "pairing-retained"] {
-        if let Some(value) = env.keychain.get(&profile.slot(kind))? {
+        if let Some(value) = env.keychain.get(&identity.slot(profile, kind)?)? {
             let encoded = Zeroizing::new(value);
             if let Ok(pending) = PendingPairing::restore(&encoded, &identity.device()) {
                 if pending.request().request_id == request {
@@ -318,13 +318,18 @@ fn establish_locked(
     }
     current_login(env, operation)?;
     let identity = if previous.is_some() {
-        DeviceIdentity::load(env.keychain, &profile, true)
-            .ok()
-            .filter(|id| {
-                previous
-                    .as_ref()
-                    .is_some_and(|w| id.device() == w.control.device)
-            })
+        DeviceIdentity::load_selected(
+            env.keychain,
+            &profile,
+            previous.as_ref().and_then(|w| w.identity_slot.as_deref()),
+            true,
+        )
+        .ok()
+        .filter(|id| {
+            previous
+                .as_ref()
+                .is_some_and(|w| id.device() == w.control.device)
+        })
     } else {
         Some(DeviceIdentity::load_or_create(
             env.keychain,
@@ -388,10 +393,11 @@ fn establish_locked(
                 )?,
             };
             let recovery_reserved = previous.as_ref().is_some_and(|w| {
-                matches!(
-                    w.recovery,
-                    Some(super::recovery_state::RecoveryState::Pending { .. })
-                )
+                (w.replacement.is_some() && w.control.anchor.is_none())
+                    || matches!(
+                        w.recovery,
+                        Some(super::recovery_state::RecoveryState::Pending { .. })
+                    )
             }) || previous
                 .as_ref()
                 .filter(|w| w.control.anchor.is_none())
@@ -399,8 +405,8 @@ fn establish_locked(
                 .transpose()?
                 .unwrap_or(false);
             if recovery_reserved {
-                // Login retains API access after a lost Recover reply, but cannot replace the
-                // protected recovery journal with an unrelated pairing/root-adoption flow.
+                // Login retains account access while an explicit recovery/replacement is reserved.
+                // It cannot bypass that intent through the original identity's pairing/root adoption.
                 if public.phase == Phase::SignedOut && public.pending_request.is_some() {
                     public.phase = Phase::AwaitingApproval;
                 }
@@ -575,7 +581,12 @@ pub fn resume(env: &SyncEnv, force_session: bool) -> Result<bool, AppError> {
         platform: env.platform,
     };
     let profile = workspace.control.profile.profile()?;
-    let identity = DeviceIdentity::load(&background, &profile, false)?;
+    let identity = DeviceIdentity::load_selected(
+        &background,
+        &profile,
+        workspace.identity_slot.as_deref(),
+        false,
+    )?;
     if identity.device() != workspace.control.device {
         return Err(invalid());
     }
@@ -686,8 +697,9 @@ pub fn sign_out(env: &SyncEnv) -> Result<Status, AppError> {
         core.central_session = None;
         core.central_user_action = None;
     }
-    let cleanup = credentials::forget_refresh(env.keychain, &profile)
-        .and_then(|_| credentials::forget_session_attempt(env.keychain, &profile));
+    let cleanup = credentials::forget_refresh(env.keychain, &profile).and_then(|_| {
+        credentials::forget_session_attempt(env.keychain, &profile, before.identity_slot.as_deref())
+    });
     // This call cannot undo local sign-out; a short-lived opaque server session also expires independently.
     if let Some(device) = session.as_ref().and_then(|s| s.device.as_ref()) {
         if let Ok(api) = Api::new(&profile.origin) {

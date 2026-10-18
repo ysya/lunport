@@ -2279,3 +2279,74 @@ fn offline_kit_recovery_revalidation_keeps_the_previous_durable_attempt_on_cance
     assert_eq!(recovery_credentials::reveal(&peer.env()).unwrap().kit, future.kit);
     assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
 }
+
+#[test]
+fn selected_replacement_identity_is_used_for_sign_in_and_background_resume_without_default_fallback() {
+    use super::{client_state::State, credentials::DeviceIdentity, workspace::Workspace};
+    use crate::sync::env::Keychain;
+    let service=Service::new(); let peer=TestDevice::new("selected",&FakeRelay::new(),&TestClock::new());
+    service.login(&peer);
+    let mut records=record_runtime::snapshot(&peer.env()).unwrap().0;
+    let old=records.local.central.as_ref().unwrap();
+    let profile=old.control.profile.profile().unwrap();
+    let original=peer.keychain.entry(&profile.slot("device")).unwrap();
+    let original_attempt=peer.keychain.entry(&profile.slot("session-attempt"));
+    peer.keychain.set(&profile.slot("pairing"),"retained-original-pairing-proof").unwrap();
+    let operation="b".repeat(32);
+    let replacement=DeviceIdentity::create_replacement(&peer.keychain,&profile,&operation).unwrap();
+    let mut selected=Workspace::new(State::new(old.control.profile.clone(),old.control.account_id.clone(),replacement.device(),old.control.auth_epoch).unwrap()).unwrap();
+    selected.identity_slot=Some(operation.clone());
+    selected.validate().unwrap();
+    assert!(super::workspace::verify_publication(None,Some(&selected)).is_err());
+    // Fixture for a previously authorized on-disk selection. Ordinary publication cannot seed it.
+    records.local.central=Some(selected);
+    std::fs::write(&peer.env().state_path,serde_json::to_vec(&records).unwrap()).unwrap();
+    let trusted=TestDevice::new("trusted-selector",&peer.relay,&peer.clock);
+    service.login(&trusted);
+    bootstrap::prepare(&trusted.env()).unwrap(); let kit=bootstrap::reveal(&trusted.env()).unwrap();
+    bootstrap::confirm(&trusted.env(),&kit.root).unwrap();
+    service.login(&peer);
+    assert_eq!(controller::context(&peer.env()).unwrap().identity.as_ref().unwrap().device(),replacement.device());
+    let pairing=devices::pairing_code(&peer.env()).unwrap();
+    devices::approve(&trusted.env(),&pairing.code).unwrap();
+    controller::refresh(&peer.env()).unwrap();
+    joining::initialize(&peer.env()).unwrap();
+    struct NoDefault<'a> { source:&'a dyn Keychain, default:String }
+    impl Keychain for NoDefault<'_> {
+        fn get(&self,_:&str)->Result<Option<String>,crate::error::AppError>{panic!("background attempted an interactive read")}
+        fn set(&self,_:&str,_:&str)->Result<(),crate::error::AppError>{panic!("background attempted an interactive write")}
+        fn delete(&self,_:&str)->Result<(),crate::error::AppError>{panic!("background attempted deletion")}
+        fn get_noninteractive(&self,key:&str)->Result<Option<String>,crate::error::AppError>{
+            assert_ne!(key,self.default);self.source.get(key)
+        }
+        fn set_noninteractive(&self,key:&str,value:&str)->Result<(),crate::error::AppError>{
+            assert_ne!(key,self.default);self.source.set(key,value)
+        }
+    }
+    let protected=NoDefault{source:&peer.keychain,default:profile.slot("device")};
+    assert!(controller::resume(&crate::sync::env::SyncEnv{keychain:&protected,..peer.env()},true).unwrap());
+    assert_eq!(controller::context(&peer.env()).unwrap().identity.as_ref().unwrap().device(),replacement.device());
+    assert_eq!(peer.keychain.entry(&profile.slot("session-attempt")),original_attempt);
+    assert_eq!(peer.keychain.entry(&profile.slot("pairing")).as_deref(),Some("retained-original-pairing-proof"));
+    let selected_attempt=profile.device_slot("session-attempt",Some(&operation)).unwrap();
+    assert!(peer.keychain.entry(&selected_attempt).is_some());
+    let slot=profile.slot(&format!("device-replacement-{operation}"));
+    for wrong in [None,Some("corrupt selected identity".to_string()),Some(original.clone())] {
+        match wrong { Some(value)=>peer.keychain.set(&slot,&value).unwrap(),None=>peer.keychain.delete(&slot).unwrap() }
+        let before=record_runtime::snapshot(&peer.env()).unwrap().0;
+        let sessions=service.state.lock().unwrap().sessions.len();
+        service.login(&peer);
+        let context=controller::context(&peer.env()).unwrap();
+        assert!(context.identity.is_none());assert!(context.device.is_none());
+        assert_eq!(service.state.lock().unwrap().sessions.len(),sessions);
+        assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0,before);
+        assert!(controller::resume(&crate::sync::env::SyncEnv{keychain:&protected,..peer.env()},true).is_err());
+        assert_eq!(peer.keychain.entry(&profile.slot("device")).as_deref(),Some(original.as_str()));
+        assert!(record_runtime::snapshot(&peer.env()).unwrap().0.local.central.as_ref().unwrap().identity_slot.as_ref()==Some(&operation));
+    }
+    controller::sign_out(&peer.env()).unwrap();
+    assert!(peer.keychain.entry(&selected_attempt).is_none());
+    assert_eq!(peer.keychain.entry(&profile.slot("session-attempt")),original_attempt);
+    assert_eq!(peer.keychain.entry(&profile.slot("pairing")).as_deref(),Some("retained-original-pairing-proof"));
+    assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0.local.central.unwrap().identity_slot,Some(operation));
+}

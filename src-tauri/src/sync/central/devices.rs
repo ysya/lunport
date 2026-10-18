@@ -31,7 +31,7 @@ pub fn pairing_code(env: &SyncEnv) -> Result<PairingReveal, AppError> {
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
     let before = workspace(env)?;
     let session = controller::context(env)?;
-    if before.control.phase != Phase::AwaitingApproval {
+    if before.replacement.is_some() || before.control.phase != Phase::AwaitingApproval {
         return Err(invalid());
     }
     let identity = session.identity.as_ref().ok_or_else(invalid)?;

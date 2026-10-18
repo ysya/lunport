@@ -64,11 +64,24 @@ impl Profile {
     pub(crate) fn slot(&self, kind: &str) -> String {
         format!("central:v2:{kind}:{}", self.locator)
     }
+    pub(crate) fn device_slot(
+        &self,
+        kind: &str,
+        replacement: Option<&str>,
+    ) -> Result<String, AppError> {
+        match replacement {
+            Some(id) if hex(id, 32) => Ok(self.slot(&format!("{kind}-replacement-{id}"))),
+            Some(_) => Err(invalid()),
+            None => Ok(self.slot(kind)),
+        }
+    }
 }
 pub struct DeviceIdentity {
     pub id: String,
     pub keys: DeviceKeys,
     credential: Zeroizing<String>,
+    // Native storage selection, never serialized as private identity material.
+    replacement: Option<String>,
 }
 impl DeviceIdentity {
     pub fn device(&self) -> Device {
@@ -102,7 +115,12 @@ impl DeviceIdentity {
             keychain.get_noninteractive(&slot)
         }?;
         let encoded=Zeroizing::new(saved.ok_or_else(||AppError::Other("This device's account keys are unavailable. Use device approval or your recovery kit; local data is retained.".into()))?);
-        Self::decode(&encoded, profile)
+        let mut identity = Self::decode(&encoded, profile)?;
+        identity.replacement = replacement.map(str::to_string);
+        Ok(identity)
+    }
+    pub(crate) fn slot(&self, profile: &Profile, kind: &str) -> Result<String, AppError> {
+        profile.device_slot(kind, self.replacement.as_deref())
     }
     pub fn load_or_create(
         keychain: &dyn Keychain,
@@ -121,11 +139,7 @@ impl DeviceIdentity {
         Self::load_or_create_slot(keychain, profile, Some(operation), true)
     }
     fn identity_slot(profile: &Profile, replacement: Option<&str>) -> Result<String, AppError> {
-        match replacement {
-            Some(id) if hex(id, 32) => Ok(profile.slot(&format!("device-replacement-{id}"))),
-            Some(_) => Err(invalid()),
-            None => Ok(profile.slot("device")),
-        }
+        profile.device_slot("device", replacement)
     }
     fn load_or_create_slot(
         keychain: &dyn Keychain,
@@ -141,7 +155,9 @@ impl DeviceIdentity {
             keychain.get_noninteractive(&slot)
         }?;
         if let Some(encoded) = saved {
-            return Self::decode(&Zeroizing::new(encoded), profile);
+            let mut identity = Self::decode(&Zeroizing::new(encoded), profile)?;
+            identity.replacement = replacement.map(str::to_string);
+            return Ok(identity);
         }
         if !interactive {
             return Err(AppError::Other(
@@ -152,6 +168,7 @@ impl DeviceIdentity {
             id: random_id(16)?,
             keys: DeviceKeys::generate()?,
             credential: Zeroizing::new(random_id(32)?),
+            replacement: replacement.map(str::to_string),
         };
         #[derive(Serialize)]
         struct Stored<'a> {
@@ -219,6 +236,7 @@ impl DeviceIdentity {
             id: stored.id.clone(),
             keys: DeviceKeys::decode_secret(&stored.keys)?,
             credential: Zeroizing::new(stored.credential.clone()),
+            replacement: None,
         })
     }
 }
@@ -260,7 +278,7 @@ impl SessionAttempt {
                 self.secret.zeroize();
             }
         }
-        let slot = profile.slot("session-attempt");
+        let slot = device.slot(profile, "session-attempt")?;
         if let Some(encoded) = keychain.get(&slot)? {
             let encoded = Zeroizing::new(encoded);
             if encoded.len() > 4096 {
@@ -464,8 +482,12 @@ pub fn renew(
         "Sign in again: the renewed account credential could not be saved securely. Local data is retained.".into()))?;
     Ok(tokens)
 }
-pub fn forget_session_attempt(keychain: &dyn Keychain, profile: &Profile) -> Result<(), AppError> {
-    keychain.delete(&profile.slot("session-attempt"))
+pub fn forget_session_attempt(
+    keychain: &dyn Keychain,
+    profile: &Profile,
+    replacement: Option<&str>,
+) -> Result<(), AppError> {
+    keychain.delete(&profile.device_slot("session-attempt", replacement)?)
 }
 pub fn forget_refresh(keychain: &dyn Keychain, profile: &Profile) -> Result<(), AppError> {
     keychain.delete(&profile.slot("refresh"))

@@ -46,7 +46,8 @@ fn current(
     Ok(publication)
 }
 fn publication_allowed(workspace: &Workspace, replica: &Replica, chain: &VerifiedChain) -> bool {
-    workspace.control.cloud_writes_allowed()
+    workspace.replacement.is_none()
+        && workspace.control.cloud_writes_allowed()
         && replica.baseline_ready()
         && replica
             .verify_write_authority(
@@ -176,6 +177,31 @@ mod tests {
             .approve_library("d".repeat(64), &ws.control.highwater.as_ref().unwrap().head)
             .unwrap();
         ws
+    }
+    #[test]
+    fn replacement_intent_stages_verified_ciphertext_without_publishing_material_or_new_keys() {
+        let mut ws = active();
+        assert!(ws.can_upload());
+        ws.replacement = Some(super::super::replacement::Intent {
+            operation: "c".repeat(32),
+            route: super::super::replacement::Route::RecoveryKit,
+            device: None,
+        });
+        ws.validate().unwrap();
+        assert!(!ws.can_upload());
+        assert!(ws.require_key_recipients().is_err());
+        let keys = VaultKeys::generate().unwrap();
+        let first = row(&ws, &keys, 1, &"0".repeat(64), true);
+        let target = Checkpoint {
+            epoch: 1,
+            sequence: 1,
+            history_hash: first.history_hash.clone(),
+        };
+        let checked = prepare(&ws, &keys, &[first], &target).unwrap();
+        assert_eq!(checked.next.current.len(), 1);
+        assert!(checked.publication.is_empty());
+        ws.replica = Some(checked.next);
+        assert!(materialize_current(&ws, &keys).is_err());
     }
     #[test]
     fn semantically_invalid_signed_history_cannot_publish_an_earlier_valid_record() {

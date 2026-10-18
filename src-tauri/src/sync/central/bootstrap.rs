@@ -98,6 +98,9 @@ pub fn prepare(env: &SyncEnv) -> Result<Status, AppError> {
     let session = controller::context(env)?;
     let identity = session.identity.as_ref().ok_or_else(invalid)?;
     let before = workspace(env)?;
+    if before.replacement.is_some() {
+        return Err(invalid());
+    }
     if before.bootstrap.is_some() {
         let intent = load_intent(env, &session)?.ok_or_else(invalid)?;
         if intent.workspace.bootstrap.as_ref().map(|p| &p.wraps)

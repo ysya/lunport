@@ -209,6 +209,7 @@ fn start(env: &SyncEnv, encoded_kit: Option<&str>, revalidate: bool) -> Result<P
     };
     if (!revalidate && before.control.phase != Phase::AwaitingApproval)
         || before.control.anchor.is_some()
+        || before.replacement.is_some()
         || (!revalidate && before.recovery.is_some())
         || env.runtime.central_recovery_read.lock().unwrap().is_some()
     {

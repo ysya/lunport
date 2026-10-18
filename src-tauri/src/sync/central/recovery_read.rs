@@ -125,6 +125,7 @@ impl ReadSession {
             || control.library.is_some()
             || before.replica.is_some()
             || before.recovery.is_some()
+            || before.replacement.is_some()
             || !before.epochs.is_empty()
             || !before.observed_epochs.is_empty()
             || before.bootstrap.is_some()

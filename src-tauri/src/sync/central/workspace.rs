@@ -26,6 +26,11 @@ pub struct BootstrapPackage {
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
     pub control: State,
+    /// Only a typed replacement publication may change the protected identity selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_slot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<super::replacement::Intent>,
     pub replica: Option<Replica>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<super::recovery_state::RecoveryState>,
@@ -45,6 +50,8 @@ impl Workspace {
     pub fn new(control: State) -> Result<Self, AppError> {
         let state = Self {
             control,
+            identity_slot: None,
+            replacement: None,
             replica: None,
             recovery: None,
             rotation: None,
@@ -58,6 +65,29 @@ impl Workspace {
         Ok(state)
     }
     pub fn validate(&self) -> Result<(), AppError> {
+        if self
+            .identity_slot
+            .as_ref()
+            .is_some_and(|id| !super::wire::hex(id, 32))
+        {
+            return Err(invalid());
+        }
+        if let Some(intent) = &self.replacement {
+            intent.validate(self)?;
+            if self.bootstrap.is_some()
+                || self.recovery.as_ref().is_some_and(|r| {
+                    !matches!(
+                        r,
+                        super::recovery_state::RecoveryState::Accepted {
+                            credentials_cleared: true,
+                            ..
+                        }
+                    )
+                })
+            {
+                return Err(invalid());
+            }
+        }
         self.control.validate()?;
         if let Some(recovery) = &self.recovery {
             recovery.validate(self)?;
@@ -306,6 +336,12 @@ impl Workspace {
     pub fn verify_transition(&self, next: &Self) -> Result<(), AppError> {
         next.validate()?;
         self.control.verify_transition(&next.control)?;
+        if self.identity_slot != next.identity_slot {
+            return Err(invalid());
+        }
+        if let Some(intent) = &self.replacement {
+            intent.verify_transition(next.replacement.as_ref())?;
+        }
         if let Some(recovery) = &self.recovery {
             recovery.verify_transition(next)?;
         } else if matches!(
@@ -458,6 +494,11 @@ impl Workspace {
         Ok(())
     }
     pub fn require_key_recipients(&self) -> Result<(), AppError> {
+        if self.replacement.is_some() {
+            return Err(AppError::Other(
+                "Finish device replacement before publishing content keys.".into(),
+            ));
+        }
         if self.recovery.as_ref().is_some_and(|r| r.requires_cleanup()) {
             return Err(AppError::Other(
                 "Finish recovery credential cleanup before publishing content keys.".into(),
@@ -466,7 +507,8 @@ impl Workspace {
         self.control.require_key_recipients()
     }
     pub fn can_upload(&self) -> bool {
-        !self.recovery.as_ref().is_some_and(|r| r.requires_cleanup())
+        self.replacement.is_none()
+            && !self.recovery.as_ref().is_some_and(|r| r.requires_cleanup())
             && self.control.cloud_writes_allowed()
             && self.rotation.is_none()
             && (self.observed_epochs.is_empty() || self.observed_epochs.len() == self.epochs.len())
@@ -495,11 +537,19 @@ pub fn verify_publication(
         (Some(before), None)
             if before.control.anchor.is_some()
                 || before.control.cutover
-                || before.recovery.is_some() =>
+                || before.recovery.is_some()
+                || before.identity_slot.is_some()
+                || before.replacement.is_some() =>
         {
             Err(invalid())
         }
-        (None, Some(after)) if after.recovery.is_some() => Err(invalid()),
+        (None, Some(after))
+            if after.recovery.is_some()
+                || after.identity_slot.is_some()
+                || after.replacement.is_some() =>
+        {
+            Err(invalid())
+        }
         (_, Some(after)) => after.validate(),
         _ => Ok(()),
     }
