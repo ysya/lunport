@@ -16,7 +16,7 @@ Lunport is a desktop SSH workspace for **macOS, Windows and Linux**, formerly na
 - **SSH terminal in the app** — open session tabs in Lunport or your preferred external terminal, search retained output, adjust terminal text size, verify server fingerprints and enter passwords or authentication codes in Lunport. Save host passwords in this device's system credential store when desired. Jump hosts use `ProxyJump`.
 - **Keys in one place** — generate keys or import an OpenSSH private key with the system file picker or by pasting. Imports copy into the local vault and preserve the source file. Key sharing has separate controls.
 - **Encrypted library sync** — connect your computers with a private 24-word code. Hosts and Groups travel together; passwords stay on each device, and private keys sync only when explicitly shared. The relay stores ciphertext and can be self-hosted.
-- **AI access through MCP** — allow individual hosts for local MCP clients. Review proposed connections, verify fingerprints in the app, and choose Ask or explicitly acknowledged Auto-log for remote commands.
+- **AI access through MCP** — add Codex, Claude Code, Claude Desktop, Cursor or VS Code from Settings, or export configuration for another local agent. Allow individual hosts, review proposed connections and choose Ask or explicitly acknowledged Auto-log for remote commands.
 - **A home for existing OpenSSH setups** — Legacy mode edits your local SSH configuration while preserving comments, ordering and unknown directives. Migration into the Records library requires an explicit review.
 - **Consistent preferences** — searchable settings, six built-in color palettes with independent light/dark/system modes, reduced motion, an animated collapsible sidebar and signed Stable/Beta updates. **Settings → About** collects the installed version, project links and license.
 
@@ -48,7 +48,7 @@ The in-app terminal ships first on the **Beta** channel. Choose **Settings → U
 2. Add a host, or open **Import** to review and copy entries from an existing SSH configuration.
 3. Open **Keys → Import private key → From a file** to choose a key. Pasting a supported OpenSSH private key is also available.
 4. Select the host's login key, verify its server fingerprint against a trusted source and double-click the host to connect. Choose **Lunport (in app)** in **Settings → Connections** to use session tabs; existing terminal preferences are preserved.
-5. Optionally open **Sync** to connect your devices, or **Settings → AI access** to enable selected hosts for an MCP client.
+5. Optionally open **Sync** to connect your devices, or **Settings → AI access → Connect an AI tool** to add your agent and allow selected hosts.
 
 Existing Legacy workspaces keep their OpenSSH files. Use the offered migration review when you are ready to move them into the Records library.
 
