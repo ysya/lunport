@@ -20,6 +20,30 @@ pub(super) struct Target {
     key_epoch: u64,
 }
 impl Target {
+    pub(super) fn binding(&self) -> Result<String, AppError> {
+        let auth = self.auth_epoch.to_string();
+        let key = self.key_epoch.to_string();
+        Ok(super::super::crypto::hash(&super::super::wire::canonical(
+            &[
+                "lunport-frozen-source-local-context-v1",
+                &self.profile,
+                &self.anchor.origin,
+                &self.anchor.account_id,
+                &self.anchor.genesis_hash,
+                &self.vault,
+                &self.device,
+                if self.identity_slot.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+                self.identity_slot.as_deref().unwrap_or(""),
+                &self.head,
+                &auth,
+                &key,
+            ],
+        )?))
+    }
     pub(super) fn current(owner: &Workspace) -> Result<Self, AppError> {
         if owner.control.cutover || owner.control.phase != Phase::Enrolled {
             return Err(invalid());
@@ -53,6 +77,7 @@ pub(in crate::sync::central) struct FrozenSnapshot {
     checkpoint: Source,
     records: Vec<Envelope>,
     context: Context,
+    progress: Progress,
 }
 impl FrozenSnapshot {
     pub fn checkpoint(&self) -> &Source {
@@ -60,6 +85,9 @@ impl FrozenSnapshot {
     }
     pub fn records(&self) -> &[Envelope] {
         &self.records
+    }
+    pub(super) fn progress(&self) -> &Progress {
+        &self.progress
     }
     pub(super) fn context(&self) -> &Context {
         &self.context
@@ -131,6 +159,7 @@ impl Sources {
         };
         Ok(FrozenSnapshot {
             checkpoint: actual,
+            progress: progress.clone(),
             records: response.records,
             context: Context {
                 target,

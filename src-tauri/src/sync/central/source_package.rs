@@ -151,7 +151,7 @@ impl Package {
             super::migration_files::MAX_ARCHIVE_BYTES,
         )?)?;
         let state = state(&files, &name)?;
-        let sources = Sources::decode_local(section(&mut input, 65536)?, &state)?;
+        let sources = Sources::decode_local(section(&mut input, super::migration_sources::MAX_BOOK_BYTES)?, &state)?;
         let decryptors = Snapshot::decode_local(section(&mut input, 2 * 1024 * 1024)?)?;
         if !input.is_empty() {
             return Err(invalid());

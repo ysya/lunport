@@ -21,6 +21,7 @@ use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 const MAX_SOURCES: usize = 65;
+pub(super) const MAX_BOOK_BYTES: usize = 4 * 1024 * 1024;
 mod archive;
 mod records;
 mod inventory;
@@ -54,6 +55,7 @@ pub(super) struct Sources {
     legacy_origin: Option<String>,
     keys: BTreeMap<String, SourceKey>,
     expected: BTreeSet<String>,
+    discovery: Option<Box<archive::Discovery>>,
 }
 fn secret<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
     String::deserialize(d).map(Zeroizing::new)
@@ -102,6 +104,7 @@ impl Sources {
             legacy_origin: None,
             keys: BTreeMap::new(),
             expected: BTreeSet::new(),
+            discovery: None,
         };
         let Some(account) = state.account.as_ref() else {
             if account_keys.is_some() || !state.spaces.is_empty() {

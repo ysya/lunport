@@ -1,6 +1,46 @@
 //! Explicit plaintext only for the protected local source capsule, never for transport or a DTO.
 use super::*;
+use crate::sync::{record::Envelope, relay::PullResponse};
 const MAX_BYTES: usize = 65536;
+/// One immutable frozen parent can discover additional children. Never recursively nest books.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Discovery {
+    #[serde(deserialize_with = "secret", serialize_with = "serialize_secret")]
+    base: Zeroizing<String>,
+    local_context: String,
+    progress: Progress,
+    latest_seq: u64,
+    records: Vec<Envelope>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Key {
+    chain_id: String,
+    #[serde(deserialize_with = "secret")]
+    auth_token: Zeroizing<String>,
+    #[serde(deserialize_with = "secret")]
+    encryption_key: Zeroizing<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Body {
+    version: u32,
+    relay: Option<String>,
+    parent: String,
+    keys: Vec<Key>,
+    #[serde(default, deserialize_with = "discovery")]
+    discovery: Option<Discovery>,
+}
+fn serialize_secret<S: serde::Serializer>(
+    value: &Zeroizing<String>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_str(value)
+}
+fn discovery<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Discovery>, D::Error> {
+    Discovery::deserialize(d).map(Some)
+}
 impl Sources {
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         if self.keys.len() > MAX_SOURCES
@@ -9,63 +49,75 @@ impl Sources {
             return Err(invalid());
         }
         #[derive(Serialize)]
-        struct Key<'a> {
+        struct RefKey<'a> {
             chain_id: &'a str,
             auth_token: &'a str,
             encryption_key: &'a str,
         }
         #[derive(Serialize)]
-        struct Body<'a> {
+        struct RefBody<'a> {
             version: u32,
             relay: Option<&'a str>,
             parent: &'a str,
-            keys: Vec<Key<'a>>,
+            keys: Vec<RefKey<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            discovery: Option<&'a Discovery>,
         }
-        let body = Body {
-            version: 1,
+        let body = RefBody {
+            version: if self.discovery.is_some() { 2 } else { 1 },
             relay: self.legacy_origin.as_deref(),
             parent: &self.parent,
             keys: self
                 .keys
                 .iter()
-                .map(|(id, key)| Key {
+                .map(|(id, key)| RefKey {
                     chain_id: id,
                     auth_token: &key.token,
                     encryption_key: &key.encryption,
                 })
                 .collect(),
+            discovery: self.discovery.as_deref(),
         };
         let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_BYTES));
         serde_json::to_writer(&mut *bytes, &body).map_err(|_| invalid())?;
-        if bytes.len() > MAX_BYTES {
+        if bytes.len()
+            > if self.discovery.is_some() {
+                MAX_BOOK_BYTES
+            } else {
+                MAX_BYTES
+            }
+        {
             return Err(invalid());
         }
         Ok(bytes)
     }
-    /// Restore against its original archived state; this cannot silently narrow source discovery.
+    /// Restore by rederiving every credential, including remote discoveries, from original evidence.
     pub fn decode_local(bytes: &[u8], state: &SyncStateV3) -> Result<Self, AppError> {
-        if bytes.len() > MAX_BYTES {
+        Self::decode_book(bytes, state, true)
+    }
+    fn decode_book(
+        bytes: &[u8],
+        state: &SyncStateV3,
+        allow_discovery: bool,
+    ) -> Result<Self, AppError> {
+        if bytes.len()
+            > if allow_discovery {
+                MAX_BOOK_BYTES
+            } else {
+                MAX_BYTES
+            }
+        {
             return Err(invalid());
         }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Key {
-            chain_id: String,
-            #[serde(deserialize_with = "secret")]
-            auth_token: Zeroizing<String>,
-            #[serde(deserialize_with = "secret")]
-            encryption_key: Zeroizing<String>,
-        }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Body {
-            version: u32,
-            relay: Option<String>,
-            parent: String,
-            keys: Vec<Key>,
-        }
         let body: Body = serde_json::from_slice(bytes).map_err(|_| invalid())?;
-        if body.version != 1 || body.keys.len() > MAX_SOURCES {
+        if body.keys.len() > MAX_SOURCES
+            || !matches!(
+                (body.version, body.discovery.is_some()),
+                (1, false) | (2, true)
+            )
+            || body.version == 1 && bytes.len() > MAX_BYTES
+            || body.version == 2 && !allow_discovery
+        {
             return Err(invalid());
         }
         let mut keys = BTreeMap::new();
@@ -88,7 +140,33 @@ impl Sources {
                 return Err(invalid());
             }
         }
-        let expected = if body.parent.is_empty() {
+        let expected = if let Some(discovery) = body.discovery {
+            let base = Self::decode_book(discovery.base.as_bytes(), state, false)?;
+            let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+            if discovery.local_context != super::frozen::Target::current(owner)?.binding()? {
+                return Err(invalid());
+            }
+            let operation = &discovery
+                .progress
+                .proof
+                .last()
+                .ok_or_else(invalid)?
+                .intent
+                .body
+                .migration_id;
+            let snapshot = base.admit_frozen(
+                owner,
+                operation,
+                &discovery.progress,
+                None,
+                &base.parent,
+                PullResponse {
+                    records: discovery.records,
+                    latest_seq: discovery.latest_seq,
+                },
+            )?;
+            base.with_parent_discovery(owner, &snapshot)?
+        } else if body.parent.is_empty() {
             if !keys.is_empty() || body.relay.is_some() {
                 return Err(invalid());
             }
@@ -112,6 +190,60 @@ impl Sources {
         }
         Ok(expected)
     }
+    /// Consume a verified parent, retaining both its proof and the exact original keybook.
+    pub fn with_parent_discovery(
+        mut self,
+        owner: &Workspace,
+        snapshot: &super::frozen::FrozenSnapshot,
+    ) -> Result<Self, AppError> {
+        let context = snapshot.context();
+        if self.discovery.is_some()
+            || self.parent.is_empty()
+            || snapshot.checkpoint().chain_id != self.parent
+            || context.keybook != super::super::crypto::hash(&self.encode_local()?)
+            || context.target != super::frozen::Target::current(owner)?
+        {
+            return Err(invalid());
+        }
+        let base = Zeroizing::new(
+            std::str::from_utf8(&self.encode_local()?)
+                .map_err(|_| invalid())?
+                .to_owned(),
+        );
+        let parent = self.keys.get(&self.parent).ok_or_else(invalid)?;
+        let temporary = Temporary(
+            ChainKeys::from_parts(&self.parent, &parent.token, &parent.encryption)
+                .map_err(|_| invalid())?,
+        );
+        for envelope in snapshot.records() {
+            let row = SealedRecord {
+                envelope: envelope.clone(),
+                dirty: false,
+                public_identity: None,
+            };
+            let opened = self.open(&self.parent, &row)?;
+            let view = opened.view()?;
+            if view.kind == "space" {
+                if !hex(view.id, 64) || view.id == self.parent {
+                    return Err(invalid());
+                }
+                self.expected.insert(view.id.into());
+            }
+            self.sealed(&row, &temporary.0)?;
+        }
+        if self.expected.iter().any(|id| !self.keys.contains_key(id)) {
+            return Err(invalid());
+        }
+        self.discovery = Some(Box::new(Discovery {
+            base,
+            local_context: context.target.binding()?,
+            progress: snapshot.progress().clone(),
+            latest_seq: super::super::wire::number(&snapshot.checkpoint().sequence, true)?,
+            records: snapshot.records().to_vec(),
+        }));
+        drop(self.encode_local()?);
+        Ok(self)
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +255,7 @@ mod tests {
     };
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use serde_json::json;
-    fn fixture() -> (SyncStateV3, ChainKeys, ChainKeys, SealedRecord) {
+    pub(super) fn fixture() -> (SyncStateV3, ChainKeys, ChainKeys, SealedRecord) {
         let parent = ChainKeys::generate().unwrap();
         let child = ChainKeys::generate().unwrap();
         let mut state:SyncStateV3=serde_json::from_value(json!({"version":3,"device_id":"d".repeat(32),"device_name":"Synthetic","relay_url":"https://relay.example","last_sync_ms":null,"last_error":null})).unwrap();
@@ -259,3 +391,6 @@ mod tests {
         assert!(Sources::decode_local(&bytes, &joined).is_err());
     }
 }
+
+#[cfg(test)]
+mod discovery_tests;
