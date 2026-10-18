@@ -242,6 +242,7 @@ export class VaultStore extends DurableObject<Env> {
       body: {
         vault: state.vault,
         epoch: state.keyEpoch,
+        phase: state.phase,
         wrap,
         committed,
         sequence: String(state.sequence),

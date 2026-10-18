@@ -235,7 +235,7 @@ fn step(env: &SyncEnv, report: &mut Report) -> Result<Step, AppError> {
             fingerprint: super::crypto::hash(keys.signing.as_bytes()),
         });
     }
-    before.control.require_key_recipients()?;
+    before.require_key_recipients()?;
     let remote: RemoteStatus = checked(
         env,
         report,

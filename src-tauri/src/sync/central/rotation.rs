@@ -258,7 +258,7 @@ impl Journal {
         plan: Plan,
         source_rows: &[Version],
     ) -> Result<Self, AppError> {
-        workspace.control.require_key_recipients()?;
+        workspace.require_key_recipients()?;
         let from = workspace
             .replica
             .as_ref()

@@ -410,7 +410,9 @@ fn persist_candidate(
                 || matches!(central.control.phase,
                     crate::sync::central::client_state::Phase::SignedOut
                     | crate::sync::central::client_state::Phase::Revoked)
-                || session.device.as_ref().is_some_and(|s| s.auth_epoch != central.control.auth_epoch)
+                || session.identity.as_ref().is_some_and(|identity| identity.device() != central.control.device)
+                || session.device.as_ref().is_some_and(|s| s.account_id != central.control.account_id
+                    || !crate::sync::central::controller::session_epoch_matches(&central.control, s.auth_epoch, s.device_state))
         })
     }) {
         core.central_session = None;

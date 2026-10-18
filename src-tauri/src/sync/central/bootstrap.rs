@@ -236,7 +236,7 @@ pub fn reveal(env: &SyncEnv) -> Result<RecoveryReveal, AppError> {
         kit: intent.kit.clone(),
     })
 }
-fn register(env: &SyncEnv, session: &Session, api: &Api) -> Result<Session, AppError> {
+pub(super) fn register(env: &SyncEnv, session: &Session, api: &Api) -> Result<Session, AppError> {
     super::round::check_cooldown(env)?;
     if session
         .tokens_started

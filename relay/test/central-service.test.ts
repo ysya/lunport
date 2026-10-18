@@ -1007,6 +1007,75 @@ describe("central device authorization and durable data", () => {
     await committed.arrayBuffer();
     // The child commit succeeded, but no account ACK was saved before the restart.
     await evictDurableObject(s.account);
+    // No old trusted device is needed to repair the lost registry ACK: a pending device
+    // first proves the CURRENT kit, then the account observes the child's committed epoch.
+    const pendingRecovery = device(10),
+      pendingGrant = await s.renew(pendingRecovery, random());
+    const recoveryEnrollment: Enrollment = {
+      origin,
+      account_id: actor.account,
+      genesis_hash: next.anchor.genesis_hash,
+      request_id: random(16),
+      device: pendingRecovery,
+      nonce: random(),
+      created_at_ms: String(Date.now() - 100),
+      expires_at_ms: String(Date.now() + 600000),
+      signature: "",
+    };
+    recoveryEnrollment.signature = sign(
+      enrollmentCanonical(recoveryEnrollment),
+      10,
+    );
+    expect(
+      (await s.account.enrollment(pendingGrant.actor!, recoveryEnrollment))
+        .status,
+    ).toBe(204);
+    const recoveryProof = {
+      request_id: recoveryEnrollment.request_id,
+      membership_head: next.head,
+      auth_epoch: String(pendingGrant.actor!.epoch),
+      signature: sign(
+        new TextEncoder().encode(
+          JSON.stringify([
+            "lunport-recovery-read-v2",
+            origin,
+            actor.account,
+            next.anchor.genesis_hash,
+            next.head,
+            String(pendingGrant.actor!.epoch),
+            base64(enrollmentCanonical(recoveryEnrollment)),
+            recoveryEnrollment.signature,
+          ]),
+        ),
+        4,
+      ),
+    };
+    expect(
+      (
+        await s.account.recoveryWraps(pendingGrant.actor!, {
+          ...recoveryProof,
+          signature: base64(new Uint8Array(64)),
+        })
+      ).status,
+    ).toBe(403);
+    const staleRegistry = await runInDurableObject(
+      s.account,
+      (_instance, ctx) =>
+        JSON.parse(
+          ctx.storage.sql
+            .exec<{ value: string }>("SELECT value FROM account_state")
+            .one().value,
+        ),
+    );
+    expect(staleRegistry.vaults[s.vault]).toEqual({ epoch: 1, rekey: true });
+    const recoveryRead = await s.account.recoveryWraps(
+      pendingGrant.actor!,
+      recoveryProof,
+    );
+    expect(recoveryRead.status).toBe(200);
+    expect(await recoveryRead.json()).toMatchObject({
+      results: [{ epoch: 2, phase: "ready", committed: { manifest } }],
+    });
     const finished = await s.account.finishRekey(
       actor,
       s.vault,

@@ -28,6 +28,8 @@ struct Account {
     epoch: u64,
     history: Vec<super::rekey::Version>,
     pulls: usize,
+    recovery_posts: usize,
+    recovery_corrupt_after_first: bool,
     reject_pull_once: bool,
     corrupt_pull_once: bool,
     denied: Vec<String>,
@@ -235,6 +237,7 @@ impl Service {
             .locator;
         install_account_access_routes(&mut server, &state, locator);
         install_rotation_routes(&mut server, &state);
+        install_recovery_routes(&mut server, &state, &config);
         Self {
             server,
             state,
@@ -261,6 +264,111 @@ impl Service {
         )
         .unwrap();
     }
+}
+fn install_recovery_routes(
+    server: &mut mockito::ServerGuard,
+    state: &Arc<Mutex<Account>>,
+    config: &OidcConfig,
+) {
+    server.mock("GET", "/v2/info").with_header("content-type", "application/json")
+        .with_body(json!({"protocol":2,"features":["central-accounts","anchored-membership","exact-revision","operation-receipts","paged-history","signed-rekey","paired-checkpoints","recovery-history"],"oidc":config}).to_string()).create();
+    let account = Arc::clone(state);
+    let barrier = Arc::clone(state);
+    server.mock("POST", "/v2/recovery/wraps").with_status_code_from_request(move |_| {let s = barrier.lock().unwrap(); if s.barrier_pending && s.hold_barrier {202} else {200}}).with_header("content-type", "application/json").with_body_from_request(move |request| {
+        let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+        let mut s = account.lock().unwrap();
+        verify_recovery_read(&s, request, &body);
+        s.barrier_pending = s.barrier_pending && s.hold_barrier;
+        if s.barrier_pending {return b"{}".to_vec();}
+        let committed = if s.key_epoch == 1 {Value::Null} else {json!({"manifest":s.commits.last(),"wraps":s.committed_wraps[&s.key_epoch]})};
+        json!({"membership_head":s.chain().unwrap().current().head(),"auth_epoch":s.epoch,"results":[{
+            "vault":s.vault,"epoch":s.key_epoch,"phase":if s.rekey_pending {"rekey_pending"}else{"ready"},"wrap":s.wraps.iter().find(|w|w.header.recipient=="recovery").unwrap(),"committed":committed,
+            "commits":s.commits,"sequence":s.history.len().to_string(),"history_hash":s.history.last().map_or("0".repeat(64),|row|row.history_hash.clone())}]}).to_string().into_bytes()
+    }).create();
+    let account = Arc::clone(state);
+    server.mock("POST", "/v2/recovery/history").with_header("content-type", "application/json").with_body_from_request(move |request| {
+        let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+        let mut s = account.lock().unwrap();
+        verify_recovery_read(&s, request, &body);
+        assert_eq!(body["vault"].as_str(),s.vault.as_deref());
+        let since: u64 = body["since"].as_str().unwrap().parse().unwrap();
+        let rows: Vec<_> = s.history.iter().filter(|row|row.sequence.parse::<u64>().unwrap()>since).take(32).cloned().collect();
+        let mut body=json!({"records":rows,"sequence":s.history.len().to_string(),"history_hash":s.history.last().map_or("0".repeat(64),|row|row.history_hash.clone()),
+            "membership_head":s.chain().unwrap().current().head(),"epoch":s.key_epoch,"phase":if s.rekey_pending {"rekey_pending"}else{"ready"}});
+        s.pulls += 1;
+        if std::mem::take(&mut s.corrupt_pull_once) || since > 0 && std::mem::take(&mut s.recovery_corrupt_after_first) {body["records"].as_array_mut().unwrap().last_mut().unwrap()["envelope"]["signature"]=json!("AA==");}
+        let encoded=body.to_string().into_bytes();
+        let hook=s.on_pull.take(); drop(s); if let Some(hook)=hook {hook();} encoded
+    }).create();
+    let response = Arc::clone(state);
+    let account = Arc::clone(state);
+    server
+        .mock("POST", "/v2/recovery/commit")
+        .with_status_code_from_request(move |_| {
+            if std::mem::take(&mut response.lock().unwrap().lose_control_response_once) {
+                503
+            } else {
+                200
+            }
+        })
+        .with_body_from_request(move |request| {
+            let body: Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+            let node: SignedMembership = serde_json::from_value(body["node"].clone()).unwrap();
+            let mut s = account.lock().unwrap();
+            s.recovery_posts += 1;
+            if s.proof.as_ref().unwrap().nodes.last() == Some(&node) {
+                return b"{}".to_vec();
+            }
+            let previous = s.chain().unwrap();
+            let next = previous.current().apply(&node).unwrap();
+            let own = s.device(request);
+            assert_eq!(node.body.enrollment.as_ref().unwrap(), &s.requests[&own]);
+            assert_eq!(node.body.action, super::membership::Action::Recover);
+            let vault = s.vault.clone().unwrap();
+            s.wraps = serde_json::from_value(body["wraps"][&vault].clone()).unwrap();
+            s.denied.extend(
+                previous
+                    .current()
+                    .devices()
+                    .keys()
+                    .filter(|id| !next.devices().contains_key(*id))
+                    .cloned(),
+            );
+            s.proof.as_mut().unwrap().nodes.push(node);
+            s.epoch += 1;
+            s.rekey_pending = true;
+            s.barrier_pending = s.hold_barrier;
+            b"{}".to_vec()
+        })
+        .create();
+}
+fn verify_recovery_read(s: &Account, request: &mockito::Request, body: &Value) {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let chain = s.chain().unwrap();
+    let own = s.device(request);
+    let enrollment = &s.requests[&own];
+    let proof = &body["proof"];
+    assert_eq!(proof["request_id"], enrollment.request_id);
+    assert_eq!(proof["membership_head"], chain.current().head());
+    assert_eq!(proof["auth_epoch"], s.epoch.to_string());
+    let a = chain.current().anchor();
+    let bytes = super::wire::canonical(&[
+        "lunport-recovery-read-v2",
+        &a.origin,
+        &a.account_id,
+        &a.genesis_hash,
+        chain.current().head(),
+        &s.epoch.to_string(),
+        &B64.encode(enrollment.canonical().unwrap()),
+        &enrollment.signature,
+    ])
+    .unwrap();
+    crypto::verify(
+        &chain.current().recovery().signing,
+        &bytes,
+        proof["signature"].as_str().unwrap(),
+    )
+    .unwrap();
 }
 fn install_account_access_routes(
     server: &mut mockito::ServerGuard,
@@ -1632,4 +1740,290 @@ fn account_only_revoke_binds_fresh_subject_target_and_epoch_preserves_intent_and
     let public = serde_json::to_string(&self_revoked).unwrap();
     assert!(!public.contains("synthetic-fresh-access"));
     assert!(!public.contains("synthetic-fresh-refresh"));
+}
+
+fn recovery_fixture(
+    count: u64,
+) -> (
+    Service,
+    Arc<TestDevice>,
+    bootstrap::RecoveryReveal,
+    super::crypto::VaultKeys,
+) {
+    use super::{payload, rekey, wire};
+    use crate::sync::records_v3::HostScope;
+    let service = Service::new();
+    let relay = FakeRelay::new();
+    let clock = TestClock::new();
+    let first = Arc::new(TestDevice::new("original", &relay, &clock));
+    let peer = Arc::new(TestDevice::new("recovered", &relay, &clock));
+    service.login(&first);
+    bootstrap::prepare(&first.env()).unwrap();
+    let kit = bootstrap::reveal(&first.env()).unwrap();
+    bootstrap::confirm(&first.env(), &kit.root).unwrap();
+    let original = controller::context(&first.env()).unwrap();
+    let signer = &original.identity.as_ref().unwrap().keys;
+    let ws = record_runtime::snapshot(&first.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap();
+    let wrap = &ws.own_wraps[0];
+    let keys = wrap
+        .open(signer, &wrap.header, &signer.public().signing)
+        .unwrap();
+    let a = ws.control.anchor.as_ref().unwrap();
+    let mut previous = "0".repeat(64);
+    for seq in 1..=count {
+        let id = payload::Identity {
+            kind: "host".into(),
+            id: format!("{seq:016x}"),
+            scope: Some(HostScope::Local),
+        };
+        let body=payload::encode(&id,&payload::Data::Host(serde_json::from_value(json!({"schema":2,"alias":format!("cloud-{seq}"),"hostname":"fixture.invalid","auth":"password"})).unwrap())).unwrap();
+        let envelope = crypto::seal_record(
+            &keys,
+            signer,
+            RecordHeader {
+                origin: a.origin.clone(),
+                account_id: a.account_id.clone(),
+                genesis_hash: a.genesis_hash.clone(),
+                vault_id: ws.control.personal_vault.clone().unwrap(),
+                record_id: id.opaque(&keys).unwrap(),
+                key_epoch: "1".into(),
+                membership_head: a.genesis_hash.clone(),
+                author: original.identity.as_ref().unwrap().id.clone(),
+                operation_id: format!("{seq:032x}"),
+                expected_revision: "0".into(),
+                kind: "host".into(),
+                deleted: false,
+            },
+            &body,
+        )
+        .unwrap();
+        let digest = rekey::envelope_digest(&envelope).unwrap();
+        let history_hash = crypto::hash(
+            &wire::canonical(&["lunport-history-v2", &previous, &seq.to_string(), &digest])
+                .unwrap(),
+        );
+        previous = history_hash.clone();
+        service.state.lock().unwrap().history.push(rekey::Version {
+            revision: "1".into(),
+            sequence: seq.to_string(),
+            envelope,
+            digest,
+            history_hash,
+        });
+    }
+    service.login(&peer);
+    (service, peer, kit, keys)
+}
+
+#[test]
+fn offline_kit_recovery_drives_verified_history_backup_lost_reply_restart_barriers_and_cleanup() {
+    use super::{recovery::RecoveryKit, recovery_credentials, recovery_flow};
+    let (service, peer, kit, keys) = recovery_fixture(33);
+    let local = Arc::clone(&peer);
+    service.state.lock().unwrap().on_pull = Some(Box::new(move || {
+        record_runtime::mutate_records(&local.env(), |records| {
+            let mut next = records.clone();
+            next.device_name = "local-B".into();
+            Ok(next)
+        })
+        .unwrap();
+    }));
+    let ready = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    assert_eq!(ready.phase, "backup_required");
+    assert_eq!(ready.verified, 33);
+    let operation = ready.operation.unwrap();
+    let shown = recovery_credentials::reveal(&peer.env()).unwrap();
+    assert_ne!(shown.kit, kit.kit);
+    let before = record_runtime::snapshot(&peer.env()).unwrap().0;
+    assert!(before
+        .local
+        .central
+        .as_ref()
+        .unwrap()
+        .control
+        .anchor
+        .is_none());
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
+    assert_eq!(before.device_name, "local-B");
+    service.login(&peer);
+    assert_eq!(
+        recovery_flow::status(&peer.env()).unwrap().phase,
+        "backup_required"
+    );
+    service.state.lock().unwrap().hold_barrier = true;
+    service.state.lock().unwrap().lose_control_response_once = true;
+    assert!(recovery_flow::confirm(&peer.env(), &operation).is_err());
+    assert_eq!(
+        recovery_flow::status(&peer.env()).unwrap().phase,
+        "submitted"
+    );
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 1);
+    service.login(&peer);
+    let sessions = service.state.lock().unwrap().sessions.len();
+    controller::resume(&peer.env(), false).unwrap();
+    assert_eq!(service.state.lock().unwrap().sessions.len(), sessions);
+    let active = controller::context(&peer.env()).unwrap();
+    record_runtime::mutate_records(&peer.env(), |records| Ok(records.clone())).unwrap();
+    assert!(Arc::ptr_eq(
+        &active,
+        &controller::context(&peer.env()).unwrap()
+    ));
+    assert_eq!(
+        recovery_flow::confirm(&peer.env(), &operation)
+            .unwrap()
+            .phase,
+        "submitted"
+    );
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 1);
+    service.state.lock().unwrap().hold_barrier = false;
+    assert_eq!(
+        recovery_flow::confirm(&peer.env(), &operation)
+            .unwrap()
+            .phase,
+        "complete"
+    );
+    let records = record_runtime::snapshot(&peer.env()).unwrap().0;
+    let ws = records.local.central.as_ref().unwrap();
+    assert_eq!(ws.replica.as_ref().unwrap().checkpoint.sequence, 33);
+    assert_eq!(ws.control.phase, super::client_state::Phase::Rekey);
+    assert!(!ws.can_upload());
+    assert_eq!(records.device_name, "local-B");
+    assert!(!serde_json::to_string(&records)
+        .unwrap()
+        .contains("fixture.invalid"));
+    assert!(!serde_json::to_string(&records).unwrap().contains("LPREC2:"));
+    let identity = controller::context(&peer.env()).unwrap();
+    let identity = identity.identity.as_ref().unwrap();
+    let own = &ws.own_wraps[0];
+    keys.verify_same(
+        &own.open(&identity.keys, &own.header, &identity.keys.public().signing)
+            .unwrap(),
+    )
+    .unwrap();
+    let chain = ws.control.verified_chain().unwrap();
+    RecoveryKit::parse(&shown.kit)
+        .unwrap()
+        .current_keys(&chain)
+        .unwrap();
+    assert!(RecoveryKit::parse(&kit.kit)
+        .unwrap()
+        .current_keys(&chain)
+        .is_err());
+    let slot = ws
+        .control
+        .profile
+        .profile()
+        .unwrap()
+        .slot("recovery-intent");
+    assert!(peer.keychain.entry(&slot).is_none());
+    assert!(recovery_credentials::reveal(&peer.env()).is_err());
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 1);
+}
+
+#[test]
+fn offline_kit_recovery_rejects_a_late_corrupt_page_and_cancel_keeps_only_unadopted_local_state() {
+    use super::{recovery_credentials, recovery_flow};
+    let (service, peer, kit, _) = recovery_fixture(33);
+    let before = record_runtime::snapshot(&peer.env()).unwrap().0;
+    service.state.lock().unwrap().recovery_corrupt_after_first = true;
+    assert!(recovery_flow::begin(&peer.env(), Some(&kit.kit)).is_err());
+    assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0, before);
+    assert_eq!(recovery_flow::status(&peer.env()).unwrap().verified, 32);
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
+    let workspace = before.local.central.as_ref().unwrap();
+    assert!(!recovery_credentials::has_intent(&peer.env(), workspace).unwrap());
+    recovery_flow::cancel(&peer.env());
+    assert_eq!(recovery_flow::status(&peer.env()).unwrap().phase, "idle");
+    let own = Arc::clone(&peer);
+    service.state.lock().unwrap().on_pull =
+        Some(Box::new(move || recovery_flow::cancel(&own.env())));
+    assert!(recovery_flow::begin(&peer.env(), Some(&kit.kit)).is_err());
+    assert_eq!(recovery_flow::status(&peer.env()).unwrap().phase, "idle");
+    assert!(!recovery_credentials::has_intent(&peer.env(), workspace).unwrap());
+    assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0, before);
+}
+#[test]
+fn offline_kit_recovery_never_submits_a_plan_after_a_new_access_barrier() {
+    use super::recovery_flow;
+    let (service, peer, kit, _) = recovery_fixture(1);
+    let ready = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    let before = record_runtime::snapshot(&peer.env()).unwrap().0;
+    service.state.lock().unwrap().epoch += 1;
+    service.state.lock().unwrap().rekey_pending = true;
+    assert!(recovery_flow::confirm(&peer.env(), ready.operation.as_deref().unwrap()).is_err());
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 0);
+    assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0, before);
+    assert_eq!(
+        recovery_flow::status(&peer.env()).unwrap().phase,
+        "backup_required"
+    );
+}
+#[test]
+fn offline_kit_recovery_pages_are_bounded_and_continue_without_returning_secret_material() {
+    use super::recovery_flow;
+    let (_service, peer, kit, _) = recovery_fixture(1025);
+    let mut progress = recovery_flow::begin(&peer.env(), Some(&kit.kit)).unwrap();
+    assert_eq!(progress.phase, "reading");
+    assert!(progress.verified <= 1024);
+    assert_eq!(progress.total, 1025);
+    assert!(!serde_json::to_string(&progress)
+        .unwrap()
+        .contains("LPREC2:"));
+    for _ in 0..4 {
+        progress = recovery_flow::advance(&peer.env()).unwrap();
+        if progress.phase != "reading" {
+            break;
+        }
+    }
+    assert_eq!(progress.phase, "backup_required");
+    assert_eq!(progress.verified, 1025);
+}
+
+#[test]
+fn offline_kit_recovery_handles_a_second_loss_before_the_prior_barrier_or_content_rotation_finishes(
+) {
+    use super::{recovery_credentials, recovery_flow};
+    let (service, peer, original_kit, _) = recovery_fixture(1);
+    let first = recovery_flow::begin(&peer.env(), Some(&original_kit.kit)).unwrap();
+    let replacement = recovery_credentials::reveal(&peer.env()).unwrap();
+    service.state.lock().unwrap().hold_barrier = true;
+    assert_eq!(
+        recovery_flow::confirm(&peer.env(), first.operation.as_deref().unwrap())
+            .unwrap()
+            .phase,
+        "submitted"
+    );
+    assert!(service.state.lock().unwrap().barrier_pending);
+    let relay = FakeRelay::new();
+    let clock = TestClock::new();
+    let another = TestDevice::new("second-loss", &relay, &clock);
+    service.login(&another);
+    service.state.lock().unwrap().hold_barrier = false;
+    let second = recovery_flow::begin(&another.env(), Some(&replacement.kit)).unwrap();
+    assert_eq!(second.phase, "backup_required");
+    assert!(!service.state.lock().unwrap().barrier_pending);
+    assert_eq!(service.state.lock().unwrap().key_epoch, 1);
+    let latest = recovery_credentials::reveal(&another.env()).unwrap();
+    assert_ne!(latest.kit, replacement.kit);
+    assert_eq!(
+        recovery_flow::confirm(&another.env(), second.operation.as_deref().unwrap())
+            .unwrap()
+            .phase,
+        "complete"
+    );
+    let state = record_runtime::snapshot(&another.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap();
+    assert_eq!(state.replica.as_ref().unwrap().checkpoint.sequence, 1);
+    assert_eq!(state.replica.as_ref().unwrap().checkpoint.epoch, 1);
+    assert_eq!(state.control.phase, super::client_state::Phase::Rekey);
+    assert_eq!(service.state.lock().unwrap().recovery_posts, 2);
 }

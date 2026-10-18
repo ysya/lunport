@@ -208,7 +208,7 @@ pub fn approve(env: &SyncEnv, code: &str) -> Result<Status, AppError> {
     let api = Api::new(&before.control.profile.origin)?;
     let remote = checked_remote(env, &api, &session, &before)?;
     remember_denials(env, &mut before, &remote.denied)?;
-    before.control.require_key_recipients()?;
+    before.require_key_recipients()?;
     let chain = before.control.verified_chain()?;
     if remote.phase != "ready"
         || remote.vaults.len() != 1

@@ -111,6 +111,15 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
         error: core.central_user_action.clone(),
     })
 }
+/// A lost Recover reply may leave a verified active API grant ahead of an unanchored
+/// pending owner. Retaining account access never adopts a root or enables cloud writes.
+pub(crate) fn session_epoch_matches(control: &State, epoch: u64, state: DeviceState) -> bool {
+    epoch == control.auth_epoch
+        || epoch > control.auth_epoch
+            && control.anchor.is_none()
+            && control.pending_request.is_some()
+            && state == DeviceState::Active
+}
 pub fn checked_config(env: &SyncEnv, service: &str, config: &OidcConfig) -> Result<(), AppError> {
     config.validate()?;
     let (records, _) = record_runtime::snapshot(env)?;
@@ -376,80 +385,99 @@ fn establish_locked(
                     remote.auth_epoch,
                 )?,
             };
-            if public.anchor.is_some() {
-                match remote.proof {
-                    Some(proof) => {
-                        public = public.observe_proof(proof, remote.auth_epoch)?;
-                        if public.phase == Phase::SignedOut {
-                            public.phase =
-                                if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) {
-                                    Phase::BackupRequired
-                                } else if public.cutover && public.library.is_some() {
-                                    Phase::Active
-                                } else {
-                                    Phase::Enrolled
-                                };
+            let recovery_reserved = previous.as_ref().is_some_and(|w| {
+                matches!(
+                    w.recovery,
+                    Some(super::recovery_state::RecoveryState::Pending { .. })
+                )
+            }) || previous
+                .as_ref()
+                .filter(|w| w.control.anchor.is_none())
+                .map(|w| super::recovery_credentials::has_intent(env, w))
+                .transpose()?
+                .unwrap_or(false);
+            if recovery_reserved {
+                // Login retains API access after a lost Recover reply, but cannot replace the
+                // protected recovery journal with an unrelated pairing/root-adoption flow.
+                if public.phase == Phase::SignedOut && public.pending_request.is_some() {
+                    public.phase = Phase::AwaitingApproval;
+                }
+            } else {
+                if public.anchor.is_some() {
+                    match remote.proof {
+                        Some(proof) => {
+                            public = public.observe_proof(proof, remote.auth_epoch)?;
+                            if public.phase == Phase::SignedOut {
+                                public.phase =
+                                    if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) {
+                                        Phase::BackupRequired
+                                    } else if public.cutover && public.library.is_some() {
+                                        Phase::Active
+                                    } else {
+                                        Phase::Enrolled
+                                    };
+                            }
+                            if (remote.phase == "revocation_pending"
+                                || remote.vaults.values().any(|v| v.rekey))
+                                && public.phase != Phase::BackupRequired
+                                && public.phase != Phase::Revoked
+                            {
+                                public.phase = Phase::Rekey;
+                            }
                         }
-                        if (remote.phase == "revocation_pending"
-                            || remote.vaults.values().any(|v| v.rekey))
-                            && public.phase != Phase::BackupRequired
-                            && public.phase != Phase::Revoked
-                        {
-                            public.phase = Phase::Rekey;
+                        None if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) => {
+                            if public.phase == Phase::SignedOut {
+                                public.phase = Phase::BackupRequired;
+                            }
                         }
-                    }
-                    None if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) => {
-                        if public.phase == Phase::SignedOut {
-                            public.phase = Phase::BackupRequired;
-                        }
-                    }
-                    None => {
-                        return Err(AppError::Other(
+                        None => return Err(AppError::Other(
                             "The existing account Vault is unavailable. Local data is retained."
                                 .into(),
-                        ))
+                        )),
                     }
-                }
-            } else if let Some(proof) = remote.proof {
-                let anchor = TrustAnchor {
-                    origin: service.into(),
-                    account_id: public.account_id.clone(),
-                    genesis_hash: remote.genesis_hash.ok_or_else(invalid)?,
-                };
-                if session.device.as_ref().unwrap().device_state == DeviceState::Pending {
-                    let pending = pending_pairing(env, &profile, identity, &anchor)?;
-                    #[derive(Serialize)]
-                    struct Request<'a> {
-                        request: &'a super::membership::Enrollment,
-                    }
-                    let reply = api.control(
-                        session.device.as_ref().unwrap(),
-                        Control::Enrollment,
-                        &Request {
-                            request: pending.request(),
-                        },
-                    )?;
-                    super::round::require_success(env, &reply)?;
-                    public = public.begin_pairing(&pending)?;
-                } else if public.pending_request.is_some() {
-                    if public.phase == Phase::SignedOut {
-                        public.phase = Phase::AwaitingApproval;
-                    }
-                    let confirmation = remote.pairing_confirmation.as_ref().ok_or_else(invalid)?;
-                    let pending = load_pairing(env, &profile, identity, &confirmation.request_id)?;
-                    if public.pending_request.as_ref() != Some(pending.request()) {
+                } else if let Some(proof) = remote.proof {
+                    let anchor = TrustAnchor {
+                        origin: service.into(),
+                        account_id: public.account_id.clone(),
+                        genesis_hash: remote.genesis_hash.ok_or_else(invalid)?,
+                    };
+                    if session.device.as_ref().unwrap().device_state == DeviceState::Pending {
+                        let pending = pending_pairing(env, &profile, identity, &anchor)?;
+                        #[derive(Serialize)]
+                        struct Request<'a> {
+                            request: &'a super::membership::Enrollment,
+                        }
+                        let reply = api.control(
+                            session.device.as_ref().unwrap(),
+                            Control::Enrollment,
+                            &Request {
+                                request: pending.request(),
+                            },
+                        )?;
+                        super::round::require_success(env, &reply)?;
                         public = public.begin_pairing(&pending)?;
+                    } else if public.pending_request.is_some() {
+                        if public.phase == Phase::SignedOut {
+                            public.phase = Phase::AwaitingApproval;
+                        }
+                        let confirmation =
+                            remote.pairing_confirmation.as_ref().ok_or_else(invalid)?;
+                        let pending =
+                            load_pairing(env, &profile, identity, &confirmation.request_id)?;
+                        if public.pending_request.as_ref() != Some(pending.request()) {
+                            public = public.begin_pairing(&pending)?;
+                        }
+                        public = public.accept_pairing(&pending, confirmation, proof)?;
                     }
-                    public = public.accept_pairing(&pending, confirmation, proof)?;
+                } else if public.pending_request.is_some() {
+                    return Err(AppError::Other("The pending account Vault is temporarily unavailable. Keep this device's pairing request and retry.".into()));
                 }
-            } else if public.pending_request.is_some() {
-                return Err(AppError::Other("The pending account Vault is temporarily unavailable. Keep this device's pairing request and retry.".into()));
+                if remote.auth_epoch < public.auth_epoch {
+                    return Err(invalid());
+                }
+                public.auth_epoch = remote.auth_epoch;
+                public = public.remember_denials(remote.denied.iter().map(String::as_str))?;
             }
-            if remote.auth_epoch < public.auth_epoch {
-                return Err(invalid());
-            }
-            public.auth_epoch = remote.auth_epoch;
-            public = public.remember_denials(remote.denied.iter().map(String::as_str))?;
             public.validate()?;
             let next = workspace.get_or_insert(Workspace::new(public.clone())?);
             next.control = public;
@@ -519,7 +547,7 @@ pub fn resume(env: &SyncEnv, force_session: bool) -> Result<bool, AppError> {
             s.tokens_started.elapsed().saturating_add(token_margin) < s.tokens.expires_in
                 && s.device.as_ref().is_some_and(|d| {
                     !d.expired()
-                        && d.auth_epoch == workspace.control.auth_epoch
+                        && session_epoch_matches(&workspace.control, d.auth_epoch, d.device_state)
                         && d.account_id == workspace.control.account_id
                 })
                 && s.identity
@@ -628,10 +656,12 @@ pub fn refresh(env: &SyncEnv) -> Result<Status, AppError> {
 /// Local sign-out is durable even when the service is offline. Keep pinned trust and encrypted edits.
 pub fn sign_out(env: &SyncEnv) -> Result<Status, AppError> {
     require_enabled()?;
+    super::recovery_flow::cancel(env);
     if let Some((_, Some(cancel))) = env.runtime.central_login.lock().unwrap().take() {
         cancel.cancel();
     }
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    env.runtime.central_recovery_read.lock().unwrap().take();
     let (records, _) = record_runtime::snapshot(env)?;
     let before = records.local.central.as_ref().ok_or_else(invalid)?;
     let profile = before.control.profile.profile()?;

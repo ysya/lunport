@@ -837,6 +837,7 @@ export class AccountStore extends DurableObject<Env> {
     const { observed, grant } = access;
     const results: unknown[] = [];
     let bytes = 1024;
+    const repaired: Record<string, Vault> = {};
     for (const id of Object.keys(observed.vaults)) {
       const result = await this.env.VAULT.getByName(
         observed.id + ":" + id,
@@ -845,12 +846,39 @@ export class AccountStore extends DurableObject<Env> {
         await result.body?.cancel();
         return { status: 409, body: { error: "recovery_checkpoint_changed" } };
       }
-      const bundle = await result.json();
+      const bundle = (await result.json()) as { epoch: number; phase: string };
+      if (
+        !Number.isSafeInteger(bundle.epoch) ||
+        bundle.epoch < observed.vaults[id].epoch ||
+        bundle.epoch > 65 ||
+        !["ready", "rekey_pending"].includes(bundle.phase)
+      )
+        return { status: 409 };
+      const rekey = bundle.phase === "rekey_pending";
+      if (
+        bundle.epoch !== observed.vaults[id].epoch ||
+        rekey !== observed.vaults[id].rekey
+      )
+        repaired[id] = { epoch: bundle.epoch, rekey };
       bytes += new TextEncoder().encode(JSON.stringify(bundle)).byteLength;
       if (bytes > 4 * 1024 * 1024) return { status: 413 };
       results.push(bundle);
     }
     if (!this.recoveryUnchanged(observed, actor, grant)) return { status: 409 };
+    if (Object.keys(repaired).length) {
+      // A child may have committed before its registry ACK was lost. Current kit PoP and
+      // the exact installed grant permit finishing that ACK without an active old device.
+      const changed = this.ctx.storage.transactionSync(() => {
+        if (!this.recoveryUnchanged(observed, actor, grant)) return false;
+        const latest = this.load()!;
+        for (const [id, checkpoint] of Object.entries(repaired))
+          latest.vaults[id] = checkpoint;
+        latest.version += 1;
+        this.save(latest);
+        return true;
+      });
+      return changed ? this.recoveryWrapsResult(actor, proof) : { status: 409 };
+    }
     return {
       status: 200,
       body: {

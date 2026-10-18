@@ -171,6 +171,15 @@ impl RecoveryKit {
             phrase: Zeroizing::new(mnemonic.to_string()),
         })
     }
+    /// Only for resuming the same protected, unsubmitted new-kit intent after a local write loss.
+    pub(super) fn resume_seed(&self, anchor: &TrustAnchor) -> Result<RecoverySeed, AppError> {
+        if &self.anchor != anchor {
+            return Err(invalid());
+        }
+        let mnemonic = Mnemonic::parse_in_normalized(Language::English, &*self.phrase)
+            .map_err(|_| invalid())?;
+        Ok(RecoverySeed(Zeroizing::new(mnemonic.to_entropy())))
+    }
     pub fn read_proof(
         &self,
         chain: &VerifiedChain,

@@ -1,3 +1,4 @@
+import { CentralRecovery } from "./CentralRecovery";
 import { CentralAccountAccess } from "./CentralAccountAccess";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -81,6 +82,7 @@ export function CentralAccountPanel({
   const [service, setService] = useState(status.service ?? "");
   const [busy, setBusy] = useState(false);
   const [deviceBusy, setDeviceBusy] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [pairing, setPairing] = useState<{
     code: string;
     expires_at_ms: string;
@@ -100,9 +102,9 @@ export function CentralAccountPanel({
     };
   }, []);
   useEffect(() => {
-    onBusyChange?.(busy || deviceBusy);
+    onBusyChange?.(busy || deviceBusy || recoveryBusy);
     return () => onBusyChange?.(false);
-  }, [busy, deviceBusy, onBusyChange]);
+  }, [busy, deviceBusy, recoveryBusy, onBusyChange]);
   useEffect(() => {
     secretGeneration.current += 1;
     setKit(null);
@@ -122,7 +124,7 @@ export function CentralAccountPanel({
     return () => document.removeEventListener("visibilitychange", hide);
   }, []);
   const run = async (operation: () => Promise<void>) => {
-    if (inFlight.current || disabled || deviceBusy) return;
+    if (inFlight.current || disabled || deviceBusy || recoveryBusy) return;
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -147,7 +149,7 @@ export function CentralAccountPanel({
     const next = await operation;
     if (mounted.current) update(next);
   };
-  const blocked = busy || deviceBusy || disabled;
+  const blocked = busy || deviceBusy || recoveryBusy || disabled;
   const login = signingIn || status.login_pending;
   const backup = status.phase === "backup_required";
   return (
@@ -279,7 +281,7 @@ export function CentralAccountPanel({
         ["enrolled", "active", "rekey"].includes(status.phase) && (
           <CentralDevices
             status={status}
-            disabled={busy || disabled}
+            disabled={busy || recoveryBusy || disabled}
             onBusyChange={setDeviceBusy}
             update={update}
           />
@@ -287,9 +289,17 @@ export function CentralAccountPanel({
       {status.configured && status.needs_recovery && !status.has_session && (
         <CentralAccountAccess
           status={status}
-          disabled={busy || disabled || status.login_pending}
+          disabled={busy || recoveryBusy || disabled || status.login_pending}
           update={update}
           onBusyChange={setDeviceBusy}
+        />
+      )}
+      {status.configured && (
+        <CentralRecovery
+          status={status}
+          disabled={busy || deviceBusy || disabled}
+          update={update}
+          onBusyChange={setRecoveryBusy}
         />
       )}
       {status.needs_recovery && (

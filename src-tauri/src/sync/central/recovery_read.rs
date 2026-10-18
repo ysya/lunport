@@ -27,6 +27,7 @@ pub struct EpochBundle {
 pub struct RecoveryVault {
     pub vault: String,
     pub epoch: u64,
+    pub phase: String,
     pub wrap: WrappedKeys,
     pub committed: Option<EpochBundle>,
     pub commits: Vec<SignedRekey>,
@@ -122,6 +123,7 @@ impl ReadSession {
             || control.cutover
             || control.library.is_some()
             || before.replica.is_some()
+            || before.recovery.is_some()
             || !before.epochs.is_empty()
             || !before.observed_epochs.is_empty()
             || before.bootstrap.is_some()
@@ -150,7 +152,9 @@ impl ReadSession {
             return Err(invalid());
         }
         let source = response.results.pop().ok_or_else(invalid)?;
-        if source.vault != personal_vault_id(anchor)? {
+        if source.vault != personal_vault_id(anchor)?
+            || !["ready", "rekey_pending"].contains(&source.phase.as_str())
+        {
             return Err(invalid());
         }
         epochs(&chain, &source, auth_epoch)?;
@@ -225,6 +229,12 @@ impl ReadSession {
             operations: BTreeSet::new(),
             bytes: 0,
         })
+    }
+    pub fn total(&self) -> u64 {
+        self.target.sequence
+    }
+    pub fn vault(&self) -> &str {
+        &self.source.vault
     }
     pub fn position(&self) -> u64 {
         self.replica.checkpoint.sequence
@@ -309,7 +319,7 @@ impl VerifiedRecovery {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::{
         client_state::{ProfileData, State},
         credentials::Profile,
@@ -329,10 +339,14 @@ mod tests {
         signer: DeviceKeys,
         keys: VaultKeys,
         before: Workspace,
+        identity: DeviceKeys,
         response: RecoveryReply,
         rows: Vec<Version>,
     }
     fn owner(kit: &RecoveryKit, auth: u64) -> Workspace {
+        owner_keys(kit, auth).0
+    }
+    fn owner_keys(kit: &RecoveryKit, auth: u64) -> (Workspace, DeviceKeys) {
         let profile = Profile::new(&kit.anchor().origin, "https://id.test", "subject").unwrap();
         let device = DeviceKeys::generate().unwrap();
         let pending = PendingPairing::begin(kit.anchor(), &"2".repeat(32), &device, 1000).unwrap();
@@ -356,7 +370,7 @@ mod tests {
         .unwrap()
         .begin_pairing(&pending)
         .unwrap();
-        Workspace::new(state).unwrap()
+        (Workspace::new(state).unwrap(), device)
     }
     fn wrapped(
         chain: &VerifiedChain,
@@ -450,7 +464,7 @@ mod tests {
         };
         let chain = proof.verify(&anchor, None).unwrap();
         let kit = seed.bind(&chain).unwrap();
-        let before = owner(&kit, 2);
+        let (before, identity) = owner_keys(&kit, 2);
         let keys = VaultKeys::generate().unwrap();
         let response = RecoveryReply {
             membership_head: chain.current().head().into(),
@@ -458,6 +472,7 @@ mod tests {
             results: vec![RecoveryVault {
                 vault: personal_vault_id(&anchor).unwrap(),
                 epoch: 1,
+                phase: "rekey_pending".into(),
                 wrap: wrapped(&chain, &signer, &keys, 1),
                 committed: None,
                 commits: vec![],
@@ -471,6 +486,7 @@ mod tests {
             signer,
             keys,
             before,
+            identity,
             response,
             rows: vec![],
         };
@@ -541,6 +557,22 @@ mod tests {
         target.commits = vec![plan.manifest.clone()];
         target.history_hash = plan.manifest.body.target_history_hash.clone();
         plan
+    }
+    pub(crate) fn verified_fresh_case(
+        count: u64,
+        rotated: bool,
+    ) -> (VerifiedRecovery, RecoveryKit, DeviceKeys) {
+        let mut c = case(count);
+        let rows = if rotated {
+            rotate(&mut c).rows
+        } else {
+            c.rows.clone()
+        };
+        let mut session = read(&c).unwrap();
+        for rows in rows.chunks(32) {
+            session.append(page(&c, rows)).unwrap();
+        }
+        (session.finish().unwrap(), c.kit, c.identity)
     }
     #[test]
     fn full_history_is_required_and_pages_keep_plaintext_inside_native_admission() {

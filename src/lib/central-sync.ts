@@ -119,3 +119,44 @@ export const centralRevokeAccountDevice = (selection: {
   tauriInvoke<CentralRevokeResult>("central_revoke_account_device", {
     selection,
   });
+
+export type CentralRecoveryProgress = {
+  phase:
+    | "idle"
+    | "reading"
+    | "backup_required"
+    | "submitted"
+    | "cleanup_required"
+    | "complete";
+  operation: string | null;
+  verified: number;
+  total: number;
+  root_fingerprint: string | null;
+};
+export const centralRecoveryKey = (status: CentralStatus) =>
+  [
+    "central-recovery",
+    status.service,
+    status.account_id,
+    status.device_id,
+    status.root_fingerprint,
+    status.authorization_epoch,
+    status.phase,
+  ] as const;
+export const centralRecoveryStatus = () =>
+  tauriInvoke<CentralRecoveryProgress>("central_recovery_status");
+// Kit inputs and reveal responses are passed directly; neither belongs in a query/mutation cache.
+export const centralBeginAccountRecovery = (kit: string) =>
+  tauriInvoke<CentralRecoveryProgress>("central_begin_account_recovery", {
+    kit,
+  });
+export const centralAdvanceAccountRecovery = () =>
+  tauriInvoke<CentralRecoveryProgress>("central_advance_account_recovery");
+export const centralCancelAccountRecovery = () =>
+  tauriInvoke<void>("central_cancel_account_recovery");
+export const centralRevealNewRecovery = () =>
+  tauriInvoke<{ root: string; kit: string }>("central_reveal_new_recovery");
+export const centralConfirmAccountRecovery = (operation: string) =>
+  tauriInvoke<CentralRecoveryProgress>("central_confirm_account_recovery", {
+    operation,
+  });

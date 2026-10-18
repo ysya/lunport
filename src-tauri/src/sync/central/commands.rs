@@ -265,3 +265,64 @@ pub async fn central_revoke_account_device(
     .await
     .map_err(engine::join_error)?
 }
+
+#[tauri::command]
+pub async fn central_recovery_status(
+    app: AppHandle,
+) -> Result<super::recovery_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, super::recovery_flow::status)?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_begin_account_recovery(
+    app: AppHandle,
+    kit: Option<String>,
+) -> Result<super::recovery_flow::Progress, AppError> {
+    let kit = kit.map(zeroize::Zeroizing::new);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::recovery_flow::begin(env, kit.as_deref().map(String::as_str))
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_advance_account_recovery(
+    app: AppHandle,
+) -> Result<super::recovery_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, super::recovery_flow::advance)?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub fn central_cancel_account_recovery(app: AppHandle) -> Result<(), AppError> {
+    controller::require_enabled()?;
+    engine::with_env(&app, |env| super::recovery_flow::cancel(env))?;
+    Ok(())
+}
+#[tauri::command]
+pub async fn central_reveal_new_recovery(app: AppHandle) -> Result<RecoveryReveal, AppError> {
+    controller::require_enabled()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, super::recovery_credentials::reveal)?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_confirm_account_recovery(
+    app: AppHandle,
+    operation: String,
+) -> Result<super::recovery_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| super::recovery_flow::confirm(env, &operation))?
+    })
+    .await
+    .map_err(engine::join_error)?
+}

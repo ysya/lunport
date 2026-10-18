@@ -28,6 +28,8 @@ pub struct Workspace {
     pub control: State,
     pub replica: Option<Replica>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<super::recovery_state::RecoveryState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<super::rotation::Journal>,
     #[serde(default)]
     pub epochs: Vec<SignedRekey>,
@@ -44,6 +46,7 @@ impl Workspace {
         let state = Self {
             control,
             replica: None,
+            recovery: None,
             rotation: None,
             epochs: vec![],
             observed_epochs: vec![],
@@ -56,6 +59,9 @@ impl Workspace {
     }
     pub fn validate(&self) -> Result<(), AppError> {
         self.control.validate()?;
+        if let Some(recovery) = &self.recovery {
+            recovery.validate(self)?;
+        }
         if self.epochs.len() > 64 || self.observed_epochs.len() > 64 {
             return Err(invalid());
         }
@@ -262,20 +268,23 @@ impl Workspace {
             } else if let Some(last) = self.epochs.last() {
                 // A fresh peer never knew the earlier epoch. Its authenticated pairing minimum
                 // replaces a source-extension proof only for that initial, already-rotated history.
-                let confirmation = self
-                    .control
-                    .pairing_confirmation
-                    .as_ref()
-                    .ok_or_else(invalid)?;
+                let approved_head = if let Some(confirmation) = &self.control.pairing_confirmation {
+                    confirmation.approved_head.as_str()
+                } else {
+                    match self.recovery.as_ref() {
+                        Some(super::recovery_state::RecoveryState::Accepted {
+                            admission, ..
+                        }) => admission.approved_head.as_str(),
+                        _ => return Err(invalid()),
+                    }
+                };
                 let minimum = replica.minimum.as_ref().ok_or_else(invalid)?;
                 if minimum.epoch != replica.checkpoint.epoch
                     || minimum.sequence < number(&last.body.source_sequence, true)?
                     || chain
                         .revision_of(&last.body.membership_head)
                         .ok_or_else(invalid)?
-                        > chain
-                            .revision_of(&confirmation.approved_head)
-                            .ok_or_else(invalid)?
+                        > chain.revision_of(approved_head).ok_or_else(invalid)?
                 {
                     return Err(invalid());
                 }
@@ -297,6 +306,14 @@ impl Workspace {
     pub fn verify_transition(&self, next: &Self) -> Result<(), AppError> {
         next.validate()?;
         self.control.verify_transition(&next.control)?;
+        if let Some(recovery) = &self.recovery {
+            recovery.verify_transition(next)?;
+        } else if matches!(
+            next.recovery,
+            Some(super::recovery_state::RecoveryState::Accepted { .. })
+        ) {
+            return Err(invalid());
+        }
         if !next.observed_epochs.starts_with(&self.observed_epochs) {
             return Err(invalid());
         }
@@ -411,6 +428,18 @@ impl Workspace {
                 }
             }
             (Some(_), None) => return Err(invalid()),
+            (None, Some(_))
+                if matches!(
+                    self.recovery,
+                    Some(super::recovery_state::RecoveryState::Pending { .. })
+                ) && matches!(
+                    next.recovery,
+                    Some(super::recovery_state::RecoveryState::Accepted { .. })
+                ) =>
+            {
+                // The preceding typed journal transition requires the exact fully admitted cache,
+                // immutable kit-signed minimum, epoch trail and own next-head bridge wrap.
+            }
             (None, Some(after)) => {
                 if after.checkpoint.sequence != 0
                     || after.checkpoint.history_hash != "0".repeat(64)
@@ -428,8 +457,17 @@ impl Workspace {
         }
         Ok(())
     }
+    pub fn require_key_recipients(&self) -> Result<(), AppError> {
+        if self.recovery.as_ref().is_some_and(|r| r.requires_cleanup()) {
+            return Err(AppError::Other(
+                "Finish recovery credential cleanup before publishing content keys.".into(),
+            ));
+        }
+        self.control.require_key_recipients()
+    }
     pub fn can_upload(&self) -> bool {
-        self.control.cloud_writes_allowed()
+        !self.recovery.as_ref().is_some_and(|r| r.requires_cleanup())
+            && self.control.cloud_writes_allowed()
             && self.rotation.is_none()
             && (self.observed_epochs.is_empty() || self.observed_epochs.len() == self.epochs.len())
             && self.replica.as_ref().is_some_and(|r| {
@@ -454,9 +492,14 @@ pub fn verify_publication(
 ) -> Result<(), AppError> {
     match (before, after) {
         (Some(before), Some(after)) => before.verify_transition(after),
-        (Some(before), None) if before.control.anchor.is_some() || before.control.cutover => {
+        (Some(before), None)
+            if before.control.anchor.is_some()
+                || before.control.cutover
+                || before.recovery.is_some() =>
+        {
             Err(invalid())
         }
+        (None, Some(after)) if after.recovery.is_some() => Err(invalid()),
         (_, Some(after)) => after.validate(),
         _ => Ok(()),
     }
