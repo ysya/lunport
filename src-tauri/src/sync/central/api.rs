@@ -533,6 +533,51 @@ impl Api {
             None,
         )
     }
+    fn prepare_freeze(
+        &self,
+        session: &DeviceSession,
+        vault: &str,
+        sources: &super::migration_sources::Sources,
+        intent: &super::migration_freeze::SignedFreeze,
+        next: &[String],
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        if session.expired() {
+            return Err(AppError::Other(
+                "Renew sign-in before synchronizing this device.".into(),
+            ));
+        }
+        if !hex(vault, 64)
+            || session.device_state != DeviceState::Active
+            || intent.body.origin != self.origin
+            || intent.body.account_id != session.account_id
+            || intent.body.vault_id != vault
+            || intent.body.authorization_epoch != session.auth_epoch.to_string()
+        {
+            return Err(invalid());
+        }
+        let body = sources.freeze_body(intent, next)?;
+        if body.len() > RESPONSE_CAP {
+            return Err(invalid());
+        }
+        Ok(body)
+    }
+    /// Old bearer bytes can only enter this fixed route after both provenance and destination checks.
+    pub(super) fn freeze_sources(
+        &self,
+        session: &DeviceSession,
+        vault: &str,
+        sources: &super::migration_sources::Sources,
+        intent: &super::migration_freeze::SignedFreeze,
+        next: &[String],
+    ) -> Result<Reply, AppError> {
+        let body = self.prepare_freeze(session, vault, sources, intent, next)?;
+        self.authenticated(
+            session,
+            Method::POST,
+            &format!("/v2/vaults/{vault}/migration/freeze"),
+            Some(body),
+        )
+    }
     pub(super) fn migration(
         &self,
         session: &DeviceSession,
@@ -619,7 +664,6 @@ pub enum VaultResource {
     Receipt { operation: String },
 }
 pub(super) enum MigrationAction {
-    Freeze,
     Begin,
     Stage,
     Commit,
@@ -628,7 +672,6 @@ pub(super) enum MigrationAction {
 impl MigrationAction {
     fn path(&self) -> &'static str {
         match self {
-            Self::Freeze => "freeze",
             Self::Begin => "begin",
             Self::Stage => "stage",
             Self::Commit => "commit",
@@ -719,35 +762,197 @@ mod tests {
         assert!(!reply.success().unwrap_err().to_string().contains("echoed"));
     }
     #[test]
+    fn a_valid_legacy_source_body_cannot_be_dispatched_to_a_different_api_origin() {
+        use crate::sync::{
+            central::{crypto, migration_freeze::SignedFreeze, migration_sources::Sources},
+            crypto::ChainKeys,
+            records_v3::SyncStateV3,
+            state_v2::AccountState,
+        };
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        let mut server = mockito::Server::new();
+        let api = Api::new(&server.url()).unwrap();
+        let parent =
+            ChainKeys::from_parts(&"3".repeat(64), &"4".repeat(64), &B64.encode([5u8; 32]))
+                .unwrap();
+        let mut state:SyncStateV3=serde_json::from_value(json!({"version":3,"device_id":"d".repeat(32),"device_name":"Synthetic","relay_url":"https://relay.example","last_sync_ms":null,"last_error":null})).unwrap();
+        state.account = Some(AccountState::new(&parent.chain_id));
+        let sources = Sources::discover(&state, Some(&parent)).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/central-source-freeze-v2.json"
+        ))
+        .unwrap();
+        let mut signed: SignedFreeze =
+            serde_json::from_value(fixture["first"]["proof"][0]["intent"].clone()).unwrap();
+        signed.body.chains = vec![parent.chain_id.clone()];
+        signed.body.parent_chain = parent.chain_id.clone();
+        signed = SignedFreeze::sign(
+            signed.body,
+            &crypto::DeviceKeys::decode_secret(&B64.encode([1u8; 64])).unwrap(),
+        )
+        .unwrap();
+        let grant = DeviceSession::synthetic_for_test(
+            signed.body.account_id.clone(),
+            DeviceState::Active,
+            1,
+            Duration::from_secs(300),
+        );
+        let endpoint = format!("/v2/vaults/{}/migration/freeze", signed.body.vault_id);
+        let no_send = server
+            .mock("POST", endpoint.as_str())
+            .with_status(403)
+            .expect(0)
+            .create();
+        let next = vec![parent.chain_id];
+        assert!(api
+            .freeze_sources(&grant, &signed.body.vault_id, &sources, &signed, &next)
+            .is_err());
+        no_send.assert();
+        // Prepare a same-origin request without dispatching a real HTTPS request.
+        let same = Api::new(&signed.body.origin).unwrap();
+        let body = same
+            .prepare_freeze(&grant, &signed.body.vault_id, &sources, &signed, &next)
+            .unwrap();
+        let encoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(encoded["credentials"][0]["token"], "4".repeat(64));
+        assert!(same
+            .prepare_freeze(&grant, &"b".repeat(64), &sources, &signed, &next)
+            .is_err());
+        for denied in [
+            DeviceSession::synthetic_for_test(
+                "b".repeat(64),
+                DeviceState::Active,
+                1,
+                Duration::from_secs(300),
+            ),
+            DeviceSession::synthetic_for_test(
+                grant.account_id.clone(),
+                DeviceState::Active,
+                2,
+                Duration::from_secs(300),
+            ),
+            DeviceSession::synthetic_for_test(
+                grant.account_id.clone(),
+                DeviceState::Pending,
+                1,
+                Duration::from_secs(300),
+            ),
+            DeviceSession::synthetic_for_test(
+                grant.account_id.clone(),
+                DeviceState::Active,
+                1,
+                Duration::ZERO,
+            ),
+        ] {
+            assert!(same
+                .prepare_freeze(&denied, &signed.body.vault_id, &sources, &signed, &next)
+                .is_err());
+        }
+    }
+    #[test]
     fn migration_transport_uses_only_fixed_private_paths_and_retains_safe_denials() {
         let mut server = mockito::Server::new();
         let api = Api::new(&server.url()).unwrap();
-        let grant = DeviceSession::synthetic_for_test("a".repeat(64), DeviceState::Active, 1, Duration::from_secs(300));
+        let grant = DeviceSession::synthetic_for_test(
+            "a".repeat(64),
+            DeviceState::Active,
+            1,
+            Duration::from_secs(300),
+        );
         let vault = "b".repeat(64);
-        let legacy = server.mock("POST", mockito::Matcher::Regex("^/v1/".into())).expect(0).create();
-        for action in [MigrationAction::Freeze, MigrationAction::Begin, MigrationAction::Stage, MigrationAction::Commit, MigrationAction::Retire] {
-            let mock = server.mock("POST", format!("/v2/vaults/{vault}/migration/{}", action.path()).as_str())
+        let legacy = server
+            .mock("POST", mockito::Matcher::Regex("^/v1/".into()))
+            .expect(0)
+            .create();
+        for action in [
+            MigrationAction::Begin,
+            MigrationAction::Stage,
+            MigrationAction::Commit,
+            MigrationAction::Retire,
+        ] {
+            let mock = server
+                .mock(
+                    "POST",
+                    format!("/v2/vaults/{vault}/migration/{}", action.path()).as_str(),
+                )
                 .match_header("authorization", "Bearer synthetic device grant")
-                .match_body("{\"synthetic\":true}").with_status(503).with_body("never echo a credential").expect(1).create();
-            let reply = api.migration(&grant, &vault, action, Zeroizing::new(b"{\"synthetic\":true}".to_vec())).unwrap();
+                .match_body("{\"synthetic\":true}")
+                .with_status(503)
+                .with_body("never echo a credential")
+                .expect(1)
+                .create();
+            let reply = api
+                .migration(
+                    &grant,
+                    &vault,
+                    action,
+                    Zeroizing::new(b"{\"synthetic\":true}".to_vec()),
+                )
+                .unwrap();
             assert_eq!(reply.status, 503);
-            assert!(!reply.success().unwrap_err().to_string().contains("credential"));
+            assert!(!reply
+                .success()
+                .unwrap_err()
+                .to_string()
+                .contains("credential"));
             mock.assert();
         }
         for freeze in [true, false] {
-            let suffix = if freeze {"migration/freeze"} else {"migration"};
-            let mock = server.mock("GET", format!("/v2/vaults/{vault}/{suffix}").as_str()).with_status(403).expect(1).create();
-            assert_eq!(api.migration_status(&grant, &vault, freeze).unwrap().status, 403);
+            let suffix = if freeze {
+                "migration/freeze"
+            } else {
+                "migration"
+            };
+            let mock = server
+                .mock("GET", format!("/v2/vaults/{vault}/{suffix}").as_str())
+                .with_status(403)
+                .expect(1)
+                .create();
+            assert_eq!(
+                api.migration_status(&grant, &vault, freeze).unwrap().status,
+                403
+            );
             mock.assert();
         }
-        let pending = DeviceSession::synthetic_for_test("a".repeat(64), DeviceState::Pending, 1, Duration::from_secs(300));
-        let expired = DeviceSession::synthetic_for_test("a".repeat(64), DeviceState::Active, 1, Duration::ZERO);
+        let pending = DeviceSession::synthetic_for_test(
+            "a".repeat(64),
+            DeviceState::Pending,
+            1,
+            Duration::from_secs(300),
+        );
+        let expired = DeviceSession::synthetic_for_test(
+            "a".repeat(64),
+            DeviceState::Active,
+            1,
+            Duration::ZERO,
+        );
         for denied in [&pending, &expired] {
             assert!(api.migration_status(denied, &vault, true).is_err());
-            assert!(api.migration(denied, &vault, MigrationAction::Freeze, Zeroizing::new(b"{}".to_vec())).is_err());
+            assert!(api
+                .migration(
+                    denied,
+                    &vault,
+                    MigrationAction::Begin,
+                    Zeroizing::new(b"{}".to_vec())
+                )
+                .is_err());
         }
-        assert!(api.migration(&grant, "../bad", MigrationAction::Freeze, Zeroizing::new(b"{}".to_vec())).is_err());
-        assert!(api.migration(&grant, &vault, MigrationAction::Freeze, Zeroizing::new(vec![0; RESPONSE_CAP+1])).is_err());
+        assert!(api
+            .migration(
+                &grant,
+                "../bad",
+                MigrationAction::Begin,
+                Zeroizing::new(b"{}".to_vec())
+            )
+            .is_err());
+        assert!(api
+            .migration(
+                &grant,
+                &vault,
+                MigrationAction::Begin,
+                Zeroizing::new(vec![0; RESPONSE_CAP + 1])
+            )
+            .is_err());
         legacy.assert();
     }
     #[test]
