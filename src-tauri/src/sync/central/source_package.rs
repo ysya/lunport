@@ -87,6 +87,7 @@ impl Package {
     /// Full current/recovery input enumeration using this package's archived legacy keybook.
     /// Payload semantics and other captured source images still require separate admission.
     pub fn record_inputs(&self) -> Result<Inventory, AppError> {
+        if state(&self.files, &self.state_name)? != self.state { return Err(invalid()); }
         Inventory::from_state(&self.sources, &self.state)
     }
     /// Admission always uses the enclosed decryptors. No OS access, writes, activation or consent.
@@ -99,6 +100,12 @@ impl Package {
         Materials::from_files_with_key_inputs(
             &self.state, keys, &self.files, &self.decryptors, references, private_inputs,
         )
+    }
+    /// Structured-record history candidate only; other files/frozen sources and consent remain gates.
+    pub fn structured_history(&self, keys: &VaultKeys, references: &BTreeMap<String, KeyStorage>) -> Result<super::migration_library::History, AppError> {
+        let known = self.record_inputs()?.admit_known()?;
+        let materials = self.materials(keys, references)?;
+        super::migration_library::prepare(&self.state, &known, materials)
     }
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         if state(&self.files, &self.state_name)? != self.state {
