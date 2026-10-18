@@ -202,8 +202,49 @@ struct ReplacementSave<'a> {
     generation:u64,
     published:std::cell::Cell<bool>,
 }
+enum ProjectionAuthority<'a> {
+    Library(&'a crate::sync::record_import::central_stage::Publication),
+    Local(&'a crate::sync::record_import::central_local::Publication),
+}
+impl ProjectionAuthority<'_> {
+    fn candidate(&self) -> &SyncStateV3 {
+        match self {
+            Self::Library(a) => a.candidate(),
+            Self::Local(a) => a.candidate(),
+        }
+    }
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Library(a) => a.generation(),
+            Self::Local(a) => a.generation(),
+        }
+    }
+    fn verify_core(&self, core: &crate::sync::runtime::SyncCore) -> Result<(), AppError> {
+        match self {
+            Self::Library(a) => a.verify_core(core),
+            Self::Local(a) => a.verify_core(core),
+        }
+    }
+    fn verify_records(
+        &self,
+        before: &SyncStateV3,
+        after: &SyncStateV3,
+        generation: u64,
+    ) -> Result<(), AppError> {
+        match self {
+            Self::Library(a) => a.verify_records(before, after, generation),
+            Self::Local(a) => a.verify_records(before, after, generation),
+        }
+    }
+    fn verify_vault(&self, path: &Path) -> Result<(), AppError> {
+        match self {
+            Self::Library(a) => a.verify_vault(path),
+            Self::Local(a) => a.verify_vault(path),
+        }
+    }
+}
 struct ProjectionSave<'a> {
-    authority:&'a crate::sync::record_import::central_stage::Publication,
+    authority:ProjectionAuthority<'a>,
     published:std::cell::Cell<bool>,
 }
 fn save_active_with_authority(
@@ -550,6 +591,18 @@ pub(crate) fn publish_projection(
     env: &crate::sync::env::SyncEnv,
     authority: &crate::sync::record_import::central_stage::Publication,
 ) -> Result<u64, AppError> {
+    publish_central_material(env, ProjectionAuthority::Library(authority))
+}
+pub(crate) fn publish_local_material(
+    env: &crate::sync::env::SyncEnv,
+    authority: &crate::sync::record_import::central_local::Publication,
+) -> Result<u64, AppError> {
+    publish_central_material(env, ProjectionAuthority::Local(authority))
+}
+fn publish_central_material(
+    env: &crate::sync::env::SyncEnv,
+    authority: ProjectionAuthority<'_>,
+) -> Result<u64, AppError> {
     let mut core = env.runtime.core.lock().unwrap();
     writes_allowed(&core)?;
     authority.verify_core(&core)?;
@@ -562,7 +615,7 @@ pub(crate) fn publish_projection(
         published: std::cell::Cell::new(false),
     };
     if let Err(error) =
-        save_active_with_authority(&env.state_path, authority.candidate(), None, Some(&context))
+        save_active_with_authority(&env.state_path, context.authority.candidate(), None, Some(&context))
     {
         if context.published.get() {
             core.save_blocked=Some("Central library reached disk but durability is uncertain. Restart to reload; all source material and stages are retained.".into());
@@ -570,7 +623,7 @@ pub(crate) fn publish_projection(
         }
         return Err(error);
     }
-    core.records = Some(authority.candidate().clone());
+    core.records = Some(context.authority.candidate().clone());
     core.generation = generation;
     core.unsaved = false;
     core.account_keys = None;

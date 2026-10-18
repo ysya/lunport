@@ -18,7 +18,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 /// Native generated transaction identifiers. Physical destination freshness still requires I/O proof.
-pub(super) struct Context {
+pub(in crate::sync) struct Context {
     pub operation: String,
     pub key_id: String,
     pub vault_id: String,
@@ -193,10 +193,11 @@ impl Receipt {
     }
 }
 /// An immutable ciphertext candidate, never a Core/vault/journal publication or readiness permit.
-pub(super) struct Plan {
+pub(in crate::sync) struct Plan {
     owner: Workspace,
     receipt: Receipt,
     order: [String; 2],
+    origin: EntryOrigin,
 }
 impl Plan {
     pub fn owner(&self) -> &Workspace {
@@ -209,6 +210,7 @@ impl Plan {
         let pending = &self.owner.replica.as_ref().ok_or_else(invalid)?.pending;
         Ok(Intent {
             receipt: self.receipt.clone(),
+            origin: Some(self.origin.clone()),
             pending: [
                 pending[&self.order[0]].clone(),
                 pending[&self.order[1]].clone(),
@@ -238,8 +240,24 @@ impl Plan {
 pub(in crate::sync) struct Intent {
     receipt: Receipt,
     pending: [super::replica::Pending; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<EntryOrigin>,
+}
+impl std::fmt::Debug for Intent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LocalMaterialIntent { ciphertext: [redacted] }")
+    }
 }
 impl Intent {
+    pub fn verify_scope(&self, owner: &Workspace) -> Result<(), AppError> {
+        self.receipt.verify(owner)
+    }
+    pub fn raw_hash(&self) -> Result<&str, AppError> {
+        match &self.receipt.slot().storage {
+            KeyStorage::Managed { sha256 } => Ok(sha256),
+            _ => Err(invalid()),
+        }
+    }
     pub fn operation(&self) -> &str {
         self.receipt.operation()
     }
@@ -257,6 +275,36 @@ impl Intent {
             &serde_json::to_vec(self).map_err(|_| invalid())?,
         ))
     }
+    /// Recover the same original container from the persisted ciphertext, never a source file or
+    /// newly generated key. This is still inert and does not attest protected vault publication.
+    pub fn recover_entry(
+        &self,
+        state: &SyncStateV3,
+        keys: &VaultKeys,
+        signer: &DeviceKeys,
+    ) -> Result<VaultEntry, AppError> {
+        self.receipt
+            .verify(state.local.central.as_ref().ok_or_else(invalid)?)?;
+        let draft = &self.pending[1].latest;
+        let plain = draft
+            .envelope
+            .verify(&signer.public().signing)?
+            .open(keys)?;
+        let admitted = payload::admit(keys, &draft.envelope.header, &plain)?;
+        let Data::Key(material) = admitted.data else {
+            return Err(invalid());
+        };
+        material.validate_against(self.key_id(), self.receipt.slot())?;
+        let entry = VaultEntry {
+            private_key: material.private().to_owned(),
+            public_key: self.public().public_key.clone(),
+            fingerprint: self.public().fingerprint.clone(),
+            origin: self.origin.clone().unwrap_or(EntryOrigin::Imported),
+            added_at_ms: self.public().created_at_ms,
+        };
+        self.candidate(state, keys, signer, &entry)?;
+        Ok(entry)
+    }
     /// Pure candidate; the native writer must separately read back the protected vault and CAS.
     pub fn candidate(
         &self,
@@ -265,6 +313,13 @@ impl Intent {
         signer: &DeviceKeys,
         entry: &VaultEntry,
     ) -> Result<SyncStateV3, AppError> {
+        if self
+            .origin
+            .as_ref()
+            .is_some_and(|origin| origin != &entry.origin)
+        {
+            return Err(invalid());
+        }
         let fresh = prepare_new(
             state,
             keys,
@@ -372,7 +427,7 @@ fn material(
     material.validate_against(id, slot)?;
     Ok(material)
 }
-pub(super) fn prepare_new(
+pub(in crate::sync) fn prepare_new(
     state: &SyncStateV3,
     keys: &VaultKeys,
     signer: &DeviceKeys,
@@ -522,6 +577,7 @@ pub(super) fn prepare_new(
         owner,
         receipt,
         order,
+        origin: entry.origin.clone(),
     })
 }
 

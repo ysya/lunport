@@ -27,6 +27,8 @@ try {
     .getByRole("button", { name: "Confirm sync", exact: true })
     .waitFor();
   await call("central", true);
+  await page.locator('main[data-central="true"]').waitFor();
+  await page.locator('[data-key-id][aria-pressed="false"]').click();
   await page.getByText("Automatic encrypted sync", { exact: true }).waitFor();
   for (const name of [
     "Sync key",
@@ -95,6 +97,60 @@ try {
   console.log(
     "PASS conflict and key creation copy follow central account policy",
   );
+  await page
+    .getByRole("button", { name: "Import private key", exact: true })
+    .click();
+  await page.getByRole("tab", { name: "Paste key", exact: true }).click();
+  await page.getByLabel("Key name", { exact: true }).fill("old_key");
+  await page
+    .getByLabel("Private key", { exact: true })
+    .fill("PRIVATE synthetic old draft");
+  await call("defer", true);
+  await page.getByRole("button", { name: "Import key", exact: true }).click();
+  await call("root", "c");
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  await page
+    .getByRole("button", { name: "Import private key", exact: true })
+    .click();
+  await page.getByRole("tab", { name: "Paste key", exact: true }).click();
+  assert.equal(
+    await page.getByLabel("Private key", { exact: true }).inputValue(),
+    "",
+  );
+  await page.getByLabel("Key name", { exact: true }).fill("new_key");
+  await page
+    .getByLabel("Private key", { exact: true })
+    .fill("PRIVATE synthetic new draft");
+  await call("root", "a");
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  await page
+    .getByRole("button", { name: "Import private key", exact: true })
+    .click();
+  await page.getByRole("tab", { name: "Paste key", exact: true }).click();
+  await page.getByLabel("Key name", { exact: true }).fill("current_key");
+  await page
+    .getByLabel("Private key", { exact: true })
+    .fill("PRIVATE synthetic current draft");
+  await call("reply");
+  assert.equal(
+    await page.getByLabel("Private key", { exact: true }).inputValue(),
+    "PRIVATE synthetic current draft",
+  );
+  assert.notEqual(
+    await page.evaluate(() => window.__centralKeysTest.cachedDestination()),
+    null,
+  );
+  assert.equal(
+    await page.evaluate(() => window.__centralKeysTest.cachedError()),
+    null,
+  );
+  await call("root", "d");
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  assert.deepEqual(await page.evaluate(() => window.__centralKeysTest.model.calls), ["records_key_import"]);
+  await call("clearCalls");
+  console.log(
+    "PASS account/device context changes clear secrets and ignore a late reply even after returning to the original root",
+  );
   await call("status", "needs_material");
   await page.locator("[data-key-id]").click();
   await page.getByText("Automatic encrypted sync", { exact: true }).waitFor();
@@ -118,7 +174,7 @@ try {
     [],
   );
   assert.deepEqual(errors, []);
-  console.log("PASS no native command invocation or browser errors");
+  console.log("PASS only expected synthetic invocation and no browser errors");
 } finally {
   await browser.close();
 }

@@ -102,6 +102,8 @@ pub struct PendingAccountView {
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordOverview {
     central_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_scope: Option<crate::sync::record_import::central_local::Invocation>,
     syncing: bool,
     generation: String,
     group_deletion_token: String,
@@ -264,6 +266,7 @@ pub fn overview_from(
         })
         .collect();
     Ok(RecordOverview {
+        key_scope: crate::sync::record_import::central_local::invocation(state).map(|scope| scope.with_generation(generation)),
         central_mode: state.local.central.as_ref().is_some_and(|owner| owner.control.cutover),
         syncing: false,
         conflicts: crate::sync::record_conflicts::views(state)?,
@@ -958,15 +961,17 @@ pub async fn records_key_import(
     app: AppHandle,
     name: String,
     private_text: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
 ) -> Result<RecordOverview, AppError> {
     let private = zeroize::Zeroizing::new(private_text);
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_keys::import_local(
+            crate::sync::record_keys::import_local_scoped(
                 env,
                 &name,
                 private,
                 crate::vault::store::EntryOrigin::Imported,
+                invocation.as_ref(),
             )?;
             let result = overview(env)?;
             env.events.status();
@@ -981,10 +986,11 @@ pub async fn records_key_import_file(
     app: AppHandle,
     name: String,
     path: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
 ) -> Result<RecordOverview, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_keys::import_local_file(env, &name, std::path::Path::new(&path))?;
+            crate::sync::record_keys::import_local_file_scoped(env, &name, std::path::Path::new(&path), invocation.as_ref())?;
             let result = overview(env)?;
             env.events.status();
             Ok(result)
@@ -997,15 +1003,17 @@ pub async fn records_key_import_file(
 pub async fn records_key_generate(
     app: AppHandle,
     name: String,
+    invocation: Option<crate::sync::record_import::central_local::Invocation>,
 ) -> Result<RecordOverview, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         crate::sync::engine::with_env(&app, |env| {
-            crate::sync::record_keys::generate_local(
+            crate::sync::record_keys::generate_local_scoped(
                 env,
                 &name,
                 crate::vault::generate::KeyAlgorithm::Ed25519,
                 &name,
                 None,
+                invocation.as_ref(),
             )?;
             let result = overview(env)?;
             env.events.status();

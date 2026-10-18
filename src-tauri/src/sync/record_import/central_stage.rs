@@ -68,6 +68,7 @@ struct Journal {
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
 mod publication;
 pub(crate) use publication::{publish, Publication};
+pub(super) use publication::publish_vault_image;
 
 pub(crate) struct Staged {
     journal: Journal,
@@ -269,7 +270,7 @@ fn saved_source(
 }
 /// Only stage/journal files use this helper. The active-state writer must separately handle
 /// uncertain post-rename errors by blocking Core/session; this function grants no such authority.
-fn durable(paths: &Paths, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+pub(super) fn durable(paths: &Paths, path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     #[cfg(not(unix))]
     {
         let _ = (paths, path, bytes);

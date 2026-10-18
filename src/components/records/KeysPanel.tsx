@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { KeyRound, Search, Plus, Upload, ArrowUpRight, Copy, PencilLine } from "lucide-react";
@@ -9,7 +9,7 @@ import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/app/PageHeader";
 import { DetailPresence } from "@/components/app/DetailPresence";
-import { applyRecordOverview, downloadRecordKey, renameRecordKey, setRecordKeySync, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
+import { applyRecordOverview, recordKeyDestinationKey, downloadRecordKey, renameRecordKey, setRecordKeySync, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
@@ -46,6 +46,12 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   const [renameError, setRenameError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const destination = recordKeyDestinationKey(overview);
+  const lifetime = useRef({ destination, version: 0 });
+  if (lifetime.current.destination !== destination) lifetime.current = { destination, version: lifetime.current.version + 1 };
+  const mounted = useRef(false);
+  const renderedLifetime = lifetime.current.version;
+  const lease = () => () => mounted.current && lifetime.current.destination === destination && lifetime.current.version === renderedLifetime;
   const inFlight = useRef(false);
   const collection = useRef<HTMLDivElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
@@ -55,54 +61,67 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
   const renameHintId = useId();
   const update = (patch: Partial<typeof draft>) => setDraft((current) => ({ ...current, ...patch }));
   const reset = () => { setDraft(clearKeyDraft()); setMode(null); setDiscarding(false); };
+  useLayoutEffect(() => {
+    mounted.current = true;
+    inFlight.current = false;
+    reset(); setSelectedId(null); setDeployKeyId(null); setConfirming(null); setRenaming(null);
+    setRenameName(""); setRenameError(null); setBusy(false); setError(null); setSearch("");
+    return () => { mounted.current = false; };
+  }, [destination]);
   const requestClose = () => {
     if (draft.busy || inFlight.current) return;
     if (draft.name || draft.privateText || draft.path) setDiscarding(true);
     else reset();
   };
   const submit = async () => {
-    if (inFlight.current) return;
+    const current = lease();
+    if (!current() || inFlight.current) return;
+    if (central && !overview.key_scope) { update({ error: "Refresh this account before adding a key." }); return; }
     inFlight.current = true;
     try {
-      if (await submitKeyDraft(client, draft, update, mode === "generate")) reset();
-    } finally { inFlight.current = false; }
+      if (await submitKeyDraft(client, draft, update, mode === "generate", { invocation: overview.key_scope, destination, current }) && current()) reset();
+    } finally { if (current()) inFlight.current = false; }
   };
   const chooseFile = async () => {
-    if (inFlight.current || draft.busy) return;
+    const current = lease();
+    if (!current() || inFlight.current || draft.busy) return;
     inFlight.current = true;
     update({ busy: true, error: null });
     try {
       const path = await open({ multiple: false, directory: false, title: "Choose an OpenSSH private key" });
-      if (typeof path === "string") setDraft((current) => ({
+      if (current() && typeof path === "string") setDraft((current) => ({
         ...current, path, source: "file",
         name: current.name || (isValidSlotName(basename(path)) ? basename(path) : ""),
       }));
     } catch {
-      update({ error: "Could not open the file picker. Try again or paste the private key." });
+      if (current()) update({ error: "Could not open the file picker. Try again or paste the private key." });
     } finally {
-      inFlight.current = false;
-      update({ busy: false });
+      if (current()) { inFlight.current = false; update({ busy: false }); }
     }
   };
-  const publicAction = async (action: () => Promise<void>) => {
-    if (inFlight.current) return;
+  const publicAction = async (action: (current: () => boolean) => Promise<void>) => {
+    const current = lease();
+    if (!current() || inFlight.current) return;
     inFlight.current = true;
     setBusy(true); setError(null);
-    try { await action(); }
-    catch { setError("The key action could not be completed. Refresh the workspace and retry."); }
-    finally { inFlight.current = false; setBusy(false); }
+    try { await action(current); }
+    catch { if (current()) setError("The key action could not be completed. Refresh the workspace and retry."); }
+    finally { if (current()) { inFlight.current = false; setBusy(false); } }
   };
   const rename = async () => {
-    if (inFlight.current || !renaming || !isValidSlotName(renameName.trim())) return;
+    const current = lease();
+    if (!current() || inFlight.current || !renaming || !isValidSlotName(renameName.trim())) return;
     inFlight.current = true;
     setBusy(true); setRenameError(null);
     try {
-      applyRecordOverview(client, await renameRecordKey(renaming.id, renaming.expected, renameName.trim()));
+      const result = await renameRecordKey(renaming.id, renaming.expected, renameName.trim());
+      if (!current() || recordKeyDestinationKey(result) !== destination) return;
+      applyRecordOverview(client, result);
       setSearch("");
       setRenaming(null);
     } catch {
-      setRenameError("Could not rename this key. It may have changed on another device. Refresh the workspace and try again.");
-    } finally { inFlight.current = false; setBusy(false); }
+      if (current()) setRenameError("Could not rename this key. It may have changed on another device. Refresh the workspace and try again.");
+    } finally { if (current()) { inFlight.current = false; setBusy(false); } }
   };
   const key = overview.keys.find((item) => item.id === selectedId);
   const visible = overview.keys.filter((item) => `${item.public?.name ?? item.id} ${item.public?.fingerprint ?? ""} ${item.public?.key_type ?? ""}`.toLowerCase().includes(search.toLowerCase().trim()));
@@ -234,7 +253,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
             Copy public key</Button>}
           {!central && key.status === "needs_material" && key.authority === "account" && <Button
             disabled={busy || draft.busy || overview.shared_writes_blocked}
-            onClick={() => publicAction(async () => { applyRecordOverview(client, await downloadRecordKey(key.id)); })}
+            onClick={() => publicAction(async (current) => { const result = await downloadRecordKey(key.id); if (current() && recordKeyDestinationKey(result) === destination) applyRecordOverview(client, result); })}
           >Download synced key</Button>}
         </div>
         {key.status === "conflict" && <p role="status" className="app-task-error">{central ? "Review this key’s identity conflict before connecting." : "Local and account key metadata conflict. Connecting and downloading are blocked until the conflict is reviewed."}</p>}
@@ -274,9 +293,11 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
             <div className="flex flex-wrap gap-2">
               <Button
                 disabled={busy || draft.busy || overview.shared_writes_blocked || typeof key.synced !== "boolean" || key.status !== "available" || confirming.enabled === key.synced}
-                onClick={() => publicAction(async () => {
+                onClick={() => publicAction(async (current) => {
                   if (typeof key.synced !== "boolean" || key.status !== "available" || confirming.enabled === key.synced) return;
-                  applyRecordOverview(client, await setRecordKeySync(key.id, confirming.enabled)); setConfirming(null);
+                  const result = await setRecordKeySync(key.id, confirming.enabled);
+                  if (!current() || recordKeyDestinationKey(result) !== destination) return;
+                  applyRecordOverview(client, result); setConfirming(null);
                 })}
               >
                 {confirming.enabled ? "Confirm sync" : "Confirm stop"}

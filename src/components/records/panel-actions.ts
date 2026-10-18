@@ -1,6 +1,8 @@
 import type { QueryClient } from "@tanstack/react-query";
 import {
   applyRecordOverview,
+  recordKeyDestinationKey,
+  type RecordKeyInvocation,
   importRecordKey,
   importRecordKeyFile,
   generateRecordKey,
@@ -51,8 +53,10 @@ export async function submitKeyDraft(
   state: KeyDraft,
   update: (patch: Partial<KeyDraft>) => void,
   generate = false,
+  fence?: { invocation?: RecordKeyInvocation; destination: string; current: () => boolean },
 ): Promise<boolean> {
   if (
+    (fence && !fence.current()) ||
     state.busy ||
     !isValidSlotName(state.name) ||
     (!generate && !hasKeyImportSource(state))
@@ -61,14 +65,16 @@ export async function submitKeyDraft(
   update({ busy: true, error: null });
   try {
     const overview = generate
-      ? await generateRecordKey(state.name)
+      ? await generateRecordKey(state.name, fence?.invocation)
       : state.source === "file"
-        ? await importRecordKeyFile(state.name, state.path!)
-        : await importRecordKey(state.name, state.privateText);
+        ? await importRecordKeyFile(state.name, state.path!, fence?.invocation)
+        : await importRecordKey(state.name, state.privateText, fence?.invocation);
+    if (fence && (!fence.current() || recordKeyDestinationKey(overview) !== fence.destination)) return false;
     update({ privateText: "", name: "", path: null });
     applyRecordOverview(client, overview);
     return true;
   } catch {
+    if (fence && !fence.current()) return false;
     update({
       error: generate
         ? "Could not generate the key. Retry when the workspace is available."
@@ -76,7 +82,7 @@ export async function submitKeyDraft(
     });
     return false;
   } finally {
-    update({ busy: false });
+    if (!fence || fence.current()) update({ busy: false });
   }
 }
 export async function submitAccountDraft(

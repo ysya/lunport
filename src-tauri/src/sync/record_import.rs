@@ -19,6 +19,7 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 pub(crate) mod central_stage;
+pub(crate) mod central_local;
 
 pub const MAX_PRIVATE_SOURCE_BYTES: u64 = 1024 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
@@ -219,6 +220,8 @@ struct Journal {
     source_kind: SourceKind,
     #[serde(default)]
     material_digests: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    central_intent: Option<crate::sync::central::LocalMaterialIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     authoritative: Option<SyncedPrecondition>,
     options: PublicOptions,
@@ -472,6 +475,7 @@ fn save_journal(paths: &Paths, journal: &Journal) -> Result<(), AppError> {
     if bytes.len() as u64 > MAX_JOURNAL_BYTES {
         return Err(failure("import journal exceeds its supported size limit"));
     }
+    if journal.central_intent.is_some() { return central_stage::durable(paths, &paths.journal, &bytes); }
     fsutil::ensure_dir_secure(&paths.dir)?;
     fsutil::atomic_write(&paths.journal, &bytes, 0o600)
 }
@@ -532,6 +536,9 @@ pub fn confirm(env: &SyncEnv, prepared: PreparedImport) -> Result<ImportReceipt,
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _publication = env.runtime.format_publication.lock().unwrap();
     let (state, _) = snapshot_for_write(env)?;
+    if central_local::invocation(&state).is_some() && !prepared.copies.is_empty() {
+        return Err(failure("add private keys through Keys before importing this configuration"));
+    }
     check_runtime(&state)?;
     let actual = importer::preview_file(&prepared.source, &prepared.options)
         .map_err(|_| failure("confirmed configuration source changed; preview it again"))?;
@@ -586,6 +593,7 @@ pub fn confirm(env: &SyncEnv, prepared: PreparedImport) -> Result<ImportReceipt,
         source_digest: actual.source_digest,
         source_kind: SourceKind::Files,
         material_digests: BTreeMap::new(),
+        central_intent: None,
         authoritative: None,
         options: PublicOptions {
             home: prepared.options.home,
@@ -622,7 +630,7 @@ pub fn confirm(env: &SyncEnv, prepared: PreparedImport) -> Result<ImportReceipt,
     // First durable side effect. All later writes have this consent/mapping receipt to recover from.
     save_journal(&paths, &journal)?;
     step(PublishStep::JournalPrepared)?;
-    execute(env, &paths, &mut journal, None).map_err(|error| {
+    execute(env, &paths, &mut journal, None, None).map_err(|error| {
         AppError::Other(format!(
             "confirmed import {} remains pending: {error}",
             journal.import_id
@@ -634,6 +642,7 @@ pub(crate) fn publish_material(
     env: &SyncEnv,
     name: &str,
     mut entry: VaultEntry,
+    invocation: Option<&central_local::Invocation>,
 ) -> Result<(ImportReceipt, KeySlotPayload), AppError> {
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
     let _vault = env
@@ -642,7 +651,13 @@ pub(crate) fn publish_material(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _publication = env.runtime.format_publication.lock().unwrap();
-    let (state, _) = snapshot_for_write(env)?;
+    let (state, generation) = snapshot_for_write(env)?;
+    central_local::check_request(&state, generation, invocation)?;
+    let central_context = if invocation.is_some() {
+        Some(central_local::Context::load(env, &state)?)
+    } else {
+        None
+    };
     let import_id = crate::sync::slot_rules::new_slot_id()?;
     let key_id = crate::sync::slot_rules::new_slot_id()?;
     let paths = Paths::new(env, &import_id)?;
@@ -666,19 +681,30 @@ pub(crate) fn publish_material(
         key_type: private.public_key().algorithm().as_str().into(),
         has_passphrase: private.is_encrypted(),
         created_at_ms: at_ms,
-        origin_device_id: state.device_id.clone(),
+        origin_device_id: invocation
+            .map_or_else(|| state.device_id.clone(), |scope| scope.device_id().into()),
     };
     crate::sync::records_v3::validate_keyslot(&key_id, &public)
         .map_err(|_| failure("local key metadata is not valid"))?;
     let material_digest = digest(entry.private_key.as_bytes());
     entry.added_at_ms = at_ms;
+    let central_intent = central_context
+        .as_ref()
+        .map(|context| context.prepare(&state, &import_id, &key_id, &public, &entry))
+        .transpose()?;
+    let source_digest = central_intent
+        .as_ref()
+        .map(|intent| intent.digest())
+        .transpose()?
+        .unwrap_or_else(|| material_digest.clone());
     let mut journal = Journal {
         version: JOURNAL_VERSION,
         import_id: import_id.clone(),
         source: paths.dir.join("memory-source"),
-        source_digest: material_digest.clone(),
+        source_digest,
         source_kind: SourceKind::Material,
         material_digests: BTreeMap::from([(key_id.clone(), material_digest)]),
+        central_intent,
         authoritative: None,
         options: PublicOptions {
             home: env.state_path.parent().unwrap().into(),
@@ -709,16 +735,17 @@ pub(crate) fn publish_material(
     verify_entry(&journal, &key_id, &entry)?;
     overlay(&state, &journal)?;
     save_journal(&paths, &journal)?;
+    step(PublishStep::JournalPrepared)?;
     let provided = BTreeMap::from([(key_id, entry)]);
-    let receipt = execute(env, &paths, &mut journal, Some(provided)).map_err(|error| {
-        AppError::Other(format!(
-            "confirmed local key {} remains pending: {error}",
-            journal.import_id
-        ))
-    })?;
+    let receipt =
+        execute(env, &paths, &mut journal, Some(provided), central_context).map_err(|error| {
+            AppError::Other(format!(
+                "confirmed local key {} remains pending: {error}",
+                journal.import_id
+            ))
+        })?;
     Ok((receipt, public))
 }
-
 /// Caller owns lifecycle; this activation owns vault -> publication only.
 pub(crate) fn publish_synced_material(
     env: &SyncEnv,
@@ -786,6 +813,7 @@ pub(crate) fn publish_synced_material(
         source_digest,
         source_kind: SourceKind::Synced,
         material_digests: BTreeMap::from([(key_id.into(), material_digest)]),
+        central_intent: None,
         authoritative: Some(SyncedPrecondition {
             chain_id: account.chain_id.clone(),
             key_row: row.clone(),
@@ -819,6 +847,7 @@ pub(crate) fn publish_synced_material(
         &paths,
         &mut journal,
         Some(BTreeMap::from([(key_id.into(), entry)])),
+        None,
     )
     .map_err(|error| {
         AppError::Other(format!(
@@ -940,13 +969,14 @@ pub fn resume(env: &SyncEnv, id: &str) -> Result<ImportReceipt, AppError> {
             "import journal contains an untrusted credential account",
         ));
     }
+    central_local::validate_journal(&journal)?;
     let (state, _) = snapshot_for_write(env)?;
     if journal.phase == Phase::Active && !already_applied(&state, &journal)? {
         return Err(failure(
             "active import has no matching durable state receipt",
         ));
     }
-    execute(env, &paths, &mut journal, None)
+    execute(env, &paths, &mut journal, None, None)
 }
 fn expected_receipt(journal: &Journal) -> crate::sync::records_v3::LocalImportReceipt {
     crate::sync::records_v3::LocalImportReceipt {
@@ -1401,7 +1431,8 @@ fn execute(
     env: &SyncEnv,
     paths: &Paths,
     journal: &mut Journal,
-    provided: Option<BTreeMap<String, VaultEntry>>,
+    mut provided: Option<BTreeMap<String, VaultEntry>>,
+    prepared_context: Option<central_local::Context>,
 ) -> Result<ImportReceipt, AppError> {
     // The state receipt is the publication proof even if the separate journal phase was lost.
     // Do not read/rewrite old sources or vault material after the user has edited completed data.
@@ -1417,9 +1448,18 @@ fn execute(
         return Ok(journal.receipt());
     }
     if journal.phase == Phase::Active {
-        return Ok(journal.receipt());
+        return Err(failure("active import has no matching durable state receipt"));
     }
+    let central_context = match prepared_context {
+        Some(context) => Some(context),
+        None => central_local::context(env, &snapshot_for_write(env)?.0, journal)?,
+    };
     if journal.phase == Phase::Prepared {
+        if provided.is_none() {
+            if let Some(context) = central_context.as_ref() {
+                provided = Some(context.recover(env, &snapshot_for_write(env)?.0, journal)?);
+            }
+        }
         stage(env, paths, journal, provided)?;
     }
     if journal.phase == Phase::Staged {
@@ -1450,9 +1490,21 @@ fn execute(
                     "original vault changed; import retained for recovery",
                 ));
             }
+            if let Some(context) = central_context.as_ref() {
+                central_local::before_vault(env, &snapshot_for_write(env)?.0, journal, paths, context)?;
+            }
             scoped.promote(staged.key_account())?;
+            if let Some(context) = central_context.as_ref() {
+                central_local::before_vault(env, &snapshot_for_write(env)?.0, journal, paths, context)?;
+            }
             step(PublishStep::MasterPromoted)?;
-            if current != journal.staged_vault_digest {
+            if let Some(context) = central_context.as_ref() {
+                central_local::before_vault(env, &snapshot_for_write(env)?.0, journal, paths, context)?;
+            }
+            if central_context.is_some() {
+                central_stage::publish_vault_image(env, paths, &journal.original_vault_digest,
+                    journal.staged_vault_digest.as_deref().ok_or_else(|| failure("central local vault receipt is missing"))?)?;
+            } else if current != journal.staged_vault_digest {
                 fsutil::atomic_write(&main, &bytes, 0o600)?;
             }
             step(PublishStep::VaultSaved)?;
@@ -1470,6 +1522,13 @@ fn execute(
         return Ok(journal.receipt());
     }
     verify_published_material(env, journal)?;
+    if let Some(context) = central_context.as_ref() {
+        central_local::publish(env, journal, context)?;
+        journal.completed_keys.extend(journal.keys.keys().cloned());
+        journal.phase = Phase::Active;
+        save_journal(paths, journal)?;
+        return Ok(journal.receipt());
+    }
     for _ in 0..MAX_COMMIT_ATTEMPTS {
         let (state, generation) = snapshot_for_write(env)?;
         let candidate = overlay(&state, journal)?;

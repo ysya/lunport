@@ -210,15 +210,24 @@ fn active_vault(env: &SyncEnv, paths: &Paths, j: &Journal) -> Result<(), AppErro
         }
         return Ok(());
     };
+    publish_vault_image(env, paths, &j.source_vault_digest, expected)
+}
+/// Shared strict additive-image publication; no metadata or source receipt is activated here.
+pub(in crate::sync::record_import) fn publish_vault_image(
+    env: &SyncEnv,
+    paths: &Paths,
+    source: &Option<String>,
+    expected: &str,
+) -> Result<(), AppError> {
     let bytes = bounded_read(&paths.vault, store::MAX_READ_ONLY_VAULT_BYTES)?;
-    if &digest(&bytes) != expected {
+    if digest(&bytes) != expected {
         return Err(failure("central stage changed before vault publication"));
     }
     let destination = store::vault_path(&env.state_path);
     let current = optional_bytes(&destination, store::MAX_READ_ONLY_VAULT_BYTES)?
         .as_ref()
         .map(|b| digest(b));
-    if current.as_ref() == Some(expected) {
+    if current.as_deref() == Some(expected) {
         // A previous rename may have succeeded before its phase/response or directory fsync.
         // Confirm this exact image is durable before allowing its new metadata to reach disk.
         let result = (|| {
@@ -241,7 +250,7 @@ fn active_vault(env: &SyncEnv, paths: &Paths, j: &Journal) -> Result<(), AppErro
         }
         return result;
     }
-    if current != j.source_vault_digest {
+    if current.as_ref() != source.as_ref() {
         return Err(failure("source vault changed before publication; retained"));
     }
     let published = Cell::new(false);
@@ -273,7 +282,7 @@ fn active_vault(env: &SyncEnv, paths: &Paths, j: &Journal) -> Result<(), AppErro
         if optional_bytes(&destination, store::MAX_READ_ONLY_VAULT_BYTES)?
             .as_ref()
             .map(|b| digest(b))
-            != j.source_vault_digest
+            != *source
         {
             return Err(failure("source vault changed before rename; retained"));
         }
@@ -295,7 +304,7 @@ fn active_vault(env: &SyncEnv, paths: &Paths, j: &Journal) -> Result<(), AppErro
         if digest(&bounded_read(
             &destination,
             store::MAX_READ_ONLY_VAULT_BYTES,
-        )?) != *expected
+        )?) != expected
         {
             return Err(failure("active vault readback differs"));
         }
