@@ -34,6 +34,8 @@ pub struct Ledger {
     pub bases: BTreeMap<String, Basis>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     materials: BTreeMap<String, MaterialReceipt>,
+    #[serde(default, skip_serializing_if = "super::local_sources::Sources::is_empty")]
+    local_sources: super::local_sources::Sources,
 }
 /// Public evidence for one exact protected material publication. No raw key or passphrase.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +126,7 @@ impl Ledger {
             catalog,
             storage,
             materials: BTreeMap::new(),
+            local_sources: Default::default(),
             bases: plan
                 .receipts()
                 .iter()
@@ -176,6 +179,7 @@ impl Ledger {
             return Err(invalid());
         }
         let chain = owner.control.verified_chain()?;
+        self.local_sources.validate(owner, &chain)?;
         let mut identities = BTreeSet::new();
         for (opaque, basis) in &self.bases {
             let r = &basis.remote;
@@ -420,6 +424,16 @@ impl Ledger {
         next.validate(plan.before())?;
         Ok(next)
     }
+    pub(in crate::sync::central) fn has_local_source(&self, id: &str) -> bool {
+        self.local_sources.contains(id)
+    }
+    pub(in crate::sync::central) fn add_local_source(&mut self, owner: &Workspace, receipt: super::local_material::Receipt) -> Result<(), AppError> {
+        self.local_sources.insert(receipt)?;
+        self.validate(owner)
+    }
+    pub(crate) fn key_storage(&self, id: &str) -> Option<&KeyStorage> {
+        self.storage.get(id).or_else(|| self.local_sources.storage(id))
+    }
     /// Metadata-side readiness only. A consumer must also verify raw material SHA256 on read.
     pub(crate) fn material_reference(
         &self,
@@ -428,7 +442,9 @@ impl Ledger {
         local: &crate::sync::records_v3::LocalKeyMetadata,
         public: &crate::sync::records_v3::KeySlotPayload,
     ) -> Option<String> {
-        let receipt = self.materials.get(id)?;
+        let Some(receipt) = self.materials.get(id) else {
+            return self.local_sources.material_reference(owner, &self.bases, &self.storage, id, local, public);
+        };
         let replica = owner.replica.as_ref()?;
         let slot = &receipt.slot.public;
         if local.vault_id != receipt.vault_id
@@ -576,8 +592,10 @@ impl Ledger {
         }
         let mut seen = BTreeSet::new();
         let mut changes = vec![];
+        let mut classifications = self.local_sources.classifications();
+        classifications.extend(self.storage.clone());
         for (identity, data) in
-            super::projection_local::public_rows(state, &self.catalog, &self.storage)?
+            super::projection_local::public_rows(state, &self.catalog, &classifications)?
         {
             let opaque = identity.opaque(keys)?;
             if !seen.insert(opaque.clone()) {

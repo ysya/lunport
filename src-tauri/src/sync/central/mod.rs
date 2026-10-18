@@ -43,6 +43,7 @@ mod inventory_keys;
 mod source_package;
 mod source_capture;
 mod local_material;
+mod local_sources;
 pub mod replacement_archive;
 pub mod replacement;
 pub mod replacement_flow;

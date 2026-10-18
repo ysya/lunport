@@ -196,7 +196,7 @@ pub fn overview_from(
         .into_iter()
         .map(|key| KeyView {
             storage: state.local.central_projection.as_ref()
-                .and_then(|ledger| ledger.storage.get(&key.id))
+                .and_then(|ledger| ledger.key_storage(&key.id))
                 .map(|storage| match storage {
                     KeyStorage::Managed { .. } => "managed",
                     KeyStorage::Hardware => "hardware",

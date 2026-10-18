@@ -118,13 +118,28 @@ impl Receipt {
     pub fn vault_id(&self) -> &str {
         &self.body.vault_id
     }
+    pub(super) fn operation(&self) -> &str {
+        &self.body.operation
+    }
+    pub(super) fn slot(&self) -> &SharedKeyslot {
+        &self.body.slot
+    }
+    pub(super) fn private_content_hash(&self) -> &str {
+        &self.body.private_content_hash
+    }
     pub fn wire_handles(&self) -> (&str, &str) {
         (&self.body.public_record, &self.body.private_record)
     }
     pub fn verify(&self, owner: &Workspace) -> Result<(), AppError> {
         owner.validate()?;
+        self.verify_with_chain(owner, &owner.control.verified_chain()?)
+    }
+    pub(super) fn verify_with_chain(
+        &self,
+        owner: &Workspace,
+        chain: &super::trust::VerifiedChain,
+    ) -> Result<(), AppError> {
         let body = &self.body;
-        let chain = owner.control.verified_chain()?;
         if owner.control.anchor.as_ref() != Some(&body.anchor)
             || owner.control.profile.locator != body.profile
             || owner.control.personal_vault.as_ref() != Some(&body.vault)
@@ -190,6 +205,16 @@ impl Plan {
     pub fn receipt(&self) -> &Receipt {
         &self.receipt
     }
+    pub fn intent(&self) -> Result<Intent, AppError> {
+        let pending = &self.owner.replica.as_ref().ok_or_else(invalid)?.pending;
+        Ok(Intent {
+            receipt: self.receipt.clone(),
+            pending: [
+                pending[&self.order[0]].clone(),
+                pending[&self.order[1]].clone(),
+            ],
+        })
+    }
     /// New private rows must be dispatched after their corresponding public metadata.
     pub fn ordered(&self) -> Result<[&Draft; 2], AppError> {
         let replica = self.owner.replica.as_ref().ok_or_else(invalid)?;
@@ -205,6 +230,135 @@ impl Plan {
                 .ok_or_else(invalid)?
                 .latest,
         ])
+    }
+}
+/// Immutable native recovery input: signed provenance plus ciphertext only. Not publication authority.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::sync) struct Intent {
+    receipt: Receipt,
+    pending: [super::replica::Pending; 2],
+}
+impl Intent {
+    pub fn operation(&self) -> &str {
+        self.receipt.operation()
+    }
+    pub fn key_id(&self) -> &str {
+        self.receipt.key_id()
+    }
+    pub fn vault_id(&self) -> &str {
+        self.receipt.vault_id()
+    }
+    pub fn public(&self) -> &KeySlotPayload {
+        &self.receipt.slot().public
+    }
+    pub fn digest(&self) -> Result<String, AppError> {
+        Ok(crypto::hash(
+            &serde_json::to_vec(self).map_err(|_| invalid())?,
+        ))
+    }
+    /// Pure candidate; the native writer must separately read back the protected vault and CAS.
+    pub fn candidate(
+        &self,
+        state: &SyncStateV3,
+        keys: &VaultKeys,
+        signer: &DeviceKeys,
+        entry: &VaultEntry,
+    ) -> Result<SyncStateV3, AppError> {
+        let fresh = prepare_new(
+            state,
+            keys,
+            signer,
+            Context {
+                operation: self.operation().into(),
+                key_id: self.key_id().into(),
+                vault_id: self.vault_id().into(),
+            },
+            self.public().clone(),
+            entry,
+        )?;
+        if fresh.receipt != self.receipt {
+            return Err(invalid());
+        }
+        let expected = fresh.ordered()?;
+        for (pending, expected) in self.pending.iter().zip(expected) {
+            let draft = &pending.latest;
+            let mut header = expected.envelope.header.clone();
+            header.operation_id = draft.envelope.header.operation_id.clone();
+            if pending.sent.is_some()
+                || pending.claimed.is_some()
+                || pending.confirmed.is_some()
+                || draft.local_revision != 1
+                || draft.content_hash != expected.content_hash
+                || draft.envelope.header != header
+            {
+                return Err(invalid());
+            }
+            let plain = draft
+                .envelope
+                .verify(&signer.public().signing)?
+                .open(keys)?;
+            if crypto::hash(&plain) != draft.content_hash {
+                return Err(invalid());
+            }
+            let admitted = payload::admit(keys, &header, &plain)?;
+            if admitted.identity.id != self.key_id() {
+                return Err(invalid());
+            }
+        }
+        let mut candidate = state.clone();
+        candidate.local.central = Some(fresh.owner);
+        let owner = candidate.local.central.as_mut().ok_or_else(invalid)?;
+        for pending in &self.pending {
+            owner.replica.as_mut().ok_or_else(invalid)?.pending.insert(
+                pending.latest.envelope.header.record_id.clone(),
+                pending.clone(),
+            );
+        }
+        let local = LocalKeyMetadata {
+            vault_id: self.vault_id().into(),
+            public: self.public().clone(),
+        };
+        self.receipt
+            .verify_material(owner, self.key_id(), &local, entry)?;
+        candidate
+            .local
+            .central_projection
+            .as_mut()
+            .ok_or_else(invalid)?
+            .add_local_source(owner, self.receipt.clone())?;
+        candidate.local.keys.insert(self.key_id().into(), local);
+        candidate
+            .account
+            .as_mut()
+            .ok_or_else(invalid)?
+            .records
+            .insert(
+                record_key(RecordKind::KeySlot, self.key_id()),
+                crate::sync::record::LocalRecord {
+                    record: crate::sync::record::Record {
+                        kind: RecordKind::KeySlot,
+                        id: self.key_id().into(),
+                        version: 1,
+                        updated_at_ms: self.public().created_at_ms,
+                        device_id: self.public().origin_device_id.clone(),
+                        deleted: false,
+                        payload: serde_json::to_value(self.public()).map_err(|_| invalid())?,
+                    },
+                    seq: 0,
+                    dirty: false,
+                },
+            );
+        candidate.local.import_receipts.insert(
+            self.operation().into(),
+            crate::sync::records_v3::LocalImportReceipt {
+                source_digest: self.digest()?,
+                host_ids: vec![],
+                key_ids: vec![self.key_id().into()],
+            },
+        );
+        records_v3::validate_state(&candidate).map_err(|_| invalid())?;
+        Ok(candidate)
     }
 }
 fn material(
@@ -259,6 +413,7 @@ pub(super) fn prepare_new(
             .records
             .contains_key(&record_key(RecordKind::KeySlot, &context.key_id))
         || ledger.storage.contains_key(&context.key_id)
+        || ledger.has_local_source(&context.key_id)
     {
         return Err(invalid());
     }
@@ -805,5 +960,192 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    #[test]
+    fn ciphertext_intent_and_matching_readback_make_a_complete_local_source_candidate() {
+        for encrypted in [false, true] {
+            let (state, keys, signer, context, public, entry) = fixture(encrypted);
+            let id = context.key_id.clone();
+            let plan = prepare_new(&state, &keys, &signer, context, public, &entry).unwrap();
+            let intent = plan.intent().unwrap();
+            let text = serde_json::to_string(&intent).unwrap();
+            assert!(!text.contains("BEGIN OPENSSH PRIVATE KEY"));
+            let restored: Intent = serde_json::from_str(&text).unwrap();
+            let candidate = restored.candidate(&state, &keys, &signer, &entry).unwrap();
+            assert_eq!(state.local.keys.len(), 0);
+            assert_eq!(
+                candidate.local.import_receipts[intent.operation()].source_digest,
+                intent.digest().unwrap()
+            );
+            assert_eq!(candidate.local.central.as_ref(), Some(plan.owner()));
+            let view = crate::sync::record_repository::resolve_key(&candidate, &id).unwrap();
+            assert_eq!(
+                view.status,
+                crate::sync::record_repository::KeyStatus::Available
+            );
+            assert!(crate::session::record_material::matches(&view, &entry));
+            assert!(candidate
+                .local
+                .central_projection
+                .as_ref()
+                .unwrap()
+                .key_storage(&id)
+                .is_some());
+            let debug = format!("{:?}", candidate.local.central_projection);
+            assert!(debug.contains("LocalMaterialSources { count: 1 }"));
+            assert!(!debug.contains(&crypto::hash(entry.private_key.as_bytes())));
+            let saved = serde_json::to_string(&candidate).unwrap();
+            let decoded = crate::sync::records_v3::decode_state(&saved).unwrap();
+            assert!(matches!(
+                decoded,
+                crate::sync::records_v3::DecodedState::V3(_)
+            ));
+            let before = candidate.clone();
+            let captured =
+                super::super::projection_capture::public_candidate(&candidate, &keys, &signer)
+                    .unwrap();
+            assert_eq!(captured.local.central, before.local.central);
+            assert!(restored
+                .candidate(&candidate, &keys, &signer, &entry)
+                .is_err());
+        }
+    }
+    #[test]
+    fn local_source_rename_preserves_exact_material_and_incompatible_pending_or_new_wire_blocks_it()
+    {
+        let (state, keys, signer, context, public, entry) = fixture(false);
+        let id = context.key_id.clone();
+        let intent = prepare_new(&state, &keys, &signer, context, public, &entry)
+            .unwrap()
+            .intent()
+            .unwrap();
+        let state = intent.candidate(&state, &keys, &signer, &entry).unwrap();
+        let expected = &state.local.keys[&id].public;
+        let renamed =
+            crate::sync::record_repository::rename_key(&state, &id, expected, "offline_name", 200)
+                .unwrap();
+        let renamed =
+            super::super::projection_capture::public_candidate(&renamed, &keys, &signer).unwrap();
+        let ready = crate::sync::record_repository::resolve_key(&renamed, &id).unwrap();
+        assert_eq!(
+            ready.status,
+            crate::sync::record_repository::KeyStatus::Available
+        );
+        assert!(crate::session::record_material::matches(&ready, &entry));
+        let ledger = renamed.local.central_projection.as_ref().unwrap();
+        let local = &renamed.local.keys[&id];
+        let public = ready.public.as_ref().unwrap();
+        let handles = intent.receipt.wire_handles();
+        for handle in [handles.0, handles.1] {
+            let mut changed = renamed.local.central.as_ref().unwrap().clone();
+            changed
+                .replica
+                .as_mut()
+                .unwrap()
+                .pending
+                .get_mut(handle)
+                .unwrap()
+                .latest
+                .content_hash = "f".repeat(64);
+            assert!(ledger
+                .material_reference(&changed, &id, local, public)
+                .is_none());
+            let mut changed = renamed.local.central.as_ref().unwrap().clone();
+            changed
+                .replica
+                .as_mut()
+                .unwrap()
+                .pending
+                .get_mut(handle)
+                .unwrap()
+                .latest
+                .envelope
+                .header
+                .deleted = true;
+            assert!(ledger
+                .material_reference(&changed, &id, local, public)
+                .is_none());
+            let mut changed = renamed.local.central.as_ref().unwrap().clone();
+            let base = changed
+                .replica
+                .as_ref()
+                .unwrap()
+                .current
+                .values()
+                .next()
+                .unwrap()
+                .clone();
+            changed
+                .replica
+                .as_mut()
+                .unwrap()
+                .current
+                .insert(handle.into(), base.clone());
+            assert!(ledger
+                .material_reference(&changed, &id, local, public)
+                .is_none());
+            let draft = changed.replica.as_ref().unwrap().pending[handle]
+                .latest
+                .clone();
+            changed.replica.as_mut().unwrap().current.remove(handle);
+            changed.replica.as_mut().unwrap().conflicts.insert(
+                handle.into(),
+                vec![super::super::replica::Conflict {
+                    base: None,
+                    local: draft,
+                    remote: base,
+                }],
+            );
+            assert!(ledger
+                .material_reference(&changed, &id, local, public)
+                .is_none());
+        }
+    }
+    #[test]
+    fn immutable_intent_rejects_ciphertext_metadata_scope_and_material_tampering() {
+        let (state, keys, signer, context, public, entry) = fixture(false);
+        let intent = prepare_new(&state, &keys, &signer, context, public, &entry)
+            .unwrap()
+            .intent()
+            .unwrap();
+        for index in 0..7 {
+            let mut changed = intent.clone();
+            match index {
+                0 => changed.pending[0].latest.content_hash = "f".repeat(64),
+                1 => changed.pending[1].latest.envelope.header.record_id = "f".repeat(64),
+                2 => changed.pending[0].sent = Some(changed.pending[0].latest.clone()),
+                3 => changed.pending[1].latest.local_revision = 2,
+                4 => changed.receipt.body.vault_id = "f".repeat(32),
+                5 => changed.pending[0].latest.envelope.header.membership_head = "f".repeat(64),
+                _ => changed.pending[1].latest.envelope.ciphertext = "AAAA".into(),
+            }
+            assert!(
+                changed.candidate(&state, &keys, &signer, &entry).is_err(),
+                "case {index}"
+            );
+        }
+        let mut wrong = entry.clone();
+        wrong.added_at_ms += 1;
+        assert!(intent.candidate(&state, &keys, &signer, &wrong).is_err());
+        let mut candidate = intent.candidate(&state, &keys, &signer, &entry).unwrap();
+        let serialized = serde_json::to_value(&candidate).unwrap();
+        let mut tampered = serialized.clone();
+        tampered["local"]["central_projection"]["local_sources"][intent.key_id()]["body"]
+            ["private_content_hash"] = "f".repeat(64).into();
+        assert!(records_v3::decode_state(&tampered.to_string()).is_err());
+        let ledger = candidate.local.central_projection.as_mut().unwrap();
+        assert!(ledger
+            .add_local_source(
+                candidate.local.central.as_ref().unwrap(),
+                intent.receipt.clone()
+            )
+            .is_err());
+        let mut legacy = serialized;
+        legacy["local"]["central_projection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("local_sources");
+        assert!(records_v3::decode_state(&legacy.to_string()).is_ok());
     }
 }
