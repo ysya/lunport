@@ -1,4 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  verifyRecoveryRead,
+  type RecoveryReadProof,
+  type RecoveryReadGrant,
+} from "./recovery";
 import { validConfirmation, type PairingConfirmation } from "./pairing";
 import type { DeviceProof, Identity, Principal, SessionProof } from "./auth";
 import {
@@ -26,6 +31,7 @@ import {
 } from "./protocol";
 import {
   metadataJson,
+  rpcResponse,
   rpcCall,
   completeWraps,
   type ControlProof,
@@ -554,19 +560,22 @@ export class AccountStore extends DurableObject<Env> {
     )
       return { status: 400 };
     const freeze = node.body.action !== "add";
-    if (!freeze) {
+    if (node.body.action === "add") {
       if (Object.values(observed.vaults).some((v) => v.rekey))
         return { status: 423 };
       const request = node.body.enrollment!,
         registered = observed.registrations[request.device.id];
-      if (!validConfirmation(confirmation, request.request_id, next.head))
-        return { status: 400 };
       if (
+        !validConfirmation(confirmation, request.request_id, next.head) ||
         !registered?.request ||
         requestId(registered.request) !== requestId(request) ||
         !(await verifyEnrollment(request, now))
       )
         return { status: 400 };
+    } else if (confirmation !== null) return { status: 400 };
+    // A new recovery authority must be able to open retained data even if this device is
+    // lost before content rekey completes. Install next-head bridge wraps at the old epoch.
+    if (node.body.action === "add" || node.body.action === "recovery") {
       if (
         !wraps ||
         Object.keys(wraps).length !== Object.keys(observed.vaults).length
@@ -577,12 +586,32 @@ export class AccountStore extends DurableObject<Env> {
           !(await completeWraps(next, id, vault.epoch, wraps[id], actor.device))
         )
           return { status: 400 };
-    } else if (!wraps || Object.keys(wraps).length || confirmation !== null)
-      return { status: 400 };
-    const result = this.ctx.storage.transactionSync(() => {
+    } else if (!wraps || Object.keys(wraps).length) return { status: 400 };
+    const result = this.publishMembership(
+      observed,
+      actor,
+      node,
+      next,
+      wraps,
+      freeze,
+      confirmation,
+    );
+    return result.status === 202 ? this.resumeBarrier() : result;
+  }
+  private publishMembership(
+    observed: Account,
+    actor: Principal,
+    node: SignedMembership,
+    next: TrustedMembership,
+    wraps: Record<string, WrappedKeys[]>,
+    freeze: boolean,
+    confirmation: PairingConfirmation | null,
+    pendingActor = false,
+  ): Result {
+    return this.ctx.storage.transactionSync(() => {
       const state = this.load();
       if (
-        !this.allowed(state, actor) ||
+        !this.allowed(state, actor, pendingActor) ||
         state.version !== observed.version ||
         state.pending
       )
@@ -610,7 +639,189 @@ export class AccountStore extends DurableObject<Env> {
       this.save(state);
       return { status: 202 };
     });
+  }
+  async recoveryWraps(
+    actor: Principal,
+    proof: RecoveryReadProof,
+  ): Promise<Response> {
+    return rpcCall(() => this.recoveryWrapsResult(actor, proof));
+  }
+  private async recoveryWrapsResult(
+    actor: Principal,
+    proof: RecoveryReadProof,
+    now = Date.now(),
+  ): Promise<Result> {
+    const observed = this.load();
+    if (
+      !this.allowed(observed, actor, true) ||
+      !observed.trusted ||
+      !observed.proof ||
+      observed.trusted.devices[actor.device]
+    )
+      return { status: 403 };
+    const request = observed.registrations[actor.device].request;
+    if (
+      !request ||
+      !(await verifyRecoveryRead(
+        observed.trusted,
+        request,
+        proof,
+        observed.epoch,
+        now,
+      ))
+    )
+      return { status: 403 };
+    if (this.load()?.version !== observed.version) return { status: 409 };
+    // A newly backed-up kit must also recover a device lost while the prior barrier was
+    // interrupted. Prove current kit authority first, then finish the already-signed barrier.
+    if (observed.pending) {
+      const result = await this.resumeBarrier();
+      if (result.status !== 200) return result;
+      return this.recoveryWrapsResult(actor, proof, now);
+    }
+    const grant: RecoveryReadGrant = {
+      kind: "recovery_read",
+      locator: observed.locator,
+      account: observed.id,
+      device: actor.device,
+      epoch: observed.epoch,
+      head: observed.trusted.head,
+      expires: Math.min(
+        actor.expires,
+        safeNumber(request.expires_at_ms, false),
+        now + 300000,
+      ),
+    };
+    const results: unknown[] = [];
+    for (const id of Object.keys(observed.vaults)) {
+      const result = await this.env.VAULT.getByName(
+        observed.id + ":" + id,
+      ).recoveryForGrant(grant);
+      if (result.status !== 200) {
+        await result.body?.cancel();
+        return { status: 409, body: { error: "recovery_checkpoint_changed" } };
+      }
+      results.push(await result.json());
+    }
+    if (this.load()?.version !== observed.version) return { status: 409 };
+    return {
+      status: 200,
+      body: {
+        membership_head: observed.trusted.head,
+        auth_epoch: observed.epoch,
+        results,
+      },
+    };
+  }
+  async recover(
+    actor: Principal,
+    node: SignedMembership,
+    wraps: Record<string, WrappedKeys[]>,
+    now = Date.now(),
+  ): Promise<Response> {
+    return rpcCall(() => this.recoverResult(actor, node, wraps, now));
+  }
+  private async recoverResult(
+    actor: Principal,
+    node: SignedMembership,
+    wraps: Record<string, WrappedKeys[]>,
+    now: number,
+  ): Promise<Result> {
+    const observed = this.load();
+    if (
+      !this.allowed(observed, actor, true) ||
+      !observed.trusted ||
+      !observed.proof
+    )
+      return { status: 403 };
+    if (
+      node?.body?.enrollment?.device?.id === actor.device &&
+      node.signature === observed.proof.nodes.at(-1)?.signature
+    ) {
+      try {
+        if (
+          (await hash(
+            (await import("./membership")).membershipCanonical(node.body),
+          )) === observed.trusted.head
+        )
+          return this.resumeBarrier();
+      } catch {
+        return { status: 400 };
+      }
+    }
+    if (observed.pending) return { status: 423 };
+    if (
+      observed.proof.nodes.length >= 1024 ||
+      observed.trusted.devices[actor.device] ||
+      observed.trusted.seen_devices[actor.device] ||
+      node?.body?.action !== "recover" ||
+      node.body.author !== "recovery"
+    )
+      return { status: 403 };
+    const request = observed.registrations[actor.device].request;
+    if (
+      !request ||
+      !node.body.enrollment ||
+      requestId(request) !== requestId(node.body.enrollment) ||
+      !(await verifyEnrollment(request, now))
+    )
+      return { status: 400 };
+    const next = await applyMembership(observed.trusted, node);
+    if (
+      !next ||
+      Math.abs(safeNumber(node.body.issued_at_ms, false) - now) > 300000 ||
+      next.recovery.signing === observed.trusted.recovery.signing ||
+      next.recovery.encryption === observed.trusted.recovery.encryption ||
+      Object.keys(next.devices).some((id) => observed.denied.includes(id))
+    )
+      return { status: 400 };
+    if (
+      !wraps ||
+      Object.keys(wraps).length !== Object.keys(observed.vaults).length
+    )
+      return { status: 400 };
+    for (const [id, vault] of Object.entries(observed.vaults))
+      if (
+        !(await completeWraps(next, id, vault.epoch, wraps[id], actor.device))
+      )
+        return { status: 400 };
+    const result = this.publishMembership(
+      observed,
+      actor,
+      node,
+      next,
+      wraps,
+      true,
+      null,
+      true,
+    );
     return result.status === 202 ? this.resumeBarrier() : result;
+  }
+  deviceAccess(identity: Identity): Response {
+    const state = this.load();
+    if (!state || identity.locator !== state.locator)
+      return rpcResponse({ status: 404 });
+    return rpcResponse({
+      status: 200,
+      body: {
+        account_locator: state.locator,
+        auth_epoch: state.epoch,
+        barrier_pending: state.pending !== null,
+        devices: Object.values(state.registrations).map((r) => ({
+          id: r.device.id,
+          name: r.name,
+          created_at_ms: r.created,
+          state:
+            state.denied.includes(r.device.id) ||
+            (state.trusted?.seen_devices[r.device.id] &&
+              !state.trusted.devices[r.device.id])
+              ? "revoked"
+              : state.trusted?.devices[r.device.id]
+                ? "active"
+                : "pending",
+        })),
+      },
+    });
   }
   private async createVaultResult(
     actor: Principal,

@@ -1,9 +1,9 @@
 //! Offline recovery is separate from legacy sync codes and SSH private-key export.
 use super::{
     crypto::{self, DeviceKeys},
-    membership::TrustAnchor,
+    membership::{Enrollment, TrustAnchor},
     trust::VerifiedChain,
-    wire::{canonical, hex, invalid, origin},
+    wire::{canonical, hex, invalid, origin, MAX_SAFE_INTEGER},
 };
 use crate::error::AppError;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -13,6 +13,52 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 const PREFIX: &str = "LPREC2:";
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryReadProof {
+    pub request_id: String,
+    pub membership_head: String,
+    pub auth_epoch: String,
+    pub signature: String,
+}
+impl RecoveryReadProof {
+    fn create(
+        chain: &VerifiedChain,
+        request: &Enrollment,
+        epoch: u64,
+        keys: &DeviceKeys,
+        now: u64,
+    ) -> Result<Self, AppError> {
+        request.verify_live(now)?;
+        let anchor = chain.current().anchor();
+        if epoch == 0
+            || epoch > MAX_SAFE_INTEGER
+            || request.origin != anchor.origin
+            || request.account_id != anchor.account_id
+            || request.genesis_hash != anchor.genesis_hash
+            || keys.public() != *chain.current().recovery()
+        {
+            return Err(invalid());
+        }
+        let epoch = epoch.to_string();
+        let bytes = canonical(&[
+            "lunport-recovery-read-v2",
+            &anchor.origin,
+            &anchor.account_id,
+            &anchor.genesis_hash,
+            chain.current().head(),
+            &epoch,
+            &B64.encode(request.canonical()?),
+            &request.signature,
+        ])?;
+        Ok(Self {
+            request_id: request.request_id.clone(),
+            membership_head: chain.current().head().into(),
+            auth_epoch: epoch,
+            signature: keys.sign(&bytes),
+        })
+    }
+}
 pub struct RecoverySeed(Zeroizing<Vec<u8>>);
 pub struct RecoveryKit {
     anchor: TrustAnchor,
@@ -125,6 +171,15 @@ impl RecoveryKit {
             phrase: Zeroizing::new(mnemonic.to_string()),
         })
     }
+    pub fn read_proof(
+        &self,
+        chain: &VerifiedChain,
+        request: &Enrollment,
+        auth_epoch: u64,
+        now: u64,
+    ) -> Result<RecoveryReadProof, AppError> {
+        RecoveryReadProof::create(chain, request, auth_epoch, &self.current_keys(chain)?, now)
+    }
     pub fn current_keys(&self, chain: &VerifiedChain) -> Result<DeviceKeys, AppError> {
         self.keys_at(chain, chain.current().head())
     }
@@ -152,6 +207,82 @@ mod tests {
         trust::ControlProof,
     };
     use super::*;
+    #[test]
+    fn recovery_read_proof_matches_independent_noble_ed25519_vector() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../fixtures/central-sync-v2.json"))
+                .unwrap();
+        let anchor: TrustAnchor = serde_json::from_value(fixture["anchor"].clone()).unwrap();
+        let request: Enrollment = serde_json::from_value(fixture["enrollment"].clone()).unwrap();
+        let chain = ControlProof {
+            genesis: serde_json::from_value(fixture["genesis"].clone()).unwrap(),
+            nodes: vec![],
+        }
+        .verify(&anchor, None)
+        .unwrap();
+        let keys = DeviceKeys::decode_secret(&B64.encode([4u8; 64])).unwrap();
+        let proof = RecoveryReadProof::create(&chain, &request, 2, &keys, 1700000001000).unwrap();
+        assert_eq!(proof.signature,"Hew0YHcd5iC9IMlFAR7eVr4AupLij37GR36JonaHmWwDIgzg9e6s9n+5GsA1CCK2sAR4IKzFQAgnmJp/lUBCBw==");
+    }
+    #[test]
+    fn recovery_read_proof_is_bound_to_current_authority_request_scope_and_epoch() {
+        let first = DeviceKeys::generate().unwrap();
+        let seed = RecoverySeed::generate().unwrap();
+        let keys = seed.keys("https://relay.test", &"a".repeat(64)).unwrap();
+        let (genesis, anchor) = Genesis::create(
+            "https://relay.test",
+            &"a".repeat(64),
+            &"f".repeat(32),
+            &first,
+            &keys,
+        )
+        .unwrap();
+        let chain = ControlProof {
+            genesis,
+            nodes: vec![],
+        }
+        .verify(&anchor, None)
+        .unwrap();
+        let kit = seed.bind(&chain).unwrap();
+        let request = Enrollment::create(
+            &anchor,
+            &"d".repeat(32),
+            &DeviceKeys::generate().unwrap(),
+            1000,
+        )
+        .unwrap();
+        let proof = kit.read_proof(&chain, &request, 2, 1100).unwrap();
+        let bytes = canonical(&[
+            "lunport-recovery-read-v2",
+            &anchor.origin,
+            &anchor.account_id,
+            &anchor.genesis_hash,
+            chain.current().head(),
+            "2",
+            &B64.encode(request.canonical().unwrap()),
+            &request.signature,
+        ])
+        .unwrap();
+        crypto::verify(&keys.public().signing, &bytes, &proof.signature).unwrap();
+        assert_eq!(proof.request_id, request.request_id);
+        assert!(kit.read_proof(&chain, &request, 0, 1100).is_err());
+        assert!(kit.read_proof(&chain, &request, 2, 10000000).is_err());
+        let altered = canonical(&[
+            "lunport-recovery-read-v2",
+            &anchor.origin,
+            &anchor.account_id,
+            &anchor.genesis_hash,
+            chain.current().head(),
+            "3",
+            &B64.encode(request.canonical().unwrap()),
+            &request.signature,
+        ])
+        .unwrap();
+        assert!(crypto::verify(&keys.public().signing, &altered, &proof.signature).is_err());
+        let json = serde_json::to_string(&proof).unwrap();
+        assert!(!json.contains("phrase"));
+        assert!(!json.contains(&*kit.phrase));
+    }
     #[test]
     fn recovery_authority_matches_independent_webcrypto_hkdf_and_noble_key_vectors() {
         // Synthetic seed 0x09; independently derived with Node WebCrypto HKDF and Noble Ed/X25519.
@@ -217,6 +348,97 @@ mod tests {
             phrase: Zeroizing::new(decoded.phrase.to_string()),
         };
         assert!(wrong.current_keys(&chain).is_err());
+    }
+    #[test]
+    fn new_kit_opens_a_bridge_even_when_the_new_device_is_lost_before_content_rekey() {
+        use super::super::{
+            crypto::{seal_record, wrap_keys, VaultKeys},
+            wire::{RecordHeader, WrapHeader},
+        };
+        let first = DeviceKeys::generate().unwrap();
+        let seed = RecoverySeed::generate().unwrap();
+        let old_recovery = seed.keys("https://relay.test", &"a".repeat(64)).unwrap();
+        let (genesis, anchor) = Genesis::create(
+            "https://relay.test",
+            &"a".repeat(64),
+            &"f".repeat(32),
+            &first,
+            &old_recovery,
+        )
+        .unwrap();
+        let mut proof = ControlProof {
+            genesis,
+            nodes: vec![],
+        };
+        let previous = proof.verify(&anchor, None).unwrap();
+        let next_seed = RecoverySeed::generate().unwrap();
+        let next_recovery = next_seed.keys(&anchor.origin, &anchor.account_id).unwrap();
+        let node = SignedMembership::sign(
+            previous.current().proposal(
+                &"f".repeat(32),
+                Action::Recovery,
+                None,
+                previous.current().devices().clone(),
+                next_recovery.public(),
+                1000,
+            ),
+            &first,
+        )
+        .unwrap();
+        proof.nodes.push(node);
+        let changed = proof.verify(&anchor, Some(&previous.highwater())).unwrap();
+        let new_kit = next_seed.bind(&changed).unwrap();
+        let old_keys = VaultKeys::generate().unwrap();
+        let header = WrapHeader {
+            origin: anchor.origin.clone(),
+            account_id: anchor.account_id.clone(),
+            genesis_hash: anchor.genesis_hash.clone(),
+            vault_id: "c".repeat(64),
+            key_epoch: "1".into(),
+            membership_head: changed.current().head().into(),
+            recipient: "recovery".into(),
+            recipient_key: next_recovery.public().encryption,
+            author: "f".repeat(32),
+        };
+        let bridge = wrap_keys(&old_keys, &first, header.clone()).unwrap();
+        let opened = bridge
+            .open(
+                &new_kit.current_keys(&changed).unwrap(),
+                &header,
+                &first.public().signing,
+            )
+            .unwrap();
+        let record = seal_record(
+            &old_keys,
+            &first,
+            RecordHeader {
+                origin: anchor.origin,
+                account_id: anchor.account_id,
+                genesis_hash: anchor.genesis_hash,
+                vault_id: "c".repeat(64),
+                record_id: old_keys.record_id("host", "source").unwrap(),
+                key_epoch: "1".into(),
+                membership_head: previous.current().head().into(),
+                author: "f".repeat(32),
+                operation_id: "1".repeat(32),
+                expected_revision: "0".into(),
+                kind: "host".into(),
+                deleted: false,
+            },
+            b"original protected material unchanged",
+        )
+        .unwrap();
+        assert_eq!(
+            &*record
+                .verify(&first.public().signing)
+                .unwrap()
+                .open(&opened)
+                .unwrap(),
+            b"original protected material unchanged"
+        );
+        assert!(bridge
+            .open(&old_recovery, &header, &first.public().signing)
+            .is_err());
     }
     #[test]
     fn rotation_stops_old_kit_authority_but_still_opens_only_its_verified_historical_checkpoint() {

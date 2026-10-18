@@ -245,6 +245,51 @@ impl Api {
             lifetime: Duration::from_millis((registered.expires_at_ms - now).min(300000)),
         })
     }
+    pub fn device_access(
+        &self,
+        profile: &Profile,
+        tokens: &LoginTokens,
+    ) -> Result<Reply, AppError> {
+        if self.origin != profile.origin
+            || tokens.issuer != profile.issuer
+            || tokens.subject != profile.subject
+        {
+            return Err(invalid());
+        }
+        self.request(
+            Method::GET,
+            "/v2/device-access",
+            Some(&tokens.access),
+            None,
+            1048576,
+        )
+    }
+    pub fn revoke_device_access(
+        &self,
+        profile: &Profile,
+        tokens: &LoginTokens,
+        device: &str,
+    ) -> Result<Reply, AppError> {
+        if self.origin != profile.origin
+            || tokens.issuer != profile.issuer
+            || tokens.subject != profile.subject
+            || !hex(device, 32)
+        {
+            return Err(invalid());
+        }
+        #[derive(Serialize)]
+        struct Revoke<'a> {
+            device: &'a str,
+        }
+        let body = Zeroizing::new(serde_json::to_vec(&Revoke { device }).map_err(|_| invalid())?);
+        self.request(
+            Method::POST,
+            "/v2/device-access/revoke",
+            Some(&tokens.access),
+            Some(body),
+            65536,
+        )
+    }
     fn authenticated(
         &self,
         session: &DeviceSession,
@@ -333,6 +378,8 @@ pub enum Control {
     ResumeBarrier,
     Logout,
     BatchPull,
+    RecoveryRead,
+    Recover,
 }
 impl Control {
     fn path(&self) -> &'static str {
@@ -344,6 +391,8 @@ impl Control {
             Self::ResumeBarrier => "/v2/barrier/resume",
             Self::Logout => "/v2/logout",
             Self::BatchPull => "/v2/pull",
+            Self::RecoveryRead => "/v2/recovery/wraps",
+            Self::Recover => "/v2/recovery/commit",
         }
     }
 }

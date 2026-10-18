@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import type { RecoveryReadGrant } from "./recovery";
 import type { Principal } from "./auth";
 import {
   applyMembership,
@@ -188,6 +189,27 @@ export class VaultStore extends DurableObject<Env> {
   async push(actor: Principal, records: RecordEnvelope[]): Promise<Response> {
     return rpcCall(() => this.pushResult(actor, records));
   }
+  recoveryForGrant(grant: RecoveryReadGrant): Response {
+    const state = this.load();
+    if (
+      !state ||
+      grant.kind !== "recovery_read" ||
+      grant.locator !== state.locator ||
+      grant.account !== state.account ||
+      grant.epoch !== state.epoch ||
+      grant.head !== state.trusted.head ||
+      grant.expires <= Date.now() ||
+      state.denied.includes(grant.device)
+    )
+      return rpcResponse({ status: 403 });
+    const wrap = state.wraps.find((w) => w.header.recipient === "recovery");
+    return wrap
+      ? rpcResponse({
+          status: 200,
+          body: { vault: state.vault, epoch: state.keyEpoch, wrap },
+        })
+      : rpcResponse({ status: 423 });
+  }
   private load(): VaultState | null {
     if (
       !this.ctx.storage.sql
@@ -265,8 +287,20 @@ export class VaultStore extends DurableObject<Env> {
     )
       return 400;
     const keyEpoch = observed?.keyEpoch ?? 1;
+    if (!Array.isArray(input.wraps)) return 400;
+    const recoveryChanged =
+      !!observed &&
+      (trusted.recovery.signing !== observed.trusted.recovery.signing ||
+        trusted.recovery.encryption !== observed.trusted.recovery.encryption);
+    const newRecipient =
+      !!observed &&
+      Object.keys(trusted.devices).some((id) => !observed.trusted.devices[id]);
     if (
-      !input.freeze &&
+      (!input.freeze ||
+        !observed ||
+        recoveryChanged ||
+        newRecipient ||
+        input.wraps.length > 0) &&
       !(await completeWraps(trusted, input.vault, keyEpoch, input.wraps))
     )
       return 400;
@@ -281,7 +315,7 @@ export class VaultStore extends DurableObject<Env> {
         keyEpoch,
         trusted,
         phase: input.freeze ? "rekey_pending" : "ready",
-        wraps: input.freeze ? (current?.wraps ?? []) : input.wraps,
+        wraps: input.wraps.length ? input.wraps : (current?.wraps ?? []),
         version: (current?.version ?? 0) + 1,
         sequence: current?.sequence ?? 0,
         historyHash: current?.historyHash ?? ZERO,

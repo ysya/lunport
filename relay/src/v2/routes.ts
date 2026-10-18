@@ -89,6 +89,9 @@ const paths = new Set([
   "/v2/device-access/revoke",
   "/v2/logout",
   "/v2/pull",
+  "/v2/recovery/wraps",
+  "/v2/recovery/commit",
+  "/v2/device-access",
 ]);
 /** No v2 authentication error ever retries a v1 bearer path. */
 export async function centralFetch(
@@ -133,16 +136,24 @@ export async function centralFetch(
     token = raw?.startsWith("Bearer ") ? raw.slice(7) : null;
   if (!token || token.length > 16384) return response({ status: 401 });
   if (
-    ["/v2/register", "/v2/session", "/v2/device-access/revoke"].includes(
-      url.pathname,
-    )
+    [
+      "/v2/register",
+      "/v2/session",
+      "/v2/device-access/revoke",
+      "/v2/device-access",
+    ].includes(url.pathname)
   ) {
-    if (request.method !== "POST") return response({ status: 405 });
+    if (
+      request.method !== (url.pathname === "/v2/device-access" ? "GET" : "POST")
+    )
+      return response({ status: 405 });
     const identity = await verifyIdentity(token, config);
     if (!identity) return response({ status: 401 });
+    const account = env.ACCOUNT.getByName(identity.locator);
+    if (url.pathname === "/v2/device-access")
+      return account.deviceAccess(identity);
     const parsed = await body(request);
     if (parsed instanceof Response) return parsed;
-    const account = env.ACCOUNT.getByName(identity.locator);
     if (url.pathname === "/v2/device-access/revoke") {
       return exactObject(parsed, ["device"]) && hex(parsed.device, 32)
         ? response(await account.revokeAccess(identity, parsed.device))
@@ -212,6 +223,20 @@ export async function centralFetch(
   const parsed = await body(request);
   if (parsed instanceof Response) return parsed;
   switch (url.pathname) {
+    case "/v2/recovery/wraps":
+      return exactObject(parsed, ["proof"])
+        ? response(await account.recoveryWraps(actor, parsed.proof as any))
+        : response({ status: 400 });
+    case "/v2/recovery/commit":
+      return exactObject(parsed, ["node", "wraps"])
+        ? response(
+            await account.recover(
+              actor,
+              parsed.node as any,
+              parsed.wraps as any,
+            ),
+          )
+        : response({ status: 400 });
     case "/v2/bootstrap":
       return exactObject(parsed, ["genesis", "vault", "wraps"])
         ? response(

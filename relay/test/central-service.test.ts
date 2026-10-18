@@ -52,6 +52,8 @@ async function wraps(
   state: TrustedMembership,
   vault: string,
   epoch = 1,
+  author = fixture.genesis.first.id,
+  authorSeed = 1,
 ): Promise<WrappedKeys[]> {
   const result: WrappedKeys[] = [];
   for (const [recipient, keys] of Object.entries({
@@ -71,7 +73,7 @@ async function wraps(
         membership_head: state.head,
         recipient,
         recipient_key: keys.encryption,
-        author: fixture.genesis.first.id,
+        author,
       },
     };
     wrapped.signature = sign(
@@ -81,6 +83,7 @@ async function wraps(
         wrapped.encapsulated_key,
         Uint8Array.from(atob(wrapped.ciphertext), (c) => c.charCodeAt(0)),
       ),
+      authorSeed,
     );
     result.push(wrapped);
   }
@@ -481,6 +484,247 @@ describe("central device authorization and durable data", () => {
     }
     expect((await s.renew()).response.status).toBe(403);
   });
+  it("requires the current kit for pending recovery wraps and bridges to the new kit before enabling the fresh device", async () => {
+    const s = await setup(),
+      d = device(6),
+      credential = random();
+    let enrolled = await s.renew(d, credential);
+    const now = Date.now();
+    const request: Enrollment = {
+      origin,
+      account_id: s.actor.account,
+      genesis_hash: s.trusted.anchor.genesis_hash,
+      request_id: random(16),
+      device: d,
+      nonce: random(),
+      created_at_ms: String(now - 100),
+      expires_at_ms: String(now + 600000),
+      signature: "",
+    };
+    request.signature = sign(enrollmentCanonical(request), 6);
+    expect((await s.account.enrollment(enrolled.actor!, request)).status).toBe(
+      204,
+    );
+    const makeProof = (
+      req: Enrollment,
+      head: string,
+      epoch: number,
+      seed: number,
+    ) => ({
+      request_id: req.request_id,
+      membership_head: head,
+      auth_epoch: String(epoch),
+      signature: sign(
+        new TextEncoder().encode(
+          JSON.stringify([
+            "lunport-recovery-read-v2",
+            origin,
+            s.actor.account,
+            s.trusted.anchor.genesis_hash,
+            head,
+            String(epoch),
+            base64(enrollmentCanonical(req)),
+            req.signature,
+          ]),
+        ),
+        seed,
+      ),
+    });
+    const proof = makeProof(request, s.trusted.head, enrolled.actor!.epoch, 4);
+    expect(
+      (
+        await s.account.recoveryWraps(enrolled.actor!, {
+          ...proof,
+          signature: base64(new Uint8Array(64)),
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await s.account.recoveryWraps(enrolled.actor!, {
+          ...proof,
+          auth_epoch: "999",
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await s.account.recoveryWraps(enrolled.actor!, {
+          ...proof,
+          request_id: random(16),
+        })
+      ).status,
+    ).toBe(403);
+    const before = await s.account.recoveryWraps(enrolled.actor!, proof);
+    expect(before.status).toBe(200);
+    expect(
+      ((await before.json()) as any).results[0].wrap.header.recipient,
+    ).toBe("recovery");
+    const vault = env.VAULT.getByName(s.actor.account + ":" + s.vault);
+    const cachedGrant = {
+      kind: "recovery_read" as const,
+      locator: s.locator,
+      account: s.actor.account,
+      device: d.id,
+      epoch: enrolled.actor!.epoch,
+      head: s.trusted.head,
+      expires: enrolled.actor!.expires,
+    };
+    const stopped = await s.account.revokeAccess(s.identity, s.first.id);
+    expect(stopped.status).toBe(200);
+    await stopped.arrayBuffer();
+    expect((await vault.recoveryForGrant(cachedGrant)).status).toBe(403);
+    enrolled = await s.renew(d, credential);
+    expect((await s.account.recoveryWraps(enrolled.actor!, proof)).status).toBe(
+      403,
+    );
+    const newRecovery = device(8).keys;
+    const body: MembershipBody = {
+      origin,
+      account_id: s.actor.account,
+      genesis_hash: s.trusted.anchor.genesis_hash,
+      revision: "1",
+      previous_head: s.trusted.head,
+      author: "recovery",
+      action: "recover",
+      issued_at_ms: String(Date.now()),
+      enrollment: request,
+      devices: { [d.id]: d.keys },
+      recovery: newRecovery,
+    };
+    const node: SignedMembership = {
+        body,
+        signature: sign(membershipCanonical(body), 4),
+      },
+      next = (await applyMembership(s.trusted, node))!;
+    const bridge = await wraps(next, s.vault, 1, d.id, 6);
+    expect(
+      (
+        await s.account.recover(
+          enrolled.actor!,
+          { ...node, signature: sign(membershipCanonical(body), 1) },
+          { [s.vault]: bridge },
+        )
+      ).status,
+    ).toBe(400);
+    expect((await s.account.recover(enrolled.actor!, node, {})).status).toBe(
+      400,
+    );
+    const savedVault = await runInDurableObject(vault, (_instance, ctx) => {
+      const encoded = ctx.storage.sql
+        .exec<{ value: string }>("SELECT value FROM vault_state WHERE id=1")
+        .one().value;
+      const data = JSON.parse(encoded);
+      data.epoch = 999;
+      ctx.storage.sql.exec(
+        "UPDATE vault_state SET value=? WHERE id=1",
+        JSON.stringify(data),
+      );
+      return encoded;
+    });
+    const recovered = await s.account.recover(enrolled.actor!, node, {
+      [s.vault]: bridge,
+    });
+    expect(recovered.status).toBe(202);
+    expect(await recovered.json()).toMatchObject({
+      access_revoked: false,
+      barrier_pending: true,
+    });
+    await evictDurableObject(s.account);
+    await runInDurableObject(vault, (_instance, ctx) => {
+      ctx.storage.sql.exec(
+        "UPDATE vault_state SET value=? WHERE id=1",
+        savedVault,
+      );
+    });
+    // Another loss before content rekey: a fresh pending device must recover using the NEW kit.
+    const another = device(9),
+      anotherLogin = await s.renew(another, random()),
+      later: Enrollment = {
+        ...request,
+        request_id: random(16),
+        device: another,
+        nonce: random(),
+        created_at_ms: String(Date.now() - 100),
+        expires_at_ms: String(Date.now() + 600000),
+        signature: "",
+      };
+    later.signature = sign(enrollmentCanonical(later), 9);
+    expect(
+      (await s.account.enrollment(anotherLogin.actor!, later)).status,
+    ).toBe(204);
+    expect(
+      (
+        await s.account.recoveryWraps(
+          anotherLogin.actor!,
+          makeProof(later, next.head, anotherLogin.actor!.epoch, 4),
+        )
+      ).status,
+    ).toBe(403);
+    const usable = await s.account.recoveryWraps(
+      anotherLogin.actor!,
+      makeProof(later, next.head, anotherLogin.actor!.epoch, 8),
+    );
+    expect(usable.status).toBe(200);
+    expect(
+      ((await usable.json()) as any).results[0].wrap.header.recipient_key,
+    ).toBe(newRecovery.encryption);
+    const active = await s.renew(d, credential);
+    expect(
+      await s.account.authorize(active.proof.session, true),
+    ).not.toBeNull();
+    const ownWrap = (await (await vault.wrap(active.actor!)).json()) as any;
+    expect(ownWrap.header.recipient).toBe(d.id);
+    expect(ownWrap.header.membership_head).toBe(next.head);
+    expect(
+      (await vault.push(active.actor!, [await record(next, s.vault)])).status,
+    ).toBe(423);
+  });
+  it("requires recovery bridge wraps before rotating authority and keeps writes frozen until content rekey", async () => {
+    const s = await setup(),
+      keys = device(8).keys,
+      now = Date.now();
+    const body: MembershipBody = {
+      origin,
+      account_id: s.trusted.anchor.account_id,
+      genesis_hash: s.trusted.anchor.genesis_hash,
+      revision: "1",
+      previous_head: s.trusted.head,
+      author: s.first.id,
+      action: "recovery",
+      issued_at_ms: String(now),
+      enrollment: null,
+      devices: s.trusted.devices,
+      recovery: keys,
+    };
+    const node: SignedMembership = {
+        body,
+        signature: sign(membershipCanonical(body)),
+      },
+      next = (await applyMembership(s.trusted, node))!;
+    expect((await s.account.control(s.actor, node, {})).status).toBe(400);
+    const result = await s.account.control(s.actor, node, {
+      [s.vault]: await wraps(next, s.vault),
+    });
+    expect(result.status).toBe(200);
+    expect(await result.json()).toMatchObject({ rekey_pending: true });
+    const fresh = (await s.renew()).actor!,
+      vault = env.VAULT.getByName(fresh.account + ":" + s.vault);
+    const recovery = await runInDurableObject(vault, (_instance, ctx) => {
+      const state = JSON.parse(
+        ctx.storage.sql
+          .exec<{ value: string }>("SELECT value FROM vault_state WHERE id=1")
+          .one().value,
+      );
+      return state.wraps.find((w: any) => w.header.recipient === "recovery");
+    });
+    expect(recovery.header.recipient_key).toBe(keys.encryption);
+    expect(recovery.header.membership_head).toBe(next.head);
+    expect(recovery.header.key_epoch).toBe("1");
+    expect(
+      (await vault.push(fresh, [await record(next, s.vault)])).status,
+    ).toBe(423);
+  });
   it("separates signed membership revocation from content rekey completion", async () => {
     const s = await setup(),
       a = await add(s),
@@ -789,6 +1033,17 @@ describe("OIDC resource-token profile", () => {
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ device_state: "pending" });
+    const management = await centralFetch(
+      new Request(origin + "/v2/device-access", {
+        headers: { authorization: "Bearer " + jwt },
+      }),
+      bindings,
+    );
+    expect(management.status).toBe(200);
+    const listed = (await management.json()) as any;
+    expect(listed.devices[0]).toMatchObject({ id: d.id, state: "pending" });
+    expect(listed.proof).toBeUndefined();
+    expect(listed.wraps).toBeUndefined();
     const identity = (await verifyIdentity(jwt, cfg))!,
       bearer = `v2.${identity.locator}.${session_id}.${session_secret}`;
     expect(
