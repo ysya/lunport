@@ -1,5 +1,5 @@
 //! Bound loopback OAuth callback. No custom HTTP parser and no credentials in the webview.
-use super::oidc::{LoginAttempt, LoginTokens, OidcConfig};
+use super::oidc::{FreshLoginTokens, LoginAttempt, LoginTokens, OidcConfig};
 use crate::error::AppError;
 use http_body_util::Full;
 use hyper::{body::Bytes, service::service_fn, Request, Response, StatusCode};
@@ -44,6 +44,19 @@ impl BrowserLogin {
         config: OidcConfig,
         http: &impl openidconnect::SyncHttpClient,
     ) -> Result<(Self, String), AppError> {
+        Self::begin_mode(config, http, false)
+    }
+    pub fn begin_fresh(
+        config: OidcConfig,
+        http: &impl openidconnect::SyncHttpClient,
+    ) -> Result<(Self, String), AppError> {
+        Self::begin_mode(config, http, true)
+    }
+    fn begin_mode(
+        config: OidcConfig,
+        http: &impl openidconnect::SyncHttpClient,
+        fresh: bool,
+    ) -> Result<(Self, String), AppError> {
         // Bind before discovery/authorization URL construction; never race a separately chosen port.
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .map_err(|_| error("Could not bind the local sign-in callback."))?;
@@ -54,14 +67,15 @@ impl BrowserLogin {
         listener
             .set_nonblocking(true)
             .map_err(|_| error("Could not prepare the local sign-in callback."))?;
-        let (attempt, url) = LoginAttempt::begin(
-            config,
-            listener
-                .local_addr()
-                .map_err(|_| error("Invalid local callback."))?
-                .port(),
-            http,
-        )?;
+        let port = listener
+            .local_addr()
+            .map_err(|_| error("Invalid local callback."))?
+            .port();
+        let (attempt, url) = if fresh {
+            LoginAttempt::begin_fresh(config, port, http)?
+        } else {
+            LoginAttempt::begin(config, port, http)?
+        };
         let attempt = Arc::new(Mutex::new(Some(attempt)));
         let (sender, receiver) = mpsc::sync_channel(1);
         let (cancel, stop) = oneshot::channel();
@@ -117,13 +131,24 @@ impl BrowserLogin {
         mut self,
         http: &impl openidconnect::SyncHttpClient,
     ) -> Result<LoginTokens, AppError> {
+        let (attempt, callback) = self.receive_callback()?;
+        attempt.finish(&callback, http)
+    }
+    pub fn finish_fresh(
+        mut self,
+        http: &impl openidconnect::SyncHttpClient,
+    ) -> Result<FreshLoginTokens, AppError> {
+        let (attempt, callback) = self.receive_callback()?;
+        attempt.finish_fresh(&callback, http)
+    }
+    fn receive_callback(&mut self) -> Result<(LoginAttempt, String), AppError> {
         let remaining = LOGIN_TTL.saturating_sub(self.started.elapsed());
-        let (attempt, callback) = self
+        let received = self
             .receiver
             .recv_timeout(remaining)
             .map_err(|_| error("Sign-in expired or was cancelled. Start again."))?;
         self.cancel();
-        attempt.finish(&callback, http)
+        Ok(received)
     }
     pub fn cancellation(&self) -> LoginCancellation {
         self.cancel.clone()

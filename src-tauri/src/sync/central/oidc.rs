@@ -116,6 +116,17 @@ pub struct LoginTokens {
     pub refresh: Option<Zeroizing<String>>,
     pub expires_in: Duration,
 }
+/// Only a verified max_age=0 exchange can construct this native authorization capability.
+/// It cannot be cloned, serialized, cached in the webview or obtained from token refresh.
+pub struct FreshLoginTokens(LoginTokens);
+impl FreshLoginTokens {
+    pub(super) fn tokens(&self) -> &LoginTokens {
+        &self.0
+    }
+    pub(super) fn into_tokens(self) -> LoginTokens {
+        self.0
+    }
+}
 pub struct LoginAttempt {
     config: OidcConfig,
     metadata: CoreProviderMetadata,
@@ -124,6 +135,7 @@ pub struct LoginAttempt {
     nonce: Nonce,
     verifier: PkceCodeVerifier,
     started: Instant,
+    fresh_auth_after: Option<u64>,
 }
 impl LoginAttempt {
     pub fn begin(
@@ -131,6 +143,22 @@ impl LoginAttempt {
         port: u16,
         http: &impl SyncHttpClient,
     ) -> Result<(Self, String), AppError> {
+        Self::begin_mode(config, port, http, false)
+    }
+    pub fn begin_fresh(
+        config: OidcConfig,
+        port: u16,
+        http: &impl SyncHttpClient,
+    ) -> Result<(Self, String), AppError> {
+        Self::begin_mode(config, port, http, true)
+    }
+    fn begin_mode(
+        config: OidcConfig,
+        port: u16,
+        http: &impl SyncHttpClient,
+        fresh: bool,
+    ) -> Result<(Self, String), AppError> {
+        let fresh_auth_after = if fresh { Some(unix_now()?) } else { None };
         config.validate()?;
         if port == 0 {
             return Err(error("Bind the local sign-in callback before starting."));
@@ -163,6 +191,9 @@ impl LoginAttempt {
             )
             .set_pkce_challenge(challenge)
             .add_scope(Scope::new("openid".into()));
+        if fresh {
+            request = request.set_max_age(Duration::ZERO);
+        }
         let mut unique = BTreeSet::from(["openid".to_string()]);
         for scope in &config.scopes {
             if unique.insert(scope.clone()) {
@@ -182,6 +213,7 @@ impl LoginAttempt {
                 nonce,
                 verifier,
                 started: Instant::now(),
+                fresh_auth_after,
             },
             url.to_string(),
         ))
@@ -223,6 +255,18 @@ impl LoginAttempt {
             })
             .ok_or_else(|| error("Sign-in response has no valid authorization code."))
     }
+    pub fn finish_fresh(
+        self,
+        callback: &str,
+        http: &impl SyncHttpClient,
+    ) -> Result<FreshLoginTokens, AppError> {
+        if self.fresh_auth_after.is_none() {
+            return Err(error(
+                "A fresh browser authentication is required for this action.",
+            ));
+        }
+        self.finish(callback, http).map(FreshLoginTokens)
+    }
     pub fn finish(
         self,
         callback: &str,
@@ -248,6 +292,13 @@ impl LoginAttempt {
         let claims = id_token
             .claims(&verifier, &self.nonce)
             .map_err(|_| error("The sign-in identity proof is invalid."))?;
+        if let Some(requested) = self.fresh_auth_after {
+            verify_fresh_auth_time(
+                requested,
+                claims.auth_time().map(|time| time.timestamp()),
+                unix_now()?,
+            )?;
+        }
         if let Some(expected) = claims.access_token_hash() {
             let algorithm = id_token
                 .signing_alg()
@@ -279,6 +330,32 @@ impl LoginAttempt {
             expires_in: response.expires_in().unwrap_or(Duration::from_secs(300)),
         })
     }
+}
+fn unix_now() -> Result<u64, AppError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| error("Could not verify the sign-in time."))
+}
+fn verify_fresh_auth_time(
+    requested: u64,
+    authenticated: Option<i64>,
+    now: u64,
+) -> Result<(), AppError> {
+    let authenticated = authenticated
+        .and_then(|v| u64::try_from(v).ok())
+        .ok_or_else(|| {
+            error("The sign-in provider did not prove a fresh account authentication.")
+        })?;
+    if authenticated < requested.saturating_sub(5)
+        || authenticated > now.saturating_add(5)
+        || now.saturating_sub(authenticated) > 300
+    {
+        return Err(error(
+            "Fresh account authentication expired or could not be verified. Start again.",
+        ));
+    }
+    Ok(())
 }
 /// Provider refresh rotation/reuse detection remains the provider's responsibility.
 /// A refreshed ID token, when present, may omit nonce; a present nonce must match the original.
@@ -362,6 +439,12 @@ mod tests {
     fn setup_with_keys(
         jwks: serde_json::Value,
     ) -> (mockito::ServerGuard, LoginAttempt, reqwest::Url) {
+        setup_with_mode(jwks, false)
+    }
+    fn setup_with_mode(
+        jwks: serde_json::Value,
+        fresh: bool,
+    ) -> (mockito::ServerGuard, LoginAttempt, reqwest::Url) {
         let mut server = mockito::Server::new();
         let issuer = server.url();
         let metadata = json!({"issuer":issuer,"authorization_endpoint":format!("{issuer}/authorize"),"token_endpoint":format!("{issuer}/token"),"jwks_uri":format!("{issuer}/jwks"),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"]});
@@ -375,7 +458,7 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(jwks.to_string())
             .create();
-        let (attempt, url) = LoginAttempt::begin(
+        let (attempt, url) = LoginAttempt::begin_mode(
             OidcConfig {
                 issuer,
                 client_id: "public-desktop".into(),
@@ -388,6 +471,7 @@ mod tests {
             },
             41234,
             &BoundedHttp::new().unwrap(),
+            fresh,
         )
         .unwrap();
         (server, attempt, reqwest::Url::parse(&url).unwrap())
@@ -433,6 +517,20 @@ mod tests {
         assert!(attempt
             .finish(callback, &BoundedHttp::new().unwrap())
             .is_err());
+    }
+    #[test]
+    fn ordinary_login_cannot_mint_fresh_account_authority_or_contact_the_token_endpoint() {
+        let (mut server, attempt, _) = setup();
+        let exchange = server.mock("POST", "/token").expect(0).create();
+        let mut callback = reqwest::Url::parse("http://127.0.0.1:41234/oauth/callback").unwrap();
+        callback
+            .query_pairs_mut()
+            .append_pair("code", "synthetic-code")
+            .append_pair("state", attempt.state.secret());
+        assert!(attempt
+            .finish_fresh(callback.as_str(), &BoundedHttp::new().unwrap())
+            .is_err());
+        exchange.assert();
     }
     #[test]
     fn provider_body_cap_and_redirect_policy_apply_before_parsing() {
@@ -489,8 +587,19 @@ mod tests {
             "signature",
             "expired",
             "access_hash",
+            "fresh_valid",
+            "fresh_missing",
+            "fresh_old",
+            "fresh_future",
         ] {
-            let (mut server, attempt, _) = setup_with_keys(json!({"keys":[public.clone()]}));
+            let (mut server, attempt, authorization) =
+                setup_with_mode(json!({"keys":[public.clone()]}), mode.starts_with("fresh_"));
+            let parameters: BTreeMap<_, _> = authorization.query_pairs().into_owned().collect();
+            if mode.starts_with("fresh_") {
+                assert_eq!(parameters["max_age"], "0");
+            } else {
+                assert!(!parameters.contains_key("max_age"));
+            }
             let refresh_config = attempt.config.clone();
             let refresh_nonce = attempt.nonce.secret().clone();
             let now = std::time::SystemTime::now();
@@ -524,6 +633,16 @@ mod tests {
             } else {
                 attempt.nonce.clone()
             }));
+            if mode.starts_with("fresh_") && mode != "fresh_missing" {
+                let authenticated = if mode == "fresh_old" {
+                    now - Duration::from_secs(60)
+                } else if mode == "fresh_future" {
+                    now + Duration::from_secs(600)
+                } else {
+                    now
+                };
+                claims = claims.set_auth_time(Some(authenticated.into()));
+            }
             let access = AccessToken::new(
                 if mode == "access_hash" {
                     "different-access"
@@ -559,8 +678,16 @@ mod tests {
                 .query_pairs_mut()
                 .append_pair("code", "synthetic-code")
                 .append_pair("state", attempt.state.secret());
-            let result = attempt.finish(callback.as_str(), &BoundedHttp::new().unwrap());
-            if mode == "valid" {
+            let result = if mode.starts_with("fresh_") {
+                attempt
+                    .finish_fresh(callback.as_str(), &BoundedHttp::new().unwrap())
+                    .map(FreshLoginTokens::into_tokens)
+            } else {
+                attempt.finish(callback.as_str(), &BoundedHttp::new().unwrap())
+            };
+            if mode == "fresh_valid" {
+                assert!(result.is_ok());
+            } else if mode == "valid" {
                 let tokens = result.ok().expect("valid OIDC flow rejected");
                 assert_eq!(tokens.subject, "opaque-subject");
                 assert_eq!(tokens.issuer, server.url());

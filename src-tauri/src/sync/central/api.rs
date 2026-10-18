@@ -388,9 +388,10 @@ impl Api {
     pub fn revoke_device_access(
         &self,
         profile: &Profile,
-        tokens: &LoginTokens,
+        tokens: &super::oidc::FreshLoginTokens,
         device: &str,
     ) -> Result<Reply, AppError> {
+        let tokens = tokens.tokens();
         if self.origin != profile.origin
             || tokens.issuer != profile.issuer
             || tokens.subject != profile.subject
