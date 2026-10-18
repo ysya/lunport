@@ -441,11 +441,37 @@ impl Ledger {
         {
             return None;
         }
+        let compatible_public_pending =
+            if let Some(pending) = replica.pending.get(&receipt.public.opaque) {
+                let header = &pending.latest.envelope.header;
+                header.kind == "keyslot"
+                    && !header.deleted
+                    && header.author == owner.control.device.id
+                    && header.record_id == receipt.public.opaque
+                    && pending.latest.content_hash
+                        == crypto::hash(
+                            &payload::encode(
+                                &Identity {
+                                    kind: "keyslot".into(),
+                                    id: id.into(),
+                                    scope: None,
+                                },
+                                &Data::Keyslot(payload::SharedKeyslot {
+                                    public: public.clone(),
+                                    storage: receipt.slot.storage.clone(),
+                                }),
+                            )
+                            .ok()?,
+                        )
+            } else {
+                true
+            };
         for r in [&receipt.public, &receipt.private] {
             let basis = self.bases.get(&r.opaque)?;
             if basis.remote != *r
                 || replica.current.get(&r.opaque) != Some(&basis.wire)
                 || replica.pending.contains_key(&r.opaque)
+                    && (r.opaque != receipt.public.opaque || !compatible_public_pending)
                 || replica.conflicts.contains_key(&r.opaque)
             {
                 return None;
@@ -902,6 +928,110 @@ pub(super) mod tests {
             },
         );
         (state, keys, plan, id, entry)
+    }
+    #[test]
+    fn offline_key_rename_keeps_exact_accepted_material_ready_after_public_capture() {
+        use crate::sync::record_repository::{self as repo, KeyStatus};
+        let (mut state, keys, plan, id, entry) = material_fixture();
+        state.local.central_projection = Some(
+            state
+                .local
+                .central_projection
+                .as_ref()
+                .unwrap()
+                .with_material_readback(&plan, &id, &"b".repeat(32), &"c".repeat(32), &entry)
+                .unwrap(),
+        );
+        let public = repo::resolve_key(&state, &id).unwrap().public.unwrap();
+        state = repo::rename_key(&state, &id, &public, "offline_name", 200).unwrap();
+        let signer = super::super::crypto::DeviceKeys::decode_secret(&base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [1u8; 64],
+        ))
+        .unwrap();
+        state = super::super::projection_capture::public_candidate(&state, &keys, &signer).unwrap();
+        assert_eq!(
+            state
+                .local
+                .central
+                .as_ref()
+                .unwrap()
+                .replica
+                .as_ref()
+                .unwrap()
+                .pending
+                .len(),
+            1
+        );
+        let ready = repo::resolve_key(&state, &id).unwrap();
+        assert_eq!(ready.status, KeyStatus::Available);
+        assert!(crate::session::record_material::matches(&ready, &entry));
+        let mut tampered = entry.clone();
+        let mut changed = crate::vault::material::parse(&tampered.private_key).unwrap();
+        changed.set_comment("same SSH identity with different original bytes");
+        tampered.private_key = changed.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string();
+        assert!(!crate::session::record_material::matches(&ready, &tampered));
+        let mut wrong_hash = state.clone();
+        wrong_hash
+            .local
+            .central
+            .as_mut()
+            .unwrap()
+            .replica
+            .as_mut()
+            .unwrap()
+            .pending
+            .values_mut()
+            .next()
+            .unwrap()
+            .latest
+            .content_hash = "f".repeat(64);
+        assert_eq!(
+            repo::resolve_key(&wrong_hash, &id).unwrap().status,
+            KeyStatus::NeedsMaterial
+        );
+        let identity = payload::Identity {
+            kind: "key".into(),
+            id: id.clone(),
+            scope: None,
+        };
+        let raw = zeroize::Zeroizing::new(tampered.private_key.clone());
+        let bytes = payload::encode(
+            &identity,
+            &payload::Data::Key(payload::PrivateMaterial::new(raw).unwrap()),
+        )
+        .unwrap();
+        let owner = state.local.central.as_mut().unwrap();
+        let chain = owner.control.verified_chain().unwrap();
+        let replica = owner.replica.as_mut().unwrap();
+        let anchor = owner.control.anchor.as_ref().unwrap();
+        replica
+            .enqueue(
+                &chain,
+                &keys,
+                &signer,
+                1,
+                super::super::wire::RecordHeader {
+                    origin: anchor.origin.clone(),
+                    account_id: anchor.account_id.clone(),
+                    genesis_hash: anchor.genesis_hash.clone(),
+                    vault_id: replica.vault.clone(),
+                    record_id: identity.opaque(&keys).unwrap(),
+                    key_epoch: replica.checkpoint.epoch.to_string(),
+                    membership_head: chain.current().head().into(),
+                    author: owner.control.device.id.clone(),
+                    operation_id: "0".repeat(32),
+                    expected_revision: "0".into(),
+                    kind: "key".into(),
+                    deleted: false,
+                },
+                &bytes,
+            )
+            .unwrap();
+        assert_eq!(
+            repo::resolve_key(&state, &id).unwrap().status,
+            KeyStatus::NeedsMaterial
+        );
     }
     #[test]
     fn an_old_vault_reference_with_the_same_public_key_is_not_activated_without_a_bound_material_receipt(
