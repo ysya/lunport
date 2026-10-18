@@ -288,6 +288,8 @@ pub fn activate_probe(
     core.records = None;
     core.legacy = None;
     core.account_keys = None;
+    core.central_session = None;
+    core.central_user_action = None;
     core.save_blocked = None;
     core.unsaved = false;
     core.swap_pending = false;
@@ -400,6 +402,17 @@ fn persist_candidate(
             != Some(keys.chain_id.as_str())
     }) {
         core.account_keys = None;
+    }
+    if core.central_session.as_ref().is_some_and(|session| {
+        candidate.local.central.as_ref().is_none_or(|central| {
+            central.control.profile != session.profile
+                || matches!(central.control.phase,
+                    crate::sync::central::client_state::Phase::SignedOut
+                    | crate::sync::central::client_state::Phase::Revoked)
+                || session.device.as_ref().is_some_and(|s| s.auth_epoch != central.control.auth_epoch)
+        })
+    }) {
+        core.central_session = None;
     }
     core.records = Some(candidate);
     core.generation = generation;

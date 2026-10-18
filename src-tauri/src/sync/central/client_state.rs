@@ -166,9 +166,12 @@ impl State {
             }
             _ => return Err(invalid()),
         }
-        if matches!(self.phase, Phase::Active | Phase::Rekey)
+        if self.phase == Phase::Active
             && (!self.cutover || self.library.is_none() || self.personal_vault.is_none())
         {
+            return Err(invalid());
+        }
+        if self.phase == Phase::Rekey && self.personal_vault.is_none() {
             return Err(invalid());
         }
         if let Some(request) = &self.pending_request {
@@ -176,7 +179,7 @@ impl State {
             if request.origin != self.profile.origin
                 || request.account_id != self.account_id
                 || request.device != self.device
-                || self.phase != Phase::AwaitingApproval
+                || !matches!(self.phase, Phase::AwaitingApproval | Phase::SignedOut)
             {
                 return Err(invalid());
             }

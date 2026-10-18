@@ -23,6 +23,7 @@ import { RecordsMigrationPanel } from "./MigrationPanel";
 import { RecordsAccountLifecyclePanel } from "./AccountLifecyclePanel";
 import { RecordConflictPanel } from "./ConflictPanel";
 import { LibrarySyncReview } from "./LibrarySyncReview";
+import { CentralAccountSection } from "./CentralAccountPanel";
 import { librarySyncError, suggestedLibraryRenames } from "./library-sync";
 
 export function RecordsAccountPanel({
@@ -81,7 +82,8 @@ export function RecordsAccountPanel({
   const [settingsBusy, setBusy] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [conflictBusy, setConflictBusy] = useState(false);
-  const busy = settingsBusy || lifecycleBusy || conflictBusy;
+  const [centralBusy, setCentralBusy] = useState(false);
+  const busy = settingsBusy || lifecycleBusy || conflictBusy || centralBusy;
   const active = busy || draft.busy || !!overview.syncing;
   useEffect(() => {
     onBusyChange?.(busy || draft.busy);
@@ -191,6 +193,7 @@ export function RecordsAccountPanel({
     <div className="app-workflow-page space-y-6">
       {libraryReview && <LibrarySyncReview preview={libraryReview} renames={libraryRenames} setRenames={setLibraryRenames} busy={busy} error={error} confirm={includeReviewedLibrary} refresh={() => prepareLibrary(true)} cancel={() => { setLibraryReview(null); setError(null); }} restoreFocus={() => (libraryTrigger.current ?? libraryHeading.current)?.focus()} />}
       <PageHeader title="Sync" description="Your host library and Groups sync across devices with a private code. Keys have their own sharing controls." />
+      <CentralAccountSection disabled={settingsBusy || lifecycleBusy || conflictBusy || draft.busy || !!overview.syncing} onBusyChange={setCentralBusy} />
       <WorkflowSteps steps={["Relay", "Device", "Library sync"]} current={pending ? 1 : overview.account ? 2 : overview.relay_url ? 1 : 0} complete={!!overview.account && overview.library_enabled && !pending && !overview.shared_writes_blocked && !draft.createdWords} />
       <RecordConflictPanel conflicts={overview.conflicts ?? []} disabled={active || !!overview.pending_account} onBusyChange={setConflictBusy} />
       {draft.createdWords && (

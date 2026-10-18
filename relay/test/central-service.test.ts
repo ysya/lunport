@@ -295,6 +295,71 @@ async function add(s: Awaited<ReturnType<typeof setup>>) {
   };
 }
 describe("central device authorization and durable data", () => {
+  it("retains a renewed pending device and a live enrollment when cleaning old pending identities", async () => {
+    for (const liveRequest of [false, true]) {
+      const s = await setup(),
+        pendingDevice = device(),
+        secret = random();
+      const pending = await s.renew(pendingDevice, secret);
+      expect(pending.response.status).toBe(200);
+      await runInDurableObject(s.account, async (_instance, state) => {
+        const stored = JSON.parse(
+          state.storage.sql
+            .exec<{ value: string }>("SELECT value FROM account_state")
+            .one().value,
+        );
+        stored.registrations[pendingDevice.id].created =
+          Date.now() - 16 * 60 * 1000;
+        delete stored.registrations[pendingDevice.id].last_activity;
+        state.storage.sql.exec(
+          "UPDATE account_state SET value=?",
+          JSON.stringify(stored),
+        );
+      });
+      let current = pending;
+      if (liveRequest) {
+        const now = Date.now();
+        const request: Enrollment = {
+          origin,
+          account_id: s.actor.account,
+          genesis_hash: s.trusted.anchor.genesis_hash,
+          request_id: random(16),
+          device: pendingDevice,
+          nonce: random(),
+          created_at_ms: String(now - 100),
+          expires_at_ms: String(now + 600000),
+          signature: "",
+        };
+        request.signature = sign(enrollmentCanonical(request), 6);
+        expect(
+          (await s.account.enrollment(pending.actor!, request)).status,
+        ).toBe(204);
+        // Old durable versions did not have last_activity; a live signed request is still retained.
+        await runInDurableObject(s.account, async (_instance, state) => {
+          const stored = JSON.parse(
+            state.storage.sql
+              .exec<{ value: string }>("SELECT value FROM account_state")
+              .one().value,
+          );
+          delete stored.registrations[pendingDevice.id].last_activity;
+          state.storage.sql.exec(
+            "UPDATE account_state SET value=?",
+            JSON.stringify(stored),
+          );
+        });
+      } else {
+        current = await s.renew(pendingDevice, secret);
+        expect(current.response.status).toBe(200);
+      }
+      expect((await s.renew(device(8), random())).response.status).toBe(200);
+      expect(
+        await s.account.authorize(current.proof.session, false),
+      ).not.toBeNull();
+      const overview = await s.account.overview(current.actor!);
+      expect(overview.status).toBe(200);
+    }
+  });
+
   it("keeps login-only devices pending, requires their independent credential and expires opaque sessions", async () => {
     const s = await setup(),
       added = device(),

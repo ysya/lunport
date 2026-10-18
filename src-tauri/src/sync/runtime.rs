@@ -39,6 +39,9 @@ pub struct SyncCore {
     pub generation: u64,
     pub format: RuntimeFormat,
     pub records: Option<SyncStateV3>,
+    /// Ephemeral native credentials only; the public central state remains in records.local.central.
+    pub central_session: Option<std::sync::Arc<crate::sync::central::controller::Session>>,
+    pub central_user_action: Option<String>,
     /// Probe-selected legacy sources wait for explicit workspace choice or migration.
     pub legacy_paused: bool,
     pub state: Option<SyncStateV2>,
@@ -63,6 +66,7 @@ pub struct SyncCore {
 #[derive(Default)]
 pub struct SyncRuntime {
     pub core: Mutex<SyncCore>,
+    pub central_login: Mutex<Option<(String, Option<crate::sync::central::browser::LoginCancellation>)>>,
     pub lifecycle: std::sync::Arc<Mutex<()>>,
     /// 保管庫檔(`vault::store`)的寫入互斥:開檔、改動、存檔全程持有(`vault::store::with_vault`)。同步執行緒、命令與 agent 共用。
     pub vault: Mutex<()>,

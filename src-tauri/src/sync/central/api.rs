@@ -66,6 +66,83 @@ struct Registered {
     auth_epoch: u64,
     expires_at_ms: u64,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountOverview {
+    pub account_id: String,
+    pub auth_epoch: u64,
+    pub device_state: DeviceState,
+    pub phase: String,
+    pub proof: Option<super::trust::ControlProof>,
+    pub genesis_hash: Option<String>,
+    pub pairing_confirmation: Option<super::pairing::PairingConfirmation>,
+    #[serde(default)]
+    pub vaults: std::collections::BTreeMap<String, VaultMetadata>,
+    #[serde(default)]
+    pub denied: Vec<String>,
+    #[serde(default)]
+    pub devices: Vec<DeviceMetadata>,
+    #[serde(default)]
+    pub barrier: Option<Barrier>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultMetadata {
+    pub epoch: u64,
+    pub rekey: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceMetadata {
+    pub device: super::membership::Device,
+    pub name: String,
+    pub state: String,
+    pub request: Option<super::membership::Enrollment>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Barrier {
+    pub id: String,
+    pub acknowledged: usize,
+    pub total: usize,
+}
+impl AccountOverview {
+    pub fn validate(&self, session: &DeviceSession) -> Result<(), AppError> {
+        if self.account_id != session.account_id
+            || self.auth_epoch != session.auth_epoch
+            || self.device_state != session.device_state
+            || !["ready", "revocation_pending"].contains(&self.phase.as_str())
+            || self.vaults.len() > 64
+            || self.devices.len() > 128
+            || self.denied.len() > 1024
+            || self
+                .vaults
+                .iter()
+                .any(|(id, v)| !hex(id, 64) || !(1..=65).contains(&v.epoch))
+            || self.denied.iter().any(|id| !hex(id, 32))
+            || self.devices.iter().any(|d| {
+                !hex(&d.device.id, 32)
+                    || d.name.len() > 80
+                    || d.name.chars().any(char::is_control)
+                    || !["active", "pending", "revoked"].contains(&d.state.as_str())
+                    || d.device.keys.validate().is_err()
+            })
+            || self
+                .barrier
+                .as_ref()
+                .is_some_and(|b| b.id.len() > 192 || b.total > 64 || b.acknowledged > b.total)
+        {
+            return Err(invalid());
+        }
+        match (&self.proof, &self.genesis_hash) {
+            (Some(proof), Some(root))
+                if root == &super::crypto::hash(&proof.genesis.canonical()?) => {}
+            (None, None) => {}
+            _ => return Err(invalid()),
+        }
+        Ok(())
+    }
+}
 /// Opaque bearer is independent of the signing/encryption keys and is never serialized.
 pub struct DeviceSession {
     pub account_id: String,

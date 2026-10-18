@@ -61,7 +61,7 @@ impl Profile {
             ])?),
         })
     }
-    fn slot(&self, kind: &str) -> String {
+    pub(crate) fn slot(&self, kind: &str) -> String {
         format!("central:v2:{kind}:{}", self.locator)
     }
 }
@@ -79,6 +79,19 @@ impl DeviceIdentity {
     }
     pub(crate) fn credential(&self) -> &str {
         &self.credential
+    }
+    pub fn load(
+        keychain: &dyn Keychain,
+        profile: &Profile,
+        interactive: bool,
+    ) -> Result<Self, AppError> {
+        let saved = if interactive {
+            keychain.get(&profile.slot("device"))
+        } else {
+            keychain.get_noninteractive(&profile.slot("device"))
+        }?;
+        let encoded=Zeroizing::new(saved.ok_or_else(||AppError::Other("This device's account keys are unavailable. Use device approval or your recovery kit; local data is retained.".into()))?);
+        Self::decode(&encoded, profile)
     }
     pub fn load_or_create(
         keychain: &dyn Keychain,

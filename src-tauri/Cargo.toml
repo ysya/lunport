@@ -17,6 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 development-profile = []
+central-sync-preview = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

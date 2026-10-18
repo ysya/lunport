@@ -2,8 +2,11 @@
 //! verified membership and migration are in place. Login alone never supplies content keys.
 pub mod api;
 pub mod browser;
+pub mod bootstrap;
 pub mod client_state;
 pub mod credentials;
+pub mod controller;
+pub mod commands;
 pub mod crypto;
 pub mod membership;
 pub mod oidc;

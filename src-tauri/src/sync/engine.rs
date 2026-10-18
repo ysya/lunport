@@ -105,6 +105,9 @@ mod windows_tests;
 
 impl SyncEvents for TauriEvents {
     fn status(&self) {
+        if let Ok(Ok(status)) = with_env(&self.app, crate::sync::central::controller::status) {
+            let _ = self.app.emit("central://status", &status);
+        }
         if let Ok(status)=crate::sync::record_commands::status(&self.app) { let _=self.app.emit("records://status",&status); }
         let records={let state=self.app.state::<AppState>();let core=state.sync.core.lock().unwrap();if core.format==crate::sync::record_runtime::RuntimeFormat::Records{core.records.clone()}else{None}};
         if let Some(records)=records {

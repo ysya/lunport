@@ -44,6 +44,7 @@ type Registration = {
   credential: string;
   name: string;
   created: number;
+  last_activity?: number;
   request: Enrollment | null;
   confirmation: PairingConfirmation | null;
 };
@@ -359,7 +360,10 @@ export class AccountStore extends DurableObject<Env> {
         for (const [id, registration] of Object.entries(state.registrations)) {
           if (
             !state.trusted?.seen_devices[id] &&
-            now - registration.created > 15 * 60 * 1000
+            now - (registration.last_activity ?? registration.created) >
+              15 * 60 * 1000 &&
+            (!registration.request ||
+              safeNumber(registration.request.expires_at_ms, false) <= now)
           )
             delete state.registrations[id];
         }
@@ -377,6 +381,7 @@ export class AccountStore extends DurableObject<Env> {
           credential: proof.credential,
           name,
           created: now,
+          last_activity: now,
           request: null,
           confirmation: null,
         };
@@ -418,6 +423,14 @@ export class AccountStore extends DurableObject<Env> {
           state.epoch,
           expires,
         );
+      // Touch only after a valid session result, at most once per minute. A live pending
+      // device must not disappear when another device registers fifteen minutes after its creation.
+      const registration = state.registrations[device.id];
+      if (now - (registration.last_activity ?? registration.created) >= 60000) {
+        registration.last_activity = now;
+        state.version += 1;
+        this.save(state);
+      }
       return {
         status: 200,
         body: {
@@ -544,6 +557,7 @@ export class AccountStore extends DurableObject<Env> {
       )
         return { status: 409 };
       state.registrations[actor.device].request = request;
+      state.registrations[actor.device].last_activity = now;
       state.version += 1;
       this.save(state);
       return { status: 204 };

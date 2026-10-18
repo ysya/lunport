@@ -1,6 +1,7 @@
 //! Public central account/replica state lives in the existing Records state owned by SyncCore.
 use super::{
-    client_state::State,
+    client_state::{Phase, State},
+    crypto::WrappedKeys,
     rekey::{Checkpoint, SignedRekey, SourceDigest, SourceExtension},
     replica::Replica,
     wire::{invalid, number},
@@ -17,12 +18,22 @@ pub struct EpochAcceptance {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BootstrapPackage {
+    pub wraps: Vec<WrappedKeys>,
+    pub submitted: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Workspace {
     pub control: State,
     pub replica: Option<Replica>,
     #[serde(default)]
     pub epochs: Vec<SignedRekey>,
     pub last_epoch_acceptance: Option<EpochAcceptance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<BootstrapPackage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_wraps: Vec<WrappedKeys>,
 }
 impl Workspace {
     pub fn new(control: State) -> Result<Self, AppError> {
@@ -31,6 +42,8 @@ impl Workspace {
             replica: None,
             epochs: vec![],
             last_epoch_acceptance: None,
+            bootstrap: None,
+            own_wraps: vec![],
         };
         state.validate()?;
         Ok(state)
@@ -39,6 +52,83 @@ impl Workspace {
         self.control.validate()?;
         if self.epochs.len() > 64 {
             return Err(invalid());
+        }
+        if self.own_wraps.len() > 65 {
+            return Err(invalid());
+        }
+        if !self.own_wraps.is_empty() {
+            let chain = self.control.verified_chain()?;
+            let a = chain.current().anchor();
+            let mut epochs = BTreeSet::new();
+            for wrap in &self.own_wraps {
+                let h = &wrap.header;
+                if h.origin != a.origin
+                    || h.account_id != a.account_id
+                    || h.genesis_hash != a.genesis_hash
+                    || self.control.personal_vault.as_deref() != Some(h.vault_id.as_str())
+                    || h.recipient != self.control.device.id
+                    || h.recipient_key != self.control.device.keys.encryption
+                    || number(&h.key_epoch, false)? > 65
+                    || !epochs.insert(&h.key_epoch)
+                    || !chain.contains_device(&h.membership_head, &self.control.device)
+                {
+                    return Err(invalid());
+                }
+                let author = chain
+                    .author_at(&h.membership_head, &h.author)
+                    .ok_or_else(invalid)?;
+                wrap.verify_author(&author.signing)?;
+            }
+        }
+        if let Some(package) = &self.bootstrap {
+            if !matches!(
+                self.control.phase,
+                Phase::BackupRequired | Phase::SignedOut | Phase::Revoked
+            ) || self.replica.is_some()
+            {
+                return Err(invalid());
+            }
+            let chain = self.control.verified_chain()?;
+            if self
+                .control
+                .proof
+                .as_ref()
+                .ok_or_else(invalid)?
+                .genesis
+                .first
+                != self.control.device
+                || package.wraps.len() != 2
+                || self.control.recovery_backup_confirmed && !package.submitted
+            {
+                return Err(invalid());
+            }
+            let genesis = &self.control.proof.as_ref().ok_or_else(invalid)?.genesis;
+            let mut recipients = std::collections::BTreeMap::from([(
+                genesis.first.id.clone(),
+                genesis.first.keys.clone(),
+            )]);
+            recipients.insert("recovery".into(), genesis.recovery.clone());
+            for wrap in &package.wraps {
+                let h = &wrap.header;
+                let public = recipients.remove(&h.recipient).ok_or_else(invalid)?;
+                if h.origin != self.control.profile.origin
+                    || h.account_id != self.control.account_id
+                    || self
+                        .control
+                        .anchor
+                        .as_ref()
+                        .map(|a| a.genesis_hash.as_str())
+                        != Some(h.genesis_hash.as_str())
+                    || self.control.personal_vault.as_deref() != Some(h.vault_id.as_str())
+                    || h.key_epoch != "1"
+                    || h.membership_head != chain.current().anchor().genesis_hash
+                    || h.author != self.control.device.id
+                    || h.recipient_key != public.encryption
+                {
+                    return Err(invalid());
+                }
+                wrap.verify_author(&self.control.device.keys.signing)?;
+            }
         }
         if let Some(replica) = &self.replica {
             let chain = self.control.verified_chain()?;
@@ -123,8 +213,26 @@ impl Workspace {
                 {
                     return Err(invalid());
                 }
-            } else if !self.epochs.is_empty() {
-                return Err(invalid());
+            } else if let Some(last) = self.epochs.last() {
+                // A fresh peer never knew the earlier epoch. Its authenticated pairing minimum
+                // replaces a source-extension proof only for that initial, already-rotated history.
+                let confirmation = self
+                    .control
+                    .pairing_confirmation
+                    .as_ref()
+                    .ok_or_else(invalid)?;
+                let minimum = replica.minimum.as_ref().ok_or_else(invalid)?;
+                if minimum.epoch != replica.checkpoint.epoch
+                    || minimum.sequence < number(&last.body.source_sequence, true)?
+                    || chain
+                        .revision_of(&last.body.membership_head)
+                        .ok_or_else(invalid)?
+                        > chain
+                            .revision_of(&confirmation.approved_head)
+                            .ok_or_else(invalid)?
+                {
+                    return Err(invalid());
+                }
             }
         } else if !self.epochs.is_empty() || self.last_epoch_acceptance.is_some() {
             return Err(invalid());
@@ -134,6 +242,19 @@ impl Workspace {
     pub fn verify_transition(&self, next: &Self) -> Result<(), AppError> {
         next.validate()?;
         self.control.verify_transition(&next.control)?;
+        if let Some(before) = &self.bootstrap {
+            if next.bootstrap.as_ref().is_some_and(|after| {
+                before.wraps != after.wraps || before.submitted && !after.submitted
+            }) {
+                return Err(invalid());
+            }
+        }
+        for wrap in &self.own_wraps {
+            if !next.own_wraps.iter().any(|known| known == wrap) {
+                return Err(invalid());
+            }
+        }
+
         match (&self.replica, &next.replica) {
             (Some(before), Some(after)) => {
                 if before.vault != after.vault
@@ -495,5 +616,119 @@ pub(crate) mod tests {
             .unwrap()
             .history_hash = "9".repeat(64);
         assert!(forked.verify_transition(&after).is_err());
+    }
+    #[test]
+    fn a_new_peer_uses_its_authenticated_post_rekey_minimum_without_inventing_an_old_checkpoint() {
+        use super::super::{
+            crypto::DeviceKeys,
+            membership::{Action, MembershipBody, SignedMembership},
+            pairing::{PairingInvite, PendingPairing, VaultMinimum},
+            replica::Replica,
+        };
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../fixtures/central-rekey-v2.json"))
+                .unwrap();
+        let mut proof: ControlProof = serde_json::from_value(fixture["proof"].clone()).unwrap();
+        let anchor = serde_json::from_value(fixture["anchor"].clone()).unwrap();
+        let chain = proof.verify(&anchor, None).unwrap();
+        let signer = DeviceKeys::decode_secret(&B64.encode([1; 64])).unwrap();
+        let peer = DeviceKeys::generate().unwrap();
+        let pending =
+            PendingPairing::begin(&anchor, &"e".repeat(32), &peer, 1_700_000_000_000).unwrap();
+        let mut members = chain.current().devices().clone();
+        members.insert(pending.request().device.id.clone(), peer.public());
+        let node = SignedMembership::sign(
+            MembershipBody {
+                origin: anchor.origin.clone(),
+                account_id: anchor.account_id.clone(),
+                genesis_hash: anchor.genesis_hash.clone(),
+                revision: (chain.current().revision() + 1).to_string(),
+                previous_head: chain.current().head().into(),
+                author: proof.genesis.first.id.clone(),
+                action: Action::Add,
+                issued_at_ms: "1700000000001".into(),
+                enrollment: Some(pending.request().clone()),
+                devices: members,
+                recovery: chain.current().recovery().clone(),
+            },
+            &signer,
+        )
+        .unwrap();
+        let manifest: SignedRekey = serde_json::from_value(fixture["manifest"].clone()).unwrap();
+        let minimum = VaultMinimum {
+            vault: manifest.body.vault_id.clone(),
+            creation_head: anchor.genesis_hash.clone(),
+            creation_authorization_epoch: "2".into(),
+            key_epoch: "2".into(),
+            sequence: manifest.body.source_sequence.clone(),
+            history_hash: manifest.body.target_history_hash.clone(),
+        };
+        let invite = PairingInvite::from_code(
+            &pending.code().unwrap(),
+            pending.request(),
+            &anchor,
+            1_700_000_000_001,
+        )
+        .unwrap();
+        let confirmation = invite
+            .confirm(
+                chain.current(),
+                &node,
+                &minimum.vault,
+                vec![minimum.clone()],
+            )
+            .unwrap();
+        proof.nodes.push(node);
+        let state = State::new(
+            enrolled().control.profile,
+            anchor.account_id.clone(),
+            pending.request().device.clone(),
+            5,
+        )
+        .unwrap()
+        .begin_pairing(&pending)
+        .unwrap()
+        .accept_pairing(&pending, &confirmation, proof)
+        .unwrap();
+        let mut ws = Workspace::new(state).unwrap();
+        ws.epochs = vec![manifest];
+        ws.replica = Some(
+            Replica::join(
+                minimum.vault.clone(),
+                minimum.creation_head.clone(),
+                2,
+                Checkpoint {
+                    epoch: 2,
+                    sequence: 2,
+                    history_hash: minimum.history_hash,
+                },
+            )
+            .unwrap(),
+        );
+        ws.validate().unwrap();
+        assert!(!ws.can_upload());
+        assert!(!ws.replica.as_ref().unwrap().baseline_ready());
+        let mut invalid = ws.clone();
+        invalid
+            .control
+            .pairing_confirmation
+            .as_mut()
+            .unwrap()
+            .minimums[0]
+            .sequence = "1".into();
+        invalid
+            .replica
+            .as_mut()
+            .unwrap()
+            .minimum
+            .as_mut()
+            .unwrap()
+            .sequence = 1;
+        assert!(invalid.validate().is_err());
+        let mut invalid = ws.clone();
+        invalid.control.pairing_confirmation = None;
+        assert!(invalid.validate().is_err());
+        assert!(enrolled().verify_transition(&ws).is_err());
     }
 }
