@@ -54,17 +54,36 @@ pub struct HistoryPage {
 /// No Debug/Serialize and no plaintext publication. Every page commits only after full admission.
 pub struct ReadSession {
     before: Workspace,
-    chain: VerifiedChain,
     proof: ControlProof,
     request: Enrollment,
     auth_epoch: u64,
-    keys: VaultKeys,
-    source: RecoveryVault,
-    target: Checkpoint,
-    replica: Replica,
+    baseline: Baseline,
+}
+/// Shared admission is private to native readers. Its constructors retain separate authority checks.
+pub(super) struct Baseline {
+    pub(super) chain: VerifiedChain,
+    pub(super) keys: VaultKeys,
+    pub(super) source: RecoveryVault,
+    pub(super) target: Checkpoint,
+    pub(super) replica: Replica,
     required_prefixes: Vec<Checkpoint>,
+    // Active readers may retain all computed hashes to recheck a newer old-owner checkpoint.
+    // At most 16385 bounded hex strings; never persisted or exposed to the frontend.
+    prefix_hashes: Option<Vec<String>>,
     operations: BTreeSet<String>,
     bytes: usize,
+}
+pub(super) struct CheckedSnapshot {
+    source: RecoveryVault,
+    target: Checkpoint,
+}
+impl CheckedSnapshot {
+    pub(super) fn source(&self) -> &RecoveryVault {
+        &self.source
+    }
+    pub(super) fn target(&self) -> &Checkpoint {
+        &self.target
+    }
 }
 /// Only a completed read mints this capability. Neither a server DTO nor a saved receipt can.
 pub struct VerifiedRecovery {
@@ -153,24 +172,13 @@ impl ReadSession {
         {
             return Err(invalid());
         }
-        let source = response.results.pop().ok_or_else(invalid)?;
-        if source.vault != personal_vault_id(anchor)?
-            || !["ready", "rekey_pending"].contains(&source.phase.as_str())
-        {
-            return Err(invalid());
-        }
-        epochs(&chain, &source, auth_epoch)?;
-        let target = Checkpoint {
-            epoch: source.epoch,
-            sequence: number(&source.sequence, true)?,
-            history_hash: source.history_hash.clone(),
-        };
-        if target.sequence > 16384
-            || !hex(&target.history_hash, 64)
-            || target.sequence == 0 && target.history_hash != ZERO
-        {
-            return Err(invalid());
-        }
+        let checked = Baseline::snapshot(
+            &chain,
+            response.results.pop().ok_or_else(invalid)?,
+            auth_epoch,
+        )?;
+        let source = &checked.source;
+        let target = &checked.target;
         let h = &source.wrap.header;
         let wrap_revision = chain.revision_of(&h.membership_head).ok_or_else(invalid)?;
         if h.origin != anchor.origin
@@ -212,32 +220,100 @@ impl ReadSession {
                 keys.verify_same(&committed_keys)?;
             }
         }
-        let replica = Replica::join(
-            source.vault.clone(),
-            anchor.genesis_hash.clone(),
-            2,
-            target.clone(),
-        )?;
+        let creation = anchor.genesis_hash.clone();
+        let baseline = Baseline::new(chain, keys, checked, creation, 2)?;
         Ok(Self {
             before: before.clone(),
-            chain,
             proof,
             request,
             auth_epoch,
+            baseline,
+        })
+    }
+    pub(super) fn chain(&self) -> &VerifiedChain {
+        &self.baseline.chain
+    }
+    pub(super) fn epochs(&self) -> &[SignedRekey] {
+        &self.baseline.source.commits
+    }
+    pub(super) fn pin_prefixes(&mut self, minimums: Vec<Checkpoint>) -> Result<(), AppError> {
+        self.baseline.pin_prefixes(minimums)
+    }
+    pub fn total(&self) -> u64 {
+        self.baseline.target.sequence
+    }
+    pub fn vault(&self) -> &str {
+        &self.baseline.source.vault
+    }
+    pub fn position(&self) -> u64 {
+        self.baseline.position()
+    }
+    pub fn append(&mut self, page: HistoryPage) -> Result<(), AppError> {
+        self.baseline.append(page)
+    }
+    pub fn finish(self) -> Result<VerifiedRecovery, AppError> {
+        self.baseline.complete()?;
+        Ok(VerifiedRecovery { session: self })
+    }
+}
+impl Baseline {
+    pub(super) fn snapshot(
+        chain: &VerifiedChain,
+        source: RecoveryVault,
+        auth_epoch: u64,
+    ) -> Result<CheckedSnapshot, AppError> {
+        if source.vault != personal_vault_id(chain.current().anchor())?
+            || !["ready", "rekey_pending"].contains(&source.phase.as_str())
+        {
+            return Err(invalid());
+        }
+        epochs(chain, &source, auth_epoch)?;
+        let target = Checkpoint {
+            epoch: source.epoch,
+            sequence: number(&source.sequence, true)?,
+            history_hash: source.history_hash.clone(),
+        };
+        if target.sequence > 16384
+            || !hex(&target.history_hash, 64)
+            || target.sequence == 0 && target.history_hash != ZERO
+        {
+            return Err(invalid());
+        }
+        Ok(CheckedSnapshot { source, target })
+    }
+    pub(super) fn new(
+        chain: VerifiedChain,
+        keys: VaultKeys,
+        checked: CheckedSnapshot,
+        creation_head: String,
+        creation_authorization_epoch: u64,
+    ) -> Result<Self, AppError> {
+        let replica = Replica::join(
+            checked.source.vault.clone(),
+            creation_head,
+            creation_authorization_epoch,
+            checked.target.clone(),
+        )?;
+        Ok(Self {
+            chain,
             keys,
-            source,
-            target,
+            source: checked.source,
+            target: checked.target,
             replica,
             required_prefixes: vec![],
+            prefix_hashes: None,
             operations: BTreeSet::new(),
             bytes: 0,
         })
     }
-    pub(super) fn chain(&self) -> &VerifiedChain {
-        &self.chain
+    pub(super) fn position(&self) -> u64 {
+        self.replica.checkpoint.sequence
     }
-    pub(super) fn epochs(&self) -> &[SignedRekey] {
-        &self.source.commits
+    pub(super) fn complete(&self) -> Result<(), AppError> {
+        if self.replica.checkpoint != self.target || !self.replica.baseline_ready() {
+            return Err(invalid());
+        }
+        Ok(())
     }
     pub(super) fn pin_prefixes(&mut self, minimums: Vec<Checkpoint>) -> Result<(), AppError> {
         if self.position() != 0 || minimums.len() > 4 {
@@ -254,19 +330,46 @@ impl ReadSession {
                 return Err(invalid());
             }
         }
-        self.required_prefixes = minimums;
+        let mut combined = self.required_prefixes.clone();
+        for minimum in minimums {
+            if combined.iter().any(|known| {
+                known.epoch == minimum.epoch
+                    && known.sequence == minimum.sequence
+                    && known.history_hash != minimum.history_hash
+            }) {
+                return Err(invalid());
+            }
+            if !combined.contains(&minimum) {
+                combined.push(minimum);
+            }
+        }
+        if combined.len() > 4 {
+            return Err(invalid());
+        }
+        self.required_prefixes = combined;
         Ok(())
     }
-    pub fn total(&self) -> u64 {
-        self.target.sequence
+    pub(super) fn retain_prefix_hashes(&mut self) -> Result<(), AppError> {
+        if self.position() != 0 || self.prefix_hashes.is_some() {
+            return Err(invalid());
+        }
+        self.prefix_hashes = Some(vec![ZERO.into()]);
+        Ok(())
     }
-    pub fn vault(&self) -> &str {
-        &self.source.vault
+    pub(super) fn verifies_prefix(&self, minimum: &Checkpoint) -> bool {
+        minimum == &self.target
+            || minimum.epoch == self.target.epoch
+                && self.prefix_hashes.as_ref().and_then(|hashes| {
+                    usize::try_from(minimum.sequence)
+                        .ok()
+                        .and_then(|index| hashes.get(index))
+                }) == Some(&minimum.history_hash)
+            || self.required_prefixes.contains(minimum)
+            || minimum.epoch == self.target.epoch
+                && minimum.sequence == 0
+                && minimum.history_hash == ZERO
     }
-    pub fn position(&self) -> u64 {
-        self.replica.checkpoint.sequence
-    }
-    pub fn append(&mut self, page: HistoryPage) -> Result<(), AppError> {
+    pub(super) fn append(&mut self, page: HistoryPage) -> Result<(), AppError> {
         if page.epoch != self.target.epoch
             || page.membership_head != self.chain.current().head()
             || number(&page.sequence, true)? != self.target.sequence
@@ -280,6 +383,14 @@ impl ReadSession {
                 .prepare_page(&self.chain, &self.keys, &page.records, &self.target)?;
         let mut operations = self.operations.clone();
         let mut bytes = self.bytes;
+        let mut prefix_hashes = vec![];
+        if self
+            .prefix_hashes
+            .as_ref()
+            .is_some_and(|hashes| hashes.len() != self.position() as usize + 1)
+        {
+            return Err(invalid());
+        }
         for opened in prepared.opened {
             let row = &opened.version;
             if self.required_prefixes.iter().any(|minimum| {
@@ -289,6 +400,9 @@ impl ReadSession {
                 return Err(invalid());
             }
             payload::admit(&self.keys, &row.envelope.header, &opened.plaintext)?;
+            if self.prefix_hashes.is_some() {
+                prefix_hashes.push(row.history_hash.clone());
+            }
             if !operations.insert(row.envelope.header.operation_id.clone()) {
                 return Err(invalid());
             }
@@ -309,36 +423,33 @@ impl ReadSession {
                 }
             }
         }
+        if let Some(hashes) = self.prefix_hashes.as_mut() {
+            if hashes.len() + prefix_hashes.len() > 16385 {
+                return Err(invalid());
+            }
+            hashes.extend(prefix_hashes);
+        }
         self.replica = prepared.next;
         self.operations = operations;
         self.bytes = bytes;
         Ok(())
     }
-    pub fn finish(self) -> Result<VerifiedRecovery, AppError> {
-        if self.replica.checkpoint != self.target || !self.replica.baseline_ready() {
-            return Err(invalid());
-        }
-        Ok(VerifiedRecovery { session: self })
-    }
 }
+
 impl VerifiedRecovery {
     /// This check refers to prefixes pinned before reading and verified during every page.
     /// It cannot be minted by deserializing a checkpoint or by pinning after the read.
     pub(super) fn verifies_prefix(&self, minimum: &Checkpoint) -> bool {
-        minimum == &self.session.target
-            || self.session.required_prefixes.contains(minimum)
-            || minimum.epoch == self.session.target.epoch
-                && minimum.sequence == 0
-                && minimum.history_hash == ZERO
+        self.session.baseline.verifies_prefix(minimum)
     }
     pub fn previous_owner(&self) -> &Workspace {
         &self.session.before
     }
     pub fn checkpoint(&self) -> &Checkpoint {
-        &self.session.target
+        &self.session.baseline.target
     }
     pub fn chain(&self) -> &VerifiedChain {
-        &self.session.chain
+        &self.session.baseline.chain
     }
     pub fn proof(&self) -> &ControlProof {
         &self.session.proof
@@ -350,13 +461,13 @@ impl VerifiedRecovery {
         self.session.auth_epoch
     }
     pub fn keys(&self) -> &VaultKeys {
-        &self.session.keys
+        &self.session.baseline.keys
     }
     pub fn replica(&self) -> &Replica {
-        &self.session.replica
+        &self.session.baseline.replica
     }
     pub fn epochs(&self) -> &[SignedRekey] {
-        &self.session.source.commits
+        &self.session.baseline.source.commits
     }
 }
 
@@ -616,6 +727,95 @@ pub(crate) mod tests {
         }
         (session.finish().unwrap(), c.kit, c.identity)
     }
+    pub(crate) struct ActiveCase {
+        pub owner: Workspace,
+        pub identity: super::super::credentials::DeviceIdentity,
+        pub proof: ControlProof,
+        pub snapshot: super::super::active_read::Snapshot,
+        pub rows: Vec<Version>,
+        pub bridges: Vec<super::super::recovery_revalidation::Bridge>,
+        pub keys: VaultKeys,
+    }
+    pub(crate) fn active_case(count: u64, rotated: bool) -> ActiveCase {
+        use crate::sync::{env::Keychain, testkit::MemKeychain};
+        let mut c = case(count);
+        let profile = c.before.control.profile.profile().unwrap();
+        let memory = MemKeychain::default();
+        let encoded =
+            serde_json::json!({"version":1,"locator":profile.locator,"id":c.proof.genesis.first.id,
+            "keys":c.signer.encode_secret().as_str(),"credential":"a".repeat(64)})
+            .to_string();
+        memory.set(&profile.slot("device"), &encoded).unwrap();
+        let identity =
+            super::super::credentials::DeviceIdentity::load(&memory, &profile, true).unwrap();
+        let chain = c.proof.verify(c.kit.anchor(), None).unwrap();
+        let mut owner = Workspace::new(
+            State::new(
+                c.before.control.profile.clone(),
+                c.before.control.account_id.clone(),
+                identity.device(),
+                2,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        owner.control.anchor = Some(c.kit.anchor().clone());
+        owner.control.proof = Some(c.proof.clone());
+        owner.control.highwater = Some(chain.highwater());
+        owner.control.phase = Phase::Enrolled;
+        owner.control.personal_vault = Some(personal_vault_id(c.kit.anchor()).unwrap());
+        owner.replica = Some(
+            Replica::new(
+                personal_vault_id(c.kit.anchor()).unwrap(),
+                c.kit.anchor().genesis_hash.clone(),
+                2,
+            )
+            .unwrap(),
+        );
+        owner.validate().unwrap();
+        let (rows, bridges, keys) = if rotated {
+            let digests = c
+                .rows
+                .iter()
+                .map(|r| super::super::rekey::SourceDigest {
+                    sequence: r.sequence.clone(),
+                    digest: r.digest.clone(),
+                })
+                .collect();
+            let plan = rotate(&mut c);
+            c.response.results[0].wrap = plan
+                .wraps
+                .iter()
+                .find(|w| w.header.recipient == identity.id)
+                .unwrap()
+                .clone();
+            (
+                plan.rows,
+                vec![super::super::recovery_revalidation::Bridge { epoch: 2, digests }],
+                plan.keys,
+            )
+        } else {
+            let h = &c.response.results[0].wrap.header;
+            let mut own = h.clone();
+            own.recipient = identity.id.clone();
+            own.recipient_key = identity.keys.public().encryption;
+            c.response.results[0].wrap = crypto::wrap_keys(&c.keys, &identity.keys, own).unwrap();
+            (c.rows.clone(), vec![], c.keys)
+        };
+        ActiveCase {
+            owner,
+            identity,
+            proof: c.proof,
+            snapshot: super::super::active_read::Snapshot {
+                membership_head: c.response.membership_head,
+                auth_epoch: c.response.auth_epoch,
+                vault: c.response.results.pop().unwrap(),
+            },
+            rows,
+            bridges,
+            keys,
+        }
+    }
     pub(crate) fn replacement_fixture(
         rotated: bool,
         pin: bool,
@@ -831,8 +1031,8 @@ pub(crate) mod tests {
         let mut r = read(&c).unwrap();
         assert!(r.append(page(&c, &c.rows)).is_err());
         assert_eq!(r.position(), 0);
-        assert!(r.operations.is_empty());
-        assert_eq!(r.bytes, 0);
+        assert!(r.baseline.operations.is_empty());
+        assert_eq!(r.baseline.bytes, 0);
         assert!(r.finish().is_err());
     }
     #[test]

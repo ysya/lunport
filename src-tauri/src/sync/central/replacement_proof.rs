@@ -3,17 +3,26 @@
 use super::{
     recovery_read::VerifiedRecovery,
     recovery_revalidation::{finish_bridge, Bridge},
-    rekey::Checkpoint,
+    rekey::{Checkpoint, SignedRekey},
     replacement::Route,
+    trust::VerifiedChain,
     wire::{invalid, number},
     workspace::Workspace,
 };
 use crate::error::AppError;
 
-fn minimum(owner: &Workspace) -> Result<Option<(Checkpoint, String, u64)>, AppError> {
+pub(super) fn minimums(
+    owner: &Workspace,
+) -> Result<Option<(Vec<Checkpoint>, String, u64)>, AppError> {
     if let Some(replica) = &owner.replica {
+        let mut floors = vec![replica.checkpoint.clone()];
+        if let Some(minimum) = &replica.minimum {
+            if minimum.sequence > replica.checkpoint.sequence {
+                floors.push(minimum.clone());
+            }
+        }
         return Ok(Some((
-            replica.checkpoint.clone(),
+            floors,
             replica.creation_head.clone(),
             replica.creation_authorization_epoch,
         )));
@@ -25,11 +34,11 @@ fn minimum(owner: &Workspace) -> Result<Option<(Checkpoint, String, u64)>, AppEr
             .find(|m| m.vault == approval.personal_vault)
             .ok_or_else(invalid)?;
         return Ok(Some((
-            Checkpoint {
+            vec![Checkpoint {
                 epoch: number(&minimum.key_epoch, false)?,
                 sequence: number(&minimum.sequence, true)?,
                 history_hash: minimum.history_hash.clone(),
-            },
+            }],
             minimum.creation_head.clone(),
             number(&minimum.creation_authorization_epoch, false)?,
         )));
@@ -44,70 +53,209 @@ pub(super) fn recovery_read(
     read: &VerifiedRecovery,
     bridges: &[Bridge],
 ) -> Result<(), AppError> {
+    if owner
+        .replacement
+        .as_ref()
+        .is_none_or(|i| i.route != Route::RecoveryKit)
+    {
+        return Err(invalid());
+    }
+    for minimum in prefixes(
+        owner,
+        View {
+            before: read.previous_owner(),
+            chain: read.chain(),
+            proof: read.proof(),
+            auth_epoch: read.auth_epoch(),
+            checkpoint: read.checkpoint(),
+            epochs: read.epochs(),
+            replica: read.replica(),
+        },
+        bridges,
+    )? {
+        if !read.verifies_prefix(&minimum) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+struct View<'a> {
+    before: &'a Workspace,
+    chain: &'a VerifiedChain,
+    proof: &'a super::trust::ControlProof,
+    auth_epoch: u64,
+    checkpoint: &'a Checkpoint,
+    epochs: &'a [SignedRekey],
+    replica: &'a super::replica::Replica,
+}
+fn prefixes(
+    owner: &Workspace,
+    read: View<'_>,
+    bridges: &[Bridge],
+) -> Result<Vec<Checkpoint>, AppError> {
     owner.validate()?;
     let intent = owner.replacement.as_ref().ok_or_else(invalid)?;
-    if intent.route != Route::RecoveryKit
-        || intent.device.as_ref() != Some(&read.request().device)
-        || owner.control.device == read.request().device
-        || owner.control.profile != read.previous_owner().control.profile
-        || owner.control.account_id != read.previous_owner().control.account_id
-        || read.auth_epoch() < owner.control.auth_epoch
-        || owner
-            .control
-            .denied_devices
-            .contains(&read.request().device.id)
-        || !read.epochs().starts_with(&owner.epochs)
-        || !read.epochs().starts_with(&owner.observed_epochs)
+    let target = &read.before.control.device;
+    if intent.device.as_ref() != Some(target)
+        || &owner.control.device == target
+        || owner.control.profile != read.before.control.profile
+        || owner.control.account_id != read.before.control.account_id
+        || read.auth_epoch < owner.control.auth_epoch
+        || owner.control.denied_devices.contains(&target.id)
+        || !read.epochs.starts_with(&owner.epochs)
+        || !read.epochs.starts_with(&owner.observed_epochs)
         || bridges.len() > 64
     {
         return Err(invalid());
     }
     if let Some(anchor) = &owner.control.anchor {
-        if anchor != read.chain().current().anchor() {
+        if anchor != read.chain.current().anchor() {
             return Err(invalid());
         }
-        read.proof()
+        read.proof
             .verify(anchor, owner.control.highwater.as_ref())?;
     }
-    if let Some(vault) = &owner.control.personal_vault {
-        if vault != &read.replica().vault {
-            return Err(invalid());
-        }
+    if owner
+        .control
+        .personal_vault
+        .as_ref()
+        .is_some_and(|vault| vault != &read.replica.vault)
+    {
+        return Err(invalid());
     }
-    let Some((mut known, creation, authorization)) = minimum(owner)? else {
+    let Some((floors, creation, authorization)) = minimums(owner)? else {
         return if bridges.is_empty() {
-            Ok(())
+            Ok(vec![])
         } else {
             Err(invalid())
         };
     };
-    if creation != read.replica().creation_head
-        || authorization != read.replica().creation_authorization_epoch
-        || known.epoch > read.checkpoint().epoch
-        || bridges.len() as u64 != read.checkpoint().epoch - known.epoch
+    if creation != read.replica.creation_head
+        || authorization != read.replica.creation_authorization_epoch
     {
         return Err(invalid());
     }
-    let mut count = 0usize;
-    for bridge in bridges {
-        count = count
-            .checked_add(bridge.digests.len())
-            .ok_or_else(invalid)?;
-        if count > 16384 {
-            return Err(invalid());
-        }
-        known = finish_bridge(
-            read.chain(),
-            &read.replica().vault,
-            read.epochs(),
-            &known,
-            bridge,
-        )?;
-    }
-    if !read.verifies_prefix(&known) {
+    extend_minimums(
+        read.chain,
+        &read.replica.vault,
+        read.epochs,
+        &floors,
+        bridges,
+        read.checkpoint.epoch,
+    )
+}
+/// Add original-owner minima before the first active-target page. Existing target minima stay pinned.
+pub(super) fn pin_active_read(
+    owner: &Workspace,
+    read: &mut super::active_read::ReadSession,
+    bridges: &[Bridge],
+) -> Result<(), AppError> {
+    if read.previous_owner().identity_slot.as_ref()
+        != owner.replacement.as_ref().map(|i| &i.operation)
+    {
         return Err(invalid());
     }
+    let minimums = prefixes(
+        owner,
+        View {
+            before: read.previous_owner(),
+            chain: read.chain(),
+            proof: read.proof(),
+            auth_epoch: read.auth_epoch(),
+            checkpoint: read.checkpoint(),
+            epochs: read.epochs(),
+            replica: read.replica(),
+        },
+        bridges,
+    )?;
+    read.pin_prefixes(minimums)
+}
+/// Recheck the latest original owner immediately before authorization/archive publication.
+pub(super) fn active_read(
+    owner: &Workspace,
+    read: &super::active_read::VerifiedLibrary,
+    bridges: &[Bridge],
+) -> Result<(), AppError> {
+    if read.previous_owner().identity_slot.as_ref()
+        != owner.replacement.as_ref().map(|i| &i.operation)
+    {
+        return Err(invalid());
+    }
+    for minimum in prefixes(
+        owner,
+        View {
+            before: read.previous_owner(),
+            chain: read.chain(),
+            proof: read.proof(),
+            auth_epoch: read.auth_epoch(),
+            checkpoint: read.checkpoint(),
+            epochs: read.epochs(),
+            replica: read.replica(),
+        },
+        bridges,
+    )? {
+        if !read.verifies_prefix(&minimum) {
+            return Err(invalid());
+        }
+    }
     Ok(())
+}
+
+/// Extend every independently known prefix, including a higher unread OOB minimum.
+pub(super) fn extend_minimums(
+    chain: &VerifiedChain,
+    vault: &str,
+    epochs: &[SignedRekey],
+    floors: &[Checkpoint],
+    bridges: &[Bridge],
+    target_epoch: u64,
+) -> Result<Vec<Checkpoint>, AppError> {
+    if floors.is_empty()
+        || floors.len() > 2
+        || bridges.len() > 64
+        || !(1..=65).contains(&target_epoch)
+    {
+        return Err(invalid());
+    }
+    let count = bridges.iter().try_fold(0usize, |count, b| {
+        count.checked_add(b.digests.len()).ok_or_else(invalid)
+    })?;
+    if count > 16384 {
+        return Err(invalid());
+    }
+    let mut minimums = vec![];
+    for (index, floor) in floors.iter().enumerate() {
+        if index > 0 && (floor.epoch != floors[0].epoch || floor.sequence <= floors[0].sequence) {
+            return Err(invalid());
+        }
+        let mut known = floor.clone();
+        if known.epoch > target_epoch || bridges.len() as u64 != target_epoch - known.epoch {
+            return Err(invalid());
+        }
+        for bridge in bridges {
+            let selected;
+            let bridge = if index == 0 {
+                bridge
+            } else {
+                let mut digests = vec![];
+                for row in &bridge.digests {
+                    if number(&row.sequence, false)? > known.sequence {
+                        digests.push(row.clone());
+                    }
+                }
+                selected = Bridge {
+                    epoch: bridge.epoch,
+                    digests,
+                };
+                &selected
+            };
+            known = finish_bridge(chain, vault, epochs, &known, bridge)?;
+        }
+        if !minimums.contains(&known) {
+            minimums.push(known);
+        }
+    }
+    Ok(minimums)
 }
 
 #[cfg(test)]
@@ -128,6 +276,29 @@ mod tests {
         }
         let (source, read, bridges) =
             super::super::recovery_read::tests::replacement_fixture(false, false);
+        assert!(recovery_read(&source, &read, &bridges).is_err());
+    }
+    #[test]
+    fn an_unread_approval_minimum_does_not_erase_the_already_verified_partial_checkpoint() {
+        let (mut source, read, bridges) =
+            super::super::recovery_read::tests::replacement_fixture(false, true);
+        source.replica.as_mut().unwrap().minimum = Some(read.checkpoint().clone());
+        source.validate().unwrap();
+        recovery_read(&source, &read, &bridges).unwrap();
+        source
+            .replica
+            .as_mut()
+            .unwrap()
+            .minimum
+            .as_mut()
+            .unwrap()
+            .history_hash = "f".repeat(64);
+        source.validate().unwrap();
+        assert!(recovery_read(&source, &read, &bridges).is_err());
+        let (mut source, read, bridges) =
+            super::super::recovery_read::tests::replacement_fixture(false, false);
+        source.replica.as_mut().unwrap().minimum = Some(read.checkpoint().clone());
+        source.validate().unwrap();
         assert!(recovery_read(&source, &read, &bridges).is_err());
     }
     #[test]

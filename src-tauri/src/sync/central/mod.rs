@@ -18,6 +18,7 @@ pub mod pairing;
 pub mod payload;
 pub mod recovery;
 pub mod recovery_read;
+pub mod active_read;
 pub mod recovery_state;
 pub mod recovery_credentials;
 pub mod recovery_flow;

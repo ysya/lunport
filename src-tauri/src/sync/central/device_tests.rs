@@ -2350,3 +2350,67 @@ fn selected_replacement_identity_is_used_for_sign_in_and_background_resume_witho
     assert_eq!(peer.keychain.entry(&profile.slot("pairing")).as_deref(),Some("retained-original-pairing-proof"));
     assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0.local.central.unwrap().identity_slot,Some(operation));
 }
+
+#[test]
+fn active_full_baseline_reads_after_trusted_approval_or_committed_recovery_use_only_the_new_device_keys() {
+    use super::{active_read, recovery_flow, recovery_read::{RecoveryVault,EpochBundle}};
+    for recovered in [false,true] {
+        let (service,peer,kit,keys,original)=recovery_fixture_with_source(33);
+        if recovered {
+            let ready=recovery_flow::begin(&peer.env(),Some(&kit.kit)).unwrap();
+            recovery_flow::confirm(&peer.env(),ready.operation.as_deref().unwrap()).unwrap();
+        } else {
+            let code=devices::pairing_code(&peer.env()).unwrap();devices::approve(&original.env(),&code.code).unwrap();
+            controller::refresh(&peer.env()).unwrap();joining::initialize(&peer.env()).unwrap();
+        }
+        let session=controller::context(&peer.env()).unwrap();let identity=session.identity.as_ref().unwrap();
+        let before=record_runtime::snapshot(&peer.env()).unwrap().0;
+        let owner=before.local.central.as_ref().unwrap();
+        let (proof,snapshot,rows)={
+            let state=service.state.lock().unwrap();
+            let head=state.chain().unwrap().current().head().to_string();
+            let committed=if state.key_epoch==1 {None} else {Some(EpochBundle{
+                manifest:state.commits.last().unwrap().clone(),wraps:state.committed_wraps[&state.key_epoch].clone()})};
+            (state.proof.clone().unwrap(),active_read::Snapshot{membership_head:head,auth_epoch:state.epoch,vault:RecoveryVault{
+                vault:state.vault.clone().unwrap(),epoch:state.key_epoch,
+                phase:if state.rekey_pending {"rekey_pending"} else {"ready"}.into(),
+                wrap:state.wraps.iter().find(|w|w.header.recipient==identity.id).unwrap().clone(),committed,
+                commits:state.commits.clone(),sequence:state.history.len().to_string(),
+                history_hash:state.history.last().map_or("0".repeat(64),|r|r.history_hash.clone()),
+            }},state.history.clone())
+        };
+        let mut reader=active_read::ReadSession::begin(owner,identity,proof,snapshot.clone(),&[]).unwrap();
+        for page in rows.chunks(32) {
+            reader.append(super::recovery_read::HistoryPage{records:page.to_vec(),sequence:snapshot.vault.sequence.clone(),
+                history_hash:snapshot.vault.history_hash.clone(),membership_head:snapshot.membership_head.clone(),epoch:snapshot.vault.epoch,phase:snapshot.vault.phase.clone()}).unwrap();
+        }
+        let verified=reader.finish().unwrap();assert_eq!(verified.replica().current.len(),33);
+        verified.keys().verify_same(&keys).unwrap();assert_eq!(verified.previous_owner(),owner);
+        let operation="c".repeat(32);
+        let profile=owner.control.profile.profile().unwrap();
+        use crate::sync::env::Keychain;
+        let saved=peer.keychain.entry(&profile.slot("device")).unwrap();
+        peer.keychain.set(&profile.device_slot("device",Some(&operation)).unwrap(),&saved).unwrap();
+        let selected=super::credentials::DeviceIdentity::load_selected(&peer.keychain,&profile,Some(&operation),true).unwrap();
+        let mut candidate=owner.clone();candidate.identity_slot=Some(operation.clone());
+        let mut source=record_runtime::snapshot(&original.env()).unwrap().0.local.central.unwrap();
+        let old_chain=source.control.verified_chain().unwrap();
+        let old=source.replica.as_ref().unwrap().prepare_page(&old_chain,&keys,&rows[..1],&super::rekey::Checkpoint{
+            epoch:1,sequence:1,history_hash:rows[0].history_hash.clone()}).unwrap().next;
+        source.replica=Some(old);source.replacement=Some(super::replacement::Intent{operation:operation.clone(),
+            route:if recovered{super::replacement::Route::RecoveryKit}else{super::replacement::Route::TrustedDevice},device:Some(selected.device())});
+        source.validate().unwrap();
+        let mut reader=active_read::ReadSession::begin(&candidate,&selected,verified.proof().clone(),snapshot.clone(),&[]).unwrap();
+        super::replacement_proof::pin_active_read(&source,&mut reader,&[]).unwrap();
+        for page in rows.chunks(32){reader.append(super::recovery_read::HistoryPage{records:page.to_vec(),sequence:snapshot.vault.sequence.clone(),
+            history_hash:snapshot.vault.history_hash.clone(),membership_head:snapshot.membership_head.clone(),epoch:snapshot.vault.epoch,phase:snapshot.vault.phase.clone()}).unwrap();}
+        let completed=reader.finish().unwrap();super::replacement_proof::active_read(&source,&completed,&[]).unwrap();
+        let newer=source.replica.as_ref().unwrap().prepare_page(&old_chain,&keys,&rows[1..2],&super::rekey::Checkpoint{
+            epoch:1,sequence:2,history_hash:rows[1].history_hash.clone()}).unwrap().next;
+        source.replica=Some(newer);source.validate().unwrap();
+        super::replacement_proof::active_read(&source,&completed,&[]).unwrap();
+        source.replica.as_mut().unwrap().checkpoint.history_hash="f".repeat(64);
+        assert!(super::replacement_proof::active_read(&source,&completed,&[]).is_err());
+        assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0,before);
+    }
+}
