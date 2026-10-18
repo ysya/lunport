@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 fn state(d: &TestDevice) -> SyncStateV3 {
     record_runtime::snapshot(&d.env()).unwrap().0
 }
-fn fixture() -> (TestDevice, String) {
+pub(super) fn fixture() -> (TestDevice, String) {
     let d = local_fixture();
     let (before, generation) = record_runtime::snapshot(&d.env()).unwrap();
     let invocation = central_local::invocation(&before)
@@ -402,4 +402,64 @@ fn removed_or_rolled_back_saved_sent_evidence_cannot_enter_transport() {
             .is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
+}
+
+pub(in crate::sync) struct AssertUnlocked<'a> {
+    pub runtime: &'a crate::sync::runtime::SyncRuntime,
+}
+impl crate::sync::env::SyncEvents for AssertUnlocked<'_> {
+    fn status(&self) {
+        assert!(
+            self.runtime.lifecycle.try_lock().is_ok(),
+            "status callback cannot hold lifecycle"
+        );
+        assert!(
+            self.runtime.vault.try_lock().is_ok(),
+            "status callback cannot hold vault"
+        );
+        assert!(
+            self.runtime.format_publication.try_lock().is_ok(),
+            "status callback cannot hold publication"
+        );
+        assert!(
+            self.runtime.core.try_lock().is_ok(),
+            "status callback cannot hold Core"
+        );
+    }
+    fn applied(&self, _: usize) {
+        self.status();
+    }
+    fn conflict(&self, _: &[crate::sync::dto::SyncConflict]) {
+        self.status();
+    }
+    fn approval(&self, _: &[crate::sync::dto::ApprovalNotice]) {
+        self.status();
+    }
+    fn notice(&self, _: &crate::sync::state_v2::SyncNotice) {
+        self.status();
+    }
+    fn wake(&self) {}
+}
+#[test]
+fn notifications_after_rename_and_claims_never_hold_runtime_locks() {
+    let (d, id) = fixture();
+    let probe = AssertUnlocked {
+        runtime: &d.runtime,
+    };
+    let mut env = d.env();
+    env.events = &probe;
+    let operation = prepare(&env, None).unwrap().operation.unwrap();
+    let (before, generation) = record_runtime::snapshot(&env).unwrap();
+    let invocation = central_local::invocation(&before)
+        .unwrap()
+        .with_generation(generation);
+    central_local::rename(
+        &env,
+        &invocation,
+        &id,
+        &before.local.keys[&id].public,
+        "notify_name",
+    )
+    .unwrap();
+    operation.claims(&env, &reply(&operation, &d)).unwrap();
 }

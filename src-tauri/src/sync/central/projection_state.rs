@@ -352,11 +352,17 @@ impl Ledger {
     }
     pub(in crate::sync) fn verify_source_material(
         &self,
+        owner: &Workspace,
         id: &str,
         local: &crate::sync::records_v3::LocalKeyMetadata,
         entry: &crate::vault::store::VaultEntry,
     ) -> Result<(), AppError> {
-        let receipt = self.materials.get(id).ok_or_else(invalid)?;
+        if owner.control.anchor.as_ref() != Some(&self.anchor)
+            || owner.control.personal_vault.as_deref() != Some(self.vault.as_str()) || !owner.control.cutover
+        { return Err(invalid()); }
+        let Some(receipt) = self.materials.get(id) else {
+            return self.local_sources.get(id).ok_or_else(invalid)?.verify_material(owner, id, local, entry);
+        };
         if receipt.vault_id != local.vault_id
             || receipt.slot.public.has_passphrase != local.public.has_passphrase
             || receipt.slot.public.key_type != local.public.key_type
@@ -592,6 +598,46 @@ impl Ledger {
             return Err(invalid());
         }
         Ok(())
+    }
+    /// A fully authenticated current value may already have acknowledged a fresh local edit
+    /// before its projection basis is installed. A service receipt/hash alone is insufficient.
+    pub(in crate::sync::central) fn public_changes_captured(
+        &self,
+        state: &SyncStateV3,
+        keys: &VaultKeys,
+    ) -> Result<bool, AppError> {
+        let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+        let replica = owner.replica.as_ref().ok_or_else(invalid)?;
+        let chain = owner.control.verified_chain()?;
+        for change in self.public_changes(state, keys)? {
+            let opaque = change.identity.opaque(keys)?;
+            let hash = crypto::hash(&payload::encode(&change.identity, &change.data)?);
+            if replica
+                .pending
+                .get(&opaque)
+                .is_some_and(|p| p.latest.content_hash == hash)
+            {
+                continue;
+            }
+            let Some(base) = replica.current.get(&opaque) else {
+                return Ok(false);
+            };
+            let h = &base.version.envelope.header;
+            let author = chain
+                .author_at(&h.membership_head, &h.author)
+                .ok_or_else(invalid)?;
+            let plain = base.version.envelope.verify(&author.signing)?.open(keys)?;
+            if crypto::hash(&plain) != base.content_hash {
+                return Err(invalid());
+            }
+            let admitted = payload::admit(keys, h, &plain)?;
+            if admitted.identity != change.identity
+                || crypto::hash(&payload::encode(&admitted.identity, &admitted.data)?) != hash
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
     pub(in crate::sync::central) fn public_changes(
         &self,

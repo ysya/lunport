@@ -559,6 +559,9 @@ pub(crate) fn rename(
         context.verify(env, &before)?;
         record_runtime::commit_candidate(env, generation, candidate)?;
     }
+    drop(_publication);
+    drop(_vault);
+    drop(_life);
     let result = crate::sync::record_commands::overview(env)?;
     env.events.status();
     env.events.wake();

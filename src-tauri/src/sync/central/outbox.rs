@@ -101,25 +101,10 @@ pub(super) fn prepare(
     for base in replica.current.values() {
         drop(current(keys, &chain, base)?);
     }
-    for change in ledger.public_changes(state, keys)? {
-        let opaque = change.identity.opaque(keys)?;
-        let hash = crypto::hash(&payload::encode(&change.identity, &change.data)?);
-        let captured = replica
-            .pending
-            .get(&opaque)
-            .is_some_and(|p| p.latest.content_hash == hash);
-        let accepted_same = match replica.current.get(&opaque) {
-            Some(base) => {
-                let admitted = current(keys, &chain, base)?;
-                crypto::hash(&payload::encode(&admitted.identity, &admitted.data)?) == hash
-            }
-            None => false,
-        };
-        if !captured && !accepted_same {
-            return Err(AppError::Other(
-                "Capture current public changes before dispatch; local data is retained.".into(),
-            ));
-        }
+    if !ledger.public_changes_captured(state, keys)? {
+        return Err(AppError::Other(
+            "Capture current public changes before dispatch; local data is retained.".into(),
+        ));
     }
     let mut public = BTreeMap::new();
     // Verify everything before building any send flags. Superseded sent A is not an unchecked blob.

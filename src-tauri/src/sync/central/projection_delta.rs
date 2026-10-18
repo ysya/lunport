@@ -170,16 +170,8 @@ impl Delta {
         if ledger.checkpoint.epoch != replica.checkpoint.epoch {
             return Err(invalid());
         }
-        for change in ledger.public_changes(state, keys)? {
-            let opaque = change.identity.opaque(keys)?;
-            let hash = crypto::hash(&payload::encode(&change.identity, &change.data)?);
-            if replica
-                .pending
-                .get(&opaque)
-                .is_none_or(|p| p.latest.content_hash != hash)
-            {
-                return Err(AppError::Other("Capture the latest local library changes before publishing a central delta. Local data is retained.".into()));
-            }
+        if !ledger.public_changes_captured(state, keys)? {
+            return Err(AppError::Other("Capture the latest local library changes before publishing a central delta. Local data is retained.".into()));
         }
         let plan = Plan::current(owner.clone(), keys)?;
         let mut candidate = state.clone();
@@ -391,7 +383,7 @@ impl Delta {
                     .central_projection
                     .as_ref()
                     .ok_or_else(invalid)?
-                    .verify_source_material(id, old, &original)?;
+                    .verify_source_material(self.before.local.central.as_ref().ok_or_else(invalid)?, id, old, &original)?;
             }
             let material = self.plan.materials().get(id).ok_or_else(invalid)?;
             let entry = vault

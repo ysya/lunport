@@ -44,11 +44,16 @@ fn fresh(session: &Session, state: &SyncStateV3) -> Result<(), AppError> {
 }
 /// Constructed only from actual protected selection and a pure validated candidate below.
 /// It cannot change ledger, material pointers or public Records cache.
+enum Kind {
+    Cipher,
+    Revalidate,
+}
 pub(crate) struct Publication {
     before: SyncStateV3,
     candidate: SyncStateV3,
     generation: u64,
     session: Arc<Session>,
+    kind: Kind,
 }
 impl Publication {
     pub(crate) fn candidate(&self) -> &SyncStateV3 {
@@ -83,11 +88,30 @@ impl Publication {
         }
         let mut expected = before.clone();
         expected.local.central = candidate.local.central.clone();
-        if &expected != candidate
-            || before.local.central.as_ref().map(|o| &o.control)
-                != candidate.local.central.as_ref().map(|o| &o.control)
-        {
+        if &expected != candidate {
             return Err(invalid());
+        }
+        match self.kind {
+            Kind::Cipher => {
+                if before.local.central.as_ref().map(|o| &o.control)
+                    != candidate.local.central.as_ref().map(|o| &o.control)
+                {
+                    return Err(invalid());
+                }
+            }
+            Kind::Revalidate => {
+                let mut notice = before.clone();
+                notice
+                    .local
+                    .central
+                    .as_mut()
+                    .ok_or_else(invalid)?
+                    .control
+                    .phase = super::client_state::Phase::Rekey;
+                if &notice != candidate {
+                    return Err(invalid());
+                }
+            }
         }
         fresh(&self.session, before)?;
         super::workspace::verify_publication(
@@ -228,9 +252,13 @@ impl Operation {
             candidate,
             generation,
             session: Arc::clone(&self.session),
+            kind: Kind::Cipher,
         };
         self.context.verify(env, &authority.before)?;
         record_runtime::publish_dispatch(env, &authority)?;
+        drop(_publication);
+        drop(_vault);
+        drop(_life);
         env.events.status();
         Ok(())
     }
@@ -268,6 +296,7 @@ pub(super) fn prepare(env: &SyncEnv, after: Option<&str>) -> Result<Batch, AppEr
             candidate,
             generation,
             session: Arc::clone(&session),
+            kind: Kind::Cipher,
         };
         context.verify(env, &authority.before)?;
         record_runtime::publish_dispatch(env, &authority)?;
@@ -285,5 +314,6 @@ pub(super) fn prepare(env: &SyncEnv, after: Option<&str>) -> Result<Batch, AppEr
         cursor: prepared.cursor,
     })
 }
+pub(super) mod pull;
 #[cfg(all(test, unix))]
 mod tests;

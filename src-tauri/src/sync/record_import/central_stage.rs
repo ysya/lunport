@@ -419,7 +419,7 @@ pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, App
                 .get(&old.vault_id)
                 .map_err(|_| failure("old source material is unreadable"))?
                 .ok_or_else(|| failure("old source material is missing"))?;
-            ledger.verify_source_material(id, old, &entry)?;
+            ledger.verify_source_material(owner, id, old, &entry)?;
             central::crypto::hash(entry.private_key.as_bytes()) == material.private().digest()
         } else {
             false
