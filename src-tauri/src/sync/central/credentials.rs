@@ -272,6 +272,12 @@ impl SessionAttempt {
     }
 }
 /// Identity fields are nonsecret; nonce/refresh are cleared when their temporary parse is dropped.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RefreshState {
+    Ready,
+    InFlight,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RefreshEntry {
@@ -280,6 +286,8 @@ struct RefreshEntry {
     client_id: String,
     nonce: String,
     refresh: String,
+    #[serde(default)]
+    state: Option<RefreshState>,
 }
 impl Drop for RefreshEntry {
     fn drop(&mut self) {
@@ -307,6 +315,23 @@ pub fn save_refresh(
     if secret.is_empty() || secret.len() > 16384 || tokens.nonce.len() > 4096 {
         return Err(invalid());
     }
+    store_refresh(
+        keychain,
+        profile,
+        config,
+        &tokens.nonce,
+        secret,
+        RefreshState::Ready,
+    )
+}
+fn store_refresh(
+    keychain: &dyn Keychain,
+    profile: &Profile,
+    config: &OidcConfig,
+    nonce: &str,
+    refresh: &str,
+    state: RefreshState,
+) -> Result<(), AppError> {
     #[derive(Serialize)]
     struct Stored<'a> {
         version: u32,
@@ -314,22 +339,31 @@ pub fn save_refresh(
         client_id: &'a str,
         nonce: &'a str,
         refresh: &'a str,
+        state: RefreshState,
     }
     let encoded = Zeroizing::new(
         serde_json::to_string(&Stored {
-            version: 1,
+            version: 2,
             locator: &profile.locator,
             client_id: &config.client_id,
-            nonce: &tokens.nonce,
-            refresh: secret,
+            nonce,
+            refresh,
+            state,
         })
         .map_err(|_| invalid())?,
     );
     if encoded.len() > 32768 {
         return Err(invalid());
     }
-    keychain.set(&profile.slot("refresh"), &encoded)
+    let slot = profile.slot("refresh");
+    keychain.set(&slot, &encoded)?;
+    let persisted = Zeroizing::new(keychain.get(&slot)?.ok_or_else(invalid)?);
+    if *persisted != *encoded {
+        return Err(invalid());
+    }
+    Ok(())
 }
+/// Caller serializes refresh/sign-in/logout with the owning SyncRuntime lifecycle lock.
 pub fn renew(
     keychain: &dyn Keychain,
     profile: &Profile,
@@ -355,8 +389,10 @@ pub fn renew(
         return Err(invalid());
     }
     let stored: RefreshEntry = serde_json::from_str(&encoded).map_err(|_| invalid())?;
-    if stored.version != 1
-        || stored.locator != profile.locator
+    if !matches!(
+        (stored.version, stored.state),
+        (1, None) | (2, Some(RefreshState::Ready | RefreshState::InFlight))
+    ) || stored.locator != profile.locator
         || stored.client_id != config.client_id
         || stored.refresh.is_empty()
         || stored.refresh.len() > 16384
@@ -364,21 +400,32 @@ pub fn renew(
     {
         return Err(invalid());
     }
+    if stored.state == Some(RefreshState::InFlight) {
+        return Err(AppError::Other("Sign in again: the previous credential renewal was interrupted. Local data is retained.".into()));
+    }
+    // Mark the old family durably before any provider request. A response loss, crash or failed
+    // rotated-token save leaves InFlight, so a restart cannot replay the potentially consumed token.
+    let background = Background(keychain);
+    let writer: &dyn Keychain = if interactive { keychain } else { &background };
+    store_refresh(writer, profile, config, &stored.nonce, &stored.refresh, RefreshState::InFlight)
+        .map_err(|_| AppError::Other("Sign in again: credential renewal could not be prepared securely. Local data is retained.".into()))?;
     let tokens = oidc::refresh(
         config,
         &profile.subject,
         &stored.nonce,
         &stored.refresh,
         http,
-    )?;
-    // Persist a provider-rotated refresh before using the new access token. Failure requires sign-in,
-    // rather than retrying an already-consumed refresh family or silently continuing without durability.
-    if interactive {
-        save_refresh(keychain, profile, config, &tokens)?;
-    } else {
-        save_refresh(&Background(keychain), profile, config, &tokens).map_err(|_|AppError::Other(
-            "Sign in again: the renewed account credential could not be saved securely. Local data is retained.".into()))?;
-    }
+    )
+    .map_err(|_| {
+        AppError::Other(
+            "Sign in again: account credential renewal did not complete. Local data is retained."
+                .into(),
+        )
+    })?;
+    // Persist and read back the new family before exposing access. Any uncertain attempt retains
+    // InFlight; it cannot be replayed by a later worker or after a crash.
+    save_refresh(writer, profile, config, &tokens).map_err(|_| AppError::Other(
+        "Sign in again: the renewed account credential could not be saved securely. Local data is retained.".into()))?;
     Ok(tokens)
 }
 pub fn forget_session_attempt(keychain: &dyn Keychain, profile: &Profile) -> Result<(), AppError> {
@@ -529,6 +576,14 @@ mod tests {
         };
         save_refresh(&memory, &profile, &config, &tokens).unwrap();
         let http = oidc::BoundedHttp::new().unwrap();
+        // Compatibility: old ready credentials are upgraded to v2 before their first renewal.
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&memory.get(&profile.slot("refresh")).unwrap().unwrap()).unwrap();
+        legacy["version"] = json!(1);
+        legacy.as_object_mut().unwrap().remove("state");
+        memory
+            .set(&profile.slot("refresh"), &legacy.to_string())
+            .unwrap();
         let wrong = OidcConfig {
             client_id: "another-client".into(),
             ..config.clone()
@@ -543,18 +598,101 @@ mod tests {
         exchange.assert();
         let lost=provider.mock("POST","/token").match_body(mockito::Matcher::UrlEncoded("refresh_token".into(),"new-refresh".into()))
             .with_header("content-type","application/json").with_body(json!({"access_token":"must-not-be-returned","refresh_token":"unsaved-rotation","token_type":"Bearer","expires_in":300}).to_string()).expect(1).create();
-        let error = match renew(&NoPrompt(&memory, false), &profile, &config, false, &http) {
+        // A denied preflight update cannot send the refresh token to the provider.
+        assert!(renew(&NoPrompt(&memory, false), &profile, &config, false, &http).is_err());
+        assert_eq!(
+            memory.get(&profile.slot("refresh")).unwrap().unwrap(),
+            persisted
+        );
+        struct FailAfterMarker<'a>(&'a Memory, std::sync::atomic::AtomicUsize);
+        impl Keychain for FailAfterMarker<'_> {
+            fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+                panic!("interactive read");
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+                panic!("interactive write");
+            }
+            fn delete(&self, _: &str) -> Result<(), AppError> {
+                panic!("interactive delete");
+            }
+            fn get_noninteractive(&self, key: &str) -> Result<Option<String>, AppError> {
+                self.0.get(key)
+            }
+            fn set_noninteractive(&self, key: &str, value: &str) -> Result<(), AppError> {
+                if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    self.0.set(key, value)
+                } else {
+                    Err(AppError::Other("synthetic secure storage failure".into()))
+                }
+            }
+        }
+        let failing = FailAfterMarker(&memory, std::sync::atomic::AtomicUsize::new(0));
+        let error = match renew(&failing, &profile, &config, false, &http) {
             Ok(_) => panic!("unsaved rotated token escaped"),
             Err(error) => error.to_string(),
         };
         assert!(error.contains("Sign in again"));
         assert!(!error.contains("must-not-be-returned"));
         assert!(!error.contains("unsaved-rotation"));
+        let pending = memory.get(&profile.slot("refresh")).unwrap().unwrap();
+        assert!(pending.contains("in_flight"));
+        assert!(pending.contains("new-refresh"));
+        assert!(!pending.contains("unsaved-rotation"));
+        // A cold retry with a now-writable keychain must still refuse the consumed old family.
+        assert!(renew(&NoPrompt(&memory, true), &profile, &config, false, &http).is_err());
         assert_eq!(
             memory.get(&profile.slot("refresh")).unwrap().unwrap(),
-            persisted
+            pending
         );
         lost.assert();
+        // An explicit new browser sign-in may replace an uncertain family. Losing its next token
+        // response after the provider received the request must still require another sign-in.
+        let fresh = LoginTokens {
+            issuer: profile.issuer.clone(),
+            subject: profile.subject.clone(),
+            nonce: Zeroizing::new("new-sign-in-nonce".into()),
+            access: Zeroizing::new("fresh-access".into()),
+            refresh: Some(Zeroizing::new("fresh-session-refresh".into())),
+            expires_in: std::time::Duration::from_secs(300),
+        };
+        save_refresh(&memory, &profile, &config, &fresh).unwrap();
+        let response_lost = provider.mock("POST", "/token")
+            .match_body(mockito::Matcher::UrlEncoded("refresh_token".into(), "fresh-session-refresh".into()))
+            .with_header("content-type", "application/json")
+            .with_body(json!({"access_token":"lost-access","refresh_token":"lost-rotation","token_type":"Bearer","expires_in":300}).to_string())
+            .expect(1).create();
+        struct LoseTokenResponse<'a>(&'a oidc::BoundedHttp);
+        impl openidconnect::SyncHttpClient for LoseTokenResponse<'_> {
+            type Error = std::io::Error;
+            fn call(
+                &self,
+                request: openidconnect::HttpRequest,
+            ) -> Result<openidconnect::HttpResponse, Self::Error> {
+                let token = request.uri().path() == "/token";
+                let response = openidconnect::SyncHttpClient::call(self.0, request)?;
+                if token {
+                    Err(std::io::Error::other(
+                        "synthetic response loss after delivery",
+                    ))
+                } else {
+                    Ok(response)
+                }
+            }
+        }
+        assert!(renew(
+            &NoPrompt(&memory, true),
+            &profile,
+            &config,
+            false,
+            &LoseTokenResponse(&http)
+        )
+        .is_err());
+        let pending = memory.get(&profile.slot("refresh")).unwrap().unwrap();
+        assert!(pending.contains("in_flight"));
+        assert!(pending.contains("fresh-session-refresh"));
+        assert!(!pending.contains("lost-rotation"));
+        assert!(renew(&NoPrompt(&memory, true), &profile, &config, false, &http).is_err());
+        response_lost.assert();
     }
     #[test]
     fn refresh_is_scoped_to_exact_issuer_subject_and_client_and_logout_preserves_device_keys() {

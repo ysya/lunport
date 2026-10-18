@@ -229,11 +229,23 @@ mod tests {
         let completed = prepare(&ws, &keys, &[second], &advertised).unwrap();
         assert!(completed.publish_baseline);
         assert_eq!(completed.publication.len(), 2);
+        let versions: std::collections::BTreeMap<_, _> = completed
+            .publication
+            .iter()
+            .map(|change| {
+                (
+                    change.payload.identity.id.as_str(),
+                    change.version.sequence.as_str(),
+                )
+            })
+            .collect();
         assert_eq!(
-            completed.publication[0].payload.identity.id,
-            "0000000000000001"
+            versions,
+            std::collections::BTreeMap::from([
+                ("0000000000000001", "1"),
+                ("0000000000000002", "2")
+            ])
         );
-        assert_eq!(completed.publication[1].version.sequence, "2");
     }
     #[test]
     fn an_uncovered_authorization_barrier_blocks_plaintext_publication_even_with_active_phase() {

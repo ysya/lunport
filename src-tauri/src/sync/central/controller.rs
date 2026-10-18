@@ -252,10 +252,7 @@ fn establish_tokens(
         credentials::save_refresh(env.keychain, &profile, &config, &tokens)?;
     }
     current_login(env, operation)?;
-    let identity = if previous
-        .as_ref()
-        .is_some_and(|w| w.control.anchor.is_some())
-    {
+    let identity = if previous.is_some() {
         DeviceIdentity::load(env.keychain, &profile, true)
             .ok()
             .filter(|id| {
@@ -589,7 +586,36 @@ mod tests {
             None
         )
         .is_err());
-        assert_eq!(record_runtime::snapshot(&env).unwrap(), (after, generation));
+        assert_eq!(
+            record_runtime::snapshot(&env).unwrap(),
+            (after.clone(), generation)
+        );
+        // Even a pre-root pending identity is not silently replaced if its OS credential is lost.
+        let public_device = after.local.central.as_ref().unwrap().control.device.clone();
+        env.keychain.delete(&profile.slot("device")).unwrap();
+        let result = establish(
+            &env,
+            &server.url(),
+            cfg.clone(),
+            tokens(&cfg, "subject"),
+            None,
+        )
+        .unwrap();
+        assert!(result.needs_recovery);
+        assert!(!result.has_session);
+        assert_eq!(
+            record_runtime::snapshot(&env)
+                .unwrap()
+                .0
+                .local
+                .central
+                .as_ref()
+                .unwrap()
+                .control
+                .device,
+            public_device
+        );
+        assert!(env.keychain.get(&profile.slot("device")).unwrap().is_none());
         register.assert();
         view.assert();
     }

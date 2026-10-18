@@ -174,6 +174,12 @@ impl DeviceSession {
         self.started.elapsed() >= self.lifetime
     }
 }
+/// Native-only outcome: callers can distinguish an expired attempt from device denial without
+/// parsing user-facing error text or falling back to legacy authorization.
+pub enum RegistrationOutcome {
+    Accepted(DeviceSession),
+    Rejected(Reply),
+}
 pub struct Api {
     origin: String,
     http: Client,
@@ -280,6 +286,23 @@ impl Api {
         name: &str,
         now: u64,
     ) -> Result<DeviceSession, AppError> {
+        match self.register_outcome(profile, identity, attempt, tokens, name, now)? {
+            RegistrationOutcome::Accepted(session) => Ok(session),
+            RegistrationOutcome::Rejected(reply) => {
+                reply.success()?;
+                Err(invalid())
+            }
+        }
+    }
+    pub fn register_outcome(
+        &self,
+        profile: &Profile,
+        identity: &DeviceIdentity,
+        attempt: &SessionAttempt,
+        tokens: &LoginTokens,
+        name: &str,
+        now: u64,
+    ) -> Result<RegistrationOutcome, AppError> {
         if self.origin != profile.origin
             || tokens.issuer != profile.issuer
             || tokens.subject != profile.subject
@@ -314,7 +337,9 @@ impl Api {
             Some(body),
             65536,
         )?;
-        reply.success()?;
+        if !(200..300).contains(&reply.status) {
+            return Ok(RegistrationOutcome::Rejected(reply));
+        }
         let registered: Registered = reply.decode()?;
         if registered.account_locator != profile.locator
             || !hex(&registered.account_id, 64)
@@ -327,7 +352,7 @@ impl Api {
                 "The account session could not be bound to this sign-in identity.".into(),
             ));
         }
-        Ok(DeviceSession {
+        Ok(RegistrationOutcome::Accepted(DeviceSession {
             account_id: registered.account_id,
             device_state: registered.device_state,
             auth_epoch: registered.auth_epoch,
@@ -339,7 +364,7 @@ impl Api {
             )),
             started,
             lifetime: Duration::from_millis((registered.expires_at_ms - now).min(300000)),
-        })
+        }))
     }
     pub fn device_access(
         &self,
@@ -670,5 +695,29 @@ mod tests {
         assert!(api
             .register(&profile, &identity, &attempt, &tokens, "Test", 1000)
             .is_err());
+        for status in [401u16, 403, 429] {
+            let denied = server
+                .mock("POST", "/v2/session")
+                .with_status(status as usize)
+                .with_header("retry-after", "90")
+                .with_body("untrusted echoed secret")
+                .expect(1)
+                .create();
+            match api
+                .register_outcome(&profile, &identity, &attempt, &tokens, "Test", 1000)
+                .unwrap()
+            {
+                RegistrationOutcome::Rejected(reply) => {
+                    assert_eq!(reply.status, status);
+                    assert!(!reply.success().unwrap_err().to_string().contains("echoed"));
+                    if status == 429 {
+                        assert_eq!(reply.retry_after, Some(Duration::from_secs(90)));
+                    }
+                }
+                RegistrationOutcome::Accepted(_) => panic!("rejected session was accepted"),
+            }
+            denied.assert();
+        }
+        legacy.assert();
     }
 }
