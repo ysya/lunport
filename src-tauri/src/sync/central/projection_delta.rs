@@ -342,6 +342,9 @@ impl Delta {
     pub fn before(&self) -> &SyncStateV3 {
         &self.before
     }
+    pub fn has_changes(&self) -> bool {
+        self.candidate != self.before || !self.required.is_empty()
+    }
     pub fn required_material(&self) -> &BTreeSet<String> {
         &self.required
     }
@@ -399,6 +402,10 @@ impl Delta {
             );
         }
         self.candidate.local.central_projection = Some(ledger);
+        self.candidate =
+            crate::sync::record_groups::invalidate_changed_pins(&self.before, self.candidate)
+                .map_err(|_| invalid())?;
+        crate::sync::record_conflicts::upgrade_state(&mut self.candidate);
         records_v3::validate_state(&self.candidate).map_err(|_| invalid())?;
         Ok(Verified {
             before: self.before,
@@ -426,7 +433,7 @@ pub(super) mod tests {
         vault::store::{self, Vault},
     };
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-    pub(super) fn append(
+    pub(in crate::sync) fn append(
         state: &mut SyncStateV3,
         keys: &VaultKeys,
         identity: Identity,

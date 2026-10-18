@@ -54,3 +54,8 @@ pub(super) use projection_state::tests::material_fixture as material_fixture_for
 
 #[cfg(test)]
 pub(super) use projection_capture::public_candidate as capture_for_test;
+
+#[cfg(test)]
+pub(super) use projection_state::tests::initial as library_fixture_for_test;
+#[cfg(test)]
+pub(super) use projection_delta::tests::append as append_library_for_test;

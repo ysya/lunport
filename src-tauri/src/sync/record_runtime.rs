@@ -194,7 +194,7 @@ pub fn probe_startup(path: &Path, device_name: &str) -> StartupProbe {
 }
 /// Shape validation allows valid remote relationship conflicts to remain available for repair.
 pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
-    save_active_with_replacement(path,state,None)
+    save_active_with_authority(path,state,None,None)
 }
 struct ReplacementSave<'a> {
     authority:&'a crate::sync::central::replacement_publication::Authorization,
@@ -202,7 +202,22 @@ struct ReplacementSave<'a> {
     generation:u64,
     published:std::cell::Cell<bool>,
 }
-fn save_active_with_replacement(path:&Path,state:&SyncStateV3,replacement:Option<&ReplacementSave<'_>>)->Result<(),AppError>{
+struct ProjectionSave<'a> {
+    authority:&'a crate::sync::record_import::central_stage::Publication,
+    published:std::cell::Cell<bool>,
+}
+fn save_active_with_authority(
+    path: &Path,
+    state: &SyncStateV3,
+    replacement: Option<&ReplacementSave<'_>>,
+    projection: Option<&ProjectionSave<'_>>,
+) -> Result<(), AppError> {
+    if replacement.is_some() && projection.is_some() {
+        return Err(AppError::Other("central publication authorities cannot be combined".into()));
+    }
+    if projection.is_some() && !path.exists() {
+        return Err(AppError::Other("The saved central projection source is missing; stage retained.".into()));
+    }
     validate_state(state)
         .map_err(|_| AppError::Other("cannot save invalid record state".into()))?;
     let bytes = serde_json::to_vec_pretty(state)
@@ -238,19 +253,23 @@ fn save_active_with_replacement(path:&Path,state:&SyncStateV3,replacement:Option
         let value: serde_json::Value = serde_json::from_slice(&source)
             .map_err(|_| AppError::Other("cannot read format upgrade source".into()))?;
         let previous_version = value.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        if projection.is_some() && previous_version != u64::from(state.version) {
+            return Err(AppError::Other("The saved central source format changed. Source and stage are retained; reload before publishing.".into()));
+        }
         if previous_version >= crate::sync::records_v3::CENTRAL_STATE_VERSION as u64 {
             if previous_version > state.version as u64 {
                 return Err(AppError::Other("The central workspace format cannot be downgraded. Original data has been retained.".into()));
             }
             let previous: SyncStateV3 = serde_json::from_value(value.clone()).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
             validate_state(&previous).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
-            if previous.local.central_projection != state.local.central_projection {
+            if previous.local.central_projection != state.local.central_projection && projection.is_none() {
                 return Err(AppError::Other("Central library projection needs its verified publication transaction. Original data is retained.".into()));
             }
             if let Some(replacement)=replacement {
                 replacement.authority.verify_records(&previous,state,replacement.archive,replacement.generation)?;
             } else {
                 crate::sync::central::workspace::verify_publication(previous.local.central.as_ref(),state.local.central.as_ref())?;
+                if let Some(projection)=projection {projection.authority.verify_records(&previous,state,projection.authority.generation())?;projection.authority.verify_vault(path)?;}
             }
         }
         if let Some(source_version) = value
@@ -282,6 +301,7 @@ fn save_active_with_replacement(path:&Path,state:&SyncStateV3,replacement:Option
         }
     }
     if let Some(replacement)=replacement {write_replacement_atomic(path,&bytes,state,replacement)}
+    else if let Some(projection)=projection {write_central_atomic(path,&bytes,&projection.published,|previous|{projection.authority.verify_records(previous,state,projection.authority.generation())?;projection.authority.verify_vault(path)})}
     else {crate::fsutil::atomic_write(path, &bytes, 0o600)}
 }
 #[cfg(test)]
@@ -301,12 +321,15 @@ pub(crate) fn with_replacement_write_hook<T>(hook: ReplacementWriteHook, action:
     action()
 }
 #[cfg(test)]
-fn replacement_write_stage(stage: ReplacementWriteStage, path: &Path) -> Result<(), AppError> {
+pub(crate) fn replacement_write_stage(stage: ReplacementWriteStage, path: &Path) -> Result<(), AppError> {
     REPLACEMENT_WRITE_HOOK.with(|value| match value.borrow_mut().as_mut() { Some(hook) => hook(stage, path), None => Ok(()) })
 }
 /// The existing app publication gate serializes material transactions. This additionally
 /// rechecks the archived source just before rename; it is not cross-process write exclusion.
 fn write_replacement_atomic(path:&Path,bytes:&[u8],state:&SyncStateV3,replacement:&ReplacementSave<'_>)->Result<(),AppError>{
+    write_central_atomic(path,bytes,&replacement.published,|previous|replacement.authority.verify_records(previous,state,replacement.archive,replacement.generation))
+}
+fn write_central_atomic(path:&Path,bytes:&[u8],published:&std::cell::Cell<bool>,verify:impl Fn(&SyncStateV3)->Result<(),AppError>)->Result<(),AppError>{
     use std::io::Write;
     crate::fsutil::check_write(path)?;
     let parent=path.parent().ok_or_else(||AppError::Other("sync state has no parent".into()))?;
@@ -325,10 +348,10 @@ fn write_replacement_atomic(path:&Path,bytes:&[u8],state:&SyncStateV3,replacemen
     if original.len() as u64>MAX_STATE_BYTES{return Err(AppError::Other("sync source exceeds the supported limit".into()));}
     let previous:SyncStateV3=serde_json::from_slice(&original).map_err(|_|AppError::Other("Cannot validate archived source state.".into()))?;
     validate_state(&previous).map_err(|_|AppError::Other("Cannot validate archived source state.".into()))?;
-    replacement.authority.verify_records(&previous,state,replacement.archive,replacement.generation)?;
+    verify(&previous)?;
     #[cfg(test)] replacement_write_stage(ReplacementWriteStage::Rename,path)?;
     temp.persist(path).map_err(|error|AppError::Io(error.error))?;
-    replacement.published.set(true);
+    published.set(true);
     #[cfg(test)] replacement_write_stage(ReplacementWriteStage::DirectorySync,path)?;
     #[cfg(unix)] {fs::File::open(parent)?.sync_all()?;}
     Ok(())
@@ -509,7 +532,7 @@ pub(crate) fn publish_replacement(
     authority.verify_records(source,&candidate,&archive,core.generation)?;
     let generation=core.generation.checked_add(1).ok_or_else(||AppError::Other("sync generation exhausted".into()))?;
     let context=ReplacementSave{authority,archive:&archive,generation:core.generation,published:std::cell::Cell::new(false)};
-    if let Err(error)=save_active_with_replacement(&env.state_path,&candidate,Some(&context)) {
+    if let Err(error)=save_active_with_authority(&env.state_path,&candidate,Some(&context),None) {
         if context.published.get(){
             core.save_blocked=Some("Device replacement reached disk but durability could not be confirmed. Restart Lunport to reload the saved owner; all identities and archives are retained.".into());
             core.central_session=None;
@@ -519,6 +542,38 @@ pub(crate) fn publish_replacement(
     if candidate.local.central.as_ref().is_some_and(|owner|owner.control.cutover){core.account_keys=None;}
     core.records=Some(candidate);core.generation=generation;core.unsaved=false;
     core.central_session=Some(std::sync::Arc::clone(authority.session()));core.central_poll=Default::default();core.central_user_action=None;
+    Ok(generation)
+}
+/// Typed central projection only. Caller owns lifecycle -> vault -> publication; no network or
+/// protected credential operation is permitted here while the single Core is held.
+pub(crate) fn publish_projection(
+    env: &crate::sync::env::SyncEnv,
+    authority: &crate::sync::record_import::central_stage::Publication,
+) -> Result<u64, AppError> {
+    let mut core = env.runtime.core.lock().unwrap();
+    writes_allowed(&core)?;
+    authority.verify_core(&core)?;
+    let generation = core
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| AppError::Other("sync generation exhausted".into()))?;
+    let context = ProjectionSave {
+        authority,
+        published: std::cell::Cell::new(false),
+    };
+    if let Err(error) =
+        save_active_with_authority(&env.state_path, authority.candidate(), None, Some(&context))
+    {
+        if context.published.get() {
+            core.save_blocked=Some("Central library reached disk but durability is uncertain. Restart to reload; all source material and stages are retained.".into());
+            core.central_session = None;
+        }
+        return Err(error);
+    }
+    core.records = Some(authority.candidate().clone());
+    core.generation = generation;
+    core.unsaved = false;
+    core.account_keys = None;
     Ok(generation)
 }
 /// Core only: safe while a caller already owns lifecycle/vault/publication. Never reacquire them here.

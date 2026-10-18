@@ -135,7 +135,12 @@ pub fn pending_imports(env: &SyncEnv) -> Result<Vec<PendingImport>, AppError> {
             (MAX_SCAN_BYTES - total).min(MAX_JOURNAL_BYTES),
         )?;
         total += bytes.len() as u64;
-        if let Some(pending)=central_stage::pending(&id,&bytes)? {result.push(pending);continue;}
+        if let Some(pending) = central_stage::pending(env, &id, &bytes)? {
+            if pending.phase != "central_active" {
+                result.push(pending);
+            }
+            continue;
+        }
         match serde_json::from_slice::<Journal>(&bytes) {
             Ok(journal) if journal.version == JOURNAL_VERSION && journal.import_id == id => {
                 if journal.phase != Phase::Active {

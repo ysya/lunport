@@ -32,6 +32,8 @@ const FORMAT: &str = "lunport-central-library-stage-v1";
 enum Phase {
     Prepared,
     Staged,
+    VaultPublished,
+    Active,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +66,9 @@ struct Journal {
     phase: Phase,
 }
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
+mod publication;
+pub(crate) use publication::{publish, Publication};
+
 pub(crate) struct Staged {
     journal: Journal,
     paths: Paths,
@@ -89,13 +94,19 @@ fn summary(journal: &Journal) -> PendingImport {
         phase: match journal.phase {
             Phase::Prepared => "central_prepared",
             Phase::Staged => "central_staged",
+            Phase::VaultPublished => "central_vault_published",
+            Phase::Active => "central_active",
         }
         .into(),
         host_count: 0,
         key_count: journal.bindings.len(),
     }
 }
-pub(super) fn pending(id: &str, bytes: &[u8]) -> Result<Option<PendingImport>, AppError> {
+pub(super) fn pending(
+    env: &SyncEnv,
+    id: &str,
+    bytes: &[u8],
+) -> Result<Option<PendingImport>, AppError> {
     let value: serde_json::Value = match serde_json::from_slice(bytes) {
         Ok(value) => value,
         Err(_) => return Ok(None),
@@ -106,7 +117,23 @@ pub(super) fn pending(id: &str, bytes: &[u8]) -> Result<Option<PendingImport>, A
     let journal: Journal = serde_json::from_slice(bytes)
         .map_err(|_| failure("central stage journal is unreadable; retained for recovery"))?;
     validate_header(&journal, id)?;
-    Ok(Some(summary(&journal)))
+    let mut status = summary(&journal);
+    if journal.phase != Phase::Prepared {
+        // Clone only this public receipt, not an entire ciphertext library per journal entry.
+        let receipt = {
+            let core = env.runtime.core.lock().unwrap();
+            record_runtime::active_state(&core)
+                .ok()
+                .and_then(|state| state.local.import_receipts.get(id).cloned())
+        };
+        let proven = publication::matches_receipt(receipt.as_ref(), &journal)?;
+        if proven {
+            status.phase = "central_active".into();
+        } else if journal.phase == Phase::Active {
+            status.phase = "central_missing_receipt".into();
+        }
+    }
+    Ok(Some(status))
 }
 fn validate_header(j: &Journal, id: &str) -> Result<(), AppError> {
     j.profile.profile()?;
@@ -155,12 +182,15 @@ fn validate_header(j: &Journal, id: &str) -> Result<(), AppError> {
     }
     match j.phase {
         Phase::Prepared if j.staged_vault_digest.is_none() && j.staged_key_account.is_none() => {}
-        Phase::Staged
+        Phase::Staged | Phase::VaultPublished | Phase::Active
             if j.source_state_digest.is_some()
-                && j.staged_vault_digest.is_some()
-                && j.staged_key_account
-                    .as_deref()
-                    .is_some_and(super::is_vault_account) => {}
+                && ((j.staged_vault_digest.is_some()
+                    && j.staged_key_account
+                        .as_deref()
+                        .is_some_and(super::is_vault_account))
+                    || (j.bindings.is_empty()
+                        && j.staged_vault_digest.is_none()
+                        && j.staged_key_account.is_none())) => {}
         _ => return Err(failure("central stage has inconsistent durable phase")),
     }
     Ok(())
@@ -354,8 +384,8 @@ pub(crate) fn prepare(env: &SyncEnv, delta: &LibraryDelta) -> Result<Staged, App
             "resume the existing pending import or central stage before creating another",
         ));
     }
-    if delta.required_material().is_empty() {
-        return Err(failure("no managed material needs staging"));
+    if !delta.has_changes() {
+        return Err(failure("no central library delta needs publication"));
     }
     let original_path = store::vault_path(&env.state_path);
     let original = optional_bytes(&original_path, store::MAX_READ_ONLY_VAULT_BYTES)?;
@@ -513,13 +543,14 @@ fn execute(
     {
         return Err(failure("central stage source snapshot changed"));
     }
-    if optional_bytes(
+    let active = optional_bytes(
         &store::vault_path(&env.state_path),
         store::MAX_READ_ONLY_VAULT_BYTES,
     )?
     .as_ref()
-    .map(|b| digest(b))
-        != journal.source_vault_digest
+    .map(|bytes| digest(bytes));
+    if active != journal.source_vault_digest
+        && (journal.staged_vault_digest.is_none() || active != journal.staged_vault_digest)
     {
         return Err(failure(
             "active vault changed; pending central stage retained",
@@ -567,14 +598,24 @@ fn execute(
         vault
             .put_new_batch(&scoped, &batch)
             .map_err(|_| failure("cannot save central material stage; original retained"))?;
-        let bytes = bounded_read(&paths.vault, store::MAX_READ_ONLY_VAULT_BYTES)?;
-        durable(paths, &paths.vault, &bytes)?;
+        if paths.vault.exists() {
+            let bytes = bounded_read(&paths.vault, store::MAX_READ_ONLY_VAULT_BYTES)?;
+            durable(paths, &paths.vault, &bytes)?;
+            journal.staged_vault_digest = Some(digest(&bytes));
+            journal.staged_key_account =
+                Some(validate_vault(&paths.vault, &scoped)?.key_account().into());
+        } else if !journal.bindings.is_empty() {
+            return Err(failure("central material stage is missing"));
+        }
         super::step(super::PublishStep::VaultStaged)?;
-        journal.staged_vault_digest = Some(digest(&bytes));
-        journal.staged_key_account =
-            Some(validate_vault(&paths.vault, &scoped)?.key_account().into());
         journal.phase = Phase::Staged;
         save(paths, journal)?;
+    }
+    if journal.staged_vault_digest.is_none() {
+        if !journal.bindings.is_empty() || paths.vault.exists() {
+            return Err(failure("central empty-vault stage is inconsistent"));
+        }
+        return Ok(());
     }
     let bytes = bounded_read(&paths.vault, store::MAX_READ_ONLY_VAULT_BYTES)?;
     if journal.staged_vault_digest.as_ref() != Some(&digest(&bytes)) {
@@ -640,7 +681,7 @@ mod tests {
         record_runtime,
         testkit::{TestClock, TestDevice},
     };
-    fn fixture() -> (TestDevice, VaultKeys, String, VaultEntry) {
+    pub(super) fn fixture() -> (TestDevice, VaultKeys, String, VaultEntry) {
         let (mut state, keys, _, id, entry) = material_fixture_for_test();
         state.local.keys.clear();
         let device = TestDevice::new("central-stage", &FakeRelay::new(), &TestClock::new());
@@ -649,7 +690,7 @@ mod tests {
         record_runtime::activate_probe(&mut device.runtime.core.lock().unwrap(), probe).unwrap();
         (device, keys, id, entry)
     }
-    fn delta(device: &TestDevice, keys: &VaultKeys) -> LibraryDelta {
+    pub(super) fn delta(device: &TestDevice, keys: &VaultKeys) -> LibraryDelta {
         LibraryDelta::prepare(
             &record_runtime::snapshot(&device.env()).unwrap().0,
             keys,

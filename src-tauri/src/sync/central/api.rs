@@ -170,6 +170,10 @@ pub struct DeviceSession {
     lifetime: Duration,
 }
 impl DeviceSession {
+    #[cfg(test)]
+    pub(crate) fn synthetic_for_test(account_id:String,device_state:DeviceState,auth_epoch:u64,lifetime:Duration)->Self {
+        Self{account_id,device_state,auth_epoch,bearer:Zeroizing::new("synthetic device grant".into()),started:Instant::now(),lifetime}
+    }
     pub fn expired(&self) -> bool {
         self.started.elapsed() >= self.lifetime
     }

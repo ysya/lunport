@@ -596,7 +596,7 @@ pub(super) mod tests {
         record::{record_key, RecordKind},
         records_v3::{self, HostScope},
     };
-    pub(in crate::sync::central) fn initial() -> (SyncStateV3, VaultKeys, Ledger) {
+    pub(in crate::sync) fn initial() -> (SyncStateV3, VaultKeys, Ledger) {
         let mut collections = vec![];
         for id in ["f", "e"] {
             collections.push(payload::Collection {
