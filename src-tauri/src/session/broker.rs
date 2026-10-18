@@ -107,6 +107,7 @@ struct Table {
     quitting: bool,
     mcp: BTreeMap<u64, CancelToken>,
     deployments: BTreeMap<u64, CancelToken>,
+    tunnels: BTreeMap<u64, CancelToken>,
 }
 
 /// The broker. One per app; its handler serves the IPC socket.
@@ -130,6 +131,10 @@ pub struct Broker {
 }
 
 pub(crate) struct DeploymentRegistration<'a> { broker: &'a Broker, id: u64 }
+pub(crate) struct TunnelRegistration { broker: Arc<Broker>, id: u64 }
+impl Drop for TunnelRegistration {
+    fn drop(&mut self) { locked(&self.broker.table).tunnels.remove(&self.id); self.broker.changed.notify_all(); }
+}
 impl Drop for DeploymentRegistration<'_> {
     fn drop(&mut self) {
         locked(&self.broker.table).deployments.remove(&self.id);
@@ -188,6 +193,14 @@ impl Broker {
         Ok(DeploymentRegistration { broker: self, id })
     }
 
+    pub(crate) fn register_tunnel(self: &Arc<Self>, cancel: CancelToken) -> Result<TunnelRegistration, String> {
+        let mut table = locked(&self.table);
+        if table.quitting { cancel.cancel(); return Err("The application is quitting.".into()); }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        table.tunnels.insert(id, cancel);
+        Ok(TunnelRegistration { broker: Arc::clone(self), id })
+    }
+
     pub fn set_audit(&self,callback:Arc<dyn Fn(crate::mcp::McpAuditEntry)+Send+Sync>){*locked(&self.audit)=Some(callback);}
     pub fn set_mcp_handler(&self, handler:McpHandler) { *locked(&self.mcp)=Some(handler); }
     /// Desktop sessions use the same native questions as deployment; standalone brokers retain terminal prompts.
@@ -210,7 +223,7 @@ impl Broker {
     /// one that is open.
     pub fn has_sessions(&self) -> bool {
         let table=locked(&self.table);
-        !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty()
+        !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty() || !table.tunnels.is_empty()
     }
 
     /// The app is quitting (spec §4): every session ends, its client told why, and no new one starts. Waits up to `wait` for the table to
@@ -234,6 +247,7 @@ impl Broker {
             table.quitting = true;
             for cancel in table.mcp.values() {cancel.cancel();}
             for cancel in table.deployments.values() {cancel.cancel();}
+            for cancel in table.tunnels.values() {cancel.cancel();}
             let (mut connecting, mut open) = (Vec::new(), Vec::new());
             for entry in table.entries.values_mut() {
                 match entry.info.state {
@@ -266,7 +280,7 @@ impl Broker {
         }
         let deadline = Instant::now() + wait;
         let mut table = locked(&self.table);
-        while !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty() {
+        while !table.entries.is_empty() || !table.mcp.is_empty() || !table.deployments.is_empty() || !table.tunnels.is_empty() {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -1001,6 +1015,23 @@ mod tests {
     /// `web` is pinned and its password is saved: it connects without a question.
     fn world(engine: FakeEngine) -> World {
         world_gated(engine, pinned_web(), Arc::new(FakeConfirmer::default()), saved_password(), |gated| gated)
+    }
+
+    #[test]
+    fn tunnels_keep_the_app_alive_and_quit_waits_until_listener_cleanup() {
+        let world = world(FakeEngine::new());
+        let cancel = CancelToken::default();
+        let registration = world.broker.register_tunnel(cancel.clone()).unwrap();
+        assert!(world.broker.has_sessions());
+        let broker = Arc::clone(&world.broker);
+        let ending = std::thread::spawn(move || broker.end_all(Duration::from_secs(5)));
+        crate::ssh::testing::eventually("the tunnel to be cancelled", 2, || cancel.is_cancelled());
+        assert!(!ending.is_finished());
+        assert!(world.broker.has_sessions());
+        drop(registration);
+        ending.join().unwrap();
+        assert!(!world.broker.has_sessions());
+        assert!(world.broker.register_tunnel(CancelToken::default()).is_err());
     }
 
     fn pinned_web() -> FakeDirectory {

@@ -5,6 +5,7 @@ mod broker_signals;
 mod connect;
 mod environment;
 mod exec;
+mod forward;
 mod jump;
 mod liveness;
 mod login_methods;
