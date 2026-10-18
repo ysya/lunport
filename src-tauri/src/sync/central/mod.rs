@@ -1,6 +1,7 @@
 //! Central sync protocol. Not connected to production transport until device authorization,
 //! verified membership and migration are in place. Login alone never supplies content keys.
 pub mod api;
+mod request_budget;
 pub mod account_access;
 pub mod browser;
 pub mod bootstrap;
@@ -47,6 +48,7 @@ mod local_material;
 mod local_sources;
 mod outbox;
 pub(crate) mod active_dispatch;
+mod active_cycle;
 pub(super) use local_material::{prepare_new as prepare_local_material, Context as LocalMaterialContext, Intent as LocalMaterialIntent};
 pub mod replacement_archive;
 pub mod replacement;

@@ -184,12 +184,20 @@ fn with_transport(
     })
 }
 pub(in crate::sync::central) fn once(env: &SyncEnv) -> Result<Report, AppError> {
-    with_transport(env, |session, vault, since| {
-        let reply = Api::new(&session.profile.origin)?.vault(
+    with_reply(env, |session, vault, since| {
+        Api::new(&session.profile.origin)?.vault(
             session.device.as_ref().ok_or_else(invalid)?,
             vault,
             VaultResource::Records { since },
-        )?;
+        )
+    })
+}
+pub(in crate::sync::central) fn with_reply(
+    env: &SyncEnv,
+    request: impl FnOnce(&Session, &str, u64) -> Result<Reply, AppError>,
+) -> Result<Report, AppError> {
+    with_transport(env, |session, vault, since| {
+        let reply = request(session, vault, since)?;
         super::super::round::require_success(env, &reply)?;
         reply.decode()
     })

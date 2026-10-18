@@ -18,6 +18,7 @@ pub struct Polling {
     pub retry_at: Option<Instant>,
     pub failures: u32,
     pub requests: usize,
+    pub(super) dispatch_cursor: Option<String>,
 }
 #[derive(Default)]
 pub struct Report {
@@ -170,9 +171,7 @@ fn stage(env: &SyncEnv, report: &mut Report) -> Result<(), AppError> {
         .as_ref()
         .is_some_and(|w| w.control.cutover)
     {
-        return Err(AppError::Other(
-            "This build cannot activate the central library yet. Local data is retained.".into(),
-        ));
+        return super::active_cycle::run(env, report);
     }
     if !controller::resume(env, false)? {
         return Ok(());

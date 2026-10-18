@@ -66,7 +66,8 @@ impl Body {
             || !hex(&self.anchor.account_id, 64)
             || !hex(&self.anchor.genesis_hash, 64)
             || !super::wire::origin(&self.anchor.origin)
-            || !self.anchor.origin.starts_with("https://")
+            // Only isolated loopback integration tests use the wire validator's HTTP exception.
+            || !self.anchor.origin.starts_with("https://") && !cfg!(test)
             || self.identity_slot.as_ref().is_some_and(|v| !hex(v, 32))
             || number(&self.key_epoch, false)? > 65
             || self.slot.public.origin_device_id != self.device.id

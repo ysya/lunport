@@ -2841,3 +2841,7 @@ fn replacement_ui_invocations_cannot_revive_cancelled_starts_or_control_a_newer_
     assert_eq!(flow::continue_invocation(&first.env(),&latest,&operation).unwrap().phase,"complete");
     assert_eq!(flow::cancel_invocation(&first.env(),&latest).unwrap().phase,"complete");
 }
+
+#[cfg(unix)]
+#[path = "active_cycle_tests.rs"]
+mod active_cycle_tests;

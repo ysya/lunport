@@ -58,7 +58,10 @@ impl OidcConfig {
         Ok(())
     }
 }
-pub struct BoundedHttp(reqwest::blocking::Client);
+pub struct BoundedHttp(
+    reqwest::blocking::Client,
+    Option<super::request_budget::Budget>,
+);
 impl BoundedHttp {
     pub fn new() -> Result<Self, AppError> {
         reqwest::blocking::Client::builder()
@@ -67,8 +70,13 @@ impl BoundedHttp {
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("Lunport/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map(Self)
+            .map(|http| Self(http, None))
             .map_err(|_| error("Sign-in network initialization failed."))
+    }
+    pub(super) fn bounded(budget: &super::request_budget::Budget) -> Result<Self, AppError> {
+        let mut http = Self::new()?;
+        http.1 = Some(budget.clone());
+        Ok(http)
     }
 }
 impl SyncHttpClient for BoundedHttp {
@@ -82,13 +90,20 @@ impl SyncHttpClient for BoundedHttp {
         if !endpoint(&url) {
             return Err(failure());
         }
-        let response = self
+        let mut request = self
             .0
             .request(request.method().clone(), url)
             .headers(request.headers().clone())
-            .body(request.body().clone())
-            .send()
-            .map_err(|_| failure())?;
+            .body(request.body().clone());
+        if let Some(budget) = &self.1 {
+            request = request.timeout(
+                budget
+                    .reserve()
+                    .map_err(|_| failure())?
+                    .min(Duration::from_secs(20)),
+            );
+        }
+        let response = request.send().map_err(|_| failure())?;
         if response
             .content_length()
             .is_some_and(|size| size > MAX_OIDC_RESPONSE as u64)

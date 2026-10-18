@@ -263,7 +263,7 @@ fn establish_tokens(
     require_enabled()?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
     establish_locked(
-        env, service, config, tokens, started, operation, new_login, false,
+        env, service, config, tokens, started, operation, new_login, false, None,
     )?;
     drop(lifecycle);
     env.runtime.note_activity(env.now());
@@ -280,6 +280,7 @@ fn establish_locked(
     operation: Option<&str>,
     new_login: bool,
     resumed: bool,
+    budget: Option<&super::request_budget::Budget>,
 ) -> Result<(), AppError> {
     if !new_login
         && !resumed
@@ -339,7 +340,10 @@ fn establish_locked(
             true,
         )?)
     };
-    let api = Api::new(service)?;
+    let api = match budget {
+        Some(budget) => Api::bounded(service, budget)?,
+        None => Api::new(service)?,
+    };
     let mut session = Session {
         profile: profile_data.clone(),
         identity: identity.map(Arc::new),
@@ -524,6 +528,20 @@ fn establish_locked(
 /// Resume a saved, already-approved/pairing profile without opening UI or inventing an identity.
 /// Token rotation and opaque registration remain serialized with foreground account operations.
 pub fn resume(env: &SyncEnv, force_session: bool) -> Result<bool, AppError> {
+    resume_with_budget(env, force_session, None)
+}
+pub(super) fn resume_bounded(
+    env: &SyncEnv,
+    force_session: bool,
+    budget: &super::request_budget::Budget,
+) -> Result<bool, AppError> {
+    resume_with_budget(env, force_session, Some(budget))
+}
+fn resume_with_budget(
+    env: &SyncEnv,
+    force_session: bool,
+    budget: Option<&super::request_budget::Budget>,
+) -> Result<bool, AppError> {
     if !enabled() {
         return Ok(false);
     }
@@ -603,7 +621,13 @@ pub fn resume(env: &SyncEnv, force_session: bool) -> Result<bool, AppError> {
             (Arc::clone(&session.tokens), session.tokens_started)
         }
         _ => {
-            let http = super::oidc::BoundedHttp::new()?;
+            let http = match budget {
+                Some(budget) => {
+                    budget.remaining()?;
+                    super::oidc::BoundedHttp::bounded(budget)?
+                }
+                None => super::oidc::BoundedHttp::new()?,
+            };
             let tokens = credentials::renew(
                 &background,
                 &profile,
@@ -623,6 +647,7 @@ pub fn resume(env: &SyncEnv, force_session: bool) -> Result<bool, AppError> {
         None,
         false,
         true,
+        budget,
     )?;
     let ready = env
         .runtime

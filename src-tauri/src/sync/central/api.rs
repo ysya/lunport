@@ -187,6 +187,7 @@ pub enum RegistrationOutcome {
 pub struct Api {
     origin: String,
     http: Client,
+    budget: Option<super::request_budget::Budget>,
 }
 impl Api {
     pub fn new(service: &str) -> Result<Self, AppError> {
@@ -203,7 +204,16 @@ impl Api {
         Ok(Self {
             origin: service.into(),
             http,
+            budget: None,
         })
+    }
+    pub(super) fn bounded(
+        service: &str,
+        budget: &super::request_budget::Budget,
+    ) -> Result<Self, AppError> {
+        let mut api = Self::new(service)?;
+        api.budget = Some(budget.clone());
+        Ok(api)
     }
     fn request(
         &self,
@@ -230,6 +240,9 @@ impl Api {
             request = request
                 .header("content-type", "application/json")
                 .body(Body::sized(Cursor::new(body), size));
+        }
+        if let Some(budget) = &self.budget {
+            request = request.timeout(budget.reserve()?.min(Duration::from_secs(30)));
         }
         let response = request.send().map_err(|_| failure())?;
         let status = response.status().as_u16();

@@ -1,4 +1,4 @@
-//! Durable native ciphertext dispatch. Not wired into the active round until migration is ready.
+//! Durable native ciphertext dispatch, restricted to a trusted cut-over library.
 use super::{
     api::{Api, DeviceState, Reply},
     controller::Session,
@@ -231,9 +231,13 @@ impl Operation {
         self.check(env)?;
         Ok(response)
     }
-    pub fn push(&self, env: &SyncEnv) -> Result<Reply, AppError> {
+    pub(super) fn push(
+        &self,
+        env: &SyncEnv,
+        budget: &super::request_budget::Budget,
+    ) -> Result<Reply, AppError> {
         self.with_transport(env, |device, vault, records| {
-            Api::new(&self.session.profile.origin)?.push(device, vault, records)
+            Api::bounded(&self.session.profile.origin, budget)?.push(device, vault, records)
         })
     }
     pub fn claims(&self, env: &SyncEnv, reply: &PushReply) -> Result<(), AppError> {
