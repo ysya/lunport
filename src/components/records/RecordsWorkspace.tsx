@@ -312,15 +312,17 @@ export function RecordsWorkspace({
         />
       </div>
       <div className="library-workspace-column flex min-h-0 min-w-0 flex-1 flex-col">
+        <TerminalWorkspace renderHeader={(tabs) => (
         <header
           data-tauri-drag-region
           className="library-titlebar"
+          data-has-sessions={!!tabs}
         >
           <Button type="button" variant="ghost" size="icon" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             aria-expanded={!sidebarCollapsed} aria-controls={LIBRARY_NAVIGATION_ID} onClick={toggleSidebar}>
             {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
           </Button>
-          <button
+          {tabs ?? <button
             type="button"
             className="library-quick-connect"
             onClick={() => setPaletteOpen(true)}
@@ -328,13 +330,13 @@ export function RecordsWorkspace({
             <Search className="size-3.5" />
             <span>Quick connect</span>
             <kbd>{shortcut}</kbd>
-          </button>
+          </button>}
           <div className="library-titlebar-actions">
             <UpdateIndicator />
             <Button type="button" variant="ghost" size="sm" title="Sync settings"
               aria-label="Sync settings" aria-current={panel === "account" ? "page" : undefined} onClick={() => { setActiveTerminal(null); setPanel("account"); }}>
               <Cloud className="size-4" />
-              Sync
+              <span className="library-sync-label">Sync</span>
             </Button>
             <Button type="button" variant="ghost" size="icon-sm" title="Settings"
               aria-label="Settings" onClick={() => openSettings("general")}>
@@ -364,7 +366,7 @@ export function RecordsWorkspace({
             </DropdownMenu>
           </div>
         </header>
-        <TerminalWorkspace>
+        )}>
         {overview.shared_writes_blocked && (
           <p role="status" className="library-notice">
             {syncActive

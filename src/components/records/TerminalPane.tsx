@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { WTerm } from "@wterm/dom";
 import { GhosttyCore } from "@wterm/ghostty";
 import ghosttyWasm from "@wterm/ghostty/ghostty-vt.wasm?url";
 import "@wterm/dom/css";
 import "./terminal.css";
-import { ArrowDown, ArrowUp, Copy, Minus, Plus, RotateCw, Search, Unplug, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, CircleAlert, Copy, LoaderCircle, Minus, MoreHorizontal, Plus, RotateCw, Search, Type, Unplug, X } from "lucide-react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Button } from "@/components/ui/button";
 import { EmbeddedTerminal } from "@/lib/embedded-terminal";
@@ -15,6 +15,7 @@ import { clampTerminalFontSize, DEFAULT_TERMINAL_FONT_SIZE } from "@/lib/setting
 import { terminalColors } from "@/lib/terminal-theme";
 import { Input } from "@/components/ui/input";
 import { isImeKey } from "@/lib/ime";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolean }) {
   const element = useRef<HTMLDivElement>(null);
@@ -35,6 +36,14 @@ export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolea
   const [size, setSize] = useState({ cols: 80, rows: 24 });
   const activeRef = useRef(active);
   activeRef.current = active;
+  const modifierLabel = typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
+  const statusLabel = state === "error" ? "Connection failed" : state === "connecting" && status !== "Loading terminal…" && status !== "Connecting…" ? "Authentication required" : status;
+  const restoreFocus = useCallback(() => {
+    if (!activeRef.current || document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
+    if (searchInput.current) searchInput.current.focus();
+    else terminal.current?.focus();
+  }, []);
+  const closeSearch = () => { setSearchOpen(false); requestAnimationFrame(restoreFocus); };
 
   useEffect(() => {
     let cancelled = false;
@@ -53,7 +62,7 @@ export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolea
           setConnectionState({ kind: "open", text: "Connected" });
           try { useSettingsStore.getState().recordConnection(tab.historyKey); } catch { /* History is optional. */ }
           wt?.fit();
-          if (activeRef.current) wt?.focus();
+          restoreFocus();
         } else if (event.type === "bridge_error") {
           setConnectionState({ kind: "error", text: event.text });
         } else if (event.type === "exited") {
@@ -96,12 +105,12 @@ export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolea
       appearance?.disconnect(); session?.close(); wt?.destroy(); core?.dispose();
       connection.current = null; terminal.current = null;
     };
-  }, [tab.id, attempt]);
+  }, [tab.id, attempt, restoreFocus]);
   useEffect(() => { useTerminalStore.getState().updateState(tab.id, state); }, [tab.id, state]);
   useEffect(() => {
     terminal.current?.setRenderingPaused(!active);
-    if (active) { terminal.current?.fit(); terminal.current?.focus(); }
-  }, [active]);
+    if (active) { terminal.current?.fit(); restoreFocus(); }
+  }, [active, restoreFocus]);
   useEffect(() => { terminal.current?.fit(); }, [fontSize]);
   useEffect(() => {
     terminal.current?.search(searchOpen ? query : "");
@@ -114,7 +123,8 @@ export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolea
   useEffect(() => {
     if (!active) return;
     const keydown = (event: KeyboardEvent) => {
-      if (event.isComposing || event.defaultPrevented || event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
+      if (event.isComposing || event.defaultPrevented) return;
+      if (event.target instanceof Element && (event.target.closest('[role="dialog"], [role="alertdialog"], [role="menu"]') || !element.current?.parentElement?.contains(event.target) && event.target.closest('input, textarea, [contenteditable="true"]'))) return;
       const modifier = /Mac/.test(navigator.platform) ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
       if (!modifier || event.altKey) return;
       const key = event.key.toLowerCase();
@@ -136,32 +146,52 @@ export function TerminalPane({ tab, active }: { tab: TerminalTab; active: boolea
     if (!text) { toast("Select terminal text to copy"); return; }
     try { await writeText(text); } catch { toast.error("Could not copy terminal selection"); }
   };
-  return <section className="embedded-pane" hidden={!active} aria-label={`SSH terminal: ${tab.name}`}>
-    <div className="embedded-toolbar">
-      <div className="embedded-endpoint"><span className="embedded-state" data-state={state} /><strong>{tab.name}</strong><span>{tab.address}</span></div>
-      <div className="embedded-actions">
-        <Button size="icon-sm" variant="ghost" aria-label="Decrease terminal font size" disabled={fontSize <= 10} onClick={() => setFontSize(fontSize - 1)}><Minus /></Button>
-        <span className="embedded-font-size">{fontSize}</span>
-        <Button size="icon-sm" variant="ghost" aria-label="Increase terminal font size" disabled={fontSize >= 24} onClick={() => setFontSize(fontSize + 1)}><Plus /></Button>
-        <Button size="icon-sm" variant="ghost" aria-label="Search terminal" onClick={() => setSearchOpen((open) => !open)}><Search /></Button>
-        <Button size="icon-sm" variant="ghost" aria-label="Copy terminal selection" onClick={() => void copy()}><Copy /></Button>
-        {state === "open" || state === "connecting"
-          ? <Button size="sm" variant="ghost" onClick={() => { connection.current?.close(); setConnectionState({ kind: "ended", text: "Disconnected" }); }}><Unplug />Disconnect</Button>
-          : <Button size="sm" variant="ghost" onClick={() => setAttempt((attempt) => attempt + 1)}><RotateCw />Reconnect</Button>}
-      </div>
-    </div>
+  return <section id={`terminal-panel-${tab.id}`} role="tabpanel" aria-labelledby={`terminal-tab-${tab.id}`} className="embedded-pane" hidden={!active}>
     {searchOpen && <div className="embedded-search" role="search" aria-label="Terminal search">
       <Input ref={searchInput} value={query} placeholder="Find in terminal…" aria-label="Find in terminal" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
         if (isImeKey(event)) return;
         if (event.key === "Enter") { event.preventDefault(); if (event.shiftKey) terminal.current?.findPrevious(); else terminal.current?.findNext(); }
-        else if (event.key === "Escape") { event.preventDefault(); setSearchOpen(false); terminal.current?.focus(); }
+        else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeSearch(); }
       }} />
       <span role="status">{searchStatus.searching ? "Searching…" : query ? `${searchStatus.activeIndex + 1} / ${searchStatus.count}${searchStatus.limited ? "+" : ""}` : ""}</span>
       <Button size="icon-sm" variant="ghost" aria-label="Previous match" disabled={!searchStatus.count} onClick={() => terminal.current?.findPrevious()}><ArrowUp /></Button>
       <Button size="icon-sm" variant="ghost" aria-label="Next match" disabled={!searchStatus.count} onClick={() => terminal.current?.findNext()}><ArrowDown /></Button>
-      <Button size="icon-sm" variant="ghost" aria-label="Close terminal search" onClick={() => { setSearchOpen(false); terminal.current?.focus(); }}><X /></Button>
+      <Button size="icon-sm" variant="ghost" aria-label="Close terminal search" onClick={closeSearch}><X /></Button>
     </div>}
     <div ref={element} className="embedded-terminal" data-cursor-blink={cursorBlink} style={{ fontSize, "--term-font-size": `${fontSize}px`, "--term-row-height": `${fontSize * 1.4}px` } as React.CSSProperties} />
-    <footer className="embedded-statusbar"><span role="status" title={status}>{status}</span><span>SSH · {size.cols} × {size.rows}</span></footer>
+    <footer className="embedded-statusbar">
+      <div className="embedded-connection">
+        <span className="embedded-address" title={tab.address}>{tab.address}</span>
+        <span className="embedded-connection-status" role="status" data-state={state} title={status}>
+          {state === "connecting" ? <LoaderCircle className="size-3 motion-safe:animate-spin" /> : state === "error" ? <CircleAlert className="size-3" /> : state === "open" ? <Check className="size-3" /> : <Unplug className="size-3" />}
+          <span>{statusLabel}</span>
+        </span>
+      </div>
+      <div className="embedded-actions">
+        {(state === "ended" || state === "error") && <Button size="xs" variant="ghost" onClick={() => setAttempt((attempt) => attempt + 1)}><RotateCw />Reconnect</Button>}
+        <Button size="icon-xs" variant="ghost" aria-label="Search terminal" title={`Find in terminal (${modifierLabel}F)`} aria-expanded={searchOpen} onClick={() => { if (searchOpen) closeSearch(); else setSearchOpen(true); }}><Search /></Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button size="icon-xs" variant="ghost" aria-label="Terminal options" title="Terminal options"><MoreHorizontal /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="end" onCloseAutoFocus={(event) => { event.preventDefault(); requestAnimationFrame(restoreFocus); }}>
+            <DropdownMenuLabel className="embedded-session-details"><strong>{tab.name}</strong><span>{tab.address}</span><span>{status}</span><span>SSH · {size.cols} × {size.rows}</span></DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => setSearchOpen(true)}><Search />Find in terminal<DropdownMenuShortcut>{modifierLabel}F</DropdownMenuShortcut></DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void copy()}><Copy />Copy selection</DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger><Type />Text size<DropdownMenuShortcut>{fontSize} px</DropdownMenuShortcut></DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuItem disabled={fontSize >= 24} onSelect={() => setFontSize(fontSize + 1)}><Plus />Increase<DropdownMenuShortcut>{modifierLabel}+</DropdownMenuShortcut></DropdownMenuItem>
+                <DropdownMenuItem disabled={fontSize <= 10} onSelect={() => setFontSize(fontSize - 1)}><Minus />Decrease<DropdownMenuShortcut>{modifierLabel}−</DropdownMenuShortcut></DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setFontSize(DEFAULT_TERMINAL_FONT_SIZE)}>Reset to default<DropdownMenuShortcut>{modifierLabel}0</DropdownMenuShortcut></DropdownMenuItem>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSeparator />
+            {state === "open" || state === "connecting"
+              ? <DropdownMenuItem variant="destructive" onSelect={() => { connection.current?.close(); setConnectionState({ kind: "ended", text: "Disconnected" }); }}><Unplug />Disconnect session</DropdownMenuItem>
+              : <DropdownMenuItem onSelect={() => setAttempt((attempt) => attempt + 1)}><RotateCw />Reconnect</DropdownMenuItem>}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </footer>
   </section>;
 }
