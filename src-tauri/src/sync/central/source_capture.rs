@@ -144,6 +144,7 @@ pub(super) fn capture(
     let readonly = NonInteractiveKeychain(env.keychain);
     let account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let sources = Sources::discover(&before, account.0.as_ref())?;
+    sources.verify_retained(&before)?;
     let files = Files::capture(env, before.legacy_v1_backup.as_deref())?;
     let observer = Capture::new(&readonly);
     drop(Materials::from_files(
@@ -321,6 +322,53 @@ mod tests {
                 .join("central-source-archives")
                 .exists());
         }
+    }
+    #[test]
+    fn a_corrupt_pending_secret_that_is_not_part_of_source_key_discovery_blocks_capture() {
+        use crate::sync::{
+            record::{Record, RecordKind},
+            state_v2::SealedRecord,
+        };
+        let (device, keys, _) = fixture(true);
+        let env = device.env();
+        let (mut state, _) = record_runtime::snapshot(&env).unwrap();
+        let parent = Legacy(record_runtime::read_account_keys(&state, env.keychain).unwrap());
+        let mut sealed = SealedRecord::seal(
+            parent.0.as_ref().unwrap(),
+            &Record {
+                kind: RecordKind::Key,
+                id: "1".repeat(32),
+                version: 1,
+                updated_at_ms: 1,
+                device_id: state.device_id.clone(),
+                deleted: false,
+                payload: serde_json::json!({"schema":1,"private_key":"PRIVATE_PENDING_SENTINEL"}),
+            },
+            0,
+        )
+        .unwrap();
+        sealed.envelope.ciphertext = B64.encode([0u8; 32]);
+        state
+            .account
+            .as_mut()
+            .unwrap()
+            .sealed
+            .insert(sealed.key(), sealed);
+        assert!(Sources::discover(&state, parent.0.as_ref()).is_ok());
+        fs::write(&env.state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        device.runtime.core.lock().unwrap().records = Some(state);
+        let error = capture(&env, &keys, &BTreeMap::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!error.contains("PRIVATE_PENDING_SENTINEL"));
+        assert_eq!(device.runtime.core.lock().unwrap().generation, 9);
+        assert!(!env
+            .state_path
+            .parent()
+            .unwrap()
+            .join("central-source-archives")
+            .exists());
     }
     #[test]
     fn missing_expired_or_changed_protected_session_and_wrong_target_keys_block_before_archiving() {

@@ -22,6 +22,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 const MAX_SOURCES: usize = 65;
 mod archive;
+mod records;
+struct Temporary(ChainKeys);
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        self.0.clear_sensitive();
+    }
+}
 
 struct SourceKey {
     token: Zeroizing<String>,

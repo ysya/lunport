@@ -1,12 +1,6 @@
 //! Explicit plaintext only for the protected local source capsule, never for transport or a DTO.
 use super::*;
 const MAX_BYTES: usize = 65536;
-struct Temporary(ChainKeys);
-impl Drop for Temporary {
-    fn drop(&mut self) {
-        self.0.clear_sensitive();
-    }
-}
 impl Sources {
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         if self.keys.len() > MAX_SOURCES
