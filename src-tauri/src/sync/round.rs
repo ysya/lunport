@@ -45,7 +45,7 @@ const LEGACY_SPACE_EVERY: u64 = 3;
 
 /// 一條 chain 這一輪拉到的結果。
 #[derive(Debug)]
-enum Fetched {
+pub(crate) enum Fetched {
     Ok(PullResponse),
     NotFound,
     /// 被限流,或批次因 `deferred` / 整批 `429` 沒輪到:cursor 不推進。
@@ -69,16 +69,16 @@ pub struct RoundOutcome {
 
 /// `pull_all` 的結果。
 #[derive(Debug, Default)]
-struct Pulled {
-    fetched: BTreeMap<String, Fetched>,
+pub(crate) struct Pulled {
+    pub(crate) fetched: BTreeMap<String, Fetched>,
     /// 有 chain(或整批)被限流:這一輪以退避收尾。
-    limited: bool,
+    pub(crate) limited: bool,
     /// relay 回 `5xx`(整批或單條):這一輪以退避收尾。
-    failed: bool,
+    pub(crate) failed: bool,
     /// 這一輪的批次查詢回了 `5xx`(連續第幾次由呼叫端記在 `SyncCore::batch_failures`)。
-    batch_failed: bool,
+    pub(crate) batch_failed: bool,
     /// 這一輪至少有一次批次查詢成功(呼叫端把 `batch_failures` 歸零)。
-    batch_ok: bool,
+    pub(crate) batch_ok: bool,
 }
 
 /// 批次查詢(spec §6.4):每批 ≤ 64 條;有 `deferred` 時**只**把 deferred 的項目排在最前面立刻再發一批;沒取得的 chain
@@ -87,7 +87,7 @@ struct Pulled {
 /// `GET`,一條壞掉的 chain 不能擋住其他的(它自己記為沒取得、這一輪以退避收尾)。整批 `429` 一律不重試、也不改逐條
 /// —— 被拒絕的批次照樣扣了整批的配額,只能退避。任何一個 `429`(整批、批次裡的一項、逐條查詢)之後這一輪都不再對 relay
 /// 發請求:沒輪到的 chain(deferred、還沒送的、逐條查詢剩下的)一律當成沒取得,cursor 不推進。
-fn pull_all(relay: &dyn RelayApi, targets: &[BatchPullItem], mut batch: bool, batch_failures: u32) -> Result<Pulled, RelayError> {
+pub(crate) fn pull_all(relay: &dyn RelayApi, targets: &[BatchPullItem], mut batch: bool, batch_failures: u32) -> Result<Pulled, RelayError> {
     let mut out = Pulled::default();
     let mut queue: Vec<BatchPullItem> = targets.to_vec();
     while batch && !queue.is_empty() {
@@ -182,14 +182,22 @@ fn pull_all(relay: &dyn RelayApi, targets: &[BatchPullItem], mut batch: bool, ba
 /// 數),閒置時約 5 分鐘;連續被限流或 relay 回 `5xx` 時依序退避到最長 15 分鐘。
 pub fn next_delay(env: &SyncEnv) -> Duration {
     let core = env.runtime.core.lock().unwrap();
-    let spaces = core.state.as_ref().map(|s| s.spaces.values().filter(|sp| sp.selected && !sp.missing).count()).unwrap_or(0);
-    next_poll_delay(
+    let records = core.format == crate::sync::record_runtime::RuntimeFormat::Records;
+    let spaces = if records {
+        core.records.as_ref().map(|s| s.spaces.values().filter(|sp| sp.selected && !sp.missing).count()).unwrap_or(0)
+    } else {
+        core.state.as_ref().map(|s| s.spaces.values().filter(|sp| sp.selected && !sp.missing).count()).unwrap_or(0)
+    };
+    let delay = next_poll_delay(
         1 + spaces,
         env.runtime.focused.load(Ordering::SeqCst),
         env.runtime.last_activity_ms.load(Ordering::SeqCst),
         env.now(),
         core.failed_rounds,
-    )
+    );
+    // Reserve headroom for ten devices behind one NAT: account proof + batched children,
+    // and each child query still consumes the relay's pull budget. Explicit writes may add IO.
+    if records { delay.max(Duration::from_secs(90)).max(Duration::from_secs(4 * (1 + spaces) as u64)) } else { delay }
 }
 
 /// 這一輪結束之後,退避還要擋多久:連續被限流、relay 出錯,或 keychain 失敗(`failed_rounds` > 0)之後的 `relay::backoff_delay`(spec §6.4),沒有失敗 → 0。退避期間順便的喚醒

@@ -30,6 +30,9 @@ pub struct RecordRoundReport {
     pub conflicts: usize,
     pub review_required: bool,
 }
+const TEMPORARY_SPACE_ERROR: &str = "This space is temporarily unavailable. Cached records are kept; sync will retry automatically.";
+const OLD_MISSING_SPACE_ERROR: &str = "the selected record space is missing from the relay";
+
 fn error(message: &str) -> AppError {
     AppError::Other(message.into())
 }
@@ -208,9 +211,15 @@ pub(crate) fn publish_prepared_account_gate(
                 if row.record.deleted {
                     if let Some(space) = next.spaces.get_mut(&row.record.id) {
                         space.missing = true;
+                        space.last_error = None;
                     }
                 } else {
-                    next.spaces.entry(row.record.id.clone()).or_default();
+                    let space = next.spaces.entry(row.record.id.clone()).or_default();
+                    // Older clients treated an ambiguous transport 404 as permanent deletion.
+                    // Authenticated live metadata permits a retry, never a new chain creation.
+                    if space.missing && space.last_error.as_deref() == Some(OLD_MISSING_SPACE_ERROR) {
+                        space.missing = false;
+                    }
                 }
             }
         }
@@ -454,35 +463,55 @@ fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
         .filter(|(_, s)| s.selected && !s.missing)
         .map(|(id, _)| id.clone())
         .collect();
+    let relay = env.relay(&proof.relay_url)?;
+    let features = match current.relay_features.as_ref().filter(|f| f.url == proof.relay_url && env.now().saturating_sub(f.checked_at_ms) < 24 * 60 * 60 * 1000) {
+        Some(features) => features.clone(),
+        None => {
+            let info = relay.info()?;
+            let features = crate::sync::state_v2::RelayFeatures::from_info(&proof.relay_url, &info, env.now());
+            section_commit(env, &proof, |latest| {
+                let mut next = latest.clone();
+                next.relay_features = Some(features.clone());
+                Ok(next)
+            })?;
+            features
+        }
+    };
+    let mut planned = Vec::new();
     for id in selected {
-        let (current, _) = crate::sync::record_runtime::snapshot(env)?;
-        let account = current.account.as_ref().unwrap();
-        let Some(keys) = crate::sync::record_merge::space_keys(account, &proof.keys, &id)? else {
-            continue;
-        };
-        let section = &current.spaces[&id];
-        let since = if section.baseline_established {
-            section.cursor_seq
-        } else {
-            0
-        };
-        let relay = env.relay(&proof.relay_url)?;
-        let pulled = match relay.pull(&keys.chain_id, &keys.auth_token, since) {
-            Err(crate::sync::relay::RelayError::NotFound) => {
+        if let Some(keys) = crate::sync::record_merge::space_keys(current.account.as_ref().unwrap(), &proof.keys, &id)? {
+            let section = &current.spaces[&id];
+            let since = if section.baseline_established { section.cursor_seq } else { 0 };
+            planned.push((id, keys, since));
+        }
+    }
+    let targets: Vec<_> = planned.iter().map(|(_, keys, since)| crate::sync::relay::BatchPullItem {
+        chain: keys.chain_id.clone(), token: keys.auth_token.clone(), since: *since,
+    }).collect();
+    let failures = env.runtime.core.lock().unwrap().batch_failures;
+    let mut pulled_all = crate::sync::round::pull_all(&*relay, &targets,
+        features.supports(crate::sync::relay::FEATURE_PULL_BATCH), failures)?;
+    {
+        let mut core = env.runtime.core.lock().unwrap();
+        if pulled_all.batch_failed { core.batch_failures = core.batch_failures.saturating_add(1); }
+        else if pulled_all.batch_ok { core.batch_failures = 0; }
+    }
+    let stopped = pulled_all.limited || pulled_all.failed;
+    for (id, keys, since) in planned {
+        let pulled = match pulled_all.fetched.remove(&keys.chain_id) {
+            Some(crate::sync::round::Fetched::Ok(pulled)) => pulled,
+            Some(crate::sync::round::Fetched::NotFound) => {
                 section_commit(env, &proof, |latest| {
                     let mut next = latest.clone();
-                    let section = next
-                        .spaces
-                        .get_mut(&id)
-                        .ok_or_else(crate::sync::runtime::superseded)?;
-                    section.missing = true;
-                    section.last_error =
-                        Some("the selected record space is missing from the relay".into());
+                    let section = next.spaces.get_mut(&id).ok_or_else(crate::sync::runtime::superseded)?;
+                    // v1 deliberately conflates a missing chain and a wrong token. Neither is
+                    // authoritative deletion. Keep the cache and cursor, and retry normally.
+                    section.last_error = Some(TEMPORARY_SPACE_ERROR.into());
                     Ok(next)
                 })?;
                 continue;
             }
-            result => result?,
+            _ => continue,
         };
         let mut review = false;
         let mut gate = AccountGate::Compatible;
@@ -500,6 +529,9 @@ fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
             gate = merged.gate;
             let mut next = latest.clone();
             next.spaces.insert(id.clone(), merged.section);
+            if gate == AccountGate::Compatible {
+                next.spaces.get_mut(&id).unwrap().last_error = None;
+            }
             if gate == AccountGate::Compatible {
                 // Resolve inheritance and cross-scope routes against one complete candidate.
                 review = crate::sync::record_repository::scope_requires_relationship_review(
@@ -520,7 +552,7 @@ fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
             report.gate = Some(gate);
             return Ok(report);
         }
-        if review {
+        if review || stopped {
             continue;
         }
         let (current, _) = crate::sync::record_runtime::snapshot(env)?;
@@ -533,12 +565,14 @@ fn run(env: &SyncEnv) -> Result<RecordRoundReport, AppError> {
             return Ok(report);
         }
     }
+    if pulled_all.limited { return Err(crate::sync::relay::RelayError::RateLimited.into()); }
+    if pulled_all.failed { return Err(crate::sync::relay::RelayError::Http(503).into()); }
     let now = env.now();
     section_commit(env, &proof, |latest| {
         let mut next = latest.clone();
         next.last_sync_ms = Some(now);
         if !report.review_required {
-            next.last_error = None;
+            next.last_error = next.spaces.values().find(|s| s.selected && !s.missing && s.last_error.as_deref() == Some(TEMPORARY_SPACE_ERROR)).and_then(|s| s.last_error.clone());
         }
         Ok(next)
     })?;
