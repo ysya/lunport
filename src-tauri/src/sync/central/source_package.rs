@@ -95,7 +95,9 @@ impl Package {
         keys: &VaultKeys,
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Materials, AppError> {
-        Materials::from_files(&self.state, keys, &self.files, &self.decryptors, references)
+        let private_inputs = self.record_inputs()?.keys()?;
+        Materials::from_files(&self.state, keys, &self.files, &self.decryptors, references)?
+            .with_key_inputs(&self.state, keys, private_inputs)
     }
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         if state(&self.files, &self.state_name)? != self.state {

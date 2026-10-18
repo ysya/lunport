@@ -18,6 +18,7 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 mod files;
+mod records;
 
 /// No Debug/Serialize: original private bytes are only consumed by explicit native encryption.
 pub(super) struct Materials {

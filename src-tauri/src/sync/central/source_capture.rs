@@ -145,13 +145,13 @@ pub(super) fn capture(
     let account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let sources = Sources::discover(&before, account.0.as_ref())?;
     let record_inputs = Inventory::from_state(&sources, &before)?;
-    drop(record_inputs.keys()?);
+    let private_inputs = record_inputs.keys()?;
     drop(record_inputs);
     let files = Files::capture(env, before.legacy_v1_backup.as_deref())?;
     let observer = Capture::new(&readonly);
     drop(Materials::from_files(
         &before, keys, &files, &observer, references,
-    )?);
+    )?.with_key_inputs(&before, keys, private_inputs)?);
     let decryptors = observer.finish()?;
     let package = Package::assemble(
         &before,

@@ -59,7 +59,7 @@ fn image<'a>(
     };
     store::read_vault_image(bytes, &SourceMaster { inner, import }).map_err(|_| invalid())
 }
-fn raw_index(materials: &Materials) -> BTreeMap<String, usize> {
+pub(super) fn raw_index(materials: &Materials) -> BTreeMap<String, usize> {
     materials
         .history
         .iter()
@@ -70,7 +70,7 @@ fn raw_index(materials: &Materials) -> BTreeMap<String, usize> {
         })
         .collect()
 }
-fn same_private(
+pub(super) fn same_private(
     materials: &Materials,
     index: &BTreeMap<String, usize>,
     entry: &VaultEntry,
