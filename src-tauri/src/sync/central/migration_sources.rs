@@ -189,8 +189,7 @@ impl Sources {
             return Err(invalid());
         }
         // Validate encoding without returning any plaintext JSON Value or parser diagnostics.
-        let _ = ChainKeys::from_parts(opened.id, &secret.auth_token, &secret.enc_key)
-            .map_err(|_| invalid())?;
+        let _decoded = Zeroizing::new(super::crypto::decode(&secret.enc_key, 32, 32)?);
         self.insert(
             opened.id,
             SourceKey {

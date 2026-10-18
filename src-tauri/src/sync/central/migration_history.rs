@@ -251,7 +251,7 @@ pub(super) fn prepare(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::{
         payload::{Catalog, PrivateMaterial},
         projection::tests::slot,
@@ -259,7 +259,7 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use zeroize::Zeroizing;
-    fn initial() -> (Workspace, VaultKeys, DeviceKeys) {
+    pub(in crate::sync::central) fn initial() -> (Workspace, VaultKeys, DeviceKeys) {
         let mut before = super::super::workspace::tests::enrolled();
         let keys = VaultKeys::generate().unwrap();
         let signer = DeviceKeys::decode_secret(&B64.encode([1u8; 64])).unwrap();

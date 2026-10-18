@@ -16,6 +16,8 @@ pub mod migration;
 pub mod migration_freeze;
 mod migration_history;
 mod migration_sources;
+mod migration_materials;
+mod migration_files;
 pub mod library_page;
 pub mod oidc;
 pub mod pairing;
