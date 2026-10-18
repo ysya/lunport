@@ -1,4 +1,19 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  migrationCanonical,
+  migrationDigest,
+  migrationScope,
+  migrationSnapshot,
+  verifyMigration,
+  type SignedMigration,
+  type MigrationJournal,
+} from "./migration";
+import {
+  sameMigration,
+  sameSnapshot,
+  type LegacyMigrationScope,
+  type LegacySnapshot,
+} from "../legacy-retirement";
 import { verifyRekey, wrapsDigest, type SignedRekey } from "./rekey";
 import type { RecoveryReadGrant } from "./recovery";
 import type { Principal } from "./auth";
@@ -121,7 +136,9 @@ CREATE TABLE IF NOT EXISTS current_records (record_id TEXT PRIMARY KEY, revision
 CREATE TABLE IF NOT EXISTS operations (operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rekey_versions (seq INTEGER PRIMARY KEY,record_id TEXT NOT NULL,revision INTEGER NOT NULL,envelope TEXT NOT NULL,digest TEXT NOT NULL,history_hash TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rekey_commits (epoch INTEGER PRIMARY KEY,rotation_id TEXT UNIQUE NOT NULL,manifest TEXT NOT NULL,wraps TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS rekey_source_digests (epoch INTEGER NOT NULL,seq INTEGER NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(epoch,seq));`;
+CREATE TABLE IF NOT EXISTS rekey_source_digests (epoch INTEGER NOT NULL,seq INTEGER NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(epoch,seq));
+CREATE TABLE IF NOT EXISTS migration_journal (id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS migration_versions (seq INTEGER PRIMARY KEY,record_id TEXT UNIQUE NOT NULL,operation_id TEXT UNIQUE NOT NULL,envelope TEXT NOT NULL,digest TEXT NOT NULL,history_hash TEXT NOT NULL);`;
 export async function verifyControl(
   proof: ControlProof,
 ): Promise<TrustedMembership | null> {
@@ -209,6 +226,527 @@ export class VaultStore extends DurableObject<Env> {
   async push(actor: Principal, records: RecordEnvelope[]): Promise<Response> {
     return rpcCall(() => this.pushResult(actor, records));
   }
+  private migrationJournal(): MigrationJournal | null {
+    if (
+      !this.ctx.storage.sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='migration_journal'",
+        )
+        .toArray().length
+    )
+      return null;
+    const row = this.ctx.storage.sql
+      .exec<{ value: string }>("SELECT value FROM migration_journal WHERE id=1")
+      .toArray()[0];
+    if (!row) return null;
+    const journal = JSON.parse(row.value) as MigrationJournal;
+    migrationCanonical(journal.manifest.body);
+    if (
+      !exactObject(journal, [
+        "manifest",
+        "digest",
+        "phase",
+        "staged",
+        "historyHash",
+        "retired",
+      ]) ||
+      !exactObject(journal.manifest, ["body", "signature"]) ||
+      !hex(journal.digest, 64) ||
+      !hex(journal.historyHash, 64) ||
+      !["staging", "committed", "retired"].includes(journal.phase) ||
+      !Number.isSafeInteger(journal.staged) ||
+      journal.staged < 0 ||
+      journal.staged >
+        safeNumber(journal.manifest.body.target_sequence, false) ||
+      !Number.isSafeInteger(journal.retired) ||
+      journal.retired < 0 ||
+      journal.retired > journal.manifest.body.sources.length ||
+      (journal.phase === "staging" && journal.retired !== 0) ||
+      (journal.phase !== "staging" &&
+        (journal.staged !==
+          safeNumber(journal.manifest.body.target_sequence, false) ||
+          journal.historyHash !== journal.manifest.body.target_history_hash)) ||
+      (journal.phase === "retired" &&
+        journal.retired !== journal.manifest.body.sources.length)
+    )
+      throw new Error("Invalid migration journal.");
+    return journal;
+  }
+  private migrationPending(): boolean {
+    return this.migrationJournal()?.phase === "staging";
+  }
+  private saveMigration(journal: MigrationJournal): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO migration_journal VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value",
+      metadataJson(journal),
+    );
+  }
+  private migrationObject(state: VaultState): boolean {
+    return this.env.VAULT.idFromName(state.account + ":" + state.vault).equals(
+      this.ctx.id,
+    );
+  }
+  private migrationCurrent(
+    state: VaultState,
+    journal: MigrationJournal,
+    actor: Principal,
+  ): boolean {
+    const body = journal.manifest.body;
+    return (
+      this.allowed(state, actor) &&
+      this.migrationObject(state) &&
+      state.phase === "ready" &&
+      !state.rekey &&
+      state.trusted.head === body.membership_head &&
+      state.epoch === safeNumber(body.authorization_epoch, false) &&
+      state.keyEpoch === safeNumber(body.key_epoch, false) &&
+      state.trusted.anchor.origin === body.origin &&
+      state.trusted.anchor.genesis_hash === body.genesis_hash &&
+      state.account === body.account_id &&
+      state.vault === body.vault_id
+    );
+  }
+  private async migrationSources(manifest: SignedMigration): Promise<boolean> {
+    try {
+      for (const source of manifest.body.sources) {
+        if (
+          !(await this.env.LEGACY_RETIREMENT.getByName(
+            source.chain_id,
+          ).confirmFrozen(
+            source.chain_id,
+            migrationScope(manifest.body),
+            migrationSnapshot(source),
+          ))
+        )
+          return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  /** Private server primitives; no HTTP route/capability until ingress and native cutover are ready. */
+  beginMigration(
+    actor: Principal,
+    manifest: SignedMigration,
+  ): Promise<Response> {
+    return rpcCall(async () => {
+      const observed = this.load();
+      if (!this.allowed(observed, actor) || !this.migrationObject(observed))
+        return { status: 403 };
+      if (
+        !(await verifyMigration(
+          observed.trusted,
+          manifest,
+          observed.epoch,
+          observed.keyEpoch,
+          observed.vault,
+          actor.device,
+        ))
+      )
+        return { status: 403 };
+      const digest = await migrationDigest(manifest),
+        prior = this.migrationJournal();
+      if (prior)
+        return prior.digest === digest
+          ? this.migrationStatusResult(actor)
+          : { status: 409 };
+      if (
+        observed.sequence !== 0 ||
+        observed.historyHash !== ZERO ||
+        observed.phase !== "ready" ||
+        observed.rekey
+      )
+        return { status: 409 };
+      if (manifest.body.wraps_digest !== (await wrapsDigest(observed.wraps)))
+        return { status: 409 };
+      if (!(await this.migrationSources(manifest))) return { status: 503 };
+      return this.ctx.storage.transactionSync(() => {
+        const current = this.load();
+        if (!this.allowed(current, actor)) return { status: 403 };
+        if (current.version !== observed.version || this.migrationJournal())
+          return { status: 409 };
+        this.ctx.storage.sql.exec(SCHEMA);
+        this.saveMigration({
+          manifest,
+          digest,
+          phase: "staging",
+          staged: 0,
+          historyHash: ZERO,
+          retired: 0,
+        });
+        return this.migrationStatusResult(actor);
+      });
+    });
+  }
+  migrationStatus(actor: Principal): Response {
+    return rpcResponse(this.migrationStatusResult(actor));
+  }
+  private migrationStatusResult(actor: Principal): Result {
+    const state = this.load();
+    if (!this.allowed(state, actor) || !this.migrationObject(state))
+      return { status: 403 };
+    const journal = this.migrationJournal();
+    return journal
+      ? {
+          status: 200,
+          body: {
+            manifest: journal.manifest,
+            manifest_digest: journal.digest,
+            phase: journal.phase,
+            staged: String(journal.staged),
+            history_hash: journal.historyHash,
+            retired: String(journal.retired),
+          },
+        }
+      : { status: 404 };
+  }
+  stageMigration(
+    actor: Principal,
+    id: string,
+    afterText: string,
+    envelopes: RecordEnvelope[],
+  ): Promise<Response> {
+    return rpcCall(async () => {
+      const observed = this.load(),
+        journal = this.migrationJournal();
+      if (!this.allowed(observed, actor)) return { status: 403 };
+      if (
+        !journal ||
+        journal.phase !== "staging" ||
+        journal.manifest.body.migration_id !== id ||
+        !this.migrationCurrent(observed, journal, actor)
+      )
+        return { status: 409 };
+      let after: number;
+      try {
+        after = safeNumber(afterText, true);
+      } catch {
+        return { status: 400 };
+      }
+      if (
+        !Array.isArray(envelopes) ||
+        envelopes.length < 1 ||
+        envelopes.length > 32
+      )
+        return { status: 400 };
+      if (
+        after > journal.staged ||
+        after + envelopes.length >
+          safeNumber(journal.manifest.body.target_sequence, false) ||
+        (after < journal.staged && after + envelopes.length > journal.staged)
+      )
+        return { status: 409 };
+      let historyHash =
+        after === 0
+          ? ZERO
+          : this.ctx.storage.sql
+              .exec<{ history_hash: string }>(
+                "SELECT history_hash FROM migration_versions WHERE seq=?",
+                after,
+              )
+              .toArray()[0]?.history_hash;
+      if (!historyHash) return { status: 409 };
+      const rows: {
+        envelope: RecordEnvelope;
+        encoded: string;
+        digest: string;
+        historyHash: string;
+        sequence: number;
+      }[] = [];
+      const ids = new Set<string>(),
+        ops = new Set<string>();
+      for (const envelope of envelopes) {
+        if (
+          !(await verifyCurrentWrite(
+            observed.trusted,
+            envelope,
+            observed.vault,
+            observed.keyEpoch,
+            actor.device,
+          )) ||
+          envelope.header.author !== journal.manifest.body.author ||
+          envelope.header.expected_revision !== "0"
+        )
+          return { status: 403 };
+        const { record_id, operation_id } = envelope.header;
+        if (ids.has(record_id) || ops.has(operation_id)) return { status: 400 };
+        ids.add(record_id);
+        ops.add(operation_id);
+        const digest = await envelopeDigest(envelope),
+          sequence = after + rows.length + 1;
+        historyHash = await hash(
+          canonical([
+            "lunport-history-v2",
+            historyHash,
+            String(sequence),
+            digest,
+          ]),
+        );
+        if (after < journal.staged) {
+          const prior = this.ctx.storage.sql
+            .exec<{ digest: string }>(
+              "SELECT digest FROM migration_versions WHERE seq=?",
+              sequence,
+            )
+            .toArray()[0];
+          if (prior?.digest !== digest) return { status: 409 };
+        } else if (
+          this.ctx.storage.sql
+            .exec(
+              "SELECT seq FROM migration_versions WHERE record_id=? OR operation_id=?",
+              record_id,
+              operation_id,
+            )
+            .toArray().length
+        )
+          return { status: 409 };
+        rows.push({
+          envelope,
+          encoded: JSON.stringify(envelope),
+          digest,
+          historyHash,
+          sequence,
+        });
+      }
+      return this.ctx.storage.transactionSync(() => {
+        const current = this.load(),
+          latest = this.migrationJournal();
+        if (!this.allowed(current, actor)) return { status: 403 };
+        if (
+          !latest ||
+          latest.digest !== journal.digest ||
+          latest.phase !== "staging" ||
+          latest.staged !== journal.staged ||
+          current.version !== observed.version ||
+          !this.migrationCurrent(current, latest, actor)
+        )
+          return { status: 409 };
+        if (after < latest.staged) return this.migrationStatusResult(actor);
+        const bytes = this.ctx.storage.sql
+          .exec<{ bytes: number }>(
+            "SELECT COALESCE(SUM(LENGTH(envelope)),0) AS bytes FROM migration_versions",
+          )
+          .one().bytes;
+        if (
+          bytes + rows.reduce((sum, row) => sum + row.encoded.length, 0) >
+          MAX_HISTORY_BYTES - 256 * 1024
+        )
+          return { status: 413 };
+        for (const row of rows)
+          this.ctx.storage.sql.exec(
+            "INSERT INTO migration_versions VALUES(?,?,?,?,?,?)",
+            row.sequence,
+            row.envelope.header.record_id,
+            row.envelope.header.operation_id,
+            row.encoded,
+            row.digest,
+            row.historyHash,
+          );
+        this.saveMigration({
+          ...latest,
+          staged: after + rows.length,
+          historyHash,
+        });
+        return this.migrationStatusResult(actor);
+      });
+    });
+  }
+  commitMigration(actor: Principal, id: string): Promise<Response> {
+    return rpcCall(async () => {
+      const observed = this.load(),
+        journal = this.migrationJournal();
+      if (!this.allowed(observed, actor) || !this.migrationObject(observed))
+        return { status: 403 };
+      if (!journal || journal.manifest.body.migration_id !== id)
+        return { status: 409 };
+      if (journal.phase !== "staging") return this.migrationStatusResult(actor);
+      if (
+        !this.migrationCurrent(observed, journal, actor) ||
+        journal.staged !==
+          safeNumber(journal.manifest.body.target_sequence, false) ||
+        journal.historyHash !== journal.manifest.body.target_history_hash ||
+        observed.sequence !== 0 ||
+        observed.historyHash !== ZERO
+      )
+        return { status: 409 };
+      if (
+        journal.manifest.body.wraps_digest !==
+          (await wrapsDigest(observed.wraps)) ||
+        !(await this.migrationSources(journal.manifest))
+      )
+        return { status: 503 };
+      return this.ctx.storage.transactionSync(() => {
+        const current = this.load(),
+          latest = this.migrationJournal();
+        if (!this.allowed(current, actor)) return { status: 403 };
+        if (
+          !latest ||
+          latest.digest !== journal.digest ||
+          latest.phase !== "staging" ||
+          latest.staged !== journal.staged ||
+          current.version !== observed.version ||
+          !this.migrationCurrent(current, latest, actor)
+        )
+          return { status: 409 };
+        const rows = this.ctx.storage.sql
+          .exec<{
+            seq: number;
+            record_id: string;
+            operation_id: string;
+            envelope: string;
+            digest: string;
+            history_hash: string;
+          }>("SELECT * FROM migration_versions ORDER BY seq")
+          .toArray();
+        if (
+          rows.length !== journal.staged ||
+          rows.at(-1)?.history_hash !== journal.historyHash ||
+          this.ctx.storage.sql
+            .exec("SELECT seq FROM versions LIMIT 1")
+            .toArray().length ||
+          this.ctx.storage.sql
+            .exec("SELECT record_id FROM current_records LIMIT 1")
+            .toArray().length ||
+          this.ctx.storage.sql
+            .exec("SELECT operation_id FROM operations LIMIT 1")
+            .toArray().length
+        )
+          return { status: 409 };
+        for (const row of rows) {
+          this.ctx.storage.sql.exec(
+            "INSERT INTO versions VALUES(?,?,?,?,?,?)",
+            row.seq,
+            row.record_id,
+            1,
+            row.envelope,
+            row.digest,
+            row.history_hash,
+          );
+          this.ctx.storage.sql.exec(
+            "INSERT INTO current_records VALUES(?,?,?,?,?,?)",
+            row.record_id,
+            1,
+            row.seq,
+            row.envelope,
+            row.digest,
+            row.history_hash,
+          );
+          const receipt: Receipt = {
+            operation_id: row.operation_id,
+            record_id: row.record_id,
+            revision: "1",
+            sequence: String(row.seq),
+            digest: row.digest,
+            history_hash: row.history_hash,
+          };
+          this.ctx.storage.sql.exec(
+            "INSERT INTO operations VALUES(?,?,?)",
+            row.operation_id,
+            row.digest,
+            JSON.stringify(receipt),
+          );
+        }
+        this.save({
+          ...current,
+          version: current.version + 1,
+          sequence: journal.staged,
+          historyHash: journal.historyHash,
+        });
+        this.saveMigration({
+          ...latest,
+          phase: latest.manifest.body.sources.length ? "committed" : "retired",
+        });
+        this.ctx.storage.sql.exec("DELETE FROM migration_versions");
+        return this.migrationStatusResult(actor);
+      });
+    });
+  }
+  /** Internal callback: registry accepts a durable target commit, never a claimed hash. */
+  migrationCommitWitness(
+    actor: Principal,
+    scope: LegacyMigrationScope,
+    chain: string,
+    snapshot: LegacySnapshot,
+  ): number {
+    const state = this.load(),
+      journal = this.migrationJournal();
+    if (!this.allowed(state, actor) || !this.migrationObject(state)) return 403;
+    if (
+      !journal ||
+      journal.phase === "staging" ||
+      !sameMigration(migrationScope(journal.manifest.body), scope)
+    )
+      return 409;
+    const source = journal.manifest.body.sources.find(
+      (s) => s.chain_id === chain,
+    );
+    return source &&
+      sameSnapshot(migrationSnapshot(source), snapshot) &&
+      state.trusted.anchor.origin === scope.origin &&
+      state.trusted.anchor.genesis_hash === scope.genesis
+      ? 204
+      : 409;
+  }
+  retireMigration(actor: Principal, id: string): Promise<Response> {
+    return rpcCall(async () => {
+      const observed = this.load(),
+        journal = this.migrationJournal();
+      if (!this.allowed(observed, actor) || !this.migrationObject(observed))
+        return { status: 403 };
+      if (
+        !journal ||
+        journal.manifest.body.migration_id !== id ||
+        journal.phase === "staging"
+      )
+        return { status: 409 };
+      if (journal.phase === "retired") return this.migrationStatusResult(actor);
+      for (const source of journal.manifest.body.sources.slice(
+        journal.retired,
+        journal.retired + 8,
+      )) {
+        let code: number;
+        try {
+          code = await this.env.LEGACY_RETIREMENT.getByName(
+            source.chain_id,
+          ).retireForMigration(
+            source.chain_id,
+            migrationScope(journal.manifest.body),
+            migrationSnapshot(source),
+            actor,
+          );
+        } catch {
+          return { status: 503 };
+        }
+        if (code !== 200) return { status: code };
+        const current = this.load(),
+          latest = this.migrationJournal();
+        if (!this.allowed(current, actor)) return { status: 403 };
+        if (
+          !latest ||
+          latest.digest !== journal.digest ||
+          latest.phase === "staging"
+        )
+          return { status: 409 };
+        const index = latest.manifest.body.sources.findIndex(
+          (s) => s.chain_id === source.chain_id,
+        );
+        // A lost acknowledgement retries the same irreversible registry transition.
+        if (latest.retired < index) return { status: 409 };
+        if (latest.retired === index)
+          this.saveMigration({
+            ...latest,
+            retired: index + 1,
+            phase:
+              index + 1 === latest.manifest.body.sources.length
+                ? "retired"
+                : "committed",
+          });
+      }
+      return this.migrationStatusResult(actor);
+    });
+  }
+
   private recoveryAllowed(
     state: VaultState | null,
     grant: RecoveryReadGrant,
@@ -228,6 +766,7 @@ export class VaultStore extends DurableObject<Env> {
     const state = this.load();
     if (!this.recoveryAllowed(state, grant))
       return rpcResponse({ status: 403 });
+    if (this.migrationPending()) return rpcResponse({ status: 423 });
     const wrap = state.wraps.find((w) => w.header.recipient === "recovery");
     if (!wrap) return rpcResponse({ status: 423 });
     const committed =
@@ -832,6 +1371,8 @@ export class VaultStore extends DurableObject<Env> {
   private metadataResult(actor: Principal): Result {
     const state = this.load();
     if (!this.allowed(state, actor)) return { status: 403 };
+    if (this.migrationPending())
+      return { status: 423, body: { error: "migration_pending" } };
     return {
       status: 200,
       body: {
@@ -848,6 +1389,8 @@ export class VaultStore extends DurableObject<Env> {
   private wrapResult(actor: Principal): Result {
     const state = this.load();
     if (!this.allowed(state, actor)) return { status: 403 };
+    if (this.migrationPending())
+      return { status: 423, body: { error: "migration_pending" } };
     const wrap = state.wraps.find((w) => w.header.recipient === actor.device);
     return wrap
       ? { status: 200, body: wrap }
@@ -860,6 +1403,8 @@ export class VaultStore extends DurableObject<Env> {
   }
   /** Same bounded ciphertext read for members and kit-authorized pending devices. */
   private historyResult(state: VaultState, since: number): Result {
+    if (this.migrationPending())
+      return { status: 423, body: { error: "migration_pending" } };
     if (!Number.isSafeInteger(since) || since < 0 || since > state.sequence)
       return { status: 400 };
     const rows = this.ctx.storage.sql
@@ -893,6 +1438,8 @@ export class VaultStore extends DurableObject<Env> {
   ): Promise<Result> {
     const observed = this.load();
     if (!this.allowed(observed, actor)) return { status: 403 };
+    if (this.migrationPending())
+      return { status: 423, body: { error: "migration_pending" } };
     if (observed.phase !== "ready")
       return { status: 423, body: { error: "rekey_pending" } };
     if (
@@ -978,6 +1525,8 @@ export class VaultStore extends DurableObject<Env> {
     return this.ctx.storage.transactionSync(() => {
       const current = this.load();
       if (!this.allowed(current, actor)) return { status: 403 };
+      if (this.migrationPending())
+        return { status: 423, body: { error: "migration_pending" } };
       if (current.phase !== "ready")
         return { status: 423, body: { error: "rekey_pending" } };
       if (current.version !== observed.version)

@@ -12,6 +12,7 @@ pub mod joining;
 pub mod commands;
 pub mod crypto;
 pub mod membership;
+pub mod migration;
 pub mod library_page;
 pub mod oidc;
 pub mod pairing;

@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import type { Principal } from "./v2/auth";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
@@ -99,11 +100,15 @@ export function sameSnapshot(a: LegacySnapshot, b: LegacySnapshot): boolean {
 /** Separate namespace: no alarm, TTL, deletion, reset or public HTTP endpoint. */
 export class LegacyRetirementStore extends DurableObject<Env> {
   private matches(chain: string): boolean {
-    return (
-      typeof chain === "string" &&
-      HEX64.test(chain) &&
-      this.env.LEGACY_RETIREMENT.idFromName(chain).equals(this.ctx.id)
-    );
+    try {
+      return (
+        typeof chain === "string" &&
+        HEX64.test(chain) &&
+        this.env.LEGACY_RETIREMENT.idFromName(chain).equals(this.ctx.id)
+      );
+    } catch {
+      return false;
+    }
   }
   async check(
     chain: string,
@@ -154,6 +159,53 @@ export class LegacyRetirementStore extends DurableObject<Env> {
       return 200;
     });
   }
-  // A retire transition is deliberately absent until the central migration
-  // coordinator can prove the target commit. Caller-supplied hashes are insufficient.
+  async confirmFrozen(
+    chain: string,
+    scope: LegacyMigrationScope,
+    snapshot: LegacySnapshot,
+  ): Promise<boolean> {
+    if (!this.matches(chain) || !validScope(scope) || !validSnapshot(snapshot))
+      return false;
+    const value: unknown = await this.ctx.storage.get("fence");
+    return (
+      validFence(value) &&
+      sameMigration(value.scope, scope) &&
+      sameSnapshot(value.snapshot, snapshot)
+    );
+  }
+  /** Private target callback, never an old bearer or caller-supplied commit hash. */
+  async retireForMigration(
+    chain: string,
+    scope: LegacyMigrationScope,
+    snapshot: LegacySnapshot,
+    actor: Principal,
+  ): Promise<LegacyGate> {
+    if (!this.matches(chain) || !validScope(scope) || !validSnapshot(snapshot))
+      return 503;
+    if (!actor || typeof actor !== "object") return 404;
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const value: unknown = await this.ctx.storage.get("fence");
+      if (!validFence(value)) return 503;
+      if (
+        !sameMigration(value.scope, scope) ||
+        !sameSnapshot(value.snapshot, snapshot)
+      )
+        return 409;
+      let code: number;
+      try {
+        code = await this.env.VAULT.getByName(
+          scope.account + ":" + scope.vault,
+        ).migrationCommitWitness(actor, scope, chain, snapshot);
+      } catch {
+        return 503;
+      }
+      if (code !== 204) return code === 403 ? 404 : 409;
+      if (value.phase !== "retired")
+        await this.ctx.storage.put("fence", {
+          ...value,
+          phase: "retired",
+        } satisfies Fence);
+      return 200;
+    });
+  }
 }
