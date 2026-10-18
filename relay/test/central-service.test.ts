@@ -574,6 +574,12 @@ describe("central device authorization and durable data", () => {
     const s = await setup(),
       d = device(6),
       credential = random();
+    const child = env.VAULT.getByName(s.actor.account + ":" + s.vault);
+    const rows = await Promise.all(
+      Array.from({ length: 33 }, () => record(s.trusted, s.vault)),
+    );
+    expect((await child.push(s.actor, rows.slice(0, 32))).status).toBe(200);
+    expect((await child.push(s.actor, rows.slice(32))).status).toBe(200);
     let enrolled = await s.renew(d, credential);
     const now = Date.now();
     const request: Enrollment = {
@@ -641,11 +647,92 @@ describe("central device authorization and durable data", () => {
         })
       ).status,
     ).toBe(403);
+    expect(
+      (
+        await s.account.recoveryHistory(
+          enrolled.actor!,
+          { ...proof, signature: base64(new Uint8Array(64)) },
+          s.vault,
+          0,
+        )
+      ).status,
+    ).toBe(403);
+    expect((await child.pull(enrolled.actor!, 0)).status).toBe(403);
+    expect(
+      (await s.account.recoveryHistory(enrolled.actor!, proof, random(), 0))
+        .status,
+    ).toBe(403);
+    expect(
+      (await s.account.recoveryHistory(enrolled.actor!, proof, s.vault, -1))
+        .status,
+    ).toBe(400);
+    const firstPage = await s.account.recoveryHistory(
+      enrolled.actor!,
+      proof,
+      s.vault,
+      0,
+    );
+    expect(firstPage.status).toBe(200);
+    const firstHistory = (await firstPage.json()) as any;
+    expect(firstHistory.records).toHaveLength(32);
+    expect(firstHistory).toMatchObject({
+      sequence: "33",
+      epoch: 1,
+      membership_head: s.trusted.head,
+    });
+    const lastPage = await s.account.recoveryHistory(
+      enrolled.actor!,
+      proof,
+      s.vault,
+      32,
+    );
+    expect(lastPage.status).toBe(200);
+    const lastHistory = (await lastPage.json()) as any;
+    expect(lastHistory.records).toHaveLength(1);
+    expect(lastHistory.records[0].sequence).toBe("33");
+    expect(lastHistory.records[0].history_hash).toBe(firstHistory.history_hash);
+    // Change account authorization after the child has produced a valid page. No ciphertext
+    // from that page may escape through an account snapshot that is no longer authorized.
+    const raced = await runInDurableObject(s.account, async (instance, ctx) => {
+      const bindings = (instance as unknown as { env: Env }).env;
+      const original = bindings.VAULT;
+      const saved = ctx.storage.sql
+        .exec<{ value: string }>("SELECT value FROM account_state")
+        .one().value;
+      const changed = JSON.parse(saved);
+      const delegate = original.getByName.bind(original);
+      bindings.VAULT = {
+        getByName: (name: string) => ({
+          recoveryHistoryForGrant: async (grant: any, since: number) => {
+            const response = await delegate(name).recoveryHistoryForGrant(
+              grant,
+              since,
+            );
+            changed.version += 1;
+            changed.epoch += 1;
+            ctx.storage.sql.exec(
+              "UPDATE account_state SET value=?",
+              JSON.stringify(changed),
+            );
+            return response;
+          },
+        }),
+      } as unknown as typeof original;
+      try {
+        return (
+          await instance.recoveryHistory(enrolled.actor!, proof, s.vault, 0)
+        ).status;
+      } finally {
+        bindings.VAULT = original;
+        ctx.storage.sql.exec("UPDATE account_state SET value=?", saved);
+      }
+    });
+    expect(raced).toBe(409);
     const before = await s.account.recoveryWraps(enrolled.actor!, proof);
     expect(before.status).toBe(200);
-    expect(
-      ((await before.json()) as any).results[0].wrap.header.recipient,
-    ).toBe("recovery");
+    const beforeBody = (await before.json()) as any;
+    expect(beforeBody.results[0].wrap.header.recipient).toBe("recovery");
+    expect(beforeBody.results[0].committed).toBeNull();
     const vault = env.VAULT.getByName(s.actor.account + ":" + s.vault);
     const cachedGrant = {
       kind: "recovery_read" as const,
@@ -656,10 +743,33 @@ describe("central device authorization and durable data", () => {
       head: s.trusted.head,
       expires: enrolled.actor!.expires,
     };
+    expect(
+      (
+        await vault.recoveryHistoryForGrant(
+          { ...cachedGrant, expires: Date.now() - 1 },
+          0,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await vault.recoveryHistoryForGrant(
+          { ...cachedGrant, head: "0".repeat(64) },
+          0,
+        )
+      ).status,
+    ).toBe(403);
     const stopped = await s.account.revokeAccess(s.identity, s.first.id);
     expect(stopped.status).toBe(200);
     await stopped.arrayBuffer();
     expect((await vault.recoveryForGrant(cachedGrant)).status).toBe(403);
+    expect((await vault.recoveryHistoryForGrant(cachedGrant, 0)).status).toBe(
+      403,
+    );
+    expect(
+      (await s.account.recoveryHistory(enrolled.actor!, proof, s.vault, 0))
+        .status,
+    ).toBe(403);
     enrolled = await s.renew(d, credential);
     expect((await s.account.recoveryWraps(enrolled.actor!, proof)).status).toBe(
       403,

@@ -208,6 +208,23 @@ describe("signed full-history rekey", () => {
     const op = fixture.source_rows[0].envelope.header.operation_id;
     const receipt = await (await s.child.operationReceipt(s.actor, op)).json();
     await begin(s);
+    const grant = {
+      kind: "recovery_read" as const,
+      locator: s.actor.locator,
+      account: s.actor.account,
+      device: "f".repeat(32),
+      epoch: s.actor.epoch,
+      head: fixture.manifest.body.membership_head,
+      expires: s.actor.expires,
+    };
+    const stagedRecovery = await s.child.recoveryForGrant(grant);
+    expect(stagedRecovery.status).toBe(200);
+    expect(await stagedRecovery.json()).toMatchObject({
+      epoch: 1,
+      committed: null,
+      commits: [],
+    });
+
     const incomplete = await s.child.commitRekey(
       s.actor,
       fixture.manifest.body.rotation_id,
@@ -254,6 +271,16 @@ describe("signed full-history rekey", () => {
       (await s.child.commitRekey(s.actor, fixture.manifest.body.rotation_id))
         .status,
     ).toBe(200);
+    const recovery = await s.child.recoveryForGrant(grant);
+    expect(recovery.status).toBe(200);
+    expect(await recovery.json()).toMatchObject({
+      epoch: 2,
+      sequence: fixture.manifest.body.source_sequence,
+      history_hash: fixture.manifest.body.target_history_hash,
+      committed: { manifest: fixture.manifest, wraps: fixture.target_wraps },
+      commits: [fixture.manifest],
+    });
+
     expect(
       (await (await s.child.metadata(s.actor)).json()) as any,
     ).toMatchObject({

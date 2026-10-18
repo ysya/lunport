@@ -765,11 +765,10 @@ export class AccountStore extends DurableObject<Env> {
   ): Promise<Response> {
     return rpcCall(() => this.recoveryWrapsResult(actor, proof));
   }
-  private async recoveryWrapsResult(
+  private async recoveryGrant(
     actor: Principal,
     proof: RecoveryReadProof,
-    now = Date.now(),
-  ): Promise<Result> {
+  ): Promise<{ observed: Account; grant: RecoveryReadGrant } | Result> {
     const observed = this.load();
     if (
       !this.allowed(observed, actor, true) ||
@@ -786,17 +785,20 @@ export class AccountStore extends DurableObject<Env> {
         request,
         proof,
         observed.epoch,
-        now,
+        Date.now(),
       ))
     )
       return { status: 403 };
-    if (this.load()?.version !== observed.version) return { status: 409 };
-    // A newly backed-up kit must also recover a device lost while the prior barrier was
-    // interrupted. Prove current kit authority first, then finish the already-signed barrier.
+    if (
+      this.load()?.version !== observed.version ||
+      !this.allowed(observed, actor, true)
+    )
+      return { status: 409 };
+    // Kit authority is proved before finishing an already signed, interrupted barrier.
     if (observed.pending) {
       const result = await this.resumeBarrier();
-      if (result.status !== 200) return result;
-      return this.recoveryWrapsResult(actor, proof, now);
+      if (result.status !== 200) return { status: result.status };
+      return this.recoveryGrant(actor, proof);
     }
     const grant: RecoveryReadGrant = {
       kind: "recovery_read",
@@ -808,10 +810,33 @@ export class AccountStore extends DurableObject<Env> {
       expires: Math.min(
         actor.expires,
         safeNumber(request.expires_at_ms, false),
-        now + 300000,
+        Date.now() + 300000,
       ),
     };
+    return { observed, grant };
+  }
+  private recoveryUnchanged(
+    observed: Account,
+    actor: Principal,
+    grant: RecoveryReadGrant,
+  ): boolean {
+    const latest = this.load();
+    return (
+      this.allowed(latest, actor, true) &&
+      latest.version === observed.version &&
+      !latest.pending &&
+      grant.expires > Date.now()
+    );
+  }
+  private async recoveryWrapsResult(
+    actor: Principal,
+    proof: RecoveryReadProof,
+  ): Promise<Result> {
+    const access = await this.recoveryGrant(actor, proof);
+    if ("status" in access) return access;
+    const { observed, grant } = access;
     const results: unknown[] = [];
+    let bytes = 1024;
     for (const id of Object.keys(observed.vaults)) {
       const result = await this.env.VAULT.getByName(
         observed.id + ":" + id,
@@ -820,17 +845,54 @@ export class AccountStore extends DurableObject<Env> {
         await result.body?.cancel();
         return { status: 409, body: { error: "recovery_checkpoint_changed" } };
       }
-      results.push(await result.json());
+      const bundle = await result.json();
+      bytes += new TextEncoder().encode(JSON.stringify(bundle)).byteLength;
+      if (bytes > 4 * 1024 * 1024) return { status: 413 };
+      results.push(bundle);
     }
-    if (this.load()?.version !== observed.version) return { status: 409 };
+    if (!this.recoveryUnchanged(observed, actor, grant)) return { status: 409 };
     return {
       status: 200,
       body: {
-        membership_head: observed.trusted.head,
+        membership_head: grant.head,
         auth_epoch: observed.epoch,
         results,
       },
     };
+  }
+  recoveryHistory(
+    actor: Principal,
+    proof: RecoveryReadProof,
+    vault: string,
+    since: number,
+  ): Promise<Response> {
+    return rpcCall(() =>
+      this.recoveryHistoryResult(actor, proof, vault, since),
+    );
+  }
+  private async recoveryHistoryResult(
+    actor: Principal,
+    proof: RecoveryReadProof,
+    vault: string,
+    since: number,
+  ): Promise<Result> {
+    if (!hex(vault, 64) || !Number.isSafeInteger(since) || since < 0)
+      return { status: 400 };
+    const access = await this.recoveryGrant(actor, proof);
+    if ("status" in access) return access;
+    const { observed, grant } = access;
+    if (!observed.vaults[vault]) return { status: 403 };
+    const result = await this.env.VAULT.getByName(
+      observed.id + ":" + vault,
+    ).recoveryHistoryForGrant(grant, since);
+    if (result.status !== 200) {
+      const status = result.status;
+      await result.body?.cancel();
+      return { status };
+    }
+    const page = await result.json();
+    if (!this.recoveryUnchanged(observed, actor, grant)) return { status: 409 };
+    return { status: 200, body: page };
   }
   async recover(
     actor: Principal,

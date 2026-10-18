@@ -17,6 +17,7 @@ pub mod oidc;
 pub mod pairing;
 pub mod payload;
 pub mod recovery;
+pub mod recovery_read;
 pub mod replacement_archive;
 pub mod rekey;
 pub mod round;

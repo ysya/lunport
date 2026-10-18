@@ -541,6 +541,7 @@ pub enum Control {
     Logout,
     BatchPull,
     RecoveryRead,
+    RecoveryHistory,
     Recover,
 }
 impl Control {
@@ -554,6 +555,7 @@ impl Control {
             Self::Logout => "/v2/logout",
             Self::BatchPull => "/v2/pull",
             Self::RecoveryRead => "/v2/recovery/wraps",
+            Self::RecoveryHistory => "/v2/recovery/history",
             Self::Recover => "/v2/recovery/commit",
         }
     }

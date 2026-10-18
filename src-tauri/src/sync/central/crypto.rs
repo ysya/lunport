@@ -137,6 +137,18 @@ impl VaultKeys {
             .map(|b| format!("{b:02x}"))
             .collect())
     }
+    /// Compare the complete index/content pair without exporting a key or a stable key digest.
+    pub fn verify_same(&self, other: &Self) -> Result<(), AppError> {
+        let mut expected =
+            <Hmac<Sha256> as Mac>::new_from_slice(&self.0[..]).map_err(|_| invalid())?;
+        expected.update(b"lunport-vault-key-continuity-v2");
+        let mut actual =
+            <Hmac<Sha256> as Mac>::new_from_slice(&other.0[..]).map_err(|_| invalid())?;
+        actual.update(b"lunport-vault-key-continuity-v2");
+        actual
+            .verify_slice(&expected.finalize().into_bytes())
+            .map_err(|_| invalid())
+    }
     pub fn next_epoch(&self) -> Result<Self, AppError> {
         let mut next = Self::generate()?;
         next.0[..32].copy_from_slice(&self.0[..32]);

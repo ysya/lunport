@@ -90,6 +90,7 @@ const paths = new Set([
   "/v2/logout",
   "/v2/pull",
   "/v2/recovery/wraps",
+  "/v2/recovery/history",
   "/v2/recovery/commit",
   "/v2/device-access",
 ]);
@@ -125,6 +126,7 @@ export async function centralFetch(
               "paged-history",
               "signed-rekey",
               "paired-checkpoints",
+              "recovery-history",
             ],
             oidc: {
               issuer: config.issuer,
@@ -307,6 +309,27 @@ export async function centralFetch(
       return exactObject(parsed, ["proof"])
         ? response(await account.recoveryWraps(actor, parsed.proof as any))
         : response({ status: 400 });
+    case "/v2/recovery/history": {
+      if (
+        !exactObject(parsed, ["proof", "vault", "since"]) ||
+        !hex(parsed.vault, 64)
+      )
+        return response({ status: 400 });
+      let since: number;
+      try {
+        since = safeNumber(parsed.since, true);
+      } catch {
+        return response({ status: 400 });
+      }
+      return response(
+        await account.recoveryHistory(
+          actor,
+          parsed.proof as any,
+          parsed.vault,
+          since,
+        ),
+      );
+    }
     case "/v2/recovery/commit":
       return exactObject(parsed, ["node", "wraps"])
         ? response(

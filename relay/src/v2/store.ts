@@ -209,26 +209,57 @@ export class VaultStore extends DurableObject<Env> {
   async push(actor: Principal, records: RecordEnvelope[]): Promise<Response> {
     return rpcCall(() => this.pushResult(actor, records));
   }
+  private recoveryAllowed(
+    state: VaultState | null,
+    grant: RecoveryReadGrant,
+  ): state is VaultState {
+    return (
+      !!state &&
+      grant.kind === "recovery_read" &&
+      grant.locator === state.locator &&
+      grant.account === state.account &&
+      grant.epoch === state.epoch &&
+      grant.head === state.trusted.head &&
+      grant.expires > Date.now() &&
+      !state.denied.includes(grant.device)
+    );
+  }
   recoveryForGrant(grant: RecoveryReadGrant): Response {
     const state = this.load();
-    if (
-      !state ||
-      grant.kind !== "recovery_read" ||
-      grant.locator !== state.locator ||
-      grant.account !== state.account ||
-      grant.epoch !== state.epoch ||
-      grant.head !== state.trusted.head ||
-      grant.expires <= Date.now() ||
-      state.denied.includes(grant.device)
-    )
+    if (!this.recoveryAllowed(state, grant))
       return rpcResponse({ status: 403 });
     const wrap = state.wraps.find((w) => w.header.recipient === "recovery");
-    return wrap
-      ? rpcResponse({
-          status: 200,
-          body: { vault: state.vault, epoch: state.keyEpoch, wrap },
-        })
-      : rpcResponse({ status: 423 });
+    if (!wrap) return rpcResponse({ status: 423 });
+    const committed =
+      state.keyEpoch === 1 ? null : this.committedBundle(state.keyEpoch);
+    if (state.keyEpoch > 1 && !committed)
+      return rpcResponse({
+        status: 409,
+        body: { error: "recovery_commit_unavailable" },
+      });
+    return rpcResponse({
+      status: 200,
+      body: {
+        vault: state.vault,
+        epoch: state.keyEpoch,
+        wrap,
+        committed,
+        sequence: String(state.sequence),
+        history_hash: state.historyHash,
+        commits: this.ctx.storage.sql
+          .exec<{ manifest: string }>(
+            "SELECT manifest FROM rekey_commits ORDER BY epoch",
+          )
+          .toArray()
+          .map((row) => JSON.parse(row.manifest)),
+      },
+    });
+  }
+  recoveryHistoryForGrant(grant: RecoveryReadGrant, since: number): Response {
+    const state = this.load();
+    if (!this.recoveryAllowed(state, grant))
+      return rpcResponse({ status: 403 });
+    return rpcResponse(this.historyResult(state, since));
   }
   private load(): VaultState | null {
     if (
@@ -713,6 +744,14 @@ export class VaultStore extends DurableObject<Env> {
     if (!this.allowed(state, actor)) return rpcResponse({ status: 403 });
     if (!Number.isSafeInteger(epoch) || epoch < 2 || epoch > 65)
       return rpcResponse({ status: 400 });
+    const bundle = this.committedBundle(epoch);
+    return rpcResponse(
+      bundle ? { status: 200, body: bundle } : { status: 404 },
+    );
+  }
+  private committedBundle(
+    epoch: number,
+  ): { manifest: SignedRekey; wraps: WrappedKeys[] } | null {
     const commit = this.ctx.storage.sql
       .exec<{ manifest: string; wraps: string }>(
         "SELECT manifest,wraps FROM rekey_commits WHERE epoch=?",
@@ -720,14 +759,11 @@ export class VaultStore extends DurableObject<Env> {
       )
       .toArray()[0];
     return commit
-      ? rpcResponse({
-          status: 200,
-          body: {
-            manifest: JSON.parse(commit.manifest),
-            wraps: JSON.parse(commit.wraps),
-          },
-        })
-      : rpcResponse({ status: 404 });
+      ? {
+          manifest: JSON.parse(commit.manifest),
+          wraps: JSON.parse(commit.wraps),
+        }
+      : null;
   }
   sourceProof(actor: Principal, epoch: number, after: number): Response {
     const state = this.load();
@@ -805,6 +841,10 @@ export class VaultStore extends DurableObject<Env> {
   private pullResult(actor: Principal, since: number): Result {
     const state = this.load();
     if (!this.allowed(state, actor)) return { status: 403 };
+    return this.historyResult(state, since);
+  }
+  /** Same bounded ciphertext read for members and kit-authorized pending devices. */
+  private historyResult(state: VaultState, since: number): Result {
     if (!Number.isSafeInteger(since) || since < 0 || since > state.sequence)
       return { status: 400 };
     const rows = this.ctx.storage.sql
