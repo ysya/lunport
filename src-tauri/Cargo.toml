@@ -49,6 +49,10 @@ ed25519-dalek = "3.0"
 hpke = { version = "0.14", default-features = false, features = ["alloc", "getrandom", "chacha", "x25519"] }
 # Native browser OIDC; HTTP is supplied by our bounded, no-redirect adapter.
 openidconnect = { version = "4.0", default-features = false, features = ["timing-resistant-secret-traits"] }
+# Local OAuth callback: use the existing Hyper parser, with bounded HTTP/1 connections.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 zeroize = "1"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 # 金鑰保管庫(src/vault/material.rs):解析、解密 OpenSSH 私鑰並簽章。ssh-key 0.6.7 的 RSA 簽章有錯,RSA 改用 rsa 套件;

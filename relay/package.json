@@ -21,6 +21,7 @@
     "wrangler": "^4.141.0"
   },
   "dependencies": {
-    "@noble/curves": "2.4.0"
+    "@noble/curves": "2.4.0",
+    "jose": "6.2.12"
   }
 }

@@ -4,7 +4,8 @@ use crate::error::AppError;
 use openidconnect::{
     core::{CoreClient, CoreProviderMetadata},
     AccessTokenHash, AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, SyncHttpClient, TokenResponse,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken, Scope, SyncHttpClient,
+    TokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -110,6 +111,7 @@ impl SyncHttpClient for BoundedHttp {
 pub struct LoginTokens {
     pub issuer: String,
     pub subject: String,
+    pub nonce: Zeroizing<String>,
     pub access: Zeroizing<String>,
     pub refresh: Option<Zeroizing<String>>,
     pub expires_in: Duration,
@@ -269,6 +271,7 @@ impl LoginAttempt {
         Ok(LoginTokens {
             issuer: self.config.issuer,
             subject: subject.into(),
+            nonce: Zeroizing::new(self.nonce.secret().clone()),
             access: Zeroizing::new(response.access_token().secret().clone()),
             refresh: response
                 .refresh_token()
@@ -276,6 +279,78 @@ impl LoginAttempt {
             expires_in: response.expires_in().unwrap_or(Duration::from_secs(300)),
         })
     }
+}
+/// Provider refresh rotation/reuse detection remains the provider's responsibility.
+/// A refreshed ID token, when present, may omit nonce; a present nonce must match the original.
+pub fn refresh(
+    config: &OidcConfig,
+    subject: &str,
+    nonce: &str,
+    secret: &str,
+    http: &impl SyncHttpClient,
+) -> Result<LoginTokens, AppError> {
+    config.validate()?;
+    if subject.is_empty() || subject.len() > 512 || secret.is_empty() || secret.len() > 16384 {
+        return Err(error("Stored sign-in credential is invalid."));
+    }
+    let metadata = CoreProviderMetadata::discover(
+        &IssuerUrl::new(config.issuer.clone()).map_err(|_| error("Invalid sign-in provider."))?,
+        http,
+    )
+    .map_err(|_| error("Could not verify the sign-in provider."))?;
+    if metadata.token_endpoint().is_none_or(|u| !endpoint(u.url())) {
+        return Err(error("The sign-in provider requires secure endpoints."));
+    }
+    let client =
+        CoreClient::from_provider_metadata(metadata, ClientId::new(config.client_id.clone()), None);
+    let response = client
+        .exchange_refresh_token(&RefreshToken::new(secret.into()))
+        .map_err(|_| error("The sign-in provider has no token endpoint."))?
+        .request(http)
+        .map_err(|_| error("Sign-in renewal failed. Sign in again."))?;
+    if let Some(token) = response.id_token() {
+        let verifier = client.id_token_verifier();
+        let expected = Nonce::new(nonce.into());
+        let claims = token
+            .claims(&verifier, |actual: Option<&Nonce>| {
+                if actual.is_some_and(|actual| actual != &expected) {
+                    Err("nonce mismatch".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|_| error("Renewed identity proof is invalid."))?;
+        if claims.subject().as_str() != subject {
+            return Err(error("Sign-in renewal changed account identity."));
+        }
+        if let Some(expected) = claims.access_token_hash() {
+            let algorithm = token
+                .signing_alg()
+                .map_err(|_| error("Invalid sign-in signature."))?;
+            let key = token
+                .signing_key(&verifier)
+                .map_err(|_| error("Invalid sign-in key."))?;
+            if AccessTokenHash::from_token(response.access_token(), algorithm, key)
+                .map_err(|_| error("Invalid access-token proof."))?
+                != *expected
+            {
+                return Err(error("Invalid access-token proof."));
+            }
+        }
+    }
+    Ok(LoginTokens {
+        issuer: config.issuer.clone(),
+        subject: subject.into(),
+        nonce: Zeroizing::new(nonce.into()),
+        access: Zeroizing::new(response.access_token().secret().clone()),
+        refresh: Some(Zeroizing::new(
+            response
+                .refresh_token()
+                .map_or(secret, |token| token.secret())
+                .into(),
+        )),
+        expires_in: response.expires_in().unwrap_or(Duration::from_secs(300)),
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -416,6 +491,8 @@ mod tests {
             "access_hash",
         ] {
             let (mut server, attempt, _) = setup_with_keys(json!({"keys":[public.clone()]}));
+            let refresh_config = attempt.config.clone();
+            let refresh_nonce = attempt.nonce.secret().clone();
             let now = std::time::SystemTime::now();
             let mut claims = CoreIdTokenClaims::new(
                 IssuerUrl::new(if mode == "issuer" {
@@ -473,6 +550,7 @@ mod tests {
                 };
                 token.replace_range(position..position + 1, replacement);
             }
+            let refresh_id_token = token.clone();
             let mock=server.mock("POST","/token").match_body(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded("grant_type".into(),"authorization_code".into()),mockito::Matcher::UrlEncoded("code_verifier".into(),attempt.verifier.secret().clone()),mockito::Matcher::UrlEncoded("client_id".into(),"public-desktop".into())]))
                 .with_header("content-type","application/json").with_body(json!({"access_token":"synthetic-access","refresh_token":"synthetic-refresh","token_type":"Bearer","expires_in":300,"id_token":token}).to_string()).create();
             let mut callback =
@@ -492,6 +570,38 @@ mod tests {
                     tokens.refresh.as_deref().map(|s| s.as_str()),
                     Some("synthetic-refresh")
                 );
+                let renewed=server.mock("POST","/token").match_body(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded("grant_type".into(),"refresh_token".into()),mockito::Matcher::UrlEncoded("refresh_token".into(),"synthetic-refresh".into()),mockito::Matcher::UrlEncoded("client_id".into(),"public-desktop".into())])).with_header("content-type","application/json").with_body(json!({"access_token":"synthetic-access","refresh_token":"rotated-refresh","token_type":"Bearer","expires_in":300,"id_token":refresh_id_token}).to_string()).expect(3).create();
+                let http = BoundedHttp::new().unwrap();
+                let refreshed = refresh(
+                    &refresh_config,
+                    "opaque-subject",
+                    &refresh_nonce,
+                    "synthetic-refresh",
+                    &http,
+                )
+                .ok()
+                .expect("valid refresh rejected");
+                assert_eq!(
+                    refreshed.refresh.as_deref().map(|v| v.as_str()),
+                    Some("rotated-refresh")
+                );
+                assert!(refresh(
+                    &refresh_config,
+                    "changed-subject",
+                    &refresh_nonce,
+                    "synthetic-refresh",
+                    &http
+                )
+                .is_err());
+                assert!(refresh(
+                    &refresh_config,
+                    "opaque-subject",
+                    "wrong-nonce",
+                    "synthetic-refresh",
+                    &http
+                )
+                .is_err());
+                renewed.assert();
             } else {
                 assert!(result.is_err(), "accepted {mode}");
             }

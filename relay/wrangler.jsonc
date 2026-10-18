@@ -7,9 +7,17 @@
   "durable_objects": {
     "bindings": [
       { "name": "CHAIN", "class_name": "ChainStore" },
-      { "name": "IP_LIMIT", "class_name": "IpLimiter" }
-    ]
+      { "name": "IP_LIMIT", "class_name": "IpLimiter" },
+      { "name": "ACCOUNT", "class_name": "AccountStore" },
+      { "name": "VAULT", "class_name": "VaultStore" },
+    ],
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChainStore", "IpLimiter"] }],
-  "observability": { "enabled": true }
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ChainStore", "IpLimiter"] },
+    {
+      "tag": "v2-central",
+      "new_sqlite_classes": ["AccountStore", "VaultStore"],
+    },
+  ],
+  "observability": { "enabled": true },
 }

@@ -1,3 +1,6 @@
+import { centralFetch } from "./v2/routes";
+export { AccountStore } from "./v2/account";
+export { VaultStore } from "./v2/store";
 import { DurableObject } from "cloudflare:workers";
 
 const MAX_RECORD_BYTES = 65_536; // 單筆 ciphertext 字元數(嚴格 base64 → 字元 = byte)
@@ -462,6 +465,7 @@ async function batchPull(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/v2/")) return centralFetch(request,env);
     if (url.pathname === "/v1/info") return request.method === "GET" ? info(request, env) : notFound();
     if (url.pathname === "/v1/pull") return request.method === "POST" ? batchPull(request, env) : notFound();
     const match = /^\/v1\/chains\/([^/]+)(\/records|\/freeze)?$/.exec(url.pathname);
