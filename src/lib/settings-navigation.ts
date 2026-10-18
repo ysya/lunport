@@ -35,6 +35,7 @@ const SEARCH_ENTRIES: SearchEntry[] = [
   { category: "appearance", title: "Color theme", detail: "Lunport, Nord, Dracula, Catppuccin, Tokyo Night, Solarized; palette colors; system, light or dark mode", section: "Color theme" },
   { category: "appearance", title: "Display", detail: "Text and font size; reduced motion; host tags", section: "Display" },
   { category: "connection", title: "Terminal", detail: "Default terminal and new tab connections", section: "Terminal" },
+  { category: "connection", title: "In-app terminal", detail: "SSH sessions, terminal font text size, blink cursor, search, keyboard shortcuts and colors", section: "In-app terminal" },
   { category: "connection", title: "Known hosts", detail: "Server identities, trusted host fingerprints and OpenSSH known_hosts", section: "Known hosts", modes: ["records"] },
   { category: "files", title: "Library & workspace tools", detail: "Local hosts and keys, import SSH configuration and open Sync", section: "Library & workspace tools", modes: ["records"] },
   { category: "files", title: "Config file", detail: "OpenSSH ssh_config path and apply", section: "Config file", modes: ["legacy"] },
