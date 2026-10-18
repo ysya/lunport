@@ -35,6 +35,8 @@ struct Body {
     operation: String,
     key_id: String,
     vault_id: String,
+    public_record: String,
+    private_record: String,
     membership_head: String,
     key_epoch: String,
     slot: SharedKeyslot,
@@ -55,6 +57,9 @@ impl Body {
             || !hex(&self.operation, 32)
             || !hex(&self.key_id, 32)
             || !hex(&self.vault_id, 32)
+            || !hex(&self.public_record, 64)
+            || !hex(&self.private_record, 64)
+            || self.public_record == self.private_record
             || !hex(&self.membership_head, 64)
             || !hex(&self.private_content_hash, 64)
             || !hex(&self.device.id, 32)
@@ -89,6 +94,8 @@ impl Body {
             &self.operation,
             &self.key_id,
             &self.vault_id,
+            &self.public_record,
+            &self.private_record,
             &self.membership_head,
             &self.key_epoch,
             &crypto::hash(&slot),
@@ -110,6 +117,9 @@ impl Receipt {
     }
     pub fn vault_id(&self) -> &str {
         &self.body.vault_id
+    }
+    pub fn wire_handles(&self) -> (&str, &str) {
+        (&self.body.public_record, &self.body.private_record)
     }
     pub fn verify(&self, owner: &Workspace) -> Result<(), AppError> {
         owner.validate()?;
@@ -311,6 +321,8 @@ pub(super) fn prepare_new(
         operation: context.operation,
         key_id: context.key_id,
         vault_id: context.vault_id,
+        public_record: order[0].clone(),
+        private_record: order[1].clone(),
         membership_head: chain.current().head().into(),
         key_epoch: epoch.clone(),
         slot,
@@ -425,6 +437,13 @@ mod tests {
             let plan =
                 prepare_new(&state, &keys, &signer, context, public.clone(), &entry).unwrap();
             let ordered = plan.ordered().unwrap();
+            assert_eq!(
+                plan.receipt().wire_handles(),
+                (
+                    ordered[0].envelope.header.record_id.as_str(),
+                    ordered[1].envelope.header.record_id.as_str()
+                )
+            );
             assert_eq!(ordered[0].envelope.header.kind, "keyslot");
             assert_eq!(ordered[1].envelope.header.kind, "key");
             let first = ordered[0]
@@ -482,6 +501,8 @@ mod tests {
             "key_id",
             "vault_id",
             "membership_head",
+            "public_record",
+            "private_record",
             "key_epoch",
             "private_content_hash",
             "signature",
