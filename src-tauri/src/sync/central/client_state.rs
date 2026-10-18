@@ -247,7 +247,16 @@ impl State {
         }
         let anchor = self.anchor.as_ref().ok_or_else(invalid)?;
         let chain = proof.verify(anchor, self.highwater.as_ref())?;
+        let previous = self.verified_chain()?;
+        let security_changed = chain.security_revision() > previous.security_revision();
+        let extra_access_barrier = auth_epoch - self.auth_epoch
+            > chain.current().revision() - previous.current().revision();
         let mut next = self.clone();
+        if matches!(next.phase, Phase::Active | Phase::Rekey)
+            && (security_changed || extra_access_barrier)
+        {
+            next.phase = Phase::Rekey;
+        }
         next.auth_epoch = auth_epoch;
         next.highwater = Some(chain.highwater());
         if chain.current().devices().get(&self.device.id) != Some(&self.device.keys) {

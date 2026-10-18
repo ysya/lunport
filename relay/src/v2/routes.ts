@@ -100,7 +100,7 @@ export async function centralFetch(
 ): Promise<Response> {
   const url = new URL(request.url),
     match =
-      /^\/v2\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata|rekey|rekey\/begin|rekey\/stage|rekey\/commit|rekey\/abort|rekey\/reconcile|rekey\/source|receipt)$/.exec(
+      /^\/v2\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata|rekey|rekey\/begin|rekey\/stage|rekey\/commit|rekey\/abort|rekey\/reconcile|rekey\/source|rekey\/wraps|receipt)$/.exec(
         url.pathname,
       );
   if (!paths.has(url.pathname) && !match) return response({ status: 404 });
@@ -207,6 +207,16 @@ export async function centralFetch(
           actor,
           url.searchParams.get("operation") ?? "",
         );
+      if (match[2] === "rekey/wraps") {
+        try {
+          return vault.committedWraps(
+            actor,
+            safeNumber(url.searchParams.get("epoch") ?? "", false),
+          );
+        } catch {
+          return response({ status: 400 });
+        }
+      }
       if (match[2] === "rekey/source") {
         try {
           return vault.sourceProof(

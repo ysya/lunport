@@ -251,7 +251,7 @@ fn invalid_state_save_preserves_existing_bytes_and_creates_no_other_files() {
     let path = temp.path().join("sync-state.json");
     fs::write(&path, b"source").unwrap();
     let mut invalid = state();
-    invalid.version = crate::sync::records_v3::LOCAL_CONFLICT_STATE_VERSION + 1;
+    invalid.version = crate::sync::records_v3::CENTRAL_STATE_VERSION + 1;
     assert!(save_active(&path, &invalid).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"source");
     assert_eq!(names(temp.path()), vec!["sync-state.json"]);
@@ -352,4 +352,58 @@ fn valid_remote_relationship_conflicts_are_saved_for_repair_without_blocking_sta
     assert!(
         matches!(probe_startup(&path, "unused"), StartupProbe::Records { state: loaded, fresh: false } if *loaded == records)
     );
+}
+
+#[test]
+fn central_publication_is_persistent_and_cannot_remove_the_root_or_downgrade_after_restart() {
+    let temp=tempfile::tempdir().unwrap();let path=temp.path().join("sync-state.json");
+    let mut candidate=state();candidate.version=crate::sync::records_v3::CENTRAL_STATE_VERSION;
+    let mut central=crate::sync::central::workspace::tests::enrolled();central.control.cutover=true;
+    candidate.local.central=Some(central.clone());save_active(&path,&candidate).unwrap();
+    let original=std::fs::read(&path).unwrap();
+    let mut removed=candidate.clone();removed.local.central=None;
+    assert!(save_active(&path,&removed).is_err());assert_eq!(std::fs::read(&path).unwrap(),original);
+    let mut older=candidate.clone();older.version=crate::sync::records_v3::LOCAL_CONFLICT_STATE_VERSION;older.local.central=None;
+    assert!(save_active(&path,&older).is_err());assert_eq!(std::fs::read(&path).unwrap(),original);
+    let restored=match probe_startup(&path,"test") {StartupProbe::Records {state,..}=>*state,other=>panic!("unexpected {other:?}")};
+    assert_eq!(restored.local.central.as_ref(),Some(&central));
+    assert!(crate::sync::records_v3::decode_state(&serde_json::to_string(&restored).unwrap()).is_ok());
+}
+
+#[test]
+fn a_central_history_page_cannot_overwrite_a_local_edit_saved_while_it_was_inflight() {
+    use crate::sync::{central::{crypto::{DeviceKeys,VaultKeys},rekey::{Checkpoint,Version},wire::{canonical,RecordHeader}},
+        fake_relay::FakeRelay,testkit::{TestClock,TestDevice},record::{LocalRecord,Record,RecordKind,record_key}};
+    use base64::{engine::general_purpose::STANDARD as B64,Engine as _};
+    let relay=FakeRelay::new();let device=TestDevice::new("a",&relay,&TestClock::new());let env=device.env();
+    let mut records=state();records.version=crate::sync::records_v3::CENTRAL_STATE_VERSION;
+    let mut workspace=crate::sync::central::workspace::tests::enrolled();workspace.control.cutover=true;
+    let chain=workspace.control.verified_chain().unwrap();
+    let fixture:serde_json::Value=serde_json::from_str(include_str!("../../../../fixtures/central-sync-v2.json")).unwrap();
+    let mut header:RecordHeader=serde_json::from_value(fixture["record"]["header"].clone()).unwrap();header.membership_head=chain.current().head().into();
+    let keys=VaultKeys::from_bytes(&[3;64]).unwrap();let signer=DeviceKeys::decode_secret(&B64.encode([1;64])).unwrap();
+    let replica=workspace.replica.as_mut().unwrap();replica.enqueue(&chain,&keys,&signer,1,header,b"A").unwrap();
+    let sent=replica.prepare_send(&chain,1,1,&[]).unwrap().pop().unwrap();
+    let digest=crate::sync::central::rekey::envelope_digest(&sent).unwrap();
+    let hash=crate::sync::central::crypto::hash(&canonical(&["lunport-history-v2",&"0".repeat(64),"1",&digest]).unwrap());
+    let row=Version {revision:"1".into(),sequence:"1".into(),envelope:sent,digest,history_hash:hash.clone()};
+    let prepared=replica.prepare_page(&chain,&keys,&[row],&Checkpoint{epoch:1,sequence:1,history_hash:hash}).unwrap();
+    let host_key=record_key(RecordKind::Host,"0000000000000001");
+    records.local.hosts.insert(host_key.clone(),LocalRecord {record:Record {kind:RecordKind::Host,id:"0000000000000001".into(),
+        version:1,updated_at_ms:1,device_id:records.device_id.clone(),deleted:false,
+        payload:serde_json::json!({"schema":2,"alias":"test","hostname":"fixture.invalid","auth":"password","notes":"A"})},seq:0,dirty:true});
+    records.local.central=Some(workspace);
+    save_active(&env.state_path,&records).unwrap();
+    activate_probe(&mut device.runtime.core.lock().unwrap(),StartupProbe::Records {state:Box::new(records),fresh:false}).unwrap();
+    let (mut network_candidate,generation)=snapshot(&env).unwrap();
+    network_candidate.local.central.as_mut().unwrap().replica=Some(prepared.next);
+    mutate_records(&env,|current| {
+        let mut next=current.clone();let row=next.local.hosts.get_mut(&host_key).unwrap();
+        row.record.version+=1;row.record.payload["notes"]="B".into();Ok(next)
+    }).unwrap();
+    assert!(commit_candidate(&env,generation,network_candidate).is_err());
+    let (latest,_)=snapshot(&env).unwrap();
+    assert_eq!(latest.local.hosts[&host_key].record.payload["notes"],"B");
+    let replica=latest.local.central.unwrap().replica.unwrap();
+    assert_eq!(replica.checkpoint.sequence,0);assert!(replica.pending.values().next().unwrap().sent.is_some());
 }

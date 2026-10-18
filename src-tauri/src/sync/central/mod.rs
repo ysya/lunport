@@ -10,5 +10,7 @@ pub mod oidc;
 pub mod pairing;
 pub mod recovery;
 pub mod rekey;
+pub mod replica;
 pub mod trust;
 pub mod wire;
+pub mod workspace;

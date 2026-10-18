@@ -193,6 +193,13 @@ impl<'a> SourceExtension<'a> {
         self.hash = hash;
         Ok(())
     }
+    pub fn position(&self) -> Result<Checkpoint, AppError> {
+        Ok(Checkpoint {
+            epoch: number(&self.manifest.body.from_epoch, false)?,
+            sequence: self.sequence,
+            history_hash: self.hash.clone(),
+        })
+    }
     pub fn finish(self) -> Result<Checkpoint, AppError> {
         if self.sequence != number(&self.manifest.body.source_sequence, true)?
             || self.hash != self.manifest.body.source_history_hash
@@ -279,6 +286,60 @@ pub fn wraps_digest(wraps: &[WrappedKeys]) -> Result<String, AppError> {
     Ok(crypto::hash(
         &serde_json::to_vec(&("lunport-rekey-wraps-v2", entries)).map_err(|_| invalid())?,
     ))
+}
+/// A valid individual wrap could belong to a cancelled attempt at the same head/epoch.
+/// Authenticate the complete committed recipient set before adopting its content key.
+pub fn open_committed_keys(
+    chain: &VerifiedChain,
+    manifest: &SignedRekey,
+    wraps: &[WrappedKeys],
+    recipient: &str,
+    keys: &DeviceKeys,
+) -> Result<VaultKeys, AppError> {
+    manifest.verify_historical(chain, &manifest.body.vault_id)?;
+    let b = &manifest.body;
+    if wraps_digest(wraps)? != b.wraps_digest {
+        return Err(invalid());
+    }
+    let mut expected = chain
+        .devices_at(&b.membership_head)
+        .ok_or_else(invalid)?
+        .clone();
+    expected.insert(
+        "recovery".into(),
+        chain
+            .recovery_at(&b.membership_head)
+            .ok_or_else(invalid)?
+            .clone(),
+    );
+    if wraps.len() != expected.len() {
+        return Err(invalid());
+    }
+    let author = chain
+        .author_at(&b.membership_head, &b.author)
+        .ok_or_else(invalid)?;
+    let mut own = None;
+    for wrap in wraps {
+        let h = &wrap.header;
+        let public = expected.remove(&h.recipient).ok_or_else(invalid)?;
+        if h.origin != b.origin
+            || h.account_id != b.account_id
+            || h.genesis_hash != b.genesis_hash
+            || h.vault_id != b.vault_id
+            || h.key_epoch != b.to_epoch
+            || h.membership_head != b.membership_head
+            || h.author != b.author
+            || h.recipient_key != public.encryption
+        {
+            return Err(invalid());
+        }
+        wrap.verify_author(&author.signing)?;
+        if h.recipient == recipient {
+            own = Some(wrap);
+        }
+    }
+    let own = own.ok_or_else(invalid)?;
+    own.open(keys, &own.header, &author.signing)
 }
 pub fn envelope_digest(envelope: &RecordEnvelope) -> Result<String, AppError> {
     Ok(crypto::hash(&canonical(&[
@@ -611,6 +672,48 @@ mod tests {
                 .is_err());
         }
         assert_eq!(c.plan.wraps.len(), 2);
+        let opened = open_committed_keys(
+            &chain,
+            &c.plan.manifest,
+            &c.plan.wraps,
+            &"f".repeat(32),
+            &c.signer,
+        )
+        .unwrap();
+        let public = &c.signer.public().signing;
+        assert_eq!(
+            &*c.plan.rows[0]
+                .envelope
+                .verify(public)
+                .unwrap()
+                .open(&opened)
+                .unwrap(),
+            &*c.plan.rows[0]
+                .envelope
+                .verify(public)
+                .unwrap()
+                .open(&c.plan.keys)
+                .unwrap()
+        );
+        let mut substituted = c.plan.wraps.clone();
+        substituted[0] = c.old_wraps[0].clone();
+        assert!(open_committed_keys(
+            &chain,
+            &c.plan.manifest,
+            &substituted,
+            &"f".repeat(32),
+            &c.signer
+        )
+        .is_err());
+        assert!(open_committed_keys(
+            &chain,
+            &c.plan.manifest,
+            &c.plan.wraps[..1],
+            &"f".repeat(32),
+            &c.signer
+        )
+        .is_err());
+
         assert_eq!(
             c.plan.manifest.body.wraps_digest,
             wraps_digest(&c.plan.wraps).unwrap()

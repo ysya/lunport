@@ -271,6 +271,14 @@ describe("signed full-history rekey", () => {
       (await s.child.commitRekey(s.actor, fixture.manifest.body.rotation_id))
         .status,
     ).toBe(200);
+    expect(await (await s.child.committedWraps(s.actor, 2)).json()).toEqual({
+      manifest: fixture.manifest,
+      wraps: fixture.target_wraps,
+    });
+    expect(
+      (await s.child.committedWraps({ ...s.actor, device: "d".repeat(32) }, 2))
+        .status,
+    ).toBe(403);
     const proof = (await (
       await s.child.sourceProof(s.actor, 2, 1)
     ).json()) as any;

@@ -42,13 +42,18 @@ fn identity(state: &SyncStateV3, id: &str) -> Result<PinIdentity, AppError> {
     Ok((route, keys))
 }
 
+fn central_identity(state:&SyncStateV3)->Option<(&str,&str,&str)> {
+    state.local.central.as_ref().filter(|c|c.control.cutover).map(|c|
+        (c.control.profile.origin.as_str(),c.control.account_id.as_str(),c.control.device.id.as_str()))
+}
 fn require_approved_identity(
     current: &SyncStateV3,
     captured: &SyncStateV3,
     id: &str,
     approved: &PinIdentity,
 ) -> Result<(), AppError> {
-    if current.device_id != captured.device_id
+    if central_identity(current)!=central_identity(captured)
+        || current.device_id != captured.device_id
         || current.relay_url != captured.relay_url
         || current.account.as_ref().map(|a| &a.chain_id)
             != captured.account.as_ref().map(|a| &a.chain_id)
@@ -71,7 +76,7 @@ pub(crate) fn confirm(
     live(cancel)?;
     let captured = {
         let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-        record_round::preflight(env)?;
+        record_round::preflight_local(env)?;
         record_runtime::snapshot(env)?.0
     };
     let host = repo::get_host(&captured, hop.id.as_str()).map_err(failed)?;
@@ -101,7 +106,7 @@ pub(crate) fn confirm(
     // Guards may resolve through FormatDirectory. All callbacks and external IO stay outside lifecycle.
     guard().map_err(failed)?;
     live(cancel)?;
-    let prepared = if matches!(host.host.scope, HostScope::Space { .. }) {
+    let prepared = if central_identity(&captured).is_none() && matches!(host.host.scope, HostScope::Space { .. }) {
         Some(record_round::prepare_account_gate(
             env,
             credentials,
@@ -215,6 +220,29 @@ mod tests {
             key.fingerprint
         );
         assert!(matches!(saved.readiness, repo::HostReadiness::NeedsKey(_)));
+    }
+    #[test]
+    fn a_central_host_can_be_locally_approved_without_legacy_credentials_or_network() {
+        struct Forbidden;
+        impl Keychain for Forbidden {
+            fn get(&self,_:&str)->Result<Option<String>,AppError>{panic!("legacy credential read")}
+            fn set(&self,_:&str,_:&str)->Result<(),AppError>{panic!("legacy credential write")}
+            fn delete(&self,_:&str)->Result<(),AppError>{panic!("legacy credential delete")}
+        }
+        let d=device();let env=d.env();
+        record_runtime::mutate_records(&env,|current| {
+            let mut next=current.clone();let mut central=crate::sync::central::workspace::tests::enrolled();
+            central.control.cutover=true;next.local.central=Some(central);Ok(next)
+        }).unwrap();
+        let key=crate::ssh::fake::default_server_key();
+        confirm(&env,&hop(),None,&key,&Forbidden,&CancelToken::default(),&||Ok(())).unwrap();
+        let state=record_runtime::snapshot(&env).unwrap().0;
+        let central=&state.local.central.as_ref().unwrap().control;
+        let receipt=&state.local.credential_approvals[HOST];
+        assert_eq!(receipt.account_id.as_deref(),Some(central.account_id.as_str()));
+        assert_eq!(receipt.relay_url.as_deref(),Some(central.profile.origin.as_str()));
+        assert_eq!(receipt.device_id,central.device.id);
+        assert!(super::super::credential_approval::matches(&state,&hop(),&key));
     }
     #[test]
     fn canceled_or_changed_probe_never_commits_an_endpoint_pin() {

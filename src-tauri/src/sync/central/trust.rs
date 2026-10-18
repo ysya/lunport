@@ -115,6 +115,9 @@ impl VerifiedChain {
     pub fn author_at(&self, head: &str, device: &str) -> Option<&PublicKeys> {
         self.views.get(head)?.devices.get(device)
     }
+    pub fn devices_at(&self, head: &str) -> Option<&BTreeMap<String, PublicKeys>> {
+        Some(&self.views.get(head)?.devices)
+    }
     pub fn recovery_at(&self, head: &str) -> Option<&PublicKeys> {
         Some(&self.views.get(head)?.recovery)
     }

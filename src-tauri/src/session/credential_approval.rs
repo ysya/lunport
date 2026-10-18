@@ -30,16 +30,17 @@ fn identity(
             "The approved connection identity changed; connect again.".into(),
         ));
     }
+    let central = state.local.central.as_ref().filter(|c|c.control.cutover);
     let shared = matches!(host.host.scope, HostScope::Space { .. });
     Ok(CredentialApproval {
-        device_id: state.device_id.clone(),
+        device_id: central.map_or_else(||state.device_id.clone(),|c|c.control.device.id.clone()),
         scope: host.host.scope,
-        account_id: if shared {
+        account_id: if let Some(central)=central { Some(central.control.account_id.clone()) } else if shared {
             state.account.as_ref().map(|a| a.chain_id.clone())
         } else {
             None
         },
-        relay_url: shared.then(|| state.relay_url.clone()),
+        relay_url: central.map(|c|c.control.profile.origin.clone()).or_else(||shared.then(||state.relay_url.clone())),
         hostname: hop.hostname.clone(),
         port: hop.port,
         user: hop.user.clone(),

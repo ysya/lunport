@@ -210,7 +210,7 @@ pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
         Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
-    if state.version >= crate::sync::records_v3::GROUP_STATE_VERSION && path.exists() {
+    if path.exists() {
         use sha2::{Digest, Sha256};
         let mut options = OpenOptions::new();
         options.read(true);
@@ -227,6 +227,15 @@ pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
         file.take(MAX_STATE_BYTES + 1).read_to_end(&mut source)?;
         let value: serde_json::Value = serde_json::from_slice(&source)
             .map_err(|_| AppError::Other("cannot read format upgrade source".into()))?;
+        let previous_version = value.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        if previous_version >= crate::sync::records_v3::CENTRAL_STATE_VERSION as u64 {
+            if previous_version > state.version as u64 {
+                return Err(AppError::Other("The central workspace format cannot be downgraded. Original data has been retained.".into()));
+            }
+            let previous: SyncStateV3 = serde_json::from_value(value.clone()).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
+            validate_state(&previous).map_err(|_|AppError::Other("Cannot validate the existing central workspace. Original data has been retained.".into()))?;
+            crate::sync::central::workspace::verify_publication(previous.local.central.as_ref(),state.local.central.as_ref())?;
+        }
         if let Some(source_version) = value
             .get("version")
             .and_then(serde_json::Value::as_u64)
@@ -357,7 +366,18 @@ fn persist_candidate(
     {
         candidate.version = crate::sync::records_v3::GROUP_STATE_VERSION;
     }
-    candidate = crate::sync::record_library::include_new_records(candidate, core.account_keys.as_ref());
+    crate::sync::central::workspace::verify_publication(
+        core.records.as_ref().and_then(|s| s.local.central.as_ref()),candidate.local.central.as_ref())?;
+    if candidate.local.central.is_some() {
+        candidate.version = candidate.version.max(crate::sync::records_v3::CENTRAL_STATE_VERSION);
+    }
+    let central_cutover = candidate.local.central.as_ref().is_some_and(|c|c.control.cutover);
+    if central_cutover && !core.records.as_ref().and_then(|s|s.local.central.as_ref()).is_some_and(|c|c.control.cutover) {
+        candidate.local.credential_approvals.clear();
+    }
+    if !central_cutover {
+        candidate = crate::sync::record_library::include_new_records(candidate, core.account_keys.as_ref());
+    }
     if crate::sync::group_order::has_navigation_data(&candidate) {
         candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
     }
@@ -372,7 +392,7 @@ fn persist_candidate(
         .ok_or_else(|| AppError::Other("sync state generation exhausted".into()))?;
     save_active(path, &candidate)?;
     // Key loading belongs outside core. An account change must not keep keys from the prior chain.
-    if core.account_keys.as_ref().is_some_and(|keys| {
+    if central_cutover || core.account_keys.as_ref().is_some_and(|keys| {
         candidate
             .account
             .as_ref()
@@ -486,6 +506,7 @@ pub fn read_account_keys(
 ) -> Result<Option<crate::sync::crypto::ChainKeys>, AppError> {
     validate_state(state)
         .map_err(|_| AppError::Other("cannot read keys for invalid record state".into()))?;
+    if state.local.central.as_ref().is_some_and(|c|c.control.cutover) { return Ok(None); }
     let Some(account) = &state.account else {
         return Ok(None);
     };

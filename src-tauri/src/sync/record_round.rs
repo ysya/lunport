@@ -49,7 +49,7 @@ fn gate_message(gate: &AccountGate) -> &'static str {
 }
 /// Check the only write boundary in this transport before credential/network callbacks.
 /// No SSH config, agent or vault path is touched by active record transport.
-pub(crate) fn preflight(env: &SyncEnv) -> Result<(), AppError> {
+pub(crate) fn preflight_local(env: &SyncEnv) -> Result<(), AppError> {
     crate::fsutil::check_write(&env.state_path)?;
     require_no_pending_migration(env)?;
     match std::fs::symlink_metadata(&env.state_path) {
@@ -81,8 +81,16 @@ pub(crate) fn require_no_pending_migration(env: &SyncEnv) -> Result<(), AppError
     }
     Ok(())
 }
+pub(crate) fn preflight(env:&SyncEnv)->Result<(),AppError> {
+    preflight_local(env)?;
+    let core=env.runtime.core.lock().unwrap();
+    if crate::sync::record_runtime::active_state(&core)?.local.central.as_ref().is_some_and(|c|c.control.cutover) {
+        return Err(error("This workspace uses central accounts; the shared-code transport is retired."));
+    }
+    Ok(())
+}
 fn same_account(state: &crate::sync::records_v3::SyncStateV3, chain: &str, url: &str) -> bool {
-    state.relay_url == url && state.account.as_ref().is_some_and(|a| a.chain_id == chain)
+    !state.local.central.as_ref().is_some_and(|c|c.control.cutover) && state.relay_url == url && state.account.as_ref().is_some_and(|a| a.chain_id == chain)
 }
 fn read_keys_from(
     keychain: &dyn crate::sync::env::Keychain,
@@ -158,6 +166,9 @@ pub(crate) fn prepare_account_gate(
     credentials: &dyn crate::sync::env::Keychain,
     snapshot: crate::sync::records_v3::SyncStateV3,
 ) -> Result<PreparedAccountGate, AppError> {
+    if snapshot.local.central.as_ref().is_some_and(|c|c.control.cutover) {
+        return Err(error("This workspace uses central accounts; the shared-code transport is retired."));
+    }
     let keys = read_keys_from(credentials, &snapshot)?;
     let relay = env.relay(&snapshot.relay_url)?;
     let pulled = relay.pull(&keys.chain_id, &keys.auth_token, 0)?;

@@ -120,7 +120,7 @@ CREATE INDEX IF NOT EXISTS versions_record ON versions(record_id, revision);
 CREATE TABLE IF NOT EXISTS current_records (record_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, seq INTEGER NOT NULL, envelope TEXT NOT NULL, digest TEXT NOT NULL, history_hash TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS operations (operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL, receipt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rekey_versions (seq INTEGER PRIMARY KEY,record_id TEXT NOT NULL,revision INTEGER NOT NULL,envelope TEXT NOT NULL,digest TEXT NOT NULL,history_hash TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS rekey_commits (epoch INTEGER PRIMARY KEY,rotation_id TEXT UNIQUE NOT NULL,manifest TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rekey_commits (epoch INTEGER PRIMARY KEY,rotation_id TEXT UNIQUE NOT NULL,manifest TEXT NOT NULL,wraps TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rekey_source_digests (epoch INTEGER NOT NULL,seq INTEGER NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(epoch,seq));`;
 export async function verifyControl(
   proof: ControlProof,
@@ -645,10 +645,11 @@ export class VaultStore extends DurableObject<Env> {
           "INSERT INTO current_records SELECT v.record_id,v.revision,v.seq,v.envelope,v.digest,v.history_hash FROM versions v JOIN (SELECT record_id,MAX(revision) AS revision FROM versions GROUP BY record_id) c ON c.record_id=v.record_id AND c.revision=v.revision",
         );
         this.ctx.storage.sql.exec(
-          "INSERT INTO rekey_commits VALUES(?,?,?)",
+          "INSERT INTO rekey_commits VALUES(?,?,?,?)",
           epoch,
           id,
           JSON.stringify(journal.manifest),
+          JSON.stringify(journal.wraps),
         );
         this.ctx.storage.sql.exec("DELETE FROM rekey_versions");
         this.save({
@@ -706,6 +707,27 @@ export class VaultStore extends DurableObject<Env> {
           .map((r) => JSON.parse(r.manifest)),
       },
     });
+  }
+  committedWraps(actor: Principal, epoch: number): Response {
+    const state = this.load();
+    if (!this.allowed(state, actor)) return rpcResponse({ status: 403 });
+    if (!Number.isSafeInteger(epoch) || epoch < 2 || epoch > 65)
+      return rpcResponse({ status: 400 });
+    const commit = this.ctx.storage.sql
+      .exec<{ manifest: string; wraps: string }>(
+        "SELECT manifest,wraps FROM rekey_commits WHERE epoch=?",
+        epoch,
+      )
+      .toArray()[0];
+    return commit
+      ? rpcResponse({
+          status: 200,
+          body: {
+            manifest: JSON.parse(commit.manifest),
+            wraps: JSON.parse(commit.wraps),
+          },
+        })
+      : rpcResponse({ status: 404 });
   }
   sourceProof(actor: Principal, epoch: number, after: number): Response {
     const state = this.load();

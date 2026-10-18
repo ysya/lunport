@@ -333,6 +333,12 @@ impl Api {
             VaultResource::Metadata => "metadata".into(),
             VaultResource::Wrap => "wrap".into(),
             VaultResource::Rekey => "rekey".into(),
+            VaultResource::EpochWraps { epoch } => {
+                if !(2..=65).contains(&epoch) {
+                    return Err(invalid());
+                }
+                format!("rekey/wraps?epoch={epoch}")
+            }
             VaultResource::SourceProof { epoch, after } => {
                 if epoch < 2 || epoch > super::wire::MAX_SAFE_INTEGER || after > 16384 {
                     return Err(invalid());
@@ -436,6 +442,7 @@ pub enum VaultResource {
     Wrap,
     Records { since: u64 },
     Rekey,
+    EpochWraps { epoch: u64 },
     SourceProof { epoch: u64, after: u64 },
     Receipt { operation: String },
 }

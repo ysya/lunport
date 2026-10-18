@@ -49,6 +49,9 @@ pub struct SyncStateV3 {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalState {
+    /// Public control proofs and ciphertext only; native credentials remain in OS storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub central: Option<crate::sync::central::workspace::Workspace>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -135,7 +138,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
         2 => serde_json::from_str(text)
             .map(DecodedState::V2)
             .map_err(state_decode_error),
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION => {
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -216,12 +219,18 @@ pub fn account_writes_blocked(state: &SyncStateV3) -> bool {
 }
 
 pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> {
+    if let Some(central) = &state.local.central {
+        if state.version < CENTRAL_STATE_VERSION || central.validate().is_err() {
+            return Err(state_invalid("central","local","central state needs schema 8 and a verified anchored replica"));
+        }
+    }
+
     if !state.local.credential_approvals.is_empty() && state.version < LOCAL_CREDENTIAL_STATE_VERSION {
         return Err(state_invalid("credential_approvals", "local", "local credential approvals need state version 6"));
     }
     if !matches!(
         state.version,
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | LOCAL_CREDENTIAL_STATE_VERSION | LOCAL_CONFLICT_STATE_VERSION | CENTRAL_STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",

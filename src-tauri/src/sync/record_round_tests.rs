@@ -1679,3 +1679,29 @@ fn unsupported_batch_is_remembered_and_legacy_http_cost_is_scheduled_with_nat_he
     assert_eq!(crate::sync::round::next_delay(&d.env()).as_secs(), 40*21);
     assert!(!d.relay.calls().iter().any(|c| c.starts_with("batch:")));
 }
+
+#[test]
+fn central_cutover_rejects_legacy_credentials_and_inflight_account_publication() {
+    struct Forbidden;
+    impl Keychain for Forbidden {
+        fn get(&self,_:&str)->Result<Option<String>,AppError>{panic!("legacy credential read after cutover")}
+        fn set(&self,_:&str,_:&str)->Result<(),AppError>{panic!("legacy credential write after cutover")}
+        fn delete(&self,_:&str)->Result<(),AppError>{panic!("legacy credential delete after cutover")}
+    }
+    impl RelayConnector for Forbidden {
+        fn connect(&self,_:&str)->Result<Box<dyn RelayApi>,AppError>{panic!("legacy network after cutover")}
+    }
+    let (device,keys)=fixture();let mut snapshot=record_runtime::snapshot(&device.env()).unwrap().0;
+    assert!(same_account(&snapshot,&keys.chain_id,&snapshot.relay_url));
+    let mut central=crate::sync::central::workspace::tests::enrolled();central.control.cutover=true;
+    snapshot.local.central=Some(central);snapshot.version=crate::sync::records_v3::CENTRAL_STATE_VERSION;
+    assert!(!same_account(&snapshot,&keys.chain_id,&snapshot.relay_url));
+    let generation=device.runtime.core.lock().unwrap().generation;
+    record_runtime::commit_candidate(&device.env(),generation,snapshot.clone()).unwrap();
+    let mut env=device.env();env.keychain=&Forbidden;env.relays=&Forbidden;
+    assert!(preflight(&env).unwrap_err().to_string().contains("central accounts"));
+    assert!(record_runtime::read_account_keys(&snapshot,&Forbidden).unwrap().is_none());
+    assert!(device.runtime.core.lock().unwrap().account_keys.is_none());
+    let failed=prepare_account_gate(&env,&Forbidden,snapshot);
+    assert!(matches!(failed,Err(error) if error.to_string().contains("central accounts")));
+}

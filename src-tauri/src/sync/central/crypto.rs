@@ -283,6 +283,21 @@ pub fn wrap_keys(
     })
 }
 impl WrappedKeys {
+    pub fn verify_author(&self, trusted_author: &str) -> Result<(), AppError> {
+        let context = self.header.canonical()?;
+        decode(&self.encapsulated_key, 32, 32)?;
+        let ciphertext = decode(&self.ciphertext, 80, 80)?;
+        verify(
+            trusted_author,
+            &author_bytes(
+                "lunport-wrap-author-v2",
+                &context,
+                &self.encapsulated_key,
+                &ciphertext,
+            )?,
+            &self.signature,
+        )
+    }
     /// The trusted membership supplies author/recipient keys; the server is never a trust root.
     pub fn open(
         &self,
