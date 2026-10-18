@@ -1,3 +1,4 @@
+import { CentralAccountAccess } from "./CentralAccountAccess";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
@@ -283,6 +284,14 @@ export function CentralAccountPanel({
             update={update}
           />
         )}
+      {status.configured && status.needs_recovery && !status.has_session && (
+        <CentralAccountAccess
+          status={status}
+          disabled={busy || disabled || status.login_pending}
+          update={update}
+          onBusyChange={setDeviceBusy}
+        />
+      )}
       {status.needs_recovery && (
         <p className="text-sm">
           Unlock this Vault with an offline recovery kit or approval from a

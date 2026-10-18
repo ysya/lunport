@@ -86,3 +86,36 @@ export const centralRevokeDevice = (
     authorizationEpoch: registry.authorization_epoch,
     fingerprint: device.fingerprint,
   });
+
+export type CentralAccountDevice = {
+  id: string;
+  name: string;
+  created_at_ms: string;
+  state: "active" | "pending" | "revoked";
+  current: boolean;
+};
+export type CentralAccountAccess = {
+  authorization_epoch: string;
+  barrier_pending: boolean;
+  devices: CentralAccountDevice[];
+};
+export const centralAccountAccessKey = (status: CentralStatus) =>
+  [
+    "central-account-access",
+    status.service,
+    status.account_id,
+    status.device_id,
+    status.root_fingerprint,
+    status.authorization_epoch,
+    status.phase,
+  ] as const;
+export const centralAccountAccess = () =>
+  tauriInvoke<CentralAccountAccess>("central_account_access");
+export const centralRevokeAccountDevice = (selection: {
+  device: string;
+  authorization_epoch: string;
+  created_at_ms: string;
+}) =>
+  tauriInvoke<CentralRevokeResult>("central_revoke_account_device", {
+    selection,
+  });

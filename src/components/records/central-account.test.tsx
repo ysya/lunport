@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it, expect, vi } from "vitest";
 import { CentralAccountPanel } from "./CentralAccountPanel";
@@ -23,7 +24,9 @@ const base: CentralStatus = {
 };
 const render = (patch: Partial<CentralStatus> = {}) =>
   renderToStaticMarkup(
-    <CentralAccountPanel status={{ ...base, ...patch }} update={vi.fn()} />,
+    <QueryClientProvider client={new QueryClient()}>
+      <CentralAccountPanel status={{ ...base, ...patch }} update={vi.fn()} />
+    </QueryClientProvider>,
   );
 describe("central account setup safety boundaries", () => {
   it("keeps sign-in and library consent separate", () => {

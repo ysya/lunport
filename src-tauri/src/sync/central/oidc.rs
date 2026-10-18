@@ -120,6 +120,10 @@ pub struct LoginTokens {
 /// It cannot be cloned, serialized, cached in the webview or obtained from token refresh.
 pub struct FreshLoginTokens(LoginTokens);
 impl FreshLoginTokens {
+    #[cfg(test)]
+    pub(super) fn synthetic_for_test(tokens: LoginTokens) -> Self {
+        Self(tokens)
+    }
     pub(super) fn tokens(&self) -> &LoginTokens {
         &self.0
     }

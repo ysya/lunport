@@ -47,6 +47,8 @@ struct Account {
     lose_stage_response_once: bool,
     lose_commit_response_once: bool,
     begun_rotations: Vec<String>,
+    lose_access_response_once: bool,
+    duplicate_access_row: bool,
     on_pull: Option<Box<dyn Fn() + Send + Sync>>,
     devices: BTreeMap<String, Device>,
     sessions: BTreeMap<String, String>,
@@ -94,9 +96,10 @@ impl Service {
         };
         let profile = Profile::new(&server.url(), &config.issuer, "opaque").unwrap();
         let account = Arc::clone(&state);
-        server.mock("POST","/v2/session").with_header("content-type","application/json").with_body_from_request(move|r|{
+        let authorization = Arc::clone(&state);
+        server.mock("POST","/v2/session").with_status_code_from_request(move |r| {let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();if authorization.lock().unwrap().denied.iter().any(|id|Some(id.as_str())==body["device"]["id"].as_str()){403}else{200}}).with_header("content-type","application/json").with_body_from_request(move|r|{
             let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();let device:Device=serde_json::from_value(body["device"].clone()).unwrap();
-            let mut s=account.lock().unwrap();s.devices.insert(device.id.clone(),device.clone());s.sessions.insert(body["session_id"].as_str().unwrap().into(),device.id.clone());
+            let mut s=account.lock().unwrap();if s.denied.contains(&device.id){return b"{}".to_vec();}s.devices.insert(device.id.clone(),device.clone());s.sessions.insert(body["session_id"].as_str().unwrap().into(),device.id.clone());
             let active=s.chain().is_some_and(|c|c.current().devices().contains_key(&device.id));
             json!({"account_id":"a".repeat(64),"account_locator":profile.locator,"device_state":if active {"active"}else{"pending"},"auth_epoch":s.epoch,"expires_at_ms":1700000300000u64}).to_string().into_bytes()
         }).create();
@@ -227,6 +230,10 @@ impl Service {
                 let body=body.to_string().into_bytes();
                 let hook = s.on_pull.take(); drop(s); if let Some(hook) = hook { hook(); } body
             }).create();
+        let locator = Profile::new(&server.url(), &config.issuer, "opaque")
+            .unwrap()
+            .locator;
+        install_account_access_routes(&mut server, &state, locator);
         install_rotation_routes(&mut server, &state);
         Self {
             server,
@@ -254,6 +261,28 @@ impl Service {
         )
         .unwrap();
     }
+}
+fn install_account_access_routes(
+    server: &mut mockito::ServerGuard,
+    state: &Arc<Mutex<Account>>,
+    locator: String,
+) {
+    let account = Arc::clone(state);
+    server.mock("GET","/v2/device-access").with_body_from_request(move |_| {
+        let s=account.lock().unwrap();let chain=s.chain();
+        let mut devices:Vec<_>=s.devices.values().map(|d|json!({"id":d.id,"name":"Synthetic device","created_at_ms":1700000000000u64,"state":if s.denied.contains(&d.id){"revoked"}else if chain.as_ref().is_some_and(|c|c.current().devices().contains_key(&d.id)){"active"}else{"pending"}})).collect();
+        if s.duplicate_access_row {if let Some(first)=devices.first().cloned(){devices.push(first);}}
+        json!({"account_locator":locator,"auth_epoch":s.epoch,"barrier_pending":s.barrier_pending,"devices":devices}).to_string().into_bytes()
+    }).create();
+    let account = Arc::clone(state);
+    let response = Arc::clone(state);
+    server.mock("POST","/v2/device-access/revoke").with_status_code_from_request(move |_|{
+        let mut s=response.lock().unwrap();if std::mem::take(&mut s.lose_access_response_once){503}else if s.hold_barrier{202}else{200}
+    }).with_body_from_request(move |r| {
+        let body:Value=serde_json::from_slice(r.body().unwrap()).unwrap();let id=body["device"].as_str().unwrap();let mut s=account.lock().unwrap();
+        assert!(s.devices.contains_key(id));if !s.denied.iter().any(|d|d==id){s.denied.push(id.into());s.epoch+=1;}s.rekey_pending=true;s.barrier_pending=s.hold_barrier;
+        json!({"access_revoked":!s.barrier_pending,"rekey_pending":true,"barrier_pending":s.barrier_pending}).to_string().into_bytes()
+    }).create();
 }
 fn install_rotation_routes(server: &mut mockito::ServerGuard, state: &Arc<Mutex<Account>>) {
     use super::{rekey, rotation};
@@ -1387,16 +1416,24 @@ fn refused_device_grant_retains_only_account_access_and_can_be_retried_without_r
     assert!(status.needs_recovery);
     assert!(!status.error.unwrap().contains("UNTRUSTED-REFUSAL-SENTINEL"));
     let current = before.0.local.central.as_ref().unwrap();
-    let access=service.server.mock("GET","/v2/device-access").match_header("authorization","Bearer synthetic access").with_body(json!({"account_locator":current.control.profile.locator,"auth_epoch":current.control.auth_epoch,"barrier_pending":false,"devices":[{"id":current.control.device.id,"name":"Synthetic device","created_at_ms":1700000000000u64,"state":"revoked"}]}).to_string()).create();
+    service
+        .state
+        .lock()
+        .unwrap()
+        .denied
+        .push(current.control.device.id.clone());
     let metadata = super::account_access::registry(&first.env()).unwrap();
     assert!(metadata.devices[0].current);
     assert_eq!(metadata.devices[0].state, "revoked");
     let public = serde_json::to_string(&metadata).unwrap();
     assert!(!public.contains("synthetic access"));
-    access.remove();
-    let duplicate=service.server.mock("GET","/v2/device-access").with_body(json!({"account_locator":current.control.profile.locator,"auth_epoch":current.control.auth_epoch,"barrier_pending":false,"devices":[{"id":current.control.device.id,"name":"One","created_at_ms":1,"state":"active"},{"id":current.control.device.id,"name":"Two","created_at_ms":1,"state":"active"}]}).to_string()).create();
+    service.state.lock().unwrap().duplicate_access_row = true;
     assert!(super::account_access::registry(&first.env()).is_err());
-    duplicate.remove();
+    {
+        let mut state = service.state.lock().unwrap();
+        state.duplicate_access_row = false;
+        state.denied.clear();
+    }
     let account = controller::context(&first.env()).unwrap();
     assert!(account.device_access_denied);
     assert!(account.device.is_none());
@@ -1409,4 +1446,190 @@ fn refused_device_grant_retains_only_account_access_and_can_be_retried_without_r
     assert!(recovered.has_session);
     assert!(!recovered.needs_recovery);
     assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0, before.0);
+}
+
+#[test]
+fn account_only_revoke_binds_fresh_subject_target_and_epoch_preserves_intent_and_works_without_device_keys(
+) {
+    use super::{account_access, oidc::FreshLoginTokens};
+    fn fresh(service: &Service, subject: &str) -> FreshLoginTokens {
+        FreshLoginTokens::synthetic_for_test(LoginTokens {
+            issuer: service.config.issuer.clone(),
+            subject: subject.into(),
+            nonce: Zeroizing::new("synthetic-fresh-nonce".into()),
+            access: Zeroizing::new("synthetic-fresh-access".into()),
+            refresh: Some(Zeroizing::new("synthetic-fresh-refresh".into())),
+            expires_in: std::time::Duration::from_secs(300),
+        })
+    }
+    fn selection(device: &TestDevice, id: &str) -> account_access::Selection {
+        let registry = account_access::registry(&device.env()).unwrap();
+        let target = registry.devices.iter().find(|d| d.id == id).unwrap();
+        account_access::Selection {
+            device: id.into(),
+            authorization_epoch: registry.authorization_epoch,
+            created_at_ms: target.created_at_ms.clone(),
+        }
+    }
+    fn reserve(device: &TestDevice) {
+        *device.runtime.central_login.lock().unwrap() = Some(("synthetic-step-up".into(), None));
+    }
+    let service = Service::new();
+    let relay = FakeRelay::new();
+    let clock = TestClock::new();
+    let first = TestDevice::new("first", &relay, &clock);
+    let peer = TestDevice::new("peer", &relay, &clock);
+    service.login(&first);
+    bootstrap::prepare(&first.env()).unwrap();
+    let kit = bootstrap::reveal(&first.env()).unwrap();
+    bootstrap::confirm(&first.env(), &kit.root).unwrap();
+    service.login(&peer);
+    let code = devices::pairing_code(&peer.env()).unwrap();
+    devices::approve(&first.env(), &code.code).unwrap();
+    let first_id = controller::context(&first.env())
+        .unwrap()
+        .identity
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    let peer_id = controller::context(&peer.env())
+        .unwrap()
+        .identity
+        .as_ref()
+        .unwrap()
+        .id
+        .clone();
+    let before = record_runtime::snapshot(&first.env()).unwrap().0;
+    let anchor = before
+        .local
+        .central
+        .as_ref()
+        .unwrap()
+        .control
+        .anchor
+        .clone();
+    let selected = selection(&first, &peer_id);
+    let prepared = account_access::prepare_revoke(&first.env(), selected.clone()).unwrap();
+    assert!(account_access::complete_revoke(
+        &first.env(),
+        prepared,
+        fresh(&service, "opaque"),
+        "synthetic-step-up"
+    )
+    .is_err());
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0, before);
+    reserve(&first);
+    let prepared = account_access::prepare_revoke(&first.env(), selected.clone()).unwrap();
+    assert!(account_access::complete_revoke(
+        &first.env(),
+        prepared,
+        fresh(&service, "wrong-subject"),
+        "synthetic-step-up"
+    )
+    .is_err());
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0, before);
+    let prepared = account_access::prepare_revoke(&first.env(), selected).unwrap();
+    service.state.lock().unwrap().epoch += 1;
+    assert!(account_access::complete_revoke(
+        &first.env(),
+        prepared,
+        fresh(&service, "opaque"),
+        "synthetic-step-up"
+    )
+    .is_err());
+    assert!(service.state.lock().unwrap().denied.is_empty());
+    controller::refresh(&first.env()).unwrap();
+    let prepared =
+        account_access::prepare_revoke(&first.env(), selection(&first, &peer_id)).unwrap();
+    reserve(&first);
+    service.state.lock().unwrap().lose_access_response_once = true;
+    assert!(account_access::complete_revoke(
+        &first.env(),
+        prepared,
+        fresh(&service, "opaque"),
+        "synthetic-step-up"
+    )
+    .is_err());
+    assert!(record_runtime::snapshot(&first.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap()
+        .control
+        .denied_devices
+        .contains(&peer_id));
+    assert!(service.state.lock().unwrap().denied.contains(&peer_id));
+    service.state.lock().unwrap().hold_barrier = true;
+    let prepared =
+        account_access::prepare_revoke(&first.env(), selection(&first, &peer_id)).unwrap();
+    reserve(&first);
+    let pending = account_access::complete_revoke(
+        &first.env(),
+        prepared,
+        fresh(&service, "opaque"),
+        "synthetic-step-up",
+    )
+    .unwrap();
+    assert!(!pending.access_revoked);
+    assert!(pending.barrier_pending);
+    assert!(pending.rekey_pending);
+    service.state.lock().unwrap().hold_barrier = false;
+    let prepared =
+        account_access::prepare_revoke(&first.env(), selection(&first, &peer_id)).unwrap();
+    reserve(&first);
+    let completed = account_access::complete_revoke(
+        &first.env(),
+        prepared,
+        fresh(&service, "opaque"),
+        "synthetic-step-up",
+    )
+    .unwrap();
+    assert!(completed.access_revoked);
+    assert!(!completed.barrier_pending);
+    assert!(completed.rekey_pending);
+    let profile = controller::context(&first.env())
+        .unwrap()
+        .profile
+        .profile()
+        .unwrap();
+    crate::sync::env::Keychain::delete(&first.keychain, &profile.slot("device")).unwrap();
+    controller::refresh(&first.env()).unwrap();
+    assert!(controller::context(&first.env())
+        .unwrap()
+        .identity
+        .is_none());
+    let prepared =
+        account_access::prepare_revoke(&first.env(), selection(&first, &first_id)).unwrap();
+    reserve(&first);
+    let self_revoked = account_access::complete_revoke(
+        &first.env(),
+        prepared,
+        fresh(&service, "opaque"),
+        "synthetic-step-up",
+    )
+    .unwrap();
+    assert!(self_revoked.access_revoked);
+    assert!(!self_revoked.status.has_session);
+    assert!(self_revoked.status.needs_recovery);
+    let after = record_runtime::snapshot(&first.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap();
+    assert_eq!(after.control.anchor, anchor);
+    assert_eq!(after.control.phase, super::client_state::Phase::Revoked);
+    assert!(after.control.denied_devices.contains(&first_id));
+    assert!(after.control.denied_devices.contains(&peer_id));
+    assert!(
+        crate::sync::env::Keychain::get(&first.keychain, &profile.slot("device"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(account_access::registry(&first.env()).is_ok());
+    let public = serde_json::to_string(&self_revoked).unwrap();
+    assert!(!public.contains("synthetic-fresh-access"));
+    assert!(!public.contains("synthetic-fresh-refresh"));
 }

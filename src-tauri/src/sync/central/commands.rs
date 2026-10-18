@@ -197,3 +197,71 @@ pub async fn central_account_access(
     .await
     .map_err(engine::join_error)?
 }
+
+#[tauri::command]
+pub async fn central_revoke_account_device(
+    app: AppHandle,
+    selection: super::account_access::Selection,
+) -> Result<super::devices::RevokeResult, AppError> {
+    controller::require_enabled()?;
+    let prepared = {
+        let app = app.clone();
+        let _ = engine::with_env(&app, |env| env.events.status());
+        tauri::async_runtime::spawn_blocking(move || {
+            engine::with_env(&app, |env| {
+                super::account_access::prepare_revoke(env, selection)
+            })?
+        })
+        .await
+        .map_err(engine::join_error)??
+    };
+    let operation = crypto::random_id(16)?;
+    {
+        let state = app.state::<AppState>();
+        let mut pending = state.sync.central_login.lock().unwrap();
+        if pending.is_some() {
+            return Err(AppError::Other(
+                "A sign-in is already in progress. Finish or cancel it first.".into(),
+            ));
+        }
+        *pending = Some((operation.clone(), None));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            let http = BoundedHttp::new()?;
+            let (login, url) = BrowserLogin::begin_fresh(prepared.profile.oidc.clone(), &http)?;
+            {
+                let state = app.state::<AppState>();
+                let mut pending = state.sync.central_login.lock().unwrap();
+                if pending.as_ref().map(|(id, _)| id.as_str()) != Some(operation.as_str()) {
+                    return Err(AppError::Other(
+                        "Account authentication was cancelled.".into(),
+                    ));
+                }
+                *pending = Some((operation.clone(), Some(login.cancellation())));
+            }
+            app.opener().open_url(url, None::<&str>).map_err(|_| {
+                AppError::Other(
+                    "Could not open the system browser for account authentication.".into(),
+                )
+            })?;
+            let fresh = login.finish_fresh(&http)?;
+            engine::with_env(&app, |env| {
+                super::account_access::complete_revoke(env, prepared, fresh, &operation)
+            })?
+        })();
+        {
+            let state = app.state::<AppState>();
+            let mut pending = state.sync.central_login.lock().unwrap();
+            if pending.as_ref().map(|(id, _)| id.as_str()) == Some(operation.as_str()) {
+                if let Some((_, Some(cancel))) = pending.take() {
+                    cancel.cancel();
+                }
+            }
+        }
+        let _ = engine::with_env(&app, |env| env.events.status());
+        result
+    })
+    .await
+    .map_err(engine::join_error)?
+}
