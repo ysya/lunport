@@ -24,6 +24,7 @@ pub mod recovery_flow;
 pub mod recovery_revalidation;
 pub mod replacement_archive;
 pub mod replacement;
+mod replacement_proof;
 pub mod rekey;
 pub mod round;
 pub mod rotation;

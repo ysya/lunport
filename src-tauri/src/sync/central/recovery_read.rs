@@ -322,6 +322,15 @@ impl ReadSession {
     }
 }
 impl VerifiedRecovery {
+    /// This check refers to prefixes pinned before reading and verified during every page.
+    /// It cannot be minted by deserializing a checkpoint or by pinning after the read.
+    pub(super) fn verifies_prefix(&self, minimum: &Checkpoint) -> bool {
+        minimum == &self.session.target
+            || self.session.required_prefixes.contains(minimum)
+            || minimum.epoch == self.session.target.epoch
+                && minimum.sequence == 0
+                && minimum.history_hash == ZERO
+    }
     pub fn previous_owner(&self) -> &Workspace {
         &self.session.before
     }
@@ -606,6 +615,88 @@ pub(crate) mod tests {
             session.append(page(&c, rows)).unwrap();
         }
         (session.finish().unwrap(), c.kit, c.identity)
+    }
+    pub(crate) fn replacement_fixture(
+        rotated: bool,
+        pin: bool,
+    ) -> (
+        Workspace,
+        VerifiedRecovery,
+        Vec<super::super::recovery_revalidation::Bridge>,
+    ) {
+        let mut c = case(2);
+        let chain = c.proof.verify(c.kit.anchor(), None).unwrap();
+        let mut source = Workspace::new(
+            State::new(
+                c.before.control.profile.clone(),
+                c.before.control.account_id.clone(),
+                c.proof.genesis.first.clone(),
+                2,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        source.control.anchor = Some(c.kit.anchor().clone());
+        source.control.proof = Some(c.proof.clone());
+        source.control.highwater = Some(chain.highwater());
+        source.control.phase = Phase::Enrolled;
+        source.control.personal_vault = Some(personal_vault_id(c.kit.anchor()).unwrap());
+        let first = Checkpoint {
+            epoch: 1,
+            sequence: 1,
+            history_hash: c.rows[0].history_hash.clone(),
+        };
+        let original = Replica::new(
+            personal_vault_id(c.kit.anchor()).unwrap(),
+            c.kit.anchor().genesis_hash.clone(),
+            2,
+        )
+        .unwrap();
+        source.replica = Some(
+            original
+                .prepare_page(&chain, &c.keys, &c.rows[..1], &first)
+                .unwrap()
+                .next,
+        );
+        source.replacement = Some(super::super::replacement::Intent {
+            operation: "e".repeat(32),
+            route: super::super::replacement::Route::RecoveryKit,
+            device: Some(c.before.control.device.clone()),
+        });
+        source.validate().unwrap();
+        let (rows, bridges, minimum) = if rotated {
+            let suffix = c
+                .rows
+                .iter()
+                .skip(1)
+                .map(|row| super::super::rekey::SourceDigest {
+                    sequence: row.sequence.clone(),
+                    digest: row.digest.clone(),
+                })
+                .collect();
+            let plan = rotate(&mut c);
+            let minimum = Checkpoint {
+                epoch: 2,
+                sequence: 2,
+                history_hash: plan.rows.last().unwrap().history_hash.clone(),
+            };
+            (
+                plan.rows,
+                vec![super::super::recovery_revalidation::Bridge {
+                    epoch: 2,
+                    digests: suffix,
+                }],
+                minimum,
+            )
+        } else {
+            (c.rows.clone(), vec![], first)
+        };
+        let mut reader = read(&c).unwrap();
+        if pin {
+            reader.pin_prefixes(vec![minimum]).unwrap();
+        }
+        reader.append(page(&c, &rows)).unwrap();
+        (source, reader.finish().unwrap(), bridges)
     }
     pub(crate) fn revalidation_fixture(
         rotated: bool,
