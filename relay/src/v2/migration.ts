@@ -82,7 +82,7 @@ export function migrationCanonical(body: MigrationBody): Uint8Array {
     throw new Error("Invalid migration manifest.");
   safeNumber(body.authorization_epoch, false);
   safeNumber(body.key_epoch, false);
-  if (safeNumber(body.target_sequence, false) > 4096)
+  if (safeNumber(body.target_sequence, false) > 16384)
     throw new Error("Invalid migration capacity.");
   let previous = "";
   const sources = body.sources.map((source) => {

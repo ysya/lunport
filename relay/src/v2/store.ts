@@ -138,7 +138,8 @@ CREATE TABLE IF NOT EXISTS rekey_versions (seq INTEGER PRIMARY KEY,record_id TEX
 CREATE TABLE IF NOT EXISTS rekey_commits (epoch INTEGER PRIMARY KEY,rotation_id TEXT UNIQUE NOT NULL,manifest TEXT NOT NULL,wraps TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rekey_source_digests (epoch INTEGER NOT NULL,seq INTEGER NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(epoch,seq));
 CREATE TABLE IF NOT EXISTS migration_journal (id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS migration_versions (seq INTEGER PRIMARY KEY,record_id TEXT UNIQUE NOT NULL,operation_id TEXT UNIQUE NOT NULL,envelope TEXT NOT NULL,digest TEXT NOT NULL,history_hash TEXT NOT NULL);`;
+CREATE TABLE IF NOT EXISTS migration_versions (seq INTEGER PRIMARY KEY,record_id TEXT NOT NULL,revision INTEGER NOT NULL,operation_id TEXT UNIQUE NOT NULL,envelope TEXT NOT NULL,digest TEXT NOT NULL,history_hash TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS migration_versions_record ON migration_versions(record_id,seq);`;
 export async function verifyControl(
   proof: ControlProof,
 ): Promise<TrustedMembership | null> {
@@ -453,8 +454,9 @@ export class VaultStore extends DurableObject<Env> {
         digest: string;
         historyHash: string;
         sequence: number;
+        revision: number;
       }[] = [];
-      const ids = new Set<string>(),
+      const revisions = new Map<string, number>(),
         ops = new Set<string>();
       for (const envelope of envelopes) {
         if (
@@ -465,14 +467,26 @@ export class VaultStore extends DurableObject<Env> {
             observed.keyEpoch,
             actor.device,
           )) ||
-          envelope.header.author !== journal.manifest.body.author ||
-          envelope.header.expected_revision !== "0"
+          envelope.header.author !== journal.manifest.body.author
         )
           return { status: 403 };
         const { record_id, operation_id } = envelope.header;
-        if (ids.has(record_id) || ops.has(operation_id)) return { status: 400 };
-        ids.add(record_id);
+        if (ops.has(operation_id)) return { status: 400 };
         ops.add(operation_id);
+        const previous =
+          revisions.get(record_id) ??
+          this.ctx.storage.sql
+            .exec<{ revision: number }>(
+              "SELECT revision FROM migration_versions WHERE record_id=? AND seq<=? ORDER BY seq DESC LIMIT 1",
+              record_id,
+              after,
+            )
+            .toArray()[0]?.revision ??
+          0;
+        if (safeNumber(envelope.header.expected_revision, true) !== previous)
+          return { status: 409 };
+        const revision = previous + 1;
+        revisions.set(record_id, revision);
         const digest = await envelopeDigest(envelope),
           sequence = after + rows.length + 1;
         historyHash = await hash(
@@ -494,8 +508,7 @@ export class VaultStore extends DurableObject<Env> {
         } else if (
           this.ctx.storage.sql
             .exec(
-              "SELECT seq FROM migration_versions WHERE record_id=? OR operation_id=?",
-              record_id,
+              "SELECT seq FROM migration_versions WHERE operation_id=?",
               operation_id,
             )
             .toArray().length
@@ -507,6 +520,7 @@ export class VaultStore extends DurableObject<Env> {
           digest,
           historyHash,
           sequence,
+          revision,
         });
       }
       return this.ctx.storage.transactionSync(() => {
@@ -533,11 +547,22 @@ export class VaultStore extends DurableObject<Env> {
           MAX_HISTORY_BYTES - 256 * 1024
         )
           return { status: 413 };
+        const ids = new Set(
+          this.ctx.storage.sql
+            .exec<{ record_id: string }>(
+              "SELECT DISTINCT record_id FROM migration_versions",
+            )
+            .toArray()
+            .map((row) => row.record_id),
+        );
+        for (const row of rows) ids.add(row.envelope.header.record_id);
+        if (ids.size > 4096) return { status: 413 };
         for (const row of rows)
           this.ctx.storage.sql.exec(
-            "INSERT INTO migration_versions VALUES(?,?,?,?,?,?)",
+            "INSERT INTO migration_versions VALUES(?,?,?,?,?,?,?)",
             row.sequence,
             row.envelope.header.record_id,
+            row.revision,
             row.envelope.header.operation_id,
             row.encoded,
             row.digest,
@@ -593,6 +618,7 @@ export class VaultStore extends DurableObject<Env> {
           .exec<{
             seq: number;
             record_id: string;
+            revision: number;
             operation_id: string;
             envelope: string;
             digest: string;
@@ -618,15 +644,15 @@ export class VaultStore extends DurableObject<Env> {
             "INSERT INTO versions VALUES(?,?,?,?,?,?)",
             row.seq,
             row.record_id,
-            1,
+            row.revision,
             row.envelope,
             row.digest,
             row.history_hash,
           );
           this.ctx.storage.sql.exec(
-            "INSERT INTO current_records VALUES(?,?,?,?,?,?)",
+            "INSERT INTO current_records VALUES(?,?,?,?,?,?) ON CONFLICT(record_id) DO UPDATE SET revision=excluded.revision,seq=excluded.seq,envelope=excluded.envelope,digest=excluded.digest,history_hash=excluded.history_hash",
             row.record_id,
-            1,
+            row.revision,
             row.seq,
             row.envelope,
             row.digest,
@@ -635,7 +661,7 @@ export class VaultStore extends DurableObject<Env> {
           const receipt: Receipt = {
             operation_id: row.operation_id,
             record_id: row.record_id,
-            revision: "1",
+            revision: String(row.revision),
             sequence: String(row.seq),
             digest: row.digest,
             history_hash: row.history_hash,

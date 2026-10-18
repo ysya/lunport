@@ -120,7 +120,7 @@ impl Body {
             || !hex(&self.migration_id, 32)
             || !hex(&self.author, 32)
             || self.sources.len() > 65
-            || number(&self.target_sequence, false)? > 4096
+            || number(&self.target_sequence, false)? > 16384
         {
             return Err(invalid());
         }
@@ -368,7 +368,7 @@ mod tests {
         let mut body = manifest.body.clone();
         body.sources = vec![body.sources[0].clone(); 66];
         assert!(body.canonical().is_err());
-        for value in ["0", "01", "-1", "4097", "9007199254740992"] {
+        for value in ["0", "01", "-1", "16385", "9007199254740992"] {
             let mut body = manifest.body.clone();
             body.target_sequence = value.into();
             assert!(body.canonical().is_err());

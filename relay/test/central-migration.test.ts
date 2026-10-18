@@ -35,6 +35,38 @@ const sign = (bytes: Uint8Array) =>
   base64(ed25519.sign(bytes, new Uint8Array(32).fill(1)));
 const zero = "0".repeat(64),
   tokenHash = "b".repeat(64);
+async function resign(envelope: RecordEnvelope): Promise<void> {
+  envelope.signature = sign(
+    await authorBytes(
+      "lunport-record-author-v2",
+      recordCanonical(envelope.header),
+      envelope.nonce,
+      Uint8Array.from(atob(envelope.ciphertext), (c) => c.charCodeAt(0)),
+    ),
+  );
+}
+async function retarget(s: Awaited<ReturnType<typeof setup>>): Promise<void> {
+  let history = zero;
+  for (const [index, envelope] of s.records.entries()) {
+    await resign(envelope);
+    const digest = await hash(
+      canonical([
+        "lunport-operation-v2",
+        new TextDecoder().decode(recordCanonical(envelope.header)),
+        envelope.nonce,
+        envelope.ciphertext,
+        envelope.signature,
+      ]),
+    );
+    history = await hash(
+      canonical(["lunport-history-v2", history, String(index + 1), digest]),
+    );
+  }
+  s.manifest.body.target_sequence = String(s.records.length);
+  s.manifest.body.target_history_hash = history;
+  s.manifest.signature = sign(migrationCanonical(s.manifest.body));
+}
+
 async function setup(sourceCount = 1, recordCount = 3) {
   const member = (await trustGenesis(fixture.genesis, fixture.anchor))!;
   const locator = random(),
@@ -349,6 +381,161 @@ describe("signed central initial-library migration", () => {
     ).toBe(410);
   });
 
+  it("atomically retains private history and a later inactive-slot tombstone", async () => {
+    const s = await setup(0);
+    s.records[0].header.kind = "keyslot";
+    s.records[1].header.kind = "key";
+    s.records[2].header = {
+      ...s.records[2].header,
+      record_id: s.records[0].header.record_id,
+      kind: "keyslot",
+      expected_revision: "1",
+      deleted: true,
+    };
+    await retarget(s);
+    await json(await begin(s));
+    await json(await stage(s, "0", s.records.slice(0, 2)));
+    await json(await stage(s, "2", s.records.slice(2)));
+    expect((await json(await stage(s))).staged).toBe("3"); // full existing prefix retry
+    expect((await s.child.pull(s.actor, 0)).status).toBe(423);
+    await json(await commit(s));
+    const page = await json(await s.child.pull(s.actor, 0));
+    expect(
+      page.records.map((r: any) => [r.revision, r.sequence, r.envelope]),
+    ).toEqual([
+      ["1", "1", s.records[0]],
+      ["1", "2", s.records[1]],
+      ["2", "3", s.records[2]],
+    ]);
+    const current = await runInDurableObject(s.child, (_instance, ctx) =>
+      ctx.storage.sql
+        .exec<{ record_id: string; revision: number; envelope: string }>(
+          "SELECT record_id,revision,envelope FROM current_records ORDER BY seq",
+        )
+        .toArray(),
+    );
+    expect(current).toHaveLength(2);
+    expect(
+      current.find((r) => r.record_id === s.records[0].header.record_id)
+        ?.revision,
+    ).toBe(2);
+    expect(
+      JSON.parse(
+        current.find((r) => r.record_id === s.records[0].header.record_id)!
+          .envelope,
+      ).header.deleted,
+    ).toBe(true);
+    expect(
+      current.some((r) => r.record_id === s.records[1].header.record_id),
+    ).toBe(true);
+    expect(
+      (
+        await json(
+          await s.child.operationReceipt(
+            s.actor,
+            s.records[2].header.operation_id,
+          ),
+        )
+      ).revision,
+    ).toBe("2");
+    expect(
+      (
+        await json(
+          await s.child.operationReceipt(
+            s.actor,
+            s.records[0].header.operation_id,
+          ),
+        )
+      ).revision,
+    ).toBe("1");
+  });
+
+  it("validates repeated revisions within a batch and rejects gaps or reused operations", async () => {
+    const s = await setup(0);
+    const id = s.records[0].header.record_id;
+    s.records[1].header = {
+      ...s.records[1].header,
+      record_id: id,
+      expected_revision: "1",
+    };
+    s.records[2].header = {
+      ...s.records[2].header,
+      record_id: id,
+      expected_revision: "2",
+      deleted: true,
+    };
+    await retarget(s);
+    await json(await begin(s));
+    const gap = structuredClone(s.records[1]);
+    gap.header.expected_revision = "2";
+    await resign(gap);
+    expect((await stage(s, "0", [s.records[0], gap])).status).toBe(409);
+    expect((await json(await s.child.migrationStatus(s.actor))).staged).toBe(
+      "0",
+    );
+    await json(await stage(s));
+    expect((await json(await stage(s, "1", s.records.slice(1)))).staged).toBe(
+      "3",
+    );
+    await json(await commit(s));
+    expect(
+      (
+        await json(
+          await s.child.operationReceipt(
+            s.actor,
+            s.records[2].header.operation_id,
+          ),
+        )
+      ).revision,
+    ).toBe("3");
+    const other = await setup(0);
+    await json(await begin(other));
+    await json(await stage(other, "0", [other.records[0]]));
+    const reused = structuredClone(other.records[1]);
+    reused.header.operation_id = other.records[0].header.operation_id;
+    await resign(reused);
+    expect((await stage(other, "1", [reused])).status).toBe(409);
+    expect(
+      (await json(await other.child.migrationStatus(other.actor))).staged,
+    ).toBe("1");
+  });
+
+  it("bounds distinct current rows even when retained history permits more revisions", async () => {
+    const s = await setup(0);
+    s.manifest.body.target_sequence = "4097";
+    s.manifest.signature = sign(migrationCanonical(s.manifest.body));
+    await json(await begin(s));
+    // Synthetic capacity fixture only: no production ciphertext or authorization is used.
+    await runInDurableObject(s.child, (_instance, ctx) => {
+      for (let index = 1; index <= 4096; index++)
+        ctx.storage.sql.exec(
+          "INSERT INTO migration_versions VALUES(?,?,?,?,?,?,?)",
+          index,
+          index.toString(16).padStart(64, "0"),
+          1,
+          index.toString(16).padStart(32, "0"),
+          "{}",
+          zero,
+          zero,
+        );
+      const j = JSON.parse(
+        ctx.storage.sql
+          .exec<{ value: string }>("SELECT value FROM migration_journal")
+          .one().value,
+      );
+      j.staged = 4096;
+      j.historyHash = zero;
+      ctx.storage.sql.exec(
+        "UPDATE migration_journal SET value=?",
+        JSON.stringify(j),
+      );
+    });
+    expect((await stage(s, "4096", [s.records[0]])).status).toBe(413);
+    expect((await json(await s.child.migrationStatus(s.actor))).staged).toBe(
+      "4096",
+    );
+  });
+
   it("accepts exact retries but rejects changed manifests, overlap and row reordering", async () => {
     const s = await setup();
     const first = await json(await begin(s));
@@ -394,7 +581,7 @@ describe("signed central initial-library migration", () => {
     for (const body of [
       { ...s.manifest.body, extra: "unknown" },
       { ...s.manifest.body, target_sequence: "0" },
-      { ...s.manifest.body, target_sequence: "4097" },
+      { ...s.manifest.body, target_sequence: "16385" },
       {
         ...s.manifest.body,
         sources: Array(66).fill(s.manifest.body.sources[0]),
