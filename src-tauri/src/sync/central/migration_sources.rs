@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 const MAX_SOURCES: usize = 65;
 mod archive;
 mod records;
+mod frozen;
 struct Temporary(ChainKeys);
 impl Drop for Temporary {
     fn drop(&mut self) {

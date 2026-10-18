@@ -146,7 +146,7 @@ fn recovery(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::sync::central::migration_sources) mod tests {
     use super::*;
     use crate::sync::{
         record::SpaceKeyPayload,
@@ -200,7 +200,8 @@ mod tests {
             },
         )
     }
-    fn fixture() -> (SyncStateV3, ChainKeys, ChainKeys) {
+    pub(in crate::sync::central::migration_sources) fn fixture(
+    ) -> (SyncStateV3, ChainKeys, ChainKeys) {
         let parent = ChainKeys::generate().unwrap();
         let child = ChainKeys::generate().unwrap();
         let mut state:SyncStateV3=serde_json::from_value(json!({"version":7,"device_id":"d".repeat(32),"device_name":"Synthetic","relay_url":"https://relay.example","last_sync_ms":null,"last_error":null})).unwrap();
