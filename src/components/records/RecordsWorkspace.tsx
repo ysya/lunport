@@ -75,6 +75,7 @@ import { DetailPresence } from "@/components/app/DetailPresence";
 import { connectSavedHost } from "./operations";
 import { TerminalWorkspace } from "./TerminalWorkspace";
 import { useTerminalStore } from "@/stores/terminals";
+import { TunnelsPanel } from "./TunnelsPanel";
 
 export function RecordsWorkspace({
   overview,
@@ -207,17 +208,18 @@ export function RecordsWorkspace({
       if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
       if (
         isTypingContext(event.target) &&
-        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID].includes((event.target as HTMLElement).id)
+        ![SEARCH_INPUT_ID, KEYS_SEARCH_INPUT_ID, "tunnels-search"].includes((event.target as HTMLElement).id)
       )
         return;
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
-        if (panel === "keys") document.getElementById(GENERATE_KEY_BUTTON_ID)?.click();
+        if (panel === "tunnels") document.getElementById("new-tunnel-button")?.click();
+        else if (panel === "keys") document.getElementById(GENERATE_KEY_BUTTON_ID)?.click();
         else createHost();
       } else if (event.key.toLowerCase() === "f") {
         event.preventDefault();
-        const searchId = panel === "keys" ? KEYS_SEARCH_INPUT_ID : SEARCH_INPUT_ID;
-        if (panel !== "keys") setPanel("hosts");
+        const searchId = panel === "tunnels" ? "tunnels-search" : panel === "keys" ? KEYS_SEARCH_INPUT_ID : SEARCH_INPUT_ID;
+        if (panel !== "keys" && panel !== "tunnels") setPanel("hosts");
         window.requestAnimationFrame(() => {
           const input = document.getElementById(searchId);
           if (input instanceof HTMLInputElement) {
@@ -472,6 +474,7 @@ export function RecordsWorkspace({
               aria-label="Workspace content"
             >
               {panel === "keys" && <RecordsKeysPanel overview={overview} />}
+              {panel === "tunnels" && <TunnelsPanel overview={overview} />}
               {panel === "account" && (
                 <RecordsAccountPanel
                   overview={overview}

@@ -36,6 +36,9 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
+#[path = "russh_forward.rs"]
+mod forwarding;
+
 use super::channel::{ByteQueue, ExitCell, QueuedShell, ShellInput};
 use super::error::{AuthError, ConnectError, SessionError};
 use super::traits::{AuthSource, HostKeyPolicy, Session, ShellChannel, SshEngine};
@@ -133,6 +136,7 @@ impl RusshEngine {
 
 /// What the handler and the engine both need to know about one hop's connection.
 struct HopShared {
+    forwards: forwarding::Routes,
     /// The last host key the policy judged, and its verdict.
     observed: Mutex<Option<(HostKey, HostKeyVerdict)>>,
     /// Set by `Handler::disconnected`: how this hop's connection ended.
@@ -147,6 +151,7 @@ struct HopShared {
 impl HopShared {
     fn new() -> Arc<HopShared> {
         Arc::new(HopShared {
+            forwards: forwarding::Routes::default(),
             observed: Mutex::new(None),
             ended: Mutex::new(None),
             no_login_method: std::sync::atomic::AtomicBool::new(false),
@@ -242,6 +247,15 @@ fn host_key_of(key: &PublicKey) -> Option<HostKey> {
 
 impl Handler for EngineHandler {
     type Error = russh::Error;
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self, channel: Channel<Msg>, _address: &str, port: u32,
+        _origin: &str, _origin_port: u32, reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        self.shared.forwards.deliver(port, channel, reply);
+        Ok(())
+    }
 
     /// Never waits for a person (spec §6.2 step 3): the policy answers from its table through the connect thread, and `Unknown` or
     /// `Mismatch` makes the handshake fail with `UnknownKey`, which `connect` turns into `HostKeyUnknown` or `HostKeyMismatch`.
@@ -1005,6 +1019,10 @@ fn signal_name(signal: &Sig) -> String {
 }
 
 impl Session for RusshSession {
+    fn forward(&self, spec: &super::forward::ForwardSpec) -> Result<Box<dyn super::forward::Forwarder>, SessionError> {
+        forwarding::start(self, spec)
+    }
+
     fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError> {
         if !self.is_alive() {
             return Err(SessionError::Closed);
