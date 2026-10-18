@@ -17,6 +17,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
+mod files;
 
 /// No Debug/Serialize: original private bytes are only consumed by explicit native encryption.
 pub(super) struct Materials {
@@ -24,6 +25,7 @@ pub(super) struct Materials {
     pub active: BTreeMap<String, SharedKeyslot>,
     pub retained: usize,
     history: Vec<(Identity, Data)>,
+    history_bytes: usize,
 }
 fn identity(kind: &str, id: &str) -> Identity {
     Identity {
@@ -74,7 +76,10 @@ impl Materials {
             if id.len() > 1024 || entries.len() >= 4096 {
                 return Err(invalid());
             }
-            let entry = vault.get(&id).map_err(|_| invalid())?.ok_or_else(invalid)?;
+            let entry = vault
+                .get_inventory(&id)
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
             original(&entry)?;
             entries.insert(id, entry);
         }
@@ -127,6 +132,7 @@ impl Materials {
             active: BTreeMap::new(),
             retained: 0,
             history: vec![],
+            history_bytes: 0,
         };
         let mut used = BTreeSet::new();
         let mut occupied: BTreeSet<_> = public
@@ -177,41 +183,7 @@ impl Materials {
             if used.contains(&source) {
                 continue;
             }
-            let private = original(&entry)?;
-            let binding = canonical(&[
-                "lunport-retained-vault-material-v1",
-                &source,
-                &private.digest(),
-            ])?;
-            let id = keys.record_id(
-                "keyslot",
-                std::str::from_utf8(&binding).map_err(|_| invalid())?,
-            )?[..32]
-                .to_owned();
-            if !hex(&id, 32) || !occupied.insert(id.clone()) {
-                return Err(invalid());
-            }
-            let parsed = material::parse(private.private()).ok_or_else(invalid)?;
-            let slot = SharedKeyslot {
-                public: KeySlotPayload {
-                    schema: records_v3::KEYSLOT_SCHEMA,
-                    name: "Retained key".into(),
-                    public_key: entry.public_key.clone(),
-                    fingerprint: entry.fingerprint.clone(),
-                    key_type: parsed.public_key().algorithm().as_str().into(),
-                    has_passphrase: parsed.is_encrypted(),
-                    created_at_ms: entry.added_at_ms,
-                    origin_device_id: state.device_id.clone(),
-                },
-                storage: KeyStorage::Managed {
-                    sha256: private.digest(),
-                },
-            };
-            private.validate_against(&id, &slot)?;
-            result.append(identity("keyslot", &id), Data::Keyslot(slot))?;
-            result.append(identity("key", &id), Data::Key(private))?;
-            result.append(identity("keyslot", &id), Data::Deleted)?;
-            result.retained += 1;
+            result.keep_retained(state, keys, &source, &entry, &mut occupied)?;
         }
         // Preserve public deletion intent even if its private material has a distinct retained ID.
         for id in deleted {
@@ -219,11 +191,64 @@ impl Materials {
         }
         Ok(result)
     }
+    fn keep_retained(
+        &mut self,
+        state: &SyncStateV3,
+        keys: &VaultKeys,
+        source: &str,
+        entry: &VaultEntry,
+        occupied: &mut BTreeSet<String>,
+    ) -> Result<usize, AppError> {
+        let private_index = self.history.len() + 1;
+        let private = original(entry)?;
+        let binding = canonical(&[
+            "lunport-retained-vault-material-v1",
+            source,
+            &private.digest(),
+        ])?;
+        let id = keys.record_id(
+            "keyslot",
+            std::str::from_utf8(&binding).map_err(|_| invalid())?,
+        )?[..32]
+            .to_owned();
+        if !hex(&id, 32) || !occupied.insert(id.clone()) {
+            return Err(invalid());
+        }
+        let parsed = material::parse(private.private()).ok_or_else(invalid)?;
+        let slot = SharedKeyslot {
+            public: KeySlotPayload {
+                schema: records_v3::KEYSLOT_SCHEMA,
+                name: "Retained key".into(),
+                public_key: entry.public_key.clone(),
+                fingerprint: entry.fingerprint.clone(),
+                key_type: parsed.public_key().algorithm().as_str().into(),
+                has_passphrase: parsed.is_encrypted(),
+                created_at_ms: entry.added_at_ms,
+                origin_device_id: state.device_id.clone(),
+            },
+            storage: KeyStorage::Managed {
+                sha256: private.digest(),
+            },
+        };
+        private.validate_against(&id, &slot)?;
+        self.append(identity("keyslot", &id), Data::Keyslot(slot))?;
+        self.append(identity("key", &id), Data::Key(private))?;
+        self.append(identity("keyslot", &id), Data::Deleted)?;
+        self.retained += 1;
+        Ok(private_index)
+    }
     fn append(&mut self, identity: Identity, data: Data) -> Result<(), AppError> {
         if self.history.len() >= 16384 {
             return Err(invalid());
         }
-        payload::encode(&identity, &data)?;
+        let encoded = payload::encode(&identity, &data)?;
+        self.history_bytes = self
+            .history_bytes
+            .checked_add(encoded.len())
+            .ok_or_else(invalid)?;
+        if self.history_bytes > 32 * 1024 * 1024 - 256 * 1024 {
+            return Err(invalid());
+        }
         self.history.push((identity, data));
         Ok(())
     }
@@ -245,10 +270,10 @@ mod tests {
         vault::store::{self, EntryOrigin, Vault},
     };
     use serde_json::json;
-    fn state() -> SyncStateV3 {
+    pub(super) fn state() -> SyncStateV3 {
         serde_json::from_value(json!({"version":3,"device_id":"d".repeat(32),"device_name":"Synthetic","relay_url":"https://relay.example","last_sync_ms":null,"last_error":null})).unwrap()
     }
-    fn entry(raw: &str) -> VaultEntry {
+    pub(super) fn entry(raw: &str) -> VaultEntry {
         let parsed = material::parse(raw).unwrap();
         VaultEntry {
             private_key: raw.into(),
@@ -261,7 +286,7 @@ mod tests {
             added_at_ms: 1,
         }
     }
-    fn metadata(raw: &str) -> KeySlotPayload {
+    pub(super) fn metadata(raw: &str) -> KeySlotPayload {
         let entry = entry(raw);
         let parsed = material::parse(raw).unwrap();
         KeySlotPayload {
@@ -419,6 +444,51 @@ mod tests {
             projected.materials().keys().cloned().collect::<Vec<_>>(),
             vec!["1".repeat(32), "2".repeat(32)]
         );
+    }
+    #[test]
+    fn aggregate_inventory_capacity_stops_large_valid_sources_without_trimming_a_subset() {
+        let mut key = material::parse(&crate::sync::slot_rules::test_keys::plain()).unwrap();
+        key.set_comment("x".repeat(32768));
+        let raw = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let memory = MemKeychain::default();
+        let protected = "f".repeat(32);
+        let mut vault = Vault::open(&path, &memory, 0).unwrap();
+        put(&mut vault, &memory, &protected, &raw);
+        let public = metadata(&raw);
+        let read = store::read_vault(&path, &memory).unwrap();
+        let keys = VaultKeys::generate().unwrap();
+        let mut state = state();
+        for i in 0..200 {
+            state.local.keys.insert(
+                format!("{i:032x}"),
+                LocalKeyMetadata {
+                    vault_id: protected.clone(),
+                    public: public.clone(),
+                },
+            );
+        }
+        assert_eq!(
+            Materials::from_vault(&state, &keys, &read, &BTreeMap::new())
+                .unwrap()
+                .active
+                .len(),
+            200
+        );
+        for i in 200..600 {
+            state.local.keys.insert(
+                format!("{i:032x}"),
+                LocalKeyMetadata {
+                    vault_id: protected.clone(),
+                    public: public.clone(),
+                },
+            );
+        }
+        let before = std::fs::read(&path).unwrap();
+        assert!(Materials::from_vault(&state, &keys, &read, &BTreeMap::new()).is_err());
+        assert_eq!(state.local.keys.len(), 600);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     #[test]
     fn deleted_public_slots_keep_local_material_in_inactive_history() {

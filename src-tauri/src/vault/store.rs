@@ -447,6 +447,38 @@ pub struct ReadOnlyVault {
 impl ReadOnlyVault {
     pub fn ids(&self) -> Vec<String> { self.vault.ids() }
     pub fn get(&self, slot_id: &str) -> Result<Option<VaultEntry>, VaultError> { self.vault.get(slot_id) }
+    /// Strict inventory admission also rejects unknown plaintext fields before interpreting a row.
+    pub(crate) fn get_inventory(&self, slot_id: &str) -> Result<Option<VaultEntry>, VaultError> {
+        let Some(sealed) = self.vault.file.entries.get(slot_id) else {
+            return Ok(None);
+        };
+        let key = self.vault.key.as_ref().ok_or(VaultError::KeyMissing)?;
+        let plaintext = Zeroizing::new(open_raw(
+            key,
+            &aad(slot_id),
+            &sealed.nonce,
+            &sealed.ciphertext,
+        )?);
+        let fields: BTreeMap<&str, &serde_json::value::RawValue> =
+            serde_json::from_slice(&plaintext).map_err(|_| {
+                readonly_vault_error("a captured vault entry is not completely readable")
+            })?;
+        let expected = [
+            "private_key",
+            "public_key",
+            "fingerprint",
+            "origin",
+            "added_at_ms",
+        ];
+        if fields.len() != expected.len() || fields.keys().any(|name| !expected.contains(name)) {
+            return Err(readonly_vault_error(
+                "a captured vault entry has unsupported fields",
+            ));
+        }
+        serde_json::from_slice(&plaintext)
+            .map(Some)
+            .map_err(|_| readonly_vault_error("a captured vault entry is not completely readable"))
+    }
     pub fn settings(&self) -> &AgentSettings { self.vault.settings() }
     pub fn key_account(&self) -> &str { self.vault.file.key_account() }
 }
@@ -477,24 +509,150 @@ pub fn read_vault(path: &Path, keychain: &dyn Keychain) -> Result<ReadOnlyVault,
         return Err(readonly_vault_error("the vault format is not supported"));
     }
     let file: VaultFile = serde_json::from_slice(&bytes).map_err(|_| readonly_vault_error("the vault format is not readable"))?;
+    readonly_image(file, path, keychain)
+}
+/// Strict inventory admission for an already descriptor-captured image. No path is reopened,
+/// credential created, source archived or private entry omitted on parse failure.
+pub(crate) fn read_vault_image(
+    bytes: &[u8],
+    keychain: &dyn Keychain,
+) -> Result<ReadOnlyVault, VaultError> {
+    if bytes.len() as u64 > MAX_READ_ONLY_VAULT_BYTES {
+        return Err(readonly_vault_limit_error());
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        nonce: String,
+        ciphertext: String,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Settings {
+        #[serde(default = "default_remember_minutes")]
+        remember_minutes: u32,
+        #[serde(default)]
+        always_ask: bool,
+    }
+    impl Default for Settings {
+        fn default() -> Self {
+            Self {
+                remember_minutes: default_remember_minutes(),
+                always_ask: false,
+            }
+        }
+    }
+    fn entries<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<BTreeMap<String, Entry>, D::Error> {
+        struct Unique;
+        impl<'de> serde::de::Visitor<'de> for Unique {
+            type Value = BTreeMap<String, Entry>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("unique protected entries")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut result = BTreeMap::new();
+                while let Some((id, value)) = map.next_entry::<String, Entry>()? {
+                    if id.len() > 1024 || result.len() >= 4096 || result.insert(id, value).is_some()
+                    {
+                        return Err(serde::de::Error::custom(
+                            "duplicate or excessive protected entries",
+                        ));
+                    }
+                }
+                Ok(result)
+            }
+        }
+        d.deserialize_map(Unique)
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Image {
+        version: u32,
+        #[serde(default)]
+        key_account: Option<String>,
+        #[serde(default)]
+        settings: Settings,
+        #[serde(deserialize_with = "entries")]
+        entries: BTreeMap<String, Entry>,
+    }
+    let image: Image = serde_json::from_slice(bytes)
+        .map_err(|_| readonly_vault_error("the captured vault image is not completely readable"))?;
+    if image.version > VAULT_VERSION {
+        return Err(VaultError::Newer {
+            version: image.version,
+        });
+    }
+    if ![LEGACY_VERSION, VAULT_VERSION].contains(&image.version) {
+        return Err(readonly_vault_error("the vault format is not supported"));
+    }
+    let settings = AgentSettings {
+        remember_minutes: image.settings.remember_minutes,
+        always_ask: image.settings.always_ask,
+    };
+    let file = VaultFile {
+        version: image.version,
+        key_account: image.key_account,
+        settings,
+        entries: image
+            .entries
+            .into_iter()
+            .map(|(id, e)| {
+                (
+                    id,
+                    SealedEntry {
+                        nonce: e.nonce,
+                        ciphertext: e.ciphertext,
+                    },
+                )
+            })
+            .collect(),
+    };
+    readonly_image(file, Path::new(""), keychain)
+}
+fn readonly_image(
+    file: VaultFile,
+    path: &Path,
+    keychain: &dyn Keychain,
+) -> Result<ReadOnlyVault, VaultError> {
     let account = file.key_account();
     let known_account = account == VAULT_KEY_ACCOUNT
-        || account.strip_prefix(VAULT_KEY_ACCOUNT_PREFIX).is_some_and(|suffix| {
-            suffix.len() == 16 && suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        });
+        || account
+            .strip_prefix(VAULT_KEY_ACCOUNT_PREFIX)
+            .is_some_and(|suffix| {
+                suffix.len() == 16
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
     if !known_account {
-        return Err(readonly_vault_error("the vault key account is not recognized"));
+        return Err(readonly_vault_error(
+            "the vault key account is not recognized",
+        ));
     }
     let key = if file.entries.is_empty() {
         None
     } else {
-        Some(read_key(keychain, account)
-            .map_err(|_| readonly_vault_error("the vault key could not be read from the keychain"))?
-            .ok_or(VaultError::KeyMissing)?)
+        Some(
+            read_key(keychain, account)
+                .map_err(|_| {
+                    readonly_vault_error("the vault key could not be read from the keychain")
+                })?
+                .ok_or(VaultError::KeyMissing)?,
+        )
     };
-    Ok(ReadOnlyVault { vault: Vault { path: path.to_path_buf(), key, file } })
+    Ok(ReadOnlyVault {
+        vault: Vault {
+            path: path.to_path_buf(),
+            key,
+            file,
+        },
+    })
 }
-
 fn readonly_vault_error(reason: &'static str) -> VaultError {
     VaultError::Unreadable { kept_as: None, reason: reason.into() }
 }
@@ -600,6 +758,99 @@ mod tests {
         names
     }
 
+    #[test]
+    fn captured_vault_image_reads_the_exact_snapshot_after_the_original_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let spy = ReadOnlyKeychainSpy::default();
+        let mut vault = Vault::open(&path, &spy.inner, 0).unwrap();
+        vault
+            .put(&spy.inner, "orphan", &entry("synthetic A"))
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        vault
+            .put(&spy.inner, "orphan", &entry("synthetic B"))
+            .unwrap();
+        let later = std::fs::read(&path).unwrap();
+        let captured = read_vault_image(&bytes, &spy).unwrap();
+        assert_eq!(
+            captured
+                .get_inventory("orphan")
+                .unwrap()
+                .unwrap()
+                .private_key,
+            "synthetic A"
+        );
+        assert_eq!(
+            read_vault(&path, &spy)
+                .unwrap()
+                .get("orphan")
+                .unwrap()
+                .unwrap()
+                .private_key,
+            "synthetic B"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), later);
+        spy.assert_reads(2);
+        assert_eq!(readonly_vault_names(dir.path()), ["vault.json"]);
+    }
+    #[test]
+    fn captured_vault_image_rejects_duplicate_unknown_missing_and_untrusted_fields_before_keychain_access(
+    ) {
+        let spy = ReadOnlyKeychainSpy::default();
+        for bytes in [
+            r#"{"version":1,"entries":{"a":{"nonce":"n","ciphertext":"c"},"a":{"nonce":"x","ciphertext":"y"}}}"#,
+            r#"{"version":1,"entries":{},"unknown_private":"PRIVATE_SENTINEL"}"#,
+            r#"{"version":1}"#,
+            r#"{"version":1,"entries":{},"settings":null}"#,
+            r#"{"version":1,"entries":{},"settings":{"unknown":"PRIVATE_SENTINEL"}}"#,
+            r#"{"version":1,"entries":{"a":{"nonce":"n","ciphertext":"c","extra":"PRIVATE_SENTINEL"}}}"#,
+            r#"{"version":1,"entries":{},"key_account":"host:PRIVATE_SENTINEL"}"#,
+        ] {
+            let error = read_vault_image(bytes.as_bytes(), &spy)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("PRIVATE_SENTINEL"));
+        }
+        let empty = read_vault_image(br#"{"version":1,"entries":{}}"#, &spy).unwrap();
+        assert!(empty.ids().is_empty());
+        assert_eq!(empty.settings(), &AgentSettings::default());
+        assert!(matches!(
+            read_vault_image(br#"{"version":99,"entries":{}}"#, &spy),
+            Err(VaultError::Newer { version: 99 })
+        ));
+        spy.assert_reads(0);
+    }
+    #[test]
+    fn captured_vault_entry_unknown_plaintext_cannot_disappear_during_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let memory = MemKeychain::default();
+        let mut vault = Vault::open(&path, &memory, 0).unwrap();
+        vault
+            .put(&memory, "orphan", &entry("synthetic private"))
+            .unwrap();
+        let mut plain = serde_json::to_value(entry("synthetic private")).unwrap();
+        plain["other_private_key"] = "PRIVATE_SENTINEL".into();
+        let (nonce, ciphertext) = seal_raw(
+            vault.key.as_ref().unwrap(),
+            &aad("orphan"),
+            &serde_json::to_vec(&plain).unwrap(),
+        )
+        .unwrap();
+        vault
+            .file
+            .entries
+            .insert("orphan".into(), SealedEntry { nonce, ciphertext });
+        let image = serde_json::to_vec(&vault.file).unwrap();
+        let read = read_vault_image(&image, &memory).unwrap();
+        assert!(read.get_inventory("orphan").is_err());
+        assert!(!read
+            .get_inventory("orphan")
+            .unwrap_err()
+            .to_string()
+            .contains("PRIVATE_SENTINEL"));
+    }
     #[test]
     fn readonly_vault_missing_and_empty_views_create_nothing_and_skip_credentials() {
         let dir = tempfile::tempdir().unwrap();
