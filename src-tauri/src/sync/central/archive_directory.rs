@@ -107,10 +107,7 @@ impl ArchiveDirectory {
         })
     }
     pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>, AppError> {
-        use std::{
-            io::Read,
-            os::fd::{AsRawFd, FromRawFd},
-        };
+        use std::os::fd::{AsRawFd, FromRawFd};
         filename(name)?;
         let name = std::ffi::CString::new(name).map_err(|_| invalid())?;
         let fd = unsafe {
@@ -129,6 +126,14 @@ impl ArchiveDirectory {
             };
         }
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        self.read_opened(&name, file).map(Some)
+    }
+    fn read_opened(
+        &self,
+        name: &std::ffi::CStr,
+        mut file: std::fs::File,
+    ) -> Result<Vec<u8>, AppError> {
+        use std::{io::Read, os::fd::AsRawFd};
         let metadata = file.metadata()?;
         use std::os::unix::fs::MetadataExt;
         if !metadata.is_file()
@@ -139,11 +144,45 @@ impl ArchiveDirectory {
             return Err(invalid());
         }
         let mut bytes = Vec::new();
-        file.take(self.kind.maximum() + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > self.kind.maximum() {
+        (&mut file)
+            .take(self.kind.maximum() + 1)
+            .read_to_end(&mut bytes)?;
+        let after = file.metadata()?;
+        if bytes.len() as u64 > self.kind.maximum()
+            || bytes.len() as u64 != metadata.len()
+            || after.len() != metadata.len()
+            || after.mtime() != metadata.mtime()
+            || after.mtime_nsec() != metadata.mtime_nsec()
+            || after.ctime() != metadata.ctime()
+            || after.ctime_nsec() != metadata.ctime_nsec()
+            || after.uid() != metadata.uid()
+            || after.mode() & 0o077 != 0
+        {
             return Err(invalid());
         }
-        Ok(Some(bytes))
+        // A still-open old descriptor cannot prove that the immutable named snapshot survived
+        // a concurrent restore/replacement of the archive file itself.
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            return Err(invalid());
+        }
+        let stat = unsafe { stat.assume_init() };
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG
+            || stat.st_dev as u64 != after.dev()
+            || stat.st_ino as u64 != after.ino()
+            || stat.st_size as u64 != after.len()
+        {
+            return Err(invalid());
+        }
+        Ok(bytes)
     }
     pub fn publish(&self, name: &str, bytes: &[u8]) -> Result<(), AppError> {
         if bytes.len() as u64 > self.kind.maximum() {
@@ -330,6 +369,31 @@ mod tests {
         assert_eq!(
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o755
+        );
+    }
+    #[test]
+    fn an_open_old_file_descriptor_cannot_claim_that_a_replaced_named_archive_is_retained() {
+        let device = device();
+        let env = device.env();
+        let parent = env.state_path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        let source = ArchiveDirectory::open(&env, Kind::Source).unwrap();
+        source.publish("snapshot", b"old encrypted source").unwrap();
+        let root = parent.join(Kind::Source.name());
+        let old = fs::File::open(root.join("snapshot")).unwrap();
+        fs::rename(root.join("snapshot"), root.join("kept-old")).unwrap();
+        fs::write(root.join("snapshot"), b"other encrypted source").unwrap();
+        fs::set_permissions(root.join("snapshot"), fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(source
+            .read_opened(&std::ffi::CString::new("snapshot").unwrap(), old)
+            .is_err());
+        assert_eq!(
+            source.read("snapshot").unwrap().unwrap(),
+            b"other encrypted source"
+        );
+        assert_eq!(
+            fs::read(root.join("kept-old")).unwrap(),
+            b"old encrypted source"
         );
     }
     #[test]
