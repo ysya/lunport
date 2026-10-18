@@ -135,6 +135,40 @@ impl Files {
         }
         Ok(())
     }
+    pub fn require_unchanged_after_archive(
+        &self,
+        env: &SyncEnv,
+        backup: Option<&str>,
+        outputs: &super::source_archive::Outputs,
+    ) -> Result<(), AppError> {
+        let latest = Self::capture(env, backup)?;
+        let mut added = 0;
+        for (path, bytes) in outputs.files() {
+            if latest.bytes.get(path).is_none_or(|v| v.as_slice() != bytes) {
+                return Err(crate::sync::runtime::superseded());
+            }
+            match self.bytes.get(path) {
+                Some(before) if before.as_slice() == bytes => {}
+                Some(_) => return Err(crate::sync::runtime::superseded()),
+                None => added += 1,
+            }
+        }
+        let root = Path::new("data/central-source-archives");
+        if latest.bytes.len() != self.bytes.len() + added
+            || self
+                .bytes
+                .iter()
+                .any(|(path, bytes)| latest.bytes.get(path) != Some(bytes))
+            || !self.directories.is_subset(&latest.directories)
+            || latest
+                .directories
+                .difference(&self.directories)
+                .any(|path| path != root)
+        {
+            return Err(crate::sync::runtime::superseded());
+        }
+        Ok(())
+    }
 }
 fn single_name(name: &str) -> bool {
     !name.is_empty()

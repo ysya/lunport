@@ -414,30 +414,70 @@ pub(super) fn resume(
         receipt: receipt.clone(),
     })
 }
+/// Authenticated own output only; no caller can supply a filesystem exclusion list.
+pub(super) struct Outputs {
+    files: [(std::path::PathBuf, Vec<u8>); 2],
+}
+impl Outputs {
+    pub fn files(&self) -> impl Iterator<Item = (&std::path::Path, &[u8])> {
+        self.files
+            .iter()
+            .map(|(path, bytes)| (path.as_path(), bytes.as_slice()))
+    }
+}
+struct Readback {
+    plain: Zeroizing<Vec<u8>>,
+    outputs: Outputs,
+}
+fn readback(env: &SyncEnv, profile: &Profile, receipt: &Receipt) -> Result<Readback, AppError> {
+    receipt.validate()?;
+    receipt.context.matches_profile(profile)?;
+    let directory = ArchiveDirectory::open(env, Kind::Source)?;
+    let name = receipt.context.filename()?;
+    let marker_name = receipt.context.marker();
+    let bytes = directory.read(&name)?.ok_or_else(invalid)?;
+    if bytes.len() as u64 != receipt.bytes || crypto::hash(&bytes) != receipt.ciphertext_hash {
+        return Err(invalid());
+    }
+    let key = protected_key(env, profile, &receipt.context, false)?;
+    let marker = directory.read(&marker_name)?.ok_or_else(invalid)?;
+    if marker.as_slice() != crypto::hash(key.as_slice()).as_bytes() {
+        return Err(invalid());
+    }
+    let plain = decode(&receipt.context, &key, &bytes)?;
+    if protected_key(env, profile, &receipt.context, false)? != key {
+        return Err(invalid());
+    }
+    directory.sync()?;
+    let root = std::path::Path::new("data/central-source-archives");
+    Ok(Readback {
+        plain,
+        outputs: Outputs {
+            files: [(root.join(name), bytes), (root.join(marker_name), marker)],
+        },
+    })
+}
+impl Archived {
+    pub fn outputs(
+        &self,
+        env: &SyncEnv,
+        profile: &Profile,
+        expected: &[u8],
+    ) -> Result<Outputs, AppError> {
+        let read = readback(env, profile, &self.receipt)?;
+        if read.plain.as_slice() != expected {
+            return Err(invalid());
+        }
+        Ok(read.outputs)
+    }
+}
 /// Native bytes only. Never recreates a protected key and accepts no external filesystem path.
 pub(super) fn restore(
     env: &SyncEnv,
     profile: &Profile,
     receipt: &Receipt,
 ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    receipt.validate()?;
-    receipt.context.matches_profile(profile)?;
-    let directory = ArchiveDirectory::open(env, Kind::Source)?;
-    let bytes = directory
-        .read(&receipt.context.filename()?)?
-        .ok_or_else(invalid)?;
-    if bytes.len() as u64 != receipt.bytes || crypto::hash(&bytes) != receipt.ciphertext_hash {
-        return Err(invalid());
-    }
-    let key = protected_key(env, profile, &receipt.context, false)?;
-    if directory.read(&receipt.context.marker())?.as_deref()
-        != Some(crypto::hash(key.as_slice()).as_bytes())
-    {
-        return Err(invalid());
-    }
-    let plain = decode(&receipt.context, &key, &bytes)?;
-    directory.sync()?;
-    Ok(plain)
+    Ok(readback(env, profile, receipt)?.plain)
 }
 
 #[cfg(all(test, unix))]

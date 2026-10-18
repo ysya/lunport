@@ -165,6 +165,21 @@ impl Package {
             .require_unchanged(env, self.state.legacy_v1_backup.as_deref())?;
         source_archive::create(env, life, owner, generation, &plain)
     }
+    /// Momentary source comparison, not a permit that survives later edits or HTTP.
+    pub fn revalidate_archive(&self, env: &SyncEnv, archived: &Archived) -> Result<(), AppError> {
+        let owner = self.state.local.central.as_ref().ok_or_else(invalid)?;
+        archived.receipt().context.matches_owner(owner)?;
+        let outputs = archived.outputs(
+            env,
+            &owner.control.profile.profile()?,
+            &self.encode_local()?,
+        )?;
+        self.files.require_unchanged_after_archive(
+            env,
+            self.state.legacy_v1_backup.as_deref(),
+            &outputs,
+        )
+    }
     pub fn restore(env: &SyncEnv, profile: &Profile, receipt: &Receipt) -> Result<Self, AppError> {
         let plain = source_archive::restore(env, profile, receipt)?;
         let package = Self::decode_local(&plain)?;
@@ -273,6 +288,7 @@ mod tests {
         package.files.require_unchanged(&env, None).unwrap();
         let life = env.runtime.lifecycle.lock().unwrap();
         let archived = package.archive(&env, &life, &owner, 7).unwrap();
+        package.revalidate_archive(&env, &archived).unwrap();
         device.keychain.delete("vault:key").unwrap();
         // The vault creates a path-specific role; erase every observed synthetic vault role as well.
         let book: serde_json::Value =
@@ -335,6 +351,100 @@ mod tests {
             .bytes
             .remove(&Path::new("data").join(&restored.state_name));
         assert!(restored.encode_local().is_err());
+    }
+    #[test]
+    fn own_output_does_not_hide_any_source_write_removal_or_added_empty_directory() {
+        for change in ["write", "remove", "new-file", "empty-dir"] {
+            let (device, package, _, owner, _) = fixture();
+            let env = device.env();
+            let life = env.runtime.lifecycle.lock().unwrap();
+            let archived = package.archive(&env, &life, &owner, 1).unwrap();
+            package.revalidate_archive(&env, &archived).unwrap();
+            let root = env.state_path.parent().unwrap();
+            match change {
+                "write" => fs::write(root.join("sync-state.retained"), b"unique source B").unwrap(),
+                "remove" => fs::remove_file(root.join("sync-state.retained")).unwrap(),
+                "new-file" => {
+                    fs::write(root.join("central-source-archives/extra"), b"new source B").unwrap()
+                }
+                _ => fs::create_dir(root.join("central-source-archives/empty-B")).unwrap(),
+            }
+            assert!(
+                package.revalidate_archive(&env, &archived).is_err(),
+                "{change}"
+            );
+        }
+    }
+    #[test]
+    fn altered_own_ciphertext_marker_and_missing_key_block_revalidation_without_repair() {
+        for change in ["ciphertext", "marker", "key"] {
+            let (device, package, _, owner, _) = fixture();
+            let env = device.env();
+            let life = env.runtime.lifecycle.lock().unwrap();
+            let archived = package.archive(&env, &life, &owner, 1).unwrap();
+            let root = env
+                .state_path
+                .parent()
+                .unwrap()
+                .join("central-source-archives");
+            if change == "key" {
+                let profile = owner.control.profile.profile().unwrap();
+                device
+                    .keychain
+                    .delete(&profile.slot(&format!(
+                        "source-archive-{}",
+                        archived.receipt().operation()
+                    )))
+                    .unwrap();
+            } else {
+                let extension = if change == "ciphertext" {
+                    "lpsource"
+                } else {
+                    "sha256"
+                };
+                let path = fs::read_dir(&root)
+                    .unwrap()
+                    .map(|v| v.unwrap().path())
+                    .find(|v| v.extension().is_some_and(|v| v == extension))
+                    .unwrap();
+                fs::write(&path, b"ALTERED_SOURCE_SENTINEL").unwrap();
+                assert!(package.revalidate_archive(&env, &archived).is_err());
+                assert_eq!(fs::read(path).unwrap(), b"ALTERED_SOURCE_SENTINEL");
+                continue;
+            }
+            assert!(package.revalidate_archive(&env, &archived).is_err());
+        }
+    }
+    #[test]
+    fn prior_archive_in_later_snapshot_stays_protected_and_cannot_be_excluded_as_own_output() {
+        let (device, package, _, owner, _) = fixture();
+        let env = device.env();
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let first = package.archive(&env, &life, &owner, 1).unwrap();
+        let sources =
+            Sources::decode_local(&package.sources.encode_local().unwrap(), &package.state)
+                .unwrap();
+        let decryptors =
+            Snapshot::decode_local(&package.decryptors.encode_local().unwrap()).unwrap();
+        let later = Package::assemble(
+            &package.state,
+            &package.state_name,
+            Files::capture(&env, None).unwrap(),
+            sources,
+            decryptors,
+        )
+        .unwrap();
+        let second = later.archive(&env, &life, &owner, 2).unwrap();
+        later.revalidate_archive(&env, &second).unwrap();
+        assert!(later.revalidate_archive(&env, &first).is_err());
+        let prior = env
+            .state_path
+            .parent()
+            .unwrap()
+            .join("central-source-archives")
+            .join(format!("{}-key.sha256", first.receipt().operation()));
+        fs::remove_file(prior).unwrap();
+        assert!(later.revalidate_archive(&env, &second).is_err());
     }
     #[test]
     fn changed_sources_block_archive_creation_before_creating_an_archive_directory() {
