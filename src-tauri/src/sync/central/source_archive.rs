@@ -286,7 +286,7 @@ fn protected_key(
 ) -> Result<Zeroizing<[u8; 32]>, AppError> {
     let role = context.key_role(profile)?;
     let scope = context.scope()?;
-    if let Some(encoded) = env.keychain.get(&role)?.map(Zeroizing::new) {
+    if let Some(encoded) = env.keychain.get_noninteractive(&role)?.map(Zeroizing::new) {
         if fresh {
             return Err(invalid());
         }
@@ -306,7 +306,11 @@ fn protected_key(
     };
     let encoded = Zeroizing::new(serde_json::to_string(&stored).map_err(|_| invalid())?);
     env.keychain.set(&role, &encoded)?;
-    let readback = Zeroizing::new(env.keychain.get(&role)?.ok_or_else(invalid)?);
+    let readback = Zeroizing::new(
+        env.keychain
+            .get_noninteractive(&role)?
+            .ok_or_else(invalid)?,
+    );
     if parse_key(&readback, &scope)? != key {
         return Err(invalid());
     }
@@ -685,12 +689,94 @@ mod tests {
         changed.snapshot = "../../escape".into();
         assert!(changed.filename().is_err());
     }
+    struct NoPrompt<'a> {
+        memory: &'a crate::sync::testkit::MemKeychain,
+        allow_creation: bool,
+        locked: std::sync::atomic::AtomicBool,
+    }
+    impl Keychain for NoPrompt<'_> {
+        fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+            panic!("archive reads cannot prompt or fall back to an interactive read")
+        }
+        fn get_noninteractive(&self, role: &str) -> Result<Option<String>, AppError> {
+            assert!(role.starts_with("central:v2:source-archive-"));
+            if self.locked.load(Ordering::SeqCst) {
+                return Err(AppError::Other(
+                    "needs interaction: synthetic locked keychain".into(),
+                ));
+            }
+            self.memory.get(role)
+        }
+        fn set(&self, role: &str, value: &str) -> Result<(), AppError> {
+            assert!(
+                self.allow_creation,
+                "readback cannot create or repair a protected key"
+            );
+            assert!(
+                self.memory.entry(role).is_none(),
+                "fresh creation cannot replace a protected item"
+            );
+            self.memory.set(role, value)
+        }
+        fn delete(&self, _: &str) -> Result<(), AppError> {
+            panic!("archive cannot erase a protected key")
+        }
+    }
+    #[test]
+    fn all_archive_key_reads_are_noninteractive_and_locked_restore_never_falls_back_or_repairs() {
+        let device = device();
+        let owner = owner();
+        let profile = owner.control.profile.profile().unwrap();
+        let creation = NoPrompt {
+            memory: &device.keychain,
+            allow_creation: true,
+            locked: std::sync::atomic::AtomicBool::new(false),
+        };
+        let mut env = device.env();
+        env.keychain = &creation;
+        let life = env.runtime.lifecycle.lock().unwrap();
+        let plain = Zeroizing::new(b"independent private source".to_vec());
+        let archived = create(&env, &life, &owner, 0, &plain).unwrap();
+        let readonly = NoPrompt {
+            memory: &device.keychain,
+            allow_creation: false,
+            locked: std::sync::atomic::AtomicBool::new(false),
+        };
+        let mut env = device.env();
+        env.keychain = &readonly;
+        assert_eq!(
+            restore(&env, &profile, archived.receipt())
+                .unwrap()
+                .as_slice(),
+            plain.as_slice()
+        );
+        assert_eq!(
+            archived
+                .outputs(&env, &profile, &plain)
+                .unwrap()
+                .files()
+                .count(),
+            2
+        );
+        let role = archived.receipt().context.key_role(&profile).unwrap();
+        let stored = device.keychain.entry(&role).unwrap();
+        readonly.locked.store(true, Ordering::SeqCst);
+        assert!(restore(&env, &profile, archived.receipt()).is_err());
+        assert!(archived.outputs(&env, &profile, &plain).is_err());
+        assert!(resume(&env, &life, &owner, archived.receipt(), &plain).is_err());
+        assert!(next(&env, &life, &owner, 1, archived.receipt(), &plain).is_err());
+        assert_eq!(device.keychain.entry(&role).unwrap(), stored);
+    }
     struct LostReadback {
         reads: AtomicUsize,
         stored: std::sync::Mutex<Option<String>>,
         lose_on: usize,
     }
     impl Keychain for LostReadback {
+        fn get_noninteractive(&self, role: &str) -> Result<Option<String>, AppError> {
+            self.get(role)
+        }
+
         fn get(&self, role: &str) -> Result<Option<String>, AppError> {
             assert!(role.starts_with("central:v2:source-archive-"));
             let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
