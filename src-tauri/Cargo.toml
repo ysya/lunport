@@ -102,6 +102,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Use only unlocked Secret Service items in background; the high-level keyring backend auto-prompts.
+# This exact version is already in Cargo.lock through keyring.
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "=5.1.0", features = ["rt-tokio-crypto-rust"] }
+
 # keyring's attributes API reads the password on macOS. Query native metadata instead.
 # This is the same Security.framework version already used by keyring.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -104,6 +104,7 @@ impl MemKeychain {
 
 impl Keychain for MemKeychain {
     fn get_noninteractive(&self,account:&str)->Result<Option<String>,AppError>{self.get(account)}
+    fn set_noninteractive(&self,account:&str,secret:&str)->Result<(),AppError>{self.set(account,secret)}
     fn get(&self, account: &str) -> Result<Option<String>, AppError> {
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(AppError::Other("keychain error: locked".to_string()));

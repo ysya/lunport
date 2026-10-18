@@ -180,6 +180,7 @@ fn request(
     operation: Operation,
     account: &str,
     secret: &[u8],
+    no_ui: bool,
 ) -> Result<Option<Zeroizing<Vec<u8>>>, AppError> {
     validate_input(operation, account, secret).map_err(error)?;
     let (bytes, requirement) = frozen()?;
@@ -188,7 +189,7 @@ fn request(
     let executable = install(&root, bytes).map_err(|_| {
         error("cannot safely install the helper; check this device's application-data permissions")
     })?;
-    exchange(&executable, &requirement, operation, account, secret, false)
+    exchange(&executable, &requirement, operation, account, secret, no_ui)
 }
 
 fn validate_input(operation: Operation, account: &str, secret: &[u8]) -> io::Result<()> {
@@ -217,7 +218,7 @@ fn exchange(
     let (mut socket, child_socket) = crate::process::without_spawns(UnixStream::pair)
         .map_err(|_| error("cannot create private channel"))?;
     socket
-        .set_read_timeout(Some(Duration::from_secs(305)))
+        .set_read_timeout(Some(Duration::from_secs(if no_ui { 10 } else { 305 })))
         .map_err(error)?;
     socket
         .set_write_timeout(Some(Duration::from_secs(5)))
@@ -296,7 +297,7 @@ fn exchange(
 }
 
 pub(super) fn get(account: &str) -> Result<Option<String>, AppError> {
-    request(Operation::Get, account, &[])?
+    request(Operation::Get, account, &[], false)?
         .map(|value| {
             std::str::from_utf8(&value)
                 .map(str::to_owned)
@@ -306,13 +307,25 @@ pub(super) fn get(account: &str) -> Result<Option<String>, AppError> {
 }
 
 pub(super) fn set(account: &str, secret: &str) -> Result<(), AppError> {
-    request(Operation::Set, account, secret.as_bytes()).map(|_| ())
+    request(Operation::Set, account, secret.as_bytes(), false).map(|_| ())
 }
 
 pub(super) fn delete(account: &str) -> Result<(), AppError> {
-    request(Operation::Delete, account, &[]).map(|_| ())
+    request(Operation::Delete, account, &[], false).map(|_| ())
 }
 
+pub(super) fn get_noninteractive(account: &str) -> Result<Option<String>, AppError> {
+    request(Operation::Get, account, &[], true)?
+        .map(|bytes| {
+            std::str::from_utf8(&bytes)
+                .map(str::to_owned)
+                .map_err(|_| error("stored credential is not UTF-8"))
+        })
+        .transpose()
+}
+pub(super) fn set_noninteractive(account: &str, secret: &str) -> Result<(), AppError> {
+    request(Operation::Set, account, secret.as_bytes(), true).map(|_| ())
+}
 #[cfg(test)]
 mod tests {
     use super::*;

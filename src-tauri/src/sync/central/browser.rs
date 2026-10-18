@@ -19,10 +19,24 @@ const LOGIN_TTL: Duration = Duration::from_secs(600);
 fn error(message: &str) -> AppError {
     AppError::Other(message.into())
 }
+#[derive(Clone)]
+pub struct LoginCancellation(Arc<Mutex<Option<oneshot::Sender<()>>>>);
+impl LoginCancellation {
+    pub fn cancel(&self) {
+        if let Some(sender) = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = sender.send(());
+        }
+    }
+}
 /// Drop/cancel stops accepting requests and lets an already-written success response drain.
 pub struct BrowserLogin {
     receiver: mpsc::Receiver<(LoginAttempt, String)>,
-    cancel: Option<oneshot::Sender<()>>,
+    cancel: LoginCancellation,
     started: Instant,
 }
 impl BrowserLogin {
@@ -93,14 +107,14 @@ impl BrowserLogin {
         Ok((
             Self {
                 receiver,
-                cancel: Some(cancel),
+                cancel: LoginCancellation(Arc::new(Mutex::new(Some(cancel)))),
                 started: Instant::now(),
             },
             url,
         ))
     }
     pub fn finish(
-        self,
+        mut self,
         http: &impl openidconnect::SyncHttpClient,
     ) -> Result<LoginTokens, AppError> {
         let remaining = LOGIN_TTL.saturating_sub(self.started.elapsed());
@@ -108,12 +122,14 @@ impl BrowserLogin {
             .receiver
             .recv_timeout(remaining)
             .map_err(|_| error("Sign-in expired or was cancelled. Start again."))?;
+        self.cancel();
         attempt.finish(&callback, http)
     }
+    pub fn cancellation(&self) -> LoginCancellation {
+        self.cancel.clone()
+    }
     pub fn cancel(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(());
-        }
+        self.cancel.cancel();
     }
     #[cfg(test)]
     fn take_callback(&self) -> (LoginAttempt, String) {
@@ -266,6 +282,20 @@ mod tests {
         let (attempt, accepted) = login.take_callback();
         assert_eq!(attempt.validate_callback(&accepted).unwrap(), "synthetic");
         assert_eq!(client.get(&callback).send().unwrap().status(), 410);
+    }
+    #[test]
+    fn an_external_cancel_handle_stops_a_login_owned_by_a_waiting_background_task() {
+        let (_provider, login, _url) = setup();
+        let cancel = login.cancellation();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let task = std::thread::spawn(move || {
+            let http = super::super::oidc::BoundedHttp::new().unwrap();
+            sender.send(login.finish(&http).is_err()).unwrap();
+        });
+        cancel.cancel();
+        cancel.cancel();
+        assert!(receiver.recv_timeout(Duration::from_secs(3)).unwrap());
+        task.join().unwrap();
     }
     #[test]
     fn oversized_headers_do_not_consume_the_login_and_cancel_closes_the_listener() {

@@ -8,6 +8,28 @@ use super::{
 use crate::{error::AppError, sync::env::Keychain};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
+/// Central renewal may update pre-existing credentials without allowing a prompt or unlock.
+/// The generic SSH NonInteractiveKeychain intentionally remains read-only.
+pub struct Background<'a>(pub &'a dyn Keychain);
+impl Keychain for Background<'_> {
+    fn get(&self, key: &str) -> Result<Option<String>, AppError> {
+        self.0.get_noninteractive(key)
+    }
+    fn get_noninteractive(&self, key: &str) -> Result<Option<String>, AppError> {
+        self.0.get_noninteractive(key)
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), AppError> {
+        self.0.set_noninteractive(key, value)
+    }
+    fn set_noninteractive(&self, key: &str, value: &str) -> Result<(), AppError> {
+        self.0.set_noninteractive(key, value)
+    }
+    fn delete(&self, _: &str) -> Result<(), AppError> {
+        Err(AppError::Other(
+            "needs interaction: credential deletion requires a foreground action".into(),
+        ))
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
     pub origin: String,
@@ -166,6 +188,15 @@ impl SessionAttempt {
         device: &DeviceIdentity,
         now: u64,
     ) -> Result<Self, AppError> {
+        Self::prepare_with_reset(keychain, profile, device, now, false)
+    }
+    pub fn prepare_with_reset(
+        keychain: &dyn Keychain,
+        profile: &Profile,
+        device: &DeviceIdentity,
+        now: u64,
+        reset: bool,
+    ) -> Result<Self, AppError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Stored {
@@ -194,7 +225,7 @@ impl SessionAttempt {
             {
                 return Err(invalid());
             }
-            if now >= stored.created && now - stored.created < 300000 {
+            if !reset && now >= stored.created && now - stored.created < 300000 {
                 return Ok(Self {
                     id: stored.id.clone(),
                     secret: Zeroizing::new(stored.secret.clone()),
@@ -329,7 +360,12 @@ pub fn renew(
     )?;
     // Persist a provider-rotated refresh before using the new access token. Failure requires sign-in,
     // rather than retrying an already-consumed refresh family or silently continuing without durability.
-    save_refresh(keychain, profile, config, &tokens)?;
+    if interactive {
+        save_refresh(keychain, profile, config, &tokens)?;
+    } else {
+        save_refresh(&Background(keychain), profile, config, &tokens).map_err(|_|AppError::Other(
+            "Sign in again: the renewed account credential could not be saved securely. Local data is retained.".into()))?;
+    }
     Ok(tokens)
 }
 pub fn forget_session_attempt(keychain: &dyn Keychain, profile: &Profile) -> Result<(), AppError> {
@@ -359,6 +395,27 @@ mod tests {
         fn delete(&self, key: &str) -> Result<(), AppError> {
             self.values.lock().unwrap().remove(key);
             Ok(())
+        }
+    }
+    struct NoPrompt<'a>(&'a Memory, bool);
+    impl Keychain for NoPrompt<'_> {
+        fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+            panic!("interactive credential read from background")
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+            panic!("interactive credential update from background")
+        }
+        fn delete(&self, _: &str) -> Result<(), AppError> {
+            panic!("interactive credential delete from background")
+        }
+        fn get_noninteractive(&self, key: &str) -> Result<Option<String>, AppError> {
+            self.0.get(key)
+        }
+        fn set_noninteractive(&self, key: &str, value: &str) -> Result<(), AppError> {
+            if !self.1 || self.0.get(key)?.is_none() {
+                return Err(invalid());
+            }
+            self.0.set(key, value)
         }
     }
     fn profile() -> Profile {
@@ -392,6 +449,25 @@ mod tests {
         let renewed = SessionAttempt::prepare(&memory, &profile, &identity, 301001).unwrap();
         assert_ne!(first.id, renewed.id);
         assert_ne!(first.secret(), renewed.secret());
+    }
+    #[test]
+    fn session_renewal_and_auth_epoch_reset_use_only_explicit_background_operations() {
+        let memory = Memory::default();
+        let profile = profile();
+        let identity = DeviceIdentity::load_or_create(&memory, &profile, true).unwrap();
+        let first = SessionAttempt::prepare(&memory, &profile, &identity, 1000).unwrap();
+        let strict = NoPrompt(&memory, true);
+        let background = Background(&strict);
+        let retry = SessionAttempt::prepare(&background, &profile, &identity, 1100).unwrap();
+        assert_eq!(first.id, retry.id);
+        let reset =
+            SessionAttempt::prepare_with_reset(&background, &profile, &identity, 1200, true)
+                .unwrap();
+        assert_ne!(first.id, reset.id);
+        let expired = SessionAttempt::prepare(&background, &profile, &identity, 301201).unwrap();
+        assert_ne!(reset.id, expired.id);
+        assert!(DeviceIdentity::load_or_create(&background, &profile, false).is_ok());
+        assert!(background.delete("anything").is_err());
     }
     #[test]
     fn unreadable_or_corrupt_credentials_are_not_replaced_with_a_fresh_identity() {
@@ -445,13 +521,27 @@ mod tests {
             ..config.clone()
         };
         assert!(renew(&memory, &profile, &wrong, true, &http).is_err());
-        let refreshed = renew(&memory, &profile, &config, true, &http).unwrap();
+        let refreshed = renew(&NoPrompt(&memory, true), &profile, &config, false, &http).unwrap();
         assert_eq!(&*refreshed.access, "new-access");
         let persisted = memory.get(&profile.slot("refresh")).unwrap().unwrap();
         assert!(persisted.contains("new-refresh"));
         assert!(!persisted.contains("old-refresh"));
         assert!(!persisted.contains("new-access"));
         exchange.assert();
+        let lost=provider.mock("POST","/token").match_body(mockito::Matcher::UrlEncoded("refresh_token".into(),"new-refresh".into()))
+            .with_header("content-type","application/json").with_body(json!({"access_token":"must-not-be-returned","refresh_token":"unsaved-rotation","token_type":"Bearer","expires_in":300}).to_string()).expect(1).create();
+        let error = match renew(&NoPrompt(&memory, false), &profile, &config, false, &http) {
+            Ok(_) => panic!("unsaved rotated token escaped"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("Sign in again"));
+        assert!(!error.contains("must-not-be-returned"));
+        assert!(!error.contains("unsaved-rotation"));
+        assert_eq!(
+            memory.get(&profile.slot("refresh")).unwrap().unwrap(),
+            persisted
+        );
+        lost.assert();
     }
     #[test]
     fn refresh_is_scoped_to_exact_issuer_subject_and_client_and_logout_preserves_device_keys() {
