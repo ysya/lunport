@@ -20,6 +20,7 @@ import { recordHostSearchText } from "./group-tree";
 import { useSettingsStore } from "@/stores/settings";
 import { recentHostKey } from "./library-view";
 import { isImeKey } from "@/lib/ime";
+import { useTerminalStore } from "@/stores/terminals";
 
 export function RecordsCommandPalette({
   overview,
@@ -28,6 +29,7 @@ export function RecordsCommandPalette({
   editorBusy,
   edit,
   create,
+  connectHost,
 }: {
   overview: RecordOverview;
   terminalId: string | null;
@@ -35,6 +37,7 @@ export function RecordsCommandPalette({
   editorBusy: boolean;
   edit: (id: string) => void;
   create: () => void;
+  connectHost?: (id: string) => Promise<void>;
 }) {
   const open = useUiStore((state) => state.paletteOpen);
   const setOpen = useUiStore((state) => state.setPaletteOpen);
@@ -54,6 +57,7 @@ export function RecordsCommandPalette({
   const recentIds = new Set(recentHosts.map((host) => host.id));
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || (useTerminalStore.getState().activeId && event.ctrlKey && !event.metaKey && !event.shiftKey)) return;
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "k" &&
@@ -71,7 +75,8 @@ export function RecordsCommandPalette({
     inFlight.current = true;
     setBusy(true);
     try {
-      await connectSavedHost(overview, id, terminalId, newTab);
+      if (connectHost) await connectHost(id);
+      else await connectSavedHost(overview, id, terminalId, newTab);
       setOpen(false);
     } catch (error) {
       toast.error("Could not connect", {

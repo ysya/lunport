@@ -69,7 +69,7 @@ import { copyText } from "@/lib/clipboard";
 import { isImeKey } from "@/lib/ime";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
-import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
+import { effectiveNewTab, IN_APP_TERMINAL, resolveTerminal } from "@/lib/settings-logic";
 import { isWildcardOnly } from "@/lib/host-display";
 import { useSyncOverview } from "@/lib/sync";
 import { revealHidden } from "@/lib/sync-approvals";
@@ -623,6 +623,7 @@ function HostActions({
               <DropdownMenuRadioItem value={APP_DEFAULT_TERMINAL}>
                 App default
               </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value={IN_APP_TERMINAL}>Lunport (in app)</DropdownMenuRadioItem>
               {(terminals.data ?? []).map((t) => (
                 <DropdownMenuRadioItem key={t.id} value={t.id}>
                   {t.label}

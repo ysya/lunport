@@ -45,6 +45,8 @@ import {
   LINT_RULES,
   quickConnectLabel,
   terminalSupportsNewTab,
+  IN_APP_TERMINAL,
+  clampTerminalFontSize,
   type ThemePref,
 } from "@/lib/settings-logic";
 import { cn } from "@/lib/utils";
@@ -557,7 +559,7 @@ function AppearancePane() {
   const motion = useSettingsStore((s) => s.motion);
   const setMotion = useSettingsStore((s) => s.setMotion);
   return (
-    <><Section title="Color theme" description="Choose a palette for Lunport. Terminal colors are controlled by your terminal app.">
+    <><Section title="Color theme" description="Choose a palette for Lunport and its in-app terminal. External terminals keep their own themes.">
       <SettingsGroup>
         <SettingsRow label="Appearance" description="System follows your OS light or dark mode.">
           <ThemeSegmented value={theme} onChange={setTheme} />
@@ -621,13 +623,17 @@ function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
   const newTabConnect = useSettingsStore((s) => s.newTabConnect);
   const setNewTabConnect = useSettingsStore((s) => s.setNewTabConnect);
   const terminals = useTerminals();
+  const terminalFontSize = useSettingsStore((s) => clampTerminalFontSize(s.terminalFontSize));
+  const setTerminalFontSize = useSettingsStore((s) => s.setTerminalFontSize);
+  const cursorBlink = useSettingsStore((s) => s.terminalCursorBlink !== false);
+  const setCursorBlink = useSettingsStore((s) => s.setTerminalCursorBlink);
 
   const supportsNewTab = terminalSupportsNewTab(terminalId, terminals.data ?? []);
 
   return (
     <><Section
       title="Terminal"
-      description="Where Lunport opens a connection. “System default” uses your OS default terminal (or the first detected)."
+      description="Connect inside Lunport or open an external terminal. Existing terminal sessions stay connected when you switch views."
     >
       <SettingsGroup>
         <SettingsRow id="set-terminal" label="Default terminal">
@@ -639,6 +645,7 @@ function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value={IN_APP_TERMINAL}>Lunport (in app)</SelectItem>
               <SelectItem value={TERMINAL_DEFAULT}>System default</SelectItem>
               {(terminals.data ?? []).map((t) => (
                 <SelectItem key={t.id} value={t.id}>
@@ -652,19 +659,33 @@ function ConnectionPane({recordOverview}: {recordOverview?:RecordOverview}) {
           id="set-new-tab"
           label="Open connections in a new tab"
           description={
-            supportsNewTab
+            terminalId === IN_APP_TERMINAL
+              ? "Lunport opens each connection in its own session tab."
+              : supportsNewTab
               ? "Opens a tab in an existing window instead of a new window."
               : "The selected terminal doesn’t support opening new tabs."
           }
         >
           <Switch
             id="set-new-tab"
-            checked={newTabConnect}
+            checked={terminalId === IN_APP_TERMINAL || newTabConnect}
             onCheckedChange={setNewTabConnect}
             disabled={!supportsNewTab}
           />
         </SettingsRow>
       </SettingsGroup>
+    </Section>
+    <Section title="In-app terminal" description="Colors follow Appearance. Search with ⌘F / Ctrl+F, switch sessions with Ctrl+Tab, and zoom with ⌘ / Ctrl + or −. Closing a running session asks for confirmation.">
+      <SettingsGroup>
+        <SettingsRow id="set-terminal-font" label="Terminal text size" description="Applies to all in-app terminal tabs without reconnecting.">
+          <Select value={String(terminalFontSize)} onValueChange={(value) => setTerminalFontSize(Number(value))}>
+            <SelectTrigger id="set-terminal-font" className="settings-select"><SelectValue /></SelectTrigger>
+            <SelectContent>{Array.from({ length: 15 }, (_, i) => i + 10).map((size) => <SelectItem key={size} value={String(size)}>{size} px</SelectItem>)}</SelectContent>
+          </Select>
+        </SettingsRow>
+        <SettingsRow id="set-terminal-cursor" label="Blink cursor" description="Reduced-motion preferences take priority."><Switch id="set-terminal-cursor" checked={cursorBlink} onCheckedChange={setCursorBlink} /></SettingsRow>
+      </SettingsGroup>
+      <p className="mt-3 text-xs leading-relaxed text-muted-foreground">Switching tabs keeps SSH connected. Closing a tab, reloading the workspace, quitting or installing an update ends its session. Reconnect starts a new shell.</p>
     </Section>
     {recordOverview && <Section title="Known hosts" description="Inspect trusted server fingerprints and manage local OpenSSH host keys.">
       <SettingsGroup><SettingsRow label="Saved server identities" description="Review fingerprints, verify a server again, or forget an old identity."><KnownHostsManager overview={recordOverview} /></SettingsRow></SettingsGroup>

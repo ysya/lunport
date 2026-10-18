@@ -26,9 +26,17 @@ The **OpenSSH known_hosts** tab manages this computer's `~/.ssh/known_hosts`. Se
 
 In a host's connection details, **Check port** performs a manual TCP reachability check with a three-second limit and displays the result, connection time and check time. A reachable port confirms TCP connectivity; server identity and login are verified separately. Timeout, refused connection and name-resolution errors describe that check rather than declaring a host offline. For jump-host routes, use **Verify fingerprint** to check through the configured route; that flow may request jump-host credentials.
 
-## Connect in your terminal
+## Connect in Lunport or an external terminal
 
-Choose a terminal in **Settings → Connections**; individual hosts can override that choice. A connection opens in the terminal while Lunport's built-in SSH engine handles authentication and server identity. New or changed server fingerprints require a decision in Lunport. Check fingerprints against a trusted source before accepting them.
+The in-app terminal is available first on the **Beta** update channel in **Settings → Updates**.
+
+Choose **Lunport (in app)** in **Settings → Connections** for integrated SSH tabs, or select an external terminal. New installations use the app terminal; existing preferences are preserved. The Records connection menu changes the same saved preference. Legacy hosts can override it individually. Lunport's built-in SSH engine handles authentication and server identity in either destination. New or changed server fingerprints require a decision in Lunport; compare them against a trusted source before accepting them.
+
+Double-click a ready host or use Quick connect. Each connection opens a separate session tab. Switching to Library, Settings or another tab keeps SSH connected. The tab dot shows connection state. Closing a running tab asks for confirmation; a completed tab closes immediately. Disconnect ends the session and Reconnect opens a new shell. Closing the app window keeps active sessions running, while quitting, reloading the workspace or installing an update ends them. Use a remote tool such as tmux when commands must survive disconnection.
+
+In **Settings → Connections → In-app terminal**, choose the terminal text size and cursor preference. App color themes apply to the terminal; dark presets include their ANSI colors. Text size and theme changes apply to open sessions without reconnecting. **⌘F / Ctrl+F** searches retained output; Enter / Shift+Enter selects the next / previous match, and Escape closes Find. **Ctrl+Tab / Ctrl+Shift+Tab** switches workspace tabs. **⌘ / Ctrl +**, **−** and **0** adjust or reset terminal text size. Quick connect is **⌘K** on macOS; inside a terminal on other platforms use **Ctrl+Shift+K** so Ctrl+K remains available to the shell. Use normal copy/paste shortcuts or the Copy selection button. Remote clipboard writes are disabled.
+
+Up to eight session tabs can be open. Retained history and queued data are bounded; if the terminal cannot consume output, it reports the interruption rather than retrying keystrokes.
 
 Use a key from the local vault, a saved password or an interactive authentication prompt. Passwords, key passphrases and two-factor codes appear in Lunport’s **SSH authentication** window, with the requesting host and username. Answers apply to the current connection; cancelling or closing the terminal abandons its questions. Shell input continues in your preferred terminal.
 

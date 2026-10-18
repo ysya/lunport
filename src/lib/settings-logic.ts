@@ -1,6 +1,12 @@
 import type { TerminalInfo } from "@/bindings/TerminalInfo";
 import type { LintIssue } from "@/bindings/LintIssue";
 
+export const IN_APP_TERMINAL = "lunport";
+export const DEFAULT_TERMINAL_FONT_SIZE = 14;
+export function clampTerminalFontSize(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 10 && value <= 24 ? value : DEFAULT_TERMINAL_FONT_SIZE;
+}
+
 /** The persisted theme preference: explicit, or follow the OS. */
 export type ThemePref = "system" | "light" | "dark";
 /** What actually gets applied to the document. */

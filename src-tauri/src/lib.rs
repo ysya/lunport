@@ -275,7 +275,16 @@ fn run_app(host: bool, start_hidden: bool) {
             diagnostics::stage(diagnostics::Stage::Ready);
             Ok(())
         })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                // A reloaded workspace cannot own the old JavaScript terminal handles.
+                webview.app_handle().state::<state::AppState>().session.embedded.close_all();
+            }
+        })
         .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window.app_handle().state::<state::AppState>().session.embedded.close_all();
+            }
             // SSH agent 的核准視窗(金鑰保管庫 spec §7.4):關掉它就是拒絕等待中的請求;它的焦點與同步的輪詢無關。
             if window.label() == agent::prompt::APPROVAL_WINDOW {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
@@ -392,6 +401,11 @@ fn run_app(host: bool, start_hidden: bool) {
             config_list_backups,
             config_restore_backup,
             connect_list_terminals,
+            session::embedded::terminal_open,
+            session::embedded::terminal_write,
+            session::embedded::terminal_resize,
+            session::embedded::terminal_ack,
+            session::embedded::terminal_close,
             connect_launch,
             keys_list,
             keys_agent_status,

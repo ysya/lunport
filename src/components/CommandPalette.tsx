@@ -23,6 +23,7 @@ import {
   useTerminals,
 } from "@/lib/queries";
 import { useUiStore } from "@/stores/ui";
+import { useTerminalStore } from "@/stores/terminals";
 import { useSettingsStore } from "@/stores/settings";
 import { effectiveNewTab, resolveTerminal } from "@/lib/settings-logic";
 import { isWildcardOnly } from "@/lib/host-display";
@@ -104,6 +105,7 @@ export function CommandPalette() {
   // the listener stays stable (identical to the previous setState-updater form).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || (useTerminalStore.getState().activeId && e.ctrlKey && !e.metaKey && !e.shiftKey)) return;
       if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         const ui = useUiStore.getState();
@@ -130,6 +132,7 @@ export function CommandPalette() {
 
   const doEdit = useCallback(
     (alias: string) => {
+      useTerminalStore.getState().activate(null);
       setSelectedAlias(alias);
       setOpen(false);
     },

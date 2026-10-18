@@ -5,6 +5,9 @@ import { getColorTheme, type ColorThemeId } from "@/lib/color-themes";
 import {
   clampFontSize,
   DEFAULT_FONT_SIZE,
+  IN_APP_TERMINAL,
+  clampTerminalFontSize,
+  DEFAULT_TERMINAL_FONT_SIZE,
   defaultLintRules,
   resolveTheme,
   systemPrefersDark,
@@ -56,11 +59,15 @@ interface SettingsState {
   /** Palette action: cycle light↔dark based on the currently RESOLVED mode. */
   toggleTheme: () => void;
   /**
-   * Preferred terminal id to launch connections into (null = system default /
-   * first detected). Passed as `terminalOverride` to `connect_launch`.
+   * "lunport" opens an in-app session; null uses the system default / first
+   * detected external terminal. Existing persisted choices survive upgrades.
    */
   terminalId: string | null;
   setTerminalId: (id: string | null) => void;
+  terminalFontSize: number;
+  setTerminalFontSize: (size: number) => void;
+  terminalCursorBlink: boolean;
+  setTerminalCursorBlink: (enabled: boolean) => void;
   /**
    * Per-host terminal overrides (host alias → terminal id). A host's override
    * wins over the global `terminalId`; no entry = use the global preference.
@@ -150,8 +157,12 @@ export const useSettingsStore = create<SettingsState>()(
         set((s) => ({
           theme: resolveTheme(s.theme, systemPrefersDark()) === "dark" ? "light" : "dark",
         })),
-      terminalId: legacyTerminalId(),
+      terminalId: legacyTerminalId() ?? IN_APP_TERMINAL,
       setTerminalId: (terminalId) => set({ terminalId }),
+      terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE,
+      setTerminalFontSize: (size) => set({ terminalFontSize: clampTerminalFontSize(size) }),
+      terminalCursorBlink: true,
+      setTerminalCursorBlink: (terminalCursorBlink) => set({ terminalCursorBlink }),
       hostTerminals: {},
       setHostTerminal: (alias, id) =>
         set((s) => {

@@ -52,6 +52,7 @@ export function RecordHostEditor({
   onDirty,
   onBusy,
   onCancel,
+  connectHost,
   initialScope = { kind: "local" },
   initialGroupId = null,
 }: {
@@ -66,6 +67,7 @@ export function RecordHostEditor({
   onDirty: (dirty: boolean) => void;
   onBusy?: (busy: boolean) => void;
   onCancel?: () => void;
+  connectHost?: (id: string) => Promise<void>;
   initialScope?: HostScope;
   initialGroupId?: string | null;
 }) {
@@ -684,7 +686,7 @@ export function RecordHostEditor({
               }
               onClick={() =>
                 run(() =>
-                  connectSavedHost(overview, state.id!, terminalId, newTab),
+                  connectHost ? connectHost(state.id!) : connectSavedHost(overview, state.id!, terminalId, newTab),
                 )
               }
             >
