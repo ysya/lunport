@@ -212,7 +212,7 @@ impl Service {
             .create();
         let account = Arc::clone(&state);
         server.mock("GET",mockito::Matcher::Regex("^/v2/vaults/[0-9a-f]{64}/metadata$".into())).with_header("content-type","application/json").with_body_from_request(move |_|{
-            let s=account.lock().unwrap();json!({"vault":s.vault,"epoch":1,"membership_head":s.chain().unwrap().current().head(),"authorization_epoch":s.epoch.to_string(),"phase":"ready","sequence":"0","history_hash":"0".repeat(64)}).to_string().into_bytes()
+            let s=account.lock().unwrap();json!({"vault":s.vault,"epoch":s.key_epoch,"membership_head":s.chain().unwrap().current().head(),"authorization_epoch":s.epoch.to_string(),"phase":if s.rekey_pending{"rekey_pending"}else{"ready"},"sequence":s.history.len().to_string(),"history_hash":s.history.last().map_or("0".repeat(64),|row|row.history_hash.clone())}).to_string().into_bytes()
         }).create();
         let account = Arc::clone(&state);
         let authorization = Arc::clone(&state);
@@ -2360,6 +2360,7 @@ fn active_full_baseline_reads_after_trusted_approval_or_committed_recovery_use_o
             let ready=recovery_flow::begin(&peer.env(),Some(&kit.kit)).unwrap();
             recovery_flow::confirm(&peer.env(),ready.operation.as_deref().unwrap()).unwrap();
         } else {
+            super::round::sync_once(&original.env()).unwrap();
             let code=devices::pairing_code(&peer.env()).unwrap();devices::approve(&original.env(),&code.code).unwrap();
             controller::refresh(&peer.env()).unwrap();joining::initialize(&peer.env()).unwrap();
         }
@@ -2395,7 +2396,9 @@ fn active_full_baseline_reads_after_trusted_approval_or_committed_recovery_use_o
         let mut candidate=owner.clone();candidate.identity_slot=Some(operation.clone());
         let mut source=record_runtime::snapshot(&original.env()).unwrap().0.local.central.unwrap();
         let old_chain=source.control.verified_chain().unwrap();
-        let old=source.replica.as_ref().unwrap().prepare_page(&old_chain,&keys,&rows[..1],&super::rekey::Checkpoint{
+        let existing=source.replica.as_ref().unwrap();
+        let partial=super::replica::Replica::new(existing.vault.clone(),existing.creation_head.clone(),existing.creation_authorization_epoch).unwrap();
+        let old=partial.prepare_page(&old_chain,&keys,&rows[..1],&super::rekey::Checkpoint{
             epoch:1,sequence:1,history_hash:rows[0].history_hash.clone()}).unwrap().next;
         source.replica=Some(old);source.replacement=Some(super::replacement::Intent{operation:operation.clone(),
             route:if recovered{super::replacement::Route::RecoveryKit}else{super::replacement::Route::TrustedDevice},device:Some(selected.device()), candidate: None, recovery_confirmation: None, });
@@ -2613,4 +2616,70 @@ fn trusted_replacement_requires_the_protected_oob_secret_and_exact_selected_sess
     assert!(switched.control.denied_devices.contains(&source.control.device.id));assert!(switched.require_key_recipients().is_err());
     assert_eq!(switched.replacement_archives[0].route,Route::TrustedDevice);assert!(!switched.replacement_archives[0].needs_reconciliation);
     assert_eq!(d.keychain.entry(&profile.slot("device")),saved);
+}
+
+#[test]
+fn trusted_replacement_driver_uses_account_only_login_and_fences_cancelled_or_corrupt_reads() {
+    use super::{replacement_flow,round};
+    use crate::sync::env::Keychain;
+    for (interrupted,rotated,stronger) in [(false,false,false),(true,false,false),(false,true,false),(false,false,true)] {
+        let (service,peer,_kit,_keys,first)=recovery_fixture_with_source(33);
+        round::sync_once(&first.env()).unwrap();
+        let invite=devices::pairing_code(&peer.env()).unwrap();devices::approve(&first.env(),&invite.code).unwrap();
+        controller::refresh(&peer.env()).unwrap();round::sync_once(&peer.env()).unwrap();
+        assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0.local.central.as_ref().unwrap().replica.as_ref().unwrap().checkpoint.sequence,33);
+        let original=record_runtime::snapshot(&first.env()).unwrap().0;
+        if rotated {
+            let registry=devices::registry(&peer.env()).unwrap();let old=registry.devices.iter().find(|v|v.id==original.local.central.as_ref().unwrap().control.device.id).unwrap();
+            devices::revoke(&peer.env(),&old.id,&registry.membership_head,&registry.authorization_epoch,&old.fingerprint).unwrap();
+            for _ in 0..8 {round::sync_once(&peer.env()).unwrap();if !service.state.lock().unwrap().rekey_pending && record_runtime::snapshot(&peer.env()).unwrap().0.local.central.as_ref().unwrap().control.phase==super::client_state::Phase::Enrolled{break;}}
+            assert_eq!(service.state.lock().unwrap().key_epoch,2);assert!(!service.state.lock().unwrap().rekey_pending);
+            assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0.local.central.as_ref().unwrap().control.phase,super::client_state::Phase::Enrolled);
+        }
+        let profile=controller::context(&first.env()).unwrap().profile.profile().unwrap();
+        first.keychain.delete(&profile.slot("device")).unwrap();controller::refresh(&first.env()).unwrap();
+        assert!(controller::context(&first.env()).unwrap().identity.is_none());
+        let pending=replacement_flow::begin_trusted(&first.env()).unwrap();assert_eq!(pending.phase,"awaiting_approval");let operation=pending.operation.unwrap();
+        let invite=replacement_flow::pairing_code(&first.env(),&operation).unwrap();devices::approve(&peer.env(),&invite.code).unwrap();
+        let reading=replacement_flow::begin_trusted(&first.env()).unwrap();assert_eq!(reading.phase,"reading");assert_eq!(reading.total,33);
+        assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0.local.central.as_ref().unwrap().control.device,original.local.central.as_ref().unwrap().control.device);
+        if stronger {
+            // Model a separate verified round advancing the old owner's floor after HTTP began.
+            let local=Arc::clone(&first);service.state.lock().unwrap().on_pull=Some(Box::new(move||{
+                record_runtime::mutate_records(&local.env(),|records|{let mut next=records.clone();let replica=next.local.central.as_mut().unwrap().replica.as_mut().unwrap();replica.checkpoint.sequence=34;replica.checkpoint.history_hash="f".repeat(64);Ok(next)}).unwrap();
+            }));
+            assert!(replacement_flow::advance(&first.env(),&operation).is_err());
+            let retained=record_runtime::snapshot(&first.env()).unwrap().0;let owner=retained.local.central.as_ref().unwrap();
+            assert_eq!(owner.control.device,original.local.central.as_ref().unwrap().control.device);assert_eq!(owner.replica.as_ref().unwrap().checkpoint.sequence,34);
+            assert!(owner.replacement_archives.is_empty());assert!(owner.replacement.is_some());continue;
+        }
+        if interrupted {
+            let local=Arc::clone(&first);service.state.lock().unwrap().on_pull=Some(Box::new(move||replacement_flow::cancel(&local.env())));
+            assert!(replacement_flow::advance(&first.env(),&operation).is_err());
+            assert_eq!(replacement_flow::status(&first.env()).unwrap().phase,"paused");
+            assert!(record_runtime::snapshot(&first.env()).unwrap().0.local.central.as_ref().unwrap().replacement_archives.is_empty());
+            assert_eq!(replacement_flow::begin_trusted(&first.env()).unwrap().operation.as_deref(),Some(operation.as_str()));
+            service.state.lock().unwrap().corrupt_pull_once=true;
+            assert!(replacement_flow::advance(&first.env(),&operation).is_err());
+            assert!(record_runtime::snapshot(&first.env()).unwrap().0.local.central.as_ref().unwrap().replacement_archives.is_empty());
+            replacement_flow::cancel(&first.env());replacement_flow::begin_trusted(&first.env()).unwrap();
+        }
+        let local=Arc::clone(&first);service.state.lock().unwrap().on_pull=Some(Box::new(move||{
+            record_runtime::mutate_records(&local.env(),|records|{let mut next=records.clone();next.device_name="local-B-during-active-read".into();Ok(next)}).unwrap();
+        }));
+        let result=replacement_flow::advance(&first.env(),&operation).unwrap();assert_eq!(result.phase,"complete");
+        let published=record_runtime::snapshot(&first.env()).unwrap().0;let owner=published.local.central.as_ref().unwrap();
+        assert_eq!(published.device_name,"local-B-during-active-read");assert_eq!(owner.identity_slot.as_deref(),Some(operation.as_str()));
+        assert_ne!(owner.control.device,original.local.central.as_ref().unwrap().control.device);
+        assert_eq!(owner.replica.as_ref().unwrap().current.len(),33);assert_eq!(owner.replica.as_ref().unwrap().checkpoint.sequence,33);
+        assert_eq!(owner.replica.as_ref().unwrap().checkpoint.epoch,if rotated{2}else{1});
+        assert_eq!(owner.replacement_archives[0].minimums[0].epoch,1);
+        assert_eq!(owner.control.phase,if rotated{super::client_state::Phase::Enrolled}else{super::client_state::Phase::Rekey});assert_eq!(owner.require_key_recipients().is_ok(),rotated);
+        let restored=super::replacement_archive::restore(&first.env(),&profile,&owner.replacement_archives[0].receipt).unwrap();
+        assert_eq!(restored.device_name,"local-B-during-active-read");assert_eq!(restored.local.central.as_ref().unwrap().control.device,original.local.central.as_ref().unwrap().control.device);
+        assert!(first.keychain.get(&profile.slot("device")).unwrap().is_none());
+        let selected=owner.control.device.clone();controller::refresh(&first.env()).unwrap();
+        assert_eq!(controller::context(&first.env()).unwrap().identity.as_ref().unwrap().device(),selected);
+        assert_eq!(replacement_flow::status(&first.env()).unwrap().phase,"complete");
+    }
 }

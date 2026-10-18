@@ -3,7 +3,7 @@
 use super::{
     client_state::Phase,
     credentials::DeviceIdentity,
-    recovery_read::{Baseline, HistoryPage, RecoveryVault},
+    recovery_read::{Baseline, CheckedSnapshot, HistoryPage, RecoveryVault},
     recovery_revalidation::Bridge,
     rekey::{self, Checkpoint, SignedRekey},
     replacement_proof::{extend_minimums, minimums},
@@ -31,13 +31,25 @@ pub struct ReadSession {
 pub struct VerifiedLibrary {
     session: ReadSession,
 }
-impl ReadSession {
-    pub fn begin(
+/// Verified native metadata/keys while bounded cross-epoch source proofs are collected.
+/// It grants no completed-read or publication capability and never crosses IPC.
+pub(super) struct Plan {
+    before: Workspace,
+    proof: ControlProof,
+    auth_epoch: u64,
+    chain: VerifiedChain,
+    keys: super::crypto::VaultKeys,
+    checked: CheckedSnapshot,
+    floors: Vec<Checkpoint>,
+    creation: String,
+    creation_auth: u64,
+}
+impl Plan {
+    pub(super) fn new(
         before: &Workspace,
         identity: &DeviceIdentity,
         proof: ControlProof,
         snapshot: Snapshot,
-        bridges: &[Bridge],
     ) -> Result<Self, AppError> {
         before.validate()?;
         let Snapshot {
@@ -131,6 +143,47 @@ impl ReadSession {
                 2,
             )
         };
+        Ok(Self {
+            before: before.clone(),
+            proof,
+            auth_epoch,
+            chain,
+            keys,
+            checked,
+            floors,
+            creation,
+            creation_auth,
+        })
+    }
+    pub(super) fn floors(&self) -> &[Checkpoint] {
+        &self.floors
+    }
+    pub(super) fn chain(&self) -> &VerifiedChain {
+        &self.chain
+    }
+    pub(super) fn vault(&self) -> &str {
+        &self.checked.source().vault
+    }
+    pub(super) fn epochs(&self) -> &[SignedRekey] {
+        &self.checked.source().commits
+    }
+    pub(super) fn checkpoint(&self) -> &Checkpoint {
+        self.checked.target()
+    }
+    pub(super) fn start(self, bridges: &[Bridge]) -> Result<ReadSession, AppError> {
+        let Self {
+            before,
+            proof,
+            auth_epoch,
+            chain,
+            keys,
+            checked,
+            floors,
+            creation,
+            creation_auth,
+        } = self;
+        let source = checked.source();
+        let target = checked.target();
         let pinned = extend_minimums(
             &chain,
             &source.vault,
@@ -157,12 +210,23 @@ impl ReadSession {
         baseline.replica.validate(&baseline.chain)?;
         baseline.pin_prefixes(pinned)?;
         baseline.retain_prefix_hashes()?;
-        Ok(Self {
-            before: before.clone(),
+        Ok(ReadSession {
+            before,
             proof,
             auth_epoch,
             baseline,
         })
+    }
+}
+impl ReadSession {
+    pub fn begin(
+        before: &Workspace,
+        identity: &DeviceIdentity,
+        proof: ControlProof,
+        snapshot: Snapshot,
+        bridges: &[Bridge],
+    ) -> Result<Self, AppError> {
+        Plan::new(before, identity, proof, snapshot)?.start(bridges)
     }
     pub(super) fn previous_owner(&self) -> &Workspace {
         &self.before

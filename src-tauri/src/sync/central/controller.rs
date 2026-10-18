@@ -167,7 +167,7 @@ pub fn overview(env: &SyncEnv, api: &Api, session: &Session) -> Result<AccountOv
     }
     Ok(value)
 }
-fn pending_pairing(
+pub(super) fn pending_pairing(
     env: &SyncEnv,
     profile: &Profile,
     identity: &DeviceIdentity,
@@ -670,6 +670,7 @@ pub fn refresh(env: &SyncEnv) -> Result<Status, AppError> {
 pub fn sign_out(env: &SyncEnv) -> Result<Status, AppError> {
     require_enabled()?;
     super::recovery_flow::cancel(env);
+    super::replacement_flow::cancel(env);
     if let Some((_, Some(cancel))) = env.runtime.central_login.lock().unwrap().take() {
         cancel.cancel();
     }

@@ -181,6 +181,11 @@ pub fn prepare(env: &SyncEnv, route: Route) -> Result<Intent, AppError> {
         .local
         .central
         .ok_or_else(invalid)?;
+    if before.control.phase == super::client_state::Phase::SignedOut {
+        return Err(AppError::Other(
+            "Sign in before replacing this device. Local data is retained.".into(),
+        ));
+    }
     if (before.control.anchor.is_none() && super::recovery_credentials::has_intent(env, &before)?)
         || before.bootstrap.is_some()
         || before.recovery.as_ref().is_some_and(|r| {
