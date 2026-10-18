@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/ysya/lunport/compare/v1.5.0...v1.6.0) (2026-10-18)
+
+
+### Features
+
+* select host cards, double-click to connect and edit from the right ([#41](https://github.com/ysya/lunport/issues/41)) ([6e92613](https://github.com/ysya/lunport/commit/6e9261319a5a27ce04ed5ad91f57b01b925a58c8))
+
 ## [1.5.0](https://github.com/ysya/lunport/compare/v1.4.0...v1.5.0) (2026-10-17)
 
 SSH password questions now appear in Lunport. Host Details can save, replace or remove a password in this device's system credential store. One-time answers are not saved automatically, and saved passwords are not included in library sync or exports.
