@@ -181,6 +181,9 @@ pub fn prepare(env: &SyncEnv, route: Route) -> Result<Intent, AppError> {
         .local
         .central
         .ok_or_else(invalid)?;
+    if before.replacement.is_none() && env.runtime.central_recovery_read.lock().unwrap().is_some() {
+        return Err(AppError::Other("Finish or pause the current recovery verification before replacing this device. Local data is retained.".into()));
+    }
     if before.control.phase == super::client_state::Phase::SignedOut {
         return Err(AppError::Other(
             "Sign in before replacing this device. Local data is retained.".into(),

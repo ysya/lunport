@@ -230,12 +230,24 @@ fn check_session(owner: &Workspace, session: &Session) -> Result<(), AppError> {
 pub fn status(env: &SyncEnv) -> Result<Progress, AppError> {
     status_at(env, &Scope::current())
 }
+pub(super) fn staged_status(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
+    if !super::wire::hex(operation, 32) {
+        return Err(invalid());
+    }
+    let mut view = Scope::current();
+    view.path = OwnerPath::Replacement(operation.into());
+    status_at(env, &view)
+}
 pub(super) fn status_at(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppError> {
     controller::require_enabled()?;
     let owner = scope.workspace(env)?;
     match env.runtime.central_recovery_read.try_lock() {
         Ok(read) => {
-            if let Some(r) = read.as_ref().filter(|r| r.scope.path == scope.path) {
+            if let Some(r) = read.as_ref().filter(|r| {
+                r.scope.path == scope.path
+                    && !env.runtime.central_recovery_cancel.load(Ordering::SeqCst)
+                    && r.scope.check(env).is_ok()
+            }) {
                 return Ok(progress(
                     "reading",
                     Some(&r.operation),

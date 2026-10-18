@@ -2758,3 +2758,41 @@ fn recovery_initialization_and_history_share_one_bounded_continuation_budget() {
     assert_eq!(progress.phase,"backup_required");assert_eq!(progress.verified,1025);
     assert_eq!(record_runtime::snapshot(&peer.env()).unwrap().0.local.central.as_ref().unwrap().recovery.as_ref().unwrap().admission().checkpoint.sequence,1025);
 }
+
+#[test]
+fn replacement_recovery_commands_resume_after_lost_reply_barrier_cancel_and_restart_without_the_old_identity() {
+    use super::replacement_flow as flow;
+    use crate::sync::env::Keychain;
+    let (service,_peer,kit,_keys,first)=recovery_fixture_with_source(33);super::round::sync_once(&first.env()).unwrap();
+    let original=record_runtime::snapshot(&first.env()).unwrap().0;let profile=controller::context(&first.env()).unwrap().profile.profile().unwrap();
+    first.keychain.delete(&profile.slot("device")).unwrap();controller::refresh(&first.env()).unwrap();
+    let ready=flow::begin_recovery(&first.env(),Some(&kit.kit)).unwrap();assert_eq!(ready.phase,"backup_required");
+    let operation=ready.operation.unwrap();let shown=flow::recovery_kit(&first.env(),&operation).unwrap();
+    assert_ne!(shown.kit,kit.kit);assert!(!flow::status(&first.env()).unwrap().backup_confirmed);
+    assert!(flow::confirm_recovery(&first.env(),&"f".repeat(32)).is_err());
+    assert!(flow::recovery_kit(&first.env(),&"f".repeat(32)).is_err());
+    {let mut state=service.state.lock().unwrap();state.hold_barrier=true;state.lose_control_response_once=true;}
+    assert!(flow::confirm_recovery(&first.env(),&operation).is_err());
+    assert_eq!(flow::status(&first.env()).unwrap().phase,"submitted");assert!(flow::status(&first.env()).unwrap().backup_confirmed);
+    flow::cancel(&first.env());let before=record_runtime::snapshot(&first.env()).unwrap().0;
+    let probe=record_runtime::probe_startup(&first.env().state_path,"replacement-restart");record_runtime::activate_probe(&mut first.runtime.core.lock().unwrap(),probe).unwrap();
+    service.login(&first);assert!(controller::context(&first.env()).unwrap().identity.is_none());
+    let resumed=flow::begin_recovery(&first.env(),None).unwrap();assert_eq!(resumed.operation.as_deref(),Some(operation.as_str()));assert_eq!(resumed.phase,"submitted");
+    assert_eq!(flow::recovery_kit(&first.env(),&operation).unwrap().kit,shown.kit);
+    let waiting=flow::confirm_recovery(&first.env(),&operation).unwrap();assert_eq!(waiting.phase,"submitted");
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0.local.central.as_ref().unwrap().control.device,original.local.central.as_ref().unwrap().control.device);
+    service.state.lock().unwrap().hold_barrier=false;
+    let verified=flow::confirm_recovery(&first.env(),&operation).unwrap();assert_eq!(verified.phase,"reading");assert_eq!(verified.total,33);
+    assert!(controller::context(&first.env()).unwrap().identity.is_none());
+    let status_json=serde_json::to_string(&flow::status(&first.env()).unwrap()).unwrap();assert!(!status_json.contains(&shown.kit));assert!(!status_json.contains(&kit.kit));
+    let complete=flow::advance(&first.env(),&operation).unwrap();assert_eq!(complete.phase,"complete");
+    let published=record_runtime::snapshot(&first.env()).unwrap().0;let owner=published.local.central.as_ref().unwrap();
+    assert_eq!(owner.identity_slot.as_deref(),Some(operation.as_str()));assert_eq!(owner.replica.as_ref().unwrap().current.len(),33);
+    assert_ne!(owner.control.device,original.local.central.as_ref().unwrap().control.device);assert!(owner.replacement.is_none());
+    assert_eq!(owner.replacement_archives.len(),1);assert!(owner.control.denied_devices.contains(&original.local.central.as_ref().unwrap().control.device.id));
+    let restored=super::replacement_archive::restore(&first.env(),&profile,&owner.replacement_archives[0].receipt).unwrap();
+    assert_eq!(restored.local.central.as_ref().unwrap().control.device,before.local.central.as_ref().unwrap().control.device);
+    assert!(first.keychain.get(&profile.slot("device")).unwrap().is_none());
+    assert!(first.keychain.get(&profile.device_slot("recovery-intent",Some(&operation)).unwrap()).unwrap().is_none());
+    controller::refresh(&first.env()).unwrap();assert_eq!(controller::context(&first.env()).unwrap().identity.as_ref().unwrap().device(),owner.control.device);
+}

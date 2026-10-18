@@ -126,6 +126,16 @@ impl Reading {
         source: Option<Workspace>,
         check: &impl Fn() -> Result<(), AppError>,
     ) -> Result<Self, AppError> {
+        Self::begin_at(env, path, session, source, check, Instant::now())
+    }
+    pub(super) fn begin_at(
+        env: &SyncEnv,
+        path: OwnerPath,
+        session: Arc<Session>,
+        source: Option<Workspace>,
+        check: &impl Fn() -> Result<(), AppError>,
+        started: Instant,
+    ) -> Result<Self, AppError> {
         let before = path.snapshot(env)?;
         let identity = session.identity.as_ref().ok_or_else(invalid)?;
         let device = session.device.as_ref().ok_or_else(invalid)?;
@@ -139,7 +149,10 @@ impl Reading {
             return Err(invalid());
         }
         let api = Api::new(&before.control.profile.origin)?;
-        let mut budget = Budget::new();
+        let mut budget = Budget {
+            started,
+            requests: 0,
+        };
         let remote: super::api::AccountOverview =
             budget.call(env, check, || api.account(device))?.decode()?;
         remote.validate(device)?;
