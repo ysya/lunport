@@ -145,7 +145,7 @@ pub(super) fn capture(
     let account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let sources = Sources::discover(&before, account.0.as_ref())?;
     let record_inputs = Inventory::from_state(&sources, &before)?;
-    let private_inputs = record_inputs.keys()?;
+    let private_inputs = record_inputs.admit_known()?.into_keys();
     drop(record_inputs);
     let files = Files::capture(env, before.legacy_v1_backup.as_deref())?;
     let observer = Capture::new(&readonly);
@@ -631,6 +631,73 @@ mod tests {
             .local
             .keys
             .is_empty());
+    }
+
+
+    #[test]
+    fn authenticated_unknown_or_unsupported_nonkey_payloads_block_capture_before_any_archive() {
+        use crate::sync::{crypto, record::Envelope, state_v2::SealedRecord};
+        for (kind, payload) in [
+            (
+                "future",
+                serde_json::json!({"schema":1,"future_secret":"PRIVATE_SENTINEL"}),
+            ),
+            (
+                "password",
+                serde_json::json!({"schema":1,"password":"PRIVATE_SENTINEL"}),
+            ),
+            (
+                "device",
+                serde_json::json!({"schema":1,"name":"old","platform":"synthetic","joined_at_ms":1,"last_seen_ms":2,"future_secret":"PRIVATE_SENTINEL"}),
+            ),
+        ] {
+            let (device, keys, _) = fixture(true);
+            let env = device.env();
+            let (mut state, _) = record_runtime::snapshot(&env).unwrap();
+            let parent = Legacy(record_runtime::read_account_keys(&state, env.keychain).unwrap());
+            let id = "1".repeat(32);
+            let body=Zeroizing::new(serde_json::json!({"kind":kind,"id":id,"version":1,"updated_at_ms":1,"device_id":state.device_id,"deleted":false,"payload":payload}).to_string().into_bytes());
+            let sealed = crypto::seal(parent.0.as_ref().unwrap(), kind, &id, &body).unwrap();
+            let row = SealedRecord {
+                envelope: Envelope {
+                    id_hash: sealed.id_hash,
+                    kind: kind.into(),
+                    seq: 1,
+                    nonce: sealed.nonce,
+                    ciphertext: sealed.ciphertext,
+                    deleted: false,
+                },
+                dirty: false,
+                public_identity: None,
+            };
+            state
+                .account
+                .as_mut()
+                .unwrap()
+                .sealed
+                .insert(row.key(), row);
+            let original = serde_json::to_vec(&state).unwrap();
+            fs::write(&env.state_path, &original).unwrap();
+            device.runtime.core.lock().unwrap().records = Some(state);
+            let readonly = ReadOnly {
+                inner: &device.keychain,
+            };
+            let mut safe = device.env();
+            safe.keychain = &readonly;
+            assert!(!capture(&safe, &keys, &BTreeMap::new())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("SENTINEL"));
+            assert_eq!(fs::read(&env.state_path).unwrap(), original);
+            assert_eq!(device.runtime.core.lock().unwrap().generation, 9);
+            assert!(!env
+                .state_path
+                .parent()
+                .unwrap()
+                .join("central-source-archives")
+                .exists());
+        }
     }
 
 }

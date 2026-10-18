@@ -232,6 +232,8 @@ impl Inventory {
     }
 }
 mod keys;
+mod typed;
 pub(in crate::sync::central) use keys::KeyInput;
+pub(in crate::sync::central) use typed::{Known, KnownData};
 #[cfg(test)]
 mod tests;

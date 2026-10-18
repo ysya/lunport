@@ -95,7 +95,7 @@ impl Package {
         keys: &VaultKeys,
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Materials, AppError> {
-        let private_inputs = self.record_inputs()?.keys()?;
+        let private_inputs = self.record_inputs()?.admit_known()?.into_keys();
         Materials::from_files_with_key_inputs(
             &self.state, keys, &self.files, &self.decryptors, references, private_inputs,
         )

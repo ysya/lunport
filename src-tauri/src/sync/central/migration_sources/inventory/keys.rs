@@ -19,7 +19,7 @@ pub(in crate::sync::central) struct KeyInput {
     pub device_id: String,
     pub material: Option<PrivateMaterial>,
 }
-fn payload(raw: &str, deleted: bool) -> Result<Option<PrivateMaterial>, AppError> {
+pub(super) fn payload(raw: &str, deleted: bool) -> Result<Option<PrivateMaterial>, AppError> {
     let body: Option<Body> = serde_json::from_str(raw).map_err(|_| invalid())?;
     match body {
         None if deleted => Ok(None),
