@@ -21,6 +21,7 @@ pub struct Session {
     pub identity: Option<Arc<DeviceIdentity>>,
     pub tokens: Arc<LoginTokens>,
     pub device: Option<DeviceSession>,
+    pub device_access_denied: bool,
     pub tokens_started: Instant,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -89,7 +90,8 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
             .as_ref()
             .is_some_and(|s| s.device.as_ref().is_some_and(|d| !d.expired())),
         needs_recovery: core.central_session.as_ref().is_some_and(|s| {
-            s.identity.is_none()
+            s.device_access_denied
+                || s.identity.is_none()
                 || s.device
                     .as_ref()
                     .is_some_and(|d| d.device_state == DeviceState::Active)
@@ -293,6 +295,7 @@ fn establish_locked(
         identity: identity.map(Arc::new),
         tokens,
         device: None,
+        device_access_denied: false,
         tokens_started: started,
     };
     let mut workspace = previous.clone();
@@ -310,112 +313,122 @@ fn establish_locked(
         );
         session.device = match registered? {
             RegistrationOutcome::Accepted(device) => Some(device),
+            RegistrationOutcome::Rejected(reply) if reply.status == 403 && previous.is_some() => {
+                // Retain the verified IdP login for account-only management. A service refusal is
+                // not a signed membership removal and must not permanently mark this device denied.
+                session.device_access_denied = true;
+                None
+            }
             RegistrationOutcome::Rejected(reply) => {
                 super::round::require_success(env, &reply)?;
                 return Err(invalid());
             }
         };
-        current_login(env, operation)?;
-        if previous.as_ref().is_some_and(|w| {
-            session
-                .device
-                .as_ref()
-                .is_none_or(|d| d.account_id != w.control.account_id)
-        }) {
-            return Err(AppError::Other("The service returned a different account for this sign-in. Local trust and data are retained.".into()));
-        }
-        let remote = overview(env, &api, &session)?;
-        let mut public = match previous.as_ref() {
-            Some(w) => w.control.clone(),
-            None => State::new(
-                profile_data,
-                session.device.as_ref().unwrap().account_id.clone(),
-                identity.device(),
-                remote.auth_epoch,
-            )?,
-        };
-        if public.anchor.is_some() {
-            match remote.proof {
-                Some(proof) => {
-                    public = public.observe_proof(proof, remote.auth_epoch)?;
-                    if public.phase == Phase::SignedOut {
-                        public.phase = if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) {
-                            Phase::BackupRequired
-                        } else if public.cutover && public.library.is_some() {
-                            Phase::Active
-                        } else {
-                            Phase::Enrolled
-                        };
-                    }
-                    if (remote.phase == "revocation_pending"
-                        || remote.vaults.values().any(|v| v.rekey))
-                        && public.phase != Phase::BackupRequired
-                        && public.phase != Phase::Revoked
-                    {
-                        public.phase = Phase::Rekey;
-                    }
-                }
-                None if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) => {
-                    if public.phase == Phase::SignedOut {
-                        public.phase = Phase::BackupRequired;
-                    }
-                }
-                None => {
-                    return Err(AppError::Other(
-                        "The existing account Vault is unavailable. Local data is retained.".into(),
-                    ))
-                }
+        if session.device.is_some() {
+            current_login(env, operation)?;
+            if previous.as_ref().is_some_and(|w| {
+                session
+                    .device
+                    .as_ref()
+                    .is_none_or(|d| d.account_id != w.control.account_id)
+            }) {
+                return Err(AppError::Other("The service returned a different account for this sign-in. Local trust and data are retained.".into()));
             }
-        } else if let Some(proof) = remote.proof {
-            let anchor = TrustAnchor {
-                origin: service.into(),
-                account_id: public.account_id.clone(),
-                genesis_hash: remote.genesis_hash.ok_or_else(invalid)?,
+            let remote = overview(env, &api, &session)?;
+            let mut public = match previous.as_ref() {
+                Some(w) => w.control.clone(),
+                None => State::new(
+                    profile_data,
+                    session.device.as_ref().unwrap().account_id.clone(),
+                    identity.device(),
+                    remote.auth_epoch,
+                )?,
             };
-            if session.device.as_ref().unwrap().device_state == DeviceState::Pending {
-                let pending = pending_pairing(env, &profile, identity, &anchor)?;
-                #[derive(Serialize)]
-                struct Request<'a> {
-                    request: &'a super::membership::Enrollment,
+            if public.anchor.is_some() {
+                match remote.proof {
+                    Some(proof) => {
+                        public = public.observe_proof(proof, remote.auth_epoch)?;
+                        if public.phase == Phase::SignedOut {
+                            public.phase =
+                                if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) {
+                                    Phase::BackupRequired
+                                } else if public.cutover && public.library.is_some() {
+                                    Phase::Active
+                                } else {
+                                    Phase::Enrolled
+                                };
+                        }
+                        if (remote.phase == "revocation_pending"
+                            || remote.vaults.values().any(|v| v.rekey))
+                            && public.phase != Phase::BackupRequired
+                            && public.phase != Phase::Revoked
+                        {
+                            public.phase = Phase::Rekey;
+                        }
+                    }
+                    None if previous.as_ref().is_some_and(|w| w.bootstrap.is_some()) => {
+                        if public.phase == Phase::SignedOut {
+                            public.phase = Phase::BackupRequired;
+                        }
+                    }
+                    None => {
+                        return Err(AppError::Other(
+                            "The existing account Vault is unavailable. Local data is retained."
+                                .into(),
+                        ))
+                    }
                 }
-                let reply = api.control(
-                    session.device.as_ref().unwrap(),
-                    Control::Enrollment,
-                    &Request {
-                        request: pending.request(),
-                    },
-                )?;
-                super::round::require_success(env, &reply)?;
-                public = public.begin_pairing(&pending)?;
+            } else if let Some(proof) = remote.proof {
+                let anchor = TrustAnchor {
+                    origin: service.into(),
+                    account_id: public.account_id.clone(),
+                    genesis_hash: remote.genesis_hash.ok_or_else(invalid)?,
+                };
+                if session.device.as_ref().unwrap().device_state == DeviceState::Pending {
+                    let pending = pending_pairing(env, &profile, identity, &anchor)?;
+                    #[derive(Serialize)]
+                    struct Request<'a> {
+                        request: &'a super::membership::Enrollment,
+                    }
+                    let reply = api.control(
+                        session.device.as_ref().unwrap(),
+                        Control::Enrollment,
+                        &Request {
+                            request: pending.request(),
+                        },
+                    )?;
+                    super::round::require_success(env, &reply)?;
+                    public = public.begin_pairing(&pending)?;
+                } else if public.pending_request.is_some() {
+                    if public.phase == Phase::SignedOut {
+                        public.phase = Phase::AwaitingApproval;
+                    }
+                    let encoded = Zeroizing::new(
+                        env.keychain
+                            .get(&profile.slot("pairing"))?
+                            .ok_or_else(invalid)?,
+                    );
+                    let pending = PendingPairing::restore(&encoded, &identity.device())?;
+                    public = public.accept_pairing(
+                        &pending,
+                        remote.pairing_confirmation.as_ref().ok_or_else(invalid)?,
+                        proof,
+                    )?;
+                }
             } else if public.pending_request.is_some() {
-                if public.phase == Phase::SignedOut {
-                    public.phase = Phase::AwaitingApproval;
-                }
-                let encoded = Zeroizing::new(
-                    env.keychain
-                        .get(&profile.slot("pairing"))?
-                        .ok_or_else(invalid)?,
-                );
-                let pending = PendingPairing::restore(&encoded, &identity.device())?;
-                public = public.accept_pairing(
-                    &pending,
-                    remote.pairing_confirmation.as_ref().ok_or_else(invalid)?,
-                    proof,
-                )?;
+                return Err(AppError::Other("The pending account Vault is temporarily unavailable. Keep this device's pairing request and retry.".into()));
             }
-        } else if public.pending_request.is_some() {
-            return Err(AppError::Other("The pending account Vault is temporarily unavailable. Keep this device's pairing request and retry.".into()));
-        }
-        if remote.auth_epoch < public.auth_epoch {
-            return Err(invalid());
-        }
-        public.auth_epoch = remote.auth_epoch;
-        public = public.remember_denials(remote.denied.iter().map(String::as_str))?;
-        public.validate()?;
-        let next = workspace.get_or_insert(Workspace::new(public.clone())?);
-        next.control = public;
-        if next.control.phase == Phase::Active && !next.can_upload() {
-            next.control.phase = Phase::Rekey;
+            if remote.auth_epoch < public.auth_epoch {
+                return Err(invalid());
+            }
+            public.auth_epoch = remote.auth_epoch;
+            public = public.remember_denials(remote.denied.iter().map(String::as_str))?;
+            public.validate()?;
+            let next = workspace.get_or_insert(Workspace::new(public.clone())?);
+            next.control = public;
+            if next.control.phase == Phase::Active && !next.can_upload() {
+                next.control.phase = Phase::Rekey;
+            }
         }
     }
     // Cancellation and final publication share this gate; a cancelled flow cannot publish later.
@@ -433,8 +446,12 @@ fn establish_locked(
     })?;
     {
         let mut core = env.runtime.core.lock().unwrap();
+        core.central_user_action = if session.device_access_denied {
+            Some("This device's cloud authorization was refused. Account access is retained for device management and recovery; local trust and data are unchanged.".into())
+        } else {
+            None
+        };
         core.central_session = Some(Arc::new(session));
-        core.central_user_action = None;
     }
     drop(commit_gate);
     Ok(())
@@ -465,6 +482,9 @@ pub fn resume(env: &SyncEnv, force_session: bool) -> Result<bool, AppError> {
         .is_some_and(|s| s.profile != workspace.control.profile)
     {
         return Err(invalid());
+    }
+    if !force_session && existing.as_ref().is_some_and(|s| s.device_access_denied) {
+        return Ok(false);
     }
     let token_margin = std::time::Duration::from_secs(60);
     if !force_session

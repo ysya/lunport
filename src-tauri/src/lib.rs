@@ -324,6 +324,7 @@ fn run_app(host: bool, start_hidden: bool) {
             updater_check_beta,
             updater_install_beta,
             sync::central::commands::central_devices,
+            sync::central::commands::central_account_access,
             sync::central::commands::central_pairing_code,
             sync::central::commands::central_approve_device,
             sync::central::commands::central_revoke_device,

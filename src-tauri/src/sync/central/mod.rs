@@ -1,6 +1,7 @@
 //! Central sync protocol. Not connected to production transport until device authorization,
 //! verified membership and migration are in place. Login alone never supplies content keys.
 pub mod api;
+pub mod account_access;
 pub mod browser;
 pub mod bootstrap;
 pub mod client_state;

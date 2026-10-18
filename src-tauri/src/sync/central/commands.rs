@@ -186,3 +186,14 @@ pub async fn central_revoke_device(
     .await
     .map_err(engine::join_error)?
 }
+
+#[tauri::command]
+pub async fn central_account_access(
+    app: AppHandle,
+) -> Result<super::account_access::Registry, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, super::account_access::registry)?
+    })
+    .await
+    .map_err(engine::join_error)?
+}

@@ -224,6 +224,7 @@ pub fn reveal(env: &SyncEnv) -> Result<RecoveryReveal, AppError> {
     if intent.workspace.control.anchor != current.control.anchor {
         return Err(invalid());
     }
+    RecoveryKit::parse(&intent.kit)?.current_keys(&current.control.verified_chain()?)?;
     Ok(RecoveryReveal {
         root: current
             .control
@@ -265,6 +266,7 @@ fn register(env: &SyncEnv, session: &Session, api: &Api) -> Result<Session, AppE
         }
     };
     Ok(Session {
+        device_access_denied: false,
         profile: session.profile.clone(),
         identity: session.identity.clone(),
         tokens: Arc::clone(&session.tokens),
@@ -624,5 +626,42 @@ mod tests {
         assert_eq!(status.phase, "backup_required");
         assert!(!status.can_sync);
         assert_eq!(reveal(&env).unwrap().kit, kit.kit);
+    }
+    #[test]
+    fn reveal_refuses_an_old_kit_after_a_verified_recovery_authority_change() {
+        use super::super::{
+            crypto::DeviceKeys,
+            membership::{Action, SignedMembership},
+        };
+        let f = Fixture::new();
+        prepare(&f.device.env()).unwrap();
+        let original = reveal(&f.device.env()).unwrap();
+        let session = controller::context(&f.device.env()).unwrap();
+        let identity = session.identity.as_ref().unwrap();
+        record_runtime::mutate_records(&f.device.env(), |records| {
+            let mut records = records.clone();
+            let workspace = records.local.central.as_mut().unwrap();
+            let chain = workspace.control.verified_chain()?;
+            let node = SignedMembership::sign(
+                chain.current().proposal(
+                    &identity.id,
+                    Action::Recovery,
+                    None,
+                    chain.current().devices().clone(),
+                    DeviceKeys::generate()?.public(),
+                    f.device.env().now(),
+                ),
+                &identity.keys,
+            )?;
+            let mut proof = workspace.control.proof.clone().unwrap();
+            proof.nodes.push(node);
+            workspace.control = workspace
+                .control
+                .observe_proof(proof, workspace.control.auth_epoch + 1)?;
+            Ok(records)
+        })
+        .unwrap();
+        assert!(reveal(&f.device.env()).is_err());
+        assert!(RecoveryKit::parse(&original.kit).is_ok());
     }
 }

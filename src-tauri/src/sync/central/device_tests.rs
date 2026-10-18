@@ -1363,3 +1363,50 @@ fn native_rotation_resumes_the_same_plan_after_lost_stage_and_commit_responses_a
     assert!(!state.begun_rotations[started..].contains(&stale_id));
     assert!(!state.wraps.iter().any(|w| w.header.recipient == offline_id));
 }
+
+#[test]
+fn refused_device_grant_retains_only_account_access_and_can_be_retried_without_resetting_trust() {
+    let mut service = Service::new();
+    let first = TestDevice::new("first", &FakeRelay::new(), &TestClock::new());
+    service.login(&first);
+    bootstrap::prepare(&first.env()).unwrap();
+    let kit = bootstrap::reveal(&first.env()).unwrap();
+    bootstrap::confirm(&first.env(), &kit.root).unwrap();
+    let before = record_runtime::snapshot(&first.env()).unwrap();
+    let context = controller::context(&first.env()).unwrap();
+    let refusal = service
+        .server
+        .mock("POST", "/v2/session")
+        .with_status(403)
+        .with_body("UNTRUSTED-REFUSAL-SENTINEL")
+        .expect(1)
+        .create();
+    let status = controller::refresh(&first.env()).unwrap();
+    assert!(!status.has_session);
+    assert!(!status.can_sync);
+    assert!(status.needs_recovery);
+    assert!(!status.error.unwrap().contains("UNTRUSTED-REFUSAL-SENTINEL"));
+    let current = before.0.local.central.as_ref().unwrap();
+    let access=service.server.mock("GET","/v2/device-access").match_header("authorization","Bearer synthetic access").with_body(json!({"account_locator":current.control.profile.locator,"auth_epoch":current.control.auth_epoch,"barrier_pending":false,"devices":[{"id":current.control.device.id,"name":"Synthetic device","created_at_ms":1700000000000u64,"state":"revoked"}]}).to_string()).create();
+    let metadata = super::account_access::registry(&first.env()).unwrap();
+    assert!(metadata.devices[0].current);
+    assert_eq!(metadata.devices[0].state, "revoked");
+    let public = serde_json::to_string(&metadata).unwrap();
+    assert!(!public.contains("synthetic access"));
+    access.remove();
+    let duplicate=service.server.mock("GET","/v2/device-access").with_body(json!({"account_locator":current.control.profile.locator,"auth_epoch":current.control.auth_epoch,"barrier_pending":false,"devices":[{"id":current.control.device.id,"name":"One","created_at_ms":1,"state":"active"},{"id":current.control.device.id,"name":"Two","created_at_ms":1,"state":"active"}]}).to_string()).create();
+    assert!(super::account_access::registry(&first.env()).is_err());
+    duplicate.remove();
+    let account = controller::context(&first.env()).unwrap();
+    assert!(account.device_access_denied);
+    assert!(account.device.is_none());
+    assert!(Arc::ptr_eq(&account.tokens, &context.tokens));
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0, before.0);
+    assert!(!controller::resume(&first.env(), false).unwrap());
+    refusal.assert();
+    refusal.remove();
+    let recovered = controller::refresh(&first.env()).unwrap();
+    assert!(recovered.has_session);
+    assert!(!recovered.needs_recovery);
+    assert_eq!(record_runtime::snapshot(&first.env()).unwrap().0, before.0);
+}
