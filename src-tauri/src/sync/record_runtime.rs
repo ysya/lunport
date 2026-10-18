@@ -192,6 +192,18 @@ pub fn probe_startup(path: &Path, device_name: &str) -> StartupProbe {
         ),
     }
 }
+/// Native read-only saved-state evidence. Missing/changed/future data is never repaired here.
+pub(crate) fn read_saved_records(path: &Path) -> Result<SyncStateV3, AppError> {
+    let mut options = OpenOptions::new(); options.read(true);
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK); }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() { return Err(AppError::Other("saved state must be a regular file".into())); }
+    let mut bytes = Vec::new(); file.take(MAX_STATE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_STATE_BYTES { return Err(AppError::Other("saved state exceeds the supported limit".into())); }
+    let state: SyncStateV3 = serde_json::from_slice(&bytes).map_err(|_| AppError::Other("saved state is unreadable; reload before synchronization".into()))?;
+    validate_state(&state).map_err(|_| AppError::Other("saved state is invalid; reload before synchronization".into()))?;
+    Ok(state)
+}
 /// Shape validation allows valid remote relationship conflicts to remain available for repair.
 pub fn save_active(path: &Path, state: &SyncStateV3) -> Result<(), AppError> {
     save_active_with_authority(path,state,None,None)
@@ -205,24 +217,28 @@ struct ReplacementSave<'a> {
 enum ProjectionAuthority<'a> {
     Library(&'a crate::sync::record_import::central_stage::Publication),
     Local(&'a crate::sync::record_import::central_local::Publication),
+    Dispatch(&'a crate::sync::central::active_dispatch::Publication),
 }
 impl ProjectionAuthority<'_> {
     fn candidate(&self) -> &SyncStateV3 {
         match self {
             Self::Library(a) => a.candidate(),
             Self::Local(a) => a.candidate(),
+            Self::Dispatch(a) => a.candidate(),
         }
     }
     fn generation(&self) -> u64 {
         match self {
             Self::Library(a) => a.generation(),
             Self::Local(a) => a.generation(),
+            Self::Dispatch(a) => a.generation(),
         }
     }
     fn verify_core(&self, core: &crate::sync::runtime::SyncCore) -> Result<(), AppError> {
         match self {
             Self::Library(a) => a.verify_core(core),
             Self::Local(a) => a.verify_core(core),
+            Self::Dispatch(a) => a.verify_core(core),
         }
     }
     fn verify_records(
@@ -234,12 +250,14 @@ impl ProjectionAuthority<'_> {
         match self {
             Self::Library(a) => a.verify_records(before, after, generation),
             Self::Local(a) => a.verify_records(before, after, generation),
+            Self::Dispatch(a) => a.verify_records(before, after, generation),
         }
     }
     fn verify_vault(&self, path: &Path) -> Result<(), AppError> {
         match self {
             Self::Library(a) => a.verify_vault(path),
             Self::Local(a) => a.verify_vault(path),
+            Self::Dispatch(a) => a.verify_vault(path),
         }
     }
 }
@@ -598,6 +616,12 @@ pub(crate) fn publish_local_material(
     authority: &crate::sync::record_import::central_local::Publication,
 ) -> Result<u64, AppError> {
     publish_central_material(env, ProjectionAuthority::Local(authority))
+}
+pub(crate) fn publish_dispatch(
+    env: &crate::sync::env::SyncEnv,
+    authority: &crate::sync::central::active_dispatch::Publication,
+) -> Result<u64, AppError> {
+    publish_central_material(env, ProjectionAuthority::Dispatch(authority))
 }
 fn publish_central_material(
     env: &crate::sync::env::SyncEnv,

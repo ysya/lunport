@@ -16,7 +16,11 @@ pub(super) fn fixture() -> (SyncStateV3, VaultKeys, DeviceKeys, String) {
         .unwrap();
     (state, keys, signer, id)
 }
-pub(super) fn accept(state: &mut SyncStateV3, keys: &VaultKeys, envelope: RecordEnvelope) {
+pub(in crate::sync::central) fn accept(
+    state: &mut SyncStateV3,
+    keys: &VaultKeys,
+    envelope: RecordEnvelope,
+) {
     let owner = state.local.central.as_mut().unwrap();
     let replica = owner.replica.as_ref().unwrap();
     let digest = rekey::envelope_digest(&envelope).unwrap();

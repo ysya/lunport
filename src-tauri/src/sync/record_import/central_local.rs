@@ -75,15 +75,25 @@ fn same_selection(a: Option<&Arc<Session>>, b: Option<&Arc<Session>>) -> bool {
     }
 }
 /// Native transient keys only; never a DTO, journal or Core field.
-pub(super) struct Context {
+pub(in crate::sync) struct Context {
     scope: Invocation,
     head: String,
     epoch: u64,
+    auth_epoch: u64,
     identity: DeviceIdentity,
     keys: VaultKeys,
     session: Option<Arc<Session>>,
 }
 impl Context {
+    pub(in crate::sync) fn keys(&self) -> &VaultKeys {
+        &self.keys
+    }
+    pub(in crate::sync) fn signer(&self) -> &central::crypto::DeviceKeys {
+        &self.identity.keys
+    }
+    pub(in crate::sync) fn session(&self) -> Option<&Arc<Session>> {
+        self.session.as_ref()
+    }
     pub fn load(env: &SyncEnv, state: &SyncStateV3) -> Result<Self, AppError> {
         central::controller::require_enabled()?;
         if !cfg!(unix) {
@@ -111,11 +121,7 @@ impl Context {
             }
         }
 
-        let saved: SyncStateV3 = serde_json::from_slice(&bounded_read(
-            &env.state_path,
-            record_runtime::MAX_STATE_BYTES,
-        )?)
-        .map_err(|_| failure("saved key destination is unreadable; reload the workspace"))?;
+        let saved = record_runtime::read_saved_records(&env.state_path)?;
         if &saved != state {
             return Err(failure(
                 "saved key destination changed; reload the workspace",
@@ -181,6 +187,7 @@ impl Context {
             scope,
             head: chain.current().head().into(),
             epoch,
+            auth_epoch: owner.control.auth_epoch,
             identity,
             keys,
             session,
@@ -210,11 +217,16 @@ impl Context {
         )?
         .intent()
     }
-    fn verify(&self, env: &SyncEnv, state: &SyncStateV3) -> Result<(), AppError> {
+    pub(in crate::sync) fn verify(
+        &self,
+        env: &SyncEnv,
+        state: &SyncStateV3,
+    ) -> Result<(), AppError> {
         check_invocation(state, Some(&self.scope))?;
         let owner = state.local.central.as_ref().unwrap();
         let chain = owner.control.verified_chain()?;
         if !owner.can_upload()
+            || owner.control.auth_epoch != self.auth_epoch
             || chain.current().head() != self.head
             || owner
                 .replica
@@ -245,7 +257,21 @@ impl Context {
             return Err(crate::sync::runtime::superseded());
         }
         let latest = record_runtime::active_state(&core)?;
-        if invocation(latest).as_ref() != Some(&self.scope) {
+        if invocation(latest).as_ref() != Some(&self.scope)
+            || latest.local.central.as_ref().is_none_or(|owner| {
+                !owner.can_upload()
+                    || owner.control.auth_epoch != self.auth_epoch
+                    || owner
+                        .control
+                        .highwater
+                        .as_ref()
+                        .is_none_or(|h| h.head != self.head)
+                    || owner
+                        .replica
+                        .as_ref()
+                        .is_none_or(|r| r.checkpoint.epoch != self.epoch)
+            })
+        {
             return Err(crate::sync::runtime::superseded());
         }
         Ok(())
@@ -540,4 +566,4 @@ pub(crate) fn rename(
 }
 #[cfg(all(test, unix))]
 #[path = "central_local_tests.rs"]
-mod tests;
+pub(in crate::sync) mod tests;

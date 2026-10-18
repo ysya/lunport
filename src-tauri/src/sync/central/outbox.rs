@@ -188,6 +188,27 @@ pub(super) fn prepare(
             {
                 return Err(invalid());
             }
+            let cache_matches = match state.account.as_ref().and_then(|account| {
+                account.records.get(&crate::sync::record::record_key(
+                    crate::sync::record::RecordKind::KeySlot,
+                    source.key_id(),
+                ))
+            }) {
+                Some(row) => {
+                    match records_v3::decode_keyslot(&row.record).map_err(|_| invalid())? {
+                        records_v3::TypedRecord::Live(public) => same_material(
+                            source.key_id(),
+                            source.slot(),
+                            &SharedKeyslot {
+                                public,
+                                storage: source.slot().storage.clone(),
+                            },
+                        )?,
+                        _ => false,
+                    }
+                }
+                None => false,
+            };
             let blocked = replica
                 .conflicts
                 .get(public_handle)
@@ -219,7 +240,12 @@ pub(super) fn prepare(
                 }
                 None => true,
             };
-            if blocked || !latest_matches || !remote_public_matches || !remote_private_matches {
+            if !cache_matches
+                || blocked
+                || !latest_matches
+                || !remote_public_matches
+                || !remote_private_matches
+            {
                 waiting_private += 1;
                 continue;
             }

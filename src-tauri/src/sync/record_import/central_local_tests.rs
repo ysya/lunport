@@ -15,7 +15,7 @@ use crate::sync::{
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use std::time::{Duration, Instant};
 
-fn fixture() -> TestDevice {
+pub(in crate::sync) fn fixture() -> TestDevice {
     let (mut state, keys, _) = central::library_fixture_for_test();
     let signer = DeviceKeys::decode_secret(&B64.encode([1u8; 64])).unwrap();
     let owner = state.local.central.as_mut().unwrap();
@@ -93,6 +93,9 @@ fn selected_slot(d: &TestDevice) -> String {
         .unwrap()
 }
 fn expired_session(d: &TestDevice) -> Arc<Session> {
+    selected_session(d, Duration::ZERO)
+}
+pub(in crate::sync) fn selected_session(d: &TestDevice, lifetime: Duration) -> Arc<Session> {
     let s = state(d);
     let o = s.local.central.as_ref().unwrap();
     Arc::new(Session {
@@ -112,13 +115,13 @@ fn expired_session(d: &TestDevice) -> Arc<Session> {
             nonce: Zeroizing::new("synthetic nonce".into()),
             access: Zeroizing::new("synthetic access".into()),
             refresh: None,
-            expires_in: Duration::ZERO,
+            expires_in: lifetime,
         }),
         device: Some(DeviceSession::synthetic_for_test(
             o.control.account_id.clone(),
             DeviceState::Active,
             o.control.auth_epoch,
-            Duration::ZERO,
+            lifetime,
         )),
         device_access_denied: false,
         tokens_started: Instant::now(),
