@@ -22,3 +22,12 @@
 .embedded-statusbar { border-top: 1px solid var(--border); min-height: 30px; }
 .embedded-statusbar > :first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .embedded-statusbar > :last-child { white-space: nowrap; }
+.terminal-workspace, .terminal-library { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.terminal-library[hidden] { display: none; }
+.embedded-new-tab { padding: 0 12px; color: var(--muted-foreground); cursor: pointer; }
+.embedded-new-tab:hover { color: var(--foreground); background: var(--accent); }
+.embedded-search { display: flex; align-items: center; gap: 6px; padding: 6px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.embedded-search input { max-width: 360px; }
+.embedded-search > span { min-width: 64px; font-size: 11px; color: var(--muted-foreground); }
+.embedded-terminal[data-cursor-blink="false"] .term-cursor, :root[data-motion="reduced"] .embedded-terminal .term-cursor { animation: none !important; }
+@media (prefers-reduced-motion: reduce) { :root[data-motion="system"] .embedded-terminal .term-cursor { animation: none !important; } }

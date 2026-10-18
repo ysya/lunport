@@ -8,7 +8,7 @@ use crate::{ipc::server::Stream, state::AppState};
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Condvar, Mutex,
     },
     time::{Duration, Instant},
@@ -28,6 +28,7 @@ type Sink = Arc<dyn Fn(Vec<u8>) -> Result<(), String> + Send + Sync>;
 #[derive(Default)]
 pub struct Terminals {
     entries: Mutex<HashMap<String, Arc<Terminal>>>,
+    generation: AtomicU64,
 }
 enum Input {
     Data(Zeroizing<Vec<u8>>),
@@ -84,7 +85,9 @@ impl Terminal {
 }
 impl Terminals {
     pub fn close_all(&self) {
-        for terminal in self.entries.lock().unwrap().values() {
+        let entries = self.entries.lock().unwrap();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        for terminal in entries.values() {
             terminal.stop();
         }
     }
@@ -99,11 +102,12 @@ impl Terminals {
     fn open(
         self: &Arc<Self>,
         id: String,
-        host: String,
+        host: HostQuery,
         cols: u16,
         rows: u16,
         mut stream: Stream,
         sink: Sink,
+        generation: u64,
     ) -> Result<(), String> {
         if id.is_empty()
             || id.len() > 64
@@ -112,6 +116,9 @@ impl Terminals {
             return Err("Invalid terminal ID".into());
         }
         let mut entries = self.entries.lock().unwrap();
+        if generation != self.generation.load(Ordering::Acquire) {
+            return Err("The workspace was reloaded before this terminal opened".into());
+        }
         if entries.len() >= MAX_SESSIONS || entries.contains_key(&id) {
             return Err("Close a terminal before opening another (maximum 8).".into());
         }
@@ -140,7 +147,7 @@ impl Terminals {
         protocol::write_control(
             &mut writer,
             &ClientMessage::OpenShell {
-                host: HostQuery::Id(host),
+                host,
                 pty: PtyRequest {
                     cols,
                     rows,
@@ -254,21 +261,54 @@ pub async fn terminal_open(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     id: String,
-    host_id: String,
+    host: HostQuery,
     cols: u16,
     rows: u16,
     output: Channel<Response>,
 ) -> Result<(), String> {
     main_only(&window)?;
     dimensions(cols, rows)?;
+    let generation = app
+        .state::<AppState>()
+        .session
+        .embedded
+        .generation
+        .load(Ordering::Acquire);
     tauri::async_runtime::spawn_blocking(move || {
         super::app::start(&app);
         let state = app.state::<AppState>();
-        if !matches!(*state.session.status.lock().unwrap(), super::app::BrokerStatus::Running) { return Err("This app's SSH broker is unavailable. Close other Development instances and try again.".into()); }
-        #[cfg(unix)] let stream = Stream::connect(super::socket_path(&crate::fsutil::app_data_root().map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
-        #[cfg(windows)] let stream = crate::ipc::pipe_windows::connect(&super::pipe_name().map_err(|e| e.to_string())?, Duration::from_secs(5)).map_err(|e| e.to_string())?;
-        state.session.embedded.open(id, host_id, cols, rows, stream, Arc::new(move |bytes| output.send(Response::new(bytes)).map_err(|e| e.to_string())))
-    }).await.map_err(|e| e.to_string())?
+        if !matches!(
+            *state.session.status.lock().unwrap(),
+            super::app::BrokerStatus::Running
+        ) {
+            return Err(
+                "Could not start the SSH service. Quit other Lunport instances and try again."
+                    .into(),
+            );
+        }
+        #[cfg(unix)]
+        let stream = Stream::connect(super::socket_path(
+            &crate::fsutil::app_data_root().map_err(|e| e.to_string())?,
+        ))
+        .map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        let stream = crate::ipc::pipe_windows::connect(
+            &super::pipe_name().map_err(|e| e.to_string())?,
+            Duration::from_secs(5),
+        )
+        .map_err(|e| e.to_string())?;
+        state.session.embedded.open(
+            id,
+            host,
+            cols,
+            rows,
+            stream,
+            Arc::new(move |bytes| output.send(Response::new(bytes)).map_err(|e| e.to_string())),
+            generation,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub fn terminal_write(
@@ -351,6 +391,27 @@ mod tests {
         }
     }
     #[test]
+    fn a_pending_open_cannot_leak_a_session_after_workspace_reload() {
+        let registry = Arc::new(Terminals::default());
+        let generation = registry.generation.load(Ordering::Acquire);
+        registry.close_all();
+        let (client, _peer) = UnixStream::pair().unwrap();
+        let sink: Sink = Arc::new(|_| Ok(()));
+        let error = registry
+            .open(
+                "old-page".into(),
+                HostQuery::Alias("web".into()),
+                80,
+                24,
+                client,
+                sink,
+                generation,
+            )
+            .unwrap_err();
+        assert!(error.contains("reloaded"));
+        assert!(registry.entries.lock().unwrap().is_empty());
+    }
+    #[test]
     fn output_budget_requires_consumption_and_close_wakes_a_blocked_reader() {
         let terminal = Arc::new(terminal());
         terminal.reserve(OUTPUT_WINDOW as usize).unwrap();
@@ -394,6 +455,13 @@ mod tests {
     }
     #[test]
     fn real_ssh_shell_input_resize_output_and_exit() {
+        real_shell(HostQuery::Id("id-preview".into()));
+    }
+    #[test]
+    fn real_ssh_shell_accepts_legacy_alias_queries() {
+        real_shell(HostQuery::Alias("preview".into()));
+    }
+    fn real_shell(host: HostQuery) {
         use crate::{
             session::{
                 broker::Broker,
@@ -439,11 +507,12 @@ mod tests {
         registry
             .open(
                 "test-preview".into(),
-                "id-preview".into(),
+                host,
                 100,
                 35,
                 client,
                 Arc::new(move |bytes| output.send(bytes).map_err(|e| e.to_string())),
+                0,
             )
             .unwrap();
         let mut bytes = Vec::new();

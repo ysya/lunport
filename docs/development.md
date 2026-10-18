@@ -27,9 +27,11 @@ Development refuses Legacy system-SSH evaluation, Connect, deployment and MCP ex
 
 An ordinary `pnpm tauri build` uses the Production profile. Keep the two profiles separate when validating existing data.
 
-## Embedded SSH terminal preview
+## Embedded SSH terminal
 
-The Records workspace offers **Lunport terminal · Preview** in the bottom-right connection menu. Double-click a ready host to open an SSH session in a workspace tab. Library and session tabs stay mounted when switching; disconnect ends the connection, and reconnect starts a new shell. Closing a tab asks before ending its session. External terminals remain available in the connection menu. This preview choice is local to the workspace, not a new persisted setting or sync format.
+Choose **Lunport (in app)** in **Settings → Connections** or the Records connection menu. The choice, terminal text size and cursor preference persist locally through the existing settings store and settings export/import. New installations default to the app terminal; existing terminal preferences are preserved. Records connections use stable host IDs and Legacy connections use saved aliases through the same broker. Unsupported Legacy directives are refused by the existing adapter; Development still refuses external OpenSSH evaluation.
+
+Double-click a ready host or use Quick connect. Library and session tabs stay mounted when switching. Tab metadata is transient; raw data, credentials and live handles never enter persistent settings. Closing a running/connecting tab asks before ending its session; ended tabs close immediately. The workspace supports up to eight tabs, adjacent-tab selection on close, Ctrl+Tab switching, terminal Find and text-size shortcuts. A workspace reload revokes pending opens before ending its existing sessions.
 
 The renderer is `@wterm/dom` with `@wterm/ghostty`, both pinned to 0.5.4. Vite bundles the Ghostty WASM asset locally, including in release builds; no external terminal, WebSocket server, Bun or Zig toolchain is needed. Rust connects to the existing protocol-1 broker, preserving the SSH engine, native password/passphrase prompts, host-key verification, jump hosts and quit lifecycle. The WebView receives ordered binary packets through a Tauri channel, with a 256 KiB acknowledged output window and bounded input. Raw terminal bytes and keystrokes never enter React state or application logs. Remote clipboard writes and image storage are disabled. App appearance updates terminal colors without reconnecting.
 
@@ -41,7 +43,7 @@ python3 scripts/preview-ssh.py
 
 Keep that process running. It prints a loopback port, a temporary SSH config and a throwaway private key. Import the printed config into **Lunport Dev**, explicitly select its optional key copy, then double-click `terminal-preview`. Verify the host fingerprint against the printed fingerprint. The remote shell uses an empty temporary HOME. Ctrl-C stops the fixture and its sessions, then removes its files; its imported host/key can be removed from the Development library afterward. Production data is not involved.
 
-Validation: `pnpm test` includes terminal transport ordering, binary data, input limits and cancellation races. `cargo test --locked --lib session::embedded::tests` includes a real scratch OpenSSH shell, ANSI/Unicode output, remote PTY resize, exit status and cleanup, using only disposable keys. The SSH engine's existing bounded overflow notice still applies if a producer outruns the renderer; the preview does not claim lossless output under sustained overload. Splits, session restoration and dedicated terminal preferences are outside this preview.
+Validation: `pnpm test` includes terminal transport ordering, binary data, input limits and cancellation races. `cargo test --locked --lib session::embedded::tests` includes a real scratch OpenSSH shell, ANSI/Unicode output, remote PTY resize, exit status and cleanup, using only disposable keys, for both ID and alias queries. The SSH engine's existing bounded overflow notice still applies if a producer outruns the renderer; the preview does not claim lossless output under sustained overload. Splits and remote process restoration are not implemented; reconnect starts a new shell.
 
 ## Brand assets and compatibility
 

@@ -20,6 +20,7 @@ import { recordHostSearchText } from "./group-tree";
 import { useSettingsStore } from "@/stores/settings";
 import { recentHostKey } from "./library-view";
 import { isImeKey } from "@/lib/ime";
+import { useTerminalStore } from "@/stores/terminals";
 
 export function RecordsCommandPalette({
   overview,
@@ -56,6 +57,7 @@ export function RecordsCommandPalette({
   const recentIds = new Set(recentHosts.map((host) => host.id));
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || (useTerminalStore.getState().activeId && event.ctrlKey && !event.metaKey && !event.shiftKey)) return;
       if (
         (event.metaKey || event.ctrlKey) &&
         event.key.toLowerCase() === "k" &&

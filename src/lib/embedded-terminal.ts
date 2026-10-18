@@ -1,6 +1,8 @@
 import { Channel } from "@tauri-apps/api/core";
 import { tauriInvoke } from "./ipc";
 
+export type TerminalHost = { id: string } | { alias: string };
+
 export type TerminalEvent =
   | { type: "opened"; session_id: string }
   | { type: "event"; event: "connected" | "disconnected" | "error" | "banner"; text?: string; reason?: string }
@@ -39,15 +41,16 @@ export class EmbeddedTerminal {
             if (this.dimensions) this.resize(this.dimensions.cols, this.dimensions.rows);
           }
           if (event.type === "closed" || event.type === "exited" || event.type === "bridge_error") this.opened = false;
+          if (event.type === "event" && (event.event === "error" || event.event === "disconnected")) this.opened = false;
           this.event(event);
         } else throw new Error("Unknown terminal packet");
       } catch (error) { this.fail(error); }
     };
   }
-  async start(hostId: string, cols: number, rows: number) {
+  async start(host: TerminalHost, cols: number, rows: number) {
     this.dimensions = { cols, rows };
     try {
-      await tauriInvoke("terminal_open", { id: this.id, hostId, cols, rows, output: this.output });
+      await tauriInvoke("terminal_open", { id: this.id, host, cols, rows, output: this.output });
       // StrictMode/unmount can happen while the native open is still pending.
       if (this.disposed) await tauriInvoke("terminal_close", { id: this.id });
     } catch (error) { this.fail(error); }
