@@ -1,5 +1,6 @@
 //! Native public-record API. Credentials and private key text never enter overview DTOs.
 use crate::error::AppError;
+use crate::sync::central::payload::KeyStorage;
 use crate::sync::env::SyncEnv;
 use crate::sync::record_repository::{
     self as repo, HostReadiness, KeyAuthority, KeyStatus, RecordRevision,
@@ -72,6 +73,8 @@ pub struct GroupView {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct KeyView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<&'static str>,
     synced: Option<bool>,
     id: String,
     authority: &'static str,
@@ -98,6 +101,7 @@ pub struct PendingAccountView {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordOverview {
+    central_mode: bool,
     syncing: bool,
     generation: String,
     group_deletion_token: String,
@@ -191,6 +195,13 @@ pub fn overview_from(
         .keys
         .into_iter()
         .map(|key| KeyView {
+            storage: state.local.central_projection.as_ref()
+                .and_then(|ledger| ledger.storage.get(&key.id))
+                .map(|storage| match storage {
+                    KeyStorage::Managed { .. } => "managed",
+                    KeyStorage::Hardware => "hardware",
+                    KeyStorage::ExternalAgent => "external_agent",
+                }),
             synced: if key.authority == KeyAuthority::Local {
                 Some(false)
             } else {
@@ -253,6 +264,7 @@ pub fn overview_from(
         })
         .collect();
     Ok(RecordOverview {
+        central_mode: state.local.central.as_ref().is_some_and(|owner| owner.control.cutover),
         syncing: false,
         conflicts: crate::sync::record_conflicts::views(state)?,
         generation: generation.to_string(),
@@ -1032,6 +1044,12 @@ fn material_for_sync(
     id: &str,
 ) -> Result<(KeySlotPayload, zeroize::Zeroizing<String>), AppError> {
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+    {
+        let core = env.runtime.core.lock().unwrap();
+        if record_runtime::active_state(&core)?.local.central.as_ref().is_some_and(|owner| owner.control.cutover) {
+            return Err(AppError::Other("Keys synchronize automatically in central account mode.".into()));
+        }
+    }
     crate::sync::record_round::require_no_pending_migration(env)?;
     let _vault = env.runtime.vault.lock().unwrap();
     let (state, _) = record_runtime::snapshot(env)?;
@@ -1351,6 +1369,54 @@ mod tests {
     use crate::sync::env::Keychain;
     use crate::sync::fake_relay::FakeRelay;
     use crate::sync::testkit::{TestClock, TestDevice};
+    struct ForbiddenKeyIo;
+    impl Keychain for ForbiddenKeyIo {
+        fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+            panic!("manual central key actions cannot read credentials")
+        }
+        fn get_noninteractive(&self, _: &str) -> Result<Option<String>, AppError> {
+            panic!("manual central key actions cannot read credentials")
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+            panic!("manual central key actions cannot write credentials")
+        }
+        fn delete(&self, _: &str) -> Result<(), AppError> {
+            panic!("manual central key actions cannot delete credentials")
+        }
+    }
+    #[test]
+    fn central_key_policy_is_public_and_legacy_actions_stop_before_material_or_network_access() {
+        let d = device("central-key-actions", &FakeRelay::new(), &TestClock::new());
+        let (state, _, _, id, entry) = crate::sync::central::material_fixture_for_test();
+        let view = overview_from(&state, 1, None).unwrap();
+        assert!(view.central_mode);
+        assert_eq!(view.keys[0].storage, Some("managed"));
+        if let KeyStorage::Managed { sha256 } =
+            &state.local.central_projection.as_ref().unwrap().storage[&id]
+        {
+            assert!(!serde_json::to_string(&view).unwrap().contains(sha256));
+        }
+        assert!(!serde_json::to_string(&view)
+            .unwrap()
+            .contains(&entry.private_key));
+        d.runtime.core.lock().unwrap().records = Some(state.clone());
+        let mut env = d.env();
+        env.keychain = &ForbiddenKeyIo;
+        assert!(material_for_sync(&env, &id)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("automatically"));
+        assert!(crate::sync::record_account::download_key(&env, &id).is_err());
+        assert!(crate::sync::record_account::unpublish_key(&env, &id).is_err());
+        assert!(d.relay.calls().is_empty());
+        let mut configured = state;
+        configured.local.central_projection = None;
+        let control = &mut configured.local.central.as_mut().unwrap().control;
+        control.phase = crate::sync::central::client_state::Phase::Enrolled;
+        control.cutover = false;
+        assert!(!overview_from(&configured, 1, None).unwrap().central_mode);
+    }
     #[test]
     fn pending_migration_blocks_account_effects_but_keeps_local_edits_available() {
         let d = device("pending", &FakeRelay::new(), &TestClock::new());

@@ -103,6 +103,7 @@ export type KeySlotPayload = {
   origin_device_id: string;
 };
 export type RecordKeyView = {
+  storage?: "managed" | "hardware" | "external_agent";
   id: string;
   authority: "local" | "account";
   synced: boolean | null;
@@ -112,6 +113,8 @@ export type RecordKeyView = {
 export type ConflictVersion = { seq: string; deleted: boolean; record: { kind: string; id: string; updated_at_ms: number; device_id: string; payload: unknown } | null };
 export type RecordConflict = { space_id: string | null; key: string; token: string; label: string; base: ConflictVersion | null; local: ConflictVersion; remote: ConflictVersion[]; can_copy_remote: boolean };
 export type RecordOverview = {
+  /** Native cutover policy; account setup alone does not enable automatic sharing. */
+  central_mode?: boolean;
   conflicts?: RecordConflict[];
   /** Transient transport activity; absent in older backend fixtures. */
   syncing?: boolean;

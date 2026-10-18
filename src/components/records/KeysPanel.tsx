@@ -9,7 +9,7 @@ import { TaskDialogContent as DialogContent, TaskDialogBody } from "@/components
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/app/PageHeader";
 import { DetailPresence } from "@/components/app/DetailPresence";
-import { applyRecordOverview, downloadRecordKey, renameRecordKey, setRecordKeySync, type KeySlotPayload, type RecordOverview } from "@/lib/records";
+import { applyRecordOverview, downloadRecordKey, renameRecordKey, setRecordKeySync, type KeySlotPayload, type RecordKeyView, type RecordOverview } from "@/lib/records";
 import { revealHidden } from "@/lib/sync-approvals";
 import { copyText } from "@/lib/clipboard";
 import { isValidSlotName } from "@/lib/key-slots";
@@ -23,7 +23,16 @@ import { RecordsDeployKeyDialog } from "./DeployKeyDialog";
 export const KEYS_SEARCH_INPUT_ID = "records-key-search";
 export const GENERATE_KEY_BUTTON_ID = "records-generate-key";
 
+function keyStatusLabel(key: RecordKeyView, central: boolean) {
+  if (key.status !== "available") {
+    if (central && key.status === "needs_material") return key.storage === "hardware" ? "Hardware key required" : key.storage === "external_agent" ? "SSH agent required" : "Sync pending";
+    return key.status.replace(/_/g, " ");
+  }
+  return central ? "Ready" : typeof key.synced !== "boolean" ? "Sharing unknown" : key.synced ? "Sync enabled" : "This device only";
+}
+
 export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
+  const central = overview.central_mode === true;
   const client = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -175,8 +184,8 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
                   {item.authority === "account" ? "Account key" : "Local key"}
                 </span>
               </span>
-              <span className="library-key-status" data-attention={item.status !== "available"}>
-                {item.status === "available" ? (typeof item.synced !== "boolean" ? "Sharing unknown" : item.synced ? "Sync enabled" : "This device only") : item.status.replace(/_/g, " ")}
+              <span className="library-key-status" data-attention={item.status === "conflict" || (!central && item.status !== "available")}>
+                {keyStatusLabel(item, central)}
               </span>
             </button>)}
           </div>
@@ -186,7 +195,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
               {search ? "No matching keys" : "No key references yet."}
             </h2>
             <p>
-              {search ? "Try another name, fingerprint or key type." : "Generate a key or import one into this device. New keys stay here until you choose to sync them."}
+              {search ? "Try another name, fingerprint or key type." : central ? "Generate or import a key to sync it automatically with your approved devices." : "Generate a key or import one into this device. New keys stay here until you choose to sync them."}
             </p>
             {search && <Button variant="outline" onClick={() => setSearch("")}>Clear search</Button>}
           </div>}
@@ -199,7 +208,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
         <p className="library-preview-address">
           {key.authority === "account" ? "Account key" : "Local key"}
           {" · "}
-          {key.status.replace(/_/g, " ")}
+          {central ? keyStatusLabel(key, true) : key.status.replace(/_/g, " ")}
         </p>
         <div className="library-preview-buttons flex-wrap">
           {key.public && (key.status === "available" || key.status === "needs_material") && <Button
@@ -223,12 +232,13 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
           >
             <Copy className="size-3.5" />
             Copy public key</Button>}
-          {key.status === "needs_material" && key.authority === "account" && <Button
+          {!central && key.status === "needs_material" && key.authority === "account" && <Button
             disabled={busy || draft.busy || overview.shared_writes_blocked}
             onClick={() => publicAction(async () => { applyRecordOverview(client, await downloadRecordKey(key.id)); })}
           >Download synced key</Button>}
         </div>
-        {key.status === "conflict" && <p role="status" className="app-task-error">Local and account key metadata conflict. Connecting and downloading are blocked until the conflict is reviewed.</p>}
+        {key.status === "conflict" && <p role="status" className="app-task-error">{central ? "Review this key’s identity conflict before connecting." : "Local and account key metadata conflict. Connecting and downloading are blocked until the conflict is reviewed."}</p>}
+        {central && key.status === "needs_material" && <p role="status" className="text-sm text-muted-foreground">{key.storage === "hardware" ? "Connect this key’s hardware device to use it on this computer." : key.storage === "external_agent" ? "Connect the SSH agent that holds this key to use it on this computer." : "This key will become available automatically after encrypted sync completes."}</p>}
         {key.status === "deleted" && <p className="text-sm text-muted-foreground">This account key was deleted. A local copy cannot replace its account identity.</p>}
         <section className="library-preview-section">
           <h3>Availability and sharing</h3>
@@ -242,13 +252,13 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
             <div>
               <dt>Sharing</dt>
               <dd>
-                {typeof key.synced !== "boolean" ? "Sync state unavailable" : key.synced ? "Sync enabled" : key.authority === "local" ? "This device only" : "Sync disabled"}
+                {central ? (key.storage === "hardware" || key.storage === "external_agent" ? "Key reference syncs automatically" : "Automatic encrypted sync") : typeof key.synced !== "boolean" ? "Sync state unavailable" : key.synced ? "Sync enabled" : key.authority === "local" ? "This device only" : "Sync disabled"}
               </dd>
             </div>
           </dl>
           {key.status === "available" && <p className="mt-3 text-muted-foreground">Private key availability is checked when connecting.</p>}
-          {key.authority === "account" && <p className="mt-3 text-muted-foreground">Sync changes may be waiting for the relay.</p>}
-          {key.status === "available" && overview.account && <Button
+          {central ? <p className="mt-3 text-muted-foreground">Keys sync automatically to approved devices.</p> : key.authority === "account" && <p className="mt-3 text-muted-foreground">Sync changes may be waiting for the relay.</p>}
+          {!central && key.status === "available" && overview.account && <Button
             className="mt-3"
             size="sm"
             variant="outline"
@@ -257,7 +267,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
           >
             {typeof key.synced !== "boolean" ? "Sync state unavailable" : key.synced ? "Stop syncing" : "Sync key"}
           </Button>}
-          {confirming?.id === key.id && <div className="space-y-3 mt-4 border-t pt-3">
+          {!central && confirming?.id === key.id && <div className="space-y-3 mt-4 border-t pt-3">
             <p className="text-sm">
               {confirming.enabled ? "Sync this key to your other computers? The encrypted private key will be uploaded to your account." : "Stop syncing this key? Copies already downloaded on other computers remain there."}
             </p>
@@ -342,7 +352,7 @@ export function RecordsKeysPanel({ overview }: { overview: RecordOverview }) {
                 {mode === "import" ? "Import private key" : "Generate Ed25519 key"}
               </DialogTitle>
               <DialogDescription>
-                {mode === "import" ? "Copy a private key into this device’s vault. The source key stays in place." : "Create an Ed25519 key in this device’s vault. It stays here until you choose to sync it."}
+                {central ? (mode === "import" ? "Copy a private key into your encrypted account vault. The source key stays in place." : "Create an Ed25519 key in your encrypted account vault.") : mode === "import" ? "Copy a private key into this device’s vault. The source key stays in place." : "Create an Ed25519 key in this device’s vault. It stays here until you choose to sync it."}
               </DialogDescription>
             </DialogHeader>
             <TaskDialogBody><fieldset disabled={draft.busy} className="space-y-4">
