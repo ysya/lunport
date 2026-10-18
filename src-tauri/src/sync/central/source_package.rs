@@ -5,7 +5,7 @@ use super::{
     inventory_keys::Snapshot,
     migration_files::Files,
     migration_materials::Materials,
-    migration_sources::{Inventory, Sources},
+    migration_sources::{FrozenSet, FrozenSnapshot, Inventory, Sources},
     payload::KeyStorage,
     source_archive::{self, Archived, Receipt},
     wire::invalid,
@@ -21,6 +21,7 @@ use crate::{
 use std::{collections::BTreeMap, path::Path};
 use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"LPSRCPK1";
+const FROZEN_MAGIC: &[u8; 8] = b"LPSRCPK2";
 const MAX_BYTES: usize = 192 * 1024 * 1024;
 /// Only explicit native encode/decode. Never a frontend DTO or an SSH private-key export.
 pub(super) struct Package {
@@ -29,6 +30,7 @@ pub(super) struct Package {
     pub files: Files,
     pub sources: Sources,
     decryptors: Snapshot,
+    frozen: Option<FrozenSet>,
 }
 fn state(files: &Files, name: &str) -> Result<SyncStateV3, AppError> {
     if name.is_empty()
@@ -82,13 +84,25 @@ impl Package {
             files,
             sources,
             decryptors,
+            frozen: None,
         })
     }
     /// Full current/recovery input enumeration using this package's archived legacy keybook.
     /// Payload semantics and other captured source images still require separate admission.
     pub fn record_inputs(&self) -> Result<Inventory, AppError> {
         if state(&self.files, &self.state_name)? != self.state { return Err(invalid()); }
-        Inventory::from_state(&self.sources, &self.state)
+        match &self.frozen {
+            Some(frozen) => frozen.inventory(&self.sources, &self.state),
+            None => Inventory::from_state(&self.sources, &self.state),
+        }
+    }
+    /// Preserve complete remote inputs alongside this exact captured source, without choosing winners.
+    pub fn with_frozen(mut self, operation: &str, progress: &super::migration_freeze::Progress,
+        minimum: Option<&super::migration_freeze::Known>, snapshots: Vec<FrozenSnapshot>) -> Result<Self, AppError> {
+        if self.frozen.is_some() { return Err(invalid()); }
+        drop(self.record_inputs()?);
+        self.frozen = Some(FrozenSet::capture(&self.state, &self.sources, operation, progress, minimum, snapshots)?);
+        Ok(self)
     }
     /// Admission always uses the enclosed decryptors. No OS access, writes, activation or consent.
     pub fn materials(
@@ -115,12 +129,12 @@ impl Package {
         let sources = self.sources.encode_local()?;
         drop(Sources::decode_local(&sources, &self.state)?);
         let decryptors = self.decryptors.encode_local()?;
-        let sections = [
-            self.state_name.as_bytes(),
-            files.as_slice(),
-            sources.as_slice(),
-            decryptors.as_slice(),
+        let frozen = self.frozen.as_ref().map(|value| value.encode_local()).transpose()?;
+        if let Some(value) = &self.frozen { drop(value.inventory(&self.sources, &self.state)?); }
+        let mut sections = vec![
+            self.state_name.as_bytes(), files.as_slice(), sources.as_slice(), decryptors.as_slice(),
         ];
+        if let Some(bytes) = &frozen { sections.push(bytes.as_slice()); }
         let length = sections
             .iter()
             .try_fold(8usize, |sum, value| {
@@ -131,7 +145,7 @@ impl Package {
             return Err(invalid());
         }
         let mut out = Zeroizing::new(Vec::with_capacity(length));
-        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(if frozen.is_some() { FROZEN_MAGIC } else { MAGIC });
         for section in sections {
             out.extend_from_slice(&(section.len() as u64).to_be_bytes());
             out.extend_from_slice(section);
@@ -139,7 +153,8 @@ impl Package {
         Ok(out)
     }
     pub fn decode_local(bytes: &[u8]) -> Result<Self, AppError> {
-        if bytes.len() > MAX_BYTES || bytes.get(..8) != Some(MAGIC.as_slice()) {
+        let magic = bytes.get(..8);
+        if bytes.len() > MAX_BYTES || ![Some(MAGIC.as_slice()), Some(FROZEN_MAGIC.as_slice())].contains(&magic) {
             return Err(invalid());
         }
         let mut input = &bytes[8..];
@@ -153,6 +168,9 @@ impl Package {
         let state = state(&files, &name)?;
         let sources = Sources::decode_local(section(&mut input, super::migration_sources::MAX_BOOK_BYTES)?, &state)?;
         let decryptors = Snapshot::decode_local(section(&mut input, 2 * 1024 * 1024)?)?;
+        let frozen = if magic == Some(FROZEN_MAGIC.as_slice()) {
+            Some(FrozenSet::decode_local(section(&mut input, super::migration_sources::MAX_FROZEN_BYTES)?, &sources, &state)?)
+        } else { None };
         if !input.is_empty() {
             return Err(invalid());
         }
@@ -162,6 +180,7 @@ impl Package {
             files,
             sources,
             decryptors,
+            frozen,
         })
     }
     /// No complete-inventory authority: this only durably preserves the captured original inputs.

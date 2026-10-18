@@ -27,6 +27,9 @@ mod records;
 mod inventory;
 pub(super) use inventory::{Inventory, KeyInput, Scope, Position, Known, KnownData, KnownInput};
 mod frozen;
+mod frozen_set;
+pub(super) use frozen::{FrozenSnapshot};
+pub(super) use frozen_set::{FrozenSet, MAX_FROZEN_BYTES};
 struct Temporary(ChainKeys);
 impl Drop for Temporary {
     fn drop(&mut self) {

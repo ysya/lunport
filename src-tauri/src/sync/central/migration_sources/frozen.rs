@@ -83,6 +83,9 @@ impl FrozenSnapshot {
     pub fn checkpoint(&self) -> &Source {
         &self.checkpoint
     }
+    pub(super) fn into_records(self) -> Vec<Envelope> {
+        self.records
+    }
     pub fn records(&self) -> &[Envelope] {
         &self.records
     }
@@ -103,22 +106,8 @@ impl Sources {
         chain: &str,
         response: PullResponse,
     ) -> Result<FrozenSnapshot, AppError> {
-        owner.validate()?;
-        owner.require_key_recipients()?;
-        if owner.control.phase != Phase::Enrolled || owner.control.cutover {
-            return Err(invalid());
-        }
-        let vault = owner
-            .control
-            .personal_vault
-            .as_deref()
-            .ok_or_else(invalid)?;
-        progress.verify(&owner.control.verified_chain()?, operation, vault, minimum)?;
-        let latest = &progress.proof.last().ok_or_else(invalid)?.intent.body;
-        self.require_service(&latest.origin)?;
-        if latest.parent_chain != self.parent
-            || latest.chains != self.chains()
-            || !self.keys.contains_key(chain)
+        let context = self.progress_context(owner, operation, progress, minimum)?;
+        if !self.keys.contains_key(chain)
             || chain != self.parent
                 && !self.parent.is_empty()
                 && !progress
@@ -147,6 +136,36 @@ impl Sources {
                 },
             )?);
         }
+        Ok(FrozenSnapshot {
+            checkpoint: actual,
+            progress: progress.clone(),
+            records: response.records,
+            context,
+        })
+    }
+    pub(super) fn progress_context(
+        &self,
+        owner: &Workspace,
+        operation: &str,
+        progress: &Progress,
+        minimum: Option<&Known>,
+    ) -> Result<Context, AppError> {
+        owner.validate()?;
+        owner.require_key_recipients()?;
+        if owner.control.phase != Phase::Enrolled || owner.control.cutover {
+            return Err(invalid());
+        }
+        let vault = owner
+            .control
+            .personal_vault
+            .as_deref()
+            .ok_or_else(invalid)?;
+        progress.verify(&owner.control.verified_chain()?, operation, vault, minimum)?;
+        let latest = &progress.proof.last().ok_or_else(invalid)?.intent.body;
+        self.require_service(&latest.origin)?;
+        if latest.parent_chain != self.parent || latest.chains != self.chains() {
+            return Err(invalid());
+        }
         let target = Target {
             profile: owner.control.profile.locator.clone(),
             anchor: owner.control.anchor.clone().ok_or_else(invalid)?,
@@ -157,16 +176,11 @@ impl Sources {
             auth_epoch: super::super::wire::number(&latest.authorization_epoch, false)?,
             key_epoch: super::super::wire::number(&latest.key_epoch, false)?,
         };
-        Ok(FrozenSnapshot {
-            checkpoint: actual,
-            progress: progress.clone(),
-            records: response.records,
-            context: Context {
-                target,
-                operation: latest.migration_id.clone(),
-                preview: latest.preview_digest.clone(),
-                keybook: super::super::crypto::hash(&self.encode_local()?),
-            },
+        Ok(Context {
+            target,
+            operation: latest.migration_id.clone(),
+            preview: latest.preview_digest.clone(),
+            keybook: super::super::crypto::hash(&self.encode_local()?),
         })
     }
 }

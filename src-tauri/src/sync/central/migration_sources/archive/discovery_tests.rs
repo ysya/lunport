@@ -297,7 +297,8 @@ fn discovery_cannot_be_reapplied_or_replace_a_known_child_credential() {
 #[test]
 fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_child_keys() {
     use crate::sync::central::source_package::Package;
-    let (device, mut package, _, owner, _) = crate::sync::central::source_package::tests::fixture();
+    let (device, mut package, keys, owner, _) =
+        crate::sync::central::source_package::tests::fixture();
     let key = package.sources.keys.get(&package.sources.parent).unwrap();
     let parent = Temporary(
         ChainKeys::from_parts(&package.sources.parent, &key.token, &key.encryption).unwrap(),
@@ -351,7 +352,68 @@ fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_c
         .sources
         .with_parent_discovery(&owner, &snapshot)
         .unwrap();
+    let next = package
+        .sources
+        .intent(
+            &owner,
+            &signer,
+            &"7".repeat(32),
+            &"8".repeat(64),
+            Some(&progress),
+        )
+        .unwrap();
+    let mut complete = progress.clone();
+    complete.proof.push(ProofStep {
+        digest: next.digest().unwrap(),
+        intent: next,
+    });
+    complete
+        .sources
+        .push(legacy_checkpoint(&child_id, 0, &[]).unwrap());
+    complete.sources.sort_by(|a, b| a.chain_id.cmp(&b.chain_id));
+    let parent_snapshot = package
+        .sources
+        .admit_frozen(
+            &owner,
+            &"7".repeat(32),
+            &complete,
+            None,
+            &parent.0.chain_id,
+            PullResponse {
+                records: snapshot.records().to_vec(),
+                latest_seq: 1,
+            },
+        )
+        .unwrap();
+    let child_snapshot = package
+        .sources
+        .admit_frozen(
+            &owner,
+            &"7".repeat(32),
+            &complete,
+            None,
+            &child_id,
+            PullResponse {
+                records: vec![],
+                latest_seq: 0,
+            },
+        )
+        .unwrap();
+    package = package
+        .with_frozen(
+            &"7".repeat(32),
+            &complete,
+            None,
+            vec![parent_snapshot, child_snapshot],
+        )
+        .unwrap();
     let plain = package.encode_local().unwrap();
+    assert_eq!(&plain[..8], b"LPSRCPK2");
+    assert!(Package::decode_local(&plain[..plain.len() - 1]).is_err());
+    let mut wrong_version = plain.to_vec();
+    wrong_version[..8].copy_from_slice(b"LPSRCPK1");
+    assert!(Package::decode_local(&wrong_version).is_err());
+
     let decoded = Package::decode_local(&plain).unwrap();
     assert!(decoded.sources.keys.contains_key(&child_id));
     drop((child, parent, decoded));
@@ -364,7 +426,19 @@ fn expanded_keybook_survives_the_actual_encrypted_package_archive_without_live_c
     let restored =
         Package::restore(&env, &owner.control.profile.profile().unwrap(), &receipt).unwrap();
     assert!(restored.sources.keys.contains_key(&child_id));
-    Inventory::from_state(&restored.sources, &restored.state).unwrap();
+    let inventory = restored.record_inputs().unwrap();
+    assert_eq!(
+        inventory
+            .rows()
+            .iter()
+            .filter(|row| row.location.position == Position::Frozen)
+            .count(),
+        1
+    );
+    inventory.admit_known().unwrap();
+    assert!(restored
+        .structured_history(&keys, &BTreeMap::new())
+        .is_err());
 }
 
 #[test]
