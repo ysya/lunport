@@ -231,5 +231,7 @@ impl Inventory {
         Ok(())
     }
 }
+mod keys;
+pub(in crate::sync::central) use keys::KeyInput;
 #[cfg(test)]
 mod tests;

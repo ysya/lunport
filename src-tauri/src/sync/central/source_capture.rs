@@ -144,7 +144,9 @@ pub(super) fn capture(
     let readonly = NonInteractiveKeychain(env.keychain);
     let account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let sources = Sources::discover(&before, account.0.as_ref())?;
-    drop(Inventory::from_state(&sources, &before)?);
+    let record_inputs = Inventory::from_state(&sources, &before)?;
+    drop(record_inputs.keys()?);
+    drop(record_inputs);
     let files = Files::capture(env, before.legacy_v1_backup.as_deref())?;
     let observer = Capture::new(&readonly);
     drop(Materials::from_files(
@@ -512,4 +514,38 @@ mod tests {
                 .exists());
         }
     }
+    #[test]
+    fn known_private_frames_are_admitted_before_capture_and_restore_without_live_legacy_credentials() {
+        use crate::sync::{record::{Record,RecordKind},state_v2::SealedRecord,slot_rules::test_keys};
+        let plain=test_keys::plain();let encrypted=test_keys::encrypted();
+        let cases=[
+            (serde_json::json!({"schema":1,"private_key":plain}),Some(plain.as_str())),
+            (serde_json::json!({"schema":1,"private_key":encrypted}),Some(encrypted.as_str())),
+            (serde_json::json!({"schema":2,"private_key":plain}),None),
+            (serde_json::json!({"schema":1,"private_key":"PRIVATE_PENDING_SENTINEL"}),None),
+            (serde_json::json!({"schema":1,"private_key":encrypted,"password":"PRIVATE_PENDING_SENTINEL"}),None),
+        ];
+        for (payload,expected) in cases {
+            let (device,keys,_)=fixture(true);let env=device.env();
+            let (mut state,_)=record_runtime::snapshot(&env).unwrap();
+            let parent=Legacy(record_runtime::read_account_keys(&state,env.keychain).unwrap());
+            let row=SealedRecord::seal(parent.0.as_ref().unwrap(),&Record{kind:RecordKind::Key,id:"1".repeat(32),version:1,updated_at_ms:1,device_id:state.device_id.clone(),deleted:false,payload},0).unwrap();
+            state.account.as_mut().unwrap().sealed.insert(row.key(),row);
+            let original=serde_json::to_vec(&state).unwrap();fs::write(&env.state_path,&original).unwrap();
+            device.runtime.core.lock().unwrap().records=Some(state);
+            let readonly=ReadOnly{inner:&device.keychain};let mut safe=device.env();safe.keychain=&readonly;
+            let result=capture(&safe,&keys,&BTreeMap::new());
+            if let Some(expected)=expected {
+                let captured=result.unwrap();
+                let package=Package::decode_local(&captured.package.encode_local().unwrap()).unwrap();
+                let inputs=package.record_inputs().unwrap().keys().unwrap();assert_eq!(inputs.len(),1);
+                assert!(inputs[0].material.as_ref().unwrap().private()==expected);
+            } else {
+                assert!(!result.err().unwrap().to_string().contains("SENTINEL"));
+            }
+            assert_eq!(fs::read(&env.state_path).unwrap(),original);assert_eq!(device.runtime.core.lock().unwrap().generation,9);
+            assert!(!env.state_path.parent().unwrap().join("central-source-archives").exists());
+        }
+    }
+
 }
