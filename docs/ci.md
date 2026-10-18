@@ -64,7 +64,8 @@ The relay's deployed workflow retains its separate shellcheck validation.
 ## Action versions and runtime
 
 Audited against upstream stable releases on 2026-10-18. Workflows use the
-maintained major tags; `dtolnay/rust-toolchain@stable` deliberately tracks the
+maintained major tags, except pnpm, whose `v6` tag trails v6.1.0; that Action uses
+the explicit stable release. `dtolnay/rust-toolchain@stable` deliberately tracks the
 stable Rust channel. The deployed relay workflow follows the same versions.
 
 | Action | Workflow ref | Stable release checked | Action runtime |
@@ -72,7 +73,7 @@ stable Rust channel. The deployed relay workflow follows the same versions.
 | actions/checkout | v7 | [v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1) | Node 24 |
 | actions/setup-node | v7 | [v7.1.0](https://github.com/actions/setup-node/releases/tag/v7.1.0) | Node 24 |
 | actions/upload-artifact | v7 | [v7.0.2](https://github.com/actions/upload-artifact/releases/tag/v7.0.2) | Node 24 |
-| pnpm/action-setup | v6 | [v6.1.0](https://github.com/pnpm/action-setup/releases/tag/v6.1.0) | Node 24 |
+| pnpm/action-setup | v6.1.0 | [v6.1.0](https://github.com/pnpm/action-setup/releases/tag/v6.1.0) | Node 24 |
 | googleapis/release-please-action | v5 | [v5.0.0](https://github.com/googleapis/release-please-action/releases/tag/v5.0.0) | Node 24 |
 | tauri-apps/tauri-action | v1 | [action-v1.0.0](https://github.com/tauri-apps/tauri-action/releases/tag/action-v1.0.0) | Node 24 |
 | Swatinem/rust-cache | v2 | [v2.9.2](https://github.com/Swatinem/rust-cache/releases/tag/v2.9.2) | Node 24 |
