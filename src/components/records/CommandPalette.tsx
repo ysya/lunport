@@ -28,6 +28,7 @@ export function RecordsCommandPalette({
   editorBusy,
   edit,
   create,
+  connectHost,
 }: {
   overview: RecordOverview;
   terminalId: string | null;
@@ -35,6 +36,7 @@ export function RecordsCommandPalette({
   editorBusy: boolean;
   edit: (id: string) => void;
   create: () => void;
+  connectHost?: (id: string) => Promise<void>;
 }) {
   const open = useUiStore((state) => state.paletteOpen);
   const setOpen = useUiStore((state) => state.setPaletteOpen);
@@ -71,7 +73,8 @@ export function RecordsCommandPalette({
     inFlight.current = true;
     setBusy(true);
     try {
-      await connectSavedHost(overview, id, terminalId, newTab);
+      if (connectHost) await connectHost(id);
+      else await connectSavedHost(overview, id, terminalId, newTab);
       setOpen(false);
     } catch (error) {
       toast.error("Could not connect", {

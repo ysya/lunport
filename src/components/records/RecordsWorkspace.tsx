@@ -1,7 +1,7 @@
 import "./library.css";
 import { UpdateIndicator } from "@/components/UpdatesPane";
 import { BrandMark } from "@/components/app/BrandMark";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpRight,
@@ -16,6 +16,8 @@ import {
   Settings,
   SunMoon,
   Terminal,
+  X,
+  Library,
 } from "lucide-react";
 import { toast } from "sonner";
 import { SettingsDialog } from "@/components/SettingsDialog";
@@ -73,6 +75,8 @@ import type { LibraryFilter } from "./library-view";
 import { HostPreview } from "./HostPreview";
 import { DetailPresence } from "@/components/app/DetailPresence";
 import { connectSavedHost } from "./operations";
+import type { TerminalTab } from "./TerminalPane";
+const TerminalPane = lazy(() => import("./TerminalPane").then((module) => ({ default: module.TerminalPane })));
 
 export function RecordsWorkspace({
   overview,
@@ -94,6 +98,10 @@ export function RecordsWorkspace({
   };
   const client = useQueryClient();
   const [panel, setPanel] = useState<WorkspacePanel>("hosts");
+  const [embedded, setEmbedded] = useState(true);
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
+  const [activeTerminal, setActiveTerminal] = useState<string | null>(null);
+  const [closingTerminal, setClosingTerminal] = useState<string | null>(null);
   const [filter, setFilter] = useState<LibraryFilter>({ kind: "all" });
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
@@ -180,8 +188,21 @@ export function RecordsWorkspace({
     setInspectedId(null);
     requestSelection({ kind: "host", id });
   };
-  const connect = async (id: string) => {
-    if (connectInFlight.current || editorBusy) return;
+  const connect = async (id: string, fromEditor = false) => {
+    if (connectInFlight.current || (editorBusy && !fromEditor)) return;
+    if (embedded) {
+      const host = selectHost(overview.hosts, id);
+      if (!host || host.readiness.kind !== "ready" || host.group_error) {
+        toast.error("Resolve this host's key or settings before connecting.");
+        return;
+      }
+      if (terminalTabs.length >= 8) { toast("Close a terminal before opening another (maximum 8)."); return; }
+      const payload = host.effective_payload;
+      const tab = { id: crypto.randomUUID(), hostId: id, name: payload.alias, address: `${payload.user}@${payload.hostname}:${payload.port}` };
+      setTerminalTabs((tabs) => [...tabs, tab]);
+      setActiveTerminal(tab.id);
+      return;
+    }
     connectInFlight.current = true;
     setConnectingId(id);
     try {
@@ -197,6 +218,7 @@ export function RecordsWorkspace({
   };
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (activeTerminal) return;
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)
         return;
       if (event.target instanceof Element && event.target.closest('[role="dialog"], [role="alertdialog"]')) return;
@@ -224,7 +246,7 @@ export function RecordsWorkspace({
     };
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [requestSelection, panel]);
+  }, [requestSelection, panel, activeTerminal]);
   const onSaved = useCallback((id: string | null) => {
     setPanel("hosts");
     setSelection({ kind: "none" });
@@ -268,9 +290,8 @@ export function RecordsWorkspace({
   const inspected = inspectedId
     ? selectHost(overview.hosts, inspectedId)
     : null;
-  const terminalName =
-    terminals.data?.find((terminal) => terminal.id === terminalId)?.label ??
-    "System default terminal";
+  const terminalName = embedded ? "Lunport terminal · Preview" :
+    terminals.data?.find((terminal) => terminal.id === terminalId)?.label ?? "System default terminal";
   const shortcut = platform.data === "macos" ? "⌘ K" : "Ctrl K";
   return (
     <div className={cn("app-shell library-shell flex h-screen overflow-hidden", platform.data === "macos" && "is-macos")}
@@ -286,8 +307,8 @@ export function RecordsWorkspace({
           overview={overview}
           panel={panel}
           filter={filter}
-          navigate={setPanel}
-          changeFilter={changeFilter}
+          navigate={(next) => { setActiveTerminal(null); setPanel(next); }}
+          changeFilter={(next) => { setActiveTerminal(null); changeFilter(next); }}
           createGroup={createGroup}
           reordering={reordering}
           reorder={(ids) => {
@@ -328,7 +349,7 @@ export function RecordsWorkspace({
           <div className="library-titlebar-actions">
             <UpdateIndicator />
             <Button type="button" variant="ghost" size="sm" title="Sync settings"
-              aria-label="Sync settings" aria-current={panel === "account" ? "page" : undefined} onClick={() => setPanel("account")}>
+              aria-label="Sync settings" aria-current={panel === "account" ? "page" : undefined} onClick={() => { setActiveTerminal(null); setPanel("account"); }}>
               <Cloud className="size-4" />
               Sync
             </Button>
@@ -360,6 +381,18 @@ export function RecordsWorkspace({
             </DropdownMenu>
           </div>
         </header>
+        {terminalTabs.length > 0 && <nav className="embedded-tabs" aria-label="Workspace sessions">
+          <div className="embedded-tab" data-active={!activeTerminal}>
+            <button type="button" aria-current={!activeTerminal ? "page" : undefined} onClick={() => setActiveTerminal(null)}><Library className="size-3.5" /><span>Library</span></button>
+          </div>
+          {terminalTabs.map((tab) => <div key={tab.id} className="embedded-tab" data-active={activeTerminal === tab.id}>
+            <button type="button" aria-current={activeTerminal === tab.id ? "page" : undefined} onClick={() => setActiveTerminal(tab.id)}><Terminal className="size-3.5" /><span>{tab.name}</span></button>
+            <button type="button" aria-label={`Close terminal ${tab.name}`} onClick={() => setClosingTerminal(tab.id)}><X className="size-3" /></button>
+          </div>)}
+        </nav>}
+        <Suspense fallback={activeTerminal ? <div className="flex flex-1 items-center justify-center text-muted-foreground">Loading terminal…</div> : null}>
+          {terminalTabs.map((tab) => <TerminalPane key={tab.id} tab={tab} active={activeTerminal === tab.id} />)}
+        </Suspense>
         {overview.shared_writes_blocked && (
           <p role="status" className="library-notice">
             {syncActive
@@ -401,6 +434,7 @@ export function RecordsWorkspace({
           )}
         <div
           className="library-detail-layout flex min-h-0 flex-1"
+          hidden={!!activeTerminal}
           data-inspecting={panel === "hosts" && !!inspected}
         >
           <main
@@ -474,7 +508,7 @@ export function RecordsWorkspace({
             </main>
           )}
         </div>
-        <footer className="library-statusbar">
+        <footer className="library-statusbar" hidden={!!activeTerminal}>
           <button
             type="button"
             className="library-sync-link"
@@ -521,9 +555,10 @@ export function RecordsWorkspace({
             <DropdownMenuContent align="end" className="w-64">
               <DropdownMenuLabel>Open connections in</DropdownMenuLabel>
               <DropdownMenuRadioGroup
-                value={terminalId ?? ""}
-                onValueChange={(value) => setTerminalId(value || null)}
+                value={embedded ? "lunport-preview" : terminalId ?? ""}
+                onValueChange={(value) => { setEmbedded(value === "lunport-preview"); if (value !== "lunport-preview") setTerminalId(value || null); }}
               >
+                <DropdownMenuRadioItem value="lunport-preview">Lunport terminal · Preview</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="">
                   System default terminal
                 </DropdownMenuRadioItem>
@@ -540,7 +575,7 @@ export function RecordsWorkspace({
               <DropdownMenuCheckboxItem
                 checked={preferNewTab}
                 disabled={
-                  !terminalSupportsNewTab(terminalId, terminals.data ?? [])
+                  embedded || !terminalSupportsNewTab(terminalId, terminals.data ?? [])
                 }
                 onCheckedChange={setNewTab}
               >
@@ -550,6 +585,20 @@ export function RecordsWorkspace({
           </DropdownMenu>
         </footer>
       </div>
+      <Dialog open={closingTerminal !== null} onOpenChange={(open) => { if (!open) setClosingTerminal(null); }}>
+        <DialogContent>
+          <DialogTitle>Close terminal?</DialogTitle>
+          <DialogDescription>This ends this SSH session. Running commands may stop. Reconnecting opens a new shell.</DialogDescription>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setClosingTerminal(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={() => {
+              setTerminalTabs((tabs) => tabs.filter((tab) => tab.id !== closingTerminal));
+              if (activeTerminal === closingTerminal) setActiveTerminal(null);
+              setClosingTerminal(null);
+            }}>Close terminal</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={selection.kind !== "none"}
         onOpenChange={(open) => {
@@ -626,6 +675,7 @@ export function RecordsWorkspace({
             ) : (
               selection.kind !== "none" && (
                 <RecordHostEditor
+              connectHost={embedded ? async (id) => { await connect(id, true); setSelection({ kind: "none" }); } : undefined}
                   key={
                     selection.kind === "host"
                       ? selection.id
@@ -694,6 +744,7 @@ export function RecordsWorkspace({
         </DialogContent>
       </Dialog>
       <RecordsCommandPalette
+        connectHost={embedded ? (id) => connect(id) : undefined}
         overview={overview}
         terminalId={terminalId}
         newTab={newTab}

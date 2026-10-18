@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import product from "@/brand/product.json";
+import terminalNotices from "@/lib/terminal-notices.txt?raw";
 import { BrandMark } from "@/components/app/BrandMark";
 import { Button } from "@/components/ui/button";
 import { Section, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
@@ -44,5 +45,6 @@ export function AboutPane() {
       </SettingsGroup>
     </Section>
     <p className="text-xs leading-relaxed text-muted-foreground">{product.copyright}<br />Formerly SSHelter.</p>
+    <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Terminal credits and licenses</summary><pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-[11px]">{terminalNotices}</pre></details>
   </div>;
 }
