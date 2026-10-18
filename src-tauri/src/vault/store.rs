@@ -296,6 +296,38 @@ impl Vault {
         self.save()
     }
 
+    /// Add a validated import batch with one file save. Occupied IDs never change; all original
+    /// entries, including retired/orphan entries, must decrypt before any credential/file effect.
+    /// Use on a staged copy under the vault lock. The journal owns readback and strict durability.
+    pub(crate) fn put_new_batch(&mut self, keychain: &dyn Keychain, entries: &BTreeMap<String, VaultEntry>) -> Result<(), VaultError> {
+        if entries.is_empty() { return Ok(()); }
+        if entries.len() > 4096 || entries.keys().any(|id| !crate::sync::slot_rules::is_slot_id(id)) {
+            return Err(readonly_vault_error("staged vault material mapping is invalid or exceeds its limit"));
+        }
+        fsutil::check_write(&self.path)?;
+        for id in self.ids() { self.get(&id)?; }
+        let mut additions = Vec::new();
+        for (id, entry) in entries {
+            match self.get(id)? {
+                Some(existing) if &existing != entry => return Err(readonly_vault_error("staged vault ID contains different material; original retained")),
+                Some(_) => {},
+                None => additions.push((id,entry)),
+            }
+        }
+        if additions.is_empty() { return Ok(()); }
+        // Failure leaves the in-memory/source image intact too. Newly staged protected master
+        // credentials are retained by the caller's namespace journal, never overwritten/deleted.
+        let mut candidate = Self { path:self.path.clone(), key:self.key.clone(), file:self.file.clone() };
+        candidate.ensure_key(keychain)?;
+        for (id,entry) in additions { candidate.seal_into(id,entry)?; }
+        if serde_json::to_vec_pretty(&candidate.file).map_err(|_|readonly_vault_error("cannot encode staged vault"))?.len() as u64 > MAX_READ_ONLY_VAULT_BYTES {
+            return Err(readonly_vault_limit_error());
+        }
+        candidate.save()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// 放進這個插槽的金鑰;原本是另一把(指紋不同)就把它改存成 retired 項目(`RETIRED_PREFIX`),不丟掉(spec §4.3:私鑰不自動刪除)。
     /// 兩件事一起存檔,回傳 retired 項目的 id。原本那一筆解不開就什麼都不改、回錯誤:不能換掉一把讀不出來的金鑰。
     pub fn replace(&mut self, keychain: &dyn Keychain, slot_id: &str, entry: &VaultEntry, now_ms: u64) -> Result<Option<String>, VaultError> {
@@ -798,6 +830,41 @@ mod tests {
     fn account_of(path: &Path) -> String {
         let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         file["key_account"].as_str().unwrap_or(VAULT_KEY_ACCOUNT).to_string()
+    }
+
+    #[test]
+    fn staged_batch_preserves_orphans_and_retired_entries_and_retry_is_a_byte_for_byte_noop() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join(VAULT_FILE);let keychain=MemKeychain::default();
+        let mut vault=Vault::open(&path,&keychain,1).unwrap();
+        let old=entry(&test_keys::plain());
+        vault.put(&keychain,"orphan-kept",&old).unwrap();
+        vault.put(&keychain,"retired:kept:1",&old).unwrap();
+        let encrypted=entry(&test_keys::encrypted());
+        let entries=BTreeMap::from([("a".repeat(32),old.clone()),("b".repeat(32),encrypted.clone())]);
+        vault.put_new_batch(&keychain,&entries).unwrap();
+        let bytes=std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("OPENSSH PRIVATE KEY"));
+        assert_eq!(vault.get("orphan-kept").unwrap(),Some(old.clone()));
+        assert_eq!(vault.get("retired:kept:1").unwrap(),Some(old));
+        assert_eq!(vault.get(&"b".repeat(32)).unwrap(),Some(encrypted));
+        vault.put_new_batch(&keychain,&entries).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(),bytes);
+        let reopened=read_vault(&path,&keychain).unwrap();assert_eq!(reopened.ids().len(),4);
+        for (id,entry) in &entries {assert_eq!(reopened.get(id).unwrap().as_ref(),Some(entry));}
+    }
+    #[test]
+    fn conflicting_or_corrupt_batch_source_cannot_partially_append_or_overwrite_material() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join(VAULT_FILE);let keychain=MemKeychain::default();
+        let mut vault=Vault::open(&path,&keychain,1).unwrap();
+        let old=entry(&test_keys::plain());vault.put(&keychain,&"b".repeat(32),&old).unwrap();
+        let original=std::fs::read(&path).unwrap();
+        let entries=BTreeMap::from([("a".repeat(32),old.clone()),("b".repeat(32),ecdsa_entry())]);
+        assert!(vault.put_new_batch(&keychain,&entries).is_err());
+        assert_eq!(vault.ids(),vec!["b".repeat(32)]);assert_eq!(std::fs::read(&path).unwrap(),original);
+        // An unreadable unrelated entry cannot disappear behind a successful new-key batch.
+        vault.file.entries.get_mut(&"b".repeat(32)).unwrap().ciphertext="corrupt".into();
+        assert!(vault.put_new_batch(&keychain,&BTreeMap::from([("a".repeat(32),old)])).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(),original);
     }
 
     /// 新的保管庫把金鑰放在自己的帳戶(`vault:key:<16 個 hex>`),帳戶名稱記在檔頭,格式是第 2 版;`vault:key` 不碰。

@@ -1185,7 +1185,13 @@ impl Keychain for ScopedKeychain<'_> {
         )?;
         self.inner
             .set(&scoped, secret)
-            .map_err(|_| failure("cannot save staged vault master credential"))
+            .map_err(|_| failure("cannot save staged vault master credential"))?;
+        if self.inner.get(&scoped)
+            .map_err(|_| failure("cannot verify staged vault master credential"))?
+            .map(Zeroizing::new).as_ref().map(|saved|saved.as_str()) != Some(secret) {
+            return Err(failure("staged vault master credential was not retained"));
+        }
+        Ok(())
     }
     fn delete(&self, _: &str) -> Result<(), AppError> {
         Err(failure("import cannot delete a credential"))
@@ -1310,23 +1316,14 @@ fn stage(
         }
         let mut vault = Vault::open(&paths.vault, &scoped, journal.at_ms)
             .map_err(|_| failure("cannot open validated staged vault"))?;
+        let mut batch = BTreeMap::new();
         for (id, entry) in entries {
-            let vault_id = &journal.keys[&id].vault_id;
-            if let Some(existing) = vault
-                .get(vault_id)
-                .map_err(|_| failure("cannot read staged import material"))?
-            {
-                if existing != entry {
-                    return Err(failure(
-                        "import key id conflicts with staged vault material",
-                    ));
-                }
-            } else {
-                vault
-                    .put(&scoped, vault_id, &entry)
-                    .map_err(|_| failure("cannot save copied material in staged vault"))?;
+            if batch.insert(journal.keys[&id].vault_id.clone(),entry).is_some() {
+                return Err(failure("import maps multiple keys onto the same protected vault ID"));
             }
         }
+        vault.put_new_batch(&scoped,&batch)
+            .map_err(|_| failure("cannot save material batch in staged vault; original retained"))?;
         let staged = validate_vault(&paths.vault, &scoped)?;
         journal.staged_key_account = Some(staged.key_account().into());
         journal.staged_vault_digest = Some(digest(&bounded_read(
