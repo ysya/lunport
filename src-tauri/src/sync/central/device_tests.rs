@@ -2702,7 +2702,7 @@ fn scoped_kit_replacement_keeps_the_original_owner_until_backup_recovery_and_a_n
         let generation="b".repeat(32);*first.runtime.central_replacement_generation.lock().unwrap()=Some(generation.clone());
         let scope=Scope::replacement(&operation,Arc::clone(&session),&generation,std::time::Instant::now()).unwrap();
         if interrupted {
-            let local=Arc::clone(&first);service.state.lock().unwrap().on_pull=Some(Box::new(move||super::replacement_flow::cancel(&local.env())));
+            let local=Arc::clone(&first);service.state.lock().unwrap().on_pull=Some(Box::new(move||{super::replacement_flow::cancel(&local.env());assert_eq!(super::replacement_flow::status(&local.env()).unwrap().phase,"paused");}));
             assert!(recovery_flow::start_at(&first.env(),scope.clone(),Some(&kit.kit),false).is_err());
             assert!(OwnerPath::Current.snapshot(&first.env()).unwrap().replacement_archives.is_empty());
             assert!(path.snapshot(&first.env()).unwrap().recovery.is_none());

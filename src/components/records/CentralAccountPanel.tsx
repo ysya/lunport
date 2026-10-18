@@ -1,3 +1,4 @@
+import { CentralReplacement } from "./CentralReplacement";
 import { CentralRecovery } from "./CentralRecovery";
 import { CentralAccountAccess } from "./CentralAccountAccess";
 import { useEffect, useRef, useState } from "react";
@@ -83,6 +84,7 @@ export function CentralAccountPanel({
   const [busy, setBusy] = useState(false);
   const [deviceBusy, setDeviceBusy] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [replacementBusy, setReplacementBusy] = useState(false);
   const [pairing, setPairing] = useState<{
     code: string;
     expires_at_ms: string;
@@ -102,9 +104,9 @@ export function CentralAccountPanel({
     };
   }, []);
   useEffect(() => {
-    onBusyChange?.(busy || deviceBusy || recoveryBusy);
+    onBusyChange?.(busy || deviceBusy || recoveryBusy || replacementBusy);
     return () => onBusyChange?.(false);
-  }, [busy, deviceBusy, recoveryBusy, onBusyChange]);
+  }, [busy, deviceBusy, recoveryBusy, replacementBusy, onBusyChange]);
   useEffect(() => {
     secretGeneration.current += 1;
     setKit(null);
@@ -149,7 +151,8 @@ export function CentralAccountPanel({
     const next = await operation;
     if (mounted.current) update(next);
   };
-  const blocked = busy || deviceBusy || recoveryBusy || disabled;
+  const blocked =
+    busy || deviceBusy || recoveryBusy || replacementBusy || disabled;
   const login = signingIn || status.login_pending;
   const backup = status.phase === "backup_required";
   return (
@@ -213,7 +216,7 @@ export function CentralAccountPanel({
         {status.configured && !login && (
           <Button
             variant="outline"
-            disabled={blocked}
+            disabled={busy || deviceBusy || recoveryBusy || disabled}
             onClick={() =>
               void run(async () => {
                 secretGeneration.current += 1;
@@ -228,60 +231,63 @@ export function CentralAccountPanel({
           </Button>
         )}
       </div>
-      {status.phase === "awaiting_approval" && (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            On a trusted device, open the same account and approve this device
-            using its pairing code.
-          </p>
-          <Button
-            variant="outline"
-            disabled={blocked || !status.has_session}
-            onClick={() =>
-              void run(async () => {
-                const generation = secretGeneration.current;
-                const code = await centralPairingCode();
-                if (
-                  mounted.current &&
-                  generation === secretGeneration.current &&
-                  !document.hidden
-                )
-                  setPairing(code);
-              })
-            }
-          >
-            Show pairing code
-          </Button>
-          {pairing && (
-            <div className="space-y-2">
-              <Textarea
-                aria-label="Device pairing code"
-                readOnly
-                value={pairing.code}
-                autoComplete="off"
-                spellCheck={false}
-                className="font-mono text-xs"
-              />
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  secretGeneration.current += 1;
-                  setPairing(null);
-                }}
-              >
-                Hide pairing code
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
+      {status.phase === "awaiting_approval" &&
+        !status.replacement_pending &&
+        !status.needs_recovery && (
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              On a trusted device, open the same account and approve this device
+              using its pairing code.
+            </p>
+            <Button
+              variant="outline"
+              disabled={blocked || !status.has_session}
+              onClick={() =>
+                void run(async () => {
+                  const generation = secretGeneration.current;
+                  const code = await centralPairingCode();
+                  if (
+                    mounted.current &&
+                    generation === secretGeneration.current &&
+                    !document.hidden
+                  )
+                    setPairing(code);
+                })
+              }
+            >
+              Show pairing code
+            </Button>
+            {pairing && (
+              <div className="space-y-2">
+                <Textarea
+                  aria-label="Device pairing code"
+                  readOnly
+                  value={pairing.code}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    secretGeneration.current += 1;
+                    setPairing(null);
+                  }}
+                >
+                  Hide pairing code
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
       {status.has_session &&
+        !status.replacement_pending &&
         status.root_fingerprint &&
         ["enrolled", "active", "rekey"].includes(status.phase) && (
           <CentralDevices
             status={status}
-            disabled={busy || recoveryBusy || disabled}
+            disabled={busy || recoveryBusy || replacementBusy || disabled}
             onBusyChange={setDeviceBusy}
             update={update}
           />
@@ -289,17 +295,40 @@ export function CentralAccountPanel({
       {status.configured && status.needs_recovery && !status.has_session && (
         <CentralAccountAccess
           status={status}
-          disabled={busy || recoveryBusy || disabled || status.login_pending}
+          disabled={
+            busy ||
+            recoveryBusy ||
+            replacementBusy ||
+            disabled ||
+            status.login_pending
+          }
           update={update}
           onBusyChange={setDeviceBusy}
         />
       )}
+      {status.configured &&
+        !status.replacement_pending &&
+        !status.needs_recovery && (
+          <CentralRecovery
+            status={status}
+            disabled={busy || deviceBusy || replacementBusy || disabled}
+            update={update}
+            onBusyChange={setRecoveryBusy}
+          />
+        )}
       {status.configured && (
-        <CentralRecovery
+        <CentralReplacement
           status={status}
-          disabled={busy || deviceBusy || disabled}
+          disabled={
+            busy ||
+            deviceBusy ||
+            recoveryBusy ||
+            disabled ||
+            status.login_pending
+          }
           update={update}
-          onBusyChange={setRecoveryBusy}
+          onBusyChange={setReplacementBusy}
+          resetGeneration={secretGeneration.current}
         />
       )}
       {status.needs_recovery && (

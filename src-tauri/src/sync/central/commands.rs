@@ -340,3 +340,137 @@ pub async fn central_confirm_account_recovery(
     .await
     .map_err(engine::join_error)?
 }
+
+// UI commands accept exact native invocation fences; convenience flow methods are not IPC APIs.
+#[tauri::command]
+pub async fn central_replacement_status(
+    app: AppHandle,
+) -> Result<super::replacement_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, super::replacement_flow::status)?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_replacement_reserve(
+    app: AppHandle,
+    route: super::replacement::Route,
+) -> Result<super::replacement_flow::Invocation, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::replacement_flow::reserve_invocation(env, route)
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_replacement_start(
+    app: AppHandle,
+    invocation: super::replacement_flow::Invocation,
+    kit: Option<String>,
+) -> Result<super::replacement_flow::Progress, AppError> {
+    let kit = kit.map(zeroize::Zeroizing::new);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::replacement_flow::start_invocation(
+                env,
+                &invocation,
+                kit.as_deref().map(String::as_str),
+            )
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_replacement_continue(
+    app: AppHandle,
+    invocation: super::replacement_flow::Invocation,
+    operation: String,
+) -> Result<super::replacement_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::replacement_flow::continue_invocation(env, &invocation, &operation)
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_replacement_revalidate(
+    app: AppHandle,
+    invocation: super::replacement_flow::Invocation,
+    operation: String,
+    kit: Option<String>,
+) -> Result<super::replacement_flow::Progress, AppError> {
+    let kit = kit.map(zeroize::Zeroizing::new);
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::replacement_flow::revalidate_invocation(
+                env,
+                &invocation,
+                &operation,
+                kit.as_deref().map(String::as_str),
+            )
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_replacement_cancel(
+    app: AppHandle,
+    invocation: super::replacement_flow::Invocation,
+) -> Result<super::replacement_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::replacement_flow::cancel_invocation(env, &invocation)
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_replacement_reveal_pairing(
+    app: AppHandle,
+    invocation: super::replacement_flow::Invocation,
+    operation: String,
+) -> Result<super::devices::PairingReveal, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::replacement_flow::reveal_pairing_invocation(env, &invocation, &operation)
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_replacement_reveal_kit(
+    app: AppHandle,
+    invocation: super::replacement_flow::Invocation,
+    operation: String,
+) -> Result<RecoveryReveal, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::replacement_flow::reveal_kit_invocation(env, &invocation, &operation)
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_replacement_confirm(
+    app: AppHandle,
+    invocation: super::replacement_flow::Invocation,
+    operation: String,
+) -> Result<super::replacement_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::replacement_flow::confirm_invocation(env, &invocation, &operation)
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}

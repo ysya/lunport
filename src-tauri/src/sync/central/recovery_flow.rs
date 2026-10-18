@@ -230,21 +230,30 @@ fn check_session(owner: &Workspace, session: &Session) -> Result<(), AppError> {
 pub fn status(env: &SyncEnv) -> Result<Progress, AppError> {
     status_at(env, &Scope::current())
 }
-pub(super) fn staged_status(env: &SyncEnv, operation: &str) -> Result<Progress, AppError> {
+pub(super) fn staged_status(
+    env: &SyncEnv,
+    operation: &str,
+    owner: &Workspace,
+) -> Result<Progress, AppError> {
     if !super::wire::hex(operation, 32) {
         return Err(invalid());
     }
-    let mut view = Scope::current();
-    view.path = OwnerPath::Replacement(operation.into());
-    status_at(env, &view)
+    status_for_owner(env, &OwnerPath::Replacement(operation.into()), owner)
 }
 pub(super) fn status_at(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppError> {
     controller::require_enabled()?;
-    let owner = scope.workspace(env)?;
+    status_for_owner(env, &scope.path, &scope.workspace(env)?)
+}
+/// Use one immutable Core snapshot for metadata, including a parent-to-child replacement view.
+fn status_for_owner(
+    env: &SyncEnv,
+    path: &OwnerPath,
+    owner: &Workspace,
+) -> Result<Progress, AppError> {
     match env.runtime.central_recovery_read.try_lock() {
         Ok(read) => {
             if let Some(r) = read.as_ref().filter(|r| {
-                r.scope.path == scope.path
+                &r.scope.path == path
                     && (r.scope.path != OwnerPath::Current
                         || !env.runtime.central_recovery_cancel.load(Ordering::SeqCst))
                     && r.scope.check(env).is_ok()
@@ -258,7 +267,20 @@ pub(super) fn status_at(env: &SyncEnv, scope: &Scope) -> Result<Progress, AppErr
                 ));
             }
         }
-        Err(_) => return Ok(progress("reading", None, 0, 0, None)),
+        Err(_) => {
+            let live = match path {
+                OwnerPath::Current => !env.runtime.central_recovery_cancel.load(Ordering::SeqCst),
+                OwnerPath::Replacement(_) => env
+                    .runtime
+                    .central_replacement_generation
+                    .lock()
+                    .unwrap()
+                    .is_some(),
+            };
+            if live {
+                return Ok(progress("reading", None, 0, 0, None));
+            }
+        }
     }
     if let Some(state) = &owner.recovery {
         let admission = state.admission();

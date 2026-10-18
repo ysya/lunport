@@ -304,7 +304,11 @@ pub fn status(env: &SyncEnv) -> Result<Progress, AppError> {
             && intent.candidate.is_some()
             && owner.control.phase != Phase::SignedOut
         {
-            let recovery = super::recovery_flow::staged_status(env, &intent.operation)?;
+            let recovery = super::recovery_flow::staged_status(
+                env,
+                &intent.operation,
+                intent.candidate.as_deref().ok_or_else(invalid)?,
+            )?;
             result.phase = match recovery.phase.as_str() {
                 "reading" => "recovering",
                 "complete" => "verification_required",

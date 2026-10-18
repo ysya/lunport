@@ -34,6 +34,7 @@ pub struct Status {
     pub device_id: Option<String>,
     pub has_session: bool,
     pub needs_recovery: bool,
+    pub replacement_pending: bool,
     pub can_sync: bool,
     pub login_pending: bool,
     pub root_fingerprint: Option<String>,
@@ -97,6 +98,7 @@ pub fn status(env: &SyncEnv) -> Result<Status, AppError> {
                     .is_some_and(|d| d.device_state == DeviceState::Active)
                     && ws.is_some_and(|w| w.control.anchor.is_none())
         }),
+        replacement_pending: ws.is_some_and(|w| w.replacement.is_some()),
         can_sync: ws.is_some_and(Workspace::can_upload)
             && core
                 .central_session

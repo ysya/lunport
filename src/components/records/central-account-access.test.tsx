@@ -24,6 +24,7 @@ const status: CentralStatus = {
   has_session: false,
   login_pending: false,
   needs_recovery: true,
+  replacement_pending: false,
   can_sync: false,
   pending: 1,
   conflicts: 0,

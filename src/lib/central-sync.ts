@@ -20,6 +20,7 @@ export type CentralStatus = {
   has_session: boolean;
   login_pending: boolean;
   needs_recovery: boolean;
+  replacement_pending: boolean;
   can_sync: boolean;
   pending: number;
   conflicts: number;
