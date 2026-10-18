@@ -87,6 +87,16 @@ impl<'a> Capture<'a> {
         if self.failed.load(Ordering::SeqCst) {
             return Err(invalid());
         }
+        let roles: Vec<_> = self
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect();
+        for role in roles {
+            drop(self.read(&role)?.map(Zeroizing::new));
+        }
         Ok(Snapshot {
             keys: self
                 .seen
@@ -332,6 +342,20 @@ mod tests {
         let error = capture.get(role).unwrap_err().to_string();
         assert!(!error.contains("PRIVATE_SENTINEL"));
         assert!(capture.finish().is_err());
+    }
+    #[test]
+    fn finish_rechecks_all_observed_presence_and_values_including_an_absent_scoped_import_role() {
+        for before in [None, Some(B64.encode([1u8; 32]))] {
+            let memory = MemKeychain::default();
+            let role = format!("migration:{}:vault:key", "a".repeat(32));
+            if let Some(value) = &before {
+                memory.set(&role, value).unwrap();
+            }
+            let observer = Capture::new(&memory);
+            assert_eq!(observer.get(&role).unwrap(), before);
+            memory.set(&role, &B64.encode([2u8; 32])).unwrap();
+            assert!(observer.finish().is_err());
+        }
     }
     #[test]
     fn strict_local_codec_preserves_valid_import_roles_and_rejects_duplicates_unknowns_schema_and_size_errors(

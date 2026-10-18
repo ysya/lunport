@@ -684,6 +684,7 @@ pub fn read_account_keys(
         .get(crate::sync::state::MNEMONIC_ACCOUNT)
         .map_err(|_| AppError::Other("the sync code could not be read".into()))?
         .ok_or_else(|| AppError::Other("the sync code is unavailable on this device".into()))?;
+    let phrase = zeroize::Zeroizing::new(phrase);
     let keys = crate::sync::crypto::derive_account(&phrase)
         .map_err(|_| AppError::Other("the sync code is invalid".into()))?;
     if keys.chain_id != account.chain_id {

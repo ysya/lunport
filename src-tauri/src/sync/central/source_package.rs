@@ -204,7 +204,7 @@ fn section<'a>(input: &mut &'a [u8], max: usize) -> Result<&'a [u8], AppError> {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(in crate::sync::central) mod tests {
     use super::*;
     use crate::{
         sync::{
@@ -222,7 +222,8 @@ mod tests {
     };
     use serde_json::json;
     use std::fs;
-    fn fixture() -> (TestDevice, Package, VaultKeys, Workspace, String) {
+    pub(in crate::sync::central) fn fixture() -> (TestDevice, Package, VaultKeys, Workspace, String)
+    {
         let device = TestDevice::new("source-package", &FakeRelay::new(), &TestClock::new());
         let env = device.env();
         let root = env.state_path.parent().unwrap();

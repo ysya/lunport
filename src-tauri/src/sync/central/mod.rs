@@ -41,6 +41,7 @@ mod archive_directory;
 mod source_archive;
 mod inventory_keys;
 mod source_package;
+mod source_capture;
 pub mod replacement_archive;
 pub mod replacement;
 pub mod replacement_flow;
