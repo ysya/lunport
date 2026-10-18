@@ -1,11 +1,11 @@
 import { useRef, useState } from "react";
 import {
-  ArrowUpRight,
   Check,
   Folder,
   FolderPlus,
   LoaderCircle,
   MoreHorizontal,
+  Pencil,
   Plus,
   Search,
   Server,
@@ -49,6 +49,8 @@ export function RecordHostList({
   overview,
   selectedId,
   select,
+  inspect,
+  dismiss,
   selectGroup,
   edit,
   create,
@@ -69,6 +71,8 @@ export function RecordHostList({
   selectedId: string | null;
   selectedGroupId?: string | null;
   select: (id: string) => void;
+  inspect?: (id: string) => void;
+  dismiss?: () => void;
   edit?: (id: string) => void;
   selectGroup?: (id: string) => void;
   selectScope?: (scope: HostScope) => void;
@@ -137,9 +141,9 @@ export function RecordHostList({
     else select(host.id);
   };
   const connectHost = (host: RecordHostView) => {
-    if (!connect || disabled || connectingId || (counts.get(host.id) ?? 0) > 1)
+    if (!connect || disabled || selecting || connectingId || (counts.get(host.id) ?? 0) > 1)
       return;
-    if (host.readiness.kind !== "ready" || host.group_error) select(host.id);
+    if (host.readiness.kind !== "ready" || host.group_error) (edit ?? select)(host.id);
     else connect(host.id);
   };
   const canOrganize = (host: RecordHostView) =>
@@ -265,7 +269,11 @@ export function RecordHostList({
           </Button>
         )}
       </div>
-      <div className="library-catalog-scroll min-h-0 flex-1 overflow-y-auto">
+      <div className="library-catalog-scroll min-h-0 flex-1 overflow-y-auto"
+        onClick={(event) => {
+          if (!(event.target instanceof Element) || event.target.closest('button, input, select, textarea, a, [role="menu"], [role="dialog"], .library-host-card, .library-group-card')) return;
+          dismiss?.();
+        }}>
         {selecting && (
           <div className="library-selection-bar">
             <span>{checked.size} selected</span>
@@ -361,6 +369,7 @@ export function RecordHostList({
                   connectDisabled={blocked || !!connectingId}
                   connect={connect ? () => connectHost(host) : undefined}
                   edit={edit ? () => edit(host.id) : undefined}
+                  inspect={inspect ? () => inspect(host.id) : undefined}
                   accept={accept}
                   onBusy={onBusy}
                   returnFocus={() => {
@@ -390,6 +399,7 @@ export function RecordHostList({
                         (selecting && !canOrganize(host))
                       }
                       onClick={() => openHost(host)}
+                      onDoubleClick={() => connectHost(host)}
                       onKeyDown={(e) => {
                         if (isImeKey(e)) return;
                         if (e.key === "Enter" && !selecting && connect) {
@@ -421,28 +431,29 @@ export function RecordHostList({
                       </span>
                     </button>
                     <div className="library-host-actions">
-                      {!selecting && connect && (
+                      {!selecting && edit && (
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          className="library-host-connect"
-                          aria-label={"Connect to " + name}
+                          className="library-host-edit"
+                          aria-label={"Edit " + name}
                           aria-busy={connectingId === host.id}
                           title={
                             connectingId === host.id
                               ? "Opening…"
-                              : "Connect to " + name
+                              : "Edit " + name
                           }
-                          disabled={disabled || !!connectingId || blocked}
+                          disabled={disabled || !!connectingId || ambiguous}
                           onClick={(e) => {
                             e.stopPropagation();
-                            connectHost(host);
+                            edit(host.id);
                           }}
+                          onDoubleClick={(event) => event.stopPropagation()}
                         >
                           {connectingId === host.id ? (
                             <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" />
                           ) : (
-                            <ArrowUpRight className="size-3.5" />
+                            <Pencil className="size-3.5" />
                           )}
                         </Button>
                       )}

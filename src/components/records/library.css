@@ -450,9 +450,9 @@
 .library-host-actions > button { width: 1.75rem; height: 1.75rem; }
 .library-host-actions > button:hover { color: var(--primary); }
 @media (hover: hover) {
-  .library-host-connect { opacity: 0; }
-  .library-host-card:is(:hover, :focus-within, .is-selected) .library-host-connect,
-  .library-host-connect[aria-busy="true"] { opacity: 1; }
+  .library-host-edit { opacity: 0; }
+  .library-host-card:is(:hover, :focus-within, .is-selected) .library-host-edit,
+  .library-host-edit[aria-busy="true"] { opacity: 1; }
 }
 .library-preview-tags > span {
   max-width: 8rem;
@@ -757,6 +757,32 @@
   gap: 0;
   padding: 0;
   overflow: hidden;
+}
+.library-editor-dialog.library-editor-drawer {
+  inset: 0 0 0 auto;
+  width: min(32rem, 100%);
+  max-width: 100%;
+  height: 100%;
+  max-height: none;
+  border-radius: 0;
+  translate: none;
+  border-left: 1px solid var(--library-line);
+  box-shadow: -12px 0 32px rgb(0 0 0 / 0.18);
+  animation: library-editor-open var(--motion-content) var(--ease-enter) both;
+}
+.library-editor-drawer[data-state="closed"] {
+  animation: library-editor-close var(--motion-content) var(--ease-enter) both;
+}
+@keyframes library-editor-open {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes library-editor-close {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .library-editor-dialog.library-editor-drawer { animation-duration: 1ms; }
 }
 .library-sync-review {
   display: flex;

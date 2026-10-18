@@ -4,6 +4,7 @@ import {
   Copy,
   FolderInput,
   Pencil,
+  Info,
   Tag,
   Trash2,
 } from "lucide-react";
@@ -41,6 +42,7 @@ export function HostContextMenu({
   connectDisabled,
   connect,
   edit,
+  inspect,
   accept,
   onBusy,
   returnFocus,
@@ -53,6 +55,7 @@ export function HostContextMenu({
   connectDisabled: boolean;
   connect?: () => void;
   edit?: () => void;
+  inspect?: () => void;
   accept?: (next: RecordOverview) => unknown;
   onBusy?: (busy: boolean) => void;
   returnFocus: () => void;
@@ -176,6 +179,15 @@ export function HostContextMenu({
             <Pencil />
             Edit host…
           </ContextMenuItem>
+          {inspect && (
+            <ContextMenuItem disabled={disabled} onSelect={() => {
+              openingDialog.current = true;
+              inspect();
+            }}>
+              <Info />
+              Connection details
+            </ContextMenuItem>
+          )}
           <ContextMenuItem
             disabled={disabled}
             onSelect={() => {

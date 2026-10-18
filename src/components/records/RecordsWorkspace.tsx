@@ -57,6 +57,7 @@ import { effectiveNewTab, terminalSupportsNewTab } from "@/lib/settings-logic";
 import { useSettingsStore } from "@/stores/settings";
 import { cn } from "@/lib/utils";
 import { revealHidden } from "@/lib/sync-approvals";
+import { useLastNonNull } from "@/lib/use-last-non-null";
 import { RecordHostList } from "./HostList";
 import { RecordHostEditor } from "./HostEditor";
 import { RecordGroupEditor } from "./GroupEditor";
@@ -95,7 +96,9 @@ export function RecordsWorkspace({
   const [panel, setPanel] = useState<WorkspacePanel>("hosts");
   const [filter, setFilter] = useState<LibraryFilter>({ kind: "all" });
   const [inspectedId, setInspectedId] = useState<string | null>(null);
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
   const [selection, setSelection] = useState<HostSelection>({ kind: "none" });
+  const editorKind = useLastNonNull(selection.kind === "none" ? null : selection.kind);
   const [pendingSelection, setPendingSelection] =
     useState<HostSelection | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -149,6 +152,7 @@ export function RecordsWorkspace({
   const changeFilter = (next: LibraryFilter) => {
     setFilter(next);
     setInspectedId(null);
+    setSelectedHostId(null);
   };
   const groupContext =
     panel === "hosts" && filter.kind === "group"
@@ -172,6 +176,8 @@ export function RecordsWorkspace({
     });
   const editHost = (id: string) => {
     setPanel("hosts");
+    setSelectedHostId(id);
+    setInspectedId(null);
     requestSelection({ kind: "host", id });
   };
   const connect = async (id: string) => {
@@ -222,7 +228,8 @@ export function RecordsWorkspace({
   const onSaved = useCallback((id: string | null) => {
     setPanel("hosts");
     setSelection({ kind: "none" });
-    setInspectedId(id);
+    setSelectedHostId(id);
+    setInspectedId(null);
     setDirty(false);
   }, []);
   const onGroupSaved = useCallback((id: string | null) => {
@@ -234,6 +241,7 @@ export function RecordsWorkspace({
   const onDeleted = useCallback(() => {
     setSelection({ kind: "none" });
     setInspectedId(null);
+    setSelectedHostId(null);
     setDirty(false);
   }, []);
   const sync = async () => {
@@ -402,8 +410,19 @@ export function RecordsWorkspace({
           >
             <RecordHostList
               overview={overview}
-              selectedId={inspectedId}
-              select={setInspectedId}
+              selectedId={selectedHostId}
+              select={(id) => {
+                setSelectedHostId(id);
+                setInspectedId(null);
+              }}
+              inspect={(id) => {
+                setSelectedHostId(id);
+                setInspectedId(id);
+              }}
+              dismiss={() => {
+                setSelectedHostId(null);
+                setInspectedId(null);
+              }}
               edit={editHost}
               selectGroup={(id) => requestSelection({ kind: "group", id })}
               create={createHost}
@@ -543,6 +562,7 @@ export function RecordsWorkspace({
           className={cn(
             "library-editor-dialog",
             isGroupEditor ? "library-group-dialog sm:max-w-xl" : "library-host-dialog sm:max-w-2xl",
+            editorKind === "host" && "library-editor-drawer",
           )}
           onOpenAutoFocus={(event) => {
             const name =
