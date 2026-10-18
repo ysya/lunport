@@ -10,9 +10,9 @@ Production installations, personal client configurations, login items and creden
 
 - TypeScript and production Vite build passed. The existing main-chunk size warning remains.
 - Frontend: 96 files, 1,132 tests passed.
-- macOS safe Rust suite: 2,664 passed, 2 ignored, 10 filtered. The existing real-Keychain and PAM exclusions were retained. The restricted tool sandbox initially prevented the existing `ps`-based process cleanup checks; the suite passed in its normal process environment.
+- macOS safe Rust suite before the final authorization narrowing: 2,664 passed, 2 ignored, 10 filtered. The final focused migration suite passed all 14 checks, including the added system file-operation test. The existing real-Keychain and PAM exclusions were retained. The restricted tool sandbox initially prevented the existing `ps`-based process cleanup checks; the suite passed in its normal process environment.
 - Migration fixtures cover repeated execution, a later update, destination conflicts including an empty directory, link failure rollback, a concurrently occupied rollback path, interrupted move recovery, unrelated journals, Development write confinement, enabled/disabled login entries and retained arguments/unknown plist keys.
-- Authorization cancellation is fault-injected after an actual filesystem permission denial. It leaves the old app usable and a later retry succeeds. An administrator password dialog was not completed automatically.
+- Authorization cancellation is fault-injected after an actual filesystem permission denial. It leaves the old app usable and a later retry succeeds. The fixed Foundation operation was also executed through both real system-script quoting layers at ordinary user privileges: Unicode, spaces, apostrophes and shell syntax remained literal, and an occupied destination was preserved. An administrator password dialog was not completed automatically.
 - Client fixtures cover JSON/TOML preservation, unrelated same-name servers, existing Lunport identity reuse, disabled Codex entries, malformed input with redacted parser errors, concurrent edits, fresh setup, restrictive file/backup permissions and symbolic-link refusal.
 - Portable commands and install links cover Unicode, spaces, quotes, shell syntax, the VS Code envelope and persistent Linux AppImage paths. The new owner-only Windows DACL test runs in Windows CI.
 

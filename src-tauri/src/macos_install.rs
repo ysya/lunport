@@ -11,7 +11,6 @@ use std::{
     sync::Mutex,
 };
 
-const HELPER_MODE: &str = "--finish-app-rename";
 static STATUS: Mutex<Option<InstallStatus>> = Mutex::new(None);
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -275,14 +274,50 @@ fn shell_quote(value: &std::ffi::OsStr) -> io::Result<String> {
         .ok_or_else(|| io::Error::other("The installation path is not UTF-8"))?;
     Ok(format!("'{}'", value.replace('\'', "'\\''")))
 }
+// Only the system interpreter is elevated. The fixed program and literal paths
+// come from this running process, never from a mutable on-disk app executable.
+const AUTHORIZED_MOVE_SCRIPT: &str = r#"
+ObjC.import('Foundation');
+function run(argv) {
+    if (argv.length !== 2) throw Error('Invalid installation arguments');
+    var old = argv[0], next = argv[1];
+    if (!(old.endsWith('/SSHelter.app') || old.endsWith('/sshelter.app')) ||
+        next !== old.slice(0, old.lastIndexOf('/') + 1) + 'Lunport.app') {
+        throw Error('Invalid installation paths');
+    }
+    var manager = $.NSFileManager.defaultManager;
+    // NSFileManager refuses an existing destination, including during rollback.
+    if (!manager.moveItemAtPathToPathError($(old), $(next), Ref())) {
+        throw Error('The application could not be moved');
+    }
+    if (!manager.createSymbolicLinkAtPathWithDestinationPathError($(old), $('Lunport.app'), Ref())) {
+        manager.moveItemAtPathToPathError($(next), $(old), Ref());
+        throw Error('The compatibility link could not be created');
+    }
+}
+"#;
+
+fn authorization_command(plan: &Plan) -> io::Result<String> {
+    validate_plan(plan, false)?;
+    Ok(format!(
+        "/usr/bin/osascript -l JavaScript -e {} {} {}",
+        shell_quote(std::ffi::OsStr::new(AUTHORIZED_MOVE_SCRIPT))?,
+        shell_quote(plan.old.as_os_str())?,
+        shell_quote(plan.new.as_os_str())?,
+    ))
+}
+
 fn authorize_move(executable: &Path, old_name: &std::ffi::OsStr) -> io::Result<()> {
-    // A fixed self-mode computes its own source/destination; no caller-supplied paths or shell code.
-    let command = format!(
-        "{} {} {}",
-        shell_quote(executable.as_os_str())?,
-        HELPER_MODE,
-        shell_quote(old_name)?
-    );
+    let bundle =
+        bundle_for(executable).ok_or_else(|| io::Error::other("Not an application bundle"))?;
+    if bundle.file_name() != Some(old_name) {
+        return Err(io::Error::other("Installation source changed"));
+    }
+    let plan = Plan {
+        old: bundle.to_path_buf(),
+        new: bundle.with_file_name("Lunport.app"),
+    };
+    let command = authorization_command(&plan)?;
     let script = format!(
         "do shell script {} with administrator privileges",
         serde_json::to_string(&command)?
@@ -301,46 +336,6 @@ fn authorize_move(executable: &Path, old_name: &std::ffi::OsStr) -> io::Result<(
             "Installation authorization was not completed",
         ))
     }
-}
-
-/// The only elevated mode moves this very app and creates its old-name compatibility link.
-/// It never initializes Tauri, reads a user's credentials or accepts a destination path.
-pub fn handle_installer_mode() {
-    let args: Vec<_> = std::env::args_os().collect();
-    if args.get(1).and_then(|s| s.to_str()) != Some(HELPER_MODE) {
-        return;
-    }
-    let result = (|| -> io::Result<()> {
-        if unsafe { libc::geteuid() } != 0
-            || !crate::app_profile::CURRENT.allows_os_integrations()
-            || args.len() != 3
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Invalid installation mode",
-            ));
-        }
-        let exe = std::env::current_exe()?;
-        let bundle =
-            bundle_for(&exe).ok_or_else(|| io::Error::other("Not an application bundle"))?;
-        let old_name = args[2].to_str().unwrap_or("");
-        if !old_names(false).contains(&old_name) {
-            return Err(io::Error::other("Invalid legacy name"));
-        }
-        let plan = Plan {
-            old: bundle.with_file_name(old_name),
-            new: bundle.with_file_name("Lunport.app"),
-        };
-        validate_plan(&plan, false)?;
-        if bundle == plan.old {
-            move_bundle(&plan)
-        } else if bundle == plan.new {
-            complete_link(&plan)
-        } else {
-            Err(io::Error::other("Not a legacy or migrated installation"))
-        }
-    })();
-    std::process::exit(if result.is_ok() { 0 } else { 1 });
 }
 
 pub fn prepare_desktop_launch() {

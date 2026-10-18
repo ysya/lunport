@@ -8,9 +8,6 @@ fn main() {
         sshelter_lib::askpass::run();
     }
 
-    #[cfg(target_os = "macos")]
-    sshelter_lib::macos_install::handle_installer_mode();
-
     // Internal, disposable CoreAudio child: no Tauri, keychain, broker or GUI initialization.
     #[cfg(target_os = "macos")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--coreaudio-probe")) {

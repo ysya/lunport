@@ -148,6 +148,45 @@ fn shell_arguments_for_authorization_are_literal() {
 }
 
 #[test]
+fn system_authorization_program_moves_only_the_literal_fixture_and_refuses_conflicts() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("Spaces 測試 O'Brien $(ignored)");
+    let plan = Plan {
+        old: parent.join("SSHelter.app"),
+        new: parent.join("Lunport.app"),
+    };
+    fs::create_dir_all(plan.old.join("Contents/MacOS")).unwrap();
+    fs::write(bundle_exe(&plan.old), b"fixture").unwrap();
+    let command = authorization_command(&plan).unwrap();
+    // Exercise the same two quoting layers without requesting administrator privileges.
+    let script = format!(
+        "do shell script {}",
+        serde_json::to_string(&command).unwrap()
+    );
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(bundle_exe(&plan.old)).unwrap(), b"fixture");
+    assert_eq!(fs::read_link(&plan.old).unwrap(), Path::new("Lunport.app"));
+    fs::remove_file(&plan.old).unwrap();
+    fs::create_dir(&plan.old).unwrap();
+    fs::write(plan.old.join("keep"), b"old").unwrap();
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fs::read(plan.old.join("keep")).unwrap(), b"old");
+    assert_eq!(fs::read(bundle_exe(&plan.new)).unwrap(), b"fixture");
+}
+
+#[test]
 fn cancelled_authorization_preserves_the_working_old_app_and_can_retry() {
     use std::os::unix::fs::PermissionsExt;
     if unsafe { libc::geteuid() } == 0 {
