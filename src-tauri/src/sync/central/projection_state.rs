@@ -87,6 +87,26 @@ impl Ledger {
                 return Err(invalid());
             }
         }
+        for (opaque, row) in plan.rows() {
+            let receipt = &row.receipt;
+            if !local.contains_key(opaque)
+                && receipt.deleted
+                && matches!(row.data, super::projection::PublicData::Deleted)
+                && matches!(receipt.kind.as_str(), "host" | "group")
+                && matches!(&receipt.scope, Some(crate::sync::records_v3::HostScope::Space { space_id }) if !state.spaces.contains_key(space_id))
+            {
+                let identity = Identity {
+                    kind: receipt.kind.clone(),
+                    id: receipt.id.clone(),
+                    scope: receipt.scope.clone(),
+                };
+                let hash = crypto::hash(&payload::encode(&identity, &Data::Deleted)?);
+                if identity.opaque(keys)? != *opaque || hash != receipt.semantic_hash {
+                    return Err(invalid());
+                }
+                local.insert(opaque.clone(), hash);
+            }
+        }
         if plan.rows().keys().any(|opaque| !local.contains_key(opaque)) {
             return Err(invalid());
         }
@@ -654,6 +674,81 @@ pub(super) mod tests {
         state.local.central_projection = Some(ledger.clone());
         records_v3::validate_state(&state).unwrap();
         (*state, keys, ledger)
+    }
+    #[test]
+    fn removed_collection_tombstones_bootstrap_without_ghost_scope_or_local_collision() {
+        let (mut state, _, _) = initial();
+        let id = "0000000000000001";
+        let removed = "f".repeat(64);
+        let deleted = Identity {
+            kind: "host".into(),
+            id: id.into(),
+            scope: Some(HostScope::Space {
+                space_id: removed.clone(),
+            }),
+        };
+        let (ws, keys) = fixture(vec![
+            (Identity { kind: "meta".into(), id: "catalog".into(), scope: None }, Data::Catalog(Catalog { collections: vec![], group_orders: vec![] })),
+            (Identity { kind: "host".into(), id: id.into(), scope: Some(HostScope::Local) }, Data::Host(serde_json::from_value(serde_json::json!({"schema":2,"alias":"local-preserved","hostname":"fixture.invalid","auth":"password"})).unwrap())),
+            (deleted.clone(), Data::Deleted),
+        ]);
+        let plan = Plan::current(ws.clone(), &keys).unwrap();
+        assert!(plan.complete());
+        let cache = Cache::initial(&plan, 100, &BTreeMap::new()).unwrap();
+        assert!(cache.spaces.is_empty());
+        assert_eq!(
+            cache.hosts[&record_key(RecordKind::Host, id)]
+                .record
+                .payload["alias"],
+            "local-preserved"
+        );
+        state.local.central = Some(ws);
+        state.local.central_projection = None;
+        state.account = Some(cache.account);
+        state.spaces = cache.spaces;
+        state.local.hosts = cache.hosts;
+        state.local.groups = cache.groups;
+        state.local.group_order = cache.group_order;
+        let ledger = Ledger::initial(&plan, &state, &keys).unwrap();
+        let opaque = deleted.opaque(&keys).unwrap();
+        assert!(ledger.bases[&opaque].remote.deleted);
+        assert_eq!(
+            ledger.bases[&opaque].local_hash.as_ref(),
+            Some(&ledger.bases[&opaque].remote.semantic_hash)
+        );
+        state.local.central_projection = Some(ledger);
+        records_v3::validate_state(&state).unwrap();
+        let records_v3::DecodedState::V3(restarted) =
+            records_v3::decode_state(&serde_json::to_string(&state).unwrap()).unwrap()
+        else {
+            panic!()
+        };
+        assert!(restarted.spaces.is_empty());
+        assert!(restarted
+            .local
+            .central_projection
+            .as_ref()
+            .unwrap()
+            .public_changes(&restarted, &keys)
+            .unwrap()
+            .is_empty());
+        let signer = super::super::crypto::DeviceKeys::decode_secret(&base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            [1u8; 64],
+        ))
+        .unwrap();
+        let captured =
+            super::super::projection_capture::public_candidate(&restarted, &keys, &signer).unwrap();
+        assert!(captured
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .replica
+            .as_ref()
+            .unwrap()
+            .pending
+            .is_empty());
     }
     #[test]
     fn durable_bases_detect_local_edits_without_dirty_flags_and_keep_scope_identity() {

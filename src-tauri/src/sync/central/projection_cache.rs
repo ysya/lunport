@@ -129,6 +129,15 @@ impl Cache {
         }
         for projected in plan.rows().values() {
             let receipt = &projected.receipt;
+            // A deleted collection has no cache namespace; keep its authenticated
+            // tombstones in the ledger without recreating a collection or Local row.
+            if receipt.deleted
+                && matches!(projected.data, PublicData::Deleted)
+                && matches!(receipt.kind.as_str(), "host" | "group")
+                && matches!(&receipt.scope, Some(HostScope::Space { space_id }) if !cache.spaces.contains_key(space_id))
+            {
+                continue;
+            }
             let (kind, payload) = match &projected.data {
                 PublicData::Host(host) => (
                     RecordKind::Host,

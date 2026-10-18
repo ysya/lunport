@@ -254,6 +254,12 @@ impl Delta {
             }
             if let Some(HostScope::Space { space_id }) = &row.receipt.scope {
                 if !candidate.spaces.contains_key(space_id) {
+                    if row.receipt.deleted
+                        && matches!(row.data, PublicData::Deleted)
+                        && matches!(row.receipt.kind.as_str(), "host" | "group")
+                    {
+                        accepted.insert(opaque.clone());
+                    }
                     continue;
                 }
             }
@@ -516,6 +522,80 @@ pub(super) mod tests {
         delta
             .finish(&vault, &BTreeMap::new(), &"c".repeat(32))
             .unwrap()
+    }
+    #[test]
+    fn removed_collection_tombstones_advance_without_recreating_scope_or_republishing() {
+        let (mut state, keys, _) = initial();
+        let removed = "f".repeat(64);
+        append(
+            &mut state,
+            &keys,
+            Identity {
+                kind: "host".into(),
+                id: "0000000000000001".into(),
+                scope: Some(HostScope::Space {
+                    space_id: removed.clone(),
+                }),
+            },
+            payload::Data::Deleted,
+        );
+        let mut state = empty_finish(Delta::prepare(&state, &keys, 200).unwrap())
+            .candidate()
+            .clone();
+        let unseen = Identity {
+            kind: "group".into(),
+            id: "0000000000000002".into(),
+            scope: Some(HostScope::Space {
+                space_id: removed.clone(),
+            }),
+        };
+        append(&mut state, &keys, unseen.clone(), payload::Data::Deleted);
+        let mut catalog = state
+            .local
+            .central_projection
+            .as_ref()
+            .unwrap()
+            .catalog
+            .clone();
+        catalog
+            .collections
+            .retain(|collection| collection.id != removed);
+        catalog
+            .group_orders
+            .retain(|order| !matches!(&order.scope,HostScope::Space{space_id} if space_id==&removed));
+        append(
+            &mut state,
+            &keys,
+            Identity {
+                kind: "meta".into(),
+                id: "catalog".into(),
+                scope: None,
+            },
+            payload::Data::Catalog(catalog),
+        );
+        let verified = empty_finish(Delta::prepare(&state, &keys, 201).unwrap());
+        assert!(!verified.catalogue_deferred);
+        let next = verified.candidate();
+        assert!(!next.spaces.contains_key(&removed));
+        assert!(
+            !next.local.hosts[&record_key(RecordKind::Host, "0000000000000001")]
+                .record
+                .deleted
+        );
+        assert!(
+            next.local.central_projection.as_ref().unwrap().bases[&unseen.opaque(&keys).unwrap()]
+                .remote
+                .deleted
+        );
+        assert!(next
+            .local
+            .central_projection
+            .as_ref()
+            .unwrap()
+            .public_changes(next, &keys)
+            .unwrap()
+            .is_empty());
+        records_v3::validate_state(next).unwrap();
     }
     #[test]
     fn unchanged_delta_is_a_noop_and_uncaptured_local_b_is_never_overwritten() {
