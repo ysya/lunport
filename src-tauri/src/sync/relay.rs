@@ -366,7 +366,7 @@ fn read_body(resp: reqwest::blocking::Response, limit: usize) -> Result<Vec<u8>,
     read_capped(resp, limit)
 }
 
-fn read_capped(reader: impl Read, limit: usize) -> Result<Vec<u8>, RelayError> {
+pub(crate) fn read_capped(reader: impl Read, limit: usize) -> Result<Vec<u8>, RelayError> {
     let mut body = Vec::new();
     reader.take(limit as u64 + 1).read_to_end(&mut body).map_err(|error| {
         let timed_out = error.kind() == std::io::ErrorKind::TimedOut
