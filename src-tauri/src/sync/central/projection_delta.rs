@@ -339,6 +339,9 @@ impl Delta {
             catalogue_deferred,
         })
     }
+    pub fn before(&self) -> &SyncStateV3 {
+        &self.before
+    }
     pub fn required_material(&self) -> &BTreeSet<String> {
         &self.required
     }

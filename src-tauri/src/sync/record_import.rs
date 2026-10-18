@@ -18,6 +18,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
+pub(crate) mod central_stage;
 
 pub const MAX_PRIVATE_SOURCE_BYTES: u64 = 1024 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
@@ -134,6 +135,7 @@ pub fn pending_imports(env: &SyncEnv) -> Result<Vec<PendingImport>, AppError> {
             (MAX_SCAN_BYTES - total).min(MAX_JOURNAL_BYTES),
         )?;
         total += bytes.len() as u64;
+        if let Some(pending)=central_stage::pending(&id,&bytes)? {result.push(pending);continue;}
         match serde_json::from_slice::<Journal>(&bytes) {
             Ok(journal) if journal.version == JOURNAL_VERSION && journal.import_id == id => {
                 if journal.phase != Phase::Active {

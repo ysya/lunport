@@ -326,7 +326,7 @@ impl Ledger {
                     && receipt.private == material.private_receipt
             })
     }
-    pub(in crate::sync::central) fn verify_source_material(
+    pub(in crate::sync) fn verify_source_material(
         &self,
         id: &str,
         local: &crate::sync::records_v3::LocalKeyMetadata,
@@ -741,7 +741,7 @@ pub(super) mod tests {
                 && matches!(&c.data,Data::Host(h) if h.alias=="remote-scope-local-B")
         ));
     }
-    pub(in crate::sync::central) fn material_fixture() -> (
+    pub(in crate::sync) fn material_fixture() -> (
         SyncStateV3,
         VaultKeys,
         Plan,

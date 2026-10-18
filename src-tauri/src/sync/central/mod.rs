@@ -22,6 +22,7 @@ pub mod projection_state;
 mod projection_local;
 mod projection_capture;
 mod projection_delta;
+pub(super) use projection_delta::Delta as LibraryDelta;
 pub mod recovery;
 pub mod recovery_read;
 pub mod active_read;
@@ -47,3 +48,9 @@ pub mod workspace;
 
 #[cfg(test)]
 mod device_tests;
+
+#[cfg(test)]
+pub(super) use projection_state::tests::material_fixture as material_fixture_for_test;
+
+#[cfg(test)]
+pub(super) use projection_capture::public_candidate as capture_for_test;
