@@ -26,7 +26,7 @@ fn endpoint(url: &reqwest::Url) -> bool {
                 && url.scheme() == "http"
                 && matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost")))
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OidcConfig {
     pub issuer: String,

@@ -7,7 +7,7 @@ use super::{
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControlProof {
     pub genesis: Genesis,
@@ -93,6 +93,9 @@ impl VerifiedChain {
         self.views
             .get(head)
             .is_some_and(|view| view.devices.get(&device.id) == Some(&device.keys))
+    }
+    pub fn has_head(&self, head: &str) -> bool {
+        self.views.contains_key(head)
     }
     pub fn head_at(&self, revision: usize) -> Option<&str> {
         self.heads.get(revision).map(String::as_str)
