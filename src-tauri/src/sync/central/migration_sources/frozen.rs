@@ -8,9 +8,51 @@ use crate::sync::{
     record::Envelope,
     relay::PullResponse,
 };
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Target {
+    profile: String,
+    anchor: super::super::membership::TrustAnchor,
+    vault: String,
+    device: String,
+    identity_slot: Option<String>,
+    head: String,
+    auth_epoch: u64,
+    key_epoch: u64,
+}
+impl Target {
+    pub(super) fn current(owner: &Workspace) -> Result<Self, AppError> {
+        if owner.control.cutover || owner.control.phase != Phase::Enrolled {
+            return Err(invalid());
+        }
+        Ok(Self {
+            profile: owner.control.profile.locator.clone(),
+            anchor: owner.control.anchor.clone().ok_or_else(invalid)?,
+            vault: owner.control.personal_vault.clone().ok_or_else(invalid)?,
+            device: owner.control.device.id.clone(),
+            identity_slot: owner.identity_slot.clone(),
+            head: owner
+                .control
+                .highwater
+                .as_ref()
+                .ok_or_else(invalid)?
+                .head
+                .clone(),
+            auth_epoch: owner.control.auth_epoch,
+            key_epoch: owner.replica.as_ref().ok_or_else(invalid)?.checkpoint.epoch,
+        })
+    }
+}
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Context {
+    pub target: Target,
+    pub operation: String,
+    pub preview: String,
+    pub keybook: String,
+}
 pub(in crate::sync::central) struct FrozenSnapshot {
     checkpoint: Source,
     records: Vec<Envelope>,
+    context: Context,
 }
 impl FrozenSnapshot {
     pub fn checkpoint(&self) -> &Source {
@@ -18,6 +60,9 @@ impl FrozenSnapshot {
     }
     pub fn records(&self) -> &[Envelope] {
         &self.records
+    }
+    pub(super) fn context(&self) -> &Context {
+        &self.context
     }
 }
 impl Sources {
@@ -74,18 +119,56 @@ impl Sources {
                 },
             )?);
         }
+        let target = Target {
+            profile: owner.control.profile.locator.clone(),
+            anchor: owner.control.anchor.clone().ok_or_else(invalid)?,
+            vault: latest.vault_id.clone(),
+            device: latest.author.clone(),
+            identity_slot: owner.identity_slot.clone(),
+            head: latest.membership_head.clone(),
+            auth_epoch: super::super::wire::number(&latest.authorization_epoch, false)?,
+            key_epoch: super::super::wire::number(&latest.key_epoch, false)?,
+        };
         Ok(FrozenSnapshot {
             checkpoint: actual,
             records: response.records,
+            context: Context {
+                target,
+                operation: latest.migration_id.clone(),
+                preview: latest.preview_digest.clone(),
+                keybook: super::super::crypto::hash(&self.encode_local()?),
+            },
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::sync::central::migration_sources) mod tests {
     use super::*;
     use crate::sync::central::migration_freeze::{Phase as FreezePhase, ProofStep};
     fn fixture() -> (
+        Sources,
+        Workspace,
+        Progress,
+        String,
+        String,
+        PullResponse,
+        PullResponse,
+    ) {
+        let (_, sources, owner, progress, parent, child, parent_response, child_response) =
+            fixture_with_state();
+        (
+            sources,
+            owner,
+            progress,
+            parent,
+            child,
+            parent_response,
+            child_response,
+        )
+    }
+    pub(in crate::sync::central::migration_sources) fn fixture_with_state() -> (
+        SyncStateV3,
         Sources,
         Workspace,
         Progress,
@@ -142,6 +225,7 @@ mod tests {
             next: vec![child.chain_id.clone()],
         };
         (
+            state,
             sources,
             owner,
             progress,

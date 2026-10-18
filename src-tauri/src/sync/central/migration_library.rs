@@ -127,7 +127,11 @@ fn normalized(
     active: &BTreeMap<String, SharedKeyslot>,
 ) -> Result<SyncStateV3, AppError> {
     records_v3::validate_state(state).map_err(|_| invalid())?;
-    if state.local.central_projection.is_some()
+    if known
+        .rows()
+        .iter()
+        .any(|row| row.location.position == Position::Frozen)
+        || state.local.central_projection.is_some()
         || state
             .local
             .central

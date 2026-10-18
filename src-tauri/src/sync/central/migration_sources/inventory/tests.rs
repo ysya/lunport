@@ -184,3 +184,192 @@ fn public_and_encrypted_inputs_share_one_aggregate_record_and_byte_limit() {
         )
         .is_err());
 }
+
+fn frozen_fixture() -> (
+    SyncStateV3,
+    Sources,
+    Workspace,
+    crate::sync::central::migration_freeze::Progress,
+    String,
+    String,
+    crate::sync::relay::PullResponse,
+    crate::sync::relay::PullResponse,
+) {
+    let (mut state, sources, owner, progress, parent, child, parent_response, child_response) =
+        super::super::frozen::tests::fixture_with_state();
+    state.version = crate::sync::records_v3::CENTRAL_STATE_VERSION;
+    state.local.central = Some(owner.clone());
+    (
+        state,
+        sources,
+        owner,
+        progress,
+        parent,
+        child,
+        parent_response,
+        child_response,
+    )
+}
+#[test]
+fn frozen_parent_and_child_inputs_accumulate_without_replacing_local_pending_or_conflict_versions()
+{
+    use crate::sync::central::{
+        migration::legacy_checkpoint, migration_freeze::Phase as FreezePhase,
+    };
+    let (state, sources, owner, mut progress, parent, child, parent_response, child_response) =
+        frozen_fixture();
+    let snapshot = sources
+        .admit_frozen(
+            &owner,
+            &"7".repeat(32),
+            &progress,
+            None,
+            &parent,
+            parent_response.clone(),
+        )
+        .unwrap();
+    let before = serde_json::to_vec(&state).unwrap();
+    let inventory = Inventory::from_state(&sources, &state).unwrap();
+    let original = inventory.rows().len();
+    let dirty = inventory.rows().iter().filter(|row| row.dirty).count();
+    let inventory = inventory.with_frozen(&sources, &snapshot).unwrap();
+    assert_eq!(
+        inventory.rows().len(),
+        original + parent_response.records.len()
+    );
+    let inventory = inventory.with_frozen(&sources, &snapshot).unwrap();
+    assert_eq!(
+        inventory.rows().len(),
+        original + parent_response.records.len()
+    );
+    progress.sources.push(
+        legacy_checkpoint(&child, child_response.latest_seq, &child_response.records).unwrap(),
+    );
+    progress.sources.sort_by(|a, b| a.chain_id.cmp(&b.chain_id));
+    progress.phase = FreezePhase::Frozen;
+    progress.next.clear();
+    let snapshot = sources
+        .admit_frozen(
+            &owner,
+            &"7".repeat(32),
+            &progress,
+            None,
+            &child,
+            child_response.clone(),
+        )
+        .unwrap();
+    let inventory = inventory.with_frozen(&sources, &snapshot).unwrap();
+    assert_eq!(
+        inventory.rows().len(),
+        original + parent_response.records.len() + child_response.records.len()
+    );
+    assert_eq!(inventory.frozen.len(), 2);
+    assert_eq!(
+        inventory.rows().iter().filter(|row| row.dirty).count(),
+        dirty
+    );
+    assert!(inventory
+        .rows()
+        .iter()
+        .filter(|row| row.location.position == Position::Frozen)
+        .all(|row| !row.dirty));
+    assert!(inventory
+        .rows()
+        .iter()
+        .any(|row| row.location.position == Position::ConflictLocal));
+    assert_eq!(serde_json::to_vec(&state).unwrap(), before);
+}
+#[test]
+fn frozen_snapshot_is_bound_to_target_identity_slot_operation_and_original_keybook() {
+    use crate::sync::central::{crypto::DeviceKeys, migration_freeze::ProofStep};
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let (state, sources, owner, progress, parent, _, response, _) = frozen_fixture();
+    let snapshot = sources
+        .admit_frozen(
+            &owner,
+            &"7".repeat(32),
+            &progress,
+            None,
+            &parent,
+            response.clone(),
+        )
+        .unwrap();
+    let mut changed = state.clone();
+    changed.local.central.as_mut().unwrap().identity_slot = Some("f".repeat(32));
+    assert!(Inventory::from_state(&sources, &changed)
+        .unwrap()
+        .with_frozen(&sources, &snapshot)
+        .is_err());
+    let mut local = state.clone();
+    local.account = None;
+    local.spaces.clear();
+    let empty = Sources::discover(&local, None).unwrap();
+    assert!(Inventory::from_state(&empty, &local)
+        .unwrap()
+        .with_frozen(&empty, &snapshot)
+        .is_err());
+    let inventory = Inventory::from_state(&sources, &state)
+        .unwrap()
+        .with_frozen(&sources, &snapshot)
+        .unwrap();
+    let signer = DeviceKeys::decode_secret(&B64.encode([1u8; 64])).unwrap();
+    let intent = sources
+        .intent(&owner, &signer, &"6".repeat(32), &"8".repeat(64), None)
+        .unwrap();
+    let mut other = progress.clone();
+    other.proof = vec![ProofStep {
+        digest: intent.digest().unwrap(),
+        intent,
+    }];
+    let other = sources
+        .admit_frozen(&owner, &"6".repeat(32), &other, None, &parent, response)
+        .unwrap();
+    assert!(inventory.with_frozen(&sources, &other).is_err());
+}
+#[test]
+fn a_frozen_checkpoint_below_a_captured_cursor_or_changing_after_observation_is_refused() {
+    use crate::sync::central::migration::legacy_checkpoint;
+    let (state, sources, owner, progress, parent, _, response, _) = frozen_fixture();
+    let snapshot = sources
+        .admit_frozen(
+            &owner,
+            &"7".repeat(32),
+            &progress,
+            None,
+            &parent,
+            response.clone(),
+        )
+        .unwrap();
+    let mut changed = state.clone();
+    changed.account.as_mut().unwrap().cursor_seq = response.latest_seq + 1;
+    assert!(Inventory::from_state(&sources, &changed)
+        .unwrap()
+        .with_frozen(&sources, &snapshot)
+        .is_err());
+    let inventory = Inventory::from_state(&sources, &state)
+        .unwrap()
+        .with_frozen(&sources, &snapshot)
+        .unwrap();
+    let mut different = response;
+    different.latest_seq += 1;
+    let mut later = progress;
+    *later
+        .sources
+        .iter_mut()
+        .find(|source| source.chain_id == parent)
+        .unwrap() = legacy_checkpoint(&parent, different.latest_seq, &different.records).unwrap();
+    let different = sources
+        .admit_frozen(&owner, &"7".repeat(32), &later, None, &parent, different)
+        .unwrap();
+    assert!(inventory.with_frozen(&sources, &different).is_err());
+}
+#[test]
+fn frozen_inputs_share_the_aggregate_budget_and_cannot_return_a_partial_accumulation() {
+    let (state, sources, owner, progress, parent, _, response, _) = frozen_fixture();
+    let snapshot = sources
+        .admit_frozen(&owner, &"7".repeat(32), &progress, None, &parent, response)
+        .unwrap();
+    let mut inventory = Inventory::from_state(&sources, &state).unwrap();
+    inventory.bytes = 32 * 1024 * 1024 - 256 * 1024;
+    assert!(inventory.with_frozen(&sources, &snapshot).is_err());
+}
