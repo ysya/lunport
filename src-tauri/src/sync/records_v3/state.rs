@@ -49,6 +49,8 @@ pub struct SyncStateV3 {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalState {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tunnel_rules: BTreeMap<String, LocalRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_order: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -117,7 +119,7 @@ pub fn decode_state(text: &str) -> Result<DecodedState, RecordValidationError> {
         2 => serde_json::from_str(text)
             .map(DecodedState::V2)
             .map_err(state_decode_error),
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION => {
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | crate::sync::tunnel_rules::STATE_VERSION => {
             let state = serde_json::from_str(text).map_err(state_decode_error)?;
             validate_state(&state)?;
             Ok(DecodedState::V3(Box::new(state)))
@@ -200,7 +202,7 @@ pub fn account_writes_blocked(state: &SyncStateV3) -> bool {
 pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> {
     if !matches!(
         state.version,
-        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION
+        STATE_VERSION | GROUP_STATE_VERSION | NAVIGATION_STATE_VERSION | crate::sync::tunnel_rules::STATE_VERSION
     ) {
         return Err(RecordValidationError::UnsupportedSchema {
             kind: "state",
@@ -263,6 +265,13 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
             "local",
             "invalid navigation format",
         ));
+    }
+    if !state.local.tunnel_rules.is_empty() && state.version < crate::sync::tunnel_rules::STATE_VERSION {
+        return Err(state_invalid("tunnel", "local", "invalid tunnel state version"));
+    }
+    for (key, row) in &state.local.tunnel_rules {
+        validate_cache_key(key, row)?;
+        if !crate::sync::tunnel_rules::valid(&row.record) { return Err(state_invalid("tunnel", &row.record.id, "invalid tunnel metadata")); }
     }
     read_hosts(&state.local.hosts, HostScope::Local)?;
     for (key, row) in &state.local.groups {
@@ -345,6 +354,9 @@ pub fn validate_state(state: &SyncStateV3) -> Result<(), RecordValidationError> 
                             "invalid navigation metadata",
                         ));
                     }
+                }
+                RecordKind::Meta if crate::sync::tunnel_rules::is_id(&record.id) => {
+                    if !crate::sync::tunnel_rules::valid(record) { return Err(state_invalid("tunnel", &record.id, "invalid tunnel metadata")); }
                 }
                 RecordKind::Meta if record.id == ACCOUNT_META_ID && !record.deleted => {
                     let meta: MetaPayload = serde_json::from_value(record.payload.clone())

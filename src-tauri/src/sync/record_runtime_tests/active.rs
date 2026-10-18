@@ -327,7 +327,7 @@ fn validation_failure_generation_overflow_and_pure_transform_error_never_publish
     let fixture = Fixture::active();
     let env = fixture.env();
     let (mut invalid, generation) = snapshot(&env).unwrap();
-    invalid.version = crate::sync::records_v3::NAVIGATION_STATE_VERSION + 1;
+    invalid.version = crate::sync::tunnel_rules::STATE_VERSION + 1;
     assert!(commit_candidate(&env, generation, invalid).is_err());
     assert!(!env.state_path.exists());
     let original = snapshot(&env).unwrap();
@@ -497,7 +497,7 @@ fn unjoined_or_invalid_records_never_access_credentials() {
         .unwrap()
         .is_none());
     let mut invalid = super::state();
-    invalid.version = crate::sync::records_v3::NAVIGATION_STATE_VERSION + 1;
+    invalid.version = crate::sync::tunnel_rules::STATE_VERSION + 1;
     assert!(read_account_keys(&invalid, &ForbiddenIo).is_err());
 }
 #[test]

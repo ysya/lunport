@@ -5,7 +5,9 @@ Uses throwaway keys and an empty temporary HOME, never ~/.ssh or real passwords.
 Keep this process running while trying the preview. Ctrl-C stops its SSH sessions
 and removes the fixture. Requires a local OpenSSH sshd and ssh-keygen (macOS/Linux).
 """
+import argparse
 import getpass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
 import shutil
@@ -13,6 +15,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 
 
 def descendants(pid):
@@ -30,6 +33,9 @@ def descendants(pid):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--forwarding", action="store_true", help="allow TCP forwarding and run a disposable HTTP destination")
+    args = parser.parse_args()
     sshd = shutil.which("sshd") or next((p for p in ["/usr/sbin/sshd", "/opt/homebrew/sbin/sshd"] if Path(p).exists()), None)
     if not sshd or not shutil.which("ssh-keygen"):
         raise SystemExit("Install OpenSSH sshd and ssh-keygen first.")
@@ -44,6 +50,21 @@ def main():
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
         (root / "ssh_config").write_text(f"Host terminal-preview\n  HostName 127.0.0.1\n  User {getpass.getuser()}\n  Port {port}\n  IdentityFile {root / 'preview_key'}\n")
+        http = None
+        if args.forwarding:
+            class Handler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    body = b"Lunport real SSH tunnel preview\n"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, *_):
+                    pass
+            http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            threading.Thread(target=http.serve_forever, daemon=True).start()
+            print(f"Tunnel destination: 127.0.0.1:{http.server_port}", flush=True)
         config = root / "sshd_config"
         config.write_text(f'''ListenAddress 127.0.0.1
 Port {port}
@@ -56,7 +77,8 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 StrictModes no
 PermitUserRC no
-AllowTcpForwarding no
+AllowTcpForwarding {'yes' if args.forwarding else 'no'}
+GatewayPorts no
 AllowAgentForwarding no
 X11Forwarding no
 PermitTunnel no
@@ -75,6 +97,9 @@ ForceCommand /usr/bin/env -i HOME="{root}" USER={getpass.getuser()} LOGNAME={get
         except KeyboardInterrupt:
             pass
         finally:
+            if http:
+                http.shutdown()
+                http.server_close()
             if server.poll() is None:
                 os.kill(server.pid, signal.SIGSTOP)
                 family = descendants(server.pid)

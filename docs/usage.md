@@ -26,6 +26,20 @@ The **OpenSSH known_hosts** tab manages this computer's `~/.ssh/known_hosts`. Se
 
 In a host's connection details, **Check port** performs a manual TCP reachability check with a three-second limit and displays the result, connection time and check time. A reachable port confirms TCP connectivity; server identity and login are verified separately. Timeout, refused connection and name-resolution errors describe that check rather than declaring a host offline. For jump-host routes, use **Verify fingerprint** to check through the configured route; that flow may request jump-host credentials.
 
+## SSH tunnels
+
+Open **Tunnels** in the Records workspace and choose **New tunnel**. Select a saved SSH host and a forwarding type:
+
+- **Local:** listen on this computer and reach a destination from the SSH host, such as `127.0.0.1:15432 → db.internal:5432`.
+- **Remote:** listen on the SSH host and reach a destination from this computer. The SSH server must allow remote forwarding; its `GatewayPorts` policy controls non-loopback exposure.
+- **SOCKS5:** point a browser or tool at the local listening address. TCP CONNECT is supported, including destination name resolution through the SSH host. UDP and SOCKS authentication are not supported.
+
+Listening addresses are IPv4 or IPv6 addresses. The default `127.0.0.1` is loopback; choose port **0** to allocate an available listening port. The actual port appears after starting. Each tunnel uses the host's existing keys, passwords, server fingerprint checks and jump hosts, without opening a shell.
+
+Rules sync as encrypted account metadata. **Running state stays on each device:** receiving a rule never starts it, and changes elsewhere do not reconfigure an existing connection. Stop and start to apply an updated rule. A rule deleted elsewhere stays visible until its local connection is stopped. On leaving sync, rules for preserved hosts become local rules.
+
+Tunnels keep running while switching pages, closing terminal tabs or closing the window. Quitting Lunport, reloading it or installing an update ends them. Reconnection is manual. Up to 16 tunnels can run on one device, each with up to 64 simultaneous TCP connections; up to 256 definitions can be saved.
+
 ## Connect in Lunport or an external terminal
 
 The in-app terminal is available first on the **Beta** update channel in **Settings → Updates**.

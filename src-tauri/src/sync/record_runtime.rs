@@ -358,6 +358,9 @@ fn persist_candidate(
         candidate.version = crate::sync::records_v3::GROUP_STATE_VERSION;
     }
     candidate = crate::sync::record_library::include_new_records(candidate, core.account_keys.as_ref());
+    crate::sync::tunnel_rules::publish_local(&mut candidate, core.account_keys.as_ref(), 0)
+        .map_err(|e| AppError::Other(e.to_string()))?;
+    if crate::sync::tunnel_rules::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::tunnel_rules::STATE_VERSION); }
     if crate::sync::group_order::has_navigation_data(&candidate) {
         candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
     }
@@ -452,6 +455,9 @@ pub fn commit_migration_candidate(
     core.generation
         .checked_add(1)
         .ok_or_else(|| AppError::Other("sync state generation exhausted".into()))?;
+    crate::sync::tunnel_rules::publish_local(&mut candidate, keys.as_ref(), 0)
+        .map_err(|e| AppError::Other(e.to_string()))?;
+    if crate::sync::tunnel_rules::has_data(&candidate) { candidate.version = candidate.version.max(crate::sync::tunnel_rules::STATE_VERSION); }
     if crate::sync::group_order::has_navigation_data(&candidate) {
         candidate.version = candidate.version.max(crate::sync::records_v3::NAVIGATION_STATE_VERSION);
     }

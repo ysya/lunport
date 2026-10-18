@@ -27,6 +27,16 @@ Development refuses Legacy system-SSH evaluation, Connect, deployment and MCP ex
 
 An ordinary `pnpm tauri build` uses the Production profile. Keep the two profiles separate when validating existing data.
 
+## SSH forwarding
+
+`ssh/forward.rs` defines the engine-neutral forwarding contract. The existing russh connection owns TCP listeners, remote forwarding registrations and SOCKS5 CONNECT relays, including jump chains, cancellation and bounded stream concurrency. `session/tunnels.rs` keeps human-started runtime handles outside persistent state and joins the broker's quit barrier. The main-window commands reuse the existing connector, native authentication and host-key policy; this feature adds no agent forwarding, MCP tool or credential delivery to the WebView.
+
+Each definition is an optional account `meta` record named `tunnel:<16-hex-id>`, with payload `{schema: 1, rule: ...}`. Host and account protocol schemas stay unchanged. Separate records give unrelated definitions independent LWW revisions; UI mutations compare the complete displayed rule. Newer opaque revisions block edits and starts. Older clients retain these envelopes without changing their contents. Local definitions live in `local.tunnel_rules`; local state format **6** protects that field from downgrade. Joining an account publishes local definitions after an authenticated baseline, while leaving remaps preserved host IDs. Code rotation re-encrypts the existing metadata through the generic rotation path. Live listeners, ports, errors and active connection counts never sync or persist.
+
+For a native Development preview, run `python3 scripts/preview-ssh.py --forwarding`, import its disposable host/key and use the printed HTTP destination as a tunnel target. The fixture remains loopback-only and stops its SSH sessions on Ctrl-C.
+
+Validation: `cargo test --locked --lib ssh::engine_tests::forward` uses disposable OpenSSH servers for all three forwarding types, binary traffic, TCP half-close, active-stream cancellation, occupied ports, denied remote requests, remote auto-port allocation, DNS via SOCKS and a two-hop chain. `scripts/validate-group-order-compat.sh` runs an injected test against the unmodified published v1.2.0 merger to check opaque rules and tombstone retention. The normal Rust suite also covers rule merge, future versions, account detach, runtime isolation and quit barriers; frontend tests cover independent starts, missing hosts, remote changes and routes.
+
 ## Embedded SSH terminal
 
 Choose **Lunport (in app)** in **Settings → Connections** or the Records connection menu. The choice, terminal text size and cursor preference persist locally through the existing settings store and settings export/import. New installations default to the app terminal; existing terminal preferences are preserved. Records connections use stable host IDs and Legacy connections use saved aliases through the same broker. Unsupported Legacy directives are refused by the existing adapter; Development still refuses external OpenSSH evaluation.

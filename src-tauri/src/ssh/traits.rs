@@ -30,6 +30,10 @@ pub trait SshEngine: Send + Sync {
 /// `tokio::task::spawn_blocking`, never from async code: the engine drives its own runtime with `block_on`, and that panics on a thread
 /// that is running async tasks.
 pub trait Session: Send + Sync {
+    fn forward(&self, _spec: &super::forward::ForwardSpec) -> Result<Box<dyn super::forward::Forwarder>, SessionError> {
+        Err(SessionError::Channel("Port forwarding is unavailable in this SSH engine.".into()))
+    }
+
     /// Opens a PTY shell on the destination host. Any number of channels can be open at once.
     fn shell(&self, pty: Pty) -> Result<Box<dyn ShellChannel>, SessionError>;
 

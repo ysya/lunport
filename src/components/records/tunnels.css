@@ -1,0 +1,7 @@
+.tunnels-panel { container-type: inline-size; min-width: 0; padding: 1.4rem var(--page-inset) 2rem; }
+.tunnel-route-compact { display: none; }
+@container (max-width: 720px) {
+  .tunnel-route-column { display: none; }
+  .tunnel-route-compact { display: block; }
+  .tunnels-panel td { padding-left: .65rem; padding-right: .65rem; }
+}

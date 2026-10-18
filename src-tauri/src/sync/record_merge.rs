@@ -471,7 +471,7 @@ fn verified_public_identity(
     let version = fields.get("version")?.as_u64()?;
     let deleted = fields.get("deleted")?.as_bool()?;
     let known_id = if account && envelope.kind == "meta" {
-        id == crate::sync::group_order::RECORD_ID
+        id == crate::sync::group_order::RECORD_ID || crate::sync::tunnel_rules::is_id(id)
     } else if account {
         is_slot_id(id)
     } else {
@@ -735,6 +735,7 @@ fn valid_public(record: &Record, account: bool, keys: &ChainKeys) -> bool {
             RecordKind::Meta if record.id == crate::sync::group_order::RECORD_ID => {
                 crate::sync::group_order::decode(record).is_some()
             }
+            RecordKind::Meta if crate::sync::tunnel_rules::is_id(&record.id) => crate::sync::tunnel_rules::valid(record),
             RecordKind::KeySlot => {
                 decode_keyslot(record).is_ok()
                     && (!record.deleted
@@ -988,6 +989,21 @@ fn admit_retained_group_order(
         diagnostics,
     )
 }
+fn admit_retained_tunnels(section: &mut AccountState, keys: &ChainKeys, conflicts: &mut Vec<String>, diagnostics: &mut Vec<MergeDiagnostic>) -> bool {
+    let retained: Vec<_> = section.sealed.iter().filter(|(_, row)| row.envelope.kind == "meta" && !row.dirty).map(|(wire, row)| (wire.clone(), row.envelope.clone())).collect();
+    for (wire, envelope) in retained {
+        let supported = open_record(keys, &envelope).is_ok_and(|record| crate::sync::tunnel_rules::valid(&record.0));
+        if !supported {
+            if let Some(hint) = verified_public_identity(keys, &envelope, true).filter(|hint| crate::sync::tunnel_rules::is_id(&hint.id)) {
+                section.sealed.get_mut(&wire).unwrap().public_identity = Some(hint);
+            }
+            continue;
+        }
+        section.sealed.remove(&wire);
+        if !merge_rows(&mut section.records, &mut section.sealed, keys, &PullResponse { records: vec![envelope], latest_seq: section.cursor_seq }, true, conflicts, diagnostics) { return false; }
+    }
+    true
+}
 pub fn merge_account(
     section: &AccountState,
     keys: &ChainKeys,
@@ -1014,7 +1030,7 @@ pub fn merge_account(
         keys,
         &mut out.conflicts,
         &mut out.diagnostics,
-    ) || !merge_rows(
+    ) || !admit_retained_tunnels(&mut out.section, keys, &mut out.conflicts, &mut out.diagnostics) || !merge_rows(
         &mut out.section.records,
         &mut out.section.sealed,
         keys,

@@ -171,7 +171,7 @@ impl VerifiedPublicIdentity {
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             }
             "keyslot" => crate::sync::slot_rules::is_slot_id(&self.id),
-            "meta" => self.id == crate::sync::group_order::RECORD_ID,
+            "meta" => self.id == crate::sync::group_order::RECORD_ID || crate::sync::tunnel_rules::is_id(&self.id),
             _ => false,
         };
         public_id && self.version > 0 && crate::sync::slot_rules::is_slot_id(&self.device_id) && self.deleted == envelope.deleted
