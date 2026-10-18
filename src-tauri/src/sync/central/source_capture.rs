@@ -8,7 +8,7 @@ use super::{
     inventory_keys::Capture,
     migration_files::Files,
     migration_materials::Materials,
-    migration_sources::Sources,
+    migration_sources::{Inventory, Sources},
     payload::KeyStorage,
     source_package::Package,
     wire::invalid,
@@ -144,7 +144,7 @@ pub(super) fn capture(
     let readonly = NonInteractiveKeychain(env.keychain);
     let account = Legacy(record_runtime::read_account_keys(&before, &readonly)?);
     let sources = Sources::discover(&before, account.0.as_ref())?;
-    sources.verify_retained(&before)?;
+    drop(Inventory::from_state(&sources, &before)?);
     let files = Files::capture(env, before.legacy_v1_backup.as_deref())?;
     let observer = Capture::new(&readonly);
     drop(Materials::from_files(

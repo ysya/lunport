@@ -22,6 +22,17 @@ impl Authenticated {
     pub fn view(&self) -> Result<View<'_>, AppError> {
         serde_json::from_slice(&self.bytes).map_err(|_| invalid())
     }
+    pub(super) fn byte_len(&self) -> usize { self.bytes.len() }
+    pub(super) fn public(row: &Record) -> Result<Self, AppError> {
+        if row.kind.is_secret() || row.id.is_empty() || row.id.len() > 1024
+            || row.version == 0 || row.version > MAX_SAFE_INTEGER
+            || row.updated_at_ms > MAX_SAFE_INTEGER || !hex(&row.device_id,32) {
+            return Err(invalid());
+        }
+        let bytes = Zeroizing::new(serde_json::to_vec(row).map_err(|_| invalid())?);
+        if bytes.len() > 49152 { return Err(invalid()); }
+        let opened = Self { bytes }; drop(opened.view()?); Ok(opened)
+    }
 }
 #[derive(Default)]
 struct Budget {

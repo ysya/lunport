@@ -23,6 +23,8 @@ use zeroize::Zeroizing;
 const MAX_SOURCES: usize = 65;
 mod archive;
 mod records;
+mod inventory;
+pub(super) use inventory::Inventory;
 mod frozen;
 struct Temporary(ChainKeys);
 impl Drop for Temporary {

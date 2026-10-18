@@ -5,7 +5,7 @@ use super::{
     inventory_keys::Snapshot,
     migration_files::Files,
     migration_materials::Materials,
-    migration_sources::Sources,
+    migration_sources::{Inventory, Sources},
     payload::KeyStorage,
     source_archive::{self, Archived, Receipt},
     wire::invalid,
@@ -83,6 +83,11 @@ impl Package {
             sources,
             decryptors,
         })
+    }
+    /// Full current/recovery input enumeration using this package's archived legacy keybook.
+    /// Payload semantics and other captured source images still require separate admission.
+    pub fn record_inputs(&self) -> Result<Inventory, AppError> {
+        Inventory::from_state(&self.sources, &self.state)
     }
     /// Admission always uses the enclosed decryptors. No OS access, writes, activation or consent.
     pub fn materials(
