@@ -391,13 +391,32 @@ impl Replica {
         authorization_epoch: u64,
         commits: &[SignedRekey],
     ) -> Result<Vec<RecordEnvelope>, AppError> {
+        let ids = self.pending.keys().cloned().collect::<Vec<_>>();
+        self.prepare_send_selected(chain, minimum_epoch, authorization_epoch, commits, &ids)
+    }
+    /// Native planner selects dependency-ready identities; still persist before dispatch.
+    pub(super) fn prepare_send_selected(
+        &mut self,
+        chain: &VerifiedChain,
+        minimum_epoch: u64,
+        authorization_epoch: u64,
+        commits: &[SignedRekey],
+        ids: &[String],
+    ) -> Result<Vec<RecordEnvelope>, AppError> {
+        if ids.len() > 4096
+            || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
+            || ids.iter().any(|id| !self.pending.contains_key(id))
+        {
+            return Err(invalid());
+        }
         if !self.baseline_ready() {
             return Err(AppError::Other("Wait for the approved device's complete data checkpoint before uploading. Local changes are retained.".into()));
         }
         self.verify_write_authority(chain, authorization_epoch, minimum_epoch, commits)?;
         let mut candidate = self.clone();
         let mut rows = Vec::new();
-        for (id, p) in &mut candidate.pending {
+        for id in ids {
+            let p = candidate.pending.get_mut(id).ok_or_else(invalid)?;
             if rows.len() == 32 {
                 break;
             }

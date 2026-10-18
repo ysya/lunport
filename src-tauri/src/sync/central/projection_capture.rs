@@ -65,7 +65,12 @@ pub fn public_candidate(
                 .confirmed
                 .as_ref()
                 .or_else(|| ledger.bases.get(&opaque).map(|basis| &basis.wire));
-            if basis != Some(remote) && remote.content_hash != pending.latest.content_hash {
+            let own_source_ack =
+                basis.is_none() && ledger.own_unprojected_keyslot(before, keys, &opaque, remote)?;
+            if basis != Some(remote)
+                && !own_source_ack
+                && remote.content_hash != pending.latest.content_hash
+            {
                 let conflict = Conflict {
                     base: basis.cloned(),
                     local: pending.latest.clone(),

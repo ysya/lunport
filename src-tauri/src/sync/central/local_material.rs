@@ -582,13 +582,13 @@ pub(in crate::sync) fn prepare_new(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::sync::central::{
         payload, projection::tests::slot, projection_state::tests::initial, wire::WrapHeader,
     };
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-    fn fixture(
+    pub(in crate::sync::central) fn fixture(
         encrypted: bool,
     ) -> (
         SyncStateV3,

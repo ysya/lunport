@@ -424,6 +424,55 @@ impl Ledger {
         next.validate(plan.before())?;
         Ok(next)
     }
+    /// A fresh local source may receive its own public-name ACK before material projection.
+    /// Authenticate the actual history payload; cached hashes alone never grant this basis.
+    pub(in crate::sync::central) fn own_unprojected_keyslot(
+        &self,
+        owner: &Workspace,
+        keys: &VaultKeys,
+        opaque: &str,
+        remote: &super::replica::Base,
+    ) -> Result<bool, AppError> {
+        if self.bases.contains_key(opaque) {
+            return Ok(false);
+        }
+        let h = &remote.version.envelope.header;
+        if h.kind != "keyslot"
+            || h.deleted
+            || h.author != owner.control.device.id
+            || h.record_id != opaque
+        {
+            return Ok(false);
+        }
+        let chain = owner.control.verified_chain()?;
+        let author = chain
+            .author_at(&h.membership_head, &h.author)
+            .ok_or_else(invalid)?;
+        let plain = remote
+            .version
+            .envelope
+            .verify(&author.signing)?
+            .open(keys)?;
+        if crypto::hash(&plain) != remote.content_hash {
+            return Err(invalid());
+        }
+        let admitted = payload::admit(keys, h, &plain)?;
+        let Some(source) = self.local_sources.get(&admitted.identity.id) else {
+            return Ok(false);
+        };
+        if source.wire_handles().0 != opaque {
+            return Ok(false);
+        }
+        let Data::Keyslot(actual) = admitted.data else {
+            return Ok(false);
+        };
+        let mut expected = source.slot().clone();
+        expected.public.name = actual.public.name.clone();
+        Ok(expected == actual)
+    }
+    pub(in crate::sync::central) fn local_source(&self, id: &str) -> Option<&super::local_material::Receipt> {
+        self.local_sources.get(id)
+    }
     pub(in crate::sync::central) fn has_local_source(&self, id: &str) -> bool {
         self.local_sources.contains(id)
     }
