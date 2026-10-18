@@ -1,4 +1,4 @@
-import { centralFetch } from "./v2/routes";
+import { centralFetch, centralPrivateFetch } from "./v2/routes";
 import type { Bucket } from "./ip-limit";
 export { IpLimiter } from "./ip-limit";
 import { validScope, sameMigration, type LegacyMigrationScope, type LegacySnapshot, type LegacyGate } from "./legacy-retirement";
@@ -552,7 +552,9 @@ export class CentralSyncBackend extends WorkerEntrypoint<Env> {
           this.env.LEGACY_RETIREMENT.idFromName(REGISTRY_WITNESS).toString()
       )
         return status(503);
-      return await backend.fetch(request, this.env);
+      return new URL(request.url).pathname.startsWith("/v2/")
+        ? await centralPrivateFetch(request, this.env)
+        : await backend.fetch(request, this.env);
     } catch {
       return status(503);
     }

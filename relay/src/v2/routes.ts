@@ -96,16 +96,31 @@ const paths = new Set([
   "/v2/device-access",
 ]);
 /** No v2 authentication error ever retries a v1 bearer path. */
-export async function centralFetch(
+export function centralFetch(request: Request, env: Env): Promise<Response> {
+  return route(request, env, false);
+}
+/** Called only by the named RPC after its same-invocation floor/registry checks. */
+export function centralPrivateFetch(
   request: Request,
   env: Env,
 ): Promise<Response> {
+  return route(request, env, true);
+}
+async function route(
+  request: Request,
+  env: Env,
+  checkedIngress: boolean,
+): Promise<Response> {
   const url = new URL(request.url),
     match =
-      /^\/v2\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata|rekey|rekey\/begin|rekey\/stage|rekey\/commit|rekey\/abort|rekey\/reconcile|rekey\/source|rekey\/wraps|receipt)$/.exec(
+      /^\/v2\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata|rekey|rekey\/begin|rekey\/stage|rekey\/commit|rekey\/abort|rekey\/reconcile|rekey\/source|rekey\/wraps|receipt|migration|migration\/freeze|migration\/begin|migration\/stage|migration\/commit|migration\/retire)$/.exec(
         url.pathname,
       );
   if (!paths.has(url.pathname) && !match) return response({ status: 404 });
+  const migration = !!match && match[2].startsWith("migration");
+  if (migration && (!checkedIngress || env.CENTRAL_PRIVATE_CORE !== "1"))
+    return response({ status: 404 });
+
   const limiter = env.IP_LIMIT.getByName(
     "ip:" + (request.headers.get("cf-connecting-ip") ?? "unknown"),
   );
@@ -205,6 +220,61 @@ export async function centralFetch(
     return response(await account.overview(actor));
   if (match) {
     const vault = env.VAULT.getByName(actor.account + ":" + match[1]);
+    if (migration) {
+      if (request.method === "GET") {
+        if (match[2] === "migration") return vault.migrationStatus(actor);
+        if (match[2] === "migration/freeze") return vault.freezeStatus(actor);
+        return response({ status: 405 });
+      }
+      if (request.method !== "POST" || match[2] === "migration")
+        return response({ status: 405 });
+      const parsed = await body(request);
+      if (parsed instanceof Response) return parsed;
+      switch (match[2]) {
+        case "migration/freeze":
+          return exactObject(parsed, ["intent", "credentials"])
+            ? response(
+                await vault.freezeSources(
+                  actor,
+                  parsed.intent as any,
+                  parsed.credentials as any,
+                ),
+              )
+            : response({ status: 400 });
+        case "migration/begin":
+          return exactObject(parsed, ["manifest", "wraps"])
+            ? response(
+                await vault.beginMigration(
+                  actor,
+                  parsed.manifest as any,
+                  parsed.wraps as any,
+                  true,
+                ),
+              )
+            : response({ status: 400 });
+        case "migration/stage":
+          return exactObject(parsed, ["migration", "after", "rows"]) &&
+            hex(parsed.migration, 32)
+            ? response(
+                await vault.stageMigration(
+                  actor,
+                  parsed.migration as string,
+                  parsed.after as string,
+                  parsed.rows as any,
+                ),
+              )
+            : response({ status: 400 });
+        case "migration/commit":
+        case "migration/retire":
+          if (!exactObject(parsed, ["migration"]) || !hex(parsed.migration, 32))
+            return response({ status: 400 });
+          return match[2] === "migration/commit"
+            ? vault.commitMigration(actor, parsed.migration)
+            : vault.retireMigration(actor, parsed.migration);
+        default:
+          return response({ status: 405 });
+      }
+    }
     if (request.method === "GET") {
       if (match[2] === "rekey") return vault.rekeyStatus(actor);
       if (match[2] === "receipt")

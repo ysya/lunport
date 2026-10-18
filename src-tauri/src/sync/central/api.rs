@@ -511,6 +511,49 @@ impl Api {
             Some(body),
         )
     }
+    /// Private-ingress-only protocol. Callers retain native inventory/consent and verify replies.
+    pub(super) fn migration_status(
+        &self,
+        session: &DeviceSession,
+        vault: &str,
+        freeze: bool,
+    ) -> Result<Reply, AppError> {
+        if !hex(vault, 64) || session.device_state != DeviceState::Active {
+            return Err(invalid());
+        }
+        let suffix = if freeze {
+            "migration/freeze"
+        } else {
+            "migration"
+        };
+        self.authenticated(
+            session,
+            Method::GET,
+            &format!("/v2/vaults/{vault}/{suffix}"),
+            None,
+        )
+    }
+    pub(super) fn migration(
+        &self,
+        session: &DeviceSession,
+        vault: &str,
+        action: MigrationAction,
+        body: Zeroizing<Vec<u8>>,
+    ) -> Result<Reply, AppError> {
+        if !hex(vault, 64)
+            || session.device_state != DeviceState::Active
+            || body.is_empty()
+            || body.len() > RESPONSE_CAP
+        {
+            return Err(invalid());
+        }
+        self.authenticated(
+            session,
+            Method::POST,
+            &format!("/v2/vaults/{vault}/migration/{}", action.path()),
+            Some(body),
+        )
+    }
     pub fn push(
         &self,
         session: &DeviceSession,
@@ -574,6 +617,24 @@ pub enum VaultResource {
     EpochWraps { epoch: u64 },
     SourceProof { epoch: u64, after: u64 },
     Receipt { operation: String },
+}
+pub(super) enum MigrationAction {
+    Freeze,
+    Begin,
+    Stage,
+    Commit,
+    Retire,
+}
+impl MigrationAction {
+    fn path(&self) -> &'static str {
+        match self {
+            Self::Freeze => "freeze",
+            Self::Begin => "begin",
+            Self::Stage => "stage",
+            Self::Commit => "commit",
+            Self::Retire => "retire",
+        }
+    }
 }
 pub enum RekeyAction {
     Begin,
@@ -656,6 +717,38 @@ mod tests {
         let reply = api.account(&one).unwrap();
         assert_eq!(reply.status, 403);
         assert!(!reply.success().unwrap_err().to_string().contains("echoed"));
+    }
+    #[test]
+    fn migration_transport_uses_only_fixed_private_paths_and_retains_safe_denials() {
+        let mut server = mockito::Server::new();
+        let api = Api::new(&server.url()).unwrap();
+        let grant = DeviceSession::synthetic_for_test("a".repeat(64), DeviceState::Active, 1, Duration::from_secs(300));
+        let vault = "b".repeat(64);
+        let legacy = server.mock("POST", mockito::Matcher::Regex("^/v1/".into())).expect(0).create();
+        for action in [MigrationAction::Freeze, MigrationAction::Begin, MigrationAction::Stage, MigrationAction::Commit, MigrationAction::Retire] {
+            let mock = server.mock("POST", format!("/v2/vaults/{vault}/migration/{}", action.path()).as_str())
+                .match_header("authorization", "Bearer synthetic device grant")
+                .match_body("{\"synthetic\":true}").with_status(503).with_body("never echo a credential").expect(1).create();
+            let reply = api.migration(&grant, &vault, action, Zeroizing::new(b"{\"synthetic\":true}".to_vec())).unwrap();
+            assert_eq!(reply.status, 503);
+            assert!(!reply.success().unwrap_err().to_string().contains("credential"));
+            mock.assert();
+        }
+        for freeze in [true, false] {
+            let suffix = if freeze {"migration/freeze"} else {"migration"};
+            let mock = server.mock("GET", format!("/v2/vaults/{vault}/{suffix}").as_str()).with_status(403).expect(1).create();
+            assert_eq!(api.migration_status(&grant, &vault, freeze).unwrap().status, 403);
+            mock.assert();
+        }
+        let pending = DeviceSession::synthetic_for_test("a".repeat(64), DeviceState::Pending, 1, Duration::from_secs(300));
+        let expired = DeviceSession::synthetic_for_test("a".repeat(64), DeviceState::Active, 1, Duration::ZERO);
+        for denied in [&pending, &expired] {
+            assert!(api.migration_status(denied, &vault, true).is_err());
+            assert!(api.migration(denied, &vault, MigrationAction::Freeze, Zeroizing::new(b"{}".to_vec())).is_err());
+        }
+        assert!(api.migration(&grant, "../bad", MigrationAction::Freeze, Zeroizing::new(b"{}".to_vec())).is_err());
+        assert!(api.migration(&grant, &vault, MigrationAction::Freeze, Zeroizing::new(vec![0; RESPONSE_CAP+1])).is_err());
+        legacy.assert();
     }
     #[test]
     fn rejects_cross_identity_sessions_and_caps_all_response_classes_without_legacy_fallback() {

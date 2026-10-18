@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
-import { evictDurableObject, runInDurableObject } from "cloudflare:test";
+import {
+  createExecutionContext,
+  evictDurableObject,
+  runInDurableObject,
+} from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from "jose";
@@ -33,6 +37,12 @@ import {
 } from "../src/v2/protocol";
 import { rekeyCanonical, wrapsDigest, type SignedRekey } from "../src/v2/rekey";
 import { centralFetch } from "../src/v2/routes";
+import { CentralSyncBackend } from "../src/index";
+import { REGISTRY_WITNESS } from "../src/security/floor";
+import { freezeCanonical, type SignedFreeze } from "../src/v2/migration-freeze";
+import { migrationCanonical, type SignedMigration } from "../src/v2/migration";
+import { envelopeDigest } from "../src/v2/store";
+import { canonical } from "../src/v2/protocol";
 const origin = "https://relay.test";
 const random = (bytes = 32) =>
   Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (v) =>
@@ -130,7 +140,8 @@ async function setup() {
   const credential = random(),
     first = fixture.genesis.first;
   const renew = async (d = first, c = credential) => {
-    const proof = (await deviceProof(d.id, c, random(16), random()))!;
+    const sessionSecret = random();
+    const proof = (await deviceProof(d.id, c, random(16), sessionSecret))!;
     const response = await account.register(
       identity,
       origin,
@@ -141,7 +152,13 @@ async function setup() {
     const actor = await account.authorize(proof.session, false);
     const text = await response.text();
     const info = text ? JSON.parse(text) : null;
-    return { proof, response, actor, info };
+    return {
+      proof,
+      response,
+      actor,
+      info,
+      bearer: `v2.${locator}.${proof.session.id}.${sessionSecret}`,
+    };
   };
   const registered = await renew();
   expect(registered.response.status).toBe(200);
@@ -1570,5 +1587,286 @@ describe("OIDC resource-token profile", () => {
         })
       ).status,
     ).toBe(503);
+  });
+});
+
+/** The private RPC is exercised here with the same real account grants as ordinary routes. */
+describe("private authenticated initial migration transport", () => {
+  const bindings = (): Env => ({
+    ...env,
+    CENTRAL_ENABLED: "1",
+    CENTRAL_PRIVATE_CORE: "1",
+    CENTRAL_ORIGIN: origin,
+    OIDC_ISSUER: config.issuer,
+    OIDC_JWKS_URL: config.jwks,
+    OIDC_API_AUDIENCE: config.audience,
+    OIDC_NATIVE_CLIENT_ID: config.clientId,
+  });
+  const registry = () =>
+    env.LEGACY_RETIREMENT.idFromName(REGISTRY_WITNESS).toString();
+  async function prepare() {
+    const s = await setup(),
+      active = await s.renew(),
+      operation = random(16);
+    const core = new CentralSyncBackend(createExecutionContext(), bindings());
+    const request = (
+      suffix: string,
+      method = "GET",
+      value?: unknown,
+      token = active.bearer,
+    ) =>
+      new Request(`${origin}/v2/vaults/${s.vault}/${suffix}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "cf-connecting-ip": random(),
+        },
+        body: value === undefined ? undefined : JSON.stringify(value),
+      });
+    const call = (
+      suffix: string,
+      method = "GET",
+      value?: unknown,
+      token = active.bearer,
+    ) => core.forward(1, registry(), request(suffix, method, value, token));
+    const body = {
+      origin,
+      account_id: s.actor.account,
+      genesis_hash: s.trusted.anchor.genesis_hash,
+      vault_id: s.vault,
+      migration_id: operation,
+      authorization_epoch: String(active.actor!.epoch),
+      key_epoch: "1",
+      membership_head: s.trusted.head,
+      author: s.first.id,
+      preview_digest: random(),
+      parent_chain: "",
+      revision: "1",
+      previous_digest: "",
+      chains: [] as string[],
+    };
+    const intent: SignedFreeze = {
+      body,
+      signature: sign(freezeCanonical(body)),
+    };
+    const rows = [await record(s.trusted, s.vault)],
+      zero = "0".repeat(64);
+    const manifest: SignedMigration = {
+      body: {
+        origin,
+        account_id: s.actor.account,
+        genesis_hash: s.trusted.anchor.genesis_hash,
+        vault_id: s.vault,
+        migration_id: operation,
+        authorization_epoch: String(active.actor!.epoch),
+        key_epoch: "1",
+        membership_head: s.trusted.head,
+        author: s.first.id,
+        inventory_digest: random(),
+        target_sequence: "1",
+        target_history_hash: await hash(
+          canonical([
+            "lunport-history-v2",
+            zero,
+            "1",
+            await envelopeDigest(rows[0]),
+          ]),
+        ),
+        wraps_digest: await wrapsDigest(await wraps(s.trusted, s.vault)),
+        sources: [],
+      },
+      signature: "",
+    };
+    manifest.signature = sign(migrationCanonical(manifest.body));
+    return {
+      s,
+      active,
+      operation,
+      core,
+      call,
+      request,
+      intent,
+      rows,
+      manifest,
+      targetWraps: await wraps(s.trusted, s.vault),
+    };
+  }
+  it("requires a complete freeze journal before staging and preserves exact retries through commit and retirement", async () => {
+    const t = await prepare(),
+      begin = () =>
+        t.call("migration/begin", "POST", {
+          manifest: t.manifest,
+          wraps: t.targetWraps,
+        });
+    expect((await begin()).status).toBe(409);
+    expect((await t.call("migration", "GET")).status).toBe(404);
+    expect(
+      (
+        await t.call("migration/freeze", "POST", {
+          intent: t.intent,
+          credentials: [],
+        })
+      ).status,
+    ).toBe(200);
+    const progress = await t.call("migration/freeze");
+    expect(await progress.json()).toMatchObject({
+      phase: "frozen",
+      sources: [],
+      next: [],
+    });
+    expect((await t.call("metadata")).status).toBe(423);
+    expect((await begin()).status).toBe(200);
+    expect((await begin()).status).toBe(200);
+    const stage = () =>
+      t.call("migration/stage", "POST", {
+        migration: t.operation,
+        after: "0",
+        rows: t.rows,
+      });
+    expect((await stage()).status).toBe(200);
+    expect((await stage()).status).toBe(200);
+    expect(
+      (await t.call("migration/commit", "POST", { migration: t.operation }))
+        .status,
+    ).toBe(200);
+    expect(
+      (await t.call("migration/commit", "POST", { migration: t.operation }))
+        .status,
+    ).toBe(200);
+    expect(
+      (await t.call("migration/retire", "POST", { migration: t.operation }))
+        .status,
+    ).toBe(200);
+    const completed = await t.call("migration");
+    expect(await completed.json()).toMatchObject({
+      phase: "retired",
+      staged: "1",
+      manifest: t.manifest,
+    });
+    expect((await t.call("metadata")).status).toBe(200);
+  });
+  it("never admits migration through compatibility HTTP, spoofed headers or a failed same-invocation floor", async () => {
+    const t = await prepare();
+    for (const suffix of [
+      "migration",
+      "migration/freeze",
+      "migration/begin",
+      "migration/stage",
+      "migration/commit",
+      "migration/retire",
+    ]) {
+      const request = t.request(suffix);
+      request.headers.set("x-lunport-private-ingress", "1");
+      expect((await centralFetch(request, bindings())).status).toBe(404);
+      expect(
+        (await t.core.forward(2, registry(), t.request(suffix))).status,
+      ).toBe(503);
+      expect(
+        (await t.core.forward(1, random(), t.request(suffix))).status,
+      ).toBe(503);
+    }
+    const publicMode = new CentralSyncBackend(createExecutionContext(), {
+      ...bindings(),
+      CENTRAL_PRIVATE_CORE: "0",
+    });
+    expect(
+      (await publicMode.forward(1, registry(), t.request("migration/freeze")))
+        .status,
+    ).toBe(503);
+    const info = await t.core.forward(
+      1,
+      registry(),
+      new Request(origin + "/v2/info"),
+    );
+    expect(
+      ((await info.json()) as any).features.some((name: string) =>
+        name.includes("migration"),
+      ),
+    ).toBe(false);
+  });
+  it("requires independent active device authorization and never treats an old bearer as central login", async () => {
+    const t = await prepare(),
+      pending = await t.s.renew(device(), random());
+    expect(
+      (
+        await t.call(
+          "migration/freeze",
+          "POST",
+          { intent: t.intent, credentials: [] },
+          pending.bearer,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await t.call(
+          "migration/freeze",
+          "POST",
+          { intent: t.intent, credentials: [] },
+          "b".repeat(64),
+        )
+      ).status,
+    ).toBe(401);
+    const other = await setup(),
+      stranger = await other.renew();
+    expect(
+      (
+        await t.call(
+          "migration/freeze",
+          "POST",
+          { intent: t.intent, credentials: [] },
+          stranger.bearer,
+        )
+      ).status,
+    ).toBe(403);
+    expect((await t.s.account.logout(t.active.actor!)).status).toBe(204);
+    expect(
+      (
+        await t.call("migration/freeze", "POST", {
+          intent: t.intent,
+          credentials: [],
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await env.VAULT.getByName(
+          t.s.actor.account + ":" + t.s.vault,
+        ).freezeStatus(t.s.actor)
+      ).status,
+    ).toBe(404);
+  });
+  it("rejects wrong methods, unexpected fields, credential excess and oversized streaming bodies", async () => {
+    const t = await prepare();
+    expect((await t.call("migration/begin")).status).toBe(405);
+    expect((await t.call("migration/freeze", "DELETE")).status).toBe(405);
+    expect(
+      (
+        await t.call("migration/freeze", "POST", {
+          intent: t.intent,
+          credentials: [],
+          token: random(),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await t.call("migration/freeze", "POST", {
+          intent: t.intent,
+          credentials: Array.from({ length: 9 }, () => ({
+            chain: random(),
+            token: random(),
+          })),
+        })
+      ).status,
+    ).toBe(400);
+    const oversized = t.request(
+      "migration/freeze",
+      "POST",
+      "x".repeat(4 * 1024 * 1024),
+    );
+    expect((await t.core.forward(1, registry(), oversized)).status).toBe(413);
+    expect((await t.call("migration/freeze")).status).toBe(404);
   });
 });

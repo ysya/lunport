@@ -642,11 +642,12 @@ export class VaultStore extends DurableObject<Env> {
       return this.freezeStatusResult(actor);
     });
   }
-  /** Private server primitives; no HTTP route/capability until ingress and native cutover are ready. */
+  /** Transport admission is private-ingress only; native cutover is separately guarded. */
   beginMigration(
     actor: Principal,
     manifest: SignedMigration,
     freshWraps?: WrappedKeys[],
+    requireFreeze = false,
   ): Promise<Response> {
     return rpcCall(async () => {
       const observed = this.load();
@@ -664,6 +665,7 @@ export class VaultStore extends DurableObject<Env> {
       )
         return { status: 403 };
       const frozen = this.freezeJournal();
+      if (requireFreeze && !frozen) return { status: 409 };
       if (
         frozen &&
         (!(await this.verifyFreezeJournal(frozen, observed)) ||
