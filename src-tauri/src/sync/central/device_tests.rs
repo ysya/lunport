@@ -29,6 +29,11 @@ struct Account {
     history: Vec<super::rekey::Version>,
     pulls: usize,
     reject_pull_once: bool,
+    denied: Vec<String>,
+    rekey_pending: bool,
+    barrier_pending: bool,
+    hold_barrier: bool,
+    lose_control_response_once: bool,
     on_pull: Option<Box<dyn Fn() + Send + Sync>>,
     devices: BTreeMap<String, Device>,
     sessions: BTreeMap<String, String>,
@@ -85,9 +90,9 @@ impl Service {
         server.mock("GET","/v2/account").with_header("content-type","application/json").with_body_from_request(move|r|{
             let s=account.lock().unwrap();let own=s.device(r);let chain=s.chain();let active=chain.as_ref().is_some_and(|c|c.current().devices().contains_key(&own));
             let devices:Vec<Value>=s.devices.values().map(|d|json!({"device":d,"name":"Synthetic device","state":if chain.as_ref().is_some_and(|c|c.current().devices().contains_key(&d.id)){"active"}else{"pending"},"request":s.requests.get(&d.id)})).collect();
-            json!({"account_id":"a".repeat(64),"device_state":if active{"active"}else{"pending"},"auth_epoch":s.epoch,"phase":"ready","proof":s.proof,
+            json!({"account_id":"a".repeat(64),"device_state":if active{"active"}else{"pending"},"auth_epoch":s.epoch,"phase":if s.barrier_pending{"revocation_pending"}else{"ready"},"proof":s.proof,
                 "genesis_hash":chain.as_ref().map(|c|c.current().anchor().genesis_hash.clone()),"pairing_confirmation":s.confirmations.get(&own),
-                "vaults":s.vault.as_ref().map(|v|json!({v:{"epoch":1,"rekey":false}})).unwrap_or_else(||json!({})),"denied":[],"devices":devices,"barrier":null}).to_string().into_bytes()
+                "vaults":s.vault.as_ref().map(|v|json!({v:{"epoch":1,"rekey":s.rekey_pending}})).unwrap_or_else(||json!({})),"denied":s.denied,"devices":devices,"barrier":if s.barrier_pending{json!({"id":"synthetic barrier","acknowledged":0,"total":1})}else{Value::Null}}).to_string().into_bytes()
         }).create();
         let account = Arc::clone(&state);
         server
@@ -124,25 +129,52 @@ impl Service {
             })
             .create();
         let account = Arc::clone(&state);
+        let response = Arc::clone(&state);
         server
             .mock("POST", "/v2/membership")
+            .with_status_code_from_request(move |_| {
+                if std::mem::take(&mut response.lock().unwrap().lose_control_response_once) {
+                    503
+                } else {
+                    200
+                }
+            })
             .with_body_from_request(move |r| {
                 let body: Value = serde_json::from_slice(r.body().unwrap()).unwrap();
                 let node: SignedMembership = serde_json::from_value(body["node"].clone()).unwrap();
                 let mut s = account.lock().unwrap();
-                s.chain().unwrap().current().apply(&node).unwrap();
-                let id = node.body.enrollment.as_ref().unwrap().device.id.clone();
-                s.confirmations.insert(
-                    id,
-                    serde_json::from_value(body["confirmation"].clone()).unwrap(),
-                );
-                let vault = s.vault.as_ref().unwrap().clone();
-                s.wraps = serde_json::from_value(body["wraps"][&vault].clone()).unwrap();
+                let previous = s.chain().unwrap();
+                let next = previous.current().apply(&node).unwrap();
+                if let Some(request) = &node.body.enrollment {
+                    s.confirmations.insert(
+                        request.device.id.clone(),
+                        serde_json::from_value(body["confirmation"].clone()).unwrap(),
+                    );
+                    let vault = s.vault.as_ref().unwrap().clone();
+                    s.wraps = serde_json::from_value(body["wraps"][&vault].clone()).unwrap();
+                } else {
+                    assert_eq!(body["wraps"], json!({}));
+                    s.denied.extend(
+                        previous
+                            .current()
+                            .devices()
+                            .keys()
+                            .filter(|id| !next.devices().contains_key(*id))
+                            .cloned(),
+                    );
+                    s.rekey_pending = true;
+                    s.barrier_pending = s.hold_barrier;
+                }
                 s.proof.as_mut().unwrap().nodes.push(node);
                 s.epoch += 1;
                 b"{}".to_vec()
             })
             .create();
+        let account = Arc::clone(&state);
+        server.mock("POST", "/v2/barrier/resume").with_body_from_request(move |_| {
+            let mut s = account.lock().unwrap(); s.barrier_pending = s.hold_barrier;
+            json!({"access_revoked":!s.barrier_pending,"barrier_pending":s.barrier_pending,"rekey_pending":s.rekey_pending}).to_string().into_bytes()
+        }).create();
         let account = Arc::clone(&state);
         server
             .mock(
@@ -591,4 +623,135 @@ fn stage_ciphertext_checks(
         .unwrap()
         .contains("SENTINEL"));
     limited.assert();
+}
+
+#[test]
+fn revoke_intent_survives_lost_response_restart_and_omission_until_verified_barriers_finish() {
+    let service = Service::new();
+    let relay = FakeRelay::new();
+    let clock = TestClock::new();
+    let first = TestDevice::new("first", &relay, &clock);
+    let peer = TestDevice::new("peer", &relay, &clock);
+    service.login(&first);
+    bootstrap::prepare(&first.env()).unwrap();
+    let kit = bootstrap::reveal(&first.env()).unwrap();
+    bootstrap::confirm(&first.env(), &kit.root).unwrap();
+    service.login(&peer);
+    let code = devices::pairing_code(&peer.env()).unwrap();
+    devices::approve(&first.env(), &code.code).unwrap();
+    let registry = devices::registry(&first.env()).unwrap();
+    let target = registry.devices.iter().find(|d| !d.current).unwrap();
+    assert!(devices::revoke(
+        &first.env(),
+        &target.id,
+        &registry.membership_head,
+        &registry.authorization_epoch,
+        &"0".repeat(64)
+    )
+    .is_err());
+    assert!(record_runtime::snapshot(&first.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap()
+        .control
+        .denied_devices
+        .is_empty());
+    service.state.lock().unwrap().hold_barrier = true;
+    service.state.lock().unwrap().lose_control_response_once = true;
+    assert!(devices::revoke(
+        &first.env(),
+        &target.id,
+        &registry.membership_head,
+        &registry.authorization_epoch,
+        &target.fingerprint
+    )
+    .is_err());
+    let saved = record_runtime::snapshot(&first.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap();
+    assert!(saved.control.denied_devices.contains(&target.id));
+    assert_eq!(saved.control.phase, super::client_state::Phase::Rekey);
+    // The uncertain response cannot speculate a signed removal locally. Publishing ANY new
+    // content-key wrap remains blocked while the old verified membership includes the target.
+    assert!(saved
+        .control
+        .verified_chain()
+        .unwrap()
+        .current()
+        .devices()
+        .contains_key(&target.id));
+    assert!(saved.control.require_key_recipients().is_err());
+    let probe = record_runtime::probe_startup(&first.env().state_path, "synthetic");
+    record_runtime::activate_probe(&mut first.runtime.core.lock().unwrap(), probe).unwrap();
+    assert!(record_runtime::snapshot(&first.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap()
+        .control
+        .denied_devices
+        .contains(&target.id));
+    service.state.lock().unwrap().denied.clear(); // hostile/old service omits the known denial
+    service.login(&first);
+    let registry = devices::registry(&first.env()).unwrap();
+    assert_eq!(
+        registry
+            .devices
+            .iter()
+            .find(|d| d.id == target.id)
+            .unwrap()
+            .state,
+        "access_blocked"
+    );
+    let pending = devices::revoke(
+        &first.env(),
+        &target.id,
+        &registry.membership_head,
+        &registry.authorization_epoch,
+        &target.fingerprint,
+    )
+    .unwrap();
+    assert!(!pending.access_revoked);
+    assert!(pending.barrier_pending);
+    assert!(pending.rekey_pending);
+    service.state.lock().unwrap().hold_barrier = false;
+    let registry = devices::registry(&first.env()).unwrap();
+    let finished = devices::revoke(
+        &first.env(),
+        &target.id,
+        &registry.membership_head,
+        &registry.authorization_epoch,
+        &target.fingerprint,
+    )
+    .unwrap();
+    assert!(finished.access_revoked);
+    assert!(!finished.barrier_pending);
+    assert!(finished.rekey_pending);
+    let after = record_runtime::snapshot(&first.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap();
+    after.control.require_key_recipients().unwrap();
+    assert!(after.control.denied_devices.contains(&target.id));
+    let mut forgotten = after.clone();
+    forgotten.control.denied_devices.clear();
+    assert!(after.verify_transition(&forgotten).is_err());
+    controller::sign_out(&first.env()).unwrap();
+    assert!(record_runtime::snapshot(&first.env())
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap()
+        .control
+        .denied_devices
+        .contains(&target.id));
 }

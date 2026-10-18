@@ -163,3 +163,26 @@ pub async fn central_approve_device(app: AppHandle, code: String) -> Result<Stat
     .await
     .map_err(engine::join_error)?
 }
+
+#[tauri::command]
+pub async fn central_revoke_device(
+    app: AppHandle,
+    device: String,
+    membership_head: String,
+    authorization_epoch: String,
+    fingerprint: String,
+) -> Result<super::devices::RevokeResult, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::devices::revoke(
+                env,
+                &device,
+                &membership_head,
+                &authorization_epoch,
+                &fingerprint,
+            )
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}

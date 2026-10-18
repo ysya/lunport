@@ -45,6 +45,50 @@ describe("trusted device management", () => {
     expect(text(html)).toContain("Approved");
     expect(html).not.toContain("<script>");
   });
+  it("offers revocation for another approved or blocked device and never for this device", () => {
+    const devices = [
+      {
+        id: "own",
+        name: "Own device",
+        state: "approved" as const,
+        fingerprint: "own",
+        current: true,
+      },
+      {
+        id: "other",
+        name: "Other device",
+        state: "approved" as const,
+        fingerprint: "other",
+        current: false,
+      },
+      {
+        id: "blocked",
+        name: "Blocked device",
+        state: "access_blocked" as const,
+        fingerprint: "blocked",
+        current: false,
+      },
+      {
+        id: "pending",
+        name: "Pending device",
+        state: "pending" as const,
+        fingerprint: "pending",
+        current: false,
+      },
+    ];
+    const html = renderToStaticMarkup(
+      <CentralDeviceList
+        registry={{ membership_head: "d", authorization_epoch: "3", devices }}
+        onRevoke={vi.fn()}
+        disabled
+      />,
+    );
+    expect((html.match(/Revoke device…/g) ?? []).length).toBe(1);
+    expect((html.match(/Finish revocation…/g) ?? []).length).toBe(1);
+    expect(buttonTag(html, "Revoke device…")).toContain(DISABLED);
+    expect(buttonTag(html, "Finish revocation…")).toContain(DISABLED);
+    expect(text(html)).toContain("Revocation requested");
+  });
   it("requires a pairing code and explains that approval unlocks the library", () => {
     const client = new QueryClient();
     client.setQueryData(centralDevicesKey(status), {

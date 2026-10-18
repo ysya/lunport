@@ -326,6 +326,7 @@ fn run_app(host: bool, start_hidden: bool) {
             sync::central::commands::central_devices,
             sync::central::commands::central_pairing_code,
             sync::central::commands::central_approve_device,
+            sync::central::commands::central_revoke_device,
             sync::central::commands::central_status,
             sync::central::commands::central_sign_in,
             sync::central::commands::central_cancel_sign_in,

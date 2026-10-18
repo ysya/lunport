@@ -69,3 +69,20 @@ export const centralPairingCode = () =>
   tauriInvoke<{ code: string; expires_at_ms: string }>("central_pairing_code");
 export const centralApproveDevice = (code: string) =>
   tauriInvoke<CentralStatus>("central_approve_device", { code });
+
+export type CentralRevokeResult = {
+  status: CentralStatus;
+  access_revoked: boolean;
+  rekey_pending: boolean;
+  barrier_pending: boolean;
+};
+export const centralRevokeDevice = (
+  device: CentralDevice,
+  registry: CentralDeviceRegistry,
+) =>
+  tauriInvoke<CentralRevokeResult>("central_revoke_device", {
+    device: device.id,
+    membershipHead: registry.membership_head,
+    authorizationEpoch: registry.authorization_epoch,
+    fingerprint: device.fingerprint,
+  });

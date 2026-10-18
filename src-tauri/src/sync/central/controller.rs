@@ -410,6 +410,7 @@ fn establish_locked(
             return Err(invalid());
         }
         public.auth_epoch = remote.auth_epoch;
+        public = public.remember_denials(remote.denied.iter().map(String::as_str))?;
         public.validate()?;
         let next = workspace.get_or_insert(Workspace::new(public.clone())?);
         next.control = public;

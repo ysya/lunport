@@ -14,7 +14,7 @@ use crate::{
     sync::{env::SyncEnv, record_runtime},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use zeroize::{Zeroize, Zeroizing};
 #[derive(Serialize)]
 pub struct PairingReveal {
@@ -85,14 +85,38 @@ fn checked_remote(
     }
     Ok(remote)
 }
+fn remember_denials(
+    env: &SyncEnv,
+    before: &mut Workspace,
+    denied: &[String],
+) -> Result<(), AppError> {
+    let next = before
+        .control
+        .remember_denials(denied.iter().map(String::as_str))?;
+    if next == before.control {
+        return Ok(());
+    }
+    record_runtime::mutate_records(env, |records| {
+        if records.local.central.as_ref() != Some(before) {
+            return Err(crate::sync::runtime::superseded());
+        }
+        let mut records = records.clone();
+        records.local.central.as_mut().ok_or_else(invalid)?.control = next.clone();
+        Ok(records)
+    })?;
+    before.control = next;
+    env.events.status();
+    Ok(())
+}
 pub fn registry(env: &SyncEnv) -> Result<Registry, AppError> {
     controller::require_enabled()?;
     super::round::check_cooldown(env)?;
     let _lifecycle = env.runtime.lifecycle.lock().unwrap();
-    let before = workspace(env)?;
+    let mut before = workspace(env)?;
     let session = controller::context(env)?;
     let api = Api::new(&before.control.profile.origin)?;
     let remote = checked_remote(env, &api, &session, &before)?;
+    remember_denials(env, &mut before, &remote.denied)?;
     let chain = before.control.verified_chain()?;
     let proof = before.control.proof.as_ref().ok_or_else(invalid)?;
     let mut seen = BTreeMap::from([(
@@ -116,7 +140,7 @@ pub fn registry(env: &SyncEnv) -> Result<Registry, AppError> {
         seen.entry(d.device.id.clone())
             .or_insert_with(|| d.device.keys.clone());
     }
-    let denied: BTreeSet<_> = remote.denied.iter().collect();
+    let denied = &before.control.denied_devices;
     let devices = seen
         .into_iter()
         .map(|(id, keys)| {
@@ -126,7 +150,9 @@ pub fn registry(env: &SyncEnv) -> Result<Registry, AppError> {
                 || proof.nodes.iter().any(|n| n.body.devices.contains_key(&id));
             DeviceView {
                 name: names.remove(&id).unwrap_or_else(|| "Unnamed device".into()),
-                state: if denied.contains(&id) {
+                state: if denied.contains(&id)
+                    && (approved || remote.phase != "ready" || remote.barrier.is_some())
+                {
                     "access_blocked"
                 } else if approved {
                     "approved"
@@ -168,7 +194,7 @@ pub fn approve(env: &SyncEnv, code: &str) -> Result<Status, AppError> {
     controller::refresh(env)?;
     super::joining::initialize(env)?;
     let lifecycle = env.runtime.lifecycle.lock().unwrap();
-    let before = workspace(env)?;
+    let mut before = workspace(env)?;
     if !matches!(before.control.phase, Phase::Enrolled | Phase::Active) {
         return Err(invalid());
     }
@@ -176,6 +202,8 @@ pub fn approve(env: &SyncEnv, code: &str) -> Result<Status, AppError> {
     let identity = session.identity.as_ref().ok_or_else(invalid)?;
     let api = Api::new(&before.control.profile.origin)?;
     let remote = checked_remote(env, &api, &session, &before)?;
+    remember_denials(env, &mut before, &remote.denied)?;
+    before.control.require_key_recipients()?;
     let chain = before.control.verified_chain()?;
     if remote.phase != "ready"
         || remote.vaults.len() != 1
@@ -198,6 +226,9 @@ pub fn approve(env: &SyncEnv, code: &str) -> Result<Status, AppError> {
                     .into(),
             )
         })?;
+    if before.control.denied_devices.contains(&request.device.id) {
+        return Err(invalid());
+    }
     if chain.current().devices().get(&request.device.id) == Some(&request.device.keys) {
         drop(lifecycle);
         return controller::status(env);
@@ -213,7 +244,7 @@ pub fn approve(env: &SyncEnv, code: &str) -> Result<Status, AppError> {
         &replica.vault,
         VaultResource::Metadata,
     )?;
-    reply.success()?;
+    super::round::require_success(env, &reply)?;
     let metadata: VaultSnapshot = reply.decode()?;
     if metadata.vault != replica.vault
         || metadata.epoch != replica.checkpoint.epoch
@@ -302,4 +333,114 @@ pub fn approve(env: &SyncEnv, code: &str) -> Result<Status, AppError> {
         ));
     }
     Ok(status)
+}
+
+#[derive(Serialize)]
+pub struct RevokeResult {
+    pub status: Status,
+    pub access_revoked: bool,
+    pub rekey_pending: bool,
+    pub barrier_pending: bool,
+}
+/// Revoke another previously approved device. The UI binds its confirmation to the locally
+/// verified membership and full signing fingerprint; intent is durable before any network call.
+pub fn revoke(
+    env: &SyncEnv,
+    device: &str,
+    expected_head: &str,
+    expected_auth_epoch: &str,
+    fingerprint: &str,
+) -> Result<RevokeResult, AppError> {
+    controller::require_enabled()?;
+    super::round::check_cooldown(env)?;
+    {
+        let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+        let mut before = workspace(env)?;
+        let chain = before.control.verified_chain()?;
+        if device == before.control.device.id
+            || !matches!(
+                before.control.phase,
+                Phase::Enrolled | Phase::Active | Phase::Rekey
+            )
+            || chain.current().head() != expected_head
+            || number(expected_auth_epoch, false)? != before.control.auth_epoch
+        {
+            return Err(invalid());
+        }
+        let proof = before.control.proof.as_ref().ok_or_else(invalid)?;
+        let public = if proof.genesis.first.id == device {
+            Some(&proof.genesis.first.keys)
+        } else {
+            proof.nodes.iter().find_map(|n| n.body.devices.get(device))
+        }
+        .ok_or_else(invalid)?;
+        if crypto::hash(public.signing.as_bytes()) != fingerprint {
+            return Err(invalid());
+        }
+        remember_denials(env, &mut before, &[device.into()])?;
+    }
+    // Reconcile an earlier accepted control request (including a lost response) before drafting.
+    controller::refresh(env)?;
+    let lifecycle = env.runtime.lifecycle.lock().unwrap();
+    let mut before = workspace(env)?;
+    let session = controller::context(env)?;
+    let identity = session.identity.as_ref().ok_or_else(invalid)?;
+    let api = Api::new(&before.control.profile.origin)?;
+    let remote = checked_remote(env, &api, &session, &before)?;
+    remember_denials(env, &mut before, &remote.denied)?;
+    let chain = before.control.verified_chain()?;
+    if !before.control.denied_devices.contains(device)
+        || chain.current().devices().get(&identity.id) != Some(&identity.keys.public())
+        || before.control.denied_devices.contains(&identity.id)
+    {
+        return Err(invalid());
+    }
+    let mut remaining = chain.current().devices().clone();
+    remaining.retain(|id, _| !before.control.denied_devices.contains(id));
+    let removing = remaining.len() != chain.current().devices().len();
+    if remote.phase == "revocation_pending" || remote.barrier.is_some() {
+        let reply = api.control(
+            session.device.as_ref().ok_or_else(invalid)?,
+            Control::ResumeBarrier,
+            &serde_json::json!({}),
+        )?;
+        super::round::require_success(env, &reply)?;
+    } else if removing {
+        let node = SignedMembership::sign(
+            chain.current().proposal(
+                &identity.id,
+                Action::Revoke,
+                None,
+                remaining,
+                chain.current().recovery().clone(),
+                env.now(),
+            ),
+            &identity.keys,
+        )?;
+        // No wraps accompany a revoke. Key rotation begins only after the signed removal and
+        // child authorization barriers have been verified through a fresh account snapshot.
+        let reply = api.control(
+            session.device.as_ref().ok_or_else(invalid)?,
+            Control::Membership,
+            &serde_json::json!({"node":node,"wraps":{}}),
+        )?;
+        super::round::require_success(env, &reply)?;
+    }
+    drop(lifecycle);
+    controller::refresh(env)?;
+    let _lifecycle = env.runtime.lifecycle.lock().unwrap();
+    let mut after = workspace(env)?;
+    let session = controller::context(env)?;
+    let remote = checked_remote(env, &api, &session, &after)?;
+    remember_denials(env, &mut after, &remote.denied)?;
+    let chain = after.control.verified_chain()?;
+    let removed = !chain.current().devices().contains_key(device);
+    let barrier_pending = remote.phase != "ready" || remote.barrier.is_some();
+    Ok(RevokeResult {
+        status: controller::status(env)?,
+        access_revoked: removed && !barrier_pending,
+        barrier_pending,
+        rekey_pending: after.control.phase == Phase::Rekey
+            || remote.vaults.values().any(|v| v.rekey),
+    })
 }

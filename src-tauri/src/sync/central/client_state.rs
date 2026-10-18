@@ -11,6 +11,7 @@ use super::{
 };
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileData {
@@ -63,6 +64,8 @@ pub struct State {
     pub account_id: String,
     pub device: Device,
     pub auth_epoch: u64,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub denied_devices: BTreeSet<String>,
     pub phase: Phase,
     pub anchor: Option<TrustAnchor>,
     pub proof: Option<ControlProof>,
@@ -87,6 +90,7 @@ impl State {
             account_id,
             device,
             auth_epoch,
+            denied_devices: BTreeSet::new(),
             phase: Phase::Setup,
             anchor: None,
             proof: None,
@@ -108,6 +112,8 @@ impl State {
             || !hex(&self.device.id, 32)
             || self.auth_epoch == 0
             || self.auth_epoch > MAX_SAFE_INTEGER
+            || self.denied_devices.len() > 1024
+            || self.denied_devices.iter().any(|id| !hex(id, 32))
             || self.personal_vault.as_ref().is_some_and(|id| !hex(id, 64))
         {
             return Err(invalid());
@@ -125,6 +131,15 @@ impl State {
                     self.phase,
                     Phase::BackupRequired | Phase::Enrolled | Phase::Active | Phase::Rekey
                 ) && chain.current().devices().get(&self.device.id) != Some(&self.device.keys)
+                {
+                    return Err(invalid());
+                }
+                if matches!(self.phase, Phase::Active | Phase::Enrolled)
+                    && chain
+                        .current()
+                        .devices()
+                        .keys()
+                        .any(|id| self.denied_devices.contains(id))
                 {
                     return Err(invalid());
                 }
@@ -165,6 +180,11 @@ impl State {
                 }
             }
             _ => return Err(invalid()),
+        }
+        if self.denied_devices.contains(&self.device.id)
+            && !matches!(self.phase, Phase::Revoked | Phase::SignedOut)
+        {
+            return Err(invalid());
         }
         if self.phase == Phase::Active
             && (!self.cutover || self.library.is_none() || self.personal_vault.is_none())
@@ -286,9 +306,63 @@ impl State {
         if chain.current().devices().get(&self.device.id) != Some(&self.device.keys) {
             next.phase = Phase::Revoked;
         }
+        let mut removed = BTreeSet::from([proof.genesis.first.id.clone()]);
+        for node in &proof.nodes {
+            removed.extend(node.body.devices.keys().cloned());
+        }
+        removed.retain(|id| !chain.current().devices().contains_key(id));
         next.proof = Some(proof);
+        next.remember_denials(removed.iter().map(String::as_str))
+    }
+    /// Local intent and observed service denials are monotonic. Omitted server metadata, logout,
+    /// restart and membership changes cannot restore a known denied recipient.
+    pub fn remember_denials<'a>(
+        &self,
+        denied: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, AppError> {
+        let mut next = self.clone();
+        for id in denied {
+            if !hex(id, 32) {
+                return Err(invalid());
+            }
+            next.denied_devices.insert(id.into());
+            if next.denied_devices.len() > 1024 {
+                return Err(invalid());
+            }
+        }
+        if next.phase != Phase::SignedOut {
+            if next.denied_devices.contains(&next.device.id) {
+                next.phase = Phase::Revoked;
+                next.pending_request = None;
+            } else if matches!(next.phase, Phase::Enrolled | Phase::Active | Phase::Rekey)
+                && next
+                    .verified_chain()?
+                    .current()
+                    .devices()
+                    .keys()
+                    .any(|id| next.denied_devices.contains(id))
+            {
+                next.phase = Phase::Rekey;
+            }
+        }
         next.validate()?;
         Ok(next)
+    }
+    /// Check BEFORE producing any content-key wraps. Backend rejection happens too late once
+    /// a known denied recipient's wrap has left this device.
+    pub fn require_key_recipients(&self) -> Result<(), AppError> {
+        self.validate()?;
+        let chain = self.verified_chain()?;
+        if self.denied_devices.contains(&self.device.id)
+            || chain
+                .current()
+                .devices()
+                .keys()
+                .any(|id| self.denied_devices.contains(id))
+        {
+            return Err(AppError::Other("Remove every known blocked device from verified membership before publishing content keys.".into()));
+        }
+        Ok(())
     }
     /// H's verified migration receipt must be persisted before setting cutover. No automatic
     /// fallback to the legacy worker is allowed after this boundary, including logout/restart.
@@ -324,6 +398,7 @@ impl State {
             || self.device != next.device
             || self.cutover && !next.cutover
             || next.auth_epoch < self.auth_epoch
+            || !self.denied_devices.is_subset(&next.denied_devices)
             || self.pairing_confirmation.is_some()
                 && self.pairing_confirmation != next.pairing_confirmation
         {
@@ -538,6 +613,27 @@ mod tests {
             .unwrap()
             .validate()
             .is_ok());
+    }
+    #[test]
+    fn self_denial_is_monotonic_even_after_logout_and_older_state_defaults_to_empty() {
+        let (state, _) = setup();
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("denied_devices"));
+        let restored: State = serde_json::from_str(&json).unwrap();
+        assert!(restored.denied_devices.is_empty());
+        let denied = state.remember_denials([state.device.id.as_str()]).unwrap();
+        assert_eq!(denied.phase, Phase::Revoked);
+        assert!(denied.require_key_recipients().is_err());
+        assert!(denied.verify_transition(&state).is_err());
+        let mut signed_out = denied.clone();
+        signed_out.phase = Phase::SignedOut;
+        denied.verify_transition(&signed_out).unwrap();
+        let saved: State =
+            serde_json::from_str(&serde_json::to_string(&signed_out).unwrap()).unwrap();
+        let omitted = saved.remember_denials(std::iter::empty()).unwrap();
+        assert!(omitted.denied_devices.contains(&state.device.id));
+        assert_eq!(omitted.phase, Phase::SignedOut);
+        assert!(state.remember_denials(["malformed"]).is_err());
     }
     #[test]
     fn stale_enablement_and_account_proof_rollback_do_not_silently_change_recipient_scope() {
