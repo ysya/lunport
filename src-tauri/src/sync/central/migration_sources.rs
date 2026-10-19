@@ -360,7 +360,7 @@ impl Sources {
         }
         SignedFreeze::sign(body, signer)
     }
-    /// The only explicit old-bearer export: bounded native HTTP bytes, never a persistable DTO.
+    /// Explicit freeze credential export: bounded native HTTP bytes, never a persistable DTO.
     pub fn freeze_body(
         &self,
         intent: &SignedFreeze,

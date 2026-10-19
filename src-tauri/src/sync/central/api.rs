@@ -653,6 +653,43 @@ impl Api {
             Some(body),
         )
     }
+    pub(super) fn prepare_frozen_source(
+        &self,
+        session: &DeviceSession,
+        owner: &super::workspace::Workspace,
+        sources: &super::migration_sources::Sources,
+        operation: &str,
+        progress: &super::migration_freeze::Progress,
+        minimum: Option<&super::migration_freeze::Known>,
+        chain: &str,
+    ) -> Result<(String, Zeroizing<String>), AppError> {
+        if session.expired()
+            || session.device_state != DeviceState::Active
+            || session.account_id != owner.control.account_id
+            || session.auth_epoch != owner.control.auth_epoch
+        {
+            return Err(invalid());
+        }
+        let token =
+            sources.frozen_bearer(&self.origin, owner, operation, progress, minimum, chain)?;
+        Ok((format!("/v1/chains/{chain}/records?since=0"), token))
+    }
+    /// Explicit migration read, never a fallback from failed central account authentication.
+    pub(super) fn frozen_source(
+        &self,
+        session: &DeviceSession,
+        owner: &super::workspace::Workspace,
+        sources: &super::migration_sources::Sources,
+        operation: &str,
+        progress: &super::migration_freeze::Progress,
+        minimum: Option<&super::migration_freeze::Known>,
+        chain: &str,
+    ) -> Result<Reply, AppError> {
+        self.budget.as_ref().ok_or_else(invalid)?.remaining()?;
+        let (path, token) = self
+            .prepare_frozen_source(session, owner, sources, operation, progress, minimum, chain)?;
+        self.request(Method::GET, &path, Some(&token), None, RESPONSE_CAP)
+    }
     pub(super) fn migration(
         &self,
         session: &DeviceSession,
