@@ -491,3 +491,210 @@ fn an_unknown_stage_file_or_new_source_blocks_cold_recovery_without_removing_evi
         assert_eq!(fs::read(path).unwrap(), b"new B");
     }
 }
+
+#[test]
+fn dedicated_initial_publication_activates_only_the_exact_consented_verified_managed_library() {
+    use std::fs;
+    let (d, keys, verified) = migration_dispatch::verified_material_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let prepared = prepare(&env, verified, &keys).unwrap();
+    let original = fs::read(&env.state_path).unwrap();
+    let before = record_runtime::snapshot(&env).unwrap();
+    assert!(
+        record_runtime::save_active(&env.state_path, prepared.projection().shadow())
+            .unwrap_err()
+            .to_string()
+            .contains("First central library activation")
+    );
+    assert_eq!(fs::read(&env.state_path).unwrap(), original);
+    let staged =
+        crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+            .unwrap();
+    let mapping = staged.mapping();
+    let result =
+        crate::sync::record_import::central_stage::publish_initial(&env, &prepared, &keys).unwrap();
+    assert_eq!(result.phase, "central_active");
+    let (state, generation) = record_runtime::snapshot(&env).unwrap();
+    assert_eq!(generation, before.1 + 1);
+    assert_eq!(
+        state.version,
+        crate::sync::records_v3::CENTRAL_STATE_VERSION
+    );
+    assert!(state.local.central.as_ref().unwrap().control.cutover);
+    assert!(state.local.central_projection.is_some());
+    assert_eq!(
+        state.local.keys[&"1".repeat(32)].vault_id,
+        mapping[&"1".repeat(32)]
+    );
+    assert!(state
+        .local
+        .import_receipts
+        .contains_key(prepared.operation()));
+    assert!(crate::sync::record_import::pending_imports(&env)
+        .unwrap()
+        .is_empty());
+    let directory = env
+        .state_path
+        .parent()
+        .unwrap()
+        .join("imports")
+        .join(prepared.operation());
+    assert_eq!(
+        fs::read(directory.join("original-state.json")).unwrap(),
+        original
+    );
+    let view = crate::vault::store::read_vault(
+        &crate::vault::store::vault_path(&env.state_path),
+        &d.keychain,
+    )
+    .unwrap();
+    assert_eq!(
+        view.get(&"3".repeat(32)).unwrap().unwrap().private_key,
+        view.get(&mapping[&"1".repeat(32)])
+            .unwrap()
+            .unwrap()
+            .private_key
+    );
+    assert!(record_runtime::commit_candidate(
+        &env,
+        generation,
+        prepared.projection().shadow().clone()
+    )
+    .is_err());
+}
+#[test]
+fn a_late_source_before_state_save_blocks_cutover_and_preserves_the_additive_vault() {
+    use crate::sync::record_import::{with_test_step, PublishStep};
+    use std::fs;
+    let (d, keys, verified) = migration_dispatch::verified_material_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let prepared = prepare(&env, verified, &keys).unwrap();
+    let before = record_runtime::snapshot(&env).unwrap();
+    let source = fs::read(&env.state_path).unwrap();
+    crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+        .unwrap();
+    let new_source = env.state_path.parent().unwrap().join("sync-state.late-B");
+    let target = new_source.clone();
+    let result = with_test_step(
+        move |step| {
+            if step == PublishStep::BeforeStateSave {
+                fs::write(&target, b"late B")?;
+            }
+            Ok(())
+        },
+        || crate::sync::record_import::central_stage::publish_initial(&env, &prepared, &keys),
+    );
+    assert!(result.is_err());
+    assert_eq!(record_runtime::snapshot(&env).unwrap(), before);
+    assert_eq!(fs::read(&env.state_path).unwrap(), source);
+    assert_eq!(fs::read(new_source).unwrap(), b"late B");
+    let view = crate::vault::store::read_vault(
+        &crate::vault::store::vault_path(&env.state_path),
+        &d.keychain,
+    )
+    .unwrap();
+    assert!(view.get(&"3".repeat(32)).unwrap().is_some());
+    assert_eq!(view.ids().len(), 2);
+}
+
+#[test]
+fn a_lost_saved_state_response_finishes_only_the_same_receipt_and_preserves_later_active_edits() {
+    use crate::sync::record_import::{with_test_step, PublishStep};
+    use std::fs;
+    let (d, keys, verified) = migration_dispatch::verified_material_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let prepared = prepare(&env, verified, &keys).unwrap();
+    let operation = prepared.operation().to_string();
+    crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+        .unwrap();
+    let result = with_test_step(
+        |step| {
+            if step == PublishStep::StateSaved {
+                Err(invalid())
+            } else {
+                Ok(())
+            }
+        },
+        || crate::sync::record_import::central_stage::publish_initial(&env, &prepared, &keys),
+    );
+    assert!(result.is_err());
+    assert!(
+        record_runtime::snapshot(&env)
+            .unwrap()
+            .0
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .control
+            .cutover
+    );
+    assert!(crate::sync::record_import::pending_imports(&env)
+        .unwrap()
+        .is_empty());
+    record_runtime::mutate_records(&env, |state| {
+        let mut next = state.clone();
+        next.device_name = "later active edit".into();
+        Ok(next)
+    })
+    .unwrap();
+    let later = record_runtime::snapshot(&env).unwrap();
+    let vault = fs::read(crate::vault::store::vault_path(&env.state_path)).unwrap();
+    drop(prepared);
+    let completed =
+        crate::sync::record_import::central_stage::complete_initial_saved(&env, &operation)
+            .unwrap();
+    assert_eq!(completed.phase, "central_active");
+    assert_eq!(record_runtime::snapshot(&env).unwrap(), later);
+    assert_eq!(
+        fs::read(crate::vault::store::vault_path(&env.state_path)).unwrap(),
+        vault
+    );
+    crate::sync::record_import::central_stage::complete_initial_saved(&env, &operation).unwrap();
+    assert_eq!(record_runtime::snapshot(&env).unwrap(), later);
+}
+#[test]
+fn an_uncertain_post_rename_directory_sync_blocks_old_core_until_saved_state_reload() {
+    use crate::sync::record_runtime::{with_replacement_write_hook, ReplacementWriteStage};
+    let (d, keys, verified) = migration_dispatch::verified_material_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let prepared = prepare(&env, verified, &keys).unwrap();
+    let operation = prepared.operation().to_string();
+    crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+        .unwrap();
+    let source = record_runtime::snapshot(&env).unwrap();
+    let result = with_replacement_write_hook(
+        Box::new(|step, path| {
+            if step == ReplacementWriteStage::DirectorySync
+                && path.file_name().is_some_and(|n| n == "sync-state.json")
+            {
+                Err(invalid())
+            } else {
+                Ok(())
+            }
+        }),
+        || crate::sync::record_import::central_stage::publish_initial(&env, &prepared, &keys),
+    );
+    assert!(result.is_err());
+    {
+        let core = d.runtime.core.lock().unwrap();
+        assert!(core.save_blocked.is_some());
+        assert!(core.central_session.is_none());
+        assert_eq!(record_runtime::active_state(&core).unwrap(), &source.0);
+    }
+    let probe = record_runtime::probe_startup(&env.state_path, "reload");
+    record_runtime::activate_probe(&mut d.runtime.core.lock().unwrap(), probe).unwrap();
+    let loaded = record_runtime::snapshot(&env).unwrap();
+    assert!(loaded.0.local.central.as_ref().unwrap().control.cutover);
+    assert_eq!(
+        crate::sync::record_import::central_stage::complete_initial_saved(&env, &operation)
+            .unwrap()
+            .phase,
+        "central_active"
+    );
+    assert_eq!(record_runtime::snapshot(&env).unwrap(), loaded);
+}

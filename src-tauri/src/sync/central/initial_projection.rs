@@ -134,19 +134,45 @@ impl Candidate {
         operation: &str,
     ) -> Result<Prepared, AppError> {
         let verified = self.delta.finish(vault, mapping, operation)?;
-        if verified.before() != &self.shadow {
+        Self::finish_verified(self.source, &self.shadow, self.manifest, verified)
+    }
+    /// Rebuild the delta from the exact immutable shadow so the original preparation remains
+    /// available for the final filesystem verification.
+    pub fn finish_readback(
+        &self,
+        keys: &VaultKeys,
+        vault: &crate::vault::store::ReadOnlyVault,
+        mapping: &BTreeMap<String, String>,
+        operation: &str,
+    ) -> Result<Prepared, AppError> {
+        let verified =
+            Delta::prepare(&self.shadow, keys, self.observed)?.finish(vault, mapping, operation)?;
+        Self::finish_verified(
+            self.source.clone(),
+            &self.shadow,
+            self.manifest.clone(),
+            verified,
+        )
+    }
+    fn finish_verified(
+        source: SyncStateV3,
+        shadow: &SyncStateV3,
+        manifest: String,
+        verified: super::projection_delta::Verified,
+    ) -> Result<Prepared, AppError> {
+        if verified.before() != shadow {
             return Err(invalid());
         }
         let candidate = crate::sync::record_groups::invalidate_changed_pins(
-            &self.source,
+            &source,
             verified.candidate().clone(),
         )
         .map_err(|_| invalid())?;
         records_v3::validate_state(&candidate).map_err(|_| invalid())?;
         Ok(Prepared {
-            source: self.source,
+            source,
             candidate,
-            manifest: self.manifest,
+            manifest,
         })
     }
     pub fn source(&self) -> &SyncStateV3 {
@@ -333,6 +359,6 @@ pub(in crate::sync) fn empty_fixture_for_stage() -> (Candidate, VaultKeys) {
 
 #[cfg(test)]
 pub(in crate::sync) fn fresh_fixture_for_stage() -> Candidate {
-    let (state,plan,keys,committed)=tests::fixture();
-    Candidate::prepare(&state,&plan,committed,&keys,100).unwrap()
+    let (state, plan, keys, committed) = tests::fixture();
+    Candidate::prepare(&state, &plan, committed, &keys, 100).unwrap()
 }

@@ -477,3 +477,51 @@ pub async fn central_replacement_confirm(
     .await
     .map_err(engine::join_error)?
 }
+
+#[tauri::command]
+pub async fn central_migration_status(
+    app: AppHandle,
+    expected: super::migration_flow::Scope,
+) -> Result<super::migration_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| super::migration_flow::status(env, &expected))?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_migration_prepare(
+    app: AppHandle,
+    expected: super::migration_flow::Scope,
+) -> Result<super::migration_flow::Preparation, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| super::migration_flow::prepare(env, &expected))?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_migration_confirm(
+    app: AppHandle,
+    expected: super::migration_flow::Scope,
+    ticket: String,
+) -> Result<super::migration_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| {
+            super::migration_flow::confirm(env, &expected, &ticket)
+        })?
+    })
+    .await
+    .map_err(engine::join_error)?
+}
+#[tauri::command]
+pub async fn central_migration_continue(
+    app: AppHandle,
+    expected: super::migration_flow::Scope,
+) -> Result<super::migration_flow::Progress, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        engine::with_env(&app, |env| super::migration_flow::advance(env, &expected))?
+    })
+    .await
+    .map_err(engine::join_error)?
+}

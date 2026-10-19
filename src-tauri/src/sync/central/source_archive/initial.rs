@@ -329,3 +329,11 @@ fn initialize(
 
 #[cfg(all(test, unix))]
 mod tests;
+
+/// Any reserved source capture freezes ordinary edits, including an interrupted first write.
+pub(in crate::sync::central) fn pending(
+    env: &SyncEnv,
+    owner: &Workspace,
+) -> Result<bool, AppError> {
+    Ok(Initial::load(env, owner)?.is_some())
+}

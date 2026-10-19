@@ -54,11 +54,18 @@ impl Files {
     fn capture_checked(
         env: &SyncEnv,
         legacy_backup: Option<&str>,
+        owned: BTreeMap<PathBuf, &[u8]>,
+    ) -> Result<Self, AppError> {
+        Self::capture_at(&env.state_path, &env.ssh_dir, legacy_backup, owned)
+    }
+    fn capture_at(
+        state_path: &Path,
+        ssh_dir: &Path,
+        legacy_backup: Option<&str>,
         mut owned: BTreeMap<PathBuf, &[u8]>,
     ) -> Result<Self, AppError> {
-        let parent = env.state_path.parent().ok_or_else(invalid)?;
-        let current = env
-            .state_path
+        let parent = state_path.parent().ok_or_else(invalid)?;
+        let current = state_path
             .file_name()
             .and_then(|v| v.to_str())
             .ok_or_else(invalid)?;
@@ -100,7 +107,7 @@ impl Files {
                 return Err(invalid());
             }
         }
-        if let Some(ssh) = Directory::open(&env.ssh_dir)? {
+        if let Some(ssh) = Directory::open(ssh_dir)? {
             // Only the caller's SSH base may resolve platform aliases. App-owned components
             // must be opened relative to that descriptor without following a redirected parent.
             if let Some(app) = ssh.optional_directory("sshelter")? {
@@ -194,6 +201,23 @@ impl Files {
         outputs: &super::source_archive::Outputs,
         effects: &crate::sync::record_import::central_stage::InitialEffects,
     ) -> Result<(), AppError> {
+        self.require_unchanged_after_initial_at(
+            &env.state_path,
+            &env.ssh_dir,
+            backup,
+            outputs,
+            effects,
+        )
+    }
+    /// Filesystem only; safe for the typed initial writer's final pre-rename check under Core.
+    pub fn require_unchanged_after_initial_at(
+        &self,
+        state_path: &Path,
+        ssh_dir: &Path,
+        backup: Option<&str>,
+        outputs: &super::source_archive::Outputs,
+        effects: &crate::sync::record_import::central_stage::InitialEffects,
+    ) -> Result<(), AppError> {
         let mut fresh = BTreeMap::new();
         for (path, bytes) in outputs.files() {
             match self.bytes.get(path) {
@@ -217,7 +241,7 @@ impl Files {
                 return Err(invalid());
             }
         }
-        let latest = Self::capture_checked(env, backup, fresh)?;
+        let latest = Self::capture_at(state_path, ssh_dir, backup, fresh)?;
         let replaced = replacement.map(|(path, _, _)| path);
         let expected =
             self.bytes.len() - usize::from(replaced.is_some_and(|p| self.bytes.contains_key(p)));

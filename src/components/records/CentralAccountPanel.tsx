@@ -1,3 +1,4 @@
+import { CentralLibraryMigration } from "./CentralLibraryMigration";
 import { CentralReplacement } from "./CentralReplacement";
 import { CentralRecovery } from "./CentralRecovery";
 import { CentralAccountAccess } from "./CentralAccountAccess";
@@ -85,6 +86,7 @@ export function CentralAccountPanel({
   const [deviceBusy, setDeviceBusy] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [replacementBusy, setReplacementBusy] = useState(false);
+  const [migrationBusy, setMigrationBusy] = useState(false);
   const [pairing, setPairing] = useState<{
     code: string;
     expires_at_ms: string;
@@ -104,9 +106,18 @@ export function CentralAccountPanel({
     };
   }, []);
   useEffect(() => {
-    onBusyChange?.(busy || deviceBusy || recoveryBusy || replacementBusy);
+    onBusyChange?.(
+      busy || deviceBusy || recoveryBusy || replacementBusy || migrationBusy,
+    );
     return () => onBusyChange?.(false);
-  }, [busy, deviceBusy, recoveryBusy, replacementBusy, onBusyChange]);
+  }, [
+    busy,
+    deviceBusy,
+    recoveryBusy,
+    replacementBusy,
+    migrationBusy,
+    onBusyChange,
+  ]);
   useEffect(() => {
     secretGeneration.current += 1;
     setKit(null);
@@ -152,7 +163,12 @@ export function CentralAccountPanel({
     if (mounted.current) update(next);
   };
   const blocked =
-    busy || deviceBusy || recoveryBusy || replacementBusy || disabled;
+    busy ||
+    deviceBusy ||
+    recoveryBusy ||
+    replacementBusy ||
+    migrationBusy ||
+    disabled;
   const login = signingIn || status.login_pending;
   const backup = status.phase === "backup_required";
   return (
@@ -235,7 +251,9 @@ export function CentralAccountPanel({
         {status.configured && !login && (
           <Button
             variant="outline"
-            disabled={busy || deviceBusy || recoveryBusy || disabled}
+            disabled={
+              busy || deviceBusy || recoveryBusy || migrationBusy || disabled
+            }
             onClick={() =>
               void run(async () => {
                 secretGeneration.current += 1;
@@ -306,7 +324,13 @@ export function CentralAccountPanel({
         ["enrolled", "active", "rekey"].includes(status.phase) && (
           <CentralDevices
             status={status}
-            disabled={busy || recoveryBusy || replacementBusy || disabled}
+            disabled={
+              busy ||
+              recoveryBusy ||
+              replacementBusy ||
+              migrationBusy ||
+              disabled
+            }
             onBusyChange={setDeviceBusy}
             update={update}
           />
@@ -318,6 +342,7 @@ export function CentralAccountPanel({
             busy ||
             recoveryBusy ||
             replacementBusy ||
+            migrationBusy ||
             disabled ||
             status.login_pending
           }
@@ -330,7 +355,9 @@ export function CentralAccountPanel({
         !status.needs_recovery && (
           <CentralRecovery
             status={status}
-            disabled={busy || deviceBusy || replacementBusy || disabled}
+            disabled={
+              busy || deviceBusy || replacementBusy || migrationBusy || disabled
+            }
             update={update}
             onBusyChange={setRecoveryBusy}
           />
@@ -342,6 +369,7 @@ export function CentralAccountPanel({
             busy ||
             deviceBusy ||
             recoveryBusy ||
+            migrationBusy ||
             disabled ||
             status.login_pending
           }
@@ -443,6 +471,14 @@ export function CentralAccountPanel({
           </Button>
         </div>
       )}
+      <CentralLibraryMigration
+        status={status}
+        disabled={
+          busy || deviceBusy || recoveryBusy || replacementBusy || disabled
+        }
+        onBusyChange={setMigrationBusy}
+        update={update}
+      />
       {(status.phase === "setup" ||
         status.phase === "backup_required" ||
         status.phase === "enrolled") && (

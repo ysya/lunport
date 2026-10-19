@@ -485,3 +485,7 @@ impl Loaded {
 }
 #[cfg(test)]
 mod tests;
+
+pub(super) fn is_frame(bytes: &[u8]) -> bool {
+    bytes.starts_with(MAGIC)
+}

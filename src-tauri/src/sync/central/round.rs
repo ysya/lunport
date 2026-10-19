@@ -171,8 +171,10 @@ fn stage(env: &SyncEnv, report: &mut Report) -> Result<(), AppError> {
         .as_ref()
         .is_some_and(|w| w.control.cutover)
     {
+        super::initial_publication::complete_saved(env)?;
         return super::active_cycle::run(env, report);
     }
+    if super::migration_flow::background(env, report)? { return Ok(()); }
     if !controller::resume(env, false)? {
         return Ok(());
     }

@@ -514,6 +514,7 @@ fn check_runtime(state: &SyncStateV3) -> Result<(), AppError> {
     Ok(())
 }
 fn snapshot_for_write(env: &SyncEnv) -> Result<(SyncStateV3, u64), AppError> {
+    crate::sync::central::migration_flow::require_editable(env)?;
     let core = env.runtime.core.lock().unwrap();
     if core.save_blocked.is_some() {
         return Err(failure(

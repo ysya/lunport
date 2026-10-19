@@ -72,6 +72,11 @@ mod initial_tests;
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
 mod input;
 mod initial_effects;
+mod initial_publish;
+pub(in crate::sync) use initial_publish::{
+    complete_saved as complete_initial_saved, publish as publish_initial,
+    Publication as InitialPublication,
+};
 pub(in crate::sync) use initial_effects::{InitialEffects, read as initial_effects, read_locked as initial_effects_locked};
 use input::Input;
 pub(crate) use input::{prepare as prepare_initial, prepare_reserved as prepare_initial_reserved, resume as resume_initial};
@@ -136,7 +141,7 @@ pub(super) fn pending(
                 .ok()
                 .and_then(|state| state.local.import_receipts.get(id).cloned())
         };
-        let proven = publication::matches_receipt(receipt.as_ref(), &journal)?;
+        let proven = if journal.initial.is_some(){initial_publish::matches_receipt(receipt.as_ref(),&journal)?}else{publication::matches_receipt(receipt.as_ref(),&journal)?};
         if proven {
             status.phase = "central_active".into();
         } else if journal.phase == Phase::Active {

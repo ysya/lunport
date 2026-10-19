@@ -264,3 +264,10 @@ pub(in crate::sync::central) fn confirm(
 }
 #[cfg(all(test, unix))]
 mod tests;
+
+pub(in crate::sync::central) fn is_approved(
+    env: &SyncEnv,
+    loaded: &Loaded,
+) -> Result<bool, AppError> {
+    Ok(read(env, loaded)?.is_some_and(|r| r.accepted))
+}

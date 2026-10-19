@@ -10,6 +10,7 @@ fn check_key_destination(
     env: &SyncEnv,
     invocation: Option<&super::record_import::central_local::Invocation>,
 ) -> Result<(), AppError> {
+    crate::sync::central::migration_flow::require_editable(env)?;
     let core = env.runtime.core.lock().unwrap();
     super::record_import::central_local::check_request(
         super::record_runtime::active_state(&core)?,

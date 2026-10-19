@@ -994,3 +994,5 @@ mod tests {
         }
     }
 }
+
+pub(super) use initial::pending as initial_pending;

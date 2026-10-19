@@ -93,8 +93,86 @@ fn reserve(env: &SyncEnv, loaded: &Loaded) -> Result<Reservation, AppError> {
     Ok(checked)
 }
 impl Prepared {
+    /// Metadata-only completion proof after state publication. No session, key promotion or
+    /// source adoption is created, and a later active library is never replaced by this path.
+    pub(in crate::sync) fn verify_saved_reservation(
+        env: &SyncEnv,
+        life: &std::sync::MutexGuard<'_, ()>,
+        current: &super::workspace::Workspace,
+        original: &crate::sync::records_v3::SyncStateV3,
+        operation: &str,
+        manifest: &str,
+        observed: u64,
+    ) -> Result<(), AppError> {
+        let before = original.local.central.as_ref().ok_or_else(invalid)?;
+        if before.control.cutover
+            || original.local.central_projection.is_some()
+            || !current.control.cutover
+            || before.control.profile != current.control.profile
+            || before.control.anchor != current.control.anchor
+            || before.control.device != current.control.device
+            || before.identity_slot != current.identity_slot
+            || before.control.personal_vault != current.control.personal_vault
+        {
+            return Err(invalid());
+        }
+        let profile = current.control.profile.profile()?;
+        let encoded = env
+            .keychain
+            .get_noninteractive(&profile.device_slot(
+                "source-migration-publication",
+                current.identity_slot.as_deref(),
+            )?)?
+            .map(Zeroizing::new)
+            .ok_or_else(invalid)?;
+        if encoded.len() > CAP {
+            return Err(invalid());
+        }
+        let saved: Reservation = serde_json::from_str(&encoded).map_err(|_| invalid())?;
+        if saved.version != 1
+            || saved.policy != "initial-publication-v1"
+            || saved.operation != operation
+            || saved.manifest != manifest
+            || saved.observed != observed
+            || !hex(operation, 32)
+            || !hex(manifest, 64)
+            || observed > MAX_SAFE_INTEGER
+        {
+            return Err(invalid());
+        }
+        saved.cursor.validate(before)?;
+        if Cursor::load(env, life, before)?.ok_or_else(invalid)?.cursor != saved.cursor {
+            return Err(invalid());
+        }
+        Ok(())
+    }
     pub(in crate::sync) fn projection(&self) -> &Candidate {
         &self.initial
+    }
+    pub(in crate::sync) fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub(in crate::sync) fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+    /// Pure byte/path verification only: no Core acquisition, protected credential access or HTTP.
+    pub(in crate::sync) fn verify_files_at(
+        &self,
+        state_path: &std::path::Path,
+        ssh_dir: &std::path::Path,
+        effects: &crate::sync::record_import::central_stage::InitialEffects,
+    ) -> Result<(), AppError> {
+        effects.matches(self.projection(), self.operation())?;
+        self.loaded
+            .package
+            .files
+            .require_unchanged_after_initial_at(
+                state_path,
+                ssh_dir,
+                self.loaded.package.state.legacy_v1_backup.as_deref(),
+                &self.loaded.outputs,
+                effects,
+            )
     }
     pub fn operation(&self) -> &str {
         &self.reservation.operation
@@ -306,3 +384,34 @@ pub(super) fn resume(
 }
 #[cfg(all(test, unix))]
 mod tests;
+
+/// Recover only the selected saved operation identifier; the metadata completer validates its
+/// original source, durable receipt and protected reservation before changing a journal.
+pub(super) fn complete_saved(env: &SyncEnv) -> Result<(), AppError> {
+    let state = crate::sync::record_runtime::snapshot(env)?.0;
+    let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+    if !owner.control.cutover {
+        return Ok(());
+    }
+    let role = owner.control.profile.profile()?.device_slot(
+        "source-migration-publication",
+        owner.identity_slot.as_deref(),
+    )?;
+    let Some(encoded) = env.keychain.get_noninteractive(&role)?.map(Zeroizing::new) else {
+        return Ok(());
+    };
+    if encoded.len() > CAP {
+        return Err(invalid());
+    }
+    let saved: Reservation = serde_json::from_str(&encoded).map_err(|_| invalid())?;
+    if saved.version != 1
+        || saved.policy != "initial-publication-v1"
+        || !hex(&saved.operation, 32)
+        || !hex(&saved.manifest, 64)
+        || saved.observed > MAX_SAFE_INTEGER
+    {
+        return Err(invalid());
+    }
+    crate::sync::record_import::central_stage::complete_initial_saved(env, &saved.operation)?;
+    Ok(())
+}

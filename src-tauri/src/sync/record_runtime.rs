@@ -218,13 +218,16 @@ enum ProjectionAuthority<'a> {
     Library(&'a crate::sync::record_import::central_stage::Publication),
     Local(&'a crate::sync::record_import::central_local::Publication),
     Dispatch(&'a crate::sync::central::active_dispatch::Publication),
+    Initial(&'a crate::sync::record_import::central_stage::InitialPublication<'a>),
 }
 impl ProjectionAuthority<'_> {
+    fn is_initial(&self)->bool {matches!(self,Self::Initial(_))}
     fn candidate(&self) -> &SyncStateV3 {
         match self {
             Self::Library(a) => a.candidate(),
             Self::Local(a) => a.candidate(),
             Self::Dispatch(a) => a.candidate(),
+            Self::Initial(a) => a.candidate(),
         }
     }
     fn generation(&self) -> u64 {
@@ -232,6 +235,7 @@ impl ProjectionAuthority<'_> {
             Self::Library(a) => a.generation(),
             Self::Local(a) => a.generation(),
             Self::Dispatch(a) => a.generation(),
+            Self::Initial(a) => a.generation(),
         }
     }
     fn verify_core(&self, core: &crate::sync::runtime::SyncCore) -> Result<(), AppError> {
@@ -239,6 +243,7 @@ impl ProjectionAuthority<'_> {
             Self::Library(a) => a.verify_core(core),
             Self::Local(a) => a.verify_core(core),
             Self::Dispatch(a) => a.verify_core(core),
+            Self::Initial(a) => a.verify_core(core),
         }
     }
     fn verify_records(
@@ -251,6 +256,7 @@ impl ProjectionAuthority<'_> {
             Self::Library(a) => a.verify_records(before, after, generation),
             Self::Local(a) => a.verify_records(before, after, generation),
             Self::Dispatch(a) => a.verify_records(before, after, generation),
+            Self::Initial(a) => a.verify_records(before, after, generation),
         }
     }
     fn verify_vault(&self, path: &Path) -> Result<(), AppError> {
@@ -258,6 +264,7 @@ impl ProjectionAuthority<'_> {
             Self::Library(a) => a.verify_vault(path),
             Self::Local(a) => a.verify_vault(path),
             Self::Dispatch(a) => a.verify_vault(path),
+            Self::Initial(a) => a.verify_vault(path),
         }
     }
 }
@@ -312,10 +319,20 @@ fn save_active_with_authority(
         let value: serde_json::Value = serde_json::from_slice(&source)
             .map_err(|_| AppError::Other("cannot read format upgrade source".into()))?;
         let previous_version = value.get("version").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        if projection.is_some() && previous_version != u64::from(state.version) {
+        let initial_projection=projection.is_some_and(|p|p.authority.is_initial());
+        if replacement.is_none() && projection.is_none() && state.local.central_projection.is_some() && value.get("local").and_then(|v|v.get("central_projection")).is_none_or(|v|v.is_null()) {
+            return Err(AppError::Other("First central library activation requires its verified initial publication transaction. Original data is retained.".into()));
+        }
+        if projection.is_some() && previous_version != u64::from(state.version) && !initial_projection {
             return Err(AppError::Other("The saved central source format changed. Source and stage are retained; reload before publishing.".into()));
         }
-        if previous_version >= crate::sync::records_v3::CENTRAL_STATE_VERSION as u64 {
+        if initial_projection {
+            let previous:SyncStateV3=serde_json::from_value(value.clone()).map_err(|_|AppError::Other("Cannot validate initial central source.".into()))?;
+            validate_state(&previous).map_err(|_|AppError::Other("Cannot validate initial central source.".into()))?;
+            let authority=&projection.unwrap().authority;
+            authority.verify_records(&previous,state,authority.generation())?;
+            authority.verify_vault(path)?;
+        } else if previous_version >= crate::sync::records_v3::CENTRAL_STATE_VERSION as u64 {
             if previous_version > state.version as u64 {
                 return Err(AppError::Other("The central workspace format cannot be downgraded. Original data has been retained.".into()));
             }
@@ -334,7 +351,9 @@ fn save_active_with_authority(
         if let Some(source_version) = value
             .get("version")
             .and_then(serde_json::Value::as_u64)
-            .filter(|v| *v >= 3 && *v < state.version as u64)
+            // The dedicated initial authority already verified the exact durable source package
+            // and stage snapshot. An extra generic backup would be an unproved new source file.
+            .filter(|v| !initial_projection && *v >= 3 && *v < state.version as u64)
         {
             let digest = format!("{:x}", Sha256::digest(&source));
             let backup =
@@ -439,6 +458,8 @@ pub fn activate_probe(
     core.account_keys = None;
     core.central_session = None;
     core.central_user_action = None;
+    core.central_migration = None;
+    core.central_migration_frozen = false;
     core.central_poll = Default::default();
     core.save_blocked = None;
     core.unsaved = false;
@@ -508,12 +529,22 @@ pub fn snapshot(env: &crate::sync::env::SyncEnv) -> Result<(SyncStateV3, u64), A
     let core = env.runtime.core.lock().unwrap();
     Ok((active_state(&core)?.clone(), core.generation))
 }
+fn library_changed(before: &SyncStateV3, after: &SyncStateV3) -> bool {
+    let mut proposed = after.clone();
+    proposed.version = before.version;
+    proposed.local.central = before.local.central.clone();
+    &proposed != before
+}
+
 fn persist_candidate(
     core: &mut crate::sync::runtime::SyncCore,
     path: &Path,
     mut candidate: SyncStateV3,
 ) -> Result<u64, AppError> {
     writes_allowed(core)?;
+    if core.central_migration_frozen {
+        if library_changed(active_state(core)?, &candidate) {return Err(crate::sync::central::migration_flow::edit_error());}
+    }
     if candidate.version == STATE_VERSION && crate::sync::record_groups::has_group_data(&candidate)
     {
         candidate.version = crate::sync::records_v3::GROUP_STATE_VERSION;
@@ -532,7 +563,7 @@ fn persist_candidate(
     if central_cutover && !core.records.as_ref().and_then(|s|s.local.central.as_ref()).is_some_and(|c|c.control.cutover) {
         candidate.local.credential_approvals.clear();
     }
-    if !central_cutover {
+    if !central_cutover && !core.central_migration_frozen {
         candidate = crate::sync::record_library::include_new_records(candidate, core.account_keys.as_ref());
     }
     if crate::sync::group_order::has_navigation_data(&candidate) {
@@ -543,6 +574,9 @@ fn persist_candidate(
             .map_err(|e| AppError::Other(e.to_string()))?;
     }
     crate::sync::record_conflicts::upgrade_state(&mut candidate);
+    if core.central_migration_frozen && library_changed(active_state(core)?, &candidate) {
+        return Err(crate::sync::central::migration_flow::edit_error());
+    }
     let generation = core
         .generation
         .checked_add(1)
@@ -623,6 +657,13 @@ pub(crate) fn publish_dispatch(
 ) -> Result<u64, AppError> {
     publish_central_material(env, ProjectionAuthority::Dispatch(authority))
 }
+pub(in crate::sync) fn publish_initial_projection(
+    env: &crate::sync::env::SyncEnv,
+    authority: &crate::sync::record_import::central_stage::InitialPublication<'_>,
+) -> Result<u64, AppError> {
+    publish_central_material(env, ProjectionAuthority::Initial(authority))
+}
+
 fn publish_central_material(
     env: &crate::sync::env::SyncEnv,
     authority: ProjectionAuthority<'_>,
@@ -653,12 +694,17 @@ fn publish_central_material(
     core.account_keys = None;
     Ok(generation)
 }
-/// Core only: safe while a caller already owns lifecycle/vault/publication. Never reacquire them here.
+/// Read any protected edit barrier before Core. A caller may already own lifecycle/vault/publication;
+/// this method never reacquires those gates. The final generation check still owns Core.
 pub fn commit_candidate(
     env: &crate::sync::env::SyncEnv,
     expected_generation: u64,
     candidate: SyncStateV3,
 ) -> Result<u64, AppError> {
+    let before = snapshot(env)?.0;
+    if library_changed(&before, &candidate) {
+        crate::sync::central::migration_flow::refresh_edit_gate(env)?;
+    }
     let mut core = env.runtime.core.lock().unwrap();
     writes_allowed(&core)?;
     if core.generation != expected_generation {
@@ -744,6 +790,13 @@ pub fn mutate_records(
     let mut core = env.runtime.core.lock().unwrap();
     writes_allowed(&core)?;
     let candidate = transform(active_state(&core)?)?;
+    if library_changed(active_state(&core)?, &candidate) {
+        let generation = core.generation;
+        drop(core);
+        crate::sync::central::migration_flow::refresh_edit_gate(env)?;
+        core = env.runtime.core.lock().unwrap();
+        if core.generation != generation { return Err(crate::sync::runtime::superseded()); }
+    }
     persist_candidate(&mut core, &env.state_path, candidate)
 }
 /// Call outside runtime locks; current mnemonic only, no staged-code promotion or cleanup.

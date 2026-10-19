@@ -197,7 +197,7 @@ pub(super) fn matches_receipt(
         )),
     }
 }
-fn active_vault(env: &SyncEnv, paths: &Paths, j: &Journal) -> Result<(), AppError> {
+pub(super) fn active_vault(env: &SyncEnv, paths: &Paths, j: &Journal) -> Result<(), AppError> {
     let Some(expected) = j.staged_vault_digest.as_ref() else {
         if !j.bindings.is_empty()
             || optional_bytes(

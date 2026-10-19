@@ -83,6 +83,7 @@ fn target(owner: &Workspace, current: &Session, keys: &VaultKeys) -> Result<(), 
     session(owner, current)?;
     let replica = owner.replica.as_ref().ok_or_else(invalid)?;
     if owner.control.phase != Phase::Enrolled
+        || owner.control.proof.as_ref().is_none_or(|proof| proof.genesis.first != owner.control.device)
         || owner.control.cutover
         || owner.bootstrap.is_some()
         || owner.replacement.is_some()
@@ -348,6 +349,7 @@ impl Captured {
             .central
             .as_ref()
             .ok_or_else(invalid)?;
+        env.runtime.core.lock().unwrap().central_migration_frozen = true;
         let initial = self.package.initialize_source(env, &life, owner, 0)?;
         self.require_current(env)?;
         let signer = &self.session.identity.as_ref().ok_or_else(invalid)?.keys;

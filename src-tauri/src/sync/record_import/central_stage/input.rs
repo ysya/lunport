@@ -10,6 +10,15 @@ pub(super) struct InitialBinding {
     observed: u64,
 }
 impl InitialBinding {
+    pub(super) fn manifest(&self) -> &str {
+        &self.manifest
+    }
+    pub(super) fn observed(&self) -> u64 {
+        self.observed
+    }
+    pub(super) fn matches_source(&self, state: &SyncStateV3) -> Result<bool, AppError> {
+        Ok(self.source == state_digest(state)?)
+    }
     pub fn validate(&self) -> Result<(), AppError> {
         if !hex(&self.manifest, 64)
             || !hex(&self.source, 64)
@@ -20,6 +29,12 @@ impl InitialBinding {
         }
         Ok(())
     }
+}
+fn state_digest(state: &SyncStateV3) -> Result<String, AppError> {
+    let bytes = zeroize::Zeroizing::new(
+        serde_json::to_vec(state).map_err(|_| failure("cannot bind initial stage state"))?,
+    );
+    Ok(digest(&bytes))
 }
 #[derive(Clone, Copy)]
 pub(super) enum Input<'a> {
@@ -42,19 +57,12 @@ impl<'a> Input<'a> {
     pub fn binding(self) -> Result<Option<InitialBinding>, AppError> {
         match self {
             Self::Library(_) => Ok(None),
-            Self::Initial(initial) => {
-                let hash = |state: &SyncStateV3| {
-                    serde_json::to_vec(state)
-                        .map(|b| digest(&b))
-                        .map_err(|_| failure("cannot bind initial stage state"))
-                };
-                Ok(Some(InitialBinding {
-                    manifest: initial.manifest().into(),
-                    source: hash(initial.source())?,
-                    shadow: hash(initial.shadow())?,
-                    observed: initial.observed(),
-                }))
-            }
+            Self::Initial(initial) => Ok(Some(InitialBinding {
+                manifest: initial.manifest().into(),
+                source: state_digest(initial.source())?,
+                shadow: state_digest(initial.shadow())?,
+                observed: initial.observed(),
+            })),
         }
     }
     pub fn verify_binding(self, binding: Option<&InitialBinding>) -> Result<(), AppError> {
@@ -114,7 +122,7 @@ pub(crate) fn resume(
         resume_input(safe, operation, Input::Initial(initial))
     })
 }
-fn with_background<T>(
+pub(super) fn with_background<T>(
     env: &SyncEnv,
     action: impl FnOnce(&SyncEnv) -> Result<T, AppError>,
 ) -> Result<T, AppError> {

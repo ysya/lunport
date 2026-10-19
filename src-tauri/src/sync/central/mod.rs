@@ -81,6 +81,7 @@ pub(crate) mod replacement_publication;
 mod owner;
 pub mod rekey;
 pub mod round;
+pub mod migration_flow;
 pub mod rotation;
 pub mod rotation_runtime;
 pub mod replica;
