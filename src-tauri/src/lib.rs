@@ -25,6 +25,7 @@ pub mod macos_install;
 pub mod mcp;
 mod mcp_setup;
 mod process;
+mod prompt_window;
 mod quick_connect;
 mod secrets;
 mod session;
