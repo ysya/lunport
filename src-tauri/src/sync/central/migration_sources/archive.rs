@@ -42,6 +42,12 @@ fn discovery<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Discovery>, D::Er
     Discovery::deserialize(d).map(Some)
 }
 impl Sources {
+    /// A book can grow only through the already authenticated immutable parent evidence.
+    pub(in crate::sync::central) fn follows_book(&self, previous: &str) -> Result<bool, AppError> {
+        Ok(super::super::crypto::hash(&self.encode_local()?) == previous
+            || self.discovery.as_ref().is_some_and(|discovery|
+                super::super::crypto::hash(discovery.base.as_bytes()) == previous))
+    }
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         if self.keys.len() > MAX_SOURCES
             || self.legacy_origin.as_ref().is_some_and(|v| v.len() > 2048)

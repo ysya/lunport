@@ -560,3 +560,36 @@ fn verified_parent_metadata_without_readable_child_credentials_blocks_the_whole_
         );
     }
 }
+
+#[test]
+fn partial_fetch_can_extend_only_from_its_exact_authenticated_parent_book() {
+    use super::super::fetching::Fetching;
+    let (state, sources, owner, signer, progress, response, child) = fixture();
+    let parent = sources.parent.clone();
+    let mut fetching = Fetching::new(&sources, &state, &"7".repeat(32), &progress).unwrap();
+    let snapshot = sources.admit_frozen(&owner, fetching.operation(), &progress, None, &parent, response.clone()).unwrap();
+    fetching.insert(&sources, &state, snapshot).unwrap();
+    let snapshot = sources.admit_frozen(&owner, fetching.operation(), &progress, None, &parent, response).unwrap();
+    let expanded = sources.with_parent_discovery(&owner, &snapshot).unwrap();
+    let intent = expanded.intent(&owner, &signer, fetching.operation(), &"8".repeat(64), Some(&progress)).unwrap();
+    let mut next = progress.clone();
+    next.proof.push(ProofStep { digest: intent.digest().unwrap(), intent });
+    next.phase = FreezePhase::Freezing;
+    next.next = vec![child.chain_id.clone()];
+    fetching.advance(&expanded, &state, &next).unwrap();
+    assert_eq!(fetching.next_source(&expanded, &state).unwrap(), None);
+    let encoded = fetching.encode_local().unwrap();
+    let book = expanded.encode_local().unwrap();
+    let expanded = Sources::decode_local(&book, &state).unwrap();
+    let mut restored = Fetching::decode_local(&encoded, &expanded, &state).unwrap();
+    let empty = PullResponse { records: vec![], latest_seq: 0 };
+    next.sources.push(legacy_checkpoint(&child.chain_id, 0, &[]).unwrap());
+    next.sources.sort_by(|a,b| a.chain_id.cmp(&b.chain_id));
+    next.phase = FreezePhase::Frozen;
+    next.next.clear();
+    restored.advance(&expanded, &state, &next).unwrap();
+    let snapshot = expanded.admit_frozen(&owner, restored.operation(), &next, None, &child.chain_id, empty).unwrap();
+    restored.insert(&expanded, &state, snapshot).unwrap();
+    restored.complete(&expanded, &state).unwrap();
+    assert!(state.spaces.is_empty());
+}

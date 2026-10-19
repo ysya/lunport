@@ -174,6 +174,13 @@ impl Package {
         drop(self.record_inputs()?);
         Ok(self)
     }
+    /// A passive complete continuation only; typed reconciliation and consent remain gates.
+    pub fn finish_fetching(mut self, fetching: super::migration_sources::Fetching) -> Result<Self, AppError> {
+        if self.frozen.is_some() { return Err(invalid()); }
+        self.frozen = Some(fetching.complete(&self.sources, &self.state)?);
+        drop(self.record_inputs()?);
+        Ok(self)
+    }
     /// Admission always uses the enclosed decryptors. No OS access, writes, activation or consent.
     pub fn materials(
         &self,
