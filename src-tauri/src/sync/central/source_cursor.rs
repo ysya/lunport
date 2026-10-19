@@ -21,6 +21,7 @@ pub(super) struct Cursor {
 pub(super) struct Restored {
     pub cursor: Cursor,
     pub bytes: Zeroizing<Vec<u8>>,
+    pub outputs: source_archive::Outputs,
 }
 fn role(owner: &Workspace) -> Result<String, AppError> {
     Ok(owner
@@ -70,15 +71,26 @@ impl Cursor {
         value.validate(owner)?;
         Ok(Some(value))
     }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn previous(&self) -> Option<&Receipt> {
+        self.previous.as_ref()
+    }
     pub fn receipt(&self) -> &Receipt {
         &self.receipt
     }
     fn restore(self, env: &SyncEnv, owner: &Workspace) -> Result<Restored, AppError> {
         self.validate(owner)?;
-        let bytes = source_archive::restore(env, &owner.control.profile.profile()?, &self.receipt)?;
+        let (bytes, outputs) = source_archive::restore_with_outputs(
+            env,
+            &owner.control.profile.profile()?,
+            &self.receipt,
+        )?;
         Ok(Restored {
             cursor: self,
             bytes,
+            outputs,
         })
     }
     /// None means no cursor was read, never permission to ignore existing source obligations.

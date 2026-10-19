@@ -108,6 +108,20 @@ impl FrozenSet {
     ) -> Result<super::reconcile::Reconciliation, AppError> {
         super::reconcile::Reconciliation::from_complete(self.inventory(sources, state)?, state)
     }
+    pub fn context(
+        &self,
+        operation: &str,
+        inventory_digest: &str,
+    ) -> Result<super::super::migration_history::Context, AppError> {
+        if operation != self.operation {
+            return Err(invalid());
+        }
+        Ok(super::super::migration_history::Context {
+            operation: operation.into(),
+            inventory_digest: inventory_digest.into(),
+            sources: self.progress.sources.clone(),
+        })
+    }
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let mut bytes = Zeroizing::new(Vec::new());
         serde_json::to_writer(&mut *bytes, self).map_err(|_| invalid())?;

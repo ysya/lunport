@@ -20,6 +20,8 @@ const MAGIC: &[u8; 8] = b"LPSARC1\0";
 const MAX_HEADER: usize = 4096;
 const MAX_PLAIN: usize = 192 * 1024 * 1024;
 const MAX_FILE: usize = MAX_PLAIN + MAX_HEADER + 28;
+const MAX_OUTPUTS: usize = 256;
+const MAX_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -442,8 +444,6 @@ pub(super) struct Outputs {
 impl Outputs {
     /// Only independently authenticated snapshots from this same operation may be joined.
     pub fn merge(self, next: Self) -> Result<Self, AppError> {
-        const MAX_OUTPUTS: usize = 256;
-        const MAX_BYTES: usize = 256 * 1024 * 1024;
         if self.scope != next.scope {
             return Err(invalid());
         }
@@ -458,7 +458,7 @@ impl Outputs {
                 continue;
             }
             total = total.checked_add(bytes.len()).ok_or_else(invalid)?;
-            if files.len() >= MAX_OUTPUTS || total > MAX_BYTES {
+            if files.len() >= MAX_OUTPUTS || total > MAX_OUTPUT_BYTES {
                 return Err(invalid());
             }
             files.insert(path, bytes);
@@ -467,6 +467,17 @@ impl Outputs {
             scope,
             files: files.into_iter().collect(),
         })
+    }
+    /// Reserve one new same-operation snapshot; the already verified key marker is unchanged.
+    pub fn require_room_for_snapshot(&self, plaintext: usize) -> Result<(), AppError> {
+        let mut total = plaintext.checked_add(MAX_HEADER + 28).ok_or_else(invalid)?;
+        for (_, bytes) in &self.files {
+            total = total.checked_add(bytes.len()).ok_or_else(invalid)?;
+        }
+        if self.files.len() >= MAX_OUTPUTS || total > MAX_OUTPUT_BYTES {
+            return Err(invalid());
+        }
+        Ok(())
     }
     pub fn files(&self) -> impl Iterator<Item = (&std::path::Path, &[u8])> {
         self.files
@@ -521,6 +532,15 @@ impl Archived {
         }
         Ok(read.outputs)
     }
+}
+/// One authenticated readback supplies native bytes and exact own-output provenance together.
+pub(super) fn restore_with_outputs(
+    env: &SyncEnv,
+    profile: &Profile,
+    receipt: &Receipt,
+) -> Result<(Zeroizing<Vec<u8>>, Outputs), AppError> {
+    let read = readback(env, profile, receipt)?;
+    Ok((read.plain, read.outputs))
 }
 /// Native bytes only. Never recreates a protected key and accepts no external filesystem path.
 pub(super) fn restore(
@@ -686,6 +706,10 @@ mod tests {
         let profile = owner.control.profile.profile().unwrap();
         let plain = Zeroizing::new(b"exact source".to_vec());
         let archived = create(&env, &life, &owner, 0, &plain).unwrap();
+        let proof = archived.outputs(&env, &profile, &plain).unwrap();
+        proof.require_room_for_snapshot(32).unwrap();
+        assert!(proof.require_room_for_snapshot(usize::MAX).is_err());
+        assert!(proof.require_room_for_snapshot(MAX_OUTPUT_BYTES).is_err());
         let mut changed = archived.outputs(&env, &profile, &plain).unwrap();
         changed.files[0].1[0] ^= 1;
         assert!(archived

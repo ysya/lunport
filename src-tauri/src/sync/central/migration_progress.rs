@@ -33,7 +33,7 @@ pub(super) struct Known {
     retired: u64,
 }
 impl Known {
-    fn validate(&self, plan: &Plan) -> Result<(), AppError> {
+    pub(super) fn validate(&self, plan: &Plan) -> Result<(), AppError> {
         let count = plan.rows.len() as u64;
         let sources = plan.manifest.body.sources.len() as u64;
         if self.version != 1
@@ -50,6 +50,17 @@ impl Known {
                 Phase::Committed => self.staged != count || self.retired >= sources,
                 Phase::Retired => self.staged != count || self.retired != sources,
             }
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn require_after(&self, plan: &Plan, minimum: &Self) -> Result<(), AppError> {
+        self.validate(plan)?;
+        minimum.validate(plan)?;
+        if self.phase < minimum.phase
+            || self.staged < minimum.staged
+            || self.retired < minimum.retired
         {
             return Err(invalid());
         }
@@ -118,13 +129,7 @@ impl Progress {
             return Err(invalid());
         }
         if let Some(minimum) = minimum {
-            minimum.validate(plan)?;
-            if result.phase < minimum.phase
-                || result.staged < minimum.staged
-                || result.retired < minimum.retired
-            {
-                return Err(invalid());
-            }
+            result.require_after(plan, minimum)?;
         }
         Ok(result)
     }

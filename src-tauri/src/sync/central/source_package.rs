@@ -152,6 +152,14 @@ impl Package {
         let materials = self.materials(keys, references)?;
         super::migration_library::prepare(&self.state, &known, materials)
     }
+    /// The caller must have decoded this package from this exact authenticated receipt.
+    /// This binds frozen inputs only; other files, consent and actual source freshness are separate.
+    pub fn migration_context(&self, receipt: &Receipt) -> Result<super::migration_history::Context, AppError> {
+        let owner = self.state.local.central.as_ref().ok_or_else(invalid)?;
+        receipt.matches_selected(owner)?;
+        drop(self.record_inputs()?);
+        self.frozen.as_ref().ok_or_else(invalid)?.context(receipt.operation(), &receipt.ciphertext_hash)
+    }
     pub fn encode_local(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {
         if state(&self.files, &self.state_name)? != self.state {
             return Err(invalid());
