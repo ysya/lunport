@@ -12,6 +12,7 @@ const buttons = Array.from(
 const list = document.querySelector<HTMLElement>("#credentials")!;
 let busy = true;
 let managing = false;
+let managementKey = "";
 async function call(path: string, body: object): Promise<any> {
   const response = await fetch("/v2/auth/passkey/" + path, {
     method: "POST",
@@ -19,7 +20,11 @@ async function call(path: string, body: object): Promise<any> {
     cache: "no-store",
     redirect: "error",
     referrerPolicy: "no-referrer",
-    headers: { "content-type": "application/json", "x-lunport-flow": key },
+    headers: {
+      "content-type": "application/json",
+      "x-lunport-flow": key,
+      ...(managementKey ? { "x-lunport-management": managementKey } : {}),
+    },
     body: JSON.stringify({ flow, ...body }),
   });
   if (!response.ok) throw new Error("Passkey request failed.");
@@ -53,6 +58,12 @@ function redirect(value: string) {
   location.replace(callback.href);
 }
 function showManagement(result: any) {
+  if (result.management_key !== undefined) {
+    if (!/^[0-9a-f]{64}$/.test(result.management_key))
+      throw new Error("Invalid management capability.");
+    managementKey = result.management_key;
+  }
+  if (!managementKey) throw new Error("Missing management capability.");
   managing = true;
   buttons.forEach((b) => {
     b.hidden = !["add", "complete"].includes(b.dataset.kind!);

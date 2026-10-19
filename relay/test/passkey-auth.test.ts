@@ -518,19 +518,22 @@ it("requires fresh Passkey proof to manage backups, preserves the signing creden
     await virtual.assertion((options.body as any).options.challenge, user),
   );
   expect(finished.status).toBe(200);
+  const managementKey = (finished.body as any).management_key;
+  expect(managementKey).toMatch(/^[0-9a-f]{64}$/);
   expect(finished.body).toMatchObject({
     managing: true,
     credentials: [{ id: primary.id, current: true }],
   });
   expect((finished.body as any).redirect).toBeUndefined();
   expect(
-    (await store.remove(origin, flow.id, flow.key, primary.id)).status,
+    (await store.remove(origin, flow.id, flow.key, primary.id, managementKey))
+      .status,
   ).toBe(409);
   expect(
     (await store.options(origin, flow.id, flow.key, "register")).status,
   ).toBe(403);
   const backup = await authenticator(),
-    add = await store.options(origin, flow.id, flow.key, "add");
+    add = await store.options(origin, flow.id, flow.key, "add", managementKey);
   expect((add.body as any).options.user.id).toBe(user);
   expect((add.body as any).options.excludeCredentials).toEqual([
     { id: primary.id, type: "public-key" },
@@ -539,14 +542,30 @@ it("requires fresh Passkey proof to manage backups, preserves the signing creden
     (add.body as any).options.challenge,
   );
   expect(
-    (await store.finish(origin, flow.id, flow.key, backupResponse)).body,
+    (
+      await store.finish(
+        origin,
+        flow.id,
+        flow.key,
+        backupResponse,
+        managementKey,
+      )
+    ).body,
   ).toMatchObject({ managing: true });
-  expect((await store.management(origin, flow.id, "0".repeat(64))).status).toBe(
-    403,
-  );
   expect(
-    (await store.management(origin, flow.id, flow.key, Date.now() + 300_001))
+    (await store.management(origin, flow.id, "0".repeat(64), managementKey))
       .status,
+  ).toBe(403);
+  expect(
+    (
+      await store.management(
+        origin,
+        flow.id,
+        flow.key,
+        managementKey,
+        Date.now() + 300_001,
+      )
+    ).status,
   ).toBe(403);
   const otherFlow = await begin(store),
     otherOptions = await store.options(
@@ -564,7 +583,15 @@ it("requires fresh Passkey proof to manage backups, preserves the signing creden
       .status,
   ).toBe(200);
   expect(
-    (await store.remove(origin, flow.id, flow.key, otherResponse.id)).status,
+    (
+      await store.remove(
+        origin,
+        flow.id,
+        flow.key,
+        otherResponse.id,
+        managementKey,
+      )
+    ).status,
   ).toBe(409);
   const login = await begin(store),
     loginOptions = await store.options(origin, login.id, login.key, "login");
@@ -579,14 +606,27 @@ it("requires fresh Passkey proof to manage backups, preserves the signing creden
     (backupLogin.body as any).redirect,
   ).searchParams.get("code")!;
   expect(
-    (await store.remove(origin, flow.id, flow.key, backupResponse.id)).status,
+    (
+      await store.remove(
+        origin,
+        flow.id,
+        flow.key,
+        backupResponse.id,
+        managementKey,
+      )
+    ).status,
   ).toBe(200);
   expect(await store.identity(origin, tokens.access_token)).toBeNull();
   expect(
     (await store.exchange(origin, pendingCode, login.verifier, login.redirect))
       .status,
   ).toBe(401);
-  const completed = await store.complete(origin, flow.id, flow.key);
+  const completed = await store.complete(
+    origin,
+    flow.id,
+    flow.key,
+    managementKey,
+  );
   expect(completed.status).toBe(200);
   expect((await store.complete(origin, flow.id, flow.key)).status).toBe(403);
   const exchanged = await store.exchange(
@@ -672,4 +712,61 @@ it("allows only one concurrent code exchange and expires codes, access tokens an
       )
     ).status,
   ).toBe(401);
+});
+
+it("does not grant credential management to a party that only knows the pre-authentication flow link", async () => {
+  const { store, virtual, user } = await enroll();
+  const flow = await begin(store),
+    options = await store.options(origin, flow.id, flow.key, "manage");
+  const verified = await store.finish(
+    origin,
+    flow.id,
+    flow.key,
+    await virtual.assertion((options.body as any).options.challenge, user),
+  );
+  expect(verified.status).toBe(200);
+  const managementKey = (verified.body as any).management_key;
+  expect(managementKey).toMatch(/^[0-9a-f]{64}$/);
+  // The link initiator knows flow.id and flow.key but cannot observe the user's same-origin
+  // verification response. Those original link credentials must not manage the account.
+  expect((await store.options(origin, flow.id, flow.key, "add")).status).toBe(
+    403,
+  );
+  expect((await store.management(origin, flow.id, flow.key)).status).toBe(403);
+  expect((await store.complete(origin, flow.id, flow.key)).status).toBe(403);
+  expect(
+    (await store.options(origin, flow.id, flow.key, "add", "0".repeat(64)))
+      .status,
+  ).toBe(403);
+  const state = await store.management(
+    origin,
+    flow.id,
+    flow.key,
+    managementKey,
+  );
+  expect(state.status).toBe(200);
+  expect((state.body as any).management_key).toBeUndefined();
+  const added = await store.options(
+    origin,
+    flow.id,
+    flow.key,
+    "add",
+    managementKey,
+  );
+  expect(added.status).toBe(200);
+  const response = await (
+    await authenticator()
+  ).registration((added.body as any).options.challenge);
+  expect((await store.finish(origin, flow.id, flow.key, response)).status).toBe(
+    403,
+  );
+  const completed = await store.finish(
+    origin,
+    flow.id,
+    flow.key,
+    response,
+    managementKey,
+  );
+  expect(completed.status).toBe(200);
+  expect((completed.body as any).management_key).toBeUndefined();
 });

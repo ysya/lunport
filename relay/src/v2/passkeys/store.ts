@@ -35,7 +35,7 @@ type Flow = Begin & {
   options: number;
   subject: string | null;
   kind: "register" | "login" | "manage" | "add" | null;
-  manager?: { subject: string; witness: string; at: number };
+  manager?: { subject: string; witness: string; at: number; key_hash: string };
   challenge: string | null;
   consumed: boolean;
   completed: boolean;
@@ -176,15 +176,19 @@ export class PasskeyStore extends DurableObject<Env> {
     id: string,
     key: string,
     kind: "register" | "login" | "manage" | "add",
+    managementKey = "",
     now = Date.now(),
   ): Promise<Result> {
     const cfg = this.open(origin),
-      flow = await this.flow(id, key, now);
+      flow = await this.flow(id, key, now),
+      managementHash = await this.managementHash(managementKey);
     if (
       !flow ||
       !["register", "login", "manage", "add"].includes(kind) ||
       flow.options >= 12 ||
-      (kind === "add" ? !this.manager(flow, now) : !!flow.manager) ||
+      (kind === "add"
+        ? !this.manager(flow, now, managementHash)
+        : !!flow.manager) ||
       (kind === "register" && flow.expected_locator)
     )
       return failed(403);
@@ -227,7 +231,10 @@ export class PasskeyStore extends DurableObject<Env> {
         !current ||
         current.expires <= Math.max(now, Date.now()) ||
         current.completed ||
-        current.options !== flow.options
+        current.options !== flow.options ||
+        (kind === "add"
+          ? !this.manager(current, Math.max(now, Date.now()), managementHash)
+          : !!current.manager)
       )
         return false;
       this.saveFlow({
@@ -247,15 +254,18 @@ export class PasskeyStore extends DurableObject<Env> {
     id: string,
     key: string,
     response: RegistrationResponseJSON | AuthenticationResponseJSON,
+    managementKey = "",
     now = Date.now(),
   ): Promise<Result> {
     const cfg = this.open(origin),
-      flow = await this.flow(id, key, now);
+      flow = await this.flow(id, key, now),
+      managementHash = await this.managementHash(managementKey);
     if (
       !flow ||
       !flow.challenge ||
       !flow.kind ||
       flow.consumed ||
+      (flow.kind === "add" && !this.manager(flow, now, managementHash)) ||
       JSON.stringify(response).length > 32768
     )
       return failed(403);
@@ -267,7 +277,9 @@ export class PasskeyStore extends DurableObject<Env> {
         current.completed ||
         current.expires <= now ||
         current.consumed ||
-        current.challenge !== flow.challenge
+        current.challenge !== flow.challenge ||
+        (flow.kind === "add" &&
+          !this.manager(current, Math.max(now, Date.now()), managementHash))
       )
         return false;
       this.saveFlow({ ...current, consumed: true });
@@ -289,7 +301,8 @@ export class PasskeyStore extends DurableObject<Env> {
       )
         return failed(403);
       if (flow.kind === "register" || flow.kind === "add") {
-        if (flow.kind === "add" && !this.manager(flow, now)) return failed(403);
+        if (flow.kind === "add" && !this.manager(flow, now, managementHash))
+          return failed(403);
         const verified = await verifyRegistrationResponse({
           response: response as RegistrationResponseJSON,
           expectedChallenge: flow.challenge,
@@ -373,6 +386,11 @@ export class PasskeyStore extends DurableObject<Env> {
     const codeId = random(16),
       codeSecret = random(),
       digest = await hash(new TextEncoder().encode(codeSecret));
+    const managerSecret = flow.kind === "manage" ? random() : managementKey;
+    const managerSecretHash =
+      flow.kind === "manage"
+        ? await this.managementHash(managerSecret)
+        : managementHash;
     const accepted = this.ctx.storage.transactionSync(() => {
       const current = this.readFlow(id);
       if (
@@ -405,7 +423,7 @@ export class PasskeyStore extends DurableObject<Env> {
             .one().n >= 16384 ||
           this.credentials(subject).length >= 8 ||
           (flow.kind === "add" &&
-            !this.manager(current, Math.max(now, Date.now())))
+            !this.manager(current, Math.max(now, Date.now()), managementHash))
         )
           return false;
         this.ctx.storage.sql.exec(
@@ -426,6 +444,7 @@ export class PasskeyStore extends DurableObject<Env> {
             subject,
             witness: credential!.id,
             at: now,
+            key_hash: managerSecretHash,
           },
         });
         return true;
@@ -445,8 +464,15 @@ export class PasskeyStore extends DurableObject<Env> {
       return true;
     });
     if (!accepted) return failed(409);
-    if (flow.kind === "manage" || flow.kind === "add")
-      return this.management(origin, id, key, now);
+    if (flow.kind === "manage" || flow.kind === "add") {
+      const result = await this.management(origin, id, key, managerSecret, now);
+      if (flow.kind === "manage" && result.status === 200)
+        return {
+          status: 200,
+          body: { ...result.body, management_key: managerSecret },
+        };
+      return result;
+    }
     const callback = new URL(flow.redirect_uri);
     callback.searchParams.set("code", `lpkc1.${codeId}.${codeSecret}`);
     callback.searchParams.set("state", flow.state);
@@ -460,9 +486,13 @@ export class PasskeyStore extends DurableObject<Env> {
       )
       .toArray();
   }
-  private manager(flow: Flow, now: number): boolean {
+  private async managementHash(key: string): Promise<string> {
+    return hex(key, 64) ? hash(new TextEncoder().encode(key)) : "";
+  }
+  private manager(flow: Flow, now: number, digest: string): boolean {
     return (
       !!flow.manager &&
+      flow.manager.key_hash === digest &&
       flow.expires > now &&
       flow.manager.at <= now &&
       now - flow.manager.at < FLOW_MS &&
@@ -475,11 +505,13 @@ export class PasskeyStore extends DurableObject<Env> {
     origin: string,
     id: string,
     key: string,
+    managementKey = "",
     now = Date.now(),
   ): Promise<Result> {
     this.open(origin);
-    const flow = await this.flow(id, key, now);
-    if (!flow || !this.manager(flow, now)) return failed(403);
+    const flow = await this.flow(id, key, now),
+      managementHash = await this.managementHash(managementKey);
+    if (!flow || !this.manager(flow, now, managementHash)) return failed(403);
     return {
       status: 200,
       body: {
@@ -498,17 +530,24 @@ export class PasskeyStore extends DurableObject<Env> {
     id: string,
     key: string,
     credential: string,
+    managementKey = "",
     now = Date.now(),
   ): Promise<Result> {
     this.open(origin);
-    const flow = await this.flow(id, key, now);
-    if (!flow || !decode(credential, 1024)) return failed(403);
+    const flow = await this.flow(id, key, now),
+      managementHash = await this.managementHash(managementKey);
+    if (
+      !flow ||
+      !this.manager(flow, now, managementHash) ||
+      !decode(credential, 1024)
+    )
+      return failed(403);
     const removed = this.ctx.storage.transactionSync(() => {
       const current = this.readFlow(id);
       if (
         !current ||
         current.completed ||
-        !this.manager(current, Math.max(now, Date.now())) ||
+        !this.manager(current, Math.max(now, Date.now()), managementHash) ||
         credential === current.manager!.witness
       )
         return false;
@@ -534,17 +573,21 @@ export class PasskeyStore extends DurableObject<Env> {
       );
       return true;
     });
-    return removed ? this.management(origin, id, key, now) : failed(409);
+    return removed
+      ? this.management(origin, id, key, managementKey, now)
+      : failed(409);
   }
   async complete(
     origin: string,
     id: string,
     key: string,
+    managementKey = "",
     now = Date.now(),
   ): Promise<Result> {
     this.open(origin);
-    const flow = await this.flow(id, key, now);
-    if (!flow || !this.manager(flow, now)) return failed(403);
+    const flow = await this.flow(id, key, now),
+      managementHash = await this.managementHash(managementKey);
+    if (!flow || !this.manager(flow, now, managementHash)) return failed(403);
     const codeId = random(16),
       codeSecret = random(),
       digest = await hash(new TextEncoder().encode(codeSecret));
@@ -553,7 +596,7 @@ export class PasskeyStore extends DurableObject<Env> {
       if (
         !current ||
         current.completed ||
-        !this.manager(current, Math.max(now, Date.now()))
+        !this.manager(current, Math.max(now, Date.now()), managementHash)
       )
         return false;
       this.saveFlow({ ...current, completed: true });

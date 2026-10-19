@@ -31,10 +31,10 @@ export async function checkPasskeyBrowser({
   const callbacks = [];
   await new Promise((resolve) => listener.listen(0, "127.0.0.1", resolve));
   const redirect = `http://127.0.0.1:${listener.address().port}/passkey/callback`;
-  const call = async (path, body) =>
+  const call = async (path, body, extraHeaders = {}) =>
     fetch(`http://${address}/v2/auth/passkey/${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...extraHeaders },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     });
@@ -106,7 +106,14 @@ export async function checkPasskeyBrowser({
       );
       assert.equal(await page.evaluate(() => isSecureContext), true);
       assert.equal(new URL(page.url()).hash, "");
-      return { verifier, state, index: callbacks.length };
+      const authUrl = new URL(body.url);
+      return {
+        verifier,
+        state,
+        index: callbacks.length,
+        flow: authUrl.searchParams.get("flow"),
+        key: new URLSearchParams(authUrl.hash.slice(1)).get("key"),
+      };
     };
     const exchange = async (flow) => {
       await page.waitForURL(redirect + "?**", { timeout: 20_000 });
@@ -140,6 +147,21 @@ export async function checkPasskeyBrowser({
       .waitFor();
     await page.waitForFunction(
       () => !document.querySelector('[data-kind="add"]').disabled,
+    );
+    // A remote link initiator can forge Origin but cannot see the browser's verification response.
+    const linkHeaders = { origin, "x-lunport-flow": manage.key };
+    assert.equal(
+      (await call("options", { flow: manage.flow, kind: "add" }, linkHeaders))
+        .status,
+      403,
+    );
+    assert.equal(
+      (await call("management", { flow: manage.flow }, linkHeaders)).status,
+      403,
+    );
+    assert.equal(
+      (await call("complete", { flow: manage.flow }, linkHeaders)).status,
+      403,
     );
     await cdp.send("WebAuthn.removeVirtualAuthenticator", {
       authenticatorId: primary,

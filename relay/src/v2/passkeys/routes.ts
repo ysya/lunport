@@ -116,6 +116,7 @@ export async function route(
   }
   if (browser) {
     const key = request.headers.get("x-lunport-flow") ?? "";
+    const managementKey = request.headers.get("x-lunport-management") ?? "";
     if (!hex(parsed.flow, 32) || !hex(key, 64)) return reply({ status: 403 });
     if (action === "context")
       return exactObject(parsed, ["flow"])
@@ -130,6 +131,7 @@ export async function route(
               parsed.flow as string,
               key,
               parsed.kind as "login" | "register" | "manage" | "add",
+              managementKey,
             ),
           )
         : reply({ status: 400 });
@@ -137,15 +139,23 @@ export async function route(
       return exactObject(parsed, ["flow"])
         ? reply(
             action === "complete"
-              ? await store.complete(origin, parsed.flow, key)
-              : await store.management(origin, parsed.flow, key),
+              ? await store.complete(origin, parsed.flow, key, managementKey)
+              : await store.management(origin, parsed.flow, key, managementKey),
           )
         : reply({ status: 400 });
     if (action === "remove")
       return exactObject(parsed, ["flow", "credential"]) &&
         typeof parsed.credential === "string" &&
         parsed.credential.length <= 2048
-        ? reply(await store.remove(origin, parsed.flow, key, parsed.credential))
+        ? reply(
+            await store.remove(
+              origin,
+              parsed.flow,
+              key,
+              parsed.credential,
+              managementKey,
+            ),
+          )
         : reply({ status: 400 });
     return exactObject(parsed, ["flow", "response"]) &&
       parsed.response &&
@@ -156,6 +166,7 @@ export async function route(
             parsed.flow as string,
             key,
             parsed.response as any,
+            managementKey,
           ),
         )
       : reply({ status: 400 });

@@ -2,6 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "sshelter-relay",
   "main": "src/index.ts",
+  "build": { "command": "node scripts/build-passkey-page.mjs" },
   // ≥ 2026-02-24:deleteAll() 連 alarm 一起刪,destroy/alarm 不用再各自 deleteAlarm()。
   "compatibility_date": "2026-08-20",
   "durable_objects": {

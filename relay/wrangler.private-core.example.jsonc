@@ -10,6 +10,7 @@
   },
   "name": "sshelter-relay",
   "main": "src/index.ts",
+  "build": { "command": "node scripts/build-passkey-page.mjs" },
   "durable_objects": {
     "bindings": [
       {
