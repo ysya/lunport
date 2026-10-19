@@ -260,4 +260,13 @@ pub(super) fn advance(
     }
 }
 #[cfg(all(test, unix))]
+pub(super) fn verified_for_test(env: &SyncEnv, keys: &VaultKeys) -> Verified {
+    tests::verified(env, keys)
+}
+#[cfg(all(test, unix))]
+pub(super) fn verified_fixture_for_test() -> (crate::sync::testkit::TestDevice, VaultKeys, Verified)
+{
+    tests::verified_fixture()
+}
+#[cfg(all(test, unix))]
 mod tests;

@@ -25,10 +25,13 @@ mod source_plan;
 mod migration_dispatch;
 mod migration_request;
 mod migration_verify;
+mod initial_publication;
 mod initial_projection;
 pub(super) use initial_projection::Candidate as InitialProjection;
 #[cfg(test)]
 pub(super) use initial_projection::fixture_for_stage as initial_projection_for_test;
+#[cfg(test)]
+pub(super) use initial_projection::fresh_fixture_for_stage as initial_fresh_projection_for_test;
 #[cfg(test)]
 pub(super) use initial_projection::empty_fixture_for_stage as initial_empty_projection_for_test;
 mod migration_library;

@@ -314,3 +314,22 @@ fn advertised_retirement_without_matching_readback_cannot_produce_verified_publi
             == before
     );
 }
+
+pub(super) fn verified(env: &SyncEnv, keys: &VaultKeys) -> Verified {
+    for _ in 0..4 {
+        let step=with_transport(env,keys,&BTreeMap::new(),|_,loaded,action|match action{
+            Action::Status=>Ok(Reply::for_test(200,&progress(loaded,"retired",loaded.plan.rows.len()))),
+            Action::Readback(_)=>Ok(Reply::for_test(200,&json!({"records":loaded.plan.rows,"sequence":loaded.plan.rows.len().to_string(),"history_hash":loaded.plan.manifest.body.target_history_hash,"membership_head":loaded.plan.manifest.body.membership_head,"epoch":1,"phase":"ready"}))),
+            Action::Send(_)=>panic!("exact retired fixture needs no write"),
+        }).unwrap();
+        if let Step::Verified(verified) = step {
+            return verified;
+        }
+    }
+    panic!("fixture did not verify readback")
+}
+pub(super) fn verified_fixture() -> (TestDevice, VaultKeys, Verified) {
+    let (d, keys) = fixture(true, false);
+    let verified = verified(&d.env(), &keys);
+    (d, keys, verified)
+}

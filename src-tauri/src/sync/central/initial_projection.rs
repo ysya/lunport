@@ -330,3 +330,9 @@ pub(in crate::sync) fn fixture_for_stage() -> (Candidate, VaultKeys) {
 pub(in crate::sync) fn empty_fixture_for_stage() -> (Candidate, VaultKeys) {
     tests::empty()
 }
+
+#[cfg(test)]
+pub(in crate::sync) fn fresh_fixture_for_stage() -> Candidate {
+    let (state,plan,keys,committed)=tests::fixture();
+    Candidate::prepare(&state,&plan,committed,&keys,100).unwrap()
+}
