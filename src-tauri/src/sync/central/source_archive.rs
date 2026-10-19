@@ -24,6 +24,8 @@ const MAX_OUTPUTS: usize = 256;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
 mod pending;
 pub(super) use pending::resume_next;
+mod initial;
+pub(super) use initial::initialize_checked as initialize_source;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -327,6 +327,33 @@ impl Package {
             .require_unchanged(env, self.state.legacy_v1_backup.as_deref())?;
         source_archive::create(env, life, owner, generation, &plain)
     }
+    /// Foreground migration start/re-entry. The caller separately fences current session/Core state.
+    pub fn initialize_source(
+        &self,
+        env: &SyncEnv,
+        life: &std::sync::MutexGuard<'_, ()>,
+        owner: &Workspace,
+        ordinal: u64,
+    ) -> Result<super::source_cursor::Restored, AppError> {
+        if self.state.local.central.as_ref() != Some(owner) {
+            return Err(invalid());
+        }
+        let plain = self.encode_local()?;
+        let restored =
+            source_archive::initialize_source(env, life, owner, ordinal, &plain, |outputs| {
+                self.files.require_unchanged_after_archive(
+                    env,
+                    self.state.legacy_v1_backup.as_deref(),
+                    outputs,
+                )
+            })?;
+        self.files.require_unchanged_after_archive(
+            env,
+            self.state.legacy_v1_backup.as_deref(),
+            &restored.outputs,
+        )?;
+        Ok(restored)
+    }
     /// Momentary source comparison, not a permit that survives later edits or HTTP.
     pub fn revalidate_archive(&self, env: &SyncEnv, archived: &Archived) -> Result<(), AppError> {
         let owner = self.state.local.central.as_ref().ok_or_else(invalid)?;
