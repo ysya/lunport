@@ -360,3 +360,134 @@ fn exact_additive_vault_replacement_is_proved_without_masking_a_new_source_or_ac
     );
     assert_eq!(fs::read(vault).unwrap(), proposed);
 }
+
+#[test]
+fn cold_reentry_restores_the_same_protected_stage_and_shadow_after_an_exact_vault_replacement() {
+    use std::fs;
+    let (d, keys, verified) = migration_dispatch::verified_material_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let prepared = prepare(&env, verified, &keys).unwrap();
+    let operation = prepared.operation().to_string();
+    let observed = prepared.reservation.observed;
+    let shadow = serde_json::to_vec(prepared.projection().shadow()).unwrap();
+    let source = record_runtime::snapshot(&env).unwrap().0;
+    let staged =
+        crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+            .unwrap();
+    let mapping = staged.mapping();
+    let directory = env
+        .state_path
+        .parent()
+        .unwrap()
+        .join("imports")
+        .join(&operation);
+    let vault = crate::vault::store::vault_path(&env.state_path);
+    let proposed = fs::read(directory.join("vault.json")).unwrap();
+    fs::write(&vault, &proposed).unwrap();
+    let tree = || {
+        fs::read_dir(&directory)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (e.file_name(), fs::read(e.path()).unwrap())
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let exact = tree();
+    drop(prepared);
+    d.runtime.core.lock().unwrap().generation = 0;
+    struct ReadOnly<'a>(&'a MemKeychain);
+    impl Keychain for ReadOnly<'_> {
+        fn get(&self, _: &str) -> Result<Option<String>, AppError> {
+            panic!("no interactive read during cold publication recovery")
+        }
+        fn get_noninteractive(&self, k: &str) -> Result<Option<String>, AppError> {
+            self.0.get_noninteractive(k)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), AppError> {
+            panic!("no credential write during recovery")
+        }
+        fn set_noninteractive(&self, _: &str, _: &str) -> Result<(), AppError> {
+            panic!("no protected write during recovery")
+        }
+        fn delete(&self, _: &str) -> Result<(), AppError> {
+            panic!("no credential deletion")
+        }
+    }
+    let guard = ReadOnly(&d.keychain);
+    let mut safe = d.env();
+    safe.keychain = &guard;
+    let restored = resume(&safe, &keys, &std::collections::BTreeMap::new()).unwrap();
+    assert_eq!(restored.operation(), operation);
+    assert_eq!(restored.reservation.observed, observed);
+    assert_eq!(
+        serde_json::to_vec(restored.projection().shadow()).unwrap(),
+        shadow
+    );
+    assert_eq!(tree(), exact);
+    assert_eq!(fs::read(vault).unwrap(), proposed);
+    assert_eq!(record_runtime::snapshot(&env).unwrap().0, source);
+    assert_eq!(
+        crate::sync::record_import::central_stage::resume_initial(
+            &env,
+            &operation,
+            restored.projection()
+        )
+        .unwrap()
+        .mapping(),
+        mapping
+    );
+}
+#[test]
+fn cold_reservation_only_reentry_does_not_create_a_stage_and_missing_reservation_is_not_recreated()
+{
+    let (d, keys, verified) = migration_dispatch::verified_fixture_for_test();
+    let env = d.env();
+    make_private(&env);
+    let prepared = prepare(&env, verified, &keys).unwrap();
+    let operation = prepared.operation().to_string();
+    let role = role(&prepared.loaded).unwrap();
+    drop(prepared);
+    d.runtime.core.lock().unwrap().generation = 0;
+    let restored = resume(&env, &keys, &std::collections::BTreeMap::new()).unwrap();
+    assert_eq!(restored.operation(), operation);
+    assert!(!env
+        .state_path
+        .parent()
+        .unwrap()
+        .join("imports")
+        .join(&operation)
+        .exists());
+    d.keychain.delete(&role).unwrap();
+    assert!(resume(&env, &keys, &std::collections::BTreeMap::new()).is_err());
+    assert!(d.keychain.entry(&role).is_none());
+}
+#[test]
+fn an_unknown_stage_file_or_new_source_blocks_cold_recovery_without_removing_evidence() {
+    use std::fs;
+    for unknown in [false, true] {
+        let (d, keys, verified) = migration_dispatch::verified_fixture_for_test();
+        let env = d.env();
+        make_private(&env);
+        let prepared = prepare(&env, verified, &keys).unwrap();
+        let operation = prepared.operation().to_string();
+        crate::sync::record_import::central_stage::prepare_initial_reserved(&env, &prepared, &keys)
+            .unwrap();
+        drop(prepared);
+        d.runtime.core.lock().unwrap().generation = 0;
+        let path = if unknown {
+            env.state_path
+                .parent()
+                .unwrap()
+                .join("imports")
+                .join(&operation)
+                .join("unknown-B")
+        } else {
+            env.state_path.parent().unwrap().join("sync-state.new-B")
+        };
+        fs::write(&path, b"new B").unwrap();
+        assert!(resume(&env, &keys, &std::collections::BTreeMap::new()).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"new B");
+    }
+}

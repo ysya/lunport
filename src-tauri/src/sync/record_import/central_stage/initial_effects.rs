@@ -279,6 +279,22 @@ pub(in crate::sync) fn read(
     prepared: &InitialPreparation,
     keys: &VaultKeys,
 ) -> Result<InitialEffects, AppError> {
+    let life = env.runtime.lifecycle.lock().unwrap();
+    let _vault = env
+        .runtime
+        .vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    read_locked(env, prepared, keys, &life)
+}
+/// Caller owns lifecycle -> vault -> publication. This function performs no mutation or HTTP.
+pub(in crate::sync) fn read_locked(
+    env: &SyncEnv,
+    prepared: &InitialPreparation,
+    keys: &VaultKeys,
+    life: &std::sync::MutexGuard<'_, ()>,
+) -> Result<InitialEffects, AppError> {
     let background = central::credentials::Background(env.keychain);
     let safe = SyncEnv {
         doc: env.doc,
@@ -294,14 +310,7 @@ pub(in crate::sync) fn read(
         clock: env.clock,
         platform: env.platform,
     };
-    let life = safe.runtime.lifecycle.lock().unwrap();
-    let _vault = safe
-        .runtime
-        .vault
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _publication = safe.runtime.format_publication.lock().unwrap();
-    prepared.check_identity_locked(&safe, keys, &life)?;
+    prepared.check_identity_locked(&safe, keys, life)?;
     drop(saved_source(&safe, Input::Initial(prepared.projection()))?);
     let effects = from_stage(
         &safe,
@@ -310,8 +319,9 @@ pub(in crate::sync) fn read(
         prepared.original_state(&safe)?,
         prepared.original_vault(&safe)?,
     )?;
-    prepared.check_effects_locked(&safe, keys, &life, &effects)?;
+    prepared.check_effects_locked(&safe, keys, life, &effects)?;
     Ok(effects)
 }
+
 #[cfg(all(test, unix))]
 mod tests;

@@ -240,5 +240,69 @@ pub(super) fn prepare(
     prepared.check_locked(env, keys, &life)?;
     Ok(prepared)
 }
+/// Restore only a previously reserved completed-readback transaction. Never create a new
+/// reservation or permit ordinary migration transport to ignore owned stage outputs.
+pub(super) fn resume(
+    env: &SyncEnv,
+    keys: &VaultKeys,
+    references: &std::collections::BTreeMap<String, super::payload::KeyStorage>,
+) -> Result<Prepared, AppError> {
+    controller::require_enabled()?;
+    let life = env.runtime.lifecycle.lock().unwrap();
+    let _vault = env
+        .runtime
+        .vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _publication = env.runtime.format_publication.lock().unwrap();
+    let (state, generation) = crate::sync::record_runtime::snapshot(env)?;
+    let session = controller::context(env)?;
+    source_complete::check(env, &state, generation, &session, keys)?;
+    let owner = state.local.central.as_ref().ok_or_else(invalid)?;
+    let signer = &session.identity.as_ref().ok_or_else(invalid)?.keys;
+    let (loaded, committed) =
+        super::migration_journal::restore_initial(env, &life, owner, keys, signer, references)?;
+    if loaded.package.state != state {
+        return Err(crate::sync::runtime::superseded());
+    }
+    let approval = super::migration_journal::review::accepted(env, &loaded)?;
+    let reservation = read(env, &loaded)?.ok_or_else(invalid)?;
+    let initial = Candidate::prepare(
+        &loaded.package.state,
+        &loaded.plan,
+        committed,
+        keys,
+        reservation.observed,
+    )?;
+    let prepared = Prepared {
+        initial,
+        loaded,
+        approval,
+        generation,
+        session,
+        reservation,
+    };
+    prepared.check_identity_locked(env, keys, &life)?;
+    let directory = env
+        .state_path
+        .parent()
+        .ok_or_else(invalid)?
+        .join("imports")
+        .join(prepared.operation());
+    match std::fs::symlink_metadata(directory) {
+        Ok(_) => {
+            drop(
+                crate::sync::record_import::central_stage::initial_effects_locked(
+                    env, &prepared, keys, &life,
+                )?,
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            prepared.check_locked(env, keys, &life)?
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(prepared)
+}
 #[cfg(all(test, unix))]
 mod tests;

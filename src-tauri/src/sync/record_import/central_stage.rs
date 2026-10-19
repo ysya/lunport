@@ -72,7 +72,7 @@ mod initial_tests;
 /// Native capability to an immutable staged image; no Serialize/Debug/Clone or active publication.
 mod input;
 mod initial_effects;
-pub(in crate::sync) use initial_effects::{InitialEffects, read as initial_effects};
+pub(in crate::sync) use initial_effects::{InitialEffects, read as initial_effects, read_locked as initial_effects_locked};
 use input::Input;
 pub(crate) use input::{prepare as prepare_initial, prepare_reserved as prepare_initial_reserved, resume as resume_initial};
 mod publication;

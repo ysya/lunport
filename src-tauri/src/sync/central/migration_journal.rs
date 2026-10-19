@@ -121,6 +121,21 @@ pub(super) fn ensure(
     source_complete::check(env, &state, generation, &session, keys)?;
     Ok(loaded)
 }
+/// Inert reconstruction for the dedicated initial publisher. The caller must subsequently prove
+/// every original file with the exact typed owned-stage effects; this grants no transport authority.
+pub(super) fn restore_initial(
+    env: &SyncEnv,
+    life: &MutexGuard<'_, ()>,
+    owner: &Workspace,
+    keys: &VaultKeys,
+    signer: &DeviceKeys,
+    references: &BTreeMap<String, KeyStorage>,
+) -> Result<(Loaded, super::migration_verify::Committed), AppError> {
+    let loaded = Journal::load(env, life, owner, keys, signer)?.ok_or_else(invalid)?;
+    loaded.require_bound(env, owner, keys, signer, references)?;
+    let committed = loaded.verifier(keys)?.finish(&loaded.plan, keys)?;
+    Ok((loaded, committed))
+}
 impl Journal {
     /// Creates metadata only. The caller still owes full source normalization and explicit consent.
     pub fn planned(
@@ -377,7 +392,9 @@ impl Journal {
     }
 }
 impl Loaded {
-    pub fn progress(&self) -> Option<&Known> { self.journal.progress.as_ref() }
+    pub fn progress(&self) -> Option<&Known> {
+        self.journal.progress.as_ref()
+    }
     fn recover_pending(
         &self,
         env: &SyncEnv,
