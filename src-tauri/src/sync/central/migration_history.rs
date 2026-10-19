@@ -37,6 +37,20 @@ impl Plan {
     pub fn before(&self) -> &Workspace {
         &self.before
     }
+    pub fn next_batch(&self, after: u64) -> Result<Option<&[Version]>, AppError> {
+        let start = usize::try_from(after).map_err(|_| invalid())?;
+        if start > self.rows.len() { return Err(invalid()); }
+        if start == self.rows.len() { return Ok(None); }
+        let mut end = start;
+        let mut bytes = 0;
+        for row in self.rows.iter().skip(start).take(32) {
+            let size = serde_json::to_vec(&row.envelope).map_err(|_| invalid())?.len();
+            if size > MAX_PAGE_BYTES { return Err(invalid()); }
+            if end > start && bytes + size > MAX_PAGE_BYTES { break; }
+            bytes += size; end += 1;
+        }
+        Ok(Some(&self.rows[start..end]))
+    }
     pub fn pages(&self) -> impl Iterator<Item = &[Version]> {
         self.pages.iter().map(|range| &self.rows[range.clone()])
     }
@@ -252,7 +266,7 @@ pub(super) mod tests {
         before.validate().unwrap();
         (before, keys, signer)
     }
-    pub(super) fn context() -> Context {
+    pub(in crate::sync::central) fn context() -> Context {
         Context {
             operation: "7".repeat(32),
             inventory_digest: "8".repeat(64),
@@ -275,7 +289,7 @@ pub(super) mod tests {
             }),
         )
     }
-    pub(super) fn library() -> Vec<(Identity, Data)> {
+    pub(in crate::sync::central) fn library() -> Vec<(Identity, Data)> {
         let active = crate::sync::slot_rules::test_keys::plain();
         let inactive = crate::sync::slot_rules::test_keys::encrypted();
         vec![
