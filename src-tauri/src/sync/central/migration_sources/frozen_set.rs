@@ -120,6 +120,9 @@ impl FrozenSet {
     ) -> Result<super::reconcile::Reconciliation, AppError> {
         super::reconcile::Reconciliation::from_complete(self.inventory(sources, state)?, state)
     }
+    pub(in crate::sync::central) fn initial_digest(&self)->Result<&str,AppError>{
+        Ok(&self.progress.proof.first().ok_or_else(invalid)?.intent.body.preview_digest)
+    }
     pub fn context(
         &self,
         operation: &str,

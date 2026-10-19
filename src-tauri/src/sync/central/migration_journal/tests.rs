@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 use crate::sync::{
     central::{
         migration::legacy_checkpoint,
@@ -379,4 +380,134 @@ fn a_committed_cursor_write_that_reports_failure_reuses_the_same_small_journal_a
     assert_eq!(std::fs::read_dir(root).unwrap().count(), count + 1);
     assert_eq!(protected.writes.load(SeqCst), 1);
     assert!(retry.plan.rows == loaded.plan.rows);
+}
+
+fn captured_outer(device: &TestDevice, template: &Package, keys: &VaultKeys) -> Package {
+    use super::super::{
+        inventory_keys::Capture, migration_files::Files, migration_materials::Materials,
+        migration_sources::Sources,
+    };
+    let env = device.env();
+    let state: crate::sync::records_v3::SyncStateV3 =
+        serde_json::from_slice(&fs::read(&env.state_path).unwrap()).unwrap();
+    let files = Files::capture(&env, None).unwrap();
+    let observer = Capture::new(&device.keychain);
+    Materials::from_files(&state, keys, &files, &observer, &BTreeMap::new()).unwrap();
+    drop(source_archive::captured::read_all(&files.bytes, &observer).unwrap());
+    let sources = Sources::decode_local(&template.sources.encode_local().unwrap(), &state).unwrap();
+    let decryptors = observer.finish().unwrap();
+    let roles: serde_json::Value =
+        serde_json::from_slice(&decryptors.encode_local().unwrap()).unwrap();
+    let package = Package::assemble(
+        &state,
+        env.state_path.file_name().unwrap().to_str().unwrap(),
+        files,
+        sources,
+        decryptors,
+    )
+    .unwrap();
+    for key in roles["keys"].as_array().unwrap() {
+        let role = key["role"].as_str().unwrap();
+        assert!(!role.contains(":device:"));
+        device.keychain.delete(role).unwrap();
+    }
+    package
+}
+#[test]
+fn captured_old_direct_frozen_plan_and_planned_journal_verify_without_original_identity_or_files() {
+    let (device, owner, keys, signer, loaded) = fixture();
+    let env = device.env();
+    let advanced = {
+        let life = env.runtime.lifecycle.lock().unwrap();
+        loaded
+            .with_progress(progress(&loaded.plan, 2), &owner)
+            .unwrap()
+            .unwrap()
+            .store(&env, &life, &owner, &keys, &signer, &loaded.cursor, 0)
+            .unwrap()
+    };
+    let package = captured_outer(&device, &advanced.package, &keys);
+    let encoded = package.encode_local().unwrap();
+    fs::remove_dir_all(
+        env.state_path
+            .parent()
+            .unwrap()
+            .join("central-source-archives"),
+    )
+    .unwrap();
+    let restored = Package::decode_local(&encoded).unwrap();
+    assert!(restored.materials(&keys, &BTreeMap::new()).is_ok());
+    assert!(restored.structured_history(&keys, &BTreeMap::new()).is_ok());
+    assert!(restored
+        .materials(&VaultKeys::generate().unwrap(), &BTreeMap::new())
+        .is_err());
+    assert_eq!(
+        restored.encode_local().unwrap().as_slice(),
+        encoded.as_slice()
+    );
+    assert!(
+        !restored
+            .state
+            .local
+            .central
+            .as_ref()
+            .unwrap()
+            .control
+            .cutover
+    );
+}
+#[test]
+fn captured_plan_cannot_hide_additional_signed_payloads_or_roll_back_journal_progress() {
+    for extra in [0, 1] {
+        let (device, owner, keys, signer, loaded) = fixture_with(extra);
+        let env = device.env();
+        if extra == 0 {
+            let life = env.runtime.lifecycle.lock().unwrap();
+            let advanced = loaded
+                .with_progress(progress(&loaded.plan, 2), &owner)
+                .unwrap()
+                .unwrap()
+                .store(&env, &life, &owner, &keys, &signer, &loaded.cursor, 0)
+                .unwrap();
+            let mut lower = Journal::decode(&advanced.journal.encode().unwrap()).unwrap();
+            lower.ancestors.push(advanced.cursor.receipt().clone());
+            lower.revision += 1;
+            lower.progress = Some(progress(&advanced.plan, 1));
+            source_archive::next(
+                &env,
+                &life,
+                &owner,
+                0,
+                advanced.cursor.receipt(),
+                &lower.encode().unwrap(),
+            )
+            .unwrap();
+        }
+        let package = captured_outer(&device, &loaded.package, &keys);
+        let original = package.encode_local().unwrap();
+        assert!(package.materials(&keys, &BTreeMap::new()).is_err());
+        assert!(package.structured_history(&keys, &BTreeMap::new()).is_err());
+        assert_eq!(
+            package.encode_local().unwrap().as_slice(),
+            original.as_slice()
+        );
+        package.files.require_unchanged(&env, None).unwrap();
+    }
+}
+#[test]
+fn captured_modern_source_bound_plan_preserves_all_actual_capture_ancestors() {
+    let (device, keys) = super::super::capture_dispatch::ready_for_test(false);
+    let env = device.env();
+    super::super::source_complete::ensure(&env, &keys)
+        .unwrap()
+        .unwrap();
+    let planned = super::super::source_plan::ensure(&env, &keys, &BTreeMap::new()).unwrap();
+    let package = captured_outer(&device, &planned.package, &keys);
+    let original = package.encode_local().unwrap();
+    assert!(package.materials(&keys, &BTreeMap::new()).is_ok());
+    assert!(package.structured_history(&keys, &BTreeMap::new()).is_ok());
+    assert_eq!(
+        package.encode_local().unwrap().as_slice(),
+        original.as_slice()
+    );
 }

@@ -18,6 +18,7 @@ const ZERO: &str = "000000000000000000000000000000000000000000000000000000000000
 const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024 - 256 * 1024;
 const MAX_PAGE_BYTES: usize = 1024 * 1024;
 mod archive;
+pub(in crate::sync::central) use archive::CapturedPlan;
 
 pub(super) struct Context {
     pub operation: String,

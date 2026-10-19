@@ -3,18 +3,13 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 const MAX_PLAN_BYTES: usize = 36 * 1024 * 1024;
-pub(super) fn target(
-    before: &Workspace,
-    keys: &VaultKeys,
-    signer: &DeviceKeys,
-) -> Result<super::super::trust::VerifiedChain, AppError> {
+fn target_context(before: &Workspace) -> Result<super::super::trust::VerifiedChain, AppError> {
     before.validate()?;
     before.require_key_recipients()?;
     let replica = before.replica.as_ref().ok_or_else(invalid)?;
     let chain = before.control.verified_chain()?;
     if before.control.cutover
         || before.control.phase != Phase::Enrolled
-        || signer.public() != before.control.device.keys
         || before.bootstrap.is_some()
         || before.replacement.is_some()
         || !before.replacement_archives.is_empty()
@@ -33,6 +28,17 @@ pub(super) fn target(
         return Err(invalid());
     }
     replica.verify_write_authority(&chain, before.control.auth_epoch, 1, &before.epochs)?;
+    Ok(chain)
+}
+pub(super) fn target(
+    before: &Workspace,
+    keys: &VaultKeys,
+    signer: &DeviceKeys,
+) -> Result<super::super::trust::VerifiedChain, AppError> {
+    let chain = target_context(before)?;
+    if signer.public() != before.control.device.keys {
+        return Err(invalid());
+    }
     let own = before
         .own_wraps
         .iter()
@@ -117,6 +123,38 @@ impl Plan {
             .map(|bound| bound.source_cursor)
             .map_err(|_| invalid())
     }
+    /// Bounded metadata only. Full strict plan decoding remains a separate admission gate.
+    pub(in crate::sync::central) fn captured_binding(
+        bytes: &[u8],
+    ) -> Result<
+        (
+            Workspace,
+            Option<super::super::source_cursor::Cursor>,
+            String,
+            String,
+        ),
+        AppError,
+    > {
+        if bytes.len() > MAX_PLAN_BYTES {
+            return Err(invalid());
+        }
+        #[derive(Deserialize)]
+        struct Binding {
+            before: Workspace,
+            #[serde(default)]
+            source_cursor: Option<super::super::source_cursor::Cursor>,
+            manifest: SignedMigration,
+        }
+        let binding: Binding = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+        binding.before.validate()?;
+        binding.manifest.body.canonical()?;
+        Ok((
+            binding.before,
+            binding.source_cursor,
+            binding.manifest.body.inventory_digest,
+            binding.manifest.body.migration_id,
+        ))
+    }
     pub fn matches_history(
         &self,
         keys: &VaultKeys,
@@ -151,6 +189,27 @@ impl Plan {
         signer: &DeviceKeys,
         expected: &Context,
     ) -> Result<Self, AppError> {
+        Self::decode_checked(bytes, before, keys, Some(signer), expected)
+    }
+    /// Historical payload/signature verification only. This never restores a device key,
+    /// returns an upload plan, or grants membership/key-wrap activation authority.
+    pub(in crate::sync::central) fn read_captured(
+        bytes: &[u8],
+        before: &Workspace,
+        keys: &VaultKeys,
+        expected: &Context,
+    ) -> Result<CapturedPlan, AppError> {
+        Ok(CapturedPlan(Self::decode_checked(
+            bytes, before, keys, None, expected,
+        )?))
+    }
+    fn decode_checked(
+        bytes: &[u8],
+        before: &Workspace,
+        keys: &VaultKeys,
+        signer: Option<&DeviceKeys>,
+        expected: &Context,
+    ) -> Result<Self, AppError> {
         if bytes.len() > MAX_PLAN_BYTES {
             return Err(invalid());
         }
@@ -174,7 +233,10 @@ impl Plan {
                 return Err(invalid());
             }
         }
-        let chain = target(before, keys, signer)?;
+        let chain = match signer {
+            Some(signer) => target(before, keys, signer)?,
+            None => target_context(before)?,
+        };
         let member = chain.current();
         let replica = before.replica.as_ref().ok_or_else(invalid)?;
         stored.manifest.verify(
@@ -210,7 +272,7 @@ impl Plan {
                 return Err(invalid());
             }
             wrap.verify_author(&before.control.device.keys.signing)?;
-            if h.recipient == before.control.device.id {
+            if let Some(signer) = signer.filter(|_| h.recipient == before.control.device.id) {
                 wrap.open(signer, h, &before.control.device.keys.signing)?
                     .verify_same(keys)?;
             }
@@ -264,6 +326,53 @@ impl Plan {
             wraps: stored.wraps,
             pages,
         })
+    }
+}
+
+/// All plaintext payloads and signatures are verified. Recipient wraps remain inert historical
+/// ciphertext; without the recipient identity, their enclosed key pair cannot be opened here.
+pub(in crate::sync::central) struct CapturedPlan(Plan);
+impl CapturedPlan {
+    pub(in crate::sync::central) fn matches_history(
+        &self,
+        keys: &VaultKeys,
+        history: &[(Identity, Data)],
+    ) -> Result<(), AppError> {
+        self.0.matches_history(keys, history)
+    }
+    pub(in crate::sync::central) fn progress_after(
+        &self,
+        current: Option<&super::super::migration_progress::Known>,
+        prefix: Option<&super::super::migration_verify::Prefix>,
+        previous: Option<&super::super::migration_progress::Known>,
+        previous_prefix: Option<&super::super::migration_verify::Prefix>,
+    ) -> Result<(), AppError> {
+        self.progress(current, prefix)?;
+        if let Some(old) = previous {
+            current.ok_or_else(invalid)?.require_after(&self.0, old)?;
+        }
+        if let Some(old) = previous_prefix {
+            prefix.ok_or_else(invalid)?.require_after(&self.0, old)?;
+        }
+        Ok(())
+    }
+    pub(in crate::sync::central) fn progress(
+        &self,
+        progress: Option<&super::super::migration_progress::Known>,
+        prefix: Option<&super::super::migration_verify::Prefix>,
+    ) -> Result<(), AppError> {
+        if let Some(progress) = progress {
+            progress.validate(&self.0)?;
+        }
+        if let Some(prefix) = prefix {
+            if progress
+                .is_none_or(|p| p.phase() != super::super::migration_progress::Phase::Retired)
+            {
+                return Err(invalid());
+            }
+            prefix.validate(&self.0)?;
+        }
+        Ok(())
     }
 }
 

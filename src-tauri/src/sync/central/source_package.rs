@@ -341,6 +341,36 @@ impl Package {
         .with_retained_states(&self.retained_states()?, &self.files, &self.decryptors)?;
         super::migration_library::prepare(&normalized, &known, materials)
     }
+    pub(in crate::sync::central) fn captured_initial_digest(&self) -> Result<&str, AppError> {
+        self.frozen.as_ref().ok_or_else(invalid)?.initial_digest()
+    }
+    pub(in crate::sync::central) fn require_captured_base(
+        &self,
+        original: &Self,
+        receipt: &Receipt,
+    ) -> Result<(), AppError> {
+        receipt.matches_selected(original.state.local.central.as_ref().ok_or_else(invalid)?)?;
+        if original.frozen.is_some()
+            || self.state_name != original.state_name
+            || self.state != original.state
+            || self.files.encode_local()?.as_slice() != original.files.encode_local()?.as_slice()
+            || self.decryptors.encode_local()?.as_slice()
+                != original.decryptors.encode_local()?.as_slice()
+            || !self
+                .sources
+                .follows_book(&super::crypto::hash(&original.sources.encode_local()?))?
+            || self.captured_initial_digest()? != receipt.ciphertext_hash
+        {
+            return Err(invalid());
+        }
+        drop(
+            self.frozen
+                .as_ref()
+                .ok_or_else(invalid)?
+                .context(receipt.operation(), &receipt.ciphertext_hash)?,
+        );
+        Ok(())
+    }
     /// The caller must have decoded this package from this exact authenticated receipt.
     /// This binds frozen inputs only; other files, consent and actual source freshness are separate.
     pub fn migration_context(&self, receipt: &Receipt) -> Result<super::migration_history::Context, AppError> {

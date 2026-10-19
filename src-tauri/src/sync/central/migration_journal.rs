@@ -24,6 +24,7 @@ use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"LPMIGJ1\0";
 const CAP: usize = 1024 * 1024;
 mod cache;
+mod captured;
 pub(super) mod checkpoint;
 pub(in crate::sync) use cache::{CachedPlan, CachedVerifier};
 #[derive(Serialize, Deserialize)]

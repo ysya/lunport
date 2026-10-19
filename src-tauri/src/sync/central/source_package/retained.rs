@@ -1,15 +1,20 @@
 //! Enclosed packages contribute inactive history, never activation or consent.
 use super::*;
+mod plan;
+struct Retained {
+    package: Package,
+    plan: Option<plan::Evidence>,
+}
 const MAX_DEPTH: usize = 8;
 const MAX_PACKAGES: usize = 256;
 impl Package {
-    fn retained_packages(&self) -> Result<Vec<Package>, AppError> {
+    fn retained_packages(&self) -> Result<Vec<Retained>, AppError> {
         fn visit(
             parent: &Package,
             selected: &Package,
             depth: usize,
             bytes: &mut usize,
-            result: &mut Vec<Package>,
+            result: &mut Vec<Retained>,
         ) -> Result<(), AppError> {
             parent.require_own_supported_files()?;
             let captured =
@@ -31,6 +36,16 @@ impl Package {
                     {
                         referenced.insert(receipt.ciphertext_hash);
                     }
+                } else if super::super::migration_journal::Journal::captured_frame(plain) {
+                    for receipt in
+                        super::super::migration_journal::Journal::captured_references(plain)?
+                    {
+                        referenced.insert(receipt.ciphertext_hash);
+                    }
+                } else if !plain.starts_with(MAGIC) && !plain.starts_with(FROZEN_MAGIC) {
+                    let (_, _, source, _) =
+                        super::super::migration_history::Plan::captured_binding(plain)?;
+                    referenced.insert(source);
                 }
             }
             let mut covered = std::collections::BTreeSet::new();
@@ -43,7 +58,8 @@ impl Package {
                 Ok(Zeroizing::new(plain.to_vec()))
             };
             for (receipt, plain) in &captured.frames {
-                if super::super::capture_journal::Journal::frame(plain)
+                if (super::super::capture_journal::Journal::frame(plain)
+                    || super::super::migration_journal::Journal::captured_frame(plain))
                     && referenced.contains(&receipt.ciphertext_hash)
                 {
                     continue;
@@ -51,15 +67,39 @@ impl Package {
                 if result.len() >= MAX_PACKAGES {
                     return Err(invalid());
                 }
-                let nested = if super::super::capture_journal::Journal::frame(plain) {
+                let (nested, evidence) = if super::super::capture_journal::Journal::frame(plain) {
                     let (package, ancestors) =
                         super::super::capture_journal::Journal::captured_complete(
                             plain, receipt, &read,
                         )?;
                     covered.extend(ancestors.into_iter().map(|r| r.ciphertext_hash));
-                    package
+                    (package, None)
+                } else if plain.starts_with(MAGIC) || plain.starts_with(FROZEN_MAGIC) {
+                    (Package::decode_local(plain)?, None)
+                } else if super::super::migration_journal::Journal::captured_frame(plain) {
+                    let (package, evidence, ancestors) =
+                        plan::read_journal(receipt, plain, &read, |hash| {
+                            captured
+                                .frames
+                                .iter()
+                                .find(|(r, _)| r.ciphertext_hash == hash)
+                                .map(|(r, _)| r.clone())
+                                .ok_or_else(invalid)
+                        })?;
+                    covered.extend(ancestors.into_iter().map(|r| r.ciphertext_hash));
+                    (package, Some(evidence))
                 } else {
-                    Package::decode_local(plain)?
+                    let (package, evidence, ancestors) =
+                        plan::read(receipt, plain, &read, |hash| {
+                            captured
+                                .frames
+                                .iter()
+                                .find(|(r, _)| r.ciphertext_hash == hash)
+                                .map(|(r, _)| r.clone())
+                                .ok_or_else(invalid)
+                        })?;
+                    covered.extend(ancestors.into_iter().map(|r| r.ciphertext_hash));
+                    (package, Some(evidence))
                 };
                 covered.insert(receipt.ciphertext_hash.clone());
                 let owner = nested.state.local.central.as_ref().ok_or_else(invalid)?;
@@ -77,7 +117,10 @@ impl Package {
                 if result.len() >= MAX_PACKAGES {
                     return Err(invalid());
                 }
-                result.push(nested);
+                result.push(Retained {
+                    package: nested,
+                    plan: evidence,
+                });
             }
             if captured
                 .frames
@@ -98,7 +141,8 @@ impl Package {
     }
     pub fn record_inputs(&self) -> Result<Inventory, AppError> {
         let mut inventory = self.own_record_inputs()?;
-        for package in self.retained_packages()? {
+        for retained in self.retained_packages()? {
+            let package = retained.package;
             inventory = inventory.with_retained_requirements(
                 &self.sources,
                 &package.sources,
@@ -113,7 +157,11 @@ impl Package {
         references: &BTreeMap<String, KeyStorage>,
     ) -> Result<Materials, AppError> {
         let mut materials = self.own_materials(keys, references)?;
-        for package in self.retained_packages()? {
+        for retained in self.retained_packages()? {
+            let package = retained.package;
+            if let Some(plan) = retained.plan {
+                plan.validate(&package, keys, references)?;
+            }
             materials =
                 materials.with_retained_materials(package.own_materials(keys, references)?)?;
         }
@@ -127,7 +175,11 @@ impl Package {
     ) -> Result<super::super::migration_library::History, AppError> {
         drop(self.record_inputs()?);
         let mut retained = vec![];
-        for package in self.retained_packages()? {
+        for source in self.retained_packages()? {
+            let package = source.package;
+            if let Some(plan) = source.plan {
+                plan.validate(&package, keys, references)?;
+            }
             retained.push(package.own_structured_history(keys, references)?);
         }
         self.own_structured_history(keys, references)?
