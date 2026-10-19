@@ -266,3 +266,349 @@ fn a_nonadvancing_service_cannot_fill_the_archive_with_redundant_progress_snapsh
     assert!(cursor(&d) == before);
     assert_eq!(tree(&d), exact);
 }
+
+struct CursorFault<'a> {
+    inner: &'a crate::sync::testkit::MemKeychain,
+    role: String,
+    after: bool,
+    armed: std::sync::atomic::AtomicBool,
+}
+impl crate::sync::env::Keychain for CursorFault<'_> {
+    fn get(&self, k: &str) -> Result<Option<String>, AppError> {
+        self.inner.get(k)
+    }
+    fn get_noninteractive(&self, k: &str) -> Result<Option<String>, AppError> {
+        self.inner.get_noninteractive(k)
+    }
+    fn set(&self, k: &str, v: &str) -> Result<(), AppError> {
+        self.inner.set(k, v)
+    }
+    fn delete(&self, _: &str) -> Result<(), AppError> {
+        panic!("continuation cannot delete credentials")
+    }
+    fn set_noninteractive(&self, k: &str, v: &str) -> Result<(), AppError> {
+        let fail = k == self.role && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst);
+        if fail && !self.after {
+            return Err(invalid());
+        }
+        self.inner.set_noninteractive(k, v)?;
+        if fail && self.after {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+#[test]
+fn cold_dispatch_recovers_a_freeze_snapshot_after_cursor_failure_without_refetching_or_reencrypting(
+) {
+    use crate::sync::env::Keychain;
+    for after in [false, true] {
+        let (d, keys) = fixture(false);
+        let env = d.env();
+        let owner = record_runtime::snapshot(&env)
+            .unwrap()
+            .0
+            .local
+            .central
+            .unwrap();
+        let fault = CursorFault {
+            inner: &d.keychain,
+            role: owner
+                .control
+                .profile
+                .profile()
+                .unwrap()
+                .slot("source-migration-cursor"),
+            after,
+            armed: std::sync::atomic::AtomicBool::new(true),
+        };
+        let mut interrupted = d.env();
+        interrupted.keychain = &fault;
+        assert!(
+            with_transport(&interrupted, &keys, |_, loaded, action| empty_frozen(
+                &interrupted,
+                loaded,
+                action
+            ))
+            .is_err()
+        );
+        let exact = tree(&d);
+        assert_eq!(exact.len(), 4);
+        d.runtime.core.lock().unwrap().generation = 0;
+        let result = with_transport(&env, &keys, |_, _, _| {
+            panic!("already written result must not be requested again")
+        })
+        .unwrap();
+        assert_eq!(result, if after { Step::Ready } else { Step::More });
+        assert_eq!(tree(&d), exact);
+        assert_eq!(cursor(&d).revision(), 3);
+        assert_eq!(
+            with_transport(&env, &keys, |_, _, _| panic!("ready has no HTTP")).unwrap(),
+            Step::Ready
+        );
+        // Confirm the test adapter can read but no recovery path silently recreated a role.
+        assert!(d
+            .keychain
+            .get_noninteractive(&fault.role)
+            .unwrap()
+            .is_some());
+    }
+}
+#[test]
+fn cold_dispatch_recovers_fetch_and_discovery_snapshots_as_the_exact_expected_next_step() {
+    for step in ["fetch", "discovery"] {
+        let (d, keys) = fixture(true);
+        let env = d.env();
+        with_transport(&env, &keys, |_, loaded, action| {
+            empty_frozen(&env, loaded, action)
+        })
+        .unwrap();
+        if step == "discovery" {
+            with_transport(&env, &keys, |_, loaded, action| {
+                empty_frozen(&env, loaded, action)
+            })
+            .unwrap();
+        }
+        let before = cursor(&d);
+        let owner = record_runtime::snapshot(&env)
+            .unwrap()
+            .0
+            .local
+            .central
+            .unwrap();
+        let fault = CursorFault {
+            inner: &d.keychain,
+            role: owner
+                .control
+                .profile
+                .profile()
+                .unwrap()
+                .slot("source-migration-cursor"),
+            after: false,
+            armed: std::sync::atomic::AtomicBool::new(true),
+        };
+        let mut interrupted = d.env();
+        interrupted.keychain = &fault;
+        assert!(
+            with_transport(&interrupted, &keys, |_, loaded, action| empty_frozen(
+                &interrupted,
+                loaded,
+                action
+            ))
+            .is_err()
+        );
+        assert!(cursor(&d) == before);
+        let exact = tree(&d);
+        assert_eq!(
+            with_transport(&env, &keys, |_, _, _| panic!("orphan recovery has no HTTP")).unwrap(),
+            Step::More
+        );
+        assert_eq!(tree(&d), exact);
+        assert_eq!(cursor(&d).revision(), before.revision() + 1);
+    }
+}
+#[test]
+fn authenticated_but_wrong_step_or_duplicate_orphans_are_preserved_and_never_admitted() {
+    for wrong in ["unknown", "old_frame", "duplicate"] {
+        let (d, keys) = fixture(false);
+        let env = d.env();
+        let owner = record_runtime::snapshot(&env)
+            .unwrap()
+            .0
+            .local
+            .central
+            .unwrap();
+        let before = cursor(&d);
+        {
+            let life = env.runtime.lifecycle.lock().unwrap();
+            let saved = Cursor::load(&env, &life, &owner).unwrap().unwrap();
+            let bytes = if wrong == "unknown" {
+                zeroize::Zeroizing::new(b"UNKNOWN_PRIVATE_INPUT".to_vec())
+            } else {
+                saved.bytes
+            };
+            super::super::source_archive::next(
+                &env,
+                &life,
+                &owner,
+                before.receipt().next_ordinal().unwrap(),
+                before.receipt(),
+                &bytes,
+            )
+            .unwrap();
+            if wrong == "duplicate" {
+                super::super::source_archive::next(
+                    &env,
+                    &life,
+                    &owner,
+                    before.receipt().next_ordinal().unwrap(),
+                    before.receipt(),
+                    &bytes,
+                )
+                .unwrap();
+            }
+        }
+        let exact = tree(&d);
+        assert!(
+            with_transport(&env, &keys, |_, _, _| panic!(
+                "unadmitted data cannot cross HTTP"
+            ))
+            .is_err(),
+            "{wrong}"
+        );
+        assert!(cursor(&d) == before);
+        assert_eq!(tree(&d), exact);
+    }
+}
+#[test]
+fn an_exact_orphan_cannot_hide_a_source_change_before_cold_recovery() {
+    let (d, keys) = fixture(false);
+    let env = d.env();
+    let owner = record_runtime::snapshot(&env)
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap();
+    let fault = CursorFault {
+        inner: &d.keychain,
+        role: owner
+            .control
+            .profile
+            .profile()
+            .unwrap()
+            .slot("source-migration-cursor"),
+        after: false,
+        armed: std::sync::atomic::AtomicBool::new(true),
+    };
+    let mut interrupted = d.env();
+    interrupted.keychain = &fault;
+    let before = cursor(&d);
+    assert!(
+        with_transport(&interrupted, &keys, |_, loaded, action| empty_frozen(
+            &interrupted,
+            loaded,
+            action
+        ))
+        .is_err()
+    );
+    let exact = tree(&d);
+    fs::write(&env.state_path, b"new local source B").unwrap();
+    assert!(with_transport(&env, &keys, |_, _, _| panic!(
+        "changed source cannot cross HTTP"
+    ))
+    .is_err());
+    assert!(cursor(&d) == before);
+    assert_eq!(tree(&d), exact);
+    assert_eq!(fs::read(&env.state_path).unwrap(), b"new local source B");
+}
+
+#[test]
+fn a_remote_only_child_is_discovered_and_durably_bound_before_its_first_frozen_read() {
+    use crate::sync::{
+        crypto::{derive_account, ChainKeys},
+        record::{Record, RecordKind, SpaceKeyPayload},
+        state::MNEMONIC_ACCOUNT,
+        state_v2::SealedRecord,
+    };
+    let (d, keys) = fixture(true);
+    let env = d.env();
+    let phrase = zeroize::Zeroizing::new(d.keychain.entry(MNEMONIC_ACCOUNT).unwrap());
+    let mut parent = derive_account(&phrase).unwrap();
+    let mut child = ChainKeys::generate().unwrap();
+    let envelope = SealedRecord::seal(
+        &parent,
+        &Record {
+            kind: RecordKind::SpaceKey,
+            id: child.chain_id.clone(),
+            version: 1,
+            updated_at_ms: 1,
+            device_id: "d".repeat(32),
+            deleted: false,
+            payload: serde_json::to_value(SpaceKeyPayload::from_keys(&child)).unwrap(),
+        },
+        1,
+    )
+    .unwrap()
+    .envelope;
+    let checkpoint = legacy_checkpoint(&parent.chain_id, 1, &[envelope.clone()]).unwrap();
+    with_transport(&env, &keys, |_, loaded, _| {
+        let mut p = progress(loaded, true);
+        p.sources = vec![checkpoint.clone()];
+        Ok(Received::Freeze(p))
+    })
+    .unwrap();
+    with_transport(&env, &keys, |_, _, action| {
+        assert!(matches!(action,Action::Fetch(chain) if chain==&parent.chain_id));
+        Ok(Received::Fetch(PullResponse {
+            records: vec![envelope],
+            latest_seq: 1,
+        }))
+    })
+    .unwrap();
+    let owner = record_runtime::snapshot(&env)
+        .unwrap()
+        .0
+        .local
+        .central
+        .unwrap();
+    let fault = CursorFault {
+        inner: &d.keychain,
+        role: owner
+            .control
+            .profile
+            .profile()
+            .unwrap()
+            .slot("source-migration-cursor"),
+        after: false,
+        armed: std::sync::atomic::AtomicBool::new(true),
+    };
+    let mut interrupted = d.env();
+    interrupted.keychain = &fault;
+    assert!(with_transport(&interrupted, &keys, |_, _, _| panic!(
+        "discover before transport"
+    ))
+    .is_err());
+    let exact = tree(&d);
+    assert_eq!(
+        with_transport(&env, &keys, |_, _, _| panic!(
+            "restore discovered book before transport"
+        ))
+        .unwrap(),
+        Step::More
+    );
+    assert_eq!(tree(&d), exact);
+    with_transport(&env, &keys, |_, loaded, action| {
+        let Action::Freeze { sources, next } = action else {
+            panic!("new child must first freeze")
+        };
+        assert_eq!(next, &vec![child.chain_id.clone()]);
+        assert!(sources.chains().contains(&child.chain_id));
+        let mut p = loaded.fetching().unwrap().progress().clone();
+        p.proof.push(ProofStep {
+            digest: loaded.intent().digest().unwrap(),
+            intent: loaded.intent().clone(),
+        });
+        p.sources
+            .push(legacy_checkpoint(&child.chain_id, 0, &[]).unwrap());
+        p.sources.sort_by(|a, b| a.chain_id.cmp(&b.chain_id));
+        p.phase = Phase::Frozen;
+        p.next = vec![];
+        Ok(Received::Freeze(p))
+    })
+    .unwrap();
+    with_transport(&env, &keys, |_, _, action| {
+        assert!(matches!(action,Action::Fetch(chain) if chain==&child.chain_id));
+        Ok(Received::Fetch(PullResponse {
+            records: vec![],
+            latest_seq: 0,
+        }))
+    })
+    .unwrap();
+    assert_eq!(
+        with_transport(&env, &keys, |_, _, _| panic!("all snapshots are captured")).unwrap(),
+        Step::Ready
+    );
+    parent.clear_sensitive();
+    child.clear_sensitive();
+}

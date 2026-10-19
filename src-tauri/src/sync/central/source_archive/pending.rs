@@ -3,14 +3,14 @@ use super::*;
 use std::collections::BTreeSet;
 /// Reuses ciphertext only after authenticating context, contents and the unchanged named files.
 /// Unknown or different abandoned data remains an obligation; it is never deleted or excluded.
-pub(in crate::sync::central) fn resume_next(
+fn read_next(
     env: &SyncEnv,
     owner: &Workspace,
     previous: &Receipt,
     generation: u64,
-    expected: &[u8],
+    expected: Option<&[u8]>,
     known: &Outputs,
-) -> Result<Option<(Archived, Outputs)>, AppError> {
+) -> Result<Option<(Archived, Outputs, Zeroizing<Vec<u8>>)>, AppError> {
     previous.matches_selected(owner)?;
     let directory = ArchiveDirectory::open(env, Kind::Source)?;
     let before = directory.names()?;
@@ -47,13 +47,38 @@ pub(in crate::sync::central) fn resume_next(
         }
         let (plain, proof) =
             restore_with_outputs(env, &owner.control.profile.profile()?, &receipt)?;
-        if plain.as_slice() != expected || found.is_some() {
+        if expected.is_some_and(|expected| plain.as_slice() != expected) || found.is_some() {
             return Err(invalid());
         }
-        found = Some((Archived { receipt }, proof));
+        found = Some((Archived { receipt }, proof, plain));
     }
     if before != directory.names()? {
         return Err(crate::sync::runtime::superseded());
     }
     Ok(found)
+}
+
+pub(in crate::sync::central) fn resume_next(
+    env: &SyncEnv,
+    owner: &Workspace,
+    previous: &Receipt,
+    generation: u64,
+    expected: &[u8],
+    known: &Outputs,
+) -> Result<Option<(Archived, Outputs)>, AppError> {
+    Ok(
+        read_next(env, owner, previous, generation, Some(expected), known)?
+            .map(|(archived, outputs, _)| (archived, outputs)),
+    )
+}
+/// Authenticated native bytes only, never permission to exclude an output or advance a cursor.
+/// The caller must reconstruct its exact next typed journal before the ordinary store rechecks it.
+pub(in crate::sync::central) fn candidate_next(
+    env: &SyncEnv,
+    owner: &Workspace,
+    previous: &Receipt,
+    generation: u64,
+    known: &Outputs,
+) -> Result<Option<Zeroizing<Vec<u8>>>, AppError> {
+    Ok(read_next(env, owner, previous, generation, None, known)?.map(|(_, _, plain)| plain))
 }

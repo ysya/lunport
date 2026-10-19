@@ -58,6 +58,27 @@ fn book(sources: &Sources) -> Result<Zeroizing<String>, AppError> {
     ))
 }
 impl Journal {
+    pub fn pending_progress(bytes: &[u8]) -> Result<Progress, AppError> {
+        Ok(Self::decode(bytes)?
+            .fetching
+            .ok_or_else(invalid)?
+            .progress()
+            .clone())
+    }
+    pub fn pending_snapshot(
+        bytes: &[u8],
+        sources: &Sources,
+        state: &crate::sync::records_v3::SyncStateV3,
+        chain: &str,
+    ) -> Result<FrozenSnapshot, AppError> {
+        Self::decode(bytes)?
+            .fetching
+            .ok_or_else(invalid)?
+            .snapshot_for(sources, state, chain)
+    }
+    pub fn matches_bytes(&self, bytes: &[u8]) -> Result<bool, AppError> {
+        Ok(self.encode()?.as_slice() == bytes)
+    }
     pub fn begin(
         cursor: &Cursor,
         package: &Package,

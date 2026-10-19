@@ -230,6 +230,17 @@ impl Fetching {
         }
         Ok(())
     }
+    pub fn snapshot_for(
+        &self,
+        sources: &Sources,
+        state: &SyncStateV3,
+        chain: &str,
+    ) -> Result<FrozenSnapshot, AppError> {
+        self.validate(sources, state)?
+            .into_iter()
+            .find(|snapshot| snapshot.checkpoint().chain_id == chain)
+            .ok_or_else(invalid)
+    }
     pub fn discovered_sources(
         &self,
         sources: &Sources,

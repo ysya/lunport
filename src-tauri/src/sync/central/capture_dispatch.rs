@@ -76,7 +76,7 @@ struct Prepared {
     session: Arc<Session>,
 }
 impl Prepared {
-    fn current(&self, env: &SyncEnv, keys: &VaultKeys) -> Result<(), AppError> {
+    fn identity_current(&self, env: &SyncEnv, keys: &VaultKeys) -> Result<(), AppError> {
         let (state, generation) = record_runtime::snapshot(env)?;
         if generation != self.generation
             || state != self.loaded.package.state
@@ -90,7 +90,76 @@ impl Prepared {
             &self.session,
             keys,
         )?;
+        Ok(())
+    }
+    fn current(&self, env: &SyncEnv, keys: &VaultKeys) -> Result<(), AppError> {
+        self.identity_current(env, keys)?;
         self.loaded.require_unchanged(env)
+    }
+    fn recover_pending(
+        &self,
+        env: &SyncEnv,
+        life: &std::sync::MutexGuard<'_, ()>,
+        keys: &VaultKeys,
+    ) -> Result<Option<Loaded>, AppError> {
+        self.identity_current(env, keys)?;
+        let owner = self
+            .loaded
+            .package
+            .state
+            .local
+            .central
+            .as_ref()
+            .ok_or_else(invalid)?;
+        let Some(bytes) = super::source_archive::candidate_next(
+            env,
+            owner,
+            self.loaded.cursor.receipt(),
+            self.loaded.cursor.receipt().next_ordinal()?,
+            &self.loaded.outputs,
+        )?
+        else {
+            return Ok(None);
+        };
+        let signer = &self.session.identity.as_ref().ok_or_else(invalid)?.keys;
+        // Derive the exact one-step successor again; AEAD by itself is not admission.
+        let expected = match action(&self.loaded)? {
+            Action::Ready => return Err(invalid()),
+            Action::Discover(sources) => self.loaded.with_discovery(owner, signer, sources)?,
+            Action::Fetch(chain) => self.loaded.with_snapshot(
+                owner,
+                Journal::pending_snapshot(
+                    &bytes,
+                    &self.loaded.package.sources,
+                    &self.loaded.package.state,
+                    &chain,
+                )?,
+            )?,
+            Action::Freeze { .. } => {
+                let progress = Journal::pending_progress(&bytes)?;
+                if !self.loaded.pending_discovery()
+                    && self
+                        .loaded
+                        .fetching()
+                        .is_some_and(|f| f.progress() == &progress)
+                {
+                    return Err(invalid());
+                }
+                self.loaded.with_progress(owner, &progress)?
+            }
+        };
+        if !expected.matches_bytes(&bytes)? {
+            return Err(invalid());
+        }
+        self.identity_current(env, keys)?;
+        Ok(Some(expected.store(
+            env,
+            life,
+            owner,
+            signer,
+            &self.loaded.cursor,
+            self.loaded.cursor.receipt().next_ordinal()?,
+        )?))
     }
     fn save(self, env: &SyncEnv, keys: &VaultKeys, journal: Journal) -> Result<Step, AppError> {
         let life = env.runtime.lifecycle.lock().unwrap();
@@ -155,6 +224,15 @@ fn with_transport(
             generation,
             session,
         };
+        if let Some(loaded) = prepared.recover_pending(env, &life, keys)? {
+            let recovered = Prepared {
+                loaded,
+                generation: prepared.generation,
+                session: Arc::clone(&prepared.session),
+            };
+            recovered.current(env, keys)?;
+            return Ok(Step::More);
+        }
         prepared.current(env, keys)?;
         prepared
     };
