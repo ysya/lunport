@@ -106,6 +106,66 @@ impl ArchiveDirectory {
             kind,
         })
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn names(&self) -> Result<Vec<String>, AppError> {
+        use std::{ffi::CStr, os::fd::AsRawFd};
+        struct Stream(*mut libc::DIR);
+        impl Drop for Stream {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::closedir(self.0);
+                }
+            }
+        }
+        let fd = unsafe { libc::dup(self.directory.as_raw_fd()) };
+        if fd < 0 {
+            return Err(invalid());
+        }
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(invalid());
+        }
+        let stream = Stream(stream);
+        unsafe {
+            libc::rewinddir(stream.0);
+        }
+        let mut names = std::collections::BTreeSet::new();
+        loop {
+            #[cfg(target_os = "macos")]
+            let errno = unsafe { libc::__error() };
+            #[cfg(target_os = "linux")]
+            let errno = unsafe { libc::__errno_location() };
+            unsafe {
+                *errno = 0;
+            }
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                if unsafe { *errno } != 0 {
+                    return Err(invalid());
+                }
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
+                .to_str()
+                .map_err(|_| invalid())?;
+            if matches!(name, "." | "..") {
+                continue;
+            }
+            filename(name)?;
+            if names.len() >= 8192 || !names.insert(name.to_owned()) {
+                return Err(invalid());
+            }
+        }
+        self.sync()?;
+        Ok(names.into_iter().collect())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    pub fn names(&self) -> Result<Vec<String>, AppError> {
+        Err(invalid())
+    }
     pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>, AppError> {
         use std::os::fd::{AsRawFd, FromRawFd};
         filename(name)?;
@@ -267,6 +327,9 @@ pub(super) struct ArchiveDirectory;
 impl ArchiveDirectory {
     pub fn open(_: &SyncEnv, _: Kind) -> Result<Self, AppError> {
         Err(AppError::Other("This platform build cannot yet guarantee durable device-recovery archives. Original data is retained.".into()))
+    }
+    pub fn names(&self) -> Result<Vec<String>, AppError> {
+        Err(invalid())
     }
     pub fn read(&self, _: &str) -> Result<Option<Vec<u8>>, AppError> {
         Err(invalid())
