@@ -64,6 +64,22 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+  authority-operator:
+    image: ${AUTHORITY_OPERATOR_IMAGE:-lunport-central-authority-operator:local}
+    build:
+      context: ../..
+      dockerfile: selfhost/central/Dockerfile
+      target: authority-operator
+    profiles: [setup]
+    command: [plan]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    volumes: [app-data:/data:ro, security-data:/security-data]
+    environment:
+      SECURITY_INSTALLATION: ${SECURITY_INSTALLATION}
   control:
     <<: *runtime
     profiles: [setup]
@@ -75,7 +91,9 @@ services:
       <<: *settings
       SELFHOST_EXPECTED_REGISTRY: ${SELFHOST_EXPECTED_REGISTRY:-}
       SELFHOST_CONFIRM_NEW_INSTALLATION: ${SELFHOST_CONFIRM_NEW_INSTALLATION:-}
-      SELFHOST_MINIMUM_FLOOR: ${SELFHOST_MINIMUM_FLOOR:-1}
+      SELFHOST_MINIMUM_FLOOR: ${SELFHOST_MINIMUM_FLOOR:-2}
+      SELFHOST_EXPECTED_AUTHORITY: ${SELFHOST_EXPECTED_AUTHORITY:-}
+      SELFHOST_AUTHORITY_RECEIPT: ${SELFHOST_AUTHORITY_RECEIPT:-}
 networks:
   proxy: { internal: true }
   identity-egress: {}

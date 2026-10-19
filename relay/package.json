@@ -10,7 +10,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json && tsc --noEmit -p passkey-browser.tsconfig.json",
     "check:security-config": "node security/check-deployment.mjs",
-    "test:security-config": "node --test security/check-deployment.test.mjs",
+    "test:security-config": "node --test security/check-deployment.test.mjs security/prepare-authority-transfer.test.mjs selfhost/central/authority-import.test.mjs",
     "build:passkey-page": "node scripts/build-passkey-page.mjs",
     "pretypecheck": "npm run build:passkey-page",
     "pretest": "npm run build:passkey-page",

@@ -53,7 +53,7 @@ describe("private selfhost operator actions", () => {
     await control.test({}, fresh());
     expect(
       await floor().authorize(settings.SECURITY_INSTALLATION),
-    ).toMatchObject({ status: 200, minimum: 1 });
+    ).toMatchObject({ status: 200, minimum: 2 });
     await expect(control.test({}, fresh())).rejects.toThrow();
   });
   it("only raises an existing floor and never repairs absent or corrupt state", async () => {
@@ -61,7 +61,7 @@ describe("private selfhost operator actions", () => {
       ...settings,
       SELFHOST_CONTROL_MODE: "raise-floor",
       SELFHOST_EXPECTED_REGISTRY: registry(),
-      SELFHOST_MINIMUM_FLOOR: "2",
+      SELFHOST_MINIMUM_FLOOR: "3",
     };
     await expect(control.test({}, raised)).rejects.toThrow();
     await control.test({}, fresh());
@@ -71,7 +71,7 @@ describe("private selfhost operator actions", () => {
     ).rejects.toThrow();
     expect(
       await floor().authorize(settings.SECURITY_INSTALLATION),
-    ).toMatchObject({ status: 200, minimum: 2 });
+    ).toMatchObject({ status: 200, minimum: 3 });
     await runInDurableObject(floor(), (_instance, state) =>
       state.storage.put("floor", { corrupt: true }),
     );

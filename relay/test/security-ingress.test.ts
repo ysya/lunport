@@ -1,3 +1,4 @@
+import { AUTHORITY_HEADER, authorityWitness } from "../src/security/authority";
 import { env, exports } from "cloudflare:workers";
 import {
   createExecutionContext,
@@ -30,7 +31,7 @@ beforeEach(() => {
 const floor = () => env.SECURITY_FLOOR.getByName("floor:" + installation);
 const identity = () =>
   env.LEGACY_RETIREMENT.idFromName(REGISTRY_WITNESS).toString();
-const provision = (minimum = 1) =>
+const provision = (minimum = 2) =>
   floor().provision(installation, minimum, identity());
 function configuration(core?: GatewayEnv["CORE"]): GatewayEnv {
   return {
@@ -49,6 +50,7 @@ function request(
     method,
     headers: {
       authorization: `Bearer ${token}`,
+      [AUTHORITY_HEADER]: authorityWitness(env),
       "cf-connecting-ip": `198.51.100.${ip}`,
       "content-type": "application/json",
     },
@@ -100,7 +102,7 @@ describe("independent ingress and persistent backend floor", () => {
     expect(
       (await gateway.fetch(request(), configuration(accepting(calls)))).status,
     ).toBe(204);
-    expect(calls).toEqual([1]);
+    expect(calls).toEqual([2]);
     expect(
       (
         await gateway.fetch(
@@ -109,7 +111,7 @@ describe("independent ingress and persistent backend floor", () => {
         )
       ).status,
     ).toBe(404);
-    expect(calls).toEqual([1]);
+    expect(calls).toEqual([2]);
   });
 
   it("never lowers its floor when an older gateway or deployment returns", async () => {
@@ -118,6 +120,7 @@ describe("independent ingress and persistent backend floor", () => {
       status: 200,
       minimum: 3,
       registry: identity(),
+      authority: authorityWitness(env),
     });
     expect((await provision(2)).status).toBe(409);
     await evictDurableObject(floor());
@@ -125,6 +128,7 @@ describe("independent ingress and persistent backend floor", () => {
       status: 200,
       minimum: 3,
       registry: identity(),
+      authority: authorityWitness(env),
     });
     const calls: number[] = [];
     expect(
@@ -169,6 +173,115 @@ describe("independent ingress and persistent backend floor", () => {
     expect(calls).toEqual([]);
   });
 
+  it("keeps old unbound floors unavailable until a scoped private authority handoff", async () => {
+    await runInDurableObject(floor(), (_instance, state) =>
+      state.storage.put("floor", {
+        version: 1,
+        installation,
+        minimum: 1,
+        registry: identity(),
+      }),
+    );
+    expect((await floor().authorize(installation)).status).toBe(503);
+    expect((await provision()).status).toBe(409);
+    expect(await floor().inspect(installation)).toMatchObject({
+      present: true,
+      status: 503,
+      minimum: 1,
+      pinned: false,
+    });
+    const receipt = random();
+    expect(
+      (
+        await floor().bindAuthority(
+          installation,
+          2,
+          identity(),
+          "wrong",
+          receipt,
+        )
+      ).status,
+    ).toBe(503);
+    expect(
+      (
+        await floor().bindAuthority(
+          installation,
+          2,
+          identity(),
+          authorityWitness(env),
+          receipt,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await floor().bindAuthority(
+          installation,
+          2,
+          identity(),
+          authorityWitness(env),
+          receipt,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await floor().bindAuthority(
+          installation,
+          2,
+          identity(),
+          authorityWitness(env),
+          random(),
+        )
+      ).status,
+    ).toBe(409);
+    await evictDurableObject(floor());
+    expect(await floor().authorize(installation)).toMatchObject({
+      status: 200,
+      minimum: 2,
+      authority: authorityWitness(env),
+    });
+  });
+  it("rejects replacement central namespaces without rewriting the authority pin", async () => {
+    await provision();
+    for (const role of ["ACCOUNT", "VAULT", "PASSKEY"] as const) {
+      const code = await runInDurableObject(floor(), async (instance) => {
+        const bindings = (instance as any).env,
+          original = bindings[role];
+        bindings[role] = env.CHAIN;
+        try {
+          return (await instance.authorize(installation)).status;
+        } finally {
+          bindings[role] = original;
+        }
+      });
+      expect(code).toBe(503);
+    }
+    expect((await floor().authorize(installation)).status).toBe(200);
+  });
+  it("replaces client-supplied authority headers with the pinned witness", async () => {
+    await provision();
+    const incoming = request();
+    incoming.headers.set(AUTHORITY_HEADER, "spoofed");
+    const core = {
+      forward: async (
+        minimum: number,
+        registry: string,
+        forwarded: Request,
+      ) => {
+        expect(minimum).toBe(2);
+        expect(registry).toBe(identity());
+        expect(forwarded.headers.get(AUTHORITY_HEADER)).toBe(
+          authorityWitness(env),
+        );
+        return new Response(null, { status: 204 });
+      },
+    } as unknown as GatewayEnv["CORE"];
+    expect((await gateway.fetch(incoming, configuration(core))).status).toBe(
+      204,
+    );
+  });
+
   it("independently prevents frozen writes and retired reads even when a backend would accept", async () => {
     await provision();
     const chain = await frozenSource(),
@@ -193,7 +306,7 @@ describe("independent ingress and persistent backend floor", () => {
       (await gateway.fetch(request(`/v1/chains/${chain}/records`), configured))
         .status,
     ).toBe(204);
-    expect(calls).toEqual([1]);
+    expect(calls).toEqual([2]);
     await runInDurableObject(
       env.LEGACY_RETIREMENT.getByName(chain),
       async (_instance, state) => {
@@ -217,7 +330,7 @@ describe("independent ingress and persistent backend floor", () => {
         )
       ).status,
     ).toBe(410);
-    expect(calls).toEqual([1]);
+    expect(calls).toEqual([2]);
   });
 
   it("fails closed without the named private backend RPC and never falls back to fetch", async () => {
@@ -246,11 +359,15 @@ describe("independent ingress and persistent backend floor", () => {
     });
     const chain = random(),
       create = () => request(`/v1/chains/${chain}`, "PUT", "{}");
-    expect((await core.forward(2, identity(), create())).status).toBe(503);
+    expect((await core.forward(3, identity(), create())).status).toBe(503);
     expect((await core.forward(0, identity(), create())).status).toBe(503);
-    expect((await core.forward(1, random(), create())).status).toBe(503);
+    expect((await core.forward(2, random(), create())).status).toBe(503);
     expect(await env.CHAIN.getByName(chain).exists()).toBe(false);
-    const accepted = await core.forward(1, identity(), create());
+    const wrong = create();
+    wrong.headers.set(AUTHORITY_HEADER, "0".repeat(64));
+    expect((await core.forward(2, identity(), wrong)).status).toBe(503);
+    expect((await core.forward(1, identity(), create())).status).toBe(503);
+    const accepted = await core.forward(2, identity(), create());
     expect(accepted.status).toBe(201);
     await accepted.body?.cancel();
     expect(await env.CHAIN.getByName(chain).exists()).toBe(true);

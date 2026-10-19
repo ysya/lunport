@@ -25,7 +25,7 @@ import {
 } from "../../src/v2/membership";
 import { freezeCanonical } from "../../src/v2/migration-freeze";
 import { migrationCanonical } from "../../src/v2/migration";
-import { wrapsDigest } from "../../src/v2/rekey";
+import { rekeyCanonical, wrapsDigest } from "../../src/v2/rekey";
 const random = (bytes = 32) => randomBytes(bytes).toString("hex");
 const sign = (bytes: Uint8Array, seed = 1) =>
   base64(ed25519.sign(bytes, new Uint8Array(32).fill(seed)));
@@ -33,10 +33,12 @@ export async function checkCentralProtocol({
   address,
   origin,
   loginToken,
+  beforeSecurityChange,
 }: {
   address: string;
   origin: string;
   loginToken: string;
+  beforeSecurityChange?: () => Promise<void>;
 }) {
   const request = async (path: string, bearer: string, value?: unknown) =>
     fetch(`http://${address}${path}`, {
@@ -120,7 +122,7 @@ export async function checkCentralProtocol({
       oldContext,
     ),
   );
-  const wrap = async (trusted: typeof member) => {
+  const wrap = async (trusted: typeof member, epoch = "1") => {
     const result = [];
     for (const [recipient, publicKeys] of Object.entries({
       ...trusted.devices,
@@ -131,7 +133,7 @@ export async function checkCentralProtocol({
         account_id: anchor.account_id,
         genesis_hash: anchor.genesis_hash,
         vault_id: vault,
-        key_epoch: "1",
+        key_epoch: epoch,
         membership_head: trusted.head,
         author: firstDevice.id,
         recipient,
@@ -439,6 +441,7 @@ export async function checkCentralProtocol({
       ).decrypt(decode(row.envelope.ciphertext, 16, 65552)),
       original[index],
     );
+  await beforeSecurityChange?.();
   await json(
     await request("/v2/device-access/revoke", loginToken, { device: peer.id }),
   );
@@ -449,26 +452,160 @@ export async function checkCentralProtocol({
   assert.equal(retired.status, 410);
   await retired.arrayBuffer();
   first = await register(firstDevice);
+  const removal = {
+    body: {
+      ...node.body,
+      revision: "2",
+      previous_head: member.head,
+      action: "revoke" as const,
+      issued_at_ms: String(Date.now()),
+      enrollment: null,
+      devices: { [firstDevice.id]: firstDevice.keys },
+    },
+    signature: "",
+  };
+  removal.signature = sign(membershipCanonical(removal.body));
+  await json(
+    await request("/v2/membership", first.bearer, { node: removal, wraps: {}, confirmation: null }),
+  );
+  member = (await applyMembership(member, removal))!;
+  assert.ok(member);
+  first = await register(firstDevice);
+  const source = await json(await request(path + "records", first.bearer));
+  keys.set(randomBytes(32), 32); // Preserve the index key and rotate only content encryption.
+  const nextWraps = await wrap(member, "2");
+  let nextHistory = "0".repeat(64);
+  const staged = [];
+  for (const [index, row] of source.records.entries()) {
+    const header = {
+      ...row.envelope.header,
+      key_epoch: "2",
+      membership_head: member.head,
+      author: firstDevice.id,
+    };
+    const nonce = base64(randomBytes(24));
+    const ciphertext = xchacha20poly1305(
+      keys.slice(32),
+      decode(nonce, 24, 24),
+      recordCanonical(header),
+    ).encrypt(original[index]);
+    const envelope = {
+      header,
+      nonce,
+      ciphertext: base64(ciphertext),
+      signature: sign(
+        await authorBytes(
+          "lunport-record-author-v2",
+          recordCanonical(header),
+          nonce,
+          ciphertext,
+        ),
+      ),
+    };
+    const digest = await hash(
+      canonical([
+        "lunport-operation-v2",
+        new TextDecoder().decode(recordCanonical(header)),
+        nonce,
+        envelope.ciphertext,
+        envelope.signature,
+      ]),
+    );
+    nextHistory = await hash(
+      canonical(["lunport-history-v2", nextHistory, String(index + 1), digest]),
+    );
+    staged.push({
+      sequence: String(index + 1),
+      revision: row.revision,
+      envelope,
+      digest,
+      history_hash: nextHistory,
+    });
+  }
+  const rekey = {
+    body: {
+      origin,
+      account_id: anchor.account_id,
+      genesis_hash: anchor.genesis_hash,
+      vault_id: vault,
+      rotation_id: random(16),
+      authorization_epoch: String(first.info.auth_epoch),
+      from_epoch: "1",
+      to_epoch: "2",
+      membership_head: member.head,
+      author: firstDevice.id,
+      source_sequence: source.sequence,
+      source_history_hash: source.history_hash,
+      target_history_hash: nextHistory,
+      wraps_digest: await wrapsDigest(nextWraps),
+    },
+    signature: "",
+  };
+  rekey.signature = sign(rekeyCanonical(rekey.body));
+  await json(
+    await request(path + "rekey/begin", first.bearer, {
+      manifest: rekey,
+      wraps: nextWraps,
+    }),
+  );
+  for (let after = 0; after < staged.length; after += 32)
+    await json(
+      await request(path + "rekey/stage", first.bearer, {
+        rotation: rekey.body.rotation_id,
+        after: String(after),
+        rows: staged.slice(after, after + 32),
+      }),
+    );
+  await json(
+    await request(path + "rekey/commit", first.bearer, {
+      rotation: rekey.body.rotation_id,
+    }),
+  );
+  await json(await request(path + "rekey/reconcile", first.bearer, {}));
   const surviving = await json(await request(path + "records", first.bearer));
+  assert.ok(
+    surviving.records.every(
+      (row: any) => row.envelope.header.key_epoch === "2",
+    ),
+  );
+  assert.equal(surviving.history_hash, nextHistory);
   assert.deepEqual(
     surviving.records.map((row: any) => row.envelope),
-    rows,
+    staged.map((row) => row.envelope),
   );
+  for (const [index, row] of surviving.records.entries()) {
+    assert.deepEqual(
+      xchacha20poly1305(
+        keys.slice(32),
+        decode(row.envelope.nonce, 24, 24),
+        recordCanonical(row.envelope.header),
+      ).decrypt(decode(row.envelope.ciphertext, 16, 65552)),
+      original[index],
+    );
+    assert.throws(() =>
+      xchacha20poly1305(
+        peerKeys.slice(32),
+        decode(row.envelope.nonce, 24, 24),
+        recordCanonical(row.envelope.header),
+      ).decrypt(decode(row.envelope.ciphertext, 16, 65552)),
+    );
+  }
   const survivingWrap = await json(await request(path + "wrap", first.bearer));
   keys.fill(0);
   peerKeys.fill(0);
   secret.fill(0);
   original.forEach((bytes) => bytes.fill(0));
   console.log(
-    "PASS: deployed central encrypted migration, permanent legacy retirement, pending-device denial, authenticated approval, peer decryption and device revocation",
+    "PASS: deployed central encrypted migration, permanent legacy retirement, pending-device denial, authenticated approval, peer decryption, device revocation and epoch-2 content rotation",
   );
   return {
     positive: {
       path: path + "records",
       token: first.bearer,
       sequence: String(rows.length),
-      history_hash: history,
-      envelopes: rows,
+      history_hash: nextHistory,
+      key_epoch: "2",
+      envelopes: staged.map((row) => row.envelope),
     },
     wrapped: { path: path + "wrap", token: first.bearer, value: survivingWrap },
     denials: [

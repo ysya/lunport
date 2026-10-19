@@ -1,4 +1,5 @@
-// Unrouted example only. Read security/README.md and audit existing namespaces before deployment.
+// Fresh-install unrouted example only; never replace an existing migration history with this file.
+// Existing namespaces require the explicit authority transfer/import procedure in security/README.md.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "compatibility_date": "2026-08-20",
@@ -25,8 +26,20 @@
         "class_name": "IpLimiter"
       },
       {
+        "name": "ACCOUNT",
+        "class_name": "AccountStore"
+      },
+      {
         "name": "VAULT",
-        "class_name": "VaultStore",
+        "class_name": "VaultStore"
+      },
+      {
+        "name": "PASSKEY",
+        "class_name": "PasskeyStore"
+      },
+      {
+        "name": "CHAIN",
+        "class_name": "ChainStore",
         "script_name": "sshelter-relay"
       }
     ]
@@ -39,6 +52,10 @@
         "SecurityFloorStore",
         "IpLimiter"
       ]
+    },
+    {
+      "tag": "security-v2-central-authority",
+      "new_sqlite_classes": ["AccountStore", "VaultStore", "PasskeyStore"]
     }
   ],
   "services": [

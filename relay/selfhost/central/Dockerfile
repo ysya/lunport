@@ -37,3 +37,12 @@ COPY selfhost/central/entrypoint.sh selfhost/central/healthcheck.sh /relay/
 USER relay
 EXPOSE 8080
 ENTRYPOINT ["/bin/sh", "/relay/entrypoint.sh"]
+
+# Offline handoff only; no server listener, provider credentials or extra npm dependencies.
+FROM node:22-bookworm-slim AS authority-operator
+RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin relay
+COPY selfhost/central/authority-import.mjs /relay/authority-import.mjs
+USER relay
+ENTRYPOINT ["flock", "--nonblock", "/security-data/.runtime.lock", "node", "/relay/authority-import.mjs"]

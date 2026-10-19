@@ -12,6 +12,14 @@ const temporary = mkdtempSync(join(tmpdir(), project + "-"));
 const installation = randomBytes(16).toString("hex"),
   proxyKey = randomBytes(32).toString("hex");
 const host = "central-test.invalid";
+const targetSecurityImage =
+  process.env.SELFHOST_TEST_SECURITY_IMAGE ?? "lunport-central-security:local";
+const targetCoreImage =
+  process.env.SELFHOST_TEST_CORE_IMAGE ?? "lunport-central-core:local";
+let securityImage =
+  process.env.SELFHOST_TEST_SOURCE_SECURITY_IMAGE ?? targetSecurityImage;
+let coreImage = process.env.SELFHOST_TEST_SOURCE_CORE_IMAGE ?? targetCoreImage;
+let initialFloor = process.env.SELFHOST_TEST_SOURCE_SECURITY_IMAGE ? 1 : 2;
 const settings = join(temporary, "test.env");
 writeFileSync(
   settings,
@@ -19,8 +27,8 @@ writeFileSync(
 SECURITY_INSTALLATION=${installation}
 SELFHOST_PROXY_KEY=${proxyKey}
 CENTRAL_ENABLED=1
-SECURITY_IMAGE=${process.env.SELFHOST_TEST_SECURITY_IMAGE ?? "lunport-central-security:local"}
-CORE_IMAGE=${process.env.SELFHOST_TEST_CORE_IMAGE ?? "lunport-central-core:local"}
+SECURITY_IMAGE=${securityImage}
+CORE_IMAGE=${coreImage}
 `,
   { mode: 0o600 },
 );
@@ -48,14 +56,14 @@ function docker(args, success = true) {
       OIDC_API_AUDIENCE: "lunport-sync",
       OIDC_NATIVE_CLIENT_ID: "lunport-native",
       OIDC_SYNC_SCOPE: "lunport:sync",
-      SECURITY_IMAGE:
-        process.env.SELFHOST_TEST_SECURITY_IMAGE ??
-        "lunport-central-security:local",
-      CORE_IMAGE:
-        process.env.SELFHOST_TEST_CORE_IMAGE ?? "lunport-central-core:local",
+      SECURITY_IMAGE: securityImage,
+      CORE_IMAGE: coreImage,
+      AUTHORITY_OPERATOR_IMAGE:
+        process.env.SELFHOST_TEST_OPERATOR_IMAGE ??
+        "lunport-central-authority-operator:local",
       SELFHOST_EXPECTED_REGISTRY: "",
       SELFHOST_CONFIRM_NEW_INSTALLATION: "",
-      SELFHOST_MINIMUM_FLOOR: "1",
+      SELFHOST_MINIMUM_FLOOR: String(initialFloor),
     },
     timeout: 180_000,
     maxBuffer: 16 * 1024 * 1024,
@@ -145,7 +153,7 @@ function request(path, options = {}) {
   };
 }
 // Snapshot only this disposable project's stopped volumes; preserve binary tar framing.
-function volumeArchive(restore, archive, appOnly = false) {
+function volumeArchive(restore, archive, appOnly = false, oldLayout = false) {
   const id = compose(["ps", "-a", "-q", "gateway"]).stdout.trim();
   assert.ok(id);
   assert.equal(
@@ -160,7 +168,9 @@ function volumeArchive(restore, archive, appOnly = false) {
         .join(
           " ",
         )} -mindepth 1 -delete && tar -xf /tmp/test-backup.tar -C / ${roots}`
-    : `tar -C / -cf - ${roots}`;
+    : oldLayout
+      ? `tar -C / -cf /tmp/test-backup.tar data; for role in accounts vaults passkeys; do ns=lunport-${installation}-$role; if [ -d /security-data/$ns ]; then tar -C /security-data --transform='s,^lunport-,data/lunport-,' -rf /tmp/test-backup.tar $ns; fi; done; cat /tmp/test-backup.tar`
+      : `tar -C / -cf - ${roots}`;
   const result = spawnSync(
     "docker",
     [
@@ -188,6 +198,60 @@ function volumeArchive(restore, archive, appOnly = false) {
   return result.stdout;
 }
 let proxy = null;
+const oldApplicationBackups = [];
+async function checkpointBeforeChange(kind) {
+  console.log(
+    `Saving an old application-layout snapshot before ${kind} security changes`,
+  );
+  compose(["stop", "gateway"]);
+  oldApplicationBackups.push(volumeArchive(false, undefined, true, true));
+  compose(["up", "-d", "gateway"]);
+  await healthy();
+}
+function checkCurrentAuthority() {
+  for (const refresh of browserProof?.revokedRefreshTokens ?? []) {
+    assert.equal(
+      request("/v2/auth/passkey/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ refresh_token: refresh }),
+      }).status,
+      401,
+      "old application backups must never revive login families",
+    );
+  }
+  const proof = browserProof?.protocolProof;
+  if (proof?.positive) {
+    const page = request(proof.positive.path, {
+      headers: { Authorization: "Bearer " + proof.positive.token },
+    });
+    assert.equal(page.status, 200);
+    const body = JSON.parse(page.body);
+    assert.equal(body.sequence, proof.positive.sequence);
+    assert.ok(
+      body.records.every(
+        (row) => row.envelope.header.key_epoch === proof.positive.key_epoch,
+      ),
+    );
+    assert.equal(body.history_hash, proof.positive.history_hash);
+    assert.deepEqual(
+      body.records.map((row) => row.envelope),
+      proof.positive.envelopes,
+    );
+    const wrapped = request(proof.wrapped.path, {
+      headers: { Authorization: "Bearer " + proof.wrapped.token },
+    });
+    assert.equal(wrapped.status, 200);
+    assert.deepEqual(JSON.parse(wrapped.body), proof.wrapped.value);
+  }
+  for (const proof of browserProof?.protocolProof?.denials ?? [])
+    assert.equal(
+      request(proof.path, {
+        headers: { Authorization: "Bearer " + proof.token },
+      }).status,
+      proof.status,
+    );
+}
 let browserProof = null;
 try {
   console.log("Checking isolated Compose configuration and private inspection");
@@ -203,7 +267,7 @@ try {
     ...expected,
     ["SELFHOST_CONFIRM_NEW_INSTALLATION", installation],
   ];
-  assert.equal(json(control("provision-new", confirmed)).minimum, 1);
+  assert.equal(json(control("provision-new", confirmed)).minimum, initialFloor);
   console.log(
     "Starting gateway with shared backend and independent security storage",
   );
@@ -330,7 +394,56 @@ http://:8080 {
       origin: `https://${host}`,
       playwrightPath: process.env.SELFHOST_TEST_BROWSER_MODULE,
       executablePath: process.env.SELFHOST_TEST_BROWSER_EXECUTABLE,
+      checkpointBeforeChange,
     });
+  }
+  if (process.env.SELFHOST_TEST_SOURCE_SECURITY_IMAGE) {
+    console.log(
+      "Migrating a real older installation with unchanged namespace IDs and retained original application data",
+    );
+    compose(["stop", "gateway"]);
+    securityImage = targetSecurityImage;
+    coreImage = targetCoreImage;
+    initialFloor = 2;
+    compose(["run", "--rm", "core-bundle"]);
+    const operator = (args) =>
+      compose([
+        "--profile",
+        "setup",
+        "run",
+        "--rm",
+        "--no-deps",
+        "authority-operator",
+        ...args,
+      ]);
+    const plan = json(operator(["plan"]));
+    assert.match(plan.sha256, /^[0-9a-f]{64}$/);
+    const imported = json(operator(["import", "--expected", plan.sha256]));
+    assert.equal(imported.receipt, plan.sha256);
+    const unbound = json(control("inspect"));
+    assert.equal(unbound.status, 503);
+    assert.equal(unbound.pinned, false);
+    assert.equal(unbound.present, true);
+    assert.notEqual(
+      control("provision-new", confirmed, false).status,
+      0,
+      "an existing old floor cannot be reinitialized as a fresh installation",
+    );
+    const handoff = [
+      ...expected,
+      ["SELFHOST_EXPECTED_AUTHORITY", unbound.authority],
+      ["SELFHOST_AUTHORITY_RECEIPT", plan.sha256],
+    ];
+    assert.equal(json(control("bind-authority", handoff)).minimum, 2);
+    assert.equal(json(control("inspect")).pinned, true);
+    assert.equal(
+      json(operator(["plan"])).sha256,
+      plan.sha256,
+      "original namespaces must remain byte-identical after handoff",
+    );
+    compose(["up", "-d", "gateway"]);
+    await healthy();
+    checkCurrentAuthority();
   }
   const chain = randomBytes(32).toString("hex"),
     token = randomBytes(32).toString("hex");
@@ -430,20 +543,31 @@ http://:8080 {
       "device revocation and permanent retirement must survive restore",
     );
   }
+  for (const backup of oldApplicationBackups) {
+    console.log(
+      "Restoring an older application-layout backup while retaining current independent authority",
+    );
+    compose(["stop", "gateway"]);
+    volumeArchive(true, backup, true);
+    assert.equal(json(control("inspect")).pinned, true);
+    compose(["up", "-d", "gateway"]);
+    await healthy();
+    checkCurrentAuthority();
+  }
   console.log(
     "Checking persistent floor increase and refusal to reopen an older backend",
   );
   compose(["stop", "gateway"]);
-  assert.equal(json(control("inspect")).minimum, 1);
+  assert.equal(json(control("inspect")).minimum, 2);
   assert.equal(
-    json(control("raise-floor", [...expected, ["SELFHOST_MINIMUM_FLOOR", "2"]]))
+    json(control("raise-floor", [...expected, ["SELFHOST_MINIMUM_FLOOR", "3"]]))
       .minimum,
-    2,
+    3,
   );
   assert.notEqual(
     control(
       "raise-floor",
-      [...expected, ["SELFHOST_MINIMUM_FLOOR", "1"]],
+      [...expected, ["SELFHOST_MINIMUM_FLOOR", "2"]],
       false,
     ).status,
     0,
@@ -452,7 +576,7 @@ http://:8080 {
   volumeArchive(true, backup, true);
   assert.equal(
     json(control("inspect")).minimum,
-    2,
+    3,
     "an application-only restore cannot lower the independent security floor",
   );
   compose(["up", "-d", "gateway"]);

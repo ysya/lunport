@@ -1,3 +1,4 @@
+import { AUTHORITY_HEADER, authorityWitness } from "./security/authority";
 import { centralFetch, centralPrivateFetch } from "./v2/routes";
 import type { Bucket } from "./ip-limit";
 export { IpLimiter } from "./ip-limit";
@@ -536,7 +537,7 @@ const backend = {
 } satisfies ExportedHandler<Env>;
 
 // Every future backend revision must preserve this mandatory same-invocation check.
-const BACKEND_SECURITY_FLOOR = 1;
+const BACKEND_SECURITY_FLOOR = 2;
 export class CentralSyncBackend extends WorkerEntrypoint<Env> {
   async forward(
     requiredFloor: number,
@@ -547,10 +548,11 @@ export class CentralSyncBackend extends WorkerEntrypoint<Env> {
       if (
         this.env.CENTRAL_PRIVATE_CORE !== "1" ||
         !Number.isSafeInteger(requiredFloor) ||
-        requiredFloor < 1 ||
+        requiredFloor < BACKEND_SECURITY_FLOOR ||
         requiredFloor > BACKEND_SECURITY_FLOOR ||
         registry !==
-          this.env.LEGACY_RETIREMENT.idFromName(REGISTRY_WITNESS).toString()
+          this.env.LEGACY_RETIREMENT.idFromName(REGISTRY_WITNESS).toString() ||
+        request.headers.get(AUTHORITY_HEADER) !== authorityWitness(this.env)
       )
         return status(503);
       return new URL(request.url).pathname.startsWith("/v2/")

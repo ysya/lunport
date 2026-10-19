@@ -1,22 +1,42 @@
 # Central sync ingress deployment status
 
-The code has separate gateway and private-core entry points. These examples are **unrouted and unprovisioned**. They are review material, not a production migration capability or permission to deploy.
-
-The account provider is intentionally generic and disabled (`CENTRAL_ENABLED=0`). Select issuer/JWKS/API audience/native client ID when an OIDC provider is chosen. The native system-browser Code+PKCE flow must then be tested with that provider.
+The gateway and private core use separate deployment identities. Built-in Passkey login is the default; OIDC is optional. The fresh-install examples remain **unrouted, unprovisioned and disabled** (`CENTRAL_ENABLED=0`). A deployed installation needs its actual routes, namespace IDs, update pipeline and operator permissions verified before activation.
 
 ## Security ownership
 
-The security Worker owns `LEGACY_RETIREMENT`, `SECURITY_FLOOR` and its IP limiter. The application core owns its existing chain/account/vault namespaces. Gateway traffic uses only the named `CentralSyncBackend.forward(requiredFloor, registryIdentity, request)` RPC. There is no public-URL or `fetch` fallback. The revision and namespace check run in the same invocation as data routing. Private-core mode returns 404 from default HTTP fetch.
+The independent security Worker owns `AccountStore`, `PasskeyStore` and `VaultStore`, including device/session denials, login-family revocations, membership, key epochs and encrypted Vault history. It also owns the permanent legacy-retirement registry, backend floor and ingress limiter. Keeping each central object's complete database together avoids splitting authorization and ciphertext commits across stores. The application core owns legacy relay chains and its own limiter and references central objects through explicit private bindings.
 
-FloorStore requires explicit private deployment provisioning. It records the stable installation ID, actual registry namespace identity and minimum backend security revision. Requests can raise that floor and cannot lower it; missing/corrupt/mismatched state rejects traffic. Provisioning is never an HTTP endpoint. No public provisioning tool or production credentials are included. Backend builds predating the named RPC fail closed; future implementations must preserve its mandatory floor argument.
+Gateway traffic uses only `CentralSyncBackend.forward(requiredFloor, registryIdentity, request)`. The gateway replaces the client's authority header with its independently pinned namespace witness. The core verifies the floor, registry and its own central namespace witnesses in the same invocation as routing. There is no public-URL or `fetch` fallback; private-core default HTTP returns 404. Backend floor 2 is required. Both an older backend and an older gateway are rejected by the current core.
 
-## Operator work still required
+The floor pins the stable installation ID, retirement registry and all three authoritative namespace identities. A previous floor without an authority pin remains unavailable until explicit private handoff. Missing, corrupt or mismatched floor pins and namespace bindings fail closed; traffic never initializes or repairs those pins. Namespace identities do not prove the freshness or completeness of a restored security database; restoration still requires the trusted current-state comparison below. Private provisioning is not an HTTP endpoint. An application-only restore cannot replace current central authorization or history.
 
-1. Inventory all existing Worker names, routes, workers.dev/previews and namespace identities. Preserve the original chain/account/vault owners. If a retirement registry/floor already exists, these fresh examples must not rebind or replace it. Restore/import all security markers and high-water state through a reviewed procedure first. Changing the Worker name creates different storage; it does not move the library.
-2. Choose a stable random installation ID and the public HTTPS origin. Keep the security Worker and its deployment approval path independent from application releases. Audit provider deployment permissions: do not assume an application token is restricted to one Worker. These source files do not establish that isolation.
-3. For a first security namespace only, deploy the unrouted bootstrap example (no missing core bindings), then the private core, then the full unrouted gateway. Review the exact names and migration history before each step. No command here runs a deployment automatically.
-4. Provision the floor through an authorized private deployment RPC with the reviewed registry identity and initial minimum. Never auto-provision after a restore or treat an empty namespace as proof that old sync codes are unused. Keep encrypted backups of security metadata and inventory namespace identities alongside ciphertext.
-5. Attach the intended public HTTPS route only to the gateway. Disable every direct backend route, workers.dev URL and preview URL in actual infrastructure. Verify that the old legacy origin is either covered by the gateway or permanently stopped. An old `workers.dev` hostname cannot simply be assumed to follow a differently named gateway.
-6. Audit the running deployment, not just JSON configuration. Test rollback to a pre-entrypoint backend, an older floor-aware backend, registry outage, namespace replacement and restore. Unknown state must stop sync. The separate [central Compose preview](../selfhost/central/README.md) supplies an isolated tested ingress and independent security storage. Actual installation routing, operator permissions and restore high-water reconciliation still require deployment-specific verification.
+## Fresh installations
 
-The examples close public routes by default. `npm run check:security-config` checks source configuration relationships only; it cannot verify Cloudflare routing, IAM, deployed versions, private provisioning or backups. Native migration and publication retain full inventory, explicit consent, target/readback verification and permanent-retirement gates. The official isolated Workers suite and central Compose test cover their implementation; neither grants permission to expose these example Workers or substitutes for the running installation checks.
+The three example configurations create new namespaces. Deploy the closed security bootstrap first, then the closed private core, then the closed full security gateway. Bootstrap has no reference to a missing core. Inspect actual namespace identities and provision only a confirmed new installation through private operator access. Existing installations must not use fresh provisioning to clear an unbound floor or missing security data.
+
+Attach the intended public HTTPS origin only after these checks. Disable every direct core route, workers.dev URL and preview URL. Preserve a separately administered security deployment and update approval path; account-wide application credentials or an old automatic build pipeline must not be assumed to enforce that boundary.
+
+## Existing public relay
+
+`prepare-authority-transfer.mjs` prepares closed configurations without deploying. It keeps the original public Worker name as the security owner, preserving its workers.dev hostname and any existing central namespaces. The legacy chain namespace transfers to a new private core; the source namespace ID must remain unchanged. The script preserves the deployed prefix of the original migration history and creates only classes absent from the verified live inventory. A destination class must not first be created empty and then used as a transfer target. These requirements follow [Cloudflare's existing-class transfer contract](https://developers.cloudflare.com/durable-objects/reference/durable-object-class-migrations-legacy/).
+
+The operator supplies the original project configuration and a trusted, complete live inventory, pinned by the SHA-256 of that exact inventory file. Its schema is `version: 1`, `account_id`, `script_name`, `origin`, `migration_tag`, `private_script_absent: true`, and `namespaces: [{class_name, id, storage: "sqlite"}]`. IDs and account identity must come from the actual Cloudflare installation. A hash of a historical backup or invented IDs is not a current inventory. Verify that the proposed new private Worker name is unused.
+
+```sh
+cd relay
+node security/prepare-authority-transfer.mjs \
+  wrangler.jsonc /protected/live-inventory.json <inventory-sha256> \
+  <stable-installation-id> <unused-private-core-name>
+```
+
+The script writes new configuration files beside the original and refuses to replace differing files. It never changes or deploys the source configuration. With writes stopped and retained backups, review/deploy the private-core bootstrap, verify the transferred chain ID, deploy the original Worker as the independent security owner, then deploy the final private-core bindings. Compare every preserved namespace ID with the trusted inventory. Keep all outputs unrouted until private floor/authority provisioning, the complete legacy-retirement/high-water inventory, data readback, actual IAM and update-pipeline checks pass. Restore the original public routing explicitly; do not assume a hostname follows a different Worker.
+
+The generator refuses already split private-core deployments and unfamiliar ownership/migration histories. Those require preserving their existing security owner and transferring the three central namespaces to that owner with a reviewed provider-native transfer, never creating empty replacement classes. The [Compose handoff](../selfhost/central/README.md#existing-central-preview-handoff) is a different storage adapter and must not be applied to Cloudflare data.
+
+## Backup and restore
+
+Preserve current independent authority while restoring older application data. Reconcile the candidate against a demonstrably current checkpoint and the exact installation/namespace identities; retain current authority for any divergent central object. Do not merge security fields by timestamp, recreate missing credentials, lower a floor or revive an old registry. The Compose operator implements stopped-storage import and reconciliation with exact readback. Cloudflare uses its provider-native namespace/storage operations and must verify the same identities and current-state requirements in the actual account.
+
+If the independent security store itself must be restored, a trusted newer reference is required. If all current authority and external references have been lost or rolled back, old copies cannot prove their own freshness. Keep the service unavailable in that case; E2EE does not reconstruct missing revocation history.
+
+`npm run check:security-config` verifies source relationships only. Isolated Workers and Compose tests exercise implementation behavior; they do not verify live Cloudflare IAM, TLS, routes, namespace transfers or automatic builds. Native migration still requires full source inventory, explicit consent, exact target/readback verification and permanent retirement.

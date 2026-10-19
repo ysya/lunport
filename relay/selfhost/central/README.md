@@ -1,8 +1,8 @@
 # Central service Compose preview
 
-This separate Compose runs the same application as managed Workers. A stable workerd gateway image owns the private entry point, permanent retirement registry and security floor. A separate application image exports only the core module into a read-only runtime mount. The application updater has no security volume, proxy capability or network access. One workerd process hosts both Workers through their existing named RPC; only Caddy can reach its private HTTP socket.
+This separate Compose runs the same application as managed Workers. A stable workerd security image owns the private entry point, central account/Passkey/Vault databases, permanent retirement registry and security floor. A separate application image exports only the core module into a read-only runtime mount. The application updater has no security volume, proxy capability or network access. One workerd process hosts both Workers through their existing named RPC; only Caddy can reach its private HTTP socket.
 
-Central account support remains a disabled preview. The isolated deployment tests cover encrypted migration, device approval/revocation and consistent restore. Production HTTPS/origin verification and operator restore procedures still require the actual deployment environment. The existing [legacy relay Compose](../compose.yaml) remains available. This preview creates new installation namespaces; an existing relay needs a reviewed namespace/data/security-marker import before changing its public origin. Starting empty volumes cannot establish that old sync codes or revoked devices are safe.
+Central account support remains a disabled preview. The isolated deployment tests cover encrypted migration, device approval/revocation, consistent restore and older application backups while current security authority is retained. Production HTTPS/origin verification and operator restore procedures still require the actual deployment environment. The existing [legacy relay Compose](../compose.yaml) remains available. This preview creates new installation namespaces; an existing relay needs a reviewed namespace/data/security-marker import before changing its public origin. Starting empty volumes cannot establish that old sync codes or revoked devices are safe.
 
 ## New installation
 
@@ -21,7 +21,7 @@ docker compose build core-bundle gateway
 docker compose --profile setup run --rm control inspect
 ```
 
-Inspection prints the installation ID, actual registry identity and current floor. It creates no authorization floor. For a confirmed fresh installation only, copy that registry identity and the installation ID into this one-shot command:
+Inspection prints the installation ID, registry and authoritative namespace witnesses, floor and pin state. It creates no authorization floor. For a confirmed fresh installation only, copy that registry identity and the installation ID into this one-shot command:
 
 ```sh
 docker compose --profile setup run --rm \
@@ -61,11 +61,51 @@ docker compose up -d gateway
 
 A lower floor or repeat fresh provisioning is rejected. A backend below the saved floor becomes unavailable; it never falls back to a public/legacy application entry point. Raising the floor before installing a compatible backend stops service, so follow the reviewed release order.
 
+## Existing central preview handoff
+
+An older central preview stored `accounts`, `vaults` and `passkeys` under `app-data`. Stop the gateway and retain a complete, consistent backup and the original installation ID before changing images. Build the approved security/core images and the offline operator:
+
+```sh
+docker compose stop gateway
+docker compose --profile setup build core-bundle gateway authority-operator
+docker compose run --rm core-bundle
+docker compose --profile setup run --rm authority-operator plan
+```
+
+Run the offline import before starting the new runtime or control image; workerd creates namespace metadata at startup. An existing floor without an authority pin remains unavailable. Do not run `provision-new`. The plan lists exact fixed namespaces, object filenames, byte counts and hashes; preserve its SHA-256 outside the candidate backup. The offline operator requires Node's built-in SQLite support, bundled in its separate image. It mounts original application storage read-only, holds the runtime lock, validates SQLite in private scratch copies and preserves every source byte.
+
+```sh
+docker compose --profile setup run --rm authority-operator import --expected <plan-sha256>
+docker compose --profile setup run --rm control inspect
+docker compose --profile setup run --rm \
+  -e SELFHOST_EXPECTED_REGISTRY=<inspected-registry> \
+  -e SELFHOST_EXPECTED_AUTHORITY=<inspected-authority-witness> \
+  -e SELFHOST_AUTHORITY_RECEIPT=<plan-sha256> \
+  control bind-authority
+```
+
+Import uses the original `lunport-<installation>-<role>` namespace keys and object IDs. Existing destination state must exactly match; newer or unknown authority is never overwritten. Exact partial staged copies can resume. Unknown, changed or corrupt input remains retained and blocks completion. The private bind command independently rereads the receipt, namespace listings and every copied file through a read-only service before pinning the handoff and minimum floor 2. No HTTP reset/provisioning route is added. Keep originals and backups after the handoff, verify `status: 200` and `pinned: true`, then start the reviewed gateway. The old application namespaces remain retained and are no longer central authority.
+
 ## Backup and restore
 
-Stop `gateway` and exclude concurrent operator commands while taking a consistent backup. Preserve `app-data` and `security-data` together, including Passkey public credentials and login-family revocations, device/session revocations, membership/epoch state, security floors, permanent retirement and ciphertext. Also preserve `.env`, namespace identities, approved security/core image references and Caddy's persistent configuration/certificates. Core module artifacts can be regenerated only from the matching approved image. Keep persistent volumes when stopping the service; removing a volume destroys that part of the installation.
+Stop `gateway` and exclude concurrent operator commands while taking a consistent backup. `security-data` contains current central accounts, Passkeys, device/session and login-family revocations, membership/key epochs, ciphertext, namespace pins and permanent retirement. `app-data` contains legacy relay chains and application limiter state. Also preserve `.env`, installation and namespace identities, import evidence, approved image digests and Caddy configuration/certificates. Never remove persistent volumes as part of an update.
 
-Before exposing a restored service, reconcile the latest revocation, membership, epoch and retirement high-water state. An internally consistent older backup can still revive previously revoked access. Keep the gateway stopped when current security state cannot be established. Do not use fresh provisioning or an empty replacement volume to clear a restore failure.
+Before restoring an older application backup, retain current independent security storage and capture a trusted current checkpoint while the runtime is stopped:
+
+```sh
+docker compose --profile setup run --rm authority-operator checkpoint
+```
+
+Preserve that exact digest independently. Restore only application storage, keeping current `security-data`, then reconcile:
+
+```sh
+docker compose --profile setup run --rm authority-operator reconcile --expected <trusted-current-sha256>
+docker compose --profile setup run --rm control inspect
+```
+
+`matching` means the candidate central namespace bytes agree. `retain-current-authority` lists divergent roles whose candidate copies must stay inactive; the command does not import or merge them. Both require the expected current digest to match before and after comparison. Check the installation/namespace inventory and require a valid existing authority pin before restarting. A missing, stale or untrusted reference is a failure; do not replace it with a digest computed from the old backup.
+
+Restoring the security store itself requires a demonstrably current authority reference and corresponding object data. A checksum cannot recover missing newer data or detect rollback when every independent current reference was also replaced. Keep the gateway stopped if current security state cannot be established. A missing, corrupt or unbound authority pin fails closed; fresh provisioning is not a restore procedure.
 
 ## Verification
 
@@ -84,7 +124,7 @@ node relay/node_modules/esbuild/bin/esbuild relay/selfhost/central/protocol-test
   --bundle --platform=node --format=esm --outfile=/tmp/lunport-protocol-test.mjs
 ```
 
-Also set `SELFHOST_TEST_PROTOCOL_MODULE=/tmp/lunport-protocol-test.mjs` alongside the two browser settings when running the smoke test. It then creates synthetic devices, migrates the encrypted native fixture through the deployed HTTP gateway, permanently retires a legacy chain, denies an unapproved device, verifies a pairing confirmation, unwraps/decrypts the same history on the approved second device, and revokes that device. The stopped-volume restore must preserve the device denial, legacy retirement and login-family revocations. An application-only restore must preserve the independent security floor. This tests a consistent backup taken after those changes; it does not make an older backup safe or replace reconciliation with the latest security high-water state.
+Also set `SELFHOST_TEST_PROTOCOL_MODULE=/tmp/lunport-protocol-test.mjs` alongside the two browser settings when running the smoke test. It then creates synthetic devices, migrates the encrypted native fixture through the deployed HTTP gateway, permanently retires a legacy chain, denies an unapproved device, verifies a pairing confirmation, unwraps/decrypts the same history on the approved second device, revokes that device, removes it from signed membership, rotates the content key to epoch 2, and checks every retained version with the new key and rejection of the old key. The stopped-volume restore must preserve the device denial, legacy retirement and login-family revocations. An application-only restore must preserve the independent security floor. The browser/protocol path also captures older application-layout copies before Passkey and device changes, restores them while retaining current independent authority, and verifies all denials and exact current ciphertext. Set `SELFHOST_TEST_SOURCE_SECURITY_IMAGE` and `SELFHOST_TEST_SOURCE_CORE_IMAGE` to approved older preview images to exercise the actual stopped-volume handoff, original-file preservation and private authority binding. `SELFHOST_TEST_OPERATOR_IMAGE` selects the built offline operator image. These tests do not authorize replacing independent security storage with an older copy.
 
 ## Passkey accounts
 

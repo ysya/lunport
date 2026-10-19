@@ -1,9 +1,13 @@
+import { AUTHORITY_HEADER } from "./authority";
 /** Independently deployed ingress. Never retries a private RPC through a public URL. */
 import type { CentralSyncBackend } from "../index";
 import { MINIMUM_BACKEND_FLOOR, type FloorEnv } from "./floor";
 export { SecurityFloorStore } from "./floor";
 export { LegacyRetirementStore } from "../legacy-retirement";
 export { IpLimiter } from "../ip-limit";
+export { AccountStore } from "../v2/account";
+export { VaultStore } from "../v2/store";
+export { PasskeyStore } from "../v2/passkeys/store";
 export type GatewayEnv = FloorEnv & {
   CORE: Service<CentralSyncBackend>;
   IP_LIMIT: Env["IP_LIMIT"];
@@ -167,6 +171,7 @@ export default {
             ? undefined
             : body,
       });
+      forwarded.headers.set(AUTHORITY_HEADER, floor.authority);
       return await env.CORE.forward(floor.minimum, floor.registry, forwarded);
     } catch {
       return failure();

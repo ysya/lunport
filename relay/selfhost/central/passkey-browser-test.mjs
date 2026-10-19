@@ -8,6 +8,7 @@ export async function checkPasskeyBrowser({
   origin,
   playwrightPath,
   executablePath,
+  checkpointBeforeChange,
 }) {
   const { chromium } = await import(pathToFileURL(playwrightPath).href);
   const browser = await chromium.launch({ executablePath, headless: true });
@@ -192,6 +193,7 @@ export async function checkPasskeyBrowser({
       buttons.findIndex((button) => !button.disabled),
     );
     assert.ok(available >= 0);
+    await checkpointBeforeChange?.("passkey");
     await removal.nth(available).click();
     await page.getByText(/1 passkey\(s\)/).waitFor();
     assert.equal(
@@ -213,6 +215,7 @@ export async function checkPasskeyBrowser({
         address,
         origin,
         loginToken: last.access_token,
+        beforeSecurityChange: async () => checkpointBeforeChange?.("device"),
       });
     }
     assert.equal(

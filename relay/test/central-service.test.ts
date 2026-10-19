@@ -1,3 +1,4 @@
+import { AUTHORITY_HEADER, authorityWitness } from "../src/security/authority";
 import { env } from "cloudflare:workers";
 import {
   createExecutionContext,
@@ -1619,6 +1620,7 @@ describe("private authenticated initial migration transport", () => {
         method,
         headers: {
           authorization: `Bearer ${token}`,
+          [AUTHORITY_HEADER]: authorityWitness(env),
           "content-type": "application/json",
           "cf-connecting-ip": random(),
         },
@@ -1629,7 +1631,7 @@ describe("private authenticated initial migration transport", () => {
       method = "GET",
       value?: unknown,
       token = active.bearer,
-    ) => core.forward(1, registry(), request(suffix, method, value, token));
+    ) => core.forward(2, registry(), request(suffix, method, value, token));
     const body = {
       origin,
       account_id: s.actor.account,
@@ -1760,10 +1762,10 @@ describe("private authenticated initial migration transport", () => {
       request.headers.set("x-lunport-private-ingress", "1");
       expect((await centralFetch(request, bindings())).status).toBe(404);
       expect(
-        (await t.core.forward(2, registry(), t.request(suffix))).status,
+        (await t.core.forward(3, registry(), t.request(suffix))).status,
       ).toBe(503);
       expect(
-        (await t.core.forward(1, random(), t.request(suffix))).status,
+        (await t.core.forward(2, random(), t.request(suffix))).status,
       ).toBe(503);
     }
     const publicMode = new CentralSyncBackend(createExecutionContext(), {
@@ -1771,13 +1773,15 @@ describe("private authenticated initial migration transport", () => {
       CENTRAL_PRIVATE_CORE: "0",
     });
     expect(
-      (await publicMode.forward(1, registry(), t.request("migration/freeze")))
+      (await publicMode.forward(2, registry(), t.request("migration/freeze")))
         .status,
     ).toBe(503);
     const info = await t.core.forward(
-      1,
+      2,
       registry(),
-      new Request(origin + "/v2/info"),
+      new Request(origin + "/v2/info", {
+        headers: { [AUTHORITY_HEADER]: authorityWitness(env) },
+      }),
     );
     expect(
       ((await info.json()) as any).features.some((name: string) =>
@@ -1866,7 +1870,7 @@ describe("private authenticated initial migration transport", () => {
       "POST",
       "x".repeat(4 * 1024 * 1024),
     );
-    expect((await t.core.forward(1, registry(), oversized)).status).toBe(413);
+    expect((await t.core.forward(2, registry(), oversized)).status).toBe(413);
     expect((await t.call("migration/freeze")).status).toBe(404);
   });
 });

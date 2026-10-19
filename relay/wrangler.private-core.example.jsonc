@@ -1,4 +1,5 @@
-// Unrouted example only. Read security/README.md and audit existing namespaces before deployment.
+// Fresh-install unrouted example only; never replace an existing migration history with this file.
+// Existing namespaces require the explicit authority transfer/import procedure in security/README.md.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "compatibility_date": "2026-08-20",
@@ -10,7 +11,9 @@
   },
   "name": "sshelter-relay",
   "main": "src/index.ts",
-  "build": { "command": "node scripts/build-passkey-page.mjs" },
+  "build": {
+    "command": "node scripts/build-passkey-page.mjs"
+  },
   "durable_objects": {
     "bindings": [
       {
@@ -23,13 +26,19 @@
       },
       {
         "name": "ACCOUNT",
-        "class_name": "AccountStore"
+        "class_name": "AccountStore",
+        "script_name": "lunport-sync-security"
       },
       {
         "name": "VAULT",
-        "class_name": "VaultStore"
+        "class_name": "VaultStore",
+        "script_name": "lunport-sync-security"
       },
-      { "name": "PASSKEY", "class_name": "PasskeyStore" },
+      {
+        "name": "PASSKEY",
+        "class_name": "PasskeyStore",
+        "script_name": "lunport-sync-security"
+      },
       {
         "name": "LEGACY_RETIREMENT",
         "class_name": "LegacyRetirementStore",
@@ -41,12 +50,7 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ChainStore", "IpLimiter"]
-    },
-    {
-      "tag": "v2-central",
-      "new_sqlite_classes": ["AccountStore", "VaultStore"]
-    },
-    { "tag": "v4-passkey-auth", "new_sqlite_classes": ["PasskeyStore"] }
+    }
   ],
   "vars": {
     "CENTRAL_PRIVATE_CORE": "1",

@@ -68,6 +68,14 @@ test("rejects security namespace or installation ownership changes", () => {
         "wrong-target";
     },
     (c, s, b) => {
+      c.durable_objects.bindings.find((v) => v.name === "ACCOUNT").script_name =
+        undefined;
+    },
+    (c, s, b) => {
+      s.durable_objects.bindings.find((v) => v.name === "PASSKEY").script_name =
+        c.name;
+    },
+    (c, s, b) => {
       b.vars.SECURITY_INSTALLATION = "f".repeat(32);
     },
     (c, s, b) => {

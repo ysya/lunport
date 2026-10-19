@@ -50,11 +50,21 @@ export function validateSecurityDeployment(core, security, bootstrap) {
     problems.push(
       "security: require only the checked named core RPC; bootstrap has no core service",
     );
-  for (const name of ["LEGACY_RETIREMENT", "SECURITY_FLOOR", "IP_LIMIT"]) {
+  for (const name of [
+    "LEGACY_RETIREMENT",
+    "SECURITY_FLOOR",
+    "IP_LIMIT",
+    "ACCOUNT",
+    "VAULT",
+    "PASSKEY",
+  ]) {
     const expected = {
       LEGACY_RETIREMENT: "LegacyRetirementStore",
       SECURITY_FLOOR: "SecurityFloorStore",
       IP_LIMIT: "IpLimiter",
+      ACCOUNT: "AccountStore",
+      VAULT: "VaultStore",
+      PASSKEY: "PasskeyStore",
     }[name];
     for (const config of [security, bootstrap]) {
       const item = binding(config, name);
@@ -70,13 +80,25 @@ export function validateSecurityDeployment(core, security, bootstrap) {
   )
     problems.push("core: registry binding must point to the security owner");
   if (
-    binding(security, "VAULT")?.script_name !== core.name ||
-    binding(security, "VAULT")?.class_name !== "VaultStore" ||
-    binding(bootstrap, "VAULT")
+    binding(security, "CHAIN")?.script_name !== core.name ||
+    binding(bootstrap, "CHAIN")
   )
     problems.push(
-      "security: target commit witness must point to the core; bootstrap cannot assume it exists",
+      "security: legacy chain access must target the core; bootstrap waits for that owner",
     );
+  for (const [name, cls] of [
+    ["ACCOUNT", "AccountStore"],
+    ["VAULT", "VaultStore"],
+    ["PASSKEY", "PasskeyStore"],
+  ]) {
+    if (
+      binding(core, name)?.class_name !== cls ||
+      binding(core, name)?.script_name !== security.name
+    )
+      problems.push(
+        `core: ${name} must reference the independent security authority`,
+      );
+  }
   const origin = security.vars?.CENTRAL_ORIGIN;
   try {
     if (new URL(origin).origin !== origin || !origin.startsWith("https://"))
@@ -97,9 +119,21 @@ export function validateSecurityDeployment(core, security, bootstrap) {
   const migrations = (config) => JSON.stringify(config.migrations);
   if (migrations(security) !== migrations(bootstrap))
     problems.push("security: bootstrap/final migration history differs");
-  for (const name of ["CHAIN", "ACCOUNT", "VAULT", "PASSKEY", "IP_LIMIT"])
+  for (const name of ["CHAIN", "IP_LIMIT"])
     if (binding(core, name)?.script_name || !binding(core, name))
       problems.push(`core: preserve local ${name} ownership`);
+  for (const config of [core, security, bootstrap]) {
+    const names = config.durable_objects?.bindings?.map((v) => v.name) ?? [];
+    if (new Set(names).size !== names.length)
+      problems.push("duplicate durable binding names");
+  }
+  const created = (cfg) =>
+    cfg.migrations?.flatMap((m) => m.new_sqlite_classes ?? []) ?? [];
+  for (const cls of ["AccountStore", "VaultStore", "PasskeyStore"])
+    if (created(core).includes(cls) || !created(security).includes(cls))
+      problems.push(
+        `${cls}: fresh central namespaces must be created only in the independent security owner`,
+      );
   return problems;
 }
 export function checkExamples(root = resolve(here, "..")) {

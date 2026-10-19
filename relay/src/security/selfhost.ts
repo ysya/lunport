@@ -5,6 +5,9 @@ export {
   SecurityFloorStore,
   LegacyRetirementStore,
   IpLimiter,
+  AccountStore,
+  VaultStore,
+  PasskeyStore,
 } from "./gateway";
 export type SelfhostEnv = GatewayEnv & { SELFHOST_PROXY_KEY: string };
 const HEX64 = /^[0-9a-f]{64}$/;
