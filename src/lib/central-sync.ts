@@ -28,8 +28,11 @@ export type CentralStatus = {
 };
 export const centralStatusKey = ["central-account-status"] as const;
 export const centralStatus = () => tauriInvoke<CentralStatus>("central_status");
-export const centralSignIn = (service: string) =>
-  tauriInvoke<CentralStatus>("central_sign_in", { service });
+export const centralSignIn = (service: string, method?: "passkey" | "oidc") =>
+  tauriInvoke<CentralStatus>("central_sign_in", {
+    service,
+    ...(method ? { method } : {}),
+  });
 export const centralCancelSignIn = () =>
   tauriInvoke<void>("central_cancel_sign_in");
 export const centralRefresh = () =>

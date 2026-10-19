@@ -10,3 +10,5 @@
 !selfhost/central/*.capnp.in
 !selfhost/central/*.ts
 !selfhost/central/*.sh
+!scripts/
+!scripts/build-passkey-page.mjs

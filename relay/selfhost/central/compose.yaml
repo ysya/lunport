@@ -19,6 +19,7 @@ x-runtime: &runtime
     SELFHOST_PROXY_KEY: ${SELFHOST_PROXY_KEY:?set a random 64-character proxy capability}
     CENTRAL_ORIGIN: https://${RELAY_DOMAIN:?set the public relay domain}
     CENTRAL_ENABLED: ${CENTRAL_ENABLED:-0}
+    PASSKEY_ENABLED: ${PASSKEY_ENABLED:-1}
     OIDC_ISSUER: ${OIDC_ISSUER:-}
     OIDC_JWKS_URL: ${OIDC_JWKS_URL:-}
     OIDC_API_AUDIENCE: ${OIDC_API_AUDIENCE:-lunport-sync}

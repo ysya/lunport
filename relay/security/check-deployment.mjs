@@ -97,7 +97,7 @@ export function validateSecurityDeployment(core, security, bootstrap) {
   const migrations = (config) => JSON.stringify(config.migrations);
   if (migrations(security) !== migrations(bootstrap))
     problems.push("security: bootstrap/final migration history differs");
-  for (const name of ["CHAIN", "ACCOUNT", "VAULT", "IP_LIMIT"])
+  for (const name of ["CHAIN", "ACCOUNT", "VAULT", "PASSKEY", "IP_LIMIT"])
     if (binding(core, name)?.script_name || !binding(core, name))
       problems.push(`core: preserve local ${name} ownership`);
   return problems;

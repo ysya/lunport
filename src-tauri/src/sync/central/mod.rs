@@ -33,6 +33,8 @@ mod migration_materials;
 mod migration_files;
 pub mod library_page;
 pub mod oidc;
+pub mod authentication;
+pub mod passkey;
 pub mod pairing;
 pub mod payload;
 mod projection;

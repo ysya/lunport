@@ -418,7 +418,7 @@ pub(super) fn start_at(
     budget.charge()?;
     count(env);
     let info = api.info()?;
-    if info.oidc != before.control.profile.oidc
+    if info.login_for(&before.control.profile.origin,Some(&before.control.profile))? != before.control.profile.login
         || !info
             .features
             .iter()

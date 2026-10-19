@@ -135,6 +135,7 @@ pub struct LoginTokens {
 /// It cannot be cloned, serialized, cached in the webview or obtained from token refresh.
 pub struct FreshLoginTokens(LoginTokens);
 impl FreshLoginTokens {
+    pub(super) fn from_passkey(proof: super::passkey::Fresh) -> Self { Self(proof.into_tokens()) }
     #[cfg(test)]
     pub(super) fn synthetic_for_test(tokens: LoginTokens) -> Self {
         Self(tokens)

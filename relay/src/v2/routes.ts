@@ -8,19 +8,32 @@ import {
 } from "./auth";
 import { exactObject, hex, safeNumber } from "./protocol";
 import type { Result } from "./store";
+import { configuration as passkeyConfiguration } from "./passkeys/protocol";
+import {
+  PREFIX as PASSKEY_PREFIX,
+  route as passkeyRoute,
+} from "./passkeys/routes";
+import { validOrigin } from "./protocol";
 
-function configured(env: Env): IdentityConfig | null {
-  const config = {
-    origin: env.CENTRAL_ORIGIN ?? "",
+function configured(env: Env, checkedIngress: boolean) {
+  const origin = env.CENTRAL_ORIGIN ?? "";
+  if (env.CENTRAL_ENABLED !== "1" || !validOrigin(origin)) return null;
+  const identity = {
+    origin,
     issuer: env.OIDC_ISSUER ?? "",
     jwks: env.OIDC_JWKS_URL ?? "",
     audience: env.OIDC_API_AUDIENCE ?? "",
     clientId: env.OIDC_NATIVE_CLIENT_ID ?? "",
     scope: env.OIDC_SYNC_SCOPE ?? "lunport:sync",
   };
-  return env.CENTRAL_ENABLED === "1" && validIdentityConfig(config)
-    ? config
-    : null;
+  const oidc = validIdentityConfig(identity) ? identity : null;
+  const passkey =
+    checkedIngress &&
+    env.CENTRAL_PRIVATE_CORE === "1" &&
+    env.PASSKEY_ENABLED !== "0"
+      ? passkeyConfiguration(origin)
+      : null;
+  return oidc || passkey ? { origin, oidc, passkey } : null;
 }
 function response(result: Result | Response): Response {
   if (result instanceof Response) return result;
@@ -116,7 +129,12 @@ async function route(
       /^\/v2\/vaults\/([0-9a-f]{64})\/(records|wrap|metadata|rekey|rekey\/begin|rekey\/stage|rekey\/commit|rekey\/abort|rekey\/reconcile|rekey\/source|rekey\/wraps|receipt|migration|migration\/freeze|migration\/begin|migration\/stage|migration\/commit|migration\/retire)$/.exec(
         url.pathname,
       );
-  if (!paths.has(url.pathname) && !match) return response({ status: 404 });
+  if (
+    !paths.has(url.pathname) &&
+    !match &&
+    !url.pathname.startsWith(PASSKEY_PREFIX)
+  )
+    return response({ status: 404 });
   const migration = !!match && match[2].startsWith("migration");
   if (migration && (!checkedIngress || env.CENTRAL_PRIVATE_CORE !== "1"))
     return response({ status: 404 });
@@ -125,9 +143,14 @@ async function route(
     "ip:" + (request.headers.get("cf-connecting-ip") ?? "unknown"),
   );
   if (!(await limiter.allow("request"))) return response({ status: 429 });
-  const config = configured(env);
+  const config = configured(env, checkedIngress);
   if (!config) return response({ status: 503 });
   if (url.origin !== config.origin) return response({ status: 421 });
+  if (url.pathname.startsWith(PASSKEY_PREFIX))
+    return config.passkey
+      ? passkeyRoute(request, env, config.origin)
+      : response({ status: 404 });
+
   if (url.pathname === "/v2/info")
     return request.method === "GET"
       ? response({
@@ -145,12 +168,18 @@ async function route(
               "recovery-history",
               "recovery-source-proofs",
             ],
-            oidc: {
-              issuer: config.issuer,
-              client_id: config.clientId,
-              audience: config.audience,
-              scopes: ["openid", config.scope, "offline_access"],
-            },
+            default_auth: config.passkey ? "passkey" : "oidc",
+            passkey: config.passkey
+              ? { origin: config.origin, rp_id: config.passkey.rpId }
+              : null,
+            oidc: config.oidc
+              ? {
+                  issuer: config.oidc.issuer,
+                  client_id: config.oidc.clientId,
+                  audience: config.oidc.audience,
+                  scopes: ["openid", config.oidc.scope, "offline_access"],
+                }
+              : null,
           },
         })
       : response({ status: 405 });
@@ -169,7 +198,13 @@ async function route(
       request.method !== (url.pathname === "/v2/device-access" ? "GET" : "POST")
     )
       return response({ status: 405 });
-    const identity = await verifyIdentity(token, config);
+    const identity = token.startsWith("lpka1.")
+      ? config.passkey
+        ? await env.PASSKEY.getByName("passkeys").identity(config.origin, token)
+        : null
+      : config.oidc
+        ? await verifyIdentity(token, config.oidc)
+        : null;
     if (!identity) return response({ status: 401 });
     const account = env.ACCOUNT.getByName(identity.locator);
     if (url.pathname === "/v2/device-access")

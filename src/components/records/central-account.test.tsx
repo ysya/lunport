@@ -63,3 +63,17 @@ it("shows pairing as an explicit short-lived reveal on the waiting device", () =
   expect(buttonTag(html, "Show pairing code")).not.toContain(DISABLED);
   expect(html).not.toContain('aria-label="Device pairing code"');
 });
+
+it("offers optional external sign-in only before an account is pinned", () => {
+  const first = render({
+    configured: false,
+    has_session: false,
+    phase: "signed_out",
+  });
+  expect(text(first)).toContain("Sign in with Passkey");
+  expect(text(first)).toContain("Use external sign-in provider");
+  expect(text(render())).not.toContain("Use external sign-in provider");
+  expect(
+    text(render({ configured: false, login_pending: true })),
+  ).not.toContain("Use external sign-in provider");
+});

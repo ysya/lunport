@@ -49,7 +49,69 @@ impl Reply {
 pub struct Info {
     pub protocol: u32,
     pub features: Vec<String>,
-    pub oidc: OidcConfig,
+    pub oidc: Option<OidcConfig>,
+    #[serde(default)]pub passkey: Option<super::passkey::Config>,
+    #[serde(default)]pub default_auth: Option<String>,
+}
+impl Info {
+    pub fn login_for(
+        &self,
+        service: &str,
+        pinned: Option<&super::client_state::ProfileData>,
+    ) -> Result<super::authentication::Config, AppError> {
+        self.login_for_method(service, pinned, None)
+    }
+    pub fn login_for_method(
+        &self,
+        service: &str,
+        pinned: Option<&super::client_state::ProfileData>,
+        requested: Option<super::authentication::Method>,
+    ) -> Result<super::authentication::Config, AppError> {
+        use super::authentication::{Config, Method};
+        let oidc = self.oidc.as_ref().map(|c| Config::Oidc(c.clone()));
+        let passkey = self.passkey.as_ref().map(|c| Config::Passkey(c.clone()));
+        if let Some(Config::Passkey(c)) = &passkey {
+            if c.origin != service {
+                return Err(invalid());
+            }
+        }
+        for config in [oidc.as_ref(), passkey.as_ref()].into_iter().flatten() {
+            config.validate()?;
+        }
+        if let Some(pinned) = pinned {
+            if requested.is_some_and(|method| method != pinned.login.method()) {
+                return Err(AppError::Other(
+                    "This account uses a different sign-in method. Sign in with its saved method."
+                        .into(),
+                ));
+            }
+            return if Some(&pinned.login) == oidc.as_ref()
+                || Some(&pinned.login) == passkey.as_ref()
+            {
+                Ok(pinned.login.clone())
+            } else {
+                Err(AppError::Other("The account service's sign-in settings changed. Verify the service before signing in again.".into()))
+            };
+        }
+        let method = match requested {
+            Some(method) => method,
+            None => match self.default_auth.as_deref() {
+                Some("passkey") => Method::Passkey,
+                Some("oidc") | None => Method::Oidc,
+                _ => return Err(invalid()),
+            },
+        };
+        match method {
+            Method::Passkey => passkey.ok_or_else(|| {
+                AppError::Other("This account service does not offer Passkey sign-in.".into())
+            }),
+            Method::Oidc => oidc.ok_or_else(|| {
+                AppError::Other(
+                    "This account service has no external sign-in provider configured.".into(),
+                )
+            }),
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,7 +353,7 @@ impl Api {
                 "This service does not support the required account protocol.".into(),
             ));
         }
-        info.oidc.validate()?;
+        drop(info.login_for(&self.origin,None)?);
         Ok(info)
     }
     pub fn register(

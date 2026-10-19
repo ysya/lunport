@@ -9,6 +9,7 @@ use super::{
     wire::invalid,
     workspace::Workspace,
 };
+use super::authentication::Config as LoginConfig;
 use crate::{
     error::AppError,
     sync::{env::SyncEnv, record_runtime},
@@ -124,14 +125,16 @@ pub(crate) fn session_epoch_matches(control: &State, epoch: u64, state: DeviceSt
             && (state == DeviceState::Active
                 || matches!(control.phase, Phase::AwaitingApproval | Phase::SignedOut))
 }
-pub fn checked_config(env: &SyncEnv, service: &str, config: &OidcConfig) -> Result<(), AppError> {
+pub fn checked_config<C: Clone+Into<LoginConfig>>(env: &SyncEnv, service: &str, config: &C) -> Result<(), AppError> {
+    let config: LoginConfig=config.clone().into();
     config.validate()?;
+    if matches!(&config,LoginConfig::Passkey(c) if c.origin!=service){return Err(invalid());}
     let (records, _) = record_runtime::snapshot(env)?;
     if records
         .local
         .central
         .as_ref()
-        .is_some_and(|w| w.control.profile.origin != service || w.control.profile.oidc != *config)
+        .is_some_and(|w| w.control.profile.origin != service || w.control.profile.login != config)
     {
         return Err(AppError::Other("The account service's sign-in settings changed. Verify the service before signing in again.".into()));
     }
@@ -234,17 +237,17 @@ pub(super) fn load_pairing(
 }
 /// A verified ID token supplies issuer/sub; service metadata never supplies a replacement subject.
 /// Caller owns the user-initiated flow; mutations merge only the central section into latest Records.
-pub fn establish(
+pub fn establish<C: Into<LoginConfig>>(
     env: &SyncEnv,
     service: &str,
-    config: OidcConfig,
+    config: C,
     tokens: LoginTokens,
     operation: Option<&str>,
 ) -> Result<Status, AppError> {
     establish_tokens(
         env,
         service,
-        config,
+        config.into(),
         Arc::new(tokens),
         Instant::now(),
         operation,
@@ -254,7 +257,7 @@ pub fn establish(
 fn establish_tokens(
     env: &SyncEnv,
     service: &str,
-    config: OidcConfig,
+    config: LoginConfig,
     tokens: Arc<LoginTokens>,
     started: Instant,
     operation: Option<&str>,
@@ -274,7 +277,7 @@ fn establish_tokens(
 fn establish_locked(
     env: &SyncEnv,
     service: &str,
-    config: OidcConfig,
+    config: LoginConfig,
     tokens: Arc<LoginTokens>,
     started: Instant,
     operation: Option<&str>,
@@ -297,7 +300,7 @@ fn establish_locked(
     }
     current_login(env, operation)?;
     checked_config(env, service, &config)?;
-    if tokens.issuer != config.issuer {
+    if tokens.issuer != config.issuer() {
         return Err(invalid());
     }
     let profile = Profile::new(service, &tokens.issuer, &tokens.subject)?;
@@ -306,7 +309,7 @@ fn establish_locked(
         issuer: profile.issuer.clone(),
         subject: profile.subject.clone(),
         locator: profile.locator.clone(),
-        oidc: config.clone(),
+        login: config.clone(),
     };
     let (snapshot, _) = record_runtime::snapshot(env)?;
     let previous = snapshot.local.central.clone();
@@ -631,7 +634,7 @@ fn resume_with_budget(
             let tokens = credentials::renew(
                 &background,
                 &profile,
-                &workspace.control.profile.oidc,
+                &workspace.control.profile.login,
                 false,
                 &http,
             )?;
@@ -641,7 +644,7 @@ fn resume_with_budget(
     establish_locked(
         &safe_env,
         &profile.origin,
-        workspace.control.profile.oidc.clone(),
+        workspace.control.profile.login.clone(),
         tokens,
         started,
         None,
@@ -686,7 +689,7 @@ pub fn refresh(env: &SyncEnv) -> Result<Status, AppError> {
     establish_tokens(
         env,
         &session.profile.origin,
-        session.profile.oidc.clone(),
+        session.profile.login.clone(),
         Arc::clone(&session.tokens),
         session.tokens_started,
         None,
@@ -732,6 +735,12 @@ pub fn sign_out(env: &SyncEnv) -> Result<Status, AppError> {
     if let Some(device) = session.as_ref().and_then(|s| s.device.as_ref()) {
         if let Ok(api) = Api::new(&profile.origin) {
             let _ = api.control(device, Control::Logout, &serde_json::json!({}));
+        }
+    }
+    if let (Some(session), super::authentication::Config::Passkey(config)) = (session.as_ref(), &before.control.profile.login) {
+        if let Ok(http) = super::oidc::BoundedHttp::new() {
+            let token = session.tokens.refresh.as_deref().map(|s| s.as_str()).unwrap_or(session.tokens.access.as_str());
+            let _ = super::passkey::logout(config, token, &http);
         }
     }
     drop(lifecycle);
@@ -972,12 +981,12 @@ mod tests {
                 issuer: profile.issuer.clone(),
                 subject: profile.subject.clone(),
                 locator: profile.locator.clone(),
-                oidc: OidcConfig {
+                login: crate::sync::central::authentication::Config::Oidc(OidcConfig {
                     issuer: profile.issuer.clone(),
                     client_id: "native".into(),
                     scopes: vec![],
                     audience: Some("api".into()),
-                },
+                }),
             },
             anchor.account_id.clone(),
             identity.device(),

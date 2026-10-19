@@ -4,6 +4,8 @@ WORKDIR /relay
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY src ./src
+COPY scripts ./scripts
+RUN node scripts/build-passkey-page.mjs
 COPY selfhost/central ./selfhost/central
 RUN npx esbuild src/index.ts --bundle --format=esm --platform=browser --external:cloudflare:* --outfile=dist/core/index.js \
     && npx esbuild src/security/selfhost.ts --bundle --format=esm --platform=browser --external:cloudflare:* --outfile=dist/security/index.js \

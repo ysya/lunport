@@ -103,11 +103,11 @@ Besides the per-chain endpoints (`PUT`/`DELETE /v1/chains/{id}`, `GET`/`POST /v1
 
 The independent ingress and private-core examples are described in [security/README.md](security/README.md). They remain unrouted and require reviewed provisioning and infrastructure verification.
 
-The account service remains an opt-in preview with generic OIDC settings. It does not yet advertise a complete legacy migration capability.
+The account service remains an opt-in preview with built-in Passkey sign-in by default and optional generic OIDC settings. It does not yet advertise a complete legacy migration capability.
 
 The central redesign keeps both deployment paths: managed Workers with Durable Objects, and Docker Compose running the same application on workerd with persistent SQLite storage. Account/device authorization and synchronization progress add server responsibilities; content encryption and decryption stay in the clients. Self hosting does not require a second application backend.
 
-The existing Compose file serves the legacy relay. A separate [central Compose preview](selfhost/central/README.md) now packages the gateway, private application module, independent security storage, explicit provisioning and health checks. Full central self hosting also requires OIDC and complete upgrade/backup/restore validation. Backups must preserve account/device revocations, security floors and permanent retirement alongside ciphertext. Declaring the new Durable Object classes alone does not complete this setup. Keep central mode disabled until these checks pass on the chosen deployment.
+The existing Compose file serves the legacy relay. A separate [central Compose preview](selfhost/central/README.md) now packages the gateway, private application module, independent security storage, explicit provisioning and health checks. Full central self hosting requires a stable HTTPS hostname and complete upgrade/backup/restore validation; OIDC is optional. Passkey login stays separate from device approval and E2EE Vault recovery. Backups must preserve account/device revocations, security floors and permanent retirement alongside ciphertext. Declaring the new Durable Object classes alone does not complete this setup. Keep central mode disabled until these checks pass on the chosen deployment.
 
 `LegacyRetirementStore` is a separate Durable Object namespace with no expiry, alarm, delete or reset RPC. Every legacy data endpoint checks it and fails closed if it is unavailable. The internal migration freeze preserves its source snapshot and prevents idle cleanup, deletion and recreation; retrying must use the same operation and target. Ordinary `/freeze` continues to support sync-code rotation.
 

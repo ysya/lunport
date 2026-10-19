@@ -621,7 +621,7 @@ mod tests {
         let status = controller::establish(
             &env,
             &f.server.url(),
-            previous.profile.oidc.clone(),
+            previous.profile.login.clone(),
             tokens,
             None,
         )

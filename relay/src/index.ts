@@ -4,6 +4,7 @@ export { IpLimiter } from "./ip-limit";
 import { validScope, sameMigration, type LegacyMigrationScope, type LegacySnapshot, type LegacyGate } from "./legacy-retirement";
 export { LegacyRetirementStore } from "./legacy-retirement";
 export { AccountStore } from "./v2/account";
+export { PasskeyStore } from "./v2/passkeys/store";
 export { VaultStore } from "./v2/store";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { REGISTRY_WITNESS } from "./security/floor";

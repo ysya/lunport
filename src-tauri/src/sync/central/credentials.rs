@@ -5,6 +5,7 @@ use super::{
     oidc::{self, LoginTokens, OidcConfig},
     wire::{canonical, hex, invalid, origin},
 };
+use super::authentication::Config as LoginConfig;
 use crate::{error::AppError, sync::env::Keychain};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -349,15 +350,16 @@ impl Drop for RefreshEntry {
         self.refresh.zeroize();
     }
 }
-pub fn save_refresh(
+pub fn save_refresh<C: Clone+Into<LoginConfig>>(
     keychain: &dyn Keychain,
     profile: &Profile,
-    config: &OidcConfig,
+    config: &C,
     tokens: &LoginTokens,
 ) -> Result<(), AppError> {
+    let config: LoginConfig=config.clone().into();
     if tokens.issuer != profile.issuer
         || tokens.subject != profile.subject
-        || config.issuer != profile.issuer
+        || config.issuer() != profile.issuer
     {
         return Err(invalid());
     }
@@ -372,20 +374,21 @@ pub fn save_refresh(
     store_refresh(
         keychain,
         profile,
-        config,
+        &config,
         &tokens.nonce,
         secret,
         RefreshState::Ready,
     )
 }
-fn store_refresh(
+fn store_refresh<C: Clone+Into<LoginConfig>>(
     keychain: &dyn Keychain,
     profile: &Profile,
-    config: &OidcConfig,
+    config: &C,
     nonce: &str,
     refresh: &str,
     state: RefreshState,
 ) -> Result<(), AppError> {
+    let config: LoginConfig=config.clone().into();
     #[derive(Serialize)]
     struct Stored<'a> {
         version: u32,
@@ -399,7 +402,7 @@ fn store_refresh(
         serde_json::to_string(&Stored {
             version: 2,
             locator: &profile.locator,
-            client_id: &config.client_id,
+            client_id: config.client_id(),
             nonce,
             refresh,
             state,
@@ -418,14 +421,15 @@ fn store_refresh(
     Ok(())
 }
 /// Caller serializes refresh/sign-in/logout with the owning SyncRuntime lifecycle lock.
-pub fn renew(
+pub fn renew<C: Clone+Into<LoginConfig>>(
     keychain: &dyn Keychain,
     profile: &Profile,
-    config: &OidcConfig,
+    config: &C,
     interactive: bool,
     http: &impl openidconnect::SyncHttpClient,
 ) -> Result<LoginTokens, AppError> {
-    if profile.issuer != config.issuer {
+    let config: LoginConfig=config.clone().into();
+    if profile.issuer != config.issuer() {
         return Err(invalid());
     }
     let slot = profile.slot("refresh");
@@ -447,7 +451,7 @@ pub fn renew(
         (stored.version, stored.state),
         (1, None) | (2, Some(RefreshState::Ready | RefreshState::InFlight))
     ) || stored.locator != profile.locator
-        || stored.client_id != config.client_id
+        || stored.client_id != config.client_id()
         || stored.refresh.is_empty()
         || stored.refresh.len() > 16384
         || stored.nonce.len() > 4096
@@ -461,15 +465,12 @@ pub fn renew(
     // rotated-token save leaves InFlight, so a restart cannot replay the potentially consumed token.
     let background = Background(keychain);
     let writer: &dyn Keychain = if interactive { keychain } else { &background };
-    store_refresh(writer, profile, config, &stored.nonce, &stored.refresh, RefreshState::InFlight)
+    store_refresh(writer, profile, &config, &stored.nonce, &stored.refresh, RefreshState::InFlight)
         .map_err(|_| AppError::Other("Sign in again: credential renewal could not be prepared securely. Local data is retained.".into()))?;
-    let tokens = oidc::refresh(
-        config,
-        &profile.subject,
-        &stored.nonce,
-        &stored.refresh,
-        http,
-    )
+    let tokens = match &config {
+        LoginConfig::Oidc(c)=>oidc::refresh(c,&profile.subject,&stored.nonce,&stored.refresh,http),
+        LoginConfig::Passkey(c)=>super::passkey::refresh(c,&profile.subject,&stored.nonce,&stored.refresh,http),
+    }
     .map_err(|_| {
         AppError::Other(
             "Sign in again: account credential renewal did not complete. Local data is retained."
@@ -478,7 +479,7 @@ pub fn renew(
     })?;
     // Persist and read back the new family before exposing access. Any uncertain attempt retains
     // InFlight; it cannot be replayed by a later worker or after a crash.
-    save_refresh(writer, profile, config, &tokens).map_err(|_| AppError::Other(
+    save_refresh(writer, profile, &config, &tokens).map_err(|_| AppError::Other(
         "Sign in again: the renewed account credential could not be saved securely. Local data is retained.".into()))?;
     Ok(tokens)
 }

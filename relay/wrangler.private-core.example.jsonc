@@ -6,7 +6,7 @@
   "preview_urls": false,
   "routes": [],
   "observability": {
-    "enabled": true
+    "enabled": true,
   },
   "name": "sshelter-relay",
   "main": "src/index.ts",
@@ -14,51 +14,48 @@
     "bindings": [
       {
         "name": "CHAIN",
-        "class_name": "ChainStore"
+        "class_name": "ChainStore",
       },
       {
         "name": "IP_LIMIT",
-        "class_name": "IpLimiter"
+        "class_name": "IpLimiter",
       },
       {
         "name": "ACCOUNT",
-        "class_name": "AccountStore"
+        "class_name": "AccountStore",
       },
       {
         "name": "VAULT",
-        "class_name": "VaultStore"
+        "class_name": "VaultStore",
       },
+      { "name": "PASSKEY", "class_name": "PasskeyStore" },
       {
         "name": "LEGACY_RETIREMENT",
         "class_name": "LegacyRetirementStore",
-        "script_name": "lunport-sync-security"
-      }
-    ]
+        "script_name": "lunport-sync-security",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": [
-        "ChainStore",
-        "IpLimiter"
-      ]
+      "new_sqlite_classes": ["ChainStore", "IpLimiter"],
     },
     {
       "tag": "v2-central",
-      "new_sqlite_classes": [
-        "AccountStore",
-        "VaultStore"
-      ]
-    }
+      "new_sqlite_classes": ["AccountStore", "VaultStore"],
+    },
+    { "tag": "v4-passkey-auth", "new_sqlite_classes": ["PasskeyStore"] },
   ],
   "vars": {
     "CENTRAL_PRIVATE_CORE": "1",
     "CENTRAL_ENABLED": "0",
     "CENTRAL_ORIGIN": "https://sync.example.invalid",
-    "OIDC_ISSUER": "https://identity.example.invalid",
-    "OIDC_JWKS_URL": "https://identity.example.invalid/.well-known/jwks.json",
+    "PASSKEY_ENABLED": "1",
+    "OIDC_ISSUER": "",
+    "OIDC_JWKS_URL": "",
     "OIDC_API_AUDIENCE": "lunport-sync",
     "OIDC_NATIVE_CLIENT_ID": "lunport-native",
-    "OIDC_SYNC_SCOPE": "lunport:sync"
-  }
+    "OIDC_SYNC_SCOPE": "lunport:sync",
+  },
 }

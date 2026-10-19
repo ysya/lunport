@@ -184,11 +184,30 @@ export function CentralAccountPanel({
             onClick={() =>
               void run(async () => {
                 setSigningIn(true);
-                await updateAfter(centralSignIn(service.trim()));
+                await updateAfter(
+                  centralSignIn(
+                    service.trim(),
+                    status.configured ? undefined : "passkey",
+                  ),
+                );
               })
             }
           >
-            {status.has_session ? "Sign in again" : "Sign in with browser"}
+            {status.configured ? "Sign in again" : "Sign in with Passkey"}
+          </Button>
+        )}
+        {!status.configured && !login && (
+          <Button
+            variant="outline"
+            disabled={blocked || !service.trim()}
+            onClick={() =>
+              void run(async () => {
+                setSigningIn(true);
+                await updateAfter(centralSignIn(service.trim(), "oidc"));
+              })
+            }
+          >
+            Use external sign-in provider
           </Button>
         )}
         {login && (

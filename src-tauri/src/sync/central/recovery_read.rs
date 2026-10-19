@@ -527,12 +527,12 @@ pub(crate) mod tests {
                 issuer: profile.issuer.clone(),
                 subject: profile.subject,
                 locator: profile.locator,
-                oidc: OidcConfig {
+                login: crate::sync::central::authentication::Config::Oidc(OidcConfig {
                     issuer: profile.issuer,
                     client_id: "native".into(),
                     scopes: vec![],
                     audience: Some("api".into()),
-                },
+                }),
             },
             kit.anchor().account_id.clone(),
             pending.request().device.clone(),

@@ -24,6 +24,7 @@ const relay :Workerd.Worker = (
     (className = "LegacyRetirementStore", uniqueKey = "sshelter-relay-LegacyRetirementStore", enableSql = true),
     (className = "AccountStore", uniqueKey = "sshelter-relay-AccountStore", enableSql = true),
     (className = "VaultStore", uniqueKey = "sshelter-relay-VaultStore", enableSql = true),
+    (className = "PasskeyStore", uniqueKey = "sshelter-relay-PasskeyStore", enableSql = true),
   ],
   durableObjectStorage = (localDisk = "storage"),
   bindings = [
@@ -32,5 +33,6 @@ const relay :Workerd.Worker = (
     (name = "LEGACY_RETIREMENT", durableObjectNamespace = "LegacyRetirementStore"),
     (name = "ACCOUNT", durableObjectNamespace = "AccountStore"),
     (name = "VAULT", durableObjectNamespace = "VaultStore"),
+    (name = "PASSKEY", durableObjectNamespace = "PasskeyStore"),
   ],
 );

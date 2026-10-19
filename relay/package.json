@@ -8,9 +8,14 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json && tsc --noEmit -p passkey-browser.tsconfig.json",
     "check:security-config": "node security/check-deployment.mjs",
-    "test:security-config": "node --test security/check-deployment.test.mjs"
+    "test:security-config": "node --test security/check-deployment.test.mjs",
+    "build:passkey-page": "node scripts/build-passkey-page.mjs",
+    "pretypecheck": "npm run build:passkey-page",
+    "pretest": "npm run build:passkey-page",
+    "predev": "npm run build:passkey-page",
+    "predeploy": "npm run build:passkey-page"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.2.8",
@@ -24,6 +29,8 @@
   },
   "dependencies": {
     "@noble/curves": "2.4.0",
+    "@simplewebauthn/browser": "14.0.0",
+    "@simplewebauthn/server": "14.0.3",
     "jose": "6.2.12"
   }
 }

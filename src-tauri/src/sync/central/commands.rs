@@ -18,7 +18,7 @@ pub async fn central_status(app: AppHandle) -> Result<Status, AppError> {
         .map_err(engine::join_error)?
 }
 #[tauri::command]
-pub async fn central_sign_in(app: AppHandle, service: String) -> Result<Status, AppError> {
+pub async fn central_sign_in(app: AppHandle, service: String, method: Option<super::authentication::Method>) -> Result<Status, AppError> {
     controller::require_enabled()?;
     let operation = crypto::random_id(16)?;
     {
@@ -35,11 +35,14 @@ pub async fn central_sign_in(app: AppHandle, service: String) -> Result<Status, 
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let info = Api::new(&service)?.info()?;
-            engine::with_env(&app, |env| {
-                controller::checked_config(env, &service, &info.oidc)
+            let config=engine::with_env(&app,|env|{
+                let (state,_)=crate::sync::record_runtime::snapshot(env)?;
+                let config=info.login_for_method(&service,state.local.central.as_ref().map(|w|&w.control.profile),method)?;
+                controller::checked_config(env,&service,&config)?;
+                Ok::<_,AppError>(config)
             })??;
             let http = BoundedHttp::new()?;
-            let (login, url) = BrowserLogin::begin(info.oidc.clone(), &http)?;
+            let (login, url) = BrowserLogin::begin(config.clone(), &http)?;
             {
                 let state = app.state::<AppState>();
                 let mut pending = state.sync.central_login.lock().unwrap();
@@ -53,7 +56,7 @@ pub async fn central_sign_in(app: AppHandle, service: String) -> Result<Status, 
             })?;
             let tokens = login.finish(&http)?;
             engine::with_env(&app, |env| {
-                controller::establish(env, &service, info.oidc, tokens, Some(&operation))
+                controller::establish(env, &service, config, tokens, Some(&operation))
             })?
         })();
         let current = {
@@ -229,7 +232,7 @@ pub async fn central_revoke_account_device(
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
             let http = BoundedHttp::new()?;
-            let (login, url) = BrowserLogin::begin_fresh(prepared.profile.oidc.clone(), &http)?;
+            let (login, url) = BrowserLogin::begin_fresh_for(prepared.profile.login.clone(), &prepared.profile.locator, &http)?;
             {
                 let state = app.state::<AppState>();
                 let mut pending = state.sync.central_login.lock().unwrap();

@@ -358,7 +358,7 @@ mod tests {
                     .insert(read.request().device.id.clone())
                     .then_some(())
                     .unwrap(),
-                3 => source.control.profile.oidc.client_id = "other-client".into(),
+                3 => if let crate::sync::central::authentication::Config::Oidc(c)=&mut source.control.profile.login {c.client_id="other-client".into();},
                 4 => source.control.auth_epoch = read.auth_epoch() + 1,
                 _ => source.replica.as_mut().unwrap().checkpoint.history_hash = "f".repeat(64),
             }

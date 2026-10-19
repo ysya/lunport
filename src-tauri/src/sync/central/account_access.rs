@@ -207,7 +207,7 @@ pub fn complete_revoke(
             "Account authentication was cancelled or replaced.".into(),
         ));
     }
-    super::credentials::save_refresh(env.keychain, &profile, &prepared.profile.oidc, tokens)?;
+    super::credentials::save_refresh(env.keychain, &profile, &prepared.profile.login, tokens)?;
     let public = before
         .control
         .remember_denials([prepared.selection.device.as_str()])?;

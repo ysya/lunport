@@ -18,7 +18,7 @@ writeFileSync(
   `RELAY_DOMAIN=${host}
 SECURITY_INSTALLATION=${installation}
 SELFHOST_PROXY_KEY=${proxyKey}
-CENTRAL_ENABLED=0
+CENTRAL_ENABLED=1
 SECURITY_IMAGE=${process.env.SELFHOST_TEST_SECURITY_IMAGE ?? "lunport-central-security:local"}
 CORE_IMAGE=${process.env.SELFHOST_TEST_CORE_IMAGE ?? "lunport-central-core:local"}
 `,
@@ -41,7 +41,8 @@ function docker(args, success = true) {
       RELAY_DOMAIN: host,
       SECURITY_INSTALLATION: installation,
       SELFHOST_PROXY_KEY: proxyKey,
-      CENTRAL_ENABLED: "0",
+      CENTRAL_ENABLED: "1",
+      PASSKEY_ENABLED: "1",
       OIDC_ISSUER: "",
       OIDC_JWKS_URL: "",
       OIDC_API_AUDIENCE: "lunport-sync",
@@ -258,6 +259,35 @@ http://:8080 {
   }
   assert.equal(response?.status, 200);
   assert.ok(!(await response.text()).includes(proxyKey));
+  const info = request("/v2/info");
+  assert.equal(info.status, 200);
+  assert.equal(JSON.parse(info.body).default_auth, "passkey");
+  assert.equal(JSON.parse(info.body).oidc, null);
+  const authorize = request("/v2/auth/passkey/authorize", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      code_challenge: randomBytes(32).toString("base64url"),
+      redirect_uri: "http://127.0.0.1:38173/passkey/callback",
+      state: randomBytes(32).toString("hex"),
+    }),
+  });
+  assert.equal(authorize.status, 201);
+  const authUrl = new URL(JSON.parse(authorize.body).url);
+  assert.equal(request(authUrl.pathname + authUrl.search).status, 200);
+  assert.equal(request("/v2/auth/passkey/script").status, 200);
+  if (
+    process.env.SELFHOST_TEST_BROWSER_MODULE &&
+    process.env.SELFHOST_TEST_BROWSER_EXECUTABLE
+  ) {
+    const { checkPasskeyBrowser } = await import("./passkey-browser-test.mjs");
+    await checkPasskeyBrowser({
+      address,
+      origin: `https://${host}`,
+      playwrightPath: process.env.SELFHOST_TEST_BROWSER_MODULE,
+      executablePath: process.env.SELFHOST_TEST_BROWSER_EXECUTABLE,
+    });
+  }
   const chain = randomBytes(32).toString("hex"),
     token = randomBytes(32).toString("hex");
   assert.equal(

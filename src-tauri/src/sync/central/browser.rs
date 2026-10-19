@@ -1,5 +1,5 @@
 //! Bound loopback OAuth callback. No custom HTTP parser and no credentials in the webview.
-use super::oidc::{FreshLoginTokens, LoginAttempt, LoginTokens, OidcConfig};
+use super::{authentication::Config as LoginConfig, oidc::{FreshLoginTokens, LoginAttempt as OidcAttempt, LoginTokens, OidcConfig}};
 use crate::error::AppError;
 use http_body_util::Full;
 use hyper::{body::Bytes, service::service_fn, Request, Response, StatusCode};
@@ -16,6 +16,12 @@ use tokio::{
     task::JoinSet,
 };
 const LOGIN_TTL: Duration = Duration::from_secs(600);
+enum LoginAttempt { Oidc(OidcAttempt), Passkey(super::passkey::Attempt) }
+impl LoginAttempt {
+    fn validate_callback(&self,value:&str)->Result<String,AppError>{match self{Self::Oidc(a)=>a.validate_callback(value),Self::Passkey(a)=>a.validate_callback(value)}}
+    fn finish(self,value:&str,http:&impl openidconnect::SyncHttpClient)->Result<LoginTokens,AppError>{match self{Self::Oidc(a)=>a.finish(value,http),Self::Passkey(a)=>a.finish(value,http)}}
+    fn finish_fresh(self,value:&str,http:&impl openidconnect::SyncHttpClient)->Result<FreshLoginTokens,AppError>{match self{Self::Oidc(a)=>a.finish_fresh(value,http),Self::Passkey(a)=>a.finish_fresh(value,http)}}
+}
 fn error(message: &str) -> AppError {
     AppError::Other(message.into())
 }
@@ -41,21 +47,23 @@ pub struct BrowserLogin {
 }
 impl BrowserLogin {
     pub fn begin(
-        config: OidcConfig,
+        config: impl Into<LoginConfig>,
         http: &impl openidconnect::SyncHttpClient,
     ) -> Result<(Self, String), AppError> {
-        Self::begin_mode(config, http, false)
+        Self::begin_mode(config.into(), http, false, None)
     }
     pub fn begin_fresh(
-        config: OidcConfig,
+        config: impl Into<LoginConfig>,
         http: &impl openidconnect::SyncHttpClient,
     ) -> Result<(Self, String), AppError> {
-        Self::begin_mode(config, http, true)
+        Self::begin_mode(config.into(), http, true, None)
     }
+    pub fn begin_fresh_for(config:LoginConfig,expected:&str,http:&impl openidconnect::SyncHttpClient)->Result<(Self,String),AppError>{Self::begin_mode(config,http,true,Some(expected.into()))}
     fn begin_mode(
-        config: OidcConfig,
+        config: LoginConfig,
         http: &impl openidconnect::SyncHttpClient,
         fresh: bool,
+        expected: Option<String>,
     ) -> Result<(Self, String), AppError> {
         // Bind before discovery/authorization URL construction; never race a separately chosen port.
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -71,10 +79,12 @@ impl BrowserLogin {
             .local_addr()
             .map_err(|_| error("Invalid local callback."))?
             .port();
-        let (attempt, url) = if fresh {
-            LoginAttempt::begin_fresh(config, port, http)?
-        } else {
-            LoginAttempt::begin(config, port, http)?
+        let (attempt,url)=match config {
+            LoginConfig::Oidc(config)=>{
+                let (a,url)=if fresh{OidcAttempt::begin_fresh(config,port,http)?}else{OidcAttempt::begin(config,port,http)?};
+                (LoginAttempt::Oidc(a),url)
+            },
+            LoginConfig::Passkey(config)=>{let(a,url)=super::passkey::Attempt::begin(config,port,expected,fresh,http)?;(LoginAttempt::Passkey(a),url)},
         };
         let attempt = Arc::new(Mutex::new(Some(attempt)));
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -192,7 +202,7 @@ fn callback(
     sender: &mpsc::SyncSender<(LoginAttempt, String)>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if request.method() != hyper::Method::GET
-        || request.uri().path() != "/oauth/callback"
+        || !matches!(request.uri().path(),"/oauth/callback"|"/passkey/callback")
         || request.uri().scheme().is_some()
         || request.uri().authority().is_some()
         || request

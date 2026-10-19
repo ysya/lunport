@@ -1,3 +1,4 @@
 node_modules/
 .wrangler/
 dist/
+src/v2/passkeys/browser.generated.ts

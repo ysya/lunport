@@ -19,21 +19,18 @@ pub struct ProfileData {
     pub issuer: String,
     pub subject: String,
     pub locator: String,
-    pub oidc: OidcConfig,
+    #[serde(alias="oidc",deserialize_with="super::authentication::deserialize_legacy")]
+    pub login: super::authentication::Config,
 }
 impl ProfileData {
     pub fn profile(&self) -> Result<Profile, AppError> {
         let profile = Profile::new(&self.origin, &self.issuer, &self.subject)?;
-        self.oidc.validate()?;
-        if profile.locator != self.locator
-            || self.oidc.issuer != self.issuer
-            || self
-                .oidc
-                .audience
-                .as_ref()
-                .is_none_or(|aud| aud == &self.oidc.client_id)
-        {
-            return Err(invalid());
+        self.login.validate()?;
+        if profile.locator != self.locator || self.login.issuer()!=self.issuer { return Err(invalid()); }
+        match &self.login {
+            super::authentication::Config::Oidc(c) if c.audience.as_ref().is_none_or(|a|a==&c.client_id)=>return Err(invalid()),
+            super::authentication::Config::Passkey(c) if c.origin!=self.origin || !hex(&self.subject,64)=>return Err(invalid()),
+            _=>{},
         }
         Ok(profile)
     }
@@ -444,12 +441,12 @@ mod tests {
                 issuer: profile.issuer.clone(),
                 subject: profile.subject,
                 locator: profile.locator,
-                oidc: OidcConfig {
+                login: crate::sync::central::authentication::Config::Oidc(OidcConfig {
                     issuer: profile.issuer,
                     client_id: "native".into(),
                     scopes: vec!["lunport:sync".into()],
                     audience: Some("api".into()),
-                },
+                }),
             },
             "a".repeat(64),
             Device {
