@@ -69,6 +69,20 @@ impl Evidence {
             history_hash: b.target_history_hash.clone(),
         })
     }
+    pub(super) fn control_minimum(
+        &self,
+        owner: &Workspace,
+    ) -> Result<super::captured::ControlMinimum, AppError> {
+        drop(self.checkpoint(owner)?);
+        let chain = self.proof.verify(
+            owner.control.anchor.as_ref().ok_or_else(invalid)?,
+            owner.control.highwater.as_ref(),
+        )?;
+        Ok(super::captured::ControlMinimum {
+            highwater: chain.highwater(),
+            auth_epoch: number(&self.status.manifest.body.authorization_epoch, false)?,
+        })
+    }
     pub(super) fn witness(&self, owner: &Workspace) -> Result<Witness, AppError> {
         Ok(Witness {
             checkpoint: self.checkpoint(owner)?,

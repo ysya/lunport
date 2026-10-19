@@ -258,20 +258,43 @@ pub fn admit(
     let incoming: Incoming<'_> = serde_json::from_slice(plaintext).map_err(|_| invalid())?;
     let identity = Identity {
         kind: header.kind.clone(),
-        id: incoming.id,
-        scope: incoming.scope,
+        id: incoming.id.clone(),
+        scope: incoming.scope.clone(),
     };
     if incoming.schema != 1 || identity.opaque(keys)? != header.record_id {
         return Err(invalid());
     }
+    logical(header.kind.as_str(), header.deleted, incoming)
+}
+/// Native signed-history admission only. This does not authenticate an original record envelope.
+pub(in crate::sync::central) fn admit_snapshot(
+    kind: &str,
+    deleted: bool,
+    plaintext: &[u8],
+) -> Result<Admitted, AppError> {
+    if plaintext.len() > MAX_PLAINTEXT_BYTES {
+        return Err(invalid());
+    }
+    let incoming: Incoming<'_> = serde_json::from_slice(plaintext).map_err(|_| invalid())?;
+    if incoming.schema != 1 {
+        return Err(invalid());
+    }
+    logical(kind, deleted, incoming)
+}
+fn logical(kind: &str, deleted: bool, incoming: Incoming<'_>) -> Result<Admitted, AppError> {
+    let identity = Identity {
+        kind: kind.into(),
+        id: incoming.id,
+        scope: incoming.scope,
+    };
     let raw = incoming.payload.get();
-    let data = if header.deleted {
+    let data = if deleted {
         if raw != "null" {
             return Err(invalid());
         }
         Data::Deleted
     } else {
-        match header.kind.as_str() {
+        match kind {
             "host" => Data::Host(serde_json::from_str(raw).map_err(|_| invalid())?),
             "group" => Data::Group(serde_json::from_str(raw).map_err(|_| invalid())?),
             "keyslot" => Data::Keyslot(serde_json::from_str(raw).map_err(|_| invalid())?),

@@ -1,22 +1,119 @@
 //! Enclosed packages contribute inactive history, never activation or consent.
+use super::super::{credentials::DeviceIdentity, migration_library::History, rekey::Checkpoint};
 use super::*;
+use std::collections::{BTreeMap, BTreeSet};
 mod plan;
 struct Retained {
-    package: Package,
+    package: Box<Package>,
     plan: Option<plan::Evidence>,
+    history: Option<History>,
+    floors: Vec<Checkpoint>,
+    controls: Vec<super::super::adoption::captured::ControlMinimum>,
 }
 const MAX_DEPTH: usize = 8;
 const MAX_PACKAGES: usize = 256;
+type IdentityReader<'a> = dyn Fn(&Workspace) -> Result<DeviceIdentity, AppError> + 'a;
+// Keep large decoded states and parser return slots out of every recursive visitor frame.
+#[inline(never)]
+fn owned_package(bytes: &[u8]) -> Result<Box<Package>, AppError> {
+    Ok(Box::new(Package::decode_local(bytes)?))
+}
+#[inline(never)]
+fn plan_source(bytes: &[u8]) -> Result<String, AppError> {
+    Ok(super::super::migration_history::Plan::captured_binding(bytes)?.2)
+}
+#[inline(never)]
+fn captured_group(
+    source: &Receipt,
+    frames: &[(Receipt, Zeroizing<Vec<u8>>)],
+    nested: &Package,
+    identities: Option<&IdentityReader<'_>>,
+) -> Result<snapshot::Group, AppError> {
+    let owner = nested.state.local.central.as_ref().ok_or_else(invalid)?;
+    let identity = identities.ok_or_else(invalid)?(owner)?;
+    let (_, plain) = frames
+        .iter()
+        .find(|(r, _)| r == source)
+        .ok_or_else(invalid)?;
+    let mut prepared = owned_package(plain)?;
+    prepared.inherited = nested.inherited.clone();
+    let verified = super::super::adoption::captured::read_prepared_group(
+        source, frames, &identity, *prepared,
+    )?;
+    snapshot::Group::captured(source, verified)
+}
+#[inline(never)]
+fn captured_package(
+    receipt: &Receipt,
+    plain: &[u8],
+    frames: &[(Receipt, Zeroizing<Vec<u8>>)],
+) -> Result<(Box<Package>, Option<plan::Evidence>, Vec<Receipt>), AppError> {
+    let read = |expected: &Receipt| -> Result<Zeroizing<Vec<u8>>, AppError> {
+        let (_, plain) = frames
+            .iter()
+            .find(|(r, _)| r == expected)
+            .ok_or_else(invalid)?;
+        Ok(Zeroizing::new(plain.to_vec()))
+    };
+    let locate = |hash: &str| {
+        frames
+            .iter()
+            .find(|(r, _)| r.ciphertext_hash == hash)
+            .map(|(r, _)| r.clone())
+            .ok_or_else(invalid)
+    };
+    if super::super::capture_journal::Journal::frame(plain) {
+        let (package, ancestors) =
+            super::super::capture_journal::Journal::captured_complete(plain, receipt, &read)?;
+        Ok((Box::new(package), None, ancestors))
+    } else if Package::frame(plain) {
+        Ok((owned_package(plain)?, None, vec![]))
+    } else {
+        let (package, evidence, ancestors) =
+            if super::super::migration_journal::Journal::captured_frame(plain) {
+                plan::read_journal(receipt, plain, &read, locate)?
+            } else {
+                plan::read(receipt, plain, &read, locate)?
+            };
+        Ok((Box::new(package), Some(evidence), ancestors))
+    }
+}
+fn inherit_groups(
+    groups: &mut BTreeMap<String, snapshot::Group>,
+    package: &Package,
+) -> Result<(), AppError> {
+    for group in package.snapshot_groups()? {
+        let hash = group.key()?;
+        if let Some(old) = groups.get(&hash) {
+            if old != &group {
+                return Err(invalid());
+            }
+        } else {
+            if groups.len() >= MAX_PACKAGES {
+                return Err(invalid());
+            }
+            groups.insert(hash, group);
+        }
+    }
+    Ok(())
+}
 impl Package {
-    fn retained_packages(&self) -> Result<Vec<Retained>, AppError> {
+    fn retained_packages_inner(
+        &self,
+        identities: Option<&IdentityReader<'_>>,
+    ) -> Result<(Vec<Retained>, Vec<snapshot::Group>), AppError> {
         fn visit(
             parent: &Package,
             selected: &Package,
             depth: usize,
             bytes: &mut usize,
             result: &mut Vec<Retained>,
-        ) -> Result<(), AppError> {
+            groups: &mut BTreeMap<String, snapshot::Group>,
+            identities: Option<&IdentityReader<'_>>,
+        ) -> Result<BTreeSet<String>, AppError> {
+            let mut used = BTreeSet::new();
             parent.require_own_supported_files()?;
+            inherit_groups(groups, parent)?;
             let captured =
                 source_archive::captured::read_all(&parent.files.bytes, &parent.decryptors)?;
             if depth >= MAX_DEPTH && !captured.frames.is_empty() {
@@ -28,8 +125,76 @@ impl Package {
                     return Err(invalid());
                 }
             }
-            let mut referenced = std::collections::BTreeSet::new();
+            // A later signed capsule can attest the same older operation still present beside it.
+            // Read only immediate signed frames here; full graph coverage/budgets are still required.
+            for (receipt, plain) in &captured.frames {
+                if plain.starts_with(SNAPSHOT_MAGIC) {
+                    let package = owned_package(plain)?;
+                    require_owner(selected, &package, receipt)?;
+                    inherit_groups(groups, &package)?;
+                }
+            }
+            let mut covered = BTreeSet::new();
+            let mut adoption_sources = BTreeMap::new();
             for (_, plain) in &captured.frames {
+                if let Some(source) = super::super::adoption::captured::source(plain)? {
+                    if adoption_sources
+                        .insert(source.ciphertext_hash.clone(), source.clone())
+                        .is_some_and(|old| old != source)
+                    {
+                        return Err(invalid());
+                    }
+                }
+            }
+            for (_, source) in adoption_sources {
+                let hash = snapshot::captured_group_key(&source, &captured.frames)?;
+                let (_, plain) = captured
+                    .frames
+                    .iter()
+                    .find(|(r, _)| r == &source)
+                    .ok_or_else(invalid)?;
+                let mut nested = owned_package(plain)?;
+                require_owner(selected, &nested, &source)?;
+                // Visit children under the same enclosing graph budget before using their history.
+                let needed = visit(
+                    &nested,
+                    selected,
+                    depth + 1,
+                    bytes,
+                    result,
+                    groups,
+                    identities,
+                )?;
+                nested.inherited = needed
+                    .iter()
+                    .map(|key| groups.get(key).cloned().ok_or_else(invalid))
+                    .collect::<Result<_, _>>()?;
+                used.extend(needed);
+                let group = match groups.get(&hash) {
+                    Some(group) if group.source() == &source => group.clone(),
+                    Some(_) => return Err(invalid()),
+                    None => captured_group(&source, &captured.frames, &nested, identities)?,
+                };
+                group.require_frames(&captured.frames)?;
+                if result.len() >= MAX_PACKAGES {
+                    return Err(invalid());
+                }
+                result.push(Retained {
+                    package: nested,
+                    plan: None,
+                    history: Some(group.history()?),
+                    floors: group.floors().to_vec(),
+                    controls: group.controls().to_vec(),
+                });
+                covered.extend(group.admitted().iter().cloned());
+                used.insert(hash.clone());
+                groups.insert(hash, group);
+            }
+            let mut referenced = BTreeSet::new();
+            for (receipt, plain) in &captured.frames {
+                if covered.contains(&receipt.ciphertext_hash) {
+                    continue;
+                }
                 if super::super::capture_journal::Journal::frame(plain) {
                     for receipt in
                         super::super::capture_journal::Journal::captured_references(plain)?
@@ -42,22 +207,14 @@ impl Package {
                     {
                         referenced.insert(receipt.ciphertext_hash);
                     }
-                } else if !plain.starts_with(MAGIC) && !plain.starts_with(FROZEN_MAGIC) {
-                    let (_, _, source, _) =
-                        super::super::migration_history::Plan::captured_binding(plain)?;
-                    referenced.insert(source);
+                } else if !Package::frame(plain) {
+                    referenced.insert(plan_source(plain)?);
                 }
             }
-            let mut covered = std::collections::BTreeSet::new();
-            let read = |expected: &Receipt| -> Result<Zeroizing<Vec<u8>>, AppError> {
-                let (_, plain) = captured
-                    .frames
-                    .iter()
-                    .find(|(receipt, _)| receipt == expected)
-                    .ok_or_else(invalid)?;
-                Ok(Zeroizing::new(plain.to_vec()))
-            };
             for (receipt, plain) in &captured.frames {
+                if covered.contains(&receipt.ciphertext_hash) {
+                    continue;
+                }
                 if (super::super::capture_journal::Journal::frame(plain)
                     || super::super::migration_journal::Journal::captured_frame(plain))
                     && referenced.contains(&receipt.ciphertext_hash)
@@ -67,59 +224,34 @@ impl Package {
                 if result.len() >= MAX_PACKAGES {
                     return Err(invalid());
                 }
-                let (nested, evidence) = if super::super::capture_journal::Journal::frame(plain) {
-                    let (package, ancestors) =
-                        super::super::capture_journal::Journal::captured_complete(
-                            plain, receipt, &read,
-                        )?;
-                    covered.extend(ancestors.into_iter().map(|r| r.ciphertext_hash));
-                    (package, None)
-                } else if plain.starts_with(MAGIC) || plain.starts_with(FROZEN_MAGIC) {
-                    (Package::decode_local(plain)?, None)
-                } else if super::super::migration_journal::Journal::captured_frame(plain) {
-                    let (package, evidence, ancestors) =
-                        plan::read_journal(receipt, plain, &read, |hash| {
-                            captured
-                                .frames
-                                .iter()
-                                .find(|(r, _)| r.ciphertext_hash == hash)
-                                .map(|(r, _)| r.clone())
-                                .ok_or_else(invalid)
-                        })?;
-                    covered.extend(ancestors.into_iter().map(|r| r.ciphertext_hash));
-                    (package, Some(evidence))
-                } else {
-                    let (package, evidence, ancestors) =
-                        plan::read(receipt, plain, &read, |hash| {
-                            captured
-                                .frames
-                                .iter()
-                                .find(|(r, _)| r.ciphertext_hash == hash)
-                                .map(|(r, _)| r.clone())
-                                .ok_or_else(invalid)
-                        })?;
-                    covered.extend(ancestors.into_iter().map(|r| r.ciphertext_hash));
-                    (package, Some(evidence))
-                };
+                let (mut nested, evidence, ancestors) =
+                    captured_package(receipt, plain, &captured.frames)?;
+                covered.extend(ancestors.into_iter().map(|r| r.ciphertext_hash));
                 covered.insert(receipt.ciphertext_hash.clone());
-                let owner = nested.state.local.central.as_ref().ok_or_else(invalid)?;
-                receipt.matches_selected(owner)?;
-                let current = selected.state.local.central.as_ref().ok_or_else(invalid)?;
-                if current.control.anchor != owner.control.anchor
-                    || current.control.profile != owner.control.profile
-                    || current.control.device != owner.control.device
-                    || current.control.personal_vault != owner.control.personal_vault
-                {
-                    return Err(invalid());
-                }
-                selected.sources.require_retained_subset(&nested.sources)?;
-                visit(&nested, selected, depth + 1, bytes, result)?;
+                require_owner(selected, &nested, receipt)?;
+                let needed = visit(
+                    &nested,
+                    selected,
+                    depth + 1,
+                    bytes,
+                    result,
+                    groups,
+                    identities,
+                )?;
+                nested.inherited = needed
+                    .iter()
+                    .map(|key| groups.get(key).cloned().ok_or_else(invalid))
+                    .collect::<Result<_, _>>()?;
+                used.extend(needed);
                 if result.len() >= MAX_PACKAGES {
                     return Err(invalid());
                 }
                 result.push(Retained {
                     package: nested,
                     plan: evidence,
+                    history: None,
+                    floors: vec![],
+                    controls: vec![],
                 });
             }
             if captured
@@ -129,11 +261,217 @@ impl Package {
             {
                 return Err(invalid());
             }
-            Ok(())
+            Ok(used)
+        }
+        fn require_owner(
+            selected: &Package,
+            nested: &Package,
+            receipt: &Receipt,
+        ) -> Result<(), AppError> {
+            let owner = nested.state.local.central.as_ref().ok_or_else(invalid)?;
+            receipt.matches_selected(owner)?;
+            let current = selected.state.local.central.as_ref().ok_or_else(invalid)?;
+            if current.control.anchor != owner.control.anchor
+                || current.control.profile != owner.control.profile
+                || current.control.device != owner.control.device
+                || current.control.personal_vault != owner.control.personal_vault
+            {
+                return Err(invalid());
+            }
+            selected.sources.require_retained_subset(&nested.sources)
         }
         let mut result = vec![];
-        visit(self, self, 0, &mut 0, &mut result)?;
-        Ok(result)
+        let mut groups = BTreeMap::new();
+        let used = visit(self, self, 0, &mut 0, &mut result, &mut groups, identities)?;
+        if groups.keys().any(|key| !used.contains(key)) {
+            return Err(invalid());
+        }
+        Ok((result, groups.into_values().collect()))
+    }
+    fn retained_packages(&self) -> Result<Vec<Retained>, AppError> {
+        Ok(self.retained_packages_inner(None)?.0)
+    }
+    /// Use only currently available scoped identities once. No key is persisted by this operation.
+    pub(in crate::sync::central) fn capture_historical_snapshots(
+        &mut self,
+        signer: &DeviceIdentity,
+        identities: &IdentityReader<'_>,
+        keys: &VaultKeys,
+        references: &BTreeMap<String, KeyStorage>,
+    ) -> Result<(), AppError> {
+        let (_, groups) = self.retained_packages_inner(Some(identities))?;
+        if groups.is_empty() {
+            return Ok(());
+        }
+        let existing = self.snapshot_groups()?;
+        if self.snapshot.is_some()
+            && existing.len() == groups.len()
+            && existing
+                .iter()
+                .all(|old| groups.iter().any(|group| group == old))
+        {
+            // Re-entry preserves the exact signed bytes already pinned by the source reservation.
+            drop(self.materials(keys, references)?);
+            drop(self.structured_history(keys, references)?);
+            return Ok(());
+        }
+        let previous = self.snapshot.take();
+        let candidate = snapshot::Snapshot::create(self, signer, groups);
+        match candidate {
+            Err(error) => {
+                self.snapshot = previous;
+                Err(error)
+            }
+            Ok(snapshot) => {
+                self.snapshot = Some(snapshot);
+                let checked = (|| {
+                    drop(self.materials(keys, references)?);
+                    drop(self.structured_history(keys, references)?);
+                    Ok(())
+                })();
+                if checked.is_err() {
+                    self.snapshot = previous;
+                }
+                checked
+            }
+        }
+    }
+    fn historical_requirements(
+        &self,
+    ) -> Result<
+        (
+            Vec<Checkpoint>,
+            Vec<super::super::adoption::captured::ControlMinimum>,
+        ),
+        AppError,
+    > {
+        let mut floors = vec![];
+        let mut controls = vec![];
+        for retained in self.retained_packages()? {
+            floors.extend(retained.floors);
+            controls.extend(retained.controls);
+            let owner = retained
+                .package
+                .state
+                .local
+                .central
+                .as_ref()
+                .ok_or_else(invalid)?;
+            controls.push(super::super::adoption::captured::ControlMinimum {
+                highwater: owner.control.verified_chain()?.highwater(),
+                auth_epoch: owner.control.auth_epoch,
+            });
+        }
+        floors.sort_by(|a, b| {
+            (a.epoch, a.sequence, &a.history_hash).cmp(&(b.epoch, b.sequence, &b.history_hash))
+        });
+        floors.dedup();
+        controls.sort_by(|a, b| {
+            (a.highwater.revision, &a.highwater.head, a.auth_epoch).cmp(&(
+                b.highwater.revision,
+                &b.highwater.head,
+                b.auth_epoch,
+            ))
+        });
+        controls.dedup();
+        Ok((floors, controls))
+    }
+    pub(in crate::sync::central) fn has_historical_requirements(&self) -> Result<bool, AppError> {
+        let (floors, controls) = self.historical_requirements()?;
+        Ok(!floors.is_empty() || !controls.is_empty())
+    }
+    pub(in crate::sync::central) fn require_historical_owner(&self) -> Result<(), AppError> {
+        let owner = self.state.local.central.as_ref().ok_or_else(invalid)?;
+        let chain = owner.control.verified_chain()?;
+        for minimum in self.historical_requirements()?.1 {
+            if owner.control.auth_epoch < minimum.auth_epoch
+                || chain.head_at(minimum.highwater.revision as usize)
+                    != Some(minimum.highwater.head.as_str())
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+    pub(in crate::sync::central) fn historical_floors(&self) -> Result<Vec<Checkpoint>, AppError> {
+        Ok(self.historical_requirements()?.0)
+    }
+    /// Pick only the bridge collection span; every independent hash is checked after the read.
+    pub(in crate::sync::central) fn historical_capture_floors(
+        &self,
+        mut extra: Vec<Checkpoint>,
+    ) -> Result<Vec<Checkpoint>, AppError> {
+        extra.extend(self.historical_floors()?);
+        extra.sort_by(|a, b| {
+            (a.epoch, a.sequence, &a.history_hash).cmp(&(b.epoch, b.sequence, &b.history_hash))
+        });
+        extra.dedup();
+        if extra.len() <= 2 {
+            return Ok(extra);
+        }
+        Ok(vec![
+            extra.first().ok_or_else(invalid)?.clone(),
+            extra.last().ok_or_else(invalid)?.clone(),
+        ])
+    }
+    pub(in crate::sync::central) fn require_historical_read(
+        &self,
+        read: &super::super::active_read::VerifiedLibrary,
+        transcript: &super::super::active_flow::Transcript,
+    ) -> Result<(), AppError> {
+        let owner = self.state.local.central.as_ref().ok_or_else(invalid)?;
+        if read.previous_owner() != owner {
+            return Err(invalid());
+        }
+        let (floors, controls) = self.historical_requirements()?;
+        Self::require_historical_prefixes(read, transcript, &floors, &controls)
+    }
+    pub(in crate::sync::central) fn require_historical_prefixes(
+        read: &super::super::active_read::VerifiedLibrary,
+        transcript: &super::super::active_flow::Transcript,
+        floors: &[Checkpoint],
+        controls: &[super::super::adoption::captured::ControlMinimum],
+    ) -> Result<(), AppError> {
+        if floors.len() > 4096 || controls.len() > 8192 {
+            return Err(invalid());
+        }
+        let vault = read
+            .previous_owner()
+            .control
+            .personal_vault
+            .as_ref()
+            .ok_or_else(invalid)?;
+        for minimum in controls {
+            if read.auth_epoch() < minimum.auth_epoch
+                || read.chain().head_at(minimum.highwater.revision as usize)
+                    != Some(minimum.highwater.head.as_str())
+            {
+                return Err(invalid());
+            }
+        }
+        for floor in floors {
+            let bridges: Vec<_> = transcript
+                .bridges
+                .iter()
+                .filter(|b| b.epoch > floor.epoch)
+                .cloned()
+                .collect();
+            let translated = super::super::replacement_proof::extend_minimums(
+                read.chain(),
+                vault,
+                read.epochs(),
+                std::slice::from_ref(floor),
+                &bridges,
+                read.checkpoint().epoch,
+            )?;
+            if translated
+                .iter()
+                .any(|prefix| !read.verifies_prefix(prefix))
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
     }
     pub(super) fn require_supported_files(&self) -> Result<(), AppError> {
         drop(self.retained_packages()?);
@@ -164,6 +502,9 @@ impl Package {
             }
             materials =
                 materials.with_retained_materials(package.own_materials(keys, references)?)?;
+            if let Some(history) = retained.history {
+                materials = materials.with_retained_history(history)?;
+            }
         }
         drop(self.record_inputs()?);
         Ok(materials)
@@ -172,7 +513,7 @@ impl Package {
         &self,
         keys: &VaultKeys,
         references: &BTreeMap<String, KeyStorage>,
-    ) -> Result<super::super::migration_library::History, AppError> {
+    ) -> Result<History, AppError> {
         drop(self.record_inputs()?);
         let mut retained = vec![];
         for source in self.retained_packages()? {
@@ -181,6 +522,9 @@ impl Package {
                 plan.validate(&package, keys, references)?;
             }
             retained.push(package.own_structured_history(keys, references)?);
+            if let Some(history) = source.history {
+                retained.push(history);
+            }
         }
         self.own_structured_history(keys, references)?
             .with_retained(retained)
@@ -417,6 +761,11 @@ mod tests {
                 }
             }
             package = capture(&device, &package, &keys);
+            if ordinal+1==MAX_DEPTH {
+                // The exact supported depth succeeds on the default test-thread stack.
+                package.materials(&keys,&BTreeMap::new()).unwrap();
+                package.structured_history(&keys,&BTreeMap::new()).unwrap();
+            }
         }
         let original = package.encode_local().unwrap();
         assert!(package.materials(&keys, &BTreeMap::new()).is_err());

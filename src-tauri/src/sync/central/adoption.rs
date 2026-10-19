@@ -31,6 +31,7 @@ use zeroize::Zeroizing;
 pub(in crate::sync::central) mod legacy;
 mod merge;
 mod rebase;
+pub(in crate::sync::central) mod captured;
 const CAP: usize = 32768;
 const MAGIC: &[u8; 8] = b"LPADOPT1";
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,13 +313,17 @@ impl Loaded {
     fn remote(&self, env: &SyncEnv) -> Result<Transcript, AppError> {
         match self.body(env, self.state.remote.as_ref().ok_or_else(invalid)?)? {
             Body::Remote(r) => {
-                if let Some(legacy) = self.legacy_evidence(env)? {
+                let legacy = self.legacy_evidence(env)?;
+                if legacy.is_some() || self.package.has_historical_requirements()? {
                     let read = r.verify(
                         self.owner()?,
                         self.session.identity.as_ref().ok_or_else(invalid)?,
                         None,
                     )?;
-                    legacy.require_read(&read, &r)?;
+                    self.package.require_historical_read(&read, &r)?;
+                    if let Some(legacy) = legacy {
+                        legacy.require_read(&read, &r)?;
+                    }
                 }
                 Ok(r)
             }
@@ -368,6 +373,7 @@ impl Loaded {
                     self.session.identity.as_ref().ok_or_else(invalid)?,
                     Some(&floor),
                 )?;
+                self.package.require_historical_read(&read, &transcript)?;
                 prior.verify_rebase(&plan, &self.package, &read, &transcript, completed)?;
                 Ok((plan, read.checkpoint().clone()))
             }
@@ -617,14 +623,15 @@ fn read_remote(
             cache.reading
         }
         _ => {
-            let mut r = Reading::begin_bounded(env, OwnerPath::Current, selected, &check, budget)?;
+            let mut r =
+                Reading::begin_bounded(env, OwnerPath::Current, selected, &check, budget)?;
             r.capture(match loaded {
                 Some(l) => {
                     let mut floors = vec![l.state.floor.clone()];
                     if let Some(proof) = l.legacy_evidence(env)? {
                         floors.push(proof.witness(l.owner()?)?.checkpoint().clone());
                     }
-                    floors
+                    l.package.historical_capture_floors(floors)?
                 }
                 None => vec![],
             })?;
@@ -636,7 +643,13 @@ fn read_remote(
     }
     let result = reading.advance_bounded(env, &check, budget);
     match result {
-        Ok(true) => Ok(Some(reading.finish_captured()?)),
+        Ok(true) => {
+            let (read, transcript) = reading.finish_captured()?;
+            if let Some(loaded) = loaded {
+                loaded.package.require_historical_read(&read, &transcript)?;
+            }
+            Ok(Some((read, transcript)))
+        }
         Ok(false) => {
             scope.check(env)?;
             env.runtime.core.lock().unwrap().adoption_read =
@@ -788,17 +801,20 @@ fn run_once(
         } else {
             None
         };
-        reading.capture(
-            retired
-                .as_ref()
-                .map(|w| vec![w.checkpoint().clone()])
-                .unwrap_or_default(),
-        )?;
         let mut next = initialize(env, scope, &reading, retired.as_ref())?;
+        reading.capture(
+            next.package.historical_capture_floors(
+                retired
+                    .as_ref()
+                    .map(|w| vec![w.checkpoint().clone()])
+                    .unwrap_or_default(),
+            )?,
+        )?;
         if let Some(retired) = retired {
             next.append(env, Body::Legacy(retired.evidence()))?;
         }
-        env.runtime.core.lock().unwrap().adoption_read = Some(Box::new(ReadingCache { reading }));
+        env.runtime.core.lock().unwrap().adoption_read =
+            Some(Box::new(ReadingCache { reading }));
         loaded = Some(next);
     }
     continue_loaded(env, scope, action, budget, loaded.ok_or_else(invalid)?)
@@ -818,7 +834,9 @@ fn continue_loaded(
                 ..
             }) if source == *loaded.state.source.receipt() => evidence,
             Some(_) => return Err(invalid()),
-            None => legacy::fetch(env, scope, loaded.owner()?, &loaded.session, budget)?.evidence(),
+            None => {
+                legacy::fetch(env, scope, loaded.owner()?, &loaded.session, budget)?.evidence()
+            }
         };
         evidence.witness(loaded.owner()?)?.require_inventory(
             loaded.owner()?,
@@ -837,17 +855,19 @@ fn continue_loaded(
             }
             match candidate.body {
                 Body::Remote(r) => {
-                    r.verify(
+                    let verified = r.verify(
                         loaded.owner()?,
                         loaded.session.identity.as_ref().ok_or_else(invalid)?,
                         Some(&loaded.state.floor),
                     )?;
+                    loaded.package.require_historical_read(&verified, &r)?;
                     loaded.append(env, Body::Remote(r))?;
                 }
                 _ => return Err(invalid()),
             }
         } else {
-            let Some((remote, transcript)) = read_remote(env, scope, Some(&loaded), budget)? else {
+            let Some((remote, transcript)) = read_remote(env, scope, Some(&loaded), budget)?
+            else {
                 return result(
                     env,
                     scope,
@@ -967,13 +987,14 @@ fn continue_loaded(
                     if observed(&plan, &t)? != plan.rows.len() {
                         return Err(invalid());
                     }
-                    let _ = verified;
+                    loaded.package.require_historical_read(&verified, &t)?;
                     loaded.append(env, Body::Final(t))?;
                 }
                 _ => return Err(invalid()),
             }
         } else {
-            let Some((read, transcript)) = read_remote(env, scope, Some(&loaded), budget)? else {
+            let Some((read, transcript)) = read_remote(env, scope, Some(&loaded), budget)?
+            else {
                 return result(env, scope, progress(&loaded, total, "reading"), None);
             };
             let completed = observed(&plan, &transcript)?;
@@ -1026,11 +1047,12 @@ fn continue_loaded(
                 }
                 loaded.check(env)?;
                 scope.check(env)?;
-                let reply = Api::bounded(&loaded.owner()?.control.profile.origin, budget)?.push(
-                    loaded.session.device.as_ref().ok_or_else(invalid)?,
-                    &read.replica().vault,
-                    &batch,
-                )?;
+                let reply = Api::bounded(&loaded.owner()?.control.profile.origin, budget)?
+                    .push(
+                        loaded.session.device.as_ref().ok_or_else(invalid)?,
+                        &read.replica().vault,
+                        &batch,
+                    )?;
                 loaded.check(env)?;
                 super::round::require_success(env, &reply)?;
                 return result(env, scope, progress(&loaded, total, "staging"), None);
@@ -1053,6 +1075,9 @@ fn publish(
         loaded.session.identity.as_ref().ok_or_else(invalid)?,
         Some(&loaded.state.floor),
     )?;
+    loaded
+        .package
+        .require_historical_read(&final_read, &transcript)?;
     if observed(&plan, &transcript)? != plan.rows.len() {
         return Err(invalid());
     }
@@ -1167,6 +1192,9 @@ impl InitialTransaction for Prepared {
             self.loaded.session.identity.as_ref().ok_or_else(invalid)?,
             Some(&self.loaded.state.floor),
         )?;
+        self.loaded
+            .package
+            .require_historical_read(&read, &self.proof)?;
         if let Some(legacy) = self.loaded.legacy_evidence(env)? {
             legacy.require_read(&read, &self.proof)?;
         }

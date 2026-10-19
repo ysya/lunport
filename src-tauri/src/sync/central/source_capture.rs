@@ -218,9 +218,13 @@ fn capture_inner(
             references,
             private_inputs,
         )?;
-        let historical = super::replacement_archive::captured::read_all(&files.bytes, &observer)?;
+        let historical =
+            super::replacement_archive::captured::read_all(&files.bytes, &observer)?;
         drop(materials.with_retained_states(&historical.states, &files, &observer)?);
-        drop(super::source_archive::captured::read_all(&files.bytes, &observer)?);
+        drop(super::source_archive::captured::read_all(
+            &files.bytes,
+            &observer,
+        )?);
         let decryptors = observer.finish()?;
         Package::assemble(
             &before,
@@ -240,6 +244,25 @@ fn capture_inner(
                 return Err(crate::sync::runtime::superseded());
             }
         }
+    }
+    package.capture_historical_snapshots(
+        selected.identity.as_ref().ok_or_else(invalid)?,
+        &|historical| {
+            DeviceIdentity::load_selected(
+                &readonly,
+                &historical.control.profile.profile()?,
+                historical.identity_slot.as_deref(),
+                false,
+            )
+        },
+        keys,
+        references,
+    )?;
+    if !adoption {
+        package.require_historical_owner()?;
+    }
+    if !adoption && !package.historical_floors()?.is_empty() {
+        return Err(AppError::Other("Retained history proves an existing central Vault. Use existing-Vault reconciliation; original inputs are retained.".into()));
     }
     if adoption && !package.sources.chains().is_empty() {
         retired.ok_or_else(invalid)?.require_inventory(

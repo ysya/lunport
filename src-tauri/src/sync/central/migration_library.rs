@@ -26,6 +26,21 @@ pub(super) struct History {
     latest: BTreeMap<String, String>,
 }
 impl History {
+    pub(in crate::sync::central) fn empty_retained() -> Self {
+        Self {
+            rows: vec![],
+            bytes: 0,
+            seen: BTreeSet::new(),
+            latest: BTreeMap::new(),
+        }
+    }
+    pub(in crate::sync::central) fn push_retained(
+        &mut self,
+        identity: Identity,
+        data: Data,
+    ) -> Result<(), AppError> {
+        self.append(identity, data, false)
+    }
     /// Ancestor-only items remain inactive; selected library versions always come last.
     pub(in crate::sync::central) fn with_retained(
         self,

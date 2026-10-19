@@ -978,6 +978,53 @@ fn an_enrolled_peer_can_adopt_a_later_epoch_only_with_the_verified_original_sour
         };
         let read = transcript.verify(owner, peer_identity, None).unwrap();
         assert!(read.epoch_acceptance().is_some());
+        // Check every independently retained hash, including lower forks under a valid stronger floor.
+        Package::require_historical_prefixes(
+            &read,
+            &transcript,
+            std::slice::from_ref(&checkpoint),
+            &[],
+        )
+        .unwrap();
+        let earlier = &f.rows[0];
+        let fork = Checkpoint {
+            epoch: 1,
+            sequence: earlier.sequence.parse().unwrap(),
+            history_hash: "f".repeat(64),
+        };
+        assert!(Package::require_historical_prefixes(
+            &read,
+            &transcript,
+            &[checkpoint.clone(), fork],
+            &[]
+        )
+        .is_err());
+        let control = captured::ControlMinimum {
+            highwater: read.chain().highwater(),
+            auth_epoch: read.auth_epoch(),
+        };
+        Package::require_historical_prefixes(
+            &read,
+            &transcript,
+            &[],
+            std::slice::from_ref(&control),
+        )
+        .unwrap();
+        let mut wrong = control.clone();
+        wrong.highwater.head = "f".repeat(64);
+        assert!(Package::require_historical_prefixes(
+            &read,
+            &transcript,
+            &[],
+            &[control.clone(), wrong]
+        )
+        .is_err());
+        let mut later = control;
+        later.auth_epoch += 1;
+        assert!(
+            Package::require_historical_prefixes(&read, &transcript, &[], &[later]).is_err()
+        );
+
         if legacy {
             let evidence: legacy::Evidence = serde_json::from_value(
                 json!({"version":1,"proof":f.proof,"status":retired_status(&f)}),
@@ -999,7 +1046,8 @@ fn an_enrolled_peer_can_adopt_a_later_epoch_only_with_the_verified_original_sour
             assert!(forged.require_read(&read, &transcript).is_err());
         }
         let candidate =
-            Candidate::adopt(&source, &read, &"c".repeat(64), env.now(), &BTreeMap::new()).unwrap();
+            Candidate::adopt(&source, &read, &"c".repeat(64), env.now(), &BTreeMap::new())
+                .unwrap();
         assert!(!candidate.delta().required_material().is_empty());
         candidate
             .shadow()
@@ -1333,4 +1381,426 @@ fn incomplete_retirement_wrong_source_or_missing_original_target_blocks_before_l
             assert_eq!(record_runtime::snapshot(&env).unwrap().0, before);
         });
     }
+}
+
+fn captured_frames(device: &TestDevice) -> Vec<(Receipt, Zeroizing<Vec<u8>>)> {
+    let files = super::super::migration_files::Files::capture(&device.env(), None).unwrap();
+    super::super::source_archive::captured::read_all(&files.bytes, &device.keychain)
+        .unwrap()
+        .frames
+}
+#[test]
+fn captured_adoption_plan_is_verified_without_network_calls_consent_or_publication() {
+    let f = fixture(true);
+    let service = service(&f);
+    api::with_test_transport(&f.origin, &service.server.url(), || {
+        let _ = prepared(&f);
+        let saved = load(&f.peer.env()).unwrap().unwrap();
+        let source = saved.state.source.receipt();
+        let identity = saved.session.identity.as_ref().unwrap();
+        let frames = captured_frames(&f.peer);
+        let before = record_runtime::snapshot(&f.peer.env()).unwrap();
+        let files = archive_bytes(&f.peer.env());
+        let calls = service.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let captured = captured::read_group(source, &frames, identity).unwrap();
+        assert_eq!(captured.package.state, saved.package.state);
+        assert!(captured
+            .history
+            .into_rows()
+            .iter()
+            .any(|(_, data)| matches!(data, super::super::payload::Data::Key(_))));
+        assert!(captured
+            .floors
+            .iter()
+            .any(|floor| floor.sequence == f.rows.len() as u64));
+        assert_eq!(captured.admitted.len(), 3);
+        let mut duplicate: Vec<_> = frames
+            .iter()
+            .map(|(r, b)| (r.clone(), Zeroizing::new(b.to_vec())))
+            .collect();
+        let repeated = duplicate
+            .iter()
+            .find(|(_, b)| b.starts_with(b"LPADOPT1"))
+            .unwrap();
+        duplicate.push((repeated.0.clone(), Zeroizing::new(repeated.1.to_vec())));
+        assert!(captured::read_group(source, &duplicate, identity).is_err());
+        let mut gap: Vec<_> = frames
+            .iter()
+            .map(|(r, b)| (r.clone(), Zeroizing::new(b.to_vec())))
+            .collect();
+        let first = gap
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, b))| b.starts_with(b"LPADOPT1"))
+            .min_by_key(|(_, (r, _))| r.next_ordinal().unwrap())
+            .unwrap()
+            .0;
+        gap.remove(first);
+        assert!(captured::read_group(source, &gap, identity).is_err());
+
+        let wrong = controller::context(&f.first.env()).unwrap();
+        assert!(
+            captured::read_group(source, &frames, wrong.identity.as_ref().unwrap()).is_err()
+        );
+        assert_eq!(record_runtime::snapshot(&f.peer.env()).unwrap(), before);
+        assert_eq!(archive_bytes(&f.peer.env()), files);
+        assert_eq!(
+            service.calls.load(std::sync::atomic::Ordering::SeqCst),
+            calls
+        );
+        assert!(!saved.state.accepted);
+    });
+}
+#[test]
+fn captured_adoption_rebase_and_final_read_retain_all_versions_and_stronger_checkpoints() {
+    let f = fixture(true);
+    let service = service(&f);
+    api::with_test_transport(&f.origin, &service.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        let saved = load(&f.peer.env()).unwrap().unwrap();
+        let source = saved.state.source.receipt().clone();
+        let identity = Arc::clone(saved.session.identity.as_ref().unwrap());
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        assert_eq!(
+            migration_flow::advance(&f.peer.env(), &scope)
+                .unwrap()
+                .phase,
+            "staging"
+        );
+        catalog_write(
+            &f,
+            &mut service.rows.lock().unwrap(),
+            "Captured concurrent collection",
+        );
+        finish(&f, &scope);
+        let frames = captured_frames(&f.peer);
+        let before = record_runtime::snapshot(&f.peer.env()).unwrap();
+        let files = archive_bytes(&f.peer.env());
+        let calls = service.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let captured = captured::read_group(&source, &frames, &identity).unwrap();
+        assert!(captured
+            .floors
+            .iter()
+            .any(|floor| floor.sequence == service.rows.lock().unwrap().len() as u64));
+        let history = captured.history.into_rows();
+        assert!(history
+            .iter()
+            .any(|(_, data)| matches!(data, super::super::payload::Data::Key(_))));
+        assert!(history.iter().any(|(_,data)|matches!(data,super::super::payload::Data::Catalog(c) if c.collections.iter().any(|c|c.name=="Captured concurrent collection"))));
+        assert_eq!(record_runtime::snapshot(&f.peer.env()).unwrap(), before);
+        assert_eq!(archive_bytes(&f.peer.env()), files);
+        assert_eq!(
+            service.calls.load(std::sync::atomic::Ordering::SeqCst),
+            calls
+        );
+    });
+}
+
+fn historical_inputs(f: &Fixture, base: &Package) -> Package {
+    use super::super::{
+        inventory_keys::Capture, migration_files::Files, migration_materials::Materials,
+        migration_sources::Sources,
+    };
+    let env = f.peer.env();
+    let files = Files::capture(&env, None).unwrap();
+    let observer = Capture::new(&f.peer.keychain);
+    drop(
+        Materials::from_files(&base.state, &f.keys, &files, &observer, &BTreeMap::new())
+            .unwrap(),
+    );
+    drop(source_archive::captured::read_all(&files.bytes, &observer).unwrap());
+    Package::assemble(
+        &base.state,
+        env.state_path.file_name().unwrap().to_str().unwrap(),
+        files,
+        Sources::decode_local(&base.sources.encode_local().unwrap(), &base.state).unwrap(),
+        observer.finish().unwrap(),
+    )
+    .unwrap()
+}
+#[test]
+fn signed_historical_snapshot_restores_without_old_device_identity_and_binds_every_original_input(
+) {
+    use super::super::{
+        inventory_keys::Capture, migration_files::Files, migration_materials::Materials,
+        migration_sources::Sources,
+    };
+    let f = fixture(true);
+    let s = service(&f);
+    api::with_test_transport(&f.origin, &s.server.url(), || {
+        let (_scope, _ticket) = prepared(&f);
+        let loaded = load(&f.peer.env()).unwrap().unwrap();
+        let owner = loaded.owner().unwrap().clone();
+        let files = Files::capture(&f.peer.env(), None).unwrap();
+        let observer = Capture::new(&f.peer.keychain);
+        drop(
+            Materials::from_files(
+                &loaded.package.state,
+                &f.keys,
+                &files,
+                &observer,
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        drop(source_archive::captured::read_all(&files.bytes, &observer).unwrap());
+        let mut package = Package::assemble(
+            &loaded.package.state,
+            f.peer
+                .env()
+                .state_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            files,
+            Sources::decode_local(
+                &loaded.package.sources.encode_local().unwrap(),
+                &loaded.package.state,
+            )
+            .unwrap(),
+            observer.finish().unwrap(),
+        )
+        .unwrap();
+        assert!(package
+            .structured_history(&f.keys, &BTreeMap::new())
+            .is_err());
+        let identity = loaded.session.identity.as_ref().unwrap();
+        let calls = s.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let originals = archive_bytes(&f.peer.env());
+        package
+            .capture_historical_snapshots(
+                identity,
+                &|before| {
+                    DeviceIdentity::load_selected(
+                        &f.peer.keychain,
+                        &before.control.profile.profile()?,
+                        before.identity_slot.as_deref(),
+                        false,
+                    )
+                },
+                &f.keys,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let floors = package.historical_floors().unwrap();
+        assert!(floors.iter().any(|p| p.sequence == f.rows.len() as u64));
+        let bytes = package.encode_local().unwrap();
+        assert_eq!(&bytes[..8], b"LPSRCPK3");
+        let archived = {
+            let env = f.peer.env();
+            let life = env.runtime.lifecycle.lock().unwrap();
+            package.archive(&env, &life, &owner, 20).unwrap()
+        };
+        let older_operation = archived.receipt().operation().to_owned();
+        let mut outer = historical_inputs(&f, &package);
+        // The already signed nested capsule supplies this proof; no old identity lookup is needed.
+        outer
+            .capture_historical_snapshots(
+                identity,
+                &|_| Err(invalid()),
+                &f.keys,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let bytes = outer.encode_local().unwrap();
+        let archived = {
+            let env = f.peer.env();
+            let life = env.runtime.lifecycle.lock().unwrap();
+            outer.archive(&env, &life, &owner, 21).unwrap()
+        };
+        drop(outer);
+        f.peer
+            .keychain
+            .delete(
+                &owner
+                    .control
+                    .profile
+                    .profile()
+                    .unwrap()
+                    .slot(&format!("source-archive-{older_operation}")),
+            )
+            .unwrap();
+        let receipt_json = serde_json::to_string(archived.receipt()).unwrap();
+        assert!(!receipt_json.contains("PRIVATE KEY"));
+        // The older operation key also disappears; the new capsule contains its captured decryptor.
+        f.peer
+            .keychain
+            .delete(&owner.control.profile.profile().unwrap().slot(&format!(
+                "source-archive-{}",
+                loaded.state.source.receipt().operation()
+            )))
+            .unwrap();
+
+        let profile = owner.control.profile.profile().unwrap();
+        let role = identity.slot(&profile, "device").unwrap();
+        f.peer.keychain.delete(&role).unwrap();
+        assert!(DeviceIdentity::load_selected(
+            &f.peer.keychain,
+            &profile,
+            owner.identity_slot.as_deref(),
+            false
+        )
+        .is_err());
+        drop(package);
+        let mut restored =
+            Package::restore(&f.peer.env(), &profile, archived.receipt()).unwrap();
+        let later_keys = f.keys.next_epoch().unwrap();
+        let rows = restored
+            .structured_history(&later_keys, &BTreeMap::new())
+            .unwrap()
+            .into_rows();
+        assert!(rows
+            .iter()
+            .any(|(_, data)| matches!(data, super::super::payload::Data::Key(_))));
+        assert_eq!(restored.historical_floors().unwrap(), floors);
+        restored
+            .capture_historical_snapshots(
+                identity,
+                &|_| Err(invalid()),
+                &later_keys,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            restored.encode_local().unwrap().as_slice(),
+            bytes.as_slice()
+        );
+        assert_eq!(s.calls.load(std::sync::atomic::Ordering::SeqCst), calls);
+        let latest = archive_bytes(&f.peer.env());
+        for (path, bytes) in originals {
+            assert_eq!(latest.get(&path), Some(&bytes));
+        }
+        // Any change to the snapshot, selected public state or original retained bytes fails closed.
+        let mut changed = bytes.to_vec();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        assert!(Package::decode_local(&changed).is_err());
+        let mut changed = Package::decode_local(&bytes).unwrap();
+        let path = changed
+            .files
+            .bytes
+            .keys()
+            .find(|p| p.extension().is_some_and(|e| e == "lpsource"))
+            .unwrap()
+            .clone();
+        changed.files.bytes.get_mut(&path).unwrap()[0] ^= 1;
+        assert!(changed.encode_local().is_err());
+        assert!(!loaded.state.accepted);
+    });
+}
+
+#[test]
+fn signed_historical_floor_blocks_a_valid_older_read_before_merge_or_publication() {
+    use super::super::{
+        inventory_keys::Capture, migration_files::Files, migration_materials::Materials,
+        migration_sources::Sources,
+    };
+    let f = fixture(true);
+    let service = service(&f);
+    api::with_test_transport(&f.origin, &service.server.url(), || {
+        let (scope, ticket) = prepared(&f);
+        let old = load(&f.peer.env()).unwrap().unwrap();
+        let original = old.remote(&f.peer.env()).unwrap();
+        migration_flow::confirm(&f.peer.env(), &scope, &ticket).unwrap();
+        assert_eq!(
+            migration_flow::advance(&f.peer.env(), &scope)
+                .unwrap()
+                .phase,
+            "staging"
+        );
+        catalog_write(
+            &f,
+            &mut service.rows.lock().unwrap(),
+            "Newer independently captured history",
+        );
+        // Persist the legitimate final read, stopping before local publication creates an import.
+        // The selected application state is still older than the encrypted retained history.
+        let mut loaded = load(&f.peer.env()).unwrap().unwrap();
+        let (read, current) = read_remote(&f.peer.env(), &scope, Some(&loaded), &Budget::new())
+            .unwrap()
+            .unwrap();
+        let remote = original
+            .verify(
+                old.owner().unwrap(),
+                old.session.identity.as_ref().unwrap(),
+                None,
+            )
+            .unwrap();
+        let plan = loaded.plan(&f.peer.env(), &remote).unwrap();
+        assert_eq!(observed(&plan, &current).unwrap(), plan.rows.len());
+        let mut next = loaded.state.clone();
+        next.completed = plan.rows.len();
+        next.floor = read.checkpoint().clone();
+        loaded.update(&f.peer.env(), next).unwrap();
+        loaded.append(&f.peer.env(), Body::Final(current)).unwrap();
+        let current = loaded.final_read(&f.peer.env()).unwrap();
+        let env = f.peer.env();
+        let files = Files::capture(&env, None).unwrap();
+        let name = env
+            .state_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let observer = Capture::new(&f.peer.keychain);
+        drop(
+            Materials::from_files(
+                &old.package.state,
+                &f.keys,
+                &files,
+                &observer,
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        drop(source_archive::captured::read_all(&files.bytes, &observer).unwrap());
+        let mut package = Package::assemble(
+            &old.package.state,
+            &name,
+            files,
+            Sources::decode_local(
+                &old.package.sources.encode_local().unwrap(),
+                &old.package.state,
+            )
+            .unwrap(),
+            observer.finish().unwrap(),
+        )
+        .unwrap();
+        let identity = old.session.identity.as_ref().unwrap();
+        let calls = service.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let before = record_runtime::snapshot(&f.peer.env()).unwrap();
+        let originals = archive_bytes(&f.peer.env());
+        package
+            .capture_historical_snapshots(
+                identity,
+                &|owner| {
+                    DeviceIdentity::load_selected(
+                        &f.peer.keychain,
+                        &owner.control.profile.profile()?,
+                        owner.identity_slot.as_deref(),
+                        false,
+                    )
+                },
+                &f.keys,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let older = original
+            .verify(old.owner().unwrap(), identity, None)
+            .unwrap();
+        assert!(package.require_historical_read(&older, &original).is_err());
+        let latest = current
+            .verify(old.owner().unwrap(), identity, None)
+            .unwrap();
+        package.require_historical_read(&latest, &current).unwrap();
+        assert_eq!(
+            service.calls.load(std::sync::atomic::Ordering::SeqCst),
+            calls
+        );
+        assert_eq!(record_runtime::snapshot(&f.peer.env()).unwrap(), before);
+        assert_eq!(archive_bytes(&f.peer.env()), originals);
+    });
 }

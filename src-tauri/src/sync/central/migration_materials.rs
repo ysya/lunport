@@ -297,6 +297,24 @@ impl Materials {
         }
         Ok(self)
     }
+    pub(in crate::sync::central) fn with_retained_history(
+        self,
+        history: super::migration_library::History,
+    ) -> Result<Self, AppError> {
+        let mut material = Self {
+            storage: BTreeMap::new(),
+            active: BTreeMap::new(),
+            retained: 0,
+            history: vec![],
+            history_bytes: 0,
+        };
+        for (id, data) in history.into_rows() {
+            if matches!(data, Data::Key(_) | Data::Keyslot(_)) {
+                material.append(id, data)?;
+            }
+        }
+        self.with_retained_materials(material)
+    }
     pub fn into_history(self) -> Vec<(Identity, Data)> {
         self.history
     }

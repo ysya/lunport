@@ -21,10 +21,12 @@ use crate::{
 use std::{collections::BTreeMap, path::Path};
 use zeroize::Zeroizing;
 const MAGIC: &[u8; 8] = b"LPSRCPK1";
+const SNAPSHOT_MAGIC: &[u8; 8] = b"LPSRCPK3";
 const FROZEN_MAGIC: &[u8; 8] = b"LPSRCPK2";
 const MAX_BYTES: usize = 192 * 1024 * 1024;
 mod coverage;
 mod retained;
+mod snapshot;
 /// Only explicit native encode/decode. Never a frontend DTO or an SSH private-key export.
 pub(super) struct Package {
     state_name: String,
@@ -33,6 +35,9 @@ pub(super) struct Package {
     pub sources: Sources,
     decryptors: Snapshot,
     frozen: Option<FrozenSet>,
+    snapshot: Option<snapshot::Snapshot>,
+    // Ephemeral proofs inherited only from a fully checked enclosing graph. Never serialized.
+    inherited: Vec<snapshot::Group>,
 }
 fn state(files: &Files, name: &str) -> Result<SyncStateV3, AppError> {
     if name.is_empty()
@@ -170,6 +175,8 @@ impl Package {
             sources,
             decryptors,
             frozen: None,
+            snapshot: None,
+            inherited: vec![],
         })
     }
     /// Full current/recovery input enumeration using this package's archived legacy keybook.
@@ -356,6 +363,8 @@ impl Package {
             || self.files.encode_local()?.as_slice() != original.files.encode_local()?.as_slice()
             || self.decryptors.encode_local()?.as_slice()
                 != original.decryptors.encode_local()?.as_slice()
+            || self.snapshot.as_ref().map(|snapshot| snapshot.bytes())
+                != original.snapshot.as_ref().map(|snapshot| snapshot.bytes())
             || !self
                 .sources
                 .follows_book(&super::crypto::hash(&original.sources.encode_local()?))?
@@ -392,14 +401,20 @@ impl Package {
             .as_ref()
             .map(|value| value.encode_local())
             .transpose()?;
-        if self.frozen.is_some() { drop(self.record_inputs()?); }
+        if self.frozen.is_some() {
+            drop(self.record_inputs()?);
+        }
         let mut sections = vec![
             self.state_name.as_bytes(),
             files.as_slice(),
             sources.as_slice(),
             decryptors.as_slice(),
         ];
-        if let Some(bytes) = &frozen {
+        if let Some(snapshot) = &self.snapshot {
+            drop(snapshot.verify(self)?);
+            sections.push(frozen.as_deref().map(|v| v.as_slice()).unwrap_or(&[]));
+            sections.push(snapshot.bytes());
+        } else if let Some(bytes) = &frozen {
             sections.push(bytes.as_slice());
         }
         let length = sections
@@ -412,7 +427,9 @@ impl Package {
             return Err(invalid());
         }
         let mut out = Zeroizing::new(Vec::with_capacity(length));
-        out.extend_from_slice(if frozen.is_some() {
+        out.extend_from_slice(if self.snapshot.is_some() {
+            SNAPSHOT_MAGIC
+        } else if frozen.is_some() {
             FROZEN_MAGIC
         } else {
             MAGIC
@@ -423,11 +440,27 @@ impl Package {
         }
         Ok(out)
     }
-    pub fn complete_frame(bytes:&[u8])->bool {bytes.starts_with(FROZEN_MAGIC)}
+    pub fn frame(bytes: &[u8]) -> bool {
+        [MAGIC, FROZEN_MAGIC, SNAPSHOT_MAGIC]
+            .iter()
+            .any(|magic| bytes.starts_with(*magic))
+    }
+    pub fn complete_frame(bytes: &[u8]) -> bool {
+        if bytes.starts_with(FROZEN_MAGIC) {
+            return true;
+        }
+        bytes.starts_with(SNAPSHOT_MAGIC)
+            && Self::decode_local(bytes).is_ok_and(|p| p.frozen.is_some())
+    }
     pub fn decode_local(bytes: &[u8]) -> Result<Self, AppError> {
         let magic = bytes.get(..8);
         if bytes.len() > MAX_BYTES
-            || ![Some(MAGIC.as_slice()), Some(FROZEN_MAGIC.as_slice())].contains(&magic)
+            || ![
+                Some(MAGIC.as_slice()),
+                Some(FROZEN_MAGIC.as_slice()),
+                Some(SNAPSHOT_MAGIC.as_slice()),
+            ]
+            .contains(&magic)
         {
             return Err(invalid());
         }
@@ -445,7 +478,21 @@ impl Package {
             &state,
         )?;
         let decryptors = Snapshot::decode_local(section(&mut input, 2 * 1024 * 1024)?)?;
-        let frozen = if magic == Some(FROZEN_MAGIC.as_slice()) {
+        let frozen_bytes = if magic == Some(SNAPSHOT_MAGIC.as_slice()) {
+            Some(section(
+                &mut input,
+                super::migration_sources::MAX_FROZEN_BYTES,
+            )?)
+        } else {
+            None
+        };
+        let frozen = if frozen_bytes.is_some_and(|bytes| !bytes.is_empty()) {
+            Some(FrozenSet::decode_local(
+                frozen_bytes.ok_or_else(invalid)?,
+                &sources,
+                &state,
+            )?)
+        } else if magic == Some(FROZEN_MAGIC.as_slice()) {
             Some(FrozenSet::decode_local(
                 section(&mut input, super::migration_sources::MAX_FROZEN_BYTES)?,
                 &sources,
@@ -454,17 +501,26 @@ impl Package {
         } else {
             None
         };
+        let snapshot = if magic == Some(SNAPSHOT_MAGIC.as_slice()) {
+            Some(snapshot::Snapshot::decode(section(&mut input, MAX_BYTES)?)?)
+        } else {
+            None
+        };
         if !input.is_empty() {
             return Err(invalid());
         }
-        Ok(Self {
+        let result = Self {
             state_name: name,
             state,
             files,
             sources,
             decryptors,
             frozen,
-        })
+            snapshot,
+            inherited: vec![],
+        };
+        drop(result.snapshot_groups()?);
+        Ok(result)
     }
     /// No complete-inventory authority: this only durably preserves the captured original inputs.
     pub fn archive(
